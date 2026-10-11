@@ -1,8 +1,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import * as Papa from 'papaparse';
-import { readLearningSummary } from './learningLedger';
-import { readProjectInvestmentStats } from './projectAnalytics';
+import { readLearningOverview } from './learningLedger';
+import { readProjectInvestmentStatsFromDatabase } from './projectAnalytics';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 
 export interface StrategyPyramidProject {
@@ -1024,26 +1026,21 @@ function displayActionToCsv(action: string): string {
   return 'maintain';
 }
 
-function readProjectStrategyCsv(globalDataPath: string): Map<string, SavedProjectStrategy> {
+async function readProjectStrategies(projects: StrategyPyramidProject[], globalDataPath: string): Promise<Map<string, SavedProjectStrategy>> {
   const map = new Map<string, SavedProjectStrategy>();
-  try {
-    const globalRoot = normalizeGlobalDataPath(globalDataPath);
-    const csvPath = path.join(globalRoot, 'strategy', 'project-strategy.csv');
-    if (fs.existsSync(csvPath)) {
-      const csv = fs.readFileSync(csvPath, 'utf8');
-      const parsed = Papa.parse<SavedProjectStrategy>(csv, { header: true, skipEmptyLines: true });
-      if (parsed.data) {
-        for (const row of parsed.data) {
-          if (row.projectPath) {
-            map.set(row.projectPath, row);
-          }
-        }
-      }
-    }
-  } catch (error) {
-    console.warn('Failed to read project-strategy.csv:', error);
+  for (const project of projects.filter(project => project?.path)) {
+    const state = await strategyState(globalDataPath, project.path);
+    if (state.value) map.set(project.path, { ...state.value as SavedProjectStrategy, projectPath: project.path });
   }
   return map;
+}
+
+type StrategyState = { objectId: string | null; revision: number; value: unknown };
+function strategyState(globalDataPath: string, root?: string): Promise<StrategyState> {
+  return sendRuntimeDataRequest(normalizeGlobalDataPath(globalDataPath), { operation: 'read_strategy_state', input: root === undefined ? {} : { root } });
+}
+function saveStrategyState(globalDataPath: string, previous: StrategyState, value: unknown, root?: string, source?: StrategySource): Promise<StrategyState> {
+  return sendRuntimeDataRequest(normalizeGlobalDataPath(globalDataPath), { operation: 'write_strategy_state', input: { ...(root === undefined ? {} : { root }), ...(source ? { expectedSourceRevision: source.databaseRevision, sourceProjectIds: source.projectIds } : {}), expectedRevision: previous.revision, value, idempotencyKey: crypto.randomUUID() } });
 }
 
 export async function saveProjectStrategyData(
@@ -1056,21 +1053,8 @@ export async function saveProjectStrategyData(
   strategicAction: string,
   abilities: string[]
 ): Promise<void> {
-  try {
-    const globalRoot = normalizeGlobalDataPath(globalDataPath);
-    const strategyRoot = path.join(globalRoot, 'strategy');
-    fs.mkdirSync(strategyRoot, { recursive: true });
-
-    const csvPath = path.join(strategyRoot, 'project-strategy.csv');
-    let rows: SavedProjectStrategy[] = [];
-    if (fs.existsSync(csvPath)) {
-      const csv = fs.readFileSync(csvPath, 'utf8');
-      const parsed = Papa.parse<SavedProjectStrategy>(csv, { header: true, skipEmptyLines: true });
-      rows = parsed.data || [];
-    }
-
-    const existingIndex = rows.findIndex((r) => r.projectPath === projectPath);
-    const newRow: SavedProjectStrategy = {
+  const previous = await strategyState(globalDataPath, projectPath);
+  const newRow: SavedProjectStrategy = {
       projectPath,
       role: displayRoleToCsv(role),
       businessStage,
@@ -1079,18 +1063,8 @@ export async function saveProjectStrategyData(
       strategicAction: displayActionToCsv(strategicAction),
       abilities: (abilities || []).map(toStrategyId).join(';'),
       updatedAt: new Date().toISOString()
-    };
-
-    if (existingIndex >= 0) {
-      rows[existingIndex] = newRow;
-    } else {
-      rows.push(newRow);
-    }
-
-    fs.writeFileSync(csvPath, Papa.unparse(rows), 'utf8');
-  } catch (error) {
-    console.error('Failed to save project strategy:', error);
-  }
+  };
+  await saveStrategyState(globalDataPath, previous, newRow, projectPath);
 }
 
 function mapAbilityCategory(ability: string): string {
@@ -1100,121 +1074,58 @@ function mapAbilityCategory(ability: string): string {
   return 'operations';
 }
 
-function writeStrategyPyramidSnapshot(
+async function writeStrategyPyramidSnapshot(
   globalDataPath: string,
+  previous: StrategyState,
   snapshot: StrategyPyramidSnapshot,
+  source: StrategySource,
+  engineConfigRevision = '',
   includeDerivedRegistries = true
-): void {
-  try {
-    const globalRoot = normalizeGlobalDataPath(globalDataPath);
-    const strategyRoot = path.join(globalRoot, 'strategy');
-    fs.mkdirSync(strategyRoot, { recursive: true });
-    fs.writeFileSync(path.join(strategyRoot, 'pyramid-snapshot.json'), `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
-    if (!includeDerivedRegistries) return;
-    const projectRows = snapshot.projects.map((project) => ({
-      projectPath: project.path,
-      role: displayRoleToCsv(project.role),
-      businessStage: project.businessStage,
-      revenueTier: project.revenueTier,
-      timeLoad: project.timeLoad,
-      strategicAction: displayActionToCsv(project.action),
-      abilities: project.abilities.map(toStrategyId).join(';'),
-      updatedAt: snapshot.generatedAt
-    }));
-    fs.writeFileSync(path.join(strategyRoot, 'project-strategy.csv'), Papa.unparse(projectRows), 'utf8');
-    const abilityRows = snapshot.abilities.map((ability) => ({
-      abilityId: toStrategyId(ability.name),
-      name: ability.name,
-      category: mapAbilityCategory(ability.name),
-      marketRelevance: ability.projectCount >= 2 ? 'high' : 'medium',
-      notes: ability.judgment,
-      updatedAt: snapshot.generatedAt
-    }));
-    fs.writeFileSync(path.join(strategyRoot, 'ability-registry.csv'), Papa.unparse(abilityRows), 'utf8');
-  } catch (error) {
-    console.warn('Failed to write strategy pyramid snapshot:', error);
-  }
+): Promise<void> {
+  const derivedRegistries = includeDerivedRegistries ? {
+    projects: snapshot.projects.map(project => ({ projectPath: project.path, role: displayRoleToCsv(project.role), businessStage: project.businessStage, revenueTier: project.revenueTier, timeLoad: project.timeLoad, strategicAction: displayActionToCsv(project.action), abilities: project.abilities.map(toStrategyId).join(';'), updatedAt: snapshot.generatedAt })),
+    abilities: snapshot.abilities.map(ability => ({ abilityId: toStrategyId(ability.name), name: ability.name, category: mapAbilityCategory(ability.name), marketRelevance: ability.projectCount >= 2 ? 'high' : 'medium', notes: ability.judgment, updatedAt: snapshot.generatedAt }))
+  } : (previous.value as { derivedRegistries?: unknown } | null)?.derivedRegistries;
+  await saveStrategyState(globalDataPath, previous, { version: 1, signature: source.signature, engineConfigRevision, snapshot, ...(derivedRegistries ? { derivedRegistries } : {}) }, undefined, source);
 }
 
-function strategySourceSignature(projectEntries: StrategyPyramidProject[], globalDataPath: string): string {
-  const fileSignature = (filePath: string) => {
-    try {
-      const stat = fs.statSync(filePath);
-      return `${Math.trunc(stat.mtimeMs)}:${stat.size}`;
-    } catch {
-      return 'missing';
-    }
-  };
-  const projectFacts = projectEntries.filter((project) => project?.path).map((project) => [
-    project.path,
-    project.name,
-    project.type || '',
-    fileSignature(path.join(project.path, '.solopreneur', 'roadmap.csv')),
-    fileSignature(path.join(project.path, '.solopreneur', 'project_journal.db'))
-  ].join(':')).join('|');
+interface StrategySource { signature: string; databaseRevision: string; projectIds: string[] }
+async function strategySourceSignature(projectEntries: StrategyPyramidProject[], globalDataPath: string): Promise<StrategySource> {
   const globalRoot = normalizeGlobalDataPath(globalDataPath);
-  const directorySignature = (directoryPath: string) => {
-    try {
-      return fs.readdirSync(directoryPath, { withFileTypes: true })
-        .filter(entry => entry.isFile())
-        .map(entry => `${entry.name}:${fileSignature(path.join(directoryPath, entry.name))}`)
-        .sort()
-        .join(',');
-    } catch {
-      return 'missing';
-    }
-  };
-  const learningRoot = path.join(globalRoot, 'learning');
-  const learningFacts = [
-    fileSignature(path.join(learningRoot, 'ledger', 'events.jsonl')),
-    directorySignature(path.join(learningRoot, 'candidates')),
-    directorySignature(path.join(learningRoot, 'approved')),
-    directorySignature(path.join(learningRoot, 'candidate-decisions'))
-  ].join('|');
-  return `${projectFacts}|${fileSignature(path.join(globalRoot, 'strategy', 'project-strategy.csv'))}|${learningFacts}`;
+  const source = await sendRuntimeDataRequest<{ revision: string; projectIds: string[] }>(globalRoot, { operation: 'read_strategy_source_revision', input: { roots: projectEntries.filter(project => project?.path).map(project => project.path) } });
+  const projects = [];
+  for (const project of projectEntries.filter(project => project?.path)) {
+    let roadmap = 'missing';
+    try { roadmap = crypto.createHash('sha256').update(await fs.promises.readFile(path.join(project.path, '.solopreneur', 'roadmap.csv'))).digest('hex'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    projects.push([project, roadmap]);
+  }
+  return { signature: crypto.createHash('sha256').update(JSON.stringify([source.revision, projects])).digest('hex'), databaseRevision: source.revision, projectIds: source.projectIds };
 }
 
-export function readCachedStrategyPyramidSnapshot(
+export async function readCachedStrategyPyramidSnapshot(
   projectEntries: StrategyPyramidProject[],
   globalDataPath: string,
   engineConfigRevision = ''
-): StrategyPyramidSnapshot | null {
-  try {
-    const strategyRoot = path.join(normalizeGlobalDataPath(globalDataPath), 'strategy');
-    const metadata = JSON.parse(fs.readFileSync(path.join(strategyRoot, 'pyramid-snapshot-meta.json'), 'utf8'));
-    if (metadata.signature !== strategySourceSignature(projectEntries, globalDataPath)) return null;
-    if (String(metadata.engineConfigRevision || '') !== engineConfigRevision) return null;
-    return JSON.parse(fs.readFileSync(path.join(strategyRoot, 'pyramid-snapshot.json'), 'utf8')) as StrategyPyramidSnapshot;
-  } catch {
-    return null;
-  }
+): Promise<StrategyPyramidSnapshot | null> {
+  const state = await strategyState(globalDataPath);
+  const value = state.value as { signature: string; engineConfigRevision?: string; snapshot: StrategyPyramidSnapshot } | null;
+  if (!value || value.signature !== (await strategySourceSignature(projectEntries, globalDataPath)).signature || String(value.engineConfigRevision || '') !== engineConfigRevision) return null;
+  return value.snapshot;
 }
 
-function writeStrategyPyramidSnapshotMetadata(
-  projectEntries: StrategyPyramidProject[],
-  globalDataPath: string,
-  engineConfigRevision = ''
-): void {
-  try {
-    const strategyRoot = path.join(normalizeGlobalDataPath(globalDataPath), 'strategy');
-    fs.mkdirSync(strategyRoot, { recursive: true });
-    fs.writeFileSync(
-      path.join(strategyRoot, 'pyramid-snapshot-meta.json'),
-      JSON.stringify({ version: 1, signature: strategySourceSignature(projectEntries, globalDataPath), engineConfigRevision }),
-      'utf8'
-    );
-  } catch (error) {
-    console.warn('Failed to write strategy pyramid snapshot metadata:', error);
-  }
-}
-
-export function buildStrategyPyramidSnapshotData(
+export async function buildStrategyPyramidSnapshotData(
   projectEntries: StrategyPyramidProject[],
   globalDataPath: string,
   fallbackWorkspaceRoot = process.cwd(),
-  persist = true
-): StrategyPyramidSnapshot {
-  const savedStrategies = readProjectStrategyCsv(globalDataPath);
+  persist = true,
+  beforeCommit?: () => boolean
+): Promise<StrategyPyramidSnapshot> {
+  if (beforeCommit && !beforeCommit()) throw new Error('Strategy pyramid request is no longer current.');
+  const previous = persist ? await strategyState(globalDataPath) : undefined;
+  const signature = await strategySourceSignature(projectEntries, globalDataPath);
+  const savedStrategies = await readProjectStrategies(projectEntries, globalDataPath);
+  const investments = new Map(await Promise.all(projectEntries.filter(project => project?.path).map(async project => [project.path, await readProjectInvestmentStatsFromDatabase(project.path, path.resolve(__dirname, '..'), new Date(), globalDataPath)] as const)));
 
   const projects = projectEntries
     .filter((project) => project && project.path)
@@ -1230,7 +1141,7 @@ export function buildStrategyPyramidSnapshotData(
 
       const saved = savedStrategies.get(project.path);
 
-      const investment = readProjectInvestmentStats(project.path);
+      const investment = investments.get(project.path)!;
       const actualMinutes = Math.round(Number(investment.totalDurationMs || 0) / 60000);
 
       const role = saved ? csvRoleToDisplay(saved.role) : inferStrategyRole(project, nodes);
@@ -1302,7 +1213,7 @@ export function buildStrategyPyramidSnapshotData(
   const sellCount = countLoop('sell');
   const learnCount = countLoop('learn');
   const improveCount = countLoop('improve');
-  const learningSummary = readLearningSummary(projects[0]?.path || fallbackWorkspaceRoot, globalDataPath);
+  const learningSummary = await readLearningOverview(projects[0]?.path || fallbackWorkspaceRoot, globalDataPath);
   const learningSignals: StrategyPyramidLearningSignal[] = learningSummary.projectSignals.map((item) => ({
     projectName: item.projectName,
     projectPath: item.projectPath,
@@ -1366,8 +1277,9 @@ export function buildStrategyPyramidSnapshotData(
   };
 
   if (persist) {
-    writeStrategyPyramidSnapshot(globalDataPath, snapshot);
-    writeStrategyPyramidSnapshotMetadata(projectEntries, globalDataPath);
+    if ((await strategySourceSignature(projectEntries, globalDataPath)).signature !== signature.signature) throw new Error('Strategy pyramid facts changed while judgment was running.');
+    if (beforeCommit && !beforeCommit()) throw new Error('Strategy pyramid request is no longer current.');
+    await writeStrategyPyramidSnapshot(globalDataPath, previous!, snapshot, signature);
   }
   return snapshot;
 }
@@ -1380,14 +1292,15 @@ export async function buildCognitiveStrategyPyramidSnapshotData(
   engineConfigRevision: string,
   beforeCommit?: () => boolean
 ): Promise<StrategyPyramidSnapshot> {
+  const previous = await strategyState(globalDataPath);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (beforeCommit && !beforeCommit()) {
       throw new Error('Strategy pyramid model configuration changed while intelligent judgment was running.');
     }
-    const baseline = buildStrategyPyramidSnapshotData(projectEntries, globalDataPath, fallbackWorkspaceRoot, false);
-    const sourceSignature = strategySourceSignature(projectEntries, globalDataPath);
+    const sourceSignature = await strategySourceSignature(projectEntries, globalDataPath);
+    const baseline = await buildStrategyPyramidSnapshotData(projectEntries, globalDataPath, fallbackWorkspaceRoot, false);
     const judgment = await engine.judgeStrategyPyramid(buildStrategyPyramidCognitiveInput(baseline));
-    if (strategySourceSignature(projectEntries, globalDataPath) !== sourceSignature) {
+    if ((await strategySourceSignature(projectEntries, globalDataPath)).signature !== sourceSignature.signature) {
       if (attempt === 0) continue;
       throw new Error('Strategy pyramid facts changed while intelligent judgment was running.');
     }
@@ -1398,8 +1311,7 @@ export async function buildCognitiveStrategyPyramidSnapshotData(
       engineId: engine.id,
       engineConfigRevision
     });
-    writeStrategyPyramidSnapshot(globalDataPath, snapshot, false);
-    writeStrategyPyramidSnapshotMetadata(projectEntries, globalDataPath, engineConfigRevision);
+    await writeStrategyPyramidSnapshot(globalDataPath, previous, snapshot, sourceSignature, engineConfigRevision, false);
     return snapshot;
   }
   throw new Error('Strategy pyramid facts changed while intelligent judgment was running.');

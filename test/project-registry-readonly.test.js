@@ -5,13 +5,21 @@ const path = require('node:path');
 const test = require('node:test');
 
 const registry = require('../out/projectRegistry.js');
+const { openAnalysisOwner } = require('./analysis-fixture.js');
 
-test('read-only project enumeration never creates the registry', () => {
+async function hydrate(t, parent, bootstrap) {
+  const root = path.join(parent, '.solomap-global');
+  await openAnalysisOwner(t, root, []);
+  await registry.refreshProjectRegistry(root, () => bootstrap || {});
+}
+
+test('read-only project enumeration never creates the registry', async t => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-registry-readonly-'));
   const workspace = path.join(parent, 'workspace');
   const legacy = path.join(parent, 'legacy');
   fs.mkdirSync(workspace);
   fs.mkdirSync(legacy);
+  await hydrate(t, parent, { legacyProjects: [{ name: 'Legacy', path: legacy }], workspaceRoot: workspace });
   const projects = registry.getProjectsReadOnly({
     globalDataPath: parent,
     projectRegistryFileName: 'projects.json',
@@ -23,9 +31,9 @@ test('read-only project enumeration never creates the registry', () => {
   assert.equal(fs.existsSync(path.join(parent, '.solomap-global', 'projects.json')), false);
 });
 
-test('conversation project snapshot preserves an offline selected project without writing the registry', t => {
+test('conversation project snapshot preserves an offline selected project without writing the registry', async t => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-conversation-projects-'));
-  t.after(() => fs.rmdirSync(parent));
+  await hydrate(t, parent, { legacyProjects: [{ name: 'Offline', path: path.join(parent, 'offline') }, { name: 'Online', path: parent }], legacySelectedProjectPath: path.join(parent, 'offline') });
   const projects = registry.getProjectsSnapshot({
     globalDataPath: parent,
     projectRegistryFileName: 'projects.json',
@@ -37,7 +45,7 @@ test('conversation project snapshot preserves an offline selected project withou
   assert.equal(fs.existsSync(path.join(parent, '.solomap-global', 'projects.json')), false);
 });
 
-test('read-only project enumeration excludes paths recorded as hidden', () => {
+test('read-only project enumeration excludes paths recorded as hidden', async t => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-registry-hidden-'));
   const visible = path.join(parent, 'visible');
   const hidden = path.join(parent, 'hidden');
@@ -51,6 +59,7 @@ test('read-only project enumeration excludes paths recorded as hidden', () => {
     projects: [{ name: 'Visible', path: visible }, { name: 'Hidden', path: hidden }],
     hiddenProjects: [hidden]
   }));
+  await hydrate(t, parent);
   const projects = registry.getProjectsReadOnly({
     globalDataPath: parent,
     projectRegistryFileName: 'projects.json',
@@ -61,7 +70,7 @@ test('read-only project enumeration excludes paths recorded as hidden', () => {
   assert.deepEqual(projects.map(project => project.path), [visible]);
 });
 
-test('read-only project enumeration matches the Agent rule for stale and non-absolute registry paths', () => {
+test('read-only project enumeration matches the Agent rule for stale and non-absolute registry paths', async t => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-registry-stale-'));
   const visible = path.join(parent, 'visible');
   const stale = path.join(parent, 'deleted');
@@ -74,6 +83,7 @@ test('read-only project enumeration matches the Agent rule for stale and non-abs
     projects: [{ name: 'Visible', path: visible }, { name: 'Deleted', path: stale }, { name: 'Relative', path: 'relative/project' }],
     hiddenProjects: []
   }));
+  await hydrate(t, parent);
   const projects = registry.getProjectsReadOnly({
     globalDataPath: parent,
     projectRegistryFileName: 'projects.json',

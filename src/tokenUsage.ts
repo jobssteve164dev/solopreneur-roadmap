@@ -81,7 +81,7 @@ function addUsage(left: AgentTokenUsage, right: AgentTokenUsage): AgentTokenUsag
   };
 }
 
-function subtractUsage(after: AgentTokenUsage, before: AgentTokenUsage): AgentTokenUsage {
+export function subtractUsage(after: AgentTokenUsage, before: AgentTokenUsage): AgentTokenUsage {
   return {
     inputTokens: Math.max(0, after.inputTokens - before.inputTokens),
     cachedInputTokens: Math.max(0, after.cachedInputTokens - before.cachedInputTokens),
@@ -161,12 +161,14 @@ export function extractTokenUsageFromOutput(outputText: string, _agentCli = ''):
   return usage;
 }
 
-function readCodexCumulativeUsage(transcriptPath: string, startedAt: string): AgentTokenUsage {
+export function extractCodexTranscriptUsage(transcript: string, startedAt: string, finishedAt?: string): AgentTokenUsage {
   const startedAtMs = Date.parse(String(startedAt || ''));
+  const finishedAtMs = finishedAt === undefined ? Infinity : Date.parse(finishedAt);
+  if (finishedAt !== undefined && (!Number.isFinite(startedAtMs) || !Number.isFinite(finishedAtMs) || finishedAtMs < startedAtMs)) return { ...EMPTY_USAGE };
   let before = { ...EMPTY_USAGE };
   let after = { ...EMPTY_USAGE };
   try {
-    for (const line of fs.readFileSync(transcriptPath, 'utf8').split(/\r?\n/).filter(Boolean)) {
+    for (const line of transcript.split(/\r?\n/).filter(Boolean)) {
       let event: any;
       try {
         event = JSON.parse(line);
@@ -181,6 +183,7 @@ function readCodexCumulativeUsage(transcriptPath: string, startedAt: string): Ag
         continue;
       }
       const timestampMs = Date.parse(String(event.timestamp || ''));
+      if (finishedAt !== undefined && (!Number.isFinite(timestampMs) || timestampMs > finishedAtMs)) continue;
       if (Number.isFinite(startedAtMs) && Number.isFinite(timestampMs) && timestampMs < startedAtMs) {
         before = usage;
       } else {
@@ -193,7 +196,12 @@ function readCodexCumulativeUsage(transcriptPath: string, startedAt: string): Ag
   return subtractUsage(after, before);
 }
 
-function findClaudeTranscript(workspaceRoot: string, startedAt: string, sessionId = '', claudeHome = path.join(process.env.HOME || '', '.claude')): string {
+function readCodexCumulativeUsage(transcriptPath: string, startedAt: string): AgentTokenUsage {
+  try { return extractCodexTranscriptUsage(fs.readFileSync(transcriptPath, 'utf8'), startedAt); }
+  catch { return { ...EMPTY_USAGE }; }
+}
+
+export function findClaudeTranscript(workspaceRoot: string, startedAt: string, sessionId = '', claudeHome = path.join(process.env.HOME || '', '.claude')): string {
   const projectsRoot = path.join(claudeHome, 'projects');
   if (!workspaceRoot || !fs.existsSync(projectsRoot)) {
     return '';
@@ -250,12 +258,14 @@ function findClaudeTranscript(workspaceRoot: string, startedAt: string, sessionI
   return '';
 }
 
-function readClaudeUsage(transcriptPath: string, startedAt: string): AgentTokenUsage {
+export function extractClaudeTranscriptUsage(transcript: string, startedAt: string, finishedAt?: string): AgentTokenUsage {
   const startedAtMs = Date.parse(String(startedAt || ''));
+  const finishedAtMs = finishedAt === undefined ? Infinity : Date.parse(finishedAt);
+  if (finishedAt !== undefined && (!Number.isFinite(startedAtMs) || !Number.isFinite(finishedAtMs) || finishedAtMs < startedAtMs)) return { ...EMPTY_USAGE };
   const usageByMessage = new Map<string, AgentTokenUsage>();
   let anonymousUsage = { ...EMPTY_USAGE };
   try {
-    for (const line of fs.readFileSync(transcriptPath, 'utf8').split(/\r?\n/).filter(Boolean)) {
+    for (const line of transcript.split(/\r?\n/).filter(Boolean)) {
       let event: any;
       try {
         event = JSON.parse(line);
@@ -263,6 +273,7 @@ function readClaudeUsage(transcriptPath: string, startedAt: string): AgentTokenU
         continue;
       }
       const timestampMs = Date.parse(String(event?.timestamp || ''));
+      if (finishedAt !== undefined && (!Number.isFinite(timestampMs) || timestampMs > finishedAtMs)) continue;
       if (Number.isFinite(startedAtMs) && Number.isFinite(timestampMs) && timestampMs < startedAtMs) {
         continue;
       }
@@ -283,6 +294,11 @@ function readClaudeUsage(transcriptPath: string, startedAt: string): AgentTokenU
     return { ...EMPTY_USAGE };
   }
   return [...usageByMessage.values()].reduce(addUsage, anonymousUsage);
+}
+
+function readClaudeUsage(transcriptPath: string, startedAt: string): AgentTokenUsage {
+  try { return extractClaudeTranscriptUsage(fs.readFileSync(transcriptPath, 'utf8'), startedAt); }
+  catch { return { ...EMPTY_USAGE }; }
 }
 
 export function extractRunTokenUsage(input: RunTokenUsageInput): AgentTokenUsage {

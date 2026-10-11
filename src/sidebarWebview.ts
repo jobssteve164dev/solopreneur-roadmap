@@ -240,6 +240,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       animation: slide-down 0.2s ease-out;
     }
 
+    .settings-overlay {
+      z-index: 101;
+    }
+
     .collaboration-overlay {
       padding: 0;
       overflow: hidden;
@@ -4742,6 +4746,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
   <script>
     ${getSharedWebviewRuntimeScript()}
     const vscode = acquireVsCodeApi();
+    const automationSoundPageId = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
     const intelligenceMarkdownScriptUri = ${JSON.stringify(String(intelligenceMarkdownUri))};
     const {
       escapeHtml,
@@ -4939,6 +4944,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let intelligenceMarkdownLoading = null;
     let currentCliPath = 'agy';
     let currentSettings = {};
+    let agentImpactRequestSeq = 0;
+    let latestAgentImpactRequestId = "";
+    let agentImpactDataPath = "";
     let settingsDataLoaded = false;
     let openCodeApiKeyRemovalRequested = false;
     let settingsFormDirty = false;
@@ -8267,11 +8275,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       vscode.postMessage(buildSettingsUpdatePayload(automation));
     }
 
-    function playAutomationTone() {
+    async function playAutomationTone() {
+      let audioContext;
       try {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-        if (!AudioContextClass) return;
-        const audioContext = new AudioContextClass();
+        if (!AudioContextClass) return false;
+        audioContext = new AudioContextClass();
+        if (audioContext.state === 'suspended') await audioContext.resume();
+        if (audioContext.state !== 'running') return false;
         const oscillator = audioContext.createOscillator();
         const gain = audioContext.createGain();
         oscillator.type = 'sine';
@@ -8281,10 +8292,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.28);
         oscillator.connect(gain);
         gain.connect(audioContext.destination);
+        const ended = new Promise(resolve => { oscillator.onended = resolve; });
         oscillator.start();
         oscillator.stop(audioContext.currentTime + 0.3);
+        await ended;
+        return true;
       } catch (error) {
         console.warn('SoloMap automation sound failed:', error);
+        return false;
+      } finally {
+        if (audioContext) await audioContext.close().catch(() => {});
       }
     }
 
@@ -8394,6 +8411,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         case 'settingsLoaded':
           settingsDataLoaded = true;
           if (message.requestId && message.requestId !== latestSettingsRequestId) break;
+          syncAgentImpactSettings(message.settings || {});
           if (settingsSavePending || settingsFormDirty) {
             currentSettings = { ...currentSettings, ...(message.settings || {}) };
             renderTelegramSettingsStatus();
@@ -8431,6 +8449,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           settingsFormDirty = settingsEditRevision !== pendingSettingsSave.revision;
           pendingSettingsSave = null;
           latestSettingsRequestId = '';
+          syncAgentImpactSettings(message.settings || currentSettings);
           if (settingsFormDirty) break;
           currentSettings = message.settings || currentSettings;
           if (settingTelegramToken) settingTelegramToken.value = '';
@@ -8473,7 +8492,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'automationPlaySound':
-          playAutomationTone();
+          if (message.pageId !== automationSoundPageId) break;
+          void playAutomationTone().then(played => vscode.postMessage({ command: 'automationSoundPlayed', pageId: automationSoundPageId, deliveryId: message.deliveryId, token: message.token, played }));
           break;
 
         case 'timePlansLoaded':
@@ -8627,7 +8647,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'agentImpactLoaded':
-          renderAgentImpact(message.status || {});
+          if (!latestAgentImpactRequestId || message.requestId !== latestAgentImpactRequestId) break;
+          if (message.error) renderAgentImpactFailure(message.error);
+          else renderAgentImpact(message.status || {});
           break;
 
         case 'collaborationRoomCreated': {
@@ -9116,14 +9138,34 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     function requestAgentImpact() {
+      latestAgentImpactRequestId = 'impact-' + (++agentImpactRequestSeq);
       setAgentImpactPending();
       vscode.postMessage({
         command: 'agentImpact.get',
+        requestId: latestAgentImpactRequestId,
         cliPath: getEffectiveSettingCliPath()
       });
     }
 
+    function syncAgentImpactSettings(settings) {
+      const dataPath = String(settings.globalDataPath || '');
+      if (dataPath === agentImpactDataPath) return;
+      agentImpactDataPath = dataPath;
+      latestAgentImpactRequestId = '';
+      if (settingsPanel && settingsPanel.style.display === 'block') requestAgentImpact();
+    }
+
+    function renderAgentImpactFailure(message) {
+      setText('impact-tokens-label', t('impactTokens'));
+      setText('impact-minutes', '—');
+      setText('impact-tokens', '—');
+      setText('impact-files', '—');
+      setText('impact-progress', '—');
+      if (agentImpactList) agentImpactList.innerHTML = '<div class="impact-agent-detail">' + escapeHtml(message) + '</div>';
+    }
+
     function setAgentImpactPending() {
+      setText('impact-tokens-label', t('impactTokens'));
       setText('impact-minutes', '...');
       setText('impact-tokens', '...');
       setText('impact-files', '...');
@@ -11831,6 +11873,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         supplementFiles: supplementFiles || []
       });
     }
+    vscode.postMessage({ command: 'automationSoundReady', pageId: automationSoundPageId });
   </script>
 </body>
 </html>`;

@@ -3,16 +3,19 @@ import { entityDefinitions } from './unifiedSchema';
 
 export const runtimeEntityDefinitions: typeof entityDefinitions = {
   ...entityDefinitions,
+  project: { ...entityDefinitions.project, columns: entityDefinitions.project.columns + ', notes_content_id TEXT REFERENCES contents(id)' },
+  turn: { ...entityDefinitions.turn, columns: entityDefinitions.turn.columns.replace('request_content_id TEXT NOT NULL', 'request_content_id TEXT').replace('started_at INTEGER NOT NULL', 'started_at INTEGER') },
   conversation: { ...entityDefinitions.conversation, project: false },
-  message: { ...entityDefinitions.message, project: false }
+  message: { ...entityDefinitions.message, project: false },
+  evidence: { ...entityDefinitions.evidence, project: false }
 };
 
-function nullableConversationTable(kind: 'conversation' | 'message'): string {
+function nullableConversationTable(kind: 'conversation' | 'message' | 'evidence'): string {
   const definition = entityDefinitions[kind];
   const table = definition.table;
   const columns = [...definition.columns.matchAll(/(?:^|,)\s*([a-z_]+)\s/g)].map(match => match[1]);
   const scopedReferences = [...definition.columns.matchAll(/([a-z_]+) TEXT(?: NOT NULL)? REFERENCES ([a-z_]+)\(id\)/g)]
-    .filter(match => ['conversations', 'roadmap_nodes', 'turns'].includes(match[2]));
+    .filter(match => (kind === 'evidence' ? ['runs', 'file_bindings'] : ['conversations', 'roadmap_nodes', 'turns']).includes(match[2]));
   return `CREATE TABLE ${table}_nullable(id TEXT PRIMARY KEY,object_kind TEXT NOT NULL DEFAULT '${kind}' CHECK(object_kind='${kind}'),project_id TEXT,${definition.columns},UNIQUE(id,project_id),FOREIGN KEY(id,object_kind) REFERENCES objects(id,kind),FOREIGN KEY(id,project_id) REFERENCES objects(id,project_id)${scopedReferences.map(match => `,FOREIGN KEY(${match[1]},project_id) REFERENCES ${match[2]}(id,project_id)`).join('')}${definition.constraints ? ',' + definition.constraints : ''});
 INSERT INTO ${table}_nullable SELECT id,object_kind,project_id,${columns.join(',')} FROM ${table};
 DROP TABLE ${table};
@@ -24,7 +27,10 @@ ${scopedReferences.map(match => `CREATE TRIGGER ${table}_${match[1]}_scope_inser
 CREATE TRIGGER ${table}_${match[1]}_scope_update BEFORE UPDATE OF ${match[1]} ON ${table} WHEN EXISTS(SELECT 1 FROM ${match[2]} WHERE id=NEW.${match[1]} AND project_id IS NOT NEW.project_id) BEGIN SELECT RAISE(ABORT,'scope_mismatch'); END;`).join('\n')}`;
 }
 const structuredMemoryColumns = 'legacy_entry_id TEXT, external_scope TEXT, layer TEXT, tags_json TEXT, provenance_json TEXT, validity_json TEXT, supersedes_json TEXT, metadata_json TEXT, external_entry_revision INTEGER';
-export const additionalEntityColumns: Record<string, string> = { memory: structuredMemoryColumns + ', valid_from INTEGER' };
+const lessonSourceColumns = 'lesson_type TEXT, source_type TEXT, promotion_target TEXT, evidence_refs_json TEXT, source_event_ids_json TEXT, legacy_lesson_id TEXT, external_created_at INTEGER, external_updated_at INTEGER, external_confidence TEXT, semantic_review_json TEXT';
+const learningEventSourceColumns = 'source_type TEXT, verification_signal INTEGER CHECK(verification_signal IN (0,1))';
+const lessonDecisionSourceColumns = 'legacy_decision_id TEXT, external_source TEXT, external_created_at INTEGER, external_updated_at INTEGER, event_revision INTEGER, lesson_revision INTEGER, source_object_id TEXT REFERENCES evidence(id), source_revision INTEGER';
+export const additionalEntityColumns: Record<string, string> = { memory: structuredMemoryColumns + ', valid_from INTEGER', lesson: lessonSourceColumns, learning_event: learningEventSourceColumns, lesson_decision: lessonDecisionSourceColumns };
 
 export const unifiedSchemaMigrations = [{ version: 2, sql: `
 CREATE TABLE migration_jobs(
@@ -98,4 +104,295 @@ INSERT INTO maintenance_tasks_v11 SELECT * FROM maintenance_tasks;
 DROP TABLE maintenance_tasks;
 ALTER TABLE maintenance_tasks_v11 RENAME TO maintenance_tasks;
 CREATE INDEX maintenance_tasks_status ON maintenance_tasks(status,updated_at);
+` }, { version: 12, sql: lessonSourceColumns.split(', ').map(column => `ALTER TABLE lessons ADD COLUMN ${column};`).join('\n') + '\n' + learningEventSourceColumns.split(', ').map(column => `ALTER TABLE learning_events ADD COLUMN ${column};`).join('\n') + '\n' + lessonDecisionSourceColumns.split(', ').map(column => `ALTER TABLE lesson_decisions ADD COLUMN ${column};`).join('\n') + '\n' + nullableConversationTable('evidence') + `
+CREATE TABLE lesson_decision_candidates(
+ decision_id TEXT NOT NULL REFERENCES lesson_decisions(id),decision_revision INTEGER NOT NULL,ordinal INTEGER NOT NULL,
+ project_id TEXT REFERENCES projects(id),lesson_id TEXT NOT NULL REFERENCES lessons(id),lesson_revision INTEGER,
+ PRIMARY KEY(decision_id,decision_revision,ordinal),
+ FOREIGN KEY(decision_id,project_id) REFERENCES lesson_decisions(id,project_id),
+ FOREIGN KEY(decision_id,decision_revision) REFERENCES object_revisions(object_id,revision),
+ FOREIGN KEY(lesson_id,lesson_revision) REFERENCES object_revisions(object_id,revision));
+CREATE TRIGGER lesson_decision_candidates_scope BEFORE INSERT ON lesson_decision_candidates
+ WHEN NOT EXISTS(SELECT 1 FROM lesson_decisions WHERE id=NEW.decision_id AND project_id IS NEW.project_id)
+ OR NOT EXISTS(SELECT 1 FROM lessons WHERE id=NEW.lesson_id AND (project_id IS NULL OR project_id IS NEW.project_id))
+ BEGIN SELECT RAISE(ABORT,'scope_mismatch'); END;
+CREATE TABLE lesson_event_refs(
+ lesson_id TEXT NOT NULL REFERENCES lessons(id),lesson_revision INTEGER NOT NULL,ordinal INTEGER NOT NULL,
+ project_id TEXT REFERENCES projects(id),source_id TEXT NOT NULL,
+ event_id TEXT REFERENCES learning_events(id),event_revision INTEGER,
+ PRIMARY KEY(lesson_id,lesson_revision,ordinal),
+ FOREIGN KEY(lesson_id,lesson_revision) REFERENCES object_revisions(object_id,revision),
+ FOREIGN KEY(event_id,event_revision) REFERENCES object_revisions(object_id,revision),
+ CHECK((event_id IS NULL)=(event_revision IS NULL)));
+CREATE TRIGGER lesson_event_refs_scope BEFORE INSERT ON lesson_event_refs
+ WHEN NOT EXISTS(SELECT 1 FROM lessons WHERE id=NEW.lesson_id AND project_id IS NEW.project_id)
+ OR (NEW.event_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM learning_events WHERE id=NEW.event_id AND (project_id IS NULL OR project_id IS NEW.project_id)))
+ BEGIN SELECT RAISE(ABORT,'scope_mismatch'); END;
+CREATE TABLE legacy_lesson_sources(
+ source_identity TEXT NOT NULL,project_id TEXT NOT NULL REFERENCES projects(id),legacy_lesson_id TEXT NOT NULL,
+ object_id TEXT NOT NULL UNIQUE REFERENCES lessons(id),imported_revision INTEGER NOT NULL,
+ source_updated_at INTEGER NOT NULL,source_key TEXT NOT NULL,
+ PRIMARY KEY(source_identity,project_id,legacy_lesson_id),
+ FOREIGN KEY(object_id,project_id) REFERENCES lessons(id,project_id));
+CREATE TABLE run_digests(
+ object_id TEXT PRIMARY KEY REFERENCES evidence(id),project_id TEXT NOT NULL REFERENCES projects(id),
+ content_id TEXT NOT NULL REFERENCES contents(id),node_key TEXT NOT NULL,run_kind TEXT NOT NULL,
+ run_key TEXT NOT NULL,finished_at TEXT NOT NULL,execution_log_id INTEGER NOT NULL,
+ UNIQUE(object_id,project_id));
+CREATE INDEX run_digests_project ON run_digests(project_id,finished_at DESC,object_id);
+CREATE TABLE run_digest_generations(
+ project_id TEXT PRIMARY KEY REFERENCES projects(id),revision INTEGER NOT NULL);
+CREATE TABLE run_digest_sources(
+ project_id TEXT NOT NULL REFERENCES projects(id),source_key TEXT NOT NULL,object_id TEXT NOT NULL,
+ projection_object_id TEXT NOT NULL UNIQUE REFERENCES evidence(id),
+ source_hash TEXT NOT NULL,PRIMARY KEY(project_id,source_key),UNIQUE(object_id),
+ FOREIGN KEY(object_id,project_id) REFERENCES run_digests(object_id,project_id));
+CREATE TABLE run_digest_signals(
+ project_id TEXT NOT NULL,object_id TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('file','tag')),ordinal INTEGER NOT NULL,
+ value TEXT NOT NULL,PRIMARY KEY(object_id,kind,ordinal),
+ FOREIGN KEY(object_id,project_id) REFERENCES run_digests(object_id,project_id));
+CREATE INDEX run_digest_signals_lookup ON run_digest_signals(project_id,object_id,kind,ordinal,value);
+CREATE TABLE run_digest_index_sources(
+ project_id TEXT NOT NULL,execution_log_id INTEGER NOT NULL,object_id TEXT NOT NULL REFERENCES run_digests(object_id),
+ PRIMARY KEY(project_id,execution_log_id),
+ FOREIGN KEY(project_id,execution_log_id) REFERENCES project_run_indexes(project_id,execution_log_id));
+CREATE TABLE project_journal_sources(
+ project_id TEXT NOT NULL,execution_log_id INTEGER NOT NULL,object_id TEXT NOT NULL UNIQUE REFERENCES evidence(id),
+ PRIMARY KEY(project_id,execution_log_id),
+ FOREIGN KEY(project_id,execution_log_id) REFERENCES project_journal_entries(project_id,execution_log_id));
+CREATE TABLE notification_deliveries(
+ id TEXT PRIMARY KEY,intent_id TEXT NOT NULL UNIQUE,channel TEXT NOT NULL CHECK(channel='telegram'),
+ object_id TEXT NOT NULL UNIQUE REFERENCES evidence(id),original_hash TEXT NOT NULL,message_hash TEXT NOT NULL,
+ payload_content_id TEXT NOT NULL REFERENCES contents(id),response_content_id TEXT REFERENCES contents(id),
+ state TEXT NOT NULL CHECK(state IN ('queued','delivered','cancelled','failed')),
+ revision INTEGER NOT NULL DEFAULT 1,error TEXT NOT NULL DEFAULT '',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+CREATE INDEX notification_deliveries_pending ON notification_deliveries(channel,state,created_at,id);
+CREATE TABLE automation_deliveries(
+ id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),intent_id TEXT NOT NULL,
+ object_id TEXT NOT NULL UNIQUE REFERENCES evidence(id),kind TEXT NOT NULL CHECK(kind IN ('notification','sound')),event_trigger TEXT NOT NULL DEFAULT '',event_action TEXT NOT NULL DEFAULT '',
+ payload_content_id TEXT NOT NULL REFERENCES contents(id),state TEXT NOT NULL CHECK(state IN ('queued','claimed','delivered','cancelled')),
+ revision INTEGER NOT NULL DEFAULT 1,owner_id TEXT,owner_pid INTEGER,owner_birth TEXT,claim_token TEXT,claimed_at INTEGER,
+ error TEXT NOT NULL DEFAULT '',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,
+ UNIQUE(project_id,intent_id));
+CREATE INDEX automation_deliveries_pending ON automation_deliveries(state,created_at,id);
+CREATE INDEX automation_deliveries_owner ON automation_deliveries(owner_pid,owner_birth,owner_id) WHERE state='claimed';
+CREATE TABLE automation_ui_owners(
+ pid INTEGER NOT NULL,birth TEXT NOT NULL,owner_id TEXT NOT NULL,active INTEGER NOT NULL CHECK(active IN (0,1)),
+ PRIMARY KEY(pid,birth));
+CREATE TABLE automation_delivery_receipts(
+ delivery_id TEXT NOT NULL REFERENCES automation_deliveries(id),claim_token TEXT NOT NULL,state TEXT NOT NULL,
+ content_id TEXT NOT NULL REFERENCES contents(id),PRIMARY KEY(delivery_id,claim_token,state));
+CREATE TABLE run_control(
+ run_id TEXT PRIMARY KEY REFERENCES runs(id),
+ project_id TEXT NOT NULL REFERENCES projects(id),execution_log_id INTEGER NOT NULL CHECK(execution_log_id>0),
+ node_key TEXT NOT NULL,generation INTEGER NOT NULL DEFAULT 1 CHECK(generation>0),
+ checkpoint_sequence INTEGER NOT NULL DEFAULT 0 CHECK(checkpoint_sequence>=0),
+ current_turn_id TEXT NOT NULL REFERENCES turns(id),metadata_content_id TEXT NOT NULL REFERENCES contents(id),
+ binding_content_id TEXT REFERENCES contents(id),process_pid INTEGER,process_birth TEXT,child_pid INTEGER,child_birth TEXT,
+ delivery_pending INTEGER NOT NULL DEFAULT 0 CHECK(delivery_pending IN (0,1)),delivery_owner_id TEXT,delivery_pid INTEGER,delivery_birth TEXT,
+ recovery_needed INTEGER NOT NULL DEFAULT 0 CHECK(recovery_needed IN (0,1)),
+ UNIQUE(project_id,execution_log_id),
+ FOREIGN KEY(run_id,project_id) REFERENCES runs(id,project_id),
+ FOREIGN KEY(current_turn_id,project_id) REFERENCES turns(id,project_id));
+CREATE INDEX run_control_project ON run_control(project_id,execution_log_id DESC);
+CREATE INDEX run_control_recovery ON run_control(recovery_needed);
+CREATE TABLE run_control_revisions(
+ run_id TEXT NOT NULL REFERENCES runs(id),revision INTEGER NOT NULL,
+ generation INTEGER NOT NULL,checkpoint_sequence INTEGER NOT NULL,current_turn_id TEXT NOT NULL REFERENCES turns(id),
+ metadata_content_id TEXT NOT NULL REFERENCES contents(id),binding_content_id TEXT REFERENCES contents(id),process_pid INTEGER,process_birth TEXT,child_pid INTEGER,child_birth TEXT,recovery_needed INTEGER NOT NULL,
+ delivery_pending INTEGER NOT NULL,delivery_owner_id TEXT,delivery_pid INTEGER,delivery_birth TEXT,
+ PRIMARY KEY(run_id,revision),FOREIGN KEY(run_id,revision) REFERENCES object_revisions(object_id,revision) DEFERRABLE INITIALLY DEFERRED);
+CREATE TABLE run_documents(
+ run_id TEXT NOT NULL REFERENCES runs(id),purpose TEXT NOT NULL,object_id TEXT NOT NULL UNIQUE REFERENCES evidence(id),
+ PRIMARY KEY(run_id,purpose));
+CREATE TABLE run_turn_journals(
+ project_id TEXT NOT NULL REFERENCES projects(id),run_id TEXT NOT NULL REFERENCES runs(id),
+ turn_id TEXT NOT NULL REFERENCES turns(id),execution_log_id INTEGER NOT NULL,
+ PRIMARY KEY(project_id,turn_id),UNIQUE(project_id,execution_log_id),
+ FOREIGN KEY(run_id,project_id) REFERENCES runs(id,project_id),
+ FOREIGN KEY(turn_id,project_id) REFERENCES turns(id,project_id),
+ FOREIGN KEY(project_id,execution_log_id) REFERENCES project_journal_entries(project_id,execution_log_id));
+CREATE TABLE run_consumer_leases(
+ run_id TEXT PRIMARY KEY REFERENCES runs(id),owner_id TEXT NOT NULL,pid INTEGER NOT NULL,birth TEXT NOT NULL,
+ token TEXT NOT NULL,generation INTEGER NOT NULL,source_revision INTEGER NOT NULL,
+ turn_id TEXT NOT NULL REFERENCES turns(id),checkpoint_sequence INTEGER NOT NULL,head_revision INTEGER NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('claimed','released','committed')));
+CREATE TABLE run_consumer_sources(
+ run_id TEXT NOT NULL REFERENCES runs(id),project_id TEXT NOT NULL REFERENCES projects(id),
+ turn_id TEXT NOT NULL REFERENCES turns(id),checkpoint_sequence INTEGER NOT NULL,source_revision INTEGER NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('queued','committed')),
+ PRIMARY KEY(run_id,source_revision),UNIQUE(run_id,turn_id,checkpoint_sequence),
+ FOREIGN KEY(run_id,source_revision) REFERENCES object_revisions(object_id,revision) DEFERRABLE INITIALLY DEFERRED,
+ FOREIGN KEY(run_id,project_id) REFERENCES runs(id,project_id),FOREIGN KEY(turn_id,project_id) REFERENCES turns(id,project_id));
+CREATE INDEX run_consumer_sources_pending ON run_consumer_sources(state,project_id);
+CREATE TABLE run_settlements(
+ run_id TEXT NOT NULL REFERENCES runs(id),turn_id TEXT NOT NULL REFERENCES turns(id),checkpoint_sequence INTEGER NOT NULL,
+ project_id TEXT NOT NULL REFERENCES projects(id),execution_log_id INTEGER NOT NULL,source_revision INTEGER NOT NULL,
+ payload_content_id TEXT NOT NULL REFERENCES contents(id),digest_content_id TEXT NOT NULL REFERENCES contents(id),
+ handoff_content_id TEXT REFERENCES contents(id),learning_event_id TEXT REFERENCES learning_events(id),committed_at INTEGER NOT NULL,
+ PRIMARY KEY(run_id,turn_id,checkpoint_sequence),
+ FOREIGN KEY(run_id,project_id) REFERENCES runs(id,project_id),
+ FOREIGN KEY(turn_id,project_id) REFERENCES turns(id,project_id));
+CREATE INDEX run_settlements_project ON run_settlements(project_id,committed_at DESC,run_id,turn_id,checkpoint_sequence);
+CREATE TABLE project_step_memory(
+ project_id TEXT NOT NULL REFERENCES projects(id),node_key TEXT NOT NULL,content_id TEXT NOT NULL REFERENCES contents(id),revision INTEGER NOT NULL,
+ PRIMARY KEY(project_id,node_key));
+CREATE TABLE project_step_memory_state(
+ project_id TEXT PRIMARY KEY REFERENCES projects(id),revision INTEGER NOT NULL CHECK(revision>0));
+CREATE TABLE project_step_memory_revisions(
+ project_id TEXT NOT NULL REFERENCES projects(id),node_key TEXT NOT NULL,revision INTEGER NOT NULL,
+ content_id TEXT NOT NULL REFERENCES contents(id),handoff_cursor INTEGER NOT NULL,
+ object_id TEXT NOT NULL REFERENCES evidence(id),metadata_object_id TEXT NOT NULL REFERENCES evidence(id),
+ source_refs_content_id TEXT NOT NULL REFERENCES contents(id),
+ PRIMARY KEY(project_id,node_key,revision));
+CREATE TABLE step_memory_sources(
+ project_id TEXT NOT NULL REFERENCES projects(id),node_key TEXT NOT NULL,source_key TEXT NOT NULL,
+ object_id TEXT NOT NULL REFERENCES evidence(id),source_hash TEXT NOT NULL,entry_count INTEGER NOT NULL CHECK(entry_count>=0),
+ format TEXT NOT NULL CHECK(format IN ('json','md')),PRIMARY KEY(project_id,node_key,source_key),
+ FOREIGN KEY(object_id,project_id) REFERENCES evidence(id,project_id));
+CREATE TABLE step_memory_field_origins(
+ project_id TEXT NOT NULL REFERENCES projects(id),node_key TEXT NOT NULL,field TEXT NOT NULL,
+ origin TEXT NOT NULL CHECK(origin IN ('default','user','import')),source_key TEXT,source_hash TEXT,
+ PRIMARY KEY(project_id,node_key,field));
+CREATE TABLE step_handoffs(
+ project_id TEXT NOT NULL REFERENCES projects(id),node_key TEXT NOT NULL,run_id TEXT NOT NULL REFERENCES runs(id),
+ turn_id TEXT NOT NULL REFERENCES turns(id),checkpoint_sequence INTEGER NOT NULL,content_id TEXT NOT NULL REFERENCES contents(id),
+ PRIMARY KEY(project_id,run_id,turn_id),FOREIGN KEY(run_id,project_id) REFERENCES runs(id,project_id),
+ FOREIGN KEY(turn_id,project_id) REFERENCES turns(id,project_id));
+CREATE INDEX step_handoffs_node ON step_handoffs(project_id,node_key);
+CREATE TABLE run_effects(
+ id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),run_id TEXT NOT NULL REFERENCES runs(id),
+ turn_id TEXT NOT NULL REFERENCES turns(id),checkpoint_sequence INTEGER NOT NULL,execution_log_id INTEGER NOT NULL,source_revision INTEGER NOT NULL,
+ kind TEXT NOT NULL CHECK(kind IN ('roadmap','review','revision','refresh','telegram','automation','flow')),
+ payload_content_id TEXT NOT NULL REFERENCES contents(id),state TEXT NOT NULL CHECK(state IN ('queued','claimed','done')),
+ owner_id TEXT NOT NULL DEFAULT '',pid INTEGER NOT NULL DEFAULT 0,birth TEXT NOT NULL DEFAULT '',token TEXT NOT NULL DEFAULT '',
+ error TEXT NOT NULL DEFAULT '',completed_at INTEGER,
+ UNIQUE(run_id,turn_id,checkpoint_sequence,kind),
+ FOREIGN KEY(run_id,project_id) REFERENCES runs(id,project_id),FOREIGN KEY(turn_id,project_id) REFERENCES turns(id,project_id),
+ FOREIGN KEY(run_id,turn_id,checkpoint_sequence) REFERENCES run_settlements(run_id,turn_id,checkpoint_sequence));
+CREATE INDEX run_effects_pending ON run_effects(state,project_id);
+CREATE INDEX run_delivery_pending ON run_control(delivery_pending,project_id);
+CREATE TABLE run_launch_intents(
+ project_id TEXT NOT NULL REFERENCES projects(id),launch_intent_id TEXT NOT NULL,run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+ PRIMARY KEY(project_id,launch_intent_id),FOREIGN KEY(run_id,project_id) REFERENCES runs(id,project_id));
+CREATE TABLE run_input_materializations(
+ run_id TEXT NOT NULL REFERENCES runs(id),project_id TEXT NOT NULL REFERENCES projects(id),generation INTEGER NOT NULL,
+ path TEXT NOT NULL UNIQUE,sha256 TEXT NOT NULL,size INTEGER NOT NULL,evidence_id TEXT NOT NULL REFERENCES evidence(id),
+ input_content_id TEXT NOT NULL REFERENCES contents(id),written INTEGER NOT NULL DEFAULT 0,
+ state TEXT NOT NULL CHECK(state IN ('active','released')),PRIMARY KEY(run_id,generation),
+ FOREIGN KEY(run_id,project_id) REFERENCES runs(id,project_id));
+CREATE INDEX run_input_materializations_active ON run_input_materializations(state,run_id,generation);
+CREATE TABLE flow_control(
+ project_id TEXT NOT NULL REFERENCES projects(id),flow_id TEXT NOT NULL,task_id TEXT NOT NULL REFERENCES tasks(id),
+ object_id TEXT NOT NULL UNIQUE REFERENCES evidence(id),PRIMARY KEY(project_id,flow_id),
+ FOREIGN KEY(task_id,project_id) REFERENCES tasks(id,project_id));
+CREATE TABLE flow_loop_details(
+ project_id TEXT NOT NULL,flow_id TEXT NOT NULL,loop_id TEXT NOT NULL,loop_object_id TEXT NOT NULL UNIQUE REFERENCES workflow_loops(id),
+ evidence_object_id TEXT NOT NULL UNIQUE REFERENCES evidence(id),PRIMARY KEY(project_id,flow_id,loop_id),
+ FOREIGN KEY(project_id,flow_id) REFERENCES flow_control(project_id,flow_id),
+ FOREIGN KEY(loop_object_id,project_id) REFERENCES workflow_loops(id,project_id),FOREIGN KEY(evidence_object_id,project_id) REFERENCES evidence(id,project_id));
+CREATE TABLE flow_role_runs(
+ project_id TEXT NOT NULL,flow_id TEXT NOT NULL,loop_id TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('planner','builder','verifier')),
+ attempt INTEGER NOT NULL CHECK(attempt>=0),run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+ PRIMARY KEY(project_id,flow_id,loop_id,role,attempt),FOREIGN KEY(project_id,flow_id,loop_id) REFERENCES flow_loop_details(project_id,flow_id,loop_id),
+ FOREIGN KEY(run_id,project_id) REFERENCES runs(id,project_id));
+CREATE TABLE flow_revisions(
+ object_id TEXT NOT NULL REFERENCES evidence(id),revision INTEGER NOT NULL,loop_versions_content_id TEXT NOT NULL REFERENCES contents(id),
+ PRIMARY KEY(object_id,revision),FOREIGN KEY(object_id,revision) REFERENCES object_revisions(object_id,revision) DEFERRABLE INITIALLY DEFERRED);
+` }, { version: 13, sql: `
+CREATE TABLE run_index_import_sources(
+ project_id TEXT NOT NULL,execution_log_id INTEGER NOT NULL,source_identity TEXT NOT NULL,
+ source_key TEXT NOT NULL,source_hash TEXT NOT NULL,index_hash TEXT NOT NULL,
+ priority INTEGER NOT NULL CHECK(priority IN (0,10,20)),
+ PRIMARY KEY(project_id,execution_log_id),
+ FOREIGN KEY(project_id,execution_log_id) REFERENCES project_run_indexes(project_id,execution_log_id));
+` }, { version: 14, sql: `
+ALTER TABLE migration_recycling ADD COLUMN authorized_path TEXT;
+ALTER TABLE migration_recycling ADD COLUMN restore_path TEXT;
+` }, { version: 15, sql: `
+CREATE TABLE recycling_restore_stages(
+ item_id TEXT PRIMARY KEY REFERENCES migration_recycling(id),directory TEXT NOT NULL UNIQUE,
+ device TEXT NOT NULL,inode TEXT NOT NULL);
+` }, { version: 16, sql: `
+CREATE TABLE recycling_restore_intents(
+ id TEXT PRIMARY KEY,item_id TEXT NOT NULL REFERENCES migration_recycling(id),directory TEXT NOT NULL UNIQUE,
+ status TEXT NOT NULL CHECK(status IN ('planned','owned','ownership_unknown','cleaned')),
+ device TEXT,inode TEXT,created_at INTEGER NOT NULL,
+ CHECK((device IS NULL)=(inode IS NULL)));
+CREATE INDEX recycling_restore_intents_item ON recycling_restore_intents(item_id,status,created_at);
+CREATE INDEX recycling_restore_intents_conflicts ON recycling_restore_intents(created_at,id) WHERE status='ownership_unknown';
+` }, { version: 17, sql: `
+CREATE TABLE report_versions(
+ ordinal INTEGER PRIMARY KEY AUTOINCREMENT,object_id TEXT NOT NULL REFERENCES reports(id),revision INTEGER NOT NULL,
+ project_id TEXT NOT NULL REFERENCES projects(id),task_id TEXT NOT NULL REFERENCES tasks(id),turn_id TEXT NOT NULL REFERENCES turns(id),
+ run_id TEXT REFERENCES runs(id),content_id TEXT NOT NULL REFERENCES contents(id),sha256 TEXT NOT NULL,
+ metadata_json TEXT NOT NULL,recorded_at INTEGER NOT NULL,
+ UNIQUE(object_id,revision),FOREIGN KEY(object_id,revision) REFERENCES object_revisions(object_id,revision),
+ FOREIGN KEY(object_id,project_id) REFERENCES reports(id,project_id),
+ FOREIGN KEY(task_id,project_id) REFERENCES tasks(id,project_id),FOREIGN KEY(turn_id,project_id) REFERENCES turns(id,project_id));
+CREATE INDEX report_versions_project_task ON report_versions(project_id,task_id,turn_id,ordinal);
+CREATE INDEX events_subject_content ON events(subject_id,content_id);
+` }, { version: 18, sql: `
+CREATE TABLE turns_historical(id TEXT PRIMARY KEY,object_kind TEXT NOT NULL DEFAULT 'turn' CHECK(object_kind='turn'),project_id TEXT NOT NULL,
+ ${entityDefinitions.turn.columns.replace('request_content_id TEXT NOT NULL', 'request_content_id TEXT').replace('started_at INTEGER NOT NULL', 'started_at INTEGER')},
+ UNIQUE(id,project_id),FOREIGN KEY(id,object_kind) REFERENCES objects(id,kind),FOREIGN KEY(id,project_id) REFERENCES objects(id,project_id),
+ FOREIGN KEY(task_id,project_id) REFERENCES tasks(id,project_id),UNIQUE(task_id,sequence));
+INSERT INTO turns_historical SELECT * FROM turns;
+DROP TRIGGER messages_turn_id_scope_insert;
+DROP TRIGGER messages_turn_id_scope_update;
+DROP TABLE turns;
+ALTER TABLE turns_historical RENAME TO turns;
+CREATE TRIGGER messages_turn_id_scope_insert BEFORE INSERT ON messages WHEN EXISTS(SELECT 1 FROM turns WHERE id=NEW.turn_id AND project_id IS NOT NEW.project_id) BEGIN SELECT RAISE(ABORT,'scope_mismatch'); END;
+CREATE TRIGGER messages_turn_id_scope_update BEFORE UPDATE OF turn_id ON messages WHEN EXISTS(SELECT 1 FROM turns WHERE id=NEW.turn_id AND project_id IS NOT NEW.project_id) BEGIN SELECT RAISE(ABORT,'scope_mismatch'); END;
+CREATE TRIGGER turns_scope_insert BEFORE INSERT ON turns WHEN NOT EXISTS(SELECT 1 FROM objects WHERE id=NEW.id AND project_id IS NEW.project_id) BEGIN SELECT RAISE(ABORT,'scope_mismatch'); END;
+CREATE TRIGGER turns_scope_update BEFORE UPDATE OF project_id ON turns WHEN NEW.project_id IS NOT OLD.project_id BEGIN SELECT RAISE(ABORT,'immutable_scope'); END;
+CREATE INDEX turns_scope ON turns(project_id);
+CREATE TABLE legacy_report_tasks(
+ project_id TEXT NOT NULL REFERENCES projects(id),legacy_task_id TEXT NOT NULL,task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
+ source_identity TEXT NOT NULL,source_key TEXT NOT NULL,started_at TEXT NOT NULL,title_preview TEXT NOT NULL,executions_json TEXT NOT NULL,
+ PRIMARY KEY(project_id,legacy_task_id),UNIQUE(source_identity,source_key),FOREIGN KEY(task_id,project_id) REFERENCES tasks(id,project_id));
+CREATE TABLE legacy_report_turns(
+ project_id TEXT NOT NULL REFERENCES projects(id),task_id TEXT NOT NULL REFERENCES tasks(id),execution_log_id INTEGER NOT NULL,
+ legacy_sequence INTEGER NOT NULL,turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id),
+ PRIMARY KEY(project_id,task_id,execution_log_id,legacy_sequence),FOREIGN KEY(turn_id,project_id) REFERENCES turns(id,project_id));
+CREATE TABLE report_version_sources(
+ object_id TEXT NOT NULL,revision INTEGER NOT NULL,source_identity TEXT NOT NULL,source_key TEXT NOT NULL,source_hash TEXT NOT NULL,
+ source_content_id TEXT NOT NULL REFERENCES contents(id),source_capture_revision INTEGER NOT NULL,source_created_at TEXT NOT NULL,
+ PRIMARY KEY(object_id,revision),FOREIGN KEY(object_id,revision) REFERENCES report_versions(object_id,revision));
+CREATE TABLE report_source_generations(project_id TEXT PRIMARY KEY REFERENCES projects(id),revision INTEGER NOT NULL);
+` }, { version: 19, sql: `
+ALTER TABLE growth_report_projection ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
+` }, { version: 20, sql: `
+CREATE TABLE learning_review_controls(
+ batch_id TEXT PRIMARY KEY REFERENCES review_batches(id),request_project_id TEXT NOT NULL REFERENCES projects(id),
+ run_key TEXT NOT NULL UNIQUE,input_content_id TEXT NOT NULL REFERENCES contents(id),run_id TEXT UNIQUE REFERENCES runs(id));
+` }, { version: 21, sql: `
+CREATE TABLE legacy_learning_review_controls(
+ batch_id TEXT PRIMARY KEY REFERENCES review_batches(id),input_content_id TEXT NOT NULL REFERENCES contents(id),
+ source_identity TEXT NOT NULL,source_key TEXT NOT NULL,UNIQUE(source_identity,source_key));
+` }, { version: 22, sql: `
+CREATE TABLE legacy_learning_review_cursor_inputs(
+ source_identity TEXT NOT NULL,cursor_hash TEXT NOT NULL,run_key TEXT NOT NULL,
+ cursor_id TEXT NOT NULL REFERENCES settings(id),cursor_revision INTEGER NOT NULL,
+ input_content_id TEXT NOT NULL REFERENCES contents(id),PRIMARY KEY(source_identity,cursor_hash),
+ FOREIGN KEY(cursor_id,cursor_revision) REFERENCES object_revisions(object_id,revision));
+` }, { version: 23, sql: `
+CREATE INDEX requests_migration_capture_key ON requests(idempotency_key)
+ WHERE idempotency_key>='migration-capture:' AND idempotency_key<'migration-capture;';
+CREATE TABLE migration_source_json_versions(
+ source_identity TEXT NOT NULL,source_key TEXT NOT NULL,capture_revision INTEGER NOT NULL,
+ content_id TEXT NOT NULL REFERENCES contents(id),transport_hash TEXT NOT NULL,json_hash TEXT,
+ request_id TEXT NOT NULL REFERENCES requests(id),PRIMARY KEY(source_identity,source_key,capture_revision));
+CREATE INDEX migration_source_json_hash ON migration_source_json_versions(source_identity,source_key,json_hash,capture_revision);
+CREATE TABLE migration_source_json_heads(
+ source_identity TEXT NOT NULL,source_key TEXT NOT NULL,through_revision INTEGER NOT NULL,
+ PRIMARY KEY(source_identity,source_key));
+` }, { version: 24, sql: `
+ALTER TABLE projects ADD COLUMN notes_content_id TEXT REFERENCES contents(id);
+` }, { version: 25, sql: `
+CREATE TABLE capability_registry(
+ kind TEXT NOT NULL CHECK(kind IN ('skill','mcp','enhancement')),legacy_id TEXT NOT NULL,
+ integration_id TEXT NOT NULL UNIQUE REFERENCES integrations(id),
+ PRIMARY KEY(kind,legacy_id));
+CREATE INDEX capability_registry_kind ON capability_registry(kind,integration_id);
 ` }];

@@ -2164,6 +2164,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
   <script>
     ${getSharedWebviewRuntimeScript()}
     const vscode = acquireVsCodeApi();
+    const automationSoundPageId = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
     const {
       escapeHtml,
       statusClass,
@@ -2779,11 +2780,14 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       return (i18n[currentLanguage].failureCategories || {})[category] || '';
     }
 
-    function playAutomationTone() {
+    async function playAutomationTone() {
+      let audioContext;
       try {
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-        if (!AudioContextClass) return;
-        const audioContext = new AudioContextClass();
+        if (!AudioContextClass) return false;
+        audioContext = new AudioContextClass();
+        if (audioContext.state === 'suspended') await audioContext.resume();
+        if (audioContext.state !== 'running') return false;
         const oscillator = audioContext.createOscillator();
         const gain = audioContext.createGain();
         oscillator.type = 'sine';
@@ -2793,10 +2797,16 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.28);
         oscillator.connect(gain);
         gain.connect(audioContext.destination);
+        const ended = new Promise(resolve => { oscillator.onended = resolve; });
         oscillator.start();
         oscillator.stop(audioContext.currentTime + 0.3);
+        await ended;
+        return true;
       } catch (error) {
         console.warn('SoloMap automation sound failed:', error);
+        return false;
+      } finally {
+        if (audioContext) await audioContext.close().catch(() => {});
       }
     }
 
@@ -3421,7 +3431,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           renderFlowPanel();
           break;
         case 'automationPlaySound':
-          playAutomationTone();
+          if (message.pageId !== automationSoundPageId) break;
+          void playAutomationTone().then(played => vscode.postMessage({ command: 'automationSoundPlayed', pageId: automationSoundPageId, deliveryId: message.deliveryId, token: message.token, played }));
           break;
         case 'setMainView':
           if (message.view === 'flow' && !currentFlowState.hasProAccess) {
@@ -5070,6 +5081,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         supplementFiles: supplementFiles || []
       });
     }
+    vscode.postMessage({ command: 'automationSoundReady', pageId: automationSoundPageId });
   </script>
 </body>
 </html>`;

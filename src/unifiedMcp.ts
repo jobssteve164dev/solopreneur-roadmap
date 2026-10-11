@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ContentPage, DataObject } from './db/unifiedDataStore';
 import { validateAgentLink, validateAgentWrite } from './dataAuthorization';
-import { dataSchema } from './db/dataSchema';
+import { dataSchema, type DataField } from './db/dataSchema';
 
 export interface UnifiedMcpSource {
   scope: string | null;
@@ -35,8 +35,18 @@ export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSou
   const schema = dataSchema();
   const kinds = Object.keys(schema.kinds) as [string, ...string[]];
   const dataFields: Record<string, any> = {};
+  const referenceField = (field: DataField): any => {
+    let value: any = field.type === 'number' ? z.number() : z.string();
+    if (field.integer) value = value.int();
+    if (field.minimum !== undefined) value = value.min(field.minimum);
+    if (field.nullable) value = value.nullable();
+    if (!field.required) value = value.optional();
+    return field.description ? value.describe(field.description) : value;
+  };
   for (const model of Object.values(schema.kinds)) for (const [key, field] of Object.entries(model.fields)) {
-    dataFields[key] = (field.type === 'text' ? z.string() : field.type === 'number' ? z.number() : z.unknown()).nullable().optional();
+    dataFields[key] = field.items
+      ? z.array(z.object(Object.fromEntries(Object.entries(field.items).map(([name, item]) => [name, referenceField(item)]))).strict()).describe(field.description || '').optional()
+      : (field.type === 'text' ? z.string() : field.type === 'number' ? z.number() : z.unknown()).nullable().optional();
   }
   const authorized = (object: DataObject): boolean => object.projectId === source.scope || object.objectId === source.scope ||
     (source.globalReads === true && object.projectId === null && ['memory', 'lesson', 'policy'].includes(object.kind) && ['verified', 'approved', 'active'].includes(String(object.data.status)));
@@ -57,7 +67,7 @@ export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSou
       catch (error) { return { isError: true, content: [{ type: 'text' as const, text: error instanceof Error ? error.message : String(error) }] }; }
     });
   };
-  register('solomap_search', '查找项目记录、记忆和执行证据。', { scope, query: z.string().optional(), kinds: z.array(z.string()).optional(), limit: z.number().int().min(1).max(500).optional(), cursor: z.string().optional() }, true, async input => {
+  register('solomap_search', '查找项目记录、记忆和执行证据。', { scope, query: z.string().optional(), terms: z.array(z.string().min(1)).nonempty().optional(), kinds: z.array(z.string()).optional(), limit: z.number().int().min(1).max(500).optional(), cursor: z.string().optional() }, true, async input => {
     if ((input.scope ?? source.scope) !== source.scope) throw new Error('scope_denied');
     return source.call('search', { ...input, scope: source.scope });
   });
@@ -77,7 +87,7 @@ export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSou
     await read(input.target);
     return source.call('link', input);
   });
-  register('solomap_context', '获取与当前目标有关的项目经验和记忆。', { project: z.string().optional(), query: z.string().optional(), categories: z.array(z.string()).optional(), budget: z.number().int().positive().optional() }, true, async input => {
+  register('solomap_context', '获取与当前目标有关的项目经验和记忆；metadata 返回固定版本引用，按 cursor 继续读取。', { project: z.string().optional(), query: z.string().optional(), terms: z.array(z.string().min(1)).nonempty().optional(), categories: z.array(z.string()).optional(), kinds: z.array(z.enum(['memory', 'lesson', 'policy'])).nonempty().optional(), budget: z.number().int().positive().optional(), view: z.enum(['full', 'metadata']).optional(), limit: z.number().int().min(1).max(500).optional(), cursor: z.string().optional() }, true, async input => {
     if (!source.scope || (input.project && input.project !== source.scope)) throw new Error('scope_denied');
     const result = await source.call('context', { ...input, project: source.scope }) as { items: DataObject[] };
     return { ...result, items: result.items.filter(authorized) };

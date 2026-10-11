@@ -2,6 +2,8 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import type { RuntimeDataOperations } from './runtimeDataOperations';
 
 export interface TelegramRuntimeConfig {
   schemaVersion: 1;
@@ -58,10 +60,17 @@ export function writeTelegramRuntimeConfig(globalDataPath: string, patch: Partia
   return next;
 }
 
-export function queueTelegramBackgroundNotification(globalDataPath: string, text: string, parseMode?: 'HTML'): void {
+export async function queueTelegramBackgroundNotification(globalDataPath: string, text: string, parseMode?: 'HTML', intentId = `telegram:${crypto.randomUUID()}`, operation?: RuntimeDataOperations): Promise<Record<string, unknown> | null> {
+  const call = (name: string, input: Record<string, unknown>) => operation ? operation({ operation: name, input }) : sendRuntimeDataRequest(globalDataPath, { operation: name, input });
+  const existing = await call('read_notification', { intentId }) as Record<string, unknown> | null;
+  if (existing) {
+    const messageHash = crypto.createHash('sha256').update(JSON.stringify({ parseMode: parseMode || '', text })).digest('hex');
+    if (existing.messageHash !== messageHash) throw new Error('notification_identity_conflict');
+    return existing;
+  }
   const config = readTelegramRuntimeConfig(globalDataPath);
-  if (!config.enabled || !config.botToken || !config.chatId) return;
-  writeTelegramRuntimeJson(telegramRuntimePath(globalDataPath, `telegram-outbox/${Date.now()}-${crypto.randomUUID()}.json`), {
-    replyGeneration: config.replyGeneration, chatId: config.chatId, text, ...(parseMode ? { parseMode } : {})
-  });
+  if (!config.enabled || !config.botToken || !config.chatId) return null;
+  return call('enqueue_notification', {
+    channel: 'telegram', intentId, payload: { replyGeneration: config.replyGeneration, chatId: config.chatId, text, ...(parseMode ? { parseMode } : {}) }, idempotencyKey: `enqueue:${intentId}`
+  }) as Promise<Record<string, unknown>>;
 }

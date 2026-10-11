@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import { disposeAutomationSoundView } from './automationSound.js';
 import { SyncEngine } from './db/syncEngine';
 import { AgentConversation } from './db/types';
 import { SolopreneurSettings } from './pluginContracts';
@@ -140,9 +141,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  public postMessage(message: Record<string, unknown>): void {
-    this._view?.webview.postMessage(message);
+  public postMessage(message: Record<string, unknown>): Thenable<boolean> | undefined {
+    return this._view?.webview.postMessage(message);
   }
+
+  public hasWebview(): boolean {
+    return Boolean(this._view);
+  }
+
+  public getWebview(): vscode.Webview | undefined { return this._view?.webview; }
 
   private refreshDependencyStatus(webviewView: vscode.WebviewView, cliPath: string): void {
     const dependencyStatus = getDependencyStatus(cliPath);
@@ -179,6 +186,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     _token: vscode.CancellationToken
   ) {
     this._view = webviewView;
+    webviewView.onDidDispose?.(() => {
+      disposeAutomationSoundView(webviewView.webview);
+      if (this._view === webviewView) this._view = undefined;
+    });
+    webviewView.onDidChangeVisibility?.(() => {
+      if (!webviewView.visible) disposeAutomationSoundView(webviewView.webview);
+    });
 
     try {
       // Allow scripts and configure local resource roots
@@ -306,7 +320,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             this.sendDailyReview();
             break;
           case 'runDailyReview': {
-            const review = startDailyReviewAgent(this._getSettings(), this._getProjects().projects, this._extensionUri);
+            const review = await startDailyReviewAgent(this._getSettings(), this._getProjects().projects, this._extensionUri);
             this._view?.webview.postMessage({ command: 'dailyReviewLoaded', review });
             break;
           }

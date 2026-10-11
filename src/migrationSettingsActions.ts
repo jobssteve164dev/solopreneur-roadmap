@@ -3,6 +3,7 @@ export interface MigrationSettingsDependencies {
   ready(root: string): Promise<void>;
   call(root: string, operation: string, input: Record<string, unknown>): Promise<any>;
   confirm(files: Array<{ itemId: string; path: string; bytes: number }>): Promise<boolean>;
+  chooseRestorePath?(): Promise<string | undefined>;
   launchAgent(kind: 'migration_review' | 'migration_apply' | 'recycling_apply', targetId?: string): Promise<void>;
 }
 
@@ -28,14 +29,27 @@ export async function handleMigrationSettingsAction(request: Record<string, unkn
     const planId = String(request.planId || '');
     const plan = await call('read_recycling_plan', { planId });
     if (!await dependencies.confirm(plan.files)) return { cancelled: true, dataRoot: root };
-    await call('confirm_recycling', { planId });
+    await call('confirm_recycling', { planId, files: plan.files });
     await dependencies.launchAgent('recycling_apply', planId);
     return { overview: await call('migration_overview'), dataRoot: root, agentStarted: true };
   } else if (command === 'dataMigration.retryRecycling') {
-    await dependencies.launchAgent('recycling_apply', String(request.planId || ''));
+    const planId = String(request.planId || '');
+    const plan = await call('read_recycling_plan', { planId });
+    if (plan.requiresConfirmation) {
+      if (!await dependencies.confirm(plan.files)) return { cancelled: true, dataRoot: root };
+      await call('confirm_recycling', { planId, files: plan.files });
+    }
+    await dependencies.launchAgent('recycling_apply', planId);
     return { overview: await call('migration_overview'), dataRoot: root, agentStarted: true };
   } else if (command === 'dataMigration.restore') {
-    await call('restore_recycling_file', { itemId: String(request.itemId || '') });
+    const itemId = String(request.itemId || '');
+    try { await call('restore_recycling_file', { itemId }); }
+    catch (error) {
+      if (!dependencies.chooseRestorePath || !(error instanceof Error) || !['recycling_path_identity_unavailable', 'recycling_path_invalid', 'restore_target_exists'].includes(error.message)) throw error;
+      const destination = await dependencies.chooseRestorePath();
+      if (!destination) return { cancelled: true, dataRoot: root };
+      await call('restore_recycling_file', { itemId, destination });
+    }
   } else if (command === 'dataMigration.retry') {
     await call('retry_migration', { jobId: String(request.jobId || '') });
   } else if (command !== 'dataMigration.get') throw new Error('unknown_migration_action');

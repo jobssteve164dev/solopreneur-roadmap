@@ -7,6 +7,28 @@ import { RuntimeDataOperations } from './runtimeDataOperations';
 type MigrationOperations = (request: Parameters<RuntimeDataOperations>[0]) => Promise<unknown>;
 type MigrationAcknowledgement = { scheduled?: boolean };
 
+async function historicalRunSourceStamp(store: UnifiedDataStore, roots: string[], shouldContinue: () => boolean): Promise<string> {
+  const hash = crypto.createHash('sha256'), pending = [...roots].sort();
+  const statusRoot = roots.find(root => path.basename(root) === 'agent-status')!;
+  while (pending.length) {
+    if (!shouldContinue()) return '';
+    const file = pending.pop()!;
+    let info: fs.Stats;
+    try { info = await fs.promises.lstat(file); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; hash.update(JSON.stringify([file, 'missing'])); continue; }
+    hash.update(JSON.stringify([file, info.mode, info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs]));
+    const statusRelative = path.relative(statusRoot, file);
+    if (info.isDirectory() && !info.isSymbolicLink()) pending.push(...(await fs.promises.readdir(file)).sort().map(name => path.join(file, name)));
+    else if (info.isFile() && !info.isSymbolicLink() && (path.basename(file) === '.agent_status.json' || (statusRelative && !statusRelative.startsWith('..') && !path.isAbsolute(statusRelative)))) {
+      try {
+        const status = JSON.parse(await fs.promises.readFile(file, 'utf8'));
+        if (status && typeof status === 'object') hash.update(JSON.stringify([file, 'owner-alive', store.historicalRunOwnerAlive(status)]));
+      } catch { /* The importer records invalid status sources; discovery preserves their metadata. */ }
+    }
+  }
+  return hash.digest('hex');
+}
+
 export async function enqueueStartupDataMigrations(store: UnifiedDataStore, operations: RuntimeDataOperations, shouldContinue: () => boolean): Promise<void> {
   await enqueueAvailableDataMigrations(store, operations, shouldContinue);
 }
@@ -18,10 +40,26 @@ export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, op
     const result = await operations(refreshCompleted ? { ...request, input: { ...request.input, refreshCompleted: true } } : request) as MigrationAcknowledgement;
     if (result.scheduled) queued++;
   };
+  try {
+    const registries = ['skills', 'mcp', 'enhancements'].map(directory => path.join(store.root, directory, 'registry.json'));
+    const existing: Array<{ file: string; hash: string }> = [];
+    for (const file of registries) {
+      if (!shouldContinue()) return { queued };
+      try { const bytes = await fs.promises.readFile(file); existing.push({ file, hash: crypto.createHash('sha256').update(bytes).digest('hex') }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    }
+    if (existing.length) await enqueue({ operation: 'import_project_data', input: { collection: 'capabilities', sourceRoot: store.root, idempotencyKey: `startup-capabilities-v1:${crypto.createHash('sha256').update(JSON.stringify(existing)).digest('hex')}` } });
+  } catch (error) { process.stderr.write(`SoloMap capability migration startup: ${String(error)}\n`); }
   try { await enqueueStartupMemoryMigration(store, enqueue, shouldContinue); }
   catch (error) { process.stderr.write(`SoloMap memory migration startup: ${String(error)}\n`); }
   try { await enqueueStartupProjectMigrations(store, enqueue, shouldContinue); }
   catch (error) { process.stderr.write(`SoloMap project data migration startup: ${String(error)}\n`); }
+  try { await enqueueStartupLearningMigration(store, enqueue, shouldContinue); }
+  catch (error) { process.stderr.write(`SoloMap learning migration startup: ${String(error)}\n`); }
+  try { await enqueueStartupLearningReviewMigration(store, enqueue, shouldContinue); }
+  catch (error) { process.stderr.write(`SoloMap review migration startup: ${String(error)}\n`); }
+  try { await enqueueStartupStrategyMigration(store, enqueue, shouldContinue); }
+  catch (error) { process.stderr.write(`SoloMap strategy migration startup: ${String(error)}\n`); }
   if (!shouldContinue()) return { queued };
   const sourceRoot = path.join(store.root, 'intelligence-conversations');
   try {
@@ -32,11 +70,71 @@ export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, op
   return { queued };
 }
 
+async function enqueueStartupLearningReviewMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
+  const sourceRoot = path.join(store.root, 'maintenance');
+  try { if (!(await fs.promises.lstat(sourceRoot)).isDirectory()) return; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  const projectScopes: Record<string, string> = {};
+  for (const root of store.registeredProjectRoots()) {
+    if (!shouldContinue()) return;
+    const project = await store.registerProject({ root });
+    projectScopes[path.resolve(root)] = project.projectId;
+  }
+  const sourceHash = crypto.createHash('sha256'), pending = [sourceRoot];
+  while (pending.length) {
+    if (!shouldContinue()) return;
+    const file = pending.pop()!, info = await fs.promises.lstat(file);
+    sourceHash.update(JSON.stringify([file, info.mode, info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs]));
+    if (info.isDirectory() && !info.isSymbolicLink()) pending.push(...(await fs.promises.readdir(file)).sort().map(name => path.join(file, name)));
+    else if (info.isFile() && file === path.join(sourceRoot, 'review.lock')) {
+      try {
+        const owner = JSON.parse(await fs.promises.readFile(file, 'utf8'));
+        sourceHash.update(JSON.stringify({ ownerAlive: store.historicalRunOwnerAlive({ agentPid: owner.pid, processBirth: owner.processStart ? `proc:${owner.processStart}` : '' }) }));
+      } catch { sourceHash.update('invalid-review-lock'); }
+    }
+  }
+  const signature = crypto.createHash('sha256').update(JSON.stringify({ sourceRoot, projectScopes, stamp: sourceHash.digest('hex') })).digest('hex');
+  if (shouldContinue()) await operations({ operation: 'import_project_data', input: { collection: 'learning-review', sourceRoot, projectScopes, idempotencyKey: `startup-learning-review-v1:${signature}` } });
+}
+
+async function enqueueStartupStrategyMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
+  const sourceRoot = path.join(store.root, 'strategy');
+  try { if (!(await fs.promises.stat(sourceRoot)).isDirectory()) return; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  const mappings: Array<[string, string]> = [];
+  for (const projectRoot of store.registeredProjectRoots()) {
+    if (!shouldContinue()) return;
+    try {
+      const registered = await store.registerProject({ root: projectRoot });
+      mappings.push([projectRoot, registered.projectId]);
+    } catch (error) { process.stderr.write(`SoloMap strategy project discovery: ${projectRoot}: ${String(error)}\n`); }
+  }
+  const projectScopes = Object.fromEntries(mappings.sort(([a], [b]) => a.localeCompare(b)));
+  const signature = crypto.createHash('sha256').update(JSON.stringify({ sourceRoot, projectScopes })).digest('hex');
+  if (shouldContinue()) await operations({ operation: 'import_project_data', input: { collection: 'strategy', sourceRoot, projectScopes, idempotencyKey: `startup-strategy-v1:${signature}` } });
+}
+
+async function enqueueStartupLearningMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
+  const sourceRoot = path.join(store.root, 'learning');
+  try { if (!(await fs.promises.stat(sourceRoot)).isDirectory()) return; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  const mappings: Array<[string, string]> = [];
+  for (const projectRoot of store.registeredProjectRoots()) {
+    if (!shouldContinue()) return;
+    try {
+      const project = await store.registerProject({ root: projectRoot });
+      mappings.push([path.resolve(projectRoot), project.projectId]);
+    } catch (error) { process.stderr.write(`SoloMap learning project discovery: ${projectRoot}: ${String(error)}\n`); }
+  }
+  const projectScopes = Object.fromEntries(mappings.sort(([a], [b]) => a.localeCompare(b)));
+  const signature = crypto.createHash('sha256').update(JSON.stringify({ sourceRoot, projectScopes })).digest('hex');
+  if (shouldContinue()) await operations({ operation: 'import_project_data', input: { collection: 'learning', sourceRoot, projectScopes, idempotencyKey: `startup-learning-v1:${signature}` } });
+}
+
 async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
   let projects: Array<{ path: string }> = store.registeredProjectRoots().map(projectPath => ({ path: projectPath }));
   try {
-    const registry = JSON.parse(await fs.promises.readFile(path.join(store.root, 'projects.json'), 'utf8'));
-    if (!Array.isArray(registry.projects)) throw new Error('project_registry_invalid');
+    const registry = (await store.initializeProjectRegistry()).registry;
     const known = new Set(projects.map(project => path.resolve(project.path)));
     for (const project of registry.projects) {
       const projectPath = String(project?.path || '');
@@ -49,15 +147,26 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
     if (!shouldContinue()) return;
     const projectRoot = String(project?.path || '');
     if (!path.isAbsolute(projectRoot)) continue;
+    try {
+      const registered = await store.registerProject({ root: projectRoot });
+      if (store.missingProjectJournalSources(registered.projectId, 1).length) {
+        await operations({ operation: 'import_project_data', input: { collection: 'project-journal', mode: 'unified', sourceRoot: `solomap://${store.databaseId}/${registered.projectId}/project-journal`, projectRoot, idempotencyKey: `startup-journal-projection-v12:${registered.projectId}`, refreshCompleted: true } });
+      }
+    } catch (error) { process.stderr.write(`SoloMap journal projection startup: ${projectRoot}: ${String(error)}\n`); }
     const sources = [
       { collection: 'project-growth', sourceRoot: path.join(projectRoot, '.solopreneur', 'project_growth.db') },
       { collection: 'project-journal', sourceRoot: path.join(projectRoot, '.solopreneur', 'project_journal.db') },
-      { collection: 'agent-runs', sourceRoot: path.join(projectRoot, '.solopreneur', 'agent-runs') }
+      { collection: 'agent-runs', sourceRoot: path.join(projectRoot, '.solopreneur', 'agent-runs') },
+      { collection: 'step-memory', sourceRoot: path.join(projectRoot, '.solopreneur', 'step-memory') },
+      { collection: 'run-digests', sourceRoot: path.join(projectRoot, '.solopreneur', 'run-digests') }
     ];
     for (const source of sources) {
-      try { if (!fs.statSync(source.sourceRoot)[source.collection === 'agent-runs' ? 'isDirectory' : 'isFile']()) continue; }
+      try { if (!(await fs.promises.stat(source.sourceRoot))[['agent-runs', 'step-memory', 'run-digests'].includes(source.collection) ? 'isDirectory' : 'isFile']()) continue; }
       catch { continue; }
-      await operations({ operation: 'import_project_data', input: { ...source, projectRoot, idempotencyKey: `startup-${source.collection}-v1:${projectRoot}` } });
+      const version = source.collection === 'agent-runs' ? 6 : source.collection === 'project-journal' ? 2 : 1;
+      const stamp = source.collection === 'agent-runs' ? await historicalRunSourceStamp(store, [source.sourceRoot, path.join(projectRoot, '.solopreneur', 'agent-status'), path.join(projectRoot, '.agent_status.json')], shouldContinue) : '';
+      if (!shouldContinue()) return;
+      await operations({ operation: 'import_project_data', input: { ...source, projectRoot, idempotencyKey: `startup-${source.collection}-v${version}:${projectRoot}${stamp ? `:${stamp}` : ''}` } });
     }
   }
 }
@@ -74,8 +183,7 @@ export async function enqueueStartupMemoryMigration(store: UnifiedDataStore, ope
   const mappings = new Map<string, string | null>();
   const projects: Array<{ path: string; name?: string }> = store.registeredProjectRoots().map(projectPath => ({ path: projectPath }));
   try {
-    const registry = JSON.parse(await fs.promises.readFile(path.join(store.root, 'projects.json'), 'utf8'));
-    if (!Array.isArray(registry.projects)) throw new Error('project_registry_invalid');
+    const registry = (await store.initializeProjectRegistry()).registry;
     const known = new Set(projects.map(project => path.resolve(project.path)));
     for (const project of registry.projects) {
       if (!project || typeof project.path !== 'string' || !path.isAbsolute(project.path)) continue;

@@ -6,6 +6,9 @@ import {
 } from './projectExternalSignals';
 import { buildProjectPortfolioSummary, ProjectPortfolioSummary, SolopreneurProject } from './projectPortfolio';
 import { readProjectInvestmentStatsFromDatabase } from './projectAnalytics';
+import { readLearningOverview } from './learningLedger';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 
 interface SidebarProjectLoaderOptions {
   isAvailable: () => boolean;
@@ -76,13 +79,17 @@ export class SidebarProjectLoader {
       void (async () => {
         try {
           const globalDataPath = this.options.getGlobalDataPath();
+          const learningOverview = await readLearningOverview(ordered[0]?.path || process.cwd(), globalDataPath);
           const summaries = new Map<string, ProjectPortfolioSummary>(basePortfolio.map((summary) => [summary.path, summary]));
           for (const project of ordered) {
             if (!this.options.isAvailable() || requestId !== this.portfolioRequest) return;
             if (projectRequests.get(project.path) !== this.portfolioProjectRequests.get(project.path)) {
               continue;
             }
-            const investment = await readProjectInvestmentStatsFromDatabase(project.path, this.options.getExtensionPath(), new Date(), globalDataPath);
+            const [investment, sourceCount] = await Promise.all([
+              readProjectInvestmentStatsFromDatabase(project.path, this.options.getExtensionPath(), new Date(), globalDataPath),
+              sendRuntimeDataRequest<number>(normalizeGlobalDataPathForExtension(globalDataPath, project.path), { operation: 'read_project_reusable_source_count', input: { root: project.path } })
+            ]);
             if (!this.options.isAvailable() || requestId !== this.portfolioRequest) return;
             if (projectRequests.get(project.path) !== this.portfolioProjectRequests.get(project.path)) {
               continue;
@@ -90,6 +97,8 @@ export class SidebarProjectLoader {
             summaries.set(project.path, buildProjectPortfolioSummary(project, {
               includeReusableSignals: true,
               globalDataPath,
+              learningOverview,
+              reusableSourceCountsByProjectPath: new Map([[project.path, sourceCount]]),
               investmentStatsByProjectPath: { [project.path]: investment }
             }));
             this.latestEnrichedPortfolio.set(project.path, summaries.get(project.path)!);

@@ -1,11 +1,11 @@
 export type IntelligenceReadToolName = 'list_projects' | 'get_current_project' | 'get_plugin_settings' | 'get_today_review';
 
 export interface IntelligenceReadToolSource {
-  getProjects(): Array<{ name: string; path: string; priority?: string; description?: string }>;
+  getProjects(): Array<{ name: string; path: string; priority?: string; description?: string }> | Promise<Array<{ name: string; path: string; priority?: string; description?: string }>>;
   getSelectedProjectPath(): string;
   getCurrentSteps(): Array<{ title: string; status: string }> | null;
   getSettings(): { language: string; cognitiveAgent?: string; cognitiveModel?: string };
-  getTodayReview?(): { summary: string; items: string[] } | null;
+  getTodayReview?(): { summary: string; items: string[] } | null | Promise<{ summary: string; items: string[] } | null>;
 }
 
 export interface IntelligenceReadTools {
@@ -24,7 +24,7 @@ export function createIntelligenceReadTools(source: IntelligenceReadToolSource):
         };
       }
       if (name === 'get_today_review') {
-        const review = source.getTodayReview?.();
+        const review = await source.getTodayReview?.();
         return review ? {
           summary: String(review.summary || '').slice(0, 500),
           items: (review.items || []).map(item => String(item).slice(0, 200)).slice(0, 10)
@@ -33,7 +33,7 @@ export function createIntelligenceReadTools(source: IntelligenceReadToolSource):
       if (name !== 'list_projects' && name !== 'get_current_project') {
         throw new Error(`Unknown read tool: ${name}`);
       }
-      const projects = source.getProjects();
+      const projects = await source.getProjects();
       if (name === 'list_projects') {
         return projects.map(project => ({
           name: project.name,

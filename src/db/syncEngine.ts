@@ -85,6 +85,8 @@ export class SyncEngine {
     this.sqliteStore?.close();
   }
 
+  public get dataRoot(): string { return this.globalDataPath; }
+
   private async readLegacy<T>(read: (legacy: SqliteStore) => T | Promise<T>, fallback: T): Promise<T> {
     if (!fs.existsSync(this.dbPath)) return fallback;
     const legacy = new SqliteStore(this.dbPath, this.extensionPath);

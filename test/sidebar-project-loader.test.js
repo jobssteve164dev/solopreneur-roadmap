@@ -27,6 +27,15 @@ function loadLoader(overrides = {}) {
     if (parent?.filename === loaderPath && request === './projectAnalytics') {
       return { readProjectInvestmentStatsFromDatabase: overrides.investment || (async () => ({})) };
     }
+    if (parent?.filename === loaderPath && request === './learningLedger') {
+      return { readLearningOverview: async () => ({ eventCount: 0, candidateCount: 0, candidateDecisionCount: 0, skippedCandidateDecisionCount: 0, approvedCount: 0, promotedCount: 0, projectSignals: [] }) };
+    }
+    if (parent?.filename === loaderPath && request === './autonomousRuntimeControl') {
+      return { sendRuntimeDataRequest: async (_root, request) => {
+        assert.equal(request.operation, 'read_project_reusable_source_count');
+        return 0;
+      } };
+    }
     if (parent?.filename === loaderPath && request === './projectPortfolio') {
       return { buildProjectPortfolioSummary: project => ({ path: project.path, name: project.name }) };
     }

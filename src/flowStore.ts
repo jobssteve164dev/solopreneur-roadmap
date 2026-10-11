@@ -1,5 +1,7 @@
-import * as fs from 'fs';
-import * as path from 'path';
+import * as crypto from 'crypto';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import { normalizeGlobalDataPathForExtension } from './projectRegistry';
+import type { FlowSnapshot } from './db/unifiedDataStore';
 
 export type FlowLifecycleStatus =
   | 'idle'
@@ -111,40 +113,14 @@ export interface FlowStatePayload {
 }
 
 const schemaVersion = 1;
+type Operation = (operation: string, input: Record<string, unknown>) => Promise<unknown>;
 
-function getFlowsRoot(projectPath: string): string {
-  return path.join(projectPath, '.solopreneur', 'flows');
-}
-
-function getFlowTracePath(projectPath: string, flowId: string): string {
-  return path.join(getFlowsRoot(projectPath), `${flowId}.json`);
-}
-
-function safeReadJson<T>(filePath: string): T | null {
-  try {
-    if (!fs.existsSync(filePath)) {
-      return null;
-    }
-    return JSON.parse(fs.readFileSync(filePath, 'utf8')) as T;
-  } catch {
-    return null;
-  }
-}
-
-function ensureFlowsRoot(projectPath: string): void {
-  fs.mkdirSync(getFlowsRoot(projectPath), { recursive: true });
-}
-
-function writeJsonAtomic(filePath: string, data: unknown): void {
-  const tempPath = `${filePath}.tmp`;
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), 'utf8');
-  JSON.parse(fs.readFileSync(tempPath, 'utf8'));
-  fs.renameSync(tempPath, filePath);
+function flowOperation(projectPath: string, globalDataPath: string, operation?: Operation): Operation {
+  return operation || ((name, input) => sendRuntimeDataRequest(normalizeGlobalDataPathForExtension(globalDataPath, projectPath), { operation: name, input }));
 }
 
 export function createFlowId(): string {
-  return `flow-${Date.now()}`;
+  return `flow-${Date.now()}-${crypto.randomUUID()}`;
 }
 
 export function createFlowTrace(
@@ -195,70 +171,59 @@ export function createFlowLoop(goal: string, index: number): FlowLoopTrace {
   };
 }
 
-export function saveFlowTrace(projectPath: string, flow: FlowTrace): void {
-  ensureFlowsRoot(projectPath);
-  writeJsonAtomic(getFlowTracePath(projectPath, flow.flowId), flow);
+export async function saveFlowTrace(projectPath: string, flow: FlowTrace, globalDataPath = '', operation?: Operation): Promise<void> {
+  const call = flowOperation(projectPath, globalDataPath, operation);
+  const value = JSON.parse(JSON.stringify(flow)) as FlowTrace;
+  const hash = crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  await call('write_flow_trace', { root: projectPath, flow: value, expectedRevision: 0, idempotencyKey: `flow:${value.flowId}:create:${hash}` });
 }
 
-export function readFlowTrace(projectPath: string, flowId: string): FlowTrace | null {
-  const trace = safeReadJson<FlowTrace>(getFlowTracePath(projectPath, flowId));
-  if (!trace || trace.schemaVersion !== schemaVersion || !Array.isArray(trace.loops)) {
-    return null;
+export async function readFlowTrace(projectPath: string, flowId: string, globalDataPath = '', operation?: Operation): Promise<FlowTrace | null> {
+  const snapshot = await flowOperation(projectPath, globalDataPath, operation)('read_flow_trace', { root: projectPath, flowId }) as FlowSnapshot | null;
+  return snapshot?.flow || null;
+}
+
+async function listFlowHeaders(projectPath: string, globalDataPath: string, operation?: Operation): Promise<Array<Omit<FlowTrace, 'loops'>>> {
+  const call = flowOperation(projectPath, globalDataPath, operation);
+  const items: Array<Omit<FlowTrace, 'loops'>> = []; let cursor: number | null = 0;
+  do {
+    const page = await call('list_flow_traces', { root: projectPath, cursor, limit: 100 }) as { items: Array<{ flow: Omit<FlowTrace, 'loops'> }>; nextCursor: number | null };
+    items.push(...page.items.map(item => item.flow)); cursor = page.nextCursor;
+  } while (cursor !== null);
+  return items.sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')));
+}
+
+export async function listFlowTraces(projectPath: string, globalDataPath = '', operation?: Operation): Promise<FlowTrace[]> {
+  const result: FlowTrace[] = [];
+  for (const header of await listFlowHeaders(projectPath, globalDataPath, operation)) {
+    const trace = await readFlowTrace(projectPath, header.flowId, globalDataPath, operation);
+    if (trace) result.push(trace);
   }
-  return trace;
+  return result;
 }
 
-export function listFlowTraces(projectPath: string): FlowTrace[] {
-  const root = getFlowsRoot(projectPath);
-  if (!fs.existsSync(root)) {
-    return [];
+export async function getLatestFlowTrace(projectPath: string, globalDataPath = '', operation?: Operation): Promise<FlowTrace | null> {
+  const header = (await listFlowHeaders(projectPath, globalDataPath, operation))[0];
+  return header ? readFlowTrace(projectPath, header.flowId, globalDataPath, operation) : null;
+}
+
+export async function buildFlowStatePayload(projectPath: string, hasProAccess: boolean, globalDataPath = '', operation?: Operation): Promise<FlowStatePayload> {
+  const headers = await listFlowHeaders(projectPath, globalDataPath, operation);
+  return { hasProAccess, flow: headers[0] ? await readFlowTrace(projectPath, headers[0].flowId, globalDataPath, operation) : null,
+    history: headers.slice(0, 8).map(trace => ({ flowId: trace.flowId, goal: trace.goal, status: trace.status, createdAt: trace.createdAt, updatedAt: trace.updatedAt, ...(trace.completedAt ? { completedAt: trace.completedAt } : {}) })) };
+}
+
+export async function updateFlowTrace(projectPath: string, flowId: string, updater: (flow: FlowTrace) => FlowTrace, globalDataPath = '', operation?: Operation): Promise<FlowTrace | null> {
+  const call = flowOperation(projectPath, globalDataPath, operation);
+  for (;;) {
+    const current = await call('read_flow_trace', { root: projectPath, flowId }) as FlowSnapshot | null;
+    if (!current) return null;
+    const next = JSON.parse(JSON.stringify(updater(structuredClone(current.flow)))) as FlowTrace;
+    next.updatedAt = new Date().toISOString();
+    const hash = crypto.createHash('sha256').update(JSON.stringify(next)).digest('hex');
+    try {
+      const saved = await call('write_flow_trace', { root: projectPath, flow: next, expectedRevision: current.revision, idempotencyKey: `flow:${flowId}:${current.revision}:update:${hash}` }) as FlowSnapshot;
+      return saved.flow;
+    } catch (error) { if ((error as Error).message !== 'revision_conflict') throw error; }
   }
-  return fs.readdirSync(root)
-    .filter((file) => file.endsWith('.json'))
-    .map((file) => safeReadJson<FlowTrace>(path.join(root, file)))
-    .filter((trace): trace is FlowTrace => Boolean(trace && trace.schemaVersion === schemaVersion && Array.isArray(trace.loops)))
-    .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')));
-}
-
-export function getLatestFlowTrace(projectPath: string): FlowTrace | null {
-  return listFlowTraces(projectPath)[0] || null;
-}
-
-export function buildFlowStatePayload(projectPath: string, hasProAccess: boolean): FlowStatePayload {
-  const traces = listFlowTraces(projectPath);
-  return {
-    hasProAccess,
-    flow: traces[0] || null,
-    history: traces.slice(0, 8).map((trace) => ({
-      flowId: trace.flowId,
-      goal: trace.goal,
-      status: trace.status,
-      createdAt: trace.createdAt,
-      updatedAt: trace.updatedAt,
-      completedAt: trace.completedAt
-    }))
-  };
-}
-
-export function updateFlowTrace(projectPath: string, flowId: string, updater: (flow: FlowTrace) => FlowTrace): FlowTrace | null {
-  const current = readFlowTrace(projectPath, flowId);
-  if (!current) {
-    return null;
-  }
-  const next = updater({
-    ...current,
-    loops: current.loops.map((loop) => ({
-      ...loop,
-      planner: { ...loop.planner },
-      builder: { ...loop.builder },
-      verifier: { ...loop.verifier },
-      evidence: loop.evidence ? { ...loop.evidence } : undefined,
-      scoring: loop.scoring ? { ...loop.scoring, reasons: [...(loop.scoring.reasons || [])] } : undefined
-    }))
-  });
-  saveFlowTrace(projectPath, {
-    ...next,
-    updatedAt: new Date().toISOString()
-  });
-  return readFlowTrace(projectPath, flowId);
 }

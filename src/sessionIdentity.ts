@@ -108,7 +108,7 @@ function withSessionBindingLease<T>(filePath: string, action: () => T): T {
   }
 }
 
-function assertVersion2Binding(value: unknown, filePath: string): NativeSessionBinding {
+export function assertVersion2Binding(value: unknown, filePath: string): NativeSessionBinding {
   const binding = value as Partial<NativeSessionBinding> | null;
   if (!binding || binding.version !== 2 || !Array.isArray(binding.revisions)) {
     throw sessionIdentityError('identity_binding_invalid', `Session binding is not version 2: ${filePath}`);
@@ -143,11 +143,7 @@ export function readSessionBinding(filePath: string): NativeSessionBinding {
   return assertVersion2Binding(value, filePath);
 }
 
-export function createSessionBinding(filePath: string, seed: SessionBindingSeed): NativeSessionBinding {
-  return withSessionBindingLease(filePath, () => {
-    if (fs.existsSync(filePath)) {
-      throw sessionIdentityError('identity_index_conflict', `Session binding already exists: ${filePath}`);
-    }
+export function createSessionBindingValue(seed: SessionBindingSeed): NativeSessionBinding {
     const createdAt = seed.createdAt || new Date().toISOString();
     const firstRevision: SessionBindingRevision = {
       revision: 1,
@@ -170,6 +166,13 @@ export function createSessionBinding(filePath: string, seed: SessionBindingSeed)
       headRevision: 1,
       revisions: [firstRevision]
     };
+    return binding;
+}
+
+export function createSessionBinding(filePath: string, seed: SessionBindingSeed): NativeSessionBinding {
+  return withSessionBindingLease(filePath, () => {
+    if (fs.existsSync(filePath)) throw sessionIdentityError('identity_index_conflict', `Session binding already exists: ${filePath}`);
+    const binding = createSessionBindingValue(seed);
     atomicWriteJson(filePath, binding);
     return binding;
   });
@@ -182,10 +185,18 @@ export function appendSessionBindingRevision(
 ): NativeSessionBinding {
   return withSessionBindingLease(filePath, () => {
     const binding = readSessionBinding(filePath);
+    const next = appendSessionBindingValue(binding, expectedHeadRevision, input);
+    atomicWriteJson(filePath, next);
+    return next;
+  });
+}
+
+export function appendSessionBindingValue(binding: NativeSessionBinding, expectedHeadRevision: number, input: SessionBindingRevisionInput): NativeSessionBinding {
+    assertVersion2Binding(binding, binding.runId);
     if (binding.headRevision !== expectedHeadRevision) {
       throw sessionIdentityError(
         'identity_index_conflict',
-        `Session binding changed from revision ${expectedHeadRevision} to ${binding.headRevision}: ${filePath}`
+        `Session binding changed from revision ${expectedHeadRevision} to ${binding.headRevision}: ${binding.runId}`
       );
     }
     const revision = expectedHeadRevision + 1;
@@ -212,9 +223,15 @@ export function appendSessionBindingRevision(
     } else {
       delete next.resumableRevision;
     }
-    atomicWriteJson(filePath, next);
     return next;
-  });
+}
+
+export function confirmSessionBindingValue(binding: NativeSessionBinding, expectedHeadRevision: number, expectedSessionId: string, confirmedAt = new Date().toISOString(), evidence?: Record<string, unknown>): NativeSessionBinding {
+  assertVersion2Binding(binding, binding.runId);
+  if (binding.headRevision !== expectedHeadRevision) throw sessionIdentityError('identity_index_conflict', `Session binding head does not match revision ${expectedHeadRevision}`);
+  const head = binding.revisions[expectedHeadRevision - 1];
+  if (head.state !== 'planned' || !head.sessionId || head.sessionId !== expectedSessionId) throw sessionIdentityError('identity_provider_mismatch', 'Planned session does not match the confirmed session');
+  return appendSessionBindingValue(binding, expectedHeadRevision, { sessionId: head.sessionId, supersedesRevision: expectedHeadRevision, method: head.method, contract: head.contract, state: 'confirmed', confirmedAt, providerContext: head.providerContext, evidence });
 }
 
 export function confirmSessionBinding(
@@ -245,12 +262,24 @@ export function confirmSessionBinding(
 }
 
 export function getResumableSession(filePath: string): ResumableSessionBinding | null {
-  let binding: NativeSessionBinding;
   try {
-    binding = readSessionBinding(filePath);
+    return getResumableSessionValue(readSessionBinding(filePath));
   } catch {
     return null;
   }
+}
+
+export function getCodexSessionHome(binding: NativeSessionBinding | null): string {
+  if (!binding || binding.provider !== 'codex') return '';
+  const context = [...binding.revisions].reverse().find(revision => revision.providerContext?.codex)?.providerContext?.codex;
+  const home = context && typeof context === 'object' ? String((context as Record<string, unknown>).codexHome || '').trim() : '';
+  if (home && !path.isAbsolute(home)) throw sessionIdentityError('identity_provider_context_invalid', 'Codex session home must be an absolute path');
+  return home;
+}
+
+export function getResumableSessionValue(binding: NativeSessionBinding | null): ResumableSessionBinding | null {
+  if (!binding) return null;
+  assertVersion2Binding(binding, binding.runId);
   if (!binding.resumableRevision || binding.resumableRevision !== binding.headRevision) {
     return null;
   }

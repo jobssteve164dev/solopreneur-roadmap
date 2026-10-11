@@ -1,6 +1,6 @@
 ---
 name: solomap-cross-agent-handoff
-description: Use SoloMap run digests, execution graph, and SQLite execution logs to take over work from another Agent CLI without repeating the previous run.
+description: Use SoloMap handoff evidence and execution history to take over work from another Agent CLI without repeating the previous run.
 ---
 
 # SoloMap Cross-Agent Handoff
@@ -9,7 +9,9 @@ Use this skill when a task is continuing, reviewing, repairing, or coordinating 
 
 ## Start Here
 
-Run the handoff command from the project root:
+Use the handoff command in the current task prompt. It includes the tool location and the data root for this run. Keep its `--project` and `--global` arguments when changing the subcommand or adding filters.
+
+For a project using the default data root, run from the project root:
 
 ```bash
 node resources/tools/solomap-experience.cjs handoff --project . --limit 3
@@ -34,6 +36,8 @@ node resources/tools/solomap-experience.cjs history --project . --node <node-id>
 ```
 
 Add `--json` when you need structured output. Add `--full` only when summarized signals are insufficient; raw execution logs can be long and should not be pasted into the final user response.
+
+Each record includes a `sourceRef`. Read its complete source with `solomap_read({ref: sourceRef.objectId, revision: sourceRef.revision})`; for large content, use `view="content"` and follow every cursor until it is null. The command reads through the same SoloMap data tools as the task, and does not require opening a database or keeping old history files.
 
 ## Rules
 

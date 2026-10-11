@@ -8,6 +8,583 @@ const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
 
+test('production extension no longer carries the retired per-run file producer', () => {
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.retiredRunProducers = [typeof buildAgentShellScript, typeof buildSessionCaptureScript, typeof buildCodexContinuationRunnerScript];');
+  assert.equal(JSON.stringify(extension.retiredRunProducers), JSON.stringify(['undefined', 'undefined', 'undefined']));
+});
+
+test('production extension no longer carries unused file identity and turn producers', () => {
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.retiredHelpers = [typeof ensureInteractiveTurnExecution, typeof markSessionBindingUnavailable, typeof confirmPlannedSessionFromCheckpoint, typeof buildWorkspaceSnapshotScript];');
+  assert.equal(JSON.stringify(extension.retiredHelpers), JSON.stringify(['undefined', 'undefined', 'undefined', 'undefined']));
+});
+
+test('production Solo prompt creates no permanent global instruction mirror', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-policy-mirror-'));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global');
+  fs.mkdirSync(project);
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.__soloPolicyPrompt = buildSoloConversationPrompt;');
+  const runtime = isolatedCapabilityRuntime(root);
+  try {
+    await extension.__soloPolicyPrompt('执行用户动作', project, '  完整原始要求\n末行\n', [], root);
+    assert.equal(fs.existsSync(path.join(root, 'context', 'global-default-prompt.md')), false);
+  } finally { await runtime.close(); }
+});
+
+test('production Solo context uses the database before its first file exists', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-policy-first-context-'));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global');
+  fs.mkdirSync(project);
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.__soloPolicyPrompt = buildSoloConversationPrompt;');
+  const runtime = isolatedCapabilityRuntime(root);
+  try {
+    assert.equal(fs.existsSync(path.join(root, 'solomap.db')), false);
+    const prompt = await extension.__soloPolicyPrompt('执行用户动作', project, '', [], root);
+    assert.match(prompt, /SoloMap 数据库工具：/);
+    assert.doesNotMatch(prompt, /solomap-memory\.cjs.*(?:route|retrieve)|documentation\.json|global-default-prompt\.md/);
+  } finally { await runtime.close(); }
+});
+
+test('production review launch retries one formal run and full evidence without permanent review files', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { SyncEngine } = require('../out/db/syncEngine.js');
+  const actualTransport = require('../out/autonomousRuntimeControl.js'); const previous = actualTransport.sendRuntimeDataRequest;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-review-launch-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const git = (...args) => childProcess.execFileSync('git', ['-C', project, ...args], { encoding: 'utf8' }).trim();
+  git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
+  fs.writeFileSync(path.join(project, 'result.txt'), '复核基线'); git('add', 'result.txt'); git('commit', '-q', '-m', 'fixture baseline');
+  const gitBaseline = git('rev-parse', 'HEAD');
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const registered = await store.registerProject({ root: project });
+  const main = store.prepareRun(registered.projectId, registered.locationId, { root: project, executionLogId: 1, nodeId: 'step', runKind: 'step', prompt: '原始任务', command: 'main', userMessage: '原始目标', metadata: { interactiveSession: true, baseGitHash: gitBaseline }, idempotencyKey: 'review-main' });
+  const mainOutput = '必须完整复核🌿'.repeat(30000);
+  store.appendRunLog(registered.projectId, { executionLogId: 1, generation: main.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from(mainOutput).toString('base64'), idempotencyKey: 'main-output' });
+  fs.writeFileSync(path.join(project, 'result.txt'), '原轮次交付');
+  const source = await ops({ operation: 'checkpoint_run', input: { projectId: main.projectId, executionLogId: 1, generation: main.generation, proof: main.proof, expectedRevision: main.revision, expectedTurnId: main.turnId, action: 'complete', outcome: 'candidate_complete', summary: '原轮次已完成', idempotencyKey: 'source-complete' } });
+  const nextTurn = await ops({ operation: 'checkpoint_run', input: { projectId: main.projectId, executionLogId: 1, generation: main.generation, proof: main.proof, expectedRevision: source.revision, expectedTurnId: source.turnId, action: 'start', message: '下一轮不同要求', idempotencyKey: 'source-next-turn' } });
+  const logHead = store.readRunLogHead(main.projectId, 1, 'stdout');
+  store.appendRunLog(main.projectId, { executionLogId: 1, generation: main.generation, stream: 'stdout', sequence: logHead.nextSequence, offset: logHead.totalBytes, bytes: Buffer.from('下一轮不同输出').toString('base64'), idempotencyKey: 'next-turn-output' });
+  fs.writeFileSync(path.join(project, 'result.txt'), '下一轮不同文件');
+  const engine = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  engine.setNodes([{ id: 'step', title: '实际交付', description: '原始目标', stage: '实施', dependencies: '', agentCli: 'claude', agentPrompt: '原始任务', status: 'Running', createdAt: new Date().toISOString(), completedAt: '' }]);
+  const commands = []; const terminal = { name: 'review', processId: Promise.resolve(process.pid), show() {}, sendText(text) { commands.push(text); } };
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => {} } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.launchReview = startAgentReviewRun; module.exports.launchRevision = startAgentReviewRevisionRun; module.exports.drain = pollActiveConversations; module.exports.settle = processAgentStatusFile;
+    module.exports.connect = (call, root, project, engine, context, terminal) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+      activeProjectRoot = project; syncEngine = engine; extensionContextRef = context;
+      getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'codex', taskPermissionMode: 'auto', enabledEnhancements: {} });
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      agentCli_1.commandExists = () => true;
+      createAgentTerminal = () => terminal;
+    };
+    module.exports.restore = () => { if (statusPoller) clearInterval(statusPoller); };
+  `);
+  actualTransport.sendRuntimeDataRequest = (_root, request) => ops(request); extension.connect(ops, root, project, engine, context, terminal);
+  try {
+    const input = { engine, workspaceRoot: project, nodeId: 'step', runKind: 'step', reviewerCli: 'codex', mainAgentCli: 'claude', mainExecutionLogId: 1, mainResolvedCommand: 'main', userMessage: '原始目标', mainStatus: 'Completed', completionReason: '提交候选', changedFilesSummary: 'A result.txt', touchedFilesSummary: 'A result.txt', outputTail: 'UI预览', targetStatus: 'Completed', globalDataPath: root, taskGoal: '全部标准', completionCriteria: Array.from({ length: 25 }, (_, index) => `完整标准${index}`), baseGitHash: '', mainOutputFilePath: `solomap://run-state/1/data/output?root=${encodeURIComponent(project)}`, mainNativeSessionId: '', reviewAttempt: 1, collaborationReviewMode: 'all', launchIntentId: 'effect:durable-review' };
+    input.sourceRevision = source.revision; input.sourceTurnId = source.turnId;
+    await Promise.all([extension.launchReview(input), extension.launchReview(input)]);
+    const review = await ops({ operation: 'read_run_intent', input: { root: project, launchIntentId: input.launchIntentId } });
+    assert.ok(review); assert.equal(commands.length, 1);
+    const plan = await ops({ operation: 'read_run_execution_plan', input: { root: project, executionLogId: review.status.rootExecutionLogId } });
+    assert.ok(plan.prompt.includes(mainOutput)); assert.ok(plan.prompt.includes('完整标准24'));
+    assert.equal(plan.prompt.split(mainOutput).length - 1, 1, 'the complete output must be supplied once rather than embedded again in the evidence manifest');
+    assert.ok(plan.prompt.includes('原轮次交付')); assert.ok(!plan.prompt.includes('下一轮不同输出')); assert.ok(!plan.prompt.includes('下一轮不同文件'));
+    assert.equal(plan.status.reviewOfExecutionLogId, 1); assert.notEqual(source.turnId, nextTurn.turnId);
+    assert.equal(plan.taskId, main.taskId); assert.equal(plan.status.agentLaunch.readOnly, true);
+    assert.equal((await ops({ operation: 'read_project_journal', input: { root: project } })).logs.length, 3);
+    const result = { status: 'pass', summary: '25条标准全部通过', findings: [], nextAction: '', goalSatisfied: true, evidenceSufficient: true, criteria: input.completionCriteria.map(criterion => ({ criterion, status: 'pass', evidence: ['manifest:review', 'output:main'], reason: '全部完整证据通过' })) };
+    const id = Number(review.status.rootExecutionLogId);
+    const document = await ops({ operation: 'write_run_document', input: { projectId: registered.projectId, executionLogId: id, generation: review.generation, turnId: review.turnId, purpose: 'review_result', bytes: Buffer.from(JSON.stringify(result)).toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: 'production-review-result' } });
+    const head = await ops({ operation: 'read_run_checkpoint_state', input: { root: project, executionLogId: id } });
+    const ready = await ops({ operation: 'patch_run_state', input: { projectId: registered.projectId, executionLogId: id, generation: head.generation, expectedRevision: head.revision, patch: { reviewResultObjectId: document.objectId, reviewResultRevision: document.revision }, idempotencyKey: 'production-review-result-reference' } });
+    await ops({ operation: 'checkpoint_run', input: { projectId: registered.projectId, executionLogId: id, generation: ready.generation, proof: head.proof, expectedRevision: ready.revision, expectedTurnId: ready.turnId, action: 'complete', outcome: 'partial', summary: '真实复核结果', idempotencyKey: 'production-review-complete' } });
+    await extension.settle(`solomap://run-state/${id}?root=${encodeURIComponent(project)}`); await extension.drain(context);
+    const settlements = await ops({ operation: 'read_run_settlements', input: { projectId: registered.projectId, executionLogId: id } });
+    assert.equal(settlements.items.length, 1); assert.equal(settlements.items[0].journal.status, 'Completed');
+    assert.ok(settlements.items[0].journal.output.includes('完整标准24'));
+    assert.equal(engine.getNodes().find(node => node.id === 'step').status, 'Running', 'passing an old turn review cannot complete the newer running turn');
+    const lateInput = { ...input, launchIntentId: 'effect:late-revise-review' };
+    await extension.launchReview(lateInput);
+    const lateReview = await ops({ operation: 'read_run_intent', input: { root: project, launchIntentId: lateInput.launchIntentId } });
+    const lateId = Number(lateReview.status.rootExecutionLogId);
+    const lateResult = { ...result, status: 'revise', findings: ['补齐旧轮次验证'] };
+    const lateDocument = await ops({ operation: 'write_run_document', input: { projectId: registered.projectId, executionLogId: lateId, generation: lateReview.generation, turnId: lateReview.turnId, purpose: 'review_result', bytes: Buffer.from(JSON.stringify(lateResult)).toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: 'late-review-result' } });
+    const lateHead = await ops({ operation: 'read_run_checkpoint_state', input: { root: project, executionLogId: lateId } });
+    const lateReady = await ops({ operation: 'patch_run_state', input: { projectId: registered.projectId, executionLogId: lateId, generation: lateHead.generation, expectedRevision: lateHead.revision, patch: { reviewResultObjectId: lateDocument.objectId, reviewResultRevision: lateDocument.revision }, idempotencyKey: 'late-review-result-reference' } });
+    await ops({ operation: 'checkpoint_run', input: { projectId: registered.projectId, executionLogId: lateId, generation: lateReady.generation, proof: lateHead.proof, expectedRevision: lateReady.revision, expectedTurnId: lateReady.turnId, action: 'complete', outcome: 'partial', summary: '旧轮次仍有缺口', idempotencyKey: 'late-review-complete' } });
+    await extension.settle(`solomap://run-state/${lateId}?root=${encodeURIComponent(project)}`); await extension.drain(context);
+    assert.equal(commands.length, 2, 'a late revise decision cannot resume the main conversation while its newer turn is running');
+    assert.equal(engine.getNodes().find(node => node.id === 'step').status, 'Running');
+    const revisionInput = { engine, workspaceRoot: project, nodeId: 'step', mainAgentCli: 'claude', mainNativeSessionId: '', reviewOfExecutionLogId: 1, reviewAttempt: 1, reviewResult: { ...result, status: 'revise', findings: ['补齐真实验证'] }, globalDataPath: root, reviewerCliPath: 'codex', collaborationReviewMode: 'all', taskPermissionMode: 'auto', taskGoal: '原始目标', completionCriteria: input.completionCriteria, launchIntentId: 'effect:durable-revision' };
+    await Promise.all([extension.launchRevision(revisionInput), extension.launchRevision(revisionInput)]);
+    const revision = await ops({ operation: 'read_run_intent', input: { root: project, launchIntentId: revisionInput.launchIntentId } });
+    assert.ok(revision); assert.equal(revision.taskId, main.taskId); assert.equal(commands.length, 3);
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')).sort(), ['project.json', 'roadmap.csv']);
+  } finally { try { await extension.drain(context); } finally { extension.restore(); actualTransport.sendRuntimeDataRequest = previous; engine.close(); await ops.close(); store.close(); } }
+});
+
+test('production Flow role launch registers its formal run before attaching the workflow role', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { SyncEngine } = require('../out/db/syncEngine.js');
+  const { createFlowTrace, createFlowLoop } = require('../out/flowStore.js');
+  const actualTransport = require('../out/autonomousRuntimeControl.js'); const previousTransport = actualTransport.sendRuntimeDataRequest;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-flow-launch-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const flow = createFlowTrace(project, '原始 Flow 目标', { selectedAgentCli: 'claude', selectedModel: 'chosen-model' }); flow.loops = [createFlowLoop(flow.goal, 1)];
+  const created = await ops({ operation: 'write_flow_trace', input: { root: project, flow, expectedRevision: 0, idempotencyKey: 'flow-launch-create' } });
+  const commands = []; const terminal = { name: 'original Flow terminal', processId: Promise.resolve(process.pid), show() {}, sendText(text) { commands.push(text); } };
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => {} } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.launch = startFlowRoleRun; module.exports.settle = processAgentStatusFile; module.exports.drain = pollActiveConversations;
+    const previousCall = autonomousRuntimeControl_1.sendRuntimeDataRequest;
+    module.exports.connect = (call, root, project, engine, context, terminal) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+      activeProjectRoot = project; syncEngine = engine; extensionContextRef = context;
+      getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude', taskPermissionMode: 'auto', enabledEnhancements: {} });
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true, message: '' });
+      createAgentTerminal = () => terminal;
+    };
+    module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; if (statusPoller) clearInterval(statusPoller); };
+  `);
+  const engine = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  actualTransport.sendRuntimeDataRequest = (_root, request) => ops(request); extension.connect(ops, root, project, engine, context, terminal);
+  try {
+    const input = { projectPath: project, flow, loopIndex: 1, role: 'planner', prompt: '完整 Planner 任务🌿' };
+    await Promise.all([extension.launch(context, input), extension.launch(context, input)]);
+    await extension.drain(context);
+    const current = await ops({ operation: 'read_flow_trace', input: { projectId: created.projectId, flowId: flow.flowId } });
+    const role = current.flow.loops[0].planner;
+    assert.equal(role.status, 'running'); assert.ok(role.executionLogId);
+    const run = await ops({ operation: 'read_run_execution_plan', input: { projectId: created.projectId, executionLogId: role.executionLogId } });
+    assert.ok(run.prompt.includes('完整 Planner 任务🌿')); assert.equal(run.status.selectedModel, 'chosen-model');
+    assert.equal((await ops({ operation: 'read_project_journal', input: { root: project } })).logs.length, 1);
+    assert.equal(commands.length, 1); assert.match(commands[0], /runAgentProcess\.js/);
+    const results = {
+      planner: { goal: flow.goal, scope: ['交付'], successCriteria: ['真实结果'], plan: ['实现'], verificationPlan: ['检查结果'] },
+      builder: { actions: ['生成实际结果'], commandsRun: ['实际验证'], recommendedStatus: 'ready_for_verification', summary: '实施已完成' },
+      verifier: { checks: [{ criterion: '实际结果', status: 'pass', evidence: ['result.txt'] }], H: { pass: true }, I: { pass: true }, J: { pass: true }, recommendedStatus: 'closed', summary: '原始目标已完成' }
+    };
+    for (const nextRole of ['planner', 'builder', 'verifier']) {
+      const before = await ops({ operation: 'read_flow_trace', input: { root: project, flowId: flow.flowId } });
+      const id = before.flow.loops[0][nextRole].executionLogId;
+      assert.ok(id, `${nextRole} must launch through its durable settlement effect`);
+      const state = await ops({ operation: 'read_run_checkpoint_state', input: { root: project, executionLogId: id } });
+      const { snapshotWorkspace, workspaceDocumentPurpose } = require('../out/runWorkspace.js');
+      const baseline = await snapshotWorkspace(project);
+      await ops({ operation: 'write_run_document', input: { projectId: state.projectId, executionLogId: id, generation: state.generation, turnId: state.turnId, purpose: workspaceDocumentPurpose(state.turnId, 'before'), bytes: Buffer.from(JSON.stringify(baseline)).toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: `cycle:${nextRole}:before` } });
+      if (nextRole === 'builder') fs.writeFileSync(path.join(project, 'result.txt'), '实际用户产物');
+      const bytes = Buffer.from(`SOLOMAP_FLOW_JSON_START\n${JSON.stringify(results[nextRole])}\nSOLOMAP_FLOW_JSON_END`);
+      await ops({ operation: 'append_run_log', input: { projectId: state.projectId, executionLogId: id, generation: state.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: bytes.toString('base64'), idempotencyKey: `cycle:${nextRole}:output` } });
+      await ops({ operation: 'checkpoint_run', input: { projectId: state.projectId, executionLogId: id, generation: state.generation, proof: state.proof, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'complete', outcome: 'partial', summary: '角色结果已保存', idempotencyKey: `cycle:${nextRole}:complete` } });
+      await extension.settle(`solomap://run-state/${id}?root=${encodeURIComponent(project)}`);
+      await extension.drain(context);
+    }
+    const closed = await ops({ operation: 'read_flow_trace', input: { root: project, flowId: flow.flowId } });
+    assert.equal(closed.flow.status, 'completed'); assert.equal(commands.length, 3);
+    assert.equal((await ops({ operation: 'read_run_settlements', input: { projectId: created.projectId } })).items.length, 3);
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+  } finally { try { await extension.drain(context); } finally { extension.restore(); } actualTransport.sendRuntimeDataRequest = previousTransport; engine.close(); await ops.close(); store.close(); }
+});
+
+test('production Flow settlement reads formal role evidence and commits scoring and learning without legacy files', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { SyncEngine } = require('../out/db/syncEngine.js');
+  const { createFlowTrace, createFlowLoop } = require('../out/flowStore.js');
+  const actualTransport = require('../out/autonomousRuntimeControl.js'); const previousTransport = actualTransport.sendRuntimeDataRequest;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-production-flow-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const flow = createFlowTrace(project, '完整验证目标'); flow.loops = [createFlowLoop(flow.goal, 1)];
+  flow.loops[0].status = 'verifying'; flow.loops[0].planner.status = 'completed'; flow.loops[0].builder.status = 'completed';
+  flow.loops[0].evidence = { changedFilesSummary: 'A result.txt', touchedFilesSummary: 'A result.txt', outputTail: '实际构建结果', commandFilePath: '', outputFilePath: '', changesFilePath: '', touchedFilesPath: '' };
+  const created = await ops({ operation: 'write_flow_trace', input: { root: project, flow, expectedRevision: 0, idempotencyKey: 'production-flow-create' } });
+  const nodeId = `__flow__::${flow.flowId}::loop-1::verifier`;
+  const run = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId, runKind: 'flow_verifier', prompt: '完整验证任务', command: 'actual verifier', userMessage: flow.goal, metadata: { globalDataPath: root, agentCli: 'grok' }, idempotencyKey: 'production-flow-role' } });
+  const verdict = { checks: [{ criterion: '实际结果', status: 'pass', evidence: ['result.txt'], reason: '真实验证通过' }], H: { pass: true, reason: '实际文件' }, I: { pass: true, reason: '原始目标' }, J: { pass: true, reason: '真实验证' }, recommendedStatus: 'closed', summary: '完整目标已验证' };
+  const output = Buffer.from('完整角色输出🌿\n'.repeat(12000) + `SOLOMAP_FLOW_JSON_START\n${JSON.stringify(verdict)}\nSOLOMAP_FLOW_JSON_END`);
+  await ops({ operation: 'append_run_log', input: { projectId: run.projectId, executionLogId: 1, generation: run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: output.toString('base64'), idempotencyKey: 'production-flow-output' } });
+  fs.writeFileSync(path.join(project, 'result.txt'), '实际交付');
+  await ops({ operation: 'checkpoint_run', input: { projectId: run.projectId, executionLogId: 1, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial', summary: '完整角色已完成', idempotencyKey: 'production-flow-complete' } });
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.settle = processAgentStatusFile; const previousCall = autonomousRuntimeControl_1.sendRuntimeDataRequest;
+    module.exports.connect = (call, root, project, engine) => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request); activeProjectRoot = project; syncEngine = engine; extensionContextRef = { extensionPath: path.resolve(__dirname, '..') }; getPersistedSettings = () => ({ globalDataPath: root }); };
+    module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; };
+  `);
+  const engine = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  actualTransport.sendRuntimeDataRequest = (_root, request) => ops(request); extension.connect(ops, root, project, engine);
+  try {
+    await extension.settle(`solomap://run-state/1?root=${encodeURIComponent(project)}`);
+    const current = await ops({ operation: 'read_flow_trace', input: { projectId: created.projectId, flowId: flow.flowId } });
+    assert.equal(current.flow.status, 'completed'); assert.equal(current.flow.loops[0].scoring.recommendedStatus, 'closed');
+    assert.deepEqual(current.flow.loops[0].verifier.data, verdict);
+    assert.equal((await ops({ operation: 'list_run_states', input: { projectId: run.projectId, pendingConsumer: true } })).items.length, 0);
+    const history = await ops({ operation: 'read_run_settlements', input: { projectId: run.projectId } });
+    assert.equal(history.items.length, 1); assert.ok(history.items[0].learningEventId);
+    assert.equal(history.items[0].flowObjectId, created.objectId);
+    const learningOverview = await ops({ operation: 'read_learning_overview', input: {} });
+    assert.equal(learningOverview.eventCount, 1);
+    assert.equal(learningOverview.projectSignals[0].verificationSignals, 1, 'the actual checked closed Flow must contribute its existing verification signal');
+    await extension.settle(`solomap://run-state/1?root=${encodeURIComponent(project)}`);
+    assert.equal((await ops({ operation: 'read_run_settlements', input: { projectId: run.projectId } })).items.length, 1);
+    assert.equal((await ops({ operation: 'read_run_log_head', input: { projectId: run.projectId, executionLogId: 1, stream: 'output' } })).totalBytes, output.length);
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+  } finally { extension.restore(); actualTransport.sendRuntimeDataRequest = previousTransport; engine.close(); await ops.close(); store.close(); }
+});
+
+test('production polling resumes an undelivered task after its creating window and Runtime restart', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { prepareAgentRun } = require('../out/agentRunPreparation.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-auto-delivery-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  let store = new UnifiedDataStore(root); let ops = createRuntimeDataOperations(store);
+  const call = request => ops(request);
+  const input = { agentCli: 'claude', selectedModel: 'original-model', prompt: '完整原始目标🌿\n'.repeat(10000), workspaceRoot: project, nodeId: '__solo__', executionLogId: 1, userMessage: '原始用户请求', runKind: 'solo', globalDataPath: root, taskPermissionMode: 'auto' };
+  const prepared = await prepareAgentRun(input, (operation, value) => call({ operation, input: operation === 'prepare_run' ? { ...value, deliveryOwner: { id: 'closed-creator', pid: 2147483647, birth: 'proc:gone' } } : value }));
+  await ops.close(); store.close(); store = new UnifiedDataStore(root); ops = createRuntimeDataOperations(store);
+  let ready; let created; let creates = 0; const commands = [];
+  const createdGate = new Promise(resolve => { created = resolve; });
+  let rejectFirstDelivery = true;
+  const terminal = { name: 'recovered original conversation', processId: new Promise(resolve => { ready = resolve; }), show() {}, sendText(text) { if (rejectFirstDelivery) { rejectFirstDelivery = false; throw new Error('terminal temporarily unavailable'); } commands.push(text); } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.poll = pollActiveConversations;
+    const previousCall = autonomousRuntimeControl_1.sendRuntimeDataRequest;
+    module.exports.connect = (call, root, project, factory) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+      getPersistedSettings = () => ({ globalDataPath: root }); getSelectedProjectPath = () => project;
+      createAgentTerminal = (...args) => { const terminal = factory(...args); vscode.window.terminals = [terminal]; return terminal; };
+    };
+    module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; };
+  `);
+  extension.connect(call, root, project, () => { creates++; created(); return terminal; });
+  try {
+    const poll = extension.poll({});
+    await Promise.race([createdGate, poll]);
+    assert.equal(creates, 1, 'the reopened window must deliver the retained original task');
+    assert.deepEqual(commands, []);
+    ready(process.pid); await poll;
+    assert.deepEqual(commands, []);
+    assert.equal((await call({ operation: 'list_run_deliveries', input: {} })).items.length, 1, 'failed sending must release the retained task for a new delivery attempt');
+    await extension.poll({});
+    const state = await call({ operation: 'read_run_state', input: { projectId: prepared.projectId, executionLogId: 1 } });
+    assert.match(state.status.terminalDeliveryId, /^[a-f0-9-]{36}$/);
+    assert.deepEqual(commands, [`SOLOMAP_TERMINAL_DELIVERY_ID=${require('../out/agentCli.js').shellQuote(state.status.terminalDeliveryId)} ${prepared.finalCommand}`]);
+    assert.equal(state.taskId, prepared.taskId); assert.equal(state.runId, prepared.runId); assert.equal(state.turnId, prepared.turnId);
+    assert.equal(state.status.selectedModel, 'original-model');
+    await extension.poll({}); assert.equal(creates, 1); assert.equal(commands.length, 1);
+    const plan = await call({ operation: 'read_run_execution_plan', input: { projectId: prepared.projectId, executionLogId: 1 } });
+    assert.ok(plan.prompt.includes(input.prompt));
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+  } finally { extension.restore(); await ops.close(); store.close(); }
+});
+
+test('production polling recovers follow-up actions when the settlement reply is lost and the window reopens', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { SyncEngine } = require('../out/db/syncEngine.js');
+  const actualTransport = require('../out/autonomousRuntimeControl.js');
+  const previousTransport = actualTransport.sendRuntimeDataRequest;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-recover-effects-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const prepared = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '完整任务', command: 'actual command', userMessage: '原始请求', metadata: { interactiveSession: true, agentCli: 'grok' }, idempotencyKey: 'effects-recovery-prepare' } });
+  await ops({ operation: 'checkpoint_run', input: { root: project, executionLogId: 1, generation: prepared.generation, proof: prepared.proof, expectedRevision: prepared.revision, expectedTurnId: prepared.turnId, action: 'complete', outcome: 'partial', summary: '实际交付结果', idempotencyKey: 'effects-recovery-complete' } });
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.settle = processAgentStatusFile; module.exports.poll = pollActiveConversations;
+    const previousCall = autonomousRuntimeControl_1.sendRuntimeDataRequest;
+    module.exports.connect = (call, root, project, engine) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+      activeProjectRoot = project; syncEngine = engine; extensionContextRef = { extensionPath: path.resolve(__dirname, '..') };
+      getPersistedSettings = () => ({ globalDataPath: root });
+      getSelectedProjectPath = () => project;
+    };
+    module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; };
+  `);
+  let lost = true;
+  const call = async request => { const result = await ops(request); if (request.operation === 'commit_run_settlement' && lost) { lost = false; throw new Error('settlement_response_lost'); } return result; };
+  const engine = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  actualTransport.sendRuntimeDataRequest = (_root, request) => call(request);
+  extension.connect(call, root, project, engine);
+  try {
+    await extension.settle(`solomap://run-state/1?root=${encodeURIComponent(project)}`);
+    assert.equal((await ops({ operation: 'read_run_state', input: { projectId: prepared.projectId, executionLogId: 1 } })).status.status, 'Waiting');
+    const pending = await ops({ operation: 'list_run_effects', input: { projectId: prepared.projectId } });
+    assert.ok(pending.items.length > 0, 'the committed result must retain its unfinished follow-up actions');
+    await extension.poll({});
+    assert.equal((await ops({ operation: 'list_run_effects', input: { projectId: prepared.projectId } })).items.length, 0);
+    assert.match(engine.getProjectAgentExecutions()[0].output, /实际交付结果/);
+    await extension.poll({});
+    assert.equal((await ops({ operation: 'read_run_settlements', input: { projectId: prepared.projectId } })).items.length, 1);
+    const current = await ops({ operation: 'read_run_checkpoint_state', input: { projectId: prepared.projectId, executionLogId: 1 } });
+    await ops({ operation: 'checkpoint_run', input: { projectId: prepared.projectId, executionLogId: 1, generation: current.generation, proof: current.proof, expectedRevision: current.revision, expectedTurnId: current.turnId, action: 'session-close', exitCode: 0, idempotencyKey: 'effects-recovery-close' } });
+    lost = true;
+    await extension.settle(`solomap://run-state/1?root=${encodeURIComponent(project)}`);
+    assert.ok((await ops({ operation: 'list_run_effects', input: { projectId: prepared.projectId } })).items.length > 0, 'closing a settled session must also retain its unfinished refresh');
+    await extension.poll({});
+    assert.equal((await ops({ operation: 'list_run_effects', input: { projectId: prepared.projectId } })).items.length, 0);
+    assert.match(engine.getProjectAgentExecutions()[0].output, /Interactive session state: Closed/);
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+  } finally { extension.restore(); actualTransport.sendRuntimeDataRequest = previousTransport; engine.close(); await ops.close(); store.close(); }
+});
+
+test('production settlement commits the accepted turn to durable history and creates no run, digest or learning files', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { SyncEngine } = require('../out/db/syncEngine.js');
+  const actualTransport = require('../out/autonomousRuntimeControl.js');
+  const previousTransport = actualTransport.sendRuntimeDataRequest;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-production-settlement-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const run = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '原始目标', command: 'actual command', userMessage: '完整用户目标', metadata: { interactiveSession: true, agentCli: 'grok' }, idempotencyKey: 'production-settlement-run' } });
+  const output = Buffer.from('完整原始日志🌿\n'.repeat(12000));
+  await ops({ operation: 'append_run_log', input: { projectId: run.projectId, executionLogId: 1, generation: run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: output.toString('base64'), idempotencyKey: 'production-settlement-log' } });
+  const report = { schemaVersion: 1, summary: '已完成实际交付', unmetRequirements: [], decisions: [], corrections: [], verification: [], commits: [], experienceUsage: [], lessons: [] };
+  await ops({ operation: 'checkpoint_run', input: { root: project, executionLogId: 1, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial', summary: '已提交完整结果🌿', report, idempotencyKey: 'production-settlement-result' } });
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.settle = processAgentStatusFile; module.exports.poll = pollActiveConversations;
+    const previousCall = autonomousRuntimeControl_1.sendRuntimeDataRequest;
+    module.exports.connect = (call, root, project, engine) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+      activeProjectRoot = project; syncEngine = engine; extensionContextRef = { extensionPath: path.resolve(__dirname, '..') };
+      getPersistedSettings = () => ({ globalDataPath: root });
+      getSelectedProjectPath = () => project;
+    };
+    module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; };
+  `);
+  const engine = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  actualTransport.sendRuntimeDataRequest = (_root, request) => ops(request);
+  extension.connect(ops, root, project, engine);
+  try {
+    const ref = `solomap://run-state/1?root=${encodeURIComponent(project)}`;
+    // Runtime receives the explicit data root from the run even without an active window.
+    await extension.settle(ref);
+    const current = await ops({ operation: 'read_run_state', input: { projectId: run.projectId, executionLogId: 1 } });
+    assert.equal(current.status.status, 'Waiting');
+    const history = await ops({ operation: 'read_run_settlements', input: { projectId: run.projectId, executionLogId: 1 } });
+    assert.equal(history.items.length, 1); assert.match(history.items[0].journal.output, /已提交完整结果🌿/);
+    assert.equal(history.items[0].reportObjectId, current.status.taskReportObjectId);
+    assert.match(history.items[0].journal.command, /actual command/);
+    assert.ok(history.items[0].learningEventId);
+    assert.deepEqual(store.readRunLog(run.projectId, { executionLogId: 1, stream: 'output', offset: output.length - 30 }).bytes, output.subarray(output.length - 30).toString('base64'));
+    assert.equal(engine.getProjectAgentExecutions()[0].output, history.items[0].journal.output);
+    await extension.settle(ref);
+    assert.equal((await ops({ operation: 'read_run_settlements', input: { projectId: run.projectId, executionLogId: 1 } })).items.length, 1);
+    let next = await ops({ operation: 'read_run_checkpoint_state', input: { projectId: run.projectId, executionLogId: 1 } });
+    next = await ops({ operation: 'checkpoint_run', input: { projectId: run.projectId, executionLogId: 1, generation: next.generation, proof: next.proof, expectedRevision: next.revision, expectedTurnId: next.turnId, action: 'start', message: '第二轮完整目标', idempotencyKey: 'production-queued-turn-start' } });
+    next = await ops({ operation: 'read_run_checkpoint_state', input: { projectId: run.projectId, executionLogId: 1 } });
+    const done = await ops({ operation: 'checkpoint_run', input: { projectId: run.projectId, executionLogId: 1, generation: next.generation, proof: next.proof, expectedRevision: next.revision, expectedTurnId: next.turnId, action: 'complete', outcome: 'partial', summary: '第二轮完整结果', report, idempotencyKey: 'production-queued-turn-complete' } });
+    next = await ops({ operation: 'read_run_checkpoint_state', input: { projectId: run.projectId, executionLogId: 1 } });
+    const latest = await ops({ operation: 'checkpoint_run', input: { projectId: run.projectId, executionLogId: 1, generation: next.generation, proof: next.proof, expectedRevision: next.revision, expectedTurnId: next.turnId, action: 'start', message: '第三轮进行中', idempotencyKey: 'production-running-next-turn' } });
+    await extension.poll({});
+    const histories = await ops({ operation: 'read_run_settlements', input: { projectId: run.projectId, executionLogId: 1 } });
+    assert.equal(histories.items.length, 2); assert.equal(histories.items[1].turnId, done.turnId);
+    assert.match(histories.items[1].journal.output, /第二轮完整结果/);
+    const stillRunning = await ops({ operation: 'read_run_state', input: { projectId: run.projectId, executionLogId: 1 } });
+    assert.equal(stillRunning.turnId, latest.turnId); assert.equal(stillRunning.status.status, 'Running');
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+  } finally { extension.restore(); actualTransport.sendRuntimeDataRequest = previousTransport; engine.close(); await ops.close(); store.close(); }
+});
+
+test('the production Agent preparation entry commits to Runtime and creates no permanent run or status files', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-production-prepare-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.prepare = buildPreparedAgentShellScript;
+    const previousCall = autonomousRuntimeControl_1.sendRuntimeDataRequest;
+    const previousReady = autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime;
+    module.exports.connect = call => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+    };
+    module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = previousReady; };
+  `);
+  extension.connect(ops);
+  try {
+    const result = await extension.prepare('claude', 'user-model', '完整原始任务🌿', project, '__solo__', 1, '用户请求', undefined, '', '', 'solo', '', root, 'manual', 'user-reviewer', 'always', {}, path.join(project, '.solopreneur', 'agent-runs', '__solo__', '1'), path.join(project, '.solopreneur', 'agent-status', '1.json'), { checkpointPreserveRoadmapState: true, parentEvidence: 'full original metadata' });
+    const state = await ops({ operation: 'read_run_state', input: { root: project, executionLogId: 1 } });
+    assert.equal(state.status.agentLaunch.taskPermissionMode, 'manual'); assert.equal(state.status.selectedModel, 'user-model');
+    assert.equal(state.status.reviewerCliPath, 'user-reviewer'); assert.equal(state.status.collaborationReviewMode, 'always');
+    assert.equal(state.status.parentEvidence, 'full original metadata'); assert.equal(state.status.checkpointPreserveRoadmapState, true);
+    assert.equal(state.status.deliveryPending, true);
+    assert.match((await ops({ operation: 'read_run_execution_plan', input: { root: project, executionLogId: 1 } })).prompt, /完整原始任务🌿/);
+    assert.match(result.finalCommand, /runAgentProcess\.js/);
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+    assert.equal(fs.existsSync(path.join(project, '.agent_status.json')), false);
+  } finally { extension.restore(); await ops.close(); store.close(); }
+});
+
+test('production status consumers read and patch formal run snapshots without legacy status files', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-production-status-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.reference = getAgentStatusFilePath; module.exports.read = readAgentStatus;
+    module.exports.write = writeAgentStatus; module.exports.list = getAgentStatusFilePaths;
+    module.exports.find = findAgentStatusForConversation;
+    const previousCall = autonomousRuntimeControl_1.sendRuntimeDataRequest;
+    module.exports.connect = (call, root) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+      getPersistedSettings = () => ({ globalDataPath: root }); extensionContextRef = {};
+    };
+    module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; };
+  `);
+  extension.connect(ops, root);
+  try {
+    await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '完整任务', command: 'actual command', userMessage: '目标', idempotencyKey: 'consumer-prepare' } });
+    const ref = extension.reference(project, 1);
+    assert.match(ref, /^solomap:\/\/run-state\//);
+    const status = await extension.read(ref); assert.equal(status.status, 'Running');
+    await extension.write(ref, { ...status, terminalName: 'original user terminal' });
+    assert.equal((await extension.find(project, 1)).terminalName, 'original user terminal');
+    assert.deepEqual(await extension.list(project), [ref]);
+    await assert.rejects(extension.write(ref, { ...status, status: 'Waiting' }), /revision_conflict/);
+    assert.equal((await extension.read(ref)).status, 'Running');
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+  } finally { extension.restore(); await ops.close(); store.close(); }
+});
+
+test('the production interactive turn entry starts from the formal Waiting conversation without checkpoint or status files', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-production-next-turn-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const run = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '原始目标', command: 'actual command', userMessage: '第一轮', metadata: { interactiveSession: true }, idempotencyKey: 'next-turn-prepare' } });
+  const complete = await ops({ operation: 'checkpoint_run', input: { root: project, executionLogId: 1, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial', summary: '第一轮结果', idempotencyKey: 'next-turn-result' } });
+  await ops({ operation: 'patch_run_state', input: { root: project, executionLogId: 1, generation: run.generation, expectedRevision: complete.revision, patch: { status: 'Waiting' }, idempotencyKey: 'next-turn-waiting' } });
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.nextTurn = registerInteractiveConversationTurn;
+    const previousCall = autonomousRuntimeControl_1.sendRuntimeDataRequest;
+    module.exports.connect = (call, root) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+      getPersistedSettings = () => ({ globalDataPath: root }); extensionContextRef = {};
+    };
+    module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; };
+  `);
+  extension.connect(ops, root);
+  try {
+    const started = await extension.nextTurn(project, 1, '完整下一轮请求🌿', true);
+    assert.ok(started); assert.equal(started.status, 'Running');
+    assert.equal(started.checkpointPreserveRoadmapState, true);
+    const state = await ops({ operation: 'read_run_state', input: { projectId: run.projectId, executionLogId: 1 } });
+    assert.notEqual(state.turnId, run.turnId); assert.equal(state.status.userMessage, '完整下一轮请求🌿');
+    assert.equal((await ops({ operation: 'read_run_turn_journal', input: { projectId: run.projectId, executionLogId: 1 } })).entry.status, 'Running');
+    assert.equal(await extension.nextTurn(project, Number(started.executionLogId), '重复推进'), null);
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+  } finally { extension.restore(); await ops.close(); store.close(); }
+});
+
+test('production terminal delivery keeps the shell readiness gate and one durable launch without active ledger files', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { prepareAgentRun } = require('../out/agentRunPreparation.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-production-terminal-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const prepared = await prepareAgentRun({ agentCli: 'claude', selectedModel: '', prompt: '原始目标', workspaceRoot: project, nodeId: '__solo__', executionLogId: 1, userMessage: '目标', runKind: 'solo', globalDataPath: root, taskPermissionMode: 'auto' }, (operation, input) => ops({ operation, input }));
+  let ready; let created; const commands = []; let creates = 0;
+  const createdGate = new Promise(resolve => { created = resolve; });
+  const terminal = { name: 'user original terminal', processId: new Promise(resolve => { ready = resolve; }), show() {}, sendText(text) { commands.push(text); } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.launch = launchAgentConversationTerminal;
+    const previousCall = autonomousRuntimeControl_1.sendRuntimeDataRequest;
+    module.exports.connect = (call, factory) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+      createAgentTerminal = factory;
+    };
+    module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; };
+  `);
+  extension.connect(ops, () => { creates++; created(); return terminal; });
+  try {
+    const input = { workspaceRoot: project, label: 'solo', conversationId: 1, nodeId: '__solo__', statusFilePath: `solomap://run-state/1?root=${encodeURIComponent(project)}`, runKind: 'solo', globalDataPath: root, command: prepared.finalCommand, agentCli: 'claude' };
+    const first = extension.launch(input); const duplicate = extension.launch(input);
+    await createdGate; assert.deepEqual(commands, []);
+    ready(process.pid); await Promise.all([first, duplicate]);
+    assert.equal(creates, 1);
+    const state = await ops({ operation: 'read_run_state', input: { projectId: prepared.projectId, executionLogId: 1 } });
+    assert.match(state.status.terminalDeliveryId, /^[a-f0-9-]{36}$/);
+    assert.deepEqual(commands, [`SOLOMAP_TERMINAL_DELIVERY_ID=${require('../out/agentCli.js').shellQuote(state.status.terminalDeliveryId)} ${prepared.finalCommand}`]);
+    assert.equal(state.status.terminalName, terminal.name);
+    assert.equal(fs.existsSync(path.join(root, 'active-conversations')), false);
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+  } finally { extension.restore(); await ops.close(); store.close(); }
+});
+
+test('the production stop action settles the database task without writing run files', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-production-stop-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const prepared = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '原始目标', command: 'actual command', userMessage: '目标', metadata: { interactiveSession: true }, idempotencyKey: 'production-stop-run' } });
+  const observed = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.stop = stopAgentRun;
+    const previousCall = autonomousRuntimeControl_1.sendRuntimeDataRequest;
+    module.exports.connect = (call, root, project, observed) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+      activeProjectRoot = project; extensionContextRef = {}; getPersistedSettings = () => ({ globalDataPath: root });
+      syncEngine = { getAgentExecutions: () => [{ id: 1, nodeId: '__solo__', status: 'Running', output: '', agentCli: 'claude', command: 'actual command' }] };
+      findActiveAgentTerminal = async () => undefined;
+      processRegisteredStatusFile = async (_context, reference) => { observed.push(reference); };
+    };
+    module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; };
+  `);
+  extension.connect(ops, root, project, observed);
+  try {
+    await extension.stop('__solo__', 1);
+    const stopped = await ops({ operation: 'read_run_state', input: { projectId: prepared.projectId, executionLogId: 1 } });
+    assert.equal(stopped.status.interactiveSessionClosed, true); assert.equal(stopped.status.status, 'Failed');
+    assert.equal(observed.length, 1); assert.match(observed[0], /^solomap:\/\/run-state\//);
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+  } finally { extension.restore(); await ops.close(); store.close(); }
+});
+
+test('the production terminal-close callback preserves a settled turn and closes its session in Runtime', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-production-close-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const run = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '原始目标', command: 'actual command', userMessage: '目标', metadata: { interactiveSession: true }, idempotencyKey: 'production-close-run' } });
+  const complete = await ops({ operation: 'checkpoint_run', input: { root: project, executionLogId: 1, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial', summary: '已提交的完整结果', idempotencyKey: 'production-close-result' } });
+  await ops({ operation: 'patch_run_state', input: { root: project, executionLogId: 1, generation: run.generation, expectedRevision: complete.revision, patch: { status: 'Waiting' }, idempotencyKey: 'production-close-waiting' } });
+  const observed = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.closed = handleAgentTerminalClosed;
+    const previousCall = autonomousRuntimeControl_1.sendRuntimeDataRequest;
+    module.exports.connect = (call, root, project, observed) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+      activeProjectRoot = project; extensionContextRef = {}; getPersistedSettings = () => ({ globalDataPath: root });
+      agentTerminalNamesByConversationId.set(1, 'original terminal'); agentTerminalProjectRootsByConversationId.set(1, project);
+      processRegisteredStatusFile = async (_context, reference) => { observed.push(reference); };
+    };
+    module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; };
+  `);
+  extension.connect(ops, root, project, observed);
+  try {
+    assert.equal(await extension.closed('original terminal', 2), true);
+    const closed = await ops({ operation: 'read_run_state', input: { projectId: run.projectId, executionLogId: 1 } });
+    assert.equal(closed.status.interactiveSessionClosed, true); assert.equal(closed.status.checkpointSummary, '已提交的完整结果');
+    assert.equal(store.read(run.turnId).data.outcome, 'partial'); assert.equal(observed.length, 1);
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+  } finally { extension.restore(); await ops.close(); store.close(); }
+});
+
 test('recent conversation snapshot bypasses pending full initialization and reads durable pages', async () => {
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.prepare = (engine, projectPath, gate) => {
@@ -34,6 +611,7 @@ test('project switching during historical reads cannot continue or display the o
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.prepare = (gate) => {
       activeProjectRoot = '/fixture/old';
+      getPersistedSettings = () => ({ globalDataPath: '/fixture/data/.solomap-global' });
       syncEngine = { readAgentExecutions: () => gate, readAgentExecutionPage: async () => { await gate; return { logs: [], hasMore: false }; } };
     };
     module.exports.switchProject = () => { activeProjectRoot = '/fixture/new'; syncEngine = { getAgentExecutions: () => { throw new Error('wrong project read'); } }; };
@@ -52,33 +630,46 @@ test('project switching during historical reads cannot continue or display the o
 });
 
 test('new Solo launch opens its terminal while a full history refresh is pending', async () => {
-  const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-launch-no-history-'));
-  const calls = [];
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { startRuntimeControlServer, sendRuntimeDataRequest } = require('../out/autonomousRuntimeControl.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-launch-no-history-'));
+  const projectPath = path.join(base, 'project'); const root = path.join(base, '.solomap-global'); fs.mkdirSync(projectPath);
+  const calls = []; const commands = []; let historyRequests = 0;
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'no-history-owner', onCommand: () => ({ status: 'running' }), onData: async request => {
+    const result = await ops(request); if (request.operation === 'prepare_run_intent') calls.push('committed'); return result;
+  } });
+  const terminal = { name: 'solo', processId: Promise.resolve(process.pid), show() {}, sendText(text) { commands.push(text); } };
   const extension = loadCompiledModule('out/extension.js', `
-    module.exports.prepare = (projectPath, calls) => {
+    module.exports.prepare = (projectPath, root, terminal, calls, onHistory) => {
       activeProjectRoot = projectPath;
-      syncEngine = { initAndSync: () => new Promise(() => {}),
-        logAgentExecution: async () => { calls.push('committed'); return 42; },
-        updateAgentExecution: async () => true, getAgentExecutions: () => [] };
-      getPersistedSettings = () => ({ cliPath: 'codex', globalDataPath: '', globalPrompt: '' });
+      syncEngine = { initAndSync: () => { onHistory(); return new Promise(() => {}); }, getAgentExecutions: () => [] };
+      getPersistedSettings = () => ({ cliPath: 'codex', globalDataPath: root, globalPrompt: '', enabledEnhancements: {} });
       ensureTaskRuntimeReady = async () => {};
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
       agentCli_1.resolveAgentCli = () => 'codex'; agentCli_1.commandExists = () => true;
       agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
-      recordLocalUsageEvent = () => {}; solomapGlobal_1.ensureSolomapMemoryStore = () => {};
-      const originalGit = preSessionGit_1.createPreSessionGitCommit;
-      module.exports.restore = () => { preSessionGit_1.createPreSessionGitCommit = originalGit; };
-      preSessionGit_1.createPreSessionGitCommit = async () => '';
-      buildSoloConversationPrompt = () => 'prompt'; buildPreparedAgentShellScript = async () => ({ finalCommand: 'codex' });
-      launchAgentConversationTerminal = async () => { calls.push('terminal'); };
+      recordLocalUsageEvent = () => {}; postNodeConversations = () => {};
+      solomapGlobal_1.ensureSolomapEnhancementRuntime = () => ({ envLines: [], preflightLines: [] });
+      buildSoloConversationPrompt = () => 'prompt';
+      createAgentTerminal = () => { calls.push('terminal'); return terminal; };
     };
     module.exports.launch = handleRunSoloConversation;
-  `);
-  extension.prepare(projectPath, calls);
+  `, { './autonomousRuntimeControl': { sendRuntimeDataRequest } });
+  extension.prepare(projectPath, root, terminal, calls, () => { historyRequests++; });
   try {
-    const id = await Promise.race([extension.launch({}, 'Start now'), new Promise(resolve => setTimeout(() => resolve(0), 100))]);
-    assert.equal(id, 42);
+    const id = await extension.launch({ extensionPath: projectRoot }, 'Start now');
+    assert.equal(id, 1); assert.equal(historyRequests, 0);
     assert.deepEqual(calls, ['committed', 'terminal']);
-  } finally { extension.restore(); }
+    const plan = await sendRuntimeDataRequest(root, { operation: 'read_run_execution_plan', input: { root: projectPath, executionLogId: id } });
+    assert.ok(plan.prompt.includes('prompt')); assert.ok(plan.prompt.includes('SoloMap 数据库工具：'));
+    assert.equal(plan.status.userMessage, 'Start now');
+    assert.equal(commands.length, 1); assert.ok(commands[0].includes('runAgentProcess.js'));
+    const state = await sendRuntimeDataRequest(root, { operation: 'read_run_state', input: { root: projectPath, executionLogId: id } });
+    assert.equal(state.status.terminalName, 'solo'); assert.ok(state.status.terminalCommandSubmittedAt);
+    assert.deepEqual(fs.readdirSync(path.join(projectPath, '.solopreneur')), ['project.json']);
+  } finally { await server.close(); await ops.close(); store.close(); }
 });
 
 test('a cached sidebar snapshot is refreshed from the global journal after plugin restart', async () => {
@@ -229,7 +820,7 @@ test('durable automation configuration restores tasks when extension global stat
   assert.equal(settings.automationTasks.scheduledTasks[0].id, 'confirmed-task');
 });
 
-test('settings capability refresh reads skills installed after the first cached settings load', () => {
+test('settings capability refresh reads skills installed after the first cached settings load', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
@@ -238,14 +829,16 @@ test('settings capability refresh reads skills installed after the first cached 
     ].join('\n')
   );
   const { writeSolomapSkillRegistry } = require(path.join(projectRoot, 'out/solomapGlobal.js'));
-  const globalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-settings-skills-'));
+  const globalRoot = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-settings-skills-')), '.solomap-global');
+  const runtime = isolatedCapabilityRuntime(globalRoot);
+  try {
   extensionModule.__vscodeTestState.configurationValues.globalDataPath = globalRoot;
   const saved = {};
   const context = { globalState: { get: () => saved } };
 
   const initial = extensionModule.__getPersistedSettings(context);
   assert.ok(Array.isArray(initial.skills));
-  writeSolomapSkillRegistry(projectRoot, globalRoot, {
+  await writeSolomapSkillRegistry(projectRoot, globalRoot, {
     version: 1,
     updatedAt: '',
     skills: [{ id: 'installed-after-load', title: 'Installed After Load', status: 'installed' }]
@@ -253,14 +846,99 @@ test('settings capability refresh reads skills installed after the first cached 
   extensionModule.__invalidatePersistedSettingsCache();
   const refreshed = extensionModule.__getPersistedSettings(context);
   assert.ok(refreshed.skills.some((skill) => skill.id === 'installed-after-load'));
+  } finally { await runtime.close(); }
 });
 
-test('built-in MCP tools appear in the shared connector settings without entering Agent CLI candidates', () => {
+function assertBundledHandoffInstructions(instructions, globalRoot) {
+  const escape = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const { shellQuote } = require('../out/agentCli.js');
+  assert.match(instructions, /solomap-experience\.cjs' handoff/);
+  assert.match(instructions, new RegExp(escape(path.join(projectRoot, 'resources', 'tools', 'solomap-experience.cjs'))));
+  assert.match(instructions, new RegExp(escape(`--global ${shellQuote(globalRoot)}`)));
+  assert.doesNotMatch(instructions, new RegExp(escape(path.join(globalRoot, 'tools', 'solomap-experience.cjs'))));
+  assert.match(instructions, new RegExp(escape(path.join(projectRoot, 'resources', 'skills', 'solomap-cross-agent-handoff', 'SKILL.md'))));
+}
+
+test('first step and revision prompts execute their bundled handoff commands from the current data root', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const transport = require('../out/autonomousRuntimeControl.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-first-prompt-handoff-'));
+  const root = path.join(base, "store 'quoted'", '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root), operations = createRuntimeDataOperations(store);
+  const server = await transport.startRuntimeControlServer({ globalDataPath: root, runtimeId: 'first-prompt-owner', onCommand: () => ({ status: 'running' }), onData: operations });
+  const call = (operation, input) => transport.sendRuntimeDataRequest(root, { operation, input });
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.firstStepPrompt = buildAgentConversationPrompt; module.exports.firstRevisionPrompt = buildRoadmapRevisionPrompt;', {
+    './autonomousRuntimeControl': { ...transport, sendRuntimeDataRequest: (resolved, request) => { assert.equal(resolved, root); return transport.sendRuntimeDataRequest(root, request); } }
+  });
+  try {
+    await call('register_project', { root: project });
+    const node = { id: 'step', title: 'Complete handoff', description: 'Read current work', stage: 'Build', status: 'In Progress', agentPrompt: 'Continue the requested work' };
+    const prompts = [
+      await extension.firstStepPrompt(node, 'Continue work', project, '', '', '', '', [], '', '', root, {}, false, true),
+      await extension.firstRevisionPrompt('Adjust the roadmap', project, '', [], root, {}, false)
+    ];
+    const snapshots = [];
+    for (const prompt of prompts) {
+      assertBundledHandoffInstructions(prompt, root);
+      const command = prompt.split('\n').find(line => line.trim().startsWith('node ') && line.includes(' handoff --project ')).trim();
+      const executed = await require('node:util').promisify(require('node:child_process').execFile)('/bin/bash', ['--noprofile', '--norc', '-c', `${command} --json`], { cwd: project });
+      const result = JSON.parse(executed.stdout);
+      assert.equal(result.globalRoot, root); assert.equal(result.projectRoot, project);
+      assert.equal(fs.existsSync(path.join(root, 'tools')), false);
+      assert.equal(fs.statSync(prompt.match(/先读取 (.+)，再运行：/)[1]).isFile(), true);
+      snapshots.push({ prompt, command, result });
+    }
+    if (process.env.SOLOMAP_462_PROMPT_HANDOFF_EVIDENCE) fs.writeFileSync(process.env.SOLOMAP_462_PROMPT_HANDOFF_EVIDENCE, JSON.stringify(snapshots, null, 2));
+  } finally { await server.close(); await operations.close(); store.close(); }
+});
+
+test('settings follow a restored database at the same capability sequence without manual invalidation', async () => {
+  const extensionModule = loadCompiledModule('out/extension.js', 'module.exports.__getPersistedSettings = getPersistedSettings;');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const global = require('../out/solomapGlobal.js'), transport = require('../out/autonomousRuntimeControl.js');
+  const previous = transport.sendRuntimeDataRequest;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-settings-restore-'));
+  const root = path.join(base, 'current', '.solomap-global'), replacement = path.join(base, 'replacement', '.solomap-global');
+  let store = new UnifiedDataStore(root), operations = createRuntimeDataOperations(store);
+  const other = new UnifiedDataStore(replacement);
+  let otherClosed = false;
+  transport.sendRuntimeDataRequest = (resolved, request) => { assert.equal(resolved, root); return operations(request); };
+  try {
+    const entry = { id: 'command-output-optimizer', status: 'installed', enabled: true, title: 'Before restore', version: '1.2.3', health: { ok: true } };
+    store.patchCapabilityRegistry({ kind: 'enhancement', entry, expectedRevision: 0, idempotencyKey: 'original-choice' });
+    other.patchCapabilityRegistry({ kind: 'enhancement', entry: { ...entry, title: 'Restored choice', enabled: false }, expectedRevision: 0, idempotencyKey: 'restored-choice' });
+    const oldSequence = store.readCapabilityRegistry({ kind: 'enhancement' }).sourceSequence;
+    assert.equal(other.readCapabilityRegistry({ kind: 'enhancement' }).sourceSequence, oldSequence);
+    other.close(); otherClosed = true;
+    extensionModule.__vscodeTestState.configurationValues.globalDataPath = root;
+    const context = { globalState: { get: () => ({}) } };
+    await global.refreshSolomapCapabilityRegistries(projectRoot, root);
+    assert.equal(extensionModule.__getPersistedSettings(context).enabledEnhancements['command-output-optimizer'], true);
+    await operations.close(); store.close();
+    fs.renameSync(path.join(root, 'solomap.db'), path.join(base, 'original-solomap.db'));
+    fs.copyFileSync(path.join(replacement, 'solomap.db'), path.join(root, 'solomap.db'));
+    store = new UnifiedDataStore(root); operations = createRuntimeDataOperations(store);
+    await global.refreshSolomapCapabilityRegistries(projectRoot, root);
+    const settings = extensionModule.__getPersistedSettings(context);
+    assert.equal(settings.enabledEnhancements['command-output-optimizer'], false, 'restored user choice must reach the settings consumer');
+    assert.equal(settings.enhancementStatuses.find(item => item.id === entry.id).title, 'Restored choice');
+    for (let i = 0; i < 20; i++) {
+      await global.refreshSolomapCapabilityRegistries(projectRoot, root);
+      assert.strictEqual(extensionModule.__getPersistedSettings(context), settings, 'unchanged reads reuse the current settings projection');
+    }
+  } finally { transport.sendRuntimeDataRequest = previous; await operations.close(); store.close(); if (!otherClosed) other.close(); }
+});
+
+test('built-in MCP tools appear in the shared connector settings without entering Agent CLI candidates', async () => {
   const extensionModule = loadCompiledModule('out/extension.js',
     'module.exports.__getPersistedSettings = getPersistedSettings;');
   const { readSolomapMcpRegistry, buildSolomapMcpCandidateInstructions } =
     require(path.join(projectRoot, 'out/solomapGlobal.js'));
-  const globalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-builtin-mcp-'));
+  const globalRoot = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-builtin-mcp-')), '.solomap-global');
+  const runtime = isolatedCapabilityRuntime(globalRoot);
+  try {
   extensionModule.__vscodeTestState.configurationValues.globalDataPath = globalRoot;
   const settings = extensionModule.__getPersistedSettings({ globalState: { get: () => ({}) } });
   const builtIn = settings.connectors.find(connector => connector.id === 'builtin:solomap-intelligence');
@@ -269,17 +947,20 @@ test('built-in MCP tools appear in the shared connector settings without enterin
   assert.deepEqual(builtIn.permissions.tools.sort(),
     ['get_current_project', 'get_plugin_settings', 'get_today_review', 'list_projects']);
   assert.equal(builtIn.permissions.externalAccess, false);
-  assert.equal(readSolomapMcpRegistry(projectRoot, globalRoot).connectors.some(connector => connector.id === builtIn.id), false);
-  assert.doesNotMatch(buildSolomapMcpCandidateInstructions(projectRoot, globalRoot, '查询当前项目'), /solomap-intelligence/);
+  assert.equal((await readSolomapMcpRegistry(projectRoot, globalRoot)).connectors.some(connector => connector.id === builtIn.id), false);
+  assert.doesNotMatch(await buildSolomapMcpCandidateInstructions(projectRoot, globalRoot, '查询当前项目'), /solomap-intelligence/);
+  } finally { await runtime.close(); }
 });
 
-test('built-in MCP settings do not hide an existing connector with the server name', () => {
+test('built-in MCP settings do not hide an existing connector with the server name', async () => {
   const extensionModule = loadCompiledModule('out/extension.js',
     'module.exports.__getPersistedSettings = getPersistedSettings;');
   const { writeSolomapMcpRegistry } = require(path.join(projectRoot, 'out/solomapGlobal.js'));
-  const globalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-mcp-id-conflict-'));
+  const globalRoot = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-mcp-id-conflict-')), '.solomap-global');
+  const runtime = isolatedCapabilityRuntime(globalRoot);
+  try {
   extensionModule.__vscodeTestState.configurationValues.globalDataPath = globalRoot;
-  writeSolomapMcpRegistry(projectRoot, globalRoot, {
+  await writeSolomapMcpRegistry(projectRoot, globalRoot, {
     version: 1, updatedAt: '',
     connectors: [{ id: 'solomap-intelligence', title: 'Existing connector', status: 'installed' }]
   });
@@ -288,6 +969,7 @@ test('built-in MCP settings do not hide an existing connector with the server na
     && connector.source.kind === 'builtin'));
   assert.ok(settings.connectors.some(connector => connector.id === 'solomap-intelligence'
     && connector.title === 'Existing connector'));
+  } finally { await runtime.close(); }
 });
 
 test('shared connector settings do not offer uninstall for a built-in MCP service', () => {
@@ -382,7 +1064,20 @@ function createWebviewStub() {
   };
 }
 
-function loadCompiledModule(relativePath, exportPatch) {
+function isolatedCapabilityRuntime(root) {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
+  let store, operations;
+  transport.sendRuntimeDataRequest = (resolvedRoot, request) => {
+    assert.equal(path.resolve(resolvedRoot), path.resolve(root), 'capability state belongs to this test owner');
+    if (!store) { store = new UnifiedDataStore(root); operations = createRuntimeDataOperations(store); }
+    return operations(request);
+  };
+  return { async close() { transport.sendRuntimeDataRequest = previous; if (operations) await operations.close(); store?.close(); } };
+}
+
+function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
   const filename = path.join(projectRoot, relativePath);
   const source = fs.readFileSync(filename, 'utf8') + `\n${exportPatch}`;
   const exports = {};
@@ -397,13 +1092,14 @@ function loadCompiledModule(relativePath, exportPatch) {
     nextInformationChoice: undefined,
     nextInformationChoices: [],
     nextInputBoxValue: undefined,
-    configurationValues: {},
+    configurationValues: { globalDataPath: fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-host-default-')) },
     fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) })
   };
   const context = {
     exports,
     module,
     require: (id) => {
+      if (Object.hasOwn(requireOverrides, id)) return requireOverrides[id];
       if (['./taskReport.js', './learningReview.js', './learningReviewRunner.js'].includes(id)) return require(path.join(projectRoot, 'out', id));
       if (id === 'child_process') {
         const cp = require('child_process');
@@ -457,10 +1153,11 @@ function loadCompiledModule(relativePath, exportPatch) {
                   asWebviewUri(uri) {
                     return String(uri && (uri.fsPath || uri.path || uri));
                   },
-                  onDidReceiveMessage() {}
+                  onDidReceiveMessage() {},
+                  postMessage() { return Promise.resolve(true); }
                 },
                 reveal() {},
-                onDidDispose() {}
+                onDidDispose(listener) { this.dispose = () => listener(); }
               };
               vscodeTestState.webviewPanels.push(panel);
               return panel;
@@ -511,6 +1208,8 @@ function loadCompiledModule(relativePath, exportPatch) {
         };
       }
       if (id.startsWith('./')) {
+        if (id === './processIdentity.js') return loadCompiledModule('out/processIdentity.js', '', requireOverrides);
+        if (['./agentRunPreparation', './runLifecycleClient', './runWorkspace', './telegramRuntimeConfig', './capabilityRegistry'].includes(id)) return require(path.join(projectRoot, 'out', `${id}.js`));
         if (id === './documentationManifest') {
           return require(path.join(projectRoot, 'out/documentationManifest.js'));
         }
@@ -584,7 +1283,7 @@ function loadCompiledModule(relativePath, exportPatch) {
           return require(path.join(projectRoot, 'out/runDigest.js'));
         }
         if (id === './solomapGlobal') {
-          return loadCompiledModule('out/solomapGlobal.js', '');
+          return loadCompiledModule('out/solomapGlobal.js', '', requireOverrides);
         }
         if (id === './systemMaintenance') {
           return require(path.join(projectRoot, 'out/systemMaintenance.js'));
@@ -669,6 +1368,7 @@ function loadCompiledModule(relativePath, exportPatch) {
           // and the generated task consumer have separate real-owner acceptance.
           return { ensureHealthyAutonomousRuntime: async () => ({ started: false, pid: process.pid, runtimeId: 'isolated-ui-host' }) };
         }
+        if (id === './automationSound.js') return require(path.join(projectRoot, 'out/automationSound.js'));
         if (id === './agentDatabaseConfig' || id === './runtimeDataOperations') {
           return require(path.join(projectRoot, 'out', id + '.js'));
         }
@@ -693,6 +1393,7 @@ function loadCompiledModule(relativePath, exportPatch) {
     __filename: filename
   };
 
+  if (String(exportPatch).includes('function buildAgentShellScript(')) context.taskReport_js_1 = require(path.join(projectRoot, 'out/taskReport.js'));
   vm.runInNewContext(source, context, { filename });
   context.module.exports.__vscodeTestState = vscodeTestState;
   return context.module.exports;
@@ -4116,45 +4817,84 @@ test('a project-local refresh keeps other projects remote loads in flight', () =
   assert.match(extension, /if \(runIndexHealth\?\.backfilledCount\) \{\s*sendLocalProjectsToWebviews\(context, projectPath\)/);
 });
 
-test('closing the roadmap panel keeps the project sentinel alive for sidebar status refreshes', () => {
-  const source = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
-  const disposeStart = source.indexOf('activePanel.onDidDispose(');
-  assert.notEqual(disposeStart, -1);
-  const disposeEnd = source.indexOf('\n  );', disposeStart);
-  const disposeBody = source.slice(disposeStart, disposeEnd);
-
-  assert.match(disposeBody, /activePanel = null/);
-  assert.doesNotMatch(disposeBody, /watcher\.dispose|clearInterval\(statusPoller\)/);
-  assert.match(source, /const processingAgentStatusFiles = new Set<string>\(\)/);
-  assert.match(source, /processingAgentStatusFiles\.has\(normalizedStatusFilePath\)/);
-  assert.match(source, /finally \{[\s\S]*processingAgentStatusFiles\.delete\(normalizedStatusFilePath\)/);
+test('closing the roadmap panel keeps the project sentinel alive for sidebar status refreshes', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-panel-close-consumer-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const received = [];
+  const { SyncEngine } = require('../out/db/syncEngine.js');
+  const engine = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  await engine.initAndSync();
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.open = openRoadmapPanel; module.exports.poll = pollActiveConversations;
+    module.exports.connect = (context, root, project, received, engine) => {
+      extensionContextRef = context; activeProjectRoot = project;
+      syncEngine = engine; syncEngineReady = true; syncEngineInitProjectRoot = project;
+      getSelectedProjectPath = () => project;
+      getPersistedSettings = () => ({ globalDataPath: root, language: 'zh' });
+      recordLocalUsageEvent = () => {};
+      processRegisteredStatusFile = async (_context, reference, _allow, status) => { received.push({ reference, status }); };
+    };
+    module.exports.start = setupFileSentinelWatcher;
+    module.exports.poller = () => statusPoller;
+    module.exports.panelOpen = () => Boolean(activePanel);
+    const originalFlowPost = postFlowStateToWebview; let flowPost;
+    postFlowStateToWebview = (...args) => { flowPost = originalFlowPost(...args); return flowPost; };
+    module.exports.stop = async () => { if (statusPoller) clearInterval(statusPoller); await Promise.all([...activeRunConsumerPolls.values()]); if (flowPost) await flowPost; };
+  `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
+  const context = { extensionUri: createUri(projectRoot), extensionPath: projectRoot, subscriptions: [], secrets: { get: async () => undefined, delete: async () => {} }, globalState: { get: (_key, fallback) => fallback } };
+  extension.connect(context, root, project, received, engine);
+  const finish = async id => {
+    const run = await native.ops({ operation: 'prepare_run', input: { root: project, executionLogId: id, nodeId: '__solo__', runKind: 'solo', prompt: `完整任务${id}`, command: 'fixture-command', userMessage: `目标${id}`, metadata: { agentCli: 'claude' }, idempotencyKey: `panel-run-${id}` } });
+    await native.ops({ operation: 'checkpoint_run', input: { projectId: run.projectId, executionLogId: id, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial', summary: `结果${id}`, idempotencyKey: `panel-complete-${id}` } });
+  };
+  try {
+    await extension.open(context); await finish(1); extension.start(project); await extension.poll(context);
+    assert.ok(received.some(item => item.status.rootExecutionLogId === 1));
+    const poller = extension.poller(); assert.ok(poller);
+    extension.__vscodeTestState.webviewPanels[0].dispose();
+    assert.equal(extension.panelOpen(), false); assert.equal(extension.poller(), poller);
+    await finish(2); await extension.poll(context);
+    assert.ok(received.some(item => item.status.rootExecutionLogId === 2), 'the closed panel must not block a later formal result from reaching the sidebar consumer');
+    assert.equal(fs.existsSync(path.join(project, '.solopreneur', 'agent-status')), false);
+    assert.equal(fs.existsSync(path.join(root, 'active-conversations')), false);
+  } finally { await extension.stop(); engine.close(); }
 });
 
-test('project sentinel processes exact changes while cross-project recovery only reads the active ledger', () => {
-  const source = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
-  const setupStart = source.indexOf('function setupFileSentinelWatcher(');
-  const setupEnd = source.indexOf('\nexport function deactivate()', setupStart);
-  const setupBody = source.slice(setupStart, setupEnd);
-  const processStart = source.indexOf('async function processAgentStatusFile(');
-  const processEnd = source.indexOf('\nfunction isPendingAgentStatusFile', processStart);
-  const processBody = source.slice(processStart, processEnd);
-
-  assert.doesNotMatch(setupBody, /getProjects\(extensionContextRef\)/);
-  assert.doesNotMatch(setupBody, /getAgentStatusFilePaths\(workspaceRoot\)/);
-  assert.match(setupBody, /processRegisteredStatusFile\(extensionContextRef, uri\.fsPath, false\)/);
-  assert.match(source, /listActiveConversations\(referenceRoot, settings\.globalDataPath\)/);
-  assert.match(source, /claimActiveConversation\(/);
-  assert.match(source, /}, 5000\)/);
-  assert.match(source, /registerActiveConversation\(\{/);
-  assert.match(processBody, /unregisterActiveConversation\(/);
-  assert.doesNotMatch(processBody, /statusWorkspaceRoot !== activeProjectRoot/);
-  assert.match(processBody, /transientStatusSyncEngine = new SyncEngine/);
-  assert.match(processBody, /transientStatusSyncEngine\?\.close\(\)/);
-  assert.ok(
-    processBody.indexOf("status === 'Running' || status === 'Processed'") < processBody.indexOf('new SyncEngine('),
-    'terminal status validation must happen before opening a background project database'
-  );
-  assert.doesNotMatch(source, /showInformationMessage\(['"]Continuation conversation was recorded\./);
+test('database sentinel dispatches fixed formal results across projects without reading legacy status or active ledgers', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cross-project-consumer-'));
+  const root = path.join(base, '.solomap-global');
+  const projects = ['A', 'B'].map(name => { const file = path.join(base, name); fs.mkdirSync(file); return { path: file }; });
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, projects);
+  const expected = [];
+  for (const project of projects) {
+    const run = await native.ops({ operation: 'prepare_run', input: { root: project.path, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: project.path, command: 'fixture-command', userMessage: project.path, metadata: { agentCli: 'claude' }, idempotencyKey: `cross-run-${project.path}` } });
+    const completed = await native.ops({ operation: 'checkpoint_run', input: { projectId: run.projectId, executionLogId: 1, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial', summary: project.path, idempotencyKey: `cross-complete-${project.path}` } });
+    await native.ops({ operation: 'patch_run_inputs', input: { projectId: run.projectId, executionLogId: 1, generation: run.generation, expectedRevision: completed.revision, prompt: `later:${project.path}`, idempotencyKey: `cross-later-input-${project.path}` } });
+    expected.push({ root: project.path, revision: completed.revision, turnId: completed.turnId });
+    fs.writeFileSync(path.join(project.path, '.agent_status.json'), 'invalid retired source');
+  }
+  const received = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.poll = pollActiveConversations;
+    module.exports.connect = (root, selected, received) => {
+      getPersistedSettings = () => ({ globalDataPath: root }); getSelectedProjectPath = () => selected;
+      processRegisteredStatusFile = async (_context, reference, _allow, status) => received.push({ reference, status });
+    };
+  `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
+  extension.connect(root, projects[0].path, received);
+  await extension.poll({});
+  assert.equal(received.length, 2);
+  const { RunLifecycleClient } = require('../out/runLifecycleClient.js');
+  const client = new RunLifecycleClient((operation, input) => native.ops({ operation, input }), root);
+  for (const item of expected) {
+    const actual = received.find(value => value.status.workspaceRoot === item.root);
+    assert.ok(actual, 'a background project result must remain visible to the shared consumer');
+    assert.equal(await client.readField(actual.reference, 'prompt', actual.status), item.root, 'the formal consumer must read the completed revision even after later inputs change');
+    assert.equal(actual.status.turnId, item.turnId);
+    assert.equal(new URL(actual.reference).searchParams.get('root'), item.root);
+  }
+  assert.equal(fs.existsSync(path.join(root, 'active-conversations')), false);
 });
 
 test('sidebar local project refresh batches core cards before scheduling enrichment', async () => {
@@ -4720,7 +5460,7 @@ test('new project portfolio shows generating the initial roadmap as its next act
   assert.equal(summary.globalNextAction, '生成初始路线图');
 });
 
-test('project investment analytics aggregate local run effort for portfolio consumers', () => {
+test('project investment analytics aggregate committed run effort for portfolio consumers', async t => {
   const analytics = require(path.join(projectRoot, 'out/projectAnalytics.js'));
   const projectPortfolio = require(path.join(projectRoot, 'out/projectPortfolio.js'));
   const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-investment-a-'));
@@ -4750,8 +5490,10 @@ test('project investment analytics aggregate local run effort for portfolio cons
     durationMs: 30 * 60 * 1000
   }), 'utf8');
 
-  analytics.clearProjectInvestmentCache(projectRootA);
-  const stats = analytics.readProjectInvestmentStats(projectRootA, new Date('2026-06-15T00:00:00.000Z'));
+  const globalRoot = path.join(projectRootA, '.solomap-global');
+  const { store, projectIds } = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, [{ name: 'Invested', path: projectRootA }]);
+  for (const [index, name] of ['step-1.json', 'solo-1.json'].entries()) store.upsertProjectRunIndex(projectIds.get(projectRootA), { ...JSON.parse(fs.readFileSync(path.join(digestRoot, name), 'utf8')), executionLogId: index + 1 });
+  const stats = await analytics.readProjectInvestmentStatsFromDatabase(projectRootA, projectRoot, new Date('2026-06-15T00:00:00.000Z'), globalRoot);
   assert.equal(stats.taskRunCount, 1);
   assert.equal(stats.soloConversationCount, 1);
   assert.equal(stats.completedRunCount, 1);
@@ -4765,13 +5507,13 @@ test('project investment analytics aggregate local run effort for portfolio cons
   assert.equal(stats.workHabits.averageSessionDurationMs, 45 * 60 * 1000);
   assert.equal(stats.workHabits.preferredStartHour, 9);
 
-  const summaries = projectPortfolio.buildProjectPortfolioSummaries([{ name: 'Invested', path: projectRootA }]);
+  const summaries = await projectPortfolio.buildProjectPortfolioSummariesFromDatabase([{ name: 'Invested', path: projectRootA }], projectRoot, { globalDataPath: globalRoot });
   assert.equal(summaries[0].investment.taskRunCount, 1);
   assert.equal(summaries[0].investment.soloConversationCount, 1);
   assert.equal(summaries[0].investment.totalDurationMs, 90 * 60 * 1000);
 });
 
-test('work duration analytics exclude delayed status processing from effort and habits', () => {
+test('work duration analytics exclude delayed status processing from effort and habits', async t => {
   const analytics = require(path.join(projectRoot, 'out/projectAnalytics.js'));
   const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-investment-delayed-'));
   const digestRoot = path.join(projectRootA, '.solopreneur', 'run-digests');
@@ -4795,8 +5537,10 @@ test('work duration analytics exclude delayed status processing from effort and 
     durationMs: 25 * 60 * 1000
   }), 'utf8');
 
-  analytics.clearProjectInvestmentCache(projectRootA);
-  const stats = analytics.readProjectInvestmentStats(projectRootA, new Date('2026-07-22T12:00:00.000Z'));
+  const globalRoot = path.join(projectRootA, '.solomap-global');
+  const { store, projectIds } = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, [{ path: projectRootA }]);
+  for (const [index, name] of ['delayed.json', 'trusted.json'].entries()) store.upsertProjectRunIndex(projectIds.get(projectRootA), { ...JSON.parse(fs.readFileSync(path.join(digestRoot, name), 'utf8')), executionLogId: index + 1 });
+  const stats = await analytics.readProjectInvestmentStatsFromDatabase(projectRootA, projectRoot, new Date('2026-07-22T12:00:00.000Z'), globalRoot);
   assert.equal(stats.totalDurationMs, 25 * 60 * 1000);
   assert.equal(stats.averageRunDurationMs, 25 * 60 * 1000);
   assert.equal(stats.workHabits.observedSessionCount, 1);
@@ -4804,7 +5548,7 @@ test('work duration analytics exclude delayed status processing from effort and 
   assert.equal(stats.workHabits.medianSessionDurationMs, 25 * 60 * 1000);
 });
 
-test('project investment analytics prefer database run index for enriched portfolio stats', async () => {
+test('project investment analytics read a migrated run index for enriched portfolio stats', async t => {
   const analytics = require(path.join(projectRoot, 'out/projectAnalytics.js'));
   const projectPortfolio = require(path.join(projectRoot, 'out/projectPortfolio.js'));
   const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
@@ -4866,11 +5610,18 @@ test('project investment analytics prefer database run index for enriched portfo
   }, [], []);
   store.close();
 
-  analytics.clearProjectInvestmentCache(projectRootA);
+  for (const [node, id, body] of [['1', 12, 'npm test passed\n'.padEnd(100, ' ')], ['__solo__', 13, 'done\n'.padEnd(80, ' ')]]) {
+    const directory = path.join(solopreneurDir, 'agent-runs', node, String(id));
+    fs.mkdirSync(directory, { recursive: true }); fs.writeFileSync(path.join(directory, 'output.log'), body);
+  }
+  const globalRoot = path.join(projectRootA, '.solomap-global');
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, [{ path: projectRootA }]);
+  const job = await native.ops({ operation: 'import_project_data', input: { collection: 'project-journal', sourceRoot: path.join(solopreneurDir, 'project_journal.db'), projectRoot: projectRootA, idempotencyKey: 'investment-old-journal-import' } });
+  await native.ops.waitForMigrations(); assert.equal(native.store.readMigrationJob(job.jobId).status, 'completed');
   const stats = await analytics.readProjectInvestmentStatsFromDatabase(
     projectRootA,
     projectRoot,
-    new Date('2026-06-15T00:00:00.000Z')
+    new Date('2026-06-15T00:00:00.000Z'), globalRoot
   );
   assert.equal(stats.taskRunCount, 1);
   assert.equal(stats.soloConversationCount, 1);
@@ -4881,7 +5632,7 @@ test('project investment analytics prefer database run index for enriched portfo
 
   const summaries = await projectPortfolio.buildProjectPortfolioSummariesFromDatabase(
     [{ name: 'Invested DB', path: projectRootA }],
-    projectRoot
+    projectRoot, { globalDataPath: globalRoot }
   );
   assert.equal(summaries[0].investment.taskRunCount, 1);
   assert.equal(summaries[0].investment.soloConversationCount, 1);
@@ -4889,9 +5640,8 @@ test('project investment analytics prefer database run index for enriched portfo
   assert.equal(summaries[0].investment.failedRunCount, 0);
 });
 
-test('run index maintenance backfills legacy digests and reports health', async () => {
+test('run index maintenance backfills formal historical digests and reports health', async t => {
   const maintenance = require(path.join(projectRoot, 'out/runIndexMaintenance.js'));
-  const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
   const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-run-index-backfill-'));
   const solopreneurDir = path.join(projectRootA, '.solopreneur');
   const digestRoot = path.join(solopreneurDir, 'run-digests');
@@ -4915,30 +5665,35 @@ test('run index maintenance backfills legacy digests and reports health', async 
     rawRefs: { sqliteTable: 'execution_logs', executionLogId: 31 }
   }), 'utf8');
 
-  const before = await maintenance.getRunIndexHealth(projectRootA, projectRoot);
+  const globalRoot = path.join(projectRootA, '.solomap-global');
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, [{ path: projectRootA }]);
+  const projectId = native.projectIds.get(projectRootA);
+  const bytes = fs.readFileSync(path.join(digestRoot, 'digest-backfill.json'));
+  const source = { identity: `run-digests:${projectId}`, key: 'digest-backfill.json', hash: require('node:crypto').createHash('sha256').update(bytes).digest('hex') };
+  native.store.captureMigrationSource(source, bytes);
+  native.store.importRunDigestSource(projectId, { source, bytes });
+  const before = await maintenance.getRunIndexHealth(projectRootA, projectRoot, globalRoot);
   assert.equal(before.digestCount, 1);
   assert.equal(before.indexedCount, 0);
   assert.equal(before.missingDigestCount, 1);
   assert.equal(before.ok, false);
 
-  const after = await maintenance.backfillRunIndexFromDigests(projectRootA, projectRoot);
+  const after = await maintenance.backfillRunIndexFromDigests(projectRootA, projectRoot, globalRoot);
   assert.equal(after.digestCount, 1);
   assert.equal(after.backfilledCount, 1);
   assert.equal(after.missingDigestCount, 0);
   assert.equal(after.ok, true);
 
-  const store = new SqliteStore(path.join(solopreneurDir, 'project_journal.db'), projectRoot);
-  await store.init();
-  const entries = store.getRunIndexEntries();
+  const entries = native.store.readProjectRunIndexes(projectId);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].executionLogId, 31);
   assert.equal(entries[0].runKind, 'solo');
-  assert.deepEqual(entries[0].files.map((file) => [file.role, file.filePath]), [['touched', 'docs/from-digest.md'], ['changed', 'src/from-digest.ts']]);
-  assert.deepEqual(entries[0].signals.map((signal) => [signal.type, signal.value]), [['reusable', 'Completion: done'], ['verification', 'npm test passed']]);
-  store.close();
+  assert.deepEqual(entries[0].files.map((file) => [file.role, file.filePath]).sort(), [['touched', 'docs/from-digest.md'], ['changed', 'src/from-digest.ts']].sort());
+  assert.deepEqual(entries[0].signals.map((signal) => [signal.type, signal.value]).sort(), [['reusable', 'Completion: done'], ['verification', 'npm test passed']].sort());
+  assert.equal(fs.existsSync(path.join(solopreneurDir, 'project_journal.db')), false);
 });
 
-test('database-backed portfolio stats fall back to digests without blocking on backfill', async () => {
+test('database-backed portfolio stats stay authoritative while legacy digest migration runs', async t => {
   const analytics = require(path.join(projectRoot, 'out/projectAnalytics.js'));
   const projectPortfolio = require(path.join(projectRoot, 'out/projectPortfolio.js'));
   const projectRootA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-investment-db-fallback-'));
@@ -4963,11 +5718,16 @@ test('database-backed portfolio stats fall back to digests without blocking on b
     rawRefs: { sqliteTable: 'execution_logs', executionLogId: 44 }
   }), 'utf8');
 
-  analytics.clearProjectInvestmentCache(projectRootA);
+  const globalRoot = path.join(projectRootA, '.solomap-global');
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, [{ path: projectRootA }]);
+  const before = await analytics.readProjectInvestmentStatsFromDatabase(projectRootA, projectRoot, new Date('2026-06-15T00:00:00.000Z'), globalRoot);
+  assert.equal(before.soloConversationCount, 0);
+  const job = await native.ops({ operation: 'import_project_data', input: { collection: 'run-digests', sourceRoot: digestRoot, projectRoot: projectRootA, idempotencyKey: 'investment-old-digest-import' } });
+  await native.ops.waitForMigrations(); assert.equal(native.store.readMigrationJob(job.jobId).status, 'completed');
   const stats = await analytics.readProjectInvestmentStatsFromDatabase(
     projectRootA,
     projectRoot,
-    new Date('2026-06-15T00:00:00.000Z')
+    new Date('2026-06-15T00:00:00.000Z'), globalRoot
   );
   assert.equal(stats.taskRunCount, 0);
   assert.equal(stats.soloConversationCount, 1);
@@ -4977,7 +5737,7 @@ test('database-backed portfolio stats fall back to digests without blocking on b
 
   const summaries = await projectPortfolio.buildProjectPortfolioSummariesFromDatabase(
     [{ name: 'Legacy Invested', path: projectRootA }],
-    projectRoot
+    projectRoot, { globalDataPath: globalRoot }
   );
   assert.equal(summaries[0].investment.soloConversationCount, 1);
   assert.equal(summaries[0].investment.failedRunCount, 1);
@@ -5559,7 +6319,7 @@ test('strategy pyramid webview renders the paid strategic cockpit without intern
   assert.equal(extensionModule.__hasProEntitlement({ proEntitlements: { strategy_pyramid: true }, proAccount: { expiresAt: '2999-01-01T00:00:00.000Z' } }, 'strategyPyramid'), true);
 });
 
-test('strategy pyramid snapshot sends portfolio facts through the intelligent kernel and writes its judgment', async () => {
+test('strategy pyramid snapshot sends portfolio facts through the intelligent kernel and writes its judgment', async t => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     'module.exports.__buildStrategyPyramidSnapshot = buildStrategyPyramidSnapshot;'
@@ -5591,21 +6351,10 @@ test('strategy pyramid snapshot sends portfolio facts through the intelligent ke
       { name: 'Content Engine', path: contentProject, type: 'content' }
     ]
   }, null, 2), 'utf8');
-  const ledger = require(path.join(projectRoot, 'out', 'learningLedger.js'));
-  ledger.appendLearningEvent(coreProject, globalRoot, {
-    sourceType: 'flow_loop',
-    sourceRef: 'flow-1:loop-1:verifier:1',
-    eventType: 'verified',
-    summary: 'Verifier closed the checkout flow after running the final UI test.',
-    evidenceRefs: [{ type: 'command', ref: 'node --test checkout-flow.test.js', summary: 'Verification signal' }],
-    tags: ['flow', 'verifier'],
-    metadata: {
-      role: 'verifier',
-      recommendedStatus: 'closed',
-      verification: ['node --test checkout-flow.test.js'],
-      failures: []
-    }
-  });
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, [{ name: 'SoloMap', path: coreProject }, { name: 'Content Engine', path: contentProject }]);
+  const scope = native.projectIds.get(coreProject);
+  const evidence = native.store.write({ kind: 'evidence', action: 'create', scope, idempotencyKey: 'strategy-kernel-evidence', data: { type: 'host_observation', source_actor_id: 'local-runtime', content: 'node --test checkout-flow.test.js passed', observed_at: Date.now() } });
+  native.store.write({ kind: 'learning_event', action: 'create', scope, idempotencyKey: 'strategy-kernel-event', data: { source_object_id: evidence.objectId, source_revision: 1, event_type: 'verified', source_type: 'flow_loop', summary: 'Verifier closed the checkout flow after running the final UI test.', verification_signal: 1, occurred_at: Date.now() } });
 
   const context = {
     globalState: {
@@ -5668,10 +6417,10 @@ test('strategy pyramid snapshot sends portfolio facts through the intelligent ke
   assert.ok(snapshot.loops.some((loop) => loop.key === 'sell' && loop.count >= 1));
   assert.ok(snapshot.moves.length >= 2);
   assert.ok(snapshot.projects.some((project) => project.name === 'SoloMap' && project.role === '核心产品' && project.roleScores.brandValue >= 1));
-  assert.ok(fs.existsSync(snapshotPath));
+  assert.equal(fs.existsSync(snapshotPath), false);
   assert.equal(fs.existsSync(projectStrategyPath), false);
   assert.equal(fs.existsSync(abilityRegistryPath), false);
-  const written = JSON.parse(fs.readFileSync(snapshotPath, 'utf8'));
+  const written = native.store.readStrategyState(null).value.snapshot;
   assert.equal(written.totalProjects, 2);
   assert.equal(written.layers.length, 5);
 
@@ -5684,8 +6433,195 @@ test('strategy pyramid snapshot sends portfolio facts through the intelligent ke
   assert.equal(fallback.decisionSource, 'rules_fallback');
   assert.equal(fallback.engineStatus, 'failed');
   assert.equal(fallback.totalProjects, 2);
-  assert.match(fs.readFileSync(projectStrategyPath, 'utf8'), /projectPath,role,businessStage,revenueTier,timeLoad,strategicAction,abilities,updatedAt/);
-  assert.match(fs.readFileSync(abilityRegistryPath, 'utf8'), /abilityId,name,category,marketRelevance,notes,updatedAt/);
+  const derived = native.store.readStrategyState(null).value.derivedRegistries;
+  assert.ok(derived.projects.some(project => project.projectPath === coreProject));
+  assert.ok(derived.abilities.length > 0);
+  assert.equal(fs.existsSync(projectStrategyPath), false);
+  assert.equal(fs.existsSync(abilityRegistryPath), false);
+
+  const judgment = mainJudgment => ({ confidence: 'medium', stageTitle: '验证期', mainJudgment, strategicAction: '验证', constraint: '不扩张', risks: [], moves: [], recommendedScenarioPath: '验证', projects: [] });
+  let finishOld; let entered;
+  const result = new Promise(resolve => { finishOld = resolve; });
+  const started = new Promise(resolve => { entered = resolve; });
+  const older = extensionModule.__buildStrategyPyramidSnapshot(context, { id: 'test-engine:same-model', async judgeStrategyPyramid() { entered(); return result; } });
+  await started;
+  await extensionModule.__buildStrategyPyramidSnapshot(context, { id: 'test-engine:same-model', async judgeStrategyPyramid() { return judgment('较新的判断'); } });
+  finishOld(judgment('迟到的判断'));
+  assert.equal((await older).mainJudgment, '较新的判断');
+  assert.equal(native.store.readStrategyState(null).value.snapshot.mainJudgment, '较新的判断');
+});
+
+test('strategy pyramid rules entry preserves request eligibility through fallback publication', async t => {
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.build = buildStrategyPyramidSnapshot;', {
+    './cognitiveRuntimeConfig': { readCognitiveRuntimeConfig: () => ({ mode: 'none' }), cognitiveRuntimeConfigRevision: () => 'none' }
+  });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-strategy-rules-entry-'));
+  const project = path.join(root, 'project'); fs.mkdirSync(project);
+  const globalRoot = path.join(root, 'global'); fs.mkdirSync(globalRoot);
+  fs.writeFileSync(path.join(globalRoot, 'projects.json'), JSON.stringify({ projects: [{ name: 'Project', path: project }], hiddenProjects: [] }));
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, [{ name: 'Project', path: project }]);
+  const context = { globalState: { get: key => key === 'solopreneur.settings' ? { globalDataPath: globalRoot } : undefined, update: async () => {} } };
+  await assert.rejects(extension.build(context, undefined, () => false), /no longer current/);
+  assert.equal(native.store.readStrategyState(null).revision, 0);
+  let eligible = true;
+  let overviewReads = 0;
+  const original = native.store.readLearningOverview.bind(native.store);
+  native.store.readLearningOverview = () => { if (++overviewReads === 2) eligible = false; return original(); };
+  await assert.rejects(extension.build(context, { id: 'failed-model', async judgeStrategyPyramid() { throw new Error('model unavailable'); } }, () => eligible), /no longer current/);
+  assert.equal(native.store.readStrategyState(null).revision, 0);
+});
+
+for (const cached of [true, false]) test(`strategy panel switches data roots while ${cached ? 'cache reading' : 'rules generation'} is in flight`, async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-strategy-root-switch-'));
+  const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const projects = [{ name: 'Project', path: project }];
+  const roots = ['a', 'b'].map(name => path.join(base, name, '.solomap-global'));
+  const owners = [];
+  const strategy = require('../out/strategyPyramid.js');
+  for (let i = 0; i < roots.length; i++) {
+    const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, roots[i], projects); owners.push(owner);
+    fs.writeFileSync(path.join(roots[i], 'projects.json'), JSON.stringify({ projects, hiddenProjects: [] }));
+    await strategy.buildStrategyPyramidSnapshotData(projects, roots[i], project);
+    const state = owner.store.readStrategyState(null);
+    owner.store.writeStrategyState(null, { expectedRevision: state.revision, value: { ...state.value, snapshot: { ...state.value.snapshot, mainJudgment: i ? '新目录结果' : '旧目录结果' } }, idempotencyKey: `root-snapshot-${i}` });
+  }
+  let rendered; const newRendered = new Promise(resolve => { rendered = resolve; }); const paints = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.refresh = refreshStrategyPyramidPanel; module.exports.updateSettings = updatePersistedSettings;
+    module.exports.broadcast = broadcastSettings;
+    module.exports.connect = panel => { activeStrategyPyramidPanel = panel; };
+    hasLocalStrategyPyramidAccess = async () => true;
+    syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {}; activateObservedBackgroundRuntime = async () => {};
+  `, {
+    './cognitiveRuntimeConfig': { readCognitiveRuntimeConfig: () => ({ mode: 'none' }), cognitiveRuntimeConfigRevision: () => '', writeCognitiveRuntimeConfig: () => {} },
+    './strategyPyramidWebview': { getStrategyPyramidWebviewHtml: (_webview, _context, snapshot) => { paints.push(snapshot.mainJudgment); if (snapshot.mainJudgment === '新目录结果') rendered(); return snapshot.mainJudgment; } }
+  });
+  let settings = { globalDataPath: roots[0] };
+  const context = { extensionPath: projectRoot, globalState: { get: key => key === 'solopreneur.settings' ? settings : undefined, update: async (_key, value) => { settings = value; } } };
+  const panel = { title: '', webview: { html: '', postMessage: async () => true } }; extension.connect(panel);
+  const method = cached ? 'readStrategyState' : 'readLearningOverview';
+  const original = owners[0].store[method].bind(owners[0].store); let enter; let release;
+  const entered = new Promise(resolve => { enter = resolve; }); const gate = new Promise(resolve => { release = resolve; });
+  const oldRevision = owners[0].store.readStrategyState(null).revision;
+  owners[0].store[method] = async (...args) => { const value = original(...args); enter(); await gate; return value; };
+  try {
+    const prior = extension.refresh(context, !cached); await entered;
+    await extension.updateSettings(context, { globalDataPath: roots[1] });
+    const boundary = paints.length; release(); await prior;
+    assert.deepEqual(paints.slice(boundary), [], 'the prior directory cannot paint after a settings switch');
+    owners[0].store[method] = original;
+    assert.equal(owners[0].store.readStrategyState(null).revision, oldRevision, 'the prior directory cannot receive a late rules cache');
+    await extension.broadcast(context, false); await newRendered;
+    assert.equal(panel.webview.html, '新目录结果', 'settings broadcasting must refresh the panel from its current data root');
+  } finally { release(); owners[0].store[method] = original; }
+});
+
+test('strategy cache connection failures reach the existing failure page and retry action', async t => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-strategy-disconnected-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'disconnected-strategy-fixture', onCommand: () => ({ status: 'running' }), onData: ops });
+  let restoredServer;
+  t.after(async () => { if (restoredServer) await restoredServer.close(); await ops.close(); store.close(); });
+  await store.registerProject({ root: project });
+  fs.writeFileSync(path.join(root, 'projects.json'), JSON.stringify({ projects: [{ name: 'Project', path: project }], hiddenProjects: [] }));
+  await server.close();
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.refresh = refreshStrategyPyramidPanel;
+    module.exports.connect = panel => { activeStrategyPyramidPanel = panel; };
+    hasLocalStrategyPyramidAccess = async () => true;
+  `, { './cognitiveRuntimeConfig': { readCognitiveRuntimeConfig: () => ({ mode: 'none' }), cognitiveRuntimeConfigRevision: () => '' } });
+  const context = { extensionUri: createUri(projectRoot), globalState: { get: key => key === 'solopreneur.settings' ? { globalDataPath: root } : undefined } };
+  const panel = { webview: { html: '正在加载战略金字塔', cspSource: 'fixture', asWebviewUri: uri => 'file://' + uri.fsPath } }; extension.connect(panel);
+  await extension.refresh(context);
+  assert.match(panel.webview.html, /战略金字塔加载失败/);
+  assert.match(panel.webview.html, /refreshStrategyPyramid/);
+  assert.doesNotMatch(panel.webview.html, /control\.json|\.solomap-global|ENOENT|solomap-strategy-disconnected/);
+  assert.equal(store.readStrategyState(null).revision, 0);
+  const script = panel.webview.html.match(/<script>([\s\S]*?)<\/script>/)[1];
+  assert.doesNotThrow(() => new vm.Script(script));
+  const artifact = path.join(base, 'failure.html'); fs.writeFileSync(artifact, panel.webview.html);
+  restoredServer = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'restored-strategy-fixture', onCommand: () => ({ status: 'running' }), onData: ops });
+  await extension.refresh(context, true);
+  assert.equal(store.readStrategyState(null).revision, 1);
+  assert.doesNotMatch(panel.webview.html, /战略金字塔加载失败/);
+  const successArtifact = path.join(base, 'restored.html'); fs.writeFileSync(successArtifact, panel.webview.html);
+  for (const match of panel.webview.html.matchAll(/<script>([\s\S]*?)<\/script>/g)) assert.doesNotThrow(() => new vm.Script(match[1]));
+  fs.writeFileSync(path.join(os.tmpdir(), 'solomap-462-analysis-cache-failure-render.json'), JSON.stringify({ artifact, successArtifact }));
+});
+
+test('a late failed strategy cache request cannot replace a newer successful panel', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-strategy-late-error-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const projects = [{ name: 'Project', path: project }];
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, projects);
+  fs.writeFileSync(path.join(root, 'projects.json'), JSON.stringify({ projects, hiddenProjects: [] }));
+  await require('../out/strategyPyramid.js').buildStrategyPyramidSnapshotData(projects, root, project);
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.refresh = refreshStrategyPyramidPanel;
+    module.exports.connect = panel => { activeStrategyPyramidPanel = panel; };
+    hasLocalStrategyPyramidAccess = async () => true;
+  `, {
+    './cognitiveRuntimeConfig': { readCognitiveRuntimeConfig: () => ({ mode: 'none' }), cognitiveRuntimeConfigRevision: () => '' },
+    './strategyPyramidWebview': { getStrategyPyramidWebviewHtml: () => '当前请求已成功' }
+  });
+  const context = { globalState: { get: key => key === 'solopreneur.settings' ? { globalDataPath: root } : undefined } };
+  const panel = { webview: { html: '正在加载', cspSource: 'fixture' } }; extension.connect(panel);
+  const original = native.store.readStrategyState.bind(native.store); let enter; let release; let reads = 0;
+  const entered = new Promise(resolve => { enter = resolve; }); const gate = new Promise(resolve => { release = resolve; });
+  native.store.readStrategyState = async (...args) => { if (++reads === 1) { enter(); await gate; throw new Error('old cache read unavailable'); } return original(...args); };
+  const prior = extension.refresh(context).then(() => null, error => error);
+  try {
+    await entered; await extension.refresh(context); release();
+    assert.equal(await prior, null, 'the existing load handler must absorb the transport rejection');
+    assert.equal(panel.webview.html, '当前请求已成功');
+  } finally { release(); native.store.readStrategyState = original; }
+});
+
+test('rechecking revoked Pro access preserves unrelated entitlements and does not write or broadcast unchanged settings', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-pro-recheck-'));
+  let saved = { globalDataPath: root, proEntitlements: { strategyPyramid: true, flowMode: true, unrelatedFeature: true }, proAccount: { authenticated: true, allowed: true, email: 'fixture@example.invalid', expiresAt: '2099-01-01T00:00:00Z' } };
+  let writes = 0;
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.clear = clearStoredProAccess;
+    let broadcasts = 0; broadcastSettings = async () => { broadcasts++; };
+    module.exports.broadcasts = () => broadcasts;
+    syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {}; activateObservedBackgroundRuntime = async () => {};
+  `);
+  const context = { extensionPath: projectRoot, secrets: { get: async () => undefined, delete: async () => {} }, globalState: { get: (key, fallback) => key === 'solopreneur.settings' ? saved : fallback, update: async (_key, value) => { saved = value; writes++; } } };
+  assert.equal(await extension.clear(context, { requireMissingCredential: true }), true);
+  assert.deepEqual(saved.proEntitlements, { unrelatedFeature: true });
+  assert.equal(saved.proAccount.authenticated, false);
+  assert.equal(saved.proAccount.allowed, false);
+  const firstWrites = writes;
+  for (let i = 0; i < 32; i++) assert.equal(await extension.clear(context, { requireMissingCredential: true }), false, 'an unchanged revoked state cannot recursively refresh the access check');
+  assert.equal(writes, firstWrites);
+  assert.equal(extension.broadcasts(), 1);
+});
+
+test('checking strategy access updates other settings views without refreshing the same strategy access check', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-pro-check-broadcast-'));
+  let saved = { globalDataPath: root };
+  const grant = { grant: 'fixture-current-grant', allowed: true, email: 'fixture@example.invalid', userId: 'fixture-user', entitlements: ['strategy_pyramid'], expiresAt: '2099-01-01T00:00:00Z' };
+  let secret = JSON.stringify(grant);
+  const context = { extensionPath: projectRoot, secrets: { get: async () => secret, store: async (_key, value) => { secret = value; }, delete: async () => { secret = undefined; } }, globalState: { get: (key, fallback) => key === 'solopreneur.settings' ? saved : fallback, update: async (_key, value) => { saved = value; } } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.access = hasStrategyPyramidAccess;
+    let refreshes = 0, settingsUpdates = 0;
+    refreshStrategyPyramidPanel = async () => { refreshes++; };
+    activeStrategyPyramidPanel = { title: '', webview: {} };
+    sidebarProvider = { sendSettings: () => { settingsUpdates++; } };
+    module.exports.counts = () => ({ refreshes, settingsUpdates });
+    syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {}; activateObservedBackgroundRuntime = async () => {};
+  `);
+  extension.__vscodeTestState.fetchImpl = async () => ({ ok: true, json: async () => grant });
+  assert.equal(await extension.access(context), true);
+  assert.equal(saved.proEntitlements.strategy_pyramid, true);
+  assert.equal(extension.counts().settingsUpdates, 1, 'other settings surfaces still receive the verified entitlement');
+  assert.equal(extension.counts().refreshes, 0, 'the active access check must render its own result instead of scheduling itself again');
 });
 
 test('strategy pyramid command blocks free users with a Pro upgrade action', async () => {
@@ -6887,15 +7823,20 @@ test('account credential mutations serialize so stale cleanup cannot erase a new
   assert.match(secrets.get('solopreneur.passportGrant'), /new-grant/);
 });
 
-test('account refresh with an open roadmap panel performs one bounded Flow recheck', async () => {
+test('account refresh with an open roadmap panel performs one bounded Flow recheck', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-account-flow-recheck-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
       'module.exports.__refreshProAccountStatus = refreshProAccountStatus;',
       'module.exports.__setAccountRefreshPanel = (panel, projectPath) => { activePanel = panel; activeProjectRoot = projectPath; };'
-    ].join('\n')
+    ].join('\n'),
+    { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') }
   );
   let saved = {
+    globalDataPath: root,
     proEntitlements: { strategy_pyramid: true, flow_mode: true },
     proAccount: { authenticated: true, allowed: true, email: 'pro@solomap.app', expiresAt: '2999-01-01T00:00:00.000Z' }
   };
@@ -6932,7 +7873,7 @@ test('account refresh with an open roadmap panel performs one bounded Flow reche
     }
   };
   const posted = [];
-  extensionModule.__setAccountRefreshPanel({ webview: { postMessage: message => { posted.push(message); return Promise.resolve(true); } } }, projectRoot);
+  extensionModule.__setAccountRefreshPanel({ webview: { postMessage: message => { posted.push(message); return Promise.resolve(true); } } }, project);
 
   await extensionModule.__refreshProAccountStatus(context);
 
@@ -7229,12 +8170,18 @@ test('sidebar conversation controls are scoped to one history tree', () => {
 });
 
 test('native continuation can recover the real node from a project conversation id', () => {
-  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
-
-  assert.match(extensionSource, /function resolveConversationNodeIdForContinuation/);
-  assert.match(extensionSource, /syncEngine\.getProjectAgentExecutions\(\)/);
-  assert.match(extensionSource, /const resolvedNodeId = resolveConversationNodeIdForContinuation\(nodeId, conversationId\)/);
-  assert.match(extensionSource, /const resolvedNodeId = resolveConversationNodeIdForContinuation\(nodeId, parentConversationId\)/);
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.resolve = resolveConversationNodeIdForContinuation;
+    module.exports.bind = engine => { syncEngine = engine; };
+  `);
+  const sourceEngine = { getAgentExecutions: () => [], getProjectAgentExecutions: () => [{ id: 7, nodeId: 'source-step' }] };
+  const otherEngine = { getAgentExecutions: () => [], getProjectAgentExecutions: () => [{ id: 7, nodeId: 'other-step' }] };
+  extension.bind(sourceEngine);
+  assert.equal(extension.resolve('__solo__', 7), 'source-step');
+  extension.bind(otherEngine);
+  assert.equal(extension.resolve('__solo__', 7, sourceEngine), 'source-step');
+  assert.equal(extension.resolve('__solo__', 7), 'other-step');
+  assert.equal(extension.resolve('requested-step', 999, sourceEngine), '');
 });
 
 test('roadmap and sidebar keep one shared application action boundary', () => {
@@ -7293,112 +8240,50 @@ test('sidebar provider delegates view, daily review, and global store responsibi
   assert.doesNotMatch(providerSource, /function buildDailyReviewPrompt/);
   assert.doesNotMatch(providerSource, /function ensureGlobalEngineeringStore/);
   assert.match(webviewSource, /export function getSidebarWebviewHtml/);
-  assert.match(dailyReviewSource, /export function startDailyReviewAgent/);
+  assert.match(dailyReviewSource, /export async function startDailyReviewAgent/);
   assert.match(globalStoreSource, /export function ensureGlobalEngineeringStore/);
 });
 
-test('agent launch path uses one terminal-first startup component', () => {
-  const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
-  const sendNodesBody = source.slice(
-    source.indexOf('function sendNodesToWebview()'),
-    source.indexOf('function reconcileActiveProjectConversationLifecycle')
-  );
-  assert.doesNotMatch(sendNodesBody, /reconcileActiveProjectConversationLifecycle\(\)/);
-
-  const launcherBody = source.slice(
-    source.indexOf('function launchAgentConversationTerminal'),
-    source.indexOf('async function handleAgentTerminalClosed')
-  );
-  assert.match(launcherBody, /createAgentTerminal\([\s\S]*?input\.workspaceRoot,[\s\S]*?input\.label,[\s\S]*?input\.conversationId/);
-  assert.ok(
-    launcherBody.indexOf('registerActiveConversation({') < launcherBody.indexOf('createAgentTerminal('),
-    'startup component must register the conversation before creating its terminal'
-  );
-  assert.ok(
-    launcherBody.indexOf('terminal.show(true)') < launcherBody.indexOf('sendTextWhenTerminalReady(terminal, input.command)'),
-    'startup component must show the terminal before sending the command'
-  );
-  assert.ok(
-    launcherBody.indexOf('sendTextWhenTerminalReady(terminal, input.command)') < launcherBody.indexOf('postNodeConversations(input.refreshNodeId)'),
-    'startup component must refresh conversation history after command dispatch'
-  );
-
-  const assertLaunchComponent = (name, startMarker, endMarker, refreshNodeExpression = '') => {
-    const start = source.indexOf(startMarker);
-    const end = source.indexOf(endMarker, start + startMarker.length);
-    assert.notEqual(start, -1, `${name} start marker missing`);
-    assert.notEqual(end, -1, `${name} end marker missing`);
-    const body = source.slice(start, end);
-    assert.match(body, /launchAgentConversationTerminal\(\{/);
-    assert.doesNotMatch(body, /createAgentTerminal\(/);
-    if (refreshNodeExpression) {
-      assert.match(body, new RegExp(`refreshNodeId:\\s*${refreshNodeExpression}`));
-    }
-  };
-
-  assertLaunchComponent(
-    'solo launch',
-    'async function handleRunSoloConversation',
-    'function getCurrentFlowTrace',
-    'soloConversationId'
-  );
-  assertLaunchComponent(
-    'roadmap revision launch',
-    'async function handleRoadmapRevision',
-    'async function handleRunSoloConversation',
-    'roadmapRevisionId'
-  );
-  assertLaunchComponent(
-    'step launch',
-    'async function handleRunAgent',
-    'function extractUserSupplementFromExecutionOutput',
-    'nodeId'
-  );
-  for (const [name, startMarker, endMarker, refreshCall] of [
-    ['solo', 'async function handleRunSoloConversation', 'function getCurrentFlowTrace', 'postNodeConversations(soloConversationId)'],
-    ['step', 'async function handleRunAgent', 'function extractUserSupplementFromExecutionOutput', 'postNodeConversations(nodeId)']
-  ]) {
-    const body = source.slice(source.indexOf(startMarker), source.indexOf(endMarker, source.indexOf(startMarker)));
-    const ledgerOwner = name === 'step' ? 'projectSyncEngine' : 'syncEngine';
-    const runtimeReady = body.indexOf('await ensureTaskRuntimeReady(context)');
-    const ledgerWrite = body.indexOf(`const executionLogId = await ${ledgerOwner}.logAgentExecution(`);
-    const ledgerPublish = body.indexOf(refreshCall, ledgerWrite);
-    const preSessionGit = body.indexOf('await createPreSessionGitCommit(', ledgerWrite);
-    assert.ok(runtimeReady >= 0 && runtimeReady < ledgerWrite, `${name} launch must recover the database Runtime before its first ledger write`);
-    assert.ok(ledgerWrite >= 0, `${name} launch must create its first ledger row`);
-    assert.ok(ledgerPublish > ledgerWrite, `${name} launch must publish its first ledger row immediately`);
-    assert.ok(preSessionGit > ledgerPublish, `${name} launch must not delay its first ledger row behind pre-session work`);
-  }
-  assertLaunchComponent(
-    'sdk continuation launch',
-    'async function handleContinueConversationTurn',
-    'async function handleContinueNativeConversation',
-    'nodeId'
-  );
-  assertLaunchComponent(
-    'native continuation launch',
-    'async function handleContinueNativeConversation',
-    'function readAgentStatus',
-    'nodeId'
-  );
-  const nativeContinuationBody = source.slice(
-    source.indexOf('async function handleContinueNativeConversation'),
-    source.indexOf('function readAgentStatus')
-  );
-  assert.match(nativeContinuationBody, /updateAgentExecution\(executionLogId, agentCli, displayCommand, launchSummary, 'Running'\)/);
-  assert.doesNotMatch(nativeContinuationBody, /startWaiting:\s*true|Interactive session state: Waiting/);
-
-  assertLaunchComponent(
-    'agent review launch',
-    'function startAgentReviewRun',
-    'function getOutputTail',
-    'input\\.nodeId'
-  );
-  assertLaunchComponent(
-    'flow role launch',
-    'async function startFlowRoleRun',
-    'async function handleRunFlow'
-  );
+test('agent launch path uses one terminal-first startup component', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-launch-component-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const deliveryOwner = await require('../out/agentRunPreparation.js').getAgentRunDeliveryOwner();
+  const run = await native.ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: 'User task', command: 'fixture-command', userMessage: 'User task', deliveryOwner, metadata: { agentCli: 'claude' }, idempotencyKey: 'launch-component' } });
+  const events = [];
+  let resolveShell, resolveShown;
+  const shown = new Promise(resolve => { resolveShown = resolve; });
+  const terminal = { name: 'Owned test terminal', processId: new Promise(resolve => { resolveShell = resolve; }), show() { events.push('show'); resolveShown(); }, sendText(command) { events.push(command); } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.launch = launchAgentConversationTerminal;
+    module.exports.connect = (terminal, events, project) => {
+      createAgentTerminal = () => { events.push('create'); vscode.window.terminals.push(terminal); return terminal; };
+      postNodeConversations = node => events.push('refresh:' + node);
+      activeProjectRoot = project; extensionContextRef = null;
+    };
+  `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
+  extension.connect(terminal, events, project);
+  const input = { workspaceRoot: project, label: 'Solo', conversationId: 1, nodeId: '__solo__', statusFilePath: require('../out/runLifecycleClient.js').runStatusReference(project, 1), runKind: 'solo', globalDataPath: root, command: 'fixture-command', agentCli: 'claude', refreshNodeId: '__solo__' };
+  const first = extension.launch(input), concurrent = extension.launch(input);
+  await shown;
+  assert.deepEqual(events, ['create', 'show'], 'the terminal must be visible while its shell is not ready');
+  const claimed = await native.ops({ operation: 'read_run_state', input: { root: project, executionLogId: 1 } });
+  assert.ok(claimed.status.deliveryOwnerId, 'the formal run must have a delivery owner before the terminal command');
+  assert.equal(claimed.status.terminalCommandSubmittedAt, undefined);
+  resolveShell(process.pid);
+  assert.equal(await first, terminal); assert.equal(await concurrent, terminal);
+  const delivered = await native.ops({ operation: 'read_run_state', input: { root: project, executionLogId: 1 } });
+  assert.equal(delivered.runId, run.runId);
+  assert.equal(delivered.status.terminalName, terminal.name);
+  assert.ok(delivered.status.terminalCommandSubmittedAt);
+  assert.equal(events.length, 4);
+  assert.match(events[2], /^SOLOMAP_TERMINAL_DELIVERY_ID=.+ fixture-command$/);
+  assert.equal(events[3], 'refresh:__solo__', 'history must refresh after successful command delivery');
+  assert.equal(await extension.launch(input), terminal);
+  assert.equal(events.filter(item => item === 'create').length, 1);
+  assert.equal(events.filter(item => /fixture-command$/.test(item)).length, 1, 'concurrent and later retries must not submit a second command');
+  assert.equal(fs.existsSync(path.join(project, '.solopreneur', 'agent-runs')), false);
+  assert.equal(fs.existsSync(path.join(root, 'active-conversations')), false);
 });
 
 test('a closed startup reservation cannot consume the next Agent launch command', () => {
@@ -7423,58 +8308,35 @@ test('a closed startup reservation cannot consume the next Agent launch command'
   assert.notEqual(terminal, closedTerminal);
 });
 
-test('the active conversation poller does not fail a quiet long-running Agent', async () => {
+test('the active conversation poller does not fail a quiet long-running Agent', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-quiet-active-'));
+  const workspaceRoot = path.join(base, 'project'), globalDataPath = path.join(base, '.solomap-global');
+  fs.mkdirSync(workspaceRoot);
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, globalDataPath, [{ path: workspaceRoot }]);
+  const actualNow = Date.now;
+  let prepared;
+  try {
+    Date.now = () => actualNow() - 30 * 60 * 1000;
+    prepared = await native.ops({ operation: 'prepare_run', input: { root: workspaceRoot, executionLogId: 73, nodeId: '__solo__', runKind: 'solo', prompt: 'Continue the user task', command: 'fixture-command', userMessage: 'Continue the user task', metadata: { interactiveSession: true, agentCli: 'claude' }, idempotencyKey: 'quiet-running' } });
+  } finally { Date.now = actualNow; }
+  const claimed = await native.ops({ operation: 'claim_run', input: { projectId: prepared.projectId, executionLogId: 73, expectedRevision: prepared.revision, agentPid: process.pid, idempotencyKey: 'quiet-owner' } });
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
       'module.exports.__pollActiveConversations = pollActiveConversations;',
-      'module.exports.__setActiveProjectForPollTest = (projectRoot) => { activeProjectRoot = projectRoot; selectedProjectPathInMemory = projectRoot; extensionContextRef = null; syncEngine = null; };'
-    ].join('\n')
+      'module.exports.__setActiveProjectForPollTest = (projectRoot, root) => { activeProjectRoot = projectRoot; selectedProjectPathInMemory = projectRoot; extensionContextRef = null; syncEngine = null; getPersistedSettings = () => ({ globalDataPath: root }); getSelectedProjectPath = () => projectRoot; vscode.window.createTerminal = () => { throw new Error("quiet run must not create a terminal"); }; };'
+    ].join('\n'),
+    { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') }
   );
-  const { registerActiveConversation } = require(path.join(projectRoot, 'out/activeConversationLedger.js'));
-  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-quiet-active-project-'));
-  const globalDataPath = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-quiet-active-global-'));
-  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '73.json');
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Running',
-    executionLogId: 73,
-    rootExecutionLogId: 73,
-    interactiveSession: true,
-    startedAt: '2026-08-31T10:00:00.000Z'
-  }), 'utf8');
-  const oldDate = new Date(Date.now() - 30 * 60 * 1000);
-  fs.utimesSync(statusFilePath, oldDate, oldDate);
-  registerActiveConversation({
-    workspaceRoot,
-    globalDataPath,
-    conversationId: 73,
-    executionLogId: 73,
-    nodeId: '__solo__',
-    statusFilePath,
-    runKind: 'solo',
-    ownerInstanceId: 'test-owner'
-  });
-  extensionModule.__vscodeTestState.configurationValues.globalDataPath = globalDataPath;
-  extensionModule.__setActiveProjectForPollTest(workspaceRoot);
-  const context = {
-    globalState: {
-      get(key) {
-        if (key === 'solopreneur.projects') return [{ name: 'quiet-project', path: workspaceRoot }];
-        if (key === 'solopreneur.selectedProjectPath') return workspaceRoot;
-        return undefined;
-      }
-    }
-  };
-
-  await extensionModule.__pollActiveConversations(context);
-
-  const persisted = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
-  assert.equal(persisted.status, 'Running');
-  assert.equal(persisted.failureCode, undefined);
+  extensionModule.__setActiveProjectForPollTest(workspaceRoot, globalDataPath);
+  await extensionModule.__pollActiveConversations({});
+  const persisted = await native.ops({ operation: 'read_run_state', input: { root: workspaceRoot, executionLogId: 73 } });
+  assert.equal(persisted.status.status, 'Running');
+  assert.equal(persisted.status.failureCode, undefined);
+  assert.equal(persisted.revision, claimed.revision, 'silence alone must not change the formal run');
+  assert.ok(Date.now() - Date.parse(persisted.status.startedAt) >= 30 * 60 * 1000);
+  assert.equal(fs.existsSync(path.join(workspaceRoot, '.solopreneur', 'agent-status')), false);
+  assert.equal(fs.existsSync(path.join(globalDataPath, 'active-conversations')), false);
 });
 
 test('agent command builder keeps background one-shot commands and uses native interactive user conversations', async () => {
@@ -7489,6 +8351,7 @@ test('agent command builder keeps background one-shot commands and uses native i
       'module.exports.__buildAgentContinuationCommandForPromptFile = agentCli_1.buildAgentContinuationCommandForPromptFile;',
       'module.exports.__buildAgentCommandFromShellVar = agentCli_1.buildAgentCommandFromShellVar;',
       'module.exports.__buildNativeContinueCommand = agentCli_1.buildNativeContinueCommand;',
+      require('./fixtures/legacy-agent-shell-source.cjs') + '\n' +
       'module.exports.__buildSessionCaptureScript = buildSessionCaptureScript;',
       'module.exports.__buildSdkSentinelCommandLabel = agentCli_1.buildSdkSentinelCommandLabel;',
       'module.exports.__supportsSdkContinuation = agentCli_1.supportsSdkContinuation;',
@@ -7498,6 +8361,7 @@ test('agent command builder keeps background one-shot commands and uses native i
       'module.exports.__findCodexTranscriptFile = continuation_1.findCodexTranscriptFile;',
       'module.exports.__extractFirstCodexUserMessageAfter = continuation_1.extractFirstCodexUserMessageAfter;',
       'module.exports.__buildInteractiveContinuationPrompt = buildInteractiveContinuationPrompt;',
+      require('./fixtures/legacy-agent-shell-source.cjs') + '\n' +
       'module.exports.__buildCodexContinuationRunnerScript = buildCodexContinuationRunnerScript;',
       'module.exports.__extractContinuationParentConversationId = continuation_1.extractContinuationParentConversationId;',
       'module.exports.__extractNativeSessionIdFromConversation = continuation_1.extractNativeSessionIdFromConversation;',
@@ -7506,6 +8370,7 @@ test('agent command builder keeps background one-shot commands and uses native i
       'module.exports.__hydrateConversationContinuations = continuation_1.hydrateConversationContinuations;',
       'module.exports.__getTaskPermissionArgs = agentCli_1.getTaskPermissionArgs;',
       'module.exports.__makeAgentTerminalName = makeAgentTerminalName;',
+      require('./fixtures/legacy-agent-shell-source.cjs') + '\n' +
       'module.exports.__buildAgentShellScript = buildAgentShellScript;',
       'module.exports.__buildAgentConversationPrompt = buildAgentConversationPrompt;',
       'module.exports.__buildRoadmapRevisionPrompt = buildRoadmapRevisionPrompt;',
@@ -9173,11 +10038,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.doesNotMatch(experiencePrompt, /RAW_LOG_SHOULD_NOT_APPEAR/);
   const crossAgentGlobalRoot = path.join(digestRoot, 'shared global');
   const crossAgentInstructions = extensionModule.__buildCrossAgentHandoffInstructions(digestRoot, '2', 'step', crossAgentGlobalRoot);
-  assert.match(crossAgentInstructions, /solomap-experience\.cjs" handoff/);
-  assert.match(crossAgentInstructions, new RegExp(path.join(crossAgentGlobalRoot, '.solomap-global', 'tools', 'solomap-experience.cjs').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  assert.match(crossAgentInstructions, /node "[^"]*shared global[^"]*solomap-experience\.cjs" handoff/);
-  assert.doesNotMatch(crossAgentInstructions, /resources[\\/]tools[\\/]solomap-experience\.cjs/);
-  assert.match(crossAgentInstructions, /solomap-cross-agent-handoff\/SKILL\.md/);
+  assertBundledHandoffInstructions(crossAgentInstructions, path.join(crossAgentGlobalRoot, '.solomap-global'));
 
   const SQL = await require('sql.js')();
   const cliDbPath = path.join(digestRoot, '.solopreneur', 'project_journal.db');
@@ -9483,7 +10344,8 @@ test('agent command builder keeps background one-shot commands and uses native i
 test('tracked native continuation creates a version 2 binding for the exact resume target', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
-    'module.exports.__buildAgentShellScript = buildAgentShellScript;'
+    require('./fixtures/legacy-agent-shell-source.cjs') + '\n' +
+      'module.exports.__buildAgentShellScript = buildAgentShellScript;'
   );
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-v2-continuation-run-'));
   const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '86');
@@ -9539,7 +10401,8 @@ test('tracked native continuation creates a version 2 binding for the exact resu
 test('session capture writer never emits legacy guessed identities for new runs', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
-    'module.exports.__buildSessionCaptureScript = buildSessionCaptureScript;'
+    require('./fixtures/legacy-agent-shell-source.cjs') + '\n' +
+      'module.exports.__buildSessionCaptureScript = buildSessionCaptureScript;'
   );
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-no-legacy-session-write-'));
   const outputFilePath = path.join(workspaceRoot, 'output.log');
@@ -9564,7 +10427,8 @@ test('session capture writer never emits legacy guessed identities for new runs'
 test('generated Codex launchers recover once without the daemon after its readiness socket is unavailable', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
-    'module.exports.__buildAgentShellScript = buildAgentShellScript;'
+    require('./fixtures/legacy-agent-shell-source.cjs') + '\n' +
+      'module.exports.__buildAgentShellScript = buildAgentShellScript;'
   );
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-daemon-recovery-'));
   const fakeBinRoot = path.join(workspaceRoot, 'bin');
@@ -9670,7 +10534,8 @@ test('generated Codex launchers recover once without the daemon after its readin
 test('generated Cursor launcher passes the provider-created chat ID into the native TUI resume command', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
-    'module.exports.__buildAgentShellScript = buildAgentShellScript;'
+    require('./fixtures/legacy-agent-shell-source.cjs') + '\n' +
+      'module.exports.__buildAgentShellScript = buildAgentShellScript;'
   );
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-cursor-launch-sim-'));
   const fakeBinRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-cursor-bin-'));
@@ -9728,7 +10593,8 @@ test('generated Cursor launcher passes the provider-created chat ID into the nat
 test('Cursor creation failures finalize the version 2 binding as unavailable', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
-    'module.exports.__buildAgentShellScript = buildAgentShellScript;'
+    require('./fixtures/legacy-agent-shell-source.cjs') + '\n' +
+      'module.exports.__buildAgentShellScript = buildAgentShellScript;'
   );
   const scenarios = [
     { name: 'create-failed', createBody: "printf '%s\\n' 'not authenticated'; exit 7", errorCode: 'native_session_creation_failed' },
@@ -9967,8 +10833,153 @@ test('sqlite store records structured run index entries', async () => {
   store.close();
 });
 
-test('agent impact summary counts local SoloMap contribution by agent', () => {
-  const { buildAgentImpactSummary } = require(path.join(projectRoot, 'out/agentImpact.js'));
+test('agent impact button reads committed contribution from the configured data root', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-impact-button-'));
+  const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const root = path.join(base, 'configured', '.solomap-global'); const projects = [{ name: 'Project', path: project }];
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, projects);
+  fs.writeFileSync(path.join(root, 'projects.json'), JSON.stringify({ projects, hiddenProjects: [] }));
+  native.store.upsertProjectRunIndex(native.projectIds.get(project), { executionLogId: 1, nodeId: '__solo__', runKind: 'solo', agentCli: 'codex', status: 'Completed', startedAt: '2026-10-09T09:00:00Z', finishedAt: '2026-10-09T09:10:00Z', durationMs: 600000, totalTokens: 88 }, [{ filePath: 'result.js', role: 'changed' }]);
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.handle = handleSharedWebviewAction;');
+  const context = { extensionPath: projectRoot, globalState: { get: key => key === 'solopreneur.settings' ? { globalDataPath: root } : undefined } };
+  const messages = [];
+  assert.equal(await extension.handle(context, { command: 'getAgentImpact' }, 'roadmap', { postMessage: async message => { messages.push(message); return true; } }), true);
+  const response = messages.find(message => message.command === 'agentImpactLoaded');
+  assert.equal(response.status.impact.totalRuns, 1); assert.equal(response.status.impact.totalTokens, 88); assert.equal(response.status.impact.changedFiles, 1);
+  assert.deepEqual(response.status.impact.byAgent.map(agent => agent.agent), ['codex']);
+});
+
+for (const surface of ['sidebar']) test(`${surface} contribution failure restores refresh and stale responses cannot replace current numbers`, () => {
+  const html = surface === 'roadmap'
+    ? require('../out/roadmapWebview.js').getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) })
+    : require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  for (const match of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) assert.doesNotThrow(() => new vm.Script(match[1]));
+  const { elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]));
+  const refresh = () => { elements['btn-refresh-agent-impact'].listeners.click(); return postedMessages.filter(message => message.command === 'agentImpact.get').at(-1); };
+  const first = refresh();
+  dispatchMessage({ command: 'agentImpactLoaded', requestId: first.requestId, status: null, error: '暂时无法读取贡献，请点击刷新重试。' });
+  assert.equal(elements['impact-minutes'].textContent, '—');
+  assert.match(elements['agent-impact-list'].innerHTML, /刷新/);
+  const second = refresh(); assert.ok(second.requestId); assert.notEqual(second.requestId, first.requestId);
+  dispatchMessage({ command: 'agentImpactLoaded', requestId: second.requestId, status: { impact: { totalMinutes: 9, changedFiles: 2, projectProgressPercent: 50 } } });
+  dispatchMessage({ command: 'agentImpactLoaded', requestId: first.requestId, status: { impact: { totalMinutes: 1 } } });
+  assert.equal(elements['impact-minutes'].textContent, '9');
+  const counted = refresh();
+  dispatchMessage({ command: 'agentImpactLoaded', requestId: counted.requestId, status: { impact: { totalRuns: 2, tokenRuns: 1, totalTokens: 88 } } });
+  assert.match(elements['impact-tokens-label'].textContent, /1\/2/);
+  const basicTokenLabel = 'Token 消耗';
+  const failed = refresh();
+  assert.equal(elements['impact-tokens-label'].textContent, basicTokenLabel, 'pending must not retain the previous coverage');
+  dispatchMessage({ command: 'agentImpactLoaded', requestId: failed.requestId, status: null, error: '暂时无法读取贡献，请点击刷新重试。' });
+  assert.equal(elements['impact-tokens-label'].textContent, basicTokenLabel, 'failed reads must not retain the previous coverage');
+  const previous = refresh();
+  dispatchMessage({ command: 'settingsLoaded', settings: { cliPath: 'codex', language: 'zh', globalPrompt: '', globalDataPath: '/current-data' } });
+  dispatchMessage({ command: 'agentImpactLoaded', requestId: previous.requestId, status: { impact: { totalMinutes: 1 } } });
+  assert.notEqual(elements['impact-minutes'].textContent, '1');
+});
+
+test('agent impact shares the workspace default owner across projects in different parents', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-impact-default-'));
+  const workspace = path.join(base, 'one', 'project'); const other = path.join(base, 'two', 'project');
+  fs.mkdirSync(workspace, { recursive: true }); fs.mkdirSync(other, { recursive: true });
+  const root = path.join(base, 'one', '.solomap-global'); const projects = [{ name: 'One', path: workspace }, { name: 'Two', path: other }];
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, projects);
+  for (const [index, project] of projects.entries()) native.store.upsertProjectRunIndex(native.projectIds.get(project.path), { executionLogId: 1, nodeId: '__solo__', runKind: 'solo', agentCli: 'codex', status: 'Completed', totalTokens: index ? 22 : 11 });
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.handle = handleSharedWebviewAction;
+    module.exports.connect = (workspace, projects, settings) => { getWorkspaceRoot = () => workspace; getProjects = () => projects; getPersistedSettings = () => settings; };
+  `);
+  extension.connect(workspace, projects, { globalDataPath: '', language: 'zh' });
+  const messages = []; const view = { postMessage: async message => { messages.push(message); return true; } };
+  await extension.handle({ extensionPath: projectRoot }, { command: 'agentImpact.get', requestId: 'default-root' }, 'roadmap', view);
+  const reply = messages.find(message => message.command === 'agentImpactLoaded');
+  assert.equal(reply.status.impact.totalRuns, 2); assert.equal(reply.status.impact.totalTokens, 33);
+  assert.equal(reply.requestId, 'default-root');
+});
+
+test('sidebar contribution switches to a saved data root even while newer settings edits remain', () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const { elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]));
+  dispatchMessage({ command: 'settingsLoaded', settings: { cliPath: 'codex', language: 'zh', globalPrompt: '', globalDataPath: '/old-data' } });
+  elements['setting-global-data-path'].value = '/new-data';
+  elements['btn-save-settings'].listeners.click();
+  const save = postedMessages.filter(message => message.command === 'settings.update').at(-1);
+  elements['btn-toggle-settings'].listeners.click();
+  elements['setting-global-prompt'].value = '保存后继续编辑的内容';
+  elements['settings-panel'].listeners.input({ target: elements['setting-global-prompt'] });
+  const old = postedMessages.filter(message => message.command === 'agentImpact.get').at(-1);
+  dispatchMessage({ command: 'settingsSaved', requestId: save.requestId, settings: { ...save, globalDataPath: '/new-data' } });
+  const fresh = postedMessages.filter(message => message.command === 'agentImpact.get').at(-1);
+  assert.notEqual(fresh.requestId, old.requestId);
+  dispatchMessage({ command: 'agentImpactLoaded', requestId: old.requestId, status: { impact: { totalMinutes: 1 } } });
+  assert.notEqual(elements['impact-minutes'].textContent, '1');
+  dispatchMessage({ command: 'agentImpactLoaded', requestId: fresh.requestId, status: { impact: { totalMinutes: 9 } } });
+  assert.equal(elements['impact-minutes'].textContent, '9');
+  assert.equal(elements['setting-global-prompt'].value, '保存后继续编辑的内容');
+});
+
+test('agent impact disconnected entry resolves with a safe failure and recovers on refresh', async t => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-impact-disconnect-entry-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store); let server;
+  t.after(async () => { if (server) await server.close(); await ops.close(); store.close(); });
+  const registered = await store.registerProject({ root: project });
+  store.upsertProjectRunIndex(registered.projectId, { executionLogId: 1, nodeId: '__solo__', runKind: 'solo', agentCli: 'codex', status: 'Completed', totalTokens: 88 });
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.handle = handleSharedWebviewAction;
+    module.exports.connect = (project, root) => { getProjects = () => [{ name: 'Project', path: project }]; getPersistedSettings = () => ({ globalDataPath: root, language: 'zh' }); };
+  `);
+  extension.connect(project, root);
+  const messages = []; const view = { postMessage: async message => { messages.push(message); return true; } };
+  await extension.handle({ extensionPath: projectRoot }, { command: 'agentImpact.get', requestId: 'failed' }, 'sidebar', view);
+  assert.equal(messages[0].status, null); assert.equal(messages[0].requestId, 'failed'); assert.ok(messages[0].error);
+  assert.doesNotMatch(messages[0].error, /ENOENT|control\.json|solomap\.db|\/tmp\/|ECONN/);
+  server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'impact-restored', onCommand: () => ({ status: 'running' }), onData: ops });
+  await extension.handle({ extensionPath: projectRoot }, { command: 'agentImpact.get', requestId: 'restored' }, 'sidebar', view);
+  assert.equal(messages[1].status.impact.totalTokens, 88); assert.equal(messages[1].requestId, 'restored');
+  fs.writeFileSync('/tmp/solomap-462-impact-entry-failure-responses.json', JSON.stringify(messages));
+});
+
+test('agent impact discards late snapshots after a newer read or data-root change', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-impact-late-entry-'));
+  const project = path.join(base, 'project'); fs.mkdirSync(project); const projects = [{ name: 'Project', path: project }];
+  const rootA = path.join(base, 'a'); const rootB = path.join(base, 'b');
+  const a = await require('./analysis-fixture.js').openAnalysisOwner(t, rootA, projects);
+  const b = await require('./analysis-fixture.js').openAnalysisOwner(t, rootB, projects);
+  const record = tokens => ({ executionLogId: 1, nodeId: '__solo__', runKind: 'solo', agentCli: 'codex', status: 'Completed', totalTokens: tokens });
+  a.store.upsertProjectRunIndex(a.projectIds.get(project), record(11)); b.store.upsertProjectRunIndex(b.projectIds.get(project), record(99));
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.handle = handleSharedWebviewAction;
+    module.exports.connect = (projects, settings) => { getProjects = () => projects; getPersistedSettings = () => settings; };
+  `);
+  const settings = { globalDataPath: rootA, language: 'zh' }; extension.connect(projects, settings);
+  const transport = require('../out/autonomousRuntimeControl.js'); const original = transport.sendRuntimeDataRequest;
+  const messages = []; const view = { postMessage: async message => { messages.push(message); return true; } };
+  try {
+    for (const changeRoot of [false, true]) {
+      settings.globalDataPath = rootA; messages.length = 0;
+      let release; let ready; const gate = new Promise(resolve => { release = resolve; }); const started = new Promise(resolve => { ready = resolve; }); let delayed = false;
+      transport.sendRuntimeDataRequest = async (...args) => {
+        const result = await original(...args);
+        if (args[1].operation === 'read_project_impact_runs' && !delayed) { delayed = true; ready(); await gate; }
+        return result;
+      };
+      const old = extension.handle({ extensionPath: projectRoot }, { command: 'agentImpact.get', requestId: 'old' }, 'roadmap', view);
+      await started;
+      if (changeRoot) settings.globalDataPath = rootB; else a.store.upsertProjectRunIndex(a.projectIds.get(project), record(77));
+      await extension.handle({ extensionPath: projectRoot }, { command: 'agentImpact.get', requestId: 'new' }, 'roadmap', view);
+      release(); await old;
+      assert.equal(messages.length, 1); assert.equal(messages[0].requestId, 'new');
+      assert.equal(messages[0].status.impact.totalTokens, changeRoot ? 99 : 77);
+    }
+  } finally { transport.sendRuntimeDataRequest = original; }
+});
+
+test('agent impact summary counts committed SoloMap contribution by agent', async t => {
+  const { buildAgentImpactSummaryFromDatabase } = require(path.join(projectRoot, 'out/agentImpact.js'));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-impact-'));
   const solopreneurDir = path.join(tempRoot, '.solopreneur');
   const runsRoot = path.join(tempRoot, '.solopreneur', 'agent-runs');
@@ -9992,9 +11003,13 @@ test('agent impact summary counts local SoloMap contribution by agent', () => {
   fs.writeFileSync(path.join(runWeek, 'touched-files.txt'), 'M src/view.ts\nM src/api.ts\n', 'utf8');
   fs.writeFileSync(path.join(runWeek, 'completion.json'), JSON.stringify({ markCompleted: false, failureReason: 'stopped' }), 'utf8');
 
-  const summary = buildAgentImpactSummary(
+  const globalRoot = path.join(tempRoot, '.solomap-global');
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, [{ name: 'Impact Project', path: tempRoot }]);
+  const imported = await native.ops({ operation: 'import_project_data', input: { collection: 'agent-runs', sourceRoot: runsRoot, projectRoot: tempRoot, idempotencyKey: 'impact-original-raw-history' } });
+  await native.ops.waitForMigrations(); assert.equal(native.store.readMigrationJob(imported.jobId).status, 'completed');
+  const summary = await buildAgentImpactSummaryFromDatabase(
     [{ name: 'Impact Project', path: tempRoot }],
-    new Date('2026-06-01T12:00:00.000Z')
+    projectRoot, new Date('2026-06-01T12:00:00.000Z'), globalRoot
   );
 
   assert.equal(summary.weekRuns, 2);
@@ -10009,8 +11024,8 @@ test('agent impact summary counts local SoloMap contribution by agent', () => {
   assert.deepEqual(summary.byAgent.map((item) => [item.agent, item.runs, item.minutes, item.changedFiles]), [['codex', 1, 2, 2], ['claude', 1, 1, 2]]);
 });
 
-test('agent impact summary prefers run digests over raw agent run logs', () => {
-  const { buildAgentImpactSummary } = require(path.join(projectRoot, 'out/agentImpact.js'));
+test('agent impact summary uses explicitly imported digests while raw logs stay retained', async t => {
+  const { buildAgentImpactSummaryFromDatabase } = require(path.join(projectRoot, 'out/agentImpact.js'));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-impact-digest-'));
   const solopreneurDir = path.join(tempRoot, '.solopreneur');
   const digestRoot = path.join(solopreneurDir, 'run-digests');
@@ -10024,6 +11039,8 @@ test('agent impact summary prefers run digests over raw agent run logs', () => {
   fs.writeFileSync(path.join(digestRoot, 'digest-1.json'), JSON.stringify({
     schemaVersion: 2,
     runId: 'digest-1',
+    executionLogId: 1,
+    nodeId: '__solo__',
     runKind: 'solo',
     agentCli: 'codex',
     status: 'Completed',
@@ -10039,9 +11056,13 @@ test('agent impact summary prefers run digests over raw agent run logs', () => {
   fs.writeFileSync(path.join(legacyRunDir, 'touched-files.txt'), 'M src/from-legacy.ts\n', 'utf8');
   fs.writeFileSync(path.join(legacyRunDir, 'completion.json'), JSON.stringify({ markCompleted: false, failureReason: 'legacy' }), 'utf8');
 
-  const summary = buildAgentImpactSummary(
+  const globalRoot = path.join(tempRoot, '.solomap-global');
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, [{ name: 'Digest Project', path: tempRoot }]);
+  const job = await native.ops({ operation: 'import_project_data', input: { collection: 'run-digests', sourceRoot: digestRoot, projectRoot: tempRoot, idempotencyKey: 'impact-explicit-digest' } });
+  await native.ops.waitForMigrations(); assert.equal(native.store.readMigrationJob(job.jobId).status, 'completed');
+  const summary = await buildAgentImpactSummaryFromDatabase(
     [{ name: 'Digest Project', path: tempRoot }],
-    new Date('2026-06-01T12:00:00.000Z')
+    projectRoot, new Date('2026-06-01T12:00:00.000Z'), globalRoot
   );
 
   assert.equal(summary.totalRuns, 1);
@@ -10052,7 +11073,7 @@ test('agent impact summary prefers run digests over raw agent run logs', () => {
   assert.deepEqual(summary.byAgent.map((item) => [item.agent, item.runs, item.minutes, item.changedFiles]), [['codex', 1, 4, 2]]);
 });
 
-test('agent impact summary prefers database run index over digests and raw logs', async () => {
+test('agent impact summary reads explicitly imported journal indexes without digest or raw log fallback', async t => {
   const { buildAgentImpactSummaryFromDatabase } = require(path.join(projectRoot, 'out/agentImpact.js'));
   const { SqliteStore } = require(path.join(projectRoot, 'out/db/sqliteStore.js'));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-impact-db-'));
@@ -10108,10 +11129,15 @@ test('agent impact summary prefers database run index over digests and raw logs'
   ]);
   store.close();
 
+  const globalRoot = path.join(tempRoot, '.solomap-global');
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, [{ name: 'DB Project', path: tempRoot }]);
+  const job = await native.ops({ operation: 'import_project_data', input: { collection: 'project-journal', sourceRoot: path.join(solopreneurDir, 'project_journal.db'), projectRoot: tempRoot, idempotencyKey: 'impact-explicit-journal' } });
+  await native.ops.waitForMigrations(); assert.equal(native.store.readMigrationJob(job.jobId).status, 'completed_with_conflicts');
+  assert.ok(native.store.readMigrationJob(job.jobId).progress.conflicts.some(item => item.error.includes('historical_run_output_missing')));
   const summary = await buildAgentImpactSummaryFromDatabase(
     [{ name: 'DB Project', path: tempRoot }],
     projectRoot,
-    new Date('2026-06-01T12:00:00.000Z')
+    new Date('2026-06-01T12:00:00.000Z'), globalRoot
   );
 
   assert.equal(summary.totalRuns, 1);
@@ -10122,7 +11148,7 @@ test('agent impact summary prefers database run index over digests and raw logs'
   assert.deepEqual(summary.byAgent.map((item) => [item.agent, item.runs, item.minutes, item.changedFiles]), [['codex', 1, 3, 2]]);
 });
 
-test('agent impact database path falls back to digests without creating a journal', async () => {
+test('agent impact reads history after explicit background import without creating a journal', async t => {
   const { buildAgentImpactSummaryFromDatabase } = require(path.join(projectRoot, 'out/agentImpact.js'));
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-impact-db-fallback-'));
   const solopreneurDir = path.join(tempRoot, '.solopreneur');
@@ -10147,10 +11173,16 @@ test('agent impact database path falls back to digests without creating a journa
     rawRefs: { sqliteTable: 'execution_logs', executionLogId: 45 }
   }), 'utf8');
 
+  const globalRoot = path.join(tempRoot, '.solomap-global');
+  const projects = [{ name: 'Impact Digest Project', path: tempRoot }];
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, projects);
+  assert.equal((await buildAgentImpactSummaryFromDatabase(projects, projectRoot, new Date('2026-06-01T12:00:00.000Z'), globalRoot)).totalRuns, 0);
+  const job = await native.ops({ operation: 'import_project_data', input: { collection: 'run-digests', sourceRoot: digestRoot, projectRoot: tempRoot, idempotencyKey: 'impact-explicit-history' } });
+  await native.ops.waitForMigrations(); assert.equal(native.store.readMigrationJob(job.jobId).status, 'completed');
   const summary = await buildAgentImpactSummaryFromDatabase(
     [{ name: 'Impact Digest Project', path: tempRoot }],
     projectRoot,
-    new Date('2026-06-01T12:00:00.000Z')
+    new Date('2026-06-01T12:00:00.000Z'), globalRoot
   );
 
   assert.equal(summary.totalRuns, 1);
@@ -10160,1275 +11192,778 @@ test('agent impact database path falls back to digests without creating a journa
   assert.equal(fs.existsSync(path.join(solopreneurDir, 'project_journal.db')), false);
 });
 
-test('step conversations can start independently while dependencies or other runs are active', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__handleRunAgent = handleRunAgent;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
-    ].join('\n')
-  );
-  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-parallel-conversation-'));
-  const updates = [];
-  const executionLogs = [];
+test('step conversations can start independently while dependencies or other runs are active', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-parallel-conversations-'));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
   const nodes = [
-    {
-      id: '1',
-      title: 'Validate customer need',
-      description: 'Talk to early users.',
-      stage: '问题与客户发现',
-      dependencies: '',
-      agentCli: 'codex',
-      agentPrompt: 'Create interview notes.',
-      status: 'Pending',
-      createdAt: '',
-      completedAt: ''
-    },
-    {
-      id: '2',
-      title: 'Draft MVP',
-      description: 'Prepare the first product slice.',
-      stage: '产品与 MVP',
-      dependencies: '1',
-      agentCli: 'codex',
-      agentPrompt: 'Draft an MVP scope document.',
-      status: 'Pending',
-      createdAt: '',
-      completedAt: ''
-    }
+    { id: '1', title: 'Validate customer need', description: 'Talk to early users.', stage: '问题与客户发现', dependencies: '', agentCli: 'claude', agentPrompt: 'Create interview notes.', status: 'Pending', createdAt: '', completedAt: '' },
+    { id: '2', title: 'Draft MVP', description: 'Prepare the first product slice.', stage: '产品与 MVP', dependencies: '1', agentCli: 'claude', agentPrompt: 'Draft an MVP scope document.', status: 'Pending', createdAt: '', completedAt: '' }
   ];
-  extensionModule.__setRuntimeForTest({
-    initAndSync: async () => {},
-    getNodes: () => nodes,
-    updateNode: (nodeId, update) => updates.push({ nodeId, update }),
-    logAgentExecution: (nodeId, agentCli, command, output, status) => {
-      const id = 41 + executionLogs.length;
-      executionLogs.push({ id, nodeId, agentCli, command, output, status });
-      return id;
-    },
-    updateAgentExecution: (id, agentCli, command, output, status) => {
-      const entry = executionLogs.find((candidate) => candidate.id === id);
-      if (entry) {
-        Object.assign(entry, { agentCli, command, output, status });
-      }
-      return Boolean(entry);
-    },
-    getAgentExecutions: () => []
-  }, projectRoot);
-
-  await extensionModule.__handleRunAgent({
-    globalState: {
-      get: () => ({ cliPath: 'codex', language: 'zh', globalPrompt: '' })
-    }
-  }, '2', '先讨论可交付的 MVP 范围。', 'codex');
-  nodes[1].status = 'Running';
-  await extensionModule.__handleRunAgent({
-    globalState: {
-      get: () => ({ cliPath: 'codex', language: 'zh', globalPrompt: '' })
-    }
-  }, '2', '并行评估另一版 MVP 范围。', 'codex');
-
-  assert.ok(updates.some((entry) => entry.nodeId === '2' && entry.update.status === 'Running'));
-  assert.equal(executionLogs.length, 2);
-  assert.equal(executionLogs[0].nodeId, '2');
-  assert.equal(executionLogs[0].status, 'Running');
-  assert.equal(executionLogs[1].nodeId, '2');
-  assert.equal(executionLogs[1].status, 'Running');
-  assert.ok(fs.existsSync(path.join(projectRoot, '.solopreneur', 'agent-runs', '2', '41', 'run-agent.sh')));
-  assert.ok(fs.existsSync(path.join(projectRoot, '.solopreneur', 'agent-runs', '2', '42', 'run-agent.sh')));
-  assert.ok(fs.readFileSync(path.join(projectRoot, '.solopreneur', 'agent-runs', '2', '41', 'run-agent.sh'), 'utf8').includes('.solopreneur/agent-status/41.json'));
-  assert.ok(fs.readFileSync(path.join(projectRoot, '.solopreneur', 'agent-runs', '2', '42', 'run-agent.sh'), 'utf8').includes('.solopreneur/agent-status/42.json'));
+  engine.setNodes(nodes); await engine.initAndSync(); t.after(() => engine.close());
+  const launches = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.run = handleRunAgent;
+    module.exports.connect = (engine, project, root, launches) => {
+      syncEngine = engine; activeProjectRoot = project; extensionContextRef = null;
+      getPersistedSettings = () => ({ cliPath: 'claude', globalPrompt: '', globalDataPath: root, enabledEnhancements: {}, taskPermissionMode: 'auto' });
+      ensureTaskRuntimeReady = async () => {}; autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      agentCli_1.resolveAgentCli = value => value; agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
+      preSessionGit_1.createPreSessionGitCommit = async () => '';
+      recordLocalUsageEvent = () => {}; sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {};
+      launchAgentConversationTerminal = async input => launches.push(input);
+    };
+  `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
+  extension.connect(engine, project, root, launches);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => {} } };
+  await extension.run(context, '2', '先讨论可交付的 MVP 范围。', 'claude');
+  await extension.run(context, '2', '并行评估另一版 MVP 范围。', 'claude');
+  const rows = (await native.ops({ operation: 'list_run_states', input: { root: project } })).items;
+  assert.equal(rows.length, 2); assert.equal(launches.length, 2);
+  assert.notEqual(rows[0].runId, rows[1].runId);
+  assert.equal(engine.getNodes().find(node => node.id === '1').status, 'Pending', 'a pending dependency must not prevent an independent conversation');
+  assert.equal(engine.getNodes().find(node => node.id === '2').status, 'Running');
+  for (const row of rows) {
+    assert.equal(row.status.nodeId, '2'); assert.equal(row.status.status, 'Running');
+    const input = await native.ops({ operation: 'read_run_document', input: { projectId: row.projectId, executionLogId: row.status.rootExecutionLogId, purpose: 'launch_request' } });
+    const request = JSON.parse(Buffer.from(input.bytes, 'base64').toString('utf8'));
+    assert.equal(request.workspaceRoot, project); assert.equal(request.globalDataPath, root);
+    assert.ok(['先讨论可交付的 MVP 范围。', '并行评估另一版 MVP 范围。'].includes(request.userMessage));
+    assert.ok(launches.some(launch => launch.conversationId === row.status.rootExecutionLogId && launch.globalDataPath === root));
+  }
+  assert.equal(fs.existsSync(path.join(project, '.solopreneur', 'agent-runs')), false);
+  assert.equal(fs.existsSync(path.join(project, '.solopreneur', 'agent-status')), false);
+  assert.equal(fs.existsSync(path.join(project, '.solopreneur', 'project_journal.db')), false);
 });
 
-test('task sentinel refreshes the settled project conversation snapshot after persisting terminal status', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
-    ].join('\n')
-  );
-  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-sentinel-sidebar-refresh-'));
-  const runDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '__solo__', '61');
-  const statusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '61.json');
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  const outputFilePath = path.join(runDir, 'output.log');
-  const changesFilePath = path.join(runDir, 'changes.txt');
-  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
-  fs.writeFileSync(outputFilePath, 'Solo task finished.\n', 'utf8');
-  fs.writeFileSync(changesFilePath, '', 'utf8');
-  fs.writeFileSync(touchedFilesPath, '', 'utf8');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot: projectRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'In Progress',
-    agentCli: 'codex',
-    command: 'codex exec',
-    executionLogId: 61,
-    rootExecutionLogId: 61,
-    interactiveSession: true,
-    checkpointOutcome: 'partial',
-    checkpointSummary: '完成这一轮讨论',
-    userMessage: '完成任务',
-    outputFilePath,
-    changesFilePath,
-    touchedFilesPath,
-    startedAt: '2026-08-03T00:00:00.000Z'
-  }), 'utf8');
-  const events = [];
-  let persistedOutput = '';
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => [{ id: 61, nodeId: '__solo__', output: 'Agent conversation started.', status: 'Running' }],
-    getAgentExecutions: () => [],
-    updateAgentExecution: (_id, _agentCli, _command, output, status) => {
-      persistedOutput = output;
-      events.push(['persist', status]);
-      return true;
-    },
-    logAgentExecution: () => 61
-  }, projectRoot, {
-    sendNodesToWebview() {},
-    sendSoloConversationHistory() {},
-    async refreshProjectConversationSnapshotAfterStatusChange(projectPath) {
-      events.push(['refresh', projectPath, JSON.parse(fs.readFileSync(statusFilePath, 'utf8')).status]);
-    },
-    sendLocalProjects() {}
-  });
+async function openSoloSettlementFixture(t, prefix, summary) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  await engine.initAndSync(); t.after(() => engine.close());
+  const run = await native.ops({ operation: 'prepare_run', input: { root: project, executionLogId: 61, nodeId: '__solo__', runKind: 'solo', prompt: '完成任务', command: 'fixture-command', userMessage: '完成任务', metadata: { interactiveSession: true, agentCli: 'claude', collaborationReviewMode: 'off' }, idempotencyKey: 'sidebar-run' } });
+  await native.ops({ operation: 'append_run_log', input: { projectId: run.projectId, executionLogId: 61, generation: run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from('Solo task finished.\n').toString('base64'), idempotencyKey: 'sidebar-output' } });
+  await native.ops({ operation: 'checkpoint_run', input: { projectId: run.projectId, executionLogId: 61, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial', summary, idempotencyKey: 'sidebar-complete' } });
+  const reference = require('../out/runLifecycleClient.js').runStatusReference(project, 61);
+  return { ...native, engine, root, project, reference, run };
+}
 
-  await extensionModule.__processAgentStatusFile(statusFilePath);
+function loadSoloSettlementHost(fixture, sidebar, transport, withContext = false) {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.settle = processAgentStatusFile;
+    module.exports.connect = (engine, project, root, sidebar, withContext) => {
+      syncEngine = engine; activeProjectRoot = project; sidebarProvider = sidebar; extensionContextRef = withContext ? { extensionPath: ${JSON.stringify(projectRoot)} } : null;
+      getPersistedSettings = () => ({ globalDataPath: root, automationTasks: {} });
+      sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {};
+    };
+  `, { './autonomousRuntimeControl': transport, './db/syncEngine': require('../out/db/syncEngine.js') });
+  extension.connect(fixture.engine, fixture.project, fixture.root, sidebar, withContext);
+  return extension;
+}
 
-  assert.deepEqual(events, [
-    ['persist', 'Completed'],
-    ['refresh', projectRoot, 'Waiting']
-  ]);
+test('task sentinel refreshes the settled project conversation snapshot after persisting terminal status', async t => {
+  const fixture = await openSoloSettlementFixture(t, 'solomap-sentinel-sidebar-', '完成这一轮讨论');
+  const events = []; let persistedOutput = '';
+  const actualTransport = require('../out/autonomousRuntimeControl.js');
+  const transport = { ...actualTransport, async sendRuntimeDataRequest(root, request) {
+    const result = await actualTransport.sendRuntimeDataRequest(root, request);
+    if (request.operation === 'commit_run_settlement') {
+      const journal = await new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation, input) => fixture.ops({ operation, input }), fixture.root).readJournal(fixture.reference);
+      persistedOutput = journal.entry.output; events.push(['persist', journal.entry.status]);
+    }
+    return result;
+  } };
+  const extension = loadSoloSettlementHost(fixture, { async refreshProjectConversationSnapshotAfterStatusChange(project) {
+    const state = await fixture.ops({ operation: 'read_run_state', input: { root: project, executionLogId: 61 } });
+    events.push(['refresh', project, state.status.status]);
+  } }, transport);
+  await extension.settle(fixture.reference, undefined, fixture.root);
+  assert.deepEqual(events, [['persist', 'Completed'], ['refresh', fixture.project, 'Waiting']]);
   assert.match(persistedOutput, /Interactive session state: Waiting/);
   assert.match(persistedOutput, /Completion decision: 完成这一轮讨论/);
-  assert.equal(JSON.parse(fs.readFileSync(statusFilePath, 'utf8')).status, 'Waiting');
+  const state = await fixture.ops({ operation: 'read_run_state', input: { root: fixture.project, executionLogId: 61 } });
+  assert.equal(state.status.status, 'Waiting');
+  assert.equal(fs.existsSync(path.join(fixture.project, '.solopreneur', 'agent-status')), false);
 });
 
-test('active project settlement waits for its terminal sidebar snapshot before completing', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
-    ].join('\n')
-  );
-  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-active-sidebar-settlement-'));
-  const runDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '__solo__', '61');
-  const statusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '61.json');
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  for (const fileName of ['output.log', 'changes.txt', 'touched-files.txt']) {
-    fs.writeFileSync(path.join(runDir, fileName), '', 'utf8');
-  }
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot: projectRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'In Progress',
-    agentCli: 'codex',
-    executionLogId: 61,
-    rootExecutionLogId: 61,
-    interactiveSession: true,
-    checkpointOutcome: 'partial',
-    checkpointSummary: '本轮已完成',
-    outputFilePath: path.join(runDir, 'output.log'),
-    changesFilePath: path.join(runDir, 'changes.txt'),
-    touchedFilesPath: path.join(runDir, 'touched-files.txt'),
-    startedAt: '2026-08-30T00:00:00.000Z'
-  }), 'utf8');
-  let releaseRefresh;
-  let signalRefreshEntered;
-  const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
-  const refreshEntered = new Promise((resolve) => { signalRefreshEntered = resolve; });
-  let settled = false;
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => [{ id: 61, nodeId: '__solo__', output: 'Interactive session state: Running', status: 'Running' }],
-    getAgentExecutions: () => [],
-    updateAgentExecution: () => true,
-    logAgentExecution: () => 61
-  }, projectRoot, {
-    sendNodesToWebview() {},
-    async refreshProjectConversationSnapshotAfterStatusChange() {
-      signalRefreshEntered();
-      await refreshGate;
-    },
-    sendLocalProjects() {}
-  });
-
-  const settlement = extensionModule.__processAgentStatusFile(statusFilePath).then(() => { settled = true; });
-  await refreshEntered;
-
-  assert.equal(JSON.parse(fs.readFileSync(statusFilePath, 'utf8')).status, 'Waiting');
-  assert.equal(settled, false, 'the task must not settle while the card still has an older snapshot');
-  releaseRefresh();
-  await settlement;
+test('active project settlement waits for its terminal sidebar snapshot before completing', async t => {
+  const fixture = await openSoloSettlementFixture(t, 'solomap-active-sidebar-', '本轮已完成');
+  let releaseRefresh, signalRefreshEntered;
+  const refreshGate = new Promise(resolve => { releaseRefresh = resolve; });
+  const refreshEntered = new Promise(resolve => { signalRefreshEntered = resolve; }); let settled = false;
+  const extension = loadSoloSettlementHost(fixture, { async refreshProjectConversationSnapshotAfterStatusChange() { signalRefreshEntered(); await refreshGate; } }, require('../out/autonomousRuntimeControl.js'));
+  const settlement = extension.settle(fixture.reference, undefined, fixture.root).then(() => { settled = true; });
+  const enteredOrFailed = Promise.race([refreshEntered, settlement.then(() => { throw new Error('settlement ended without refreshing the sidebar'); })]);
+  try {
+    await enteredOrFailed;
+    const state = await fixture.ops({ operation: 'read_run_state', input: { root: fixture.project, executionLogId: 61 } });
+    assert.equal(state.status.status, 'Waiting');
+    assert.equal(settled, false, 'the task must not settle while the card still has an older snapshot');
+  } finally { releaseRefresh(); await settlement; }
   assert.equal(settled, true);
 });
 
-test('interactive start checkpoint opens a new tracked turn under the same terminal session', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
-    ].join('\n')
-  );
-  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-interactive-turn-start-'));
-  const statusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '61.json');
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot: projectRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Turn Started',
-    agentCli: 'codex',
-    commandPreview: 'codex [interactive turn]',
-    executionLogId: 61,
-    rootExecutionLogId: 61,
-    interactiveSession: true,
-    checkpointMessage: '继续审计剩余风险',
-    turnStartedAt: '2026-08-03T00:01:00.000Z',
-    terminalName: 'project · solo-61 · 1 (solomap)'
-  }), 'utf8');
-  const logged = [];
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => [{ id: 61, nodeId: '__solo__', output: 'Interactive session state: Waiting', status: 'Completed' }],
-    getAgentExecutions: () => [],
-    logAgentExecution: (nodeId, agentCli, command, output, status) => {
-      logged.push({ nodeId, agentCli, command, output, status });
-      return 62;
+test('interactive start checkpoint opens a new tracked turn under the same terminal session', async t => {
+  const fixture = await openSoloSettlementFixture(t, 'solomap-native-turn-start-', '上一轮已经完成');
+  const extension = loadSoloSettlementHost(fixture, null, require('../out/autonomousRuntimeControl.js'));
+  await extension.settle(fixture.reference, undefined, fixture.root);
+  const previous = await fixture.ops({ operation: 'read_run_state', input: { root: fixture.project, executionLogId: 61 } });
+  const started = await fixture.ops({ operation: 'checkpoint_run', input: { projectId: previous.projectId, executionLogId: 61, generation: previous.generation, proof: fixture.run.proof, expectedRevision: previous.revision, expectedTurnId: previous.turnId, action: 'start', message: '继续审计剩余风险', idempotencyKey: 'same-session-next-turn' } });
+  const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation, input) => fixture.ops({ operation, input }), fixture.root);
+  const snapshot = await client.readStatus(fixture.reference);
+  assert.equal(snapshot.turnId, started.turnId);
+  const journal = await client.readJournal(fixture.reference, snapshot);
+  await extension.settle(fixture.reference, undefined, fixture.root);
+  assert.equal(started.status.status, 'Running');
+  assert.equal(started.status.rootExecutionLogId, 61);
+  assert.equal(started.runId, previous.runId);
+  assert.equal(started.generation, previous.generation);
+  assert.notEqual(started.turnId, previous.turnId);
+  assert.notEqual(journal.executionLogId, 61, 'a new turn must receive its own tracked conversation row');
+  assert.equal(journal.entry.status, 'Running');
+  const relationship = await fixture.ops({ operation: 'resolve_run_conversation', input: { root: fixture.project, executionLogId: journal.executionLogId } });
+  assert.equal(relationship.state.status.rootExecutionLogId, 61, 'the new conversation row must resolve to its original terminal run');
+  assert.equal(relationship.turnId, started.turnId);
+  assert.match(journal.entry.output, /继续审计剩余风险/);
+  const rows = (await fixture.ops({ operation: 'list_run_states', input: { root: fixture.project } })).items;
+  assert.equal(rows.length, 1, 'starting another turn must retain the original terminal run');
+  assert.equal(fs.existsSync(path.join(fixture.project, '.solopreneur', 'agent-status')), false);
+});
+
+test('project management reads the committed database registry after bootstrap instead of stale globalState or a missing file', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 971);
+  const initial = await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: '原名称', path: f.project, notes: '要保留的项目备注' }] } });
+  await f.ops({ operation: 'patch_project_registry', input: { expectedRevision: initial.revision, projectPatches: [{ path: f.project, fields: { name: '数据库中的新名称' } }], idempotencyKey: 'host-project-name' } });
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.bootstrapProjects = reconcileBackgroundIntelligenceService;
+    module.exports.projects = getProjects;
+    module.exports.connect = (project, root) => {
+      activeProjectRoot = project; sidebarProvider = null;
+      getWorkspaceRoot = () => project;
+      getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude', cognitiveEngineAgent: 'follow_main', agentModelPreferences: {} });
+      activateObservedBackgroundRuntime = async (_extensionPath, actualRoot) => { if (actualRoot !== root) throw new Error('runtime root escaped fixture'); };
+    };
+  `, { './projectRegistry': require('../out/projectRegistry.js'), './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js'), './cognitiveRuntimeConfig': require('../out/cognitiveRuntimeConfig.js') });
+  extension.connect(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: key => key === 'solopreneur.projects' ? [{ name: '过时窗口中的旧名称', path: f.project }] : undefined } };
+  await extension.bootstrapProjects(context);
+  assert.deepEqual(extension.projects(context).map(project => ({ name: project.name, path: project.path, notes: project.notes })), [{ name: '数据库中的新名称', path: f.project, notes: '要保留的项目备注' }]);
+  assert.equal(fs.existsSync(path.join(f.root, 'projects.json')), false);
+});
+
+test('cold roadmap initialization uses the database selected project before constructing its real sync engine', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 972);
+  const selected = path.join(path.dirname(f.project), 'selected-project'); fs.mkdirSync(selected);
+  await f.ops({ operation: 'register_project', input: { root: selected } });
+  const csv = Buffer.from('id,title,stage,status,dependencies\nselected,已选择项目的任务,实施,Pending,\n');
+  fs.writeFileSync(path.join(selected, '.solopreneur', 'roadmap.csv'), csv);
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: '工作区', path: f.project }, { name: '已选择', path: selected }], legacySelectedProjectPath: selected } });
+  const actualSync = require('../out/db/syncEngine.js');
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.initialize = ensureSyncEngine;
+    module.exports.currentRoot = () => activeProjectRoot;
+    module.exports.currentEngine = () => syncEngine;
+    module.exports.drainNodes = sendNodesToWebview;
+    module.exports.close = () => syncEngine?.close();
+    module.exports.connect = (workspace, root) => {
+      activeProjectRoot = ''; selectedProjectPathInMemory = ''; syncEngine = null; sidebarProvider = null;
+      getWorkspaceRoot = () => workspace;
+      getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude' });
+      setupFileSentinelWatcher = () => {};
+      ensureSolopreneurReadme = ensureRoadmapMethodologyInstructions = ensureBootstrapRoadmapInstructions = ensureRoadmapValidationScript = () => {};
+      ensureCompletionCriteriaForNodes = async (_root, nodes) => nodes;
+    };
+  `, { './projectRegistry': require('../out/projectRegistry.js'), './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js'), './db/syncEngine': actualSync });
+  extension.connect(f.project, f.root); t.after(() => extension.close());
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback } };
+  assert.equal(await extension.initialize(context), true);
+  assert.equal(extension.currentRoot(), selected, 'the opened workspace must not override the database saved selection');
+  assert.equal(extension.currentEngine().dataRoot, f.root);
+  await extension.currentEngine().loadHistory();
+  await extension.drainNodes();
+  assert.deepEqual(fs.readdirSync(path.join(selected, '.solopreneur')).sort(), ['documentation.json', 'project.json', 'roadmap.csv'], 'the existing documentation index remains tracked under P5; registry and journal files must not return');
+  assert.deepEqual(fs.readFileSync(path.join(selected, '.solopreneur', 'roadmap.csv')), csv);
+  assert.equal(fs.existsSync(path.join(f.root, 'projects.json')), false);
+  await new Promise(resolve => setImmediate(resolve));
+});
+
+test('a registered project click changes the visible selection before its database write completes', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 973);
+  const selected = path.join(path.dirname(f.project), 'other-project'); fs.mkdirSync(selected);
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: '当前', path: f.project }, { name: '要切换', path: selected }], legacySelectedProjectPath: f.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  const transport = require('../out/autonomousRuntimeControl.js'); const previousTransport = transport.sendRuntimeDataRequest;
+  transport.sendRuntimeDataRequest = async (root, request) => { assert.equal(root, f.root); await gate; return previousTransport(root, request); };
+  t.after(() => { transport.sendRuntimeDataRequest = previousTransport; });
+  const delivered = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.select = selectProject;
+    module.exports.selected = getSelectedProjectPath;
+    module.exports.connect = (workspace, root, post) => {
+      selectedProjectPathInMemory = workspace; activeProjectRoot = workspace; syncEngine = null; sidebarProvider = null;
+      activePanel = { webview: { postMessage: post } };
+      getWorkspaceRoot = () => workspace; getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude' });
+      synchronizeTelegramChannel = scheduleProjectRunIndexBackfill = () => {};
+      ensureSyncEngine = async () => false;
+    };
+  `, { './projectRegistry': registry, './autonomousRuntimeControl': transport });
+  extension.connect(f.project, f.root, message => { delivered.push(message); return Promise.resolve(true); });
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => assert.fail('project actions must not write legacy globalState') } };
+  const action = extension.select(context, selected);
+  try {
+    assert.equal(extension.selected(context), selected, 'the click must not wait for registry I/O');
+    assert.equal(delivered.find(message => message.command === 'projectsLoaded')?.projects.selectedProjectPath, selected);
+  } finally { release(); await action; }
+  assert.equal((await f.ops({ operation: 'read_project_registry', input: {} })).registry.selectedProjectPath, selected);
+  assert.equal(fs.existsSync(path.join(f.root, 'projects.json')), false);
+});
+
+function loadProjectManagementHost(workspace, root) {
+  const extension = loadCompiledModule('out/extension.js', `
+    let fixtureDataRoot;
+    module.exports.select = selectProject; module.exports.selected = getSelectedProjectPath;
+    module.exports.update = updateProjectMetadata; module.exports.hide = setProjectHidden; module.exports.pin = toggleProjectPinned;
+    module.exports.add = addProjectFromDialog; module.exports.state = getProjectState;
+    module.exports.changeDataRoot = root => { fixtureDataRoot = root; };
+    module.exports.setFolder = folder => { vscode.window.showOpenDialog = async () => [{ fsPath: folder }]; vscode.window.showQuickPick = async () => ({ value: 'tool' }); };
+    module.exports.connect = (workspace, root) => {
+      fixtureDataRoot = root; selectedProjectPathInMemory = ''; activeProjectRoot = workspace; syncEngine = null; sidebarProvider = null; activePanel = null;
+      getWorkspaceRoot = () => workspace; getPersistedSettings = () => ({ globalDataPath: fixtureDataRoot, cliPath: 'claude' });
+      synchronizeTelegramChannel = scheduleProjectRunIndexBackfill = recordLocalUsageEvent = sendNodesToWebview = () => {};
+      ensureSyncEngine = async () => false;
+    };
+  `, { './projectRegistry': require('../out/projectRegistry.js'), './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js'), './projectFoundation': require('../out/projectFoundation.js') });
+  extension.connect(workspace, root); return extension;
+}
+
+test('project selection belongs to its data root when the same projects appear in two registries', async t => {
+  const a = await openProviderCheckpointFixture(t, 'claude', 974), b = await openProviderCheckpointFixture(t, 'claude', 975);
+  const projects = [{ name: '项目甲', path: a.project }, { name: '项目乙', path: b.project }];
+  await a.ops({ operation: 'initialize_project_registry', input: { legacyProjects: projects, legacySelectedProjectPath: b.project } });
+  await b.ops({ operation: 'initialize_project_registry', input: { legacyProjects: projects, legacySelectedProjectPath: b.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(a.root); await registry.refreshProjectRegistry(b.root);
+  const extension = loadProjectManagementHost(a.project, a.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => assert.fail('project selection must not write globalState') } };
+  await extension.select(context, a.project);
+  extension.changeDataRoot(b.root);
+  assert.equal(extension.selected(context), b.project, 'the previous root selection must not override the new root saved selection');
+  assert.equal(extension.state(context).selectedProjectPath, b.project);
+  await extension.select(context, b.project);
+  extension.changeDataRoot(a.root);
+  assert.equal(extension.selected(context), a.project);
+  assert.equal((await a.ops({ operation: 'read_project_registry', input: {} })).registry.selectedProjectPath, a.project);
+  assert.equal((await b.ops({ operation: 'read_project_registry', input: {} })).registry.selectedProjectPath, b.project);
+});
+
+test('adding another registered folder selects it even after a previous explicit project selection', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 976);
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: '当前项目', path: f.project }], legacySelectedProjectPath: f.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const extension = loadProjectManagementHost(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => assert.fail('adding a project must not write globalState') } };
+  await extension.select(context, f.project);
+  const folder = path.join(path.dirname(f.project), 'added-project'); fs.mkdirSync(folder); extension.setFolder(folder);
+  await extension.add(context);
+  assert.equal(extension.selected(context), folder, 'adding a folder must update the visible selection as well as the database');
+  const current = await f.ops({ operation: 'read_project_registry', input: {} });
+  assert.equal(current.registry.selectedProjectPath, folder); assert.equal(current.registry.projects.find(project => project.path === folder).type, 'tool');
+  assert.equal(fs.existsSync(path.join(f.root, 'projects.json')), false);
+});
+
+test('a delayed earlier project click cannot overwrite the last committed selection', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 977), other = path.join(path.dirname(f.project), 'other'); fs.mkdirSync(other);
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: '原项目', path: f.project }, { name: '另一项目', path: other }], legacySelectedProjectPath: f.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
+  let release, entered; const gate = new Promise(resolve => { release = resolve; }), ready = new Promise(resolve => { entered = resolve; });
+  const writes = []; let secondCommitted; const committed = new Promise(resolve => { secondCommitted = resolve; });
+  transport.sendRuntimeDataRequest = async (root, request) => {
+    assert.equal(root, f.root);
+    if (request.operation === 'patch_project_registry' && request.input.selectedProjectPath !== undefined) {
+      writes.push(request.input.selectedProjectPath);
+      if (writes.length === 1) { entered(); await gate; }
     }
-  }, projectRoot, {
-    sendNodesToWebview() {},
-    sendSoloConversationHistory() {},
-    sendLocalProjects() {}
-  });
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  const running = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
-  assert.equal(running.status, 'Running');
-  assert.equal(running.executionLogId, 62);
-  assert.equal(running.rootExecutionLogId, 61);
-  assert.equal(logged.length, 1);
-  assert.equal(logged[0].status, 'Running');
-  assert.match(logged[0].output, /Continuation parent conversation: 61/);
-  assert.match(logged[0].output, /继续审计剩余风险/);
+    const result = await previous(root, request);
+    if (request.operation === 'patch_project_registry' && request.input.selectedProjectPath === f.project) secondCommitted();
+    return result;
+  };
+  t.after(() => { transport.sendRuntimeDataRequest = previous; });
+  const extension = loadProjectManagementHost(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => assert.fail('selection must not write globalState') } };
+  const first = extension.select(context, other); await ready;
+  const last = extension.select(context, f.project);
+  try {
+    assert.equal(extension.selected(context), f.project);
+    await committed;
+    assert.equal((await f.ops({ operation: 'read_project_registry', input: {} })).registry.selectedProjectPath, f.project);
+  } finally { release(); await Promise.all([first, last]); }
+  assert.equal(extension.selected(context), f.project);
+  assert.equal((await f.ops({ operation: 'read_project_registry', input: {} })).registry.selectedProjectPath, f.project);
+  assert.equal(fs.existsSync(path.join(f.root, 'projects.json')), false);
 });
 
-test('interactive start checkpoint confirms the caller-assigned native session before the terminal closes', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
-    ].join('\n')
-  );
-  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-caller-assigned-confirm-'));
-  const runDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '__solo__', '71');
-  const statusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '71.json');
-  const sessionFilePath = path.join(runDir, 'session.json');
-  const plannedSessionId = '019ecd99-4325-7050-8e71-7def92359c9f';
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
-  identity.createSessionBinding(sessionFilePath, {
-    runId: '71',
-    provider: 'claude',
-    workspaceRoot: projectRoot,
-    cliPath: 'claude',
-    bindingNonce: 'claude-test-nonce',
-    method: 'caller_assigned',
-    contract: 'official_stable'
-  });
-  identity.appendSessionBindingRevision(sessionFilePath, 1, {
-    sessionId: plannedSessionId,
-    method: 'caller_assigned',
-    contract: 'official_stable',
-    state: 'planned'
-  });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot: projectRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Turn Started',
-    agentCli: 'claude',
-    sessionProvider: 'claude',
-    sessionFilePath,
-    plannedNativeSessionId: plannedSessionId,
-    providerReportedSessionId: plannedSessionId,
-    nativeSessionId: '',
-    nativeSessionIdIsCurrent: false,
-    executionLogId: 71,
-    rootExecutionLogId: 71,
-    interactiveSession: true,
-    checkpointMessage: '开始首轮',
-    turnStartedAt: '2026-09-01T00:01:00.000Z'
-  }), 'utf8');
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => [{ id: 71, nodeId: '__solo__', output: 'Interactive session state: Waiting', status: 'Completed' }],
-    getAgentExecutions: () => [],
-    logAgentExecution: () => 72
-  }, projectRoot, {
-    sendNodesToWebview() {},
-    sendSoloConversationHistory() {},
-    sendLocalProjects() {}
-  });
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  const running = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
-  assert.equal(fs.existsSync(sessionFilePath), true, 'the start checkpoint must persist the planned session');
-  const session = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
-  assert.equal(running.nativeSessionId, plannedSessionId);
-  assert.equal(running.nativeSessionIdIsCurrent, true);
-  assert.equal(session.version, 2);
-  assert.equal(session.headRevision, 3);
-  assert.equal(session.resumableRevision, 3);
-  assert.equal(session.revisions[2].sessionId, plannedSessionId);
-  assert.equal(session.revisions[2].state, 'confirmed');
-  assert.equal(session.revisions[2].method, 'caller_assigned');
-
-  const cursorRunDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '__solo__', '73');
-  const cursorStatusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '73.json');
-  const cursorSessionFilePath = path.join(cursorRunDir, 'session.json');
-  const cursorSessionId = '019ecd99-4325-7050-8e71-7def92359ca0';
-  fs.mkdirSync(cursorRunDir, { recursive: true });
-  identity.createSessionBinding(cursorSessionFilePath, {
-    runId: '73',
-    provider: 'cursor',
-    workspaceRoot: projectRoot,
-    cliPath: 'cursor-agent',
-    bindingNonce: 'cursor-test-nonce',
-    method: 'provider_created',
-    contract: 'official_stable'
-  });
-  identity.appendSessionBindingRevision(cursorSessionFilePath, 1, {
-    sessionId: cursorSessionId,
-    method: 'provider_created',
-    contract: 'official_stable',
-    state: 'planned'
-  });
-  fs.writeFileSync(cursorStatusFilePath, JSON.stringify({
-    workspaceRoot: projectRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Turn Started',
-    agentCli: 'cursor-agent',
-    sessionProvider: 'cursor',
-    sessionFilePath: cursorSessionFilePath,
-    plannedNativeSessionId: cursorSessionId,
-    nativeSessionId: '',
-    nativeSessionIdIsCurrent: false,
-    executionLogId: 73,
-    rootExecutionLogId: 73,
-    interactiveSession: true,
-    checkpointMessage: '开始 Cursor 首轮',
-    turnStartedAt: '2026-09-01T00:02:00.000Z'
-  }), 'utf8');
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => [{ id: 73, nodeId: '__solo__', output: 'Interactive session state: Waiting', status: 'Completed' }],
-    getAgentExecutions: () => [],
-    logAgentExecution: () => 74
-  }, projectRoot, {
-    sendNodesToWebview() {},
-    sendSoloConversationHistory() {},
-    sendLocalProjects() {}
-  });
-
-  await extensionModule.__processAgentStatusFile(cursorStatusFilePath);
-
-  const cursorRunning = JSON.parse(fs.readFileSync(cursorStatusFilePath, 'utf8'));
-  const cursorSession = JSON.parse(fs.readFileSync(cursorSessionFilePath, 'utf8'));
-  assert.equal(cursorRunning.nativeSessionId, cursorSessionId);
-  assert.equal(cursorRunning.nativeSessionIdIsCurrent, true);
-  assert.equal(cursorSession.headRevision, 3);
-  assert.equal(cursorSession.resumableRevision, 3);
-  assert.equal(cursorSession.revisions[2].sessionId, cursorSessionId);
-  assert.equal(cursorSession.revisions[2].state, 'confirmed');
-  assert.equal(cursorSession.revisions[2].method, 'provider_created');
-
-  const mismatchRunDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '__solo__', '75');
-  const mismatchStatusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '75.json');
-  const mismatchSessionFilePath = path.join(mismatchRunDir, 'session.json');
-  const expectedClaudeSessionId = '019ecd99-4325-7050-8e71-7def92359ca1';
-  fs.mkdirSync(mismatchRunDir, { recursive: true });
-  identity.createSessionBinding(mismatchSessionFilePath, {
-    runId: '75',
-    provider: 'claude',
-    workspaceRoot: projectRoot,
-    cliPath: 'claude',
-    bindingNonce: 'claude-mismatch-nonce',
-    method: 'caller_assigned',
-    contract: 'official_stable'
-  });
-  identity.appendSessionBindingRevision(mismatchSessionFilePath, 1, {
-    sessionId: expectedClaudeSessionId,
-    method: 'caller_assigned',
-    contract: 'official_stable',
-    state: 'planned'
-  });
-  fs.writeFileSync(mismatchStatusFilePath, JSON.stringify({
-    workspaceRoot: projectRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Turn Started',
-    agentCli: 'claude',
-    sessionProvider: 'claude',
-    sessionFilePath: mismatchSessionFilePath,
-    plannedNativeSessionId: expectedClaudeSessionId,
-    providerReportedSessionId: '019ecd99-4325-7050-8e71-7def92359ca2',
-    nativeSessionId: '',
-    nativeSessionIdIsCurrent: false,
-    executionLogId: 75,
-    rootExecutionLogId: 75,
-    interactiveSession: true,
-    checkpointMessage: '开始不匹配首轮',
-    turnStartedAt: '2026-09-01T00:03:00.000Z'
-  }), 'utf8');
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => [{ id: 75, nodeId: '__solo__', output: 'Interactive session state: Waiting', status: 'Completed' }],
-    getAgentExecutions: () => [],
-    logAgentExecution: () => 76
-  }, projectRoot, {
-    sendNodesToWebview() {},
-    sendSoloConversationHistory() {},
-    sendLocalProjects() {}
-  });
-
-  await extensionModule.__processAgentStatusFile(mismatchStatusFilePath);
-
-  const mismatchRunning = JSON.parse(fs.readFileSync(mismatchStatusFilePath, 'utf8'));
-  const mismatchBinding = JSON.parse(fs.readFileSync(mismatchSessionFilePath, 'utf8'));
-  assert.equal(mismatchRunning.nativeSessionId, '');
-  assert.equal(mismatchRunning.nativeSessionIdIsCurrent, false);
-  assert.equal(mismatchBinding.resumableRevision, undefined);
-  assert.equal(mismatchBinding.revisions[2].state, 'conflict');
-  assert.equal(mismatchBinding.revisions[2].errorCode, 'identity_provider_mismatch');
+test('a cold project selection stops when its data root changes while the registry read is pending', async t => {
+  const a = await openProviderCheckpointFixture(t, 'claude', 978), b = await openProviderCheckpointFixture(t, 'claude', 979);
+  const projects = [{ name: '项目甲', path: a.project }, { name: '项目乙', path: b.project }];
+  const first = await a.ops({ operation: 'initialize_project_registry', input: { legacyProjects: projects, legacySelectedProjectPath: b.project } });
+  const second = await b.ops({ operation: 'initialize_project_registry', input: { legacyProjects: projects, legacySelectedProjectPath: b.project } });
+  await require('../out/projectRegistry.js').refreshProjectRegistry(b.root);
+  const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
+  let release, entered; const gate = new Promise(resolve => { release = resolve; }), ready = new Promise(resolve => { entered = resolve; });
+  transport.sendRuntimeDataRequest = async (root, request) => {
+    if (root === a.root && request.operation === 'read_project_registry') { entered(); await gate; }
+    return previous(root, request);
+  };
+  t.after(() => { transport.sendRuntimeDataRequest = previous; });
+  const extension = loadProjectManagementHost(a.project, a.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => assert.fail('project selection must not write globalState') } };
+  const pending = extension.select(context, a.project); await ready;
+  extension.changeDataRoot(b.root); release(); await pending;
+  assert.equal(extension.selected(context), b.project);
+  assert.deepEqual(await a.ops({ operation: 'read_project_registry', input: {} }), first, 'a superseded cold selection must not mutate the previous root');
+  assert.deepEqual(await b.ops({ operation: 'read_project_registry', input: {} }), second);
 });
 
-test('the pre-registered first completion confirms its planned native session', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
-    ].join('\n')
-  );
-  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-first-complete-confirm-'));
-  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '79');
-  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '79.json');
-  const sessionFilePath = path.join(runDir, 'session.json');
-  const sessionId = '019ecd99-4325-7050-8e71-7def92359d19';
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
-  identity.createSessionBinding(sessionFilePath, {
-    runId: '79',
-    provider: 'claude',
-    workspaceRoot,
-    cliPath: 'claude',
-    bindingNonce: 'first-complete-confirm-nonce',
-    method: 'caller_assigned',
-    contract: 'official_stable'
-  });
-  identity.appendSessionBindingRevision(sessionFilePath, 1, {
-    sessionId,
-    method: 'caller_assigned',
-    contract: 'official_stable',
-    state: 'planned'
-  });
-  const outputFilePath = path.join(runDir, 'output.log');
-  const changesFilePath = path.join(runDir, 'changes.txt');
-  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
-  fs.writeFileSync(outputFilePath, 'First native turn completed.\n', 'utf8');
-  fs.writeFileSync(changesFilePath, '', 'utf8');
-  fs.writeFileSync(touchedFilesPath, '', 'utf8');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'In Progress',
-    agentCli: 'claude',
-    sessionProvider: 'claude',
-    sessionFilePath,
-    plannedNativeSessionId: sessionId,
-    providerReportedSessionId: sessionId,
-    nativeSessionId: '',
-    nativeSessionIdIsCurrent: false,
-    executionLogId: 79,
-    rootExecutionLogId: 79,
-    interactiveSession: true,
-    checkpointOutcome: 'partial',
-    checkpointSummary: '首轮完成',
-    outputFilePath,
-    changesFilePath,
-    touchedFilesPath
-  }), 'utf8');
-  const logs = [{ id: 79, nodeId: '__solo__', agentCli: 'claude', command: 'claude', output: 'Interactive session state: Running', status: 'Running' }];
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => logs,
-    getAgentExecutions: () => [],
-    updateAgentExecution: (id, agentCli, command, output, status) => {
-      const entry = logs.find((candidate) => candidate.id === id);
-      if (entry) Object.assign(entry, { agentCli, command, output, status });
-      return Boolean(entry);
-    },
-    logAgentExecution: () => 79
-  }, workspaceRoot, {
-    sendNodesToWebview() {},
-    sendSoloConversationHistory() {},
-    async refreshProjectConversationSnapshotAfterStatusChange() {},
-    sendLocalProjects() {}
-  });
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  const binding = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
-  const stored = JSON.parse(fs.readFileSync(path.join(workspaceRoot, '.solopreneur', 'step-sessions', '__solo__.json'), 'utf8'));
-  assert.equal(binding.headRevision, 3);
-  assert.equal(binding.resumableRevision, 3);
-  assert.equal(binding.revisions[2].state, 'confirmed');
-  assert.equal(stored.sessions.claude.sessionId, sessionId);
-  assert.equal(stored.sessions.claude.runId, '79');
-  assert.equal(stored.sessions.claude.revision, 3);
+test('compiled project metadata, hidden state and pin actions preserve partial fields without legacy writes', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 980);
+  const first = await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: '原名称', path: f.project, notes: '原备注', priority: 'high' }] } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const extension = loadProjectManagementHost(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: () => assert.fail('existing database actions must not read legacy globalState'), update: async () => assert.fail('project actions must not write globalState') } };
+  await f.ops({ operation: 'patch_project_registry', input: { expectedRevision: first.revision, projectPatches: [{ path: f.project, fields: { notes: '另一个窗口完整备注' } }], idempotencyKey: 'external-window-notes-before-host' } });
+  await extension.update(context, f.project, { name: '新名称', priority: undefined });
+  await extension.pin(context, f.project); await extension.hide(context, f.project, true);
+  const current = await f.ops({ operation: 'read_project_registry', input: {} });
+  assert.equal(current.registry.projects[0].name, '新名称'); assert.equal(current.registry.projects[0].notes, '另一个窗口完整备注'); assert.equal(current.registry.projects[0].priority, 'high'); assert.ok(current.registry.projects[0].pinnedAt);
+  assert.deepEqual(current.registry.hiddenProjects, [f.project]);
+  await extension.pin(context, f.project); await extension.hide(context, f.project, false);
+  const restored = await f.ops({ operation: 'read_project_registry', input: {} });
+  assert.equal(restored.registry.projects[0].pinnedAt, undefined); assert.deepEqual(restored.registry.hiddenProjects, []);
+  assert.equal(fs.existsSync(path.join(f.root, 'projects.json')), false);
 });
 
-test('unvalidated OpenCode and Antigravity bindings become unavailable after the first checkpoint', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
-    ].join('\n')
-  );
-  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
-  for (const [provider, method, runId] of [
-    ['opencode', 'provider_created', 791],
-    ['antigravity', 'provider_callback', 792]
-  ]) {
-    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), `solopreneur-${provider}-unavailable-`));
-    const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', String(runId));
-    const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', `${runId}.json`);
-    const sessionFilePath = path.join(runDir, 'session.json');
-    const outputFilePath = path.join(runDir, 'output.log');
-    const changesFilePath = path.join(runDir, 'changes.txt');
-    const touchedFilesPath = path.join(runDir, 'touched-files.txt');
-    fs.mkdirSync(runDir, { recursive: true });
-    fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-    identity.createSessionBinding(sessionFilePath, {
-      runId: String(runId),
-      provider,
-      workspaceRoot,
-      cliPath: provider,
-      bindingNonce: `${provider}-unavailable-binding-nonce`,
-      method,
-      contract: 'official_stable'
-    });
-    fs.writeFileSync(outputFilePath, `${provider} completed its first turn.\n`, 'utf8');
-    fs.writeFileSync(changesFilePath, '', 'utf8');
-    fs.writeFileSync(touchedFilesPath, '', 'utf8');
-    fs.writeFileSync(statusFilePath, JSON.stringify({
-      workspaceRoot,
-      nodeId: '__solo__',
-      runKind: 'solo',
-      status: 'In Progress',
-      agentCli: provider,
-      sessionProvider: provider,
-      sessionFilePath,
-      sessionBindingHeadRevision: 1,
-      executionLogId: runId,
-      rootExecutionLogId: runId,
-      interactiveSession: true,
-      checkpointOutcome: 'partial',
-      checkpointSummary: '首轮完成',
-      outputFilePath,
-      changesFilePath,
-      touchedFilesPath
-    }), 'utf8');
-    const logs = [{ id: runId, nodeId: '__solo__', agentCli: provider, command: provider, output: 'Interactive session state: Running', status: 'Running' }];
-    extensionModule.__setRuntimeForTest({
-      getNodes: () => [],
-      getProjectAgentExecutions: () => logs,
-      getAgentExecutions: () => [],
-      updateAgentExecution: (id, agentCli, command, output, status) => {
-        const entry = logs.find((candidate) => candidate.id === id);
-        if (entry) Object.assign(entry, { agentCli, command, output, status });
-        return Boolean(entry);
-      },
-      logAgentExecution: () => runId
-    }, workspaceRoot, {
-      sendNodesToWebview() {},
-      sendSoloConversationHistory() {},
-      async refreshProjectConversationSnapshotAfterStatusChange() {},
-      sendLocalProjects() {}
-    });
+async function openProviderCheckpointFixture(t, provider, executionLogId, nodeId = '__solo__', runKind = 'solo') {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-provider-host-'));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  await engine.initAndSync(); t.after(() => engine.close());
+  if (nodeId !== '__solo__') engine.setNodes([{ id: nodeId, title: '原任务', description: '原目标', stage: '实施', dependencies: '', agentCli: provider, agentPrompt: '原任务', status: 'Pending', createdAt: new Date().toISOString(), completedAt: '' }]);
+  let run = await require('../out/agentRunPreparation.js').prepareAgentRun({ agentCli: provider, selectedModel: '', prompt: '完成用户任务', workspaceRoot: project, nodeId, executionLogId, userMessage: '完成用户任务', runKind, globalDataPath: root, taskPermissionMode: 'auto', collaborationReviewMode: 'off' }, (operation, input) => native.ops({ operation, input }));
+  if (provider === 'cursor-agent') run = await require('../out/agentRunPreflight.js').prepareNativeAgentLaunch({ state: run, workspaceRoot: project, prepareDatabase: false, operation: (operation, input) => native.ops({ operation, input }), execute: async command => ({ code: 0, stdout: Buffer.from(command.endsWith('create-chat') ? 'official-cursor-host-chat-73\n' : '--resume supported'), stderr: Buffer.alloc(0) }) });
+  const reference = require('../out/runLifecycleClient.js').runStatusReference(project, executionLogId);
+  const checkpoint = async (action, fields, reportedSessionId) => {
+    const state = await native.ops({ operation: 'read_run_checkpoint_state', input: { root: project, executionLogId } });
+    const env = { ...process.env, SOLOMAP_GLOBAL_DATA_PATH: root, SOLOMAP_PROJECT_ID: state.projectId, SOLOMAP_EXECUTION_LOG_ID: String(executionLogId), SOLOMAP_RUN_GENERATION: String(state.generation), SOLOMAP_RUN_PROOF: state.proof, SOLOMAP_TASK_TURN_ID: state.turnId };
+    delete env.CLAUDE_CODE_SESSION_ID;
+    if (reportedSessionId !== undefined) env.CLAUDE_CODE_SESSION_ID = reportedSessionId;
+    const argv = [path.resolve(__dirname, '../out/taskCheckpointProcess.js'), action, ...Object.entries(fields).flatMap(([key, value]) => [`--${key}`, String(value)])];
+    return JSON.parse((await require('node:util').promisify(childProcess.execFile)(process.execPath, argv, { env })).stdout);
+  };
+  return { ...native, engine, root, project, run, reference, checkpoint };
+}
 
-    await extensionModule.__processAgentStatusFile(statusFilePath);
+test('the native Continue button resumes a database-bound conversation without old session files', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 79);
+  await f.checkpoint('complete', { outcome: 'partial', summary: '已有完整结果' }, f.run.status.plannedNativeSessionId);
+  await loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js')).settle(f.reference, undefined, f.root);
+  const unrelated = await f.ops({ operation: 'prepare_run', input: { root: f.project, executionLogId: 80, nodeId: '__solo__', runKind: 'solo', prompt: '另一段对话', command: 'fixture-command', userMessage: '另一段对话', metadata: { interactiveSession: true, sessionProvider: 'claude', agentCli: 'claude', nativeSessionId: 'another-native-session' }, idempotencyKey: 'unrelated-conversation' } });
+  const otherProject = path.join(path.dirname(f.project), 'other-project'); fs.mkdirSync(otherProject);
+  const foreign = await f.ops({ operation: 'prepare_run', input: { root: otherProject, executionLogId: 79, nodeId: '__solo__', runKind: 'solo', prompt: '其他项目同号对话', command: 'fixture-command', userMessage: '其他项目同号对话', metadata: { interactiveSession: true, sessionProvider: 'claude', agentCli: 'claude', nativeSessionId: f.run.status.plannedNativeSessionId }, idempotencyKey: 'foreign-conversation' } });
+  const delivered = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.nativeContinue = handleContinueNativeConversation;
+    module.exports.connect = (engine, project, root, prepare, deliver) => {
+      syncEngine = engine; activeProjectRoot = project; sidebarProvider = null; extensionContextRef = {};
+      getPersistedSettings = () => ({ globalDataPath: root, globalPrompt: '', taskPermissionMode: 'auto' });
+      agentCli_1.commandExists = () => true;
+      createPreSessionGitCommit = async () => '';
+      prepareOrdinaryConversation = prepare; deliverOrdinaryConversation = deliver;
+    };
+  `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
+  extension.connect(f.engine, f.project, f.root,
+    (_context, input) => require('../out/agentRunPreparation.js').prepareAgentRun({ ...input, executionLogId: 0, launchIntentId: 'native-continue-user-action' }, (operation, input) => f.ops({ operation, input })),
+    async (_context, prepared) => { delivered.push(prepared.finalCommand); return Number(prepared.status.rootExecutionLogId); });
+  await extension.nativeContinue({}, '__solo__', 79);
+  const states = await f.ops({ operation: 'list_run_states', input: { root: f.project, cursor: 0, limit: 10 } });
+  assert.equal(states.items.length, 3, 'Continue must prepare a durable continuation from the confirmed database binding');
+  const continuation = states.items.find(state => state.runId !== f.run.runId && state.runId !== unrelated.runId);
+  assert.equal(continuation.taskId, f.run.taskId);
+  assert.notEqual(continuation.turnId, f.run.turnId);
+  assert.equal(continuation.status.plannedNativeSessionId, f.run.status.plannedNativeSessionId);
+  assert.equal(continuation.status.userMessage, '继续当前 Agent 对话');
+  assert.equal(delivered.length, 1); assert.match(delivered[0], /runAgentProcess\.js/);
+  const original = await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 79 } });
+  assert.equal(original.status.checkpointSummary, '已有完整结果');
+  assert.equal(original.status.interactiveSessionClosed, true, 'the prior writer must be closed before resuming its native session');
+  const untouched = await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 80 } });
+  assert.equal(untouched.revision, unrelated.revision); assert.notEqual(untouched.status.interactiveSessionClosed, true);
+  const other = await f.ops({ operation: 'read_run_state', input: { root: otherProject, executionLogId: 79 } });
+  assert.equal(other.revision, foreign.revision); assert.notEqual(other.status.interactiveSessionClosed, true);
+  for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', dir)), false);
+});
 
-    const binding = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
+test('interactive start checkpoint confirms the caller-assigned native session before the terminal closes', async t => {
+  for (const [provider, id, matches] of [['claude', 71, true], ['cursor-agent', 73, true], ['claude', 75, false]]) {
+    const f = await openProviderCheckpointFixture(t, provider, id);
+    const host = loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js'));
+    await f.checkpoint('complete', { outcome: 'partial', summary: '上一轮已完成' });
+    await host.settle(f.reference, undefined, f.root);
+    const expected = f.run.status.plannedNativeSessionId;
+    const started = await f.checkpoint('start', { message: '开始下一轮' }, provider === 'claude' ? (matches ? expected : 'different-claude-session') : undefined);
+    const binding = await f.ops({ operation: 'read_run_binding', input: { root: f.project, executionLogId: id } });
+    assert.equal(started.status.status, 'Running');
+    assert.notEqual(started.status.interactiveSessionClosed, true);
+    assert.equal(started.status.nativeSessionId, matches ? expected : '');
+    assert.equal(started.status.nativeSessionIdIsCurrent, matches);
+    assert.equal(binding.version, 2); assert.equal(binding.headRevision, 3);
+    assert.equal(binding.revisions[2].state, matches ? 'confirmed' : 'conflict');
+    if (matches) {
+      assert.equal(binding.resumableRevision, 3); assert.equal(binding.revisions[2].sessionId, expected);
+      assert.equal(binding.revisions[2].method, provider === 'claude' ? 'caller_assigned' : 'provider_created');
+    } else {
+      assert.equal(binding.resumableRevision, undefined); assert.equal(binding.revisions[2].errorCode, 'identity_provider_mismatch');
+    }
+    const journal = await new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation, input) => f.ops({ operation, input })).readJournal(f.reference);
+    assert.equal(journal.entry.status, 'Running');
+    for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', dir)), false);
+  }
+});
+
+test('the pre-registered first completion confirms its planned native session', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 79);
+  await f.ops({ operation: 'append_run_log', input: { root: f.project, executionLogId: 79, generation: f.run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from('First native turn completed.\n').toString('base64'), idempotencyKey: 'first-output' } });
+  const completed = await f.checkpoint('complete', { outcome: 'partial', summary: '首轮完成' }, f.run.status.plannedNativeSessionId);
+  assert.equal(completed.turnId, f.run.turnId, 'the pre-registered first turn must be preserved');
+  const host = loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js'));
+  await host.settle(f.reference, undefined, f.root);
+  const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation, input) => f.ops({ operation, input }));
+  const binding = await client.readBinding(f.reference);
+  const stored = await client.getResumableSession(f.reference);
+  assert.equal(binding.headRevision, 3); assert.equal(binding.resumableRevision, 3); assert.equal(binding.revisions[2].state, 'confirmed');
+  assert.equal(stored.provider, 'claude'); assert.equal(stored.sessionId, f.run.status.plannedNativeSessionId);
+  assert.equal(stored.runId, '79'); assert.equal(stored.revision, 3);
+  const journal = await client.readJournal(f.reference);
+  assert.equal(journal.entry.status, 'Completed'); assert.match(journal.entry.output, /First native turn completed\./);
+  for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', dir)), false);
+});
+
+test('unvalidated OpenCode and Antigravity bindings become unavailable after the first checkpoint', async t => {
+  for (const [provider, method, executionLogId] of [['opencode', 'provider_created', 791], ['antigravity', 'provider_callback', 792]]) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), `solomap-${provider}-unvalidated-`));
+    const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+    const f = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+    const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+    await engine.initAndSync(); t.after(() => engine.close());
+    const run = await f.ops({ operation: 'prepare_run', input: { root: project, executionLogId, nodeId: '__solo__', runKind: 'solo', prompt: '保留用户完整目标', command: provider, userMessage: '完成用户目标', metadata: { interactiveSession: true, agentCli: provider, sessionProvider: provider }, idempotencyKey: 'unvalidated-provider-run' } });
+    const scope = { root: project, projectId: run.projectId, executionLogId, generation: run.generation };
+    await f.ops({ operation: 'write_run_binding', input: { ...scope, expectedHeadRevision: 0, seed: { runId: String(executionLogId), provider, workspaceRoot: project, cliPath: provider, bindingNonce: `${provider}-unavailable-binding-nonce`, method, contract: 'official_stable' }, idempotencyKey: 'unvalidated-provider-binding' } });
+    await f.ops({ operation: 'append_run_log', input: { ...scope, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from(`${provider} completed its first turn.\n`).toString('base64'), idempotencyKey: 'unvalidated-provider-output' } });
+    const state = await f.ops({ operation: 'read_run_checkpoint_state', input: scope });
+    const intent = { ...scope, proof: state.proof, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'complete', outcome: 'partial', summary: '首轮完成', idempotencyKey: 'unvalidated-provider-complete' };
+    const completed = await f.ops({ operation: 'checkpoint_run', input: intent });
+    const binding = await f.ops({ operation: 'read_run_binding', input: scope });
     assert.equal(binding.headRevision, 2);
     assert.equal(binding.revisions[1].state, 'unavailable');
     assert.equal(binding.revisions[1].errorCode, 'identity_capability_unverified');
     assert.equal(binding.resumableRevision, undefined);
+    assert.equal(completed.status.checkpointSummary, '首轮完成');
+    assert.equal(completed.status.nativeSessionId, ''); assert.equal(completed.status.nativeSessionIdIsCurrent, false);
+    const output = await f.ops({ operation: 'read_run_log', input: { ...scope, stream: 'stdout', offset: 0, limit: 65536 } });
+    assert.equal(Buffer.from(output.bytes, 'base64').toString(), `${provider} completed its first turn.\n`);
+    const walPath = path.join(root, 'solomap.db-wal'); const wal = fs.readFileSync(walPath);
+    const replay = await f.ops({ operation: 'checkpoint_run', input: intent });
+    assert.equal(replay.receipt.committedSequence, completed.receipt.committedSequence); assert.deepEqual(fs.readFileSync(walPath), wal);
+    const reference = require('../out/runLifecycleClient.js').runStatusReference(project, executionLogId);
+    await loadSoloSettlementHost({ ...f, engine, project, root }, null, require('../out/autonomousRuntimeControl.js')).settle(reference, undefined, root);
+    assert.equal((await f.ops({ operation: 'read_run_state', input: scope })).status.status, 'Waiting');
+    for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(project, '.solopreneur', dir)), false);
   }
 });
 
-test('Codex start checkpoint confirms only the unique nonce-correlated transcript', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
-    ].join('\n')
-  );
-  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-nonce-confirm-'));
-  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-nonce-home-'));
-  const runDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '__solo__', '81');
-  const statusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '81.json');
-  const sessionFilePath = path.join(runDir, 'session.json');
-  const bindingNonce = 'f0f1f2f3f4f5f6f7f8f9a0a1a2a3a4a5';
+test('a confirmed provider binding and its older snapshots survive business completion', async t => {
+  for (const [provider, method, executionLogId] of [['opencode', 'provider_created', 793], ['antigravity', 'provider_callback', 794]]) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), `solomap-${provider}-confirmed-`));
+    const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+    const f = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+    const run = await f.ops({ operation: 'prepare_run', input: { root: project, executionLogId, nodeId: '__solo__', runKind: 'solo', prompt: '用户完整目标', command: provider, userMessage: '用户完整目标', metadata: { interactiveSession: true, sessionProvider: provider }, idempotencyKey: 'confirmed-provider-run' } });
+    const scope = { root: project, projectId: run.projectId, executionLogId, generation: run.generation };
+    await f.ops({ operation: 'write_run_binding', input: { ...scope, expectedHeadRevision: 0, seed: { runId: String(executionLogId), provider, workspaceRoot: project, cliPath: provider, bindingNonce: `${provider}-confirmed`, method, contract: 'official_stable' }, idempotencyKey: 'confirmed-provider-seed' } });
+    const sessionId = `${provider}-confirmed-session`;
+    await f.ops({ operation: 'write_run_binding', input: { ...scope, expectedHeadRevision: 1, revision: { sessionId, method, contract: 'official_stable', state: 'planned' }, idempotencyKey: 'confirmed-provider-planned' } });
+    const planned = await f.ops({ operation: 'read_run_state', input: scope });
+    const confirmed = await f.ops({ operation: 'write_run_binding', input: { ...scope, expectedHeadRevision: 2, confirmSessionId: sessionId, evidence: { source: 'official_provider_receipt' }, idempotencyKey: 'confirmed-provider-ack' } });
+    const state = await f.ops({ operation: 'read_run_checkpoint_state', input: scope });
+    const completed = await f.ops({ operation: 'checkpoint_run', input: { ...scope, proof: state.proof, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'complete', outcome: 'partial', summary: '用户目标已处理', idempotencyKey: 'confirmed-provider-complete' } });
+    assert.deepEqual(await f.ops({ operation: 'read_run_binding', input: scope }), confirmed);
+    assert.equal(completed.status.nativeSessionId, sessionId); assert.equal(completed.status.nativeSessionIdIsCurrent, true);
+    const old = await f.ops({ operation: 'read_run_state', input: { ...scope, revision: planned.revision } });
+    assert.equal(old.status.nativeSessionIdIsCurrent, false); assert.equal(old.status.sessionBindingHeadRevision, 2);
+    assert.equal(completed.status.checkpointSummary, '用户目标已处理');
+  }
+});
+
+async function openNativeCodexHostFixture(t, executionLogId) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-codex-host-'));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'), codexHome = path.join(base, 'codex-home'); fs.mkdirSync(project);
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  await engine.initAndSync(); t.after(() => engine.close());
+  const nonce = require('node:crypto').randomBytes(32).toString('hex');
+  const run = await native.ops({ operation: 'prepare_run', input: { root: project, executionLogId, nodeId: '__solo__', runKind: 'solo', prompt: `SoloMap binding nonce: ${nonce}.`, command: 'codex [fresh]', userMessage: '用户完整目标', metadata: { interactiveSession: true, agentCli: 'codex', sessionProvider: 'codex', bindingNonce: nonce, collaborationReviewMode: 'off' }, idempotencyKey: 'native-host-run' } });
+  const scope = { projectId: run.projectId, root: project, executionLogId };
+  await native.ops({ operation: 'write_run_binding', input: { ...scope, generation: run.generation, expectedHeadRevision: 0, seed: { runId: String(executionLogId), provider: 'codex', workspaceRoot: project, cliPath: 'codex', bindingNonce: nonce, method: 'transcript_correlated_compat', contract: 'compatibility', createdAt: run.status.startedAt, providerContext: { codex: { codexHome } } }, idempotencyKey: 'native-host-binding' } });
+  const state = await native.ops({ operation: 'read_run_state', input: scope });
+  const claimed = await native.ops({ operation: 'claim_run', input: { ...scope, expectedRevision: state.revision, agentPid: process.pid, idempotencyKey: 'native-host-owner' } });
+  const purpose = require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId, 'before');
+  await native.ops({ operation: 'write_run_document', input: { ...scope, generation: claimed.generation, turnId: run.turnId, purpose, bytes: Buffer.from(JSON.stringify(await require('../out/runWorkspace.js').snapshotWorkspace(project))).toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: 'native-host-before' } });
+  const reference = require('../out/runLifecycleClient.js').runStatusReference(project, executionLogId);
   const sessionId = '019ecd99-4325-7050-8e71-7def92359d20';
-  const transcriptRoot = path.join(codexHome, 'sessions', '2026', '09', '02');
-  fs.mkdirSync(transcriptRoot, { recursive: true });
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  const transcriptPath = path.join(transcriptRoot, `rollout-${sessionId}.jsonl`);
-  fs.writeFileSync(transcriptPath, [
-    JSON.stringify({
-      timestamp: '2026-09-02T00:00:01.000Z',
-      type: 'session_meta',
-      payload: { id: sessionId, session_id: sessionId, cwd: projectRoot }
-    }),
-    JSON.stringify({
-      timestamp: '2026-09-02T00:00:01.000Z',
-      type: 'response_item',
-      payload: {
-        type: 'message',
-        role: 'user',
-        content: [{ type: 'input_text', text: `SoloMap binding nonce: ${bindingNonce}.` }]
-      }
-    })
-  ].join('\n'), 'utf8');
-  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
-  identity.createSessionBinding(sessionFilePath, {
-    runId: '81',
-    provider: 'codex',
-    workspaceRoot: projectRoot,
-    cliPath: 'codex',
-    bindingNonce,
-    method: 'transcript_correlated_compat',
-    contract: 'compatibility',
-    createdAt: '2026-09-02T00:00:00.000Z',
-    providerContext: { codex: { codexHome } }
-  });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot: projectRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Turn Started',
-    agentCli: 'codex',
-    sessionProvider: 'codex',
-    sessionFilePath,
-    plannedNativeSessionId: '',
-    nativeSessionId: '',
-    nativeSessionIdIsCurrent: false,
-    executionLogId: 81,
-    rootExecutionLogId: 81,
-    interactiveSession: true,
-    checkpointMessage: '开始 Codex 首轮',
-    turnStartedAt: '2026-09-02T00:00:02.000Z'
-  }), 'utf8');
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => [{ id: 81, nodeId: '__solo__', output: 'Interactive session state: Waiting', status: 'Completed' }],
-    getAgentExecutions: () => [],
-    logAgentExecution: () => 82
-  }, projectRoot, {
-    sendNodesToWebview() {},
-    sendSoloConversationHistory() {},
-    sendLocalProjects() {}
-  });
+  const timestamp = new Date(Date.parse(run.status.startedAt) + 10).toISOString(); const date = new Date(timestamp);
+  const directory = path.join(codexHome, 'sessions', String(date.getUTCFullYear()), String(date.getUTCMonth() + 1).padStart(2, '0'), String(date.getUTCDate()).padStart(2, '0')); fs.mkdirSync(directory, { recursive: true });
+  const transcriptPath = path.join(directory, `rollout-${sessionId}.jsonl`);
+  const headers = [{ timestamp, type: 'session_meta', payload: { id: sessionId, session_id: sessionId, cwd: project } }, { timestamp, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `SoloMap binding nonce: ${nonce}.` }] } }];
+  const append = rows => fs.appendFileSync(transcriptPath, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
+  append(headers);
+  return { ...native, engine, project, root, codexHome, run: claimed, scope, reference, sessionId, timestamp, transcriptPath, nonce, append };
+}
 
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  const running = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
-  const binding = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
-  assert.equal(running.nativeSessionId, sessionId);
-  assert.equal(running.nativeSessionIdIsCurrent, true);
-  assert.equal(binding.headRevision, 3);
-  assert.equal(binding.resumableRevision, 3);
-  assert.equal(binding.revisions[1].evidence.transcriptPath, transcriptPath);
-  assert.equal(binding.revisions[2].state, 'confirmed');
-  assert.equal(binding.revisions[2].method, 'transcript_correlated_compat');
+test('Codex start checkpoint confirms only the unique nonce-correlated transcript', async t => {
+  const f = await openNativeCodexHostFixture(t, 81);
+  f.append([{ timestamp: f.timestamp, type: 'event_msg', payload: { type: 'task_started', turn_id: 'native-first-turn', started_at: f.timestamp } }]);
+  await f.ops({ operation: 'recover_run_executions', input: {} });
+  const running = await f.ops({ operation: 'read_run_state', input: f.scope });
+  const binding = await f.ops({ operation: 'read_run_binding', input: f.scope });
+  assert.equal(running.status.nativeSessionId, f.sessionId); assert.equal(running.status.nativeSessionIdIsCurrent, true);
+  assert.equal(binding.headRevision, 3); assert.equal(binding.resumableRevision, 3);
+  assert.equal(binding.revisions[1].evidence.transcriptPath, f.transcriptPath);
+  assert.equal(binding.revisions[2].state, 'confirmed'); assert.equal(binding.revisions[2].method, 'transcript_correlated_compat');
+  assert.equal(running.turnId, f.run.turnId); assert.equal(running.status.status, 'Running');
+  for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', dir)), false);
 });
 
-test('Codex completion retries nonce correlation before saving the resumable session', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
-    ].join('\n')
-  );
-  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-complete-confirm-'));
-  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-complete-home-'));
-  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '83');
-  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '83.json');
-  const sessionFilePath = path.join(runDir, 'session.json');
-  const bindingNonce = '00112233445566778899aabbccddeeff';
-  const sessionId = '019ecd99-4325-7050-8e71-7def92359d21';
-  const transcriptRoot = path.join(codexHome, 'sessions', '2026', '09', '02');
-  fs.mkdirSync(transcriptRoot, { recursive: true });
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(path.join(transcriptRoot, `rollout-${sessionId}.jsonl`), [
-    JSON.stringify({
-      timestamp: '2026-09-02T00:10:01.000Z',
-      type: 'session_meta',
-      payload: { id: sessionId, session_id: sessionId, cwd: workspaceRoot }
-    }),
-    JSON.stringify({
-      timestamp: '2026-09-02T00:10:01.000Z',
-      type: 'response_item',
-      payload: {
-        type: 'message',
-        role: 'user',
-        content: [{ type: 'input_text', text: `SoloMap binding nonce: ${bindingNonce}.` }]
-      }
-    })
-  ].join('\n'), 'utf8');
-  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
-  identity.createSessionBinding(sessionFilePath, {
-    runId: '83',
-    provider: 'codex',
-    workspaceRoot,
-    cliPath: 'codex',
-    bindingNonce,
-    method: 'transcript_correlated_compat',
-    contract: 'compatibility',
-    createdAt: '2026-09-02T00:10:00.000Z',
-    providerContext: { codex: { codexHome } }
-  });
-  const outputFilePath = path.join(runDir, 'output.log');
-  const commandFilePath = path.join(runDir, 'command.txt');
-  const changesFilePath = path.join(runDir, 'changes.txt');
-  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
-  fs.writeFileSync(outputFilePath, `Codex completed the first turn for nonce ${bindingNonce}.\n`, 'utf8');
-  fs.writeFileSync(commandFilePath, `codex --no-alt-screen 'SoloMap binding nonce: ${bindingNonce}.'\n`, 'utf8');
-  fs.writeFileSync(changesFilePath, '', 'utf8');
-  fs.writeFileSync(touchedFilesPath, '', 'utf8');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'In Progress',
-    agentCli: 'codex',
-    commandPreview: 'codex [fresh]',
-    commandFilePath,
-    sessionProvider: 'codex',
-    sessionFilePath,
-    nativeSessionId: '',
-    nativeSessionIdIsCurrent: false,
-    executionLogId: 83,
-    rootExecutionLogId: 83,
-    interactiveSession: true,
-    checkpointOutcome: 'partial',
-    checkpointSummary: '首轮完成',
-    outputFilePath,
-    changesFilePath,
-    touchedFilesPath,
-    startedAt: '2026-09-02T00:10:00.000Z'
-  }), 'utf8');
-  const logs = [{ id: 83, nodeId: '__solo__', agentCli: 'codex', command: 'codex', output: 'Interactive session state: Running', status: 'Running' }];
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => logs,
-    getAgentExecutions: () => [],
-    updateAgentExecution: (id, agentCli, command, output, status) => {
-      const entry = logs.find((candidate) => candidate.id === id);
-      if (entry) Object.assign(entry, { agentCli, command, output, status });
-      return Boolean(entry);
-    },
-    logAgentExecution: () => 83
-  }, workspaceRoot, {
-    sendNodesToWebview() {},
-    sendSoloConversationHistory() {},
-    async refreshProjectConversationSnapshotAfterStatusChange() {},
-    sendLocalProjects() {}
-  });
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  const binding = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
-  const stored = JSON.parse(fs.readFileSync(path.join(workspaceRoot, '.solopreneur', 'step-sessions', '__solo__.json'), 'utf8'));
-  assert.equal(binding.headRevision, 3);
-  assert.equal(binding.resumableRevision, 3);
-  assert.equal(binding.revisions[2].sessionId, sessionId);
-  assert.equal(stored.sessions.codex.sessionId, sessionId);
-  assert.equal(stored.sessions.codex.runId, '83');
-  assert.equal(stored.sessions.codex.revision, 3);
-  assert.equal(logs[0].command, 'codex [fresh]');
-  assert.doesNotMatch(logs[0].output, new RegExp(bindingNonce));
+test('Codex completion retries nonce correlation before saving the resumable session', async t => {
+  const f = await openNativeCodexHostFixture(t, 83);
+  await f.ops({ operation: 'append_run_log', input: { ...f.scope, generation: f.run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from('Codex completed the first turn for nonce ' + f.nonce + '.\n').toString('base64'), idempotencyKey: 'first-nonce-output' } });
+  const controlled = await f.ops({ operation: 'read_run_checkpoint_state', input: f.scope });
+  await f.ops({ operation: 'checkpoint_run', input: { ...f.scope, generation: controlled.generation, proof: controlled.proof, expectedRevision: controlled.revision, expectedTurnId: controlled.turnId, action: 'complete', outcome: 'partial', summary: '首轮完成', idempotencyKey: 'first-business-complete' } });
+  f.append([{ timestamp: f.timestamp, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'native-first-complete', started_at: f.timestamp, completed_at: f.timestamp, last_agent_message: 'Codex completed the first turn for nonce ' + f.nonce + '.' } }]);
+  await f.ops({ operation: 'recover_run_executions', input: {} });
+  await loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js')).settle(f.reference, undefined, f.root);
+  const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation, input) => f.ops({ operation, input }));
+  const binding = await client.readBinding(f.reference); const stored = await client.getResumableSession(f.reference);
+  assert.equal(binding.headRevision, 3); assert.equal(binding.resumableRevision, 3); assert.equal(binding.revisions[2].sessionId, f.sessionId);
+  assert.equal(stored.sessionId, f.sessionId); assert.equal(stored.runId, '83'); assert.equal(stored.revision, 3);
+  const journal = await client.readJournal(f.reference);
+  assert.equal(journal.entry.command, 'codex [fresh]'); assert.doesNotMatch(journal.entry.output, new RegExp(f.nonce));
+  const nextTimestamp = new Date(Date.parse(f.timestamp) + 1000).toISOString();
+  f.append([
+    { timestamp: nextTimestamp, type: 'event_msg', payload: { type: 'task_started', turn_id: 'native-second-turn', started_at: nextTimestamp } },
+    { timestamp: nextTimestamp, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '继续已经确认的对话，保留用户原话' }] } }
+  ]);
+  await f.ops({ operation: 'recover_run_executions', input: {} });
+  const next = await f.ops({ operation: 'read_run_state', input: f.scope });
+  assert.notEqual(next.turnId, f.run.turnId); assert.equal(next.status.userMessage, '继续已经确认的对话，保留用户原话', 'the first nonce header cannot become the next business request');
+  for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', dir)), false);
 });
 
-test('a native Codex task completion settles the interactive turn without an Agent checkpoint', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__isPendingAgentStatusFile = isPendingAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
-    ].join('\n')
-  );
-  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-native-complete-'));
-  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-native-home-'));
-  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '84');
-  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '84.json');
-  const sessionFilePath = path.join(runDir, 'session.json');
-  const bindingNonce = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
-  const sessionId = '019ecd99-4325-7050-8e71-7def92359d22';
-  const transcriptRoot = path.join(codexHome, 'sessions', '2026', '09', '02');
-  const transcriptPath = path.join(transcriptRoot, `rollout-${sessionId}.jsonl`);
-  fs.mkdirSync(transcriptRoot, { recursive: true });
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(transcriptPath, [
-    JSON.stringify({
-      timestamp: '2026-09-02T00:20:01.000Z',
-      type: 'session_meta',
-      payload: { id: sessionId, session_id: sessionId, cwd: workspaceRoot }
-    }),
-    JSON.stringify({
-      timestamp: '2026-09-02T00:20:01.100Z',
-      type: 'response_item',
-      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '# AGENTS.md instructions' }] }
-    }),
-    JSON.stringify({
-      timestamp: '2026-09-02T00:20:01.200Z',
-      type: 'response_item',
-      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>...</environment_context>' }] }
-    }),
-    JSON.stringify({
-      timestamp: '2026-09-02T00:20:01.300Z',
-      type: 'response_item',
-      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `SoloMap binding nonce: ${bindingNonce}.` }] }
-    }),
-    JSON.stringify({
-      timestamp: '2026-09-02T00:20:03.000Z',
-      type: 'response_item',
-      payload: { type: 'message', role: 'assistant', phase: 'final_answer', content: [{ type: 'output_text', text: '第一轮信息已记住。' }] }
-    }),
-    JSON.stringify({
-      timestamp: '2026-09-02T00:20:03.100Z',
-      type: 'event_msg',
-      payload: {
-        type: 'task_complete',
-        turn_id: '019ecd99-4325-7050-8e71-7def92359d99',
-        last_agent_message: '第一轮信息已记住。',
-        started_at: 1788308401.4,
-        completed_at: 1788308403.1
-      }
-    })
-  ].join('\n') + '\n', 'utf8');
-  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
-  identity.createSessionBinding(sessionFilePath, {
-    runId: '84',
-    provider: 'codex',
-    workspaceRoot,
-    cliPath: 'codex',
-    bindingNonce,
-    method: 'transcript_correlated_compat',
-    contract: 'compatibility',
-    createdAt: '2026-09-02T00:20:00.000Z',
-    providerContext: { codex: { codexHome } }
-  });
-  const outputFilePath = path.join(runDir, 'output.log');
-  const changesFilePath = path.join(runDir, 'changes.txt');
-  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
-  fs.writeFileSync(outputFilePath, '第一轮信息已记住。\n', 'utf8');
-  fs.writeFileSync(changesFilePath, '', 'utf8');
-  fs.writeFileSync(touchedFilesPath, '', 'utf8');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Running',
-    agentCli: 'codex',
-    commandPreview: 'codex [fresh]',
-    sessionProvider: 'codex',
-    sessionFilePath,
-    nativeSessionId: '',
-    nativeSessionIdIsCurrent: false,
-    sessionBindingHeadRevision: 1,
-    executionLogId: 84,
-    rootExecutionLogId: 84,
-    interactiveSession: true,
-    checkpointSequence: 0,
-    outputFilePath,
-    changesFilePath,
-    touchedFilesPath,
-    startedAt: '2026-09-02T00:20:00.000Z',
-    turnStartedAt: '2026-09-02T00:20:00.000Z'
-  }), 'utf8');
-  const logs = [{ id: 84, nodeId: '__solo__', agentCli: 'codex', command: 'codex', output: 'Interactive session state: Running', status: 'Running' }];
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => logs,
-    getAgentExecutions: () => [],
-    updateAgentExecution: (id, agentCli, command, output, status) => {
-      const entry = logs.find((candidate) => candidate.id === id);
-      if (entry) Object.assign(entry, { agentCli, command, output, status });
-      return Boolean(entry);
-    },
-    logAgentExecution: () => 84
-  }, workspaceRoot, {
-    sendNodesToWebview() {},
-    sendSoloConversationHistory() {},
-    async refreshProjectConversationSnapshotAfterStatusChange() {},
-    sendLocalProjects() {}
-  });
+test('delayed first native completion preserves the later user request for the next turn', async t => {
+  const f = await openNativeCodexHostFixture(t, 86);
+  const controlled = await f.ops({ operation: 'read_run_checkpoint_state', input: f.scope });
+  await f.ops({ operation: 'checkpoint_run', input: { ...f.scope, generation: controlled.generation, proof: controlled.proof, expectedRevision: controlled.revision, expectedTurnId: controlled.turnId, action: 'complete', outcome: 'partial', summary: '首轮完成', idempotencyKey: 'first-business-complete' } });
+  const nextTimestamp = new Date(Date.parse(f.timestamp) + 1000).toISOString();
+  const request = '这条后来收到的用户请求必须完整保留';
+  f.append([
+    { timestamp: nextTimestamp, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: request }] } },
+    { timestamp: f.timestamp, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'native-first-complete', started_at: f.timestamp, last_agent_message: '首轮完整回复' } },
+    { timestamp: nextTimestamp, type: 'event_msg', payload: { type: 'task_started', turn_id: 'native-second-turn', started_at: nextTimestamp } }
+  ]);
+  await f.ops({ operation: 'recover_run_executions', input: {} });
+  const next = await f.ops({ operation: 'read_run_state', input: f.scope });
+  assert.notEqual(next.turnId, f.run.turnId);
+  assert.equal(next.status.userMessage, request);
+  assert.equal(next.status.codexNativeTurnId, 'native-second-turn');
+  const native = await f.ops({ operation: 'read_run_log', input: { ...f.scope, stream: 'native:codex', offset: 0, limit: 65536 } });
+  assert.deepEqual(Buffer.from(native.bytes, 'base64'), fs.readFileSync(f.transcriptPath));
+});
 
-  assert.equal(extensionModule.__isPendingAgentStatusFile(statusFilePath), true);
-  const originalReadFileSync = fs.readFileSync;
-  fs.readFileSync = function patchedReadFileSync(filePath, ...args) {
-    if (path.resolve(String(filePath)) === path.resolve(transcriptPath)) {
-      throw new Error('the status poller must not synchronously read the complete transcript');
-    }
-    return originalReadFileSync.call(this, filePath, ...args);
-  };
+test('a resumed Codex run accepts its own first native completion without replaying older results', async t => {
+  const f = await openNativeCodexHostFixture(t, 91);
+  f.append([{ timestamp: f.timestamp, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'prior-native-turn', started_at: f.timestamp, last_agent_message: '上一轮完整结果' } }]);
+  await f.ops({ operation: 'recover_run_executions', input: {} });
+  const prior = await f.ops({ operation: 'read_run_state', input: f.scope });
+  const resumed = await require('../out/agentRunPreparation.js').prepareAgentRun({ agentCli: 'codex', selectedModel: '', prompt: '继续原完整任务', workspaceRoot: f.project, nodeId: '__solo__', executionLogId: 0, userMessage: '恢复后的当前用户目标', runKind: 'solo_continue', globalDataPath: f.root, taskPermissionMode: 'auto', collaborationReviewMode: 'off', nativeSessionId: f.sessionId, continuation: true, parentExecutionLogId: 91, expectedParentTurnId: prior.turnId, launchIntentId: 'resume-native-without-start', metadata: { codexResumeTranscriptPath: f.transcriptPath, nativeResumeProviderContext: { codex: { codexHome: f.codexHome } } } }, (operation, input) => f.ops({ operation, input }));
+  const scope = { projectId: resumed.projectId, root: f.project, executionLogId: Number(resumed.status.rootExecutionLogId) };
+  await f.ops({ operation: 'claim_run', input: { ...scope, expectedRevision: resumed.revision, agentPid: process.pid, idempotencyKey: 'resumed-native-owner' } });
+  await f.ops({ operation: 'recover_run_executions', input: {} });
+  const untouched = await f.ops({ operation: 'read_run_state', input: scope });
+  assert.equal(untouched.turnId, resumed.turnId); assert.equal(untouched.status.status, 'Running'); assert.equal(untouched.status.checkpointSummary, undefined, 'an old completion cannot settle the resumed turn');
+  const timestamp = new Date(Date.parse(resumed.status.startedAt) + 10).toISOString();
+  f.append([{ timestamp, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'resumed-native-first', started_at: timestamp, last_agent_message: '恢复后这一轮完整结果' } }]);
+  await f.ops({ operation: 'recover_run_executions', input: {} });
+  const final = await f.ops({ operation: 'read_run_state', input: scope });
+  assert.equal(final.status.checkpointSummary, '恢复后这一轮完整结果'); assert.equal(final.turnId, resumed.turnId);
+  assert.equal(final.taskId, prior.taskId); assert.notEqual(final.turnId, prior.turnId);
+  assert.equal(final.status.codexNativeTurnId, 'resumed-native-first');
+  assert.equal((await f.ops({ operation: 'read_run_state', input: f.scope })).status.checkpointSummary, '上一轮完整结果');
+});
+
+test('an invalid native completion cannot bind the first business turn or block a later valid result', async t => {
+  const f = await openNativeCodexHostFixture(t, 85);
+  f.append([{ timestamp: new Date(Date.parse(f.timestamp) - 1000).toISOString(), type: 'event_msg', payload: { type: 'task_complete', turn_id: 'invalid-completion-turn', started_at: f.timestamp, last_agent_message: '不应接受的结果' } }]);
+  await f.ops({ operation: 'recover_run_executions', input: {} });
+  const invalid = await f.ops({ operation: 'read_run_state', input: f.scope });
+  assert.equal(invalid.status.codexNativeTurnId, undefined, 'invalid completion timestamps cannot take ownership of the turn');
+  assert.equal(invalid.status.status, 'Running');
+  f.append([{ timestamp: f.timestamp, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'valid-completion-turn', started_at: f.timestamp, completed_at: f.timestamp, last_agent_message: '后来有效的完整结果' } }]);
+  await f.ops({ operation: 'recover_run_executions', input: {} });
+  await loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js')).settle(f.reference, undefined, f.root);
+  const valid = await f.ops({ operation: 'read_run_state', input: f.scope });
+  assert.equal(valid.status.status, 'Waiting'); assert.equal(valid.status.checkpointSummary, '后来有效的完整结果');
+});
+
+test('a native Codex task completion settles the interactive turn without an Agent checkpoint', async t => {
+  const f = await openNativeCodexHostFixture(t, 84);
+  f.append([
+    { timestamp: f.timestamp, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '# AGENTS.md instructions' }] } },
+    { timestamp: f.timestamp, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '<environment_context>...</environment_context>' }] } },
+    { timestamp: f.timestamp, type: 'response_item', payload: { type: 'message', role: 'assistant', phase: 'final_answer', content: [{ type: 'output_text', text: '第一轮信息已记住。' }] } },
+    { timestamp: f.timestamp, type: 'event_msg', payload: { type: 'task_complete', turn_id: '019ecd99-4325-7050-8e71-7def92359d99', last_agent_message: '第一轮信息已记住。', started_at: f.timestamp, completed_at: f.timestamp } }
+  ]);
+  const originalRead = fs.readFileSync;
+  fs.readFileSync = function(file, ...args) { if (path.resolve(String(file)) === f.transcriptPath) throw new Error('the status poller must not synchronously read the complete transcript'); return originalRead.call(this, file, ...args); };
   try {
-    await extensionModule.__processAgentStatusFile(statusFilePath);
-  } finally {
-    fs.readFileSync = originalReadFileSync;
-  }
-
-  const settledStatus = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
-  const binding = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
-  assert.equal(settledStatus.status, 'Waiting');
-  assert.equal(settledStatus.nativeSessionId, sessionId);
-  assert.equal(settledStatus.nativeSessionIdIsCurrent, true);
-  assert.equal(settledStatus.checkpointSequence, 1);
-  assert.ok(settledStatus.codexTranscriptCursor > 0);
-  assert.equal(binding.resumableRevision, 3);
-  assert.equal(binding.revisions[2].evidence.transcriptPath, transcriptPath);
-  assert.equal(logs[0].status, 'Completed');
+    await f.ops({ operation: 'recover_run_executions', input: {} });
+    await loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js')).settle(f.reference, undefined, f.root);
+  } finally { fs.readFileSync = originalRead; }
+  const status = await f.ops({ operation: 'read_run_state', input: f.scope });
+  const binding = await f.ops({ operation: 'read_run_binding', input: f.scope });
+  assert.equal(status.status.status, 'Waiting'); assert.equal(status.status.nativeSessionId, f.sessionId);
+  assert.equal(status.status.nativeSessionIdIsCurrent, true); assert.equal(status.status.checkpointSequence, 1);
+  assert.ok(status.status.codexNativeCursor > 0); assert.equal(binding.resumableRevision, 3);
+  assert.equal(binding.revisions[2].evidence.transcriptPath, f.transcriptPath);
+  const journal = await new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation, input) => f.ops({ operation, input })).readJournal(f.reference);
+  assert.equal(journal.entry.status, 'Completed'); assert.match(journal.entry.output, /第一轮信息已记住。/);
+  assert.equal(status.turnId, f.run.turnId);
+  const captured = await f.ops({ operation: 'read_run_log', input: { ...f.scope, stream: 'native:codex', offset: 0, limit: 65536 } });
+  assert.deepEqual(Buffer.from(captured.bytes, 'base64'), fs.readFileSync(f.transcriptPath), 'the full original machine evidence must remain byte exact');
+  const walPath = path.join(f.root, 'solomap.db-wal'); const wal = fs.readFileSync(walPath);
+  await f.ops({ operation: 'recover_run_executions', input: {} });
+  assert.deepEqual(fs.readFileSync(walPath), wal, 'unchanged native recovery must not amplify writes');
+  for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', dir)), false);
 });
 
-test('continuation recovers a preparing Codex binding from its exact launch transcript', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__buildAgentShellScript = buildAgentShellScript;',
-      'module.exports.__getConfirmedCodexResumeContext = getConfirmedCodexResumeContext;',
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__resolveNativeSessionIdForConversation = resolveNativeSessionIdForConversation;',
-      'module.exports.__recoverCodexSessionIdentityForConversation = recoverCodexSessionIdentityForConversation;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
-    ].join('\n')
-  );
-  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-click-recover-'));
-  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-click-home-'));
-  const cliRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-click-cli-'));
-  const mockCodexPath = path.join(cliRoot, 'codex');
-  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '85');
-  const sessionFilePath = path.join(runDir, 'session.json');
-  const bindingNonce = '1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef';
-  const sessionId = '019ecd99-4325-7050-8e71-7def92359d23';
-  const transcriptRoot = path.join(codexHome, 'sessions', '2026', '09', '02');
-  fs.mkdirSync(transcriptRoot, { recursive: true });
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(mockCodexPath, '#!/bin/sh\necho codex-cli 0.151.0\n', 'utf8');
-  fs.chmodSync(mockCodexPath, 0o755);
-  fs.writeFileSync(path.join(transcriptRoot, `rollout-${sessionId}.jsonl`), [
-    JSON.stringify({
-      timestamp: '2026-09-02T00:30:01.000Z',
-      type: 'session_meta',
-      payload: { id: sessionId, session_id: sessionId, cwd: workspaceRoot }
-    }),
-    JSON.stringify({
-      timestamp: '2026-09-02T00:30:01.100Z',
-      type: 'response_item',
-      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '# AGENTS.md instructions' }] }
-    }),
-    JSON.stringify({
-      timestamp: '2026-09-02T00:30:01.200Z',
-      type: 'response_item',
-      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `SoloMap binding nonce: ${bindingNonce}.` }] }
-    })
-  ].join('\n') + '\n', 'utf8');
-  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
-  identity.createSessionBinding(sessionFilePath, {
-    runId: '85',
-    provider: 'codex',
-    workspaceRoot,
-    cliPath: mockCodexPath,
-    bindingNonce,
-    method: 'transcript_correlated_compat',
-    contract: 'compatibility',
-    createdAt: '2026-09-02T00:30:00.000Z',
-    providerContext: { codex: { codexHome } }
-  });
-  const logs = [{ id: 85, nodeId: '__solo__', agentCli: mockCodexPath, command: 'codex', output: 'Interactive session state: Closed', status: 'Failed' }];
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => logs,
-    getAgentExecutions: () => logs,
-    updateAgentExecution: (id, agentCli, command, output, status) => {
-      const entry = logs.find((candidate) => candidate.id === id);
-      if (entry) Object.assign(entry, { agentCli, command, output, status });
-      return Boolean(entry);
-    },
-    logAgentExecution: () => 86
-  }, workspaceRoot, {
-    sendNodesToWebview() {},
-    sendSoloConversationHistory() {},
-    async refreshProjectConversationSnapshotAfterStatusChange() {},
-    sendLocalProjects() {}
-  });
-  const previousCodexHome = process.env.CODEX_HOME;
-  process.env.CODEX_HOME = codexHome;
-  try {
-    await extensionModule.__recoverCodexSessionIdentityForConversation('__solo__', {
-      id: 85,
-      agentCli: mockCodexPath,
-      output: 'Interactive session state: Closed',
-      status: 'Failed'
-    });
-    const sourceConversation = {
-      id: 85,
-      agentCli: mockCodexPath,
-      output: 'Interactive session state: Closed',
-      status: 'Failed'
+test('continuation recovers a preparing Codex binding from its exact launch transcript', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-preparing-history-host-'));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'), codexHome = path.join(base, 'codex-home'); fs.mkdirSync(project);
+  const f = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  await engine.initAndSync(); t.after(() => engine.close());
+  const startedAt = new Date(Date.now() - 2000).toISOString(), finishedAt = new Date(Date.parse(startedAt) + 500).toISOString();
+  const nonce = require('node:crypto').randomBytes(32).toString('hex'), sessionId = '019ecd99-4325-7050-8e71-7def92359d23';
+  const binding = require('../out/sessionIdentity.js').createSessionBindingValue({ runId: '85', provider: 'codex', workspaceRoot: project, cliPath: 'codex', bindingNonce: nonce, method: 'transcript_correlated_compat', contract: 'compatibility', createdAt: startedAt, providerContext: { codex: { codexHome } } });
+  const date = new Date(startedAt);
+  const transcriptPath = path.join(codexHome, 'sessions', String(date.getUTCFullYear()), String(date.getUTCMonth() + 1).padStart(2, '0'), String(date.getUTCDate()).padStart(2, '0'), `rollout-${sessionId}.jsonl`); fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+  const timestamp = new Date(Date.parse(startedAt) + 10).toISOString();
+  fs.writeFileSync(transcriptPath, [{ timestamp, type: 'session_meta', payload: { id: sessionId, session_id: sessionId, cwd: project } }, { timestamp, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `SoloMap binding nonce: ${nonce}.` }] } }].map(row => JSON.stringify(row)).join('\n') + '\n');
+  assert.equal((await require('../out/codexSessionIdentity.js').locateCodexSessionByBindingNonce({ codexHome, workspaceRoot: project, bindingNonce: nonce, startedAt })).status, 'matched', 'the historical fixture must have a valid exact native source before exercising Continue');
+  const status = { workspaceRoot: project, nodeId: '__solo__', executionLogId: 85, rootExecutionLogId: 85, runKind: 'solo', agentCli: 'codex', status: 'Failed', userMessage: '用户原始完整历史目标', interactiveSession: true, interactiveSessionClosed: true, startedAt, turnStartedAt: startedAt, finishedAt, checkpointSequence: 0, checkpointSummary: '保留原会话失败说明', sessionProvider: 'codex', bindingNonce: nonce, sessionBindingHeadRevision: 1 };
+  const projectId = f.projectIds.get(project), location = await f.store.registerProject({ root: project });
+  const capture = (identity, key, bytes) => { const source = { identity, key, hash: require('node:crypto').createHash('sha256').update(bytes).digest('hex') }; f.store.captureMigrationSource(source, bytes); return source; };
+  const statusBytes = Buffer.from(JSON.stringify(status)); const statusSource = capture(`agent-status:${project}`, '85.json', statusBytes);
+  const nativeBytes = fs.readFileSync(transcriptPath); const nativeSource = capture(`native-codex:${project}`, transcriptPath, nativeBytes);
+  const old = f.store.adoptHistoricalRun(projectId, location.locationId, statusSource, { status, binding, prompt: `完整历史提示词\nSoloMap binding nonce: ${nonce}.`, command: 'codex original arguments', output: Buffer.from('完整历史原始输出'), nativeTranscript: { source: nativeSource, bytes: nativeBytes }, unregisteredReports: [] }).state;
+  await assert.rejects(f.ops({ operation: 'recover_run_executions', input: { root: project, executionLogId: 85, generation: old.generation + 1, identityOnly: true } }), /run_owner_conflict/);
+  assert.deepEqual(await f.ops({ operation: 'read_run_binding', input: { root: project, executionLogId: 85 } }), binding);
+  const delivered = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.nativeContinue = handleContinueNativeConversation;
+    module.exports.connect = (engine, project, root, prepare, deliver) => {
+      syncEngine = engine; activeProjectRoot = project; sidebarProvider = null; extensionContextRef = {};
+      getPersistedSettings = () => ({ globalDataPath: root, globalPrompt: '', taskPermissionMode: 'auto' });
+      agentCli_1.commandExists = () => true; createPreSessionGitCommit = async () => '';
+      prepareOrdinaryConversation = prepare; deliverOrdinaryConversation = deliver;
     };
-    const recoveredSessionId = extensionModule.__resolveNativeSessionIdForConversation('__solo__', sourceConversation);
-    assert.equal(recoveredSessionId, sessionId);
-
-    const legacyContinuationRunDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '86');
-    const legacyContinuationBindingPath = path.join(legacyContinuationRunDir, 'session.json');
-    identity.createSessionBinding(legacyContinuationBindingPath, {
-      runId: '86',
-      provider: 'codex',
-      workspaceRoot,
-      cliPath: mockCodexPath,
-      bindingNonce: '99887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbbaa',
-      method: 'transcript_correlated_compat',
-      contract: 'compatibility',
-      providerContext: { codex: { codexHome } }
-    });
-    identity.appendSessionBindingRevision(legacyContinuationBindingPath, 1, {
-      sessionId,
-      method: 'transcript_correlated_compat',
-      contract: 'compatibility',
-      state: 'planned',
-      providerContext: { codex: { codexHome } },
-      evidence: { source: 'confirmed_resume_target' }
-    });
-    identity.confirmSessionBinding(
-      legacyContinuationBindingPath,
-      2,
-      sessionId,
-      new Date().toISOString(),
-      { source: 'solomap_turn_completed' }
-    );
-    const legacyContinuationConversation = {
-      id: 86,
-      agentCli: mockCodexPath,
-      output: `Agent continuation started.\n\nContinuation parent conversation: 85\n\nNative Agent session saved: session.json (${sessionId})`,
-      status: 'Completed'
-    };
-    logs.push(legacyContinuationConversation);
-
-    const resumeContext = extensionModule.__getConfirmedCodexResumeContext(
-      workspaceRoot,
-      '__solo__',
-      legacyContinuationConversation,
-      recoveredSessionId
-    );
-    assert.equal(resumeContext.transcriptPath, path.join(transcriptRoot, `rollout-${sessionId}.jsonl`));
-    const transcriptPath = resumeContext.transcriptPath;
-    const resumeCursor = fs.statSync(transcriptPath).size;
-    const continuationRunDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '87');
-    const continuationStatusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '87.json');
-    const built = extensionModule.__buildAgentShellScript(
-      mockCodexPath,
-      '',
-      '继续当前 Codex 对话。',
-      workspaceRoot,
-      '__solo__',
-      87,
-      '继续当前 Codex 对话。',
-      undefined,
-      recoveredSessionId,
-      `${mockCodexPath} resume ${recoveredSessionId}`,
-      'solo_continue',
-      '',
-      '',
-      'auto',
-      '',
-      'off',
-      {},
-      continuationRunDir,
-      continuationStatusFilePath,
-      { codexResumeTranscriptPath: transcriptPath }
-    );
-    const continuationBindingPath = path.join(continuationRunDir, 'session.json');
-    const continuationBinding = JSON.parse(fs.readFileSync(continuationBindingPath, 'utf8'));
-    const continuationStartedMs = Date.parse(continuationBinding.createdAt);
-    assert.equal(continuationBinding.headRevision, 3);
-    assert.equal(continuationBinding.resumableRevision, 3);
-    assert.equal(continuationBinding.revisions[2].sessionId, sessionId);
-    assert.equal(continuationBinding.revisions[2].evidence.transcriptPath, transcriptPath);
-    const generatedRunScript = fs.readFileSync(built.runScriptPath, 'utf8');
-    assert.match(generatedRunScript, new RegExp(`"codexTranscriptCursor":${resumeCursor}`));
-    assert.match(generatedRunScript, new RegExp(`"nativeSessionId":"${sessionId}"`));
-
-    fs.appendFileSync(transcriptPath, [
-      JSON.stringify({
-        timestamp: new Date(continuationStartedMs + 1_000).toISOString(),
-        type: 'response_item',
-        payload: { type: 'message', role: 'assistant', phase: 'final_answer', content: [{ type: 'output_text', text: '续聊已完成。' }] }
-      }),
-      JSON.stringify({
-        timestamp: new Date(continuationStartedMs + 1_100).toISOString(),
-        type: 'event_msg',
-        payload: {
-          type: 'task_complete',
-          turn_id: '019ecd99-4325-7050-8e71-7def92359d24',
-          last_agent_message: '续聊已完成。',
-          started_at: (continuationStartedMs + 500) / 1000,
-          completed_at: (continuationStartedMs + 1_100) / 1000
-        }
-      })
-    ].join('\n') + '\n', 'utf8');
-    const outputFilePath = path.join(continuationRunDir, 'output.log');
-    const changesFilePath = path.join(continuationRunDir, 'changes.txt');
-    const touchedFilesPath = path.join(continuationRunDir, 'touched-files.txt');
-    fs.mkdirSync(path.dirname(continuationStatusFilePath), { recursive: true });
-    fs.writeFileSync(outputFilePath, '续聊已完成。\n', 'utf8');
-    fs.writeFileSync(changesFilePath, '', 'utf8');
-    fs.writeFileSync(touchedFilesPath, '', 'utf8');
-    fs.writeFileSync(continuationStatusFilePath, JSON.stringify({
-      workspaceRoot,
-      nodeId: '__solo__',
-      runKind: 'solo_continue',
-      status: 'Running',
-      agentCli: mockCodexPath,
-      commandPreview: `${mockCodexPath} [resume]`,
-      sessionProvider: 'codex',
-      sessionFilePath: continuationBindingPath,
-      plannedNativeSessionId: sessionId,
-      nativeSessionId: sessionId,
-      nativeSessionIdIsCurrent: true,
-      sessionBindingHeadRevision: 3,
-      executionLogId: 87,
-      rootExecutionLogId: 87,
-      interactiveSession: true,
-      checkpointSequence: 0,
-      codexTranscriptCursor: resumeCursor,
-      outputFilePath,
-      changesFilePath,
-      touchedFilesPath,
-      startedAt: continuationBinding.createdAt,
-      turnStartedAt: continuationBinding.createdAt
-    }), 'utf8');
-    logs.push({ id: 87, nodeId: '__solo__', agentCli: mockCodexPath, command: 'codex resume', output: 'Interactive session state: Running', status: 'Running' });
-
-    await extensionModule.__processAgentStatusFile(continuationStatusFilePath);
-
-    const settledContinuation = JSON.parse(fs.readFileSync(continuationStatusFilePath, 'utf8'));
-    assert.equal(settledContinuation.status, 'Waiting');
-    assert.equal(settledContinuation.nativeSessionId, sessionId);
-    assert.equal(settledContinuation.checkpointEventId, `codex:${sessionId}:019ecd99-4325-7050-8e71-7def92359d24`);
-    assert.equal(logs[2].status, 'Completed');
-  } finally {
-    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
-    else process.env.CODEX_HOME = previousCodexHome;
-  }
-  const binding = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
-  assert.equal(binding.resumableRevision, 3);
+  `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
+  extension.connect(engine, project, root,
+    (_context, input) => require('../out/agentRunPreparation.js').prepareAgentRun({ ...input, executionLogId: 0, launchIntentId: 'historical-native-continue' }, (operation, input) => f.ops({ operation, input })),
+    async (_context, prepared) => { delivered.push(prepared); return Number(prepared.status.rootExecutionLogId); });
+  await extension.nativeContinue({}, '__solo__', 85);
+  assert.equal(delivered.length, 1); const continuation = delivered[0];
+  const scope = { root: project, projectId, executionLogId: 85 };
+  const recovered = await f.ops({ operation: 'read_run_binding', input: scope });
+  assert.equal(recovered.resumableRevision, 3); assert.equal(recovered.revisions[2].sessionId, sessionId); assert.equal(recovered.revisions[2].evidence.transcriptPath, transcriptPath);
+  const prior = await f.ops({ operation: 'read_run_state', input: scope });
+  assert.equal(prior.status.interactiveSessionClosed, true); assert.equal(prior.status.status, 'Failed'); assert.equal(prior.status.checkpointSummary, status.checkpointSummary); assert.equal(prior.turnId, old.turnId);
+  assert.deepEqual(await f.ops({ operation: 'read_run_binding', input: { ...scope, revision: old.revision } }), binding);
+  assert.deepEqual(f.store.readMigrationSource(statusSource.identity, statusSource.key).bytes, statusBytes);
+  const walPath = path.join(root, 'solomap.db-wal'); const wal = fs.readFileSync(walPath);
+  await f.ops({ operation: 'recover_run_executions', input: { root: project, executionLogId: 85, generation: prior.generation, identityOnly: true } });
+  assert.deepEqual(fs.readFileSync(walPath), wal, 'unchanged sealed identity recovery must not amplify writes');
+  assert.equal(continuation.taskId, old.taskId); assert.notEqual(continuation.turnId, old.turnId); assert.match(continuation.finalCommand, /runAgentProcess\.js/);
+  const resumedScope = { root: project, projectId, executionLogId: Number(continuation.status.rootExecutionLogId) };
+  const resumedBinding = await f.ops({ operation: 'read_run_binding', input: resumedScope });
+  assert.equal(resumedBinding.resumableRevision, 3); assert.equal(resumedBinding.revisions[2].evidence.transcriptPath, transcriptPath);
+  const head = await f.ops({ operation: 'read_run_state', input: resumedScope });
+  await f.ops({ operation: 'claim_run', input: { ...resumedScope, expectedRevision: head.revision, agentPid: process.pid, idempotencyKey: 'historical-resume-owner' } });
+  const resumedAt = new Date(Date.parse(head.status.startedAt) + 10).toISOString();
+  fs.appendFileSync(transcriptPath, JSON.stringify({ timestamp: resumedAt, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'history-resumed-first', started_at: resumedAt, last_agent_message: '续聊已完成。' } }) + '\n');
+  await f.ops({ operation: 'recover_run_executions', input: {} });
+  const reference = require('../out/runLifecycleClient.js').runStatusReference(project, resumedScope.executionLogId);
+  await loadSoloSettlementHost({ ...f, engine, project, root }, null, require('../out/autonomousRuntimeControl.js')).settle(reference, undefined, root);
+  const settled = await f.ops({ operation: 'read_run_state', input: resumedScope });
+  assert.equal(settled.status.status, 'Waiting'); assert.equal(settled.status.checkpointSummary, '续聊已完成。'); assert.equal(settled.status.nativeSessionId, sessionId);
+  for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(project, '.solopreneur', dir)), false);
 });
 
-test('closing Codex without an exact nonce match records unavailable and never guesses a session', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
-    ].join('\n')
-  );
-  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-close-unavailable-'));
-  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-codex-close-home-'));
-  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '84');
-  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '84.json');
-  const sessionFilePath = path.join(runDir, 'session.json');
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
-  identity.createSessionBinding(sessionFilePath, {
-    runId: '84',
-    provider: 'codex',
-    workspaceRoot,
-    cliPath: 'codex',
-    bindingNonce: 'ffeeddccbbaa99887766554433221100',
-    method: 'transcript_correlated_compat',
-    contract: 'compatibility',
-    createdAt: '2026-09-02T00:20:00.000Z',
-    providerContext: { codex: { codexHome } }
-  });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Session Closed',
-    agentCli: 'codex',
-    sessionProvider: 'codex',
-    sessionFilePath,
-    nativeSessionId: '019ecd99-4325-7050-8e71-7def92359fff',
-    nativeSessionIdIsCurrent: true,
-    executionLogId: 84,
-    rootExecutionLogId: 84,
-    interactiveSession: true
-  }), 'utf8');
-  const logs = [{ id: 84, nodeId: '__solo__', agentCli: 'codex', command: 'codex', output: 'Interactive session state: Waiting', status: 'Completed' }];
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => logs,
-    getAgentExecutions: () => [],
-    updateAgentExecution: (id, agentCli, command, output, status) => {
-      const entry = logs.find((candidate) => candidate.id === id);
-      if (entry) Object.assign(entry, { agentCli, command, output, status });
-      return Boolean(entry);
-    }
-  }, workspaceRoot, {
-    sendNodesToWebview() {},
-    sendSoloConversationHistory() {},
-    async refreshProjectConversationSnapshotAfterStatusChange() {},
-    sendLocalProjects() {}
-  });
+test('closing Codex without an exact nonce match records unavailable and never guesses a session', async t => {
+  const f = await openNativeCodexHostFixture(t, 88);
+  fs.writeFileSync(f.transcriptPath, fs.readFileSync(f.transcriptPath, 'utf8').replace(f.nonce, 'another-launch-binding-nonce'));
+  const state = await f.ops({ operation: 'read_run_state', input: f.scope });
+  await f.ops({ operation: 'patch_run_state', input: { ...f.scope, generation: state.generation, expectedRevision: state.revision, patch: { nativeSessionId: '019ecd99-4325-7050-8e71-7def92359fff', nativeSessionIdIsCurrent: true }, idempotencyKey: 'unobserved-stale-session' } });
+  const latest = await f.ops({ operation: 'read_run_checkpoint_state', input: f.scope });
+  const intent = { ...f.scope, generation: latest.generation, proof: latest.proof, expectedRevision: latest.revision, expectedTurnId: latest.turnId, action: 'session-close', exitCode: 0, idempotencyKey: 'unobserved-session-close' };
+  const closed = await f.ops({ operation: 'checkpoint_run', input: intent });
+  const binding = await f.ops({ operation: 'read_run_binding', input: f.scope });
+  assert.equal(binding.version, 2); assert.equal(binding.headRevision, 2);
+  assert.equal(binding.revisions[1].state, 'unavailable'); assert.equal(binding.revisions[1].errorCode, 'identity_not_observed');
+  assert.equal(binding.resumableRevision, undefined); assert.equal(closed.status.nativeSessionId, '');
+  assert.equal(closed.status.nativeSessionIdIsCurrent, false); assert.equal(closed.status.interactiveSessionClosed, true);
+  const walPath = path.join(f.root, 'solomap.db-wal'); const wal = fs.readFileSync(walPath);
+  const replay = await f.ops({ operation: 'checkpoint_run', input: intent });
+  assert.equal(replay.receipt.committedSequence, closed.receipt.committedSequence); assert.deepEqual(fs.readFileSync(walPath), wal);
+  for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', dir)), false);
+});
 
-  await extensionModule.__processAgentStatusFile(statusFilePath);
+test('closing the native session imports its exact final identity and result before sealing the run', async t => {
+  const f = await openNativeCodexHostFixture(t, 89);
+  f.append([{ timestamp: f.timestamp, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'final-native-turn', started_at: f.timestamp, last_agent_message: '退出前最后一份完整结果' } }]);
+  let closed;
+  for (;;) {
+    const state = await f.ops({ operation: 'read_run_checkpoint_state', input: f.scope });
+    try { closed = await f.ops({ operation: 'checkpoint_run', input: { ...f.scope, generation: state.generation, proof: state.proof, expectedRevision: state.revision, expectedTurnId: f.run.turnId, action: 'session-close', exitCode: 0, idempotencyKey: 'matched-session-close' } }); break; }
+    catch (error) { if (error.message !== 'revision_conflict') throw error; }
+  }
+  const binding = await f.ops({ operation: 'read_run_binding', input: f.scope });
+  assert.equal(binding.resumableRevision, 3); assert.equal(binding.revisions[2].sessionId, f.sessionId);
+  assert.equal(closed.status.checkpointSummary, '退出前最后一份完整结果'); assert.equal(closed.status.interactiveSessionClosed, true);
+  assert.equal(closed.turnId, f.run.turnId);
+  const log = await f.ops({ operation: 'read_run_log', input: { ...f.scope, stream: 'native:codex', offset: 0, limit: 65536 } });
+  assert.deepEqual(Buffer.from(log.bytes, 'base64'), fs.readFileSync(f.transcriptPath));
+});
 
-  const binding = JSON.parse(fs.readFileSync(sessionFilePath, 'utf8'));
-  const status = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
-  assert.equal(binding.version, 2);
-  assert.equal(binding.headRevision, 2);
-  assert.equal(binding.revisions[1].state, 'unavailable');
-  assert.equal(binding.revisions[1].errorCode, 'identity_not_observed');
-  assert.equal(binding.resumableRevision, undefined);
-  assert.equal(status.nativeSessionId, '');
-  assert.equal(fs.existsSync(path.join(workspaceRoot, '.solopreneur', 'step-sessions', '__solo__.json')), false);
+test('stopping a finished native writer imports its final reply before sealing the conversation', async t => {
+  const f = await openNativeCodexHostFixture(t, 90);
+  f.append([{ timestamp: f.timestamp, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'stopped-native-turn', started_at: f.timestamp, last_agent_message: '停止前已写出的完整回复' } }]);
+  const state = await f.ops({ operation: 'read_run_state', input: f.scope });
+  const dead = await f.ops({ operation: 'patch_run_state', input: { ...f.scope, generation: state.generation, expectedRevision: state.revision, patch: { agentPid: 0, agentChildPid: 0 }, idempotencyKey: 'native-writer-exited' } });
+  const closed = await f.ops({ operation: 'stop_run', input: { ...f.scope, generation: dead.generation, expectedRevision: dead.revision, expectedTurnId: f.run.turnId, reason: '用户关闭会话', idempotencyKey: 'stop-native-final' } });
+  const binding = await f.ops({ operation: 'read_run_binding', input: f.scope });
+  assert.equal(binding.resumableRevision, 3); assert.equal(closed.status.checkpointSummary, '停止前已写出的完整回复');
+  assert.equal(closed.status.interactiveSessionClosed, true); assert.equal(closed.turnId, f.run.turnId);
 });
 
 test('a confirmed Codex conversation remains resumable after the CLI is upgraded', () => {
@@ -11500,953 +12035,614 @@ test('a confirmed Codex conversation remains resumable after the CLI is upgraded
   }
 });
 
-test('a damaged version 2 binding never falls back to a stale native session ID', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
-    ].join('\n')
-  );
-  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-damaged-v2-binding-'));
-  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '841');
-  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '841.json');
-  const sessionFilePath = path.join(runDir, 'session.json');
-  const staleSessionId = '019ecd99-4325-7050-8e71-7def92359bad';
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(sessionFilePath, '{"version":2,"revisions":', 'utf8');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Session Closed',
-    agentCli: 'codex',
-    sessionProvider: 'codex',
-    sessionFilePath,
-    sessionBindingHeadRevision: 1,
-    nativeSessionId: staleSessionId,
-    nativeSessionIdIsCurrent: true,
-    executionLogId: 841,
-    rootExecutionLogId: 841,
-    interactiveSession: true
-  }), 'utf8');
-  const logs = [{ id: 841, nodeId: '__solo__', agentCli: 'codex', command: 'codex', output: 'Interactive session state: Waiting', status: 'Completed' }];
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => logs,
-    getAgentExecutions: () => [],
-    updateAgentExecution: (id, agentCli, command, output, status) => {
-      const entry = logs.find((candidate) => candidate.id === id);
-      if (entry) Object.assign(entry, { agentCli, command, output, status });
-      return Boolean(entry);
-    }
-  }, workspaceRoot, {
-    sendNodesToWebview() {},
-    sendSoloConversationHistory() {},
-    async refreshProjectConversationSnapshotAfterStatusChange() {},
-    sendLocalProjects() {}
-  });
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  const status = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
-  assert.equal(status.nativeSessionId, '');
-  assert.equal(fs.existsSync(path.join(workspaceRoot, '.solopreneur', 'step-sessions', '__solo__.json')), false);
-  assert.equal(fs.readFileSync(sessionFilePath, 'utf8'), '{"version":2,"revisions":');
+test('a damaged version 2 binding never falls back to a stale native session ID', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 841);
+  await f.checkpoint('complete', { outcome: 'partial', summary: '已有完整结果不因身份损坏丢失' }, f.run.status.plannedNativeSessionId);
+  await loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js')).settle(f.reference, undefined, f.root);
+  const source = await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 841 } });
+  const binding = await f.ops({ operation: 'read_run_binding', input: { projectId: source.projectId, executionLogId: 841 } });
+  const journal = await f.ops({ operation: 'read_run_turn_journal', input: { root: f.project, executionLogId: 841 } });
+  const damaged = structuredClone(binding); damaged.revisions[1].revision = 1;
+  // Only this owned fixture simulates damaged stored identity bytes; the production write operation rejects them.
+  const damagedContent = f.store.putContent(JSON.stringify(damaged), 'application/json');
+  f.store.db.run('UPDATE run_control SET binding_content_id=? WHERE project_id=? AND run_id=?', [damagedContent, source.projectId, source.runId]);
+  await assert.rejects(f.ops({ operation: 'read_run_binding', input: { projectId: source.projectId, executionLogId: 841 } }), error => error.code === 'identity_binding_invalid');
+  const host = loadCompiledModule('out/extension.js', `
+    module.exports.nativeContinue = handleContinueNativeConversation;
+    module.exports.connect = (engine, project, root) => {
+      syncEngine = engine; activeProjectRoot = project; sidebarProvider = null; extensionContextRef = {};
+      getPersistedSettings = () => ({ globalDataPath: root, globalPrompt: '', taskPermissionMode: 'auto' });
+      agentCli_1.commandExists = () => true;
+      createPreSessionGitCommit = async () => { throw new Error('damaged identity must not reach Git preparation'); };
+      prepareOrdinaryConversation = async () => { throw new Error('damaged identity must not launch a continuation'); };
+    };
+  `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
+  host.connect(f.engine, f.project, f.root);
+  const walPath = path.join(f.root, 'solomap.db-wal'), wal = fs.readFileSync(walPath);
+  await assert.rejects(host.nativeContinue({}, '__solo__', 841), /Session binding revision sequence is invalid/);
+  assert.deepEqual(fs.readFileSync(walPath), wal);
+  assert.deepEqual(await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 841 } }), source);
+  assert.deepEqual(await f.ops({ operation: 'read_run_turn_journal', input: { root: f.project, executionLogId: 841 } }), journal);
+  assert.equal((await f.ops({ operation: 'list_run_states', input: { root: f.project } })).items.length, 1);
+  assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'step-sessions', '__solo__.json')), false);
+  assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'agent-runs')), false);
 });
 
-test('closing a confirmed interactive session preserves the run revision pointer', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
-    ].join('\n')
-  );
-  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-confirmed-close-pointer-'));
-  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '85');
-  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '85.json');
-  const sessionFilePath = path.join(runDir, 'session.json');
-  const sessionId = '019ecd99-4325-7050-8e71-7def92359d22';
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  const identity = require(path.join(__dirname, '..', 'out', 'sessionIdentity.js'));
-  identity.createSessionBinding(sessionFilePath, {
-    runId: '85',
-    provider: 'claude',
-    workspaceRoot,
-    cliPath: 'claude',
-    bindingNonce: 'confirmed-close-pointer-nonce',
-    method: 'caller_assigned',
-    contract: 'official_stable'
-  });
-  identity.appendSessionBindingRevision(sessionFilePath, 1, {
-    sessionId,
-    method: 'caller_assigned',
-    contract: 'official_stable',
-    state: 'planned'
-  });
-  identity.confirmSessionBinding(sessionFilePath, 2, sessionId);
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Session Closed',
-    agentCli: 'claude',
-    sessionProvider: 'claude',
-    sessionFilePath,
-    executionLogId: 85,
-    rootExecutionLogId: 85,
-    interactiveSession: true
-  }), 'utf8');
-  const logs = [{ id: 85, nodeId: '__solo__', agentCli: 'claude', command: 'claude', output: 'Interactive session state: Waiting', status: 'Completed' }];
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => logs,
-    getAgentExecutions: () => [],
-    updateAgentExecution: () => true
-  }, workspaceRoot, {
-    sendNodesToWebview() {},
-    sendSoloConversationHistory() {},
-    async refreshProjectConversationSnapshotAfterStatusChange() {},
-    sendLocalProjects() {}
-  });
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  const stored = JSON.parse(fs.readFileSync(path.join(workspaceRoot, '.solopreneur', 'step-sessions', '__solo__.json'), 'utf8'));
-  assert.equal(stored.version, 2);
-  assert.equal(stored.sessions.claude.sessionId, sessionId);
-  assert.equal(stored.sessions.claude.runId, '85');
-  assert.equal(stored.sessions.claude.revision, 3);
+test('closing a confirmed interactive session preserves the run revision pointer', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 95);
+  await f.checkpoint('complete', { outcome: 'partial', summary: '关闭前已经完成的完整结果' }, f.run.status.plannedNativeSessionId);
+  const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation, input) => f.ops({ operation, input }));
+  const binding = await client.readBinding(f.reference);
+  await f.checkpoint('session-close', { 'exit-code': 0 });
+  await loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js')).settle(f.reference, undefined, f.root);
+  const stored = await client.getResumableSession(f.reference);
+  assert.equal(stored.sessionId, f.run.status.plannedNativeSessionId); assert.equal(stored.runId, '95'); assert.equal(stored.revision, 3);
+  assert.deepEqual(await client.readBinding(f.reference), binding);
+  const state = await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 95 } });
+  assert.equal(state.status.interactiveSessionClosed, true); assert.equal(state.status.checkpointSummary, '关闭前已经完成的完整结果');
+  assert.equal(state.status.sessionBindingHeadRevision, 3);
+  for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', dir)), false);
 });
 
-test('interactive completion recovers a distinct ledger turn when the Agent omitted start', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
-    ].join('\n')
-  );
-  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-interactive-implicit-turn-'));
-  const runDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '__solo__', '61');
-  const statusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '61.json');
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  const outputFilePath = path.join(runDir, 'output.log');
-  const changesFilePath = path.join(runDir, 'changes.txt');
-  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
-  fs.writeFileSync(outputFilePath, 'Agent completed an unregistered terminal turn.\n', 'utf8');
-  fs.writeFileSync(changesFilePath, '', 'utf8');
-  fs.writeFileSync(touchedFilesPath, '', 'utf8');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot: projectRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'In Progress',
-    agentCli: 'codex',
-    command: 'codex interactive',
-    executionLogId: 61,
-    rootExecutionLogId: 61,
-    interactiveSession: true,
-    checkpointSequence: 4,
-    checkpointEventId: '4:complete',
-    checkpointImplicitTurn: true,
-    checkpointMessage: '检查遗漏的账本记录',
-    checkpointOutcome: 'partial',
-    checkpointSummary: '已补齐本轮结果',
-    outputFilePath,
-    changesFilePath,
-    touchedFilesPath,
-    startedAt: '2026-08-30T09:00:00.000Z'
-  }), 'utf8');
-  const logs = [{ id: 61, nodeId: '__solo__', output: 'Previous completed turn.', status: 'Completed' }];
-  const logged = [];
-  const updated = [];
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => logs,
-    getAgentExecutions: () => [],
-    logAgentExecution: (nodeId, agentCli, command, output, status) => {
-      const entry = { id: 62, nodeId, agentCli, command, output, status };
-      logs.push(entry);
-      logged.push(entry);
-      return 62;
-    },
-    updateAgentExecution: (id, agentCli, command, output, status) => {
-      updated.push({ id, agentCli, command, output, status });
-      const entry = logs.find((candidate) => candidate.id === id);
-      if (entry) Object.assign(entry, { agentCli, command, output, status });
-      return Boolean(entry);
-    }
-  }, projectRoot, {
-    sendNodesToWebview() {},
-    sendSoloConversationHistory() {},
-    async refreshProjectConversationSnapshotAfterStatusChange() {},
-    sendLocalProjects() {}
-  });
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  const settledStatus = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
-  assert.equal(logged.length, 1);
-  assert.equal(logged[0].id, 62);
-  assert.match(logged[0].output, /检查遗漏的账本记录/);
-  assert.ok(updated.some((entry) => entry.id === 62 && entry.status === 'Completed'));
-  assert.ok(!updated.some((entry) => entry.id === 61), 'the previous completed turn must not be overwritten');
-  assert.equal(settledStatus.executionLogId, 62);
-  assert.equal(settledStatus.status, 'Waiting');
-  assert.equal(settledStatus.checkpointImplicitTurn, false);
+test('interactive completion recovers a distinct ledger turn when the Agent omitted start', async t => {
+  const f = await openNativeCodexHostFixture(t, 61);
+  const host = loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js'));
+  f.append([{ timestamp: f.timestamp, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'first-native-turn', started_at: f.timestamp, last_agent_message: 'Previous completed turn.' } }]);
+  await f.ops({ operation: 'recover_run_executions', input: {} }); await host.settle(f.reference, undefined, f.root);
+  const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation, input) => f.ops({ operation, input }));
+  const first = await client.readJournal(f.reference);
+  const timestamp = new Date(Date.now() + 10).toISOString();
+  f.append([
+    { timestamp, type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '检查遗漏的账本记录' }] } },
+    { timestamp, type: 'event_msg', payload: { type: 'task_started', turn_id: 'implicit-next-native-turn', started_at: timestamp } },
+    { timestamp, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'implicit-next-native-turn', started_at: timestamp, last_agent_message: 'Agent completed an unregistered terminal turn.' } }
+  ]);
+  await f.ops({ operation: 'recover_run_executions', input: {} }); await host.settle(f.reference, undefined, f.root);
+  const second = await client.readJournal(f.reference); const status = await client.readStatus(f.reference);
+  const entries = await f.engine.readAgentExecutions('__solo__');
+  assert.equal(entries.length, 2); assert.equal(second.executionLogId, 62); assert.match(second.entry.output, /检查遗漏的账本记录/);
+  assert.equal(second.entry.status, 'Completed'); assert.deepEqual(await f.ops({ operation: 'read_run_turn_journal', input: { ...f.scope, turnId: f.run.turnId } }), first, 'the previous completed turn must not be overwritten');
+  assert.equal(status.executionLogId, 62); assert.equal(status.status, 'Waiting'); assert.notEqual(status.checkpointImplicitTurn, true);
+  assert.notEqual(second.turnId, first.turnId); assert.equal((await f.ops({ operation: 'read_run_state', input: f.scope })).taskId, f.run.taskId);
+  for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', dir)), false);
 });
 
-test('a long-waiting interactive session can still register a new turn before delivery', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__registerInteractiveConversationTurn = registerInteractiveConversationTurn;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; extensionContextRef = null; };'
-    ].join('\n')
-  );
-  const { ensureTaskCheckpointRuntime } = require(path.join(projectRoot, 'out/taskCheckpoint.js'));
-  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-interactive-long-wait-'));
-  const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '71.json');
-  const runtimePath = ensureTaskCheckpointRuntime(workspaceRoot);
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Waiting',
-    agentCli: 'codex',
-    executionLogId: 71,
-    rootExecutionLogId: 71,
-    interactiveSession: true,
-    taskCheckpointCommandPath: runtimePath,
-    checkpointToken: 'long-wait-token',
-    checkpointSequence: 2
-  }), 'utf8');
-  const oldTime = new Date(Date.now() - 10 * 60 * 1000);
-  fs.utimesSync(statusFilePath, oldTime, oldTime);
-  const logged = [];
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => [{ id: 71, nodeId: '__solo__', output: 'Interactive session state: Waiting', status: 'Completed' }],
-    getAgentExecutions: () => [],
-    logAgentExecution: (nodeId, agentCli, command, output, status) => {
-      logged.push({ nodeId, agentCli, command, output, status });
-      return 72;
-    }
-  }, workspaceRoot);
-
-  const registered = await extensionModule.__registerInteractiveConversationTurn(
-    workspaceRoot,
-    71,
-    '等待十分钟后继续'
-  );
-
-  assert.equal(registered, true);
-  assert.equal(logged.length, 1);
-  assert.equal(logged[0].status, 'Running');
-  assert.match(logged[0].output, /等待十分钟后继续/);
-  const runningStatus = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
-  assert.equal(runningStatus.status, 'Running');
-  assert.equal(runningStatus.executionLogId, 72);
+test('a long-waiting interactive session can still register a new turn before delivery', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 71);
+  await f.checkpoint('complete', { outcome: 'partial', summary: '首轮完成' }, f.run.status.plannedNativeSessionId);
+  await loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js')).settle(f.reference, undefined, f.root);
+  const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation, input) => f.ops({ operation, input }));
+  const prior = await client.readJournal(f.reference);
+  const current = await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 71 } });
+  const oldTime = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  await f.ops({ operation: 'patch_run_state', input: { root: f.project, executionLogId: 71, generation: current.generation, expectedRevision: current.revision, patch: { checkpointAt: oldTime, turnStartedAt: oldTime }, idempotencyKey: 'long-idle-session' } });
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.register = registerInteractiveConversationTurn;', { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
+  const registered = await extension.register(f.project, 71, '等待十分钟后继续', false, f.root, f.engine);
+  assert.ok(registered); assert.equal(registered.status, 'Running'); assert.equal(registered.executionLogId, 72);
+  const second = await client.readJournal(f.reference);
+  assert.equal(second.entry.status, 'Running'); assert.match(second.entry.output, /等待十分钟后继续/);
+  assert.deepEqual(await f.ops({ operation: 'read_run_turn_journal', input: { root: f.project, executionLogId: 71, turnId: f.run.turnId } }), prior);
+  const state = await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 71 } });
+  assert.equal(state.status.status, 'Running'); assert.equal(state.status.journalExecutionLogId, 72); assert.equal(state.taskId, f.run.taskId);
+  for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', dir)), false);
 });
 
-test('growth continuation keeps roadmap state and registers the actual new execution in the stable task', async () => {
-  const extensionModule = loadCompiledModule('out/extension.js', 'module.exports.__ensureInteractiveTurnExecution = ensureInteractiveTurnExecution;');
-  const { ensureTaskCheckpointRuntime } = require('../out/taskCheckpoint.js');
-  const { registerLearningTask } = require('../out/taskReport.js');
-  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-growth-continuation-'));
-  const runDir = path.join(workspaceRoot, '.solopreneur/agent-runs/node/1');
-  fs.mkdirSync(runDir, { recursive: true });
-  const taskId = registerLearningTask(workspaceRoot, { executionLogId: 1, runDir, userMessage: '原任务', startedAt: '2026-09-01' });
-  const statusFile = path.join(runDir, 'status.json');
-  fs.writeFileSync(statusFile, JSON.stringify({ workspaceRoot, status: 'Waiting', nodeId: 'node', executionLogId: 1, rootExecutionLogId: 1,
-    checkpointToken: 'test', checkpointSequence: 1, interactiveSession: true, learningTaskId: taskId, outputFilePath: path.join(runDir, 'output.log') }));
-  const runtime = ensureTaskCheckpointRuntime(workspaceRoot);
-  const started = childProcess.spawnSync(process.execPath, [runtime, 'start', '--message', '从汇报继续', '--preserve-roadmap-state', 'true'], {
-    encoding: 'utf8', env: { ...process.env, SOLOMAP_TASK_STATUS_FILE: statusFile, SOLOMAP_TASK_CHECKPOINT_TOKEN: 'test' }
-  });
-  assert.equal(started.status, 0, started.stderr);
-  const status = JSON.parse(fs.readFileSync(statusFile));
-  assert.equal(status.checkpointPreserveRoadmapState, true);
-  const result = await extensionModule.__ensureInteractiveTurnExecution({
-    getAgentExecutions: () => [{ id: 1, status: 'Completed' }],
-    logAgentExecution: () => 2,
-    getNodes: () => [{ id: 'node', status: 'Pending' }],
-    updateNode: () => assert.fail('viewing and continuing a report must not change roadmap state')
-  }, status, workspaceRoot);
-  assert.equal(result.executionLogId, 2);
-  const task = JSON.parse(fs.readFileSync(path.join(workspaceRoot, '.solopreneur/agent-runs/learning-tasks', `${taskId}.json`)));
-  assert.deepEqual(task.executions.map(run => run.id), [1, 2]);
-  assert.ok(task.executions.every(run => run.runDir === runDir));
+test('growth continuation keeps roadmap state and registers the actual new execution in the stable task', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 1, 'node');
+  await f.checkpoint('complete', { outcome: 'partial', summary: '原轮结果' }, f.run.status.plannedNativeSessionId);
+  await loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js')).settle(f.reference, undefined, f.root);
+  const before = f.engine.getNodes(); const csvPath = path.join(f.project, '.solopreneur', 'roadmap.csv'), csv = fs.readFileSync(csvPath);
+  assert.equal(before.find(node => node.id === 'node').status, 'Pending');
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.register = registerInteractiveConversationTurn;', { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
+  const originalUpdate = f.engine.updateNode; f.engine.updateNode = () => assert.fail('viewing and continuing a report must not change roadmap state');
+  let registered;
+  try { registered = await extension.register(f.project, 1, '从汇报继续', true, f.root, f.engine); }
+  finally { f.engine.updateNode = originalUpdate; }
+  assert.ok(registered); assert.equal(registered.executionLogId, 2);
+  const state = await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 1 } });
+  assert.equal(state.status.checkpointPreserveRoadmapState, true); assert.equal(state.taskId, f.run.taskId); assert.equal(state.status.learningTaskId, f.run.status.learningTaskId);
+  const tasks = f.store.readRegisteredReportSources(state.projectId, { taskId: state.status.learningTaskId }).tasks;
+  assert.equal(tasks.length, 1); assert.deepEqual(tasks[0].executions.map(run => run.id), [1, 2]);
+  assert.deepEqual(f.engine.getNodes(), before); assert.deepEqual(fs.readFileSync(csvPath), csv);
+  for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', dir)), false);
 });
 
-test('a checkpoint event arriving during settlement is queued and processed after the current event', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, sidebar) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = sidebar; };'
-    ].join('\n')
-  );
-  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-checkpoint-event-queue-'));
-  const runDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '__solo__', '81');
-  const statusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '81.json');
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  const outputFilePath = path.join(runDir, 'output.log');
-  const changesFilePath = path.join(runDir, 'changes.txt');
-  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
-  fs.writeFileSync(outputFilePath, 'First turn complete.\n', 'utf8');
-  fs.writeFileSync(changesFilePath, '', 'utf8');
-  fs.writeFileSync(touchedFilesPath, '', 'utf8');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot: projectRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'In Progress',
-    agentCli: 'codex',
-    executionLogId: 81,
-    rootExecutionLogId: 81,
-    interactiveSession: true,
-    checkpointSequence: 1,
-    checkpointEventId: '1:complete',
-    checkpointOutcome: 'partial',
-    checkpointSummary: '第一轮已完成',
-    outputFilePath,
-    changesFilePath,
-    touchedFilesPath,
-    startedAt: '2026-08-30T09:10:00.000Z'
-  }), 'utf8');
-  const logs = [{ id: 81, nodeId: '__solo__', output: 'Interactive session state: Running', status: 'Running' }];
-  const logged = [];
-  let releaseRefresh;
-  let signalRefreshEntered;
-  const refreshGate = new Promise((resolve) => { releaseRefresh = resolve; });
-  const refreshEntered = new Promise((resolve) => { signalRefreshEntered = resolve; });
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    getProjectAgentExecutions: () => logs,
-    getAgentExecutions: () => [],
-    logAgentExecution: (nodeId, agentCli, command, output, status) => {
-      const entry = { id: 82, nodeId, agentCli, command, output, status };
-      logs.push(entry);
-      logged.push(entry);
-      return 82;
-    },
-    updateAgentExecution: (id, agentCli, command, output, status) => {
-      const entry = logs.find((candidate) => candidate.id === id);
-      if (entry) Object.assign(entry, { agentCli, command, output, status });
-      return Boolean(entry);
-    }
-  }, projectRoot, {
-    sendNodesToWebview() {},
-    sendSoloConversationHistory() {},
-    async refreshProjectConversationSnapshotAfterStatusChange() {
-      signalRefreshEntered();
-      await refreshGate;
-    },
-    sendLocalProjects() {}
-  });
-
-  const firstSettlement = extensionModule.__processAgentStatusFile(statusFilePath);
-  await refreshEntered;
-  const waitingStatus = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
-  assert.equal(waitingStatus.status, 'Waiting');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    ...waitingStatus,
-    status: 'Turn Started',
-    checkpointSequence: 2,
-    checkpointEventId: '2:start',
-    checkpointMessage: '第二轮紧接着开始',
-    turnStartedAt: '2026-08-30T09:11:00.000Z'
-  }), 'utf8');
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-  releaseRefresh();
-  await firstSettlement;
-  await new Promise((resolve) => setTimeout(resolve, 50));
-
-  const runningStatus = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
-  assert.equal(logged.length, 1);
-  assert.equal(logged[0].id, 82);
-  assert.match(logged[0].output, /第二轮紧接着开始/);
-  assert.equal(runningStatus.status, 'Running');
-  assert.equal(runningStatus.executionLogId, 82);
-  assert.equal(runningStatus.checkpointEventId, '2:start');
+test('a checkpoint event arriving during settlement is queued and processed after the current event', async t => {
+  const f = await openSoloSettlementFixture(t, 'solomap-checkpoint-queue-host-', '第一轮已完成');
+  let releaseRefresh, signalRefreshEntered;
+  const refreshGate = new Promise(resolve => { releaseRefresh = resolve; });
+  const refreshEntered = new Promise(resolve => { signalRefreshEntered = resolve; });
+  const host = loadSoloSettlementHost(f, { async refreshProjectConversationSnapshotAfterStatusChange() { signalRefreshEntered(); await refreshGate; } }, require('../out/autonomousRuntimeControl.js'));
+  const firstSettlement = host.settle(f.reference, undefined, f.root);
+  let started;
+  try {
+    await Promise.race([refreshEntered, firstSettlement.then(() => { throw new Error('settlement ended before sidebar refresh'); })]);
+    const waiting = await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 61 } });
+    assert.equal(waiting.status.status, 'Waiting');
+    started = await f.ops({ operation: 'checkpoint_run', input: { projectId: waiting.projectId, executionLogId: 61, generation: waiting.generation, proof: f.run.proof, expectedRevision: waiting.revision, expectedTurnId: waiting.turnId, action: 'start', message: '第二轮紧接着开始', idempotencyKey: 'queued-next-turn' } });
+    await host.settle(f.reference, undefined, f.root);
+  } finally { releaseRefresh(); await firstSettlement; }
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const running = await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 61 } });
+  const journal = await f.ops({ operation: 'read_run_turn_journal', input: { root: f.project, executionLogId: 61 } });
+  assert.equal(running.status.status, 'Running'); assert.equal(running.turnId, started.turnId);
+  assert.equal(journal.executionLogId, 62); assert.match(journal.entry.output, /第二轮紧接着开始/);
+  await f.engine.readAgentExecutions('__solo__');
+  assert.equal(f.engine.getAgentExecutions('__solo__').filter(row => row.id === 62).length, 1);
+  const previous = await f.ops({ operation: 'read_run_turn_journal', input: { root: f.project, executionLogId: 61, turnId: f.run.turnId } });
+  assert.equal(previous.entry.status, 'Completed');
+  assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'agent-status')), false);
 });
 
-test('finishing one parallel step conversation keeps the node running without rewriting that conversation status', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
-    ].join('\n')
-  );
-  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-parallel-finish-'));
-  const runDir = path.join(projectRoot, '.solopreneur', 'agent-runs', '2', '21');
-  fs.mkdirSync(runDir, { recursive: true });
-  const outputFilePath = path.join(runDir, 'output.log');
-  const changesFilePath = path.join(runDir, 'changes.txt');
-  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
-  const completionDecisionFilePath = path.join(runDir, 'completion.json');
-  fs.writeFileSync(outputFilePath, 'Done.\n', 'utf8');
-  fs.writeFileSync(changesFilePath, ' M src/app.ts\n', 'utf8');
-  fs.writeFileSync(touchedFilesPath, 'src/app.ts\n', 'utf8');
-  fs.writeFileSync(completionDecisionFilePath, JSON.stringify({ markCompleted: true, reason: '已完成这一条对话。' }), 'utf8');
-  const statusFilePath = path.join(projectRoot, '.solopreneur', 'agent-status', '21.json');
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    nodeId: '2',
-    runKind: 'step',
-    status: 'In Progress',
-    agentCli: 'codex',
-    command: 'codex exec',
-    executionLogId: 21,
-    userMessage: '完成第一条并发对话',
-    outputFilePath,
-    changesFilePath,
-    touchedFilesPath,
-    completionDecisionFilePath,
-    startedAt: '2026-06-06T00:00:00.000Z'
-  }), 'utf8');
-  let nodeUpdate = null;
-  let executionUpdate = null;
-  let historyReady = false;
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'Running' }],
-    updateNode: (_nodeId, update) => { nodeUpdate = update; },
-    readAgentExecutions: async () => { historyReady = true; },
-    getAgentExecutions: () => [
-      ...(historyReady ? [{ id: 22, nodeId: '2', agentCli: 'codex', command: 'codex exec', output: 'Still running.', status: 'Running' }] : []),
-      { id: 21, nodeId: '2', agentCli: 'codex', command: 'codex exec', output: 'Agent conversation started.', status: 'Running' }
-    ],
-    updateAgentExecution: (id, agentCli, command, output, status) => {
-      executionUpdate = { id, agentCli, command, output, status };
-      return true;
-    },
-    logAgentExecution: () => 99
-  }, projectRoot);
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  assert.equal(nodeUpdate.status, 'Running');
-  assert.equal(executionUpdate.id, 21);
-  assert.equal(executionUpdate.status, 'Completed');
+test('finishing one parallel step conversation keeps the node running without rewriting that conversation status', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 21, '2', 'step');
+  const peer = await f.ops({ operation: 'prepare_run', input: { root: f.project, executionLogId: 22, nodeId: '2', runKind: 'step', prompt: '另一条并发任务', command: 'claude', userMessage: '另一条并发任务', metadata: { interactiveSession: true, agentCli: 'claude', collaborationReviewMode: 'off' }, idempotencyKey: 'parallel-peer' } });
+  f.engine.updateNode('2', { status: 'Running' });
+  fs.writeFileSync(path.join(f.project, 'deliverable.txt'), '可交付结果');
+  await f.checkpoint('complete', { outcome: 'candidate_complete', summary: '已完成这一条对话' }, f.run.status.plannedNativeSessionId);
+  await loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js')).settle(f.reference, undefined, f.root);
+  assert.equal(f.engine.getNodes().find(node => node.id === '2').status, 'Running');
+  const completed = await f.ops({ operation: 'read_run_turn_journal', input: { root: f.project, executionLogId: 21 } });
+  assert.equal(completed.executionLogId, 21); assert.equal(completed.entry.status, 'Completed');
+  const stillRunning = await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 22 } });
+  assert.equal(stillRunning.turnId, peer.turnId); assert.equal(stillRunning.status.status, 'Running');
+  assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'agent-status')), false);
 });
 
-test('closing a session loads its older turns even while background hydration is incomplete', async () => {
-  const extension = loadCompiledModule('out/extension.js', `
-    module.exports.process = processAgentStatusFile;
-    module.exports.prepare = (engine, projectPath) => { syncEngine = engine; activeProjectRoot = projectPath; };
-  `);
-  const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-close-partial-history-'));
-  const statusFile = path.join(projectPath, '.solopreneur/agent-status/10.json');
-  fs.mkdirSync(path.dirname(statusFile), { recursive: true });
-  fs.writeFileSync(statusFile, JSON.stringify({ workspaceRoot: projectPath, nodeId: '__solo__', runKind: 'solo', status: 'Session Closed', agentCli: 'claude', executionLogId: 10, rootExecutionLogId: 1, interactiveSession: true }));
-  const durable = [
-    { id: 1, nodeId: '__solo__', agentCli: 'claude', command: 'run', output: 'Interactive session state: Waiting', status: 'Completed' },
-    { id: 2, nodeId: '__solo__', agentCli: 'claude', command: 'run', output: 'Interactive session root: 1\n\nInteractive session state: Waiting', status: 'Completed' },
-    { id: 10, nodeId: '__solo__', agentCli: 'claude', command: 'run', output: 'Interactive session root: 1\n\nInteractive session state: Waiting', status: 'Completed' }
-  ];
-  let cached = [durable[2]]; const changed = [];
-  extension.prepare({
-    getNodes: () => [], getAgentExecutions: () => cached, getProjectAgentExecutions: () => cached,
-    readAgentExecutionById: async id => { const row = durable.find(log => log.id === id); if (!cached.includes(row)) cached.push(row); return row; },
-    readAgentExecutions: async () => { cached = [...durable]; return cached; },
-    updateAgentExecution: async (id, agentCli, command, output, status) => { changed.push(id); Object.assign(durable.find(log => log.id === id), { agentCli, command, output, status }); return true; }
-  }, projectPath);
-  await extension.process(statusFile);
-  assert.deepEqual(changed.sort((a,b) => a-b), [1, 2, 10]);
-  assert.match(durable[0].output, /Interactive session state: Closed/);
+test('closing a session loads its older turns even while background hydration is incomplete', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 1);
+  const host = loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js'));
+  const turns = [], snapshots = [];
+  for (let i = 0; i < 3; i++) {
+    if (i) await f.checkpoint('start', { message: `第${i + 1}轮用户原文` }, f.run.status.plannedNativeSessionId);
+    await f.checkpoint('complete', { outcome: 'partial', summary: `第${i + 1}轮结果` }, f.run.status.plannedNativeSessionId);
+    await host.settle(f.reference, undefined, f.root);
+    turns.push(await f.ops({ operation: 'read_run_turn_journal', input: { root: f.project, executionLogId: 1 } }));
+    snapshots.push(await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 1 } }));
+  }
+  const previousSettlements = await f.ops({ operation: 'read_run_settlements', input: { projectId: f.run.projectId, executionLogId: 1 } });
+  const peer = await f.ops({ operation: 'prepare_run', input: { root: f.project, executionLogId: 40, nodeId: '__solo__', runKind: 'solo', prompt: '另一段会话', command: 'claude', userMessage: '另一段会话', metadata: { interactiveSession: true, agentCli: 'claude' }, idempotencyKey: 'close-scope-peer' } });
+  const peerSnapshot = await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 40 } });
+  const peerJournal = await f.ops({ operation: 'read_run_turn_journal', input: { root: f.project, executionLogId: 40 } });
+  const otherProject = path.join(path.dirname(f.project), 'other-project'); fs.mkdirSync(otherProject);
+  const foreign = await f.ops({ operation: 'prepare_run', input: { root: otherProject, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '另一项目同号会话', command: 'claude', userMessage: '另一项目同号会话', metadata: { interactiveSession: true, agentCli: 'claude' }, idempotencyKey: 'close-scope-foreign' } });
+  const foreignSnapshot = await f.ops({ operation: 'read_run_state', input: { root: otherProject, executionLogId: 1 } });
+  const foreignJournal = await f.ops({ operation: 'read_run_turn_journal', input: { root: otherProject, executionLogId: 1 } });
+  f.engine.close();
+  const coldEngine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(f.project, '.solopreneur', 'roadmap.csv'), path.join(f.project, '.solopreneur', 'project_journal.db'), projectRoot, f.root);
+  await coldEngine.initAndSync({ history: 'background' }); t.after(() => coldEngine.close());
+  await f.checkpoint('session-close', {}, f.run.status.plannedNativeSessionId);
+  const coldHost = loadSoloSettlementHost({ ...f, engine: coldEngine }, null, require('../out/autonomousRuntimeControl.js'));
+  await coldHost.settle(f.reference, undefined, f.root);
+  for (const old of turns) {
+    const closed = await f.ops({ operation: 'read_run_turn_journal', input: { root: f.project, executionLogId: 1, turnId: old.turnId } });
+    assert.equal(closed.entry.status, 'Completed'); assert.match(closed.entry.output, /Interactive session state: Closed/);
+    assert.match(closed.entry.output, new RegExp(`第${turns.indexOf(old) + 1}轮结果`));
+  }
+  assert.equal((await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 1 } })).status.interactiveSessionClosed, true);
+  for (const snapshot of snapshots) assert.deepEqual(await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 1, revision: snapshot.revision } }), snapshot);
+  const settlements = await f.ops({ operation: 'read_run_settlements', input: { projectId: f.run.projectId, executionLogId: 1 } });
+  assert.deepEqual(settlements.items.slice(0, 3), previousSettlements.items);
+  assert.deepEqual(await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 40 } }), peerSnapshot);
+  assert.deepEqual(await f.ops({ operation: 'read_run_turn_journal', input: { root: f.project, executionLogId: 40 } }), peerJournal);
+  assert.deepEqual(await f.ops({ operation: 'read_run_state', input: { root: otherProject, executionLogId: 1 } }), foreignSnapshot);
+  assert.deepEqual(await f.ops({ operation: 'read_run_turn_journal', input: { root: otherProject, executionLogId: 1 } }), foreignJournal);
+  const walPath = path.join(f.root, 'solomap.db-wal'), wal = fs.readFileSync(walPath);
+  await coldHost.settle(f.reference, undefined, f.root);
+  assert.deepEqual(fs.readFileSync(walPath), wal, 'settlement replay must not rewrite historical journals');
+  assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'agent-status')), false);
 });
 
-test('agent status files from another project are not reconciled into the active project', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
-    ].join('\n')
-  );
-  const activeProjectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-active-project-'));
-  const otherProjectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-other-project-'));
-  const otherRunDir = path.join(otherProjectRoot, '.solopreneur', 'agent-runs', '__solo__', '7');
-  fs.mkdirSync(otherRunDir, { recursive: true });
-  const outputFilePath = path.join(otherRunDir, 'output.log');
-  const changesFilePath = path.join(otherRunDir, 'changes.txt');
-  const touchedFilesPath = path.join(otherRunDir, 'touched-files.txt');
-  fs.writeFileSync(outputFilePath, 'Other project solo finished.\n', 'utf8');
-  fs.writeFileSync(changesFilePath, '', 'utf8');
-  fs.writeFileSync(touchedFilesPath, '', 'utf8');
-  const statusFilePath = path.join(otherProjectRoot, '.solopreneur', 'agent-status', '7.json');
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    nodeId: '__solo__',
-    runKind: 'solo_continue',
-    status: 'In Progress',
-    agentCli: 'codex',
-    command: 'codex resume',
-    executionLogId: 7,
-    userMessage: '继续 B 项目对话',
-    outputFilePath,
-    changesFilePath,
-    touchedFilesPath,
-    startedAt: '2026-07-01T00:00:00.000Z'
-  }), 'utf8');
-
-  let updateCount = 0;
-  let logCount = 0;
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [{ id: '1', title: 'A 项目环节', status: 'Pending' }],
-    updateNode: () => { throw new Error('cross-project status must not update the active project node'); },
-    getAgentExecutions: () => [],
-    getProjectAgentExecutions: () => [],
-    updateAgentExecution: () => {
-      updateCount += 1;
-      return true;
-    },
-    logAgentExecution: () => {
-      logCount += 1;
-      return 1;
-    }
-  }, activeProjectRoot);
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  assert.equal(updateCount, 0);
-  assert.equal(logCount, 0);
+test('agent status files from another project are not reconciled into the active project', async t => {
+  const active = await openProviderCheckpointFixture(t, 'claude', 7, '1');
+  const other = await openSoloSettlementFixture(t, 'solomap-other-project-host-', 'B 项目独立结果');
+  const activeState = await active.ops({ operation: 'read_run_state', input: { root: active.project, executionLogId: 7 } });
+  const csv = fs.readFileSync(path.join(active.project, '.solopreneur', 'roadmap.csv'));
+  const host = loadSoloSettlementHost(active, null, require('../out/autonomousRuntimeControl.js'), true);
+  await host.settle(other.reference, undefined, other.root);
+  assert.deepEqual(await active.ops({ operation: 'read_run_state', input: { root: active.project, executionLogId: 7 } }), activeState);
+  assert.deepEqual(fs.readFileSync(path.join(active.project, '.solopreneur', 'roadmap.csv')), csv);
+  const foreignJournal = await other.ops({ operation: 'read_run_turn_journal', input: { root: other.project, executionLogId: 61 } });
+  assert.equal(foreignJournal.entry.status, 'Completed'); assert.match(foreignJournal.entry.output, /B 项目独立结果/);
+  assert.equal(fs.existsSync(path.join(other.project, '.solopreneur', 'agent-status')), false);
 });
 
-test('roadmap csv generated by an agent is not overwritten by stale node state', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
-    ].join('\n')
-  );
-
-  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-roadmap-sync-'));
-  const solopreneurDir = path.join(projectRoot, '.solopreneur');
-  const runDir = path.join(solopreneurDir, 'agent-runs', '1');
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(path.join(solopreneurDir, 'roadmap.csv'), [
+test('roadmap csv generated by an agent is not overwritten by stale node state', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 1, '1', 'step');
+  f.engine.setNodes([{ id: '1', title: '生成初始路线图', description: 'starter', stage: '问题与客户发现', dependencies: '', agentCli: 'claude', agentPrompt: '阅读 .solopreneur/bootstrap-roadmap-instructions.md', status: 'Running', createdAt: '', completedAt: '' }]);
+  const before = await require('../out/runWorkspace.js').snapshotWorkspace(f.project);
+  const baseline = await f.ops({ operation: 'read_run_document', input: { projectId: f.run.projectId, executionLogId: 1, purpose: require('../out/runWorkspace.js').workspaceDocumentPurpose(f.run.turnId, 'before') } });
+  await f.ops({ operation: 'write_run_document', input: { projectId: f.run.projectId, executionLogId: 1, generation: f.run.generation, purpose: require('../out/runWorkspace.js').workspaceDocumentPurpose(f.run.turnId, 'before'), bytes: Buffer.from(JSON.stringify(before)).toString('base64'), mimeType: 'application/json', expectedRevision: baseline?.revision || 0, idempotencyKey: 'bootstrap-baseline' } });
+  const csvPath = path.join(f.project, '.solopreneur', 'roadmap.csv');
+  const generated = [
     'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
     '10,梳理目标客户,整理 ICP 与定价假设,问题与客户发现,,codex,创建 docs/icp.md 并补充访谈假设,Pending,2026-01-01T00:00:00.000Z,',
     '20,实现首个 MVP 切片,完成最小闭环,产品与 MVP,10,codex,修改 src/app.js 并运行 npm test,Pending,2026-01-01T00:00:00.000Z,',
     '30,准备首轮外联,输出外联材料,营销与销售,20,codex,创建 outreach/email.md 并校验文案,Pending,2026-01-01T00:00:00.000Z,',
     '40,建立反馈循环,整理反馈和改进任务,反馈与规模化,30,codex,创建 docs/learning-loop.md 并记录指标,Pending,2026-01-01T00:00:00.000Z,'
-  ].join('\n'));
-  fs.writeFileSync(path.join(runDir, 'changes.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'touched-files.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'output.log'), 'Codex updated roadmap.csv\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'command.txt'), 'codex exec\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'completion.json'), '{"markCompleted":true,"reason":"路线图已生成"}', 'utf8');
-  const statusFilePath = path.join(projectRoot, '.agent_status.json');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    nodeId: '1',
-    status: 'In Progress',
-    agentCli: 'codex',
-    commandFilePath: path.join(runDir, 'command.txt'),
-    executionLogId: 1,
-    userMessage: '',
-    outputFilePath: path.join(runDir, 'output.log'),
-    changesFilePath: path.join(runDir, 'changes.txt'),
-    touchedFilesPath: path.join(runDir, 'touched-files.txt'),
-    completionDecisionFilePath: path.join(runDir, 'completion.json'),
-    sessionMode: 'fresh'
-  }), 'utf8');
-
-  let initAndSyncCalled = false;
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [{
-      id: '1',
-      title: '生成初始路线图',
-      description: 'starter',
-      stage: '问题与客户发现',
-      dependencies: '',
-      agentCli: 'codex',
-      agentPrompt: '阅读 .solopreneur/bootstrap-roadmap-instructions.md',
-      status: 'Running',
-      createdAt: '',
-      completedAt: ''
-    }],
-    updateNode: () => {
-      throw new Error('stale node state must not be written back over an agent-generated roadmap.csv');
-    },
-    initAndSync: async () => {
-      initAndSyncCalled = true;
-    },
-    updateAgentExecution: () => true,
-    logAgentExecution: () => 1,
-    getAgentExecutions: () => []
-  }, projectRoot);
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    nodeId: '10',
-    status: 'Running',
-    executionLogId: 2
-  }), 'utf8');
-  await new Promise((resolve) => setTimeout(resolve, 1100));
-
-  const finalCsv = fs.readFileSync(path.join(solopreneurDir, 'roadmap.csv'), 'utf8');
-  assert.equal(initAndSyncCalled, true);
-  assert.match(finalCsv, /梳理目标客户/);
-  assert.doesNotMatch(finalCsv, /生成初始路线图/);
-  assert.doesNotMatch(finalCsv, /bootstrap-roadmap-instructions/);
-  assert.equal(JSON.parse(fs.readFileSync(statusFilePath, 'utf8')).executionLogId, 2);
+  ].join('\n');
+  fs.writeFileSync(csvPath, generated);
+  await f.checkpoint('complete', { outcome: 'candidate_complete', summary: '路线图已生成' }, f.run.status.plannedNativeSessionId);
+  await loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js')).settle(f.reference, undefined, f.root);
+  assert.equal(fs.readFileSync(csvPath, 'utf8'), generated);
+  assert.deepEqual(f.engine.getNodes().map(node => node.id), ['10', '20', '30', '40']);
+  assert.equal((await f.ops({ operation: 'read_run_turn_journal', input: { root: f.project, executionLogId: 1 } })).entry.status, 'Completed');
+  assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'agent-status')), false);
 });
 
-test('invalid Agent completion state is recorded as a visible failed conversation', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-invalid-completion-'));
-  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '2');
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(path.join(runDir, 'completion.json'), '{broken-json', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'changes.txt'), 'M docs/work.md\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'touched-files.txt'), 'M docs/work.md\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'output.log'), 'Implemented a working draft.\n', 'utf8');
-  const statusFilePath = path.join(tempRoot, '.agent_status.json');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    nodeId: '2',
-    status: 'In Progress',
-    agentCli: 'codex',
-    executionLogId: 9,
-    outputFilePath: path.join(runDir, 'output.log'),
-    changesFilePath: path.join(runDir, 'changes.txt'),
-    touchedFilesPath: path.join(runDir, 'touched-files.txt'),
-    completionDecisionFilePath: path.join(runDir, 'completion.json'),
-    startedAt: '2026-05-24T00:00:00.000Z'
-  }), 'utf8');
-
-  let nodeUpdate = null;
-  let loggedOutput = '';
-  let loggedStatus = '';
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'Running' }],
-    updateNode: (_nodeId, update) => { nodeUpdate = update; },
-    updateAgentExecution: (_id, _cli, _command, output, status) => {
-      loggedOutput = output;
-      loggedStatus = status;
-      return true;
-    },
-    logAgentExecution: () => 1,
-    getAgentExecutions: () => []
-  }, tempRoot);
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  assert.equal(nodeUpdate.status, 'Failed');
-  assert.equal(loggedStatus, 'Failed');
-  assert.match(loggedOutput, /Failure category: completion_state_invalid/);
-  assert.match(loggedOutput, /Failure reason:\nAgent completion decision file could not be parsed/);
+for (const late of [false, true]) test(`invalid Agent completion state is recorded as a visible failed conversation${late ? ' after its earlier database import' : ''}`, async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-invalid-completion-'));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  await engine.initAndSync(); t.after(() => engine.close());
+  engine.setNodes([{ id: '2', title: '实现 MVP', stage: '实施', status: 'Running' }]);
+  const sourceRoot = path.join(project, '.solopreneur', 'agent-runs'), runDir = path.join(sourceRoot, '2', '9'); fs.mkdirSync(runDir, { recursive: true });
+  const completion = Buffer.from('{broken-json'), output = Buffer.from('Implemented a working draft.\n完整输出🌿');
+  for (const [name, bytes] of [['completion.json', completion], ['output.log', output], ['prompt.txt', Buffer.from('完成原始用户目标')], ['command.txt', Buffer.from('claude original arguments')], ['changes.txt', Buffer.from('M docs/work.md\n')]]) if (!late || name !== 'completion.json') fs.writeFileSync(path.join(runDir, name), bytes);
+  const startedAt = '2026-05-24T00:00:00.000Z';
+  const taskId = require('../out/taskReport.js').registerLearningTask(project, { executionLogId: 9, runDir, userMessage: '完成原始用户目标', startedAt });
+  const statusFilePath = path.join(project, '.agent_status.json');
+  const status = { learningTaskId: taskId, workspaceRoot: project, nodeId: '2', runKind: 'step', status: 'In Progress', agentCli: 'claude', executionLogId: 9, rootExecutionLogId: 9, userMessage: '完成原始用户目标', outputFilePath: path.join(runDir, 'output.log'), changesFilePath: path.join(runDir, 'changes.txt'), completionDecisionFilePath: path.join(runDir, 'completion.json'), startedAt, finishedAt: '2026-05-24T00:01:00.000Z' };
+  if (late) delete status.completionDecisionFilePath;
+  const statusBytes = Buffer.from(JSON.stringify(status)); fs.writeFileSync(statusFilePath, statusBytes);
+  fs.writeFileSync(path.join(runDir, 'workspace-before.json'), JSON.stringify(await require('../out/runWorkspace.js').snapshotWorkspace(project)));
+  native.store.importProjectJournal(native.projectIds.get(project), { id: 9, nodeId: '2', timestamp: startedAt, agentCli: 'claude', command: 'claude original arguments', output: output.toString('utf8'), status: 'Running' });
+  const imported = await require('../out/projectDataMigration.js').importAgentRuns(native.store, sourceRoot, { projectRoot: project });
+  assert.deepEqual(imported.conflicts, []);
+  if (late) {
+    fs.writeFileSync(path.join(runDir, 'completion.json'), completion);
+    assert.deepEqual((await require('../out/projectDataMigration.js').importAgentRuns(native.store, sourceRoot, { projectRoot: project })).conflicts, []);
+  }
+  const reference = require('../out/runLifecycleClient.js').runStatusReference(project, 9);
+  const state = await native.ops({ operation: 'read_run_state', input: { root: project, executionLogId: 9 } });
+  assert.equal(state.status.status, 'Failed', 'the accepted malformed completion must be visible through the formal database state');
+  assert.equal(state.status.failureCode, 'completion_state_invalid');
+  assert.deepEqual(Buffer.from(native.store.readRunArtifact(state.projectId, 9, '2/9/completion.json').bytes, 'base64'), completion);
+  fs.renameSync(sourceRoot, path.join(base, 'historical-source-isolation')); fs.renameSync(statusFilePath, path.join(base, 'historical-status-isolation.json'));
+  const host = loadSoloSettlementHost({ ...native, engine, project, root }, null, require('../out/autonomousRuntimeControl.js'));
+  await host.settle(reference, undefined, root);
+  const journal = await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: 9 } });
+  const effects = native.store.rows('SELECT kind,state,payload_content_id FROM run_effects').map(row => { const payload = JSON.parse(native.store.content(row.payload_content_id).toString('utf8')); return { kind: row.kind, state: row.state, nextStatus: payload.nextStatus, shouldWriteNodeStatus: payload.shouldWriteNodeStatus, executionLogId: payload.executionLogId, originalExecutionLogId: payload.originalExecutionLogId }; });
+  assert.equal(engine.getNodes().find(node => node.id === '2').status, 'Failed', JSON.stringify({ journal: journal.entry.status, journalId: journal.executionLogId, effects })); assert.equal(journal.entry.status, 'Failed');
+  assert.match(journal.entry.output, /Failure category: completion_state_invalid/);
+  assert.match(journal.entry.output, /Failure reason:\nAgent completion decision file could not be parsed/);
+  assert.ok(journal.entry.output.includes(output.toString('utf8')));
+  assert.deepEqual(fs.readFileSync(path.join(base, 'historical-status-isolation.json')), statusBytes);
+  assert.equal(fs.existsSync(sourceRoot), false); assert.equal(fs.existsSync(path.join(project, '.solopreneur', 'agent-status')), false);
+  const wal = fs.readFileSync(path.join(root, 'solomap.db-wal'));
+  await host.settle(reference, undefined, root);
+  assert.deepEqual(fs.readFileSync(path.join(root, 'solomap.db-wal')), wal, 'an accepted failed settlement must not be replayed');
+  assert.deepEqual(await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: 9 } }), journal);
 });
 
-test('completed step starts read-only Agent review before marking the step complete', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };',
-      'module.exports.__setCommandExistsForTest = (fn) => { commandExists = fn; };',
-      'module.exports.__setTerminalForTest = (fn) => { createAgentTerminal = fn; };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-review-start-'));
-  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '2');
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(path.join(runDir, 'completion.json'), '{"markCompleted":true,"reason":"实现已完成"}', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'changes.txt'), 'M src/app.js\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'touched-files.txt'), 'M src/app.js\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'output.log'), 'Implemented and validated.\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'command.txt'), 'codex exec\n', 'utf8');
-  const statusFilePath = path.join(tempRoot, '.agent_status.json');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    nodeId: '2',
-    runKind: 'step',
-    status: 'In Progress',
-    agentCli: 'codex',
-    reviewerCliPath: 'agy',
-    collaborationReviewMode: 'high_risk',
-    executionLogId: 12,
-    userMessage: '完成 MVP',
-    outputFilePath: path.join(runDir, 'output.log'),
-    changesFilePath: path.join(runDir, 'changes.txt'),
-    touchedFilesPath: path.join(runDir, 'touched-files.txt'),
-    commandFilePath: path.join(runDir, 'command.txt'),
-    completionDecisionFilePath: path.join(runDir, 'completion.json'),
-    startedAt: '2026-05-24T00:00:00.000Z'
-  }), 'utf8');
-
-  let nodeUpdate = null;
-  const executionUpdates = [];
-  const executionLogs = [];
-  let reviewCommand = '';
-  extensionModule.__setCommandExistsForTest(() => true);
-  extensionModule.__setTerminalForTest(() => ({
-    show() {},
-    sendText(command) {
-      reviewCommand = command;
-    }
-  }));
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'Running' }],
-    updateNode: (_nodeId, update) => { nodeUpdate = update; },
-    updateAgentExecution: (_id, _cli, _command, output, status) => {
-      executionUpdates.push({ output, status });
-      return true;
-    },
-    logAgentExecution: (nodeId, agentCli, command, output, status) => {
-      executionLogs.push({ nodeId, agentCli, command, output, status });
-      return 88;
-    },
-    getAgentExecutions: () => executionLogs
-  }, tempRoot);
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  assert.equal(nodeUpdate.status, 'In Progress');
-  assert.match(executionUpdates[0].output, /正在等待副 Agent 复核/);
-  assert.equal(executionLogs.length, 1);
-  assert.equal(path.basename(executionLogs[0].agentCli), 'agy');
-  assert.equal(executionLogs[0].status, 'Running');
-  assert.match(executionLogs[0].output, /Agent review started/);
-  assert.match(reviewCommand, /run-agent-review\.sh/);
-  const reviewPrompt = fs.readFileSync(path.join(runDir, 'review-12', 'prompt.txt'), 'utf8');
-  assert.match(reviewPrompt, /只读复核 Agent/);
-  assert.match(reviewPrompt, /不要修改项目文件/);
-  assert.match(reviewPrompt, /goalSatisfied/);
-  assert.doesNotMatch(reviewPrompt, /H\/I\/J/);
-  const reviewScript = fs.readFileSync(path.join(runDir, 'review-12', 'run-agent-review.sh'), 'utf8');
-  assert.match(reviewScript, /--mode plan --sandbox/);
-  assert.doesNotMatch(reviewScript, /dangerously-skip-permissions/);
-  assert.match(reviewScript, /SOLOMAP_REVIEW_JSON_START/);
-  assert.match(reviewScript, /process\.argv\[1\]/);
-  assert.match(reviewScript, /review-result\.json' \|\| status=125/);
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-  assert.equal(executionLogs.length, 1);
+for (const historical of [false, true]) test(`completed step starts read-only Agent review before marking the step complete${historical ? ' after historical source isolation' : ''}`, async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-completion-review-'));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+  const reviewerDir = path.join(base, 'reviewer'); fs.mkdirSync(reviewerDir);
+  const reviewer = path.join(reviewerDir, 'agy'), captured = path.join(base, 'reviewer-input.json'), response = path.join(base, 'reviewer-response.json');
+  fs.writeFileSync(reviewer, `#!${process.execPath}\nconst fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(captured)}, JSON.stringify({args:process.argv.slice(2),prompt:fs.readFileSync(0,'utf8')})); process.stdout.write('SOLOMAP_REVIEW_JSON_START\\n'+fs.readFileSync(${JSON.stringify(response)},'utf8')+'\\nSOLOMAP_REVIEW_JSON_END\\n');\n`); fs.chmodSync(reviewer, 0o755);
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  await engine.initAndSync(); t.after(() => engine.close());
+  engine.setNodes([{ id: '2', title: '实现 MVP', description: '完整用户目标', stage: '实施', status: 'Running' }]);
+  let run;
+  if (historical) {
+    const sourceRoot = path.join(project, '.solopreneur', 'agent-runs'), runDir = path.join(sourceRoot, '2', '12'); fs.mkdirSync(runDir, { recursive: true });
+    const startedAt = '2026-05-24T00:00:00.000Z';
+    const taskId = require('../out/taskReport.js').registerLearningTask(project, { executionLogId: 12, runDir, userMessage: '完成 MVP', startedAt });
+    const raw = { learningTaskId: taskId, workspaceRoot: project, nodeId: '2', runKind: 'step', status: 'In Progress', agentCli: 'claude', reviewerCliPath: reviewer, collaborationReviewMode: 'high_risk', executionLogId: 12, rootExecutionLogId: 12, userMessage: '完成 MVP', completionDecisionFilePath: path.join(runDir, 'completion.json'), outputFilePath: path.join(runDir, 'output.log'), changesFilePath: path.join(runDir, 'changes.txt'), startedAt, finishedAt: '2026-05-24T00:01:00.000Z' };
+    fs.writeFileSync(path.join(project, '.agent_status.json'), JSON.stringify(raw));
+    for (const [file, body] of [['completion.json', '{"markCompleted":true,"reason":"实现已完成"}'], ['prompt.txt', '完成 MVP'], ['command.txt', 'claude original arguments'], ['output.log', '完整结果🌿\n'.repeat(10000)], ['changes.txt', 'A result.txt\n'], ['workspace-before.json', JSON.stringify(await require('../out/runWorkspace.js').snapshotWorkspace(project))]]) fs.writeFileSync(path.join(runDir, file), body);
+    native.store.importProjectJournal(native.projectIds.get(project), { id: 12, nodeId: '2', timestamp: startedAt, agentCli: 'claude', command: 'claude original arguments', output: '等待复核', status: 'Running' });
+    assert.deepEqual((await require('../out/projectDataMigration.js').importAgentRuns(native.store, sourceRoot, { projectRoot: project })).conflicts, []);
+    fs.renameSync(sourceRoot, path.join(base, 'retained-history')); fs.renameSync(path.join(project, '.agent_status.json'), path.join(base, 'retained-status.json'));
+    run = await native.ops({ operation: 'read_run_checkpoint_state', input: { root: project, executionLogId: 12 } });
+    assert.equal(fs.existsSync(sourceRoot), false);
+  } else {
+    run = await native.ops({ operation: 'prepare_run', input: { root: project, executionLogId: 12, nodeId: '2', runKind: 'step', prompt: '完成 MVP', command: 'claude original arguments', userMessage: '完成 MVP', metadata: { agentCli: 'claude', reviewerCliPath: reviewer, collaborationReviewMode: 'high_risk' }, idempotencyKey: 'review-completion-main' } });
+  const before = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+  await native.ops({ operation: 'write_run_document', input: { projectId: run.projectId, executionLogId: 12, generation: run.generation, turnId: run.turnId, purpose: require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId, 'before'), bytes: Buffer.from(JSON.stringify(before)).toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: 'review-completion-baseline' } });
+  const output = '完整结果🌿\n'.repeat(10000);
+  await native.ops({ operation: 'append_run_log', input: { projectId: run.projectId, executionLogId: 12, generation: run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from(output).toString('base64'), idempotencyKey: 'review-completion-output' } });
+  fs.writeFileSync(path.join(project, 'result.txt'), '完整交付');
+  await native.ops({ operation: 'checkpoint_run', input: { projectId: run.projectId, executionLogId: 12, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'candidate_complete', summary: '实现已完成', idempotencyKey: 'review-completion-candidate' } });
+  }
+  const output = '完整结果🌿\n'.repeat(10000);
+  const commands = [], terminal = { name: 'actual review terminal', processId: Promise.resolve(process.pid), show() {}, sendText(command) { commands.push(command); } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.settle = processAgentStatusFile;
+    module.exports.connect = (engine, project, root, terminal) => {
+      syncEngine = engine; activeProjectRoot = project; extensionContextRef = null;
+      getPersistedSettings = () => ({ globalDataPath: root, automationTasks: {} });
+      agentCli_1.commandExists = () => true;
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      createAgentTerminal = () => terminal;
+      sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {};
+    };
+  `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js'), './db/syncEngine': require('../out/db/syncEngine.js') });
+  extension.connect(engine, project, root, terminal);
+  const reference = require('../out/runLifecycleClient.js').runStatusReference(project, 12);
+  await extension.settle(reference, undefined, root);
+  const journal = await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: 12 } });
+  assert.equal(engine.getNodes().find(node => node.id === '2').status, 'In Progress', 'the step awaits its read-only review rather than completing prematurely');
+  assert.match(journal.entry.output, /正在等待副 Agent 复核/);
+  const runs = (await native.ops({ operation: 'list_run_states', input: { root: project } })).items;
+  const review = runs.find(item => item.status.runKind === 'agent_review');
+  assert.ok(review, JSON.stringify(runs.map(item => item.status)));
+  assert.equal(runs.length, 2); assert.equal(commands.length, 1);
+  assert.equal(path.basename(review.status.agentCli), 'agy'); assert.equal(review.taskId, run.taskId);
+  const id = Number(review.status.rootExecutionLogId);
+  const plan = await native.ops({ operation: 'read_run_execution_plan', input: { root: project, executionLogId: id } });
+  assert.equal(plan.status.agentLaunch.readOnly, true);
+  assert.match(plan.prompt, /只读复核 Agent/); assert.match(plan.prompt, /不要修改项目文件/); assert.match(plan.prompt, /goalSatisfied/); assert.doesNotMatch(plan.prompt, /H\/I\/J/);
+  assert.ok(plan.prompt.includes(output.trim())); assert.match(commands[0], /runAgentProcess\.js/);
+  const wal = fs.readFileSync(path.join(root, 'solomap.db-wal'));
+  await extension.settle(reference, undefined, root);
+  assert.equal(commands.length, 1); assert.deepEqual(fs.readFileSync(path.join(root, 'solomap.db-wal')), wal);
+  assert.deepEqual(await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: 12 } }), journal);
+  const request = await native.ops({ operation: 'read_run_document', input: { projectId: review.projectId, executionLogId: id, purpose: 'launch_request', revision: 1 } });
+  const manifest = JSON.parse(Buffer.from(request.bytes, 'base64').toString('utf8')).reviewEvidence;
+  const criteria = manifest.completionCriteria.length ? manifest.completionCriteria : [manifest.taskGoal];
+  const result = { status: 'pass', summary: '复核通过，可以完成环节。', findings: [], nextAction: '', goalSatisfied: true, evidenceSufficient: true, criteria: criteria.map(criterion => ({ criterion, status: 'pass', evidence: ['output:main'], reason: '完整交付结果已独立检查' })) };
+  fs.writeFileSync(response, JSON.stringify(result));
+  assert.equal(childProcess.spawnSync('bash', ['-n', '-c', commands[0]], { encoding: 'utf8' }).status, 0, 'the final terminal command must parse');
+  const beforeReview = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+  const runner = childProcess.spawn('bash', ['-c', commands[0]], { cwd: project, stdio: ['ignore', 'pipe', 'pipe'] });
+  const runnerOutput = []; runner.stdout.on('data', bytes => runnerOutput.push(bytes)); runner.stderr.on('data', bytes => runnerOutput.push(bytes));
+  const exit = await new Promise((resolve, reject) => { runner.once('error', reject); runner.once('exit', resolve); });
+  assert.equal(exit, 0, Buffer.concat(runnerOutput).toString('utf8'));
+  const received = JSON.parse(fs.readFileSync(captured, 'utf8'));
+  assert.deepEqual(received.args.slice(0, 4), ['--print', '--mode', 'plan', '--sandbox']);
+  assert.ok(!received.args.some(arg => arg.includes('dangerously'))); assert.equal(received.prompt, plan.prompt);
+  assert.deepEqual(await require('../out/runWorkspace.js').snapshotWorkspace(project), beforeReview, 'review execution must preserve the project files');
+  await extension.settle(require('../out/runLifecycleClient.js').runStatusReference(project, id), undefined, root);
+  assert.equal(engine.getNodes().find(node => node.id === '2').status, 'Completed');
+  assert.ok(engine.getNodes().find(node => node.id === '2').completedAt);
+  const accepted = await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: id } });
+  assert.equal(accepted.entry.status, 'Completed'); assert.match(accepted.entry.output, /Review decision: pass/); assert.match(accepted.entry.output, /复核通过/);
+  const afterPass = fs.readFileSync(path.join(root, 'solomap.db-wal'));
+  await extension.settle(require('../out/runLifecycleClient.js').runStatusReference(project, id), undefined, root);
+  assert.deepEqual(fs.readFileSync(path.join(root, 'solomap.db-wal')), afterPass); assert.equal(commands.length, 1);
+  assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')).sort(), ['project.json', 'roadmap.csv']);
 });
 
-test('completed Solo conversation starts configured review Agent when review mode is every task', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };',
-      'module.exports.__setCommandExistsForTest = (fn) => { commandExists = fn; };',
-      'module.exports.__setTerminalForTest = (fn) => { createAgentTerminal = fn; };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-solo-agent-review-start-'));
-  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '__solo__', '21');
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(path.join(runDir, 'changes.txt'), '', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'touched-files.txt'), '', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'output.log'), 'Solo task completed.\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'command.txt'), 'codex exec\n', 'utf8');
-  const statusFilePath = path.join(tempRoot, '.agent_status-21.json');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'In Progress',
-    agentCli: 'codex',
-    reviewerCliPath: 'agy',
-    collaborationReviewMode: 'all',
-    executionLogId: 21,
-    userMessage: '检查 Solo 任务复核',
-    outputFilePath: path.join(runDir, 'output.log'),
-    changesFilePath: path.join(runDir, 'changes.txt'),
-    touchedFilesPath: path.join(runDir, 'touched-files.txt'),
-    commandFilePath: path.join(runDir, 'command.txt'),
-    startedAt: '2026-05-24T00:00:00.000Z'
-  }), 'utf8');
-
-  const executionUpdates = [];
-  const executionLogs = [];
-  let reviewCommand = '';
-  extensionModule.__setCommandExistsForTest(() => true);
-  extensionModule.__setTerminalForTest(() => ({
-    show() {},
-    sendText(command) {
-      reviewCommand = command;
-    }
-  }));
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    updateNode: () => { throw new Error('Solo review must not update roadmap nodes.'); },
-    updateAgentExecution: (_id, _cli, _command, output, status) => {
-      executionUpdates.push({ output, status });
-      return true;
-    },
-    logAgentExecution: (nodeId, agentCli, command, output, status) => {
-      executionLogs.push({ nodeId, agentCli, command, output, status });
-      return 89;
-    },
-    getAgentExecutions: () => [],
-    getProjectAgentExecutions: () => []
-  }, tempRoot);
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  assert.equal(executionUpdates[0].status, 'Completed');
-  assert.match(executionUpdates[0].output, /Solo conversation state: Completed/);
-  assert.equal(executionLogs.length, 1);
-  assert.equal(executionLogs[0].nodeId, '__solo__');
-  assert.equal(path.basename(executionLogs[0].agentCli), 'agy');
-  assert.equal(executionLogs[0].status, 'Running');
-  assert.match(executionLogs[0].output, /Agent review started/);
-  assert.match(reviewCommand, /run-agent-review\.sh/);
-  const reviewPrompt = fs.readFileSync(path.join(tempRoot, '.solopreneur', 'agent-runs', '__solo__', 'review-21', 'prompt.txt'), 'utf8');
-  assert.match(reviewPrompt, /只读复核 Agent/);
-  assert.match(reviewPrompt, /runKind: solo/);
+for (const { mode, historical } of [{ mode: 'all', historical: false }, { mode: 'off', historical: false }, { mode: 'high_risk', historical: false }, { mode: 'all', historical: true }]) test(`completed Solo conversation starts configured review Agent when review mode is every task${historical ? ' after historical source isolation' : mode === 'all' ? '' : ` - ${mode} without file changes`}`, async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-solo-review-'));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  await engine.initAndSync(); t.after(() => engine.close());
+  engine.setNodes([{ id: 'unchanged', title: '用户既有环节', description: '不得由 Solo 对话改变', stage: '实施', status: 'Pending' }]);
+  const roadmap = fs.readFileSync(path.join(project, '.solopreneur', 'roadmap.csv'));
+  let run;
+  if (historical) {
+    const sourceRoot = path.join(project, '.solopreneur', 'agent-runs'), runDir = path.join(sourceRoot, '__solo__', '21'); fs.mkdirSync(runDir, { recursive: true });
+    const startedAt = '2026-05-24T00:00:00.000Z';
+    const taskId = require('../out/taskReport.js').registerLearningTask(project, { executionLogId: 21, runDir, userMessage: '检查 Solo 任务复核', startedAt });
+    const raw = { learningTaskId: taskId, workspaceRoot: project, nodeId: '__solo__', runKind: 'solo', status: 'In Progress', agentCli: 'claude', reviewerCliPath: 'agy', collaborationReviewMode: mode, executionLogId: 21, rootExecutionLogId: 21, userMessage: '检查 Solo 任务复核', outputFilePath: path.join(runDir, 'output.log'), changesFilePath: path.join(runDir, 'changes.txt'), startedAt, finishedAt: '2026-05-24T00:01:00.000Z' };
+    fs.writeFileSync(path.join(project, '.agent_status.json'), JSON.stringify(raw));
+    for (const [file, body] of [['prompt.txt', '检查 Solo 任务复核'], ['command.txt', 'claude original arguments'], ['output.log', 'Solo task completed.\n完整对话结果🌿\n'.repeat(10000)], ['changes.txt', ''], ['workspace-before.json', JSON.stringify(await require('../out/runWorkspace.js').snapshotWorkspace(project))]]) fs.writeFileSync(path.join(runDir, file), body);
+    native.store.importProjectJournal(native.projectIds.get(project), { id: 21, nodeId: '__solo__', timestamp: startedAt, agentCli: 'claude', command: 'claude original arguments', output: 'Solo task completed.', status: 'Running' });
+    assert.deepEqual((await require('../out/projectDataMigration.js').importAgentRuns(native.store, sourceRoot, { projectRoot: project })).conflicts, []);
+    fs.renameSync(sourceRoot, path.join(base, 'retained-history')); fs.renameSync(path.join(project, '.agent_status.json'), path.join(base, 'retained-status.json'));
+    run = await native.ops({ operation: 'read_run_checkpoint_state', input: { root: project, executionLogId: 21 } });
+    assert.equal(fs.existsSync(sourceRoot), false);
+  } else {
+    run = await native.ops({ operation: 'prepare_run', input: { root: project, executionLogId: 21, nodeId: '__solo__', runKind: 'solo', prompt: '检查 Solo 任务复核', command: 'claude original arguments', userMessage: '检查 Solo 任务复核', metadata: { interactiveSession: true, agentCli: 'claude', reviewerCliPath: 'agy', collaborationReviewMode: mode }, idempotencyKey: 'solo-review-main' } });
+  const before = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+  await native.ops({ operation: 'write_run_document', input: { projectId: run.projectId, executionLogId: 21, generation: run.generation, turnId: run.turnId, purpose: require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId, 'before'), bytes: Buffer.from(JSON.stringify(before)).toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: 'solo-review-baseline' } });
+  const output = 'Solo task completed.\n完整对话结果🌿\n'.repeat(10000);
+  await native.ops({ operation: 'append_run_log', input: { projectId: run.projectId, executionLogId: 21, generation: run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from(output).toString('base64'), idempotencyKey: 'solo-review-output' } });
+  await native.ops({ operation: 'checkpoint_run', input: { projectId: run.projectId, executionLogId: 21, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial', summary: 'Solo 任务已完成', idempotencyKey: 'solo-review-complete' } });
+  }
+  const output = 'Solo task completed.\n完整对话结果🌿\n'.repeat(10000);
+  const commands = [], terminal = { name: 'configured Solo reviewer', processId: Promise.resolve(process.pid), show() {}, sendText(command) { commands.push(command); } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.settle = processAgentStatusFile;
+    module.exports.connect = (engine, project, root, terminal) => {
+      syncEngine = engine; activeProjectRoot = project; extensionContextRef = null;
+      getPersistedSettings = () => ({ globalDataPath: root, automationTasks: {} });
+      agentCli_1.commandExists = () => true;
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      createAgentTerminal = () => terminal;
+      sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {};
+    };
+  `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js'), './db/syncEngine': require('../out/db/syncEngine.js') });
+  extension.connect(engine, project, root, terminal);
+  const reference = require('../out/runLifecycleClient.js').runStatusReference(project, 21);
+  await Promise.all([extension.settle(reference, undefined, root), extension.settle(reference, undefined, root)]);
+  const journal = await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: 21 } });
+  assert.equal(journal.entry.status, 'Completed'); assert.match(journal.entry.output, /Solo conversation state: Completed/);
+  const settled = await native.ops({ operation: 'read_run_state', input: { root: project, executionLogId: 21 } });
+  assert.equal(settled.status.status, historical ? 'Processed' : 'Waiting', 'the original interactive conversation stays open; completed legacy batch runs remain noninteractive');
+  const runs = (await native.ops({ operation: 'list_run_states', input: { root: project } })).items;
+  const reviews = runs.filter(item => item.status.runKind === 'agent_review');
+  assert.equal(reviews.length, mode === 'all' ? 1 : 0); assert.equal(commands.length, reviews.length);
+  if (mode === 'all') {
+    const review = reviews[0];
+    assert.equal(review.status.nodeId, '__solo__'); assert.equal(review.taskId, run.taskId);
+    assert.equal(path.basename(review.status.agentCli), 'agy'); assert.equal(review.status.status, 'Running');
+    const plan = await native.ops({ operation: 'read_run_execution_plan', input: { root: project, executionLogId: Number(review.status.rootExecutionLogId) } });
+    assert.equal(plan.status.agentLaunch.readOnly, true); assert.match(plan.prompt, /只读复核 Agent/); assert.match(plan.prompt, /runKind: solo/);
+    assert.ok(plan.prompt.includes(output)); assert.equal(plan.prompt.split(output).length - 1, 1, 'the full dialogue output appears once');
+    assert.equal(childProcess.spawnSync('bash', ['-n', '-c', commands[0]], { encoding: 'utf8' }).status, 0);
+  }
+  assert.deepEqual(fs.readFileSync(path.join(project, '.solopreneur', 'roadmap.csv')), roadmap);
+  assert.equal(engine.getNodes().find(node => node.id === 'unchanged').status, 'Pending'); assert.equal(engine.getNodes().length, 1);
+  const wal = fs.readFileSync(path.join(root, 'solomap.db-wal'));
+  await extension.settle(reference, undefined, root);
+  assert.deepEqual(fs.readFileSync(path.join(root, 'solomap.db-wal')), wal); assert.equal(commands.length, reviews.length);
+  assert.deepEqual(await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: 21 } }), journal);
+  assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')).sort(), ['project.json', 'roadmap.csv']);
 });
 
-test('completed conversation does not start Agent review when persisted review mode is off', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };',
-      'module.exports.__setCommandExistsForTest = (fn) => { commandExists = fn; };',
-      'module.exports.__setTerminalForTest = (fn) => { createAgentTerminal = fn; };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-review-off-'));
-  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '2');
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(path.join(runDir, 'completion.json'), '{"markCompleted":true,"reason":"实现已完成"}', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'changes.txt'), 'M src/app.js\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'touched-files.txt'), 'M src/app.js\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'output.log'), 'Implemented and validated.\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'command.txt'), 'codex exec\n', 'utf8');
-  const statusFilePath = path.join(tempRoot, '.agent_status.json');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    nodeId: '2',
-    runKind: 'step',
-    status: 'In Progress',
-    agentCli: 'codex',
-    reviewerCliPath: 'agy',
-    collaborationReviewMode: 'off',
-    executionLogId: 12,
-    userMessage: '完成 MVP',
-    outputFilePath: path.join(runDir, 'output.log'),
-    changesFilePath: path.join(runDir, 'changes.txt'),
-    touchedFilesPath: path.join(runDir, 'touched-files.txt'),
-    commandFilePath: path.join(runDir, 'command.txt'),
-    completionDecisionFilePath: path.join(runDir, 'completion.json'),
-    startedAt: '2026-05-24T00:00:00.000Z'
-  }), 'utf8');
-
-  let nodeUpdate = null;
-  const executionUpdates = [];
-  const executionLogs = [];
-  let reviewCommand = '';
-  extensionModule.__setCommandExistsForTest(() => true);
-  extensionModule.__setTerminalForTest(() => ({
-    show() {},
-    sendText(command) {
-      reviewCommand = command;
-    }
-  }));
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'Running' }],
-    updateNode: (_nodeId, update) => { nodeUpdate = update; },
-    updateAgentExecution: (_id, _cli, _command, output, status) => {
-      executionUpdates.push({ output, status });
-      return true;
-    },
-    logAgentExecution: (nodeId, agentCli, command, output, status) => {
-      executionLogs.push({ nodeId, agentCli, command, output, status });
-      return 88;
-    },
-    getAgentExecutions: () => executionLogs
-  }, tempRoot);
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  assert.equal(nodeUpdate.status, 'Completed');
-  assert.equal(executionUpdates[0].status, 'Completed');
-  assert.equal(executionLogs.length, 0);
-  assert.equal(reviewCommand, '');
+for (const historical of [false, true]) test(`completed conversation does not start Agent review when persisted review mode is off${historical ? ' after historical source isolation' : ''}`, async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-review-disabled-'));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+  const reviewer = 'agy';
+  const closeCallbacks = [];
+  let native = await require('./analysis-fixture.js').openAnalysisOwner({ after: close => closeCallbacks.push(close) }, root, [{ path: project }]);
+  t.after(async () => { for (const close of closeCallbacks.splice(0).reverse()) await close(); });
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  await engine.initAndSync(); t.after(() => engine.close());
+  engine.setNodes([{ id: '2', title: '实现 MVP', description: '完整用户目标', stage: '实施', status: 'Running' }]);
+  let run;
+  if (historical) {
+    const sourceRoot = path.join(project, '.solopreneur', 'agent-runs'), runDir = path.join(sourceRoot, '2', '12'); fs.mkdirSync(runDir, { recursive: true });
+    const startedAt = '2026-05-24T00:00:00.000Z';
+    const taskId = require('../out/taskReport.js').registerLearningTask(project, { executionLogId: 12, runDir, userMessage: '完成 MVP', startedAt });
+    const raw = { learningTaskId: taskId, workspaceRoot: project, nodeId: '2', runKind: 'step', status: 'In Progress', agentCli: 'claude', reviewerCliPath: reviewer, collaborationReviewMode: 'off', executionLogId: 12, rootExecutionLogId: 12, userMessage: '完成 MVP', completionDecisionFilePath: path.join(runDir, 'completion.json'), outputFilePath: path.join(runDir, 'output.log'), changesFilePath: path.join(runDir, 'changes.txt'), startedAt, finishedAt: '2026-05-24T00:01:00.000Z' };
+    fs.writeFileSync(path.join(project, '.agent_status.json'), JSON.stringify(raw));
+    for (const [file, body] of [['completion.json', '{"markCompleted":true,"reason":"实现已完成"}'], ['prompt.txt', '完成 MVP'], ['command.txt', 'claude original arguments'], ['output.log', '完整结果🌿\n'.repeat(10000)], ['changes.txt', 'A result.txt\n'], ['workspace-before.json', JSON.stringify(await require('../out/runWorkspace.js').snapshotWorkspace(project))]]) fs.writeFileSync(path.join(runDir, file), body);
+    fs.writeFileSync(path.join(project, 'result.txt'), '完整交付');
+    native.store.importProjectJournal(native.projectIds.get(project), { id: 12, nodeId: '2', timestamp: startedAt, agentCli: 'claude', command: 'claude original arguments', output: '等待复核', status: 'Running' });
+    assert.deepEqual((await require('../out/projectDataMigration.js').importAgentRuns(native.store, sourceRoot, { projectRoot: project })).conflicts, []);
+    fs.renameSync(sourceRoot, path.join(base, 'retained-history')); fs.renameSync(path.join(project, '.agent_status.json'), path.join(base, 'retained-status.json'));
+    run = await native.ops({ operation: 'read_run_checkpoint_state', input: { root: project, executionLogId: 12 } });
+    assert.equal(fs.existsSync(sourceRoot), false);
+  } else {
+    run = await native.ops({ operation: 'prepare_run', input: { root: project, executionLogId: 12, nodeId: '2', runKind: 'step', prompt: '完成 MVP', command: 'claude original arguments', userMessage: '完成 MVP', metadata: { agentCli: 'claude', reviewerCliPath: reviewer, collaborationReviewMode: 'off' }, idempotencyKey: 'review-disabled-main' } });
+  const before = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+  await native.ops({ operation: 'write_run_document', input: { projectId: run.projectId, executionLogId: 12, generation: run.generation, turnId: run.turnId, purpose: require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId, 'before'), bytes: Buffer.from(JSON.stringify(before)).toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: 'review-disabled-baseline' } });
+  const output = '完整结果🌿\n'.repeat(10000);
+  await native.ops({ operation: 'append_run_log', input: { projectId: run.projectId, executionLogId: 12, generation: run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from(output).toString('base64'), idempotencyKey: 'review-disabled-output' } });
+  fs.writeFileSync(path.join(project, 'result.txt'), '完整交付');
+  await native.ops({ operation: 'checkpoint_run', input: { projectId: run.projectId, executionLogId: 12, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'candidate_complete', summary: '实现已完成', idempotencyKey: 'review-disabled-candidate' } });
+  }
+  const output = '完整结果🌿\n'.repeat(10000);
+  const commands = [], terminal = { name: 'actual review terminal', processId: Promise.resolve(process.pid), show() {}, sendText(command) { commands.push(command); } };
+  let settingsReads = 0;
+  const currentSettings = () => { settingsReads++; return { globalDataPath: root, collaborationReviewMode: 'all', reviewerCliPath: 'agy', automationTasks: {} }; };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.settle = processAgentStatusFile;
+    module.exports.connect = (engine, project, root, terminal, readSettings) => {
+      syncEngine = engine; activeProjectRoot = project; extensionContextRef = { extensionPath: path.resolve(__dirname, '..') };
+      getPersistedSettings = readSettings;
+      agentCli_1.commandExists = () => true;
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      createAgentTerminal = () => terminal;
+      sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {};
+    };
+  `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js'), './db/syncEngine': require('../out/db/syncEngine.js') });
+  extension.connect(engine, project, root, terminal, currentSettings);
+  const reference = require('../out/runLifecycleClient.js').runStatusReference(project, 12);
+  await Promise.all([extension.settle(reference, undefined, root), extension.settle(reference, undefined, root)]);
+  const journal = await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: 12 } });
+  assert.equal(engine.getNodes().find(node => node.id === '2').status, 'Completed', 'the saved off choice completes the task directly, including file-changing tasks');
+  assert.ok(engine.getNodes().find(node => node.id === '2').completedAt);
+  assert.equal(fs.readFileSync(path.join(project, 'result.txt'), 'utf8'), '完整交付');
+  assert.ok(settingsReads > 0, 'the real host context must consume the current settings provider');
+  assert.equal(journal.entry.status, 'Completed'); assert.match(journal.entry.output, /实现已完成/); assert.doesNotMatch(journal.entry.output, /正在等待副 Agent 复核/);
+  const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation, input) => native.ops({ operation, input }), root);
+  assert.equal((await client.readLog(reference, historical ? 'output' : 'stdout')).toString('utf8'), output, 'settlement preserves the complete Unicode output');
+  const settled = await native.ops({ operation: 'read_run_state', input: { root: project, executionLogId: 12 } });
+  assert.equal(settled.status.collaborationReviewMode, 'off'); assert.equal(settled.taskId, run.taskId);
+  const runs = (await native.ops({ operation: 'list_run_states', input: { root: project } })).items;
+  assert.equal(runs.length, 1); assert.equal(runs.filter(item => item.status.runKind === 'agent_review').length, 0); assert.equal(commands.length, 0);
+  const node = engine.getNodes().find(node => node.id === '2');
+  const wal = fs.readFileSync(path.join(root, 'solomap.db-wal'));
+  await Promise.all([extension.settle(reference, undefined, root), extension.settle(reference, undefined, root)]);
+  assert.deepEqual(fs.readFileSync(path.join(root, 'solomap.db-wal')), wal);
+  assert.deepEqual(await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: 12 } }), journal);
+  assert.deepEqual(engine.getNodes().find(item => item.id === '2'), node); assert.equal(commands.length, 0);
+  for (const close of closeCallbacks.splice(0).reverse()) await close();
+  native = await require('./analysis-fixture.js').openAnalysisOwner({ after: close => closeCallbacks.push(close) }, root, [{ path: project }]);
+  assert.deepEqual(await native.ops({ operation: 'read_run_state', input: { root: project, executionLogId: 12 } }), settled);
+  assert.deepEqual(await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: 12 } }), journal);
+  const restartWal = fs.readFileSync(path.join(root, 'solomap.db-wal'));
+  await extension.settle(reference, undefined, root);
+  assert.deepEqual(fs.readFileSync(path.join(root, 'solomap.db-wal')), restartWal); assert.equal(commands.length, 0);
+  assert.equal((await native.ops({ operation: 'list_run_states', input: { root: project } })).items.length, 1);
+  assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')).sort(), ['project.json', 'roadmap.csv']);
 });
 
-test('passing Agent review completes the deferred roadmap step', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-review-pass-'));
-  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '2', 'review-12');
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(path.join(runDir, 'review-result.json'), JSON.stringify({
-    status: 'pass',
-    summary: '复核通过，可以完成环节。',
-    findings: [],
-    nextAction: '写入完成证据',
-    goalSatisfied: true,
-    evidenceSufficient: true,
-    criteria: [{ criterion: '实现 MVP', status: 'pass', evidence: ['output:main'], reason: '验证通过' }]
-  }), 'utf8');
-  fs.writeFileSync(path.join(runDir, 'changes.txt'), '', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'touched-files.txt'), '', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'output.log'), 'Review passed.\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'review-evidence.json'), JSON.stringify({ workspaceRoot: tempRoot, mainOutputFilePath: path.join(runDir, 'output.log') }), 'utf8');
-  fs.writeFileSync(path.join(runDir, 'command.txt'), 'agy review\n', 'utf8');
-  const statusFilePath = path.join(tempRoot, '.agent_status.json');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    nodeId: '2',
-    runKind: 'agent_review',
-    status: 'In Progress',
-    agentCli: 'agy',
-    executionLogId: 88,
-    reviewOfExecutionLogId: 12,
-    reviewTargetStatus: 'Completed',
-    reviewResultFilePath: path.join(runDir, 'review-result.json'),
-    outputFilePath: path.join(runDir, 'output.log'),
-    changesFilePath: path.join(runDir, 'changes.txt'),
-    touchedFilesPath: path.join(runDir, 'touched-files.txt'),
-    commandFilePath: path.join(runDir, 'command.txt'),
-    startedAt: '2026-05-24T00:00:00.000Z'
-  }), 'utf8');
-
-  let nodeUpdate = null;
-  let loggedOutput = '';
-  let loggedStatus = '';
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'In Progress' }],
-    updateNode: (_nodeId, update) => { nodeUpdate = update; },
-    updateAgentExecution: (_id, _cli, _command, output, status) => {
-      loggedOutput = output;
-      loggedStatus = status;
-      return true;
-    },
-    logAgentExecution: () => 1,
-    getAgentExecutions: () => []
-  }, tempRoot);
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  assert.equal(nodeUpdate.status, 'Completed');
-  assert.ok(nodeUpdate.completedAt);
-  assert.equal(loggedStatus, 'Completed');
-  assert.match(loggedOutput, /Review decision: pass/);
-  assert.match(loggedOutput, /复核通过，可以完成环节/);
+test('passing Agent review completes the deferred roadmap step', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-review-pass-'));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+  const reviewerDir = path.join(base, 'reviewer'); fs.mkdirSync(reviewerDir);
+  const reviewer = path.join(reviewerDir, 'agy'), captured = path.join(base, 'reviewer-input.json'), response = path.join(base, 'reviewer-response.json');
+  fs.writeFileSync(reviewer, `#!${process.execPath}\nconst fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(captured)}, JSON.stringify({args:process.argv.slice(2),prompt:fs.readFileSync(0,'utf8')})); process.stdout.write('SOLOMAP_REVIEW_JSON_START\\n'+fs.readFileSync(${JSON.stringify(response)},'utf8')+'\\nSOLOMAP_REVIEW_JSON_END\\n');\n`); fs.chmodSync(reviewer, 0o755);
+  const closeCallbacks = [];
+  let native = await require('./analysis-fixture.js').openAnalysisOwner({ after: close => closeCallbacks.push(close) }, root, [{ path: project }]);
+  t.after(async () => { for (const close of closeCallbacks.splice(0).reverse()) await close(); });
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  await engine.initAndSync(); t.after(() => engine.close());
+  engine.setNodes([{ id: '2', title: '实现 MVP', description: '完整用户目标', stage: '实施', status: 'Running' }]);
+  const run = await native.ops({ operation: 'prepare_run', input: { root: project, executionLogId: 12, nodeId: '2', runKind: 'step', prompt: '完成 MVP', command: 'claude original arguments', userMessage: '完成 MVP', metadata: { agentCli: 'claude', reviewerCliPath: reviewer, collaborationReviewMode: 'high_risk' }, idempotencyKey: 'review-pass-main' } });
+  const before = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+  await native.ops({ operation: 'write_run_document', input: { projectId: run.projectId, executionLogId: 12, generation: run.generation, turnId: run.turnId, purpose: require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId, 'before'), bytes: Buffer.from(JSON.stringify(before)).toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: 'review-pass-baseline' } });
+  const output = '完整结果🌿\n'.repeat(10000);
+  await native.ops({ operation: 'append_run_log', input: { projectId: run.projectId, executionLogId: 12, generation: run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from(output).toString('base64'), idempotencyKey: 'review-pass-output' } });
+  fs.writeFileSync(path.join(project, 'result.txt'), '完整交付');
+  await native.ops({ operation: 'checkpoint_run', input: { projectId: run.projectId, executionLogId: 12, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'candidate_complete', summary: '实现已完成', idempotencyKey: 'review-pass-candidate' } });
+  const commands = [], terminal = { name: 'actual review terminal', processId: Promise.resolve(process.pid), show() {}, sendText(command) { commands.push(command); } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.settle = processAgentStatusFile;
+    module.exports.connect = (engine, project, root, terminal) => {
+      syncEngine = engine; activeProjectRoot = project; extensionContextRef = null;
+      getPersistedSettings = () => ({ globalDataPath: root, automationTasks: {} });
+      agentCli_1.commandExists = () => true;
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      createAgentTerminal = () => terminal;
+      sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {};
+    };
+  `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js'), './db/syncEngine': require('../out/db/syncEngine.js') });
+  extension.connect(engine, project, root, terminal);
+  const reference = require('../out/runLifecycleClient.js').runStatusReference(project, 12);
+  await extension.settle(reference, undefined, root);
+  const journal = await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: 12 } });
+  assert.equal(engine.getNodes().find(node => node.id === '2').status, 'In Progress', 'the step awaits its read-only review rather than completing prematurely');
+  assert.match(journal.entry.output, /正在等待副 Agent 复核/);
+  const runs = (await native.ops({ operation: 'list_run_states', input: { root: project } })).items;
+  const review = runs.find(item => item.status.runKind === 'agent_review');
+  assert.ok(review, JSON.stringify(runs.map(item => item.status)));
+  assert.equal(runs.length, 2); assert.equal(commands.length, 1);
+  assert.equal(path.basename(review.status.agentCli), 'agy'); assert.equal(review.taskId, run.taskId);
+  const id = Number(review.status.rootExecutionLogId);
+  const plan = await native.ops({ operation: 'read_run_execution_plan', input: { root: project, executionLogId: id } });
+  assert.equal(plan.status.agentLaunch.readOnly, true);
+  assert.match(plan.prompt, /只读复核 Agent/); assert.match(plan.prompt, /不要修改项目文件/); assert.match(plan.prompt, /goalSatisfied/); assert.doesNotMatch(plan.prompt, /H\/I\/J/);
+  assert.ok(plan.prompt.includes(output)); assert.equal(plan.prompt.split(output).length - 1, 1); assert.match(commands[0], /runAgentProcess\.js/);
+  const wal = fs.readFileSync(path.join(root, 'solomap.db-wal'));
+  await extension.settle(reference, undefined, root);
+  assert.equal(commands.length, 1); assert.deepEqual(fs.readFileSync(path.join(root, 'solomap.db-wal')), wal);
+  assert.deepEqual(await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: 12 } }), journal);
+  const request = await native.ops({ operation: 'read_run_document', input: { projectId: review.projectId, executionLogId: id, purpose: 'launch_request', revision: 1 } });
+  const manifest = JSON.parse(Buffer.from(request.bytes, 'base64').toString('utf8')).reviewEvidence;
+  const criteria = manifest.completionCriteria.length ? manifest.completionCriteria : [manifest.taskGoal];
+  const result = { status: 'pass', summary: '复核通过，可以完成环节。', findings: [], nextAction: '', goalSatisfied: true, evidenceSufficient: true, criteria: criteria.map(criterion => ({ criterion, status: 'pass', evidence: ['output:main'], reason: '完整交付结果已独立检查' })) };
+  fs.writeFileSync(response, JSON.stringify(result));
+  assert.equal(childProcess.spawnSync('bash', ['-n', '-c', commands[0]], { encoding: 'utf8' }).status, 0, 'the final terminal command must parse');
+  const beforeReview = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+  const runner = childProcess.spawn('bash', ['-c', commands[0]], { cwd: project, stdio: ['ignore', 'pipe', 'pipe'] });
+  const runnerOutput = []; runner.stdout.on('data', bytes => runnerOutput.push(bytes)); runner.stderr.on('data', bytes => runnerOutput.push(bytes));
+  const exit = await new Promise((resolve, reject) => { runner.once('error', reject); runner.once('exit', resolve); });
+  assert.equal(exit, 0, Buffer.concat(runnerOutput).toString('utf8'));
+  const received = JSON.parse(fs.readFileSync(captured, 'utf8'));
+  assert.deepEqual(received.args.slice(0, 4), ['--print', '--mode', 'plan', '--sandbox']);
+  assert.ok(!received.args.some(arg => arg.includes('dangerously'))); assert.equal(received.prompt, plan.prompt);
+  assert.deepEqual(await require('../out/runWorkspace.js').snapshotWorkspace(project), beforeReview, 'review execution must preserve the project files');
+  const capturedResult = await native.ops({ operation: 'read_run_state', input: { root: project, executionLogId: id } });
+  assert.ok(capturedResult.status.reviewResultObjectId); assert.ok(capturedResult.status.reviewResultRevision);
+  for (const close of closeCallbacks.splice(0).reverse()) await close();
+  native = await require('./analysis-fixture.js').openAnalysisOwner({ after: close => closeCallbacks.push(close) }, root, [{ path: project }]);
+  assert.deepEqual(await native.ops({ operation: 'read_run_state', input: { root: project, executionLogId: id } }), capturedResult);
+  fs.renameSync(reviewerDir, path.join(base, 'retained-reviewer'));
+  fs.renameSync(response, path.join(base, 'retained-response.json'));
+  assert.equal(fs.existsSync(reviewer), false); assert.equal(fs.existsSync(response), false);
+  await extension.settle(require('../out/runLifecycleClient.js').runStatusReference(project, id), undefined, root);
+  assert.equal(engine.getNodes().find(node => node.id === '2').status, 'Completed');
+  assert.ok(engine.getNodes().find(node => node.id === '2').completedAt);
+  const accepted = await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: id } });
+  assert.equal(accepted.entry.status, 'Completed'); assert.match(accepted.entry.output, /Review decision: pass/); assert.match(accepted.entry.output, /复核通过/);
+  const completedNode = { ...engine.getNodes().find(node => node.id === '2') };
+  const afterPass = fs.readFileSync(path.join(root, 'solomap.db-wal'));
+  await Promise.all([extension.settle(require('../out/runLifecycleClient.js').runStatusReference(project, id), undefined, root), extension.settle(require('../out/runLifecycleClient.js').runStatusReference(project, id), undefined, root)]);
+  assert.deepEqual(engine.getNodes().find(node => node.id === '2'), completedNode);
+  assert.deepEqual(await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: id } }), accepted);
+  assert.deepEqual(fs.readFileSync(path.join(root, 'solomap.db-wal')), afterPass); assert.equal(commands.length, 1);
+  assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')).sort(), ['project.json', 'roadmap.csv']);
 });
 
 test('high-risk review only triggers for real changes and rejects evidence-free pass results', () => {
@@ -12474,9 +12670,7 @@ test('high-risk review only triggers for real changes and rejects evidence-free 
     'M src/app.js'
   ), true);
 
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-review-evidence-gate-'));
-  const resultPath = path.join(tempRoot, 'review-result.json');
-  fs.writeFileSync(resultPath, JSON.stringify({
+  const parsed = extensionModule.__parseAgentReviewResult({
     status: 'pass',
     summary: '看起来已经完成。',
     findings: [],
@@ -12484,218 +12678,311 @@ test('high-risk review only triggers for real changes and rejects evidence-free 
     goalSatisfied: true,
     evidenceSufficient: true,
     criteria: [{ criterion: '完成目标', status: 'pass', evidence: [], reason: '主 Agent 说已完成' }]
-  }), 'utf8');
-  const parsed = extensionModule.__parseAgentReviewResult(resultPath);
+  }, { completionCriteria: ['完成目标'] });
   assert.equal(parsed.status, 'revise');
   assert.match(parsed.findings[0], /缺少逐项完成标准或独立证据/);
 });
 
-test('first revise decision automatically returns actionable findings to the main Agent once', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };',
-      'module.exports.__setCommandExistsForTest = (fn) => { commandExists = fn; };',
-      'module.exports.__setTerminalForTest = (fn) => { createAgentTerminal = fn; };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-review-revise-'));
-  const reviewRunDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '2', 'review-12');
-  fs.mkdirSync(reviewRunDir, { recursive: true });
-  fs.writeFileSync(path.join(reviewRunDir, 'review-result.json'), JSON.stringify({
-    status: 'revise',
-    summary: '缺少必要验证。',
-    findings: ['运行最窄回归并修复失败。'],
-    nextAction: 'npm test',
-    goalSatisfied: false,
-    evidenceSufficient: false,
-    criteria: [{ criterion: '测试通过', status: 'fail', evidence: ['output:main'], reason: '没有测试结果' }]
-  }), 'utf8');
-  fs.writeFileSync(path.join(reviewRunDir, 'changes.txt'), '', 'utf8');
-  fs.writeFileSync(path.join(reviewRunDir, 'touched-files.txt'), '', 'utf8');
-  fs.writeFileSync(path.join(reviewRunDir, 'output.log'), 'Review requested revision.\n', 'utf8');
-  fs.writeFileSync(path.join(reviewRunDir, 'command.txt'), 'agy review\n', 'utf8');
-  const statusFilePath = path.join(tempRoot, '.agent_status.json');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot: tempRoot,
-    nodeId: '2',
-    runKind: 'agent_review',
-    status: 'In Progress',
-    agentCli: 'agy',
-    executionLogId: 88,
-    reviewOfExecutionLogId: 12,
-    reviewTargetStatus: 'Completed',
-    reviewResultFilePath: path.join(reviewRunDir, 'review-result.json'),
-    reviewMainAgentCli: 'agy',
-    reviewMainNativeSessionId: 'session-12',
-    reviewAttempt: 1,
-    reviewTaskGoal: '完成 MVP',
-    reviewCompletionCriteria: ['测试通过'],
-    reviewerCliPath: 'agy',
-    collaborationReviewMode: 'all',
-    outputFilePath: path.join(reviewRunDir, 'output.log'),
-    changesFilePath: path.join(reviewRunDir, 'changes.txt'),
-    touchedFilesPath: path.join(reviewRunDir, 'touched-files.txt'),
-    commandFilePath: path.join(reviewRunDir, 'command.txt'),
-    startedAt: '2026-05-24T00:00:00.000Z'
-  }), 'utf8');
-
-  const executionLogs = [];
-  let launchedCommand = '';
-  extensionModule.__setCommandExistsForTest(() => true);
-  extensionModule.__setTerminalForTest(() => ({
-    show() {},
-    sendText(command) { launchedCommand = command; }
-  }));
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'In Progress' }],
-    updateNode: () => {},
-    updateAgentExecution: () => true,
-    logAgentExecution: (nodeId, agentCli, command, output, status) => {
-      executionLogs.push({ nodeId, agentCli, command, output, status });
-      return 90;
-    },
-    getAgentExecutions: () => executionLogs
-  }, tempRoot);
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  assert.equal(executionLogs.length, 1);
-  assert.match(executionLogs[0].output, /Agent review revision started/);
-  assert.match(executionLogs[0].output, /Continuation parent conversation: 12/);
-  assert.match(launchedCommand, /run-agent\.sh/);
-  const revisionPrompt = fs.readFileSync(path.join(tempRoot, '.solopreneur', 'agent-runs', '2', '90', 'prompt.txt'), 'utf8');
-  assert.match(revisionPrompt, /运行最窄回归并修复失败/);
-  assert.match(revisionPrompt, /只修正以下明确问题/);
+test('a passing review cannot use a file created or changed after its sealed source turn', () => {
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.parse = parseAgentReviewResult;');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-review-file-evidence-'));
+  const result = { status: 'pass', summary: '已完成', findings: [], nextAction: '', goalSatisfied: true, evidenceSufficient: true, criteria: [{ criterion: '真实产物', status: 'pass', evidence: ['file:result.txt'], reason: '检查文件' }] };
+  fs.writeFileSync(path.join(root, 'result.txt'), '下一轮新增文件');
+  assert.equal(extension.parse(result, { workspaceRoot: root, completionCriteria: ['真实产物'], files: {} }).status, 'revise');
+  const crypto = require('node:crypto');
+  const files = { 'result.txt': { algorithm: 'sha256', format: 'bytes', digest: crypto.createHash('sha256').update('原轮次文件').digest('hex') } };
+  assert.equal(extension.parse(result, { workspaceRoot: root, completionCriteria: ['真实产物'], files }).status, 'revise');
+  fs.writeFileSync(path.join(root, 'result.txt'), '原轮次文件');
+  assert.equal(extension.parse(result, { workspaceRoot: root, completionCriteria: ['真实产物'], files }).status, 'pass');
 });
 
-test('manual completion immediately persists the user decision for an active Agent run', () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__completeNodeManually = completeNodeManually;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-manual-action-'));
-  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '2');
-  fs.mkdirSync(runDir, { recursive: true });
-  const completionDecisionFilePath = path.join(runDir, 'completion.json');
-  fs.writeFileSync(completionDecisionFilePath, '{"markCompleted":false}', 'utf8');
-  fs.writeFileSync(path.join(tempRoot, '.agent_status.json'), JSON.stringify({
-    nodeId: '2',
-    status: 'Running',
-    completionDecisionFilePath
-  }), 'utf8');
-  let nodeUpdate = null;
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    updateNode: (_nodeId, update) => { nodeUpdate = update; }
-  }, tempRoot);
-
-  extensionModule.__completeNodeManually('2');
-
-  assert.equal(nodeUpdate.status, 'Completed');
-  const decision = JSON.parse(fs.readFileSync(completionDecisionFilePath, 'utf8'));
-  assert.equal(decision.markCompleted, true);
-  assert.equal(decision.source, 'user');
+for (const permission of ['auto', 'never']) test(`first revise decision automatically returns actionable findings to the main Agent once (${permission})`, async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-review-revise-'));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+  const cliDir = path.join(base, 'cli'); fs.mkdirSync(cliDir);
+  const home = path.join(base, 'source-codex-home'); fs.mkdirSync(home);
+  fs.writeFileSync(path.join(home, 'config.toml'), 'model = "original-provider-model"\n');
+  const mainCli = path.join(cliDir, 'codex'), reviewer = path.join(cliDir, 'agy');
+  const captured = path.join(base, 'correction-input.json'), reviewInput = path.join(base, 'review-input.json'), response = path.join(base, 'response.json');
+  const sessionId = 'cc70ea64-51ec-41ef-842b-72f62bb8b7b3';
+  const correctionOutput = '已修正并验证完整结果🌿\n'.repeat(10000);
+  fs.writeFileSync(mainCli, `#!${process.execPath}
+const fs=require('node:fs'),assert=require('node:assert/strict');
+assert.equal(process.argv[2],'app-server');assert.equal(process.env.CODEX_HOME,${JSON.stringify(home)});
+assert.match(fs.readFileSync(${JSON.stringify(path.join(home, 'config.toml'))},'utf8'),/SoloMap managed database MCP begin/);
+const send=m=>process.stdout.write(JSON.stringify(m)+'\\n');let resume;
+require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+ const m=JSON.parse(line);
+ if(m.method==='initialize')send({id:0,result:{}});
+ if(m.method==='thread/resume'){resume=m.params;assert.equal(resume.threadId,${JSON.stringify(sessionId)});assert.equal(resume.model,'original-model');${permission === 'never' ? "assert.equal(resume.sandbox,undefined);assert.equal(resume.approvalPolicy,undefined);" : "assert.equal(resume.sandbox,'danger-full-access');assert.equal(resume.approvalPolicy,'never');"}send({id:1,result:{thread:{id:resume.threadId}}});}
+ if(m.method==='turn/start'){
+  assert.equal(m.params.model,'original-model');fs.writeFileSync(${JSON.stringify(captured)},JSON.stringify({resume,turn:m.params,home:process.env.CODEX_HOME}));
+  fs.writeFileSync('result.txt','修正后的完整交付');
+  require('node:child_process').execFileSync(process.execPath,[process.env.SOLOMAP_TASK_COMMAND,'complete','--turn-id',process.env.SOLOMAP_TASK_TURN_ID,'--outcome','candidate_complete','--summary','必要修正和验证已完成'],{stdio:'pipe'});
+  send({id:2,result:{turn:{id:'correction-turn'}}});send({method:'item/agentMessage/delta',params:{threadId:resume.threadId,turnId:'correction-turn',delta:${JSON.stringify(correctionOutput)}}});send({method:'turn/completed',params:{threadId:resume.threadId,turn:{id:'correction-turn',status:'completed'}}});
+ }
 });
-
-test('manual completion is not overwritten when an in-flight Agent run refreshes the roadmap afterward', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-manual-complete-'));
-  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '2');
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(path.join(runDir, 'completion.json'), '{"markCompleted":false}', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'changes.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'touched-files.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'output.log'), 'Agent finished additional work.\n', 'utf8');
-  const statusFilePath = path.join(tempRoot, '.agent_status.json');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    nodeId: '2',
-    status: 'In Progress',
-    agentCli: 'codex',
-    executionLogId: 10,
-    outputFilePath: path.join(runDir, 'output.log'),
-    changesFilePath: path.join(runDir, 'changes.txt'),
-    touchedFilesPath: path.join(runDir, 'touched-files.txt'),
-    completionDecisionFilePath: path.join(runDir, 'completion.json')
-  }), 'utf8');
-
-  let nodes = [{ id: '2', title: '实现 MVP', status: 'Completed', completedAt: '2026-05-25T00:00:00.000Z' }];
-  let nodeUpdate = null;
-  let refreshed = false;
-  let loggedStatus = '';
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => nodes,
-    updateNode: (_nodeId, update) => {
-      nodeUpdate = update;
-      nodes = [{ ...nodes[0], ...update }];
-    },
-    initAndSync: async () => {
-      refreshed = true;
-      nodes = [{ id: '2', title: '实现 MVP', status: 'Pending', completedAt: '' }];
-    },
-    updateAgentExecution: (_id, _cli, _command, _output, status) => {
-      loggedStatus = status;
-      return true;
-    },
-    logAgentExecution: () => 1,
-    getAgentExecutions: () => []
-  }, tempRoot);
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  assert.equal(refreshed, true);
-  assert.equal(nodeUpdate.status, 'Completed');
-  assert.equal(nodes[0].status, 'Completed');
-  assert.equal(loggedStatus, 'In Progress');
-});
-
-test('roadmap revision accepts valid CSV updates and restores the previous roadmap after invalid output', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
-    ].join('\n')
-  );
-  const createRevisionRun = (suffix, revisedCsv) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), `solopreneur-revision-${suffix}-`));
-    const solopreneurDir = path.join(root, '.solopreneur');
-    const runDir = path.join(solopreneurDir, 'agent-runs', 'roadmap-revision');
-    fs.mkdirSync(runDir, { recursive: true });
-    const originalCsv = [
-      'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
-      '1,Original step,Keep existing work,规划,,codex,Continue original work,In Progress,2026-01-01T00:00:00.000Z,'
-    ].join('\n');
-    fs.writeFileSync(path.join(solopreneurDir, 'roadmap.csv'), revisedCsv, 'utf8');
-    fs.writeFileSync(path.join(runDir, 'roadmap-before.csv'), originalCsv, 'utf8');
-    fs.writeFileSync(path.join(runDir, 'changes.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
-    fs.writeFileSync(path.join(runDir, 'touched-files.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
-    fs.writeFileSync(path.join(runDir, 'output.log'), 'Updated the roadmap for the new priority.\n', 'utf8');
-    const statusPath = path.join(root, '.agent_status.json');
-    fs.writeFileSync(statusPath, JSON.stringify({
-      nodeId: '__roadmap_revision__',
-      runKind: 'roadmap_revision',
-      roadmapBackupFilePath: path.join(runDir, 'roadmap-before.csv'),
-      status: 'In Progress',
-      agentCli: 'codex',
-      executionLogId: suffix === 'valid' ? 31 : 32,
-      outputFilePath: path.join(runDir, 'output.log'),
-      changesFilePath: path.join(runDir, 'changes.txt'),
-      touchedFilesPath: path.join(runDir, 'touched-files.txt'),
-      startedAt: '2026-05-24T00:00:00.000Z'
-    }), 'utf8');
-    return { root, statusPath, originalCsv };
+`); fs.chmodSync(mainCli, 0o755);
+  fs.writeFileSync(reviewer, `#!${process.execPath}\nconst fs=require('node:fs');fs.writeFileSync(${JSON.stringify(reviewInput)},JSON.stringify({args:process.argv.slice(2),prompt:fs.readFileSync(0,'utf8')}));process.stdout.write('SOLOMAP_REVIEW_JSON_START\\n'+fs.readFileSync(${JSON.stringify(response)},'utf8')+'\\nSOLOMAP_REVIEW_JSON_END\\n');\n`); fs.chmodSync(reviewer, 0o755);
+  const closes = []; let native = await require('./analysis-fixture.js').openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: project }]);
+  t.after(async () => { for (const close of closes.splice(0).reverse()) await close(); });
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  await engine.initAndSync(); t.after(() => engine.close());
+  engine.setNodes([{ id: '2', title: '实现 MVP', description: '完成 MVP', stage: '实施', status: 'Running' }]);
+  let run = await native.ops({ operation: 'prepare_run', input: { root: project, executionLogId: 12, nodeId: '2', runKind: 'step', prompt: '完成 MVP', command: 'source command', userMessage: '完成 MVP', metadata: { agentCli: mainCli, selectedModel: 'original-model', reviewerCliPath: reviewer, collaborationReviewMode: 'all', agentDatabaseConfigPath: path.join(home, 'config.toml'), agentLaunch: { schemaVersion: 1, agentCli: mainCli, selectedModel: 'original-model', taskPermissionMode: permission, continuation: false, direct: false } }, idempotencyKey: 'revise-main' } });
+  const identity = { projectId: run.projectId, executionLogId: 12, generation: run.generation }, proof = run.proof;
+  let binding = await native.ops({ operation: 'write_run_binding', input: { ...identity, expectedHeadRevision: 0, seed: { runId: '12', provider: 'codex', workspaceRoot: project, cliPath: mainCli, bindingNonce: '1'.repeat(64), createdAt: run.status.startedAt, method: 'provider_callback', contract: 'official_stable', providerContext: { codex: { codexHome: home } } }, idempotencyKey: 'revise-source-binding' } });
+  binding = await native.ops({ operation: 'write_run_binding', input: { ...identity, expectedHeadRevision: binding.headRevision, revision: { sessionId, method: 'provider_callback', contract: 'official_stable', state: 'planned', createdAt: run.status.startedAt, evidence: { source: 'confirmed_resume_target' } }, idempotencyKey: 'revise-source-planned' } });
+  binding = await native.ops({ operation: 'write_run_binding', input: { ...identity, expectedHeadRevision: binding.headRevision, confirmSessionId: sessionId, evidence: { source: 'codex_app_server' }, idempotencyKey: 'revise-source-confirmed' } });
+  run = await native.ops({ operation: 'read_run_state', input: identity });
+  run = await native.ops({ operation: 'patch_run_state', input: { ...identity, expectedRevision: run.revision, patch: { nativeSessionId: sessionId, nativeSessionIdIsCurrent: true, sessionBindingHeadRevision: binding.headRevision }, idempotencyKey: 'revise-source-identity' } });
+  const before = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+  await native.ops({ operation: 'write_run_document', input: { ...identity, turnId: run.turnId, purpose: require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId, 'before'), bytes: Buffer.from(JSON.stringify(before)).toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: 'revise-before' } });
+  fs.writeFileSync(path.join(project, 'result.txt'), '未完成验证的交付');
+  await native.ops({ operation: 'append_run_log', input: { ...identity, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from('原任务输出').toString('base64'), idempotencyKey: 'revise-output' } });
+  await native.ops({ operation: 'checkpoint_run', input: { ...identity, proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'candidate_complete', summary: '实现完成', idempotencyKey: 'revise-candidate' } });
+  const commands = [], terminal = { name: 'actual revision terminal', processId: Promise.resolve(process.pid), show() {}, sendText(command) { commands.push(command); } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.settle = processAgentStatusFile;
+    module.exports.restore = () => { if (statusPoller) clearInterval(statusPoller); statusPoller = null; };
+    module.exports.connect = (engine, project, root, terminal) => {
+      syncEngine = engine; activeProjectRoot = project; extensionContextRef = {extensionPath: ${JSON.stringify(projectRoot)}, globalState:{get:(_key,fallback)=>fallback}};
+      getPersistedSettings = () => ({globalDataPath:root,taskPermissionMode:'${permission === 'never' ? 'auto' : 'never'}',collaborationReviewMode:'off',automationTasks:{}});
+      agentCli_1.commandExists = () => true; autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      ensureActiveConversationPoller = () => {};
+      createAgentTerminal = () => terminal; sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {};
+    };
+  `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js'), './db/syncEngine': require('../out/db/syncEngine.js') });
+  t.after(() => extension.restore());
+  extension.connect(engine, project, root, terminal);
+  const reference = id => require('../out/runLifecycleClient.js').runStatusReference(project, id);
+  const states = async () => (await native.ops({ operation: 'list_run_states', input: { root: project } })).items;
+  const execute = async command => {
+    assert.equal(childProcess.spawnSync('bash', ['-n', '-c', command], { encoding: 'utf8' }).status, 0);
+    const child = childProcess.spawn('bash', ['-c', command], { cwd: project, stdio: ['ignore', 'pipe', 'pipe'] });
+    const output = []; child.stdout.on('data', bytes => output.push(bytes)); child.stderr.on('data', bytes => output.push(bytes));
+    const code = await new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', resolve); });
+    assert.equal(code, 0, Buffer.concat(output).toString('utf8'));
   };
+  await extension.settle(reference(12), undefined, root);
+  let review = (await states()).find(item => item.status.runKind === 'agent_review');
+  assert.ok(review); assert.equal(commands.length, 1); assert.equal(review.taskId, run.taskId);
+  const reviewId = Number(review.status.rootExecutionLogId);
+  const findings = '运行最窄回归并修复失败。\n完整修正依据🌿\n'.repeat(4000);
+  fs.writeFileSync(response, JSON.stringify({ status: 'revise', summary: '缺少必要验证。', findings: [findings], nextAction: '完成验证', goalSatisfied: false, evidenceSufficient: false, criteria: [{ criterion: '测试通过', status: 'fail', evidence: ['output:main'], reason: '没有测试结果' }] }));
+  await execute(commands[0]);
+  const unchanged = fs.readFileSync(path.join(project, 'result.txt'), 'utf8');
+  for (const close of closes.splice(0).reverse()) await close();
+  native = await require('./analysis-fixture.js').openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: project }]);
+  await extension.settle(reference(reviewId), undefined, root);
+  const revision = (await states()).find(item => item.status.runKind === 'agent_review_revision');
+  assert.ok(revision); assert.equal(commands.length, 2); assert.equal(revision.taskId, run.taskId);
+  assert.equal(revision.status.selectedModel, 'original-model', 'automatic revision preserves the source model');
+  assert.equal(revision.status.agentLaunch.taskPermissionMode, permission, 'automatic revision preserves the source permission mode');
+  assert.equal(revision.status.sourceParentRunId, run.runId); assert.equal(revision.status.sourceParentTurnId, run.turnId);
+  const revisionId = Number(revision.status.rootExecutionLogId);
+  const revisionBinding = await native.ops({ operation: 'read_run_binding', input: { root: project, executionLogId: revisionId } });
+  assert.equal(require('../out/sessionIdentity.js').getCodexSessionHome(revisionBinding), home, 'source native configuration remains isolated and unchanged');
+  assert.equal(revision.status.plannedNativeSessionId, sessionId); assert.equal(revision.status.agentLaunch.continuation, true);
+  const plan = await native.ops({ operation: 'read_run_execution_plan', input: { root: project, executionLogId: revisionId } });
+  assert.ok(plan.prompt.includes(findings)); assert.ok(plan.prompt.includes('只修正以下明确问题')); assert.ok(plan.prompt.includes(`原始目标：${review.status.reviewTaskGoal}`)); assert.ok(plan.prompt.includes('[fail] 测试通过: 没有测试结果'));
+  const wal = fs.readFileSync(path.join(root, 'solomap.db-wal'));
+  await Promise.all([extension.settle(reference(reviewId), undefined, root), extension.settle(reference(reviewId), undefined, root)]);
+  assert.equal(commands.length, 2); assert.deepEqual(fs.readFileSync(path.join(root, 'solomap.db-wal')), wal); assert.equal(fs.readFileSync(path.join(project, 'result.txt'), 'utf8'), unchanged);
+  await execute(commands[1]);
+  const received = JSON.parse(fs.readFileSync(captured, 'utf8')); assert.equal(received.turn.input[0].text, plan.prompt); assert.equal(received.resume.threadId, sessionId); assert.equal(received.home, home);
+  assert.equal(fs.readFileSync(path.join(project, 'result.txt'), 'utf8'), '修正后的完整交付');
+  assert.match(fs.readFileSync(path.join(home, 'config.toml'), 'utf8'), /model = "original-provider-model"/);
+  const corrected = await native.ops({ operation: 'read_run_state', input: { root: project, executionLogId: revisionId } });
+  assert.equal(corrected.status.nativeSessionId, sessionId); assert.equal(corrected.status.nativeSessionIdIsCurrent, true);
+  await extension.settle(reference(revisionId), undefined, root);
+  const reviews = (await states()).filter(item => item.status.runKind === 'agent_review'); assert.equal(reviews.length, 2); assert.equal(commands.length, 3);
+  const second = reviews.find(item => Number(item.status.reviewAttempt) === 2); assert.ok(second); assert.equal(second.taskId, run.taskId); assert.equal(Number(second.status.reviewOfExecutionLogId), revisionId);
+  assert.equal(engine.getNodes().find(node => node.id === '2').status, 'In Progress');
+  const secondId = Number(second.status.rootExecutionLogId), secondPlan = await native.ops({ operation: 'read_run_execution_plan', input: { root: project, executionLogId: secondId } });
+  assert.ok(secondPlan.prompt.includes(correctionOutput)); assert.equal(secondPlan.prompt.split(correctionOutput).length - 1, 1);
+  const request = await native.ops({ operation: 'read_run_document', input: { root: project, executionLogId: secondId, purpose: 'launch_request', revision: 1 } });
+  const manifest = JSON.parse(Buffer.from(request.bytes, 'base64').toString('utf8')).reviewEvidence;
+  fs.writeFileSync(response, JSON.stringify({ status: 'pass', summary: '修正后复核通过', findings: [], nextAction: '', goalSatisfied: true, evidenceSufficient: true, criteria: manifest.completionCriteria.map(criterion => ({ criterion, status: 'pass', evidence: ['output:main'], reason: '实际修正结果已检查' })) }));
+  const beforeReview = await require('../out/runWorkspace.js').snapshotWorkspace(project); await execute(commands[2]);
+  assert.deepEqual(await require('../out/runWorkspace.js').snapshotWorkspace(project), beforeReview);
+  const secondReceived = JSON.parse(fs.readFileSync(reviewInput, 'utf8')); assert.equal(secondReceived.prompt, secondPlan.prompt); assert.deepEqual(secondReceived.args.slice(0, 4), ['--print', '--mode', 'plan', '--sandbox']);
+  for (const close of closes.splice(0).reverse()) await close();
+  native = await require('./analysis-fixture.js').openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: project }]);
+  fs.renameSync(cliDir, path.join(base, 'retained-cli')); fs.renameSync(response, path.join(base, 'retained-response.json'));
+  await extension.settle(reference(secondId), undefined, root);
+  const node = { ...engine.getNodes().find(item => item.id === '2') }; assert.equal(node.status, 'Completed'); assert.ok(node.completedAt);
+  const journal = await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: secondId } }); assert.equal(journal.entry.status, 'Completed'); assert.match(journal.entry.output, /Review decision: pass/);
+  const finalWal = fs.readFileSync(path.join(root, 'solomap.db-wal'));
+  await Promise.all([extension.settle(reference(secondId), undefined, root), extension.settle(reference(reviewId), undefined, root), extension.settle(reference(revisionId), undefined, root)]);
+  assert.deepEqual(engine.getNodes().find(item => item.id === '2'), node); assert.deepEqual(fs.readFileSync(path.join(root, 'solomap.db-wal')), finalWal); assert.equal(commands.length, 3); assert.equal((await states()).length, 4);
+  assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')).sort(), ['project.json', 'roadmap.csv']);
+});
+
+for (const dataRootMode of ['stable', 'switched', 'interactive']) test(`manual completion immediately persists the user decision for an active Agent run (${dataRootMode})`, async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-manual-completion-'));
+  const project = path.join(base, 'project'), other = path.join(base, 'other-project'); fs.mkdirSync(project); fs.mkdirSync(other);
+  const root = path.join(base, '.solomap-global'), otherRoot = path.join(base, 'other-data-root');
+  const closes = [];
+  let native = await require('./analysis-fixture.js').openAnalysisOwner({after: close => closes.push(close)}, root, [{path: project}, {path: other}]);
+  t.after(async () => { for (const close of closes.splice(0).reverse()) await close(); });
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  await engine.initAndSync(); t.after(() => engine.close());
+  engine.setNodes(['2','3'].map(id=>({id,title:id==='2'?'用户确认完成的任务':'其他任务',description:'',stage:'实施',dependencies:'',agentCli:'',agentPrompt:'',status:'Running',createdAt:'',completedAt:''})));
+  const otherOwner = await require('./analysis-fixture.js').openAnalysisOwner(t, otherRoot, [{path: project}]);
+  const prepare = (owner, workspace, id, node) => owner.ops({operation:'prepare_run',input:{root:workspace,executionLogId:id,nodeId:node,runKind:'step',prompt:'原任务完整要求',command:'fixture never executes',userMessage:'原用户目标',metadata:{agentCli:'fixture-cli',collaborationReviewMode:'off',interactiveSession:dataRootMode==='interactive'},idempotencyKey:`manual-run:${workspace}:${id}`}});
+  const run = await prepare(native, project, 12, '2');
+  const peer = await prepare(native, project, 14, '2');
+  await prepare(native, project, 13, '3'); await prepare(native, other, 12, '2'); await prepare(otherOwner, project, 12, '2');
+  const read = (owner, workspace, id) => owner.ops({operation:'read_run_state',input:{root:workspace,executionLogId:id}});
+  const unrelated = await read(native, project, 13), otherProject = await read(native, other, 12), otherDataRoot = await read(otherOwner, project, 12);
+  const sourceWalBefore = fs.readFileSync(path.join(otherRoot,'solomap.db-wal'));
+  const before = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+  await native.ops({operation:'write_run_document',input:{projectId:run.projectId,executionLogId:12,generation:run.generation,turnId:run.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId,'before'),bytes:Buffer.from(JSON.stringify(before)).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:'manual-before'}});
+  const output = '手动确认前已产生的完整结果🌿\n'.repeat(10000);
+  await native.ops({operation:'append_run_log',input:{projectId:run.projectId,executionLogId:12,generation:run.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:'manual-output'}});
+  fs.writeFileSync(path.join(project,'result.txt'),'在途Agent真实交付');
+  let switchPending = dataRootMode === 'switched';
+  const actual = require('../out/autonomousRuntimeControl.js');
+  const transport = {...actual,sendRuntimeDataRequest:async (dataRoot,request) => {
+    const result = await actual.sendRuntimeDataRequest(dataRoot,request);
+    if(switchPending && dataRoot===root && request.operation==='list_run_states'){switchPending=false;extension.selectRoot(otherRoot);}
+    return result;
+  }};
+  const extension = loadCompiledModule('out/extension.js', `
+    let selectedRoot;
+    module.exports.complete = completeNodeManually; module.exports.settle = processAgentStatusFile;
+    module.exports.drain = async () => { do { await new Promise(resolve=>setTimeout(resolve,0)); } while(processingAgentStatusFiles.size || pendingAgentStatusFiles.size); };
+    module.exports.selectRoot = root => {selectedRoot=root;};
+    module.exports.connect = (engine,project,root) => {
+      selectedRoot=root;syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
+      getPersistedSettings=()=>({globalDataPath:selectedRoot,automationTasks:{}});
+      sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
+    };
+  `, {'./autonomousRuntimeControl':transport,'./db/syncEngine':require('../out/db/syncEngine.js')});
+  extension.connect(engine,project,root);
+  await extension.complete('2');
+  const completed = {...engine.getNodes().find(node=>node.id==='2')};assert.equal(completed.status,'Completed');assert.ok(completed.completedAt);
+  const accepted = await read(native,project,12), acceptedPeer = await read(native,project,14);
+  assert.equal(accepted.status.userConfirmedCompletion,true,'the user choice is saved in the original data root');assert.ok(accepted.status.userConfirmedCompletionAt);
+  assert.equal(acceptedPeer.status.userConfirmedCompletion,true);assert.ok(acceptedPeer.status.userConfirmedCompletionAt);assert.equal(accepted.taskId,run.taskId);assert.equal(acceptedPeer.taskId,peer.taskId);
+  const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation,input)=>native.ops({operation,input}),root);
+  const reference = require('../out/runLifecycleClient.js').runStatusReference(project,12);
+  const status = await client.readStatus(reference);
+  const decision = JSON.parse((await client.readData(status.completionDecisionFilePath,status)).toString('utf8'));
+  assert.equal(decision.markCompleted,true,'the formal decision reflects the user choice before the Agent ends');assert.equal(decision.source,'user');
+  assert.deepEqual(await read(native,project,13),unrelated);assert.deepEqual(await read(native,other,12),otherProject);assert.deepEqual(await read(otherOwner,project,12),otherDataRoot);
+  assert.deepEqual(fs.readFileSync(path.join(otherRoot,'solomap.db-wal')),sourceWalBefore);
+  const head = await native.ops({operation:'read_run_checkpoint_state',input:{root:project,executionLogId:12}});
+  await native.ops({operation:'checkpoint_run',input:{projectId:run.projectId,executionLogId:12,generation:head.generation,proof:head.proof,expectedRevision:head.revision,expectedTurnId:head.turnId,action:'complete',outcome:'partial',summary:'Agent仍认为要继续',idempotencyKey:'manual-agent-finish'}});
+  await extension.settle(reference,undefined,root);
+  assert.deepEqual(engine.getNodes().find(node=>node.id==='2'),completed,'the in-flight Agent cannot undo the user completion');
+  const journal = await native.ops({operation:'read_run_turn_journal',input:{root:project,executionLogId:12}});
+  assert.equal(journal.entry.status,'Completed');assert.match(journal.entry.output,/用户确认完成/);
+  if(dataRootMode==='interactive') { const waiting = await read(native,project,12);assert.equal(waiting.status.status,'Waiting');assert.notEqual(waiting.status.interactiveSessionClosed,true); }
+  assert.equal((await client.readLog(reference,'stdout')).toString('utf8'),output);
+  const wal = fs.readFileSync(path.join(root,'solomap.db-wal'));
+  await Promise.all([extension.settle(reference,undefined,root),extension.settle(reference,undefined,root)]);
+  await extension.drain();
+  assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),wal);assert.deepEqual(engine.getNodes().find(node=>node.id==='2'),completed);
+  for(const close of closes.splice(0).reverse()) await close();
+  native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
+  assert.equal((await read(native,project,12)).status.userConfirmedCompletion,true);
+  assert.deepEqual(await read(native,project,14),acceptedPeer);
+  assert.deepEqual(await native.ops({operation:'read_run_turn_journal',input:{root:project,executionLogId:12}}),journal);
+  await engine.initAndSync();assert.deepEqual(engine.getNodes().find(node=>node.id==='2'),completed);
+  const restartWal = fs.readFileSync(path.join(root,'solomap.db-wal'));await extension.settle(reference,undefined,root);
+  await extension.drain();
+  assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),restartWal);
+  assert.deepEqual(await read(native,project,13),unrelated);assert.deepEqual(await read(native,other,12),otherProject);assert.deepEqual(await read(otherOwner,project,12),otherDataRoot);
+  assert.deepEqual(fs.readFileSync(path.join(otherRoot,'solomap.db-wal')),sourceWalBefore);
+  assert.deepEqual(fs.readdirSync(path.join(project,'.solopreneur')).sort(),['project.json','roadmap.csv']);
+});
+
+test('manual completion is not overwritten when an in-flight Agent run refreshes the roadmap afterward', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-manual-refresh-'));
+  const project = path.join(base, 'project'), other = path.join(base, 'other-project'); fs.mkdirSync(project); fs.mkdirSync(other);
+  const root = path.join(base, '.solomap-global'), closes = [];
+  let native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)}, root, [{path:project},{path:other}]);
+  t.after(async()=>{for(const close of closes.splice(0).reverse())await close();});
+  const csvPath = path.join(project,'.solopreneur','roadmap.csv');
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);
+  await engine.initAndSync();t.after(()=>engine.close());
+  engine.setNodes(['2','3'].map(id=>({id,title:id==='2'?'用户确认的任务':'其他任务',description:'原始说明',stage:'实施',dependencies:'',agentCli:'',agentPrompt:'',status:'Running',createdAt:'2026-05-24T00:00:00.000Z',completedAt:''})));
+  const prepare = (workspace,id,node) => native.ops({operation:'prepare_run',input:{root:workspace,executionLogId:id,nodeId:node,runKind:'step',prompt:'保留用户的完成决定和其他有效修改',command:'fixture never executes',userMessage:'原用户要求',metadata:{agentCli:'fixture-cli',collaborationReviewMode:'off',interactiveSession:true},idempotencyKey:`manual-refresh:${workspace}:${id}`}});
+  const run = await prepare(project,12,'2');await prepare(project,13,'3');await prepare(other,12,'2');
+  const read = (workspace,id) => native.ops({operation:'read_run_state',input:{root:workspace,executionLogId:id}});
+  const peer = await read(project,13), foreign = await read(other,12);
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.complete=completeNodeManually;module.exports.settle=processAgentStatusFile;
+    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.connect=(engine,project,root)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
+      getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};};
+  `, {'./db/syncEngine':require('../out/db/syncEngine.js'),'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js')});
+  extension.connect(engine,project,root);await extension.complete('2');
+  const completed = {...engine.getNodes().find(node=>node.id==='2')};assert.equal(completed.status,'Completed');assert.ok(completed.completedAt);
+  const confirmed = await read(project,12);assert.equal(confirmed.status.userConfirmedCompletion,true);
+  const before = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+  await native.ops({operation:'write_run_document',input:{projectId:run.projectId,executionLogId:12,generation:run.generation,turnId:run.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId,'before'),bytes:Buffer.from(JSON.stringify(before)).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:'manual-refresh-before'}});
+  const output = 'Agent刷新路线图时产生的完整说明🌿\n'.repeat(10000);
+  await native.ops({operation:'append_run_log',input:{projectId:run.projectId,executionLogId:12,generation:run.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:'manual-refresh-output'}});
+  const agentNodes = engine.getNodes().map(node=>node.id==='2'?{...node,title:'Agent补充后的任务标题',description:'保留在途Agent的合法说明修改',status:'Pending',completedAt:''}:{...node,title:'其他任务的新标题',description:'其他节点的合法修改',status:'In Progress'});
+  const csv = new (require('../out/db/csvStore.js').CsvStore)(csvPath);csv.writeNodes(agentNodes);
+  assert.deepEqual(csv.readNodes(),agentNodes);assert.deepEqual(engine.getNodes().find(node=>node.id==='2'),completed,'the Agent changes the file before the plugin refreshes');
+  const expected = agentNodes.map(node=>node.id==='2'?{...node,status:'Completed',completedAt:completed.completedAt}:node);
+  const actualInit = engine.initAndSync.bind(engine);let refreshes=0, imported;
+  engine.initAndSync = async (...args)=>{await actualInit(...args);refreshes++;imported=engine.getNodes().map(node=>({...node}));};
+  const head = await native.ops({operation:'read_run_checkpoint_state',input:{root:project,executionLogId:12}});
+  await native.ops({operation:'checkpoint_run',input:{projectId:run.projectId,executionLogId:12,generation:head.generation,proof:head.proof,expectedRevision:head.revision,expectedTurnId:head.turnId,action:'complete',outcome:'partial',summary:'Agent改动CSV但仍认为要继续',idempotencyKey:'manual-refresh-finish'}});
+  const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation,input)=>native.ops({operation,input}),root);
+  const reference = require('../out/runLifecycleClient.js').runStatusReference(project,12), status = await client.readStatus(reference);
+  assert.match((await client.readData(status.changesFilePath,status)).toString('utf8'),/M \.solopreneur\/roadmap\.csv/);
+  await extension.settle(reference,undefined,root);await extension.drain();
+  assert.equal(refreshes,1,'the actual CSV refresh runs exactly once');assert.deepEqual(imported,agentNodes,'the actual engine first imports the Agent CSV');
+  assert.deepEqual(engine.getNodes(),expected);assert.deepEqual(csv.readNodes(),expected,'completion and its original time are persisted while valid Agent edits remain');
+  const journal = await native.ops({operation:'read_run_turn_journal',input:{root:project,executionLogId:12}});assert.equal(journal.entry.status,'Completed');assert.match(journal.entry.output,/用户确认完成/);
+  assert.equal((await client.readLog(reference,'stdout')).toString('utf8'),output);
+  const waiting = await read(project,12);assert.equal(waiting.status.status,'Waiting');assert.notEqual(waiting.status.interactiveSessionClosed,true);
+  const finalCsv = fs.readFileSync(csvPath), wal = fs.readFileSync(path.join(root,'solomap.db-wal'));
+  await Promise.all([extension.settle(reference,undefined,root),extension.settle(reference,undefined,root)]);await extension.drain();
+  assert.equal(refreshes,1);assert.deepEqual(fs.readFileSync(csvPath),finalCsv);assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),wal);
+  for(const close of closes.splice(0).reverse())await close();
+  native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
+  await engine.initAndSync();assert.deepEqual(engine.getNodes(),expected);assert.deepEqual(fs.readFileSync(csvPath),finalCsv);
+  assert.deepEqual(await native.ops({operation:'read_run_turn_journal',input:{root:project,executionLogId:12}}),journal);assert.deepEqual(await read(project,12),waiting);
+  const restartWal = fs.readFileSync(path.join(root,'solomap.db-wal'));await extension.settle(reference,undefined,root);await extension.drain();
+  assert.equal(refreshes,2);assert.deepEqual(fs.readFileSync(csvPath),finalCsv);assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),restartWal);
+  assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,12),foreign);
+  assert.deepEqual(fs.readdirSync(path.join(project,'.solopreneur')).sort(),['project.json','roadmap.csv']);
+});
+
+for (const resultMode of ['valid', 'invalid', 'stopped']) test(`roadmap revision accepts valid CSV updates and restores the previous roadmap after invalid output (${resultMode})`, async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-roadmap-revision-'));
+  const project = path.join(base,'project'), other = path.join(base,'other-project');fs.mkdirSync(project);fs.mkdirSync(other);
+  const root = path.join(base,'.solomap-global'), closes = [];
+  let native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
+  t.after(async()=>{for(const close of closes.splice(0).reverse())await close();});
+  const csvPath = path.join(project,'.solopreneur','roadmap.csv');
+  const originalCsv = [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Original step,Keep existing work,规划,,codex,Continue original work,In Progress,2026-01-01T00:00:00.000Z,'
+  ].join('\n');
+  fs.writeFileSync(csvPath,originalCsv);
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);
+  await engine.initAndSync();t.after(()=>engine.close());const originalNodes = engine.getNodes().map(node=>({...node}));
+  const prepare = (workspace,id,node,kind,metadata={})=>native.ops({operation:'prepare_run',input:{root:workspace,executionLogId:id,nodeId:node,runKind:kind,prompt:'按本次要求调整路线图，非法结果或停止保留原路线图',command:'fixture never executes',userMessage:'原路线图调整要求',metadata:{agentCli:'fixture-cli',collaborationReviewMode:'off',interactiveSession:false,...metadata},idempotencyKey:`roadmap-revision:${workspace}:${id}`}});
+  const run = await prepare(project,31,'__roadmap_revision__','roadmap_revision',{captureRoadmapBackup:true});
+  await prepare(project,13,'1','step');await prepare(other,31,'__roadmap_revision__','roadmap_revision');
+  const read = (workspace,id)=>native.ops({operation:'read_run_state',input:{root:workspace,executionLogId:id}});
+  const peer = await read(project,13), foreign = await read(other,31);
+  const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation,input)=>native.ops({operation,input}),root);
+  const reference = require('../out/runLifecycleClient.js').runStatusReference(project,31);
+  const backupReference = require('../out/runLifecycleClient.js').runDataReference(reference,'roadmap-backup');
+  const initial = await client.readStatus(reference);assert.ok(initial.roadmapBackupObjectId);assert.equal((await client.readData(backupReference,initial)).toString('utf8'),originalCsv);
+  const before = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+  await native.ops({operation:'write_run_document',input:{projectId:run.projectId,executionLogId:31,generation:run.generation,turnId:run.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId,'before'),bytes:Buffer.from(JSON.stringify(before)).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:'roadmap-revision-before'}});
+  const output = '路线图调整的完整说明🌿\n'.repeat(10000);
+  await native.ops({operation:'append_run_log',input:{projectId:run.projectId,executionLogId:31,generation:run.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:'roadmap-revision-output'}});
   const validCsv = [
     'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
     '1,Validate customer problem,Keep existing discovery,问题与客户发现,,codex,Create docs/problem-discovery.md,Completed,2026-01-01T00:00:00.000Z,2026-05-24T00:00:00.000Z',
@@ -12703,198 +12990,160 @@ test('roadmap revision accepts valid CSV updates and restores the previous roadm
     '3,Prepare checkout launch,Write launch message,营销与销售,2,codex,Create docs/launch-message.md,Pending,2026-05-24T00:00:00.000Z,',
     '4,Create learning loop,Track feedback and metrics,反馈与规模化,3,codex,Create docs/learning-loop.md,Pending,2026-05-24T00:00:00.000Z,'
   ].join('\n');
-  const validRun = createRevisionRun('valid', validCsv);
-  let validStatus = '';
-  let validOutput = '';
-  let validRefresh = false;
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    updateNode: () => { throw new Error('roadmap revision is not a roadmap step'); },
-    updateAgentExecution: (_id, _cli, _command, output, status) => {
-      validOutput = output;
-      validStatus = status;
-      return true;
-    },
-    logAgentExecution: () => 31,
-    getAgentExecutions: () => [],
-    initAndSync: async () => { validRefresh = true; }
-  }, validRun.root);
-
-  await extensionModule.__processAgentStatusFile(validRun.statusPath);
-  assert.equal(validStatus, 'Completed');
-  assert.equal(validRefresh, true);
-  assert.match(validOutput, /路线图已按本次要求更新并通过校验/);
-  assert.equal(fs.readFileSync(path.join(validRun.root, '.solopreneur', 'roadmap.csv'), 'utf8'), validCsv);
-
-  const invalidRun = createRevisionRun('invalid', [
+  const revisedCsv = resultMode==='invalid' ? [
     'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
     '2,Broken dependency,Cannot proceed,产品,404,codex,Try work,Pending,2026-05-24T00:00:00.000Z,'
-  ].join('\n'));
-  let invalidStatus = '';
-  let invalidOutput = '';
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    updateNode: () => { throw new Error('invalid roadmap revision must not become a node update'); },
-    updateAgentExecution: (_id, _cli, _command, output, status) => {
-      invalidOutput = output;
-      invalidStatus = status;
-      return true;
-    },
-    logAgentExecution: () => 32,
-    getAgentExecutions: () => []
-  }, invalidRun.root);
-
-  await extensionModule.__processAgentStatusFile(invalidRun.statusPath);
-  assert.equal(invalidStatus, 'Failed');
-  assert.match(invalidOutput, /Failure category: roadmap_validation_failed/);
-  assert.match(invalidOutput, /已保留调整前的路线图/);
-  assert.equal(fs.readFileSync(path.join(invalidRun.root, '.solopreneur', 'roadmap.csv'), 'utf8'), invalidRun.originalCsv);
-
-  const stoppedRun = createRevisionRun('stopped', validCsv);
-  const stoppedStatusData = JSON.parse(fs.readFileSync(stoppedRun.statusPath, 'utf8'));
-  fs.writeFileSync(stoppedRun.statusPath, JSON.stringify({
-    ...stoppedStatusData,
-    status: 'Failed',
-    failureCode: 'stopped_by_user',
-    failureReason: 'Stopped by user.'
-  }), 'utf8');
-  let stoppedOutput = '';
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    updateNode: () => { throw new Error('stopped roadmap revision must not become a node update'); },
-    updateAgentExecution: (_id, _cli, _command, output) => {
-      stoppedOutput = output;
-      return true;
-    },
-    logAgentExecution: () => 33,
-    getAgentExecutions: () => []
-  }, stoppedRun.root);
-
-  await extensionModule.__processAgentStatusFile(stoppedRun.statusPath);
-  assert.match(stoppedOutput, /Failure category: stopped_by_user/);
-  assert.match(stoppedOutput, /Stopped by user\. 已保留调整前的路线图。/);
-  assert.equal(fs.readFileSync(path.join(stoppedRun.root, '.solopreneur', 'roadmap.csv'), 'utf8'), stoppedRun.originalCsv);
+  ].join('\n') : validCsv;
+  fs.writeFileSync(csvPath,revisedCsv);
+  const head = await native.ops({operation:'read_run_checkpoint_state',input:{root:project,executionLogId:31}});
+  if(resultMode==='stopped') await native.ops({operation:'stop_run',input:{projectId:run.projectId,executionLogId:31,generation:head.generation,expectedRevision:head.revision,expectedTurnId:head.turnId,reason:'Stopped by user.',idempotencyKey:'roadmap-revision-stop'}});
+  else await native.ops({operation:'checkpoint_run',input:{projectId:run.projectId,executionLogId:31,generation:head.generation,proof:head.proof,expectedRevision:head.revision,expectedTurnId:head.turnId,action:'complete',outcome:'candidate_complete',summary:'Agent提交路线图调整结果',idempotencyKey:'roadmap-revision-finish'}});
+  const accepted = await read(project,31);assert.equal(accepted.taskId,run.taskId);
+  for(const close of closes.splice(0).reverse())await close();
+  native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
+  assert.deepEqual(await read(project,31),accepted);
+  const status = await client.readStatus(reference);assert.equal((await client.readData(backupReference,status)).toString('utf8'),originalCsv);
+  assert.match((await client.readData(status.changesFilePath,status)).toString('utf8'),/M \.solopreneur\/roadmap\.csv/);
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.settle=processAgentStatusFile;
+    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.connect=(engine,project,root)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
+      getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};};
+  `, {'./db/syncEngine':require('../out/db/syncEngine.js'),'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js')});
+  extension.connect(engine,project,root);const actualInit = engine.initAndSync.bind(engine);let refreshes=0;
+  engine.initAndSync = async(...args)=>{await actualInit(...args);refreshes++;};
+  await extension.settle(reference,undefined,root);await extension.drain();
+  const journal = await native.ops({operation:'read_run_turn_journal',input:{root:project,executionLogId:31}});
+  assert.equal(journal.entry.status,resultMode==='valid'?'Completed':'Failed');
+  if(resultMode==='valid'){assert.match(journal.entry.output,/路线图已按本次要求更新并通过校验/);assert.equal(refreshes,1);assert.equal(fs.readFileSync(csvPath,'utf8'),validCsv);assert.deepEqual(engine.getNodes(),new (require('../out/db/csvStore.js').CsvStore)(csvPath).readNodes());}
+  else {assert.match(journal.entry.output,/已保留调整前的路线图/);assert.equal(fs.readFileSync(csvPath,'utf8'),originalCsv);assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(refreshes,0);
+    if(resultMode==='invalid')assert.match(journal.entry.output,/Failure category: roadmap_validation_failed/);
+    else {assert.match(journal.entry.output,/Failure category: stopped_by_user/);assert.match(journal.entry.output,/Stopped by user\. 已保留调整前的路线图。/);}
+  }
+  assert.equal((await client.readLog(reference,'stdout')).toString('utf8'),output);
+  const finalNodes = engine.getNodes().map(node=>({...node})), finalCsv = fs.readFileSync(csvPath), settled = await read(project,31), wal = fs.readFileSync(path.join(root,'solomap.db-wal'));
+  await Promise.all([extension.settle(reference,undefined,root),extension.settle(reference,undefined,root)]);await extension.drain();
+  assert.deepEqual(fs.readFileSync(csvPath),finalCsv);assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),wal);assert.deepEqual(engine.getNodes(),finalNodes);
+  for(const close of closes.splice(0).reverse())await close();
+  native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
+  await engine.initAndSync();assert.deepEqual(engine.getNodes(),finalNodes);assert.deepEqual(fs.readFileSync(csvPath),finalCsv);assert.deepEqual(await read(project,31),settled);assert.deepEqual(await native.ops({operation:'read_run_turn_journal',input:{root:project,executionLogId:31}}),journal);
+  const restartWal = fs.readFileSync(path.join(root,'solomap.db-wal'));await extension.settle(reference,undefined,root);await extension.drain();
+  assert.deepEqual(fs.readFileSync(csvPath),finalCsv);assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),restartWal);
+  assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,31),foreign);
+  assert.deepEqual(fs.readdirSync(path.join(project,'.solopreneur')).sort(),['project.json','roadmap.csv']);
 });
 
-test('Solo completion stays project-scoped and preserves the existing roadmap', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
-    ].join('\n')
-  );
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-solo-completion-'));
-  const solopreneurDir = path.join(root, '.solopreneur');
-  const runDir = path.join(solopreneurDir, 'agent-runs', '__solo__');
-  fs.mkdirSync(runDir, { recursive: true });
+test('Solo completion stays project-scoped and preserves the existing roadmap', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(),'solomap-solo-completion-'));
+  const project = path.join(base,'project'), other = path.join(base,'other-project');fs.mkdirSync(project);fs.mkdirSync(other);
+  const root = path.join(base,'.solomap-global'), closes = [];
+  let native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
+  t.after(async()=>{for(const close of closes.splice(0).reverse())await close();});
+  const csvPath = path.join(project,'.solopreneur','roadmap.csv'), otherCsvPath = path.join(other,'.solopreneur','roadmap.csv');
   const originalCsv = [
     'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
     '2,实现 MVP,完成可运行切片,产品与 MVP,,codex,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'
   ].join('\n');
-  fs.writeFileSync(path.join(solopreneurDir, 'roadmap.csv'), originalCsv.replace('实现 MVP', 'Changed without permission'), 'utf8');
-  fs.writeFileSync(path.join(runDir, 'roadmap-before.csv'), originalCsv, 'utf8');
-  fs.writeFileSync(path.join(runDir, 'changes.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'touched-files.txt'), 'M .solopreneur/roadmap.csv\n', 'utf8');
-  fs.writeFileSync(path.join(runDir, 'output.log'), '建议将这个想法留在 Solo。\n', 'utf8');
-  const statusFilePath = path.join(root, '.agent_status.json');
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    nodeId: '__solo__',
-    runKind: 'solo',
-    roadmapBackupFilePath: path.join(runDir, 'roadmap-before.csv'),
-    status: 'In Progress',
-    agentCli: 'codex',
-    executionLogId: 77,
-    outputFilePath: path.join(runDir, 'output.log'),
-    changesFilePath: path.join(runDir, 'changes.txt'),
-    touchedFilesPath: path.join(runDir, 'touched-files.txt')
-  }), 'utf8');
-
-  let loggedOutput = '';
-  let loggedStatus = '';
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'In Progress' }],
-    updateNode: () => { throw new Error('Solo conversation must not update a roadmap node'); },
-    updateAgentExecution: (_id, _cli, _command, output, status) => {
-      loggedOutput = output;
-      loggedStatus = status;
-      return true;
-    },
-    logAgentExecution: () => 77,
-    getAgentExecutions: () => []
-  }, root);
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  assert.equal(loggedStatus, 'Completed');
-  assert.match(loggedOutput, /Solo conversation state: Completed/);
-  assert.match(loggedOutput, /等待用户决定是否关联到路线图环节/);
-  assert.match(loggedOutput, /Solo 对话不会直接调整路线图/);
-  assert.match(loggedOutput, /Execution digest saved: \.solopreneur\/run-digests\/__solo__-77\.json/);
-  assert.ok(fs.existsSync(path.join(solopreneurDir, 'run-digests', '__solo__-77.json')));
-  assert.equal(fs.readFileSync(path.join(solopreneurDir, 'roadmap.csv'), 'utf8'), originalCsv);
+  fs.writeFileSync(csvPath,originalCsv);const otherCsv = originalCsv.replace('实现 MVP','其他项目的任务');fs.writeFileSync(otherCsvPath,otherCsv);
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);
+  await engine.initAndSync();t.after(()=>engine.close());const originalNodes = engine.getNodes().map(node=>({...node}));
+  const prepare = (workspace,id,node,kind,metadata={})=>native.ops({operation:'prepare_run',input:{root:workspace,executionLogId:id,nodeId:node,runKind:kind,prompt:'讨论用户想法，保留既有路线图',command:'fixture never executes',userMessage:'请讨论这个新想法',metadata:{agentCli:'fixture-cli',collaborationReviewMode:'off',interactiveSession:kind==='solo',...metadata},idempotencyKey:`solo-completion:${workspace}:${id}`}});
+  const run = await prepare(project,77,'__solo__','solo',{captureRoadmapBackup:true});await prepare(project,13,'2','step');await prepare(other,77,'__solo__','solo',{captureRoadmapBackup:true});
+  const read = (workspace,id)=>native.ops({operation:'read_run_state',input:{root:workspace,executionLogId:id}});
+  const peer = await read(project,13), foreign = await read(other,77);
+  const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation,input)=>native.ops({operation,input}),root);
+  const reference = require('../out/runLifecycleClient.js').runStatusReference(project,77), backup = require('../out/runLifecycleClient.js').runDataReference(reference,'roadmap-backup');
+  assert.equal((await client.readData(backup,await client.readStatus(reference))).toString('utf8'),originalCsv);
+  const before = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+  await native.ops({operation:'write_run_document',input:{projectId:run.projectId,executionLogId:77,generation:run.generation,turnId:run.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId,'before'),bytes:Buffer.from(JSON.stringify(before)).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:'solo-completion-before'}});
+  const output = '建议将这个想法留在Solo继续讨论🌿\n'.repeat(10000), artifact = '给用户保留的完整讨论结果。';
+  await native.ops({operation:'append_run_log',input:{projectId:run.projectId,executionLogId:77,generation:run.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:'solo-completion-output'}});
+  fs.writeFileSync(csvPath,originalCsv.replace('实现 MVP','Changed without permission'));fs.writeFileSync(path.join(project,'discussion.txt'),artifact);
+  const head = await native.ops({operation:'read_run_checkpoint_state',input:{root:project,executionLogId:77}});
+  await native.ops({operation:'checkpoint_run',input:{projectId:run.projectId,executionLogId:77,generation:head.generation,proof:head.proof,expectedRevision:head.revision,expectedTurnId:head.turnId,action:'complete',outcome:'partial',summary:'建议留在Solo讨论，不调整路线图',idempotencyKey:'solo-completion-finish'}});
+  const accepted = await read(project,77);assert.equal(accepted.taskId,run.taskId);
+  for(const close of closes.splice(0).reverse())await close();
+  native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);assert.deepEqual(await read(project,77),accepted);
+  const status = await client.readStatus(reference);assert.equal((await client.readData(backup,status)).toString('utf8'),originalCsv);assert.match((await client.readData(status.changesFilePath,status)).toString('utf8'),/M \.solopreneur\/roadmap\.csv/);
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.settle=processAgentStatusFile;
+    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.connect=(engine,project,root)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
+      getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};};
+  `, {'./db/syncEngine':require('../out/db/syncEngine.js'),'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js')});
+  extension.connect(engine,project,root);await extension.settle(reference,undefined,root);await extension.drain();
+  const journal = await native.ops({operation:'read_run_turn_journal',input:{root:project,executionLogId:77}});
+  assert.equal(journal.entry.status,'Completed');assert.match(journal.entry.output,/Solo conversation state: Completed/);assert.match(journal.entry.output,/等待用户决定是否关联到路线图环节/);assert.match(journal.entry.output,/Solo 对话不会直接调整路线图/);assert.match(journal.entry.output,/Execution digest saved: solomap:\/\/run-settlement\//);
+  const settled = await read(project,77);assert.equal(settled.taskId,run.taskId);assert.equal(settled.status.status,'Waiting');assert.notEqual(settled.status.interactiveSessionClosed,true);
+  const settlements = await client.readSettlements(reference,await client.readStatus(reference));assert.equal(settlements.length,1);assert.equal(settlements[0].digest.projectPath,project);assert.equal(settlements[0].digest.nodeId,'__solo__');assert.equal(settlements[0].digest.runKind,'solo');assert.equal(settlements[0].digest.executionLogId,77);assert.equal(settlements[0].digest.status,'Completed');
+  assert.equal((await client.readLog(reference,'stdout')).toString('utf8'),output);assert.equal(fs.readFileSync(csvPath,'utf8'),originalCsv);assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(fs.readFileSync(path.join(project,'discussion.txt'),'utf8'),artifact);
+  const wal = fs.readFileSync(path.join(root,'solomap.db-wal'));await Promise.all([extension.settle(reference,undefined,root),extension.settle(reference,undefined,root)]);await extension.drain();
+  assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),wal);assert.equal(fs.readFileSync(csvPath,'utf8'),originalCsv);assert.deepEqual(engine.getNodes(),originalNodes);
+  for(const close of closes.splice(0).reverse())await close();
+  native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(engine.getNodes(),originalNodes);assert.deepEqual(await read(project,77),settled);assert.deepEqual(await native.ops({operation:'read_run_turn_journal',input:{root:project,executionLogId:77}}),journal);assert.deepEqual(await client.readSettlements(reference,await client.readStatus(reference)),settlements);
+  const restartWal = fs.readFileSync(path.join(root,'solomap.db-wal'));await extension.settle(reference,undefined,root);await extension.drain();assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),restartWal);assert.equal(fs.readFileSync(csvPath,'utf8'),originalCsv);
+  assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,77),foreign);assert.equal(fs.readFileSync(otherCsvPath,'utf8'),otherCsv);
+  assert.equal(fs.readFileSync(path.join(project,'discussion.txt'),'utf8'),artifact);assert.deepEqual(fs.readdirSync(path.join(project,'.solopreneur')).sort(),['project.json','roadmap.csv']);
 });
 
-test('continuation runs are recorded without task status judgment while preserving file changes', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__processAgentStatusFile = processAgentStatusFile;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
-    ].join('\n')
-  );
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-continuation-recorded-'));
-  const runDir = path.join(root, '.solopreneur', 'agent-runs', '2', '88');
-  fs.mkdirSync(runDir, { recursive: true });
-  const outputFilePath = path.join(runDir, 'output.log');
-  const changesFilePath = path.join(runDir, 'changes.txt');
-  const touchedFilesPath = path.join(runDir, 'touched-files.txt');
-  fs.writeFileSync(outputFilePath, 'User continued the native session.\n', 'utf8');
-  fs.writeFileSync(changesFilePath, ' M src/extension.ts\n', 'utf8');
-  fs.writeFileSync(touchedFilesPath, 'src/extension.ts\n', 'utf8');
-  const statusFilePath = path.join(root, '.solopreneur', 'agent-status', '88.json');
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    nodeId: '2',
-    runKind: 'step_continue',
-    status: 'Failed',
-    failureCode: 'agent_exit_failed',
-    failureReason: 'Native terminal closed.',
-    agentCli: 'codex',
-    command: 'codex resume',
-    executionLogId: 88,
-    outputFilePath,
-    changesFilePath,
-    touchedFilesPath,
-    nativeSessionId: '019dc472-6a80-7c70-99a4-b2593a641d11',
-    startedAt: '2026-06-15T00:00:00.000Z'
-  }), 'utf8');
-
-  let updateNodeCalled = false;
-  let loggedOutput = '';
-  let loggedStatus = '';
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [{ id: '2', title: '实现 MVP', status: 'In Progress' }],
-    updateNode: () => { updateNodeCalled = true; },
-    getAgentExecutions: () => [{ id: 88, nodeId: '2', agentCli: 'codex', command: 'codex resume', output: 'Agent continuation started.\n\nContinuation parent conversation: 12', status: 'Running' }],
-    updateAgentExecution: (_id, _cli, _command, output, status) => {
-      loggedOutput = output;
-      loggedStatus = status;
-      return true;
-    },
-    logAgentExecution: () => 88,
-    initAndSync: async () => {}
-  }, root);
-
-  await extensionModule.__processAgentStatusFile(statusFilePath);
-
-  assert.equal(updateNodeCalled, false);
-  assert.equal(loggedStatus, 'Recorded');
-  assert.match(loggedOutput, /Continuation record state: Recorded/);
-  assert.match(loggedOutput, /续聊已记录；不参与任务完成、失败或进行中判断。/);
-  assert.match(loggedOutput, /Workspace changes:\n\nM src\/extension\.ts/);
-  assert.doesNotMatch(loggedOutput, /Failure category: agent_exit_failed/);
-  assert.ok(fs.existsSync(path.join(root, '.solopreneur', 'run-digests', '2-88.json')));
+test('continuation runs are recorded without task status judgment while preserving file changes', async t => {
+  for (const mode of ['open-partial','closed-failed']) await t.test(mode, async t => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(),'solomap-continuation-record-'));
+    const project = path.join(base,'project'), other = path.join(base,'other-project');fs.mkdirSync(project);fs.mkdirSync(other);
+    const root = path.join(base,'.solomap-global'), closes = [];
+    let native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
+    t.after(async()=>{for(const close of closes.splice(0).reverse())await close();});
+    const csvPath = path.join(project,'.solopreneur','roadmap.csv'), otherCsvPath = path.join(other,'.solopreneur','roadmap.csv');
+    const originalCsv = [
+      'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+      '2,实现 MVP,完成可运行切片,产品与 MVP,,codex,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'
+    ].join('\n');
+    fs.writeFileSync(csvPath,originalCsv);const otherCsv = originalCsv.replace('实现 MVP','其他项目的任务');fs.writeFileSync(otherCsvPath,otherCsv);
+    const artifactPath = path.join(project,'src','extension.ts');fs.mkdirSync(path.dirname(artifactPath));fs.writeFileSync(artifactPath,'export const result = "before";\n');
+    const engine = new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);
+    await engine.initAndSync();t.after(()=>engine.close());const originalNodes = engine.getNodes().map(node=>({...node}));
+    const prepare = (workspace,id,kind,extra={})=>native.ops({operation:'prepare_run',input:{root:workspace,executionLogId:id,nodeId:'2',runKind:kind,prompt:'继续原任务并保留文件修改，不判断环节状态',command:'fixture never executes',userMessage:'继续讨论并保留本轮修改',metadata:{agentCli:'fixture-cli',collaborationReviewMode:'off',interactiveSession:true,...(id===88?{checkpointPreserveRoadmapState:true}:{}),...(mode==='closed-failed'&&id===88?{failureCode:'agent_exit_failed',failureReason:'Native terminal closed.'}: {})},...extra,idempotencyKey:`continuation-record:${workspace}:${id}`}});
+    const parentRun = await prepare(project,12,'step');await prepare(project,13,'step');await prepare(other,88,'step_continue');
+    const run = await prepare(project,88,'step_continue',{parentExecutionLogId:12,expectedParentTurnId:parentRun.turnId});
+    assert.equal(run.taskId,parentRun.taskId);assert.equal(run.conversationId,parentRun.conversationId);assert.notEqual(run.turnId,parentRun.turnId);
+    assert.equal(run.status.sourceParentRunId,parentRun.runId);assert.equal(run.status.sourceParentTurnId,parentRun.turnId);assert.equal(run.status.interactiveSession,true);assert.equal(run.status.checkpointPreserveRoadmapState,true);
+    const read = (workspace,id)=>native.ops({operation:'read_run_state',input:{root:workspace,executionLogId:id}});
+    const parent = await read(project,12), peer = await read(project,13), foreign = await read(other,88);
+    const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation,input)=>native.ops({operation,input}),root);
+    const reference = require('../out/runLifecycleClient.js').runStatusReference(project,88);
+    const before = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+    await native.ops({operation:'write_run_document',input:{projectId:run.projectId,executionLogId:88,generation:run.generation,turnId:run.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId,'before'),bytes:Buffer.from(JSON.stringify(before)).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:'continuation-record-before'}});
+    const output = 'User continued the native session. 保留全部续聊原文🌿\n'.repeat(10000), artifact = 'export const result = "用户本轮实际修改🌿";\n';
+    await native.ops({operation:'append_run_log',input:{projectId:run.projectId,executionLogId:88,generation:run.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:'continuation-record-output'}});
+    fs.writeFileSync(artifactPath,artifact);
+    const checkpoint = async extra => {const head = await native.ops({operation:'read_run_checkpoint_state',input:{root:project,executionLogId:88}});return native.ops({operation:'checkpoint_run',input:{projectId:run.projectId,executionLogId:88,generation:head.generation,proof:head.proof,expectedRevision:head.revision,expectedTurnId:head.turnId,...extra}});};
+    await checkpoint({action:'complete',outcome:mode==='closed-failed'?'failed':'partial',summary:'续聊已记录，保留修改，不判断环节状态',idempotencyKey:'continuation-record-finish'});
+    if(mode==='closed-failed')await checkpoint({action:'session-close',exitCode:1,idempotencyKey:'continuation-record-close'});
+    const accepted = await read(project,88);assert.equal(accepted.taskId,parentRun.taskId);assert.equal(accepted.status.interactiveSessionClosed===true,mode==='closed-failed');
+    for(const close of closes.splice(0).reverse())await close();
+    native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);assert.deepEqual(await read(project,88),accepted);
+    const status = await client.readStatus(reference);assert.match((await client.readData(status.changesFilePath,status)).toString('utf8'),/M src\/extension\.ts/);
+    const extension = loadCompiledModule('out/extension.js', `
+      module.exports.settle=processAgentStatusFile;
+      module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+      module.exports.connect=(engine,project,root)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
+        getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};};
+    `, {'./db/syncEngine':require('../out/db/syncEngine.js'),'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js')});
+    extension.connect(engine,project,root);await extension.settle(reference,undefined,root);await extension.drain();
+    if(mode==='closed-failed'){await extension.settle(reference,undefined,root);await extension.drain();}
+    const journal = await native.ops({operation:'read_run_turn_journal',input:{root:project,executionLogId:88}});
+    assert.equal(journal.entry.status,'Recorded');assert.match(journal.entry.output,/Continuation record state: Recorded/);assert.match(journal.entry.output,/续聊已记录；不参与任务完成、失败或进行中判断。/);assert.match(journal.entry.output,/Workspace changes:\n\nM src\/extension\.ts/);assert.doesNotMatch(journal.entry.output,/Failure category: agent_exit_failed/);assert.match(journal.entry.output,/Execution digest saved: solomap:\/\/run-settlement\//);
+    const settled = await read(project,88);assert.equal(settled.taskId,parentRun.taskId);assert.equal(settled.conversationId,parentRun.conversationId);assert.equal(settled.status.status,mode==='closed-failed'?'Processed':'Waiting');assert.equal(settled.status.interactiveSessionClosed===true,mode==='closed-failed');assert.equal(settled.status.sourceParentRunId,parentRun.runId);assert.equal(settled.status.sourceParentTurnId,parentRun.turnId);
+    const settlements = await client.readSettlements(reference,await client.readStatus(reference));assert.equal(settlements.length,mode==='closed-failed'?2:1);assert.equal(settlements[0].digest.projectPath,project);assert.equal(settlements[0].digest.nodeId,'2');assert.equal(settlements[0].digest.runKind,'step_continue');assert.equal(settlements[0].digest.executionLogId,88);assert.equal(settlements[0].digest.status,'Recorded');assert.deepEqual(settlements[0].digest.failures,[]);if(mode==='closed-failed')assert.deepEqual(settlements[1].digest,settlements[0].digest);assert.match(JSON.stringify(settlements[0].digest),/src\/extension\.ts/);
+    assert.equal((await client.readLog(reference,'stdout')).toString('utf8'),output);assert.equal(fs.readFileSync(csvPath,'utf8'),originalCsv);assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(fs.readFileSync(artifactPath,'utf8'),artifact);
+    const wal = fs.readFileSync(path.join(root,'solomap.db-wal'));await Promise.all([extension.settle(reference,undefined,root),extension.settle(reference,undefined,root)]);await extension.drain();
+    assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),wal);assert.equal(fs.readFileSync(csvPath,'utf8'),originalCsv);assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(fs.readFileSync(artifactPath,'utf8'),artifact);
+    for(const close of closes.splice(0).reverse())await close();
+    native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(engine.getNodes(),originalNodes);assert.deepEqual(await read(project,88),settled);assert.deepEqual(await native.ops({operation:'read_run_turn_journal',input:{root:project,executionLogId:88}}),journal);assert.deepEqual(await client.readSettlements(reference,await client.readStatus(reference)),settlements);
+    const restartWal = fs.readFileSync(path.join(root,'solomap.db-wal'));await extension.settle(reference,undefined,root);await extension.drain();assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),restartWal);assert.equal(fs.readFileSync(csvPath,'utf8'),originalCsv);assert.equal(fs.readFileSync(artifactPath,'utf8'),artifact);
+    assert.deepEqual(await read(project,12),parent);assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,88),foreign);assert.equal(fs.readFileSync(otherCsvPath,'utf8'),otherCsv);
+    assert.deepEqual(fs.readdirSync(path.join(project,'.solopreneur')).sort(),['project.json','roadmap.csv']);
+  });
 });
 
 test('linking a Solo conversation records a reference without changing the step state', async () => {
@@ -12948,164 +13197,204 @@ test('linking a Solo conversation records a reference without changing the step 
   assert.equal(stepRefresh.conversations[1].id, 7);
 });
 
-test('stopping an Agent run records the user decision on the active conversation', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__stopAgentRun = stopAgentRun;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };',
-      'module.exports.__setAgentTerminalForTest = (conversationId, terminalName, projectRoot, terminal) => { agentTerminalNamesByConversationId.set(Number(conversationId), terminalName); agentTerminalProjectRootsByConversationId.set(Number(conversationId), projectRoot); vscode.window.terminals.push(terminal); };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-stop-run-'));
-  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '3');
-  fs.mkdirSync(runDir, { recursive: true });
-  const outputFilePath = path.join(runDir, 'output.log');
-  fs.writeFileSync(outputFilePath, 'Working on the task.\n', 'utf8');
-  fs.writeFileSync(path.join(tempRoot, '.agent_status.json'), JSON.stringify({
-    nodeId: '3',
-    status: 'Running',
-    executionLogId: 11,
-    agentCli: 'codex',
-    outputFilePath,
-    startedAt: '2026-05-24T00:00:00.000Z'
-  }), 'utf8');
-  let updatedStatus = '';
-  let updatedOutput = '';
-  let terminalDisposed = false;
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [{ id: '3', title: '完善体验', status: 'Running' }],
-    updateNode: () => {},
-    getAgentExecutions: () => [{ id: 11, nodeId: '3', agentCli: 'codex', command: 'codex exec', output: 'Agent conversation started.', status: 'Running' }],
-    updateAgentExecution: (_id, _cli, _command, output, status) => {
-      updatedOutput = output;
-      updatedStatus = status;
-      return true;
-    },
-    logAgentExecution: () => 11
-  }, tempRoot);
-  extensionModule.__setAgentTerminalForTest(11, 'solomap stop test', tempRoot, {
-    name: 'solomap stop test',
-    dispose() { terminalDisposed = true; }
+test('stopping an Agent run records the user decision on the active conversation', async t => {
+  for (const kind of ['step','solo']) await t.test(kind, async t => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(),'solomap-user-stop-'));
+    const project = path.join(base,'project'), other = path.join(base,'other-project');fs.mkdirSync(project);fs.mkdirSync(other);
+    const root = path.join(base,'.solomap-global'), closes = [], nodeId = kind==='solo'?'__solo__':'3';
+    let native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
+    t.after(async()=>{for(const close of closes.splice(0).reverse())await close();});
+    const csvPath = path.join(project,'.solopreneur','roadmap.csv'), otherCsvPath = path.join(other,'.solopreneur','roadmap.csv');
+    const originalCsv = [
+      'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+      '3,完善体验,完成用户需要的功能,产品与 MVP,,codex,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'
+    ].join('\n');
+    fs.writeFileSync(csvPath,originalCsv);const otherCsv = originalCsv.replace('完善体验','其他项目的任务');fs.writeFileSync(otherCsvPath,otherCsv);
+    const engine = new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);
+    await engine.initAndSync();t.after(()=>engine.close());const originalNodes = engine.getNodes().map(node=>({...node}));
+    const {spawn} = require('node:child_process'), {once} = require('node:events');
+    const wrapper = spawn(process.execPath,['-e',"process.stdout.write('ready');setInterval(()=>{},1000)"],{cwd:project,stdio:'pipe'});
+    t.after(async()=>{if(wrapper.exitCode===null&&wrapper.signalCode===null){const ended=once(wrapper,'exit');wrapper.kill('SIGTERM');await ended;}});
+    await once(wrapper.stdout,'data');wrapper.stderr.resume();const ended = once(wrapper,'exit');
+    const stat = fs.readFileSync(`/proc/${wrapper.pid}/stat`,'utf8'), birth = `proc:${stat.slice(stat.lastIndexOf(') ')+2).trim().split(/\s+/)[19]}`;
+    const prepare = (workspace,id,node,metadata={})=>native.ops({operation:'prepare_run',input:{root:workspace,executionLogId:id,nodeId:node,runKind:node==='__solo__'?'solo':'step',prompt:'执行用户任务',command:'owned Node fixture process',userMessage:'完成这个功能',metadata:{agentCli:'fixture-cli',collaborationReviewMode:'off',interactiveSession:true,...metadata},idempotencyKey:`user-stop:${workspace}:${id}`}});
+    const run = await prepare(project,11,nodeId,{agentPid:wrapper.pid,processBirth:birth});await prepare(project,13,'3');await prepare(other,11,nodeId);
+    const read = (workspace,id)=>native.ops({operation:'read_run_state',input:{root:workspace,executionLogId:id}});
+    const peer = await read(project,13), foreign = await read(other,11);
+    const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation,input)=>native.ops({operation,input}),root);
+    const reference = require('../out/runLifecycleClient.js').runStatusReference(project,11);
+    const before = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+    await native.ops({operation:'write_run_document',input:{projectId:run.projectId,executionLogId:11,generation:run.generation,turnId:run.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId,'before'),bytes:Buffer.from(JSON.stringify(before)).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:'user-stop-before'}});
+    const output = 'Working on the task. 保留用户停止前的完整输出🌿\n'.repeat(10000);
+    await native.ops({operation:'append_run_log',input:{projectId:run.projectId,executionLogId:11,generation:run.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:'user-stop-output'}});
+    let disposed = 0;
+    const extension = loadCompiledModule('out/extension.js', `
+      module.exports.stop=stopAgentRun;module.exports.settle=processAgentStatusFile;
+      module.exports.owned=id=>agentTerminalNamesByConversationId.has(id)||agentTerminalProjectRootsByConversationId.has(id);
+      module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+      module.exports.connect=(engine,project,root,terminal)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
+        getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
+        agentTerminalNamesByConversationId.set(11,terminal.name);agentTerminalProjectRootsByConversationId.set(11,project);vscode.window.terminals.push(terminal);};
+    `, {'./db/syncEngine':require('../out/db/syncEngine.js'),'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js')});
+    extension.connect(engine,project,root,{name:'solomap owned stop test',dispose(){assert.equal(extension.owned(11),false,'terminal ownership must be cleared before dispose/close callback');assert.notEqual(wrapper.signalCode,null,'Runtime must stop the owned process before terminal disposal');disposed++;}});
+    await extension.stop(nodeId,11);await ended;await extension.drain();assert.equal(disposed,1);assert.equal(wrapper.signalCode,'SIGTERM');assert.equal(extension.owned(11),false);
+    await extension.settle(reference,undefined,root);await extension.drain();
+    const journal = await native.ops({operation:'read_run_turn_journal',input:{root:project,executionLogId:11}});
+    assert.equal(journal.entry.status,'Failed');assert.match(journal.entry.output,/Failure category: stopped_by_user/);assert.match(journal.entry.output,/用户已停止当前对话。/);assert.doesNotMatch(journal.entry.output,/Failure category: agent_exit_failed/);assert.match(journal.entry.output,/Interactive session state: Closed/);
+    const settled = await read(project,11);assert.equal(settled.taskId,run.taskId);assert.equal(settled.status.status,'Processed');assert.equal(settled.status.interactiveSessionClosed,true);assert.equal(settled.status.stopRequested,true);assert.equal(settled.status.stopReason,'用户已停止当前对话。');assert.equal(settled.status.processBirth,birth);
+    const settlements = await client.readSettlements(reference,await client.readStatus(reference));assert.equal(settlements.length,2);assert.deepEqual(settlements[1].digest,settlements[0].digest);assert.equal(settlements[0].digest.projectPath,project);assert.equal(settlements[0].digest.nodeId,nodeId);assert.equal(settlements[0].digest.executionLogId,11);assert.equal(settlements[0].digest.status,'Failed');assert.match(settlements[0].digest.failures.join('\n'),/stopped_by_user/);assert.doesNotMatch(settlements[0].digest.failures.join('\n'),/agent_exit_failed/);
+    assert.equal((await client.readLog(reference,'stdout')).toString('utf8'),output);
+    const finalNodes = engine.getNodes().map(node=>({...node})), finalCsv = fs.readFileSync(csvPath);
+    if(kind==='solo'){assert.deepEqual(finalNodes,originalNodes);assert.equal(finalCsv.toString('utf8'),originalCsv);}else{assert.equal(finalNodes[0].status,'Running','another active conversation keeps its node running');assert.deepEqual({...finalNodes[0],status:originalNodes[0].status},originalNodes[0]);}
+    const wal = fs.readFileSync(path.join(root,'solomap.db-wal'));await Promise.all([extension.settle(reference,undefined,root),extension.settle(reference,undefined,root)]);await extension.drain();await extension.stop(nodeId,11);
+    assert.equal(disposed,1);assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),wal);assert.deepEqual(fs.readFileSync(csvPath),finalCsv);assert.deepEqual(engine.getNodes(),finalNodes);
+    for(const close of closes.splice(0).reverse())await close();
+    native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(engine.getNodes(),finalNodes);assert.deepEqual(await read(project,11),settled);assert.deepEqual(await native.ops({operation:'read_run_turn_journal',input:{root:project,executionLogId:11}}),journal);assert.deepEqual(await client.readSettlements(reference,await client.readStatus(reference)),settlements);
+    const restartWal = fs.readFileSync(path.join(root,'solomap.db-wal'));await extension.settle(reference,undefined,root);await extension.drain();assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),restartWal);assert.deepEqual(fs.readFileSync(csvPath),finalCsv);
+    assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,11),foreign);assert.equal(fs.readFileSync(otherCsvPath,'utf8'),otherCsv);
+    assert.deepEqual(fs.readdirSync(path.join(project,'.solopreneur')).sort(),['project.json','roadmap.csv']);
   });
-
-  await extensionModule.__stopAgentRun('3', 11);
-
-  assert.equal(terminalDisposed, true);
-  assert.equal(updatedStatus, 'Failed');
-  assert.match(updatedOutput, /Failure category: stopped_by_user/);
-  assert.match(fs.readFileSync(outputFilePath, 'utf8'), /Task stopped by user/);
-  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
-  const stopBody = extensionSource.slice(
-    extensionSource.indexOf('async function stopAgentRun('),
-    extensionSource.indexOf('\nasync function handleRunAgent(', extensionSource.indexOf('async function stopAgentRun('))
-  );
-  assert.ok(
-    stopBody.indexOf('agentTerminalNamesByConversationId.delete') < stopBody.indexOf('terminal?.dispose()'),
-    'the close listener must lose ownership before the stop action disposes the terminal'
-  );
 });
 
-test('a closed interactive conversation cannot reuse its stale terminal when continuing', () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__findReusableAgentTerminal = findReusableAgentTerminal;',
-      'module.exports.__setAgentTerminalForTest = (conversationId, terminalName, projectRoot, terminal) => { activeProjectRoot = projectRoot; agentTerminalNamesByConversationId.set(Number(conversationId), terminalName); agentTerminalProjectRootsByConversationId.set(Number(conversationId), projectRoot); vscode.window.terminals.push(terminal); };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-stale-terminal-'));
-  const statusFilePath = path.join(tempRoot, '.solopreneur', 'agent-status', '336.json');
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot: tempRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Processed',
-    executionLogId: 336,
-    rootExecutionLogId: 336,
-    interactiveSession: true,
-    interactiveSessionClosed: true,
-    terminalName: 'solomap stale terminal'
-  }), 'utf8');
-  const staleTerminal = {
-    name: 'solomap stale terminal',
-    show() { throw new Error('the closed terminal must not be shown'); }
-  };
-  extensionModule.__setAgentTerminalForTest(336, staleTerminal.name, tempRoot, staleTerminal);
-
-  assert.equal(extensionModule.__findReusableAgentTerminal(tempRoot, 336), undefined);
-
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot: tempRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Waiting',
-    executionLogId: 336,
-    rootExecutionLogId: 336,
-    interactiveSession: true,
-    interactiveSessionClosed: false,
-    terminalName: staleTerminal.name
-  }), 'utf8');
-
-  assert.equal(extensionModule.__findReusableAgentTerminal(tempRoot, 336), staleTerminal);
+test('a closed interactive conversation cannot reuse its stale terminal when continuing', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(),'solomap-stale-terminal-'));
+  const project = path.join(base,'project'), other = path.join(base,'other-project');fs.mkdirSync(project);fs.mkdirSync(other);
+  const root = path.join(base,'.solomap-global'), closes = [];
+  let native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
+  t.after(async()=>{for(const close of closes.splice(0).reverse())await close();});
+  const csvPath = path.join(project,'.solopreneur','roadmap.csv'), otherCsvPath = path.join(other,'.solopreneur','roadmap.csv');
+  const originalCsv = [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '2,实现 MVP,完成可运行切片,产品与 MVP,,codex,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'
+  ].join('\n');
+  fs.writeFileSync(csvPath,originalCsv);const otherCsv = originalCsv.replace('实现 MVP','其他项目的任务');fs.writeFileSync(otherCsvPath,otherCsv);
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);
+  await engine.initAndSync();t.after(()=>engine.close());const originalNodes = engine.getNodes().map(node=>({...node}));
+  const terminal = {name:'solomap stale terminal',show(){throw new Error('terminal lookup must not reveal a closed terminal');}};
+  const foreignTerminal = {name:'solomap other-project terminal',show(){throw new Error('terminal lookup must not reveal another project terminal');}};
+  const prepare = (workspace,id,node,name)=>native.ops({operation:'prepare_run',input:{root:workspace,executionLogId:id,nodeId:node,runKind:node==='__solo__'?'solo':'step',prompt:'保持原对话并允许继续',command:'fixture never executes',userMessage:'请继续讨论',metadata:{agentCli:'fixture-cli',collaborationReviewMode:'off',interactiveSession:true,terminalName:name},idempotencyKey:`stale-terminal:${workspace}:${id}`}});
+  const run = await prepare(project,336,'__solo__',terminal.name);await prepare(project,13,'2','peer terminal');await prepare(other,336,'__solo__',foreignTerminal.name);
+  const read = (workspace,id)=>native.ops({operation:'read_run_state',input:{root:workspace,executionLogId:id}});
+  const peer = await read(project,13), foreign = await read(other,336);
+  const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation,input)=>native.ops({operation,input}),root);
+  const reference = require('../out/runLifecycleClient.js').runStatusReference(project,336);
+  const before = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+  await native.ops({operation:'write_run_document',input:{projectId:run.projectId,executionLogId:336,generation:run.generation,turnId:run.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId,'before'),bytes:Buffer.from(JSON.stringify(before)).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:'stale-terminal-before'}});
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.reuse=findReusableAgentTerminal;module.exports.settle=processAgentStatusFile;
+    module.exports.owned=id=>agentTerminalNamesByConversationId.has(id)&&agentTerminalProjectRootsByConversationId.has(id);
+    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.connect=(engine,project,root,terminal,foreignTerminal)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
+      getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
+      agentTerminalNamesByConversationId.set(336,terminal.name);agentTerminalProjectRootsByConversationId.set(336,project);vscode.window.terminals.push(terminal,foreignTerminal);};
+  `, {'./db/syncEngine':require('../out/db/syncEngine.js'),'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js')});
+  extension.connect(engine,project,root,terminal,foreignTerminal);
+  assert.equal(await extension.reuse(project,336),terminal);assert.equal(await extension.reuse(project,336,root),terminal);
+  assert.equal(await extension.reuse(other,336),foreignTerminal);assert.equal(await extension.reuse(other,336,root),foreignTerminal);
+  const output = '对话完整原文保留，等待用户继续🌿\n'.repeat(10000);
+  await native.ops({operation:'append_run_log',input:{projectId:run.projectId,executionLogId:336,generation:run.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:'stale-terminal-output'}});
+  const checkpoint = async extra => {const head = await native.ops({operation:'read_run_checkpoint_state',input:{root:project,executionLogId:336}});return native.ops({operation:'checkpoint_run',input:{projectId:run.projectId,executionLogId:336,generation:head.generation,proof:head.proof,expectedRevision:head.revision,expectedTurnId:head.turnId,...extra}});};
+  await checkpoint({action:'complete',outcome:'partial',summary:'继续在原Solo讨论',idempotencyKey:'stale-terminal-partial'});
+  await extension.settle(reference,undefined,root);await extension.drain();const waiting = await read(project,336);
+  assert.equal(waiting.status.status,'Waiting');assert.notEqual(waiting.status.interactiveSessionClosed,true);assert.equal(waiting.taskId,run.taskId);
+  const waitingWal = fs.readFileSync(path.join(root,'solomap.db-wal'));
+  assert.equal(await extension.reuse(project,336),terminal);assert.equal(await extension.reuse(project,336,root),terminal);
+  assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),waitingWal);
+  for(const close of closes.splice(0).reverse())await close();
+  native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);assert.deepEqual(await read(project,336),waiting);
+  assert.equal(await extension.reuse(project,336),terminal);assert.equal(await extension.reuse(project,336,root),terminal);
+  await checkpoint({action:'session-close',exitCode:0,idempotencyKey:'stale-terminal-close'});const closed = await read(project,336);assert.equal(closed.status.interactiveSessionClosed,true);assert.equal(closed.taskId,run.taskId);
+  assert.equal(extension.owned(336),true,'stale mapping is intentionally still present before close consumer');
+  const closedWal = fs.readFileSync(path.join(root,'solomap.db-wal'));
+  assert.equal(await extension.reuse(project,336),undefined);assert.equal(await extension.reuse(project,336,root),undefined);
+  assert.equal(await extension.reuse(other,336),foreignTerminal);assert.equal(await extension.reuse(other,336,root),foreignTerminal);
+  assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),closedWal);
+  await extension.settle(reference,undefined,root);await extension.drain();const settled = await read(project,336);
+  assert.equal(settled.status.status,'Processed');assert.equal(settled.status.interactiveSessionClosed,true);assert.equal(settled.taskId,run.taskId);
+  const journal = await native.ops({operation:'read_run_turn_journal',input:{root:project,executionLogId:336}}), settlements = await client.readSettlements(reference,await client.readStatus(reference));
+  assert.equal(journal.entry.status,'Completed');assert.match(journal.entry.output,/Interactive session state: Closed/);assert.equal(settlements.length,2);assert.deepEqual(settlements[1].digest,settlements[0].digest);assert.equal((await client.readLog(reference,'stdout')).toString('utf8'),output);
+  assert.equal(await extension.reuse(project,336),undefined);assert.equal(await extension.reuse(project,336,root),undefined);
+  for(const close of closes.splice(0).reverse())await close();
+  native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await read(project,336),settled);assert.deepEqual(await native.ops({operation:'read_run_turn_journal',input:{root:project,executionLogId:336}}),journal);assert.deepEqual(await client.readSettlements(reference,await client.readStatus(reference)),settlements);assert.deepEqual(engine.getNodes(),originalNodes);
+  const restartWal = fs.readFileSync(path.join(root,'solomap.db-wal'));
+  assert.equal(await extension.reuse(project,336),undefined);assert.equal(await extension.reuse(project,336,root),undefined);assert.equal(await extension.reuse(other,336),foreignTerminal);
+  await Promise.all([extension.settle(reference,undefined,root),extension.settle(reference,undefined,root)]);await extension.drain();assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),restartWal);
+  assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,336),foreign);assert.equal(fs.readFileSync(csvPath,'utf8'),originalCsv);assert.equal(fs.readFileSync(otherCsvPath,'utf8'),otherCsv);assert.deepEqual(fs.readdirSync(path.join(project,'.solopreneur')).sort(),['project.json','roadmap.csv']);
 });
 
-test('continuing a stopped interactive conversation opens a new terminal and settles the button action', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__handleSharedWebviewAction = handleSharedWebviewAction;',
-      'module.exports.__setStoppedContinueRuntimeForTest = (engine, projectRoot, conversationId, terminal, reveal, continueConversation) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = null; agentTerminalNamesByConversationId.set(Number(conversationId), terminal.name); agentTerminalProjectRootsByConversationId.set(Number(conversationId), projectRoot); vscode.window.terminals.push(terminal); revealAgentStartupTerminal = reveal; ensureActionProject = async () => projectRoot; handleContinueNativeConversation = continueConversation; postNodeConversations = () => {}; };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-stopped-continue-'));
-  const statusFilePath = path.join(tempRoot, '.solopreneur', 'agent-status', '336.json');
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot: tempRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Processed',
-    executionLogId: 336,
-    rootExecutionLogId: 336,
-    interactiveSession: true,
-    interactiveSessionClosed: true,
-    terminalName: 'solomap stopped terminal'
-  }), 'utf8');
-  let staleTerminalShown = false;
-  let startupTerminalRevealed = 0;
-  let nativeContinuationStarted = 0;
-  extensionModule.__setStoppedContinueRuntimeForTest(
-    {
-      getAgentExecutions: () => [{ id: 336, nodeId: '__solo__', agentCli: 'codex', status: 'Failed' }],
-      getProjectAgentExecutions: () => []
-    },
-    tempRoot,
-    336,
-    { name: 'solomap stopped terminal', show() { staleTerminalShown = true; } },
-    async () => { startupTerminalRevealed += 1; },
-    async () => { nativeContinuationStarted += 1; }
-  );
-  const posted = [];
-
-  const handled = await extensionModule.__handleSharedWebviewAction(
-    { globalState: { get: () => ({}) } },
-    { command: 'conversation.continue', projectPath: tempRoot, nodeId: '__solo__', conversationId: 336 },
-    'sidebar',
-    { postMessage(message) { posted.push(message); return Promise.resolve(true); } }
-  );
-
-  assert.equal(handled, true);
-  assert.equal(staleTerminalShown, false);
-  assert.equal(startupTerminalRevealed, 1);
-  assert.equal(nativeContinuationStarted, 1);
-  assert.ok(posted.some((message) => message.command === 'conversationActionSettled'
-    && message.action === 'continue'
-    && Number(message.conversationId) === 336));
+test('continuing a stopped interactive conversation opens a new terminal and settles the button action', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(),'solomap-stopped-continue-'));
+  const project = path.join(base,'project'), other = path.join(base,'other-project');fs.mkdirSync(project);fs.mkdirSync(other);
+  const root = path.join(base,'.solomap-global'), closes = [];
+  let native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
+  t.after(async()=>{for(const close of closes.splice(0).reverse())await close();});
+  const csvPath = path.join(project,'.solopreneur','roadmap.csv'), otherCsvPath = path.join(other,'.solopreneur','roadmap.csv');
+  const originalCsv = ['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt','2,实现 MVP,保留原目标,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'].join('\n');
+  fs.writeFileSync(csvPath,originalCsv);const otherCsv = originalCsv.replace('实现 MVP','另一项目原任务');fs.writeFileSync(otherCsvPath,otherCsv);
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);
+  await engine.initAndSync();t.after(()=>engine.close());const originalNodes = engine.getNodes().map(node=>({...node}));
+  const operation = (operation,input)=>native.ops({operation,input});
+  const run = await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'继续原用户任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:336,userMessage:'保留原任务继续',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',metadata:{terminalName:'solomap stopped terminal'}},operation);
+  const preparePeer = (workspace,id)=>native.ops({operation:'prepare_run',input:{root:workspace,executionLogId:id,nodeId:'__solo__',runKind:'solo',prompt:'另一段对话',command:'fixture never executes',userMessage:'其他目标',metadata:{interactiveSession:true,agentCli:'claude',sessionProvider:'claude',nativeSessionId:workspace===other?run.status.plannedNativeSessionId:'unrelated-native-session'},idempotencyKey:`stopped-continue-peer:${workspace}:${id}`}});
+  await preparePeer(project,13);await preparePeer(other,336);
+  const read = (workspace,id)=>native.ops({operation:'read_run_state',input:{root:workspace,executionLogId:id}});
+  const peer = await read(project,13), foreign = await read(other,336);
+  const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)(operation,root), reference = require('../out/runLifecycleClient.js').runStatusReference(project,336);
+  const before = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+  await native.ops({operation:'write_run_document',input:{projectId:run.projectId,executionLogId:336,generation:run.generation,turnId:run.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId,'before'),bytes:Buffer.from(JSON.stringify(before)).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:'stopped-continue-before'}});
+  const output = '原对话完整输入与结果继续保留🌿\n'.repeat(10000);
+  await native.ops({operation:'append_run_log',input:{projectId:run.projectId,executionLogId:336,generation:run.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:'stopped-continue-output'}});
+  const head = await native.ops({operation:'read_run_checkpoint_state',input:{root:project,executionLogId:336}});
+  const env = {...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:'336',SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId};
+  await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'complete','--outcome','partial','--summary','上一轮完整结果'],{env});
+  const sent = [], created = [], posted = [], errors = [], preparedRuns = [];
+  let staleShown = 0, staleDisposed = 0;
+  const stale = {name:'solomap stopped terminal',show(){staleShown++;},dispose(){staleDisposed++;}};
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;
+    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.reservations=project=>reservedAgentTerminalsByProject.get(project)?.length||0;
+    module.exports.owned=id=>({name:agentTerminalNamesByConversationId.get(id),root:agentTerminalProjectRootsByConversationId.get(id)});
+    module.exports.connect=(engine,project,root,stale,create,prepare,reportError)=>{syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
+      getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
+      agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';getOpenCodeTerminalEnvironment=async()=>({});
+      ensureActionProject=async(_context,requested)=>{if(requested!==project)throw new Error('unexpected selected project');return project;};
+      prepareOrdinaryConversation=prepare;vscode.window.createTerminal=create;vscode.window.showErrorMessage=reportError;
+      sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
+      agentTerminalNamesByConversationId.set(336,stale.name);agentTerminalProjectRootsByConversationId.set(336,project);vscode.window.terminals.push(stale);
+      const factory=create;vscode.window.createTerminal=options=>{const terminal=factory(options);vscode.window.terminals.push(terminal);return terminal;};};
+  `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
+  extension.connect(engine,project,root,stale,options=>{const terminal={name:options.name,show(){terminal.shown=(terminal.shown||0)+1;},sendText(text){sent.push({terminal,text});},dispose(){terminal.disposed=true;}};created.push({options,terminal});return terminal;},
+    async(_context,input)=>{const prepared=await require('../out/agentRunPreparation.js').prepareAgentRun({...input,launchIntentId:'stopped-continue-button'},operation);preparedRuns.push(prepared);return prepared;},message=>errors.push(message));
+  await extension.settle(reference,undefined,root);await extension.drain();
+  assert.equal((await client.getResumableSession(reference)).sessionId,run.status.plannedNativeSessionId);
+  await client.stop(reference,await client.readStatus(reference),'用户停止当前对话','stopped-continue-user-stop');
+  await extension.settle(reference,undefined,root);await extension.drain();
+  const stopped = await read(project,336), originalJournal = await client.readJournal(reference), originalSettlements = await client.readSettlements(reference,await client.readStatus(reference)), binding = await client.readBinding(reference);
+  assert.equal(stopped.status.interactiveSessionClosed,true);assert.equal(stopped.status.status,'Processed');assert.equal(stopped.status.stopRequested,true);assert.equal(stopped.status.stopReason,'用户停止当前对话');assert.equal(stopped.taskId,run.taskId);assert.equal(originalSettlements.length,2);
+  for(const close of closes.splice(0).reverse())await close();
+  native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await read(project,336),stopped);assert.deepEqual(await client.readBinding(reference),binding);
+  const click=()=>extension.action({}, {command:'conversation.continue',projectPath:project,nodeId:'__solo__',conversationId:336},'sidebar',{postMessage(message){posted.push(message);return Promise.resolve(true);}});
+  assert.deepEqual(await Promise.all([click(),click()]),[true,true]);
+  assert.deepEqual(errors,[]);assert.equal(staleShown,0);assert.equal(staleDisposed,1);assert.equal(created.length,1,'concurrent button actions reserve one fresh terminal');assert.equal(preparedRuns.length,1);
+  const terminal = created[0].terminal, continuation = preparedRuns[0], newId = Number(continuation.status.rootExecutionLogId), nextReference = require('../out/runLifecycleClient.js').runStatusReference(project,newId);
+  assert.equal(created[0].options.cwd,project);assert.equal(Object.keys(created[0].options.env).length,0);assert.ok(terminal.shown>=1);assert.notEqual(terminal.name,stale.name);
+  assert.equal(extension.reservations(project),0,'actual delivery consumes the startup reservation rather than creating another terminal');assert.deepEqual({...extension.owned(newId)},{name:terminal.name,root:project});assert.deepEqual({...extension.owned(336)},{name:undefined,root:undefined});
+  assert.equal(sent.length,2);assert.equal(sent[0].terminal,terminal);assert.equal(sent[1].terminal,terminal);assert.match(sent[0].text,/正在准备本地对话/);assert.match(sent[1].text,/SOLOMAP_TERMINAL_DELIVERY_ID=/);assert.ok(sent[1].text.endsWith(continuation.finalCommand));assert.match(continuation.finalCommand,/runAgentProcess\.js/);
+  const states = await native.ops({operation:'list_run_states',input:{root:project,cursor:0,limit:10}});assert.equal(states.items.length,3);
+  const delivered = await read(project,newId);assert.equal(delivered.taskId,run.taskId);assert.equal(delivered.conversationId,run.conversationId);assert.notEqual(delivered.turnId,run.turnId);assert.equal(delivered.status.sourceParentRunId,run.runId);assert.equal(delivered.status.sourceParentTurnId,run.turnId);assert.equal(delivered.status.lineageRootExecutionLogId,336);assert.equal(delivered.status.plannedNativeSessionId,run.status.plannedNativeSessionId);assert.equal(delivered.status.terminalName,terminal.name);assert.ok(delivered.status.terminalCommandSubmittedAt);assert.ok(delivered.status.terminalDeliveryId);
+  assert.equal(posted.filter(message=>message.command==='conversationActionSettled'&&message.action==='continue'&&Number(message.conversationId)===336&&message.projectPath===project).length,2);
+  assert.deepEqual(await read(project,336),stopped);assert.deepEqual(await client.readJournal(reference),originalJournal);assert.deepEqual(await client.readSettlements(reference,await client.readStatus(reference)),originalSettlements);assert.deepEqual(await client.readBinding(reference),binding);assert.equal((await client.readLog(reference,'stdout')).toString('utf8'),output);
+  assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,336),foreign);assert.equal(fs.readFileSync(csvPath,'utf8'),originalCsv);assert.equal(fs.readFileSync(otherCsvPath,'utf8'),otherCsv);assert.deepEqual(engine.getNodes(),originalNodes);
+  for(const close of closes.splice(0).reverse())await close();
+  native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await read(project,newId),delivered);assert.deepEqual(await read(project,336),stopped);assert.deepEqual(await client.readJournal(reference),originalJournal);assert.deepEqual(await client.readSettlements(reference,await client.readStatus(reference)),originalSettlements);assert.deepEqual(await client.readBinding(reference),binding);assert.equal((await client.readLog(reference,'stdout')).toString('utf8'),output);
+  const wal = fs.readFileSync(path.join(root,'solomap.db-wal'));await Promise.all([extension.settle(reference,undefined,root),extension.settle(reference,undefined,root)]);await extension.drain();assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),wal);
+  assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,336),foreign);assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(fs.readFileSync(csvPath,'utf8'),originalCsv);assert.equal(fs.readFileSync(otherCsvPath,'utf8'),otherCsv);assert.deepEqual(fs.readdirSync(path.join(project,'.solopreneur')).sort(),['project.json','roadmap.csv']);
+  // The mocked terminal acknowledged the final command without spawning any CLI; close this temporary prepared run through the formal operation before owner teardown.
+  await client.stop(nextReference,await client.readStatus(nextReference),'结束本次隔离按钮验收','stopped-continue-temporary-close');assert.equal((await read(project,newId)).status.interactiveSessionClosed,true);
 });
 
-test('growth continuation finds the live resumed descendant rather than starting a competing session', () => {
+test('growth continuation finds the live resumed descendant rather than starting a competing session', async () => {
   const extensionModule = loadCompiledModule('out/extension.js', [
     'module.exports.__findReusableContinuationTerminal = findReusableContinuationTerminal;',
     'module.exports.__setContinuationTerminalTest = (conversations, find) => { syncEngine = { getAgentExecutions: () => conversations }; findReusableAgentTerminal = find; };'
@@ -13118,64 +13407,82 @@ test('growth continuation finds the live resumed descendant rather than starting
     { id: 5, output: 'Different task', status: 'Running' }
   ];
   extensionModule.__setContinuationTerminalTest(conversations, (_project, id) => id === 3 || id === 5 ? terminal : undefined);
-  const reusable = extensionModule.__findReusableContinuationTerminal('/project', '__solo__', 1);
+  const reusable = await extensionModule.__findReusableContinuationTerminal('/project', '__solo__', 1);
   assert.equal(reusable.terminal, terminal);
   assert.equal(reusable.conversationId, 3);
 });
 
-test('continuing an earlier turn opens a new session terminal once for concurrent clicks', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__handleSharedWebviewAction = handleSharedWebviewAction;',
-      'module.exports.__setOpenLineageContinueRuntimeForTest = (engine, projectRoot, rootConversationId, terminal, reveal, continueConversation, registerTurn) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = null; agentTerminalNamesByConversationId.set(Number(rootConversationId), terminal.name); agentTerminalProjectRootsByConversationId.set(Number(rootConversationId), projectRoot); vscode.window.terminals.push(terminal); revealAgentStartupTerminal = reveal; ensureActionProject = async () => projectRoot; handleContinueNativeConversation = continueConversation; registerInteractiveConversationTurn = registerTurn; postNodeConversations = () => {}; };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-open-lineage-'));
-  const statusFilePath = path.join(tempRoot, '.solopreneur', 'agent-status', '336.json');
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot: tempRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Waiting',
-    executionLogId: 340,
-    rootExecutionLogId: 336,
-    interactiveSession: true,
-    interactiveSessionClosed: false,
-    terminalName: 'solomap open root terminal'
-  }), 'utf8');
-  const conversations = [
-    { id: 336, nodeId: '__solo__', agentCli: 'codex', output: 'Interactive session state: Waiting', status: 'Completed' },
-    { id: 338, nodeId: '__solo__', agentCli: 'codex', output: 'Agent continuation started.\n\nContinuation parent conversation: 336', status: 'Completed' },
-    { id: 340, nodeId: '__solo__', agentCli: 'codex', output: 'Agent continuation started.\n\nContinuation parent conversation: 338', status: 'Completed' }
-  ];
-  let terminalShown = 0;
-  let startupTerminalRevealed = 0;
-  let nativeContinuationStarted = 0;
-  const registrations = [];
-  extensionModule.__setOpenLineageContinueRuntimeForTest(
-    { getAgentExecutions: () => conversations, getProjectAgentExecutions: () => conversations },
-    tempRoot,
-    336,
-    { name: 'solomap open root terminal', show() { terminalShown += 1; } },
-    async () => { startupTerminalRevealed += 1; },
-    async () => { nativeContinuationStarted += 1; },
-    async (workspaceRoot, conversationId) => { registrations.push({ workspaceRoot, conversationId }); return true; }
-  );
-
-  const click = () => extensionModule.__handleSharedWebviewAction(
-    { globalState: { get: () => ({}) } },
-    { command: 'conversation.continue', projectPath: tempRoot, nodeId: '__solo__', conversationId: 338 },
-    'sidebar',
-    { postMessage() { return Promise.resolve(true); } }
-  );
-  await Promise.all([click(), click()]);
-
-  assert.equal(startupTerminalRevealed, 1);
-  assert.equal(nativeContinuationStarted, 1);
-  assert.equal(terminalShown, 0);
-  assert.deepEqual(registrations, []);
+test('continuing an earlier turn opens a new session terminal once for concurrent clicks', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(),'solomap-earlier-turn-'));
+  const project = path.join(base,'project'), other = path.join(base,'other-project');fs.mkdirSync(project);fs.mkdirSync(other);
+  const root = path.join(base,'.solomap-global'), closes = [];
+  let native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
+  t.after(async()=>{for(const close of closes.splice(0).reverse())await close();});
+  const csvPath = path.join(project,'.solopreneur','roadmap.csv'), otherCsvPath = path.join(other,'.solopreneur','roadmap.csv');
+  const csv = ['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt','2,实现 MVP,保留原目标,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'].join('\n');
+  fs.writeFileSync(csvPath,csv);const otherCsv = csv.replace('实现 MVP','另一项目原任务');fs.writeFileSync(otherCsvPath,otherCsv);
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);
+  await engine.initAndSync();t.after(()=>engine.close());const originalNodes = engine.getNodes().map(node=>({...node}));
+  const operation = (operation,input)=>native.ops({operation,input}), client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)(operation,root), ref = id=>require('../out/runLifecycleClient.js').runStatusReference(project,id);
+  const run = await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'保留原任务继续讨论',workspaceRoot:project,nodeId:'__solo__',executionLogId:336,userMessage:'原用户完整任务',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',metadata:{terminalName:'solomap open root terminal'}},operation);
+  for(const [workspace,id] of [[project,13],[other,338]])await operation('prepare_run',{root:workspace,executionLogId:id,nodeId:'__solo__',runKind:'solo',prompt:'其他目标',command:'fixture never executes',userMessage:'其他对话',metadata:{interactiveSession:true,agentCli:'claude',sessionProvider:'claude',nativeSessionId:workspace===other?run.status.plannedNativeSessionId:'unrelated-native-session'},idempotencyKey:`earlier-turn-peer:${workspace}:${id}`});
+  const read = (workspace,id)=>operation('read_run_state',{root:workspace,executionLogId:id}), peer = await read(project,13), foreign = await read(other,338);
+  const sent = [], created = [], posted = [], errors = [], preparedRuns = [], registrations = [];
+  let oldShown = 0, oldDisposed = 0;
+  const oldTerminal = {name:'solomap open root terminal',show(){oldShown++;},dispose(){oldDisposed++;}};
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;
+    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.reservations=project=>reservedAgentTerminalsByProject.get(project)?.length||0;
+    module.exports.owned=id=>({name:agentTerminalNamesByConversationId.get(id),root:agentTerminalProjectRootsByConversationId.get(id)});
+    module.exports.connect=(engine,project,root,oldTerminal,create,prepare,reportError,recordRegistration)=>{syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
+      getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
+      agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';getOpenCodeTerminalEnvironment=async()=>({});
+      ensureActionProject=async(_context,requested)=>{if(requested!==project)throw new Error('unexpected selected project');return project;};
+      const originalRegister=registerInteractiveConversationTurn;registerInteractiveConversationTurn=async(...args)=>{recordRegistration(args);return originalRegister(...args);};
+      prepareOrdinaryConversation=prepare;vscode.window.showErrorMessage=reportError;
+      sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
+      agentTerminalNamesByConversationId.set(336,oldTerminal.name);agentTerminalProjectRootsByConversationId.set(336,project);vscode.window.terminals.push(oldTerminal);
+      vscode.window.createTerminal=options=>{const terminal=create(options);vscode.window.terminals.push(terminal);return terminal;};};
+  `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
+  extension.connect(engine,project,root,oldTerminal,options=>{const terminal={name:options.name,show(){terminal.shown=(terminal.shown||0)+1;},sendText(text){sent.push({terminal,text});},dispose(){terminal.disposed=true;}};created.push({options,terminal});return terminal;},
+    async(_context,input)=>{const prepared=await require('../out/agentRunPreparation.js').prepareAgentRun({...input,launchIntentId:'earlier-turn-button'},operation);preparedRuns.push(prepared);return prepared;},message=>errors.push(message),args=>registrations.push(args));
+  const outputs = new Map();
+  const finish = async state => {
+    const id = Number(state.status.rootExecutionLogId), before = await require('../out/runWorkspace.js').snapshotWorkspace(project), output = `第${id}轮完整原文保留🌿\n`.repeat(10000);outputs.set(id,output);
+    await operation('write_run_document',{projectId:state.projectId,executionLogId:id,generation:state.generation,turnId:state.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(state.turnId,'before'),bytes:Buffer.from(JSON.stringify(before)).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:`earlier-turn-before:${id}`});
+    await operation('append_run_log',{projectId:state.projectId,executionLogId:id,generation:state.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:`earlier-turn-output:${id}`});
+    const head = await operation('read_run_checkpoint_state',{root:project,executionLogId:id});
+    const env = {...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:String(id),SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId};
+    await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'complete','--outcome','partial','--summary',`第${id}轮完成等待继续`],{env});
+    await extension.settle(ref(id),undefined,root);await extension.drain();
+  };
+  await finish(run);
+  let parent = run;const children = [];
+  for(const id of [338,340]){
+    const child = await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:`第${id}轮继续原任务`,workspaceRoot:project,nodeId:'__solo__',executionLogId:0,launchIntentId:`earlier-turn-history:${id}`,userMessage:`第${id}轮补充`,runKind:'solo_continue',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',nativeSessionId:run.status.plannedNativeSessionId,continuation:true,parentExecutionLogId:Number(parent.status.rootExecutionLogId),expectedParentTurnId:parent.turnId,metadata:{lineageRootExecutionLogId:336,terminalName:oldTerminal.name,launchSummary:`Agent continuation started.\n\nContinuation parent conversation: ${Number(parent.status.rootExecutionLogId)}\nContinuation session id: ${run.status.plannedNativeSessionId}\n\nUser supplement:\n第${id}轮补充`}},operation);
+    assert.equal(child.taskId,run.taskId);assert.equal(child.conversationId,run.conversationId);await finish(child);children.push(Number(child.status.rootExecutionLogId));parent=child;
+  }
+  const ids = [336,...children], earlierId = children[0], latestId = children[1], initial = new Map();assert.equal(latestId,338);
+  for(const id of ids){const state=await read(project,id);assert.equal(state.status.status,'Waiting');assert.notEqual(state.status.interactiveSessionClosed,true);initial.set(id,{state,journal:await client.readJournal(ref(id)),binding:await client.readBinding(ref(id)),settlements:await client.readSettlements(ref(id),await client.readStatus(ref(id)))});assert.equal(initial.get(id).settlements.length,1);assert.equal((await client.getResumableSession(ref(id))).sessionId,run.status.plannedNativeSessionId);}
+  const lineage = engine.getAgentExecutions('__solo__'), continuationTools = require('../out/continuation.js');assert.equal(continuationTools.resolveContinuationRootConversationFromList(lineage,earlierId).id,336,JSON.stringify(lineage.map(x=>({id:x.id,output:x.output.slice(0,1200)}))));assert.equal(continuationTools.resolveContinuationLeafConversationFromList(lineage,earlierId).id,latestId);
+  for(const close of closes.splice(0).reverse())await close();
+  native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();for(const id of ids){assert.deepEqual(await read(project,id),initial.get(id).state);assert.deepEqual(await client.readBinding(ref(id)),initial.get(id).binding);}
+  const click=()=>extension.action({}, {command:'conversation.continue',projectPath:project,nodeId:'__solo__',conversationId:earlierId},'sidebar',{postMessage(message){posted.push(message);return Promise.resolve(true);}});
+  assert.deepEqual(await Promise.all([click(),click()]),[true,true]);assert.deepEqual(errors,[]);assert.equal(oldShown,0);assert.equal(oldDisposed,1);assert.equal(created.length,1);assert.equal(preparedRuns.length,1);assert.deepEqual(registrations,[],'continue from an earlier turn does not register input against the old terminal');
+  const prepared = preparedRuns[0], newId = Number(prepared.status.rootExecutionLogId), terminal = created[0].terminal;
+  assert.equal(created[0].options.cwd,project);assert.equal(Object.keys(created[0].options.env).length,0);assert.notEqual(terminal.name,oldTerminal.name);assert.ok(terminal.shown>=1);assert.equal(extension.reservations(project),0);assert.deepEqual({...extension.owned(newId)},{name:terminal.name,root:project});assert.deepEqual({...extension.owned(336)},{name:undefined,root:undefined});
+  assert.equal(sent.length,2);assert.equal(sent[0].terminal,terminal);assert.equal(sent[1].terminal,terminal);assert.match(sent[0].text,/正在准备本地对话/);assert.match(sent[1].text,/SOLOMAP_TERMINAL_DELIVERY_ID=/);assert.ok(sent[1].text.endsWith(prepared.finalCommand));assert.match(prepared.finalCommand,/runAgentProcess\.js/);
+  const delivered = await read(project,newId);assert.equal(delivered.taskId,run.taskId);assert.equal(delivered.conversationId,run.conversationId);assert.notEqual(delivered.turnId,parent.turnId);assert.equal(delivered.status.sourceParentRunId,parent.runId);assert.equal(delivered.status.sourceParentTurnId,parent.turnId);assert.equal(delivered.status.lineageRootExecutionLogId,336);assert.equal(delivered.status.plannedNativeSessionId,run.status.plannedNativeSessionId);assert.equal(delivered.status.terminalName,terminal.name);assert.ok(delivered.status.terminalDeliveryId);assert.ok(delivered.status.terminalCommandSubmittedAt);
+  assert.equal((await operation('list_run_states',{root:project,cursor:0,limit:10})).items.length,5);assert.equal(posted.filter(m=>m.command==='conversationActionSettled'&&m.action==='continue'&&m.projectPath===project&&Number(m.conversationId)===earlierId).length,2);
+  const closed = new Map();
+  for(const id of ids){await extension.settle(ref(id),undefined,root);await extension.drain();const state=await read(project,id), journal=await client.readJournal(ref(id)), settlements=await client.readSettlements(ref(id),await client.readStatus(ref(id))), binding=await client.readBinding(ref(id));assert.equal(state.status.interactiveSessionClosed,true);assert.equal(state.status.status,'Processed');assert.equal(state.taskId,run.taskId);assert.equal(state.turnId,initial.get(id).state.turnId);assert.deepEqual(binding,initial.get(id).binding);assert.equal(settlements.length,2);assert.deepEqual(settlements[0],initial.get(id).settlements[0]);assert.deepEqual(settlements[1].digest,settlements[0].digest);assert.match(journal.entry.output,/Interactive session state: Closed/);assert.equal((await client.readLog(ref(id),'stdout')).toString('utf8'),outputs.get(id));closed.set(id,{state,journal,settlements,binding});}
+  assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,latestId),foreign);assert.equal(fs.readFileSync(csvPath,'utf8'),csv);assert.equal(fs.readFileSync(otherCsvPath,'utf8'),otherCsv);assert.deepEqual(engine.getNodes(),originalNodes);
+  for(const close of closes.splice(0).reverse())await close();
+  native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await read(project,newId),delivered);
+  for(const id of ids){assert.deepEqual(await read(project,id),closed.get(id).state);assert.deepEqual(await client.readJournal(ref(id)),closed.get(id).journal);assert.deepEqual(await client.readBinding(ref(id)),closed.get(id).binding);assert.deepEqual(await client.readSettlements(ref(id),await client.readStatus(ref(id))),closed.get(id).settlements);assert.equal((await client.readLog(ref(id),'stdout')).toString('utf8'),outputs.get(id));}
+  const wal = fs.readFileSync(path.join(root,'solomap.db-wal'));await Promise.all(ids.flatMap(id=>[extension.settle(ref(id),undefined,root),extension.settle(ref(id),undefined,root)]));await extension.drain();assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),wal);assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,latestId),foreign);assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(fs.readFileSync(csvPath,'utf8'),csv);assert.equal(fs.readFileSync(otherCsvPath,'utf8'),otherCsv);assert.deepEqual(fs.readdirSync(path.join(project,'.solopreneur')).sort(),['project.json','roadmap.csv']);
+  await client.stop(ref(newId),await client.readStatus(ref(newId)),'结束本次隔离按钮验收','earlier-turn-temporary-close');assert.equal((await read(project,newId)).status.interactiveSessionClosed,true);
 });
 
 test('new terminal names cannot collide with restored windows after extension reload', () => {
@@ -13186,371 +13493,418 @@ test('new terminal names cannot collide with restored windows after extension re
   assert.equal(extensionModule.__name('/project/ST', 'continue'), 'ST · continue · 3 (solomap)');
 });
 
-test('native continuation stops old lineage processes before launching the same session and leaves other conversations alive', async () => {
-  const extensionModule = loadCompiledModule('out/extension.js', [
-    'module.exports.__continue = handleContinueNativeConversation;',
-    'module.exports.__setRestart = (root, logs, sessionId, terminal, launch, startupTerminal) => { activeProjectRoot = root; syncEngine = { getAgentExecutions: () => logs, getProjectAgentExecutions: () => logs, logAgentExecution: () => 80, updateAgentExecution: () => {} }; commandExists = () => true; recoverCodexSessionIdentityForConversation = async () => {}; resolveNativeSessionIdForConversation = () => sessionId; getConfirmedCodexResumeContext = () => ({ transcriptPath: "transcript" }); createPreSessionGitCommit = async () => ""; buildAgentShellScript = (...args) => ({ finalCommand: args[9] }); launchAgentConversationTerminal = launch; vscode.window.terminals.push(terminal, startupTerminal); reservedAgentTerminalsByProject.set(root, [{ terminal: startupTerminal, environmentSignature: "" }]); agentTerminalNamesByConversationId.set(53, terminal.name); agentTerminalProjectRootsByConversationId.set(53, root); };'
-  ].join('\n'));
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-restart-native-'));
-  const statuses = path.join(root, '.solopreneur', 'agent-status');
-  fs.mkdirSync(statuses, { recursive: true });
-  const sessionId = '01a09c9f-df1b-7253-ad44-3f4f0de671d5';
-  const children = [];
-  const exited = new Set();
-  let terminalDisposed = false;
-  let startupDisposed = false;
-  try {
-    for (const id of [53, 54, 99]) {
-      const child = childProcess.spawn(process.execPath, ['-e', "process.on('SIGTERM', () => { process.stdout.write('stopping'); setTimeout(() => process.exit(0), 120); }); process.stdout.write('ready'); setInterval(() => {}, 1000)"], { stdio: ['ignore', 'pipe', 'ignore'] });
-      children.push(child);
-      child.once('exit', () => exited.add(id));
-      await new Promise((resolve) => child.stdout.once('data', resolve));
-      const pidFile = path.join(root, `${id}.pid`);
-      fs.writeFileSync(pidFile, `${child.pid}\n${getProcessBirthMarker(child.pid)}\n`);
-      fs.writeFileSync(path.join(statuses, `${id}.json`), JSON.stringify({ workspaceRoot: root, nodeId: '__solo__', executionLogId: id, rootExecutionLogId: id,
-        nativeSessionId: id === 99 ? 'another-session' : sessionId, status: 'Running', interactiveSession: true, agentProcessPidFilePath: pidFile,
-        terminalName: id === 53 ? 'old window' : '' }));
-      if (id === 54) child.stdout.on('data', () => {
-        const statusFile = path.join(statuses, '54.json');
-        const status = JSON.parse(fs.readFileSync(statusFile));
-        fs.writeFileSync(statusFile, JSON.stringify({ ...status, status: 'In Progress', checkpointEventId: '1:complete', checkpointOutcome: 'partial', checkpointSummary: 'saved result' }));
-      });
+test('native continuation stops old lineage processes before launching the same session and leaves other conversations alive', async t => {
+  for (const mode of ['verified', 'running', 'unverified']) await t.test(mode, async t => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-lineage-process-'));
+    const project = path.join(base, 'project'), other = path.join(base, 'other-project');fs.mkdirSync(project);fs.mkdirSync(other);
+    const root = path.join(base, '.solomap-global'), closes = [];
+    let native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)}, root, [{path:project},{path:other}]);
+    t.after(async()=>{for(const wrapper of wrappers){if(wrapper&&wrapper.exitCode===null&&wrapper.signalCode===null){const ended=require('node:events').once(wrapper,'exit');wrapper.kill('SIGTERM');await ended;}}for(const close of closes.splice(0).reverse())await close();});
+    const csvPath = path.join(project,'.solopreneur','roadmap.csv'), otherCsvPath = path.join(other,'.solopreneur','roadmap.csv');
+    const csv = ['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt','2,实现 MVP,保留原目标,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'].join('\n');
+    fs.writeFileSync(csvPath,csv);const otherCsv=csv.replace('实现 MVP','其他项目任务');fs.writeFileSync(otherCsvPath,otherCsv);
+    const engine = new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);
+    await engine.initAndSync();t.after(()=>engine.close());const originalNodes=engine.getNodes().map(node=>({...node}));
+    const {once}=require('node:events'), wrappers=[];
+    for(let i=0;i<4;i++){
+      if(mode==='running'&&i===0){wrappers.push(undefined);continue;}
+      const child=childProcess.spawn(process.execPath,['-e',"process.on('SIGTERM',()=>setTimeout(()=>process.exit(0),120));process.stdout.write('ready');setInterval(()=>{},1000)"],{cwd:i===3?other:project,stdio:'pipe'});
+      wrappers.push(child);t.after(async()=>{if(child.exitCode===null&&child.signalCode===null){const ended=once(child,'exit');child.kill('SIGTERM');await ended;}});
+      await once(child.stdout,'data');child.stdout.resume();child.stderr.resume();
     }
-    const logs = [
-      { id: 53, nodeId: '__solo__', agentCli: 'codex', status: 'Running', output: '' },
-      { id: 54, nodeId: '__solo__', agentCli: 'codex', status: 'Completed', output: 'Continuation parent conversation: 53' },
-      { id: 99, nodeId: '__solo__', agentCli: 'codex', status: 'Running', output: '' }
-    ];
-    const commands = [];
-    extensionModule.__setRestart(root, logs, sessionId, { name: 'old window', show() { assert.fail('must not reuse old window'); }, dispose() { terminalDisposed = true; } }, async ({ command }) => {
-      assert.ok(exited.has(53) && exited.has(54), 'all old writers must have exited before resume');
-      assert.ok(terminalDisposed);
-      assert.equal(startupDisposed, false, 'a new reserved terminal with the same name must stay open');
-      assert.equal(exited.has(99), false);
-      commands.push(command);
-    }, { name: 'old window', dispose() { startupDisposed = true; } });
-    await extensionModule.__continue({ globalState: { get: () => ({}) } }, '__solo__', 53);
-    assert.equal(commands.length, 1);
-    assert.match(commands[0], new RegExp(`resume .*${sessionId}`));
-    assert.equal(logs[0].status, 'Running', 'replacing a window must not mark the task failed');
-    for (const id of [53, 54]) {
-      const status = JSON.parse(fs.readFileSync(path.join(statuses, `${id}.json`)));
-      assert.equal(status.status, id === 54 ? 'In Progress' : 'Session Closed');
-      assert.equal(status.failureCode, undefined);
-      if (id === 54) assert.equal(status.checkpointSummary, 'saved result');
+    const live=child=>child.exitCode===null&&child.signalCode===null;
+    const identity=child=>({agentPid:child.pid,processBirth:getProcessBirthMarker(child.pid)});
+    const operation=(operation,input)=>native.ops({operation,input}), read=(workspace,id)=>operation('read_run_state',{root:workspace,executionLogId:id});
+    const client=new (require('../out/runLifecycleClient.js').RunLifecycleClient)(operation,root), ref=id=>require('../out/runLifecycleClient.js').runStatusReference(project,id);
+    const runnerOutput='第336轮完整结果保留🌿\n'.repeat(10000), quote=require('../out/agentCli.js').shellQuote;
+    const run=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'原任务完整输入',workspaceRoot:project,nodeId:'__solo__',executionLogId:336,userMessage:'保持原会话继续讨论',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',...(mode==='running'?{directExecutionCommand:`exec ${quote(process.execPath)} -e ${quote(`process.stdout.write('第336轮完整结果保留🌿\\n'.repeat(10000));setInterval(()=>{},1000)`)}`} : {}),metadata:{terminalName:'old window',...(mode==='verified'?identity(wrappers[0]):mode==='unverified'?{agentPid:wrappers[2].pid,processBirth:'proc:wrong-birth-marker'}:{})}},operation);
+    if(mode==='running'){
+      const runner=childProcess.spawn(process.execPath,[path.join(projectRoot,'out/runAgentProcess.js'),'--global-data-path',root,'--project-path',project,'--execution-log-id','336'],{cwd:project,stdio:'pipe'});wrappers[0]=runner;
+      t.after(async()=>{if(live(runner)){const ended=once(runner,'exit');runner.kill('SIGTERM');await ended;}});
+      const stdout=[],stderr=[];runner.stdout.on('data',bytes=>stdout.push(bytes));runner.stderr.on('data',bytes=>stderr.push(bytes));
+      const deadline=Date.now()+10000;
+      while(Buffer.concat(stdout).toString().replace(/\r\n/g,'\n').length<runnerOutput.length){
+        assert.equal(live(runner),true,Buffer.concat(stderr).toString());assert.ok(Date.now()<deadline,'actual shared runner must durably capture complete output');await new Promise(resolve=>setTimeout(resolve,20));
+      }
+      assert.equal(Buffer.concat(stdout).toString().replace(/\r\n/g,'\n'),runnerOutput);
+      const state=await read(project,336);assert.equal(state.status.agentPid,runner.pid);assert.ok(state.status.agentChildPid);assert.equal(Boolean(state.status.finishedAt),false);
     }
-    assert.equal(JSON.parse(fs.readFileSync(path.join(statuses, '99.json'))).sessionRestartRequested, undefined);
-    fs.writeFileSync(path.join(root, '53.pid'), `${children[2].pid}\nproc:wrong-birth-marker\n`);
-    await assert.rejects(extensionModule.__continue({ globalState: { get: () => ({}) } }, '__solo__', 53), /无法确认原会话进程身份/);
-    assert.equal(commands.length, 1, 'an unverified process must never be signaled or followed by a competing session');
-    assert.equal(exited.has(99), false);
-  } finally {
-    await Promise.all(children.map((child) => child.exitCode !== null || child.signalCode !== null ? Promise.resolve() : new Promise((resolve) => { child.once('exit', resolve); child.kill('SIGKILL'); })));
-  }
-});
-
-test('continuing a conversation never reuses a same-numbered terminal from another project', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__handleSharedWebviewAction = handleSharedWebviewAction;',
-      'module.exports.__setCrossProjectContinueRuntimeForTest = (engine, activeRoot, conversationId, mappedRoot, terminals, continueConversation) => { syncEngine = engine; activeProjectRoot = activeRoot; sidebarProvider = null; agentTerminalNamesByConversationId.set(Number(conversationId), terminals[0].name); agentTerminalProjectRootsByConversationId.set(Number(conversationId), mappedRoot); vscode.window.terminals.push(...terminals); revealAgentStartupTerminal = async () => {}; ensureActionProject = async () => activeRoot; handleContinueNativeConversation = async (_context, _node, id) => continueConversation(activeProjectRoot, id); postNodeConversations = () => {}; };'
-    ].join('\n')
-  );
-  const projectA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-project-a-'));
-  const projectB = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-project-b-'));
-  for (const [workspaceRoot, terminalName] of [[projectA, 'project A terminal'], [projectB, 'project B terminal']]) {
-    const statusFilePath = path.join(workspaceRoot, '.solopreneur', 'agent-status', '336.json');
-    fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-    fs.writeFileSync(statusFilePath, JSON.stringify({
-      workspaceRoot,
-      nodeId: '__solo__',
-      runKind: 'solo',
-      status: 'Waiting',
-      executionLogId: 336,
-      rootExecutionLogId: 336,
-      interactiveSession: true,
-      interactiveSessionClosed: false,
-      terminalName
-    }), 'utf8');
-  }
-  let projectATerminalShown = 0;
-  let projectBTerminalShown = 0;
-  const registrations = [];
-  extensionModule.__setCrossProjectContinueRuntimeForTest(
-    {
-      getAgentExecutions: () => [{ id: 336, nodeId: '__solo__', agentCli: 'codex', status: 'Completed' }],
-      getProjectAgentExecutions: () => []
-    },
-    projectB,
-    336,
-    projectA,
-    [
-      { name: 'project A terminal', show() { projectATerminalShown += 1; } },
-      { name: 'project B terminal', show() { projectBTerminalShown += 1; } }
-    ],
-    async (workspaceRoot, conversationId) => { registrations.push({ workspaceRoot, conversationId }); return true; }
-  );
-
-  await extensionModule.__handleSharedWebviewAction(
-    { globalState: { get: () => ({}) } },
-    { command: 'conversation.continue', projectPath: projectB, nodeId: '__solo__', conversationId: 336 },
-    'sidebar',
-    { postMessage() { return Promise.resolve(true); } }
-  );
-
-  assert.equal(projectATerminalShown, 0);
-  assert.equal(projectBTerminalShown, 0);
-  assert.deepEqual(registrations, [{ workspaceRoot: projectB, conversationId: 336 }]);
-});
-
-test('window reload keeps a running Agent conversation recoverable', async () => {
-  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
-  assert.match(extensionSource, /handleAgentTerminalClosed\(terminal\.name, terminal\.exitStatus\?\.reason\)/);
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__handleAgentTerminalClosed = handleAgentTerminalClosed;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };',
-      'module.exports.__setAgentTerminalForTest = (conversationId, terminalName, projectRoot) => { agentTerminalNamesByConversationId.set(Number(conversationId), terminalName); agentTerminalProjectRootsByConversationId.set(Number(conversationId), projectRoot); };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-window-reload-'));
-  const statusFilePath = path.join(tempRoot, '.solopreneur', 'agent-status', '51.json');
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Running',
-    executionLogId: 51,
-    startedAt: '2026-08-03T00:00:00.000Z'
-  }), 'utf8');
-  let executionUpdated = false;
-  extensionModule.__setRuntimeForTest({
-    getAgentExecutions: () => [{ id: 51, nodeId: '__solo__', status: 'Running' }],
-    updateAgentExecution: () => { executionUpdated = true; return true; }
-  }, tempRoot);
-  extensionModule.__setAgentTerminalForTest(51, 'solomap reload test', tempRoot);
-
-  const handled = await extensionModule.__handleAgentTerminalClosed('solomap reload test', 1);
-
-  assert.equal(handled, false);
-  assert.equal(executionUpdated, false);
-  assert.equal(JSON.parse(fs.readFileSync(statusFilePath, 'utf8')).status, 'Running');
-});
-
-test('closing an interactive terminal terminates its tracked Agent process before settling the session', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__handleAgentTerminalClosed = handleAgentTerminalClosed;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };',
-      'module.exports.__setAgentTerminalForTest = (conversationId, terminalName, projectRoot) => { agentTerminalNamesByConversationId.set(Number(conversationId), terminalName); agentTerminalProjectRootsByConversationId.set(Number(conversationId), projectRoot); };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-close-process-'));
-  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '__solo__', '52');
-  fs.mkdirSync(runDir, { recursive: true });
-  const outputFilePath = path.join(runDir, 'output.log');
-  const agentProcessPidFilePath = path.join(runDir, 'agent.pid');
-  fs.writeFileSync(outputFilePath, 'Working inside native session.\n', 'utf8');
-  const child = childProcess.spawn(process.execPath, ['-e', [
-    "const { spawn } = require('child_process');",
-    "const nested = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
-    "process.stdout.write(String(nested.pid));",
-    'setInterval(() => {}, 1000);'
-  ].join(' ')], {
-    stdio: ['ignore', 'pipe', 'ignore']
+    for(const [workspace,id,child] of [[project,13,wrappers[2]],[other,337,wrappers[3]]])await operation('prepare_run',{root:workspace,executionLogId:id,nodeId:'__solo__',runKind:'solo',prompt:'其他对话',command:'owned Node fixture',userMessage:'其他任务',metadata:{interactiveSession:true,agentCli:'claude',sessionProvider:'claude',nativeSessionId:workspace===other?run.status.plannedNativeSessionId:'another-session',...identity(child)},idempotencyKey:`lineage-peer:${workspace}:${id}`});
+    const peer=await read(project,13), foreign=await read(other,337), sent=[], preparedRuns=[];
+    let oldDisposed=0, startupDisposed=0;
+    const oldTerminal={name:'old window',show(){assert.fail('must not reuse old window');},dispose(){if(mode!=='unverified'){assert.equal(live(wrappers[0]),false);assert.equal(live(wrappers[1]),false);}oldDisposed++;}};
+    const startup={name:'old window',show(){},sendText(text){if(mode!=='unverified'&&text.includes('SOLOMAP_TERMINAL_DELIVERY_ID=')){assert.equal(live(wrappers[0]),false,'root writer exits before the resume command');assert.equal(live(wrappers[1]),false,'latest writer exits before the resume command');assert.equal(live(wrappers[2]),true);assert.equal(live(wrappers[3]),true);assert.equal(oldDisposed,1);assert.equal(startupDisposed,0);}sent.push(text);},dispose(){startupDisposed++;}};
+    const extension=loadCompiledModule('out/extension.js', `
+      module.exports.resume=handleContinueNativeConversation;module.exports.reveal=revealAgentStartupTerminal;module.exports.settle=processAgentStatusFile;
+      module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+      module.exports.reservations=project=>reservedAgentTerminalsByProject.get(project)?.length||0;
+      module.exports.connect=(engine,project,root,oldTerminal,startup,prepare)=>{syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
+        getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
+        agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';getOpenCodeTerminalEnvironment=async()=>({});prepareOrdinaryConversation=prepare;
+        sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
+        agentTerminalNamesByConversationId.set(336,oldTerminal.name);agentTerminalProjectRootsByConversationId.set(336,project);vscode.window.terminals.push(oldTerminal);
+        vscode.window.createTerminal=()=>{vscode.window.terminals.push(startup);return startup;};};
+    `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
+    extension.connect(engine,project,root,oldTerminal,startup,async(_context,input)=>{
+      if(mode!=='unverified'){assert.equal(live(wrappers[0]),false);assert.equal(live(wrappers[1]),false);}
+      const prepared=await require('../out/agentRunPreparation.js').prepareAgentRun({...input,launchIntentId:'lineage-resume-button'},operation);preparedRuns.push(prepared);return prepared;
+    });
+    const outputs=new Map(), finish=async (state,complete=true)=>{
+      const id=Number(state.status.rootExecutionLogId), before=await require('../out/runWorkspace.js').snapshotWorkspace(project), output=`第${id}轮完整结果保留🌿\n`.repeat(10000);outputs.set(id,output);
+      if(mode==='running'&&id===336){outputs.set(id,(await client.readLog(ref(id),'stdout')).toString('utf8'));assert.equal(outputs.get(id).replace(/\r\n/g,'\n'),runnerOutput);return;}
+      await operation('write_run_document',{projectId:state.projectId,executionLogId:id,generation:state.generation,turnId:state.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(state.turnId,'before'),bytes:Buffer.from(JSON.stringify(before)).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:`lineage-before:${id}`});
+      await operation('append_run_log',{projectId:state.projectId,executionLogId:id,generation:state.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:`lineage-stdout:${id}`});
+      if(!complete)return;
+      const head=await operation('read_run_checkpoint_state',{root:project,executionLogId:id});
+      await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'complete','--outcome','partial','--summary','saved result'],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:String(id),SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId}});
+      await extension.settle(ref(id),undefined,root);await extension.drain();
+    };
+    await finish(run,mode!=='running');
+    const child=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'补充原任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:0,launchIntentId:'lineage-history-child',userMessage:'原任务后续轮',runKind:'solo_continue',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',nativeSessionId:run.status.plannedNativeSessionId,continuation:true,parentExecutionLogId:336,expectedParentTurnId:run.turnId,metadata:{lineageRootExecutionLogId:336,terminalName:'old window',...identity(wrappers[1]),launchSummary:`Agent continuation started.\n\nContinuation parent conversation: 336\nContinuation session id: ${run.status.plannedNativeSessionId}`}},operation);
+    const childId=Number(child.status.rootExecutionLogId);assert.equal(childId,337);await finish(child);
+    const ids=[336,childId], initial=new Map();
+    for(const id of ids){const state=await read(project,id);assert.equal(state.status.status,mode==='running'&&id===336?'Running':'Waiting');if(mode!=='running'||id!==336)assert.equal(state.status.checkpointSummary,'saved result');assert.equal(state.status.failureCode,undefined);initial.set(id,{state,binding:await client.readBinding(ref(id)),journal:await client.readJournal(ref(id)),settlements:await client.readSettlements(ref(id),await client.readStatus(ref(id)))});assert.equal(initial.get(id).settlements.length,mode==='running'&&id===336?0:1);}
+    for(const close of closes.splice(0).reverse())await close();
+    native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();for(const id of ids)assert.deepEqual(await read(project,id),initial.get(id).state);
+    await extension.reveal({},project,'continue-__solo__-336');assert.equal(extension.reservations(project),1);
+    if(mode==='unverified'){
+      await assert.rejects(extension.resume({},'__solo__',336),/无法确认原会话进程身份，未启动新会话/);
+      assert.equal(preparedRuns.length,0);assert.equal(sent.filter(text=>text.includes('SOLOMAP_TERMINAL_DELIVERY_ID=')).length,0);assert.equal(oldDisposed,0);assert.equal(startupDisposed,0);
+      for(const wrapper of wrappers)assert.equal(live(wrapper),true,'identity refusal never signals another process');
+      assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,337),foreign);assert.notEqual((await read(project,336)).status.interactiveSessionClosed,true);assert.deepEqual(await read(project,childId),initial.get(childId).state);
+      assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(fs.readFileSync(csvPath,'utf8'),csv);assert.equal(fs.readFileSync(otherCsvPath,'utf8'),otherCsv);
+      for(const close of closes.splice(0).reverse())await close();
+      native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();
+      await assert.rejects(operation('recover_run_executions',{}),/run_process_identity_unverified/);
+      await assert.rejects(extension.resume({},'__solo__',336),/无法确认原会话进程身份，未启动新会话/);
+      assert.equal(preparedRuns.length,0);assert.equal(oldDisposed,0);assert.equal(startupDisposed,0);for(const wrapper of wrappers)assert.equal(live(wrapper),true);
+      assert.notEqual((await read(project,336)).status.interactiveSessionClosed,true);assert.deepEqual(await read(project,childId),initial.get(childId).state);assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,337),foreign);
+      assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(fs.readFileSync(csvPath,'utf8'),csv);assert.equal(fs.readFileSync(otherCsvPath,'utf8'),otherCsv);assert.deepEqual(fs.readdirSync(path.join(project,'.solopreneur')).sort(),['project.json','roadmap.csv']);
+      return;
+    }
+    await extension.resume({},'__solo__',336);assert.equal(preparedRuns.length,1);assert.equal(oldDisposed,1);assert.equal(startupDisposed,0);assert.equal(extension.reservations(project),0);
+    assert.equal(sent.filter(text=>text.includes('SOLOMAP_TERMINAL_DELIVERY_ID=')).length,1);
+    const prepared=preparedRuns[0], newId=Number(prepared.status.rootExecutionLogId), delivered=await read(project,newId);
+    assert.ok(sent.some(text=>text.endsWith(prepared.finalCommand)));assert.equal(delivered.taskId,run.taskId);assert.equal(delivered.conversationId,run.conversationId);assert.notEqual(delivered.turnId,child.turnId);assert.equal(delivered.status.sourceParentRunId,child.runId);assert.equal(delivered.status.sourceParentTurnId,child.turnId);assert.equal(delivered.status.plannedNativeSessionId,run.status.plannedNativeSessionId);assert.equal(delivered.status.terminalName,startup.name);assert.ok(delivered.status.terminalDeliveryId);assert.ok(delivered.status.terminalCommandSubmittedAt);
+    assert.match(await client.readField(ref(newId),'command'),new RegExp(`resume .*${run.status.plannedNativeSessionId}`));
+    const closed=new Map();for(const id of ids){await extension.settle(ref(id),undefined,root);await extension.drain();if(mode==='running'&&id===336){await extension.settle(ref(id),undefined,root);await extension.drain();}const state=await read(project,id),journal=await client.readJournal(ref(id)),binding=await client.readBinding(ref(id)),settlements=await client.readSettlements(ref(id),await client.readStatus(ref(id)));assert.equal(state.status.status,'Processed');assert.equal(state.status.interactiveSessionClosed,true);assert.equal(state.status.checkpointOutcome,'partial','changing windows must not mark the task failed');assert.equal(state.status.checkpointSummary,mode==='running'&&id===336?'正在原会话中继续处理。':'saved result');assert.equal(state.status.failureCode,undefined);assert.equal(state.taskId,run.taskId);assert.equal(state.turnId,initial.get(id).state.turnId);if(mode==='running'&&id===336){assert.deepEqual(binding.revisions.slice(0,initial.get(id).binding.headRevision),initial.get(id).binding.revisions);assert.equal(binding.revisions.at(-1).state,'unavailable');assert.equal(binding.revisions.at(-1).errorCode,'identity_not_observed');}else assert.deepEqual(binding,initial.get(id).binding);assert.equal(settlements.length,2);if(initial.get(id).settlements.length)assert.deepEqual(settlements[0],initial.get(id).settlements[0]);else{assert.equal(settlements[0].digest.status,'Completed');assert.deepEqual(settlements[0].digest.failures,[]);}assert.deepEqual(settlements[1].digest,settlements[0].digest);assert.equal(journal.entry.status,mode==='running'&&id===336?'Completed':initial.get(id).journal.entry.status);assert.notEqual(journal.entry.status,'Failed');assert.match(journal.entry.output,/Interactive session state: Closed/);assert.equal((await client.readLog(ref(id),'stdout')).toString('utf8'),outputs.get(id));closed.set(id,{state,journal,binding,settlements});}
+    assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,337),foreign);assert.equal(live(wrappers[2]),true);assert.equal(live(wrappers[3]),true);assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(fs.readFileSync(csvPath,'utf8'),csv);assert.equal(fs.readFileSync(otherCsvPath,'utf8'),otherCsv);
+    for(const close of closes.splice(0).reverse())await close();
+    native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await read(project,newId),delivered);
+    for(const id of ids){assert.deepEqual(await read(project,id),closed.get(id).state);assert.deepEqual(await client.readJournal(ref(id)),closed.get(id).journal);assert.deepEqual(await client.readBinding(ref(id)),closed.get(id).binding);assert.deepEqual(await client.readSettlements(ref(id),await client.readStatus(ref(id))),closed.get(id).settlements);assert.equal((await client.readLog(ref(id),'stdout')).toString('utf8'),outputs.get(id));}
+    const wal=fs.readFileSync(path.join(root,'solomap.db-wal'));await Promise.all(ids.flatMap(id=>[extension.settle(ref(id),undefined,root),extension.settle(ref(id),undefined,root)]));await extension.drain();assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),wal);assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,337),foreign);assert.equal(live(wrappers[2]),true);assert.equal(live(wrappers[3]),true);assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(fs.readFileSync(csvPath,'utf8'),csv);assert.equal(fs.readFileSync(otherCsvPath,'utf8'),otherCsv);assert.deepEqual(fs.readdirSync(path.join(project,'.solopreneur')).sort(),['project.json','roadmap.csv']);
+    await client.stop(ref(newId),await client.readStatus(ref(newId)),'关闭临时新轮','lineage-temporary-close');assert.equal((await read(project,newId)).status.interactiveSessionClosed,true);
   });
-  assert.ok(child.pid);
-  const nestedPid = Number(await new Promise((resolve) => child.stdout.once('data', (chunk) => resolve(String(chunk)))));
-  assert.ok(nestedPid);
-  const childBirthMarker = getProcessBirthMarker(child.pid);
-  fs.writeFileSync(agentProcessPidFilePath, `${child.pid}\n${childBirthMarker}\n`, 'utf8');
-  const childExit = new Promise((resolve) => child.once('exit', () => resolve(true)));
-  const statusFilePath = path.join(tempRoot, '.solopreneur', 'agent-status', '52.json');
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot: tempRoot,
-    nodeId: '__solo__',
-    runKind: 'solo',
-    status: 'Waiting',
-    executionLogId: 52,
-    rootExecutionLogId: 52,
-    interactiveSession: true,
-    interactiveSessionClosed: false,
-    outputFilePath,
-    agentProcessPidFilePath,
-    startedAt: '2026-09-04T00:00:00.000Z'
-  }), 'utf8');
-  extensionModule.__setRuntimeForTest({
-    getAgentExecutions: () => [{ id: 52, nodeId: '__solo__', status: 'Running' }],
-    updateAgentExecution: () => true
-  }, tempRoot);
-  extensionModule.__setAgentTerminalForTest(52, 'solomap process cleanup test', tempRoot);
+});
 
-  let exited = false;
-  try {
-    const handled = await extensionModule.__handleAgentTerminalClosed('solomap process cleanup test');
-    exited = await Promise.race([
-      childExit,
-      new Promise((resolve) => setTimeout(() => resolve(false), 1000))
-    ]);
-
-    assert.equal(handled, true);
-    assert.equal(exited, true, 'the tracked Agent process must release its native session writer');
-    assert.throws(() => process.kill(nestedPid, 0), /ESRCH/);
-    const settledStatus = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
-    assert.equal(settledStatus.status, 'Processed');
-    assert.equal(settledStatus.interactiveSessionClosed, true);
-  } finally {
-    if (!exited) child.kill('SIGKILL');
-    try { process.kill(nestedPid, 'SIGKILL'); } catch {}
+test('continuing a conversation never reuses a same-numbered terminal from another project', async t => {
+  for(const mode of ['saved','new-turn'])await t.test(mode,async t=>{
+  const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-cross-project-terminal-')),projectA=path.join(base,'project-a'),projectB=path.join(base,'project-b');fs.mkdirSync(projectA);fs.mkdirSync(projectB);
+  const root=path.join(base,'.solomap-global'),closes=[],wrappers=[];
+  let native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:projectA},{path:projectB}]);
+  t.after(async()=>{for(const child of wrappers){if(child.exitCode===null&&child.signalCode===null){const ended=require('node:events').once(child,'exit');child.kill('SIGTERM');await ended;}}for(const close of closes.splice(0).reverse())await close();});
+  for(const project of [projectA,projectB]){const child=childProcess.spawn(process.execPath,['-e',"process.on('SIGTERM',()=>setTimeout(()=>process.exit(0),120));process.stdout.write('ready');setInterval(()=>{},1000)"],{cwd:project,stdio:'pipe'});wrappers.push(child);await require('node:events').once(child.stdout,'data');child.stdout.resume();child.stderr.resume();}
+  const live=child=>child.exitCode===null&&child.signalCode===null,operation=(operation,input)=>native.ops({operation,input}),read=(project,id)=>operation('read_run_state',{root:project,executionLogId:id});
+  const csv=['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt','2,实现 MVP,保原路线图,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'].join('\n');
+  const csvA=path.join(projectA,'.solopreneur','roadmap.csv'),csvB=path.join(projectB,'.solopreneur','roadmap.csv');fs.writeFileSync(csvA,csv);fs.writeFileSync(csvB,csv);
+  const engine=new (require('../out/db/syncEngine.js').SyncEngine)(csvB,path.join(projectB,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();t.after(()=>engine.close());const originalNodes=engine.getNodes().map(node=>({...node}));
+  const client=new (require('../out/runLifecycleClient.js').RunLifecycleClient)(operation,root),ref=(project,id)=>require('../out/runLifecycleClient.js').runStatusReference(project,id),runs=[];
+  for(let i=0;i<2;i++){
+    const project=[projectA,projectB][i],wrapper=wrappers[i];
+    const run=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'保留本项目原任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:336,userMessage:'本项目原用户任务',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',...(i?{nativeSessionId:runs[0].status.plannedNativeSessionId,continuation:true}:{}),metadata:{terminalName:i?'project B terminal':'project A terminal',agentPid:wrapper.pid,processBirth:getProcessBirthMarker(wrapper.pid)}},operation);runs.push(run);
   }
-});
-
-test('closing a terminal after switching projects keeps the persisted conversation lineage for cleanup retry', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__handleAgentTerminalClosed = handleAgentTerminalClosed;',
-      'module.exports.__setCrossProjectCloseRuntimeForTest = (engine, activeRoot, conversationId, terminalName, terminalRoot) => { syncEngine = engine; activeProjectRoot = activeRoot; agentTerminalNamesByConversationId.set(Number(conversationId), terminalName); agentTerminalProjectRootsByConversationId.set(Number(conversationId), terminalRoot); processRegisteredStatusFile = async () => {}; };'
-    ].join('\n')
-  );
-  const projectA = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-close-project-a-'));
-  const projectB = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-close-project-b-'));
-  const runDir = path.join(projectA, '.solopreneur', 'agent-runs', '__solo__', '54');
-  fs.mkdirSync(runDir, { recursive: true });
-  const agentProcessPidFilePath = path.join(runDir, 'agent.pid');
-  fs.writeFileSync(agentProcessPidFilePath, `${process.pid}\nproc:not-this-process\n`, 'utf8');
-  const statusFilePath = path.join(projectA, '.solopreneur', 'agent-status', '54.json');
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot: projectA,
-    nodeId: '__solo__',
-    runKind: 'solo_continue',
-    status: 'Waiting',
-    executionLogId: 54,
-    rootExecutionLogId: 54,
-    lineageRootExecutionLogId: 53,
-    interactiveSession: true,
-    agentProcessPidFilePath
-  }), 'utf8');
-  const projectBConversations = [
-    { id: 88, nodeId: '__solo__', status: 'Completed' },
-    { id: 54, nodeId: '__solo__', output: 'Continuation parent conversation: 88', status: 'Completed' }
-  ];
-  extensionModule.__setCrossProjectCloseRuntimeForTest(
-    {
-      getAgentExecutions: () => projectBConversations,
-      getProjectAgentExecutions: () => projectBConversations,
-      updateAgentExecution: () => true
-    },
-    projectB,
-    54,
-    'solomap project A continuation',
-    projectA
-  );
-
-  const handled = await extensionModule.__handleAgentTerminalClosed('solomap project A continuation');
-
-  assert.equal(handled, true);
-  const settledStatus = JSON.parse(fs.readFileSync(statusFilePath, 'utf8'));
-  assert.equal(settledStatus.failureCode, 'agent_process_cleanup_failed');
-  assert.equal(settledStatus.cleanupRootConversationId, 53);
-});
-
-test('continuing a root conversation immediately after its continuation terminal closes waits for the previous writer', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__handleAgentTerminalClosed = handleAgentTerminalClosed;',
-      'module.exports.__handleSharedWebviewAction = handleSharedWebviewAction;',
-      'module.exports.__setCloseThenContinueRuntimeForTest = (engine, projectRoot, conversationId, terminal, reveal, continueConversation) => { syncEngine = engine; activeProjectRoot = projectRoot; sidebarProvider = null; agentTerminalNamesByConversationId.set(Number(conversationId), terminal.name); agentTerminalProjectRootsByConversationId.set(Number(conversationId), projectRoot); vscode.window.terminals.push(terminal); revealAgentStartupTerminal = reveal; ensureActionProject = async () => projectRoot; handleContinueNativeConversation = continueConversation; postNodeConversations = () => {}; };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-close-continue-'));
-  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '__solo__', '54');
-  fs.mkdirSync(runDir, { recursive: true });
-  const outputFilePath = path.join(runDir, 'output.log');
-  const agentProcessPidFilePath = path.join(runDir, 'agent.pid');
-  fs.writeFileSync(outputFilePath, 'Waiting for another turn.\n', 'utf8');
-  const child = childProcess.spawn(process.execPath, [
-    '-e',
-    "process.on('SIGTERM', () => setTimeout(() => process.exit(0), 200)); process.stdout.write('ready'); setInterval(() => {}, 1000)"
-  ], { stdio: ['ignore', 'pipe', 'ignore'] });
-  assert.ok(child.pid);
-  await new Promise((resolve) => child.stdout.once('data', resolve));
-  const childBirthMarker = getProcessBirthMarker(child.pid);
-  fs.writeFileSync(agentProcessPidFilePath, `${child.pid}\n${childBirthMarker}\n`, 'utf8');
-  let childExited = false;
-  child.once('exit', () => { childExited = true; });
-  const statusFilePath = path.join(tempRoot, '.solopreneur', 'agent-status', '54.json');
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    workspaceRoot: tempRoot,
-    nodeId: '__solo__',
-    runKind: 'solo_continue',
-    status: 'Waiting',
-    executionLogId: 54,
-    rootExecutionLogId: 54,
-    interactiveSession: true,
-    interactiveSessionClosed: false,
-    outputFilePath,
-    agentProcessPidFilePath,
-    startedAt: '2026-09-04T00:00:00.000Z'
-  }), 'utf8');
-  const conversations = [
-    { id: 53, nodeId: '__solo__', agentCli: 'codex', output: 'Interactive session state: Waiting', status: 'Completed' },
-    { id: 54, nodeId: '__solo__', agentCli: 'codex', output: 'Agent continuation started.\n\nContinuation parent conversation: 53', status: 'Completed' }
-  ];
-  let continuedBeforeWriterExit = false;
-  extensionModule.__setCloseThenContinueRuntimeForTest(
-    {
-      getAgentExecutions: () => conversations,
-      getProjectAgentExecutions: () => conversations,
-      updateAgentExecution: () => true
-    },
-    tempRoot,
-    54,
-    { name: 'solomap close then continue test' },
-    async () => {},
-    async () => { continuedBeforeWriterExit = !childExited; }
-  );
-
-  try {
-    const closePromise = extensionModule.__handleAgentTerminalClosed('solomap close then continue test');
-    const continuePromise = extensionModule.__handleSharedWebviewAction(
-      { globalState: { get: () => ({}) } },
-      { command: 'conversation.continue', projectPath: tempRoot, nodeId: '__solo__', conversationId: 53 },
-      'sidebar',
-      { postMessage() { return Promise.resolve(true); } }
-    );
-    await Promise.all([closePromise, continuePromise]);
-
-    assert.equal(childExited, true);
-    assert.equal(continuedBeforeWriterExit, false, 'resume must not start while the previous writer is alive');
-  } finally {
-    if (!childExited) child.kill('SIGKILL');
+  assert.notEqual(runs[0].taskId,runs[1].taskId);assert.notEqual(runs[0].conversationId,runs[1].conversationId);assert.equal(runs[0].status.plannedNativeSessionId,runs[1].status.plannedNativeSessionId);
+  await operation('prepare_run',{root:projectB,executionLogId:13,nodeId:'__solo__',runKind:'solo',prompt:'其他本项目任务',command:'not executed',userMessage:'其他任务',metadata:{interactiveSession:true},idempotencyKey:'cross-project-peer'});
+  const sent=[],created=[],posted=[],preparedRuns=[],errors=[];let aShown=0,aDisposed=0,bShown=0,bDisposed=0;
+  const terminalA={name:'project A terminal',show(){aShown++;},sendText(){assert.fail('must not write to another project terminal');},dispose(){aDisposed++;}},terminalB={name:'project B terminal',show(){bShown++;},sendText(){assert.fail('must use the new resume window');},dispose(){bDisposed++;assert.equal(live(wrappers[1]),false);assert.equal(live(wrappers[0]),true);}};
+  const extension=loadCompiledModule('out/extension.js',`
+    module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;module.exports.find=findReusableAgentTerminal;
+    module.exports.select=(engine,project)=>{syncEngine=engine;activeProjectRoot=project;};
+    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.owned=id=>({name:agentTerminalNamesByConversationId.get(id),root:agentTerminalProjectRootsByConversationId.get(id)});
+    module.exports.connect=(engine,projectA,projectB,root,terminalA,terminalB,create,prepare,error)=>{syncEngine=engine;activeProjectRoot=projectB;sidebarProvider=null;extensionContextRef=null;
+      getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
+      agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';getOpenCodeTerminalEnvironment=async()=>({});prepareOrdinaryConversation=prepare;vscode.window.showErrorMessage=error;
+      ensureActionProject=async(_context,requested)=>{if(requested!==projectB)throw new Error('wrong selected project');return projectB;};sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
+      agentTerminalNamesByConversationId.set(336,terminalA.name);agentTerminalProjectRootsByConversationId.set(336,projectA);vscode.window.terminals.push(terminalA,terminalB);
+      vscode.window.createTerminal=options=>{const terminal=create(options);vscode.window.terminals.push(terminal);return terminal;};};
+  `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
+  extension.connect(engine,projectA,projectB,root,terminalA,terminalB,options=>{const terminal={name:options.name,show(){terminal.shown=(terminal.shown||0)+1;},sendText(text){if(text.includes('SOLOMAP_TERMINAL_DELIVERY_ID=')){assert.equal(live(wrappers[0]),true);assert.equal(live(wrappers[1]),false);}sent.push({terminal,text});},dispose(){terminal.disposed=true;}};created.push({options,terminal});return terminal;},async(_context,input)=>{assert.equal(input.workspaceRoot,projectB);assert.equal(live(wrappers[0]),true);assert.equal(live(wrappers[1]),false);const prepared=await require('../out/agentRunPreparation.js').prepareAgentRun({...input,launchIntentId:'cross-project-resume-button'},operation);preparedRuns.push(prepared);return prepared;},message=>errors.push(message));
+  const outputs=new Map();
+  for(const [i,project] of [projectA,projectB].entries()){
+    const run=runs[i],output=`项目${i}第336轮完整原文🌿\n`.repeat(10000);outputs.set(project,output);
+    await operation('write_run_document',{projectId:run.projectId,executionLogId:336,generation:run.generation,turnId:run.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId,'before'),bytes:Buffer.from(JSON.stringify(await require('../out/runWorkspace.js').snapshotWorkspace(project))).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:`cross-project-before:${i}`});
+    await operation('append_run_log',{projectId:run.projectId,executionLogId:336,generation:run.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:`cross-project-output:${i}`});
+    const head=await operation('read_run_checkpoint_state',{root:project,executionLogId:336});await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'complete','--outcome','partial','--summary',`项目${i}保存的结果`],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:'336',SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId}});
+    // Finish the foreign source using its own real engine; it remains an open Waiting session.
+    if(i===0){const foreignEngine=new (require('../out/db/syncEngine.js').SyncEngine)(csvA,path.join(projectA,'.solopreneur','project_journal.db'),projectRoot,root);await foreignEngine.initAndSync();try{extension.select(foreignEngine,projectA);await extension.settle(ref(project,336),undefined,root);await extension.drain();}finally{extension.select(engine,projectB);foreignEngine.close();}}
+    else{await extension.settle(ref(project,336),undefined,root);await extension.drain();}
   }
+  const savedBStatus=await client.readStatus(ref(projectB,336)),savedBJournal=await client.readJournal(ref(projectB,336),savedBStatus),savedBSettlements=await client.readSettlements(ref(projectB,336),savedBStatus);
+  if(mode==='new-turn'){
+    const head=await operation('read_run_checkpoint_state',{root:projectB,executionLogId:336});await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'start','--message','继续处理本项目新一轮'],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:'336',SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:runs[1].status.plannedNativeSessionId}});await engine.initAndSync();
+  }
+  const beforeA={state:await read(projectA,336),journal:await client.readJournal(ref(projectA,336)),binding:await client.readBinding(ref(projectA,336)),settlements:await client.readSettlements(ref(projectA,336),await client.readStatus(ref(projectA,336)))},beforeB={state:await read(projectB,336),journal:await client.readJournal(ref(projectB,336)),binding:await client.readBinding(ref(projectB,336)),settlements:await client.readSettlements(ref(projectB,336),await client.readStatus(ref(projectB,336)))},peer=await read(projectB,13);
+  assert.equal(beforeA.state.status.status,'Waiting');assert.equal(beforeB.state.status.status,mode==='saved'?'Waiting':'Running');assert.equal(beforeA.settlements.length,1);assert.equal(beforeB.settlements.length,mode==='saved'?1:0);
+  assert.deepEqual({...extension.owned(336)},{name:terminalA.name,root:projectA});assert.equal(await extension.find(projectA,336),terminalA);assert.equal(await extension.find(projectB,336),terminalB);
+  for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:projectA},{path:projectB}]);await engine.initAndSync();assert.deepEqual(await read(projectA,336),beforeA.state);assert.deepEqual(await read(projectB,336),beforeB.state);
+  const click=()=>extension.action({}, {command:'conversation.continue',projectPath:projectB,nodeId:'__solo__',conversationId:336},'sidebar',{postMessage(message){posted.push(message);return Promise.resolve(true);}});
+  assert.deepEqual(await Promise.all([click(),click()]),[true,true]);assert.deepEqual(errors,[]);assert.equal(preparedRuns.length,1);assert.equal(created.length,1);assert.equal(aShown,0);assert.equal(aDisposed,0);assert.equal(bShown,0);assert.equal(bDisposed,1);assert.notEqual(created[0].terminal,terminalA);assert.notEqual(created[0].terminal,terminalB);assert.equal(created[0].options.cwd,projectB);assert.equal(created[0].terminal.disposed,undefined);assert.ok(created[0].terminal.shown>=1);
+  const prepared=preparedRuns[0],newId=Number(prepared.status.rootExecutionLogId),delivered=await read(projectB,newId);assert.equal(delivered.taskId,runs[1].taskId);assert.equal(delivered.conversationId,runs[1].conversationId);assert.notEqual(delivered.taskId,runs[0].taskId);assert.equal(delivered.status.sourceParentRunId,runs[1].runId);assert.equal(delivered.status.sourceParentTurnId,beforeB.state.turnId);assert.equal(delivered.status.plannedNativeSessionId,runs[1].status.plannedNativeSessionId);assert.ok(delivered.status.terminalDeliveryId);assert.ok(delivered.status.terminalCommandSubmittedAt);
+  assert.equal(sent.filter(x=>x.text.includes('SOLOMAP_TERMINAL_DELIVERY_ID=')).length,1);assert.ok(sent.some(x=>x.text.endsWith(prepared.finalCommand)));assert.equal(posted.filter(x=>x.command==='conversationActionSettled'&&x.projectPath===projectB&&Number(x.conversationId)===336).length,2);
+  await extension.settle(ref(projectB,336),undefined,root);await extension.drain();if(mode==='new-turn'){await extension.settle(ref(projectB,336),undefined,root);await extension.drain();}const closedB={state:await read(projectB,336),journal:await client.readJournal(ref(projectB,336)),binding:await client.readBinding(ref(projectB,336)),settlements:await client.readSettlements(ref(projectB,336),await client.readStatus(ref(projectB,336)))};
+  assert.equal(closedB.state.status.interactiveSessionClosed,true);assert.equal(closedB.state.status.checkpointSummary,mode==='saved'?'项目1保存的结果':'正在原会话中继续处理。');assert.equal(closedB.settlements.length,2);if(beforeB.settlements.length)assert.deepEqual(closedB.settlements[0],beforeB.settlements[0]);else{assert.equal(closedB.settlements[0].digest.status,'Completed');assert.deepEqual(closedB.settlements[0].digest.failures,[]);}assert.deepEqual(closedB.settlements[1].digest,closedB.settlements[0].digest);assert.deepEqual(closedB.binding,beforeB.binding);if(mode==='new-turn'){const expectedSavedJournal=structuredClone(savedBJournal);assert.match(expectedSavedJournal.entry.output,/Interactive session state: Waiting/);expectedSavedJournal.entry.output=expectedSavedJournal.entry.output.replace(/Interactive session state:\s*(?:Open|Waiting|Running)/gi,'Interactive session state: Closed');assert.deepEqual(await client.readJournal(ref(projectB,336),savedBStatus),expectedSavedJournal);assert.deepEqual(await client.readSettlements(ref(projectB,336),savedBStatus),savedBSettlements);}
+  assert.deepEqual({...extension.owned(336)},{name:terminalA.name,root:projectA},'closing project B must preserve project A terminal ownership even when both conversation numbers match');
+  assert.deepEqual(await read(projectA,336),beforeA.state);assert.deepEqual(await client.readJournal(ref(projectA,336)),beforeA.journal);assert.deepEqual(await client.readBinding(ref(projectA,336)),beforeA.binding);assert.deepEqual(await client.readSettlements(ref(projectA,336),await client.readStatus(ref(projectA,336))),beforeA.settlements);assert.equal((await client.readLog(ref(projectA,336),'stdout')).toString(),outputs.get(projectA));assert.equal((await client.readLog(ref(projectB,336),'stdout')).toString(),outputs.get(projectB));assert.deepEqual(await read(projectB,13),peer);assert.equal(live(wrappers[0]),true);assert.equal(live(wrappers[1]),false);
+  for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:projectA},{path:projectB}]);await engine.initAndSync();assert.deepEqual(await read(projectA,336),beforeA.state);assert.deepEqual(await read(projectB,336),closedB.state);assert.deepEqual(await read(projectB,newId),delivered);assert.deepEqual(await client.readJournal(ref(projectB,336)),closedB.journal);assert.deepEqual(await client.readBinding(ref(projectB,336)),closedB.binding);assert.deepEqual(await client.readSettlements(ref(projectB,336),await client.readStatus(ref(projectB,336))),closedB.settlements);
+  const wal=fs.readFileSync(path.join(root,'solomap.db-wal'));await Promise.all([extension.settle(ref(projectB,336),undefined,root),extension.settle(ref(projectB,336),undefined,root)]);await extension.drain();assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),wal);assert.deepEqual({...extension.owned(336)},{name:terminalA.name,root:projectA});assert.deepEqual(await read(projectA,336),beforeA.state);assert.deepEqual(await read(projectB,13),peer);assert.equal(live(wrappers[0]),true);assert.equal(fs.readFileSync(csvA,'utf8'),csv);assert.equal(fs.readFileSync(csvB,'utf8'),csv);assert.deepEqual(engine.getNodes(),originalNodes);assert.deepEqual(fs.readdirSync(path.join(projectA,'.solopreneur')).sort(),['project.json','roadmap.csv']);assert.deepEqual(fs.readdirSync(path.join(projectB,'.solopreneur')).sort(),['project.json','roadmap.csv']);
+  await client.stop(ref(projectB,newId),await client.readStatus(ref(projectB,newId)),'关闭临时新轮','cross-project-temporary-close');assert.equal((await read(projectB,newId)).status.interactiveSessionClosed,true);
+  });
 });
 
-test('a delayed terminal close preserves a checkpoint arriving during process cleanup', async () => {
-  const extensionModule = loadCompiledModule('out/extension.js', [
-    'module.exports.__closed = handleAgentTerminalClosed;',
-    'module.exports.__setup = (root, statusFile) => { activeProjectRoot = root; agentTerminalNamesByConversationId.set(53, "old window"); agentTerminalProjectRootsByConversationId.set(53, root); beginAgentProcessCleanup = async () => { const current = JSON.parse(fs.readFileSync(statusFile, "utf8")); fs.writeFileSync(statusFile, JSON.stringify({ ...current, status: "In Progress", checkpointEventId: "1:complete", checkpointOutcome: "partial", checkpointSummary: "completed while closing" })); }; };'
-  ].join('\n'));
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-close-result-'));
-  const statusFile = path.join(root, '.solopreneur', 'agent-status', '53.json');
-  fs.mkdirSync(path.dirname(statusFile), { recursive: true });
-  fs.writeFileSync(statusFile, JSON.stringify({ workspaceRoot: root, nodeId: '__solo__', executionLogId: 53,
-    rootExecutionLogId: 53, interactiveSession: true, sessionRestartRequested: true, status: 'Running' }));
-  extensionModule.__setup(root, statusFile);
-  await extensionModule.__closed('old window');
-  const result = JSON.parse(fs.readFileSync(statusFile));
-  assert.equal(result.status, 'In Progress');
-  assert.equal(result.checkpointEventId, '1:complete');
-  assert.equal(result.checkpointSummary, 'completed while closing');
+test('window reload keeps a running Agent conversation recoverable', async t => {
+  const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-window-reload-')),project=path.join(base,'project'),other=path.join(base,'other');fs.mkdirSync(project);fs.mkdirSync(other);
+  const root=path.join(base,'.solomap-global'),closes=[],wrappers=[];
+  let native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
+  t.after(async()=>{for(const child of wrappers){if(child.exitCode===null&&child.signalCode===null){const ended=require('node:events').once(child,'exit');child.kill('SIGTERM');await ended;}}for(const close of closes.splice(0).reverse())await close();});
+  for(const cwd of [project,project,other]){const child=childProcess.spawn(process.execPath,['-e',"process.stdout.write('ready');setInterval(()=>{},1000)"],{cwd,stdio:'pipe'});wrappers.push(child);await require('node:events').once(child.stdout,'data');child.stdout.resume();child.stderr.resume();}
+  const operation=(operation,input)=>native.ops({operation,input}),read=(workspace,id)=>operation('read_run_state',{root:workspace,executionLogId:id});
+  const csv=['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt','2,实现 MVP,保原用户路线图,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'].join('\n');
+  const csvPath=path.join(project,'.solopreneur','roadmap.csv'),otherCsv=path.join(other,'.solopreneur','roadmap.csv');fs.writeFileSync(csvPath,csv);fs.writeFileSync(otherCsv,csv);
+  let engine=new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();t.after(()=>engine.close());const originalNodes=engine.getNodes().map(node=>({...node}));
+  const run=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'窗口重载后继续原任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:51,userMessage:'保留这段正在进行的对话',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off'},operation);
+  for(const [i,workspace,id] of [[1,project,13],[2,other,51]])await operation('prepare_run',{root:workspace,executionLogId:id,nodeId:'2',runKind:'step',prompt:'其他会话',command:'owned Node fixture',userMessage:'保其他会话',metadata:{interactiveSession:true,agentPid:wrappers[i].pid,processBirth:getProcessBirthMarker(wrappers[i].pid)},idempotencyKey:`reload-peer:${i}`});
+  const client=new (require('../out/runLifecycleClient.js').RunLifecycleClient)(operation,root),reference=require('../out/runLifecycleClient.js').runStatusReference(project,51),commands=[],created=[];
+  const compiled=fs.readFileSync(path.join(projectRoot,'out/extension.js'),'utf8'),registrationStart=compiled.indexOf("    if (typeof vscode.window.onDidCloseTerminal === 'function') {"),registrationEnd=compiled.indexOf('\n    // Register settings saved broadcast',registrationStart);
+  assert.ok(registrationStart>=0&&registrationEnd>registrationStart,'capture the actual final terminal-close registration block');const registration=compiled.slice(registrationStart,registrationEnd);
+  const loadWindow=()=>loadCompiledModule('out/extension.js',`
+    const closedBeforeObserver=handleAgentTerminalClosed,closedPromises=[];let closeCallback;
+    handleAgentTerminalClosed=(...args)=>{const promise=closedBeforeObserver(...args);closedPromises.push(promise);return promise;};
+    module.exports.subscribe=context=>{${registration}};
+    module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};
+    module.exports.closed=handleAgentTerminalClosed;module.exports.launch=launchAgentConversationTerminal;module.exports.find=findReusableAgentTerminal;module.exports.snapshot=getProjectConversationSnapshotForProject;module.exports.settle=processAgentStatusFile;
+    module.exports.owned=()=>({names:agentTerminalNamesByConversationId.size,roots:agentTerminalProjectRootsByConversationId.size,targets:agentTerminalRunTargets.size});
+    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.connect=(engine,project,root,terminals,factory)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef=null;sidebarProvider=null;getProjects=()=>[{path:project}];
+      getPersistedSettings=()=>({globalDataPath:root,automationTasks:{},collaborationReviewMode:'off'});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
+      vscode.window.terminals.push(...terminals);vscode.window.createTerminal=factory;vscode.window.onDidCloseTerminal=callback=>{closeCallback=callback;return {dispose(){}};};};
+  `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
+  const window1=loadWindow();window1.connect(engine,project,root,[],options=>{const terminal={name:options.name,processId:Promise.resolve(wrappers[0].pid),exitStatus:{reason:1},show(){},sendText(text){commands.push(text);},dispose(){assert.fail('window reload must not dispose the running terminal');}};created.push(terminal);return terminal;});const subscriptions=[];window1.subscribe({subscriptions});assert.equal(subscriptions.length,1);
+  const terminal=await window1.launch({workspaceRoot:project,label:'solo',conversationId:51,nodeId:'__solo__',statusFilePath:reference,runKind:'solo',globalDataPath:root,command:run.finalCommand,agentCli:'claude'});assert.equal(created.length,1);assert.equal(commands.length,1);assert.ok(commands[0].endsWith(run.finalCommand));
+  let head=await read(project,51);await operation('claim_run',{projectId:run.projectId,executionLogId:51,expectedRevision:head.revision,agentPid:wrappers[0].pid,processBirth:getProcessBirthMarker(wrappers[0].pid),terminalDeliveryId:head.status.terminalDeliveryId,idempotencyKey:'reload-live-claim'});head=await read(project,51);assert.equal(head.status.status,'Running');
+  await operation('write_run_document',{projectId:run.projectId,executionLogId:51,generation:head.generation,turnId:head.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(head.turnId,'before'),bytes:Buffer.from(JSON.stringify(await require('../out/runWorkspace.js').snapshotWorkspace(project))).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:'reload-workspace-before'});
+  const firstOutput='窗口重载前完整输出🌿\n'.repeat(10000);await operation('append_run_log',{projectId:run.projectId,executionLogId:51,generation:head.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(firstOutput).toString('base64'),idempotencyKey:'reload-first-output'});
+  const before={state:await read(project,51),journal:await client.readJournal(reference),binding:await client.readBinding(reference),settlements:await client.readSettlements(reference,await client.readStatus(reference))},peer=await read(project,13),foreign=await read(other,51),ownedBefore={...window1.owned()};assert.deepEqual(ownedBefore,{names:1,roots:1,targets:1});
+  const wal=fs.readFileSync(path.join(root,'solomap.db-wal'));assert.deepEqual(Array.from(await window1.emit(terminal)),[false]);assert.deepEqual({...window1.owned()},ownedBefore);assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),wal);assert.deepEqual(await read(project,51),before.state);assert.deepEqual(await client.readJournal(reference),before.journal);assert.deepEqual(await client.readBinding(reference),before.binding);assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,51),foreign);assert.ok(wrappers.every(child=>child.exitCode===null&&child.signalCode===null));
+  engine.close();for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await operation('recover_run_executions',{});engine=new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();assert.deepEqual(await read(project,51),before.state);assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,51),foreign);
+  const window2=loadWindow();window2.connect(engine,project,root,[terminal],()=>assert.fail('restored Running conversation must use its recorded terminal'));window2.subscribe({subscriptions:[]});assert.deepEqual({...window2.owned()},{names:0,roots:0,targets:0});assert.deepEqual(Array.from(await window2.emit(terminal)),[false]);assert.equal(await window2.find(project,51),terminal);assert.equal(await window2.find(project,51,root),terminal);assert.equal(await window2.find(other,51,root),undefined);
+  const snapshot=await window2.snapshot({},project);assert.equal(snapshot.solo.length,1);assert.equal(snapshot.solo[0].id,51);assert.equal(snapshot.solo[0].status,'Running');assert.ok(snapshot.solo[0].output.includes('保留这段正在进行的对话'));assert.equal((await client.readLog(reference,'stdout')).toString(),firstOutput);assert.equal(commands.length,1);
+  const checkpoint=async(action,args)=>{const current=await operation('read_run_checkpoint_state',{root:project,executionLogId:51});await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),action,...args],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:current.projectId,SOLOMAP_EXECUTION_LOG_ID:'51',SOLOMAP_RUN_GENERATION:String(current.generation),SOLOMAP_RUN_PROOF:current.proof,SOLOMAP_TASK_TURN_ID:current.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId}});};
+  await checkpoint('complete',['--outcome','partial','--summary','重载后保存的完整结果']);await window2.settle(reference,undefined,root);await window2.drain();const firstStatus=await client.readStatus(reference),firstJournal=await client.readJournal(reference,firstStatus),firstSettlements=await client.readSettlements(reference,firstStatus);assert.equal(firstStatus.status,'Waiting');assert.equal(firstStatus.checkpointSummary,'重载后保存的完整结果');assert.equal(firstSettlements.length,1);assert.equal((await client.readLog(reference,'stdout',firstStatus)).toString(),firstOutput);assert.equal((await client.getResumableSession(reference)).sessionId,run.status.plannedNativeSessionId);
+  await checkpoint('start',['--message','窗口重载后继续原任务，保留补充🌿']);const next=await read(project,51);assert.equal(next.taskId,run.taskId);assert.equal(next.runId,run.runId);assert.equal(next.conversationId,run.conversationId);assert.notEqual(next.turnId,before.state.turnId);assert.equal(next.status.status,'Running');assert.equal(next.status.userMessage,'窗口重载后继续原任务，保留补充🌿');assert.equal(next.status.interactiveSessionClosed,undefined);assert.equal(await window2.find(project,51,root),terminal);
+  const secondOutput='窗口重载后新轮完整输出🌿\n'.repeat(10000);await operation('append_run_log',{projectId:run.projectId,executionLogId:51,generation:next.generation,stream:'stdout',sequence:1,offset:Buffer.byteLength(firstOutput),bytes:Buffer.from(secondOutput).toString('base64'),idempotencyKey:'reload-second-output'});await checkpoint('complete',['--outcome','partial','--summary','继续原任务后的结果']);await window2.settle(reference,undefined,root);await window2.drain();const finalStatus=await client.readStatus(reference),finalState=await read(project,51),finalJournal=await client.readJournal(reference),finalBinding=await client.readBinding(reference),finalSettlements=await client.readSettlements(reference,finalStatus);assert.equal(finalStatus.status,'Waiting');assert.equal(finalStatus.checkpointSummary,'继续原任务后的结果');assert.equal((await client.readLog(reference,'stdout',finalStatus)).toString(),secondOutput);assert.deepEqual(await client.readJournal(reference,firstStatus),firstJournal);assert.deepEqual(await client.readSettlements(reference,firstStatus),firstSettlements);assert.equal(finalSettlements.length,1);assert.equal(commands.length,1);assert.ok(wrappers.every(child=>child.exitCode===null&&child.signalCode===null));
+  for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await read(project,51),finalState);assert.deepEqual(await client.readJournal(reference),finalJournal);assert.deepEqual(await client.readBinding(reference),finalBinding);assert.deepEqual(await client.readSettlements(reference,await client.readStatus(reference)),finalSettlements);assert.deepEqual(await client.readJournal(reference,firstStatus),firstJournal);assert.equal((await client.readLog(reference,'stdout',firstStatus)).toString(),firstOutput);assert.equal((await client.readLog(reference,'stdout',await client.readStatus(reference))).toString(),secondOutput);
+  const walAfter=fs.readFileSync(path.join(root,'solomap.db-wal'));await Promise.all([window2.settle(reference,undefined,root),window2.settle(reference,undefined,root)]);await window2.drain();assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),walAfter);assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,51),foreign);assert.equal(fs.readFileSync(csvPath,'utf8'),csv);assert.equal(fs.readFileSync(otherCsv,'utf8'),csv);assert.deepEqual(engine.getNodes(),originalNodes);for(const workspace of [project,other])assert.deepEqual(fs.readdirSync(path.join(workspace,'.solopreneur')).sort(),['project.json','roadmap.csv']);
+  await client.stop(reference,await client.readStatus(reference),'关闭本轮临时测试会话','window-reload-temporary-stop');assert.equal((await read(project,51)).status.interactiveSessionClosed,true);
+});
+
+test('closing an interactive terminal terminates its tracked Agent process before settling the session', async t => {
+  for (const mode of ['waiting', 'running']) await t.test(mode, async t => {
+    const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-close-process-')),project=path.join(base,'project'),other=path.join(base,'other');fs.mkdirSync(project);fs.mkdirSync(other);
+    const root=path.join(base,'.solomap-global'),closes=[],processes=[];
+    let native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
+    const {once}=require('node:events'),live=child=>child.exitCode===null&&child.signalCode===null;
+    t.after(async()=>{for(const child of processes)if(live(child)){const ended=once(child,'exit');child.kill('SIGTERM');await ended;}for(const close of closes.splice(0).reverse())await close();});
+    const operation=(operation,input)=>native.ops({operation,input}),read=(workspace,id)=>operation('read_run_state',{root:workspace,executionLogId:id});
+    const csv=['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt','2,实现 MVP,保原任务,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'].join('\n');
+    const csvPath=path.join(project,'.solopreneur','roadmap.csv'),otherCsv=path.join(other,'.solopreneur','roadmap.csv');fs.writeFileSync(csvPath,csv);fs.writeFileSync(otherCsv,csv);
+    let engine=new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();t.after(()=>engine.close());const originalNodes=engine.getNodes().map(node=>({...node}));
+    const output='关闭终端前完整结果🌿\n'.repeat(10000),quote=require('../out/agentCli.js').shellQuote;
+    const program=`const {spawn}=require('node:child_process');const nested=spawn(process.execPath,['-e',"process.stdout.write('ready');setInterval(()=>{},1000)"],{stdio:['ignore','pipe','ignore']});let closing=false;const close=()=>{if(closing)return;closing=true;nested.once('exit',()=>setTimeout(()=>process.exit(0),120));nested.kill('SIGTERM');};process.on('SIGTERM',close);process.on('SIGHUP',close);nested.stdout.once('data',()=>{process.stdout.write('nested='+nested.pid+'\\n');process.stdout.write('关闭终端前完整结果🌿\\n'.repeat(10000));});setInterval(()=>{},1000);`;
+    const run=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'保留原用户任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:52,userMessage:'关闭当前对话终端',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',directExecutionCommand:`exec ${quote(process.execPath)} -e ${quote(program)}`},operation);
+    const client=new (require('../out/runLifecycleClient.js').RunLifecycleClient)(operation,root),reference=require('../out/runLifecycleClient.js').runStatusReference(project,52),sent=[],created=[],consumerEntries=[];
+    let runner,nestedPid,trackedChildPid;
+    const assertWritersStopped=()=>{assert.equal(live(runner),false,'the tracked shared runner must exit before plugin settlement');assert.throws(()=>process.kill(nestedPid,0),/ESRCH/,'nested writer must be reaped before plugin settlement');try{const stat=fs.readFileSync(`/proc/${trackedChildPid}/stat`,'utf8');assert.equal(stat.slice(stat.lastIndexOf(') ')+2).split(' ')[0],'Z','tracked child cannot still be running');}catch(error){if(error.code!=='ENOENT')throw error;}};
+    const compiled=fs.readFileSync(path.join(projectRoot,'out/extension.js'),'utf8'),start=compiled.indexOf("    if (typeof vscode.window.onDidCloseTerminal === 'function') {"),end=compiled.indexOf('\n    // Register settings saved broadcast',start);assert.ok(start>=0&&end>start);const registration=compiled.slice(start,end);
+    const extension=loadCompiledModule('out/extension.js',`
+      const originalClosed=handleAgentTerminalClosed,closedPromises=[];let closeCallback;
+      handleAgentTerminalClosed=(...args)=>{const promise=originalClosed(...args);closedPromises.push(promise);return promise;};
+      module.exports.subscribe=context=>{${registration}};
+      module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};
+      module.exports.launch=launchAgentConversationTerminal;module.exports.settle=processAgentStatusFile;
+      module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+      module.exports.owned=()=>({names:agentTerminalNamesByConversationId.size,roots:agentTerminalProjectRootsByConversationId.size,targets:agentTerminalRunTargets.size});
+      module.exports.connect=(engine,project,root,create,observe)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef=null;sidebarProvider=null;
+        getPersistedSettings=()=>({globalDataPath:root,automationTasks:{},collaborationReviewMode:'off'});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
+        vscode.window.createTerminal=create;vscode.window.onDidCloseTerminal=callback=>{closeCallback=callback;return {dispose(){}};};
+        const originalConsumer=processRegisteredStatusFile;processRegisteredStatusFile=async(...args)=>{await observe(args);return originalConsumer(...args);};};
+    `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
+    extension.connect(engine,project,root,options=>{const terminal={name:options.name,exitStatus:{reason:3},show(){},sendText(text){sent.push(text);},dispose(){assert.fail('OS close callback should not dispose another terminal');}};created.push(terminal);return terminal;},async args=>{assertWritersStopped();assert.equal(args[1],reference);assert.equal(args[4],root);consumerEntries.push({state:await read(project,52),args});});extension.subscribe({subscriptions:[]});
+    const terminal=await extension.launch({workspaceRoot:project,label:'solo',conversationId:52,nodeId:'__solo__',statusFilePath:reference,runKind:'solo',globalDataPath:root,command:run.finalCommand,agentCli:'claude'});assert.equal(created.length,1);assert.equal(sent.length,1);assert.ok(sent[0].endsWith(run.finalCommand));
+    let head=await read(project,52);runner=childProcess.spawn(process.execPath,[path.join(projectRoot,'out/runAgentProcess.js'),'--global-data-path',root,'--project-path',project,'--execution-log-id','52'],{cwd:project,stdio:'pipe',env:{...process.env,SOLOMAP_TERMINAL_DELIVERY_ID:head.status.terminalDeliveryId}});processes.push(runner);const ended=once(runner,'exit'),stdout=[],stderr=[];runner.stdout.on('data',bytes=>stdout.push(bytes));runner.stderr.on('data',bytes=>stderr.push(bytes));
+    const deadline=Date.now()+10000;while(!/nested=\d+\n/.test(Buffer.concat(stdout).toString().replace(/\r\n/g,'\n'))||Buffer.concat(stdout).toString().replace(/\r\n/g,'\n').split('\n').length<10002){assert.equal(live(runner),true,Buffer.concat(stderr).toString());assert.ok(Date.now()<deadline,'shared runner must capture the full real child output');await new Promise(resolve=>setTimeout(resolve,20));}
+    const rendered=Buffer.concat(stdout).toString().replace(/\r\n/g,'\n');nestedPid=Number(rendered.match(/^nested=(\d+)\n/)[1]);assert.equal(rendered,`nested=${nestedPid}\n`+output);head=await read(project,52);trackedChildPid=Number(head.status.agentChildPid);assert.equal(head.status.agentPid,runner.pid);assert.ok(trackedChildPid);assert.doesNotThrow(()=>process.kill(nestedPid,0));
+    const fullOutput=(await client.readLog(reference,'stdout')).toString();assert.equal(fullOutput.replace(/\r\n/g,'\n'),rendered);assert.equal(head.taskId,run.taskId);assert.equal(head.turnId,run.turnId);
+    for(const [workspace,id] of [[project,13],[other,52]]){const child=childProcess.spawn(process.execPath,['-e',"process.stdout.write('ready');setInterval(()=>{},1000)"],{cwd:workspace,stdio:'pipe'});processes.push(child);await once(child.stdout,'data');child.stdout.resume();child.stderr.resume();await operation('prepare_run',{root:workspace,executionLogId:id,nodeId:'2',runKind:'step',prompt:'其他任务',command:'owned Node fixture',userMessage:'保其他任务',metadata:{interactiveSession:true,agentPid:child.pid,processBirth:getProcessBirthMarker(child.pid)},idempotencyKey:`terminal-close-peer:${workspace}`});}
+    const peer=await read(project,13),foreign=await read(other,52),initialBinding=await client.readBinding(reference);
+    let saved;
+    if(mode==='waiting'){
+      const current=await operation('read_run_checkpoint_state',{root:project,executionLogId:52});await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'complete','--outcome','partial','--summary','已经保存的原结果'],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:current.projectId,SOLOMAP_EXECUTION_LOG_ID:'52',SOLOMAP_RUN_GENERATION:String(current.generation),SOLOMAP_RUN_PROOF:current.proof,SOLOMAP_TASK_TURN_ID:current.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId}});
+      await extension.settle(reference,undefined,root);await extension.drain();const status=await client.readStatus(reference);assert.equal(status.status,'Waiting');saved={status,journal:await client.readJournal(reference,status),settlements:await client.readSettlements(reference,status),binding:await client.readBinding(reference)};assert.equal(saved.settlements.length,1);assert.equal(live(runner),true);
+    }else{assert.equal((await read(project,52)).status.status,'Running');assert.equal((await client.readSettlements(reference,await client.readStatus(reference))).length,0);}
+    assert.deepEqual({...extension.owned()},{names:1,roots:1,targets:1});
+    assert.deepEqual(Array.from(await extension.emit(terminal)),[true]);await ended;await extension.drain();assertWritersStopped();assert.equal(consumerEntries.length,mode==='waiting'?1:2,'closing must settle all queued completion and close events before returning');assert.equal(consumerEntries[0].state.status.interactiveSessionClosed,true);
+    const finalStatus=await client.readStatus(reference),finalState=await read(project,52),journal=await client.readJournal(reference),binding=await client.readBinding(reference),settlements=await client.readSettlements(reference,finalStatus);
+    assert.equal(finalStatus.status,'Processed');assert.equal(finalStatus.interactiveSessionClosed,true);assert.equal(finalState.taskId,run.taskId);assert.equal(finalState.runId,run.runId);assert.equal(finalState.turnId,run.turnId);assert.equal(finalStatus.stopReason,'用户已关闭当前对话终端。');assert.deepEqual({...extension.owned()},{names:0,roots:0,targets:0});assert.match(journal.entry.output,/Interactive session state: Closed/);assert.equal((await client.readLog(reference,'stdout')).toString(),fullOutput);assert.equal((await client.readLog(reference,'stdout',finalStatus)).toString(),fullOutput);
+    if(saved){assert.equal(finalStatus.checkpointOutcome,'partial');assert.equal(finalStatus.checkpointSummary,'已经保存的原结果');assert.equal(settlements.length,2);assert.deepEqual(settlements[0],saved.settlements[0]);assert.deepEqual(settlements[1].digest,saved.settlements[0].digest);assert.deepEqual(binding,saved.binding);assert.equal((await client.readLog(reference,'stdout',saved.status)).toString(),fullOutput);}else{assert.equal(finalStatus.checkpointOutcome,'failed');assert.equal(settlements.length,2,'completion is consumed before the close event');assert.match(consumerEntries[0].args[3].checkpointEventId,/:complete$/);assert.match(consumerEntries[1].args[3].checkpointEventId,/:session-close$/);assert.equal(settlements[0].digest.status,'Failed');assert.deepEqual(binding.revisions.slice(0,initialBinding.headRevision),initialBinding.revisions);}
+    assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,52),foreign);assert.ok(processes.slice(1).every(live));assert.equal(sent.length,1);assert.equal(created.length,1);assert.equal(fs.readFileSync(csvPath,'utf8'),csv);assert.equal(fs.readFileSync(otherCsv,'utf8'),csv);assert.deepEqual(engine.getNodes(),originalNodes);for(const workspace of [project,other])assert.deepEqual(fs.readdirSync(path.join(workspace,'.solopreneur')).sort(),['project.json','roadmap.csv']);
+    engine.close();for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);engine=new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();assert.deepEqual(await read(project,52),finalState);assert.deepEqual(await client.readJournal(reference),journal);assert.deepEqual(await client.readBinding(reference),binding);assert.deepEqual(await client.readSettlements(reference,await client.readStatus(reference)),settlements);assert.equal((await client.readLog(reference,'stdout',await client.readStatus(reference))).toString(),fullOutput);
+    const wal=fs.readFileSync(path.join(root,'solomap.db-wal'));assert.deepEqual(Array.from(await extension.emit(terminal)),[false]);await Promise.all([extension.settle(reference,undefined,root),extension.settle(reference,undefined,root)]);await extension.drain();const afterWal=fs.readFileSync(path.join(root,'solomap.db-wal'));const walHash=bytes=>require('node:crypto').createHash('sha256').update(bytes).digest('hex');assert.equal(walHash(afterWal),walHash(wal),'duplicate callback and consumer must not append durable changes');assert.equal(consumerEntries.length,mode==='waiting'?1:2);assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,52),foreign);assert.ok(processes.slice(1).every(live));assert.equal(fs.readFileSync(csvPath,'utf8'),csv);assert.equal(fs.readFileSync(otherCsv,'utf8'),csv);assert.deepEqual(engine.getNodes(),originalNodes);
+  });
+});
+
+test('closing a terminal after switching projects keeps the persisted conversation lineage for cleanup retry', async t => {
+  const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-switched-cleanup-')),projectA=path.join(base,'project-a'),projectB=path.join(base,'project-b');fs.mkdirSync(projectA);fs.mkdirSync(projectB);
+  const root=path.join(base,'.solomap-global'),closes=[],writers=[],{once}=require('node:events');
+  let native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:projectA},{path:projectB}]);
+  const live=child=>child.exitCode===null&&child.signalCode===null;
+  t.after(async()=>{for(const child of writers)if(live(child)){const ended=once(child,'exit');child.kill('SIGTERM');await ended;}for(const close of closes.splice(0).reverse())await close();});
+  const operation=(operation,input)=>native.ops({operation,input}),read=(workspace,id)=>operation('read_run_state',{root:workspace,executionLogId:id});
+  const client=new (require('../out/runLifecycleClient.js').RunLifecycleClient)(operation,root),ref=(workspace,id)=>require('../out/runLifecycleClient.js').runStatusReference(workspace,id);
+  const csv=['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt','2,实现 MVP,保原任务,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'].join('\n');
+  const engines=new Map();
+  for(const workspace of [projectA,projectB]){const csvPath=path.join(workspace,'.solopreneur','roadmap.csv');fs.writeFileSync(csvPath,csv);const engine=new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(workspace,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();engines.set(workspace,engine);t.after(()=>engine.close());}
+  const nodes=new Map([...engines].map(([workspace,engine])=>[workspace,engine.getNodes().map(node=>({...node}))]));
+  for(const workspace of [projectA,projectB]){const child=childProcess.spawn(process.execPath,['-e',"process.stdout.write('ready');setInterval(()=>{},1000)"],{cwd:workspace,stdio:'pipe'});writers.push(child);await once(child.stdout,'data');child.stdout.resume();child.stderr.resume();}
+  const compiled=fs.readFileSync(path.join(projectRoot,'out/extension.js'),'utf8'),start=compiled.indexOf("    if (typeof vscode.window.onDidCloseTerminal === 'function') {"),end=compiled.indexOf('\n    // Register settings saved broadcast',start);assert.ok(start>=0&&end>start);const registration=compiled.slice(start,end);
+  const consumerEntries=[],created=[],sent=[];
+  const extension=loadCompiledModule('out/extension.js',`
+    const originalClosed=handleAgentTerminalClosed,closedPromises=[];let closeCallback;
+    handleAgentTerminalClosed=(...args)=>{const promise=originalClosed(...args);closedPromises.push(promise);return promise;};
+    module.exports.subscribe=context=>{${registration}};
+    module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};
+    module.exports.launch=launchAgentConversationTerminal;module.exports.settle=processAgentStatusFile;
+    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.owned=()=>({names:agentTerminalNamesByConversationId.size,roots:agentTerminalProjectRootsByConversationId.size,targets:agentTerminalRunTargets.size});
+    module.exports.enableBackground=()=>{extensionContextRef={extensionPath:${JSON.stringify(projectRoot)},extensionUri:{fsPath:${JSON.stringify(projectRoot)}}};};
+    module.exports.switch=(engine,workspace)=>{syncEngine=engine;activeProjectRoot=workspace;};
+    module.exports.connect=(engine,workspace,root,create,observe)=>{syncEngine=engine;activeProjectRoot=workspace;extensionContextRef=null;sidebarProvider=null;
+      getPersistedSettings=()=>({globalDataPath:root,automationTasks:{},collaborationReviewMode:'off'});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
+      vscode.window.createTerminal=create;vscode.window.onDidCloseTerminal=callback=>{closeCallback=callback;return {dispose(){}};};
+      const originalConsumer=processRegisteredStatusFile;processRegisteredStatusFile=async(...args)=>{await observe(args);return originalConsumer(...args);};};
+  `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
+  extension.connect(engines.get(projectA),projectA,root,options=>{const terminal={name:options.name,exitStatus:{reason:3},show(){},sendText(text){sent.push(text);},dispose(){assert.fail('closing A must not dispose another terminal');}};created.push(terminal);return terminal;},async args=>{assert.equal(live(writers[0]),false,'A writer must stop before background settlement');assert.equal(live(writers[1]),true,'B writer must remain alive');assert.equal(args[1],ref(projectA,54));assert.equal(args[4],root);consumerEntries.push(args);});extension.subscribe({subscriptions:[]});
+  const prepare=(workspace,id,parent,metadata={})=>require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'保留完整原任务',workspaceRoot:workspace,nodeId:'__solo__',executionLogId:id,userMessage:'继续原项目对话',runKind:parent?'solo_continue':'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',...(parent?{nativeSessionId:parent.status.plannedNativeSessionId,continuation:true,parentExecutionLogId:Number(parent.status.rootExecutionLogId),expectedParentTurnId:parent.turnId}:{}),metadata:{...(parent?{lineageRootExecutionLogId:Number(parent.status.rootExecutionLogId)}:{}),...metadata}},operation);
+  const outputs=new Map(),finish=async(state,workspace)=>{
+    const id=Number(state.status.rootExecutionLogId),reference=ref(workspace,id),output=`原项目${path.basename(workspace)}会话${id}完整结果🌿\n`.repeat(10000);outputs.set(reference,output);
+    const before=await require('../out/runWorkspace.js').snapshotWorkspace(workspace);await operation('write_run_document',{projectId:state.projectId,executionLogId:id,generation:state.generation,turnId:state.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(state.turnId,'before'),bytes:Buffer.from(JSON.stringify(before)).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:`switch-cleanup-before:${reference}`});
+    await operation('append_run_log',{projectId:state.projectId,executionLogId:id,generation:state.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:`switch-cleanup-output:${reference}`});
+    const head=await operation('read_run_checkpoint_state',{root:workspace,executionLogId:id});await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'complete','--outcome','partial','--summary','已经保存的原项目结果'],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:String(id),SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:state.status.plannedNativeSessionId}});
+    await extension.settle(reference,undefined,root);await extension.drain();assert.equal((await read(workspace,id)).status.status,'Waiting');
+  };
+  const parentA=await prepare(projectA,53);await finish(parentA,projectA);
+  const runA=await prepare(projectA,54,parentA,{agentPid:process.pid,processBirth:'proc:not-this-process'});
+  const terminal=await extension.launch({workspaceRoot:projectA,label:'solo',conversationId:54,nodeId:'__solo__',statusFilePath:ref(projectA,54),runKind:'solo_continue',globalDataPath:root,command:runA.finalCommand,agentCli:'claude'});extension.enableBackground();await finish(runA,projectA);
+  const parentB=await prepare(projectB,88);await finish(parentB,projectB);const runB=await prepare(projectB,54,parentB,{agentPid:writers[1].pid,processBirth:getProcessBirthMarker(writers[1].pid)});await finish(runB,projectB);
+  const snapshot=async(workspace,id)=>{const reference=ref(workspace,id),state=await read(workspace,id),status=await client.readStatus(reference);return {state,status,journal:await client.readJournal(reference,status),settlements:await client.readSettlements(reference,status),binding:await client.readBinding(reference)};};
+  const savedA=await snapshot(projectA,54),savedParentA=await snapshot(projectA,53),savedB=await snapshot(projectB,54),savedParentB=await snapshot(projectB,88);
+  assert.equal(savedA.state.status.sourceParentRunId,parentA.runId);assert.equal(savedA.state.status.sourceParentTurnId,parentA.turnId);assert.equal(savedA.state.status.lineageRootExecutionLogId,53);assert.equal(savedB.state.status.lineageRootExecutionLogId,88);assert.notEqual(savedA.state.projectId,savedB.state.projectId);assert.equal(savedA.settlements.length,1);
+  extension.switch(engines.get(projectB),projectB);
+  await assert.rejects(extension.emit(terminal),/run_process_identity_conflict/);await extension.drain();assert.ok(writers.every(live));assert.equal(consumerEntries.length,0);assert.deepEqual({...extension.owned()},{names:1,roots:1,targets:1});
+  const rejected=await read(projectA,54);assert.equal(rejected.status.stopRequested,true);assert.equal(rejected.status.stopReason,'用户已关闭当前对话终端。');assert.equal(rejected.status.stopRequestIntent.executionLogId,54);assert.equal(rejected.status.stopRequestIntent.expectedTurnId,runA.turnId);assert.equal(rejected.status.lineageRootExecutionLogId,53);assert.equal(rejected.status.sourceParentRunId,parentA.runId);assert.equal(rejected.status.sourceParentTurnId,parentA.turnId);assert.notEqual(rejected.status.interactiveSessionClosed,true);assert.equal(rejected.status.checkpointSummary,savedA.state.status.checkpointSummary);assert.deepEqual(await snapshot(projectB,54),savedB);assert.deepEqual(await snapshot(projectB,88),savedParentB);
+  for(const engine of engines.values())engine.close();for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:projectA},{path:projectB}]);
+  assert.deepEqual(await read(projectA,54),rejected);assert.deepEqual(await client.readSettlements(ref(projectA,54),await client.readStatus(ref(projectA,54))),savedA.settlements);assert.deepEqual(await client.readBinding(ref(projectA,54)),savedA.binding);assert.deepEqual(await snapshot(projectA,53),savedParentA);assert.deepEqual(await snapshot(projectB,54),savedB);assert.deepEqual(await snapshot(projectB,88),savedParentB);
+  await assert.rejects(operation('recover_run_executions',{}),/run_process_identity_conflict/);assert.deepEqual(await read(projectA,54),rejected);assert.ok(writers.every(live));
+  const current=await client.readStatus(ref(projectA,54));await client.writeStatus(ref(projectA,54),{...current,agentPid:writers[0].pid,processBirth:getProcessBirthMarker(writers[0].pid)});
+  const ended=once(writers[0],'exit');await operation('recover_run_executions',{});await ended;assert.equal((await read(projectA,54)).status.interactiveSessionClosed,true);assert.deepEqual(Array.from(await extension.emit(terminal)),[true]);await extension.drain();assert.equal(live(writers[0]),false);assert.equal(live(writers[1]),true);assert.equal(consumerEntries.length,1);assert.deepEqual({...extension.owned()},{names:0,roots:0,targets:0});
+  const finalA=await snapshot(projectA,54);assert.equal(finalA.state.status.status,'Processed');assert.equal(finalA.state.status.interactiveSessionClosed,true);assert.equal(finalA.state.status.lineageRootExecutionLogId,53);assert.equal(finalA.state.status.sourceParentRunId,parentA.runId);assert.equal(finalA.state.status.sourceParentTurnId,parentA.turnId);assert.equal(finalA.state.taskId,runA.taskId);assert.equal(finalA.state.runId,runA.runId);assert.equal(finalA.state.turnId,runA.turnId);assert.equal(finalA.state.status.checkpointOutcome,'partial');assert.equal(finalA.state.status.checkpointSummary,savedA.state.status.checkpointSummary);assert.equal(finalA.settlements.length,2);assert.deepEqual(finalA.settlements[0],savedA.settlements[0]);assert.deepEqual(finalA.settlements[1].digest,savedA.settlements[0].digest);assert.deepEqual(finalA.binding,savedA.binding);assert.equal(finalA.journal.entry.status,savedA.journal.entry.status);assert.match(finalA.journal.entry.output,/Interactive session state: Closed/);
+  for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:projectA},{path:projectB}]);assert.deepEqual(await snapshot(projectA,54),finalA);assert.deepEqual(await snapshot(projectA,53),savedParentA);assert.deepEqual(await snapshot(projectB,54),savedB);assert.deepEqual(await snapshot(projectB,88),savedParentB);
+  const walHash=()=>require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(root,'solomap.db-wal'))).digest('hex'),wal=walHash();assert.deepEqual(Array.from(await extension.emit(terminal)),[false]);await Promise.all([extension.settle(ref(projectA,54),undefined,root),extension.settle(ref(projectA,54),undefined,root)]);await extension.drain();assert.equal(walHash(),wal,'retry and repeated consumers must not append durable changes');assert.equal(consumerEntries.length,1);assert.equal(live(writers[1]),true);assert.equal(created.length,1);assert.equal(sent.length,1);
+  for(const workspace of [projectA,projectB]){const engine=new (require('../out/db/syncEngine.js').SyncEngine)(path.join(workspace,'.solopreneur','roadmap.csv'),path.join(workspace,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();t.after(()=>engine.close());assert.deepEqual(engine.getNodes(),nodes.get(workspace));assert.equal(fs.readFileSync(path.join(workspace,'.solopreneur','roadmap.csv'),'utf8'),csv);assert.deepEqual(fs.readdirSync(path.join(workspace,'.solopreneur')).sort(),['project.json','roadmap.csv']);}
+  for(const [reference,output] of outputs){assert.equal((await client.readLog(reference,'stdout')).toString('utf8'),output);assert.equal((await client.readLog(reference,'stdout',reference===ref(projectA,54)?savedA.status:await client.readStatus(reference))).toString('utf8'),output);}
+});
+
+test('continuing a root conversation immediately after its continuation terminal closes waits for the previous writer', async t => {
+  const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-close-continue-')),project=path.join(base,'project'),other=path.join(base,'other');fs.mkdirSync(project);fs.mkdirSync(other);
+  const root=path.join(base,'.solomap-global'),closes=[],writers=[],{once}=require('node:events');let native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
+  const live=child=>child.exitCode===null&&child.signalCode===null;
+  t.after(async()=>{for(const child of writers)if(live(child)){const ended=once(child,'exit');child.kill('SIGTERM');await ended;}for(const close of closes.splice(0).reverse())await close();});
+  const operation=(operation,input)=>native.ops({operation,input}),read=(workspace,id)=>operation('read_run_state',{root:workspace,executionLogId:id}),client=new (require('../out/runLifecycleClient.js').RunLifecycleClient)(operation,root),ref=id=>require('../out/runLifecycleClient.js').runStatusReference(project,id);
+  const csv=['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt','2,实现 MVP,保原目标,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'].join('\n'),csvPath=path.join(project,'.solopreneur','roadmap.csv'),otherCsv=path.join(other,'.solopreneur','roadmap.csv');fs.writeFileSync(csvPath,csv);fs.writeFileSync(otherCsv,csv);
+  const engine=new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();t.after(()=>engine.close());const originalNodes=engine.getNodes().map(node=>({...node}));
+  let closingSeen=false;
+  for(let index=0;index<3;index++){const program=index===0?"let closing=false;process.on('SIGTERM',()=>{if(closing)return;closing=true;process.stdout.write('closing');setTimeout(()=>process.exit(0),350)});process.stdout.write('ready');setInterval(()=>{},1000)":"process.stdout.write('ready');setInterval(()=>{},1000)";const child=childProcess.spawn(process.execPath,['-e',program],{cwd:index===2?other:project,stdio:'pipe'});writers.push(child);await once(child.stdout,'data');if(index===0)child.stdout.on('data',bytes=>{if(bytes.toString().includes('closing'))closingSeen=true;});else child.stdout.resume();child.stderr.resume();}
+  const identity=child=>({agentPid:child.pid,processBirth:getProcessBirthMarker(child.pid)}),created=[],sent=[],posted=[],errors=[],preparedRuns=[],prepareObservations=[];
+  const compiled=fs.readFileSync(path.join(projectRoot,'out/extension.js'),'utf8'),start=compiled.indexOf("    if (typeof vscode.window.onDidCloseTerminal === 'function') {"),end=compiled.indexOf('\n    // Register settings saved broadcast',start);assert.ok(start>=0&&end>start);const registration=compiled.slice(start,end);
+  const extension=loadCompiledModule('out/extension.js',`
+    const originalClosed=handleAgentTerminalClosed,closedPromises=[];let closeCallback;
+    handleAgentTerminalClosed=(...args)=>{const promise=originalClosed(...args);closedPromises.push(promise);return promise;};
+    module.exports.subscribe=context=>{${registration}};module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};
+    module.exports.launch=launchAgentConversationTerminal;module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;
+    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.reservations=project=>reservedAgentTerminalsByProject.get(project)?.length||0;module.exports.owned=id=>({name:agentTerminalNamesByConversationId.get(id),root:agentTerminalProjectRootsByConversationId.get(id)});
+    module.exports.connect=(engine,project,root,create,prepare,reportError)=>{syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
+      getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
+      agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';getOpenCodeTerminalEnvironment=async()=>({});
+      ensureActionProject=async(_context,requested)=>{if(requested!==project)throw new Error('unexpected selected project');return project;};prepareOrdinaryConversation=prepare;vscode.window.showErrorMessage=reportError;
+      sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
+      vscode.window.createTerminal=options=>{const terminal=create(options);vscode.window.terminals.push(terminal);return terminal;};vscode.window.onDidCloseTerminal=callback=>{closeCallback=callback;return {dispose(){}};};};
+  `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
+  extension.connect(engine,project,root,options=>{const terminal={name:options.name,exitStatus:{reason:3},show(){terminal.shown=(terminal.shown||0)+1;},sendText(text){sent.push({terminal,text});},dispose(){terminal.disposed=(terminal.disposed||0)+1;}};created.push({options,terminal,writerAliveAtCreation:live(writers[0])});return terminal;},async(_context,input)=>{assert.equal(closingSeen,true,'continue must overlap the previous writer cleanup');assert.equal(live(writers[0]),false,'new preparation must wait until the old writer exits');assert.ok(writers.slice(1).every(live));prepareObservations.push({old:await read(project,54),parent:input.parentExecutionLogId,turn:input.expectedParentTurnId});assert.equal(prepareObservations[0].old.status.interactiveSessionClosed,true);const prepared=await require('../out/agentRunPreparation.js').prepareAgentRun({...input,launchIntentId:'close-continue-button'},operation);preparedRuns.push(prepared);return prepared;},message=>errors.push(message));extension.subscribe({subscriptions:[]});
+  const parent=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'原完整任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:53,userMessage:'原对话',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off'},operation);
+  const outputs=new Map(),finish=async state=>{const id=Number(state.status.rootExecutionLogId),output=`第${id}轮完整结果保留🌿\n`.repeat(10000);outputs.set(id,output);const before=await require('../out/runWorkspace.js').snapshotWorkspace(project);await operation('write_run_document',{projectId:state.projectId,executionLogId:id,generation:state.generation,turnId:state.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(state.turnId,'before'),bytes:Buffer.from(JSON.stringify(before)).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:`close-continue-before:${id}`});await operation('append_run_log',{projectId:state.projectId,executionLogId:id,generation:state.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:`close-continue-output:${id}`});const head=await operation('read_run_checkpoint_state',{root:project,executionLogId:id});await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'complete','--outcome','partial','--summary',`第${id}轮已保存`],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:String(id),SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:parent.status.plannedNativeSessionId}});await extension.settle(ref(id),undefined,root);await extension.drain();};
+  await finish(parent);const child=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'补充原任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:0,launchIntentId:'close-continue-history',userMessage:'继续原对话',runKind:'solo_continue',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',nativeSessionId:parent.status.plannedNativeSessionId,continuation:true,parentExecutionLogId:53,expectedParentTurnId:parent.turnId,metadata:{lineageRootExecutionLogId:53,launchSummary:`Agent continuation started.\n\nContinuation parent conversation: 53\nContinuation session id: ${parent.status.plannedNativeSessionId}`}},operation);
+  assert.equal(Number(child.status.rootExecutionLogId),54);const oldTerminal=await extension.launch({workspaceRoot:project,label:'solo',conversationId:54,nodeId:'__solo__',statusFilePath:ref(54),runKind:'solo_continue',globalDataPath:root,command:child.finalCommand,agentCli:'claude'});const deliveredStatus=await client.readStatus(ref(54));await client.writeStatus(ref(54),{...deliveredStatus,...identity(writers[0])});await finish(child);
+  for(const [workspace,id,writer] of [[project,13,writers[1]],[other,54,writers[2]]])await operation('prepare_run',{root:workspace,executionLogId:id,nodeId:'__solo__',runKind:'solo',prompt:'其他目标',command:'controlled fixture',userMessage:'其他对话',metadata:{interactiveSession:true,agentCli:'claude',sessionProvider:'claude',nativeSessionId:workspace===other?parent.status.plannedNativeSessionId:'unrelated-session',...identity(writer)},idempotencyKey:`close-continue-peer:${workspace}:${id}`});
+  const peer=await read(project,13),foreign=await read(other,54),snapshot=async id=>{const state=await read(project,id),status=await client.readStatus(ref(id));return {state,status,journal:await client.readJournal(ref(id),status),binding:await client.readBinding(ref(id)),settlements:await client.readSettlements(ref(id),status)};},saved=new Map();for(const id of [53,54]){saved.set(id,await snapshot(id));assert.equal(saved.get(id).settlements.length,1);assert.equal(saved.get(id).state.status.status,'Waiting');}
+  assert.equal(require('../out/continuation.js').resolveContinuationLeafConversationFromList(engine.getAgentExecutions('__solo__'),53).id,54);
+  for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();for(const id of [53,54])assert.deepEqual(await snapshot(id),saved.get(id));
+  const click=()=>extension.action({}, {command:'conversation.continue',projectPath:project,nodeId:'__solo__',conversationId:53},'sidebar',{postMessage(message){posted.push(message);return Promise.resolve(true);}}),ended=once(writers[0],'exit'),closing=extension.emit(oldTerminal),continuing=Promise.all([click(),click()]);
+  assert.deepEqual(Array.from(await closing),[true]);assert.deepEqual(await continuing,[true,true]);await ended;await extension.drain();assert.deepEqual(errors,[]);assert.equal(closingSeen,true);assert.equal(live(writers[0]),false);assert.ok(writers.slice(1).every(live));assert.equal(preparedRuns.length,1);assert.equal(created.length,2);assert.equal(created[1].writerAliveAtCreation,true,'startup reservation must be made while old writer is still closing');assert.equal(prepareObservations.length,1);assert.equal(prepareObservations[0].parent,54);assert.equal(prepareObservations[0].turn,child.turnId);
+  const prepared=preparedRuns[0],newId=Number(prepared.status.rootExecutionLogId),newTerminal=created[1].terminal,delivered=await read(project,newId);assert.equal(newId,55);assert.notEqual(newTerminal,oldTerminal);assert.notEqual(newTerminal.name,oldTerminal.name);assert.equal(extension.reservations(project),0);assert.equal(delivered.taskId,parent.taskId);assert.equal(delivered.conversationId,parent.conversationId);assert.equal(delivered.status.sourceParentRunId,child.runId);assert.equal(delivered.status.sourceParentTurnId,child.turnId);assert.equal(delivered.status.lineageRootExecutionLogId,53);assert.equal(delivered.status.plannedNativeSessionId,parent.status.plannedNativeSessionId);assert.ok(delivered.status.terminalDeliveryId);assert.ok(delivered.status.terminalCommandSubmittedAt);assert.deepEqual({...extension.owned(newId)},{name:newTerminal.name,root:project});assert.deepEqual({...extension.owned(54)},{name:undefined,root:undefined});assert.equal(sent.filter(x=>x.terminal===newTerminal&&x.text.endsWith(prepared.finalCommand)).length,1);assert.equal(sent.filter(x=>x.terminal===oldTerminal).length,1);assert.equal(posted.filter(x=>x.command==='conversationActionSettled'&&x.action==='continue'&&Number(x.conversationId)===53).length,2);
+  const closed=new Map();for(const id of [53,54]){for(const pending of await client.listStatuses(project,true))if(pending.reference===ref(id))await extension.settle(ref(id),pending.status,root);await extension.drain();const final=await snapshot(id);closed.set(id,final);assert.equal(final.state.status.interactiveSessionClosed,true);assert.equal(final.state.status.status,'Processed');assert.equal(final.state.taskId,parent.taskId);assert.equal(final.state.turnId,saved.get(id).state.turnId);assert.equal(final.state.status.checkpointOutcome,'partial');assert.equal(final.state.status.checkpointSummary,saved.get(id).state.status.checkpointSummary);assert.deepEqual(final.binding,saved.get(id).binding);assert.equal(final.settlements.length,2);assert.deepEqual(final.settlements[0],saved.get(id).settlements[0]);assert.deepEqual(final.settlements[1].digest,saved.get(id).settlements[0].digest);assert.match(final.journal.entry.output,/Interactive session state: Closed/);assert.equal((await client.readLog(ref(id),'stdout',saved.get(id).status)).toString('utf8'),outputs.get(id));}
+  assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,54),foreign);assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(fs.readFileSync(csvPath,'utf8'),csv);assert.equal(fs.readFileSync(otherCsv,'utf8'),csv);
+  for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await read(project,newId),delivered);for(const id of [53,54]){assert.deepEqual(await snapshot(id),closed.get(id));assert.equal((await client.readLog(ref(id),'stdout')).toString('utf8'),outputs.get(id));}
+  const walHash=()=>require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(root,'solomap.db-wal'))).digest('hex'),wal=walHash();assert.deepEqual(Array.from(await extension.emit(oldTerminal)),[false]);await Promise.all([53,54].flatMap(id=>[extension.settle(ref(id),undefined,root),extension.settle(ref(id),undefined,root)]));await extension.drain();assert.equal(walHash(),wal);assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,54),foreign);assert.ok(writers.slice(1).every(live));assert.deepEqual(engine.getNodes(),originalNodes);for(const workspace of [project,other]){assert.equal(fs.readFileSync(path.join(workspace,'.solopreneur','roadmap.csv'),'utf8'),csv);assert.deepEqual(fs.readdirSync(path.join(workspace,'.solopreneur')).sort(),['project.json','roadmap.csv']);}
+  await client.stop(ref(newId),await client.readStatus(ref(newId)),'结束本次隔离接续验收','close-continue-temporary-close');for(const pending of await client.listStatuses(project,true))if(pending.reference===ref(newId))await extension.settle(ref(newId),pending.status,root);await extension.drain();assert.equal((await read(project,newId)).status.interactiveSessionClosed,true);
+});
+
+test('a delayed terminal close preserves a checkpoint arriving during process cleanup', async t => {
+  const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-delayed-close-')),project=path.join(base,'project'),other=path.join(base,'other');fs.mkdirSync(project);fs.mkdirSync(other);
+  const root=path.join(base,'.solomap-global'),closes=[],processes=[],{once}=require('node:events');let native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
+  let closeResult,captured;const live=child=>child.exitCode===null&&child.signalCode===null;t.after(async()=>{for(const child of processes)if(live(child)){const ended=once(child,'exit');child.kill('SIGTERM');await ended;}await closeResult?.catch(()=>undefined);await captured?.catch(()=>undefined);for(const close of closes.splice(0).reverse())await close();});
+  const operation=(operation,input)=>native.ops({operation,input}),read=(workspace,id)=>operation('read_run_state',{root:workspace,executionLogId:id}),client=new (require('../out/runLifecycleClient.js').RunLifecycleClient)(operation,root),reference=require('../out/runLifecycleClient.js').runStatusReference(project,53);
+  const csv=['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt','2,实现 MVP,保原任务,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'].join('\n'),csvPath=path.join(project,'.solopreneur','roadmap.csv'),otherCsv=path.join(other,'.solopreneur','roadmap.csv');fs.writeFileSync(csvPath,csv);fs.writeFileSync(otherCsv,csv);
+  let engine=new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();t.after(()=>engine.close());const originalNodes=engine.getNodes().map(node=>({...node}));
+  const initialOutput='关闭前完整输出🌿\n'.repeat(10000),report={schemaVersion:1,summary:'关闭时保存的原结果',unmetRequirements:[],decisions:[],corrections:[],verification:[],commits:[],experienceUsage:[],lessons:[]},summary='completed while closing';
+  const checkpointPath=path.join(projectRoot,'out/taskCheckpointProcess.js'),program=`let closing=false;const close=()=>{if(closing)return;closing=true;process.stdout.write('closing\\n');setTimeout(()=>process.exit(0),700);};process.on('SIGTERM',close);process.stdin.once('data',()=>{process.stdout.write(${JSON.stringify(initialOutput.slice(0,initialOutput.indexOf('\n')+1))}.repeat(10000)+'ready\\n');});setInterval(()=>{},1000);`;
+  const quote=require('../out/agentCli.js').shellQuote,run=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'保留原用户完整任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:53,userMessage:'关闭当前交互终端',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',directExecutionCommand:`exec ${quote(process.execPath)} -e ${quote(program)}`},operation);
+  const created=[],sent=[],consumerEntries=[],compiled=fs.readFileSync(path.join(projectRoot,'out/extension.js'),'utf8'),start=compiled.indexOf("    if (typeof vscode.window.onDidCloseTerminal === 'function') {"),end=compiled.indexOf('\n    // Register settings saved broadcast',start);assert.ok(start>=0&&end>start);const registration=compiled.slice(start,end);let runner;
+  const extension=loadCompiledModule('out/extension.js',`
+    const originalClosed=handleAgentTerminalClosed,closedPromises=[];let closeCallback;
+    handleAgentTerminalClosed=(...args)=>{const promise=originalClosed(...args);closedPromises.push(promise);return promise;};
+    module.exports.subscribe=context=>{${registration}};module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};module.exports.launch=launchAgentConversationTerminal;module.exports.settle=processAgentStatusFile;
+    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};module.exports.owned=()=>({names:agentTerminalNamesByConversationId.size,roots:agentTerminalProjectRootsByConversationId.size,targets:agentTerminalRunTargets.size});
+    module.exports.connect=(engine,project,root,create,observe)=>{syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
+      getPersistedSettings=()=>({globalDataPath:root,automationTasks:{},collaborationReviewMode:'off'});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
+      vscode.window.createTerminal=create;vscode.window.onDidCloseTerminal=callback=>{closeCallback=callback;return {dispose(){}};};const originalConsumer=processRegisteredStatusFile;processRegisteredStatusFile=async(...args)=>{await observe(args);return originalConsumer(...args);};};
+  `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
+  extension.connect(engine,project,root,options=>{const terminal={name:options.name,exitStatus:{reason:3},show(){},sendText(text){sent.push(text);},dispose(){assert.fail('OS close must not dispose another terminal');}};created.push(terminal);return terminal;},async args=>{assert.equal(live(runner),false,'tracked writer must exit before plugin consumes late completion');assert.equal(args[1],reference);assert.equal(args[4],root);const state=await read(project,53);assert.equal(state.status.checkpointOutcome,'partial');assert.equal(state.status.checkpointSummary,summary);assert.equal(state.status.interactiveSessionClosed,true);assert.equal((await client.readReport(reference,await client.readStatus(reference))).report.summary,report.summary);consumerEntries.push(args);});extension.subscribe({subscriptions:[]});
+  const terminal=await extension.launch({workspaceRoot:project,label:'solo',conversationId:53,nodeId:'__solo__',statusFilePath:reference,runKind:'solo',globalDataPath:root,command:run.finalCommand,agentCli:'claude'}),delivered=await read(project,53);
+  runner=childProcess.spawn(process.execPath,['-e',program],{cwd:project,stdio:'pipe'});processes.push(runner);const ended=once(runner,'exit'),stdout=[],stderr=[];runner.stderr.on('data',bytes=>stderr.push(bytes));const rendered=()=>Buffer.concat(stdout).toString('utf8'),hash=bytes=>require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+  const claimed=await operation('claim_run',{root:project,executionLogId:53,expectedRevision:delivered.revision,agentPid:runner.pid,processBirth:getProcessBirthMarker(runner.pid),terminalDeliveryId:delivered.status.terminalDeliveryId,idempotencyKey:'delayed-close-controlled-writer-claim'});let sequence=0,offset=0;captured=(async()=>{for await(const bytes of runner.stdout){await operation('append_run_log',{root:project,executionLogId:53,generation:claimed.generation,stream:'stdout',sequence,offset,bytes:bytes.toString('base64'),idempotencyKey:`delayed-close-log:${sequence}`});stdout.push(bytes);sequence++;offset+=bytes.length;}})();captured.catch(()=>undefined);runner.stdin.end('launch\n');
+  const deadline=Date.now()+10000;while(!rendered().endsWith('ready\n')){assert.equal(live(runner),true,Buffer.concat(stderr).toString());assert.ok(Date.now()<deadline,'controlled writer must persist its complete initial output');await new Promise(resolve=>setTimeout(resolve,20));}assert.equal(hash(rendered()),hash(initialOutput+'ready\n'));
+  const running=await read(project,53);assert.equal(running.status.status,'Running');assert.equal(Boolean(running.status.finishedAt),false);assert.equal(running.status.agentPid,runner.pid);assert.equal(running.status.processBirth,getProcessBirthMarker(runner.pid));assert.equal((await client.readSettlements(reference,await client.readStatus(reference))).length,0);
+  for(const [workspace,id] of [[project,13],[other,53]]){const child=childProcess.spawn(process.execPath,['-e',"process.stdout.write('ready');setInterval(()=>{},1000)"],{cwd:workspace,stdio:'pipe'});processes.push(child);await once(child.stdout,'data');child.stdout.resume();child.stderr.resume();await operation('prepare_run',{root:workspace,executionLogId:id,nodeId:'__solo__',runKind:'solo',prompt:'其他目标',command:'controlled fixture',userMessage:'其他对话',metadata:{interactiveSession:true,agentPid:child.pid,processBirth:getProcessBirthMarker(child.pid)},idempotencyKey:`delayed-close-peer:${workspace}:${id}`});}
+  const peer=await read(project,13),foreign=await read(other,53);
+  const closing=closeResult=extension.emit(terminal);closing.catch(()=>undefined);const closingDeadline=Date.now()+10000;while(!rendered().includes('closing\n')){assert.equal(live(runner),true,Buffer.concat(stderr).toString());assert.ok(Date.now()<closingDeadline,'close must signal the tracked real child');await new Promise(resolve=>setTimeout(resolve,5));}const during=await read(project,53);assert.equal(during.status.stopRequested,true);assert.equal(Boolean(during.status.finishedAt),false,'the checkpoint must arrive after close has begun');assert.equal(live(runner),true);
+  const checkpoint=await require('node:util').promisify(childProcess.execFile)(process.execPath,[checkpointPath,'complete','--outcome','partial','--summary',summary,'--report-json',JSON.stringify(report)],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:claimed.projectId,SOLOMAP_EXECUTION_LOG_ID:'53',SOLOMAP_RUN_GENERATION:String(claimed.generation),SOLOMAP_RUN_PROOF:claimed.proof,SOLOMAP_TASK_TURN_ID:claimed.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId}});const accepted=JSON.parse(checkpoint.stdout);assert.equal(accepted.turnId,run.turnId);assert.equal(accepted.status.checkpointSummary,summary);assert.equal(accepted.status.stopRequested,true);assert.equal(Boolean(accepted.status.interactiveSessionClosed),false);assert.equal(live(runner),true,'late completion must be accepted while process cleanup is still pending');
+  assert.deepEqual(Array.from(await closing),[true]);await ended;await captured;await extension.drain();assert.equal(consumerEntries.length,2);assert.match(consumerEntries[0][3].checkpointEventId,/:complete$/);assert.match(consumerEntries[1][3].checkpointEventId,/:session-close$/);assert.equal(live(runner),false);assert.equal(Buffer.concat(stderr).length,0);
+  const expected=initialOutput+'ready\nclosing\n';assert.equal(hash(rendered()),hash(expected));const fullOutput=(await client.readLog(reference,'stdout')).toString('utf8');assert.equal(hash(fullOutput.replace(/\r\n/g,'\n')),hash(expected));
+  const status=await client.readStatus(reference),final=await read(project,53),journal=await client.readJournal(reference,status),settlements=await client.readSettlements(reference,status),binding=await client.readBinding(reference),savedReport=await client.readReport(reference,status);assert.equal(final.status.status,'Processed');assert.equal(final.status.interactiveSessionClosed,true);assert.equal(final.status.checkpointOutcome,'partial');assert.equal(final.status.checkpointSummary,summary);assert.equal(final.status.stopReason,'用户已关闭当前对话终端。');assert.equal(final.taskId,run.taskId);assert.equal(final.runId,run.runId);assert.equal(final.turnId,run.turnId);assert.deepEqual(savedReport.report,report);assert.equal(savedReport.availability,'available');assert.equal(settlements.length,2);assert.deepEqual(settlements[1].digest,settlements[0].digest);assert.deepEqual(settlements[0].digest.failures,[]);assert.doesNotMatch(journal.entry.output,/Failure category: stopped_by_user|Failure category: agent_exit_failed/);assert.match(journal.entry.output,/Interactive session state: Closed/);assert.ok(journal.entry.output.includes(summary));assert.deepEqual({...extension.owned()},{names:0,roots:0,targets:0});
+  for(const source of consumerEntries){const fixed=source[3];assert.equal((await client.readReport(reference,fixed)).objectId,savedReport.objectId);assert.deepEqual((await client.readReport(reference,fixed)).report,report);assert.equal(hash(await client.readLog(reference,'stdout',fixed)),hash(Buffer.from(fullOutput)));}
+  assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,53),foreign);assert.ok(processes.slice(1).every(live));assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(created.length,1);assert.equal(sent.length,1);
+  for(let restart=0;restart<2;restart++){engine.close();for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);engine=new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();assert.deepEqual(await read(project,53),final);assert.deepEqual(await client.readJournal(reference),journal);assert.deepEqual(await client.readSettlements(reference,await client.readStatus(reference)),settlements);assert.deepEqual(await client.readBinding(reference),binding);assert.deepEqual(await client.readReport(reference,await client.readStatus(reference)),savedReport);assert.equal(hash(await client.readLog(reference,'stdout',status)),hash(Buffer.from(fullOutput)));const wal=hash(fs.readFileSync(path.join(root,'solomap.db-wal')));assert.deepEqual(Array.from(await extension.emit(terminal)),[false]);await Promise.all([extension.settle(reference,undefined,root),extension.settle(reference,undefined,root)]);await extension.drain();assert.equal(hash(fs.readFileSync(path.join(root,'solomap.db-wal'))),wal);assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,53),foreign);assert.ok(processes.slice(1).every(live));assert.deepEqual(engine.getNodes(),originalNodes);for(const workspace of [project,other]){assert.equal(fs.readFileSync(path.join(workspace,'.solopreneur','roadmap.csv'),'utf8'),csv);assert.deepEqual(fs.readdirSync(path.join(workspace,'.solopreneur')).sort(),['project.json','roadmap.csv']);}}
 });
 
 test('Agent cleanup refuses an unverified reused PID without signaling that process', async () => {
@@ -13575,153 +13929,74 @@ test('Agent cleanup refuses an unverified reused PID without signaling that proc
   }
 });
 
-test('a later retry cleans the newest failed continuation writer and resolves only that failure', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    'module.exports.__waitForAgentProcessCleanup = waitForAgentProcessCleanup;'
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-retry-cleanup-'));
-  const statusRoot = path.join(tempRoot, '.solopreneur', 'agent-status');
-  fs.mkdirSync(statusRoot, { recursive: true });
-  const oldPidFilePath = path.join(tempRoot, 'old-agent.pid');
-  fs.writeFileSync(oldPidFilePath, '', 'utf8');
-  fs.writeFileSync(path.join(statusRoot, '54.json'), JSON.stringify({
-    executionLogId: 54,
-    rootExecutionLogId: 54,
-    cleanupRootConversationId: 53,
-    failureCode: 'agent_process_cleanup_failed',
-    agentProcessPidFilePath: oldPidFilePath
-  }), 'utf8');
-  const child = childProcess.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
-  assert.ok(child.pid);
-  const latestPidFilePath = path.join(tempRoot, 'latest-agent.pid');
-  fs.writeFileSync(latestPidFilePath, `${child.pid}\n${getProcessBirthMarker(child.pid)}\n`, 'utf8');
-  const latestStatusFilePath = path.join(statusRoot, '55.json');
-  fs.writeFileSync(latestStatusFilePath, JSON.stringify({
-    executionLogId: 55,
-    rootExecutionLogId: 55,
-    cleanupRootConversationId: 53,
-    failureCode: 'agent_process_cleanup_failed',
-    failureReason: 'previous cleanup failed',
-    agentProcessPidFilePath: latestPidFilePath
-  }), 'utf8');
-  let exited = false;
-  child.once('exit', () => { exited = true; });
-
-  try {
-    await extensionModule.__waitForAgentProcessCleanup(tempRoot, 53);
-
-    assert.equal(exited, true);
-    assert.equal(JSON.parse(fs.readFileSync(latestStatusFilePath, 'utf8')).failureCode, undefined);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(statusRoot, '54.json'), 'utf8')).failureCode, 'agent_process_cleanup_failed');
-  } finally {
-    if (!exited) child.kill('SIGKILL');
-  }
+test('a later retry cleans the newest failed continuation writer and resolves only that failure', async t => {
+  for(const mode of ['implicit-root','explicit-root'])await t.test(mode,async t=>{
+    const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-newest-cleanup-')),project=path.join(base,'project'),other=path.join(base,'other');fs.mkdirSync(project);fs.mkdirSync(other);const root=path.join(base,'.solomap-global'),closes=[],writers=[],{once}=require('node:events');let native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);const live=child=>child.exitCode===null&&child.signalCode===null;t.after(async()=>{for(const child of writers)if(live(child)){const ended=once(child,'exit');child.kill('SIGTERM');await ended;}for(const close of closes.splice(0).reverse())await close();});
+    const operation=(operation,input)=>native.ops({operation,input}),read=(workspace,id)=>operation('read_run_state',{root:workspace,executionLogId:id}),client=new (require('../out/runLifecycleClient.js').RunLifecycleClient)(operation,root),ref=(workspace,id)=>require('../out/runLifecycleClient.js').runStatusReference(workspace,id);
+    const csv=['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt','2,实现 MVP,保原任务,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'].join('\n'),csvPath=path.join(project,'.solopreneur','roadmap.csv'),otherCsv=path.join(other,'.solopreneur','roadmap.csv');fs.writeFileSync(csvPath,csv);fs.writeFileSync(otherCsv,csv);let engine=new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();t.after(()=>engine.close());const originalNodes=engine.getNodes().map(node=>({...node}));
+    const extension=loadCompiledModule('out/extension.js',`module.exports.wait=waitForAgentProcessCleanup;module.exports.pending=()=>agentProcessCleanupByConversationKey.size;module.exports.connect=(engine,project,root)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef={};getPersistedSettings=()=>({globalDataPath:root});};`,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./solomapGlobal':require('../out/solomapGlobal.js'),'./db/syncEngine':require('../out/db/syncEngine.js')});extension.connect(engine,project,root);
+    const prepare=(id,parent,metadata={})=>require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'保原任务完整上下文',workspaceRoot:project,nodeId:'__solo__',executionLogId:id,userMessage:'清理最新失败后再继续',runKind:parent?'solo_continue':'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',...(parent?{parentExecutionLogId:Number(parent.status.rootExecutionLogId),expectedParentTurnId:parent.turnId,continuation:true,nativeSessionId:parent.status.plannedNativeSessionId}:{}),metadata:{...(mode==='implicit-root'?{lineageRootExecutionLogId:53}:{}),...metadata},directExecutionCommand:'controlled standalone fixture'},operation);
+    const report=id=>({schemaVersion:1,summary:`保留原${id}报告`,unmetRequirements:[],decisions:[],corrections:[],verification:[],commits:[],experienceUsage:[],lessons:[]}),outputs=new Map(),complete=async(state,outcome,close=true)=>{const id=Number(state.status.rootExecutionLogId),reference=ref(project,id),output=`原${id}完整结果🌿\n`.repeat(10000);outputs.set(id,output);await operation('append_run_log',{root:project,executionLogId:id,generation:state.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:`newest-cleanup-output:${id}`});const head=await operation('read_run_checkpoint_state',{root:project,executionLogId:id}),env={...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:state.projectId,SOLOMAP_EXECUTION_LOG_ID:String(id),SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:state.status.plannedNativeSessionId};for(const args of [['complete','--outcome',outcome,'--summary',`原${id}完整结果`,'--report-json',JSON.stringify(report(id))],...(close?[['session-close']]:[])])await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),...args],{env});assert.equal(Boolean((await read(project,id)).status.interactiveSessionClosed),close);assert.deepEqual((await client.readReport(reference,await client.readStatus(reference))).report,report(id));};
+    const parent=await prepare(53);await complete(parent,'partial');const old=await prepare(54,parent,{failureCode:'agent_process_cleanup_failed',failureReason:'保留早先清理失败原文',cleanupRootConversationId:53});await complete(old,'failed');const latest=await prepare(55,old,{failureCode:'agent_process_cleanup_failed',failureReason:'只解决最新清理失败',cleanupRootConversationId:53});
+    let closingSeen=false;for(let index=0;index<3;index++){const program=index===0?"let closing=false;process.on('SIGTERM',()=>{if(closing)return;closing=true;process.stdout.write('closing');setTimeout(()=>process.exit(0),350)});process.stdout.write('ready');setInterval(()=>{},1000)":"process.stdout.write('ready');setInterval(()=>{},1000)";const child=childProcess.spawn(process.execPath,['-e',program],{cwd:index===2?other:project,stdio:'pipe'});writers.push(child);await once(child.stdout,'data');if(index===0)child.stdout.on('data',bytes=>{if(bytes.toString().includes('closing'))closingSeen=true;});else child.stdout.resume();child.stderr.resume();}
+    let status=await client.readStatus(ref(project,55));await client.writeStatus(ref(project,55),{...status,agentPid:writers[0].pid,processBirth:getProcessBirthMarker(writers[0].pid)});await complete(latest,'partial',false);for(const [workspace,id,writer,cleanupRoot] of [[project,99,writers[1],99],[other,55,writers[2],53]])await operation('prepare_run',{root:workspace,executionLogId:id,nodeId:'__solo__',runKind:'solo',prompt:'其它原任务',command:'controlled fixture',userMessage:'保其它失败',metadata:{interactiveSession:true,failureCode:'agent_process_cleanup_failed',failureReason:'不能解决其它对话失败',cleanupRootConversationId:cleanupRoot,agentPid:writer.pid,processBirth:getProcessBirthMarker(writer.pid)},idempotencyKey:`newest-cleanup-peer:${workspace}:${id}`});
+    const snapshot=async(workspace,id)=>{const reference=ref(workspace,id),state=await read(workspace,id),status=await client.readStatus(reference);return {state,status,journal:await client.readJournal(reference,status),settlements:await client.readSettlements(reference,status),binding:await client.readBinding(reference),report:await client.readReport(reference,status)};},saved=new Map();for(const [workspace,id] of [[project,53],[project,54],[project,55],[project,99],[other,55]])saved.set(`${workspace}:${id}`,await snapshot(workspace,id));
+    for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);assert.deepEqual(await snapshot(project,54),saved.get(`${project}:54`));const latestReference=ref(project,55);let unverified=await client.readStatus(latestReference);await client.writeStatus(latestReference,{...unverified,processBirth:'proc:not-the-owned-writer'});await assert.rejects(extension.wait(project,53,mode==='explicit-root'?root:undefined),/run_process_identity_unverified/);assert.ok(writers.every(live));assert.equal(extension.pending(),0);assert.equal(Boolean((await read(project,55)).status.processCleanupResolvedAt),false);for(const [workspace,id] of [[project,53],[project,54],[project,99],[other,55]])assert.deepEqual(await snapshot(workspace,id),saved.get(`${workspace}:${id}`));unverified=await client.readStatus(latestReference);await client.writeStatus(latestReference,{...unverified,processBirth:getProcessBirthMarker(writers[0].pid)});const ended=once(writers[0],'exit');await Promise.all([extension.wait(project,53,mode==='explicit-root'?root:undefined),extension.wait(project,53,mode==='explicit-root'?root:undefined)]);await new Promise(resolve=>setTimeout(resolve,0));assert.equal(live(writers[0]),false,'newest actual writer must stop before cleanup retry returns');await ended;assert.equal(closingSeen,true);assert.equal(extension.pending(),0);assert.ok(writers.slice(1).every(live));const resolved=await snapshot(project,55);assert.equal(Boolean(resolved.status.failureCode),false,'only newest cleanup failure must be resolved');assert.equal(Boolean(resolved.status.failureReason),false);assert.ok(resolved.status.processCleanupResolvedAt);assert.equal(resolved.status.cleanupRootConversationId,53);assert.equal(resolved.state.status.interactiveSessionClosed,true);assert.equal(resolved.state.taskId,latest.taskId);assert.equal(resolved.state.turnId,latest.turnId);assert.equal(resolved.state.status.sourceParentRunId,old.runId);assert.equal(resolved.state.status.sourceParentTurnId,old.turnId);assert.equal(resolved.state.status.lineageRootExecutionLogId,saved.get(`${project}:55`).state.status.lineageRootExecutionLogId);assert.deepEqual(resolved.binding,saved.get(`${project}:55`).binding);assert.deepEqual(resolved.report,saved.get(`${project}:55`).report);
+    for(const [workspace,id] of [[project,53],[project,54],[project,99],[other,55]])assert.deepEqual(await snapshot(workspace,id),saved.get(`${workspace}:${id}`));for(const id of [53,54,55])assert.equal((await client.readLog(ref(project,id),'stdout',saved.get(`${project}:${id}`).status)).toString('utf8'),outputs.get(id));
+    for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);assert.deepEqual(await snapshot(project,55),resolved);const hash=bytes=>require('node:crypto').createHash('sha256').update(bytes).digest('hex'),wal=hash(fs.readFileSync(path.join(root,'solomap.db-wal')));await Promise.all([extension.wait(project,53,mode==='explicit-root'?root:undefined),extension.wait(project,53,mode==='explicit-root'?root:undefined)]);assert.equal(hash(fs.readFileSync(path.join(root,'solomap.db-wal'))),wal,'retry must not walk backward into older cleanup failure');assert.deepEqual(await snapshot(project,55),resolved);for(const [workspace,id] of [[project,53],[project,54],[project,99],[other,55]])assert.deepEqual(await snapshot(workspace,id),saved.get(`${workspace}:${id}`));assert.ok(writers.slice(1).every(live));assert.deepEqual(engine.getNodes(),originalNodes);for(const workspace of [project,other]){assert.equal(fs.readFileSync(path.join(workspace,'.solopreneur','roadmap.csv'),'utf8'),csv);assert.deepEqual(fs.readdirSync(path.join(workspace,'.solopreneur')).sort(),['project.json','roadmap.csv']);}
+  });
 });
 
-test('stopping a continuation records it without marking the task failed', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__stopAgentRun = stopAgentRun;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-stop-continuation-'));
-  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '3', '31');
-  fs.mkdirSync(runDir, { recursive: true });
-  const outputFilePath = path.join(runDir, 'output.log');
-  fs.writeFileSync(outputFilePath, 'Working inside native continuation.\n', 'utf8');
-  const statusFilePath = path.join(tempRoot, '.solopreneur', 'agent-status', '31.json');
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    nodeId: '3',
-    runKind: 'step_continue',
-    status: 'Running',
-    executionLogId: 31,
-    agentCli: 'codex',
-    outputFilePath,
-    startedAt: '2026-05-24T00:00:00.000Z'
-  }), 'utf8');
-  let nodeUpdated = false;
-  let updatedStatus = '';
-  let updatedOutput = '';
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [{ id: '3', title: '完善体验', status: 'Running' }],
-    updateNode: () => { nodeUpdated = true; },
-    getAgentExecutions: () => [{ id: 31, nodeId: '3', agentCli: 'codex', command: 'codex resume', output: 'Agent continuation started.', status: 'Running' }],
-    updateAgentExecution: (_id, _cli, _command, output, status) => {
-      updatedOutput = output;
-      updatedStatus = status;
-      return true;
-    },
-    logAgentExecution: () => 31
-  }, tempRoot);
-
-  await extensionModule.__stopAgentRun('3', 31);
-
-  assert.equal(nodeUpdated, false);
-  assert.equal(updatedStatus, 'Recorded');
-  assert.match(updatedOutput, /Continuation record state: Recorded/);
-  assert.doesNotMatch(updatedOutput, /Failure category: stopped_by_user/);
-  assert.match(fs.readFileSync(outputFilePath, 'utf8'), /Continuation terminal stopped by user/);
+test('stopping a continuation records it without marking the task failed', async t => {
+  for(const kind of ['step_continue','solo_continue'])await t.test(kind,async t=>{
+    const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-stop-continuation-')),project=path.join(base,'project'),other=path.join(base,'other');fs.mkdirSync(project);fs.mkdirSync(other);const root=path.join(base,'.solomap-global'),closes=[],writers=[],{once}=require('node:events'),live=child=>child.exitCode===null&&child.signalCode===null;let native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);t.after(async()=>{for(const child of writers)if(live(child)){const ended=once(child,'exit');child.kill('SIGTERM');await ended;}for(const close of closes.splice(0).reverse())await close();});
+    const operation=(operation,input)=>native.ops({operation,input}),read=(workspace,id)=>operation('read_run_state',{root:workspace,executionLogId:id}),client=new (require('../out/runLifecycleClient.js').RunLifecycleClient)(operation,root),ref=(workspace,id)=>require('../out/runLifecycleClient.js').runStatusReference(workspace,id),nodeId=kind==='solo_continue'?'__solo__':'3';
+    const csv=['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt','3,完善体验,保原任务不失败,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'].join('\n'),csvPath=path.join(project,'.solopreneur','roadmap.csv'),otherCsvPath=path.join(other,'.solopreneur','roadmap.csv');fs.writeFileSync(csvPath,csv);fs.writeFileSync(otherCsvPath,csv);let engine=new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();t.after(()=>engine.close());const originalNodes=engine.getNodes().map(node=>({...node}));
+    const prepared=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'保原任务和完整结果',workspaceRoot:project,nodeId,executionLogId:29,userMessage:'原任务完整目标',runKind:kind==='solo_continue'?'solo':'step',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',directExecutionCommand:'controlled standalone fixture'},operation);
+    const cli=async(id,args)=>{const head=await operation('read_run_checkpoint_state',{root:project,executionLogId:id});await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),...args],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:String(id),SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:prepared.status.plannedNativeSessionId}});};
+    const outputs=new Map(),append=async(id)=>{const state=await read(project,id),output=`原${id}完整续聊输出🌿\n`.repeat(10000);outputs.set(id,output);await operation('append_run_log',{root:project,executionLogId:id,generation:state.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:`stop-continuation-output:${id}`});};
+    const report={schemaVersion:1,summary:'保留原任务成果',unmetRequirements:[],decisions:[],corrections:[],verification:[],commits:[],experienceUsage:[],lessons:[]};await append(29);await cli(29,['complete','--outcome','partial','--summary','原任务已有成果','--report-json',JSON.stringify(report)]);await cli(29,['session-close']);
+    const child=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'继续原任务',workspaceRoot:project,nodeId,executionLogId:31,userMessage:'只停止这次续聊',runKind:kind,globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',directExecutionCommand:'controlled standalone fixture',continuation:true,nativeSessionId:prepared.status.plannedNativeSessionId,parentExecutionLogId:29,expectedParentTurnId:prepared.turnId,metadata:{lineageRootExecutionLogId:29,terminalName:'solomap owned continuation'}},operation);const childBinding=await client.readBinding(ref(project,31));await client.writeBinding(ref(project,31),await client.readStatus(ref(project,31)),{expectedHeadRevision:childBinding.headRevision,confirmSessionId:prepared.status.plannedNativeSessionId,evidence:{source:'owned identity fixture',parentRunId:prepared.runId},idempotencyKey:'stop-continuation-confirmed-binding'});await append(31);
+    let closingSeen=false;for(let index=0;index<3;index++){const program=index===0?"let closing=false;process.on('SIGTERM',()=>{if(closing)return;closing=true;process.stdout.write('closing');setTimeout(()=>process.exit(0),350)});process.stdout.write('ready');setInterval(()=>{},1000)":"process.stdout.write('ready');setInterval(()=>{},1000)";const writer=childProcess.spawn(process.execPath,['-e',program],{cwd:index===2?other:project,stdio:'pipe'});writers.push(writer);await once(writer.stdout,'data');writer.stdout.on('data',bytes=>{if(index===0&&bytes.toString().includes('closing'))closingSeen=true;});writer.stderr.resume();}
+    let childStatus=await client.readStatus(ref(project,31));await client.writeStatus(ref(project,31),{...childStatus,agentPid:writers[0].pid,processBirth:getProcessBirthMarker(writers[0].pid)});for(const [workspace,id,writer] of [[project,13,writers[1]],[other,31,writers[2]]])await operation('prepare_run',{root:workspace,executionLogId:id,nodeId,runKind:'step',prompt:'其它原任务',command:'controlled peer writer',userMessage:'其它对话不能停止',metadata:{interactiveSession:true,agentCli:'claude',collaborationReviewMode:'off',agentPid:writer.pid,processBirth:getProcessBirthMarker(writer.pid)},idempotencyKey:`stop-continuation-peer:${workspace}:${id}`});
+    let disposed=0;const errors=[],terminal={name:'solomap owned continuation',dispose(){assert.equal(extension.owned(31),false,'ownership clears before terminal disposal');assert.equal(live(writers[0]),false,'owned writer must exit before terminal disposal');disposed++;}},extension=loadCompiledModule('out/extension.js',`
+      module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;module.exports.stop=stopAgentRun;
+      module.exports.owned=id=>agentTerminalNamesByConversationId.has(id)||agentTerminalProjectRootsByConversationId.has(id);
+      module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+      module.exports.connect=(engine,project,root,terminal,error)=>{syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};ensureActionProject=async(_context,target)=>{if(target!==project)throw new Error('unexpected selected project');return project;};vscode.window.showErrorMessage=error;agentTerminalNamesByConversationId.set(31,terminal.name);agentTerminalProjectRootsByConversationId.set(31,project);vscode.window.terminals.push(terminal);};
+    `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./solomapGlobal':require('../out/solomapGlobal.js'),'./projectGrowth':require('../out/projectGrowth.js')});extension.connect(engine,project,root,terminal,message=>errors.push(message));await extension.settle(ref(project,29),undefined,root);await extension.drain();
+    const snapshot=async(workspace,id)=>{const reference=ref(workspace,id),state=await read(workspace,id),status=await client.readStatus(reference);return {state,journal:await client.readJournal(reference,status),settlements:await client.readSettlements(reference,status),binding:await client.readBinding(reference),report:await client.readReport(reference,status)};};const saved=new Map();for(const [workspace,id] of [[project,29],[project,31],[project,13],[other,31]])saved.set(`${workspace}:${id}`,await snapshot(workspace,id));assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(saved.get(`${project}:31`).state.status.interactiveSession,true);assert.equal((await client.getResumableSession(ref(project,31))).sessionId,prepared.status.plannedNativeSessionId);
+    for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await snapshot(project,29),saved.get(`${project}:29`));for(const id of [29,31])assert.equal((await client.readLog(ref(project,id),'stdout')).toString('utf8'),outputs.get(id));const hash=bytes=>require('node:crypto').createHash('sha256').update(bytes).digest('hex'),walPath=path.join(root,'solomap.db-wal'),beforeWrong=hash(fs.readFileSync(walPath));await extension.stop('not-the-requested-node',31);assert.equal(hash(fs.readFileSync(walPath)),beforeWrong);assert.ok(writers.every(live));assert.equal(disposed,0);
+    const ended=once(writers[0],'exit');assert.equal(await extension.action({}, {command:'conversation.stop',projectPath:project,nodeId,conversationId:31},'sidebar',{postMessage(){return Promise.resolve(true);}}),true);await ended;await extension.drain();assert.deepEqual(errors,[]);assert.equal(closingSeen,true);assert.equal(live(writers[0]),false);assert.equal(disposed,1);assert.equal(extension.owned(31),false);await extension.settle(ref(project,31),undefined,root);await extension.drain();const stopped=await snapshot(project,31);assert.equal(stopped.journal.entry.status,'Recorded','stopping continuation must record it without failing the original task');assert.match(stopped.journal.entry.output,/Continuation record state: Recorded/);assert.equal(stopped.state.status.stopReason,'用户已停止当前对话。');assert.match(stopped.journal.entry.output,/Interactive session state: Closed/);assert.doesNotMatch(stopped.journal.entry.output,/Failure category: (stopped_by_user|agent_exit_failed)/);assert.equal(stopped.settlements.length,2);for(const settlement of stopped.settlements){assert.equal(settlement.digest.status,'Recorded');assert.deepEqual(settlement.digest.failures,[]);}assert.deepEqual(stopped.settlements[1].digest,stopped.settlements[0].digest);assert.equal(stopped.state.status.stopRequested,true);assert.equal(stopped.state.status.interactiveSessionClosed,true);assert.equal(stopped.state.status.status,'Processed');assert.equal(stopped.state.taskId,prepared.taskId);assert.equal(stopped.state.taskId,child.taskId);assert.equal(stopped.state.turnId,saved.get(`${project}:31`).state.turnId);assert.equal(stopped.state.status.sourceParentRunId,prepared.runId);assert.equal(stopped.state.status.sourceParentTurnId,prepared.turnId);assert.equal(stopped.state.status.lineageRootExecutionLogId,29);assert.deepEqual(stopped.binding,saved.get(`${project}:31`).binding);for(const id of [29,31])assert.equal((await client.readLog(ref(project,id),'stdout')).toString('utf8'),outputs.get(id));for(const [workspace,id] of [[project,29],[project,13],[other,31]])assert.deepEqual(await snapshot(workspace,id),saved.get(`${workspace}:${id}`));assert.ok(writers.slice(1).every(live));assert.deepEqual(engine.getNodes(),originalNodes);
+    for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await snapshot(project,31),stopped);for(const id of [29,31])assert.equal((await client.readLog(ref(project,id),'stdout')).toString('utf8'),outputs.get(id));const beforeRepeat=hash(fs.readFileSync(walPath));await extension.stop(nodeId,31);await Promise.all([extension.settle(ref(project,31),undefined,root),extension.settle(ref(project,31),undefined,root)]);await extension.drain();assert.equal(hash(fs.readFileSync(walPath)),beforeRepeat);assert.equal(disposed,1);assert.deepEqual(await snapshot(project,31),stopped);for(const [workspace,id] of [[project,29],[project,13],[other,31]])assert.deepEqual(await snapshot(workspace,id),saved.get(`${workspace}:${id}`));assert.ok(writers.slice(1).every(live));assert.deepEqual(engine.getNodes(),originalNodes);for(const workspace of [project,other]){assert.equal(fs.readFileSync(path.join(workspace,'.solopreneur','roadmap.csv'),'utf8'),csv);assert.deepEqual(fs.readdirSync(path.join(workspace,'.solopreneur')).sort(),['project.json','roadmap.csv']);}
+  });
 });
 
-test('closing a continuation terminal records the conversation as stopped', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__handleAgentTerminalClosed = handleAgentTerminalClosed;',
-      'module.exports.__setRuntimeForTest = (engine, projectRoot) => { syncEngine = engine; activeProjectRoot = projectRoot; };',
-      'module.exports.__setAgentTerminalForTest = (conversationId, terminalName, projectRoot) => { agentTerminalNamesByConversationId.set(Number(conversationId), terminalName); agentTerminalProjectRootsByConversationId.set(Number(conversationId), projectRoot); };'
-    ].join('\n')
-  );
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-close-continuation-'));
-  const runDir = path.join(tempRoot, '.solopreneur', 'agent-runs', '__solo__', '41');
-  fs.mkdirSync(runDir, { recursive: true });
-  const outputFilePath = path.join(runDir, 'output.log');
-  fs.writeFileSync(outputFilePath, 'Working inside native continuation.\n', 'utf8');
-  const statusFilePath = path.join(tempRoot, '.solopreneur', 'agent-status', '41.json');
-  fs.mkdirSync(path.dirname(statusFilePath), { recursive: true });
-  fs.writeFileSync(statusFilePath, JSON.stringify({
-    nodeId: '__solo__',
-    runKind: 'solo_continue',
-    status: 'Running',
-    executionLogId: 41,
-    agentCli: 'codex',
-    outputFilePath,
-    nativeSessionId: '019dc472-6a80-7c70-99a4-b2593a641d11',
-    startedAt: '2026-05-24T00:00:00.000Z'
-  }), 'utf8');
-  let updatedStatus = '';
-  let updatedOutput = '';
-  extensionModule.__setRuntimeForTest({
-    getNodes: () => [],
-    updateNode: () => { throw new Error('closing a continuation terminal must not update roadmap node state'); },
-    getAgentExecutions: () => [{
-      id: 41,
-      nodeId: '__solo__',
-      agentCli: 'codex',
-      command: 'codex resume',
-      output: 'Agent continuation started.\n\nContinuation parent conversation: 39',
-      status: 'Running'
-    }],
-    updateAgentExecution: (_id, _cli, _command, output, status) => {
-      updatedOutput = output;
-      updatedStatus = status;
-      return true;
-    },
-    logAgentExecution: () => 41
-  }, tempRoot);
-  extensionModule.__setAgentTerminalForTest(41, 'solomap close test', tempRoot);
-
-  const handled = await extensionModule.__handleAgentTerminalClosed('solomap close test');
-
-  assert.equal(handled, true);
-  assert.equal(updatedStatus, 'Recorded');
-  assert.match(updatedOutput, /Continuation record state: Recorded/);
-  assert.match(updatedOutput, /Continuation session id: 019dc472-6a80-7c70-99a4-b2593a641d11/);
-  assert.match(fs.readFileSync(outputFilePath, 'utf8'), /Continuation terminal closed/);
+test('closing a continuation terminal records the conversation as stopped', async t => {
+  for(const kind of ['step_continue','solo_continue'])await t.test(kind,async t=>{
+    const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-stop-continuation-')),project=path.join(base,'project'),other=path.join(base,'other');fs.mkdirSync(project);fs.mkdirSync(other);const root=path.join(base,'.solomap-global'),closes=[],writers=[],{once}=require('node:events'),live=child=>child.exitCode===null&&child.signalCode===null;let native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);t.after(async()=>{for(const child of writers)if(live(child)){const ended=once(child,'exit');child.kill('SIGTERM');await ended;}for(const close of closes.splice(0).reverse())await close();});
+    const operation=(operation,input)=>native.ops({operation,input}),read=(workspace,id)=>operation('read_run_state',{root:workspace,executionLogId:id}),client=new (require('../out/runLifecycleClient.js').RunLifecycleClient)(operation,root),ref=(workspace,id)=>require('../out/runLifecycleClient.js').runStatusReference(workspace,id),nodeId=kind==='solo_continue'?'__solo__':'3';
+    const csv=['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt','3,完善体验,保原任务不失败,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'].join('\n'),csvPath=path.join(project,'.solopreneur','roadmap.csv'),otherCsvPath=path.join(other,'.solopreneur','roadmap.csv');fs.writeFileSync(csvPath,csv);fs.writeFileSync(otherCsvPath,csv);let engine=new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();t.after(()=>engine.close());const originalNodes=engine.getNodes().map(node=>({...node}));
+    const prepared=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'保原任务和完整结果',workspaceRoot:project,nodeId,executionLogId:29,userMessage:'原任务完整目标',runKind:kind==='solo_continue'?'solo':'step',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',directExecutionCommand:'controlled standalone fixture'},operation);
+    const cli=async(id,args)=>{const head=await operation('read_run_checkpoint_state',{root:project,executionLogId:id});await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),...args],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:String(id),SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:prepared.status.plannedNativeSessionId}});};
+    const outputs=new Map(),append=async(id)=>{const state=await read(project,id),output=`原${id}完整续聊输出🌿\n`.repeat(10000);outputs.set(id,output);await operation('append_run_log',{root:project,executionLogId:id,generation:state.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:`stop-continuation-output:${id}`});};
+    const report={schemaVersion:1,summary:'保留原任务成果',unmetRequirements:[],decisions:[],corrections:[],verification:[],commits:[],experienceUsage:[],lessons:[]};await append(29);await cli(29,['complete','--outcome','partial','--summary','原任务已有成果','--report-json',JSON.stringify(report)]);await cli(29,['session-close']);
+    const child=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'继续原任务',workspaceRoot:project,nodeId,executionLogId:31,userMessage:'只停止这次续聊',runKind:kind,globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',directExecutionCommand:'controlled standalone fixture',continuation:true,nativeSessionId:prepared.status.plannedNativeSessionId,parentExecutionLogId:29,expectedParentTurnId:prepared.turnId,metadata:{lineageRootExecutionLogId:29,terminalName:'solomap owned continuation'}},operation);const childBinding=await client.readBinding(ref(project,31));await client.writeBinding(ref(project,31),await client.readStatus(ref(project,31)),{expectedHeadRevision:childBinding.headRevision,confirmSessionId:prepared.status.plannedNativeSessionId,evidence:{source:'owned identity fixture',parentRunId:prepared.runId},idempotencyKey:'stop-continuation-confirmed-binding'});await append(31);
+    let closingSeen=false;for(let index=0;index<3;index++){const program=index===0?"let closing=false;process.on('SIGTERM',()=>{if(closing)return;closing=true;process.stdout.write('closing');setTimeout(()=>process.exit(0),350)});process.stdout.write('ready');setInterval(()=>{},1000)":"process.stdout.write('ready');setInterval(()=>{},1000)";const writer=childProcess.spawn(process.execPath,['-e',program],{cwd:index===2?other:project,stdio:'pipe'});writers.push(writer);await once(writer.stdout,'data');writer.stdout.on('data',bytes=>{if(index===0&&bytes.toString().includes('closing'))closingSeen=true;});writer.stderr.resume();}
+    for(const [workspace,id,writer] of [[project,13,writers[1]],[other,31,writers[2]]])await operation('prepare_run',{root:workspace,executionLogId:id,nodeId,runKind:'step',prompt:'其它原任务',command:'controlled peer writer',userMessage:'其它对话不能停止',metadata:{interactiveSession:true,agentCli:'claude',collaborationReviewMode:'off',agentPid:writer.pid,processBirth:getProcessBirthMarker(writer.pid)},idempotencyKey:`stop-continuation-peer:${workspace}:${id}`});
+    const errors=[],sent=[],consumerEntries=[],terminal={name:'solomap owned continuation',exitStatus:{reason:3},show(){},sendText(text){sent.push(text);},dispose(){assert.fail('OS close must not dispose a terminal');}};const compiled=fs.readFileSync(path.join(projectRoot,'out/extension.js'),'utf8'),registrationStart=compiled.indexOf("    if (typeof vscode.window.onDidCloseTerminal === 'function') {"),registrationEnd=compiled.indexOf('\n    // Register settings saved broadcast',registrationStart);assert.ok(registrationStart>=0&&registrationEnd>registrationStart);const registration=compiled.slice(registrationStart,registrationEnd),extension=loadCompiledModule('out/extension.js',`
+      const originalClosed=handleAgentTerminalClosed,closedPromises=[];let closeCallback;handleAgentTerminalClosed=(...args)=>{const promise=originalClosed(...args);closedPromises.push(promise);return promise;};
+      module.exports.subscribe=context=>{${registration}};module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};module.exports.closed=originalClosed;module.exports.launch=launchAgentConversationTerminal;module.exports.target=terminal=>agentTerminalRunTargets.get(terminal);module.exports.targetCount=()=>agentTerminalRunTargets.size;module.exports.shutdownReason=vscode.TerminalExitReason.Shutdown;
+      module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;module.exports.stop=stopAgentRun;
+      module.exports.owned=id=>agentTerminalNamesByConversationId.has(id)||agentTerminalProjectRootsByConversationId.has(id);
+      module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+      module.exports.connect=(engine,project,root,terminal,error,observe)=>{syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};ensureActionProject=async(_context,target)=>{if(target!==project)throw new Error('unexpected selected project');return project;};vscode.window.showErrorMessage=error;vscode.window.createTerminal=options=>{terminal.name=options.name;vscode.window.terminals.push(terminal);return terminal;};vscode.window.onDidCloseTerminal=callback=>{closeCallback=callback;return {dispose(){}};};const originalConsumer=processRegisteredStatusFile;processRegisteredStatusFile=async(...args)=>{await observe(args);return originalConsumer(...args);};};
+    `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./solomapGlobal':require('../out/solomapGlobal.js'),'./projectGrowth':require('../out/projectGrowth.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});extension.connect(engine,project,root,terminal,message=>errors.push(message),async args=>{assert.equal(live(writers[0]),false,'writer must exit before closure consumer');assert.equal(args[1],ref(project,31));assert.equal(args[4],root);consumerEntries.push(args);});extension.subscribe({subscriptions:[]});assert.equal(await extension.launch({workspaceRoot:project,label:kind,conversationId:31,nodeId,statusFilePath:ref(project,31),runKind:kind,globalDataPath:root,command:child.finalCommand,agentCli:'claude'}),terminal);const delivered=await read(project,31);await operation('claim_run',{root:project,executionLogId:31,expectedRevision:delivered.revision,agentPid:writers[0].pid,processBirth:getProcessBirthMarker(writers[0].pid),terminalDeliveryId:delivered.status.terminalDeliveryId,idempotencyKey:'close-continuation-controlled-writer-claim'});assert.equal(sent.filter(text=>text.includes('SOLOMAP_TERMINAL_DELIVERY_ID=')).length,1);assert.ok(sent.some(text=>text.endsWith(child.finalCommand)));assert.equal(extension.targetCount(),1);await extension.settle(ref(project,29),undefined,root);await extension.drain();
+    const snapshot=async(workspace,id)=>{const reference=ref(workspace,id),state=await read(workspace,id),status=await client.readStatus(reference);return {state,journal:await client.readJournal(reference,status),settlements:await client.readSettlements(reference,status),binding:await client.readBinding(reference),report:await client.readReport(reference,status)};};const saved=new Map();for(const [workspace,id] of [[project,29],[project,31],[project,13],[other,31]])saved.set(`${workspace}:${id}`,await snapshot(workspace,id));assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(saved.get(`${project}:31`).state.status.interactiveSession,true);assert.equal((await client.getResumableSession(ref(project,31))).sessionId,prepared.status.plannedNativeSessionId);
+    for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await snapshot(project,29),saved.get(`${project}:29`));for(const id of [29,31])assert.equal((await client.readLog(ref(project,id),'stdout')).toString('utf8'),outputs.get(id));const hash=bytes=>require('node:crypto').createHash('sha256').update(bytes).digest('hex'),walPath=path.join(root,'solomap.db-wal'),beforeWrong=hash(fs.readFileSync(walPath));terminal.exitStatus.reason=extension.shutdownReason;assert.deepEqual([...await extension.emit(terminal)],[false]);terminal.exitStatus.reason=3;assert.equal(await extension.closed(terminal.name,3,{...extension.target(terminal),generation:saved.get(`${project}:31`).state.generation+2}),false);assert.equal(hash(fs.readFileSync(walPath)),beforeWrong);assert.ok(writers.every(live));assert.equal(extension.owned(31),true);assert.equal(extension.targetCount(),1);
+    const ended=once(writers[0],'exit');assert.deepEqual([...await extension.emit(terminal)],[true]);await ended;await extension.drain();assert.deepEqual(errors,[]);assert.equal(closingSeen,true);assert.equal(live(writers[0]),false);assert.equal(extension.targetCount(),0);assert.equal(extension.owned(31),false);await extension.settle(ref(project,31),undefined,root);await extension.drain();const stopped=await snapshot(project,31);assert.equal(stopped.journal.entry.status,'Recorded','closing continuation must record it without failing the original task');assert.match(stopped.journal.entry.output,/Continuation record state: Recorded/);assert.equal(stopped.state.status.stopReason,'用户已关闭当前对话终端。');assert.equal(consumerEntries.length,2);assert.match(stopped.journal.entry.output,/Interactive session state: Closed/);assert.doesNotMatch(stopped.journal.entry.output,/Failure category: (stopped_by_user|agent_exit_failed)/);assert.equal(stopped.settlements.length,2);for(const settlement of stopped.settlements){assert.equal(settlement.digest.status,'Recorded');assert.deepEqual(settlement.digest.failures,[]);}assert.deepEqual(stopped.settlements[1].digest,stopped.settlements[0].digest);assert.equal(stopped.state.status.stopRequested,true);assert.equal(stopped.state.status.interactiveSessionClosed,true);assert.equal(stopped.state.status.status,'Processed');assert.equal(stopped.state.taskId,prepared.taskId);assert.equal(stopped.state.taskId,child.taskId);assert.equal(stopped.state.turnId,saved.get(`${project}:31`).state.turnId);assert.equal(stopped.state.status.sourceParentRunId,prepared.runId);assert.equal(stopped.state.status.sourceParentTurnId,prepared.turnId);assert.equal(stopped.state.status.lineageRootExecutionLogId,29);assert.deepEqual(stopped.binding,saved.get(`${project}:31`).binding);for(const id of [29,31])assert.equal((await client.readLog(ref(project,id),'stdout')).toString('utf8'),outputs.get(id));for(const [workspace,id] of [[project,29],[project,13],[other,31]])assert.deepEqual(await snapshot(workspace,id),saved.get(`${workspace}:${id}`));assert.ok(writers.slice(1).every(live));assert.deepEqual(engine.getNodes(),originalNodes);
+    for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await snapshot(project,31),stopped);for(const id of [29,31])assert.equal((await client.readLog(ref(project,id),'stdout')).toString('utf8'),outputs.get(id));const beforeRepeat=hash(fs.readFileSync(walPath));assert.deepEqual([...await extension.emit(terminal)],[false]);await Promise.all([extension.settle(ref(project,31),undefined,root),extension.settle(ref(project,31),undefined,root)]);await extension.drain();assert.equal(hash(fs.readFileSync(walPath)),beforeRepeat);assert.equal(extension.targetCount(),0);assert.deepEqual(await snapshot(project,31),stopped);for(const [workspace,id] of [[project,29],[project,13],[other,31]])assert.deepEqual(await snapshot(workspace,id),saved.get(`${workspace}:${id}`));assert.ok(writers.slice(1).every(live));assert.deepEqual(engine.getNodes(),originalNodes);for(const workspace of [project,other]){assert.equal(fs.readFileSync(path.join(workspace,'.solopreneur','roadmap.csv'),'utf8'),csv);assert.deepEqual(fs.readdirSync(path.join(workspace,'.solopreneur')).sort(),['project.json','roadmap.csv']);}
+  });
 });
 
 test('agent execution log updates one conversation instead of creating a duplicate', async () => {
@@ -14127,7 +14402,7 @@ test('cognitive Runtime config uses the same normalized data root as the detache
 test('manual experience review is routed from the existing settings action', async () => {
   const extensionModule = loadCompiledModule('out/extension.js', 'module.exports.__review = handleReviewGlobalPrompt;');
   assert.equal(typeof extensionModule.__review, 'function');
-  const { buildLearningReviewPrompt } = require('../out/learningReviewApply.js');
+  const { buildLearningReviewPrompt } = require('./fixtures/legacy-learning-review-apply.cjs');
   const { reviewHash } = require('../out/learningReview.js');
   const manifest = { schemaVersion: 1, runId: 'review-1', globalRoot: '/global', globalPrompt: 'Keep scope.', promptHash: reviewHash('Keep scope.'), projects: [], sources: [], memory: [], gaps: [] };
   const prompt = buildLearningReviewPrompt('/review/manifest.json', manifest, '/review/proposal.json');
@@ -14140,20 +14415,28 @@ test('manual experience review is routed from the existing settings action', asy
   assert.match(prompt, /应用阶段只允许插件写 globalPrompt、分层 memory Markdown 和学习候选/);
 });
 
-test('concurrent settings patches serialize without restoring stale values', async () => {
+test('concurrent settings patches serialize without restoring stale values', async t => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'concurrent-settings-'));
+  const globalRoot = path.join(tempRoot, '.solomap-global');
+  const store = new UnifiedDataStore(globalRoot), operations = createRuntimeDataOperations(store);
+  t.after(async () => { await operations.close(); store.close(); });
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
       'module.exports.__updatePersistedSettings = updatePersistedSettings;',
-      'module.exports.__getPersistedSettings = getPersistedSettings;'
+      'module.exports.__getPersistedSettings = getPersistedSettings;',
+      'module.exports.__connectSettingsDatabase = (call) => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request); autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {}; };'
     ].join('\n')
   );
   const saved = {
     cliPath: 'codex',
     language: 'en',
     globalPrompt: 'Original',
-    globalDataPath: ''
+    globalDataPath: globalRoot
   };
+  extensionModule.__connectSettingsDatabase(operations);
   const writes = [];
   let releaseFirstWrite;
   let writeCount = 0;
@@ -14193,6 +14476,8 @@ test('concurrent settings patches serialize without restoring stale values', asy
   assert.equal(writes.length, 2);
   assert.equal(writes[1].language, 'zh');
   assert.equal(writes[1].globalPrompt, 'Keep the newer prompt');
+  const policy = await operations({ operation: 'read_global_prompt_policy', input: {} });
+  assert.equal(policy.data.content, 'Keep the newer prompt');
 });
 
 test('scheduled automation computes the next daily trigger time', () => {
@@ -14263,343 +14548,462 @@ test('scheduled automation computes the next daily trigger time', () => {
   );
 });
 
-test('Flow pause and abandon commands work correctly', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, context) => { syncEngine = engine; activeProjectRoot = projectRoot; extensionContextRef = context; };',
-      'module.exports.__updateFlowTrace = flowStore_1.updateFlowTrace;',
-      'module.exports.__readFlowTrace = flowStore_1.readFlowTrace;'
-    ].join('\n')
-  );
-  
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-flow-ctrl-'));
-  const mockContext = {
-    globalState: {
-      get: (key) => ({}),
-      update: (key, val) => Promise.resolve()
-    }
+test('Flow pause and abandon commands work correctly', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-flow-ctrl-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'), other = path.join(base, 'other');
+  fs.mkdirSync(project); fs.mkdirSync(other);
+  const closes = [], fixture = require('./analysis-fixture.js');
+  let native = await fixture.openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: project }, { path: other }]);
+  t.after(async () => { for (const close of closes.splice(0).reverse()) await close(); });
+  const transport = require('../out/autonomousRuntimeControl.js');
+  const call = (operation, input) => transport.sendRuntimeDataRequest(root, { operation, input });
+  const flowStore = require('../out/flowStore.js');
+  const trace = flowStore.createFlowTrace(project, '暂停后仍保留完整任务🌿', { roadmapStepId: '3', selectedAgentCli: 'claude', selectedModel: 'chosen-model' });
+  trace.flowId = 'test-flow-123'; trace.currentLoopIndex = 2;
+  trace.loops = [flowStore.createFlowLoop('上一轮完整结果', 1), flowStore.createFlowLoop(trace.goal, 2)];
+  trace.loops[0].status = 'closed'; trace.loops[0].verifier = { status: 'completed', data: { fullOutput: '上一轮完整验证🌿\n'.repeat(10000) } };
+  trace.loops[1].summary = '当前轮完整上下文🌿\n'.repeat(10000);
+  const created = await call('write_flow_trace', { root: project, flow: trace, expectedRevision: 0, idempotencyKey: 'flow-controls-create' });
+  const peer = structuredClone(trace); peer.flowId = 'peer-flow'; peer.goal = '同项目其他目标';
+  const foreign = structuredClone(trace); foreign.projectPath = other; foreign.goal = '同编号其他项目';
+  await call('write_flow_trace', { root: project, flow: peer, expectedRevision: 0, idempotencyKey: 'flow-controls-peer' });
+  await call('write_flow_trace', { root: other, flow: foreign, expectedRevision: 0, idempotencyKey: 'flow-controls-foreign' });
+  const roleInput = { root: project, flowId: trace.flowId, loopId: 'loop-2', role: 'planner', attempt: 0, prompt: '完整下一角色输入', command: '', userMessage: trace.goal, status: 'Preparing', metadata: { launchIntentHash: 'flow-controls-planner', agentCli: 'claude' }, deliveryOwner: { id: 'closed-window', pid: 99999999, birth: 'gone' }, launchRequest: { workspaceRoot: project, executionLogId: 0, nodeId: `__flow__::${trace.flowId}::loop-2::planner` }, idempotencyKey: 'flow-controls-role' };
+  const role = await call('prepare_flow_role', roleInput), id = role.status.rootExecutionLogId;
+  const csv = ['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt', '3,保留路线图,暂停不修改任务环节,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'].join('\n');
+  for (const workspace of [project, other]) fs.writeFileSync(path.join(workspace, '.solopreneur', 'roadmap.csv'), csv);
+  const state = () => call('read_flow_trace', { root: project, flowId: trace.flowId });
+  const roleState = () => call('read_run_checkpoint_state', { root: project, executionLogId: id });
+  const permission = () => call('read_run_launch_permission', { root: project, executionLogId: id, generation: role.generation, proof: role.proof, expectedTurnId: role.turnId });
+  const current = await state(), roleBefore = await roleState(), peerBefore = await call('read_flow_trace', { root: project, flowId: peer.flowId }), foreignBefore = await call('read_flow_trace', { root: other, flowId: foreign.flowId });
+  const taskBefore = native.store.read(created.taskId);
+  assert.equal((await permission()).permission, 'allow');
+  assert.equal((await call('list_run_deliveries', { root: project })).items.length, 1);
+  const messages = [], context = {}, panel = { webview: { postMessage: async message => { messages.push(message); return true; } } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.action = handleSharedWebviewAction;
+    module.exports.connect = (project, root, panel) => { activeProjectRoot = project; extensionContextRef = {}; activePanel = panel; sidebarProvider = null; getPersistedSettings = () => ({ globalDataPath: root }); hasFlowModeAccess = async () => true; };
+  `, { './autonomousRuntimeControl': transport, './flowStore': flowStore });
+  extension.connect(project, root, panel);
+  const action = command => extension.action(context, { command, flowId: trace.flowId }, 'roadmap', panel.webview);
+  assert.deepEqual([...await Promise.all([action('pauseFlow'), action('flow.pause')])], [true, true]);
+  const paused = await state();
+  assert.equal(paused.flow.status, 'paused'); assert.match(paused.flow.latestSummary, /暂停推进/);
+  assert.equal(paused.objectId, current.objectId); assert.equal(paused.taskId, current.taskId);
+  assert.deepEqual(paused.flow.loops, current.flow.loops); assert.deepEqual(paused.flow.source, current.flow.source);
+  assert.equal(paused.flow.goal, trace.goal); assert.equal(paused.flow.currentLoopIndex, 2);
+  const pausedTask = native.store.read(created.taskId);
+  assert.equal(pausedTask.data.status, 'paused'); assert.equal(pausedTask.data.original_request_content, taskBefore.data.original_request_content);
+  assert.equal(pausedTask.data.conversation_id, taskBefore.data.conversation_id);
+  assert.ok(messages.length >= 2); assert.ok(messages.every(message => message.command === 'flowStateLoaded' && message.projectPath === project && message.state.hasProAccess === true && message.state.flow.status === 'paused'));
+  assert.deepEqual(await roleState(), roleBefore);
+  for (const close of closes.splice(0).reverse()) await close();
+  native = await fixture.openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: project }, { path: other }]);
+  assert.deepEqual(await state(), paused); assert.deepEqual(native.store.read(created.taskId), pausedTask);
+  const hash = bytes => require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+  const wal = path.join(root, 'solomap.db-wal');
+  const blocked = async (expectedPermission, expectedReason, stage) => {
+    const before = hash(fs.readFileSync(wal));
+    assert.deepEqual(await permission(), { permission: expectedPermission, reason: expectedReason });
+    assert.equal((await call('list_run_deliveries', { root: project })).items.length, 0);
+    await assert.rejects(call('claim_run_delivery', { root: project, executionLogId: id, generation: role.generation, expectedRevision: roleBefore.revision, owner: { id: 'other-window', pid: process.pid, birth: getProcessBirthMarker(process.pid) }, idempotencyKey: `flow-controls-${stage}-claim` }), /flow_not_running/);
+    await assert.rejects(call('prepare_flow_role', { ...roleInput, role: 'builder', idempotencyKey: `flow-controls-${stage}-builder` }), /flow_not_running/);
+    assert.equal(hash(fs.readFileSync(wal)), before, 'rejected launch cannot mutate the database');
+    assert.deepEqual(await roleState(), roleBefore);
   };
-  extensionModule.__setRuntimeForTest(null, tempRoot, mockContext);
-  
-  const trace = {
-    schemaVersion: 1,
-    flowId: 'test-flow-123',
-    projectPath: tempRoot,
-    goal: 'Test flow control',
-    status: 'running',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    source: { type: 'goal', userInput: 'Test flow control' },
-    currentLoopIndex: 1,
-    loops: [
-      {
-        loopId: 'loop-1',
-        index: 1,
-        goal: 'Test flow control',
-        status: 'created',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        planner: { status: 'pending' },
-        builder: { status: 'pending' },
-        verifier: { status: 'pending' }
-      }
-    ]
-  };
-  
-  const flowsDir = path.join(tempRoot, '.solopreneur', 'flows');
-  fs.mkdirSync(flowsDir, { recursive: true });
-  fs.writeFileSync(path.join(flowsDir, 'test-flow-123.json'), JSON.stringify(trace), 'utf8');
-
-  extensionModule.__updateFlowTrace(tempRoot, 'test-flow-123', (t) => {
-    t.status = 'paused';
-    t.latestSummary = 'Flow 已被用户手动暂停推进。';
-    return t;
-  });
-  
-  const pausedTrace = extensionModule.__readFlowTrace(tempRoot, 'test-flow-123');
-  assert.equal(pausedTrace.status, 'paused');
-  assert.match(pausedTrace.latestSummary, /暂停推进/);
-
-  extensionModule.__updateFlowTrace(tempRoot, 'test-flow-123', (t) => {
-    t.status = 'abandoned';
-    t.latestSummary = 'Flow 已被用户手动放弃。';
-    if (t.loops.length > 0) {
-      t.loops[t.loops.length - 1].status = 'abandoned';
-    }
-    return t;
-  });
-
-  const abandonedTrace = extensionModule.__readFlowTrace(tempRoot, 'test-flow-123');
-  assert.equal(abandonedTrace.status, 'abandoned');
-  assert.equal(abandonedTrace.loops[0].status, 'abandoned');
+  await blocked('wait', 'flow_paused', 'paused');
+  assert.equal(await action('abandonFlow'), true);
+  const abandoned = await state(), abandonedTask = native.store.read(created.taskId);
+  assert.equal(abandoned.flow.status, 'abandoned'); assert.match(abandoned.flow.latestSummary, /手动放弃/);
+  assert.equal(abandoned.flow.loops[1].status, 'abandoned');
+  assert.deepEqual(abandoned.flow.loops[0], current.flow.loops[0]);
+  assert.deepEqual({ ...abandoned.flow.loops[1], status: current.flow.loops[1].status }, current.flow.loops[1]);
+  assert.equal(abandoned.objectId, current.objectId); assert.equal(abandoned.taskId, current.taskId);
+  assert.deepEqual(abandoned.flow.source, current.flow.source); assert.equal(abandoned.flow.goal, trace.goal);
+  assert.equal(abandonedTask.data.status, 'abandoned'); assert.equal(abandonedTask.data.original_request_content, taskBefore.data.original_request_content);
+  assert.equal(abandonedTask.data.conversation_id, taskBefore.data.conversation_id);
+  assert.equal(messages.at(-1).state.flow.status, 'abandoned'); assert.equal(messages.at(-1).state.flow.loops[1].status, 'abandoned');
+  await blocked('deny', 'flow_not_running', 'abandoned');
+  for (const close of closes.splice(0).reverse()) await close();
+  native = await fixture.openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: project }, { path: other }]);
+  assert.deepEqual(await state(), abandoned); assert.deepEqual(native.store.read(created.taskId), abandonedTask);
+  const recoveredPayload = await flowStore.buildFlowStatePayload(project, true, root);
+  assert.deepEqual(recoveredPayload.flow, abandoned.flow); assert.equal(recoveredPayload.history.find(item => item.flowId === trace.flowId).status, 'abandoned');
+  await blocked('deny', 'flow_not_running', 'reopened');
+  const beforeNegative = hash(fs.readFileSync(wal));
+  assert.equal(await extension.action(context, { command: 'pauseFlow' }, 'roadmap', panel.webview), true);
+  assert.equal(await extension.action(context, { command: 'flow.abandon', flowId: 'not-registered' }, 'roadmap', panel.webview), true);
+  extension.connect('', root, panel); assert.equal(await action('flow.pause'), true);
+  assert.equal(hash(fs.readFileSync(wal)), beforeNegative); assert.deepEqual(await state(), abandoned);
+  assert.deepEqual(await call('read_flow_trace', { root: project, flowId: peer.flowId }), peerBefore);
+  assert.deepEqual(await call('read_flow_trace', { root: other, flowId: foreign.flowId }), foreignBefore);
+  assert.equal((await call('read_project_journal', { root: project })).logs.length, 1);
+  for (const workspace of [project, other]) {
+    assert.equal(fs.readFileSync(path.join(workspace, '.solopreneur', 'roadmap.csv'), 'utf8'), csv);
+    assert.deepEqual(fs.readdirSync(path.join(workspace, '.solopreneur')).sort(), ['project.json', 'roadmap.csv']);
+  }
 });
 
-test('Verifier successful close auto-attributes roadmap step status to Completed', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, context) => { syncEngine = engine; activeProjectRoot = projectRoot; extensionContextRef = context; };',
-      'module.exports.__processFlowStatusFile = processFlowStatusFile;',
-      'module.exports.__readFlowTrace = flowStore_1.readFlowTrace;'
-    ].join('\n')
-  );
-  
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-flow-attribution-'));
-  const mockContext = {
-    globalState: {
-      get: (key) => ({}),
-      update: (key, val) => Promise.resolve()
+test('Verifier successful close auto-attributes roadmap step status to Completed', async t => {
+  for (const mode of ['foreground', 'background', 'paused', 'abandoned', 'needs_user_confirmation']) await t.test(mode, async t => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-flow-attribution-'));
+    const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'), other = path.join(base, 'other');
+    fs.mkdirSync(project); fs.mkdirSync(other);
+    const closes = [], fixture = require('./analysis-fixture.js');
+    let native = await fixture.openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: project }, { path: other }]);
+    t.after(async () => { for (const close of closes.splice(0).reverse()) await close(); });
+    const transport = require('../out/autonomousRuntimeControl.js'), operation = async (operation, input) => { try { return await transport.sendRuntimeDataRequest(root, { operation, input }); } catch (error) { error.message = `${operation} root=${input.root || ''} flow=${input.flowId || ''}: ${error.message}`; throw error; } };
+    const { SyncEngine } = require('../out/db/syncEngine.js'), engines = [];
+    const csv = ['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt', '3,交付真实结果,验证后完成,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,', '4,另一个任务,不能误改,实施,,claude,Keep,In Progress,2026-01-01T00:00:00.000Z,'].join('\n');
+    for (const workspace of [project, other]) {
+      const csvPath = path.join(workspace, '.solopreneur', 'roadmap.csv'); fs.writeFileSync(csvPath, csv);
+      const engine = new SyncEngine(csvPath, path.join(workspace, '.solopreneur', 'project_journal.db'), projectRoot, root); await engine.initAndSync(); engines.push(engine);
     }
-  };
-  extensionModule.__setRuntimeForTest(null, tempRoot, mockContext);
-  
-  const mockNodes = [
-    { id: 'step-1', title: 'Task 1', status: 'In Progress', dependencies: '' }
-  ];
-  const mockEngine = {
-    updateNode(id, fields) {
-      const node = mockNodes.find(n => n.id === id);
-      if (node) {
-        Object.assign(node, fields);
-      }
-    },
-    getNodes() {
-      return mockNodes;
-    },
-    updateAgentExecution() {},
-    logAgentExecution() {
-      return 123;
+    t.after(() => { for (const engine of engines) engine.close(); });
+    const [engine, foreignEngine] = engines, originalNodes = engine.getNodes().map(node => ({ ...node })), foreignNodes = foreignEngine.getNodes().map(node => ({ ...node }));
+    const { createFlowTrace, createFlowLoop } = require('../out/flowStore.js');
+    const flow = createFlowTrace(project, '完成实际用户目标🌿', { roadmapStepId: '3', selectedAgentCli: 'grok' }); flow.flowId = 'test-flow-456'; flow.loops = [createFlowLoop(flow.goal, 1)];
+    flow.loops[0].status = 'verifying'; flow.loops[0].planner = { status: 'completed', data: { completePlan: '完整计划上下文🌿\n'.repeat(10000) } }; flow.loops[0].builder = { status: 'completed', data: { summary: '完整实施上下文🌿\n'.repeat(10000) } };
+    flow.loops[0].evidence = { changedFilesSummary: 'A result.txt', touchedFilesSummary: 'A result.txt', outputTail: '实际产物已创建', commandFilePath: '', outputFilePath: '', changesFilePath: '', touchedFilesPath: '' };
+    const created = await operation('write_flow_trace', { root: project, flow, expectedRevision: 0, idempotencyKey: `attribution:${mode}:flow` });
+    const foreign = structuredClone(flow); foreign.projectPath = other; foreign.goal = '另一项目同编号不能完成';
+    const foreignCreated = await operation('write_flow_trace', { root: other, flow: foreign, expectedRevision: 0, idempotencyKey: `attribution:${mode}:foreign-flow` });
+    const roleInput = (workspace, goal) => ({ root: workspace, flowId: flow.flowId, loopId: 'loop-1', role: 'verifier', attempt: 0, prompt: '完整验证输入', command: 'controlled verifier evidence fixture', userMessage: goal, status: 'Running', metadata: { agentCli: 'grok', globalDataPath: root, launchIntentHash: `attribution:${mode}:${workspace}` }, idempotencyKey: `attribution:${mode}:${workspace}:role` });
+    const run = await operation('prepare_flow_role', roleInput(project, flow.goal)), peer = await operation('prepare_flow_role', roleInput(other, foreign.goal));
+    assert.equal(run.status.rootExecutionLogId, peer.status.rootExecutionLogId);
+    const id = run.status.rootExecutionLogId, reference = require('../out/runLifecycleClient.js').runStatusReference(project, id), peerReference = require('../out/runLifecycleClient.js').runStatusReference(other, id);
+    const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)(operation, root);
+    const current = () => operation('read_flow_trace', { root: project, flowId: flow.flowId });
+    const snapshotRun = async ref => { const status = await client.readStatus(ref); return { state: await operation('read_run_checkpoint_state', { root: ref === peerReference ? other : project, executionLogId: id }), journal: await client.readJournal(ref, status), binding: await client.readBinding(ref), report: await client.readReport(ref, status), settlements: await client.readSettlements(ref, status) }; };
+    const foreignBefore = await operation('read_flow_trace', { root: other, flowId: flow.flowId }), peerBefore = await snapshotRun(peerReference), foreignTaskBefore = native.store.read(foreignCreated.taskId);
+    const before = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+    await operation('write_run_document', { projectId: run.projectId, executionLogId: id, generation: run.generation, turnId: run.turnId, purpose: require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId, 'before'), bytes: Buffer.from(JSON.stringify(before)).toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: `attribution:${mode}:before` });
+    fs.writeFileSync(path.join(project, 'result.txt'), '真实隔离测试产物🌿');
+    const verdict = { checks: [{ criterion: '实际产物', status: 'pass', evidence: ['result.txt'], reason: '已检查结果' }], H: { pass: true, reason: 'result.txt实际存在' }, I: { pass: true, reason: '符合原目标' }, J: { pass: true, reason: '完成验证' }, recommendedStatus: mode === 'needs_user_confirmation' ? mode : 'closed', summary: '验证结果完整保留' };
+    const fullOutput = '完整验证输出🌿\n'.repeat(10000) + `SOLOMAP_FLOW_JSON_START\n${JSON.stringify(verdict)}\nSOLOMAP_FLOW_JSON_END`;
+    await operation('append_run_log', { root: project, executionLogId: id, generation: run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from(fullOutput).toString('base64'), idempotencyKey: `attribution:${mode}:stdout` });
+    const head = await operation('read_run_checkpoint_state', { root: project, executionLogId: id });
+    const report = { schemaVersion: 1, summary: '已保留完整验证结果', unmetRequirements: [], decisions: [], corrections: [], verification: [], commits: [], experienceUsage: [], lessons: [] };
+    await require('node:util').promisify(childProcess.execFile)(process.execPath, [path.join(projectRoot, 'out/taskCheckpointProcess.js'), 'complete', '--outcome', 'partial', '--summary', '真实检查点提交完整验证', '--report-json', JSON.stringify(report)], { env: { ...process.env, SOLOMAP_GLOBAL_DATA_PATH: root, SOLOMAP_PROJECT_ID: head.projectId, SOLOMAP_EXECUTION_LOG_ID: String(id), SOLOMAP_RUN_GENERATION: String(head.generation), SOLOMAP_RUN_PROOF: head.proof, SOLOMAP_TASK_TURN_ID: head.turnId } });
+    if (['paused', 'abandoned'].includes(mode)) {
+      const saved = await current(); saved.flow.status = mode; if (mode === 'abandoned') saved.flow.loops[0].status = mode;
+      await operation('write_flow_trace', { root: project, flow: saved.flow, expectedRevision: saved.revision, idempotencyKey: `attribution:${mode}:before-consumer` });
     }
-  };
-  extensionModule.__setRuntimeForTest(mockEngine, tempRoot);
-
-  const trace = {
-    schemaVersion: 1,
-    flowId: 'test-flow-456',
-    projectPath: tempRoot,
-    goal: 'Complete Task 1',
-    status: 'running',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    source: { type: 'goal', userInput: 'Complete Task 1', roadmapStepId: 'step-1' },
-    currentLoopIndex: 1,
-    loops: [
-      {
-        loopId: 'loop-1',
-        index: 1,
-        goal: 'Complete Task 1',
-        status: 'verifying',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        planner: { status: 'completed' },
-        builder: { status: 'completed' },
-        verifier: { status: 'running' }
-      }
-    ]
-  };
-  
-  const flowsDir = path.join(tempRoot, '.solopreneur', 'flows');
-  fs.mkdirSync(flowsDir, { recursive: true });
-  fs.writeFileSync(path.join(flowsDir, 'test-flow-456.json'), JSON.stringify(trace), 'utf8');
-
-  const logDir = path.join(tempRoot, '.solopreneur', 'flows', 'test-flow-456', 'loop-1', 'verifier', '123');
-  fs.mkdirSync(logDir, { recursive: true });
-  
-  const verifierJson = {
-    checks: [{ criterion: 'Verify CRM', status: 'pass', evidence: [], reason: '' }],
-    H: { pass: true, reason: 'Files modified' },
-    I: { pass: true, reason: 'Aligns with goal' },
-    J: { pass: true, reason: 'Good design' },
-    recommendedStatus: 'closed',
-    summary: 'Task 1 fully closed'
-  };
-  
-  fs.writeFileSync(
-    path.join(logDir, 'output.log'),
-    `SOLOMAP_FLOW_JSON_START\n${JSON.stringify(verifierJson)}\nSOLOMAP_FLOW_JSON_END`,
-    'utf8'
-  );
-
-  const statusData = {
-    nodeId: '__flow__::test-flow-456::loop-1::verifier',
-    status: 'In Progress',
-    executionLogId: 123,
-    outputFilePath: path.join(logDir, 'output.log'),
-    changesFilePath: '',
-    touchedFilesPath: '',
-    commandFilePath: ''
-  };
-
-  await extensionModule.__processFlowStatusFile(null, statusData);
-
-  const updatedTrace = extensionModule.__readFlowTrace(tempRoot, 'test-flow-456');
-  assert.equal(updatedTrace.status, 'completed');
-  assert.equal(mockNodes[0].status, 'Completed');
-});
-
-test('Flow role output validation error triggers self-correction loop', async () => {
-  const extensionModule = loadCompiledModule(
-    'out/extension.js',
-    [
-      'module.exports.__setRuntimeForTest = (engine, projectRoot, context) => { syncEngine = engine; activeProjectRoot = projectRoot; extensionContextRef = context; };',
-      'module.exports.__processFlowStatusFile = processFlowStatusFile;',
-      'module.exports.__readFlowTrace = flowStore_1.readFlowTrace;',
-      'module.exports.__setStartFlowRoleRun = (fn) => { startFlowRoleRun = fn; };'
-    ].join('\n')
-  );
-  
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-flow-retry-'));
-  const mockContext = {
-    globalState: {
-      get: (key) => ({}),
-      update: (key, val) => Promise.resolve()
-    }
-  };
-  extensionModule.__setRuntimeForTest(null, tempRoot, mockContext);
-  
-  let startRoleRunCalled = false;
-  let startRoleRunPayload = null;
-  extensionModule.__setStartFlowRoleRun(async (context, payload) => {
-    startRoleRunCalled = true;
-    startRoleRunPayload = payload;
+    const accepted = await snapshotRun(reference), acceptedFlow = await current();
+    assert.deepEqual(accepted.report.report, report); assert.equal(accepted.report.availability, 'available'); assert.equal(accepted.report.validationError, ''); assert.equal(accepted.state.turnId, run.turnId);
+    assert.equal((await client.readLog(reference, 'stdout')).toString('utf8'), fullOutput);
+    assert.deepEqual(engine.getNodes(), originalNodes);
+    for (const close of closes.splice(0).reverse()) await close();
+    native = await fixture.openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: project }, { path: other }]);
+    assert.deepEqual(await snapshotRun(reference), accepted); assert.deepEqual(await current(), acceptedFlow);
+    const extension = loadCompiledModule('out/extension.js', `
+      module.exports.settle = processAgentStatusFile;
+      module.exports.drain = async () => { do { await new Promise(resolve => setTimeout(resolve, 0)); } while (processingAgentStatusFiles.size || pendingAgentStatusFiles.size); };
+      module.exports.connect = (engine, project, root, background) => { syncEngine = engine; activeProjectRoot = project; extensionContextRef = background ? { extensionPath: path.resolve(__dirname, '..') } : null; getPersistedSettings = () => ({ globalDataPath: root }); sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {}; };
+    `, { './autonomousRuntimeControl': transport, './db/syncEngine': require('../out/db/syncEngine.js'), './flowStore': require('../out/flowStore.js'), './solomapGlobal': require('../out/solomapGlobal.js') });
+    extension.connect(mode === 'background' ? foreignEngine : engine, mode === 'background' ? other : project, root, mode === 'background');
+    await Promise.all([extension.settle(reference, undefined, root), extension.settle(reference, undefined, root)]); await extension.drain();
+    await engine.initAndSync(); await foreignEngine.initAndSync();
+    const closed = await current(), settled = await snapshotRun(reference), expectedFlowStatus = ['foreground', 'background'].includes(mode) ? 'completed' : mode;
+    assert.equal(closed.flow.status, expectedFlowStatus); assert.equal(closed.objectId, created.objectId); assert.equal(closed.taskId, created.taskId);
+    assert.equal(native.store.read(created.taskId).data.status, expectedFlowStatus);
+    assert.deepEqual(closed.flow.source, flow.source); assert.equal(closed.flow.goal, flow.goal);
+    assert.deepEqual(closed.flow.loops[0].planner, flow.loops[0].planner); assert.deepEqual(closed.flow.loops[0].builder, flow.loops[0].builder); assert.deepEqual(closed.flow.loops[0].evidence, flow.loops[0].evidence);
+    assert.equal(closed.flow.loops[0].verifier.status, 'completed'); assert.deepEqual(closed.flow.loops[0].verifier.data, verdict);
+    assert.equal(closed.flow.loops[0].scoring.hardEvidencePass, true); assert.equal(closed.flow.loops[0].scoring.intentPass, true); assert.equal(closed.flow.loops[0].scoring.judgmentPass, true);
+    assert.equal(closed.flow.loops[0].status, mode === 'abandoned' ? mode : mode === 'needs_user_confirmation' ? mode : 'closed');
+    assert.equal(settled.state.taskId, run.taskId); assert.equal(settled.state.turnId, run.turnId); assert.deepEqual(settled.report, accepted.report); assert.deepEqual(settled.binding, accepted.binding);
+    assert.equal(settled.journal.entry.status, 'Completed'); assert.equal(settled.settlements.length, 1); assert.deepEqual(settled.settlements[0].digest.failures, []);
+    assert.equal((await client.readLog(reference, 'stdout')).toString('utf8'), fullOutput);
+    const nodes = engine.getNodes(), completed = ['foreground', 'background'].includes(mode);
+    assert.equal(nodes.find(node => node.id === '3').status, completed ? 'Completed' : originalNodes.find(node => node.id === '3').status);
+    if (completed) assert.equal(nodes.find(node => node.id === '3').completedAt, closed.flow.completedAt);
+    else assert.deepEqual(nodes, originalNodes);
+    assert.deepEqual(nodes.find(node => node.id === '4'), originalNodes.find(node => node.id === '4'));
+    assert.deepEqual(foreignEngine.getNodes(), foreignNodes); assert.equal(fs.readFileSync(path.join(other, '.solopreneur', 'roadmap.csv'), 'utf8'), csv);
+    assert.deepEqual(await operation('read_flow_trace', { root: other, flowId: flow.flowId }), foreignBefore); assert.deepEqual(await snapshotRun(peerReference), peerBefore); assert.deepEqual(native.store.read(foreignCreated.taskId), foreignTaskBefore);
+    const writtenCsv = fs.readFileSync(path.join(project, '.solopreneur', 'roadmap.csv'), 'utf8');
+    if (completed) assert.notEqual(writtenCsv, csv); else assert.equal(writtenCsv, csv);
+    for (const close of closes.splice(0).reverse()) await close();
+    native = await fixture.openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: project }, { path: other }]);
+    await engine.initAndSync(); await foreignEngine.initAndSync();
+    assert.deepEqual(await current(), closed); assert.deepEqual(await snapshotRun(reference), settled); assert.deepEqual(engine.getNodes(), nodes);
+    assert.equal((await client.readLog(reference, 'stdout')).toString('utf8'), fullOutput); assert.equal(fs.readFileSync(path.join(project, '.solopreneur', 'roadmap.csv'), 'utf8'), writtenCsv);
+    const hash = bytes => require('node:crypto').createHash('sha256').update(bytes).digest('hex'), wal = path.join(root, 'solomap.db-wal'), priorWal = hash(fs.readFileSync(wal));
+    await Promise.all([extension.settle(reference, undefined, root), extension.settle(reference, undefined, root)]); await extension.drain();
+    assert.equal(hash(fs.readFileSync(wal)), priorWal); assert.deepEqual(await snapshotRun(reference), settled); assert.deepEqual(await current(), closed);
+    assert.deepEqual(await snapshotRun(peerReference), peerBefore); assert.deepEqual(foreignEngine.getNodes(), foreignNodes);
+    for (const workspace of [project, other]) assert.deepEqual(fs.readdirSync(path.join(workspace, '.solopreneur')).sort(), ['project.json', 'roadmap.csv']);
   });
-
-  const mockEngine = {
-    updateAgentExecution() {},
-    logAgentExecution() {
-      return 789;
-    }
-  };
-  extensionModule.__setRuntimeForTest(mockEngine, tempRoot);
-
-  const trace = {
-    schemaVersion: 1,
-    flowId: 'test-flow-789',
-    projectPath: tempRoot,
-    goal: 'Test validation correction',
-    status: 'running',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    source: { type: 'goal', userInput: 'Test validation correction' },
-    currentLoopIndex: 1,
-    loops: [
-      {
-        loopId: 'loop-1',
-        index: 1,
-        goal: 'Test validation correction',
-        status: 'created',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        planner: { status: 'running', retryCount: 0 },
-        builder: { status: 'pending' },
-        verifier: { status: 'pending' }
-      }
-    ]
-  };
-  
-  const flowsDir = path.join(tempRoot, '.solopreneur', 'flows');
-  fs.mkdirSync(flowsDir, { recursive: true });
-  fs.writeFileSync(path.join(flowsDir, 'test-flow-789.json'), JSON.stringify(trace), 'utf8');
-
-  const logDir = path.join(tempRoot, '.solopreneur', 'flows', 'test-flow-789', 'loop-1', 'planner', '789');
-  fs.mkdirSync(logDir, { recursive: true });
-  
-  const invalidPlannerJson = {
-    goal: '',
-    scope: [],
-    successCriteria: []
-  };
-  
-  fs.writeFileSync(
-    path.join(logDir, 'output.log'),
-    `SOLOMAP_FLOW_JSON_START\n${JSON.stringify(invalidPlannerJson)}\nSOLOMAP_FLOW_JSON_END`,
-    'utf8'
-  );
-
-  const statusData = {
-    nodeId: '__flow__::test-flow-789::loop-1::planner',
-    status: 'In Progress',
-    executionLogId: 789,
-    outputFilePath: path.join(logDir, 'output.log'),
-    changesFilePath: '',
-    touchedFilesPath: '',
-    commandFilePath: ''
-  };
-
-  await extensionModule.__processFlowStatusFile(null, statusData);
-
-  const updatedTrace = extensionModule.__readFlowTrace(tempRoot, 'test-flow-789');
-  assert.equal(updatedTrace.loops[0].planner.retryCount, 1);
-  assert.equal(startRoleRunCalled, true);
-  assert.equal(startRoleRunPayload.role, 'planner');
-  assert.match(startRoleRunPayload.prompt, /自检修正/);
 });
 
-test('settings review executes one Agent and persists its generated global prompt', async () => {
-  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-review-settings-'));
-  const globalRoot = path.join(workspace, '.solomap-global');
-  const reviewEvidence = path.join(globalRoot, 'memory/profile.md');
-  fs.mkdirSync(path.dirname(reviewEvidence), { recursive: true });
-  fs.writeFileSync(reviewEvidence, 'The reviewed instruction was explicitly confirmed.');
-  const fakeAgent = path.join(workspace, 'review-agent.cjs');
-  fs.writeFileSync(fakeAgent, `const fs=require('fs'),path=require('path'),crypto=require('crypto');
-const prompt=process.argv[2], dir=path.dirname(prompt), text=fs.readFileSync(prompt,'utf8');
-const line=name=>text.match(new RegExp('^'+name+'=(.*)$','m'))[1];
-const hash=value=>crypto.createHash('sha256').update(value).digest('hex');
-const globalRoot=line('全局数据根目录'),globalPrompt=JSON.parse(line('当前全局默认提示词JSON')),persistedPromptHash=line('当前已持久化提示词哈希');
-const evidence=path.join(globalRoot,'memory/profile.md'),stat=fs.statSync(evidence),source={id:'source-'+hash(evidence+':memory').slice(0,24),kind:'memory',file:evidence,hash:hash(fs.readFileSync(evidence,'utf8')),size:stat.size,mtimeMs:stat.mtimeMs};
-const manifest={schemaVersion:1,runId:path.basename(dir),globalRoot,globalPrompt,promptHash:hash(globalPrompt),persistedPromptHash,projects:[],sources:[source],memory:[],gaps:[]};
-fs.writeFileSync(path.join(dir,'manifest.json'),JSON.stringify(manifest));
-fs.writeFileSync(path.join(dir,'context-index.json'),JSON.stringify({schemaVersion:1,runId:manifest.runId,manifestHash:hash(JSON.stringify(manifest))}));
-const reviewed=globalPrompt+'\\nReviewed instruction.';
-fs.writeFileSync(path.join(dir,'proposal.json'),JSON.stringify({globalPrompt:reviewed,changes:[{type:'add',before:[],after:'Reviewed instruction.',evidence:[source.id],reason:'The confirmed durable instruction is required by the current review.'}],processedSourceIds:[source.id],unresolved:[],deferredSourceIds:[],recovery:[]}));`);
-  const extensionModule = loadCompiledModule('out/extension.js', [
-    'let reviewTerminalCount = 0;',
-    'let reviewAgentCommandCount = 0;',
-    'const reviewStartupOrder = [];',
-    'module.exports.__review = handleReviewGlobalPrompt;',
-    'module.exports.__reviewTerminalCount = () => reviewTerminalCount;',
-    'module.exports.__reviewAgentCommandCount = () => reviewAgentCommandCount;',
-    'module.exports.__reviewStartupOrder = () => reviewStartupOrder;',
-    'const originalGetReviewSettings = getPersistedSettings; getPersistedSettings = (...args) => { reviewStartupOrder.push("settings"); return originalGetReviewSettings(...args); };',
-    'projectRegistry_1.getProjectsReadOnly = () => { reviewStartupOrder.push("projects"); return []; };',
-    'agentCli_1.resolveAgentCli = () => { reviewStartupOrder.push("cli"); return "test-cli"; };',
-    'agentCli_1.commandExists = () => true;',
-    'agentCli_1.ensureAgentTaskAutomation = () => ({ok:true});',
-    `agentCli_1.buildAgentCommandForPromptFile = (_cli, prompt, workspaceRoot, mode) => { reviewStartupOrder.push('scope:' + workspaceRoot + ':' + mode); return agentCli_1.shellQuote(process.execPath) + ' ' + agentCli_1.shellQuote(${JSON.stringify(fakeAgent)}) + ' ' + agentCli_1.shellQuote(prompt); };`,
-    'createAgentTerminal = () => { reviewStartupOrder.push("terminal"); reviewTerminalCount += 1; return {show(){}, sendText(command){ if (/\\.run\\.sh/.test(command)) { reviewAgentCommandCount += 1; reviewStartupOrder.push("agent-command"); } require("child_process").execFileSync("bash", ["-c", command]); }}; };'
-  ].join('\n'));
-  const saved = { cliPath: 'test-cli', globalDataPath: globalRoot, globalPrompt: 'Saved instruction.' };
-  const context = { extensionPath: projectRoot, globalState: { get(key) { if (key === 'solopreneur.settings') return saved; if (key === 'solopreneur.projects') return [{ name: 'Legacy only', path: '/legacy/not-visible-to-agent' }]; return undefined; }, async update(_key, value) { Object.assign(saved, value); } } };
-  const messages = [];
-  const review = extensionModule.__review(context, 'Current unsaved instruction.', { postMessage(value) { messages.push(value); return Promise.resolve(true); } });
-  assert.equal(extensionModule.__reviewTerminalCount(), 1, 'the command window must open in the click turn');
-  const duplicateMessages = [];
-  const duplicate = extensionModule.__review(context, 'Current unsaved instruction.', { postMessage(value) { duplicateMessages.push(value); return Promise.resolve(true); } });
-  assert.equal(extensionModule.__reviewTerminalCount(), 1, 'a repeated click must not open another command window');
-  const differentDraftMessages = [];
-  await extensionModule.__review(context, 'A different unsaved instruction.', { postMessage(value) { differentDraftMessages.push(value); return Promise.resolve(true); } });
-  const rejectedDraft = differentDraftMessages.find(message => message.command === 'globalPromptReviewCompleted');
-  assert.equal(rejectedDraft?.success, false, 'a different draft must not inherit the active review result');
-  assert.match(rejectedDraft?.message || '', /草稿保持不变/);
-  await Promise.all([review, duplicate]);
-  assert.equal(duplicateMessages.find(message => message.command === 'globalPromptReviewCompleted')?.success, true, 'each waiting settings view must receive completion');
-  assert.equal(extensionModule.__reviewTerminalCount(), 1, 'generation and verification must reuse one command window');
-  assert.equal(extensionModule.__reviewAgentCommandCount(), 1, 'one click must start exactly one Agent process');
-  assert.ok(extensionModule.__reviewStartupOrder().indexOf('agent-command') < extensionModule.__reviewStartupOrder().indexOf('settings'), 'full settings aggregation must not run before the Agent command');
-  assert.ok(extensionModule.__reviewStartupOrder().indexOf('agent-command') < extensionModule.__reviewStartupOrder().indexOf('projects'), 'the Agent command must run before plugin-side project validation');
-  assert.ok(extensionModule.__reviewStartupOrder().some(item => /scope:.*\.solomap-global\/maintenance:auto$/.test(item)), 'the review Agent must use the normal task workspace and the user-selected permission mode');
-  const final = messages.find(message => message.command === 'globalPromptReviewCompleted');
-  assert.equal(final?.success, true, final?.message);
-  assert.equal(final.globalPrompt, 'Current unsaved instruction.\nReviewed instruction.');
-  assert.equal(saved.globalPrompt, 'Current unsaved instruction.\nReviewed instruction.');
-  const runs = path.join(globalRoot, 'maintenance/runs');
-  const dir = path.join(runs, fs.readdirSync(runs)[0]);
-  assert.equal(fs.existsSync(path.join(globalRoot, 'projects.json')), false, 'review validation must not initialize the project registry');
-  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'application.json'))).status, 'applied');
-  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'proposal.json.done.json'))).exitCode, 0);
-  assert.equal(fs.existsSync(path.join(dir, 'review.json.done.json')), false);
+test('Flow role output validation error triggers self-correction loop', async t => {
+  const cases = [['planner', 'recover'], ['builder', 'recover'], ['verifier', 'recover'], ['planner', 'background'], ['planner', 'exhausted'], ['planner', 'paused'], ['planner', 'abandoned']];
+  for (const [initialRole, mode] of cases) await t.test(`${initialRole}/${mode}`, async t => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-flow-correction-'));
+    const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'), other = path.join(base, 'other');
+    fs.mkdirSync(project); fs.mkdirSync(other);
+    const closes = [], fixture = require('./analysis-fixture.js');
+    let native = await fixture.openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: project }, { path: other }]);
+    t.after(async () => { for (const close of closes.splice(0).reverse()) await close(); });
+    const transport = require('../out/autonomousRuntimeControl.js'), operation = (operation, input) => transport.sendRuntimeDataRequest(root, { operation, input });
+    const { SyncEngine } = require('../out/db/syncEngine.js');
+    const csv = 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n3,原任务,原要求,实施,,claude,交付,In Progress,2026-01-01,\n4,另一任务,保持,实施,,claude,保持,In Progress,2026-01-01,\n';
+    const engines = [];
+    for (const workspace of [project, other]) {
+      const file = path.join(workspace, '.solopreneur', 'roadmap.csv'); fs.writeFileSync(file, csv);
+      const engine = new SyncEngine(file, path.join(workspace, '.solopreneur', 'project_journal.db'), projectRoot, root); await engine.initAndSync(); engines.push(engine);
+    }
+    t.after(() => { for (const engine of engines) engine.close(); });
+    const [engine, foreignEngine] = engines, nodesBefore = engine.getNodes().map(node => ({ ...node })), foreignNodes = foreignEngine.getNodes().map(node => ({ ...node }));
+    const { createFlowTrace, createFlowLoop } = require('../out/flowStore.js');
+    const flow = createFlowTrace(project, '修正后交付用户完整目标🌿', { selectedAgentCli: 'claude', selectedModel: 'original-model', roadmapStepId: '3' });
+    flow.flowId = 'test-flow-789'; flow.loops = [createFlowLoop(flow.goal, 1)];
+    const results = {
+      planner: { goal: flow.goal, scope: ['实际交付'], successCriteria: ['result.txt可读'], plan: ['产生结果'], verificationPlan: ['读取结果'], summary: '完整计划🌿\n'.repeat(10000) },
+      builder: { actions: ['产生结果'], commandsRun: ['检查文件'], recommendedStatus: 'ready_for_verification', summary: '完整实施🌿\n'.repeat(10000) },
+      verifier: { checks: [{ criterion: '实际结果', status: 'pass', evidence: ['result.txt'], reason: '实际文件可读' }], H: { pass: true }, I: { pass: true }, J: { pass: true }, recommendedStatus: 'closed', summary: '修正后的完整结果已验证' }
+    };
+    for (const role of ['planner', 'builder'].slice(0, ['planner', 'builder', 'verifier'].indexOf(initialRole))) flow.loops[0][role] = { status: 'completed', data: results[role] };
+    if (initialRole === 'verifier') flow.loops[0].evidence = { changedFilesSummary: 'A result.txt', touchedFilesSummary: 'A result.txt', outputTail: '实际结果', commandFilePath: '', outputFilePath: '', changesFilePath: '', touchedFilesPath: '' };
+    const created = await operation('write_flow_trace', { root: project, flow, expectedRevision: 0, idempotencyKey: 'correction-main-flow' });
+    const foreign = structuredClone(flow); foreign.projectPath = other; foreign.goal = '同号另一项目不受影响';
+    const foreignCreated = await operation('write_flow_trace', { root: other, flow: foreign, expectedRevision: 0, idempotencyKey: 'correction-foreign-flow' });
+    const peer = await operation('prepare_flow_role', { root: other, flowId: flow.flowId, loopId: 'loop-1', role: initialRole, attempt: 0, prompt: '其他项目完整输入', command: 'controlled evidence fixture', userMessage: foreign.goal, status: 'Running', metadata: { agentCli: 'claude', globalDataPath: root, launchIntentHash: 'foreign-same-flow-role' }, idempotencyKey: 'foreign-same-flow-role' });
+    const { RunLifecycleClient, runStatusReference } = require('../out/runLifecycleClient.js'), client = new RunLifecycleClient(operation, root);
+    const current = () => operation('read_flow_trace', { root: project, flowId: flow.flowId });
+    const reference = (workspace, id) => runStatusReference(workspace, id);
+    const snapshot = async (workspace, id) => { const ref = reference(workspace, id), status = await client.readStatus(ref), state = await operation('read_run_checkpoint_state', { root: workspace, executionLogId: id }); return { state, journal: await client.readJournal(ref, status), binding: await client.readBinding(ref), report: await client.readReport(ref, status), settlements: await client.readSettlements(ref, status) }; };
+    const foreignBefore = await operation('read_flow_trace', { root: other, flowId: flow.flowId }), peerBefore = await snapshot(other, peer.status.rootExecutionLogId), foreignTaskBefore = native.store.read(foreignCreated.taskId);
+    if (initialRole === 'verifier') fs.writeFileSync(path.join(project, 'result.txt'), '真实隔离结果🌿');
+    const terminals = [], commands = [], context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => {} } };
+    const extension = loadCompiledModule('out/extension.js', `
+      module.exports.launch = startFlowRoleRun; module.exports.settle = processAgentStatusFile;
+      module.exports.drain = async () => { do { await new Promise(resolve => setTimeout(resolve, 0)); } while (processingAgentStatusFiles.size || pendingAgentStatusFiles.size); };
+      module.exports.connect = (engine, project, root, context, terminals, commands) => {
+        syncEngine = engine; activeProjectRoot = project; extensionContextRef = context;
+        getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude', taskPermissionMode: 'auto', enabledEnhancements: {} });
+        autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+        agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
+        ensureActiveConversationPoller = () => {};
+        sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {}; postFlowStateToWebview = async () => {};
+        createAgentTerminal = (_root, label) => { const terminal = { name: label, processId: Promise.resolve(process.pid), show() {}, sendText(command) { commands.push(command); } }; terminals.push(terminal); return terminal; };
+      };
+    `, { './autonomousRuntimeControl': transport, './db/syncEngine': require('../out/db/syncEngine.js'), './flowStore': require('../out/flowStore.js'), './solomapGlobal': require('../out/solomapGlobal.js') });
+    extension.connect(mode === 'background' ? foreignEngine : engine, mode === 'background' ? other : project, root, context, terminals, commands);
+    await extension.launch(context, { projectPath: project, flow, loopIndex: 1, role: initialRole, prompt: '原始完整角色输入🌿', globalDataPath: root });
+    assert.equal(commands.length, 1); assert.match(commands[0], /runAgentProcess\.js/);
+    assert.equal((await current()).flow.loops[0][initialRole].executionLogId, peer.status.rootExecutionLogId);
+    const savedRuns = new Map(), outputs = new Map(), roles = ['planner', 'builder', 'verifier'];
+    const validCase = ['recover', 'background'].includes(mode);
+    let finishedRole = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const before = await current(), role = finishedRole ? roles[roles.indexOf(initialRole) + attempt - 2] : initialRole;
+      if (!role) break;
+      const id = before.flow.loops[0][role].executionLogId; assert.ok(id, 'the ordinary effect must have prepared the next actual role');
+      const state = await operation('read_run_checkpoint_state', { root: project, executionLogId: id });
+      assert.equal(state.status.selectedModel, 'original-model'); assert.equal(state.projectId, created.projectId);
+      const workspaceBefore = await require('../out/runWorkspace.js').snapshotWorkspace(project);
+      await operation('write_run_document', { projectId: state.projectId, executionLogId: id, generation: state.generation, turnId: state.turnId, purpose: require('../out/runWorkspace.js').workspaceDocumentPurpose(state.turnId, 'before'), bytes: Buffer.from(JSON.stringify(workspaceBefore)).toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: `correction:${id}:before` });
+      const invalid = !finishedRole && (attempt < 2 || !validCase), result = invalid ? { goal: '', scope: [], successCriteria: [] } : results[role];
+      if (role === 'builder' && !invalid) fs.writeFileSync(path.join(project, 'result.txt'), '真实隔离结果🌿');
+      const output = '必须保留的完整角色输出🌿\n'.repeat(10000) + `attempt-${attempt}-${role}\nSOLOMAP_FLOW_JSON_START\n${JSON.stringify(result)}\nSOLOMAP_FLOW_JSON_END`;
+      outputs.set(id, output);
+      await operation('append_run_log', { root: project, executionLogId: id, generation: state.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from(output).toString('base64'), idempotencyKey: `correction:${id}:stdout` });
+      const report = { schemaVersion: 1, summary: '角色完整结果已保存', unmetRequirements: [], decisions: [], corrections: [], verification: [], commits: [], experienceUsage: [], lessons: [] };
+      const head = await operation('read_run_checkpoint_state', { root: project, executionLogId: id });
+      await require('node:util').promisify(childProcess.execFile)(process.execPath, [path.join(projectRoot, 'out/taskCheckpointProcess.js'), 'complete', '--outcome', 'partial', '--summary', '真实角色检查点', '--report-json', JSON.stringify(report)], { env: { ...process.env, SOLOMAP_GLOBAL_DATA_PATH: root, SOLOMAP_PROJECT_ID: head.projectId, SOLOMAP_EXECUTION_LOG_ID: String(id), SOLOMAP_RUN_GENERATION: String(head.generation), SOLOMAP_RUN_PROOF: head.proof, SOLOMAP_TASK_TURN_ID: head.turnId } });
+      if (['paused', 'abandoned'].includes(mode)) {
+        const saved = await current(); saved.flow.status = mode; if (mode === 'abandoned') saved.flow.loops[0].status = mode;
+        await operation('write_flow_trace', { root: project, flow: saved.flow, expectedRevision: saved.revision, idempotencyKey: `correction:${mode}` });
+      }
+      const accepted = await snapshot(project, id), acceptedFlow = await current(); assert.deepEqual(accepted.report.report, report);
+      if (attempt === 0) {
+        for (const close of closes.splice(0).reverse()) await close();
+        native = await fixture.openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: project }, { path: other }]);
+        assert.deepEqual(await snapshot(project, id), accepted); assert.deepEqual(await current(), acceptedFlow);
+      }
+      const submitted = commands.length, ref = reference(project, id);
+      await Promise.all([extension.settle(ref, undefined, root), extension.settle(ref, undefined, root)]); await extension.drain();
+      const updated = await current(), settled = await snapshot(project, id); savedRuns.set(id, settled);
+      assert.equal(settled.state.taskId, accepted.state.taskId); assert.equal(settled.state.turnId, accepted.state.turnId); assert.deepEqual(settled.binding, accepted.binding); assert.deepEqual(settled.report, accepted.report);
+      assert.equal(settled.settlements.length, 1); assert.equal((await client.readLog(ref, 'stdout')).toString('utf8'), output);
+      assert.equal(updated.objectId, created.objectId); assert.equal(updated.taskId, created.taskId); assert.deepEqual(updated.flow.source, flow.source); assert.equal(updated.flow.goal, flow.goal);
+      if (invalid && attempt < 2 && !['paused', 'abandoned'].includes(mode)) {
+        const corrected = updated.flow.loops[0][role]; assert.equal(corrected.retryCount, attempt + 1); assert.match(updated.flow.latestSummary, /自检修正/);
+        assert.notEqual(corrected.executionLogId, id); assert.equal(commands.length, submitted + 1);
+        const plan = await operation('read_run_execution_plan', { root: project, executionLogId: corrected.executionLogId });
+        assert.match(plan.prompt, /上一轮结构化 JSON 未通过校验/); assert.match(plan.prompt, /重新输出完整 JSON/); assert.ok(plan.prompt.includes(`attempt-${attempt}-${role}`));
+        assert.ok(settled.settlements[0].digest.failures.some(failure => failure.includes('flow_role_validation')));
+      } else if (invalid) {
+        assert.equal(commands.length, submitted); assert.equal(updated.flow.status, ['paused', 'abandoned'].includes(mode) ? mode : 'failed');
+        assert.equal(updated.flow.loops[0][role].retryCount, Math.min(attempt + 1, 2)); break;
+      } else {
+        assert.equal(updated.flow.loops[0][role].status, 'completed'); assert.deepEqual(updated.flow.loops[0][role].data, results[role]); assert.deepEqual(settled.settlements[0].digest.failures, []);
+        finishedRole = true;
+        if (role === 'verifier') { assert.equal(updated.flow.status, 'completed'); assert.equal(commands.length, submitted); break; }
+        assert.equal(commands.length, submitted + 1);
+      }
+      const wal = path.join(root, 'solomap.db-wal'), hash = bytes => require('node:crypto').createHash('sha256').update(bytes).digest('hex'), priorWal = hash(fs.readFileSync(wal)), stableFlow = await current();
+      await Promise.all([extension.settle(ref, undefined, root), extension.settle(ref, undefined, root)]); await extension.drain();
+      assert.equal(hash(fs.readFileSync(wal)), priorWal); assert.deepEqual(await current(), stableFlow); assert.deepEqual(await snapshot(project, id), settled);
+    }
+    const finalFlow = await current(); assert.equal(finalFlow.flow.status, validCase ? 'completed' : mode === 'exhausted' ? 'failed' : mode);
+    if (validCase) for (const role of roles) { assert.equal(finalFlow.flow.loops[0][role].status, 'completed'); assert.deepEqual(finalFlow.flow.loops[0][role].data, results[role]); }
+    assert.equal(finalFlow.flow.loops[0][initialRole].retryCount, ['paused', 'abandoned'].includes(mode) ? 1 : 2);
+    assert.equal(native.store.read(created.taskId).data.status, finalFlow.flow.status);
+    assert.equal(commands.length, validCase ? 6 - roles.indexOf(initialRole) - 1 : mode === 'exhausted' ? 3 : 1);
+    await engine.initAndSync(); await foreignEngine.initAndSync();
+    if (validCase) { assert.equal(engine.getNodes().find(node => node.id === '3').status, 'Completed'); assert.equal(engine.getNodes().find(node => node.id === '3').completedAt, finalFlow.flow.completedAt); }
+    else assert.deepEqual(engine.getNodes(), nodesBefore);
+    assert.deepEqual(engine.getNodes().find(node => node.id === '4'), nodesBefore.find(node => node.id === '4'));
+    assert.deepEqual(foreignEngine.getNodes(), foreignNodes); assert.equal(fs.readFileSync(path.join(other, '.solopreneur', 'roadmap.csv'), 'utf8'), csv);
+    if (!validCase) assert.equal(fs.readFileSync(path.join(project, '.solopreneur', 'roadmap.csv'), 'utf8'), csv);
+    assert.deepEqual(await operation('read_flow_trace', { root: other, flowId: flow.flowId }), foreignBefore); assert.deepEqual(await snapshot(other, peer.status.rootExecutionLogId), peerBefore); assert.deepEqual(native.store.read(foreignCreated.taskId), foreignTaskBefore);
+    const finalCsv = fs.readFileSync(path.join(project, '.solopreneur', 'roadmap.csv')), finalNodes = engine.getNodes().map(node => ({ ...node }));
+    const finalTask = native.store.read(created.taskId);
+    for (const close of closes.splice(0).reverse()) await close();
+    native = await fixture.openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: project }, { path: other }]);
+    await engine.initAndSync(); await foreignEngine.initAndSync(); assert.deepEqual(await current(), finalFlow); assert.deepEqual(engine.getNodes(), finalNodes); assert.deepEqual(fs.readFileSync(path.join(project, '.solopreneur', 'roadmap.csv')), finalCsv);
+    for (const [id, saved] of savedRuns) { assert.deepEqual(await snapshot(project, id), saved); assert.equal((await client.readLog(reference(project, id), 'stdout')).toString('utf8'), outputs.get(id)); }
+    const hash = bytes => require('node:crypto').createHash('sha256').update(bytes).digest('hex'), wal = path.join(root, 'solomap.db-wal'), priorWal = hash(fs.readFileSync(wal)), submitted = commands.length;
+    await Promise.all([...savedRuns.keys()].flatMap(id => [extension.settle(reference(project, id), undefined, root), extension.settle(reference(project, id), undefined, root)])); await extension.drain();
+    assert.equal(hash(fs.readFileSync(wal)), priorWal); assert.equal(commands.length, submitted); assert.deepEqual(await current(), finalFlow);
+    assert.deepEqual(await snapshot(other, peer.status.rootExecutionLogId), peerBefore); assert.deepEqual(foreignEngine.getNodes(), foreignNodes);
+    assert.deepEqual(native.store.read(created.taskId), finalTask); assert.deepEqual(native.store.read(foreignCreated.taskId), foreignTaskBefore); assert.deepEqual(await operation('read_flow_trace', { root: other, flowId: flow.flowId }), foreignBefore);
+    for (const workspace of [project, other]) assert.deepEqual(fs.readdirSync(path.join(workspace, '.solopreneur')).sort(), ['project.json', 'roadmap.csv']);
+  });
+});
+
+test('settings review executes one Agent and persists its generated global prompt', async t => {
+  for (const changedDuringReview of [false, true]) await t.test(changedDuringReview ? 'a concurrent user edit is preserved with the full submitted proposal' : 'one ready terminal executes the shared runner and applies the complete MCP proposal', async t => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-review-settings-'));
+    const root = path.join(base, 'global'), workspace = path.join(base, 'project'), other = path.join(base, 'other'), config = path.join(base, 'cli-config');
+    for (const dir of [workspace, other, config]) fs.mkdirSync(dir);
+    const closes = [], fixture = require('./analysis-fixture.js');
+    let native = await fixture.openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: workspace }, { path: other }]);
+    t.after(async () => { for (const close of closes.splice(0).reverse()) await close(); });
+    const transport = require('../out/autonomousRuntimeControl.js'), { RunLifecycleClient, runStatusReference } = require('../out/runLifecycleClient.js');
+    const call = (operation, input) => transport.sendRuntimeDataRequest(root, { operation, input }), client = new RunLifecycleClient(call, root);
+    const hash = bytes => require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+    const fullSource = '用户确认：完成当前目标后核验完整结果。🌿\n'.repeat(10000);
+    const source = native.store.write({ kind: 'memory', action: 'create', scope: native.projectIds.get(workspace), idempotencyKey: 'settings-review-source', data: { title: '用户要求', content: fullSource, status: 'captured', category: 'rules' } });
+    const foreign = native.store.write({ kind: 'memory', action: 'create', scope: native.projectIds.get(other), idempotencyKey: 'settings-review-foreign', data: { title: '其他项目原文', content: '不得借给当前项目。🌿\n'.repeat(10000), status: 'captured', category: 'rules' } });
+    const foreignBefore = native.store.read(foreign.objectId), sourceBefore = native.store.read(source.objectId);
+    const csv = 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n3,保留路线图,不改环节,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,\n';
+    for (const project of [workspace, other]) fs.writeFileSync(path.join(project, '.solopreneur', 'roadmap.csv'), csv);
+    const draft = 'Current unsaved instruction.\n保留用户目标。', addition = '完成当前目标后核验完整结果。', reviewed = draft + '\n' + addition;
+    const protectedPolicy = await call('save_global_prompt', { policy: null, content: 'Saved instruction.', source: 'user', idempotencyKey: 'settings-review-baseline-policy' });
+    const cli = path.join(base, 'claude');
+    fs.writeFileSync(cli, '#!' + process.execPath + '\n' + `
+const assert=require('node:assert/strict'),fs=require('node:fs'),crypto=require('node:crypto');
+const {Client}=require(${JSON.stringify(require.resolve('@modelcontextprotocol/sdk/client/index.js'))});
+const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcontextprotocol/sdk/client/stdio.js'))});
+(async()=>{
+ const wrapper=process.argv.find(a=>a.includes('Read the complete SoloMap task prompt using'));
+ assert.ok(wrapper,'the actual generated native command must supply the database wrapper');
+ const read=JSON.parse(wrapper.match(/with (\\{.*?\\})\\. Keep reading/)[1]);
+ const config=JSON.parse(fs.readFileSync(process.env.CLAUDE_CONFIG_DIR+'/.claude.json','utf8')).mcpServers.solomap_data;
+ const mcp=new Client({name:'settings-review-controlled-cli',version:'1.0.0'});
+ await mcp.connect(new StdioClientTransport({command:config.command,args:config.args,cwd:process.cwd(),env:{...process.env,...config.env},stderr:'pipe'}));
+ const tool=async(name,args)=>{const r=await mcp.callTool({name,arguments:args});assert.notEqual(r.isError,true,JSON.stringify(r.content));return JSON.parse(r.content[0].text);};
+ const full=async(args)=>{let cursor,parts=[],pages=0,sha;do{const page=await tool('solomap_read',{...args,...(cursor?{cursor}:{})});parts.push(Buffer.from(page.data,'base64'));cursor=page.cursor;sha=page.sha256;pages++;}while(cursor);const bytes=Buffer.concat(parts);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),sha);return {text:bytes.toString('utf8'),pages};};
+ try{
+  const prompt=await full(read);assert.ok(prompt.text.includes('完整全局默认提示词'));
+  const batch=prompt.text.match(/本次固定复盘批次=([0-9a-f-]+)，初始revision=(\\d+)/);assert.ok(batch);
+  const ref=batch[1],revision=Number(batch[2]),meta=await tool('solomap_read',{ref,revision,view:'metadata'});
+  const sources=meta.projection.sources,receipts=[];let evidence;
+  for(const s of sources){const value=await full({ref,revision,view:'content',field:'review_source:'+s.id});receipts.push({id:s.id,content:value.text,pages:value.pages});if(value.text.includes('用户确认：完成当前目标后核验完整结果。')){evidence=s.id;assert.equal(crypto.createHash('sha256').update(JSON.parse(value.text).content).digest('hex'),${JSON.stringify(hash(fullSource))});assert.ok(value.pages>1);}}
+  assert.ok(evidence,'the actual pinned formal source must be read in full');
+  const denied=await mcp.callTool({name:'solomap_write',arguments:{kind:'policy',action:'patch',objectId:${JSON.stringify(protectedPolicy.objectId)},expectedRevision:${protectedPolicy.revision},idempotencyKey:'settings-review-denied-policy',data:{content:'越权结果'}}});assert.equal(denied.isError,true);
+  const proposal={globalPrompt:${JSON.stringify(reviewed)},changes:[{type:'add',before:[],after:${JSON.stringify(addition)},evidence:[evidence],reason:'用户要求在目标完成后核验完整结果。'}],processedSourceIds:sources.map(s=>s.id),deferredSourceIds:[],unresolved:[],recovery:[]};
+  const schema=await tool('solomap_read',{ref:'solomap://schema'});assert.ok(schema);
+  const current=await tool('solomap_read',{ref,view:'metadata'});
+  const committed=await tool('solomap_write',{kind:'review_batch',action:'patch',scope:process.env.SOLOMAP_PROJECT_ID,objectId:ref,expectedRevision:current.revision,idempotencyKey:'settings-review-proposal:'+ref,data:{proposal_content:JSON.stringify(proposal)}});
+  const result=await full({ref,revision:committed.revision,view:'content',field:'proposal_content'});assert.equal(result.text,JSON.stringify(proposal));
+  process.stdout.write('完整复盘输出🌿\\n'.repeat(10000));
+  process.stdout.write('SETTINGS_REVIEW_RECEIPT='+JSON.stringify({pid:process.pid,runId:read.ref,runRevision:read.revision,prompt:prompt.text,promptPages:prompt.pages,batchId:ref,batchRevision:revision,proposal,proposalRevision:committed.revision,sources:receipts,policyWriteDenied:true})+'\\n');
+ }finally{await mcp.close();}
+})().catch(error=>{process.stderr.write(error.stack+'\\n');process.exitCode=1;});
+`);
+    require('node:child_process').execFileSync(process.execPath, ['--check', cli]);
+    fs.chmodSync(cli, 0o755);
+    const saved = { cliPath: cli, globalDataPath: root, globalPrompt: 'Saved instruction.', language: 'en', reviewerCliPath: 'unchanged-reviewer', collaborationReviewMode: 'off', telegramEnabled: false, telegramBotToken: '', telegramChatId: '', agentModelPreferences: { claude: 'chosen-model' }, cognitiveEngineAgent: 'local_only', taskPermissionMode: 'auto', enabledEnhancements: {}, automationTasks: {}, proEntitlements: {} };
+    const savedBefore = structuredClone(saved), messages = [], duplicateMessages = [], differentDraftMessages = [], commands = [], order = [], writes = [], children = [];
+    let ready, terminalCount = 0, childResult;
+    const terminal = { show() {}, processId: new Promise(resolve => { ready = resolve; }), sendText(command) {
+      commands.push(command); order.push('agent-command');
+      const child = require('node:child_process').spawn('bash', ['-c', command], { cwd: workspace, env: { ...process.env, CLAUDE_CONFIG_DIR: config }, stdio: ['ignore', 'pipe', 'pipe'] });
+      const output = [], errors = []; child.stdout.on('data', b => output.push(b)); child.stderr.on('data', b => errors.push(b));
+      childResult = new Promise((resolve, reject) => { child.on('error', reject); child.on('close', (code, signal) => resolve({ code, signal, stdout: Buffer.concat(output).toString('utf8'), stderr: Buffer.concat(errors).toString('utf8') })); }); children.push(childResult);
+    } };
+    t.after(async () => { await Promise.all(children); });
+    const registry = require('../out/projectRegistry.js'); let oldRegistryReads = 0;
+    const extension = loadCompiledModule('out/extension.js', `
+module.exports.review=handleReviewGlobalPrompt;
+module.exports.setup=(project, terminal, saved, order, counts)=>{
+ activeProjectRoot=project;
+ createAgentTerminal=()=>{counts.open();order.push('terminal');return terminal;};
+ agentCli_1.commandExists=()=>true;agentCli_1.ensureAgentTaskAutomation=()=>({ok:true});
+ autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime=async()=>{};
+ getPersistedSettings=()=>{order.push('settings');return {...saved};};
+ getEnabledEnhancementMap=()=>saved.enabledEnhancements;
+ syncCognitiveRuntimeConfig=()=>{};synchronizeTelegramChannel=()=>{};broadcastSettings=async()=>{};
+};
+`, { './autonomousRuntimeControl': transport, './projectRegistry': { ...registry, getProjectsReadOnly() { oldRegistryReads++; return []; } } });
+    const context = { extensionPath: projectRoot, globalState: { get(key) { if (key === 'solopreneur.settings') return structuredClone(saved); if (key === 'solopreneur.projects') return [{ name: 'Legacy only', path: '/legacy/not-visible-to-agent' }]; }, async update(key, value) { writes.push({ key, value: structuredClone(value) }); Object.assign(saved, value); } } };
+    extension.setup(workspace, terminal, saved, order, { open() { terminalCount++; } });
+    const view = target => ({ postMessage(value) { target.push(value); return Promise.resolve(true); } });
+    const review = extension.review(context, draft, view(messages));
+    assert.equal(terminalCount, 1, 'the terminal opens in the click turn');
+    const duplicate = extension.review(context, draft, view(duplicateMessages));
+    await extension.review(context, 'A different unsaved instruction.', view(differentDraftMessages));
+    assert.equal(terminalCount, 1); assert.equal(commands.length, 0, 'a not-ready terminal must not receive the run'); assert.equal(order.includes('settings'), false);
+    const rejected = differentDraftMessages.find(m => m.command === 'globalPromptReviewCompleted'); assert.equal(rejected?.success, false); assert.match(rejected.message, /草稿保持不变/);
+    if (changedDuringReview) saved.globalPrompt = '用户后来保存的新提示词。';
+    ready(process.pid); await Promise.all([review, duplicate]);
+    assert.equal(commands.length, 1, JSON.stringify(messages)); assert.match(commands[0], /runAgentProcess\.js/); assert.equal(terminalCount, 1); assert.equal(oldRegistryReads, 0);
+    const executed = await childResult; assert.equal(executed.code, 0, executed.stderr); assert.equal(executed.signal, null);
+    const receipt = JSON.parse(executed.stdout.match(/^SETTINGS_REVIEW_RECEIPT=(.*)$/m)[1]);
+    assert.notEqual(receipt.pid, process.pid); assert.equal(JSON.parse(receipt.prompt.match(/^当前全局默认提示词JSON=(.*)$/m)[1]), draft); assert.equal(receipt.proposal.globalPrompt, reviewed); assert.equal(receipt.policyWriteDenied, true);
+    const runs = native.store.search({ scope: native.projectIds.get(workspace), kinds: ['run'] }).items.filter(r => r.data.run_kind === 'learning_review'); assert.equal(runs.length, 1);
+    const run = native.store.read(runs[0].objectId), executionLogId = Number(commands[0].match(/--execution-log-id (\d+)/)[1]);
+    const state = await call('read_run_state', { root: workspace, executionLogId });
+    assert.equal(state.runId, receipt.runId); assert.equal(state.status.exitCode, 0); assert.notEqual(state.status.hostOutputPending, true);
+    const reference = runStatusReference(workspace, executionLogId), stdout = (await client.readLog(reference, 'stdout')).toString('utf8');
+    assert.ok(stdout.includes('完整复盘输出🌿\n'.repeat(10000))); assert.ok(stdout.includes('SETTINGS_REVIEW_RECEIPT='));
+    const batch = native.store.read(receipt.batchId); assert.equal(batch.data.proposal_content, JSON.stringify(receipt.proposal));
+    const final = messages.find(m => m.command === 'globalPromptReviewCompleted'), duplicateFinal = duplicateMessages.find(m => m.command === 'globalPromptReviewCompleted');
+    assert.equal(final?.success, !changedDuringReview, final?.message); assert.equal(duplicateFinal?.success, !changedDuringReview);
+    let policy, applications;
+    if (changedDuringReview) {
+      assert.match(final.message, /默认指令已被修改/); assert.equal(saved.globalPrompt, '用户后来保存的新提示词。'); assert.equal(writes.length, 0); assert.equal(order.includes('settings'), false);
+      assert.equal(batch.data.status, 'interrupted'); assert.equal(native.store.readGlobalPromptPolicy().data.content, savedBefore.globalPrompt);
+    } else {
+      assert.equal(final.globalPrompt, reviewed); assert.equal(duplicateFinal.globalPrompt, reviewed); assert.equal(saved.globalPrompt, reviewed); assert.equal(extension.__vscodeTestState.configurationValues.globalPrompt, reviewed);
+      assert.ok(order.indexOf('agent-command') < order.indexOf('settings')); assert.equal(writes.length, 1); assert.equal(batch.data.status, 'applied');
+      policy = native.store.readGlobalPromptPolicy(); assert.equal(policy.data.content, reviewed);
+      applications = native.store.search({ scope: native.projectIds.get(workspace), kinds: ['application'] }).items.map(a => native.store.read(a.objectId)); assert.equal(applications.length, 1); assert.equal(applications[0].data.status, 'applied'); assert.equal(applications[0].data.after_content, reviewed);
+      for (const key of ['cliPath', 'globalDataPath', 'language', 'reviewerCliPath', 'collaborationReviewMode', 'telegramEnabled', 'telegramBotToken', 'telegramChatId', 'cognitiveEngineAgent']) assert.deepEqual(saved[key], savedBefore[key], key);
+      assert.equal(saved.agentModelPreferences.claude, savedBefore.agentModelPreferences.claude);
+    }
+    assert.deepEqual(native.store.read(source.objectId), sourceBefore); assert.deepEqual(native.store.read(foreign.objectId), foreignBefore);
+    const checkpoint = await call('read_run_checkpoint_state', { root: workspace, executionLogId });
+    for (let restart = 0; restart < 2; restart++) {
+      for (const close of closes.splice(0).reverse()) await close();
+      native = await fixture.openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: workspace }, { path: other }]);
+      assert.deepEqual(await call('read_run_checkpoint_state', { root: workspace, executionLogId }), checkpoint); assert.deepEqual(native.store.read(receipt.batchId), batch);
+      assert.equal((await client.readLog(reference, 'stdout')).toString('utf8'), stdout);
+      assert.deepEqual(native.store.read(source.objectId), sourceBefore); assert.deepEqual(native.store.read(foreign.objectId), foreignBefore);
+      if (policy) { assert.deepEqual(native.store.readGlobalPromptPolicy(), policy); assert.deepEqual(applications.map(a => native.store.read(a.objectId)), applications); }
+    }
+    const wal = path.join(root, 'solomap.db-wal'), priorWal = hash(fs.readFileSync(wal));
+    await Promise.all([call('read_run_state', { root: workspace, executionLogId }), call('read', { ref: receipt.batchId, revision: receipt.proposalRevision })]);
+    assert.equal(hash(fs.readFileSync(wal)), priorWal); assert.equal(commands.length, 1);
+    for (const project of [workspace, other]) { assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')).sort(), ['project.json', 'roadmap.csv']); assert.equal(fs.readFileSync(path.join(project, '.solopreneur', 'roadmap.csv'), 'utf8'), csv); }
+    for (const retired of ['maintenance', 'memory', 'context', 'projects.json']) assert.equal(fs.existsSync(path.join(root, retired)), false);
+    fs.writeFileSync(path.join(base, 'acceptance.json'), JSON.stringify({ changedDuringReview, receipt, state, checkpoint, stdout, batch, policy, applications, sourceBefore, foreignBefore, savedBefore, saved, final, duplicateFinal, commands, order, writes, cliSource: fs.readFileSync(cli, 'utf8'), configuration: extension.__vscodeTestState.configurationValues, cursor: native.store.search({ scope: null, kinds: ['setting'] }).items.filter(s => s.data.namespace === 'learning_review'), permanentProjectFiles: fs.readdirSync(path.join(workspace, '.solopreneur')).sort() }));
+  });
 });
 
 test('settings review reports terminal startup failures back to the requesting view', async () => {
@@ -14686,7 +15090,8 @@ test('conversation snapshots re-read when the database changes during their read
 });
 
 test('generated task script prepares CLI configuration and uses database tools before running the agent', async () => {
-  const extensionModule = loadCompiledModule('out/extension.js', ['module.exports.__buildAgentShellScript = buildAgentShellScript;']);
+  const extensionModule = loadCompiledModule('out/extension.js', [require('./fixtures/legacy-agent-shell-source.cjs') + '\n' +
+      'module.exports.__buildAgentShellScript = buildAgentShellScript;']);
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
   const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
@@ -14725,6 +15130,7 @@ const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcon
 
 test('a first task prepares the database and native config before its CLI can read and write', async () => {
   const extensionModule = loadCompiledModule('out/extension.js', [
+    `Object.assign(autonomousRuntimeControl_1, require(${JSON.stringify(path.join(projectRoot, 'out/autonomousRuntimeControl.js'))}));`,
     `Object.assign(autonomousRuntimeHost_1, require(${JSON.stringify(path.join(projectRoot, 'out/autonomousRuntimeHost.js'))}));`,
     'module.exports.buildReady = typeof buildPreparedAgentShellScript === "function" ? buildPreparedAgentShellScript : async (...args) => buildAgentShellScript(...args);'
   ].join('\n'));
@@ -14755,6 +15161,7 @@ const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcon
   const receipt=JSON.parse(response.content[0].text);
   const read=await client.callTool({name:'solomap_read',arguments:{ref:receipt.objectId}});
   assert.equal(JSON.parse(read.content[0].text).data.content,'first-task-committed');
+  fs.writeFileSync('first-task-result.txt','first-task-config-ready');
   console.log('first-task-config-ready');
  } finally {await client.close();await transport.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});
@@ -14763,11 +15170,18 @@ const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcon
   try {
     assert.equal(fs.existsSync(path.join(root, 'solomap.db')), false);
     const built = await extensionModule.buildReady(cli, '', 'Read and write project data.', workspace, 'task', 2, '', undefined, '', '', 'maintenance', '', root);
-    assert.match(fs.readFileSync(built.promptFilePath, 'utf8'), /SoloMap 数据库工具/);
+    const { RunLifecycleClient, runStatusReference } = require('../out/runLifecycleClient.js');
+    const client = new RunLifecycleClient((operation, input) => control.sendRuntimeDataRequest(root, { operation, input }));
+    assert.match((await client.readData(built.promptFilePath)).toString('utf8'), /SoloMap 数据库工具/);
     assert.equal(fs.existsSync(path.join(root, 'solomap.db')), true);
-    childProcess.execFileSync('bash', ['-n', built.runScriptPath]);
-    await new Promise((resolve,reject) => childProcess.execFile('bash',[built.runScriptPath],{env:{...process.env,CLAUDE_CONFIG_DIR:config}},(error,stdout,stderr)=>error?reject(new Error(String(stderr||error))):resolve(stdout)));
-    assert.match(fs.readFileSync(built.outputFilePath,'utf8'),/first-task-config-ready/);
+    childProcess.execFileSync(process.execPath, ['--check', built.runScriptPath]);
+    childProcess.execFileSync('bash', ['-n', '-c', built.finalCommand]);
+    await new Promise((resolve,reject) => childProcess.execFile('bash',['-c', built.finalCommand],{env:{...process.env,CLAUDE_CONFIG_DIR:config}},(error,stdout,stderr)=>error?reject(new Error(String(stderr||error))):resolve(stdout)));
+    assert.match((await client.readData(built.outputFilePath)).toString('utf8'), /first-task-config-ready/);
+    const status = await client.readStatus(runStatusReference(workspace, 2));
+    assert.equal(status.status, 'In Progress');
+    assert.deepEqual(fs.readdirSync(path.join(workspace, '.solopreneur')), ['project.json']);
+    assert.deepEqual(fs.existsSync(path.join(root, 'tmp')) ? fs.readdirSync(path.join(root, 'tmp')) : [], []);
     const identity = JSON.parse(fs.readFileSync(path.join(workspace,'.solopreneur/project.json'),'utf8'));
     const receipt = await control.sendRuntimeDataRequest(root,{operation:'write',input:{kind:'memory',action:'create',scope:identity.projectId,idempotencyKey:'first-task',data:{category:'project',title:'First task',status:'active',content:'Immediate first task data'}}});
     assert.equal((await control.sendRuntimeDataRequest(root,{operation:'read',input:{ref:receipt.objectId}})).data.content,'Immediate first task data');
@@ -14801,4 +15215,1147 @@ test('old project initialization failure cannot replace the newly selected roadm
   await pending;
   assert.equal(extension.isReady(), true);
   assert.deepEqual(messages, []);
+});
+
+
+test('the actual native settlement consumer uses the sealed turn duration and token delta rather than the whole live session', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { RunNativeObserver } = require('../out/runNativeObserver.js');
+  const { SyncEngine } = require('../out/db/syncEngine.js');
+  const transport = require('../out/autonomousRuntimeControl.js'); const previous = transport.sendRuntimeDataRequest;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-native-consumer-time-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const run = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '原目标', command: 'codex', userMessage: '原目标', metadata: { globalDataPath: root, agentCli: 'codex', interactiveSession: true, sessionProvider: 'codex' }, idempotencyKey: 'native-consumer-prepare' } });
+  const scope = { projectId: run.projectId, executionLogId: 1, generation: run.generation };
+  const current = () => store.readRunCheckpointState(run.projectId, 1);
+  const patch = (fields, event) => { const latest = current(); return store.patchRunState(run.projectId, { ...scope, expectedRevision: latest.revision, patch: fields, idempotencyKey: `consumer-time:${event}:${latest.revision}` }); };
+  const observer = new RunNativeObserver(store);
+  const states = []; const firstStarted = Date.parse(run.status.startedAt) + 1000;
+  for (let i = 0; i < 2; i++) {
+    const start = new Date(firstStarted + i * 1500).toISOString(); const end = new Date(firstStarted + i * 1500 + 500).toISOString();
+    await observer.observeRow(current, patch, { type: 'event_msg', timestamp: start, payload: { type: 'task_started', turn_id: `consumer-time-${i}`, started_at: start } }, i * 100);
+    await observer.observeRow(current, patch, { type: 'event_msg', timestamp: end, payload: { type: 'token_count', info: { total_token_usage: { input_tokens: i ? 150 : 100, output_tokens: i ? 60 : 40, total_tokens: i ? 210 : 140 } } } }, i * 100 + 1);
+    await observer.observeRow(current, patch, { type: 'event_msg', timestamp: end, payload: { type: 'task_complete', turn_id: `consumer-time-${i}`, started_at: start, last_agent_message: `实际结果${i}` } }, i * 100 + 2);
+    states.push(current());
+  }
+  const engine = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.settle = processAgentStatusFile;
+    module.exports.connect = (call, root, project, engine) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+      activeProjectRoot = project; syncEngine = engine;
+      getPersistedSettings = () => ({ globalDataPath: root, collaborationReviewMode: 'off' });
+    };
+  `);
+  transport.sendRuntimeDataRequest = (_root, request) => ops(request); extension.connect(ops, root, project, engine);
+  try {
+    const { RunLifecycleClient, runStatusReference } = require('../out/runLifecycleClient.js');
+    const client = new RunLifecycleClient((operation, input) => ops({ operation, input }));
+    const ref = runStatusReference(project, 1);
+    await extension.settle(ref, await client.readStatus(ref, states[1].revision));
+    const saved = store.readRunSettlements(run.projectId, { turnId: states[1].turnId }).items[0];
+    assert.ok(saved);
+    assert.deepEqual({ duration: saved.digest.durationMs, total: saved.index.record.totalTokens, started: saved.index.record.startedAt }, { duration: 500, total: 70, started: states[1].status.turnStartedAt });
+    assert.equal(saved.digest.tokenUsage.totalTokens, 70);
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+  } finally { transport.sendRuntimeDataRequest = previous; engine.close(); await ops.close(); store.close(); }
+});
+
+for (const scenario of ['user-completed', 'other-started', 'other-finished']) test(`the real delayed roadmap effect preserves current state after ${scenario}`, async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { SyncEngine } = require('../out/db/syncEngine.js');
+  const { CsvStore } = require('../out/db/csvStore.js');
+  const transport = require('../out/autonomousRuntimeControl.js'); const previous = transport.sendRuntimeDataRequest;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-delayed-roadmap-effect-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(path.join(project, '.solopreneur'), { recursive: true });
+  const csv = new CsvStore(path.join(project, '.solopreneur', 'roadmap.csv'));
+  csv.writeNodes([{ id: 'step', title: '原用户目标', description: '', stage: '产品与 MVP', dependencies: '', agentCli: 'codex', agentPrompt: '完成原目标', status: 'Running', createdAt: '', completedAt: '' }]);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const call = (operation, input) => ops({ operation, input });
+  const run = await call('prepare_run', { root: project, executionLogId: 1, nodeId: 'step', runKind: 'step', prompt: '原目标', command: 'codex', userMessage: '原目标', metadata: { globalDataPath: root, interactiveSession: true }, idempotencyKey: 'delayed-roadmap-main' });
+  const engine = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  transport.sendRuntimeDataRequest = (_root, request) => ops(request);
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.applyEffect = applyRunSettlementEffect;
+    module.exports.connect = (operation, root, project, engine) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => operation(request);
+      activeProjectRoot = project; syncEngine = engine;
+    };
+  `);
+  extension.connect(ops, root, project, engine);
+  try {
+    await engine.initAndSync();
+    if (scenario === 'user-completed') engine.updateNode('step', { status: 'Completed', completedAt: 'user-confirmed' });
+    if (scenario === 'other-started') await call('prepare_run', { root: project, executionLogId: 2, nodeId: 'step', runKind: 'step', prompt: '新会话', command: 'codex', userMessage: '新会话', metadata: { interactiveSession: true }, idempotencyKey: 'delayed-roadmap-other' });
+    const nextStatus = scenario === 'user-completed' ? 'In Progress' : 'Completed';
+    await extension.applyEffect({ effectId: 'delayed-effect', projectId: run.projectId, runId: run.runId, turnId: run.turnId, executionLogId: 1, sourceRevision: run.revision, checkpointSequence: 1, kind: 'roadmap', payload: { workspaceRoot: project, globalDataPath: root, nodeId: 'step', executionLogId: 1, originalExecutionLogId: 1, nextStatus, shouldWriteNodeStatus: true, preserveCompletedNode: false, hasOtherRunningConversationForNode: scenario === 'other-finished' } });
+    const final = csv.readNodes().find(node => node.id === 'step');
+    assert.equal(final.status, scenario === 'other-started' ? 'Running' : 'Completed');
+    if (scenario === 'user-completed') assert.equal(final.completedAt, 'user-confirmed');
+  } finally { transport.sendRuntimeDataRequest = previous; engine.close(); await ops.close(); store.close(); }
+});
+
+for (const scenario of ['__solo__', 'step', 'unavailable-cli', 'missing-node']) test(`the actual automatic prompt launch for ${scenario} remains in its source project and reuses the same durable intent after a window restart`, async () => {
+  const nodeId = scenario === '__solo__' ? '__solo__' : scenario === 'missing-node' ? 'absent' : 'step';
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { SyncEngine } = require('../out/db/syncEngine.js');
+  const transport = require('../out/autonomousRuntimeControl.js'); const previous = transport.sendRuntimeDataRequest;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-automatic-source-intent-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'A'); const active = path.join(base, 'B'); fs.mkdirSync(project); fs.mkdirSync(active);
+  fs.mkdirSync(path.join(project, '.solopreneur'));
+  const originalRoadmap = 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\nstep,原目标,原要求,实施,,claude,推进,Pending,2026-10-01,\n';
+  fs.writeFileSync(path.join(project, '.solopreneur', 'roadmap.csv'), originalRoadmap);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  transport.sendRuntimeDataRequest = (_root, request) => ops(request);
+  const engine = new SyncEngine(path.join(active, '.solopreneur', 'roadmap.csv'), path.join(active, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  const calls = [];
+  const connect = () => {
+    const extension = loadCompiledModule('out/extension.js', `
+      module.exports.runAutomatic = runAutomationTasksAfterRun;
+      module.exports.connect = (ops, root, project, active, engine, calls, SyncEngine, scenario) => {
+        syncEngine_1.SyncEngine = SyncEngine;
+        autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request);
+        autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+        ensureTaskRuntimeReady = async () => {};
+        activeProjectRoot = active; syncEngine = engine;
+        getPersistedSettings = () => ({ cliPath: 'claude', globalDataPath: root, taskPermissionMode: 'auto', enabledEnhancements: {}, automationTasks: { triggers: { completed: { prompt: '继续来源项目的原目标' } } } });
+        agentCli_1.resolveAgentCli = value => value; agentCli_1.commandExists = () => scenario !== 'unavailable-cli';
+        agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
+        recordLocalUsageEvent = () => {}; postNodeConversations = () => {};
+        buildSoloConversationPrompt = () => '来源项目的固定正式输入';
+        buildAgentConversationPrompt = () => '来源项目的固定正式输入';
+        ensureRoadmapValidationScript = () => {};
+        sendNodesToWebview = () => {}; refreshSidebarProjectCards = () => {};
+        solomapGlobal_1.ensureSolomapMemoryStore = () => {};
+        solomapGlobal_1.ensureSolomapEnhancementRuntime = () => ({ envLines: [], preflightLines: [] });
+        preSessionGit_1.createPreSessionGitCommit = async () => '';
+        launchAgentConversationTerminal = async input => { calls.push(input); };
+      };
+      module.exports.activeRoot = () => activeProjectRoot;
+      module.exports.failCli = () => { agentCli_1.commandExists = () => false; };
+    `);
+    extension.connect(ops, root, project, active, engine, calls, SyncEngine, scenario); return extension;
+  };
+  const input = { workspaceRoot: project, nodeId, runKind: nodeId === '__solo__' ? 'solo' : 'step', nextStatus: 'Completed', failureCode: '', executionLogId: 1, agentCli: 'claude', userMessage: '原始要求', effectId: 'same-stable-effect', globalDataPath: root };
+  try {
+    await engine.initAndSync();
+    let extension = connect();
+    if (scenario === 'unavailable-cli' || scenario === 'missing-node') {
+      await assert.rejects(extension.runAutomatic({}, 'completed', input), /automation_launch_not_registered/);
+      assert.equal(calls.length, 0);
+      assert.equal(await ops({ operation: 'read_run_intent', input: { root: project, launchIntentId: 'run-effect:same-stable-effect:prompt' } }), null);
+      return;
+    }
+    await extension.runAutomatic({}, 'completed', input);
+    assert.equal(calls.length, 1); assert.equal(calls[0].workspaceRoot, project, 'background completion must not start a task in the currently selected project');
+    const first = (await ops({ operation: 'list_run_states', input: { root: project } })).items[0]; assert.ok(first);
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')).sort(), ['project.json', 'roadmap.csv']);
+    if (nodeId === '__solo__') assert.equal(fs.readFileSync(path.join(project, '.solopreneur', 'roadmap.csv'), 'utf8'), originalRoadmap);
+    await ops({ operation: 'claim_run', input: { projectId: first.projectId, executionLogId: first.status.rootExecutionLogId, expectedRevision: first.revision, agentPid: process.pid, idempotencyKey: 'automatic-accepted-wrapper' } });
+    if (nodeId === 'step') fs.writeFileSync(path.join(project, '.solopreneur', 'roadmap.csv'), originalRoadmap.replace(',Pending,', ',Completed,'));
+    extension = connect(); extension.failCli(); await extension.runAutomatic({}, 'completed', input);
+    assert.equal(calls.length, 1, 'replayed effect after window restart must not launch an accepted run again');
+    const history = await ops({ operation: 'read_project_journal', input: { root: project } });
+    assert.equal(history.logs.filter(row => row.nodeId === nodeId).length, 1);
+    if (nodeId === 'step') assert.equal(new (require('../out/db/csvStore.js').CsvStore)(path.join(project, '.solopreneur', 'roadmap.csv')).readNodes()[0].status, 'Completed', 'replaying an accepted effect cannot put a user-completed step back into Running');
+    assert.equal(extension.activeRoot(), active, 'a background launch must not change the user project selection');
+    assert.equal((await ops({ operation: 'list_run_states', input: { root: active } })).items.length, 0);
+  } finally { transport.sendRuntimeDataRequest = previous; engine.close(); await ops.close(); store.close(); }
+});
+
+for (const editedLater of [false, true]) test(`formal roadmap recovery ${editedLater ? 'preserves a newer user edit' : 'restores the original bytes without a backup file'}`, async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { RunLifecycleClient, runStatusReference } = require('../out/runLifecycleClient.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-formal-roadmap-recovery-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const call = (operation, input) => ops({ operation, input });
+  const client = new RunLifecycleClient(call);
+  await call('register_project', { root: project });
+  const csv = path.join(project, '.solopreneur', 'roadmap.csv');
+  const original = Buffer.from('id,title,status\nstep,原目标🌿,Pending\n');
+  fs.writeFileSync(csv, original);
+  const state = await call('prepare_run_intent', { root: project, launchIntentId: 'backup-recovery', nodeId: '__solo__', runKind: 'solo', userMessage: '仅讨论', prompt: '仅讨论', command: 'claude', metadata: { launchIntentHash: 'fixed', interactiveSession: true, captureRoadmapBackup: true }, idempotencyKey: 'backup-recovery' });
+  const ref = runStatusReference(project, state.status.rootExecutionLogId);
+  fs.writeFileSync(csv, 'id,title,status\nstep,Agent误改,Completed\n');
+  const finished = await client.checkpoint(ref, await client.readStatus(ref), { action: 'complete', outcome: 'partial', summary: '讨论已结束', idempotencyKey: 'backup-recovery-complete' });
+  const later = 'id,title,status\nstep,用户后来选择,In Progress\n';
+  if (editedLater) fs.writeFileSync(csv, later);
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.restore = restoreRoadmapBackup;');
+  try {
+    const restored = await extension.restore(ref, project, client, finished);
+    assert.equal(restored, !editedLater);
+    assert.deepEqual(fs.readFileSync(csv), editedLater ? Buffer.from(later) : original);
+    assert.deepEqual(fs.readdirSync(path.dirname(csv)).sort(), ['project.json', 'roadmap.csv']);
+  } finally { await ops.close(); store.close(); }
+});
+
+test('the actual step criteria initializer preserves all database criteria and creates missing defaults without permanent memory files', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-step-criteria-consumer-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const call = (operation, input) => ops({ operation, input });
+  const criteria = Array.from({ length: 25 }, (_, index) => `用户完整标准 ${index} 🌿`);
+  const first = await call('write_step_memory', { root: project, nodeId: 'custom', expectedRevision: 0, patch: { completionCriteria: criteria, lastCompletionEvidence: Array.from({ length: 30 }, (_, index) => `原证据${index}`), userField: '保留用户元数据' }, idempotencyKey: 'criteria-custom' });
+  const nodes = [{ id: 'custom', title: '用户标准', agentPrompt: '测试完整结果', stage: '实施', status: 'Pending' }, { id: 'missing', title: '新步骤', agentPrompt: '产出结果', stage: '实施', status: 'Pending' }];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.initialize = ensureCompletionCriteriaForNodes;
+    module.exports.criteria = readCompletionCriteria;
+    module.exports.connect = (ops, root) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request);
+      getPersistedSettings = () => ({ globalDataPath: root });
+      extensionContextRef = {};
+    };
+  `);
+  extension.connect(ops, root);
+  try {
+    const initialized = await extension.initialize(project, nodes);
+    assert.deepEqual(initialized[0].completionCriteria, criteria);
+    assert.deepEqual(await extension.criteria(project, nodes[0]), criteria);
+    const unchanged = await call('read_step_memory', { root: project, nodeId: 'custom', includeEntries: false });
+    assert.equal(unchanged.revision, first.revision); assert.equal(unchanged.data.userField, '保留用户元数据'); assert.equal(unchanged.data.lastCompletionEvidence.length, 30);
+    const missing = await call('read_step_memory', { root: project, nodeId: 'missing', includeEntries: false });
+    assert.equal(JSON.stringify(missing.data.completionCriteria), JSON.stringify(initialized[1].completionCriteria));
+    await extension.initialize(project, nodes);
+    assert.equal((await call('read_step_memory', { root: project, nodeId: 'missing', includeEntries: false })).revision, missing.revision);
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+  } finally { await ops.close(); store.close(); }
+});
+
+for (const continuation of [false, true]) test(`the actual ${continuation ? 'continuation' : 'step'} prompt reads pinned step context through ordinary MCP without legacy files`, async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-step-prompt-reference-')); const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'actual-step-prompt', onCommand: () => ({ status: 'running' }), onData: ops });
+  const identity = await ops({ operation: 'register_project', input: { root: project } });
+  const lesson = store.write({ kind: 'lesson', action: 'create', scope: identity.projectId, idempotencyKey: 'step-prompt-formal-lesson', data: { status: 'candidate', summary: '保留用户当前选择', applies_when: '刷新界面', do_this: '保留选中的模式', avoid_this: '异步回包重置选择', confidence: 0.8, lesson_type: 'boundary_rule' } });
+  const sourceRoot = path.join(project, '.solopreneur', 'step-memory'); fs.mkdirSync(sourceRoot);
+  const source = { completionCriteria: Array.from({ length: 31 }, (_, index) => `原用户标准-${index}`), entries: [{ usefulSignals: '完整历史信号必须通过正式引用读取🌿'.repeat(20000) }] };
+  fs.writeFileSync(path.join(sourceRoot, 'step.json'), JSON.stringify(source));
+  await ops({ operation: 'import_project_data', input: { collection: 'step-memory', projectRoot: project, sourceRoot, idempotencyKey: 'prompt-original-source' } }); await ops.waitForMigrations();
+  const memory = await ops({ operation: 'read_step_memory', input: { projectId: identity.projectId, nodeId: 'step', includeEntries: false } });
+  fs.renameSync(sourceRoot, path.join(project, '.solopreneur', 'retained-original-step-memory'));
+  let reads = 0;
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.stepPrompt = buildAgentConversationPrompt; module.exports.continuationPrompt = buildInteractiveContinuationPrompt;
+    module.exports.connect = (call, root) => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request); extensionContextRef = {}; getPersistedSettings = () => ({ globalDataPath: root }); };
+  `);
+  extension.connect(request => { if (request.operation === 'read_step_memory') { reads++; assert.equal(request.input.includeEntries, false); } return ops(request); }, root);
+  const node = { id: 'step', title: '用户当前目标', description: '完成实际任务', stage: '实施', agentCli: 'claude', agentPrompt: '交付用户所需结果', status: 'In Progress' };
+  try {
+    const prompt = continuation ? await extension.continuationPrompt(node, '执行本轮最新要求', project, '', [], '', root) : await extension.stepPrompt(node, '执行本轮最新要求', project, '/must-not-read-step.json', '/must-not-read-runs', '', '', [], '', '', root, {}, false, true);
+    assert.ok(prompt.includes(memory.objectId), 'the actual preparation prompt must pin the formal step snapshot');
+    assert.ok(prompt.includes(memory.sources[0].objectId)); assert.match(prompt, /solomap_read/); assert.match(prompt, /revision[^\n]*1/);
+    assert.ok(prompt.includes(source.completionCriteria[30])); assert.ok(prompt.includes('执行本轮最新要求'));
+    assert.ok(prompt.includes('保留用户当前选择')); assert.ok(prompt.includes(`solomap://objects/${lesson.objectId}`));
+    assert.doesNotMatch(prompt, /环节交接文件|环节交接 JSON|环节运行记录目录|must-not-read-step|must-not-read-runs|\.solopreneur\/step-memory/);
+    assert.ok(prompt.length < source.entries[0].usefulSignals.length / 4, 'preparation uses pinned references rather than injecting the retained history body');
+    assert.equal(reads, 1, 'criteria and source pointers must come from the same accepted snapshot');
+    assert.equal(fs.existsSync(sourceRoot), false); assert.equal(fs.existsSync(path.join(project, '.solopreneur', 'agent-runs')), false);
+    assert.equal(fs.existsSync(path.join(root, 'learning')), false, 'the complete preparation prompt must not create a parallel learning ledger');
+    assert.equal(fs.existsSync(path.join(root, 'metrics')), false);
+  } finally { await server.close(); await ops.close(); store.close(); }
+});
+
+test('late step criteria hydration cannot replace the user latest roadmap state or newer database criteria', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { SyncEngine } = require('../out/db/syncEngine.js');
+  const { CsvStore } = require('../out/db/csvStore.js');
+  const transport = require('../out/autonomousRuntimeControl.js'); const previous = transport.sendRuntimeDataRequest;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-step-criteria-timing-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  transport.sendRuntimeDataRequest = (_root, request) => ops(request);
+  await ops({ operation: 'register_project', input: { root: project } });
+  const csvPath = path.join(project, '.solopreneur', 'roadmap.csv');
+  const engine = new SyncEngine(csvPath, path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  const csv = new CsvStore(csvPath); engine.setNodes([{ id: 'step', title: '原目标', description: '原要求', stage: '实施', agentCli: 'claude', agentPrompt: '原动作', status: 'Pending', dependencies: '', createdAt: '', completedAt: '' }]);
+  const first = await ops({ operation: 'write_step_memory', input: { root: project, nodeId: 'step', expectedRevision: 0, patch: { completionCriteria: ['旧标准'] }, idempotencyKey: 'hydrate-old-criteria' } });
+  let release; const gate = new Promise(resolve => { release = resolve; }); let entered; const reading = new Promise(resolve => { entered = resolve; }); let delayed = true; let requested = false;
+  const delayedOps = async request => {
+    if (request.operation === 'read_step_memory') requested = true;
+    const result = await ops(request);
+    if (request.operation === 'read_step_memory' && delayed) { delayed = false; entered(); await gate; }
+    return result;
+  };
+  const messages = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.send = sendNodesToWebview;
+    module.exports.connect = (ops, root, project, engine, messages) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request);
+      getPersistedSettings = () => ({ globalDataPath: root }); extensionContextRef = {};
+      activeProjectRoot = project; syncEngine = engine;
+      activePanel = { webview: { postMessage: message => { messages.push(message); } } };
+      postFlowStateToWebview = async () => {};
+    };
+  `);
+  extension.connect(delayedOps, root, project, engine, messages);
+  try {
+    const old = extension.send();
+    assert.equal(messages[0].nodes[0].status, 'Pending', 'local nodes must paint synchronously before database hydration');
+    await reading;
+    assert.equal(requested, true, 'the visible criteria must hydrate from the formal database');
+    const latestCriteria = Array.from({ length: 25 }, (_, index) => `最新标准${index}`);
+    await ops({ operation: 'write_step_memory', input: { root: project, nodeId: 'step', expectedRevision: first.revision, patch: { completionCriteria: latestCriteria }, idempotencyKey: 'hydrate-new-criteria' } });
+    engine.updateNode('step', { status: 'Completed', completedAt: 'user-confirmed' });
+    const boundary = messages.length;
+    await extension.send(); release(); await old;
+    assert.equal(messages.at(-1).nodes[0].status, 'Completed');
+    assert.equal(messages.at(-1).nodes[0].completedAt, 'user-confirmed');
+    assert.deepEqual(messages.at(-1).nodes[0].completionCriteria, latestCriteria);
+    assert.ok(messages.slice(boundary).every(message => message.nodes[0].status === 'Completed'));
+    assert.deepEqual(fs.readdirSync(path.dirname(csvPath)).sort(), ['project.json', 'roadmap.csv']);
+  } finally { release(); transport.sendRuntimeDataRequest = previous; engine.close(); await ops.close(); store.close(); }
+});
+
+test('a delayed default criteria initializer keeps concurrently committed user standards', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-criteria-write-conflict-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  await ops({ operation: 'register_project', input: { root: project } });
+  let release; const gate = new Promise(resolve => { release = resolve; }); let entered; const readStarted = new Promise(resolve => { entered = resolve; }); let delayed = true;
+  const call = async request => {
+    const result = await ops(request);
+    if (request.operation === 'read_step_memory' && delayed) { delayed = false; entered(); await gate; }
+    return result;
+  };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.initialize = ensureCompletionCriteriaForNodes;
+    module.exports.connect = (ops, root) => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request); getPersistedSettings = () => ({ globalDataPath: root }); extensionContextRef = {}; };
+  `);
+  extension.connect(call, root);
+  try {
+    const initialized = extension.initialize(project, [{ id: 'step', title: '新步骤', stage: '实施', agentPrompt: '原要求', status: 'Pending' }]);
+    await readStarted;
+    const criteria = Array.from({ length: 25 }, (_, index) => `并发用户标准${index}`);
+    await ops({ operation: 'write_step_memory', input: { root: project, nodeId: 'step', expectedRevision: 0, patch: { completionCriteria: criteria, custom: '用户资料' }, idempotencyKey: 'concurrent-user-criteria' } });
+    release();
+    assert.deepEqual((await initialized)[0].completionCriteria, criteria);
+    const stored = await ops({ operation: 'read_step_memory', input: { root: project, nodeId: 'step', includeEntries: false } });
+    assert.equal(stored.revision, 1); assert.equal(stored.data.custom, '用户资料');
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+  } finally { release(); await ops.close(); store.close(); }
+});
+
+test('default step criteria for identical nodes in two projects commit independently in one database', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-criteria-project-identity-'));
+  const root = path.join(base, '.solomap-global'); const projects = ['A', 'B'].map(name => path.join(base, name)); projects.forEach(project => fs.mkdirSync(project));
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.initialize = ensureCompletionCriteriaForNodes;
+    module.exports.connect = (ops, root) => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request); getPersistedSettings = () => ({ globalDataPath: root }); extensionContextRef = {}; };
+  `);
+  extension.connect(ops, root);
+  try {
+    const node = { id: 'step', title: '相同目标', stage: '实施', agentPrompt: '完成结果', status: 'Pending' };
+    await Promise.all(projects.map(project => extension.initialize(project, [node])));
+    for (const project of projects) {
+      const saved = await ops({ operation: 'read_step_memory', input: { root: project, nodeId: 'step', includeEntries: false } });
+      assert.equal(saved.revision, 1); assert.equal(saved.data.completionCriteria.length, 4);
+      assert.equal(saved.data.completionCriteria[0], '已经围绕“相同目标”产出可提交的本地文件、页面、配置、市场材料或反馈记录。');
+      await extension.initialize(project, [node]);
+      assert.equal((await ops({ operation: 'read_step_memory', input: { root: project, nodeId: 'step', includeEntries: false } })).revision, 1);
+      assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
+    }
+  } finally { await ops.close(); store.close(); }
+});
+
+for (const refused of [false, true]) test(`scheduled reminder ${refused ? 'preserves its occurrence when event commit fails' : 'waits for event commit before completion'}`, async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const ledger = require('../out/scheduledTaskLedger.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reminder-commit-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const task = { id: 'reminder', title: '发布提醒', enabled: true, projectPath: project, scheduleKind: 'daily', timeOfDay: '09:00', assignee: 'user' };
+  const now = new Date(Date.now() - 2 * 86400000);
+  const occurrence = ledger.syncScheduledTaskLedger(project, root, [task], now).tasks[0];
+  let release; const gate = new Promise(resolve => { release = resolve; }); let entered; const started = new Promise(resolve => { entered = resolve; });
+  let settled; const commitFinished = new Promise(resolve => { settled = resolve; });
+  const call = async request => {
+    if (['append_automation_event', 'prepare_automation_delivery', 'prepare_automation_deliveries'].includes(request.operation)) {
+      entered(); await gate;
+      try { if (refused) throw new Error('event_commit_refused'); return await ops(request); }
+      finally { settled(); }
+    }
+    return ops(request);
+  };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.run = runScheduledAutomationTask;
+    module.exports.connect = (ops, root, project, task, ledger) => {
+      Object.assign(scheduledTaskLedger_1, ledger);
+      activeProjectRoot = project;
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request);
+      getPersistedSettings = () => ({ globalDataPath: root, language: 'zh', automationTasks: { scheduledTasks: [task] } });
+      getScheduledAutomationLedgerReferenceRoot = () => project;
+    };
+  `);
+  extension.connect(call, root, project, task, ledger);
+  const pending = extension.run({}, task, occurrence.occurrenceId);
+  const outcome = pending.then(() => null, error => error);
+  try {
+    await Promise.race([started, outcome.then(error => { if (error) throw error; throw new Error('scheduled occurrence completed before requesting its event commit'); })]);
+    const remainedBeforeCommit = ledger.readScheduledTaskLedger(project, root).tasks.some(row => row.occurrenceId === occurrence.occurrenceId);
+    release();
+    await commitFinished;
+    const error = await outcome;
+    assert.equal(remainedBeforeCommit, true, 'a pending event commit cannot complete the scheduled occurrence');
+    if (refused) { assert.equal(error?.message, 'event_commit_refused'); assert.equal(ledger.readScheduledTaskLedger(project, root).tasks[0].occurrenceId, occurrence.occurrenceId); }
+    else { assert.equal(error, null); assert.ok(ledger.readScheduledTaskLedger(project, root).tasks.every(row => row.occurrenceId !== occurrence.occurrenceId)); }
+  } finally { release(); await outcome; await ops.close(); store.close(); }
+});
+
+for (const scenario of ['accepted', 'refused', 'cancelled']) test(`focus reminder ${scenario === 'refused' ? 'handles a refused event commit without notifying' : scenario === 'cancelled' ? 'does not notify after cancellation during commit' : 'waits for event commit in its original project'}`, async () => {
+  const refused = scenario === 'refused';
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-focus-commit-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'A'); const selectedLater = path.join(base, 'B'); fs.mkdirSync(project); fs.mkdirSync(selectedLater);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  let release; const gate = new Promise(resolve => { release = resolve; }); let entered; const started = new Promise(resolve => { entered = resolve; });
+  let settled; const finished = new Promise(resolve => { settled = resolve; }); const eventRoots = [];
+  const call = async request => {
+    if (['append_automation_event', 'prepare_automation_delivery', 'prepare_automation_deliveries'].includes(request.operation)) {
+      eventRoots.push(request.input.root); entered(); await gate;
+      try { if (refused) throw new Error('focus_commit_refused'); return await ops(request); }
+      finally { settled(); }
+    }
+    return ops(request);
+  };
+  const timers = []; const warnings = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.schedule = scheduleFocusReminder;
+    module.exports.cancel = root => { getPersistedSettings = () => ({ globalDataPath: root, automationTasks: { triggers: { focus_time: {} } } }); scheduleFocusReminder({}); };
+    module.exports.select = project => { activeProjectRoot = project; };
+    module.exports.connect = (ops, root, project, timers, warnings) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request);
+      getPersistedSettings = () => ({ globalDataPath: root, automationTasks: { focusMinutes: 25, triggers: { focus_time: { notify: true } } } });
+      activeProjectRoot = project; broadcastSettings = async () => {};
+      setTimeout = callback => { timers.push(callback); return { unref() {} }; }; clearTimeout = () => {};
+      console = { ...console, warn: (...args) => warnings.push(args) };
+    };
+  `);
+  extension.connect(call, root, project, timers, warnings);
+  try {
+    extension.schedule({}); extension.select(selectedLater); timers[0](); await started;
+    const noticesBeforeCommit = extension.__vscodeTestState.informationMessages.length;
+    if (scenario === 'cancelled') extension.cancel(root);
+    release(); await finished; await new Promise(resolve => setImmediate(resolve));
+    assert.equal(noticesBeforeCommit, 0, 'the focus reminder cannot notify while its event is still uncommitted');
+    assert.deepEqual(eventRoots, [project], 'changing the selected project must not move a pending focus reminder');
+    assert.equal(extension.__vscodeTestState.informationMessages.length, scenario === 'accepted' ? 1 : 0);
+    assert.equal(warnings.length, refused ? 1 : 0);
+    assert.equal(timers.length, scenario === 'cancelled' ? 1 : 2, 'only an active reminder may schedule another callback');
+  } finally { release(); await finished; await ops.close(); store.close(); }
+});
+
+for (const mutation of ['add', 'edit', 'delete', 'unchanged']) test(`a completed one-time reminder preserves current scheduled settings after ${mutation}`, async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const ledger = require('../out/scheduledTaskLedger.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reminder-settings-race-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const task = { id: 'once', title: '原提醒', enabled: true, projectPath: project, scheduleKind: 'once', scheduledAt: new Date(Date.now() - 1000).toISOString(), assignee: 'user' };
+  const occurrence = ledger.syncScheduledTaskLedger(project, root, [task]).tasks[0];
+  const state = { settings: { globalDataPath: root, language: 'zh', automationTasks: { scheduledTasks: [task] } } };
+  let release; const gate = new Promise(resolve => { release = resolve; }); let entered; const started = new Promise(resolve => { entered = resolve; });
+  const call = async request => { if (['append_automation_event', 'prepare_automation_delivery'].includes(request.operation)) { entered(); await gate; } return ops(request); };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.run = runScheduledAutomationTask;
+    module.exports.connect = (ops, root, project, state, ledger) => {
+      Object.assign(scheduledTaskLedger_1, ledger); activeProjectRoot = project;
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request);
+      getPersistedSettings = () => state.settings;
+      getScheduledAutomationLedgerReferenceRoot = () => project;
+      updatePersistedSettings = async (_context, patch) => { state.settings = { ...state.settings, automationTasks: { ...state.settings.automationTasks, ...patch.automationTasks } }; };
+    };
+  `);
+  extension.connect(call, root, project, state, ledger);
+  const pending = extension.run({}, task, occurrence.occurrenceId);
+  try {
+    await started;
+    const added = { ...task, id: 'new', title: '用户新任务' };
+    const edited = { ...task, title: '用户新要求', scheduledAt: new Date(Date.now() + 86400000).toISOString() };
+    const current = mutation === 'add' ? [task, added] : mutation === 'edit' ? [edited] : mutation === 'delete' ? [] : [task];
+    state.settings = { ...state.settings, automationTasks: { scheduledTasks: current } };
+    release(); await pending;
+    const expected = mutation === 'add' ? [{ ...task, enabled: false }, added] : mutation === 'edit' ? [edited] : mutation === 'delete' ? [] : [{ ...task, enabled: false }];
+    assert.equal(JSON.stringify(state.settings.automationTasks.scheduledTasks), JSON.stringify(expected));
+  } finally { release(); await pending; await ops.close(); store.close(); }
+});
+
+test('an actual scheduled prompt remains in project A when the user selects B during terminal readiness', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { SyncEngine } = require('../out/db/syncEngine.js'); const ledger = require('../out/scheduledTaskLedger.js');
+  const transport = require('../out/autonomousRuntimeControl.js'); const previous = transport.sendRuntimeDataRequest;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-scheduled-source-race-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'A'); const selected = path.join(base, 'B'); fs.mkdirSync(project); fs.mkdirSync(selected);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store); transport.sendRuntimeDataRequest = (_root, request) => ops(request);
+  const engineA = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  const engineB = new SyncEngine(path.join(selected, '.solopreneur', 'roadmap.csv'), path.join(selected, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  const task = { id: 'scheduled-agent', title: '原任务', enabled: true, projectPath: project, scheduleKind: 'daily', timeOfDay: '09:00', assignee: 'agent', prompt: '推进来源项目' };
+  const occurrence = ledger.syncScheduledTaskLedger(project, root, [task], new Date(Date.now() - 2 * 86400000)).tasks[0];
+  let release; const gate = new Promise(resolve => { release = resolve; }); let entered; const started = new Promise(resolve => { entered = resolve; }); const launches = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.run = runScheduledAutomationTask;
+    module.exports.select = (project, engine) => { activeProjectRoot = project; syncEngine = engine; };
+    module.exports.active = () => activeProjectRoot;
+    module.exports.connect = (ops, root, project, engine, ledger, SyncEngine, task, gate, entered, launches) => {
+      Object.assign(scheduledTaskLedger_1, ledger); syncEngine_1.SyncEngine = SyncEngine;
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request);
+      activeProjectRoot = project; syncEngine = engine;
+      getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude', taskPermissionMode: 'auto', enabledEnhancements: {}, automationTasks: { scheduledTasks: [task] } });
+      getScheduledAutomationLedgerReferenceRoot = () => project;
+      ensureActionProject = async () => project;
+      ensureTaskRuntimeReady = async () => {}; autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      revealAgentStartupTerminal = async () => { entered(); await gate; };
+      agentCli_1.resolveAgentCli = value => value; agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
+      recordLocalUsageEvent = () => {}; postNodeConversations = () => {}; buildSoloConversationPrompt = () => '来源项目固定输入';
+      ensureRoadmapValidationScript = () => {}; sendNodesToWebview = () => {}; refreshSidebarProjectCards = () => {};
+      solomapGlobal_1.ensureSolomapMemoryStore = () => {}; solomapGlobal_1.ensureSolomapEnhancementRuntime = () => ({ envLines: [], preflightLines: [] });
+      preSessionGit_1.createPreSessionGitCommit = async () => '';
+      launchAgentConversationTerminal = async input => { launches.push(input); };
+    };
+  `);
+  extension.connect(ops, root, project, engineA, ledger, SyncEngine, task, gate, entered, launches);
+  let pending;
+  try {
+    await engineA.initAndSync(); await engineB.initAndSync();
+    pending = extension.run({}, task, occurrence.occurrenceId); await started; extension.select(selected, engineB); release(); await pending;
+    assert.equal(launches.length, 1); assert.equal(launches[0].workspaceRoot, project);
+    assert.ok(await ops({ operation: 'read_run_intent', input: { root: project, launchIntentId: `scheduled:${occurrence.occurrenceId}` } }));
+    assert.equal((await ops({ operation: 'list_run_states', input: { root: selected } })).items.length, 0);
+    assert.equal(extension.active(), selected);
+  } finally { release(); if (pending) await pending; transport.sendRuntimeDataRequest = previous; engineA.close(); engineB.close(); await ops.close(); store.close(); }
+});
+
+test('replaying a committed scheduled reminder after a window restart does not notify again', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js'); const ledger = require('../out/scheduledTaskLedger.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reminder-replay-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  let store = new UnifiedDataStore(root); let ops = createRuntimeDataOperations(store);
+  const task = { id: 'reminder', title: '只提醒一次', enabled: true, projectPath: project, scheduleKind: 'daily', timeOfDay: '09:00', assignee: 'user' };
+  const occurrence = ledger.syncScheduledTaskLedger(project, root, [task], new Date(Date.now() - 2 * 86400000)).tasks[0];
+  const connect = () => {
+    const extension = loadCompiledModule('out/extension.js', `
+      module.exports.run = runScheduledAutomationTask;
+      module.exports.connect = (ops, root, project, task, ledger) => {
+        Object.assign(scheduledTaskLedger_1, ledger); activeProjectRoot = project;
+        autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request);
+        getPersistedSettings = () => ({ globalDataPath: root, automationTasks: { scheduledTasks: [task] } });
+        getScheduledAutomationLedgerReferenceRoot = () => project;
+      };
+    `); extension.connect(ops, root, project, task, ledger); return extension;
+  };
+  try {
+    const first = connect(); await first.run({}, task, occurrence.occurrenceId);
+    assert.equal(first.__vscodeTestState.informationMessages.length, 1);
+    await ops.close(); store.close(); store = new UnifiedDataStore(root); ops = createRuntimeDataOperations(store);
+    const restarted = connect(); await restarted.run({}, task, occurrence.occurrenceId);
+    assert.equal(restarted.__vscodeTestState.informationMessages.length, 0);
+  } finally { await ops.close(); store.close(); }
+});
+
+for (const edited of [false, true]) test(`a scheduled reminder does not acknowledge occurrence completion when another window holds the ledger lock${edited ? ' and settings are later edited' : ''}`, async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js'); const ledger = require('../out/scheduledTaskLedger.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reminder-lock-contention-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const task = { id: 'reminder', title: '保留待完成提醒', enabled: true, projectPath: project, scheduleKind: 'daily', timeOfDay: '09:00', assignee: 'user' };
+  const occurrence = ledger.syncScheduledTaskLedger(project, root, [task], new Date(Date.now() - 2 * 86400000)).tasks[0];
+  const lockPath = path.join(path.dirname(ledger.getScheduledTaskLedgerPath(project, root)), 'scheduled-tasks.lock');
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, claimedAt: new Date().toISOString() }));
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.run = runScheduledAutomationTask;
+    module.exports.connect = (ops, root, project, task, ledger) => {
+      Object.assign(scheduledTaskLedger_1, ledger); activeProjectRoot = project;
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request);
+      getPersistedSettings = () => ({ globalDataPath: root, automationTasks: { scheduledTasks: [task] } });
+      getScheduledAutomationLedgerReferenceRoot = () => project;
+    };
+  `); extension.connect(ops, root, project, task, ledger);
+  try {
+    await assert.rejects(extension.run({}, task, occurrence.occurrenceId), /scheduled_completion_not_committed/);
+    assert.equal(ledger.readScheduledTaskLedger(project, root).tasks[0].occurrenceId, occurrence.occurrenceId);
+    assert.equal(extension.__vscodeTestState.informationMessages.length, 1);
+    fs.renameSync(lockPath, `${lockPath}.retained-fixture`);
+    const retryTask = edited ? { ...task, title: '用户后来修改的标题' } : task;
+    if (edited) ledger.syncScheduledTaskLedger(project, root, [retryTask]);
+    await extension.run({}, retryTask, occurrence.occurrenceId);
+    assert.ok(ledger.readScheduledTaskLedger(project, root).tasks.every(row => row.occurrenceId !== occurrence.occurrenceId));
+    assert.equal(extension.__vscodeTestState.informationMessages.length, 1, 'retrying completion must not repeat the already committed reminder');
+  } finally { await ops.close(); store.close(); }
+});
+
+test('a scheduled reminder committed before a lost window reply is displayed after restart rather than silently completed', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js'); const ledger = require('../out/scheduledTaskLedger.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reminder-lost-reply-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  let store = new UnifiedDataStore(root); let ops = createRuntimeDataOperations(store);
+  const task = { id: 'reminder', title: '关闭窗口后仍应显示', enabled: true, projectPath: project, scheduleKind: 'daily', timeOfDay: '09:00', assignee: 'user' };
+  const occurrence = ledger.syncScheduledTaskLedger(project, root, [task], new Date(Date.now() - 2 * 86400000)).tasks[0];
+  let loseReply = true;
+  const call = async request => {
+    const result = await ops(request);
+    if (['append_automation_event', 'prepare_automation_delivery'].includes(request.operation) && loseReply) { loseReply = false; throw new Error('window_closed_after_commit'); }
+    return result;
+  };
+  const connect = () => {
+    const extension = loadCompiledModule('out/extension.js', `
+      module.exports.run = runScheduledAutomationTask;
+      module.exports.connect = (ops, root, project, task, ledger) => {
+        Object.assign(scheduledTaskLedger_1, ledger); activeProjectRoot = project;
+        autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request);
+        getPersistedSettings = () => ({ globalDataPath: root, automationTasks: { scheduledTasks: [task] } });
+        getScheduledAutomationLedgerReferenceRoot = () => project;
+      };
+    `); extension.connect(call, root, project, task, ledger); return extension;
+  };
+  try {
+    const first = connect(); await assert.rejects(first.run({}, task, occurrence.occurrenceId), /window_closed_after_commit/);
+    assert.equal(first.__vscodeTestState.informationMessages.length, 0);
+    assert.equal(ledger.readScheduledTaskLedger(project, root).tasks[0].occurrenceId, occurrence.occurrenceId);
+    await ops.close(); store.close(); store = new UnifiedDataStore(root); ops = createRuntimeDataOperations(store);
+    const restarted = connect(); await restarted.run({}, task, occurrence.occurrenceId);
+    assert.equal(restarted.__vscodeTestState.informationMessages.length, 1);
+    assert.ok(ledger.readScheduledTaskLedger(project, root).tasks.every(row => row.occurrenceId !== occurrence.occurrenceId));
+  } finally { await ops.close(); store.close(); }
+});
+
+test('a queued automation sound remains pending without a view and completes through the actual sidebar message acknowledgement', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-sound-delivery-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const messages = []; const sidebar = Object.create(SolopreneurSidebarProvider.prototype);
+  sidebar._view = { webview: { postMessage: async message => { messages.push(message); return true; } } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.run = runAutomationTasksAfterRun; module.exports.drain = pollAutomationUiDeliveries;
+    module.exports.view = sidebar => { sidebarProvider = sidebar; };
+    module.exports.message = (message, view) => handleSharedWebviewAction({}, message, 'sidebar', view);
+    module.exports.idle = () => Promise.allSettled([...automationUiFlights.values()]);
+    module.exports.connect = (ops, root) => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request); getPersistedSettings = () => ({ globalDataPath: root, automationTasks: { triggers: { completed: { sound: true } } } }); };
+  `); extension.connect(ops, root);
+  const input = { workspaceRoot: project, nodeId: 'step', runKind: 'step', nextStatus: 'Completed', failureCode: '', executionLogId: 1, agentCli: 'claude', userMessage: '原要求', globalDataPath: root, effectId: 'sound-effect' };
+  try {
+    await extension.run({}, 'completed', input);
+    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 1);
+    extension.view(sidebar); await extension.drain(root);
+    assert.equal(messages.length, 0, 'posting to an initial shell cannot count as playing a sound');
+    await extension.message({ command: 'automationSoundReady', pageId: 'actual-sidebar-page' }, sidebar._view.webview);
+    await extension.drain(root);
+    assert.equal(messages.length, 1);
+    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 1, 'postMessage(true) is not a playback acknowledgement');
+    await extension.message({ command: 'automationSoundPlayed', pageId: messages[0].pageId, deliveryId: messages[0].deliveryId, token: 'wrong', played: true }, sidebar._view.webview);
+    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 1);
+    await extension.message({ command: 'automationSoundPlayed', pageId: messages[0].pageId, deliveryId: messages[0].deliveryId, token: messages[0].token, played: true }, sidebar._view.webview);
+    await extension.idle();
+    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 0, 'the actual view acknowledgement must settle the preserved sound action');
+    await extension.run({}, 'completed', input);
+    assert.equal(messages.length, 1); assert.equal(messages[0].command, 'automationPlaySound');
+    await extension.run({}, 'completed', { ...input, effectId: 'sound-page-reload' });
+    assert.equal(messages.length, 2);
+    await extension.message({ command: 'automationSoundReady', pageId: 'sidebar-page-reloaded' }, sidebar._view.webview);
+    await extension.idle();
+    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items[0].state, 'queued');
+    await extension.drain(root);
+    assert.equal(messages.length, 3); assert.equal(messages[2].deliveryId, messages[1].deliveryId);
+    assert.equal(messages[2].pageId, 'sidebar-page-reloaded');
+    await extension.message({ command: 'automationSoundPlayed', pageId: messages[1].pageId, deliveryId: messages[1].deliveryId, token: messages[1].token, played: true }, sidebar._view.webview);
+    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 1, 'a late reply from the reloaded page cannot settle the renewed claim');
+    await extension.message({ command: 'automationSoundPlayed', pageId: messages[2].pageId, deliveryId: messages[2].deliveryId, token: messages[2].token, played: true }, sidebar._view.webview);
+    await extension.idle();
+    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 0);
+  } finally { await ops.close(); store.close(); }
+});
+
+for (const providerExists of [false, true]) test(`repeated unchanged sound polling without ${providerExists ? 'a resolved sidebar view' : 'any view'} does not write delivery history`, async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js'); const { DatabaseSync } = require('node:sqlite');
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-sound-idle-resource-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.run = runAutomationTasksAfterRun; module.exports.drain = pollAutomationUiDeliveries;
+    module.exports.connect = (ops, root, sidebar) => { sidebarProvider = sidebar; autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request); getPersistedSettings = () => ({ globalDataPath: root, automationTasks: { triggers: { completed: { sound: true } } } }); };
+  `); extension.connect(ops, root, providerExists ? Object.create(SolopreneurSidebarProvider.prototype) : null);
+  const db = new DatabaseSync(store.filePath, { readOnly: true });
+  const counts = () => db.prepare('SELECT (SELECT COUNT(*) FROM automation_delivery_receipts) AS receipts,(SELECT revision FROM automation_deliveries LIMIT 1) AS revision,(SELECT COUNT(*) FROM events) AS events').get();
+  try {
+    await extension.run({}, 'completed', { workspaceRoot: project, nodeId: 'step', runKind: 'step', nextStatus: 'Completed', failureCode: '', executionLogId: 1, agentCli: 'claude', userMessage: '原要求', globalDataPath: root, effectId: 'idle-sound' });
+    const before = counts();
+    for (let index = 0; index < 20; index++) await extension.drain(root);
+    assert.deepEqual(counts(), before, 'an unavailable output surface must not create another claim, revision or receipt every polling tick');
+    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 1);
+  } finally { db.close(); await ops.close(); store.close(); }
+});
+
+test('the Windows UI owner obtains a verifiable process creation marker without proc or ps', () => {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.birth = readProcessBirthMarker;
+    module.exports.windows = () => {
+      process = { ...process, platform: 'win32' };
+    };
+  `, {
+    fs: { ...fs, readFileSync: (...args) => { if (String(args[0]).startsWith('/proc/')) throw new Error('no-proc'); return fs.readFileSync(...args); } },
+    child_process: { ...childProcess, execFileSync: command => { if (command === 'powershell.exe') return '638954012345678901\r\n'; throw new Error('no-ps'); } }
+  });
+  extension.windows(); assert.equal(extension.birth(42), 'win32:638954012345678901');
+});
+
+for (const scenario of ['lost-claim-reply', 'delivered-ack-outage']) test(`a live notification instance recovers after ${scenario} without a plugin restart`, async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-ui-runtime-outage-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  let offline = false; let interrupted = false;
+  const call = async request => {
+    if (offline) throw new Error('runtime_temporarily_unavailable');
+    if (!interrupted && request.operation === (scenario === 'lost-claim-reply' ? 'claim_automation_delivery' : 'settle_automation_delivery')) {
+      interrupted = true; offline = true;
+      if (scenario === 'lost-claim-reply') await ops(request);
+      throw new Error('runtime_temporarily_unavailable');
+    }
+    return ops(request);
+  };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.queue = queueAutomationUiDelivery; module.exports.drain = pollAutomationUiDeliveries;
+    module.exports.idle = () => Promise.allSettled([...automationUiFlights.values()]);
+    module.exports.connect = call => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request); };
+  `); extension.connect(call);
+  try {
+    const launch = extension.queue(project, root, 'one-notice', { trigger: 'completed', action: 'notify' }, { kind: 'notification', message: '原提醒', warning: false });
+    if (scenario === 'lost-claim-reply') await assert.rejects(launch, /runtime_temporarily_unavailable/); else await launch;
+    await extension.idle();
+    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items[0].state, 'claimed');
+    offline = false;
+    await extension.drain(root); await extension.idle();
+    await extension.drain(root); await extension.idle();
+    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 0, 'the same live owner must resume its accepted claim without being replaced');
+    assert.equal(extension.__vscodeTestState.informationMessages.length, 1, 'an already displayed notice must retry only its acknowledgement');
+  } finally { offline = false; await extension.idle(); await ops.close(); store.close(); }
+});
+
+test('an asynchronously rejected notification remains recoverable while an open notice does not block another delivery', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-notice-rejection-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.queue = queueAutomationUiDelivery; module.exports.drain = pollAutomationUiDeliveries;
+    module.exports.idle = () => Promise.allSettled([...automationUiFlights.values()]);
+    module.exports.connect = call => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request); vscode.window.showInformationMessage = () => Promise.reject(new Error('notice_display_refused')); };
+    module.exports.notice = fn => { vscode.window.showInformationMessage = fn; };
+  `); extension.connect(ops);
+  let dismiss;
+  try {
+    await extension.queue(project, root, 'refused', { trigger: 'completed', action: 'notify' }, { kind: 'notification', message: '应恢复的通知', warning: false });
+    await extension.idle();
+    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 1, 'a rejected notice must not be permanently marked delivered');
+    const shown = [];
+    extension.notice(message => { shown.push(message); if (message === '应恢复的通知') return new Promise(resolve => { dismiss = resolve; }); return Promise.resolve(); });
+    await extension.drain(root);
+    await extension.queue(project, root, 'second', { trigger: 'completed', action: 'notify' }, { kind: 'notification', message: '另一项通知', warning: false });
+    assert.deepEqual(shown, ['应恢复的通知', '另一项通知']);
+    dismiss(); await extension.idle();
+    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 0);
+  } finally { dismiss?.(); await extension.idle(); await ops.close(); store.close(); }
+});
+
+test('a focus reminder preserves both actions when the enqueue reply is lost after commit', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-focus-batch-loss-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store); const timers = [];
+  let committed; const done = new Promise(resolve => { committed = resolve; });
+  const call = async request => {
+    const result = await ops(request);
+    if (['prepare_automation_delivery', 'prepare_automation_deliveries'].includes(request.operation)) { committed(); throw new Error('focus_enqueue_reply_lost'); }
+    return result;
+  };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.schedule = scheduleFocusReminder;
+    module.exports.connect = (call, root, project, timers) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request); activeProjectRoot = project;
+      getPersistedSettings = () => ({ globalDataPath: root, automationTasks: { focusMinutes: 25, triggers: { focus_time: { notify: true, sound: true } } } });
+      setTimeout = fn => { timers.push(fn); return { unref() {} }; }; clearTimeout = () => {}; broadcastSettings = async () => {};
+    };
+  `); extension.connect(call, root, project, timers);
+  try {
+    extension.schedule({}); timers[0](); await done; await new Promise(resolve => setImmediate(resolve));
+    const page = await ops({ operation: 'list_automation_deliveries', input: {} });
+    assert.equal(page.items.length, 2, 'a committed reminder must retain every enabled action despite the lost reply');
+    assert.deepEqual(page.items.map(item => item.kind).sort(), ['notification', 'sound']);
+  } finally { await ops.close(); store.close(); }
+});
+
+test('a pending focus notification is cancelled after restart when the user has disabled reminders', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-focus-pending-disabled-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  let store = new UnifiedDataStore(root); let ops = createRuntimeDataOperations(store);
+  try {
+    await ops({ operation: 'prepare_automation_delivery', input: { root: project, intentId: 'focus-before-shutdown', event: { trigger: 'focus_time', action: 'reminder', focusMinutes: 25 }, payload: { kind: 'notification', message: '旧专注提醒', warning: false } } });
+    await ops.close(); store.close(); store = new UnifiedDataStore(root); ops = createRuntimeDataOperations(store);
+    const extension = loadCompiledModule('out/extension.js', `
+      module.exports.drain = pollAutomationUiDeliveries;
+      module.exports.connect = (ops, root) => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request); extensionContextRef = {}; getPersistedSettings = () => ({ globalDataPath: root, automationTasks: { triggers: { focus_time: { notify: false, sound: false } } } }); };
+    `); extension.connect(ops, root);
+    await extension.drain(root);
+    assert.equal(extension.__vscodeTestState.informationMessages.length, 0);
+    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 0);
+  } finally { await ops.close(); store.close(); }
+});
+
+
+for (const delayed of [true, false]) test(`database-only step criteria migration refreshes the actual ${delayed ? 'delayed' : 'already visible'} page without a node action`, async t => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { SyncEngine } = require('../out/db/syncEngine.js');
+  const actualTransport = require('../out/autonomousRuntimeControl.js'); const previous = actualTransport.sendRuntimeDataRequest;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-step-migration-refresh-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  actualTransport.sendRuntimeDataRequest = (_root, request) => ops(request);
+  await ops({ operation: 'register_project', input: { root: project } });
+  const engine = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  engine.setNodes([{ id: 'step', title: '用户当前目标', stage: '实施', agentPrompt: '继续推进', status: 'Pending' }]);
+  await ops({ operation: 'write_step_memory', input: { root: project, nodeId: 'step', expectedRevision: 0, origin: 'default', patch: { completionCriteria: ['旧默认标准'] }, idempotencyKey: 'refresh-default' } });
+  const csvBefore = fs.readFileSync(path.join(project, '.solopreneur', 'roadmap.csv'));
+  let release; const gate = new Promise(resolve => { release = resolve; }); let entered; const reading = new Promise(resolve => { entered = resolve; }); let delay = delayed; let metadataReads = 0;
+  const call = async request => {
+    if (request.operation === 'read_step_memory') metadataReads++;
+    const result = await ops(request);
+    if (request.operation === 'read_step_memory' && delay) { delay = false; entered(); await gate; }
+    return result;
+  };
+  const messages = [];
+  const sidebarWrapper = fs.readFileSync(path.join(projectRoot, 'out/extension.js'), 'utf8').match(/const syncEngineWrapper = \{[\s\S]*?\n    \};/)[0];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.makeSidebarEngine = () => { ${sidebarWrapper} return syncEngineWrapper; };
+    module.exports.send = sendNodesToWebview; module.exports.poll = pollActiveConversations;
+    module.exports.connect = (call, root, project, engine, messages) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+      getPersistedSettings = () => ({ globalDataPath: root }); getSelectedProjectPath = () => project;
+      extensionContextRef = {}; activeProjectRoot = project; syncEngine = engine;
+      activePanel = { webview: { postMessage: message => messages.push(message) } };
+      postFlowStateToWebview = async () => {};
+    };
+  `);
+  extension.connect(call, root, project, engine, messages);
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const sidebar = new SolopreneurSidebarProvider(createUri(projectRoot), extension.makeSidebarEngine(), { getSettings: () => ({ globalDataPath: root }), updateSettings: async () => {}, getProjects: () => ({ projects: [], selectedProjectPath: project }) });
+  sidebar._view = { webview: { postMessage: message => { messages.push(message); return Promise.resolve(true); } } };
+  try {
+    const firstPaint = extension.send();
+    assert.equal(messages[0].nodes[0].status, 'Pending', 'first paint cannot wait for database metadata');
+    if (delayed) await reading; else await firstPaint;
+    const sourceRoot = path.join(project, '.solopreneur', 'step-memory'); fs.mkdirSync(sourceRoot);
+    const criteria = Array.from({ length: 31 }, (_, index) => `迁移后的原用户标准${index}`);
+    fs.writeFileSync(path.join(sourceRoot, 'step.json'), JSON.stringify({ completionCriteria: criteria, largeUnknownMetadata: '必须完整保留的历史元数据🌿'.repeat(40000), entries: [{ signal: '全部原历史' }] }));
+    await ops({ operation: 'import_project_data', input: { collection: 'step-memory', projectRoot: project, sourceRoot, idempotencyKey: 'refresh-only-database' } }); await ops.waitForMigrations();
+    if (delayed) { release(); await firstPaint; } else await extension.poll({});
+    assert.deepEqual(messages.filter(message => message.command === 'nodesUpdated').at(-1).nodes[0].completionCriteria, criteria, 'the latest standards must appear with only a database migration, without sending another node update');
+    assert.deepEqual(fs.readFileSync(path.join(project, '.solopreneur', 'roadmap.csv')), csvBefore);
+    sidebar.sendNodesToWebview();
+    assert.deepEqual(messages.at(-1).nodes[0].completionCriteria, criteria, 'a later sidebar node request must preserve the accepted database standards');
+    const stableReads = metadataReads;
+    const content = store.content; let decoded = 0; let retainedDecodes = 0;
+    const retainedIds = new Set(store.rows('SELECT content_id,source_refs_content_id FROM project_step_memory_revisions').flatMap(row => [row.content_id, row.source_refs_content_id]));
+    for (const row of store.rows("SELECT content_id FROM evidence WHERE type IN ('step_memory','step_memory_source')")) retainedIds.add(row.content_id);
+    store.content = function(id, ...args) { decoded++; if (retainedIds.has(id)) retainedDecodes++; return content.call(this, id, ...args); };
+    for (let iteration = 0; iteration < 12; iteration++) await extension.poll({});
+    store.content = content;
+    t.diagnostic(JSON.stringify({ unchangedPolls: 12, metadataReads: metadataReads - stableReads, allContentDecodes: decoded, retainedMetadataDecodes: retainedDecodes }));
+    assert.equal(metadataReads, stableReads, 'unchanged polling must not rehydrate the retained metadata');
+    assert.equal(retainedDecodes, 0, 'lightweight freshness checks cannot decode retained bodies');
+  } finally { release(); actualTransport.sendRuntimeDataRequest = previous; engine.close(); await ops.close(); store.close(); }
+});
+
+
+for (const delayed of [false, true]) test(`switching the settings data root refreshes ${delayed ? 'an in-flight' : 'a visible'} criteria snapshot even when both roots have the same revision`, async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { SyncEngine } = require('../out/db/syncEngine.js'); const transport = require('../out/autonomousRuntimeControl.js'); const previous = transport.sendRuntimeDataRequest;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-criteria-root-switch-')); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const roots = [path.join(base, 'a', '.solomap-global'), path.join(base, 'b', '.solomap-global')];
+  const stores = roots.map(root => new UnifiedDataStore(root)); const operations = stores.map(store => createRuntimeDataOperations(store));
+  for (let index = 0; index < 2; index++) {
+    await operations[index]({ operation: 'register_project', input: { root: project } });
+    await operations[index]({ operation: 'write_step_memory', input: { root: project, nodeId: 'step', expectedRevision: 0, patch: { completionCriteria: [index ? '新数据目录的用户标准' : '原数据目录的用户标准'] }, idempotencyKey: `root-criteria-${index}` } });
+    assert.equal((await operations[index]({ operation: 'read_step_memory_state', input: { root: project } })).revision, 1);
+  }
+  let release; const gate = new Promise(resolve => { release = resolve; }); let entered; const reading = new Promise(resolve => { entered = resolve; }); let delay = delayed;
+  const call = async (root, request) => {
+    const index = roots.indexOf(root); assert.notEqual(index, -1, 'all hydration reads must use one actual normalized data root');
+    const result = await operations[index](request);
+    if (index === 0 && request.operation === 'read_step_memory' && delay) { delay = false; entered(); await gate; }
+    return result;
+  };
+  transport.sendRuntimeDataRequest = call;
+  const engine = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, roots[0]);
+  engine.setNodes([{ id: 'step', title: '当前目标', stage: '实施', agentPrompt: '继续', status: 'Pending' }]);
+  let saved = {}; const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => saved || fallback, update: async (_key, value) => { saved = value; } } }; const messages = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.send = sendNodesToWebview; module.exports.poll = pollActiveConversations; module.exports.updateSettings = updatePersistedSettings;
+    module.exports.connect = (call, context, project, engine, messages) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = call; extensionContextRef = context;
+      activeProjectRoot = project; syncEngine = engine; getSelectedProjectPath = () => project; getSettingsEnhancementWorkspaceRoot = () => project;
+      activePanel = { webview: { postMessage: message => messages.push(message) } }; postFlowStateToWebview = async () => {};
+      syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {}; activateObservedBackgroundRuntime = async () => {};
+    };
+  `);
+  extension.__vscodeTestState.configurationValues.globalDataPath = roots[0]; extension.connect(call, context, project, engine, messages);
+  try {
+    const paint = extension.send(); if (delayed) await reading; else await paint;
+    await extension.updateSettings(context, { globalDataPath: roots[1] });
+    const boundary = messages.length; release(); await paint;
+    assert.ok(messages.slice(boundary).filter(message => message.command === 'nodesUpdated').every(message => !message.nodes[0].completionCriteria.includes('原数据目录的用户标准')), 'a late old-root hydration cannot commit after the settings root changed');
+    await extension.poll(context);
+    assert.deepEqual(messages.filter(message => message.command === 'nodesUpdated').at(-1).nodes[0].completionCriteria, ['新数据目录的用户标准']);
+    const reads = []; extension.connect(async (root, request) => { if (request.operation === 'read_step_memory') reads.push(root); return call(root, request); }, context, project, engine, messages);
+    for (let index = 0; index < 3; index++) await extension.poll(context);
+    assert.deepEqual(reads, [], 'the accepted root and version must stay cached on unchanged polling');
+  } finally { release(); transport.sendRuntimeDataRequest = previous; engine.close(); for (const ops of operations) await ops.close(); for (const store of stores) store.close(); }
+});
+
+
+for (const [changeRoot, transientFailure] of [[false, false], [true, false], [false, true]]) test(`production experience review button applies a database proposal using the shared launcher without review files${changeRoot ? ' and preserves a later root selection' : ''}${transientFailure ? ' after a transient state RPC failure' : ''}`, async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-formal-review-host-')), project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root), ops = createRuntimeDataOperations(store);
+  const { projectId } = await ops({ operation: 'register_project', input: { root: project } });
+  store.write({ kind: 'memory', action: 'create', scope: projectId, idempotencyKey: 'host-source', data: { category: 'rules', title: '用户要求', status: 'captured', content: '保留原功能和用户目标，交付前核验真实结果。' } });
+  let saved = { cliPath: 'mock-review-agent', globalPrompt: '保留用户目标。', globalDataPath: root }; const launches = [];
+  const context = { extensionPath: projectRoot, globalState: { get: () => saved, update: async (_key, value) => { saved = value; } } };
+  const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
+  let transientInjected = false;
+  const call = async (dataRoot, request) => {
+    assert.equal(dataRoot, root);
+    if (transientFailure && !transientInjected && launches.length > 0 && request.operation === 'read_run_state') {
+      transientInjected = true; throw Object.assign(new Error('state RPC connection reset'), { code: 'ECONNRESET' });
+    }
+    return ops(request);
+  };
+  transport.sendRuntimeDataRequest = call;
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.review = runGlobalPromptReview;
+    module.exports.connect = (root, project, call, readSettings, writeSettings, send) => {
+      activeProjectRoot = project; autonomousRuntimeControl_1.sendRuntimeDataRequest = call;
+      agentCli_1.resolveAgentCli = value => value; agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
+      getPersistedSettings = () => readSettings(); getReviewLaunchSettings = () => ({ ...readSettings(), taskPermissionMode: 'auto' });
+      updatePersistedSettings = async (_context, patch) => writeSettings(patch); broadcastSettings = async () => {};
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {}; createAgentTerminal = () => ({ show() {}, processId: Promise.resolve(991) });
+      terminalCompatibility_1.sendTextWhenTerminalReady = async (_terminal, command) => send(command);
+    };
+  `);
+  extension.connect(root, project, call, () => saved, patch => { saved = { ...saved, ...patch }; }, async command => {
+    assert.match(command, /runAgentProcess\.js/); assert.doesNotMatch(command, /maintenance\/runs|\.run\.sh/); launches.push(command);
+    const id = Number(command.match(/--execution-log-id (\d+)/)?.[1]); assert.ok(id > 0);
+    const plan = await ops({ operation: 'read_run_execution_plan', input: { root: project, executionLogId: id } });
+    assert.match(plan.prompt, /完整全局默认提示词/);
+    const batchId = plan.status.learningReviewBatchId; assert.ok(batchId);
+    const batch = store.read(batchId), index = batch.projection;
+    const result = { globalPrompt: '保留用户目标。', changes: [], processedSourceIds: index.sources.map(source => source.id), deferredSourceIds: [], unresolved: [], recovery: [] };
+    if (changeRoot) { result.globalPrompt += '\n交付前核验真实结果。'; result.changes = [{ type: 'add', before: [], after: '交付前核验真实结果。', evidence: [index.sources.find(source => source.kind === 'memory').id], reason: '已记录的用户要求。' }]; }
+    let state = await ops({ operation: 'claim_run', input: { root: project, executionLogId: id, expectedRevision: plan.revision, agentPid: process.pid, processBirth: '', idempotencyKey: 'host-review-claim' } });
+    const proof = state.proof;
+    const session = await ops({ operation: 'open_mcp_session', input: { projectId, runIdentity: { executionLogId: id, generation: state.generation, proof } } });
+    await ops({ operation: 'write', sessionToken: session.sessionToken, input: { kind: 'review_batch', action: 'patch', scope: projectId, objectId: batchId, expectedRevision: batch.revision, idempotencyKey: 'host-agent-result', data: { proposal_content: JSON.stringify(result) } } });
+    state = await ops({ operation: 'checkpoint_run', input: { root: project, executionLogId: id, generation: state.generation, proof, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'complete', source: 'host', outcome: 'partial', summary: '完整提示词已提交。', exitCode: 0, idempotencyKey: 'host-review-exit' } });
+    if (state.status.hostOutputPending) await ops({ operation: 'finalize_run_output', input: { root: project, executionLogId: id, generation: state.generation, proof, expectedRevision: state.revision, expectedTurnId: state.turnId, exitCode: 0, source: 'host', idempotencyKey: 'host-review-output-final' } });
+    if (changeRoot) saved = { ...saved, globalDataPath: path.join(base, 'selected', '.solomap-global') };
+    return true;
+  });
+  try {
+    const result = await extension.review(context, saved.globalPrompt);
+    assert.equal(result.success, !changeRoot, result.message); assert.equal(launches.length, 1);
+    assert.equal(transientInjected, transientFailure);
+    assert.equal(result.globalPrompt, saved.globalPrompt);
+    assert.equal(store.search({ scope: projectId, kinds: ['review_batch'] }).items[0].data.status, changeRoot ? 'applying' : 'applied');
+    assert.equal(fs.existsSync(path.join(root, 'maintenance')), false); assert.equal(fs.existsSync(path.join(root, 'context')), false);
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')).sort(), ['project.json']);
+  } finally { transport.sendRuntimeDataRequest = previous; await ops.close(); store.close(); }
+});
+
+for (const appliedFirst of [true, false]) test(`production default instruction save keeps the next review baseline current after ${appliedFirst ? 'a completed review' : 'an interrupted review'}`, async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { reviewHash } = require('../out/learningReview.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'review-settings-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root), ops = createRuntimeDataOperations(store);
+  const call = (operation, input) => ops({ operation, input });
+  let saved = { globalDataPath: root, globalPrompt: '保留用户目标。', cliPath: 'fixture' };
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async (_key, value) => { saved = { ...saved, ...value }; } } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.save = updatePersistedSettings;
+    module.exports.connect = (call, root, project, readSettings) => {
+      activeProjectRoot = project; getPersistedSettings = readSettings;
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request.operation, request.input);
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {};
+    };
+  `);
+  extension.connect(call, root, project, () => saved);
+  try {
+    await call('register_project', { root: project });
+    const batch = await call('prepare_learning_review', { runId: 'initial-settings-review', workspaceRoot: project, globalPrompt: saved.globalPrompt, persistedGlobalPrompt: saved.globalPrompt });
+    if (appliedFirst) {
+      const result = { globalPrompt: saved.globalPrompt, changes: [], processedSourceIds: batch.manifest.sources.map(source => source.id), deferredSourceIds: [], unresolved: [], recovery: [] };
+      const applied = await call('apply_learning_review', { batchId: batch.objectId, expectedRevision: batch.revision, manifestHash: reviewHash(JSON.stringify(batch.manifest)), result, idempotencyKey: 'settings-first-apply' });
+      await call('finish_learning_review', { applicationId: applied.application.objectId, expectedRevision: applied.application.revision, promptHash: reviewHash(result.globalPrompt), idempotencyKey: 'settings-first-finish' });
+    } else await call('interrupt_learning_review', { batchId: batch.objectId });
+    const edited = '保留用户目标。\n用户新增的长期要求。';
+    await extension.save(context, { globalPrompt: edited });
+    assert.equal(saved.globalPrompt, edited);
+    const next = await call('prepare_learning_review', { runId: 'after-user-settings-save', workspaceRoot: project, globalPrompt: edited, persistedGlobalPrompt: edited });
+    assert.equal(next.manifest.globalPrompt, edited);
+    assert.equal(store.read(next.policy.objectId, next.policy.revision).data.content, edited);
+  } finally { await ops.close(); store.close(); }
+});
+
+for (const unchanged of [true, false]) test(`production default instruction save ${unchanged ? 'does not version an unchanged settings submission' : 'discards a delayed review projection after a newer user save'}`, async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'review-settings-order-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root), ops = createRuntimeDataOperations(store);
+  let saved = { globalDataPath: root, globalPrompt: '保留用户目标。', cliPath: 'fixture' };
+  const writes = [];
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async (_key, value) => { writes.push(value.globalPrompt); saved = { ...saved, ...value }; } } };
+  let release, announce, held = false;
+  const ready = new Promise(resolve => { announce = resolve; });
+  const blocked = new Promise(resolve => { release = resolve; });
+  const call = async (operation, input) => {
+    if (!unchanged && !held && operation === 'read_global_prompt_policy') { held = true; announce(); await blocked; }
+    return ops({ operation, input });
+  };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.save = updatePersistedSettings;
+    module.exports.connect = (call, project, readSettings) => {
+      activeProjectRoot = project; getPersistedSettings = readSettings;
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request.operation, request.input);
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {};
+    };
+  `);
+  extension.connect(call, project, () => saved);
+  try {
+    await ops({ operation: 'register_project', input: { root: project } });
+    const batch = await ops({ operation: 'prepare_learning_review', input: { runId: 'settings-order-baseline', workspaceRoot: project, globalPrompt: saved.globalPrompt, persistedGlobalPrompt: saved.globalPrompt } });
+    await ops({ operation: 'interrupt_learning_review', input: { batchId: batch.objectId } });
+    const initial = store.read(batch.policy.objectId);
+    if (unchanged) {
+      for (let index = 0; index < 8; index++) await extension.save(context, { globalPrompt: saved.globalPrompt });
+      assert.equal(store.read(initial.objectId).revision, initial.revision, 'ordinary unchanged settings submissions must not add policy versions');
+    } else {
+      const first = extension.save(context, { globalPrompt: saved.globalPrompt }, { globalPromptSource: 'review_projection' });
+      await ready;
+      const latest = '用户刚保存的新要求。';
+      const newer = extension.save(context, { globalPrompt: latest });
+      release();
+      await Promise.all([first, newer]);
+      assert.deepEqual(writes, [latest], 'a delayed review mirror cannot persist its superseded text');
+      assert.equal(saved.globalPrompt, latest); assert.equal(store.read(initial.objectId).data.content, latest);
+    }
+  } finally { release(); await ops.close(); store.close(); }
+});
+
+for(const mixed of [false,true]) test(mixed?'production default instruction save a superseded prompt preserves the earlier automation settings patch':'production default instruction save the real save projects a validated complete prompt including its final newline',async()=>{
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { reviewHash } = require('../out/learningReview.js');
+ const base=fs.mkdtempSync(path.join(os.tmpdir(),'review-save-boundary-')),root=path.join(base,'.solomap-global'),project=path.join(base,'project');fs.mkdirSync(project);
+ const store=new UnifiedDataStore(root),ops=createRuntimeDataOperations(store);let saved={globalDataPath:root,globalPrompt:'保留用户目标。',cliPath:'fixture',automationTasks:{focusMinutes:10}};
+ const context={extensionPath:projectRoot,globalState:{get:()=>saved,update:async(_key,value)=>{saved={...saved,...value}}}};
+ let release,announce,held=false;const ready=new Promise(r=>{announce=r}),blocked=new Promise(r=>{release=r});
+ const call=async(operation,input)=>{if(mixed&&!held&&operation==='read_global_prompt_policy'){held=true;announce();await blocked;}return ops({operation,input})};
+ const extension=loadCompiledModule('out/extension.js',`module.exports.save=updatePersistedSettings;module.exports.readActual=getPersistedSettings;
+ module.exports.connect=(call,project,readSettings)=>{activeProjectRoot=project;getPersistedSettings=readSettings;autonomousRuntimeControl_1.sendRuntimeDataRequest=(_root,request)=>call(request.operation,request.input);autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime=async()=>{};syncCognitiveRuntimeConfig=()=>{};synchronizeTelegramChannel=()=>{};scheduleFocusReminder=()=>{};};`);
+ extension.__vscodeTestState.configurationValues.automationTasks={focusMinutes:10};extension.connect(call,project,()=>saved);
+ try{
+  const registered=await call('register_project',{root:project});
+  store.write({kind:'memory',action:'create',scope:registered.projectId,idempotencyKey:'new-rule-source',data:{category:'rules',title:'完整要求',status:'captured',content:'新增要求。'}});
+  const batch=await call('prepare_learning_review',{runId:'boundary',workspaceRoot:project,globalPrompt:saved.globalPrompt,persistedGlobalPrompt:saved.globalPrompt});
+  if(!mixed){
+   const target='保留用户目标。\n新增要求。\n'.replace(/\\n/g,'\n');
+   const result={globalPrompt:target,changes:[{type:'add',before:[],after:'新增要求。\n'.replace(/\\n/g,'\n'),evidence:[batch.manifest.sources[0].id],reason:'保留完整用户要求。'}],processedSourceIds:batch.manifest.sources.map(s=>s.id),deferredSourceIds:[],unresolved:[],recovery:[]};
+   await call('apply_learning_review',{batchId:batch.objectId,expectedRevision:batch.revision,manifestHash:reviewHash(JSON.stringify(batch.manifest)),result,idempotencyKey:'boundary-apply'});
+   await assert.doesNotReject(extension.save(context,{globalPrompt:target},{globalPromptSource:'review_projection'}));assert.equal(saved.globalPrompt,target);
+  }else{
+   await call('interrupt_learning_review',{batchId:batch.objectId});
+   const first=extension.save(context,{globalPrompt:'较早的指令。',automationTasks:{focusMinutes:25}});await ready;
+   const later=extension.save(context,{globalPrompt:saved.globalPrompt},{globalPromptSource:'review_projection'});release();await Promise.all([first,later]);
+   assert.equal(extension.__vscodeTestState.configurationValues.automationTasks.focusMinutes,25,'superseding only the prompt must retain another setting from the earlier save');
+   assert.equal(extension.readActual(context).automationTasks.focusMinutes,25);
+  }
+ }finally{release();await ops.close();store.close();}
+});
+
+for (const kind of ['step', 'solo', 'roadmap_revision']) test(`the actual automatic ${kind} handler keeps prompt context in the same original data root as its formal run`, async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { SyncEngine } = require('../out/db/syncEngine.js'); const transport = require('../out/autonomousRuntimeControl.js'); const previous = transport.sendRuntimeDataRequest;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-automatic-prompt-root-')); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const roots = [path.join(base, 'original', '.solomap-global'), path.join(base, 'selected', '.solomap-global')];
+  const stores = roots.map(root => new UnifiedDataStore(root)); const operations = stores.map(store => createRuntimeDataOperations(store)); const memory = [];
+  const call = (root, request) => { const index = roots.indexOf(root); assert.notEqual(index, -1); return operations[index](request); };
+  transport.sendRuntimeDataRequest = call;
+  for (let index = 0; index < 2; index++) {
+    await operations[index]({ operation: 'register_project', input: { root: project } });
+    memory.push(await operations[index]({ operation: 'write_step_memory', input: { root: project, nodeId: 'step', expectedRevision: 0, patch: { completionCriteria: [index ? '当前另一个目录的标准' : '原任务所属目录的完整标准'] }, idempotencyKey: `automation-root-memory-${index}` } }));
+  }
+  const engine = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, roots[0]);
+  engine.setNodes([{ id: 'step', title: '用户目标', description: '继续原任务', stage: '实施', agentCli: 'claude', agentPrompt: '交付实际结果', status: 'Pending' }]);
+  const launches = []; const extension = loadCompiledModule('out/extension.js', `
+    module.exports.runAutomatic = runAutomationTasksAfterRun;
+    module.exports.connect = (call, selectedRoot, project, engine, launches) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = call;
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {}; ensureTaskRuntimeReady = async () => {};
+      activeProjectRoot = project; syncEngine = engine;
+      getPersistedSettings = () => ({ cliPath: 'claude', globalDataPath: selectedRoot, taskPermissionMode: 'auto', enabledEnhancements: {}, automationTasks: { triggers: { completed: { prompt: '推进原任务的下一步' } } } });
+      agentCli_1.resolveAgentCli = value => value; agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
+      recordLocalUsageEvent = () => {}; postNodeConversations = () => {}; ensureRoadmapValidationScript = () => {}; sendNodesToWebview = () => {}; refreshSidebarProjectCards = () => {};
+      solomapGlobal_1.ensureSolomapMemoryStore = () => {}; solomapGlobal_1.ensureSolomapEnhancementRuntime = () => ({ envLines: [], preflightLines: [] });
+      preSessionGit_1.createPreSessionGitCommit = async () => ''; launchAgentConversationTerminal = async input => launches.push(input);
+    };
+  `);
+  extension.connect(call, roots[1], project, engine, launches);
+  try {
+    await engine.initAndSync();
+    await extension.runAutomatic({ extensionPath: projectRoot }, 'completed', { workspaceRoot: project, nodeId: kind === 'solo' ? '__solo__' : kind === 'roadmap_revision' ? '__roadmap_revision__' : 'step', runKind: kind, nextStatus: 'Completed', failureCode: '', executionLogId: 1, agentCli: 'claude', userMessage: '原始目标', effectId: 'original-root-effect', globalDataPath: roots[0], engine });
+    assert.equal(launches.length, 1); assert.equal(launches[0].globalDataPath, roots[0]);
+    const run = (await operations[0]({ operation: 'list_run_states', input: { root: project } })).items[0];
+    const document = await operations[0]({ operation: 'read_run_document', input: { projectId: run.projectId, executionLogId: run.status.rootExecutionLogId, purpose: 'launch_request', revision: 1 } });
+    const prepared = JSON.parse(Buffer.from(document.bytes, 'base64').toString('utf8'));
+    assert.ok(prepared.prompt.includes(roots[0]), 'actual startup context must pin the original task data root');
+    assert.ok(!prepared.prompt.includes(roots[1]), 'the selected data root cannot leak into the original task prompt');
+    if (kind === 'step') {
+      assert.ok(prepared.prompt.includes('原任务所属目录的完整标准')); assert.ok(prepared.prompt.includes(memory[0].objectId));
+      assert.ok(!prepared.prompt.includes('当前另一个目录的标准')); assert.ok(!prepared.prompt.includes(memory[1].objectId));
+    }
+    assert.equal((await operations[1]({ operation: 'list_run_states', input: { root: project } })).items.length, 0);
+    const pinned = await operations[0]({ operation: 'read', input: { ref: memory[0].objectId, revision: 1 } }); assert.equal(pinned.objectId, memory[0].objectId);
+    assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')).sort(), ['project.json', 'roadmap.csv']);
+  } finally { transport.sendRuntimeDataRequest = previous; engine.close(); for (const ops of operations) await ops.close(); for (const store of stores) store.close(); }
 });

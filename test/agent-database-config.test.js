@@ -1,4 +1,19 @@
 const test = require('node:test');
+
+test('Codex forwards current run credentials without storing their values or dropping existing environment declarations', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-config-run-forward-'));
+  const file = path.join(root, 'config.toml');
+  const module = require('../out/agentDatabaseConfig.js'), toml = require('@iarna/toml');
+  module.configureAgentDatabase({ provider: 'codex', configPath: file, command: process.execPath, globalDataPath: '/global/.solomap-global' });
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(/\nenv_vars\s*=\s*\[[^\]]*\]/, '').replace('[mcp_servers.solomap_data]\n', '[mcp_servers.solomap_data]\nenv_vars=["USER_VARIABLE"]\n'));
+  module.configureAgentDatabase({ provider: 'codex', configPath: file, command: process.execPath, globalDataPath: '/global/.solomap-global' });
+  const parsed = toml.parse(fs.readFileSync(file, 'utf8')), server = parsed.mcp_servers.solomap_data;
+  for (const name of ['USER_VARIABLE', 'SOLOMAP_EXECUTION_LOG_ID', 'SOLOMAP_RUN_GENERATION', 'SOLOMAP_RUN_PROOF']) assert.ok(server.env_vars.includes(name), name);
+  assert.equal(Object.hasOwn(server.env, 'SOLOMAP_RUN_PROOF'), false);
+  const once = fs.readFileSync(file, 'utf8');
+  module.configureAgentDatabase({ provider: 'codex', configPath: file, command: process.execPath, globalDataPath: '/global/.solomap-global' });
+  assert.equal(fs.readFileSync(file, 'utf8'), once);
+});
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');

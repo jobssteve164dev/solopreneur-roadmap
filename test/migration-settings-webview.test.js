@@ -102,3 +102,45 @@ test('reviewing an exact file list pauses polling and stale responses cannot hid
   panel.style.display = 'none'; observe();
   assert.equal(timers.size, 0);
 });
+
+test('restoring the last file keeps the result visible until the next action', () => {
+  const elements = new Map(); const listeners = new Map(); const messages = []; let observe;
+  const element = selector => {
+    if (!elements.has(selector)) elements.set(selector, { hidden: false, disabled: false, textContent: '', innerHTML: '', setAttribute() {}, removeAttribute() {} });
+    return elements.get(selector);
+  };
+  const panel = { style: { display: 'block' } };
+  const card = { querySelector: element, querySelectorAll: () => [], setAttribute() {}, addEventListener: (name, listener) => listeners.set(name, listener) };
+  vm.runInNewContext(getMigrationSettingsScript(), { currentLanguage: 'zh', vscode: { postMessage: message => messages.push(message) }, document: { getElementById: id => id === 'settings-panel' ? panel : card }, window: { addEventListener: (name, listener) => listeners.set('window-' + name, listener) }, MutationObserver: class { constructor(callback) { observe = callback; } observe() {} disconnect() {} }, setTimeout, clearTimeout });
+  const deliver = data => listeners.get('window-message')({ data: { command: 'dataMigrationLoaded', ...data } });
+  observe(); const first = messages.at(-1);
+  deliver({ requestId: first.requestId, dataRoot: '/isolated', overview: { jobs: [], recycling: [{ itemId: 'last-file', path: '/project/old.db', status: 'trashed' }] } });
+  const restore = { disabled: false, hasAttribute: name => name === 'data-migration-restore', getAttribute: () => 'last-file', closest() { return this; } };
+  listeners.get('click')({ target: restore }); const request = messages.at(-1);
+  assert.equal(request.command, 'dataMigration.restore');
+  deliver({ requestId: request.requestId, overview: { jobs: [], recycling: [] }, successMessage: '文件已恢复。' });
+  assert.equal(card.hidden, false, 'the last restored file must leave a visible result');
+  assert.equal(element('[data-migration-status]').textContent, '文件已恢复。');
+  deliver({ requestId: first.requestId, overview: {} }); assert.equal(card.hidden, false);
+  const refresh = { disabled: false, hasAttribute: name => name === 'data-migration-refresh', closest() { return this; } };
+  listeners.get('click')({ target: refresh }); deliver({ requestId: messages.at(-1).requestId, overview: { jobs: [], recycling: [] } });
+  assert.equal(card.hidden, true, 'an empty cleanup card is hidden after refresh');
+});
+
+test('restored files retain visible review details for an unowned recovery directory', () => {
+  const elements = new Map(); const listeners = new Map(); const messages = []; let observe;
+  const element = selector => {
+    if (!elements.has(selector)) elements.set(selector, { hidden: false, disabled: false, textContent: '', innerHTML: '', setAttribute() {}, removeAttribute() {} });
+    return elements.get(selector);
+  };
+  const card = { querySelector: element, querySelectorAll: () => [], setAttribute() {}, addEventListener: (name, listener) => listeners.set(name, listener) };
+  vm.runInNewContext(getMigrationSettingsScript(), { currentLanguage: 'zh', vscode: { postMessage: message => messages.push(message) }, document: { getElementById: id => id === 'settings-panel' ? { style: { display: 'block' } } : card }, window: { addEventListener: (name, listener) => listeners.set('window-' + name, listener) }, MutationObserver: class { constructor(callback) { observe = callback; } observe() {} disconnect() {} }, setTimeout, clearTimeout });
+  observe();
+  listeners.get('window-message')({ data: { command: 'dataMigrationLoaded', requestId: messages.at(-1).requestId, dataRoot: '/isolated', overview: { jobs: [], recycling: [], recoveryConflicts: [{ itemId: 'restored', path: '/project/<user-folder>' }] } } });
+  assert.equal(card.hidden, false, 'a successful restore must not hide retained files awaiting review');
+  assert.match(element('[data-migration-status]').textContent, /需要你确认/);
+  assert.equal(element('[data-migration-cleanable]').textContent, '1', 'kept recovery files must be counted among items awaiting review');
+  assert.equal(element('[data-migration-details]').hidden, false);
+  assert.match(element('[data-migration-jobs]').innerHTML, /&lt;user-folder&gt;/);
+  assert.doesNotMatch(element('[data-migration-jobs]').innerHTML, /<user-folder>|ownership_unknown|inode|intent|stage/);
+});

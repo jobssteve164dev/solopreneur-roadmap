@@ -1,0 +1,70 @@
+{
+  "purpose": "Actual pre-retirement generated modules retained exclusively to reproduce historical migration inputs and regressions. Not shipped; not a live product entry.",
+  "head": "69f1aead20d4bed6d7fed52f3c2ebcfb8c9a8e2b",
+  "modules": [
+    {
+      "fixture": "test/fixtures/legacy-learning-review.cjs",
+      "original": "out/learningReview.js",
+      "originalSha256": "10fbfa753aa0443f8374e354c80076da2d7435b157e9d5a37fdade9fd4950a4c",
+      "fixtureSha256": "e3a6eeb9d3e6d0ea3d819c3ee3d2ae4ac30fb612daadbb87e0676c070be49c83",
+      "transforms": [
+        {
+          "relativeProductionImports": 3
+        }
+      ]
+    },
+    {
+      "fixture": "test/fixtures/legacy-learning-review-apply.cjs",
+      "original": "out/learningReviewApply.js",
+      "originalSha256": "c009482c46cd0151c31766fe5657d25f4365490889e5d0079485f13abd8e2a5b",
+      "fixtureSha256": "ed80e424a6c049ca5917cc87c31abb0673a6608436809ec4bec571e63e52cf3a",
+      "transforms": [
+        [
+          "require(\"./learningReview.js\")",
+          "require(\"./legacy-learning-review.cjs\")"
+        ],
+        {
+          "relativeProductionImports": 2
+        },
+        [
+          "path.resolve(__dirname, '..', 'resources', 'tools', 'solomap-review.cjs')",
+          "path.resolve(__dirname, 'legacy-solomap-review.cjs')"
+        ]
+      ]
+    },
+    {
+      "fixture": "test/fixtures/legacy-learning-review-runner.cjs",
+      "original": "out/learningReviewRunner.js",
+      "originalSha256": "97c30f717a11abfc5edcdf9f35e81719c9902e9c52531bff8b785ba645b6b37d",
+      "fixtureSha256": "708d7b68f1b6049d2d5c281ae05b7df99afc6eff7319055c987a409b62110d54",
+      "transforms": [
+        [
+          "require(\"./learningReview.js\")",
+          "require(\"./legacy-learning-review.cjs\")"
+        ],
+        [
+          "require(\"./learningReviewApply.js\")",
+          "require(\"./legacy-learning-review-apply.cjs\")"
+        ],
+        {
+          "relativeProductionImports": 4
+        }
+      ]
+    },
+    {
+      "fixture": "test/fixtures/legacy-solomap-review.cjs",
+      "original": "resources/tools/solomap-review.cjs",
+      "originalSha256": "6fa5eee05af4ed8b12f363a9385c6c5e1f5b55bc4dd138829f55fe6e61b67734",
+      "fixtureSha256": "49d0bbdc4fd6220393188d30359ef56448b2bfc2c46973e7b1210bd2a000bf92",
+      "transforms": [
+        {
+          "relativeProductionImports": 0
+        },
+        [
+          "require('../../out/learningReview.js')",
+          "require('./legacy-learning-review.cjs')"
+        ]
+      ]
+    }
+  ]
+}

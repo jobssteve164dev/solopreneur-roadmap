@@ -1,0 +1,145 @@
+[
+  {
+    "id": "solomap-global-execution-guide",
+    "title": "SoloMap Global Execution Guide",
+    "description": "Default SoloMap execution guide for anchored, user-goal-preserving, verifiable project work.",
+    "keywords": [
+      "SoloMap",
+      "路线图",
+      "Solo",
+      "执行",
+      "验证",
+      "闭环",
+      "记忆",
+      "skill",
+      "插件",
+      "UI",
+      "界面",
+      "文案",
+      "修复",
+      "实现"
+    ],
+    "useWhen": [
+      "SoloMap 路线图环节、Solo 对话、路线图调整或项目执行任务",
+      "任务需要读取项目事实、全局经验库、文档或代码后再改动",
+      "任务需要交付可验证结果、用户向 UI、内容或工程闭环"
+    ],
+    "doNotUseWhen": [
+      "用户只是纯闲聊，且不涉及项目判断、执行、文档、代码或设计"
+    ],
+    "skillMd": "---\nname: solomap-global-execution-guide\ndescription: Use for SoloMap project work by default. Guides agents to anchor reality, read relevant memory, keep user goals higher than implementation preference, make minimal verifiable changes, validate final artifacts, and preserve reusable lessons.\n---\n\n# SoloMap Global Execution Guide\n\nUse this skill for SoloMap roadmap steps, Solo conversations, roadmap revisions, and project work unless the user is only making casual conversation.\n\n## Execution Contract\n\n1. State the concrete deliverable in one sentence before implementation.\n2. Anchor on real files, commands, logs, tests, or current user-provided evidence before judging current implementation.\n3. Read the relevant SoloMap memory files when the task needs project or cross-project context; treat memory as context, not stronger evidence than current files.\n4. Preserve the user's goal, wording, boundaries, and requested path. Do not replace the task with a more familiar engineering problem.\n5. Make the smallest change that directly advances the goal. Avoid unrelated architecture changes, route changes, roadmap edits, or broad rewrites.\n6. For user-facing UI or content, optimize for the final user's action and comprehension. Remove engineering self-description, template language, implementation traces, and maintenance-facing copy.\n7. Validate the actual artifact the user will rely on. For generated scripts, templates, webviews, or configs, validate the generated output, not only the source template.\n8. Close the loop: classify temporary run artifacts, explain verification, and record reusable stable lessons in the appropriate memory location when they will matter later.\n\n## Before Acting\n\n- Identify the user's intended result.\n- Identify any explicit consistency, path, interface, or boundary the user wants preserved.\n- Identify anything the user explicitly rejected or is correcting.\n- Decide whether the user wants a result, a correction, a discussion, or a durable rule update.\n\n## Memory Use\n\n- Prefer the memory paths injected by SoloMap for the current run.\n- Read only high-signal memory files that can change the current decision.\n- Write stable reusable lessons to memory only after they are verified and broadly useful.\n- Put temporary observations in active or inbox-style memory rather than stable project, pattern, or decision files.\n\n## Completion Standard\n\nThe task is not complete until the requested result is landed, the narrow relevant verification has run or is explicitly impossible, known tail items are classified, and the final response states what changed, what was verified, and remaining risk.\n",
+    "sha256": "2a1ca770af66743a6f0da83ecda514e827b2b6cc4fcaae16db63d6df750a846c"
+  },
+  {
+    "id": "solomap-roadmap-planning",
+    "title": "SoloMap Roadmap Planning",
+    "description": "Generate and revise SoloMap roadmaps from the user goal, project type, current project state, and validation rules.",
+    "keywords": [
+      "roadmap",
+      "路线图",
+      "生成初始路线图",
+      "调整路线图",
+      "revision",
+      "bootstrap",
+      "Build",
+      "Sell",
+      "Learn",
+      "Improve",
+      "项目类型"
+    ],
+    "useWhen": [
+      "生成初始路线图、调整路线图或重排后续环节",
+      "用户改变项目目标、优先级、商业化方向或阶段边界",
+      "需要把方法论转成用户可执行的路线图环节"
+    ],
+    "doNotUseWhen": [
+      "任务只是在既有环节内执行代码、文档或修复，不需要修改路线图"
+    ],
+    "skillMd": "---\nname: solomap-roadmap-planning\ndescription: Use when generating or revising SoloMap roadmaps. Converts project goals and project type into executable roadmap steps, preserves completed facts, and validates the final CSV.\n---\n\n# SoloMap Roadmap Planning\n\nUse this skill when the task is to generate an initial roadmap, revise a roadmap, or decide how project goals should map into SoloMap steps.\n\n## Workflow\n\n1. Read the current user request, project files, existing `.solopreneur/roadmap.csv`, roadmap methodology, and validation script when present.\n2. Classify the project type before choosing stages:\n   - Core product: cover Build, Sell, Learn, and Improve.\n   - Infrastructure: emphasize contracts, integration, versioning, compatibility, and verification.\n   - Content product: emphasize production, distribution, and feedback.\n   - Research or experiment: allow validation failure, but require a conclusion.\n   - Tooling scaffold: emphasize reusable entrypoints and handoff.\n   - Archive or maintenance: emphasize stability, monitoring, and low-risk upkeep.\n3. Preserve completed work unless the user explicitly asks to undo it.\n4. Turn methodology into user-executable steps. Do not create roadmap steps that merely explain methodology, internal directories, prompts, or maintenance mechanics.\n5. Each step must have a concrete user-facing or project-facing outcome, a clear stage, valid dependencies, and an Agent prompt that can be executed.\n6. Keep `roadmap.csv` schema intact: `id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt`.\n7. Run the project validation command required by the prompt, usually `node .solopreneur/validate-roadmap.cjs --mode bootstrap` or `--mode revision`, and fix failures before finalizing.\n\n## Quality Bar\n\n- The user should see a practical next path, not an explanation of SoloMap's internal method.\n- Commercial products must not silently degrade into build-only plans.\n- Non-commercial projects must not receive fake sales or marketing stages.\n- Roadmap steps should be few enough to execute and specific enough to validate.\n",
+    "sha256": "01e8c3b09f477b2d2136721b00d446a42cd219417e5990c0b928f667cefbf6ef"
+  },
+  {
+    "id": "solomap-project-docs-lifecycle",
+    "title": "SoloMap Project Docs Lifecycle",
+    "description": "Maintain long-lived project engineering documents without creating noisy summaries, logs, or prompt dumps.",
+    "keywords": [
+      "文档",
+      "documentation",
+      "docs",
+      "README",
+      "business plan",
+      "methodology",
+      "architecture",
+      "boundary",
+      "manifest",
+      "项目生命周期",
+      "工程文档"
+    ],
+    "useWhen": [
+      "任务需要新增、更新或审计项目长期文档",
+      "蓝图、方案、路线图、工程设计、边界或方法论需要落到仓库文档",
+      "需要判断某个信息应写入 README、方向文档、方法论文档、边界文档还是不应写入长期文档"
+    ],
+    "doNotUseWhen": [
+      "任务只是代码修复且没有长期文档判断或项目解释性产出"
+    ],
+    "skillMd": "---\nname: solomap-project-docs-lifecycle\ndescription: Use when creating, updating, or auditing long-lived project documents in SoloMap projects. Keeps docs tied to durable project responsibilities instead of run summaries.\n---\n\n# SoloMap Project Docs Lifecycle\n\nUse this skill when project work needs durable documentation.\n\n## Document Placement\n\n1. Direction documents explain what the project is, who it serves, success criteria, and external expression.\n2. Methodology documents explain lifecycle models, execution models, or harness judgment rules.\n3. Boundary documents freeze product, engineering, or user-mindset boundaries to prevent future drift.\n4. UI guideline documents constrain long-term UI or governance-surface behavior.\n5. Reference documents hold long-lived explanatory background.\n6. Data ownership documents explain project data, cache, run records, and Git management boundaries.\n\n## Rules\n\n- Do not create low-semantic files such as `summary.md`, `notes.md`, `plan.md`, or run logs as long-term documentation.\n- Do not copy prompts, terminal logs, execution traces, or internal process narration into project docs.\n- If adding a new official document, choose a filename that states its durable responsibility, preferably under existing `docs/architecture/`, `docs/methodology/`, `docs/ui/`, `docs/product/`, or `docs/decisions/`.\n- Keep docs written for future project understanding, not for proving that the current run happened.\n- If the repository has a plugin-managed documentation manifest, do not hand-edit the manifest unless the codebase explicitly expects manual edits.\n\n## Completion Check\n\nBefore finalizing, confirm that the document says something future work can reuse, that it is in the right responsibility bucket, and that no run-only material leaked into long-term docs.\n",
+    "sha256": "0d59dea4bfabe2bde50e4cff63cae58b9caf2fa827b9f5232b2c2fcb4af7659e"
+  },
+  {
+    "id": "solomap-cross-project-memory",
+    "title": "SoloMap Cross-Project Memory",
+    "description": "Classify and write reusable SoloMap memory into the right global memory location without leaking project-private details.",
+    "keywords": [
+      "memory",
+      "记忆",
+      "经验库",
+      "沉淀",
+      "profile",
+      "operating-rules",
+      "patterns",
+      "decisions",
+      "domains",
+      "inbox",
+      "active",
+      "learning candidates",
+      "跨项目"
+    ],
+    "useWhen": [
+      "任务结束时需要沉淀跨会话或跨项目仍有价值的信息",
+      "需要判断信息应进入 profile、operating-rules、projects、patterns、decisions、domains、inbox、active 或 learning candidates",
+      "需要把一次经验抽象成可复用模式，同时避免泄漏项目私有事实"
+    ],
+    "doNotUseWhen": [
+      "本轮没有产生未来可复用的新事实、决策、模式、领域知识或交接信息"
+    ],
+    "skillMd": "---\nname: solomap-cross-project-memory\ndescription: Use when recording reusable SoloMap memory. Classifies lessons into profile, operating rules, project memory, patterns, decisions, domains, inbox, active handoff, or learning candidates.\n---\n\n# SoloMap Cross-Project Memory\n\nUse this skill when the task creates information that should survive the current conversation.\n\n## Classification\n\n- `profile.md`: durable user preferences, collaboration style, recurring priorities, and prohibitions.\n- `operating-rules.md`: cross-task execution rules and agent behavior constraints.\n- `projects/<project>.md`: stable facts, entrypoints, decisions, and context for one project.\n- `patterns/`: reusable delivery, debugging, implementation, or verification patterns.\n- `decisions/`: confirmed cross-project decisions with rationale and impact.\n- `domains/`: reusable domain knowledge.\n- `inbox/`: observations that may become memory but are not verified enough.\n- `active/`: temporary current-session handoff.\n- `learning/candidates/`: candidate lessons produced by SoloMap learning flows.\n\n## Writing Protocol\n\n1. Verify the information against current files, tests, logs, or explicit user confirmation before writing stable memory.\n2. Read the target directory's `_example.md` before creating or appending a topic file.\n3. Write only distilled facts, decisions, patterns, or handoff context. Do not paste raw logs, prompts, or execution transcripts.\n4. Do not put project-specific names, fields, providers, database details, or deployment mechanics into global operating principles.\n5. Do not leak one project's private facts into another project's reusable memory.\n6. If the information is useful but not yet stable, write it to inbox or learning candidates instead of stable memory.\n\n## Completion Check\n\nMemory is useful only if it can change a future execution decision. If it is merely a record that this run happened, do not write it as long-term memory.\n",
+    "sha256": "1d3a28da490148d5d97c076db45c08d897a659980a24bce9406762fe64a6fd44"
+  },
+  {
+    "id": "solomap-enhancement-installer",
+    "title": "SoloMap Enhancement Installer",
+    "description": "Install, configure, verify, and report curated SoloMap execution enhancements under the SoloMap global enhancement registry.",
+    "keywords": [
+      "enhancement",
+      "执行增强",
+      "安装增强",
+      "rtk",
+      "codegraph",
+      "caveman",
+      "mcp shrink",
+      "增强安装"
+    ],
+    "useWhen": [
+      "用户从 SoloMap 设置页点击执行增强的安装、修复或更新",
+      "需要安装或配置 rtk、CodeGraph、MCP 描述压缩等 SoloMap curated 执行增强",
+      "需要写入增强 manifest、source lock、health 和 result.json 供插件复验"
+    ],
+    "doNotUseWhen": [
+      "普通项目执行任务不需要安装、更新或修复执行增强"
+    ],
+    "defaultCandidate": false,
+    "skillMd": "---\nname: solomap-enhancement-installer\ndescription: Use only for SoloMap curated execution enhancement installation, repair, update, and verification. Produces registry-ready manifests, health reports, and result.json for plugin validation.\n---\n\n# SoloMap Enhancement Installer\n\nUse this skill only when SoloMap asks you to install, repair, update, or verify a curated execution enhancement.\n\n## Workflow\n\n1. Read the requested enhancement id, target project, SoloMap global directory, enhancement directory, and required result.json path from the prompt.\n2. Install and configure only the requested curated enhancement. Do not install unrelated tools.\n3. Prefer the user's existing package managers and Agent configuration conventions. If an installer modifies Agent configuration, record exactly which config files changed in the result.\n4. Write the enhancement package directory under `.solomap-global/enhancements/installed/<enhancement-id>/`.\n5. Write:\n   - `solomap.enhancement.json`: id, title, description, status, version, source, adapter, activation, risk, evidencePolicy, installedAt, updatedAt, and health.\n   - `source.lock.json`: source, package/version/commit if known, installer command summary, and updatedAt.\n   - `health.json`: ok, version, command checks, config files touched, warnings, and lastCheckedAt.\n   - the prompt-specified `result.json`.\n6. Treat `health.version` as the canonical installed version. If the primary command has no useful `--version`, derive the version from the package manager, package metadata, source lock, smoke-tested executable package, or upstream commit.\n7. Do not replace a previously known top-level version with `版本未知`, an empty string, or a weaker check result. Put weaker command output under `health.commandChecks` with the reason.\n8. Preserve existing `source.lock.json`, `solomap.enhancement.json`, and `health.json` fields unless the new run has stronger evidence. During repair or recheck, never overwrite source provenance with a reduced placeholder.\n9. Do not write Agent private config unless the enhancement cannot work without it and the prompt explicitly permits it. If any installer touches Agent config, record `configFilesTouched` exactly in health and result.\n10. If a step partially succeeds, keep the installed files and report status as `failed` or `needs_repair` with a clear repair hint. Do not hide partial failures behind a successful result.\n11. Never delete existing files or clear directories. If cleanup is needed, report it in result.json instead of doing it.\n\n## Result JSON\n\nSuccessful install:\n\n```json\n{\n  \"ok\": true,\n  \"enhancementId\": \"code-structure-assistant\",\n  \"installedPath\": \".solomap-global/enhancements/installed/code-structure-assistant\",\n  \"solomapEnhancementJson\": \".solomap-global/enhancements/installed/code-structure-assistant/solomap.enhancement.json\",\n  \"sourceLockJson\": \".solomap-global/enhancements/installed/code-structure-assistant/source.lock.json\",\n  \"healthJson\": \".solomap-global/enhancements/installed/code-structure-assistant/health.json\",\n  \"metadata\": { \"name\": \"Code Structure Assistant\", \"version\": \"1.2.3\" },\n  \"health\": { \"ok\": true, \"version\": \"1.2.3\", \"message\": \"Ready\" },\n  \"configFilesTouched\": []\n}\n```\n\nFailed install:\n\n```json\n{ \"ok\": false, \"enhancementId\": \"code-structure-assistant\", \"error\": \"Clear reason\", \"health\": { \"ok\": false, \"message\": \"What failed\" } }\n```\n\n## Validation Bar\n\n- A claimed success must include a command/version check. If any package or source version is known, top-level `version` and `health.version` must use that known value rather than `版本未知`.\n- Critical installation logs belong in the run output, not in long-term docs.\n- The plugin is the final validator; write enough structured evidence for it to decide whether the enhancement can be used.\n",
+    "sha256": "6b772bebbb11719ed66e8a1a9cb6fce214b4732a5ecad71ce0e8f1bc99164736"
+  }
+]

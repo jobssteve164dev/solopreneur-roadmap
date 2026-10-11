@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
-const fs = require('node:fs');
 const path = require('node:path');
-const initSqlJs = require('sql.js');
+const { openDataClient } = require('./solomap-data-client.cjs');
 
 function parseArgs(argv) {
   const args = { _: [] };
@@ -42,61 +41,48 @@ function unique(values, limit = 20) {
   return result;
 }
 
-function readJson(filePath) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  } catch {
-    return null;
+async function readDigests(client, metadata, includeFull) {
+  const result = [];
+  for (const object of metadata.filter(object => object.data.type === 'run_digest_source')) {
+    const sourceRef = object.projection.sourceRef;
+    const digest = JSON.parse((await client.content(sourceRef)).replace(/^\uFEFF/, ''));
+    const settlementRef = object.projection.settlementRef;
+    let log;
+    if (settlementRef) {
+      const settlement = JSON.parse(await client.content(settlementRef));
+      log = parseLogSignals({ id: digest.executionLogId, nodeId: digest.nodeId, timestamp: digest.finishedAt, ...settlement.journal, sourceRef: settlementRef }, includeFull);
+    }
+    result.push({ ...digest, sourceRef, ...(log ? { log } : {}) });
   }
+  return result.sort((a, b) => String(b.finishedAt || '').localeCompare(String(a.finishedAt || '')));
 }
 
-function getSolomapRoot(projectRoot) {
-  return path.join(projectRoot, '.solopreneur');
-}
-
-function readDigests(projectRoot) {
-  const root = path.join(getSolomapRoot(projectRoot), 'run-digests');
-  if (!fs.existsSync(root)) return [];
-  return fs.readdirSync(root)
-    .filter((file) => file.endsWith('.json'))
-    .map((file) => ({ file, digest: readJson(path.join(root, file)) }))
-    .filter((entry) => entry.digest && (entry.digest.schemaVersion === 1 || entry.digest.schemaVersion === 2))
-    .map((entry) => ({ ...entry.digest, digestFile: path.join(root, entry.file) }))
-    .sort((a, b) => String(b.finishedAt || '').localeCompare(String(a.finishedAt || '')));
-}
-
-function readGraph(projectRoot) {
-  return readJson(path.join(getSolomapRoot(projectRoot), 'execution-graph.json')) || null;
-}
-
-function readLearningCandidates(globalRoot) {
-  const root = path.join(globalRoot, 'learning', 'candidates');
-  if (!fs.existsSync(root)) return [];
-  return fs.readdirSync(root)
-    .filter((file) => file.endsWith('.json'))
-    .map((file) => readJson(path.join(root, file)))
-    .filter((candidate) => candidate && candidate.schemaVersion === 1 && candidate.status !== 'rejected');
-}
-
-async function readExecutionLogs(projectRoot) {
-  const dbPath = path.join(getSolomapRoot(projectRoot), 'project_journal.db');
-  if (!fs.existsSync(dbPath)) return [];
-  const SQL = await initSqlJs();
-  const db = new SQL.Database(fs.readFileSync(dbPath));
-  try {
-    const res = db.exec('SELECT id, nodeId, timestamp, agentCli, command, output, status FROM execution_logs ORDER BY id DESC');
-    if (!res.length) return [];
-    const columns = res[0].columns;
-    return res[0].values.map((row) => {
-      const record = {};
-      columns.forEach((column, index) => {
-        record[column] = row[index];
-      });
-      return record;
+async function readLearningCandidates(client, projectRoot) {
+  const lessons = await client.list(['lesson']);
+  const result = [];
+  for (const object of lessons.filter(object => !['rejected', 'invalidated', 'superseded', 'expired'].includes(String(object.data.status)))) {
+    const data = object.data;
+    result.push({ ...object.data, id: object.objectId, revision: object.revision,
+      sourceRef: { objectId: object.objectId, revision: object.revision }, projectPath: projectRoot,
+      projectName: path.basename(projectRoot), appliesWhen: data.applies_when || '',
+      doThis: data.do_this || '', avoidThis: data.avoid_this || '',
+      doesNotApplyWhen: data.does_not_apply_when || '', lessonType: data.lesson_type || '',
+      sourceType: data.source_type || '', promotionTarget: data.promotion_target || '',
+      evidenceRefs: data.evidence_refs_json == null ? [] : JSON.parse(data.evidence_refs_json),
+      sourceEventIds: data.source_event_ids_json == null ? [] : JSON.parse(data.source_event_ids_json),
+      semanticReview: data.semantic_review_json == null ? undefined : JSON.parse(data.semantic_review_json),
+      confidence: ({ low: 0, medium: 0.5, high: 1 })[data.external_confidence] === data.confidence ? data.external_confidence : data.confidence,
+      createdAt: new Date(data.external_created_at ?? object.createdAt).toISOString(),
+      updatedAt: new Date(data.external_updated_at ?? object.updatedAt).toISOString()
     });
-  } finally {
-    db.close();
   }
+  return result;
+}
+
+async function readExecutionLogs(client, metadata) {
+  const result = [];
+  for (const object of metadata.filter(object => object.data.type === 'project_journal')) result.push({ ...JSON.parse(await client.content(object)), sourceRef: { objectId: object.objectId, revision: object.revision } });
+  return result;
 }
 
 function extractSection(output, title) {
@@ -124,6 +110,7 @@ function parseLogSignals(log, includeFull) {
     .slice(-12);
   return {
     id: Number(log.id || 0),
+    sourceRef: log.sourceRef,
     nodeId: String(log.nodeId || ''),
     timestamp: String(log.timestamp || ''),
     agentCli: String(log.agentCli || ''),
@@ -220,7 +207,9 @@ function retrieveLessons(candidates, records, query, projectRoot, limit) {
       ]);
       const projectScore = path.resolve(String(candidate.projectPath || '')) === path.resolve(projectRoot) ? 3 : 0;
       const statusScore = candidate.status === 'promoted' || candidate.status === 'approved' ? 5 : 0;
-      const confidenceScore = candidate.confidence === 'high' ? 2 : candidate.confidence === 'medium' ? 1 : 0;
+      const confidenceScore = typeof candidate.confidence === 'number'
+        ? candidate.confidence * 2
+        : candidate.confidence === 'high' ? 2 : candidate.confidence === 'medium' ? 1 : 0;
       return { candidate, score: match.score + projectScore + statusScore + confidenceScore, matches: match.matches };
     })
     .filter((entry) => entry.matches > 0 && entry.score >= 7)
@@ -234,16 +223,18 @@ function retrieveLessons(candidates, records, query, projectRoot, limit) {
     .slice(0, limit)
     .map(({ candidate, score }) => ({
       id: candidate.id,
+      sourceRef: candidate.sourceRef,
       relevance: score,
       lesson: compactLine(candidate.summary, 360),
       appliesWhen: compactLine(candidate.appliesWhen, 240),
       doThis: compactLine(candidate.doThis, 240),
       avoidThis: compactLine(candidate.avoidThis, 240),
-      confidence: candidate.confidence || 'unknown',
+      confidence: candidate.confidence ?? 'unknown',
       status: candidate.status || 'candidate',
       projectName: candidate.projectName || '',
       evidence: (candidate.evidenceRefs || []).filter((ref) => candidate.semanticReview?.schemaVersion === 2 || ref.type === 'run_digest' || ref.type === 'command').slice(0, 3),
-      doesNotApplyWhen: candidate.doesNotApplyWhen || ''
+      doesNotApplyWhen: candidate.doesNotApplyWhen || '',
+      verification: candidate.verification || ''
     }));
   const evidenceLeads = records
     .map((record) => {
@@ -262,6 +253,7 @@ function retrieveLessons(candidates, records, query, projectRoot, limit) {
     .map(({ record, score }) => ({
       relevance: score,
       runId: record.runId,
+      sourceRef: record.sourceRef,
       executionLogId: record.executionLogId,
       intent: compactLine(record.userIntent, 220),
       outcome: /等待用户决定是否关联到路线图环节/.test(String(record.outcome || '')) ? '' : compactLine(record.outcome, 260),
@@ -310,14 +302,16 @@ function mergeDigestAndLogs(digests, logs, args) {
     failures: digest.failures || [],
     reusableSignals: digest.reusableSignals || [],
     handoff: digest.handoff || null,
-    digestFile: digest.digestFile,
-    log: logById.get(Number(digest.executionLogId || 0)) || null
+    sourceRef: digest.sourceRef,
+    digestFile: digest.sourceRef ? `solomap://${digest.sourceRef.objectId}?revision=${digest.sourceRef.revision}` : '',
+    log: digest.log || logById.get(Number(digest.executionLogId || 0)) || null
   }));
   const digestLogIds = new Set(digestRecords.map((record) => Number(record.executionLogId || 0)));
   const logRecords = logs
     .filter((log) => !digestLogIds.has(Number(log.id || 0)))
     .map((log) => ({
-      source: 'sqlite',
+      source: 'database',
+      sourceRef: log.sourceRef,
       runId: '',
       executionLogId: Number(log.id || 0),
       nodeId: String(log.nodeId || ''),
@@ -345,6 +339,7 @@ function buildHandoffPack(records, limit) {
     const handoff = record.handoff || {};
     return {
       runId: record.runId,
+      sourceRef: record.sourceRef,
       executionLogId: record.executionLogId,
       nodeId: record.nodeId,
       agentCli: record.agentCli,
@@ -396,10 +391,12 @@ function renderMarkdown(title, payload) {
     payload.lessons.forEach((item, index) => {
       lines.push(`### ${index + 1}. ${item.lesson}`);
       lines.push(`- Experience ID: ${item.id}`);
+      if (item.sourceRef) lines.push(`- Source: solomap://objects/${item.sourceRef.objectId} · revision=${item.sourceRef.revision}`);
       lines.push(`- Applies when: ${item.appliesWhen}`);
       if (item.doesNotApplyWhen) lines.push(`- Does not apply when: ${item.doesNotApplyWhen}`);
       lines.push(`- Do: ${item.doThis}`);
       lines.push(`- Avoid: ${item.avoidThis}`);
+      if (item.verification) lines.push(`- Verify: ${item.verification}`);
       lines.push(`- Confidence: ${item.confidence} · status: ${item.status} · relevance: ${item.relevance}`);
       if (item.evidence.length) lines.push(`- Evidence: ${item.evidence.map((ref) => ref.ref).join(' / ')}`);
       lines.push('');
@@ -411,6 +408,7 @@ function renderMarkdown(title, payload) {
       if (item.intent && item.outcome) lines.push(`  Outcome: ${item.outcome}`);
       if (item.files.length) lines.push(`  Files: ${item.files.join(', ')}`);
       if (item.digestFile) lines.push(`  Digest: ${item.digestFile}`);
+      if (item.sourceRef) lines.push(`  Source: solomap://objects/${item.sourceRef.objectId} · revision=${item.sourceRef.revision}`);
     });
     return lines.join('\n');
   }
@@ -423,6 +421,7 @@ function renderMarkdown(title, payload) {
       lines.push('');
       if (item.brief) lines.push(`- Brief: ${item.brief}`);
       if (item.executionLogId) lines.push(`- Execution log: ${item.executionLogId}`);
+      if (item.sourceRef) lines.push(`- Source: solomap://objects/${item.sourceRef.objectId} · revision=${item.sourceRef.revision}`);
       if (item.filesToInspectFirst && item.filesToInspectFirst.length) lines.push(`- Files: ${item.filesToInspectFirst.join(', ')}`);
       if (item.recommendedFirstActions && item.recommendedFirstActions.length) lines.push(`- First actions: ${item.recommendedFirstActions.join(' / ')}`);
       if (item.commandsToRunNext && item.commandsToRunNext.length) lines.push(`- Verify: ${item.commandsToRunNext.join(' / ')}`);
@@ -454,12 +453,12 @@ function printHelp() {
     '',
     'Commands:',
     '  retrieve         Find high-value lessons and evidence leads for a concrete task query.',
-    '  handoff          Build a cross-agent handoff pack from run digests and SQLite logs.',
+    '  handoff          Build a cross-agent handoff pack from formal run evidence.',
     '  summary          Show counts and latest execution signals.',
     '  history          Show recent execution records.',
     '  failures         Show failed or risky records.',
     '  latest-changes   Show recently changed/touched files.',
-    '  search           Search digests and SQLite signal summaries.',
+    '  search           Search formal execution signals.',
     '  pack             Alias for handoff with broader retrieval wording.',
     '',
     'Options:',
@@ -471,7 +470,7 @@ function printHelp() {
     '  --query <text>   Search text.',
     '  --limit <n>      Max records. Defaults to 8.',
     '  --json           Output JSON.',
-    '  --full           Include raw SQLite output in history/search records.'
+    '  --full           Include complete execution evidence in history/search records.'
   ].join('\n'));
 }
 
@@ -485,19 +484,37 @@ async function main() {
   const projectRoot = path.resolve(args.project || process.cwd());
   const globalRoot = path.resolve(args.global || path.join(path.dirname(projectRoot), '.solomap-global'));
   const limit = normalizeLimit(args.limit);
-  const digests = readDigests(projectRoot);
-  const graph = readGraph(projectRoot);
-  const logs = (await readExecutionLogs(projectRoot)).map((log) => parseLogSignals(log, Boolean(args.full)));
+  const client = await openDataClient(globalRoot, projectRoot);
+  try {
+  const metadata = await client.list(['evidence']);
+  const digestHeaders = metadata.filter(object => object.data.type === 'run_digest_source');
+  const digestLogIds = new Set(digestHeaders.map(object => object.projection.executionLogId));
+  const headers = [...digestHeaders, ...metadata.filter(object => object.data.type === 'project_journal' && !digestLogIds.has(object.projection.executionLogId))]
+    .filter(object => !args.node || object.projection.nodeId === args.node)
+    .filter(object => !args.agent || object.projection.agentCli === args.agent)
+    .filter(object => !args.status || object.projection.status === args.status)
+    .sort((a, b) => String(b.projection.finishedAt).localeCompare(String(a.projection.finishedAt)));
+  const bounded = !args.query && ['history', 'handoff', 'pack', 'search', 'summary'].includes(command);
+  const selected = bounded ? headers.slice(0, command === 'summary' ? 5 : limit) : headers;
+  const digests = await readDigests(client, selected, Boolean(args.full));
+  const graph = { runCount: digestHeaders.length };
+  const selectedDigestIds = new Set(digests.filter(digest => !digest.log).map(digest => digest.executionLogId));
+  const journalMetadata = metadata.filter(object => object.data.type === 'project_journal' && (selected.includes(object) || selectedDigestIds.has(object.projection.executionLogId)));
+  const logs = (await readExecutionLogs(client, journalMetadata)).map((log) => parseLogSignals(log, Boolean(args.full)));
   const records = mergeDigestAndLogs(digests, logs, args);
 
   let title = 'SoloMap Experience';
   let payload;
   if (command === 'retrieve') {
     title = 'SoloMap Task Experience Retrieval';
-    payload = retrieveLessons(readLearningCandidates(globalRoot), records, String(args.query || ''), projectRoot, limit);
+    payload = retrieveLessons(await readLearningCandidates(client, projectRoot), records, String(args.query || ''), projectRoot, limit);
   } else if (command === 'summary') {
     title = 'SoloMap Execution Summary';
     payload = buildSummary(records, graph);
+    if (bounded) {
+      const counts = buildSummary(headers.map(object => object.projection), graph);
+      payload.totalRecords = counts.totalRecords; payload.byStatus = counts.byStatus; payload.byAgent = counts.byAgent;
+    }
   } else if (command === 'history') {
     title = 'SoloMap Execution History';
     payload = records.slice(0, limit);
@@ -524,6 +541,7 @@ async function main() {
     return;
   }
   console.log(renderMarkdown(title, payload));
+  } finally { await client.close(); }
 }
 
 main().catch((error) => {

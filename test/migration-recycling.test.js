@@ -235,6 +235,24 @@ test('the approved recoverable database recycling path works when system trash i
   } finally { await f.operations.close(); f.store.close(); }
 });
 
+test('restore recreates an absent original directory after recycling and owner restart', async () => {
+  const f = fixture(); let reopened;
+  try {
+    await importLegacyIntelligenceConversation(f.store, f.file);
+    const plan = await f.call('prepare_recycling'); const itemId = plan.files[0].itemId;
+    await f.call('confirm_recycling', { planId: plan.planId });
+    await f.call('execute_recycling_plan', { planId: plan.planId });
+    fs.rmdirSync(path.dirname(f.file));
+    await f.operations.close(); f.store.close(); reopened = UnifiedDataStore.open(f.root);
+    const ops = createRuntimeDataOperations(reopened);
+    try {
+      await ops({ operation: 'restore_recycling_file', input: { itemId } });
+      assert.equal(fs.readFileSync(f.file, 'utf8'), f.original);
+      assert.equal(reopened.recyclingItems()[0].status, 'restored');
+    } finally { await ops.close(); }
+  } finally { if (reopened) reopened.close(); else { await f.operations.close(); f.store.close(); } }
+});
+
 test('interrupted restore publishes atomically and resumes its own target after owner restart', async () => {
   const f = fixture();
   let reopened;

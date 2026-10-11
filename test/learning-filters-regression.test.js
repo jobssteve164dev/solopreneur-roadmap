@@ -7,6 +7,7 @@ const test = require('node:test');
 const projectRoot = path.resolve(__dirname, '..');
 const ledger = require(path.join(projectRoot, 'out', 'learningLedger.js'));
 const runDigest = require(path.join(projectRoot, 'out', 'runDigest.js'));
+const { readFormalLearningContext } = require('./learning-fixture.js');
 
 test('isTrashOrLocalPrivate correctly identifies trash and local private candidates', () => {
   // 1. 垃圾占位符
@@ -63,7 +64,7 @@ test('isArtifactOrTempFile correctly flags build artifacts and temporary files',
   assert.equal(runDigest.isArtifactOrTempFile('src/extension.ts'), false);
 });
 
-test('buildLearningRetrievalContext filters out trash, local private data and applies deduplication', () => {
+test('buildLearningRetrievalContext filters out trash, local private data and applies deduplication', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-retrieval-test-'));
   const projectPath = path.join(root, 'app');
   const globalRoot = path.join(root, '.solomap-global');
@@ -73,7 +74,7 @@ test('buildLearningRetrievalContext filters out trash, local private data and ap
   const summaries = ['Same duplicate rule to check', 'Same duplicate rule to check', 'Run completed without explicit verification signal in captured tail', 'Private /home/ubuntu/project'];
   summaries.forEach((summary, i) => fs.writeFileSync(path.join(paths.candidatesRoot, `fixture-${i}.json`), JSON.stringify({ schemaVersion: 1, id: `fixture-${i}`, projectPath, summary, appliesWhen: 'Duplicate rule check', doThis: 'Check actual outcomes', avoidThis: 'Do not guess', evidenceRefs: [], status: 'candidate', promotionTarget: 'pattern', updatedAt: '2026-09-08' })));
 
-  const retrieval = ledger.buildLearningRetrievalContext(projectPath, globalRoot, {
+  const retrieval = await readFormalLearningContext(projectPath, globalRoot, {
     projectPath,
     runKind: 'solo',
     contextText: 'Duplicate rule check Junk verification /home/ubuntu',
@@ -93,7 +94,7 @@ test('buildLearningRetrievalContext filters out trash, local private data and ap
   assert.doesNotMatch(retrieval, /home\/ubuntu/);
 });
 
-test('agent dispatch commands and empty verification placeholders do not become learning candidates', () => {
+test('agent dispatch commands and empty verification placeholders do not become learning candidates', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-dispatch-learning-'));
   const projectPath = path.join(root, 'app');
   const globalRoot = path.join(root, '.solomap-global');
@@ -139,7 +140,7 @@ test('agent dispatch commands and empty verification placeholders do not become 
     .map((name) => JSON.parse(fs.readFileSync(path.join(globalRoot, 'learning', 'candidate-decisions', name), 'utf8')));
   assert.deepEqual(decisions, [], 'no semantic decisions before manual review');
 
-  const retrieval = ledger.buildLearningRetrievalContext(projectPath, globalRoot, {
+  const retrieval = await readFormalLearningContext(projectPath, globalRoot, {
     projectPath,
     runKind: 'solo',
     contextText: 'codex agent dispatch verification',
@@ -221,9 +222,8 @@ test('buildExecutionExperiencePrompt filters compiler artifacts and temp files f
   assert.ok(!digest.handoff.commandsToRunNext.some(cmd => cmd.includes('cat /home/ubuntu')));
 
   // 2. 写入 digest，再跑 prompt 召回，检查格式化文本
-  runDigest.writeRunDigest(digestRoot, digest);
 
-  const prompt = runDigest.buildExecutionExperiencePrompt(digestRoot, {
+  const prompt = runDigest.formatExecutionExperiencePrompt([{ digest, ref: { objectId: 'fixed-source', revision: 1 } }], {
     nodeId: '3',
     runKind: 'step',
     contextText: 'Test message src/extension.ts',

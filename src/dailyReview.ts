@@ -2,9 +2,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type * as vscode from 'vscode';
 import { buildAgentCommandForPromptFile, commandExists, getAgentCliCandidates, resolveAgentCli, shellQuote } from './agentCli';
-import { readLearningSummary } from './learningLedger';
+import { readLearningOverview, LearningOverview } from './learningLedger';
 import { SolopreneurSettings } from './pluginContracts';
-import { buildProjectPortfolioSummaries, commonParent, getDailyWorkRhythm, getLocalDateKey, normalizeGlobalDataPath, ProjectPortfolioSummary, SolopreneurProject } from './projectPortfolio';
+import { buildProjectPortfolioSummariesFromDatabase, commonParent, getDailyWorkRhythm, getLocalDateKey, normalizeGlobalDataPath, ProjectPortfolioSummary, SolopreneurProject } from './projectPortfolio';
 import { GlobalEngineeringSnapshot, ensureGlobalEngineeringStore } from './globalEngineeringStore';
 import { sendTextWhenTerminalReady } from './terminalCompatibility';
 import { projectShadowDecisionForToday, readCurrentShadowDecision, readShadowDecisionFeedbackOutcome } from './autonomousRuntime';
@@ -252,7 +252,7 @@ export function buildDailyReviewPrompt(options: {
   reviewMode: string;
   portfolio: ProjectPortfolioSummary[];
   globalStore: GlobalEngineeringSnapshot;
-  learningSummary?: ReturnType<typeof readLearningSummary>;
+  learningSummary?: LearningOverview;
 }): string {
   const mode = describeDailyReviewMode(options.reviewMode);
   const learningSummary = options.learningSummary;
@@ -381,11 +381,11 @@ export function buildDailyReviewPrompt(options: {
   ].join('\n');
 }
 
-export function startDailyReviewAgent(settings: SolopreneurSettings, projects: SolopreneurProject[], extensionUri?: vscode.Uri): DailyReviewArtifact {
+export async function startDailyReviewAgent(settings: SolopreneurSettings, projects: SolopreneurProject[], extensionUri?: vscode.Uri): Promise<DailyReviewArtifact> {
   const vscode = require('vscode') as typeof import('vscode');
-  const portfolio = buildProjectPortfolioSummaries(projects, { includeReusableSignals: true, globalDataPath: settings.globalDataPath });
-  const globalStore = ensureGlobalEngineeringStore(settings.globalDataPath, portfolio);
-  const learningSummary = readLearningSummary(projects[0]?.path || process.cwd(), settings.globalDataPath);
+  const learningSummary = await readLearningOverview(projects[0]?.path || process.cwd(), settings.globalDataPath);
+  const portfolio = await buildProjectPortfolioSummariesFromDatabase(projects, path.resolve(__dirname, '..'), { includeReusableSignals: true, globalDataPath: settings.globalDataPath, learningOverview: learningSummary });
+  const globalStore = { ...ensureGlobalEngineeringStore(settings.globalDataPath, portfolio), learningCandidateCount: learningSummary.candidateCount };
   const dateKey = getLocalDateKey();
   const rhythm = getDailyWorkRhythm();
   const reviewMode = getDailyReviewMode(rhythm, portfolio, globalStore);

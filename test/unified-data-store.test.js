@@ -47,15 +47,34 @@ test('rollback, scope isolation, content integrity, backup and reopen preserve f
     assert.equal(store.read(item.objectId).revision, 1);
     assert.equal(store.read(item.objectId).data.content, body);
     assert.deepEqual(store.search({ scope: second.objectId, query: '你好' }).items, []);
+    const { DatabaseSync } = require('node:sqlite');
+    const source = new DatabaseSync(path.join(root, 'solomap.db'), { readOnly: true });
+    let sourceMigrations;
+    try { sourceMigrations = source.prepare('SELECT version,checksum,applied_at FROM schema_migrations ORDER BY version').all(); }
+    finally { source.close(); }
     const destination = path.join(root, 'exports', 'backup.db');
     await store.backup(destination);
-    const { DatabaseSync } = require('node:sqlite');
     const backup = new DatabaseSync(destination, { readOnly: true });
     try {
       assert.equal(backup.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
       assert.equal(backup.prepare('SELECT count(*) AS n FROM objects').get().n, 3);
-      assert.equal(backup.prepare('SELECT count(*) AS n FROM schema_migrations').get().n, 11);
+      assert.deepEqual(backup.prepare('SELECT version,checksum,applied_at FROM schema_migrations ORDER BY version').all(), sourceMigrations, 'the backup preserves every actual applied migration, including its checksum and timestamp');
     } finally { backup.close(); }
+    store.write({ kind: 'memory', action: 'patch', scope: first.objectId, objectId: item.objectId, expectedRevision: 1, idempotencyKey: 'after-backup-change', data: { content: '导出后新增正文' } });
+    const restoredRoot = path.join(root, 'isolated-restored-copy'); fs.mkdirSync(restoredRoot);
+    fs.copyFileSync(destination, path.join(restoredRoot, 'solomap.db'));
+    const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+    for (let restart = 0; restart < 2; restart++) {
+      const restored = new UnifiedDataStore(restoredRoot);
+      try {
+        assert.equal(restored.read(item.objectId).revision, 1);
+        assert.equal(restored.read(item.objectId).projectId, first.objectId);
+        assert.equal(restored.read(item.objectId).data.content, body, 'the exported snapshot retains the complete body independently of later source edits');
+        assert.equal(restored.read(item.objectId, 1).data.content, body);
+        assert.deepEqual(restored.search({ scope: second.objectId, query: '你好' }).items, []);
+        if (process.env.SOLOMAP_462_BACKUP_SCHEMA_EVIDENCE && restart === 1) fs.writeFileSync(process.env.SOLOMAP_462_BACKUP_SCHEMA_EVIDENCE, JSON.stringify({ sourceMigrations, backupPath: destination, restoredRoot, restored: restored.read(item.objectId), sourceAfterBackup: store.read(item.objectId) }, null, 2));
+      } finally { restored.close(); }
+    }
   } finally { store.close(); }
 });
 

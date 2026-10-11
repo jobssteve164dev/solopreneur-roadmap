@@ -78,6 +78,19 @@ test('Codex compatibility locator accepts injected user prelude before the launc
   });
 });
 
+test('native transcript discovery keeps the Runtime available by avoiding synchronous directory inventory', async () => {
+  const { locateCodexSessionByBindingNonce } = require(path.join(projectRoot, 'out', 'codexSessionIdentity.js'));
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-codex-async-discovery-'));
+  const workspaceRoot = '/workspace/async-discovery'; const bindingNonce = '1'.repeat(64); const sessionId = '019ecd99-4325-7050-8e71-7def92359d99';
+  writeTranscript(codexHome, { sessionId, workspaceRoot, timestamp: '2026-10-09T00:00:01Z', messages: [{ role: 'user', text: `SoloMap binding nonce: ${bindingNonce}.` }] });
+  const original = fs.readdirSync;
+  fs.readdirSync = () => { throw new Error('synchronous native inventory blocks owner operations'); };
+  try {
+    const result = await locateCodexSessionByBindingNonce({ codexHome, workspaceRoot, bindingNonce, startedAt: '2026-10-09T00:00:00Z' });
+    assert.equal(result.status, 'matched'); assert.equal(result.sessionId, sessionId);
+  } finally { fs.readdirSync = original; }
+});
+
 test('Codex compatibility locator reports ambiguity instead of selecting the newest transcript', async () => {
   const { locateCodexSessionByBindingNonce } = require(path.join(projectRoot, 'out', 'codexSessionIdentity.js'));
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-codex-conflict-'));

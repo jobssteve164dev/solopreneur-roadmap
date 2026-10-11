@@ -40,3 +40,25 @@ test('delegating migration launches the Agent migration task instead of only rev
   assert.deepEqual(launches, [{ kind: 'migration_apply', targetId: undefined }]);
   assert.deepEqual(calls, ['migration_overview']);
 });
+
+test('recycling approval sends the exact displayed files and refuses a changed preview', async () => {
+  const files = [{ itemId: 'item', path: '/physical/old.db', hash: 'snapshot-hash', bytes: 42 }];
+  const calls = [];
+  const dependencies = { getRoot: () => '/isolated', ready: async () => {}, call: async (_root, operation, input) => { calls.push({ operation, input }); return { files }; }, confirm: async () => true, launchAgent: async () => {} };
+  await handleMigrationSettingsAction({ command: 'dataMigration.recycle', planId: 'plan', dataRoot: '/isolated' }, dependencies);
+  assert.deepEqual(calls.find(call => call.operation === 'confirm_recycling').input, { planId: 'plan', files });
+});
+
+test('restore asks for a file location only when the original location is unavailable', async () => {
+  const calls = [];
+  const dependencies = { getRoot: () => '/isolated', ready: async () => {}, call: async (_root, operation, input) => { calls.push({ operation, input }); if (operation === 'restore_recycling_file' && !input.destination) throw new Error('recycling_path_identity_unavailable'); return {}; }, chooseRestorePath: async () => '/physical/recovered.db' };
+  await handleMigrationSettingsAction({ command: 'dataMigration.restore', itemId: 'item', dataRoot: '/isolated' }, dependencies);
+  assert.deepEqual(calls, [{ operation: 'restore_recycling_file', input: { itemId: 'item' } }, { operation: 'restore_recycling_file', input: { itemId: 'item', destination: '/physical/recovered.db' } }, { operation: 'migration_overview', input: {} }]);
+});
+
+test('cancelling a restore location never changes or publishes a file', async () => {
+  const calls = [];
+  const dependencies = { getRoot: () => '/isolated', ready: async () => {}, call: async (_root, operation) => { calls.push(operation); throw new Error('recycling_path_identity_unavailable'); }, chooseRestorePath: async () => undefined };
+  assert.equal((await handleMigrationSettingsAction({ command: 'dataMigration.restore', itemId: 'item', dataRoot: '/isolated' }, dependencies)).cancelled, true);
+  assert.deepEqual(calls, ['restore_recycling_file']);
+});

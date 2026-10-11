@@ -1,9 +1,6 @@
-import * as fs from 'fs';
-import * as path from 'path';
 import * as crypto from 'crypto';
 import * as childProcess from 'child_process';
-import { learningTasksRoot, readLearningJson, writeLearningJson } from './taskReport.js';
-import { readRegisteredProjectSources } from './growthReports.js';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl.js';
 
 export const reviewHash = (value: string): string => crypto.createHash('sha256').update(value).digest('hex');
 export type GithubRead = (endpoint: string) => Promise<any>;
@@ -28,14 +25,14 @@ function taskTrailers(message: string, known: Set<string>): string[] {
 }
 
 type EvidenceInput = {
-  projectPath: string; repository: string; tasks: any[]; reports: any[]; api?: GithubRead; persist?: boolean;
+  projectPath: string; repository: string; tasks: any[]; reports: any[]; api?: GithubRead; persist?: boolean; globalDataPath?: string;
 };
 type GithubEvidence = { repository: string; commits: any[]; gaps: string[] };
 const factRequests = new Map<string, Promise<GithubEvidence>>();
 
 export function collectGithubEvidence(input: EvidenceInput): Promise<GithubEvidence> {
   const scope = reviewHash(input.tasks.map(task => task.taskId).sort().join('\n'));
-  const key = `${input.projectPath}:${input.repository}:${scope}:${input.persist === false ? 'read-only' : 'persist'}`;
+  const key = `${input.globalDataPath || ''}:${input.projectPath}:${input.repository}:${scope}:${input.persist === false ? 'read-only' : 'persist'}`;
   const pending = factRequests.get(key); if (pending) return pending;
   const operation = collectGithubFacts(input, scope).finally(() => factRequests.delete(key));
   factRequests.set(key, operation); return operation;
@@ -47,13 +44,36 @@ async function collectGithubFacts(input: EvidenceInput, scope: string): Promise<
   const result: { repository: string; commits: any[]; gaps: string[] } = { repository, commits: [], gaps: [] };
   if (!repository) { result.gaps.push('No GitHub origin; only local reports are available.'); return result; }
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('Invalid GitHub repository');
+  if (persist && !input.globalDataPath) throw new Error('database_root_required');
   const api = input.api || readGithubApi;
   const known = new Set<string>(tasks.map(task => task.taskId));
-  const root = path.join(input.projectPath, '.solopreneur', 'agent-runs', 'learning-evidence');
-  const cursorFile = path.join(root, `${reviewHash(repository)}-${scope}.json`);
-  const factsFile = path.join(root, `${reviewHash(repository)}.facts.json`);
-  const previous = persist ? readLearningJson(factsFile) : undefined;
-  const cursor = (persist ? readLearningJson(cursorFile) : undefined) || { discovered: {}, coveredHead: '', page: 1, scanHead: '' };
+  const loadFacts = async () => sendRuntimeDataRequest<{ revision: number; facts: any }>(input.globalDataPath!, { operation: 'read_github_facts', input: { root: input.projectPath, repository } });
+  const previous = persist ? (await loadFacts()).facts : undefined;
+  const cursorKey = `github-cursor:${repository}:${scope}`;
+  const loadCursor = async () => (await sendRuntimeDataRequest<Array<{ key: string; value: any; revision: number }>>(input.globalDataPath!, { operation: 'read_growth_report_projection', input: { root: input.projectPath, prefix: cursorKey } })).find(row => row.key === cursorKey);
+  const nativeCursor = persist ? await loadCursor() : undefined;
+  let cursorRevision = nativeCursor?.revision || 0;
+  let cursorSuperseded = false;
+  const cursor = (persist ? nativeCursor?.value : undefined) || { discovered: {}, coveredHead: '', page: 1, scanHead: '' };
+  const saveCursor = async (value: any) => {
+    if (!persist) return;
+    for (;;) {
+      if (cursorSuperseded) {
+        const latest = await loadCursor(); cursorRevision = latest?.revision || 0;
+        const discovered: Record<string, string[]> = { ...value.discovered };
+        for (const [sha, taskIds] of Object.entries(latest?.value.discovered || {})) discovered[sha] = [...new Set([...(discovered[sha] || []), ...(taskIds as string[])])];
+        // Once superseded, later pages also preserve the other window's committed position.
+        value = { ...(latest?.value || value), discovered };
+      }
+      try {
+        const receipt = await sendRuntimeDataRequest<{ revisions: Array<{ key: string; revision: number }> }>(input.globalDataPath!, { operation: 'write_growth_report_projection', input: { root: input.projectPath, updates: [{ key: cursorKey, value, expectedRevision: cursorRevision }] } });
+        cursorRevision = receipt.revisions.find(row => row.key === cursorKey)!.revision; return;
+      } catch (error) {
+        if (!String(error).includes('revision_conflict')) throw error;
+        cursorSuperseded = true;
+      }
+    }
+  };
   const discovered: Record<string, string[]> = cursor.discovered || {};
   const since = tasks.map(task => task.startedAt).filter(Boolean).sort()[0];
   if (known.size && since) {
@@ -74,14 +94,14 @@ async function collectGithubFacts(input: EvidenceInput, scope: string): Promise<
         }
         if (boundaryFound || commits.length < 100) {
           if (cursor.coveredHead && !boundaryFound) result.gaps.push('Previous commit boundary was not found; history may have changed.');
-          if (persist) writeLearningJson(cursorFile, { discovered, coveredHead: !cursor.coveredHead || boundaryFound ? scanHead : cursor.coveredHead, scanHead: '', page: 1 });
+          await saveCursor({ discovered, coveredHead: !cursor.coveredHead || boundaryFound ? scanHead : cursor.coveredHead, scanHead: '', page: 1 });
           break;
         }
         page += 1;
-        if (persist) writeLearningJson(cursorFile, { discovered, coveredHead: cursor.coveredHead, scanHead, page });
+        await saveCursor({ discovered, coveredHead: cursor.coveredHead, scanHead, page });
       }
     } catch (error: any) {
-      if (persist) writeLearningJson(cursorFile, { discovered, coveredHead: cursor.coveredHead, scanHead, page });
+      await saveCursor({ discovered, coveredHead: cursor.coveredHead, scanHead, page });
       result.gaps.push(String(error.message));
     }
   }
@@ -149,7 +169,8 @@ async function collectGithubFacts(input: EvidenceInput, scope: string): Promise<
   }
   // Read again at publication: another task scope may have completed while this request awaited GitHub.
   if (!persist) return result;
-  const latest = readLearningJson(factsFile);
+  for (;;) {
+  const state = await loadFacts(); const latest = state.facts;
   const merged = new Map<string, any>((latest?.commits || []).map((commit: any) => [commit.sha, commit]));
   for (const commit of result.commits) {
     const old = merged.get(commit.sha);
@@ -163,241 +184,49 @@ async function collectGithubFacts(input: EvidenceInput, scope: string): Promise<
     }
     merged.set(commit.sha, combined);
   }
-  writeLearningJson(factsFile, { schemaVersion: 1, repository, observedAt: new Date().toISOString(), commits: [...merged.values()], gaps: result.gaps });
-  writeLearningJson(factsFile.replace('.facts.json', '.summary.json'), {
+  const facts = { schemaVersion: 1, repository, observedAt: new Date().toISOString(), commits: [...merged.values()], gaps: result.gaps };
+  const summary = {
     schemaVersion: 1, repository, observedAt: new Date().toISOString(), gaps: result.gaps,
     commits: [...merged.values()].map(({ message, files, checks, statuses, ...commit }) => ({
       ...commit, files: (files || []).map((file: any) => ({ filename: file.filename, status: file.status, previous_filename: file.previous_filename })),
       checks: (checks || []).map((check: any) => ({ id: check.id, head_sha: check.head_sha, name: check.name, status: check.status, conclusion: check.conclusion, html_url: check.html_url })),
       statuses: (statuses || []).map((status: any) => ({ id: status.id, context: status.context, state: status.state, target_url: status.target_url }))
     }))
-  });
+  };
+  try { await sendRuntimeDataRequest(input.globalDataPath!, { operation: 'write_github_facts', input: { root: input.projectPath, repository, expectedRevision: state.revision, facts, summary } }); }
+  catch (error) { if (String(error).includes('revision_conflict')) continue; throw error; }
+  break;
+  }
   return result;
 }
 
-export interface ReviewSource { id: string; kind: string; projectPath?: string; file?: string; hash: string; size?: number; mtimeMs?: number; ctimeMs?: number; dev?: number; ino?: number; content?: string; value?: any; previousVersions?: any[] }
+export interface ReviewSource { id: string; kind: string; projectPath?: string; file?: string; ref?: { objectId: string; revision: number; scope: string | null }; hash: string; contentHash?: string; size?: number; mtimeMs?: number; ctimeMs?: number; dev?: number; ino?: number; content?: string; value?: any; previousVersions?: any[] }
+
+/** Old fact hashes identify semantic versions; contentHash identifies the complete transport bytes. */
+export function legacyReviewSourceBody(source: ReviewSource): string {
+  if (!source || typeof source.id !== 'string' || !source.id || source.id.includes(':') || typeof source.kind !== 'string'
+    || !/^[a-f0-9]{64}$/.test(source.hash || '') || (source.previousVersions !== undefined && !Array.isArray(source.previousVersions))) throw new Error('legacy_review_source_invalid');
+  const value = source.value;
+  if (source.kind === 'github') {
+    const { observedAt, ...stable } = value || {};
+    if (!value || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value.repository || '') || !/^[a-f0-9]{40}$/.test(value.sha || '')
+      || source.id !== `github-${reviewHash(`${value.repository}:${value.sha}`).slice(0, 24)}` || source.hash !== reviewHash(JSON.stringify(stable))) throw new Error('legacy_review_source_invalid');
+    const body = JSON.stringify(value);
+    if (source.content !== undefined && source.content !== body) throw new Error('legacy_review_source_invalid');
+    return body;
+  }
+  if (source.kind === 'deleted_source') {
+    if (!value || typeof value.file !== 'string' || !value.file || typeof value.previousKind !== 'string' || !value.previousKind
+      || !/^[a-f0-9]{64}$/.test(value.previousHash || '') || reviewHash(JSON.stringify(value)) !== source.hash) throw new Error('legacy_review_source_invalid');
+    if (source.content === undefined && value.contentUnavailable === true) return JSON.stringify(value);
+    if (typeof source.content !== 'string' || reviewHash(source.content) !== value.previousHash || value.contentUnavailable === true) throw new Error('legacy_review_source_invalid');
+    return source.content;
+  }
+  if (typeof source.content !== 'string' || reviewHash(source.content) !== source.hash) throw new Error('legacy_review_source_invalid');
+  return source.content;
+}
 export interface ReviewManifest {
   schemaVersion: 1; runId: string; globalRoot: string; globalPrompt: string; promptHash: string; persistedPromptHash?: string;
   projects: string[]; sources: ReviewSource[]; memory: { relativePath: string; hash: string; content: string }[]; gaps: string[];
   cursorUpdates?: ReviewSource[];
-}
-
-function sameSourceVersion(source: any, stat: fs.Stats): boolean {
-  return source?.size === stat.size && source?.mtimeMs === stat.mtimeMs && source?.ctimeMs === stat.ctimeMs
-    && source?.dev === stat.dev && source?.ino === stat.ino;
-}
-
-export function registeredReviewSourceFiles(project: string, previousSources: Record<string, any> = {}): { tasks: string[]; reports: string[]; revokedReports: string[]; reportRegistrations: Record<string, any> } {
-  const taskRoot = learningTasksRoot(project); const runsRoot = path.join(project, '.solopreneur', 'agent-runs');
-  const tasks: string[] = []; const reports: string[] = []; const revokedReports: string[] = []; const reportRegistrations: Record<string, any> = {}; const parsedTasks = new Map<string, any>();
-  const safe = (file: string, directory = false) => {
-    try {
-      const relative = path.relative(project, path.resolve(file));
-      if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return false;
-      let current = project;
-      for (const part of relative.split(path.sep)) { current = path.join(current, part); if (fs.lstatSync(current).isSymbolicLink()) return false; }
-      return directory ? fs.statSync(current).isDirectory() : fs.statSync(current).isFile();
-    } catch { return false; }
-  };
-  const previous = (file: string, kind: string) => previousSources[`source-${reviewHash(`${file}:${kind}`).slice(0, 24)}`];
-  const readTask = (taskId: string): any => {
-    if (parsedTasks.has(taskId)) return parsedTasks.get(taskId);
-    const file = path.join(taskRoot, `${taskId}.json`); let task: any;
-    try { task = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { task = undefined; }
-    const valid = task?.schemaVersion === 1 && task.projectPath === project && task.taskId === taskId && Array.isArray(task.executions)
-      ? task : undefined;
-    parsedTasks.set(taskId, valid); return valid;
-  };
-  if (fs.existsSync(taskRoot)) for (const entry of fs.readdirSync(taskRoot, { withFileTypes: true })) {
-    if (!entry.isFile() || !/^task-[A-Za-z0-9-]+\.json$/.test(entry.name)) continue;
-    const file = path.join(taskRoot, entry.name); if (!safe(file)) continue;
-    const taskId = entry.name.slice(0, -5); const old = previous(file, 'task');
-    if (old && sameSourceVersion(old, fs.statSync(file))) tasks.push(file);
-    else if (readTask(taskId)) tasks.push(file);
-  }
-  const reportCandidates: string[] = [];
-  if (fs.existsSync(runsRoot)) for (const first of fs.readdirSync(runsRoot, { withFileTypes: true })) {
-    if (!first.isDirectory() || first.isSymbolicLink()) continue;
-    const firstPath = path.join(runsRoot, first.name);
-    for (const second of fs.readdirSync(firstPath, { withFileTypes: true })) {
-      const secondPath = path.join(firstPath, second.name);
-      if (second.isFile() && /^task-report-\d+\.json$/.test(second.name)) reportCandidates.push(secondPath);
-      if (!second.isDirectory() || second.isSymbolicLink()) continue;
-      for (const third of fs.readdirSync(secondPath, { withFileTypes: true })) if (third.isFile() && /^task-report-\d+\.json$/.test(third.name)) reportCandidates.push(path.join(secondPath, third.name));
-    }
-  }
-  for (const file of reportCandidates) {
-    if (!safe(file)) continue;
-    const old = previous(file, 'agent_report');
-    if (old && sameSourceVersion(old, fs.statSync(file))) {
-      const registration = old.value?.registration;
-      if (registration && typeof registration.taskId === 'string') {
-        const taskFile = path.join(taskRoot, `${registration.taskId}.json`); const oldTask = previous(taskFile, 'task');
-        if (safe(taskFile) && oldTask && sameSourceVersion(oldTask, fs.statSync(taskFile))) {
-          reports.push(file); reportRegistrations[file] = registration; continue;
-        }
-      }
-    }
-    let envelope: any; try { envelope = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { if (old) revokedReports.push(file); continue; }
-    const sequence = Number(path.basename(file).match(/\d+/)?.[0]); const task = readTask(envelope?.taskId);
-    const execution = task?.executions?.find((run: any) => run?.id === envelope?.executionLogId && path.resolve(run.runDir) === path.dirname(file)
-      && safe(run.runDir, true));
-    if (execution && envelope.projectPath === project && envelope.turnId === `${sequence}:complete`
-      && envelope.report && typeof envelope.report === 'object' && typeof envelope.report.summary === 'string') {
-      reports.push(file); reportRegistrations[file] = { taskId: envelope.taskId, executionLogId: envelope.executionLogId, runDir: path.dirname(file), turnId: envelope.turnId };
-    } else if (old) revokedReports.push(file);
-  }
-  return { tasks, reports, revokedReports, reportRegistrations };
-}
-
-export async function collectReviewManifest(input: {
-  runId: string; globalRoot: string; globalPrompt: string; projects: string[]; api?: GithubRead;
-  repositoryForProject?: (project: string) => Promise<string>; incremental?: boolean; includeGithub?: boolean;
-  previousSources?: Record<string, string | { hash?: string; file?: string; kind?: string; projectPath?: string; size?: number; mtimeMs?: number; ctimeMs?: number; dev?: number; ino?: number; content?: string }>;
-  deferredSourceIds?: string[];
-}): Promise<ReviewManifest> {
-  const manifest: ReviewManifest = { schemaVersion: 1, runId: input.runId, globalRoot: input.globalRoot, globalPrompt: input.globalPrompt, promptHash: reviewHash(input.globalPrompt), projects: input.projects, sources: [], memory: [], gaps: [], ...(input.incremental ? { cursorUpdates: [] } : {}) };
-  const safeFile = (root: string, file: string): boolean => {
-    try {
-      const relative = path.relative(path.resolve(root), path.resolve(file));
-      if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return false;
-      let current = path.resolve(root);
-      for (const part of relative.split(path.sep)) {
-        current = path.join(current, part);
-        if (fs.lstatSync(current).isSymbolicLink()) return false;
-      }
-      return fs.statSync(current).isFile();
-    } catch { return false; }
-  };
-  const deferred = new Set(input.deferredSourceIds || []);
-  const addFile = (file: string, kind: string, projectPath?: string): string | undefined => {
-    if (manifest.sources.some(source => source.file === file && source.kind === kind)) return undefined;
-    const id = `source-${reviewHash(`${file}:${kind}`).slice(0, 24)}`;
-    const stat = fs.statSync(file);
-    const previous = input.previousSources?.[id];
-    if (input.incremental && !deferred.has(id) && previous && typeof previous === 'object'
-      && previous.file === file && previous.kind === kind && previous.size === stat.size && previous.mtimeMs === stat.mtimeMs
-      && previous.ctimeMs === stat.ctimeMs && previous.dev === stat.dev && previous.ino === stat.ino) return undefined;
-    const content = fs.readFileSync(file, 'utf8');
-    const hash = reviewHash(content);
-    const previousHash = typeof previous === 'string' ? previous : previous?.hash;
-    if (input.incremental && !deferred.has(id) && previousHash === hash) {
-      manifest.cursorUpdates!.push({ id, kind, projectPath, file, hash, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino });
-      return undefined;
-    }
-    manifest.sources.push({ id, kind, projectPath, file, hash, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, dev: stat.dev, ino: stat.ino, content });
-    return content;
-  };
-  const addDirectoryFiles = (root: string, directory: string, kind: string, projectPath?: string, pattern = /\.json$/) => {
-    if (!fs.existsSync(directory)) return;
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      const file = path.join(directory, entry.name);
-      if (entry.isFile() && pattern.test(entry.name) && safeFile(root, file)) addFile(file, kind, projectPath);
-    }
-  };
-  const promptMirror = path.join(input.globalRoot, 'context', 'global-default-prompt.md');
-  if (safeFile(input.globalRoot, promptMirror)) addFile(promptMirror, 'global_prompt_mirror');
-  const sharedProjectRoot = path.dirname(input.globalRoot);
-  const globalConstraintFile = path.join(sharedProjectRoot, 'agent.md');
-  if (safeFile(sharedProjectRoot, globalConstraintFile)) addFile(globalConstraintFile, 'global_constraint');
-  for (const project of input.projects) {
-    for (const name of ['agent.md', 'AGENTS.md']) {
-      const file = path.join(project, name);
-      if (file !== globalConstraintFile && safeFile(project, file)) addFile(file, 'project_constraint', project);
-    }
-    const legacyProjectMemory = path.join(project, 'PROJECT_MEMORY.md');
-    if (safeFile(project, legacyProjectMemory)) addFile(legacyProjectMemory, 'project_memory_legacy', project);
-    const documentationFile = path.join(project, '.solopreneur', 'documentation.json');
-    if (safeFile(project, documentationFile)) {
-      const documentationContent = addFile(documentationFile, 'project_document_index', project);
-      const indexId = `source-${reviewHash(`${documentationFile}:project_document_index`).slice(0, 24)}`;
-      const oldIndex: any = input.previousSources?.[indexId];
-      let activeDocumentPaths: string[] = Array.isArray(oldIndex?.value?.activeDocumentPaths) ? oldIndex.value.activeDocumentPaths : [];
-      if (documentationContent !== undefined || !activeDocumentPaths.length) {
-        let documentation: any = {}; try { documentation = JSON.parse(documentationContent ?? fs.readFileSync(documentationFile, 'utf8')); } catch { documentation = {}; }
-        activeDocumentPaths = (Array.isArray(documentation?.documents) ? documentation.documents : [])
-          .filter((item: any) => item?.status === 'active' && typeof item.path === 'string').map((item: any) => path.resolve(project, item.path));
-      }
-      const indexSnapshot = [...manifest.sources, ...(manifest.cursorUpdates || [])].find(source => source.id === indexId);
-      if (indexSnapshot) indexSnapshot.value = { activeDocumentPaths };
-      for (const file of activeDocumentPaths) if (safeFile(project, file)) addFile(file, 'project_document', project);
-    }
-    addDirectoryFiles(project, path.join(project, '.solopreneur', 'run-digests'), 'run_digest', project);
-    const taskRoot = learningTasksRoot(project);
-    let tasks: any[] = []; let reports: any[] = [];
-    if (input.includeGithub === false) {
-      const registered = registeredReviewSourceFiles(project, input.previousSources as Record<string, any>);
-      for (const file of registered.tasks) addFile(file, 'task', project);
-      for (const file of registered.reports) {
-        addFile(file, 'agent_report', project);
-        const id = `source-${reviewHash(`${file}:agent_report`).slice(0, 24)}`;
-        const snapshot = [...manifest.sources, ...(manifest.cursorUpdates || [])].find(source => source.id === id);
-        const registration = registered.reportRegistrations[file] || (input.previousSources?.[id] as any)?.value?.registration;
-        if (snapshot && registration) snapshot.value = { registration };
-      }
-      for (const file of registered.revokedReports) {
-        const id = `source-${reviewHash(`${file}:agent_report`).slice(0, 24)}`; const previous: any = input.previousSources?.[id];
-        const value = { file, previousHash: previous?.hash, previousKind: 'agent_report', registrationRevoked: true, ...(typeof previous?.content === 'string' ? {} : { contentUnavailable: true }) };
-        manifest.sources.push({ id, kind: 'deleted_source', projectPath: project, hash: reviewHash(JSON.stringify(value)), content: previous?.content, value });
-      }
-    } else {
-      const registered = await readRegisteredProjectSources(project, path.resolve(__dirname, '..'));
-      tasks = registered.tasks; reports = registered.reports;
-      for (const task of tasks) {
-        addFile(path.join(taskRoot, `${task.taskId}.json`), 'task', project);
-        for (const observation of registered.observations.filter(item => item.taskId === task.taskId && item.envelope)) addFile(observation.file, 'agent_report', project);
-      }
-    }
-    if (input.includeGithub !== false) try {
-      const repository = await (input.repositoryForProject || projectGithubRepository)(project);
-      const evidence = await collectGithubEvidence({ projectPath: project, repository, tasks, reports, api: input.api });
-      manifest.gaps.push(...evidence.gaps.map(gap => `${project}: ${gap}`));
-      for (const commit of evidence.commits) {
-        const { observedAt, ...stableEvidence } = commit;
-        manifest.sources.push({ id: `github-${reviewHash(`${repository}:${commit.sha}`).slice(0, 24)}`, kind: 'github', projectPath: project, hash: reviewHash(JSON.stringify(stableEvidence)), value: commit });
-      }
-    } catch (error: any) { manifest.gaps.push(`${project}: ${error.message}`); }
-  }
-  const walkMemory = (dir: string) => {
-    if (!fs.existsSync(dir)) return;
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const file = path.join(dir, entry.name);
-      if (entry.isSymbolicLink()) continue;
-      if (entry.isDirectory()) walkMemory(file);
-      else if (entry.name.endsWith('.md') && !entry.name.startsWith('_')) {
-        const content = addFile(file, 'memory');
-        if (content !== undefined) manifest.memory.push({ relativePath: path.relative(path.join(input.globalRoot, 'memory'), file).replace(/\\/g, '/'), hash: reviewHash(content), content });
-      }
-    }
-  };
-  walkMemory(path.join(input.globalRoot, 'memory'));
-  addDirectoryFiles(input.globalRoot, path.join(input.globalRoot, 'memory', 'entries'), 'memory_entry');
-  for (const name of ['index.json', 'events.jsonl']) {
-    const file = path.join(input.globalRoot, 'learning', 'ledger', name);
-    if (safeFile(input.globalRoot, file)) addFile(file, 'learning_ledger');
-  }
-  addDirectoryFiles(input.globalRoot, path.join(input.globalRoot, 'learning', 'ledger', 'sources'), 'learning_event_source');
-  for (const dir of ['candidates', 'approved', 'rejected', 'promotion-suggestions', 'candidate-decisions']) {
-    const root = path.join(input.globalRoot, 'learning', dir);
-    if (!fs.existsSync(root)) continue;
-    if (input.incremental) {
-      continue;
-    }
-    for (const name of fs.readdirSync(root).filter(name => name.endsWith('.json'))) {
-      const file = path.join(root, name); const value = readLearningJson(file);
-      if (dir === 'candidate-decisions' && [1, 2].includes(value?.schemaVersion)) addFile(file, `legacy_${dir}`);
-      else if (value?.schemaVersion === 1 && input.projects.includes(value?.projectPath)) addFile(file, `legacy_${dir}` , value.projectPath);
-    }
-  }
-  manifest.sources = manifest.sources.filter(source => {
-    if (input.incremental) return source.kind !== 'legacy_candidate-decisions';
-    if (!input.incremental && (['memory', 'memory_entry', 'task', 'global_prompt_mirror', 'global_constraint', 'project_constraint', 'project_memory_legacy', 'project_document_index', 'project_document', 'run_digest', 'learning_ledger', 'learning_event_source'].includes(source.kind) || source.kind.startsWith('legacy_'))) return true;
-    const decision = readLearningJson(path.join(input.globalRoot, 'learning', 'candidate-decisions', `semantic-${reviewHash(`${source.id}:${source.hash}`)}.json`));
-    return !(decision?.schemaVersion === 2 && decision.id === source.id && decision.hash === source.hash && ['created', 'skipped'].includes(decision.decision));
-  });
-  if (input.incremental) {
-    const includedMemory = new Set(manifest.sources.filter(source => source.kind === 'memory' && source.file).map(source => path.resolve(source.file!)));
-    manifest.memory = manifest.memory.filter(item => includedMemory.has(path.resolve(input.globalRoot, 'memory', ...item.relativePath.split('/'))));
-  }
-  return manifest;
 }

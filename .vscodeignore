@@ -29,6 +29,7 @@ resources/logo.svg
 resources/logo_with_text.png
 resources/solomap_*.png
 resources/tools/validate-scheduled-tasks.cjs
+resources/tools/solomap-review.cjs
 node_modules/sql.js/dist/**
 !node_modules/sql.js/dist/sql-wasm.js
 !node_modules/sql.js/dist/sql-wasm.wasm

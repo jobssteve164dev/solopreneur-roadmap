@@ -60,6 +60,7 @@ export function configureAgentDatabase(options: { provider: DatabaseAgentProvide
       const owned = begin >= 0 ? (toml.parse(original.slice(begin, finish)) as any).mcp_servers?.solomap_data : inline && existing?.env?.SOLOMAP_MANAGED_BRIDGE === '1' ? existing : undefined;
       if (existing && !owned) throw new Error('solomap_mcp_config_name_conflict');
       const server = { ...owned, command: options.command, args, env: { ...owned?.env, ELECTRON_RUN_AS_NODE: '1', SOLOMAP_MANAGED_BRIDGE: '1' } };
+      if (options.provider === 'codex') Object.assign(server, { env_vars: [...(Array.isArray(owned?.env_vars) ? owned.env_vars : []), ...['SOLOMAP_EXECUTION_LOG_ID', 'SOLOMAP_RUN_GENERATION', 'SOLOMAP_RUN_PROOF'].filter(name => !owned?.env_vars?.includes(name))] });
       const block = [start, toml.stringify({ mcp_servers: { solomap_data: server } }).trimEnd(), end].join('\n');
       if (inline) {
         const field = inline.body.find((node: any) => matchesKey(node.key, 'solomap_data'));

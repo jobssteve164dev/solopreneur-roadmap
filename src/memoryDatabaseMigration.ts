@@ -21,7 +21,13 @@ export interface MemoryImportOptions {
 
 function structuredMemory(bytes: Buffer, options: MemoryImportOptions): { scope: string | null; data: Record<string, unknown> } {
   const entry = JSON.parse(bytes.toString('utf8')) as Record<string, any>;
-  if (entry.schemaVersion !== 1 || entry.objectType !== 'memory_entry' || typeof entry.title !== 'string' || typeof entry.content !== 'string' || typeof entry.kind !== 'string' || typeof entry.status !== 'string' || !Number.isInteger(entry.revision) || entry.revision < 1) throw new Error('legacy_memory_entry_invalid');
+  const compactEntry = entry.objectType === undefined && typeof entry.id === 'string' && entry.id.length > 0 && typeof entry.canonicalHash === 'string';
+  if (entry.schemaVersion !== 1 || (!compactEntry && entry.objectType !== 'memory_entry') || typeof entry.title !== 'string' || typeof entry.content !== 'string' || typeof entry.kind !== 'string' || typeof entry.status !== 'string' || (!compactEntry && (!Number.isInteger(entry.revision) || entry.revision < 1)) || (compactEntry && entry.revision !== undefined && (!Number.isInteger(entry.revision) || entry.revision < 1))) throw new Error('legacy_memory_entry_invalid');
+  if (entry.canonicalHash !== undefined) {
+    const ordered = (value: any): any => Array.isArray(value) ? value.map(ordered) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, ordered(value[key])])) : value;
+    const { canonicalHash, ...data } = entry;
+    if (canonicalHash !== `sha256:${crypto.createHash('sha256').update(JSON.stringify(ordered(data))).digest('hex')}`) throw new Error('legacy_memory_hash_mismatch');
+  }
   let scope: string | null = null;
   if (entry.scopeId !== 'memory_scope:global') {
     if (typeof entry.scopeId !== 'string' || !entry.scopeId.startsWith('memory_scope:project:')) throw new Error('legacy_memory_scope_invalid');
@@ -35,7 +41,7 @@ function structuredMemory(bytes: Buffer, options: MemoryImportOptions): { scope:
     category: ({ project_fact: 'project', operating_rule: 'rules' } as Record<string, string>)[entry.kind] || entry.kind,
     title: entry.title, status: entry.status, confidence: 0, content: entry.content, valid_until: expiry, valid_from: starts,
     legacy_entry_id: String(entry.entryId || entry.memoryId || entry.id || ''), external_scope: entry.scopeId,
-    layer: typeof entry.layer === 'string' ? entry.layer : null, external_entry_revision: entry.revision,
+    layer: typeof entry.layer === 'string' ? entry.layer : null, external_entry_revision: entry.revision ?? 1,
     tags_json: JSON.stringify(entry.tags || []), provenance_json: JSON.stringify(entry.provenance || {}),
     validity_json: JSON.stringify(entry.validity || {}), supersedes_json: JSON.stringify(entry.supersedes || []), metadata_json: JSON.stringify(entry.metadata || {})
   } };

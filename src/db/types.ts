@@ -69,6 +69,10 @@ export interface RunIndexEntry extends RunIndexRecord {
   signals: RunIndexSignal[];
 }
 
+export type RunImpactRecord = Pick<RunIndexRecord, 'runKind' | 'agentCli' | 'status' | 'startedAt' | 'finishedAt' | 'durationMs' | 'inputTokens' | 'cachedInputTokens' | 'outputTokens' | 'reasoningOutputTokens' | 'totalTokens'> & {
+  files: Pick<RunIndexFile, 'filePath' | 'role'>[];
+};
+
 export interface GrowthSnapshotRecord {
   id: string;
   createdAt: string;

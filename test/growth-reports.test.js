@@ -30,6 +30,21 @@ async function stopRuntime(run, root) {
   await exited;
 }
 
+async function importReportFixture(globalDataPath, project) {
+  const queued = await sendRuntimeDataRequest(globalDataPath, { operation: 'import_project_data', input: {
+    collection: 'agent-runs', projectRoot: project, sourceRoot: path.join(project, '.solopreneur/agent-runs'),
+    idempotencyKey: `report-fixture:${project}`, refreshCompleted: true
+  } });
+  const deadline = Date.now() + 10000;
+  for (;;) {
+    const job = await sendRuntimeDataRequest(globalDataPath, { operation: 'migration_status', input: { jobId: queued.jobId } });
+    if (job.status === 'completed') { assert.deepEqual(job.progress.conflicts || [], []); return; }
+    assert.notEqual(job.status, 'failed', job.error || 'report fixture migration failed');
+    assert.ok(Date.now() < deadline, 'report fixture migration must finish');
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
+
 function fixture() {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'growth-reports-'));
   const runDir = path.join(project, '.solopreneur/agent-runs/__solo__/1');
@@ -84,7 +99,7 @@ test('report reading rejects cross-project directories, symlinks and forged turn
 });
 
 test('explicit fact refresh coalesces requests and retains exact previous checks on partial failure', async () => {
-  const { collectGithubEvidence } = require('../out/learningReview.js');
+  const { collectGithubEvidence } = require('./fixtures/legacy-learning-review.cjs');
   const f = fixture(); const sha = 'a'.repeat(40); let checks = 0; let fail = false;
   const input = { projectPath: f.project, repository: 'owner/repo', tasks: [{ taskId: f.taskId, startedAt: '2026-09-01' }], reports: [], api: async endpoint => {
     if (endpoint.includes('/commits?')) return [{ sha, commit: { message: `fix: result\n\nSoloMap-Task: ${f.taskId}` } }];
@@ -153,7 +168,7 @@ test('large accumulated evidence remains readable without loading diff bodies in
 });
 
 test('separately refreshed shared tasks retain scopes and never inherit the entire diff', async () => {
-  const { collectGithubEvidence } = require('../out/learningReview.js');
+  const { collectGithubEvidence } = require('./fixtures/legacy-learning-review.cjs');
   const f = fixture(); const sha = 'b'.repeat(40); const second = 'task-second';
   const api = async endpoint => {
     if (endpoint.includes('/commits?')) return [{ sha, commit: { message: `fix: shared\n\nSoloMap-Task: ${f.taskId}\nSoloMap-Task: ${second}` } }];
@@ -205,6 +220,7 @@ test('non-code reports paginate and module changes do not silently reassign hist
   const extension = path.resolve(__dirname, '..');
   const globalDataPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'growth-reports-global-')), '.solomap-global');
   const runtime = launchRuntime(globalDataPath); await readyRuntime(runtime, globalDataPath); t.after(() => stopRuntime(runtime, globalDataPath));
+  await importReportFixture(globalDataPath, f.project);
   const snapshot = { snapshot: { id: 'mapping', projectPath: f.project, createdAt: new Date().toISOString(), gitHead: '', scanReason: 'test', status: 'completed', durationMs: 1, error: '' },
     nodes: [{ nodeId: 'file:src/a.js', kind: 'file', path: 'src/a.js', label: 'a', parentId: '', primaryRole: 'feature', fileCount: 1, testFileCount: 0, bytes: 1 }, { nodeId: 'module:a', kind: 'module', path: 'src', label: '模块 A', parentId: '', primaryRole: 'feature', fileCount: 1, testFileCount: 0, bytes: 1 }, { nodeId: 'capability:a', kind: 'capability', path: '', label: '导出', parentId: '', primaryRole: 'feature', fileCount: 0, testFileCount: 0, bytes: 0 }],
     edges: [{ sourceId: 'module:a', targetId: 'file:src/a.js', kind: 'contains', weight: 1, evidence: 'module-scan' }, { sourceId: 'module:a', targetId: 'capability:a', kind: 'implements', weight: 1, evidence: 'run_index:nodeId' }], signals: [], labels: [] };
@@ -219,6 +235,7 @@ test('non-code reports paginate and module changes do not silently reassign hist
     const runDir = path.join(f.project, '.solopreneur/agent-runs/__solo__', String(id)); fs.mkdirSync(runDir, { recursive: true });
     registerLearningTask(f.project, { executionLogId: id, runDir, userMessage: `讨论 ${id}`, startedAt: '2026-09-01' });
   }
+  await importReportFixture(globalDataPath, f.project);
   const first = await queryGrowthReports(f.project, extension, {}, globalDataPath);
   const second = await queryGrowthReports(f.project, extension, { offset: 20 }, globalDataPath);
   assert.equal(first.tasks.length, 20); assert.equal(second.tasks.length, 3);

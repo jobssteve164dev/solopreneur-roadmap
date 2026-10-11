@@ -3,13 +3,14 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { openAnalysisOwner } = require('./analysis-fixture.js');
 
 const {
   buildStrategyPyramidSnapshotData,
   readCachedStrategyPyramidSnapshot
 } = require('../out/strategyPyramid.js');
 
-test('strategy pyramid reuses its local snapshot until a project source changes', () => {
+test('strategy pyramid reuses its committed snapshot until a project source changes', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-strategy-cache-'));
   const projectPath = path.join(root, 'project');
   const solopreneurPath = path.join(projectPath, '.solopreneur');
@@ -22,55 +23,21 @@ test('strategy pyramid reuses its local snapshot until a project source changes'
     'utf8'
   );
   const projects = [{ name: 'Project', path: projectPath, type: 'core_product' }];
+  const { store, projectIds } = await openAnalysisOwner(t, globalDataPath, projects);
 
-  try {
-    const generated = buildStrategyPyramidSnapshotData(projects, globalDataPath, projectPath);
-    const cached = readCachedStrategyPyramidSnapshot(projects, globalDataPath);
+    const generated = await buildStrategyPyramidSnapshotData(projects, globalDataPath, projectPath);
+    const cached = await readCachedStrategyPyramidSnapshot(projects, globalDataPath);
     assert.equal(cached.generatedAt, generated.generatedAt);
     assert.equal(cached.projects[0].path, projectPath);
 
     fs.appendFileSync(path.join(solopreneurPath, 'roadmap.csv'), '2,Verify demand,Learn,Pending\n');
-    assert.equal(readCachedStrategyPyramidSnapshot(projects, globalDataPath), null);
+    assert.equal(await readCachedStrategyPyramidSnapshot(projects, globalDataPath), null);
 
-    const regenerated = buildStrategyPyramidSnapshotData(projects, globalDataPath, projectPath);
-    assert.equal(readCachedStrategyPyramidSnapshot(projects, globalDataPath).generatedAt, regenerated.generatedAt);
-    const learningLedgerPath = path.join(globalDataPath, 'learning', 'ledger');
-    fs.mkdirSync(learningLedgerPath, { recursive: true });
-    fs.writeFileSync(path.join(learningLedgerPath, 'events.jsonl'), '{"eventType":"verified"}\n');
-    assert.equal(readCachedStrategyPyramidSnapshot(projects, globalDataPath), null);
-  } finally {
-    for (const filePath of [
-      path.join(strategyPath, 'pyramid-snapshot-meta.json'),
-      path.join(strategyPath, 'pyramid-snapshot.json'),
-      path.join(strategyPath, 'project-strategy.csv'),
-      path.join(strategyPath, 'ability-registry.csv'),
-      path.join(solopreneurPath, 'roadmap.csv')
-    ]) {
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    }
-    const learningPath = path.join(globalDataPath, 'learning');
-    for (const filePath of [
-      path.join(learningPath, 'ledger', 'events.jsonl'),
-      path.join(learningPath, 'ledger', 'index.json')
-    ]) {
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    }
-    for (const directoryPath of [
-      path.join(learningPath, 'ledger', 'sources'),
-      path.join(learningPath, 'ledger'),
-      path.join(learningPath, 'approved'),
-      path.join(learningPath, 'candidate-decisions'),
-      path.join(learningPath, 'candidates'),
-      path.join(learningPath, 'promotion-suggestions'),
-      path.join(learningPath, 'rejected'),
-      learningPath
-    ]) {
-      if (fs.existsSync(directoryPath)) fs.rmdirSync(directoryPath);
-    }
-    if (fs.existsSync(strategyPath)) fs.rmdirSync(strategyPath);
-    if (fs.existsSync(globalDataPath)) fs.rmdirSync(globalDataPath);
-    fs.rmdirSync(solopreneurPath);
-    fs.rmdirSync(projectPath);
-    fs.rmdirSync(root);
-  }
+    const regenerated = await buildStrategyPyramidSnapshotData(projects, globalDataPath, projectPath);
+    assert.equal((await readCachedStrategyPyramidSnapshot(projects, globalDataPath)).generatedAt, regenerated.generatedAt);
+    const scope = projectIds.get(projectPath);
+    const evidence = store.write({ kind: 'evidence', action: 'create', scope, idempotencyKey: 'cache-test-evidence', data: { type: 'host_observation', source_actor_id: 'local-runtime', content: 'Verification passed', observed_at: Date.now() } });
+    store.write({ kind: 'learning_event', action: 'create', scope, idempotencyKey: 'cache-test-event', data: { source_object_id: evidence.objectId, source_revision: 1, event_type: 'verified', source_type: 'solo', summary: 'Verification passed', occurred_at: Date.now() } });
+    assert.equal(await readCachedStrategyPyramidSnapshot(projects, globalDataPath), null);
+    assert.equal(fs.existsSync(strategyPath), false);
 });

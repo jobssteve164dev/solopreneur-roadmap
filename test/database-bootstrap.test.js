@@ -272,7 +272,9 @@ test('a damaged project registry cannot block global memory import or assign unp
     assert.equal(store.read(items[0].objectId).data.content, 'global preferences survive');
     const { DatabaseSync } = require('node:sqlite');
     const db = new DatabaseSync(store.filePath, { readOnly: true });
-    assert.equal(db.prepare('SELECT count(*) AS total FROM migration_items').get().total, 2);
+    assert.equal(db.prepare('SELECT count(*) AS total FROM migration_items').get().total, 3);
+    const captured = store.readMigrationSource(`project-registry:${root}`, 'projects.json');
+    assert.equal(captured.bytes.toString(), '{damaged'); assert.equal(captured.stage, 'unmapped');
     db.close();
   } finally { await operations.close(); store.close(); }
 });
@@ -382,7 +384,6 @@ test('project investment consumer reads run indexes from the global Runtime data
       files: [], signals: []
     } });
     const analytics = require('../out/projectAnalytics.js');
-    analytics.clearProjectInvestmentCache(workspace);
     const stats = await analytics.readProjectInvestmentStatsFromDatabase(workspace, path.resolve(__dirname, '..'), new Date('2026-10-08T10:06:00.000Z'), root);
     assert.equal(stats.soloConversationCount, 1);
     assert.equal(stats.completedRunCount, 1);

@@ -138,3 +138,16 @@ test('a binding with a broken revision sequence is never accepted as resumable',
     (error) => error && error.code === 'identity_binding_invalid'
   );
 });
+
+
+test('in-memory resumable identities reject malformed revision chains before exposing a session', () => {
+  const identity = require('../out/sessionIdentity.js');
+  let binding = identity.createSessionBindingValue({ runId: 'owned-integrity-run', provider: 'claude', workspaceRoot: '/owned/project', cliPath: 'claude', bindingNonce: 'nonce', method: 'caller_assigned', contract: 'official_stable', createdAt: '2026-10-10T00:00:00.000Z' });
+  binding = identity.appendSessionBindingValue(binding, 1, { sessionId: 'owned-native-id', state: 'confirmed', method: 'caller_assigned', contract: 'official_stable', createdAt: '2026-10-10T00:00:01.000Z', confirmedAt: '2026-10-10T00:00:01.000Z' });
+  assert.equal(identity.getResumableSessionValue(binding).sessionId, 'owned-native-id');
+  for (const mutate of [b => { b.version = 1; }, b => { b.revisions[0].revision = 2; }, b => { b.revisions.push({ ...b.revisions[1], revision: 3 }); }]) {
+    const damaged = structuredClone(binding); mutate(damaged);
+    assert.throws(() => identity.getResumableSessionValue(damaged), error => error.code === 'identity_binding_invalid');
+  }
+  assert.equal(identity.getResumableSessionValue(null), null);
+});

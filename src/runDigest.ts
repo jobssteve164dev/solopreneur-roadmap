@@ -1,77 +1,12 @@
-import * as fs from 'fs';
 import * as path from 'path';
 import { AgentTokenUsage, normalizeTokenUsage } from './tokenUsage';
 import { normalizeSolomapGlobalPath } from './solomapGlobal';
 import * as crypto from 'crypto';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import { executionQueryTokens, RunDigestReference } from './runDigestData.js';
+import { parseStepMemorySource } from './stepMemorySource.js';
+import { shellQuote } from './agentCli';
 
-
-function normalizeStringList(value: unknown): string[] {
-  if (Array.isArray(value)) {
-    return value.map((item) => String(item || '').trim()).filter(Boolean);
-  }
-  if (typeof value === 'string') {
-    return value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
-  }
-  return [];
-}
-
-function readStepMemoryObject(filePath: string): Record<string, unknown> {
-  if (!filePath || !fs.existsSync(filePath)) {
-    return {};
-  }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function toProjectRelativeRuntimePath(workspaceRoot: string, targetPath: string): string {
-  const relativePath = path.relative(workspaceRoot, targetPath).replace(/\\/g, '/');
-  return relativePath && !relativePath.startsWith('..') ? relativePath : targetPath;
-}
-
-export function getLegacyStepMemoryFilePath(workspaceRoot: string, nodeId: string): string {
-  return path.join(workspaceRoot, '.solopreneur', 'step-memory', `${nodeId}.md`);
-}
-
-export function readStepHandoffSummary(filePath: string): string {
-  const legacyFilePath = filePath.endsWith('.json') ? filePath.replace(/\.json$/, '.md') : '';
-  const sourceFilePath = filePath && fs.existsSync(filePath)
-    ? filePath
-    : legacyFilePath && fs.existsSync(legacyFilePath)
-      ? legacyFilePath
-      : '';
-  if (!sourceFilePath) {
-    return '暂无交接总结。';
-  }
-
-  const content = fs.readFileSync(sourceFilePath, 'utf8').trim();
-  if (content.startsWith('{')) {
-    const memory = readStepMemoryObject(sourceFilePath);
-    const entries = parseStepHandoffEntries(content);
-    if (Object.keys(memory).length > 0) {
-      return JSON.stringify({
-        version: 1,
-        format: String(memory.format || 'solopreneur.stepHandoff'),
-        description: String(memory.description || 'Step memory used by SoloMap. completionCriteria defines when this roadmap step can be closed. entries keeps real Agent run handoffs.'),
-        ...(
-          normalizeStringList(memory.completionCriteria).length > 0
-            ? { completionCriteria: normalizeStringList(memory.completionCriteria) }
-            : {}
-        ),
-        ...(
-          normalizeStringList(memory.lastCompletionEvidence).length > 0
-            ? { lastCompletionEvidence: normalizeStringList(memory.lastCompletionEvidence) }
-            : {}
-        ),
-        entries
-      }, null, 2);
-    }
-  }
-  return buildStepHandoffSummary(parseStepHandoffEntries(content)) || '暂无交接总结。';
-}
 
 export function compactLine(value: string, maxLength: number): string {
   const compacted = (value || '').replace(/\s+/g, ' ').trim();
@@ -132,25 +67,13 @@ export function buildRunHandoffEntry(
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)
-    .slice(0, 12)
     .filter((line) => !/^No (workspace|git|project) /i.test(line));
-
-  const usefulSignals = outputTail
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) =>
-      line &&
-      !/^\s*(npm|node|git|>|\[|\{)/i.test(line) &&
-      !line.includes('Refreshing run status')
-    )
-    .slice(-12)
-    .join('\n');
 
   return {
     timestamp: new Date().toISOString(),
     status,
     changedFiles: changedFiles.length > 0 ? changedFiles : [],
-    usefulSignals: usefulSignals ? compactLine(usefulSignals, 1200) : compactLine(outputTail, 1200) || '',
+    usefulSignals: outputTail || '',
     completionReason: completionReason || (status === 'Completed' ? '该环节已完成。' : '该环节仍需后续推进。')
   };
 }
@@ -179,7 +102,7 @@ export interface RunDigest {
   tags: string[];
   handoff?: AgentHandoff;
   rawRefs?: {
-    sqliteTable: string;
+    sqliteTable?: string;
     executionLogId: number;
     digestPath?: string;
   };
@@ -202,6 +125,8 @@ export interface AgentHandoff {
 
 export interface ExecutionGraphRun {
   runId: string;
+  sourceRunId?: string;
+  sourceRef?: { objectId: string; revision: number };
   executionLogId: number;
   nodeId: string;
   runKind: string;
@@ -297,15 +222,8 @@ export interface ExecutionExperienceQuery {
   supplementFiles?: string[];
 }
 
-function getRunDigestRoot(workspaceRoot: string): string {
-  return path.join(workspaceRoot, '.solopreneur', 'run-digests');
-}
-
 function sanitizeRunDigestSegment(value: string): string {
-  return (value || 'run')
-    .replace(/[^a-zA-Z0-9._-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 80) || 'run';
+  return (value || 'run').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'run';
 }
 
 function stripFileSummaryPrefix(line: string): string {
@@ -326,9 +244,6 @@ export function parseFileSummaryLines(summary: string): string[] {
     }
     seen.add(file);
     files.push(file);
-    if (files.length >= 24) {
-      break;
-    }
   }
   return files;
 }
@@ -511,13 +426,7 @@ function buildAgentHandoff(input: RunDigestInput, changedFiles: string[], touche
 }
 
 function tokenizeExperienceText(value: string): Set<string> {
-  const tokens = (value || '')
-    .toLowerCase()
-    .split(/[^a-z0-9_\-/.]+/i)
-    .map((token) => token.trim())
-    .filter((token) => token.length >= 3)
-    .slice(0, 300);
-  return new Set(tokens);
+  return new Set(executionQueryTokens(value));
 }
 
 export function buildRunDigest(input: RunDigestInput): RunDigest {
@@ -585,54 +494,9 @@ export function buildRunDigest(input: RunDigestInput): RunDigest {
       cleanReusableSignals
     ),
     rawRefs: {
-      sqliteTable: 'execution_logs',
       executionLogId: Number(input.executionLogId || 0)
     }
   };
-}
-
-export function writeRunDigest(workspaceRoot: string, digest: RunDigest): string {
-  const digestRoot = getRunDigestRoot(workspaceRoot);
-  fs.mkdirSync(digestRoot, { recursive: true });
-  const digestPath = path.join(digestRoot, `${sanitizeRunDigestSegment(digest.runId)}.json`);
-  const nextDigest: RunDigest = {
-    ...digest,
-    rawRefs: {
-      ...(digest.rawRefs || { sqliteTable: 'execution_logs', executionLogId: Number(digest.executionLogId || 0) }),
-      digestPath: toProjectRelativeRuntimePath(workspaceRoot, digestPath)
-    }
-  };
-  fs.writeFileSync(digestPath, JSON.stringify(nextDigest, null, 2), 'utf8');
-  try {
-    writeExecutionGraph(workspaceRoot);
-  } catch (error) {
-    console.warn('Failed to update SoloMap execution graph:', error);
-  }
-  return digestPath;
-}
-
-function readRunDigests(workspaceRoot: string): RunDigest[] {
-  const digestRoot = getRunDigestRoot(workspaceRoot);
-  if (!fs.existsSync(digestRoot)) {
-    return [];
-  }
-  return fs.readdirSync(digestRoot)
-    .filter((file) => file.endsWith('.json'))
-    .map((file) => {
-      try {
-        const parsed = JSON.parse(fs.readFileSync(path.join(digestRoot, file), 'utf8'));
-        return parsed && (parsed.schemaVersion === 1 || parsed.schemaVersion === 2) ? parsed as RunDigest : null;
-      } catch {
-        return null;
-      }
-    })
-    .filter((entry): entry is RunDigest => Boolean(entry))
-    .sort((a, b) => String(b.finishedAt || '').localeCompare(String(a.finishedAt || '')))
-    .slice(0, 120);
-}
-
-function getExecutionGraphPath(workspaceRoot: string): string {
-  return path.join(workspaceRoot, '.solopreneur', 'execution-graph.json');
 }
 
 function addExecutionGraphIndex(index: Record<string, string[]>, key: string, runId: string): void {
@@ -827,8 +691,7 @@ function buildExperienceEdgesForDigest(digest: RunDigest): Array<{ node: Executi
     });
 }
 
-function buildExecutionGraph(workspaceRoot: string): ExecutionGraph {
-  const digests = readRunDigests(workspaceRoot);
+export function buildExecutionGraphFromDigests(digests: RunDigest[], sourceRefs: RunDigestReference['ref'][] = []): ExecutionGraph {
   const graph: ExecutionGraph = {
     schemaVersion: 2,
     updatedAt: new Date().toISOString(),
@@ -846,23 +709,26 @@ function buildExecutionGraph(workspaceRoot: string): ExecutionGraph {
     usageEdges: [],
     runs: []
   };
-  for (const digest of digests) {
-    const runId = String(digest.runId || '');
+  for (const [index, digest] of digests.entries()) {
+    const sourceRef = sourceRefs[index]; const sourceUri = sourceRef ? `solomap://${sourceRef.objectId}?revision=${sourceRef.revision}` : '';
+    const runId = sourceRef?.objectId || String(digest.runId || '');
     if (!runId) {
       continue;
     }
     graph.runs.push({
       runId,
+      sourceRunId: digest.runId,
+      ...(sourceRef ? { sourceRef } : {}),
       executionLogId: Number(digest.executionLogId || 0),
       nodeId: String(digest.nodeId || ''),
       runKind: String(digest.runKind || ''),
       agentCli: String(digest.agentCli || ''),
       status: String(digest.status || ''),
       finishedAt: String(digest.finishedAt || ''),
-      changedFiles: (digest.changedFiles || []).slice(0, 24),
-      touchedFiles: (digest.touchedFiles || []).slice(0, 24),
-      failures: (digest.failures || []).slice(0, 8),
-      handoffSummary: compactLine(digest.handoff?.nextAgentBrief || digest.outcome || '', 800)
+      changedFiles: digest.changedFiles || [],
+      touchedFiles: digest.touchedFiles || [],
+      failures: digest.failures || [],
+      handoffSummary: digest.handoff?.nextAgentBrief || digest.outcome || ''
     });
     addExecutionGraphIndex(graph.indexes.byNode, digest.nodeId, runId);
     addExecutionGraphIndex(graph.indexes.byAgent, digest.agentCli, runId);
@@ -877,10 +743,12 @@ function buildExecutionGraph(workspaceRoot: string): ExecutionGraph {
       addExecutionGraphIndex(graph.indexes.byCommand, command, runId);
     }
     for (const { node, edge } of buildExperienceEdgesForDigest(digest)) {
+      edge.runId = runId;
+      if (sourceUri) { node.sourceRefs = [sourceUri]; edge.evidenceRefs = [sourceUri, ...node.checks.map(check => `check:${check}`)]; }
       const existing = graph.experienceNodes[node.id];
       if (existing) {
         existing.sourceKinds = mergeUnique(existing.sourceKinds, node.sourceKinds, 8);
-        existing.sourceRefs = mergeUnique(existing.sourceRefs, node.sourceRefs, 24);
+        existing.sourceRefs = [...new Set([...existing.sourceRefs, ...node.sourceRefs])];
         existing.appliesWhen = mergeUnique(existing.appliesWhen, node.appliesWhen, 8);
         existing.checks = mergeUnique(existing.checks, node.checks, 8, 260);
         existing.stats = updateExperienceStats(existing.stats, edge);
@@ -895,11 +763,17 @@ function buildExecutionGraph(workspaceRoot: string): ExecutionGraph {
   return graph;
 }
 
-export function writeExecutionGraph(workspaceRoot: string): string {
-  const graphPath = getExecutionGraphPath(workspaceRoot);
-  fs.mkdirSync(path.dirname(graphPath), { recursive: true });
-  fs.writeFileSync(graphPath, JSON.stringify(buildExecutionGraph(workspaceRoot), null, 2), 'utf8');
-  return graphPath;
+export async function readExecutionGraph(workspaceRoot: string, globalDataPath = ''): Promise<ExecutionGraph> {
+  const root = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
+  for (;;) {
+    const entries: RunDigestReference[] = []; let cursor: number | null = 0; let sourceRevision: number | undefined; let changed = false;
+    do {
+      const page: { items: RunDigestReference[]; nextCursor: number | null; sourceRevision: number; sourceChanged: boolean } = await sendRuntimeDataRequest(root, { operation: 'read_run_digests', input: { root: workspaceRoot, cursor, limit: 100, ...(sourceRevision === undefined ? {} : { sourceRevision }) } });
+      if (page.sourceChanged) { changed = true; break; }
+      sourceRevision = page.sourceRevision; entries.push(...page.items); cursor = page.nextCursor;
+    } while (cursor !== null);
+    if (!changed) return buildExecutionGraphFromDigests(entries.map(item => item.digest), entries.map(item => item.ref));
+  }
 }
 
 function buildExecutionGraphExperienceHints(graph: ExecutionGraph, runId: string, limit = 2): string[] {
@@ -948,13 +822,13 @@ function scoreRunDigest(digest: RunDigest, query: ExecutionExperienceQuery): { s
   return { score, reasons };
 }
 
-export function buildExecutionExperiencePrompt(workspaceRoot: string, query: ExecutionExperienceQuery): string {
-  const graph = buildExecutionGraph(workspaceRoot);
-  const matches = readRunDigests(workspaceRoot)
-    .map((digest) => ({ digest, ...scoreRunDigest(digest, query) }))
-    .filter((entry) => entry.score >= 3)
-    .sort((a, b) => b.score - a.score || String(b.digest.finishedAt || '').localeCompare(String(a.digest.finishedAt || '')))
-    .slice(0, 3);
+export async function buildExecutionExperiencePrompt(workspaceRoot: string, query: ExecutionExperienceQuery, globalDataPath = ''): Promise<string> {
+  const selected: RunDigestReference[] = await sendRuntimeDataRequest(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), { operation: 'query_run_digests', input: { root: workspaceRoot, ...query } });
+  return formatExecutionExperiencePrompt(selected, query);
+}
+
+export function formatExecutionExperiencePrompt(selected: RunDigestReference[], query: ExecutionExperienceQuery): string {
+  const matches = selected.map(entry => ({ ...entry, ...scoreRunDigest(entry.digest, query) }));
   if (matches.length === 0) {
     return '';
   }
@@ -965,7 +839,7 @@ export function buildExecutionExperiencePrompt(workspaceRoot: string, query: Exe
       .filter((file) => !isArtifactOrTempFile(file))
       .slice(0, 6);
     const handoff = digest.handoff;
-    const experienceHints = buildExecutionGraphExperienceHints(graph, digest.runId, 2);
+    const experienceHints = buildExecutionGraphExperienceHints(buildExecutionGraphFromDigests([digest]), digest.runId, 2);
 
     const filesToInspectFirst = (handoff?.filesToInspectFirst || [])
       .filter((file: string) => !isArtifactOrTempFile(file));
@@ -1020,6 +894,7 @@ export function buildExecutionExperiencePrompt(workspaceRoot: string, query: Exe
 
     return [
       `${index + 1}. 命中原因：${entry.reasons.join('；') || '近期相关执行'}`,
+      `   - 完整来源：solomap_read({ref:"${entry.ref.objectId}",revision:${entry.ref.revision}})`,
       digest.userIntent ? `   - 上次目标：${digest.userIntent}` : '',
       digest.outcome ? `   - 上次结果：${digest.outcome}` : `   - 上次状态：${digest.status}`,
       experienceHints.length > 0 ? `   - 经验节点：${experienceHints.join(' / ')}` : '',
@@ -1042,182 +917,27 @@ export function buildExecutionExperiencePrompt(workspaceRoot: string, query: Exe
 }
 
 export function buildCrossAgentHandoffInstructions(workspaceRoot: string, nodeId: string, runKind: string, globalDataPath = ''): string {
-  const experienceTool = path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'tools', 'solomap-experience.cjs');
-  const skillPath = 'resources/skills/solomap-cross-agent-handoff/SKILL.md';
-  const nodeFilter = nodeId ? ` --node ${JSON.stringify(nodeId)}` : '';
+  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
+  const extensionRoot = path.resolve(__dirname, '..');
+  const experienceTool = path.join(extensionRoot, 'resources', 'tools', 'solomap-experience.cjs');
+  const skillPath = path.join(extensionRoot, 'resources', 'skills', 'solomap-cross-agent-handoff', 'SKILL.md');
+  const nodeFilter = nodeId ? ` --node ${shellQuote(nodeId)}` : '';
   return [
     'SoloMap 跨 Agent 协作入口：',
     `- 如果本轮是在接续、复核、修复失败运行、跨不同 Agent CLI 协作，或你不确定上一轮到底改了什么，先读取 ${skillPath}，再运行：`,
-    `  node ${JSON.stringify(experienceTool)} handoff --project ${JSON.stringify(workspaceRoot)}${nodeFilter} --limit 3`,
-    `- 需要进一步查看 SQLite 中的结构化历史信号时，用同一工具的 \`summary\`、\`history\`、\`failures\`、\`latest-changes\` 或 \`search\` 子命令；当前运行类型：${runKind || 'unknown'}。`,
+    `  node ${shellQuote(experienceTool)} handoff --project ${shellQuote(workspaceRoot)} --global ${shellQuote(globalRoot)}${nodeFilter} --limit 3`,
+    `- 需要进一步查看历史记录时，用同一工具的 \`summary\`、\`history\`、\`failures\`、\`latest-changes\` 或 \`search\` 子命令；当前运行类型：${runKind || 'unknown'}。`,
     '- 这些历史信号只能降低重复探索，不能覆盖本轮用户最新要求、当前文件、测试和命令输出。',
     '- 不要把原始 execution log 全文复制进最终回复；只提炼对用户有帮助的结论、改动、验证和风险。'
   ].join('\n');
 }
 
-function normalizeStepHandoffEntry(entry: any): Record<string, unknown> | null {
-  if (!entry || typeof entry !== 'object') {
-    return null;
-  }
-  const changedFiles = Array.isArray(entry.changedFiles)
-    ? entry.changedFiles.map((line: unknown) => String(line || '').trim()).filter(Boolean).slice(0, 12)
-    : String(entry.changedFiles || '')
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .slice(0, 12);
-  return {
-    timestamp: String(entry.timestamp || new Date().toISOString()),
-    status: String(entry.status || 'In Progress'),
-    changedFiles,
-    usefulSignals: compactLine(String(entry.usefulSignals || ''), 1200),
-    completionReason: compactLine(String(entry.completionReason || ''), 600)
-  };
-}
-
-function parseLegacyMarkdownHandoffEntry(entry: string): Record<string, unknown> | null {
-  const cleaned = entry.replace(/\n# 环节交接总结[\s\S]*$/g, '').trim();
-  const header = cleaned.match(/^##\s+([^\n]+?)\s+·\s+([^\n]+)\n/);
-  if (!header) {
-    return null;
-  }
-  const section = (title: string) => {
-    const match = cleaned.match(new RegExp(`### ${title}\\n([\\s\\S]*?)(?=\\n\\n### |$)`));
-    return match ? match[1].trim() : '';
-  };
-  const changedFiles = section('本轮文件变化')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .filter((line) => !/^No (workspace|git|project) /i.test(line))
-    .slice(0, 12);
-  return {
-    timestamp: header[1].trim(),
-    status: header[2].trim(),
-    changedFiles,
-    usefulSignals: compactLine(section('本轮关键信号'), 1200),
-    completionReason: compactLine(section('完成判断'), 600)
-  };
-}
-
-function handoffEntryDedupeKey(entry: Record<string, unknown>): string {
-  return JSON.stringify({
-    status: entry.status || '',
-    changedFiles: entry.changedFiles || [],
-    usefulSignals: entry.usefulSignals || '',
-    completionReason: entry.completionReason || ''
-  });
-}
-
-export function parseStepHandoffEntries(content: string): Record<string, unknown>[] {
-  const body = (content || '').trim();
-  if (!body || body === '暂无交接总结。') {
-    return [];
-  }
-
-  if (body.startsWith('{') || body.startsWith('[')) {
-    try {
-      const parsed = JSON.parse(body);
-      const rawEntries = Array.isArray(parsed) ? parsed : Array.isArray(parsed.entries) ? parsed.entries : [];
-      const seen = new Set<string>();
-      const entries: Record<string, unknown>[] = [];
-      for (const rawEntry of rawEntries) {
-        const entry = normalizeStepHandoffEntry(rawEntry);
-        if (!entry) continue;
-        const key = handoffEntryDedupeKey(entry);
-        if (!seen.has(key)) {
-          seen.add(key);
-          entries.push(entry);
-        }
-      }
-      return entries.slice(0, 10);
-    } catch {
-      return [];
-    }
-  }
-
-  const normalized = body
-    .replace(/^# 环节交接总结[\s\S]*?(?=\n##\s+\d{4}-\d{2}-\d{2}T|\n##\s+\d{4}-\d{2}-\d{2}\s|$)/, '')
-    .trim();
-  if (!normalized) {
-    return [];
-  }
-
-  const rawEntries = normalized
-    .split(/\n\n---\n\n|(?=\n##\s+\d{4}-\d{2}-\d{2}(?:T|\s))/)
-    .map((entry) => entry.trim())
-    .filter((entry) => /^##\s+\d{4}-\d{2}-\d{2}(?:T|\s)/.test(entry));
-
-  const seen = new Set<string>();
-  const entries: Record<string, unknown>[] = [];
-  for (const entry of rawEntries) {
-    const parsedEntry = parseLegacyMarkdownHandoffEntry(entry);
-    if (!parsedEntry) continue;
-    const key = handoffEntryDedupeKey(parsedEntry);
-    if (!seen.has(key)) {
-      seen.add(key);
-      entries.push(parsedEntry);
-    }
-  }
-  return entries;
+export function parseStepHandoffEntries(content: string): unknown[] {
+  const body = content.trim();
+  if (!body || body === '暂无交接总结。') return [];
+  return parseStepMemorySource(content, body.startsWith('{') || body.startsWith('[') ? 'json' : 'md').entries;
 }
 
 export function buildStepHandoffSummary(entries: Record<string, unknown>[]): string {
-  const seen = new Set<string>();
-  const validEntries = entries
-    .map((entry) => normalizeStepHandoffEntry(entry))
-    .filter((entry): entry is Record<string, unknown> => Boolean(entry))
-    .filter((entry) => {
-      const key = handoffEntryDedupeKey(entry);
-      if (seen.has(key)) {
-        return false;
-      }
-      seen.add(key);
-      return true;
-    })
-    .slice(0, 10);
-  if (validEntries.length === 0) {
-    return '';
-  }
-  return JSON.stringify({
-    version: 1,
-    format: 'solopreneur.stepHandoff',
-    description: 'Only real Agent run handoff entries are kept here. Newest first, max 10.',
-    entries: validEntries
-  }, null, 2);
-}
-
-export function updateStepHandoffSummary(filePath: string, entry: Record<string, unknown>): string {
-  const legacyFilePath = filePath.endsWith('.json') ? filePath.replace(/\.json$/, '.md') : '';
-  const existing = filePath && fs.existsSync(filePath)
-    ? fs.readFileSync(filePath, 'utf8')
-    : legacyFilePath && fs.existsSync(legacyFilePath)
-      ? fs.readFileSync(legacyFilePath, 'utf8')
-      : '';
-  const existingObject = readStepMemoryObject(filePath);
-  const normalizedEntry = normalizeStepHandoffEntry(entry);
-  const entries = normalizedEntry ? [normalizedEntry, ...parseStepHandoffEntries(existing)] : parseStepHandoffEntries(existing);
-  const completionCriteria = normalizeStringList(existingObject.completionCriteria);
-  const existingCompletionEvidence = normalizeStringList(existingObject.lastCompletionEvidence);
-  const entryEvidence = normalizedEntry
-    ? [
-      ...normalizeStringList(normalizedEntry.changedFiles),
-      String(normalizedEntry.completionReason || '').trim()
-    ].filter(Boolean)
-    : [];
-  const lastCompletionEvidence = entryEvidence.length > 0
-    ? [...entryEvidence, ...existingCompletionEvidence].filter((item, index, all) => all.indexOf(item) === index).slice(0, 8)
-    : existingCompletionEvidence;
-  const nextContent = JSON.stringify({
-    version: 1,
-    format: 'solopreneur.stepHandoff',
-    description: 'Step memory used by SoloMap. completionCriteria defines when this roadmap step can be closed. entries keeps real Agent run handoffs.',
-    ...(completionCriteria.length > 0 ? { completionCriteria } : {}),
-    ...(lastCompletionEvidence.length > 0 ? { lastCompletionEvidence } : {}),
-    entries: parseStepHandoffEntries(buildStepHandoffSummary(entries))
-  }, null, 2).slice(0, 12000);
-
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, nextContent, 'utf8');
-  return nextContent;
+  return entries.length ? JSON.stringify({ version: 1, format: 'solopreneur.stepHandoff', entries }, null, 2) : '';
 }

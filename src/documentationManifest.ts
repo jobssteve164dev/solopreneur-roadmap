@@ -104,8 +104,9 @@ export function ensureDocumentationManifest(workspaceRoot: string, now = new Dat
   return manifest;
 }
 
-export function buildDocumentationPromptContext(workspaceRoot: string): string {
-  const manifest = ensureDocumentationManifest(workspaceRoot);
+export function buildDocumentationPromptContext(workspaceRoot: string, source: DocumentationManifest): string {
+  if (!source || !Array.isArray(source.documents) || !Array.isArray(source.pendingReview)) throw new Error('documentation_source_required');
+  const manifest = { ...source, documents: mergeDocuments(source.documents, scanProjectDocuments(workspaceRoot, source.updatedAt), source.updatedAt) };
   const documents = manifest.documents
     .filter((document) => document.status === 'active')
     .slice(0, 20)
@@ -115,8 +116,7 @@ export function buildDocumentationPromptContext(workspaceRoot: string): string {
     .map((item) => `- ${item.path}：${item.reason}`);
   return [
     'SoloMap 项目文档 Harness：',
-    `- 项目文档 manifest：${toProjectRelativePath(workspaceRoot, getDocumentationManifestPath(workspaceRoot))}`,
-    '- 该 manifest 由插件维护，Agent 不要手动编辑它；如需沉淀长期判断，优先更新下列正式文档。',
+    '- 需要更多项目文档时，通过 solomap_search 检索 document，再用 solomap_read 读取对应记录；正式文档仍按下列路径编辑。',
     ...(documents.length > 0 ? ['- 当前正式文档：', ...documents] : ['- 当前还没有正式项目解释性文档；只有形成长期判断时才创建。']),
     ...(pending.length > 0 ? ['- 待用户确认的文档风险：', ...pending] : []),
     '- 项目解释性文档只记录长期复用的判断：方向、模型、边界、决策、运行方式。',
@@ -129,6 +129,14 @@ export function buildDocumentationPromptContext(workspaceRoot: string): string {
 export function auditDocumentationAfterRun(workspaceRoot: string, options: DocumentationAuditOptions): DocumentationAuditResult {
   const finishedAt = options.finishedAt || new Date().toISOString();
   const manifest = ensureDocumentationManifest(workspaceRoot, finishedAt);
+  const result = buildDocumentationAudit(workspaceRoot, manifest, options);
+  try { writeDocumentationManifest(workspaceRoot, result.manifest); }
+  catch { return { manifest, touchedDocuments: result.touchedDocuments, pendingReview: [], summary: '文档：审计状态无法写入，主任务已保留' }; }
+  return result;
+}
+
+export function buildDocumentationAudit(workspaceRoot: string, manifest: DocumentationManifest, options: DocumentationAuditOptions): DocumentationAuditResult {
+  const finishedAt = options.finishedAt || new Date().toISOString();
   const touchedDocuments = extractChangedProjectPaths([
     options.changedFilesSummary || '',
     options.touchedFilesSummary || ''
@@ -158,16 +166,6 @@ export function auditDocumentationAfterRun(workspaceRoot: string, options: Docum
       pendingReviewCount: pendingReview.length
     }
   };
-  try {
-    writeDocumentationManifest(workspaceRoot, nextManifest);
-  } catch {
-    return {
-      manifest,
-      touchedDocuments,
-      pendingReview: [],
-      summary: '文档：审计状态无法写入，主任务已保留'
-    };
-  }
   return {
     manifest: nextManifest,
     touchedDocuments,

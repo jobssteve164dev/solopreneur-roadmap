@@ -165,7 +165,7 @@ test('journal migration yields during both logs and indexes so new data can comm
   legacy.close();
   const store = new UnifiedDataStore(root); const registered = await store.registerProject({ root: project });
   let logs = 0; let indexes = 0; const observed = [];
-  const importLog = store.importProjectJournal.bind(store); const importIndex = store.importProjectRunIndex.bind(store);
+  const importLog = store.importProjectJournal.bind(store); const importIndex = store.importHistoricalRunIndex.bind(store);
   store.importProjectJournal = (...args) => {
     const result = importLog(...args); logs++;
     if (logs === 1) setImmediate(() => {
@@ -174,7 +174,7 @@ test('journal migration yields during both logs and indexes so new data can comm
     });
     return result;
   };
-  store.importProjectRunIndex = (...args) => {
+  store.importHistoricalRunIndex = (...args) => {
     importIndex(...args); indexes++;
     if (indexes === 1) setImmediate(() => {
       observed.push(['indexes', indexes]);
@@ -424,13 +424,16 @@ test('captured agent-run source resumes after restart until its artifact is writ
   const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project'); const runs = path.join(project, '.solopreneur', 'agent-runs');
   const relativePath = path.join('3', 'output.log'); const source = path.join(runs, relativePath); const bytes = Buffer.from('captured-before-interruption');
   fs.mkdirSync(path.dirname(source), { recursive: true }); fs.mkdirSync(root); fs.writeFileSync(source, bytes);
-  const store = new UnifiedDataStore(root);
+  let store = new UnifiedDataStore(root);
   store.captureMigrationSource({ identity: `agent-runs:${project}`, key: relativePath, hash: crypto.createHash('sha256').update(bytes).digest('hex') }, bytes, { mimeType: 'application/octet-stream', encoding: 'binary' });
+  store.close(); store = new UnifiedDataStore(root);
   try {
     const result = await importAgentRuns(store, runs, { projectRoot: project });
     const registered = await store.registerProject({ root: project });
     assert.equal(result.imported, 1);
-    assert.equal(Buffer.from(store.readRunArtifact(registered.projectId, 3, relativePath).bytes, 'base64').toString(), bytes.toString());
+    const indexedRuns = store.readProjectRunIndexes(registered.projectId);
+    assert.equal(indexedRuns.length, 1); assert.equal(indexedRuns[0].nodeId, '3'); assert.ok(indexedRuns[0].executionLogId > 0);
+    assert.equal(Buffer.from(store.readRunArtifact(registered.projectId, indexedRuns[0].executionLogId, relativePath).bytes, 'base64').toString(), bytes.toString());
   } finally { store.close(); }
 });
 

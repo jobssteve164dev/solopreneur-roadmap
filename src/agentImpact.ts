@@ -1,10 +1,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as Papa from 'papaparse';
-import { SqliteStore } from './db/sqliteStore';
-import { RunIndexEntry } from './db/types';
-import { AgentTokenUsage, extractRunTokenUsage, extractTokenUsageFromOutput, normalizeTokenUsage } from './tokenUsage';
+import { RunImpactRecord } from './db/types';
+import { AgentTokenUsage, normalizeTokenUsage } from './tokenUsage';
 import { getTrustedWorkDurationMs } from './workHabits';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 
 export interface AgentImpactProject {
   name: string;
@@ -53,78 +54,6 @@ interface AgentImpactRun {
   changedFiles: string[];
 }
 
-function readFileIfExists(filePath: string): string {
-  try {
-    return fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
-  } catch {
-    return '';
-  }
-}
-
-function readFileTailIfExists(filePath: string, maxBytes = 64 * 1024): string {
-  let fd: number | null = null;
-  try {
-    if (!fs.existsSync(filePath)) {
-      return '';
-    }
-    const stat = fs.statSync(filePath);
-    const length = Math.min(Math.max(0, stat.size), maxBytes);
-    if (length <= 0) {
-      return '';
-    }
-    const buffer = Buffer.alloc(length);
-    fd = fs.openSync(filePath, 'r');
-    fs.readSync(fd, buffer, 0, length, Math.max(0, stat.size - length));
-    return buffer.toString('utf8');
-  } catch {
-    return '';
-  } finally {
-    if (fd !== null) {
-      try {
-        fs.closeSync(fd);
-      } catch {}
-    }
-  }
-}
-
-function getRunTimestamp(runDir: string): number {
-  const startedAtPath = path.join(runDir, 'started_at');
-  const startedAt = readFileIfExists(startedAtPath).trim();
-  const parsed = startedAt ? Date.parse(startedAt) : NaN;
-  if (Number.isFinite(parsed)) {
-    return parsed;
-  }
-  try {
-    return fs.statSync(runDir).mtimeMs;
-  } catch {
-    return 0;
-  }
-}
-
-function getRunDurationMinutes(runDir: string, startedAtMs: number): number {
-  const output = readFileTailIfExists(path.join(runDir, 'output.log'));
-  const storedDuration = output.match(/Run duration ms:\s*(\d+)/);
-  if (storedDuration) {
-    return Math.max(1, Math.round(Number(storedDuration[1] || 0) / 60000));
-  }
-  const candidates = [
-    'completion.json',
-    'touched-files.txt',
-    'changes.txt',
-    'output.log',
-    'session.json'
-  ].map((name) => path.join(runDir, name));
-  const latestMtime = candidates.reduce((latest, candidate) => {
-    try {
-      return fs.existsSync(candidate) ? Math.max(latest, fs.statSync(candidate).mtimeMs) : latest;
-    } catch {
-      return latest;
-    }
-  }, startedAtMs);
-  const durationMs = Math.max(0, latestMtime - startedAtMs);
-  return durationMs > 0 ? Math.max(1, Math.round(durationMs / 60000)) : 0;
-}
-
 function inferAgentFromCommand(command: string): string {
   const lower = String(command || '').toLowerCase();
   if (/\bcodex(?:-cli)?\b/.test(lower)) return 'codex';
@@ -134,84 +63,6 @@ function inferAgentFromCommand(command: string): string {
   if (/\b(?:opencode|open-code|open-code-cli)\b/.test(lower)) return 'opencode';
   if (/\b(?:agy|antigravity|antigravity-cli)\b/.test(lower)) return 'agy';
   return 'unknown';
-}
-
-function inferRunStatus(runDir: string): 'completed' | 'failed' | 'unknown' {
-  const completionPath = path.join(runDir, 'completion.json');
-  if (fs.existsSync(completionPath)) {
-    try {
-      const completion = JSON.parse(fs.readFileSync(completionPath, 'utf8'));
-      if (completion?.markCompleted === true) {
-        return 'completed';
-      }
-      if (completion?.markCompleted === false || completion?.failureReason || completion?.failureCode) {
-        return 'failed';
-      }
-    } catch {
-      return 'unknown';
-    }
-  }
-  const output = readFileTailIfExists(path.join(runDir, 'output.log'));
-  if (/Failure category:|Failure reason:|Agent CLI exited before completing/i.test(output)) {
-    return 'failed';
-  }
-  return 'unknown';
-}
-
-function parseChangedFiles(content: string): string[] {
-  return String(content || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => line.replace(/^(?:[AMDRCU?!]{1,2}|\?\?)\s+/, '').trim())
-    .filter((line) => line && !line.startsWith('.solopreneur/agent-runs/'));
-}
-
-function readRunChangedFiles(runDir: string): string[] {
-  const touched = parseChangedFiles(readFileIfExists(path.join(runDir, 'touched-files.txt')));
-  if (touched.length > 0) {
-    return touched;
-  }
-  return parseChangedFiles(readFileIfExists(path.join(runDir, 'changes.txt')));
-}
-
-function isAgentRunDir(runDir: string): boolean {
-  return [
-    'command.txt',
-    'output.log',
-    'completion.json',
-    'touched-files.txt',
-    'changes.txt',
-    'prompt.txt'
-  ].some((name) => fs.existsSync(path.join(runDir, name)));
-}
-
-function listAgentRunDirs(runsRoot: string): string[] {
-  const result: string[] = [];
-  const visit = (dir: string) => {
-    let entries: string[] = [];
-    try {
-      entries = fs.existsSync(dir) ? fs.readdirSync(dir) : [];
-    } catch {
-      return;
-    }
-    if (isAgentRunDir(dir)) {
-      result.push(dir);
-      return;
-    }
-    for (const entry of entries) {
-      const candidate = path.join(dir, entry);
-      try {
-        if (fs.statSync(candidate).isDirectory()) {
-          visit(candidate);
-        }
-      } catch {
-        // Ignore partial run directories while an Agent is still starting.
-      }
-    }
-  };
-  visit(runsRoot);
-  return result;
 }
 
 function normalizeRunKind(value: unknown): string {
@@ -234,45 +85,20 @@ function statusFromDigest(value: unknown): 'completed' | 'failed' | 'unknown' {
   return 'unknown';
 }
 
-function inferAgentFromDigest(digest: any): string {
-  const agentCli = String(digest?.agentCli || '').trim();
-  if (agentCli) {
-    return inferAgentFromCommand(agentCli);
-  }
-  const commandSignal = Array.isArray(digest?.commandSignals) ? String(digest.commandSignals[0] || '') : '';
-  return inferAgentFromCommand(commandSignal);
-}
-
-function readRunsFromRunIndexEntries(entries: RunIndexEntry[], projectPath: string): AgentImpactRun[] {
+function readRunsFromRunIndexEntries(entries: RunImpactRecord[]): AgentImpactRun[] {
   return entries.map((entry) => {
     const runKind = normalizeRunKind(entry.runKind);
     if (!isImpactRunKind(runKind)) {
       return null;
     }
     const timestamp = Date.parse(String(entry.finishedAt || entry.startedAt || ''));
-    let tokenUsage = normalizeTokenUsage({
+    const tokenUsage = normalizeTokenUsage({
       inputTokens: entry.inputTokens,
       cachedInputTokens: entry.cachedInputTokens,
       outputTokens: entry.outputTokens,
       reasoningOutputTokens: entry.reasoningOutputTokens,
       totalTokens: entry.totalTokens
     });
-    if (tokenUsage.totalTokens <= 0 && entry.outputPath) {
-      const outputPath = path.isAbsolute(entry.outputPath) ? entry.outputPath : path.join(projectPath, entry.outputPath);
-      const runDir = path.dirname(outputPath);
-      let sessionId = '';
-      try {
-        sessionId = String(JSON.parse(readFileIfExists(path.join(runDir, 'session.json')))?.sessionId || '').trim();
-      } catch {}
-      tokenUsage = extractRunTokenUsage({
-        agentCli: entry.agentCli,
-        outputText: readFileTailIfExists(outputPath),
-        workspaceRoot: projectPath,
-        startedAt: entry.startedAt,
-        sessionId,
-        codexHome: readFileIfExists(path.join(runDir, 'codex-home.txt')).trim()
-      });
-    }
     return {
       agent: inferAgentFromCommand(entry.agentCli),
       status: statusFromDigest(entry.status),
@@ -285,81 +111,6 @@ function readRunsFromRunIndexEntries(entries: RunIndexEntry[], projectPath: stri
         .filter(Boolean)
     };
   }).filter((run): run is AgentImpactRun => Boolean(run));
-}
-
-async function readRunsFromRunIndex(projectPath: string, extensionPath: string): Promise<AgentImpactRun[]> {
-  const dbPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
-  if (!fs.existsSync(dbPath)) {
-    return [];
-  }
-  const store = new SqliteStore(dbPath, extensionPath);
-  try {
-    await store.init();
-    return readRunsFromRunIndexEntries(store.getRunIndexEntries(), projectPath);
-  } catch {
-    return [];
-  } finally {
-    store.close();
-  }
-}
-
-function readRunsFromDigests(projectPath: string): AgentImpactRun[] {
-  const digestRoot = path.join(projectPath, '.solopreneur', 'run-digests');
-  if (!fs.existsSync(digestRoot)) {
-    return [];
-  }
-  let files: string[] = [];
-  try {
-    files = fs.readdirSync(digestRoot).filter((file) => file.endsWith('.json'));
-  } catch {
-    return [];
-  }
-  return files.map((file) => {
-    let digest: any = null;
-    try {
-      digest = JSON.parse(fs.readFileSync(path.join(digestRoot, file), 'utf8'));
-    } catch {
-      return null;
-    }
-    if (!digest || typeof digest !== 'object') {
-      return null;
-    }
-    const runKind = normalizeRunKind(digest.runKind);
-    if (!isImpactRunKind(runKind)) {
-      return null;
-    }
-    const timestamp = Date.parse(String(digest.finishedAt || digest.startedAt || ''));
-    const durationMs = Math.max(0, Number(digest.durationMs || 0));
-    const changedFiles = [
-      ...(Array.isArray(digest.changedFiles) ? digest.changedFiles : []),
-      ...(Array.isArray(digest.touchedFiles) ? digest.touchedFiles : [])
-    ].map((item) => String(item || '').trim()).filter(Boolean);
-    return {
-      agent: inferAgentFromDigest(digest),
-      status: statusFromDigest(digest.status),
-      timestamp: Number.isFinite(timestamp) ? timestamp : 0,
-      minutes: durationMs > 0 ? Math.max(1, Math.round(durationMs / 60000)) : 0,
-      tokenUsage: normalizeTokenUsage(digest.tokenUsage),
-      changedFiles
-    };
-  }).filter((run): run is AgentImpactRun => Boolean(run));
-}
-
-function readRunsFromAgentDirs(projectPath: string): AgentImpactRun[] {
-  const runsRoot = path.join(projectPath, '.solopreneur', 'agent-runs');
-  return listAgentRunDirs(runsRoot).map((runDir) => {
-    const timestamp = getRunTimestamp(runDir);
-    const command = readFileIfExists(path.join(runDir, 'command.txt'));
-    const output = readFileTailIfExists(path.join(runDir, 'output.log'));
-    return {
-      agent: inferAgentFromCommand(command),
-      status: inferRunStatus(runDir),
-      timestamp,
-      minutes: getRunDurationMinutes(runDir, timestamp),
-      tokenUsage: extractTokenUsageFromOutput(output, command),
-      changedFiles: readRunChangedFiles(runDir)
-    };
-  });
 }
 
 function readProjectRoadmapNodes(projectPath: string): RoadmapNodeLike[] {
@@ -478,31 +229,16 @@ function buildAgentImpactSummaryFromProjectRuns(
   };
 }
 
-export function buildAgentImpactSummary(projects: AgentImpactProject[], now = new Date()): AgentImpactSummary {
-  return buildAgentImpactSummaryFromProjectRuns(projects, (project) => {
-    const digestRuns = readRunsFromDigests(project.path);
-    return digestRuns.length > 0 ? digestRuns : readRunsFromAgentDirs(project.path);
-  }, now);
-}
-
-export async function buildAgentImpactSummaryFromDatabase(projects: AgentImpactProject[], extensionPath: string, now = new Date()): Promise<AgentImpactSummary> {
+export async function buildAgentImpactSummaryFromDatabase(projects: AgentImpactProject[], extensionPath: string, now = new Date(), globalDataPath = ''): Promise<AgentImpactSummary> {
   const runsByProject = new Map<string, AgentImpactRun[]>();
   for (const project of projects) {
-    const indexedRuns = await readRunsFromRunIndex(project.path, extensionPath);
-    if (indexedRuns.length > 0) {
-      runsByProject.set(project.path, indexedRuns);
-      continue;
-    }
-    const digestRuns = readRunsFromDigests(project.path);
-    runsByProject.set(project.path, digestRuns.length > 0 ? digestRuns : readRunsFromAgentDirs(project.path));
+    const root = normalizeGlobalDataPathForExtension(globalDataPath, project.path);
+    const indexedRuns = await sendRuntimeDataRequest<RunImpactRecord[]>(root, { operation: 'read_project_impact_runs', input: { root: project.path } });
+    runsByProject.set(project.path, readRunsFromRunIndexEntries(indexedRuns));
   }
   return buildAgentImpactSummaryFromProjectRuns(projects, (project) => runsByProject.get(project.path) || [], now);
 }
 
-export function getAgentImpactStatus(projects: AgentImpactProject[]): AgentImpactStatus {
-  return { impact: buildAgentImpactSummary(projects) };
-}
-
-export async function getAgentImpactStatusFromDatabase(projects: AgentImpactProject[], extensionPath: string): Promise<AgentImpactStatus> {
-  return { impact: await buildAgentImpactSummaryFromDatabase(projects, extensionPath) };
+export async function getAgentImpactStatusFromDatabase(projects: AgentImpactProject[], extensionPath: string, globalDataPath = ''): Promise<AgentImpactStatus> {
+  return { impact: await buildAgentImpactSummaryFromDatabase(projects, extensionPath, new Date(), globalDataPath) };
 }

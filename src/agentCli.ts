@@ -450,7 +450,7 @@ export function buildAgentCommand(agentCli: string, agentPrompt: string, workspa
   return `${quotedCli} run --task ${quotedPrompt}`;
 }
 
-export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = '', newSessionId = ''): string {
+export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = '', newSessionId = '', promptInstruction = ''): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const quotedPromptFile = shellQuote(promptFilePath);
@@ -458,10 +458,11 @@ export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath:
   const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
   const modelSegment = getAgentModelFlag(agentCli, selectedModel);
   const newSessionSegment = newSessionId.trim() ? ` --session-id ${shellQuote(newSessionId)}` : '';
-  const promptFileInstruction = `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.`;
+  const promptFileInstruction = promptInstruction || `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Do not answer this wrapper sentence.`;
   const quotedPromptFileInstruction = shellQuote(promptFileInstruction);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
+    if (promptInstruction) return `${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} ${quotedPromptFileInstruction}`;
     return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} -`;
   }
   if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
@@ -469,6 +470,7 @@ export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath:
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
+    if (promptInstruction) return `${quotedCli} --print${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} ${quotedPromptFileInstruction}`;
     return `cat ${quotedPromptFile} | ${quotedCli} --print${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
@@ -487,7 +489,7 @@ export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath:
   return `${quotedCli} run --task ${quotedPromptFileInstruction}`;
 }
 
-export function buildInteractiveAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = '', newSessionId = '', bindingNonce = ''): string {
+export function buildInteractiveAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = '', newSessionId = '', bindingNonce = '', promptInstruction = ''): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
@@ -495,7 +497,7 @@ export function buildInteractiveAgentCommandForPromptFile(agentCli: string, prom
   const modelSegment = getAgentModelFlag(agentCli, selectedModel);
   const newSessionSegment = newSessionId.trim() ? ` --session-id ${shellQuote(newSessionId)}` : '';
   const bindingInstruction = bindingNonce.trim() ? ` SoloMap binding nonce: ${bindingNonce}.` : '';
-  const promptFileInstruction = `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Stay in this interactive session after completing the current turn.${bindingInstruction}`;
+  const promptFileInstruction = promptInstruction || `Read the complete SoloMap task prompt from ${promptFilePath} and follow that file exactly. The user request inside the file is the highest priority. Stay in this interactive session after completing the current turn.${bindingInstruction}`;
   const quotedInstruction = shellQuote(promptFileInstruction);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
@@ -542,9 +544,9 @@ export function buildInteractiveCursorCommandForPromptFileWithSessionEnv(
   return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --resume "$${sessionEnvName}"${permissionSegment}${modelSegment} ${shellQuote(promptFileInstruction)})`;
 }
 
-export function buildInteractiveAgentContinuationCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, sessionId: string, taskPermissionMode = 'auto', selectedModel = ''): string {
+export function buildInteractiveAgentContinuationCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, sessionId: string, taskPermissionMode = 'auto', selectedModel = '', promptInstruction = ''): string {
   if (!String(sessionId || '').trim()) {
-    return buildInteractiveAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, taskPermissionMode, selectedModel);
+    return buildInteractiveAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, taskPermissionMode, selectedModel, '', '', promptInstruction);
   }
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
@@ -552,7 +554,7 @@ export function buildInteractiveAgentContinuationCommandForPromptFile(agentCli: 
   const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
   const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
   const modelSegment = getAgentModelFlag(agentCli, selectedModel);
-  const promptFileInstruction = `Read the complete SoloMap continuation prompt from ${promptFilePath} and follow that file exactly. Continue the existing task in this interactive session.`;
+  const promptFileInstruction = promptInstruction || `Read the complete SoloMap continuation prompt from ${promptFilePath} and follow that file exactly. Continue the existing task in this interactive session.`;
   const quotedInstruction = shellQuote(promptFileInstruction);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
@@ -605,7 +607,7 @@ export function buildReadOnlyAgentCommandForPromptFile(agentCli: string, promptF
   return '';
 }
 
-export function buildAgentContinuationCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, sessionId: string, taskPermissionMode = 'auto', selectedModel = ''): string {
+export function buildAgentContinuationCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, sessionId: string, taskPermissionMode = 'auto', selectedModel = '', inlineInstruction = ''): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const quotedPromptFile = shellQuote(promptFilePath);
@@ -613,14 +615,14 @@ export function buildAgentContinuationCommandForPromptFile(agentCli: string, pro
   const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
   const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
   const modelSegment = getAgentModelFlag(agentCli, selectedModel);
-  const promptFileInstruction = `Read the complete SoloMap revision prompt from ${promptFilePath} and continue the existing task accordingly. The revision request inside the file is the highest priority.`;
+  const promptFileInstruction = inlineInstruction || `Read the complete SoloMap revision prompt from ${promptFilePath} and continue the existing task accordingly. The revision request inside the file is the highest priority.`;
   const quotedInstruction = shellQuote(promptFileInstruction);
 
   if (!sessionId) {
     return buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, taskPermissionMode, selectedModel);
   }
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `cat ${quotedPromptFile} | ${quotedCli} --print --conversation ${quotedSessionId}${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)}`;
+    return `${inlineInstruction ? `printf %s ${quotedInstruction}` : `cat ${quotedPromptFile}`} | ${quotedCli} --print --conversation ${quotedSessionId}${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)}`;
   }
   if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `${quotedCli} -p --resume ${quotedSessionId}${permissionSegment}${modelSegment} --output-format text ${quotedInstruction}`;

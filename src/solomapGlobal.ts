@@ -1,12 +1,24 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { buildAgentDatabaseInstructions } from './agentDatabaseConfig';
 import { buildSystemMaintenancePromptGuard } from './systemMaintenance';
 import * as childProcess from 'child_process';
 import { RoadmapNode } from './db/types';
-import { appendLearningEvent, buildLearningPromotionContext, readLearningSummary, LearningEvidenceRef } from './learningLedger';
+import { appendLearningEvent, buildLearningPromotionContext, readLearningOverview, LearningEvidenceRef } from './learningLedger';
 import { shellQuote } from './agentCli';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
+import { capabilitySnapshot, capabilityVersion, refreshCapabilityRegistry, writeCapabilityEntries, captureInstallationFiles, CapabilityKind, CapabilityRegistryVersion } from './capabilityRegistry';
+
+export async function refreshSolomapCapabilityRegistries(workspaceRoot: string, globalDataPath = ''): Promise<void> {
+  await Promise.all([readSolomapSkillRegistry(workspaceRoot, globalDataPath), readSolomapMcpRegistry(workspaceRoot, globalDataPath), readSolomapEnhancementRegistry(workspaceRoot, globalDataPath)]);
+}
+
+export function getSolomapCapabilityRevision(workspaceRoot: string, globalDataPath = ''): string {
+  const root = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
+  return (['skill', 'mcp', 'enhancement'] as CapabilityKind[]).map(kind => capabilityVersion(root, kind)).join(':');
+}
 
 export interface SolomapSkillRegistryEntry {
   id: string;
@@ -38,7 +50,7 @@ export interface SolomapSkillRegistryEntry {
   updatedAt?: string;
 }
 
-export interface SolomapSkillRegistry {
+export interface SolomapSkillRegistry extends CapabilityRegistryVersion {
   version: number;
   updatedAt: string;
   skills: SolomapSkillRegistryEntry[];
@@ -79,12 +91,12 @@ Use this skill for SoloMap roadmap steps, Solo conversations, roadmap revisions,
 
 1. State the concrete deliverable in one sentence before implementation.
 2. Anchor on real files, commands, logs, tests, or current user-provided evidence before judging current implementation.
-3. Read the relevant SoloMap memory files when the task needs project or cross-project context; treat memory as context, not stronger evidence than current files.
+3. Use the shared SoloMap context, search and read tools when the task needs project or reusable memory; treat recalled content as context, not stronger evidence than current files.
 4. Preserve the user's goal, wording, boundaries, and requested path. Do not replace the task with a more familiar engineering problem.
 5. Make the smallest change that directly advances the goal. Avoid unrelated architecture changes, route changes, roadmap edits, or broad rewrites.
 6. For user-facing UI or content, optimize for the final user's action and comprehension. Remove engineering self-description, template language, implementation traces, and maintenance-facing copy.
 7. Validate the actual artifact the user will rely on. For generated scripts, templates, webviews, or configs, validate the generated output, not only the source template.
-8. Close the loop: classify temporary run artifacts, explain verification, and record reusable stable lessons in the appropriate memory location when they will matter later.
+8. Close the loop: classify temporary run artifacts, explain verification, and capture reusable lessons through the shared memory tools when they will matter later. Reviewed status is assigned by the authorized review workflow.
 
 ## Before Acting
 
@@ -95,10 +107,10 @@ Use this skill for SoloMap roadmap steps, Solo conversations, roadmap revisions,
 
 ## Memory Use
 
-- Prefer the memory paths injected by SoloMap for the current run.
-- Read only high-signal memory files that can change the current decision.
-- Write stable reusable lessons to memory only after they are verified and broadly useful.
-- Put temporary observations in active or inbox-style memory rather than stable project, pattern, or decision files.
+- Use the SoloMap tools connected to the current project. Start with solomap_context, then search and read fixed object revisions when needed.
+- Read full content; follow every content cursor until it is null. Never treat a preview as a complete source.
+- Use solomap_write for captured reusable memory and retain its receipt, revision and committedSequence. Retry the same intention with the same key and immediately read back.
+- Keep project-private content scoped to the current project. Cross-project publication, promotion and adoption belong to the authorized review workflow.
 
 ## Completion Standard
 
@@ -191,7 +203,7 @@ Before finalizing, confirm that the document says something future work can reus
 }, {
   id: 'solomap-cross-project-memory',
   title: 'SoloMap Cross-Project Memory',
-  description: 'Classify and write reusable SoloMap memory into the right global memory location without leaking project-private details.',
+  description: 'Recall and save useful SoloMap memory without leaking project-private details.',
   keywords: ['memory', '记忆', '经验库', '沉淀', 'profile', 'operating-rules', 'patterns', 'decisions', 'domains', 'inbox', 'active', 'learning candidates', '跨项目'],
   useWhen: [
     '任务结束时需要沉淀跨会话或跨项目仍有价值的信息',
@@ -210,24 +222,35 @@ Use this skill when the task creates information that should survive the current
 
 ## Classification
 
-- \`profile.md\`: durable user preferences, collaboration style, recurring priorities, and prohibitions.
-- \`operating-rules.md\`: cross-task execution rules and agent behavior constraints.
-- \`projects/<project>.md\`: stable facts, entrypoints, decisions, and context for one project.
-- \`patterns/\`: reusable delivery, debugging, implementation, or verification patterns.
-- \`decisions/\`: confirmed cross-project decisions with rationale and impact.
-- \`domains/\`: reusable domain knowledge.
-- \`inbox/\`: observations that may become memory but are not verified enough.
-- \`active/\`: temporary current-session handoff.
-- \`learning/candidates/\`: candidate lessons produced by SoloMap learning flows.
+- Choose a memory category for preferences, operating rules, project facts, patterns, decisions, domain knowledge, observations, or session handoff.
+- Keep project-private facts in the current project. Shared rules and lessons require the existing authorized review flow before cross-project publication.
+- New observations and handoff remain captured memory; recall alone does not make a lesson verified or adopted.
 
 ## Writing Protocol
 
-1. Verify the information against current files, tests, logs, or explicit user confirmation before writing stable memory.
-2. Read the target directory's \`_example.md\` before creating or appending a topic file.
-3. Write only distilled facts, decisions, patterns, or handoff context. Do not paste raw logs, prompts, or execution transcripts.
-4. Do not put project-specific names, fields, providers, database details, or deployment mechanics into global operating principles.
-5. Do not leak one project's private facts into another project's reusable memory.
-6. If the information is useful but not yet stable, write it to inbox or learning candidates instead of stable memory.
+1. Use \`solomap_context\` for relevant memory and \`solomap_search\` to locate existing records. Read the complete record with \`solomap_read\`; when paginated, follow its cursor at the fixed revision until cursor is null.
+2. Read \`solomap_read({"ref":"solomap://schema"})\` before writing. Use the same tools for project memory and authorized shared memory; never append to old memory or learning files.
+3. Create a captured memory using \`solomap_write\`. The current project is bound by the tool connection. Choose one unique idempotencyKey for the intent and reuse it for retries, including after a timeout.
+4. To update an existing record, first read its objectId and revision, then patch only changed fields with expectedRevision. On revision_conflict, reread and coordinate the changes rather than overwriting a newer revision.
+5. Confirm revision and committedSequence in the receipt and immediately read the saved record back. Preserve complete content. Do not declare captured memory verified or approved; submit reusable lessons through the authorized review flow.
+6. Distill useful facts and decisions. Do not put project names, private fields, providers or deployment details into shared operating principles. Export only when the user requests an export.
+
+Example create request for \`solomap_write\` (choose a fresh intent key and replace the example content):
+
+\`\`\`json
+{
+  "action": "create",
+  "kind": "memory",
+  "idempotencyKey": "memory:session-fact:unique-intent",
+  "data": {
+    "category": "project",
+    "title": "Project fact to recall",
+    "status": "captured",
+    "confidence": 0.8,
+    "content": "The complete fact, its evidence and the conditions in which it applies."
+  }
+}
+\`\`\`
 
 ## Completion Check
 
@@ -260,35 +283,21 @@ Use this skill only when SoloMap asks you to install, repair, update, or verify 
 2. Install and configure only the requested curated enhancement. Do not install unrelated tools.
 3. Prefer the user's existing package managers and Agent configuration conventions. If an installer modifies Agent configuration, record exactly which config files changed in the result.
 4. Write the enhancement package directory under \`.solomap-global/enhancements/installed/<enhancement-id>/\`.
-5. Write:
+5. Write the following installation evidence only at the exact temporary paths supplied by the current prompt:
    - \`solomap.enhancement.json\`: id, title, description, status, version, source, adapter, activation, risk, evidencePolicy, installedAt, updatedAt, and health.
    - \`source.lock.json\`: source, package/version/commit if known, installer command summary, and updatedAt.
    - \`health.json\`: ok, version, command checks, config files touched, warnings, and lastCheckedAt.
    - the prompt-specified \`result.json\`.
 6. Treat \`health.version\` as the canonical installed version. If the primary command has no useful \`--version\`, derive the version from the package manager, package metadata, source lock, smoke-tested executable package, or upstream commit.
 7. Do not replace a previously known top-level version with \`版本未知\`, an empty string, or a weaker check result. Put weaker command output under \`health.commandChecks\` with the reason.
-8. Preserve existing \`source.lock.json\`, \`solomap.enhancement.json\`, and \`health.json\` fields unless the new run has stronger evidence. During repair or recheck, never overwrite source provenance with a reduced placeholder.
+8. Read the current registered enhancement metadata through the supplied SoloMap tools. Preserve known versions and provenance unless this run has stronger evidence. Do not create permanent registry, manifest, lock or health mirrors in the execution package.
 9. Do not write Agent private config unless the enhancement cannot work without it and the prompt explicitly permits it. If any installer touches Agent config, record \`configFilesTouched\` exactly in health and result.
 10. If a step partially succeeds, keep the installed files and report status as \`failed\` or \`needs_repair\` with a clear repair hint. Do not hide partial failures behind a successful result.
 11. Never delete existing files or clear directories. If cleanup is needed, report it in result.json instead of doing it.
 
 ## Result JSON
 
-Successful install:
-
-\`\`\`json
-{
-  "ok": true,
-  "enhancementId": "code-structure-assistant",
-  "installedPath": ".solomap-global/enhancements/installed/code-structure-assistant",
-  "solomapEnhancementJson": ".solomap-global/enhancements/installed/code-structure-assistant/solomap.enhancement.json",
-  "sourceLockJson": ".solomap-global/enhancements/installed/code-structure-assistant/source.lock.json",
-  "healthJson": ".solomap-global/enhancements/installed/code-structure-assistant/health.json",
-  "metadata": { "name": "Code Structure Assistant", "version": "1.2.3" },
-  "health": { "ok": true, "version": "1.2.3", "message": "Ready" },
-  "configFilesTouched": []
-}
-\`\`\`
+For success, follow the complete result JSON schema in the current installation prompt. Use its exact installedPath and temporary solomapEnhancementJson, sourceLockJson, healthJson and result.json paths. Include the observed version, command checks, provenance and configFilesTouched. The plugin validates and commits these documents together; they are not permanent package files.
 
 Failed install:
 
@@ -342,7 +351,7 @@ export interface SolomapMcpRegistryEntry {
   updatedAt?: string;
 }
 
-export interface SolomapMcpRegistry {
+export interface SolomapMcpRegistry extends CapabilityRegistryVersion {
   version: number;
   updatedAt: string;
   connectors: SolomapMcpRegistryEntry[];
@@ -409,7 +418,7 @@ export interface SolomapEnhancementRegistryEntry {
   };
 }
 
-export interface SolomapEnhancementRegistry {
+export interface SolomapEnhancementRegistry extends CapabilityRegistryVersion {
   version: number;
   updatedAt: string;
   enhancements: SolomapEnhancementRegistryEntry[];
@@ -572,7 +581,8 @@ export function getSolomapEnhancementsRoot(workspaceRoot: string, globalDataPath
 
 export function ensureSolomapMaintenanceWorkspace(workspaceRoot: string, globalDataPath = ''): { maintenanceRoot: string; runsRoot: string } {
   const maintenanceRoot = path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'maintenance');
-  const runsRoot = path.join(maintenanceRoot, 'runs');
+  const runsRoot = path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'tmp', 'maintenance-runs');
+  fs.mkdirSync(maintenanceRoot, { recursive: true });
   fs.mkdirSync(runsRoot, { recursive: true });
   return { maintenanceRoot, runsRoot };
 }
@@ -760,63 +770,7 @@ export function writeSolomapMemoryExamples(memoryRoot: string, learningCandidate
 
 export function ensureSolomapMemoryStore(workspaceRoot: string, globalDataPath = ''): { globalRoot: string; memoryRoot: string; projectMemoryFile: string } {
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
-  const memoryRoot = path.join(globalRoot, 'memory');
-  const projectMemoryFile = getProjectMemoryFilePath(workspaceRoot, globalDataPath);
-  if (fs.existsSync(path.join(globalRoot, 'solomap.db'))) return { globalRoot, memoryRoot, projectMemoryFile };
-  ensureSolomapGlobalTools(globalRoot);
-  const learningCandidatesDir = path.join(globalRoot, 'learning', 'candidates');
-  const learningApprovedDir = path.join(globalRoot, 'learning', 'approved');
-  const learningRejectedDir = path.join(globalRoot, 'learning', 'rejected');
-  const metricsDir = path.join(globalRoot, 'metrics');
-  fs.mkdirSync(learningCandidatesDir, { recursive: true });
-  fs.mkdirSync(learningApprovedDir, { recursive: true });
-  fs.mkdirSync(learningRejectedDir, { recursive: true });
-  fs.mkdirSync(metricsDir, { recursive: true });
-  ['projects', 'patterns', 'decisions', 'domains', 'inbox', 'active'].forEach((dir) => {
-    fs.mkdirSync(path.join(memoryRoot, dir), { recursive: true });
-  });
-  const memoryReadmePath = path.join(memoryRoot, 'README.md');
-  const profilePath = path.join(memoryRoot, 'profile.md');
-  const operatingRulesPath = path.join(memoryRoot, 'operating-rules.md');
-  if (!fs.existsSync(memoryReadmePath)) {
-    fs.writeFileSync(memoryReadmePath, [
-      '# SoloMap Memory',
-      '',
-      'This directory stores reusable SoloMap experience across projects.',
-      '',
-      '- `profile.md`: stable user preferences and collaboration style.',
-      '- `operating-rules.md`: reusable execution rules that apply across projects.',
-      '- `projects/`: one memory file per project.',
-      '- `patterns/`: reusable implementation, debugging, and delivery patterns.',
-      '- `decisions/`: confirmed cross-project decisions and their rationale.',
-      '- `domains/`: domain knowledge that can help future projects.',
-      '- `inbox/`: unverified observations and learning candidates before promotion.',
-      '- `active/`: current session handoff and temporary working context.',
-      '',
-      'Agents should treat memory as context, not as stronger evidence than current files, tests, logs, or the user request.',
-      ''
-    ].join('\n'), 'utf8');
-  }
-  if (!fs.existsSync(profilePath)) {
-    fs.writeFileSync(profilePath, '# Profile\n\nStable user preferences and collaboration style promoted by SoloMap.\n', 'utf8');
-  }
-  if (!fs.existsSync(operatingRulesPath)) {
-    fs.writeFileSync(operatingRulesPath, '# Operating Rules\n\nReusable execution rules promoted by SoloMap.\n', 'utf8');
-  }
-  if (!fs.existsSync(projectMemoryFile)) {
-    fs.writeFileSync(projectMemoryFile, [
-      `# ${path.basename(workspaceRoot || 'Project')}`,
-      '',
-      'Stable project facts, decisions, and handoff context promoted by SoloMap.',
-      ''
-    ].join('\n'), 'utf8');
-  }
-  writeFileIfMissing(path.join(metricsDir, 'execution-speed.csv'), 'project,node_id,stage,status,duration_ms,completed_at\n');
-  writeFileIfMissing(path.join(metricsDir, 'reuse-rate.csv'), 'project,node_id,reusable_signals,learning_candidates,recorded_at\n');
-  writeFileIfMissing(path.join(metricsDir, 'priority-accuracy.csv'), 'project,priority,next_action,outcome,recorded_at\n');
-  writeFileIfMissing(path.join(metricsDir, 'monthly-summary.md'), '# Monthly Learning Summary\n\nSoloMap uses this file to collect low-frequency cross-project learning signals.\n');
-  writeSolomapMemoryExamples(memoryRoot, learningCandidatesDir);
-  return { globalRoot, memoryRoot, projectMemoryFile };
+  return { globalRoot, memoryRoot: path.join(globalRoot, 'memory'), projectMemoryFile: getProjectMemoryFilePath(workspaceRoot, globalDataPath) };
 }
 
 function copyBundledFile(sourcePath: string, targetPath: string): void {
@@ -835,7 +789,7 @@ function ensureSolomapGlobalTools(globalRoot: string): void {
   const bundledToolsRoot = path.join(extensionRoot, 'resources', 'tools');
   const bundledSqlJsRoot = path.join(extensionRoot, 'node_modules', 'sql.js');
   const toolsRoot = path.join(globalRoot, 'tools');
-  ['solomap-memory.cjs', 'solomap-experience.cjs'].forEach((fileName) => {
+  ['solomap-memory.cjs', 'solomap-experience.cjs', 'solomap-data-client.cjs'].forEach((fileName) => {
     const targetPath = path.join(toolsRoot, fileName);
     copyBundledFile(path.join(bundledToolsRoot, fileName), targetPath);
   });
@@ -873,7 +827,7 @@ export function summarizeLearningEvidence(changedFilesSummary: string, touchedFi
   ].filter(Boolean).join('\n') || '- This run completed and updated the SoloMap execution history.';
 }
 
-export function recordSolomapLearningCycle(
+export async function recordSolomapLearningCycle(
   workspaceRoot: string,
   globalDataPath: string,
   node: RoadmapNode | null,
@@ -883,189 +837,114 @@ export function recordSolomapLearningCycle(
   outputTail: string,
   runDurationMs: number,
   finishedAt: string
-): void {
-  if (!workspaceRoot || !node || !node.id) {
-    return;
-  }
-  const { globalRoot } = ensureSolomapMemoryStore(workspaceRoot, globalDataPath);
-  const projectName = path.basename(workspaceRoot);
-  const learningCandidatesDir = path.join(globalRoot, 'learning', 'candidates');
-  const metricsDir = path.join(globalRoot, 'metrics');
-  const reusableSignals = (() => {
-    try {
-      return fs.existsSync(path.join(workspaceRoot, '.solopreneur', 'step-memory'))
-        ? fs.readdirSync(path.join(workspaceRoot, '.solopreneur', 'step-memory')).length
-        : 0;
-    } catch {
-      return 0;
-    }
-  })();
-  appendCsvRecord(
-    path.join(metricsDir, 'execution-speed.csv'),
-    'project,node_id,stage,status,duration_ms,completed_at',
-    [projectName, node.id, node.stage || '', nextStatus, runDurationMs, finishedAt]
-  );
-  appendCsvRecord(
-    path.join(metricsDir, 'reuse-rate.csv'),
-    'project,node_id,reusable_signals,learning_candidates,recorded_at',
-    [projectName, node.id, reusableSignals, countMarkdownFiles(learningCandidatesDir), finishedAt]
-  );
-  appendCsvRecord(
-    path.join(metricsDir, 'priority-accuracy.csv'),
-    'project,priority,next_action,outcome,recorded_at',
-    [projectName, '', node.title || '', nextStatus, finishedAt]
-  );
-
-  // Run metrics remain available; semantic candidates are created by manual review.
+): Promise<void> {
+  if (!workspaceRoot || !node || !node.id) return;
+  await sendRuntimeDataRequest(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), { operation: 'record_learning_cycle', input: {
+    root: workspaceRoot, node, nextStatus, changedFilesSummary, touchedFilesSummary, outputTail, runDurationMs, finishedAt
+  } });
 }
 
-export function buildSolomapLearningContext(workspaceRoot: string, globalDataPath = ''): string {
-  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
-  const learningCandidatesDir = path.join(globalRoot, 'learning', 'candidates');
-  const metricsDir = path.join(globalRoot, 'metrics');
-  const candidateCount = countMarkdownFiles(learningCandidatesDir);
-  const ledgerSummary = readLearningSummary(workspaceRoot, globalDataPath);
-  const hasExecutionMetrics = fs.existsSync(path.join(metricsDir, 'execution-speed.csv'));
-  const hasReuseMetrics = fs.existsSync(path.join(metricsDir, 'reuse-rate.csv'));
+export async function buildSolomapLearningContext(workspaceRoot: string, globalDataPath = ''): Promise<string> {
+  const ledgerSummary = await readLearningOverview(workspaceRoot, globalDataPath);
   return [
     'SoloMap 跨项目学习信号：',
-    `- 待审核学习候选：${Math.max(candidateCount, ledgerSummary.candidateCount)}`,
+    `- 待审核学习候选：${ledgerSummary.candidateCount}`,
     `- 统一学习账本事件：${ledgerSummary.eventCount}`,
     `- 已确认/已晋升经验：${ledgerSummary.approvedCount + ledgerSummary.promotedCount}`,
     ledgerSummary.projectSignals.length ? `- 最近项目学习信号：${ledgerSummary.projectSignals.slice(0, 4).map((item) => `${item.projectName}: ${item.candidateCount}候选/${item.riskSignals}风险/${item.verificationSignals}验证`).join('；')}` : '',
-    hasExecutionMetrics || hasReuseMetrics ? '- 低频指标已记录：仅用于 Improve、复盘或路线图调整时判断趋势，不作为普通执行任务的行动指令。' : '',
     '- 如果当前环节属于 Improve / 复盘 / 调整路线图，应优先参考这些信号来提出下一轮路线图调整。'
   ].filter(Boolean).join('\n');
 }
 
 export function getSolomapSkillRegistryPath(workspaceRoot: string, globalDataPath = ''): string {
-  return path.join(getSolomapSkillsRoot(workspaceRoot, globalDataPath), 'registry.json');
+  return 'solomap://capability-registry/skill';
 }
 
-export function ensureBuiltinSolomapSkills(skillsRoot: string, registryPath: string): void {
-  const installedAt = 'builtin';
-  let registry: SolomapSkillRegistry = { version: 1, updatedAt: '', skills: [] };
-  try {
-    const parsed = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
-    registry = {
-      version: Number(parsed.version || 1),
-      updatedAt: String(parsed.updatedAt || ''),
-      skills: Array.isArray(parsed.skills) ? parsed.skills : []
-    };
-  } catch {
-    registry = { version: 1, updatedAt: '', skills: [] };
+export async function ensureBuiltinSolomapSkills(skillsRoot: string, _registryReference: string): Promise<void> {
+  const root = path.dirname(skillsRoot);
+  const releasedDocuments: Record<string, string> = {
+    'solomap-global-execution-guide': '2a1ca770af66743a6f0da83ecda514e827b2b6cc4fcaae16db63d6df750a846c',
+    'solomap-cross-project-memory': '1d3a28da490148d5d97c076db45c08d897a659980a24bce9406762fe64a6fd44',
+    'solomap-enhancement-installer': '6b772bebbb11719ed66e8a1a9cb6fce214b4732a5ecad71ce0e8f1bc99164736'
+  };
+  const digest = (bytes: Buffer | string) => crypto.createHash('sha256').update(bytes).digest('hex');
+  let snapshot = await refreshCapabilityRegistry(root, 'skill');
+  // Historical choices must enter the authority before defaults can be supplied.
+  for (const builtin of BUILTIN_SOLOMAP_SKILLS) {
+    const version = digest(builtin.skillMd);
+    for (;;) {
+      const current = snapshot.entries.find(item => item.entry.id === builtin.id);
+      if ((!current && snapshot.legacySkillsPending) || current?.entry.status === 'uninstalled') break;
+      if (current && (current.entry.source?.type !== 'builtin' || current.entry.source?.owner !== 'solomap')) break;
+      const previousPath = path.join(skillsRoot, current?.entry.entry || `installed/${builtin.id}/package/SKILL.md`);
+      if (current?.entry.source?.builtinVersion === version && fs.existsSync(previousPath)) break;
+      const previous = fs.existsSync(previousPath) ? captureInstallationFiles(root, { previous_entry_document: previousPath }) : [];
+      const oldHash = previous.length ? digest(Buffer.from(previous[0].bytes, 'base64')) : undefined;
+      // A shipped document may be upgraded; a user's edited document belongs to them.
+      if (current && oldHash && oldHash !== version && oldHash !== releasedDocuments[builtin.id]) break;
+      const packagePath = oldHash && oldHash !== version
+        ? `installed/${builtin.id}/versions/${version}/package`
+        : current?.entry.packagePath || `installed/${builtin.id}/package`;
+      const packageRoot = path.join(skillsRoot, packagePath), entryPath = path.join(packageRoot, 'SKILL.md');
+      // Check every existing ancestor before writing so package paths cannot escape the data root.
+      const physicalRoot = fs.realpathSync(root);
+      let ancestor = packageRoot;
+      while (!fs.existsSync(ancestor)) ancestor = path.dirname(ancestor);
+      const relative = path.relative(physicalRoot, fs.realpathSync(ancestor));
+      if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('builtin_skill_package_path_invalid');
+      fs.mkdirSync(packageRoot, { recursive: true });
+      try { fs.writeFileSync(entryPath, builtin.skillMd, { encoding: 'utf8', flag: 'wx' }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+      const document = captureInstallationFiles(root, { entry_document: entryPath });
+      if (digest(Buffer.from(document[0].bytes, 'base64')) !== version) throw new Error('builtin_skill_document_conflict');
+      const entry: SolomapSkillRegistryEntry = current ? {
+        ...current.entry, id: builtin.id, entry: path.relative(skillsRoot, entryPath).split(path.sep).join('/'), packagePath,
+        source: { ...current.entry.source, builtinVersion: version }
+      } : {
+        id: builtin.id, title: builtin.title, description: builtin.description,
+        entry: path.relative(skillsRoot, entryPath).split(path.sep).join('/'), packagePath,
+        status: 'installed', defaultCandidate: builtin.defaultCandidate !== false,
+        source: { type: 'builtin', owner: 'solomap', builtinVersion: version },
+        activation: { keywords: builtin.keywords, useWhen: builtin.useWhen, doNotUseWhen: builtin.doNotUseWhen },
+        risk: { hasScripts: false, hasExecutables: false, usesNetwork: false, writesFiles: 'guidance-only', requiresUserApprovalToRunScripts: true },
+        installedAt: 'builtin', updatedAt: 'builtin'
+      };
+      try {
+        await sendRuntimeDataRequest(root, { operation: 'patch_capability_registry', input: {
+          kind: 'skill', entry, expectedRevision: current?.revision || 0,
+          idempotencyKey: `builtin-skill:${builtin.id}:${version}:${current?.revision || 0}`,
+          attachments: [...(oldHash !== version ? previous : []), ...document]
+        } });
+      } catch (error) { if ((error as Error).message !== 'revision_conflict') throw error; }
+      snapshot = await refreshCapabilityRegistry(root, 'skill');
+    }
   }
-  const builtinEntries = BUILTIN_SOLOMAP_SKILLS.map((builtinSkill) => {
-    const skillRoot = path.join(skillsRoot, 'installed', builtinSkill.id);
-    const packageRoot = path.join(skillRoot, 'package');
-    const entryPath = path.join(packageRoot, 'SKILL.md');
-    const skillJsonPath = path.join(skillRoot, 'solomap.skill.json');
-    const sourceLockPath = path.join(skillRoot, 'source.lock.json');
-    fs.mkdirSync(packageRoot, { recursive: true });
-    fs.writeFileSync(entryPath, builtinSkill.skillMd, 'utf8');
-    const skillJson = {
-      id: builtinSkill.id,
-      title: builtinSkill.title,
-      description: builtinSkill.description,
-      entry: `installed/${builtinSkill.id}/package/SKILL.md`,
-      packagePath: `installed/${builtinSkill.id}/package`,
-      status: 'installed',
-      defaultCandidate: builtinSkill.defaultCandidate !== false,
-      source: { type: 'builtin', owner: 'solomap' },
-      activation: {
-        keywords: builtinSkill.keywords,
-        useWhen: builtinSkill.useWhen,
-        doNotUseWhen: builtinSkill.doNotUseWhen
-      },
-      risk: {
-        hasScripts: false,
-        hasExecutables: false,
-        usesNetwork: false,
-        writesFiles: 'guidance-only',
-        requiresUserApprovalToRunScripts: true
-      },
-      installedAt,
-      updatedAt: installedAt
-    };
-    fs.writeFileSync(skillJsonPath, JSON.stringify(skillJson, null, 2) + '\n', 'utf8');
-    fs.writeFileSync(sourceLockPath, JSON.stringify({
-      source: 'solomap-builtin',
-      skillId: builtinSkill.id,
-      installedAt,
-      version: 1
-    }, null, 2) + '\n', 'utf8');
-    return {
-      id: builtinSkill.id,
-      title: skillJson.title,
-      description: skillJson.description,
-      entry: skillJson.entry,
-      packagePath: skillJson.packagePath,
-      status: 'installed',
-      defaultCandidate: builtinSkill.defaultCandidate !== false,
-      source: skillJson.source,
-      activation: skillJson.activation,
-      risk: skillJson.risk,
-      installedAt,
-      updatedAt: installedAt
-    };
-  });
-  const builtinIds = new Set(BUILTIN_SOLOMAP_SKILLS.map((skill) => skill.id));
-  const skills = registry.skills
-    .filter((skill) => !builtinIds.has(skill.id))
-    .concat(builtinEntries)
-    .sort((a, b) => {
-      if (a.defaultCandidate !== b.defaultCandidate) {
-        return a.defaultCandidate ? -1 : 1;
-      }
-      return a.id.localeCompare(b.id);
-    });
-  fs.writeFileSync(registryPath, JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), skills }, null, 2) + '\n', 'utf8');
 }
 
-export function ensureSolomapSkillStore(workspaceRoot: string, globalDataPath = ''): { skillsRoot: string; installedRoot: string; runsRoot: string; registryPath: string } {
+export async function ensureSolomapSkillStore(workspaceRoot: string, globalDataPath = ''): Promise<{ skillsRoot: string; installedRoot: string; runsRoot: string; registryPath: string }> {
   const skillsRoot = getSolomapSkillsRoot(workspaceRoot, globalDataPath);
   const installedRoot = path.join(skillsRoot, 'installed');
-  const runsRoot = path.join(skillsRoot, 'runs');
-  const registryPath = path.join(skillsRoot, 'registry.json');
+  const runsRoot = path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'tmp', 'skill-installs');
+  const registryPath = 'solomap://capability-registry/skill';
   fs.mkdirSync(installedRoot, { recursive: true });
-  fs.mkdirSync(runsRoot, { recursive: true });
-  if (!fs.existsSync(registryPath)) {
-    fs.writeFileSync(registryPath, JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), skills: [] }, null, 2), 'utf8');
-  }
-  ensureBuiltinSolomapSkills(skillsRoot, registryPath);
+  await ensureBuiltinSolomapSkills(skillsRoot, registryPath);
   return { skillsRoot, installedRoot, runsRoot, registryPath };
 }
 
-export function readSolomapSkillRegistry(workspaceRoot: string, globalDataPath = ''): SolomapSkillRegistry {
-  try {
-    ensureSolomapSkillStore(workspaceRoot, globalDataPath);
-  } catch {
-    return { version: 1, updatedAt: '', skills: [] };
-  }
-  const registryPath = getSolomapSkillRegistryPath(workspaceRoot, globalDataPath);
-  if (!fs.existsSync(registryPath)) {
-    return { version: 1, updatedAt: '', skills: [] };
-  }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
-    return {
-      version: Number(parsed.version || 1),
-      updatedAt: String(parsed.updatedAt || ''),
-      skills: Array.isArray(parsed.skills) ? parsed.skills : []
-    };
-  } catch {
-    return { version: 1, updatedAt: new Date().toISOString(), skills: [] };
-  }
+export async function readSolomapSkillRegistry(workspaceRoot: string, globalDataPath = ''): Promise<SolomapSkillRegistry> {
+  await ensureSolomapSkillStore(workspaceRoot, globalDataPath);
+  await refreshCapabilityRegistry(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'skill');
+  return readSolomapSkillRegistrySnapshot(workspaceRoot, globalDataPath);
 }
 
-export function writeSolomapSkillRegistry(workspaceRoot: string, globalDataPath: string, registry: SolomapSkillRegistry): void {
-  const { registryPath } = ensureSolomapSkillStore(workspaceRoot, globalDataPath);
-  const normalized: SolomapSkillRegistry = {
-    version: 1,
-    updatedAt: new Date().toISOString(),
-    skills: Array.isArray(registry.skills) ? registry.skills : []
-  };
-  fs.writeFileSync(registryPath, JSON.stringify(normalized, null, 2) + '\n', 'utf8');
+export function readSolomapSkillRegistrySnapshot(workspaceRoot: string, globalDataPath = ''): SolomapSkillRegistry {
+  const current = capabilitySnapshot(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'skill');
+  return { version: 1, updatedAt: '', skills: current.entries.filter(item => item.entry.status !== 'uninstalled').map(item => item.entry as SolomapSkillRegistryEntry), entryVersions: Object.fromEntries(current.entries.map(item => [item.entry.id, item.revision])) };
+}
+
+export async function writeSolomapSkillRegistry(workspaceRoot: string, globalDataPath: string, registry: SolomapSkillRegistry): Promise<void> {
+  await ensureSolomapSkillStore(workspaceRoot, globalDataPath);
+  await writeCapabilityEntries(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'skill', registry.skills, registry.entryVersions);
 }
 
 export function normalizeSkillKeywords(value: unknown): string[] {
@@ -1110,8 +989,8 @@ export function scoreSolomapSkill(skill: SolomapSkillRegistryEntry, contextText:
   return { score, reasons };
 }
 
-export function selectSolomapSkillCandidates(workspaceRoot: string, globalDataPath: string, contextText: string, limit = 6): Array<{ skill: SolomapSkillRegistryEntry; reasons: string[] }> {
-  const registry = readSolomapSkillRegistry(workspaceRoot, globalDataPath);
+export async function selectSolomapSkillCandidates(workspaceRoot: string, globalDataPath: string, contextText: string, limit = 6): Promise<Array<{ skill: SolomapSkillRegistryEntry; reasons: string[] }>> {
+  const registry = await readSolomapSkillRegistry(workspaceRoot, globalDataPath);
   return registry.skills
     .map((skill) => ({ skill, ...scoreSolomapSkill(skill, contextText) }))
     .filter((candidate) => candidate.score > 0)
@@ -1125,8 +1004,8 @@ export function selectSolomapSkillCandidates(workspaceRoot: string, globalDataPa
     .map(({ skill, reasons }) => ({ skill, reasons }));
 }
 
-export function buildSolomapSkillCandidateInstructions(workspaceRoot: string, globalDataPath: string, contextText: string): string {
-  const candidates = selectSolomapSkillCandidates(workspaceRoot, globalDataPath, contextText, 6);
+export async function buildSolomapSkillCandidateInstructions(workspaceRoot: string, globalDataPath: string, contextText: string): Promise<string> {
+  const candidates = await selectSolomapSkillCandidates(workspaceRoot, globalDataPath, contextText, 6);
   if (candidates.length === 0) {
     return '';
   }
@@ -1224,7 +1103,7 @@ function relativeOrAbsolute(workspaceRoot: string, filePath: string): string {
   return rel && !rel.startsWith('..') ? rel : filePath;
 }
 
-export function buildSolomapStartupPackInstructions(input: {
+export async function buildSolomapStartupPackInstructions(input: {
   workspaceRoot: string;
   globalDataPath?: string;
   runKind: string;
@@ -1233,21 +1112,14 @@ export function buildSolomapStartupPackInstructions(input: {
   learningSummaryContext?: string;
   learningRetrievalContext?: string;
   executionExperienceContext?: string;
-}): string {
+}): Promise<string> {
   const workspaceRoot = input.workspaceRoot;
   const globalDataPath = input.globalDataPath || '';
-  const memoryRoot = getSolomapMemoryRoot(workspaceRoot, globalDataPath);
-  const projectMemoryFile = getProjectMemoryFilePath(workspaceRoot, globalDataPath);
-  const promotionContext = buildLearningPromotionContext(workspaceRoot, globalDataPath, 5);
+  const promotionContext = await buildLearningPromotionContext(workspaceRoot, globalDataPath, 5);
   const requiredReadFiles = [
-    path.join(workspaceRoot, 'agent.md'),
-    path.join(memoryRoot, 'profile.md'),
-    path.join(memoryRoot, 'operating-rules.md'),
-    projectMemoryFile,
-    path.join(memoryRoot, 'active', 'current-session.md'),
-    ...selectRelevantMemoryFiles(workspaceRoot, globalDataPath, input.contextText)
+    path.join(workspaceRoot, 'agent.md')
   ].filter((filePath, index, all) => filePath && all.indexOf(filePath) === index);
-  const skillCandidates = selectSolomapSkillCandidates(workspaceRoot, globalDataPath, input.contextText, 6);
+  const skillCandidates = await selectSolomapSkillCandidates(workspaceRoot, globalDataPath, input.contextText, 6);
   const skillBlocks = skillCandidates.map(({ skill, reasons }, index) => {
     const entry = skill.entry || `installed/${skill.id}/package/SKILL.md`;
     const entryPath = path.join(getSolomapSkillsRoot(workspaceRoot, globalDataPath), entry);
@@ -1268,6 +1140,7 @@ export function buildSolomapStartupPackInstructions(input: {
     '- 在做任何实现、判断、规划、验证或最终回答前，必须先完成本启动包。',
     '- 先读取下列存在的文件；文件不存在时记录为 skipped，不得因此中断主任务：',
     ...requiredReadFiles.map((filePath) => `  - ${relativeOrAbsolute(workspaceRoot, filePath)}`),
+    buildAgentDatabaseInstructions(),
     '- 读取后用一句话形成本轮约束：用户目标、必须保留的边界、适用经验、最窄验证。',
     skillBlocks.length
       ? ['- 命中的技能必须逐一判定 used / skipped-not-applicable；判定为 used 的技能必须先读取入口 SKILL.md：', ...skillBlocks].join('\n')
@@ -1285,6 +1158,7 @@ export function buildSkillInstallPrompt(skillInput: string, workspaceRoot: strin
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const skillsRoot = getSolomapSkillsRoot(workspaceRoot, globalDataPath);
   const { maintenanceRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, globalDataPath);
+  const stagingRoot = path.dirname(resultFilePath);
   return [
     '你正在为 SoloMap 安装一个跨 Agent 通用 skill package。',
     '这是受控安装任务；只能按 SoloMap 指定目录和 schema 落盘，不要安装到各 Agent 自己的全局技能目录作为正式结果。',
@@ -1297,18 +1171,18 @@ export function buildSkillInstallPrompt(skillInput: string, workspaceRoot: strin
     '',
     '目标目录结构：',
     '- `.solomap-global/skills/installed/<skill-id>/package/`：完整 skill package，必须包含入口 `SKILL.md`，并保留 scripts、templates、assets、examples 等同级资源。',
-    '- `.solomap-global/skills/installed/<skill-id>/solomap.skill.json`：SoloMap 统一技能元数据。',
-    '- `.solomap-global/skills/installed/<skill-id>/source.lock.json`：来源、commit、原始 skillPath、安装时间、文件 hash 或目录 hash。',
+    `- ${path.join(stagingRoot, 'solomap.skill.json')}：本次安装的完整技能元数据，供插件提交到数据库。`,
+    `- ${path.join(stagingRoot, 'source.lock.json')}：本次安装的完整来源、commit、原始 skillPath、安装时间和 hash。`,
     '',
     '安装步骤：',
     '1. 解析用户提供的来源。支持 skills.sh URL、GitHub URL、owner/repo、owner/repo@skill、仓库子目录 URL。',
-    '2. 下载或克隆来源到临时预览区；如果使用 `npx skills`，必须设置 `DISABLE_TELEMETRY=1`，并把 HOME 指向临时目录，避免污染用户真实 Agent 技能目录。',
+    `2. 下载或克隆来源到 ${path.join(stagingRoot, 'preview')}；使用明确的目标目录参数，不修改 HOME 或用户真实 Agent 技能目录。`,
     '3. 定位目标 skill package 的实际文件夹；不要只复制 `SKILL.md`。',
     '4. 选择稳定 `skill-id`：优先用 SKILL.md frontmatter 的 `name`，否则用目录名；只允许小写字母、数字和连字符。',
     '5. 将完整 package 写入 `.solomap-global/skills/installed/<skill-id>/package/`。',
-    '6. 从 `SKILL.md` 解析 title/name、description、version，并生成 `solomap.skill.json`。至少包含 id、title、description、entry、packagePath、status、source、activation、risk、installedAt、updatedAt。',
+    `6. 从 SKILL.md 解析 title/name、description、version，在 ${path.join(stagingRoot, 'solomap.skill.json')} 生成元数据；至少包含 id、title、description、entry、packagePath、status、source、activation、risk、installedAt、updatedAt。`,
     '7. 扫描 package，标记风险：是否包含 scripts、可执行文件、网络访问提示、文件写入提示。默认 `requiresUserApprovalToRunScripts=true`。',
-    '8. 写入 `source.lock.json`。',
+    `8. 将完整来源锁写入 ${path.join(stagingRoot, 'source.lock.json')}，不要在实际执行包旁保存第二份元数据。`,
     '9. 写入安装结果 JSON。',
     '',
     '结果 JSON schema：',
@@ -1318,8 +1192,8 @@ export function buildSkillInstallPrompt(skillInput: string, workspaceRoot: strin
     '  "installedPath": ".solomap-global/skills/installed/skill-id",',
     '  "packagePath": ".solomap-global/skills/installed/skill-id/package",',
     '  "entryFile": ".solomap-global/skills/installed/skill-id/package/SKILL.md",',
-    '  "solomapSkillJson": ".solomap-global/skills/installed/skill-id/solomap.skill.json",',
-    '  "sourceLockJson": ".solomap-global/skills/installed/skill-id/source.lock.json",',
+    `  "solomapSkillJson": ${JSON.stringify(path.join(stagingRoot, 'solomap.skill.json'))},`,
+    `  "sourceLockJson": ${JSON.stringify(path.join(stagingRoot, 'source.lock.json'))},`,
     '  "metadata": { "name": "skill-id", "description": "...", "version": "..." },',
     '  "source": { "input": "...", "repo": "owner/repo", "commit": "...", "skillPath": "..." },',
     '  "risk": { "hasScripts": false, "hasExecutables": false, "usesNetwork": "unknown", "writesFiles": "unknown", "requiresUserApprovalToRunScripts": true }',
@@ -1349,7 +1223,7 @@ export function pathInside(parent: string, candidate: string): boolean {
   return Boolean(relativePath) && !relativePath.startsWith('..') && !path.isAbsolute(relativePath);
 }
 
-export function validateAndRegisterSkillInstall(workspaceRoot: string, globalDataPath: string, resultFilePath: string): { ok: boolean; message: string; skillId?: string } {
+export async function validateAndRegisterSkillInstall(workspaceRoot: string, globalDataPath: string, resultFilePath: string): Promise<{ ok: boolean; message: string; skillId?: string }> {
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const skillsRoot = getSolomapSkillsRoot(workspaceRoot, globalDataPath);
   const installedRoot = path.join(skillsRoot, 'installed');
@@ -1389,7 +1263,6 @@ export function validateAndRegisterSkillInstall(workspaceRoot: string, globalDat
   } catch (error: any) {
     return { ok: false, message: `solomap.skill.json is invalid: ${error.message}` };
   }
-  const now = new Date().toISOString();
   const entry: SolomapSkillRegistryEntry = {
     id: skillId,
     title: String(skillJson.title || skillJson.name || result.metadata?.name || skillId),
@@ -1415,58 +1288,42 @@ export function validateAndRegisterSkillInstall(workspaceRoot: string, globalDat
       writesFiles: skillJson.risk?.writesFiles ?? result.risk?.writesFiles ?? 'unknown',
       requiresUserApprovalToRunScripts: skillJson.risk?.requiresUserApprovalToRunScripts !== false
     },
-    installedAt: String(skillJson.installedAt || result.installedAt || now),
-    updatedAt: now
+    ...(skillJson.installedAt || result.installedAt ? { installedAt: String(skillJson.installedAt || result.installedAt) } : {}),
+    ...(skillJson.updatedAt || result.updatedAt ? { updatedAt: String(skillJson.updatedAt || result.updatedAt) } : {})
   };
-  const registry = readSolomapSkillRegistry(workspaceRoot, globalDataPath);
+  const registry = await readSolomapSkillRegistry(workspaceRoot, globalDataPath);
   const nextSkills = registry.skills.filter((skill) => skill.id !== skillId);
   nextSkills.push(entry);
-  writeSolomapSkillRegistry(workspaceRoot, globalDataPath, { ...registry, skills: nextSkills.sort((a, b) => a.id.localeCompare(b.id)) });
+  await writeCapabilityEntries(globalRoot, 'skill', nextSkills.sort((a, b) => a.id.localeCompare(b.id)), registry.entryVersions, { [skillId]: { result: resultFilePath, manifest: solomapSkillJson, source_lock: sourceLockJson, entry_document: entryFile } });
   return { ok: true, message: `Skill installed: ${skillId}`, skillId };
 }
 
 export function getSolomapMcpRegistryPath(workspaceRoot: string, globalDataPath = ''): string {
-  return path.join(getSolomapMcpRoot(workspaceRoot, globalDataPath), 'registry.json');
+  return 'solomap://capability-registry/mcp';
 }
 
 export function ensureSolomapMcpStore(workspaceRoot: string, globalDataPath = ''): { mcpRoot: string; serversRoot: string; runsRoot: string; profilesRoot: string; registryPath: string } {
   const mcpRoot = getSolomapMcpRoot(workspaceRoot, globalDataPath);
   const serversRoot = path.join(mcpRoot, 'servers');
-  const runsRoot = path.join(mcpRoot, 'runs');
+  const runsRoot = path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'tmp', 'mcp-installs');
   const profilesRoot = path.join(mcpRoot, 'profiles');
-  const registryPath = path.join(mcpRoot, 'registry.json');
-  [mcpRoot, serversRoot, runsRoot, profilesRoot].forEach((dir) => fs.mkdirSync(dir, { recursive: true }));
-  if (!fs.existsSync(registryPath)) {
-    fs.writeFileSync(registryPath, JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), connectors: [] }, null, 2), 'utf8');
-  }
+  const registryPath = getSolomapMcpRegistryPath(workspaceRoot, globalDataPath);
+  [mcpRoot, serversRoot, profilesRoot].forEach((dir) => fs.mkdirSync(dir, { recursive: true }));
   return { mcpRoot, serversRoot, runsRoot, profilesRoot, registryPath };
 }
 
-export function readSolomapMcpRegistry(workspaceRoot: string, globalDataPath = ''): SolomapMcpRegistry {
-  const registryPath = getSolomapMcpRegistryPath(workspaceRoot, globalDataPath);
-  if (!fs.existsSync(registryPath)) {
-    return { version: 1, updatedAt: '', connectors: [] };
-  }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
-    return {
-      version: Number(parsed.version || 1),
-      updatedAt: String(parsed.updatedAt || ''),
-      connectors: Array.isArray(parsed.connectors) ? parsed.connectors : []
-    };
-  } catch {
-    return { version: 1, updatedAt: new Date().toISOString(), connectors: [] };
-  }
+export async function readSolomapMcpRegistry(workspaceRoot: string, globalDataPath = ''): Promise<SolomapMcpRegistry> {
+  await refreshCapabilityRegistry(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'mcp');
+  return readSolomapMcpRegistrySnapshot(workspaceRoot, globalDataPath);
 }
 
-export function writeSolomapMcpRegistry(workspaceRoot: string, globalDataPath: string, registry: SolomapMcpRegistry): void {
-  const { registryPath } = ensureSolomapMcpStore(workspaceRoot, globalDataPath);
-  const normalized: SolomapMcpRegistry = {
-    version: 1,
-    updatedAt: new Date().toISOString(),
-    connectors: Array.isArray(registry.connectors) ? registry.connectors : []
-  };
-  fs.writeFileSync(registryPath, JSON.stringify(normalized, null, 2), 'utf8');
+export function readSolomapMcpRegistrySnapshot(workspaceRoot: string, globalDataPath = ''): SolomapMcpRegistry {
+  const current = capabilitySnapshot(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'mcp');
+  return { version: 1, updatedAt: '', connectors: current.entries.filter(item => item.entry.status !== 'uninstalled').map(item => item.entry as SolomapMcpRegistryEntry), entryVersions: Object.fromEntries(current.entries.map(item => [item.entry.id, item.revision])) };
+}
+
+export async function writeSolomapMcpRegistry(workspaceRoot: string, globalDataPath: string, registry: SolomapMcpRegistry): Promise<void> {
+  await writeCapabilityEntries(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'mcp', registry.connectors, registry.entryVersions);
 }
 
 export function scoreSolomapMcp(connector: SolomapMcpRegistryEntry, contextText: string): { score: number; reasons: string[] } {
@@ -1503,8 +1360,8 @@ export function scoreSolomapMcp(connector: SolomapMcpRegistryEntry, contextText:
   return { score, reasons };
 }
 
-export function selectSolomapMcpCandidates(workspaceRoot: string, globalDataPath: string, contextText: string, limit = 3): Array<{ connector: SolomapMcpRegistryEntry; reasons: string[] }> {
-  const registry = readSolomapMcpRegistry(workspaceRoot, globalDataPath);
+export async function selectSolomapMcpCandidates(workspaceRoot: string, globalDataPath: string, contextText: string, limit = 3): Promise<Array<{ connector: SolomapMcpRegistryEntry; reasons: string[] }>> {
+  const registry = await readSolomapMcpRegistry(workspaceRoot, globalDataPath);
   return registry.connectors
     .map((connector) => ({ connector, ...scoreSolomapMcp(connector, contextText) }))
     .filter((item) => item.score > 0)
@@ -1513,8 +1370,8 @@ export function selectSolomapMcpCandidates(workspaceRoot: string, globalDataPath
     .map(({ connector, reasons }) => ({ connector, reasons }));
 }
 
-export function buildSolomapMcpCandidateInstructions(workspaceRoot: string, globalDataPath: string, contextText: string): string {
-  const candidates = selectSolomapMcpCandidates(workspaceRoot, globalDataPath, contextText, 3);
+export async function buildSolomapMcpCandidateInstructions(workspaceRoot: string, globalDataPath: string, contextText: string): Promise<string> {
+  const candidates = await selectSolomapMcpCandidates(workspaceRoot, globalDataPath, contextText, 3);
   if (!candidates.length) {
     return '';
   }
@@ -1544,6 +1401,7 @@ export function buildMcpInstallPrompt(mcpInput: string, workspaceRoot: string, g
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const mcpRoot = getSolomapMcpRoot(workspaceRoot, globalDataPath);
   const { maintenanceRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, globalDataPath);
+  const stagingRoot = path.dirname(resultFilePath);
   return [
     '你正在为 SoloMap 安装一个跨 Agent 通用 MCP 能力连接器。',
     ...buildSystemMaintenancePromptGuard(maintenanceRoot),
@@ -1555,17 +1413,17 @@ export function buildMcpInstallPrompt(mcpInput: string, workspaceRoot: string, g
     '',
     '目标目录结构：',
     '- `.solomap-global/mcp/servers/<mcp-id>/package/`：完整 MCP server package 或配置说明。',
-    '- `.solomap-global/mcp/servers/<mcp-id>/solomap.mcp.json`：SoloMap 统一 MCP 元数据。',
-    '- `.solomap-global/mcp/servers/<mcp-id>/source.lock.json`：来源、commit、安装时间、文件 hash 或目录 hash。',
-    '- `.solomap-global/mcp/servers/<mcp-id>/profiles/`：不同 Agent CLI 的配置建议片段，例如 codex.json、claude.json、cursor.json、agy.json。',
+    `- ${path.join(stagingRoot, 'solomap.mcp.json')}：本次安装的完整 MCP 元数据，供插件提交到数据库。`,
+    `- ${path.join(stagingRoot, 'source.lock.json')}：完整来源、commit、安装时间和 hash。`,
+    `- ${path.join(stagingRoot, 'profiles')}：本次安装的 Agent 配置建议，供插件完整提交到数据库。`,
     '',
     '安装要求：',
     '1. 解析来源。支持 GitHub URL、npm package、MCP server 仓库、文档页或用户粘贴的 server 配置片段。',
     '2. 只做下载、复制、分析和生成配置建议；不要启动 MCP server，不要登录外部服务，不要写入任何 Agent 私有配置目录。',
     '3. 选择稳定 `mcp-id`：只允许小写字母、数字和连字符。',
-    '4. 生成 `solomap.mcp.json`。至少包含 id、title、description、status、source、server、profiles、activation、permissions、risk、installedAt、updatedAt。',
+    `4. 在 ${path.join(stagingRoot, 'solomap.mcp.json')} 生成元数据；至少包含 id、title、description、status、source、server、profiles、activation、permissions、risk、installedAt、updatedAt。来源锁写入 ${path.join(stagingRoot, 'source.lock.json')}。`,
     '5. 识别风险：是否需要凭证、是否访问外网、是否可外部写入、是否可发消息、是否可修改云资源、是否可访问密钥；不确定时按高风险处理并设置 `requiresExplicitEnable: true`。',
-    '6. 生成各 Agent 的 profile/config 建议，但只写入 `.solomap-global/mcp/servers/<mcp-id>/profiles/`，不要应用到真实 Agent 配置。',
+    `6. 配置建议只写入 ${path.join(stagingRoot, 'profiles')}，不要应用到真实 Agent 配置，不要在实际执行包旁保存第二份元数据。`,
     '',
     '结果 JSON 格式：',
     '{',
@@ -1573,9 +1431,9 @@ export function buildMcpInstallPrompt(mcpInput: string, workspaceRoot: string, g
     '  "mcpId": "mcp-id",',
     '  "installedPath": ".solomap-global/mcp/servers/mcp-id",',
     '  "packagePath": ".solomap-global/mcp/servers/mcp-id/package",',
-    '  "solomapMcpJson": ".solomap-global/mcp/servers/mcp-id/solomap.mcp.json",',
-    '  "sourceLockJson": ".solomap-global/mcp/servers/mcp-id/source.lock.json",',
-    '  "profilesPath": ".solomap-global/mcp/servers/mcp-id/profiles",',
+    `  "solomapMcpJson": ${JSON.stringify(path.join(stagingRoot, 'solomap.mcp.json'))},`,
+    `  "sourceLockJson": ${JSON.stringify(path.join(stagingRoot, 'source.lock.json'))},`,
+    `  "profilesPath": ${JSON.stringify(path.join(stagingRoot, 'profiles'))},`,
     '  "metadata": { "name": "mcp-id", "description": "...", "version": "..." },',
     '  "source": { "input": "...", "repo": "owner/repo", "commit": "..." },',
     '  "permissions": { "tools": [], "requiresCredentials": false, "externalAccess": "unknown", "writeAccess": "unknown" },',
@@ -1589,7 +1447,7 @@ export function buildMcpInstallPrompt(mcpInput: string, workspaceRoot: string, g
   ].join('\n');
 }
 
-export function validateAndRegisterMcpInstall(workspaceRoot: string, globalDataPath: string, resultFilePath: string): { ok: boolean; message: string; mcpId?: string } {
+export async function validateAndRegisterMcpInstall(workspaceRoot: string, globalDataPath: string, resultFilePath: string): Promise<{ ok: boolean; message: string; mcpId?: string }> {
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const mcpRoot = getSolomapMcpRoot(workspaceRoot, globalDataPath);
   const serversRoot = path.join(mcpRoot, 'servers');
@@ -1625,7 +1483,6 @@ export function validateAndRegisterMcpInstall(workspaceRoot: string, globalDataP
   } catch (error: any) {
     return { ok: false, message: `solomap.mcp.json is invalid: ${error.message}` };
   }
-  const now = new Date().toISOString();
   const entry: SolomapMcpRegistryEntry = {
     id: mcpId,
     title: String(mcpJson.title || mcpJson.name || result.metadata?.name || mcpId),
@@ -1660,60 +1517,54 @@ export function validateAndRegisterMcpInstall(workspaceRoot: string, globalDataP
       canAccessSecrets: Boolean(mcpJson.risk?.canAccessSecrets || result.risk?.canAccessSecrets),
       requiresExplicitEnable: Boolean(mcpJson.risk?.requiresExplicitEnable ?? result.risk?.requiresExplicitEnable ?? (mcpJson.permissions?.requiresCredentials || result.permissions?.requiresCredentials))
     },
-    installedAt: String(mcpJson.installedAt || result.installedAt || now),
-    updatedAt: now
+    ...(mcpJson.installedAt || result.installedAt ? { installedAt: String(mcpJson.installedAt || result.installedAt) } : {}),
+    ...(mcpJson.updatedAt || result.updatedAt ? { updatedAt: String(mcpJson.updatedAt || result.updatedAt) } : {})
   };
-  if (profilesPath && !pathInside(installedPath, profilesPath)) {
-    return { ok: false, message: 'MCP profiles path is outside installed MCP directory.' };
+  if (profilesPath && !pathInside(installedPath, profilesPath) && !pathInside(path.dirname(resultFilePath), profilesPath)) {
+    return { ok: false, message: 'MCP profiles path is outside its install or staging directory.' };
   }
-  const registry = readSolomapMcpRegistry(workspaceRoot, globalDataPath);
+  const registry = await readSolomapMcpRegistry(workspaceRoot, globalDataPath);
   const nextConnectors = registry.connectors.filter((connector) => connector.id !== mcpId);
   nextConnectors.push(entry);
-  writeSolomapMcpRegistry(workspaceRoot, globalDataPath, { ...registry, connectors: nextConnectors.sort((a, b) => a.id.localeCompare(b.id)) });
+  const files: Record<string, string> = { result: resultFilePath, manifest: solomapMcpJson, source_lock: sourceLockJson };
+  const collectProfiles = (directory: string): void => {
+    for (const item of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const file = path.join(directory, item.name);
+      if (item.isDirectory()) collectProfiles(file);
+      else if (item.isFile()) files[`profile_${Buffer.from(path.relative(profilesPath, file)).toString('hex')}`] = file;
+      else throw new Error('capability_attachment_path_invalid');
+    }
+  };
+  if (fs.existsSync(profilesPath)) collectProfiles(profilesPath);
+  await writeCapabilityEntries(globalRoot, 'mcp', nextConnectors.sort((a, b) => a.id.localeCompare(b.id)), registry.entryVersions, { [mcpId]: files });
   return { ok: true, message: `MCP connector installed: ${mcpId}`, mcpId };
 }
 
 export function getSolomapEnhancementRegistryPath(workspaceRoot: string, globalDataPath = ''): string {
-  return path.join(getSolomapEnhancementsRoot(workspaceRoot, globalDataPath), 'registry.json');
+  return 'solomap://capability-registry/enhancement';
 }
 
 export function ensureSolomapEnhancementStore(workspaceRoot: string, globalDataPath = ''): { enhancementsRoot: string; installedRoot: string; runsRoot: string; registryPath: string } {
   const enhancementsRoot = getSolomapEnhancementsRoot(workspaceRoot, globalDataPath);
   const installedRoot = path.join(enhancementsRoot, 'installed');
-  const runsRoot = path.join(enhancementsRoot, 'runs');
-  const registryPath = path.join(enhancementsRoot, 'registry.json');
-  [enhancementsRoot, installedRoot, runsRoot].forEach((dir) => fs.mkdirSync(dir, { recursive: true }));
-  if (!fs.existsSync(registryPath)) {
-    fs.writeFileSync(registryPath, JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), enhancements: [] }, null, 2), 'utf8');
-  }
+  const runsRoot = path.join(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'tmp', 'enhancement-installs');
+  const registryPath = getSolomapEnhancementRegistryPath(workspaceRoot, globalDataPath);
+  [enhancementsRoot, installedRoot].forEach((dir) => fs.mkdirSync(dir, { recursive: true }));
   return { enhancementsRoot, installedRoot, runsRoot, registryPath };
 }
 
-export function readSolomapEnhancementRegistry(workspaceRoot: string, globalDataPath = ''): SolomapEnhancementRegistry {
-  const registryPath = getSolomapEnhancementRegistryPath(workspaceRoot, globalDataPath);
-  if (!fs.existsSync(registryPath)) {
-    return { version: 1, updatedAt: '', enhancements: [] };
-  }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
-    return {
-      version: Number(parsed.version || 1),
-      updatedAt: String(parsed.updatedAt || ''),
-      enhancements: Array.isArray(parsed.enhancements) ? parsed.enhancements : []
-    };
-  } catch {
-    return { version: 1, updatedAt: new Date().toISOString(), enhancements: [] };
-  }
+export async function readSolomapEnhancementRegistry(workspaceRoot: string, globalDataPath = ''): Promise<SolomapEnhancementRegistry> {
+  await refreshCapabilityRegistry(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'enhancement');
+  return readSolomapEnhancementRegistrySnapshot(workspaceRoot, globalDataPath);
 }
 
-export function writeSolomapEnhancementRegistry(workspaceRoot: string, globalDataPath: string, registry: SolomapEnhancementRegistry): void {
-  const { registryPath } = ensureSolomapEnhancementStore(workspaceRoot, globalDataPath);
-  const normalized: SolomapEnhancementRegistry = {
-    version: 1,
-    updatedAt: new Date().toISOString(),
-    enhancements: Array.isArray(registry.enhancements) ? registry.enhancements : []
-  };
-  fs.writeFileSync(registryPath, JSON.stringify(normalized, null, 2), 'utf8');
+export function readSolomapEnhancementRegistrySnapshot(workspaceRoot: string, globalDataPath = ''): SolomapEnhancementRegistry {
+  const current = capabilitySnapshot(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'enhancement');
+  return { version: 1, updatedAt: '', enhancements: current.entries.map(item => item.entry as SolomapEnhancementRegistryEntry), entryVersions: Object.fromEntries(current.entries.map(item => [item.entry.id, item.revision])) };
+}
+
+export async function writeSolomapEnhancementRegistry(workspaceRoot: string, globalDataPath: string, registry: SolomapEnhancementRegistry): Promise<void> {
+  await writeCapabilityEntries(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), 'enhancement', registry.enhancements, registry.entryVersions);
 }
 
 export function isEnhancementUsable(enhancement: SolomapEnhancementRegistryEntry | undefined): boolean {
@@ -1735,7 +1586,7 @@ export function enabledEnhancementIds(enabledEnhancements: Record<string, boolea
 }
 
 export function getEnabledEnhancementMap(workspaceRoot: string, globalDataPath = ''): Record<string, boolean> {
-  const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
+  const registry = readSolomapEnhancementRegistrySnapshot(workspaceRoot, globalDataPath);
   return mergeBuiltinSolomapEnhancements(registry.enhancements)
     .filter((enhancement) => BUILTIN_SOLOMAP_ENHANCEMENTS.some((builtin) => builtin.id === enhancement.id))
     .reduce<Record<string, boolean>>((acc, enhancement) => {
@@ -1758,7 +1609,7 @@ export function statusLabelForEnhancement(status: string, installed: boolean, en
 }
 
 export function getSolomapEnhancementStatusSummaries(workspaceRoot: string, globalDataPath = ''): SolomapEnhancementStatusSummary[] {
-  const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
+  const registry = readSolomapEnhancementRegistrySnapshot(workspaceRoot, globalDataPath);
   return mergeBuiltinSolomapEnhancements(registry.enhancements).map((enhancement) => {
     const installed = isEnhancementUsable(enhancement);
     const enabled = isEnhancementEnabled(enhancement);
@@ -1780,16 +1631,16 @@ export function getSolomapEnhancementStatusSummaries(workspaceRoot: string, glob
   }).filter((summary) => BUILTIN_SOLOMAP_ENHANCEMENTS.some((builtin) => builtin.id === summary.id));
 }
 
-export function refreshSolomapEnhancementStatusSummaries(workspaceRoot: string, globalDataPath = ''): SolomapEnhancementStatusSummary[] {
-  const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
+export async function refreshSolomapEnhancementStatusSummaries(workspaceRoot: string, globalDataPath = ''): Promise<SolomapEnhancementStatusSummary[]> {
+  const registry = await readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
   const byId = new Map(registry.enhancements.map((enhancement) => [enhancement.id, enhancement]));
-  BUILTIN_SOLOMAP_ENHANCEMENTS.forEach((builtin) => {
+  for (const builtin of BUILTIN_SOLOMAP_ENHANCEMENTS) {
     const currentStatus = String(byId.get(builtin.id)?.status || '').toLowerCase();
     if (currentStatus === 'installing' || currentStatus === 'uninstalling' || currentStatus === 'uninstalled') {
-      return;
+      continue;
     }
-    checkAndRegisterEnhancement(workspaceRoot, globalDataPath, builtin.id);
-  });
+    await checkAndRegisterEnhancement(workspaceRoot, globalDataPath, builtin.id);
+  }
   return getSolomapEnhancementStatusSummaries(workspaceRoot, globalDataPath);
 }
 
@@ -2039,14 +1890,14 @@ export function mergeBuiltinSolomapEnhancements(
   return Array.from(merged.values());
 }
 
-export function selectSolomapEnhancementCandidates(
+export async function selectSolomapEnhancementCandidates(
   workspaceRoot: string,
   globalDataPath: string,
   contextText: string,
   limit = 3,
   enabledEnhancements: Record<string, boolean> = {}
-): Array<{ enhancement: SolomapEnhancementRegistryEntry; reasons: string[] }> {
-  const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
+): Promise<Array<{ enhancement: SolomapEnhancementRegistryEntry; reasons: string[] }>> {
+  const registry = await readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
   return mergeBuiltinSolomapEnhancements(registry.enhancements, enabledEnhancements)
     .filter((enhancement) => Boolean(enabledEnhancements[enhancement.id]))
     .map((enhancement) => ({ enhancement, ...scoreSolomapEnhancement(enhancement, contextText) }))
@@ -2056,13 +1907,13 @@ export function selectSolomapEnhancementCandidates(
     .map(({ enhancement, reasons }) => ({ enhancement, reasons }));
 }
 
-export function buildSolomapEnhancementCandidateInstructions(
+export async function buildSolomapEnhancementCandidateInstructions(
   workspaceRoot: string,
   globalDataPath: string,
   contextText: string,
   enabledEnhancements: Record<string, boolean> = {}
-): string {
-  const candidates = selectSolomapEnhancementCandidates(workspaceRoot, globalDataPath, contextText, 3, enabledEnhancements);
+): Promise<string> {
+  const candidates = await selectSolomapEnhancementCandidates(workspaceRoot, globalDataPath, contextText, 3, enabledEnhancements);
   if (!candidates.length) {
     return '';
   }
@@ -2101,12 +1952,16 @@ export function buildEnhancementInstallPrompt(enhancementId: string, workspaceRo
   const enhancementsRoot = getSolomapEnhancementsRoot(workspaceRoot, globalDataPath);
   const { maintenanceRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, globalDataPath);
   const installedPath = path.join(enhancementsRoot, 'installed', enhancementId);
-  const installerSkillPath = path.join(getSolomapSkillsRoot(workspaceRoot, globalDataPath), 'installed/solomap-enhancement-installer/package/SKILL.md');
+  const installerEntry = capabilitySnapshot(globalRoot, 'skill').entries.find(item => item.entry.id === 'solomap-enhancement-installer')?.entry.entry;
+  const installerInstructions = installerEntry
+    ? path.join(getSolomapSkillsRoot(workspaceRoot, globalDataPath), installerEntry)
+    : BUILTIN_SOLOMAP_SKILLS.find(skill => skill.id === 'solomap-enhancement-installer')!.skillMd;
+  const stagingRoot = path.dirname(resultFilePath);
   return [
     '你正在为 SoloMap 安装一个受管执行增强。',
     ...buildSystemMaintenancePromptGuard(maintenanceRoot),
-    '请先读取并遵守这个安装 skill：',
-    installerSkillPath,
+    installerEntry ? '请先读取并遵守这个安装 skill：' : '请遵守以下安装 skill：',
+    installerInstructions,
     '',
     `请求安装的增强 ID：${enhancementId}`,
     `增强名称：${enhancement?.title || enhancementId}`,
@@ -2115,6 +1970,10 @@ export function buildEnhancementInstallPrompt(enhancementId: string, workspaceRo
     `SoloMap 增强目录：${enhancementsRoot}`,
     `目标安装目录：${installedPath}`,
     `安装结果 JSON 必须写入：${resultFilePath}`,
+    `本次 manifest、source lock、health 只能写入 ${stagingRoot}，不得在执行包旁新增永久元数据。`,
+    '',
+    '结果 JSON 格式：',
+    JSON.stringify({ ok: true, enhancementId, installedPath, solomapEnhancementJson: path.join(stagingRoot, 'solomap.enhancement.json'), sourceLockJson: path.join(stagingRoot, 'source.lock.json'), healthJson: path.join(stagingRoot, 'health.json'), metadata: { name: enhancement?.title || enhancementId, version: '' }, health: { ok: true, version: '', message: '' } }, null, 2),
     '',
     '该增强的 SoloMap manifest 基线：',
     JSON.stringify(enhancement || {}, null, 2),
@@ -2138,12 +1997,15 @@ export function buildEnhancementUninstallPrompt(enhancementId: string, workspace
   const enhancementsRoot = getSolomapEnhancementsRoot(workspaceRoot, globalDataPath);
   const { maintenanceRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, globalDataPath);
   const installedPath = path.join(enhancementsRoot, 'installed', enhancementId);
-  const installerSkillPath = path.join(getSolomapSkillsRoot(workspaceRoot, globalDataPath), 'installed/solomap-enhancement-installer/package/SKILL.md');
+  const installerEntry = capabilitySnapshot(globalRoot, 'skill').entries.find(item => item.entry.id === 'solomap-enhancement-installer')?.entry.entry;
+  const installerInstructions = installerEntry
+    ? path.join(getSolomapSkillsRoot(workspaceRoot, globalDataPath), installerEntry)
+    : BUILTIN_SOLOMAP_SKILLS.find(skill => skill.id === 'solomap-enhancement-installer')!.skillMd;
   return [
     '你正在为 SoloMap 卸载一个受管执行增强。',
     ...buildSystemMaintenancePromptGuard(maintenanceRoot),
-    '请先读取并遵守这个安装/卸载 skill：',
-    installerSkillPath,
+    installerEntry ? '请先读取并遵守这个安装/卸载 skill：' : '请遵守以下安装/卸载 skill：',
+    installerInstructions,
     '',
     `请求卸载的增强 ID：${enhancementId}`,
     `增强名称：${enhancement?.title || enhancementId}`,
@@ -2171,7 +2033,7 @@ export function resolveEnhancementResultPath(globalRoot: string, value: string):
   return resolveSkillResultPath(globalRoot, value);
 }
 
-export function validateAndRegisterEnhancementInstall(workspaceRoot: string, globalDataPath: string, resultFilePath: string): { ok: boolean; message: string; enhancementId?: string } {
+export async function validateAndRegisterEnhancementInstall(workspaceRoot: string, globalDataPath: string, resultFilePath: string): Promise<{ ok: boolean; message: string; enhancementId?: string }> {
   const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const { enhancementsRoot, installedRoot } = ensureSolomapEnhancementStore(workspaceRoot, globalDataPath);
   if (!fs.existsSync(resultFilePath)) {
@@ -2189,7 +2051,7 @@ export function validateAndRegisterEnhancementInstall(workspaceRoot: string, glo
     return { ok: false, message: '增强安装结果缺少有效的 enhancementId。' };
   }
   if (!result.ok || result.health?.ok === false) {
-    upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, {
+    await upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, {
       ...builtin,
       status: 'failed',
       version: String(result.metadata?.version || result.health?.version || ''),
@@ -2217,8 +2079,7 @@ export function validateAndRegisterEnhancementInstall(workspaceRoot: string, glo
     return { ok: false, message: `增强 manifest 或 health JSON 无效：${error.message}`, enhancementId };
   }
   const version = String(health.version || enhancementJson.version || result.health?.version || result.metadata?.version || '').trim();
-  const now = new Date().toISOString();
-  const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
+  const registry = await readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
   const existingEntry = registry.enhancements.find((enhancement) => enhancement.id === enhancementId);
   const entry: SolomapEnhancementRegistryEntry = {
     ...builtin,
@@ -2236,20 +2097,22 @@ export function validateAndRegisterEnhancementInstall(workspaceRoot: string, glo
     activation: { ...(builtin.activation || {}), ...(enhancementJson.activation || {}) },
     risk: { ...(builtin.risk || {}), ...(enhancementJson.risk || {}) },
     evidencePolicy: { ...(builtin.evidencePolicy || {}), ...(enhancementJson.evidencePolicy || {}) },
-    installedAt: String(enhancementJson.installedAt || result.installedAt || now),
-    updatedAt: now,
-    lastCheckedAt: String(health.lastCheckedAt || now),
+    ...(enhancementJson.installedAt || result.installedAt ? { installedAt: String(enhancementJson.installedAt || result.installedAt) } : {}),
+    ...(enhancementJson.updatedAt || result.updatedAt ? { updatedAt: String(enhancementJson.updatedAt || result.updatedAt) } : {}),
+    ...(health.lastCheckedAt ? { lastCheckedAt: String(health.lastCheckedAt) } : {}),
     health: {
       ok: health.ok !== false,
       message: String(health.message || result.health?.message || '可用'),
       version
     }
   };
-  upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, entry);
+  const nextEnhancements = registry.enhancements.filter((enhancement) => enhancement.id !== enhancementId);
+  nextEnhancements.push(entry);
+  await writeCapabilityEntries(globalRoot, 'enhancement', nextEnhancements.sort((a, b) => a.id.localeCompare(b.id)), registry.entryVersions, { [enhancementId]: { result: resultFilePath, manifest: solomapEnhancementJson, source_lock: sourceLockJson, health: healthJson } });
   return { ok: true, message: `执行增强已安装：${entry.title}（${version || '版本未知'}）`, enhancementId };
 }
 
-export function validateAndRegisterEnhancementUninstall(workspaceRoot: string, globalDataPath: string, resultFilePath: string): { ok: boolean; message: string; enhancementId?: string } {
+export async function validateAndRegisterEnhancementUninstall(workspaceRoot: string, globalDataPath: string, resultFilePath: string): Promise<{ ok: boolean; message: string; enhancementId?: string }> {
   if (!fs.existsSync(resultFilePath)) {
     return { ok: false, message: '增强卸载结果 result.json 未生成。' };
   }
@@ -2266,7 +2129,7 @@ export function validateAndRegisterEnhancementUninstall(workspaceRoot: string, g
   }
   if (!result.ok || result.health?.ok === false) {
     const message = String(result.error || result.health?.message || result.message || '增强卸载未完成。');
-    upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, {
+    await upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, {
       ...builtin,
       status: 'failed',
       enabled: false,
@@ -2281,15 +2144,17 @@ export function validateAndRegisterEnhancementUninstall(workspaceRoot: string, g
     return { ok: false, message, enhancementId };
   }
   const resultMessage = String(result.message || result.health?.message || '已从用户环境中卸载。');
-  const registryResult = uninstallSolomapEnhancement(workspaceRoot, globalDataPath, enhancementId, resultMessage);
+  const registryResult = await uninstallSolomapEnhancement(workspaceRoot, globalDataPath, enhancementId, resultMessage);
   return { ...registryResult, message: `执行增强已卸载：${builtin.title}` };
 }
 
-export function upsertEnhancementRegistryEntry(workspaceRoot: string, globalDataPath: string, entry: SolomapEnhancementRegistryEntry): void {
-  const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
+export async function upsertEnhancementRegistryEntry(workspaceRoot: string, globalDataPath: string, entry: SolomapEnhancementRegistryEntry, expectedRevision?: number): Promise<void> {
+  const registry = await readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
   const nextEnhancements = registry.enhancements.filter((enhancement) => enhancement.id !== entry.id);
   nextEnhancements.push(entry);
-  writeSolomapEnhancementRegistry(workspaceRoot, globalDataPath, { ...registry, enhancements: nextEnhancements.sort((a, b) => a.id.localeCompare(b.id)) });
+  await writeSolomapEnhancementRegistry(workspaceRoot, globalDataPath, { ...registry,
+    entryVersions: { ...registry.entryVersions, ...(expectedRevision === undefined ? {} : { [entry.id]: expectedRevision }) },
+    enhancements: nextEnhancements.sort((a, b) => a.id.localeCompare(b.id)) });
 }
 
 export function runEnhancementCheckCommand(enhancementId: string, workspaceRoot: string): { ok: boolean; version: string; message: string } {
@@ -2332,7 +2197,7 @@ export function extractVersionText(output: string): string {
   return match ? match[1] : (text ? '版本未知' : '');
 }
 
-export function checkAndRegisterEnhancement(workspaceRoot: string, globalDataPath: string, enhancementId: string): { ok: boolean; message: string; enhancementId?: string } {
+export async function checkAndRegisterEnhancement(workspaceRoot: string, globalDataPath: string, enhancementId: string): Promise<{ ok: boolean; message: string; enhancementId?: string }> {
   const builtin = getBuiltinEnhancementDefinition(enhancementId);
   if (!builtin) {
     return { ok: false, message: '未知执行增强。' };
@@ -2340,11 +2205,11 @@ export function checkAndRegisterEnhancement(workspaceRoot: string, globalDataPat
   const check = runEnhancementCheckCommand(enhancementId, workspaceRoot);
   const now = new Date().toISOString();
   const { enhancementsRoot, installedRoot } = ensureSolomapEnhancementStore(workspaceRoot, globalDataPath);
-  const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
+  const registry = await readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
   const existingEntry = registry.enhancements.find((enhancement) => enhancement.id === enhancementId);
   const uninstalledEntry = String(existingEntry?.status || '').toLowerCase() === 'uninstalled' ? existingEntry : undefined;
   if (uninstalledEntry) {
-    upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, {
+    await upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, {
       ...builtin,
       ...uninstalledEntry,
       id: enhancementId,
@@ -2364,7 +2229,7 @@ export function checkAndRegisterEnhancement(workspaceRoot: string, globalDataPat
           checkedAt: now
         }
       }
-    });
+    }, registry.entryVersions?.[enhancementId] ?? 0);
     return {
       ok: false,
       message: `执行增强已卸载：${builtin.title}。需要恢复时请点击安装或修复。`,
@@ -2372,13 +2237,11 @@ export function checkAndRegisterEnhancement(workspaceRoot: string, globalDataPat
     };
   }
   const installedPath = path.join(installedRoot, enhancementId);
-  fs.mkdirSync(installedPath, { recursive: true });
   const manifestPath = path.join(installedPath, 'solomap.enhancement.json');
   const healthPath = path.join(installedPath, 'health.json');
   const sourceLockPath = path.join(installedPath, 'source.lock.json');
-  const existingManifest = readJsonFileIfExists(manifestPath) || {};
-  const existingHealth = readJsonFileIfExists(healthPath) || {};
-  const existingSourceLock = readJsonFileIfExists(sourceLockPath) || {};
+  const existingManifest: Partial<SolomapEnhancementRegistryEntry> = existingEntry || {};
+  const existingHealth = existingEntry?.health || {};
   const version = chooseEnhancementVersion(
     check.version,
     existingHealth.version,
@@ -2386,9 +2249,7 @@ export function checkAndRegisterEnhancement(workspaceRoot: string, globalDataPat
     existingManifest.version,
     existingEntry?.health?.version,
     existingEntry?.version,
-    existingSourceLock.version,
-    existingSourceLock.metadata?.version,
-    ...(Array.isArray(existingSourceLock.packages) ? existingSourceLock.packages.map((pkg: any) => pkg?.version) : [])
+    existingEntry?.source?.version
   );
   const nextHealth = {
     ...existingHealth,
@@ -2425,12 +2286,7 @@ export function checkAndRegisterEnhancement(workspaceRoot: string, globalDataPat
     lastCheckedAt: now,
     health: nextHealth
   };
-  fs.writeFileSync(healthPath, JSON.stringify(nextHealth, null, 2) + '\n', 'utf8');
-  fs.writeFileSync(manifestPath, JSON.stringify(entry, null, 2) + '\n', 'utf8');
-  if (!fs.existsSync(sourceLockPath)) {
-    fs.writeFileSync(sourceLockPath, JSON.stringify({ source: builtin.source || {}, checkedAt: now }, null, 2) + '\n', 'utf8');
-  }
-  upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, entry);
+  await upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, entry, registry.entryVersions?.[enhancementId] ?? 0);
   return {
     ok: check.ok,
     message: check.ok ? `执行增强可用：${builtin.title}（${version || '版本未知'}）` : `执行增强检测失败：${builtin.title}。${check.message}`,
@@ -2438,18 +2294,18 @@ export function checkAndRegisterEnhancement(workspaceRoot: string, globalDataPat
   };
 }
 
-export function setSolomapEnhancementEnabled(workspaceRoot: string, globalDataPath: string, enhancementId: string, enabled: boolean): { ok: boolean; message: string; enhancementId?: string } {
+export async function setSolomapEnhancementEnabled(workspaceRoot: string, globalDataPath: string, enhancementId: string, enabled: boolean): Promise<{ ok: boolean; message: string; enhancementId?: string }> {
   const builtin = getBuiltinEnhancementDefinition(enhancementId);
   if (!builtin) {
     return { ok: false, message: '未知执行增强。' };
   }
-  const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
+  const registry = await readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
   const current = mergeBuiltinSolomapEnhancements(registry.enhancements).find((enhancement) => enhancement.id === enhancementId);
   if (enabled && !isEnhancementUsable(current)) {
     return { ok: false, message: `执行增强尚不可用：${builtin.title}。请先安装或修复。`, enhancementId };
   }
   const now = new Date().toISOString();
-  upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, {
+  await upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, {
     ...builtin,
     ...(current || {}),
     id: enhancementId,
@@ -2458,7 +2314,7 @@ export function setSolomapEnhancementEnabled(workspaceRoot: string, globalDataPa
     updatedAt: now,
     lastCheckedAt: current?.lastCheckedAt || now,
     health: current?.health || { ok: enabled, message: enabled ? '已启用。' : '已禁用。' }
-  });
+  }, registry.entryVersions?.[enhancementId] ?? 0);
   return {
     ok: true,
     message: enabled ? `已启用执行增强：${builtin.title}` : `已禁用执行增强：${builtin.title}`,
@@ -2466,15 +2322,15 @@ export function setSolomapEnhancementEnabled(workspaceRoot: string, globalDataPa
   };
 }
 
-export function uninstallSolomapEnhancement(workspaceRoot: string, globalDataPath: string, enhancementId: string, healthMessage = '已从用户环境卸载。'): { ok: boolean; message: string; enhancementId?: string } {
+export async function uninstallSolomapEnhancement(workspaceRoot: string, globalDataPath: string, enhancementId: string, healthMessage = '已从用户环境卸载。'): Promise<{ ok: boolean; message: string; enhancementId?: string }> {
   const builtin = getBuiltinEnhancementDefinition(enhancementId);
   if (!builtin) {
     return { ok: false, message: '未知执行增强。' };
   }
-  const registry = readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
+  const registry = await readSolomapEnhancementRegistry(workspaceRoot, globalDataPath);
   const current = mergeBuiltinSolomapEnhancements(registry.enhancements).find((enhancement) => enhancement.id === enhancementId);
   const now = new Date().toISOString();
-  upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, {
+  await upsertEnhancementRegistryEntry(workspaceRoot, globalDataPath, {
     ...builtin,
     ...(current || {}),
     id: enhancementId,
@@ -2488,34 +2344,10 @@ export function uninstallSolomapEnhancement(workspaceRoot: string, globalDataPat
       message: healthMessage,
       version: current?.health?.version || current?.version || ''
     }
-  });
+  }, registry.entryVersions?.[enhancementId] ?? 0);
   return { ok: true, message: `已卸载执行增强：${builtin.title}`, enhancementId };
 }
 
-export function buildSoloMapSystemMemoryPrompt(workspaceRoot: string, globalDataPath = ''): string {
-  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
-  if (fs.existsSync(path.join(globalRoot, 'solomap.db'))) return buildAgentDatabaseInstructions();
-  const memoryRoot = path.join(globalRoot, 'memory');
-  const projectMemoryFile = getProjectMemoryFilePath(workspaceRoot, globalDataPath);
-  const learningCandidatesDir = path.join(globalRoot, 'learning', 'candidates');
-  return [
-    'SoloMap 默认系统提示词：全局经验库机制',
-    `- 当前项目目录：${workspaceRoot}`,
-    `- 跨项目数据目录：${globalRoot}`,
-    `- 全局经验库目录：${memoryRoot}`,
-    `- 当前项目记忆文件：${projectMemoryFile}`,
-    `- 待沉淀候选目录：${learningCandidatesDir}`,
-    '- 开始工作前，按需读取全局经验库中的 `profile.md`、`operating-rules.md`、当前项目记忆、相关 `patterns/`、`decisions/`、`domains/`、`active/` 与 `inbox/`；文件不存在时继续完成本轮任务。',
-    '- 写入协议：每个子目录都有 `_example.md` 示例；写入前先读取对应示例，按示例结构新建或追加真实主题文件，不要覆盖 `_example.md`，不要把原始日志、执行流水或用户不需要看的内部过程直接复制进去。',
-    '- 写入位置：项目事实写入当前项目记忆；可复用做法写入 `patterns/`；已确认的跨项目决策写入 `decisions/`；领域知识写入 `domains/`；未验证观察写入 `inbox/` 或 `learning/candidates/`；临时交接写入 `active/`。',
-    '- 旧 `.codex-memory/` 只作为兼容来源；新的稳定经验优先进入 `.solomap-global/memory`，未验证观察先作为候选进入 `.solomap-global/learning/candidates` 或经验库 `inbox/`。',
-    '- 当前用户请求、当前项目文件、测试、日志和命令输出的证据优先级高于经验库；经验库只能帮助理解和减少重复，不能覆盖用户本轮目标。',
-    '- 不要把经验库目录结构、实现机制或内部治理负担暴露给普通用户；面向用户的输出只保留能帮助其完成动作的结论、改动、验证和风险。',
-    '- 不要自动把某个项目的私有事实泄漏到其他项目；跨项目复用前必须确认其是稳定、可泛化且不含敏感信息的经验。',
-    '- 新项目或新环节开始时，必须先做启动注入自检：确认项目类型、当前用户动作、成功标准、可复用经验、相似项目记忆和本轮最窄验证，再开始改动。',
-    '- 项目类型用于选择路线图形态：核心产品默认覆盖 Build/Sell/Learn/Improve；基础设施强调契约、接入、版本和兼容；内容产品强调生产、分发和反馈；试验研究允许验证失败但必须沉淀结论；工具脚手架强调可复用入口；归档维护强调稳定性和监控。',
-    '- 如果当前是生成初始路线图或调整路线图，必须先把全局方法论转成用户能执行的环节，不要把方法论说明、内部目录结构或维护者自述做成路线图环节。',
-    '- 如果当前是普通执行环节，先查询可能相关的项目记忆、patterns、decisions、domains 和学习候选；只有确认可复用且不含项目私有细节时才复用。',
-    '- 任务结束时，如发现未来可复用的经验，先以候选或明确建议形式沉淀；只有已验证且稳定的信息才进入长期记忆。'
-  ].join('\n');
+export function buildSoloMapSystemMemoryPrompt(_workspaceRoot: string, _globalDataPath = ''): string {
+  return buildAgentDatabaseInstructions();
 }

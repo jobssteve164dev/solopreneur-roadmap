@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { openAnalysisOwner } = require('./analysis-fixture.js');
 
 const {
   applyCognitiveStrategyPyramidJudgment,
@@ -92,7 +93,7 @@ test('cognitive judgment replaces the strategy pyramid decisions while preservin
   assert.equal(result.engineStatus, 'completed');
 });
 
-test('strategy pyramid persists and caches the cognitive judgment for the current model configuration', async () => {
+test('strategy pyramid persists and caches the cognitive judgment for the current model configuration', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-strategy-cognitive-'));
   const projectPath = path.join(root, 'project');
   const globalDataPath = path.join(root, '.solomap-global');
@@ -103,6 +104,7 @@ test('strategy pyramid persists and caches the cognitive judgment for the curren
     '2,Verify payment,营销与销售,Pending'
   ].join('\n'));
   const projects = [{ name: 'Project', path: projectPath, type: 'core_product' }];
+  const { store } = await openAnalysisOwner(t, globalDataPath, projects);
   const engine = {
     id: 'pi-agent:agent-cli:codex:gpt-test:revision-1',
     async judgeStrategyPyramid(input) {
@@ -123,12 +125,13 @@ test('strategy pyramid persists and caches the cognitive judgment for the curren
 
   assert.equal(snapshot.decisionSource, 'cognitive');
   assert.equal(snapshot.mainJudgment, '需要验证付费。');
-  assert.equal(readCachedStrategyPyramidSnapshot(projects, globalDataPath, 'revision-1').mainJudgment, '需要验证付费。');
-  assert.equal(readCachedStrategyPyramidSnapshot(projects, globalDataPath, 'revision-2'), null);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(globalDataPath, 'strategy', 'pyramid-snapshot.json'))).decisionSource, 'cognitive');
+  assert.equal((await readCachedStrategyPyramidSnapshot(projects, globalDataPath, 'revision-1')).mainJudgment, '需要验证付费。');
+  assert.equal(await readCachedStrategyPyramidSnapshot(projects, globalDataPath, 'revision-2'), null);
+  assert.equal(store.readStrategyState(null).value.snapshot.decisionSource, 'cognitive');
+  assert.equal(fs.existsSync(path.join(globalDataPath, 'strategy')), false);
 });
 
-test('cognitive judgment never overwrites the user saved project strategy', async () => {
+test('cognitive judgment never overwrites the user saved project strategy', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-strategy-user-marker-'));
   const projectPath = path.join(root, 'project');
   const globalDataPath = path.join(root, '.solomap-global');
@@ -141,6 +144,10 @@ test('cognitive judgment never overwrites the user saved project strategy', asyn
   ].join('\n'));
 
   const savedBefore = fs.readFileSync(path.join(globalDataPath, 'strategy', 'project-strategy.csv'), 'utf8');
+  const { store, ops, projectIds } = await openAnalysisOwner(t, globalDataPath, [{ name: 'Project', path: projectPath, type: 'core_product' }]);
+  const job = await ops({ operation: 'import_project_data', input: { collection: 'strategy', sourceRoot: path.join(globalDataPath, 'strategy'), projectScopes: Object.fromEntries(projectIds), idempotencyKey: 'historical-user-choice' } });
+  await ops.waitForMigrations(); assert.equal(store.readMigrationJob(job.jobId).status, 'completed');
+  const preferencesBefore = store.readStrategyState(projectIds.get(projectPath));
   await buildCognitiveStrategyPyramidSnapshotData(
     [{ name: 'Project', path: projectPath, type: 'core_product' }], globalDataPath, projectPath,
     {
@@ -158,15 +165,17 @@ test('cognitive judgment never overwrites the user saved project strategy', asyn
 
   const saved = fs.readFileSync(path.join(globalDataPath, 'strategy', 'project-strategy.csv'), 'utf8');
   assert.equal(saved, savedBefore);
+  assert.deepEqual(store.readStrategyState(projectIds.get(projectPath)), preferencesBefore);
 });
 
-test('strategy pyramid discards a cognitive result when project facts change during judgment', async () => {
+test('strategy pyramid discards a cognitive result when project facts change during judgment', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-strategy-race-'));
   const projectPath = path.join(root, 'project');
   const globalDataPath = path.join(root, '.solomap-global');
   const roadmapPath = path.join(projectPath, '.solopreneur', 'roadmap.csv');
   fs.mkdirSync(path.dirname(roadmapPath), { recursive: true });
   fs.writeFileSync(roadmapPath, 'id,title,stage,status\n1,Build,产品与 MVP,Completed\n');
+  await openAnalysisOwner(t, globalDataPath, [{ name: 'Project', path: projectPath, type: 'core_product' }]);
   let calls = 0;
   const snapshot = await buildCognitiveStrategyPyramidSnapshotData(
     [{ name: 'Project', path: projectPath, type: 'core_product' }],
@@ -194,13 +203,14 @@ test('strategy pyramid discards a cognitive result when project facts change dur
   assert.equal(snapshot.projects[0].totalNodes, 2);
 });
 
-test('strategy pyramid does not commit a judgment after its model configuration becomes stale', async () => {
+test('strategy pyramid does not commit a judgment after its model configuration becomes stale', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-strategy-config-race-'));
   const projectPath = path.join(root, 'project');
   const globalDataPath = path.join(root, '.solomap-global');
   fs.mkdirSync(path.join(projectPath, '.solopreneur'), { recursive: true });
   fs.writeFileSync(path.join(projectPath, '.solopreneur', 'roadmap.csv'), 'id,title,stage,status\n1,Build,产品与 MVP,Completed\n');
   const projects = [{ name: 'Project', path: projectPath, type: 'core_product' }];
+  await openAnalysisOwner(t, globalDataPath, projects);
 
   await assert.rejects(
     buildCognitiveStrategyPyramidSnapshotData(
@@ -225,7 +235,7 @@ test('strategy pyramid does not commit a judgment after its model configuration 
     /configuration changed/i
   );
 
-  assert.equal(readCachedStrategyPyramidSnapshot(projects, globalDataPath, 'old-revision'), null);
+  assert.equal(await readCachedStrategyPyramidSnapshot(projects, globalDataPath, 'old-revision'), null);
 });
 
 test('only the latest strategy pyramid request may update the visible result', async () => {
@@ -254,13 +264,14 @@ test('only the latest strategy pyramid request may update the visible result', a
   assert.equal(visible, 'newest result');
 });
 
-test('a superseded strategy pyramid request cannot overwrite the latest cached judgment', async () => {
+test('a superseded strategy pyramid request cannot overwrite the latest cached judgment', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-strategy-late-cache-'));
   const projectPath = path.join(root, 'project');
   const globalDataPath = path.join(root, '.solomap-global');
   fs.mkdirSync(path.join(projectPath, '.solopreneur'), { recursive: true });
   fs.writeFileSync(path.join(projectPath, '.solopreneur', 'roadmap.csv'), 'id,title,stage,status\n1,Build,产品与 MVP,Completed\n');
   const projects = [{ name: 'Project', path: projectPath, type: 'core_product' }];
+  await openAnalysisOwner(t, globalDataPath, projects);
   const judgment = mainJudgment => ({
     confidence: 'medium', stageTitle: '验证期', mainJudgment, strategicAction: '验证', constraint: '不扩张', risks: [],
     moves: [{ horizon: '本月', title: '验证', reason: '缺证据', evidence: [] }], recommendedScenarioPath: '先验证',
@@ -274,6 +285,7 @@ test('a superseded strategy pyramid request cannot overwrite the latest cached j
     id: 'pi-agent:agent-cli:codex:gpt-test:same-revision',
     async judgeStrategyPyramid() { return oldResult; }
   }, 'same-revision', oldCurrent);
+  const oldRejected = assert.rejects(oldRequest, /configuration changed/i);
 
   const newCurrent = gate.begin();
   await buildCognitiveStrategyPyramidSnapshotData(projects, globalDataPath, projectPath, {
@@ -281,12 +293,12 @@ test('a superseded strategy pyramid request cannot overwrite the latest cached j
     async judgeStrategyPyramid() { return judgment('NEW'); }
   }, 'same-revision', newCurrent);
   finishOld(judgment('OLD'));
-  await assert.rejects(oldRequest, /configuration changed/i);
+  await oldRejected;
 
-  assert.equal(readCachedStrategyPyramidSnapshot(projects, globalDataPath, 'same-revision').mainJudgment, 'NEW');
+  assert.equal((await readCachedStrategyPyramidSnapshot(projects, globalDataPath, 'same-revision')).mainJudgment, 'NEW');
 });
 
-test('cognitive input keeps learning signals for every registered project', async () => {
+test('cognitive input keeps learning signals for every registered project', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-strategy-learning-'));
   const globalDataPath = path.join(root, '.solomap-global');
   const projects = Array.from({ length: 9 }, (_, index) => {
@@ -304,11 +316,17 @@ test('cognitive input keeps learning signals for every registered project', asyn
     projectPath: project.path,
     projectName: project.name,
     sourceType: 'strategy',
+    sourceRef: `strategy-observation-${index + 1}`,
     eventType: 'partial',
     summary: `Signal ${index + 1}`,
     createdAt: `2026-09-${String(index + 1).padStart(2, '0')}T00:00:00.000Z`,
+    evidenceRefs: [],
+    tags: [],
     metadata: {}
   })).join('\n') + '\n');
+  const { store, ops, projectIds } = await openAnalysisOwner(t, globalDataPath, projects);
+  const imported = await ops({ operation: 'import_project_data', input: { collection: 'learning', sourceRoot: path.join(globalDataPath, 'learning'), projectScopes: Object.fromEntries(projectIds), idempotencyKey: 'all-learning-projects' } });
+  await ops.waitForMigrations(); assert.equal(store.readMigrationJob(imported.jobId).status, 'completed');
   let receivedInput;
 
   await buildCognitiveStrategyPyramidSnapshotData(projects, globalDataPath, projects[0].path, {

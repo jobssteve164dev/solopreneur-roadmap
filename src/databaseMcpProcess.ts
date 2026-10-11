@@ -39,7 +39,9 @@ async function main(): Promise<void> {
     ? maintenanceRuntimeId && Number.isInteger(maintenanceRuntimePort) && maintenanceRuntimePort > 0
       ? runtimeMaintenanceEndpointMcpSource({ runtimeId: maintenanceRuntimeId, host: '127.0.0.1', port: maintenanceRuntimePort }, maintenanceTaskId, maintenanceProof, maintenanceLaunchToken)
       : runtimeMaintenanceMcpSource(path.resolve(globalDataPath), maintenanceTaskId, maintenanceProof, maintenanceLaunchToken)
-    : runtimeMcpSource(path.resolve(globalDataPath), projectId, true);
+    : runtimeMcpSource(path.resolve(globalDataPath), projectId, true, process.env.SOLOMAP_RUN_PROOF ? {
+      executionLogId: Number(process.env.SOLOMAP_EXECUTION_LOG_ID), generation: Number(process.env.SOLOMAP_RUN_GENERATION), proof: process.env.SOLOMAP_RUN_PROOF,
+    } : undefined);
   // The bridge owns no SQLite connection and starts no second persistence daemon.
   if (!maintenanceTaskId) {
     const project = await source.call('read', { ref: projectId }) as { kind: string };

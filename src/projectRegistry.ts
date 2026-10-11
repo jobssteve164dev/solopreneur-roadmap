@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import * as crypto from 'crypto';
 
 export interface SolopreneurProject {
   name: string;
@@ -17,6 +18,86 @@ export interface ProjectRegistryFile {
   updatedAt: string;
   projects: SolopreneurProject[];
   hiddenProjects: string[];
+  selectedProjectPath?: string;
+}
+
+export interface ProjectRegistrySnapshot {
+  legacyContextImported: boolean;
+  objectId: string;
+  revision: number;
+  registry: ProjectRegistryFile;
+}
+
+export interface ProjectRegistryPatch {
+  expectedRevision: number;
+  idempotencyKey: string;
+  projectPatches?: Array<{ path: string; fields?: Partial<Omit<SolopreneurProject, 'path'>>; remove?: boolean }>;
+  hiddenPatches?: Array<{ path: string; hidden: boolean }>;
+  selectedProjectPath?: string;
+}
+
+export interface ProjectRegistryBootstrap {
+  legacyProjects?: SolopreneurProject[];
+  legacyHiddenProjects?: string[];
+  legacySelectedProjectPath?: string;
+  workspaceRoot?: string;
+}
+
+type RegistryOperation = (operation: string, input: Record<string, unknown>) => Promise<unknown>;
+const registrySnapshots = new Map<string, ProjectRegistrySnapshot>();
+const registryReads = new Map<string, Promise<ProjectRegistrySnapshot>>();
+
+function acceptRegistrySnapshot(root: string, snapshot: ProjectRegistrySnapshot): ProjectRegistrySnapshot {
+  const previous = registrySnapshots.get(root);
+  if (!previous || previous.objectId !== snapshot.objectId || previous.revision <= snapshot.revision) registrySnapshots.set(root, snapshot);
+  return registrySnapshots.get(root)!;
+}
+
+async function registryOperation(root: string, operation?: RegistryOperation): Promise<RegistryOperation> {
+  if (operation) return operation;
+  const { sendRuntimeDataRequest } = await import('./autonomousRuntimeControl');
+  return (name, input) => sendRuntimeDataRequest(root, { operation: name, input });
+}
+
+export async function refreshProjectRegistry(globalDataPath: string, bootstrap?: () => ProjectRegistryBootstrap, operation?: RegistryOperation): Promise<ProjectRegistrySnapshot> {
+  const root = normalizeGlobalDataPathForExtension(globalDataPath);
+  const pending = registryReads.get(root);
+  if (pending) {
+    const snapshot = await pending;
+    if (!bootstrap || snapshot.legacyContextImported) return snapshot;
+  }
+  const flight = (async () => {
+    const call = await registryOperation(root, operation);
+    const previous = registrySnapshots.get(root);
+    let result = await call('read_project_registry', previous ? { knownRevision: previous.revision, knownObjectId: previous.objectId } : {}) as ProjectRegistrySnapshot | { objectId: string; revision: number; unchanged: true; legacyContextImported: boolean } | null;
+    if (!result || bootstrap && !result.legacyContextImported) result = await call('initialize_project_registry', { ...(bootstrap?.() || {}) }) as ProjectRegistrySnapshot;
+    if ('unchanged' in result) {
+      const current = registrySnapshots.get(root);
+      if (!current || current.objectId !== result.objectId) throw new Error('project_registry_snapshot_missing');
+      return current;
+    }
+    return acceptRegistrySnapshot(root, result);
+  })();
+  registryReads.set(root, flight);
+  try { return await flight; }
+  finally { if (registryReads.get(root) === flight) registryReads.delete(root); }
+}
+
+export async function patchProjectRegistry(globalDataPath: string, changes: Omit<ProjectRegistryPatch, 'expectedRevision' | 'idempotencyKey'>, idempotencyKey = `project-registry:${crypto.randomUUID()}`, operation?: RegistryOperation, isCurrent?: () => boolean): Promise<ProjectRegistrySnapshot> {
+  const root = normalizeGlobalDataPathForExtension(globalDataPath);
+  const call = await registryOperation(root, operation);
+  let snapshot = registrySnapshots.get(root) || await refreshProjectRegistry(root, undefined, call);
+  for (;;) {
+    try {
+      const accepted = await call('patch_project_registry', { ...changes, expectedRevision: snapshot.revision, idempotencyKey }) as ProjectRegistrySnapshot;
+      acceptRegistrySnapshot(root, accepted);
+      return accepted;
+    } catch (error) {
+      if ((error as Error).message !== 'revision_conflict') throw error;
+      snapshot = await refreshProjectRegistry(root, undefined, call);
+      if (isCurrent && !isCurrent()) return snapshot;
+    }
+  }
 }
 
 export function projectName(projectPath: string): string {
@@ -79,41 +160,25 @@ export function sortProjectsForDisplay(projects: SolopreneurProject[]): Solopren
   });
 }
 
-function getProjectRegistryPath(globalDataPath: string, projectRegistryFileName: string): string {
-  return path.join(normalizeGlobalDataPathForExtension(globalDataPath), projectRegistryFileName);
-}
-
 export function readProjectRegistry(globalDataPath: string, projectRegistryFileName: string): ProjectRegistryFile | null {
-  const registryPath = getProjectRegistryPath(globalDataPath, projectRegistryFileName);
-  if (!fs.existsSync(registryPath)) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
-    return {
-      schemaVersion: 1,
-      updatedAt: String(parsed.updatedAt || ''),
-      projects: normalizeProjectsForStorage(Array.isArray(parsed.projects) ? parsed.projects : []),
-      hiddenProjects: Array.isArray(parsed.hiddenProjects)
-        ? parsed.hiddenProjects.map((item: unknown) => String(item || '').trim()).filter(Boolean)
-        : []
-    };
-  } catch (error) {
-    console.error('SoloMap failed to read global project registry:', error);
-    return null;
-  }
+  const snapshot = registrySnapshots.get(normalizeGlobalDataPathForExtension(globalDataPath));
+  return snapshot ? structuredClone(snapshot.registry) : null;
 }
 
-export function writeProjectRegistry(globalDataPath: string, projectRegistryFileName: string, projects: SolopreneurProject[], hiddenProjects: string[]): void {
-  const registryPath = getProjectRegistryPath(globalDataPath, projectRegistryFileName);
-  fs.mkdirSync(path.dirname(registryPath), { recursive: true });
-  const payload: ProjectRegistryFile = {
-    schemaVersion: 1,
-    updatedAt: new Date().toISOString(),
-    projects: normalizeProjectsForStorage(projects),
-    hiddenProjects: [...new Set((hiddenProjects || []).map((item) => String(item || '').trim()).filter(Boolean))]
-  };
-  fs.writeFileSync(registryPath, JSON.stringify(payload, null, 2), 'utf8');
+export async function writeProjectRegistry(globalDataPath: string, projectRegistryFileName: string, projects: SolopreneurProject[], hiddenProjects: string[]): Promise<void> {
+  const root = normalizeGlobalDataPathForExtension(globalDataPath);
+  const previous = registrySnapshots.get(root);
+  const snapshot = previous || await refreshProjectRegistry(root);
+  const projectPatches: NonNullable<ProjectRegistryPatch['projectPatches']> = [];
+  for (const project of projects) {
+    const old = previous?.registry.projects.find(candidate => candidate.path === project.path);
+    const fields: Partial<Omit<SolopreneurProject, 'path'>> = {};
+    for (const key of ['name', 'type', 'priority', 'description', 'notes', 'pinnedAt'] as const) if (project[key] !== undefined && project[key] !== old?.[key]) fields[key] = project[key];
+    if (Object.keys(fields).length) projectPatches.push({ path: project.path, fields });
+  }
+  if (previous) for (const old of previous.registry.projects) if (!projects.some(project => project.path === old.path)) projectPatches.push({ path: old.path, remove: true });
+  const hiddenPatches = [...new Set([...snapshot.registry.hiddenProjects, ...hiddenProjects])].filter(projectPath => snapshot.registry.hiddenProjects.includes(projectPath) !== hiddenProjects.includes(projectPath)).map(projectPath => ({ path: projectPath, hidden: hiddenProjects.includes(projectPath) }));
+  if (projectPatches.length || hiddenPatches.length) await patchProjectRegistry(root, { projectPatches, hiddenPatches });
 }
 
 export function getHiddenProjects(input: {
@@ -122,7 +187,7 @@ export function getHiddenProjects(input: {
   legacyHiddenProjects: string[];
 }): string[] {
   const registry = readProjectRegistry(input.globalDataPath, input.projectRegistryFileName);
-  return registry ? registry.hiddenProjects : input.legacyHiddenProjects;
+  return registry ? registry.hiddenProjects : [];
 }
 
 export function getProjects(input: {
@@ -133,8 +198,8 @@ export function getProjects(input: {
   workspaceRoot?: string;
 }): SolopreneurProject[] {
   const registry = readProjectRegistry(input.globalDataPath, input.projectRegistryFileName);
-  const savedProjects = registry ? registry.projects : input.legacyProjects;
-  const hiddenProjects = new Set(registry ? registry.hiddenProjects : input.legacyHiddenProjects);
+  const savedProjects = registry ? registry.projects : [];
+  const hiddenProjects = new Set(registry ? registry.hiddenProjects : []);
   const workspaceRoot = String(input.workspaceRoot || '').trim();
   const projects = normalizeProjectsForStorage(savedProjects);
 
@@ -146,9 +211,6 @@ export function getProjects(input: {
   }
 
   const normalizedProjects = normalizeProjectsForStorage(projects);
-  if (!registry) {
-    writeProjectRegistry(input.globalDataPath, input.projectRegistryFileName, normalizedProjects, [...hiddenProjects]);
-  }
   return sortProjectsForDisplay(normalizedProjects);
 }
 
@@ -160,8 +222,8 @@ export function getProjectsSnapshot(input: {
   workspaceRoot?: string;
 }): SolopreneurProject[] {
   const registry = readProjectRegistry(input.globalDataPath, input.projectRegistryFileName);
-  const savedProjects = registry ? registry.projects : input.legacyProjects;
-  const hiddenProjects = new Set(registry ? registry.hiddenProjects : input.legacyHiddenProjects);
+  const savedProjects = registry ? registry.projects : [];
+  const hiddenProjects = new Set(registry ? registry.hiddenProjects : []);
   const workspaceRoot = String(input.workspaceRoot || '').trim();
   const projects = normalizeProjectsForStorage(savedProjects);
   if (workspaceRoot && !hiddenProjects.has(workspaceRoot) && !projects.some(project => project.path === workspaceRoot)) {
@@ -187,8 +249,8 @@ export function getProjectsReadOnly(input: {
     }
   };
   const registry = readProjectRegistry(input.globalDataPath, input.projectRegistryFileName);
-  const savedProjects = registry ? registry.projects : input.legacyProjects;
-  const hiddenProjects = new Set(registry ? registry.hiddenProjects : input.legacyHiddenProjects);
+  const savedProjects = registry ? registry.projects : [];
+  const hiddenProjects = new Set(registry ? registry.hiddenProjects : []);
   const workspaceRoot = String(input.workspaceRoot || '').trim();
   const projects = normalizeProjectsForStorage(savedProjects)
     .filter(project => !hiddenProjects.has(project.path) && readableProjectDirectory(project.path));

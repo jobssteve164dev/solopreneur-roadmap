@@ -3,9 +3,10 @@ import * as path from 'path';
 import * as Papa from 'papaparse';
 
 import { summarizeDocumentationForReview } from './documentationManifest';
-import { readLearningSummary } from './learningLedger';
+import { readLearningOverview, LearningOverview } from './learningLedger';
 import { assessProjectFoundation, ProjectFoundationAssessment } from './projectFoundation';
-import { ProjectInvestmentStats, readProjectInvestmentStats, readProjectInvestmentStatsFromDatabase } from './projectAnalytics';
+import { ProjectInvestmentStats, readProjectInvestmentStatsFromDatabase } from './projectAnalytics';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { buildWorkHabitStats } from './workHabits';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import {
@@ -99,6 +100,8 @@ export interface ProjectPortfolioBuildOptions {
   includeReusableSignals?: boolean;
   globalDataPath?: string;
   investmentStatsByProjectPath?: Map<string, ProjectInvestmentStats> | Record<string, ProjectInvestmentStats>;
+  learningOverview?: LearningOverview;
+  reusableSourceCountsByProjectPath?: Map<string, number>;
   coreOnly?: boolean;
 }
 
@@ -397,30 +400,10 @@ function inferSecuritySignal(security: ProjectSecuritySummary): string {
   return '';
 }
 
-function countReusableSignals(projectPath: string, globalDataPath = ''): number {
-  const candidates = [
-    path.join(projectPath, '.solopreneur', 'step-memory'),
-    path.join(projectPath, '.solopreneur', 'agent-runs')
-  ];
-  const legacyCount = candidates.reduce((count, candidate) => {
-    try {
-      return count + (fs.existsSync(candidate) ? fs.readdirSync(candidate).length : 0);
-    } catch {
-      return count;
-    }
-  }, 0);
-  const ledgerSignalCount = (() => {
-    try {
-      const summary = readLearningSummary(projectPath, globalDataPath);
-      const projectSignal = summary.projectSignals.find((item) => item.projectPath === projectPath);
-      return projectSignal
-        ? Number(projectSignal.candidateCount || 0) + Number(projectSignal.promotedCount || 0) + Number(projectSignal.riskSignals || 0) + Number(projectSignal.verificationSignals || 0)
-        : 0;
-    } catch {
-      return 0;
-    }
-  })();
-  return legacyCount + ledgerSignalCount;
+function countReusableSignals(projectPath: string, options: ProjectPortfolioBuildOptions): number {
+  const signal = options.learningOverview?.projectSignals.find(item => item.projectPath === projectPath);
+  return (options.reusableSourceCountsByProjectPath?.get(projectPath) || 0)
+    + (signal ? signal.candidateCount + signal.promotedCount + signal.riskSignals + signal.verificationSignals : 0);
 }
 
 function getInvestmentOverride(projectPath: string, options: ProjectPortfolioBuildOptions): ProjectInvestmentStats | null {
@@ -482,7 +465,7 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
   const securitySignal = inferSecuritySignal(baseSummary.security);
   const needsRelease = baseSummary.delivery.available && totalNodes > 0 && completedNodes === totalNodes && !baseSummary.delivery.latestRelease;
   const documentationSummary = options.coreOnly ? { documentCount: 0, pendingReviewCount: 0 } : summarizeDocumentationForReview(project.path);
-  const investment = options.coreOnly ? emptyInvestmentStats() : (getInvestmentOverride(project.path, options) || readProjectInvestmentStats(project.path));
+  const investment = options.coreOnly ? emptyInvestmentStats() : (getInvestmentOverride(project.path, options) || emptyInvestmentStats());
   const loopSummary = buildProjectLoopSummary(nodes, recommendedNode, stageSummary);
   return {
     ...baseSummary,
@@ -495,7 +478,7 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
       : baseSummary.delivery.failedWorkflowRuns > 0
         ? '修复发布检查'
         : recommendedNode?.title || (needsRelease ? '发布当前成果' : (totalNodes ? (stageSummary.gap ? `调整路线图：补齐 ${stageSummary.gap}` : 'Review completed roadmap') : '生成初始路线图')),
-    reusableSignals: options.includeReusableSignals ? countReusableSignals(project.path, options.globalDataPath || '') : 0,
+    reusableSignals: options.includeReusableSignals ? countReusableSignals(project.path, options) : 0,
     issuePressure: inferIssuePressure(baseSummary.issues),
     stageGap: stageSummary.gap,
     delivery: baseSummary.delivery,
@@ -533,14 +516,21 @@ export async function buildProjectPortfolioSummariesFromDatabase(
   options: ProjectPortfolioBuildOptions = {}
 ): Promise<ProjectPortfolioSummary[]> {
   const investmentStatsByProjectPath = new Map<string, ProjectInvestmentStats>();
+  const reusableSourceCountsByProjectPath = new Map<string, number>();
+  const learningOverview = options.includeReusableSignals
+    ? options.learningOverview || await readLearningOverview(projects[0]?.path || process.cwd(), options.globalDataPath || '')
+    : undefined;
   await Promise.all(projects.map(async (project) => {
     investmentStatsByProjectPath.set(
       project.path,
       await readProjectInvestmentStatsFromDatabase(project.path, extensionPath, new Date(), options.globalDataPath || '')
     );
+    if (options.includeReusableSignals) reusableSourceCountsByProjectPath.set(project.path, await sendRuntimeDataRequest<number>(normalizeGlobalDataPathForExtension(options.globalDataPath || '', project.path), { operation: 'read_project_reusable_source_count', input: { root: project.path } }));
   }));
   return buildProjectPortfolioSummaries(projects, {
     ...options,
-    investmentStatsByProjectPath
+    investmentStatsByProjectPath,
+    learningOverview,
+    reusableSourceCountsByProjectPath
   });
 }

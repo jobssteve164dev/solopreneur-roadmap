@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 'use strict';
 
-const fs = require('node:fs');
 const path = require('node:path');
-const crypto = require('node:crypto');
+const { openDataClient } = require('./solomap-data-client.cjs');
 
 const SOURCE_ORDER = ['profile', 'rules', 'project', 'decisions', 'patterns', 'domains', 'inbox', 'active'];
 const ROUTE_ALIASES = {
@@ -107,107 +106,37 @@ function parseSources(value) {
   return requested;
 }
 
-function markdownFiles(directory) {
-  if (!fs.existsSync(directory)) return [];
-  return fs.readdirSync(directory, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.md') && !entry.name.startsWith('_'))
-    .map((entry) => path.join(directory, entry.name))
-    .sort();
+const MEMORY_SOURCES = {
+  profile: 'profile', preference: 'profile', rules: 'rules', rule: 'rules', operating_rule: 'rules',
+  project: 'project', project_fact: 'project', decision: 'decisions', decisions: 'decisions',
+  pattern: 'patterns', patterns: 'patterns', domain: 'domains', domains: 'domains',
+  observation: 'inbox', inbox: 'inbox', handoff: 'active', active: 'active'
+};
+
+async function memoryReferences(client, terms, sources, includeCandidates = false) {
+  const categories = Object.keys(MEMORY_SOURCES).filter(category => sources.has(MEMORY_SOURCES[category]));
+  for (;;) {
+    const objects = []; let cursor; let changed = false;
+    do {
+      const page = await client.call('context', { project: client.scope, view: 'metadata', categories, limit: 100, ...(terms ? { terms } : {}), ...(cursor ? { cursor } : {}) });
+      if (page.sourceChanged) { changed = true; break; }
+      objects.push(...page.items.filter(object => object.kind === 'memory' && (includeCandidates || object.data.layer !== 'candidate' || (sources.explicit && sources.has('inbox')))));
+      cursor = page.cursor;
+    } while (cursor);
+    if (!changed) return objects;
+  }
 }
 
-function sortValue(value) {
-  if (Array.isArray(value)) return value.map(sortValue);
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortValue(value[key])]));
-}
-
-function memoryHash(entry) {
-  const { canonicalHash, ...withoutHash } = entry || {};
-  return `sha256:${crypto.createHash('sha256').update(JSON.stringify(sortValue(withoutHash))).digest('hex')}`;
-}
-
-function sourceForMemoryKind(kind) {
-  return ({
-    preference: 'profile',
-    rule: 'rules',
-    project_fact: 'project',
-    decision: 'decisions',
-    pattern: 'patterns',
-    domain: 'domains',
-    observation: 'inbox',
-    handoff: 'active'
-  })[kind] || 'inbox';
-}
-
-function jsonMemoryEntries(memoryRoot, currentProjectSlug, sources) {
-  const entriesRoot = path.join(memoryRoot, 'entries');
-  if (!fs.existsSync(entriesRoot)) return [];
-  const now = Date.now();
-  return fs.readdirSync(entriesRoot, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
-    .map((entry) => path.join(entriesRoot, entry.name))
-    .sort()
-    .map((filePath) => {
-      try {
-        return { filePath, entry: JSON.parse(fs.readFileSync(filePath, 'utf8')) };
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean)
-    .filter(({ entry }) => entry.schemaVersion === 1
-      && entry.status === 'active'
-      && entry.id
-      && entry.canonicalHash === memoryHash(entry)
-      && (entry.layer !== 'candidate' || (sources.explicit && sources.has('inbox')))
-      && (!entry.validity?.validUntil || new Date(entry.validity.validUntil).getTime() > now))
-    .filter(({ entry }) => {
-      const source = sourceForMemoryKind(entry.kind);
-      if (!sources.has(source)) return false;
-      if (!String(entry.scopeId || '').startsWith('memory_scope:project:')) return true;
-      return String(entry.scopeId).slice('memory_scope:project:'.length).toLowerCase() === currentProjectSlug;
-    })
-    .map(({ filePath, entry }) => ({
-      source: sourceForMemoryKind(entry.kind),
-      filePath,
-      heading: entry.title || entry.id,
-      lineStart: 1,
-      lineEnd: 1,
-      text: [entry.title, entry.content, ...(entry.tags || []), ...(entry.provenance?.evidenceRefs || [])].filter(Boolean).join('\n'),
-      memoryId: entry.id,
-      format: 'json'
-    }));
-}
-
-function sourceFiles(memoryRoot, currentProjectSlug, sources) {
-  const entries = [];
-  const add = (source, files) => {
-    if (!sources.has(source)) return;
-    files.forEach((file) => {
-      if (fs.existsSync(file)) entries.push({ source, file });
-    });
-  };
-  add('profile', [path.join(memoryRoot, 'profile.md')]);
-  add('rules', [path.join(memoryRoot, 'operating-rules.md')]);
-  add('project', [path.join(memoryRoot, 'projects', `${currentProjectSlug}.md`)]);
-  add('decisions', markdownFiles(path.join(memoryRoot, 'decisions')));
-  add('patterns', markdownFiles(path.join(memoryRoot, 'patterns')));
-  add('domains', markdownFiles(path.join(memoryRoot, 'domains')));
-  add('inbox', markdownFiles(path.join(memoryRoot, 'inbox')));
-  add('active', [path.join(memoryRoot, 'active', 'current-session.md')]);
-  return entries;
-}
-
-function splitMarkdown(filePath, source) {
-  const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/);
+function splitMarkdown(text, source, headingValue) {
+  const lines = text.split(/\r?\n/);
   const chunks = [];
-  let heading = path.basename(filePath);
+  let heading = headingValue;
   let start = 1;
   let buffer = [];
   const flush = (end) => {
     const text = buffer.join('\n').trim();
     if (text && !/^#?\s*(template|模板|示例)\s*:?$/i.test(heading)) {
-      chunks.push({ source, filePath, heading, lineStart: start, lineEnd: Math.max(start, end), text });
+      chunks.push({ source, heading, lineStart: start, lineEnd: Math.max(start, end), text });
     }
     buffer = [];
   };
@@ -235,9 +164,9 @@ function splitMarkdown(filePath, source) {
 }
 
 function scoreChunk(chunk, tokens, query) {
-  const fileName = path.basename(chunk.filePath).toLowerCase();
+  const fileName = String(chunk.sourceName || '').toLowerCase();
   const heading = chunk.heading.toLowerCase();
-  const body = chunk.text.toLowerCase();
+  const body = [chunk.text, chunk.searchMetadata || ''].join('\n').toLowerCase();
   const matchedTerms = [];
   let score = 0;
   for (const token of tokens) {
@@ -252,7 +181,7 @@ function scoreChunk(chunk, tokens, query) {
   if (chunk.source === 'project') score += 3;
   if (chunk.source === 'decisions' || chunk.source === 'patterns') score += 2;
   if (chunk.source === 'inbox') score -= 2;
-  if (chunk.format === 'json') score += 4;
+  if (chunk.format === 'json' || chunk.format === 'record' || chunk.searchMetadata) score += 4;
   return { score, matchedTerms: unique(matchedTerms, 8) };
 }
 
@@ -263,7 +192,7 @@ function summarizeChunk(chunk) {
   return compact(useful.slice(0, 3).join(' '), 360);
 }
 
-function retrieveMemory(memoryRoot, projectRoot, query, sources, limit) {
+async function retrieveMemory(client, projectRoot, query, sources, limit) {
   const tokens = queryTokens(query, projectRoot);
   if (!tokens.length) {
     return {
@@ -273,28 +202,39 @@ function retrieveMemory(memoryRoot, projectRoot, query, sources, limit) {
       message: '请使用具体功能、边界、决策、错误或目标查询；URL、项目名和“记忆系统”等泛化词不会作为相关性依据。'
     };
   }
-  const currentProjectSlug = projectSlug(projectRoot);
-  const candidates = [
-    ...jsonMemoryEntries(memoryRoot, currentProjectSlug, sources),
-    ...sourceFiles(memoryRoot, currentProjectSlug, sources)
-      .flatMap(({ source, file }) => splitMarkdown(file, source))
-  ]
+  const objects = await memoryReferences(client, tokens, sources);
+  const chunks = [];
+  for (const object of objects) {
+    const source = MEMORY_SOURCES[object.data.category];
+    const body = await client.content(object);
+    const tags = JSON.parse(object.data.tags_json || '[]');
+    const provenance = JSON.parse(object.data.provenance_json || '{}');
+    const searchMetadata = [...(Array.isArray(tags) ? tags : []), ...(Array.isArray(provenance?.evidenceRefs) ? provenance.evidenceRefs : [])].map(value => typeof value === 'string' ? value : JSON.stringify(value)).join('\n');
+    const metadata = { sourceRef: { objectId: object.objectId, revision: object.revision }, sourceName: path.basename(String(object.data.external_source || object.data.title)), memoryId: object.data.legacy_entry_id || object.objectId, searchMetadata };
+    if (object.data.legacy_entry_id) {
+      chunks.push({ ...metadata, source, heading: object.data.title, lineStart: 1, lineEnd: body.split(/\r?\n/).length, text: [object.data.title, body, searchMetadata].filter(Boolean).join('\n'), format: 'json' });
+    } else {
+      chunks.push(...splitMarkdown(body, source, object.data.title).map(chunk => ({ ...chunk, ...metadata, format: object.data.external_source ? 'markdown' : 'record' })));
+    }
+  }
+  const candidates = chunks
     .map((chunk) => ({ chunk, ...scoreChunk(chunk, tokens, query) }))
     .filter((entry) => entry.matchedTerms.length > 0 && entry.score >= 6)
     .sort((a, b) => b.score - a.score
       || SOURCE_ORDER.indexOf(a.chunk.source) - SOURCE_ORDER.indexOf(b.chunk.source)
-      || a.chunk.filePath.localeCompare(b.chunk.filePath)
+      || a.chunk.sourceRef.objectId.localeCompare(b.chunk.sourceRef.objectId)
       || a.chunk.lineStart - b.chunk.lineStart);
   const seen = new Set();
   const results = [];
   for (const entry of candidates) {
-    const key = `${entry.chunk.filePath}:${entry.chunk.lineStart}`;
+    const key = `${entry.chunk.sourceRef.objectId}:${entry.chunk.sourceRef.revision}:${entry.chunk.lineStart}`;
     const summary = summarizeChunk(entry.chunk);
     if (!summary || seen.has(key)) continue;
     seen.add(key);
     results.push({
       source: entry.chunk.source,
-      file: entry.chunk.filePath,
+      sourceRef: entry.chunk.sourceRef,
+      contentField: 'content',
       lineStart: entry.chunk.lineStart,
       lineEnd: entry.chunk.lineEnd,
       heading: entry.chunk.heading,
@@ -317,57 +257,47 @@ function retrieveMemory(memoryRoot, projectRoot, query, sources, limit) {
   };
 }
 
-function routeMemory(memoryRoot, projectRoot, kindValue, titleValue, now = new Date()) {
+async function routeMemory(client, kindValue, titleValue) {
   const kind = ROUTE_ALIASES[String(kindValue || '').toLowerCase().trim()];
   if (!kind) {
     throw new Error('Unknown memory kind. Use profile, rules, project, decision, pattern, domain, inbox, or active.');
   }
   const title = compact(titleValue, 120);
-  const month = now.toISOString().slice(0, 7);
   const titledSlug = fileSlug(title);
-  let targetFile;
   let operation;
   let requiredStructure;
   let appliesWhen;
   if (kind === 'profile') {
-    targetFile = path.join(memoryRoot, 'profile.md');
     operation = 'Update an existing matching preference; append only when no equivalent preference exists.';
     requiredStructure = ['Preference', 'Evidence or repeated user signal', 'Applies across projects when'];
     appliesWhen = 'Stable user preference, communication style, collaboration preference, or prohibition that applies across projects.';
   } else if (kind === 'rules') {
-    targetFile = path.join(memoryRoot, 'operating-rules.md');
     operation = 'Merge with an existing rule when possible; add one concise rule backed by verified evidence.';
     requiredStructure = ['Rule', 'Applies when', 'Evidence'];
     appliesWhen = 'Reusable execution rule that applies across tasks or projects, not a project-specific implementation fact.';
   } else if (kind === 'project') {
-    targetFile = path.join(memoryRoot, 'projects', `${projectSlug(projectRoot)}.md`);
     operation = 'Update the matching stable fact or append a concise project-scoped section; remove or mark superseded facts when current evidence invalidates them.';
     requiredStructure = ['Stable project fact', 'Current evidence', 'Affected boundary or entry point'];
     appliesWhen = 'Stable fact, entry point, architecture boundary, or operational context unique to the current project.';
   } else if (kind === 'decision') {
-    targetFile = path.join(memoryRoot, 'decisions', `${month}.md`);
     operation = 'Append or update a titled decision section; do not create a duplicate decision with equivalent meaning.';
     requiredStructure = ['Decision', 'Rationale', 'Evidence', 'Consequences'];
     appliesWhen = 'Confirmed choice with rationale and future consequences; not an unverified idea or temporary implementation note.';
   } else if (kind === 'pattern') {
     if (!titledSlug) throw new Error('--title is required for pattern memory routing.');
-    targetFile = path.join(memoryRoot, 'patterns', `${titledSlug}.md`);
-    operation = 'Create or update one reusable pattern file; merge equivalent patterns instead of creating variants.';
+    operation = 'Create or update one reusable pattern; merge equivalent patterns instead of creating variants.';
     requiredStructure = ['Pattern', 'Evidence', 'Applies when', 'Do this', 'Avoid this'];
     appliesWhen = 'Verified implementation, debugging, validation, deployment, or delivery approach reusable across projects.';
   } else if (kind === 'domain') {
     if (!titledSlug) throw new Error('--title is required for domain memory routing.');
-    targetFile = path.join(memoryRoot, 'domains', `${titledSlug}.md`);
-    operation = 'Create or update the matching domain file; separate verified facts from assumptions and record freshness when facts can change.';
+    operation = 'Create or update the matching domain record; separate verified facts from assumptions and record freshness when facts can change.';
     requiredStructure = ['Domain fact', 'Evidence or source', 'Applies when', 'Freshness or validity note'];
     appliesWhen = 'Cross-project business, platform, protocol, regulatory, or technical domain knowledge.';
   } else if (kind === 'inbox') {
-    targetFile = path.join(memoryRoot, 'inbox', 'capture.md');
     operation = 'Append a clearly marked unverified observation for later review; do not present it as stable fact.';
     requiredStructure = ['Observation', 'Source task', 'What remains unverified', 'Possible promotion target'];
     appliesWhen = 'Potentially useful information that is not yet sufficiently verified for stable memory.';
   } else {
-    targetFile = path.join(memoryRoot, 'active', 'current-session.md');
     operation = 'Update the current handoff state; replace stale session state instead of accumulating an execution diary.';
     requiredStructure = ['Current goal', 'Verified facts', 'Open work or blocker', 'Next action'];
     appliesWhen = 'Current session handoff, pause state, continuation context, or unresolved work.';
@@ -375,13 +305,15 @@ function routeMemory(memoryRoot, projectRoot, kindValue, titleValue, now = new D
   return {
     kind,
     title,
-    targetFile,
+    target: { kind: 'memory', scope: client.scope, data: { category: kind, status: 'captured', ...(title ? { title } : {}) } },
+    existing: (await memoryReferences(client, undefined, new Set([kind === 'decision' ? 'decisions' : kind === 'pattern' ? 'patterns' : kind === 'domain' ? 'domains' : kind]), true)).filter(object => !title || String(object.data.title).toLowerCase().includes(title.toLowerCase())).map(object => ({ objectId: object.objectId, revision: object.revision, title: object.data.title, scope: object.projectId, status: object.data.status })),
     operation,
     appliesWhen,
     requiredStructure,
     guardrails: [
-      'Read the target file before editing and preserve unrelated user content.',
-      'Write only information verified by current code, logs, tests, commands, or an explicit user decision.',
+      'Read the fixed source revision before editing and preserve unrelated user content; patch with expectedRevision and a unique idempotencyKey.',
+      'Create captured project-scoped claims through solomap_write; approval and cross-project promotion use the existing authorized review action.',
+      'Keep evidence and unverified observations distinct from approved rules.',
       'Do not write command output, diffs, commit ids, completion boilerplate, or an execution diary into stable memory.',
       'If an equivalent entry exists, update or supersede it instead of appending a duplicate.',
       'Memory must not override newer user instructions or current runtime evidence.'
@@ -394,8 +326,8 @@ function renderMarkdown(payload) {
   if (!payload.results.length) return `${lines.join('\n')}\nNo high-value memory matched.`;
   payload.results.forEach((result, index) => {
     lines.push(`## ${index + 1}. ${result.heading}`);
-    lines.push(`- Source: ${result.source}`);
-    lines.push(`- Location: ${result.file}:${result.lineStart}`);
+    lines.push(`- Category: ${result.source}`);
+    lines.push(`- Source: solomap://objects/${result.sourceRef.objectId} · revision=${result.sourceRef.revision} · content lines ${result.lineStart}-${result.lineEnd}`);
     lines.push(`- Relevance: ${result.relevance}`);
     lines.push(`- Why: ${result.reason}`);
     lines.push(`- Summary: ${result.summary}`, '');
@@ -408,7 +340,8 @@ function renderRouteMarkdown(payload) {
     '# SoloMap Memory Write Route',
     '',
     `- Kind: ${payload.kind}`,
-    `- Target: ${payload.targetFile}`,
+    '- Target: ' + JSON.stringify(payload.target),
+    '- Existing sources: ' + JSON.stringify(payload.existing),
     `- Applies when: ${payload.appliesWhen}`,
     `- Update strategy: ${payload.operation}`,
     `- Required structure: ${payload.requiredStructure.join(' / ')}`,
@@ -436,28 +369,27 @@ function printHelp() {
   ].join('\n'));
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv.slice(2));
   const command = args._[0] || 'retrieve';
   if (args.help || command === 'help') return printHelp();
   if (command !== 'retrieve' && command !== 'route') throw new Error(`Unknown command: ${command}`);
   const projectRoot = path.resolve(args.project || process.cwd());
   const globalRoot = path.resolve(args.global || path.join(path.dirname(projectRoot), '.solomap-global'));
-  const memoryRoot = path.join(globalRoot, 'memory');
-  if (!fs.existsSync(memoryRoot)) throw new Error(`Memory root not found: ${memoryRoot}`);
-  const payload = command === 'retrieve'
-    ? retrieveMemory(memoryRoot, projectRoot, String(args.query || ''), parseSources(args.sources), normalizeLimit(args.limit))
-    : routeMemory(memoryRoot, projectRoot, args.kind, args.title);
-  if (args.json) {
-    console.log(JSON.stringify({ command, projectRoot, globalRoot, memoryRoot, payload }, null, 2));
-    return;
-  }
-  console.log(command === 'retrieve' ? renderMarkdown(payload) : renderRouteMarkdown(payload));
+  const client = await openDataClient(globalRoot, projectRoot);
+  try {
+    const payload = command === 'retrieve'
+      ? await retrieveMemory(client, projectRoot, String(args.query || ''), parseSources(args.sources), normalizeLimit(args.limit))
+      : await routeMemory(client, args.kind, args.title);
+    if (args.json) {
+      console.log(JSON.stringify({ command, projectRoot, globalRoot, payload }, null, 2));
+      return;
+    }
+    console.log(command === 'retrieve' ? renderMarkdown(payload) : renderRouteMarkdown(payload));
+  } finally { await client.close(); }
 }
 
-try {
-  main();
-} catch (error) {
+main().catch(error => {
   console.error(`solomap-memory failed: ${error && error.message ? error.message : error}`);
   process.exitCode = 1;
-}
+});

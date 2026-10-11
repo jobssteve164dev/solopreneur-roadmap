@@ -25,7 +25,7 @@ function mountGrowthReports(vscode: any, projectPath: string, isZh: boolean): vo
   }
   function send(command: string, values: any = {}): void { vscode.postMessage({ command, projectPath, ...values }); }
   function load(): void {
-    save(); request += 1; loadErrors.clear();
+    save(); request += 1; loadErrors.clear(); details.clear(); nextTurns.clear();
     send('growth.reports', { query: { offset: state.offset, unmetOnly: state.unmetOnly, moduleId: state.moduleId, capabilityId: state.capabilityId }, requestId: request });
   }
   function text(value: any): string {

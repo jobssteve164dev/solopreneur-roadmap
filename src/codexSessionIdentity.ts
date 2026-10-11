@@ -46,21 +46,20 @@ function sessionDayRoots(codexHome: string, startedMs: number): string[] {
   });
 }
 
-function listTranscriptFiles(roots: string[]): string[] {
+async function listTranscriptFiles(roots: string[]): Promise<string[]> {
   const files: string[] = [];
-  const stack = roots.filter((root) => fs.existsSync(root));
+  const stack = [...roots];
   while (stack.length > 0) {
     const current = stack.pop() || '';
-    let entries: fs.Dirent[] = [];
     try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
+      const directory = await fs.promises.opendir(current);
+      for await (const entry of directory) {
+        const candidate = path.join(current, entry.name);
+        if (entry.isDirectory()) stack.push(candidate);
+        else if (entry.isFile() && entry.name.endsWith('.jsonl')) files.push(candidate);
+      }
     } catch {
       continue;
-    }
-    for (const entry of entries) {
-      const candidate = path.join(current, entry.name);
-      if (entry.isDirectory()) stack.push(candidate);
-      else if (entry.isFile() && entry.name.endsWith('.jsonl')) files.push(candidate);
     }
   }
   return files.sort();
@@ -176,6 +175,22 @@ async function inspectTranscript(
   } : null;
 }
 
+export async function assertCodexResumeTranscript(transcriptPath: string, workspaceRoot: string, sessionId: string): Promise<void> {
+  const stat = await fs.promises.stat(transcriptPath);
+  if (!stat.isFile()) throw new Error('identity_transcript_unavailable');
+  let meta: any = null;
+  await scanJsonLines(transcriptPath, 0, row => {
+    if (row?.type !== 'session_meta') return false;
+    meta = row.payload;
+    return true;
+  });
+  const id = String(meta?.id || '').trim(), alias = String(meta?.session_id || '').trim();
+  const cwd = String(meta?.cwd || '').trim();
+  if (!sessionId || (id || alias) !== sessionId || (id && alias && id !== alias) || !cwd || path.resolve(cwd) !== path.resolve(workspaceRoot)) {
+    throw new Error('identity_transcript_mismatch');
+  }
+}
+
 export async function locateCodexSessionByBindingNonce(input: CodexSessionLocatorInput): Promise<CodexSessionLocatorResult> {
   const codexHomeInput = String(input?.codexHome || '').trim();
   const workspaceInput = String(input?.workspaceRoot || '').trim();
@@ -187,7 +202,7 @@ export async function locateCodexSessionByBindingNonce(input: CodexSessionLocato
   const codexHome = path.resolve(codexHomeInput);
   const workspaceRoot = path.resolve(workspaceInput);
   const candidates = new Map<string, CodexSessionCandidate>();
-  for (const transcriptPath of listTranscriptFiles(sessionDayRoots(codexHome, startedMs))) {
+  for (const transcriptPath of await listTranscriptFiles(sessionDayRoots(codexHome, startedMs))) {
     const candidate = await inspectTranscript(transcriptPath, workspaceRoot, bindingNonce, startedMs);
     if (candidate && !candidates.has(candidate.sessionId)) {
       candidates.set(candidate.sessionId, candidate);

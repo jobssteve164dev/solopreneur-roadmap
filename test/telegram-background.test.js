@@ -10,13 +10,13 @@ const control = require('../out/autonomousRuntimeControl.js');
 async function waitFor(check, message, timeout = 7000) {
   const until = Date.now() + timeout;
   while (Date.now() < until) {
-    if (check()) return;
+    if (await check()) return;
     await new Promise(resolve => setTimeout(resolve, 25));
   }
   assert.fail(message);
 }
 
-async function backgroundFixture(t, overrides = {}) {
+async function backgroundFixture(t, overrides = {}, intervalMs = 5000) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-tg-background-'));
   const globalRoot = path.join(root, '.solomap-global');
   const runtimeRoot = path.join(globalRoot, 'runtime');
@@ -74,7 +74,7 @@ async function backgroundFixture(t, overrides = {}) {
 const load=Module._load;Module._load=function(name,...rest){if(name==='vscode')throw Error('Editor API must not be loaded by background chat');return load.call(this,name,...rest)};
 const request=https.request;https.request=function(options,callback){if(options.hostname==='api.telegram.org')return http.request({...options,hostname:'127.0.0.1',port:${server.address().port},agent:undefined},callback);throw Error('Unexpected external request in TG acceptance test')};\n`);
   async function start() {
-    child = cp.spawn(process.execPath, ['--require', preload, path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', globalRoot, '--interval-ms', '5000'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    child = cp.spawn(process.execPath, ['--require', preload, path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', globalRoot, '--interval-ms', String(intervalMs)], { stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.resume();
     child.stderr.resume();
     await waitFor(() => fs.existsSync(path.join(runtimeRoot, 'control.json')), 'Daemon must start its authenticated endpoint');
@@ -130,9 +130,10 @@ test('background delivery retries the completed answer and sends queued notifica
   await waitFor(() => fixture.sent.some(m => m.text === 'Alpha 的下一步是 Ship Alpha。'), 'A temporary transport failure must not discard the answer');
   assert.equal(fixture.deliveryAttempts.filter(m => m.text === 'Alpha 的下一步是 Ship Alpha。').length, 2);
   assert.equal(fixture.sent.filter(m => m.text === 'Alpha 的下一步是 Ship Alpha。').length, 1);
-  queueTelegramBackgroundNotification(fixture.globalRoot, '任务完成');
+  await queueTelegramBackgroundNotification(fixture.globalRoot, '任务完成');
   await waitFor(() => fixture.sent.some(m => m.text === '任务完成'), 'Queued task notifications must be sent by the daemon');
-  await waitFor(() => fs.readdirSync(path.join(fixture.runtimeRoot, 'telegram-outbox')).length === 0, 'Successfully sent deliveries must be acknowledged');
+  await waitFor(async () => (await control.sendRuntimeDataRequest(fixture.globalRoot, { operation: 'list_notification_deliveries', input: { channel: 'telegram' } })).items.length === 0, 'Successfully sent deliveries must be acknowledged');
+  assert.equal(fs.existsSync(path.join(fixture.runtimeRoot, 'telegram-outbox')), false);
   await fixture.stop();
 });
 
@@ -184,14 +185,14 @@ test('permanent delivery errors retain failed evidence and allow later messages 
   const fixture = await backgroundFixture(t);
   const { queueTelegramBackgroundNotification } = require('../out/telegramRuntimeConfig.js');
   fixture.rejectText('不可投递的内容');
-  queueTelegramBackgroundNotification(fixture.globalRoot, '不可投递的内容');
-  await new Promise(resolve => setTimeout(resolve, 2));
-  queueTelegramBackgroundNotification(fixture.globalRoot, '后续正常消息');
   await fixture.start();
+  await queueTelegramBackgroundNotification(fixture.globalRoot, '不可投递的内容', undefined, 'permanent-failure');
+  await new Promise(resolve => setTimeout(resolve, 2));
+  await queueTelegramBackgroundNotification(fixture.globalRoot, '后续正常消息');
   await waitFor(() => fixture.sent.some(m => m.text === '后续正常消息'), 'Permanent content failure must not block subsequent replies');
-  const failed = fs.readdirSync(path.join(fixture.runtimeRoot, 'telegram-failed'));
-  assert.equal(failed.length, 1);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(fixture.runtimeRoot, 'telegram-failed', failed[0]))).text, '不可投递的内容');
+  const failed = await control.sendRuntimeDataRequest(fixture.globalRoot, { operation: 'read_notification', input: { intentId: 'permanent-failure' } });
+  assert.equal(failed.state, 'failed'); assert.equal(failed.payload.text, '不可投递的内容');
+  assert.equal(fs.existsSync(path.join(fixture.runtimeRoot, 'telegram-failed')), false);
   await fixture.stop();
 });
 
@@ -223,12 +224,12 @@ test('quickly disabling and re-enabling invalidates pending replies while preser
 test('disabled channel invalidates queued replies and bad HTML is delivered as plain text', async t => {
   const fixture = await backgroundFixture(t);
   const { queueTelegramBackgroundNotification, writeTelegramRuntimeConfig } = require('../out/telegramRuntimeConfig.js');
-  queueTelegramBackgroundNotification(fixture.globalRoot, '撤销前排队的回复');
+  await fixture.start();
+  await queueTelegramBackgroundNotification(fixture.globalRoot, '撤销前排队的回复');
   writeTelegramRuntimeConfig(fixture.globalRoot, { enabled: false });
   writeTelegramRuntimeConfig(fixture.globalRoot, { enabled: true });
   fixture.rejectText('<b>任务完成</b>');
-  queueTelegramBackgroundNotification(fixture.globalRoot, '<b>任务完成</b>', 'HTML');
-  await fixture.start();
+  await queueTelegramBackgroundNotification(fixture.globalRoot, '<b>任务完成</b>', 'HTML');
   await waitFor(() => fixture.sent.some(m => m.text === '任务完成'), 'Invalid HTML must be retried as readable plain text');
   assert.equal(fixture.sent.some(m => m.text === '撤销前排队的回复'), false);
   assert.equal(fixture.sent.find(m => m.text === '任务完成').parse_mode, undefined);
@@ -265,4 +266,49 @@ test('a pending chat does not block stop commands and survives a background rest
   await waitFor(() => fixture.sent.slice(beforeRestart).some(m => m.text === '慢聊天完成'), 'Accepted pending chat must survive daemon restart');
   await waitFor(() => fs.readdirSync(path.join(fixture.runtimeRoot, 'telegram-inbox')).length === 0, 'Finished chat must leave no pending input');
   await fixture.stop();
+});
+
+// Break caught: a committed completion effect can replay after a daemon restart and create a second notification.
+test('the actual daemon sends one formal notification across duplicate effects and a restart without outbox files', async t => {
+  const fixture = await backgroundFixture(t);
+  const { queueTelegramBackgroundNotification } = require('../out/telegramRuntimeConfig.js');
+  await fixture.start();
+  const intentId = 'run-effect:actual-notification-once';
+  const first = await queueTelegramBackgroundNotification(fixture.globalRoot, '原轮正式通知🌿', 'HTML', intentId);
+  const duplicate = await queueTelegramBackgroundNotification(fixture.globalRoot, '原轮正式通知🌿', 'HTML', intentId);
+  assert.equal(first.id, duplicate.id);
+  await waitFor(() => fixture.sent.some(message => message.text === '原轮正式通知🌿'), 'The daemon must read and deliver the formal database outbox');
+  await fixture.stop();
+  await fixture.start();
+  const replay = await queueTelegramBackgroundNotification(fixture.globalRoot, '原轮正式通知🌿', 'HTML', intentId);
+  assert.equal(replay.id, first.id); assert.equal(replay.state, 'delivered');
+  assert.equal(fixture.sent.filter(message => message.text === '原轮正式通知🌿').length, 1);
+  assert.equal(fs.existsSync(path.join(fixture.runtimeRoot, 'telegram-outbox')), false);
+  assert.equal(fs.existsSync(path.join(fixture.runtimeRoot, 'telegram-failed')), false);
+  assert.equal((await control.sendRuntimeDataRequest(fixture.globalRoot, { operation: 'list_notification_deliveries', input: { channel: 'telegram' } })).items.length, 0);
+  await fixture.stop();
+});
+
+
+test('background Telegram status and actual MCP chat consume a committed project rename after source isolation', async t => {
+  const f = await backgroundFixture(t, {}, 600000);
+  await f.start();
+  const initial = await control.sendRuntimeDataRequest(f.globalRoot, { operation: 'initialize_project_registry', input: {} });
+  const name = '数据库即时新名称';
+  await control.sendRuntimeDataRequest(f.globalRoot, { operation: 'patch_project_registry', input: { expectedRevision: initial.revision, projectPatches: [{ path: f.projectRoot, fields: { name } }], idempotencyKey: 'telegram-rename-without-next-cycle' } });
+  const isolation = path.join(f.root, 'source-isolation'); fs.mkdirSync(isolation);
+  const original = fs.readFileSync(path.join(f.globalRoot, 'projects.json'));
+  fs.renameSync(path.join(f.globalRoot, 'projects.json'), path.join(isolation, 'projects.json'));
+  fs.writeFileSync(f.cli, `#!/usr/bin/env node
+let input='';process.stdin.on('data', bytes => input += bytes);process.stdin.on('end', () => console.log(input.includes(${JSON.stringify(JSON.stringify({ name }).slice(1, -1))}) ? ${JSON.stringify(name + ' 的下一步是 Ship Alpha。')} : JSON.stringify({ toolCall: { name: 'get_current_project' } })));
+`, { mode: 0o700 });
+  f.updates.push(f.update(20001, '/status'));
+  await waitFor(() => f.sent.some(message => message.text.includes(name) && message.text.includes('路线图')), 'status must read the database rename without waiting ten minutes for another decision cycle');
+  f.updates.push(f.update(20002, '当前项目下一步是什么？'));
+  await waitFor(() => f.sent.some(message => message.text === name + ' 的下一步是 Ship Alpha。'), 'the actual intelligence MCP tool must see the committed project metadata');
+  const conversations = await control.sendRuntimeDataRequest(f.globalRoot, { operation: 'list_intelligence_conversations', input: {} });
+  assert.equal(conversations.length, 1);
+  assert.equal(fs.existsSync(path.join(f.globalRoot, 'projects.json')), false);
+  assert.deepEqual(fs.readFileSync(path.join(isolation, 'projects.json')), original);
+  await f.stop();
 });

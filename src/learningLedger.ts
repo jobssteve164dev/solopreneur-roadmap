@@ -2,6 +2,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import { runtimeMcpSource } from './runtimeDataOperations';
+import type { DataObject } from './db/unifiedDataStore';
+import { isTrashOrLocalPrivate, isLowValueLearningText, isUsefulVerificationSignal } from './learningQuality.js';
+export { isTrashOrLocalPrivate } from './learningQuality.js';
 
 export type LearningSourceType = 'step_run' | 'solo' | 'flow_loop' | 'review' | 'roadmap_revision' | 'issue' | 'release' | 'strategy' | 'user_correction';
 export type LearningEventType = 'completed' | 'failed' | 'verified' | 'deviated' | 'corrected' | 'blocked' | 'reused' | 'partial' | 'needs_confirmation';
@@ -45,11 +50,12 @@ export interface LessonCandidate {
   doThis: string;
   avoidThis: string;
   evidenceRefs: LearningEvidenceRef[];
-  confidence: 'low' | 'medium' | 'high';
+  confidence: 'low' | 'medium' | 'high' | number;
   status: 'candidate' | 'approved' | 'rejected' | 'promoted';
   promotionTarget: 'project_memory' | 'pattern' | 'decision' | 'domain' | 'operating_rule' | 'strategy_signal';
   createdAt: string;
   updatedAt: string;
+  sourceRef?: { objectId: string; revision: number };
 }
 
 export interface LearningPromotionSuggestion {
@@ -119,6 +125,12 @@ export interface LearningRetrievalQuery {
   limit?: number;
 }
 
+export type LearningOverview = Omit<LearningSummary, 'globalRoot' | 'recentEvents' | 'recentCandidates'>;
+
+export async function readLearningOverview(workspaceRoot: string, globalDataPath = ''): Promise<LearningOverview> {
+  return sendRuntimeDataRequest<LearningOverview>(normalizeSolomapGlobalPath(workspaceRoot, globalDataPath), { operation: 'read_learning_overview', input: {} });
+}
+
 function normalizeSolomapGlobalPath(workspaceRoot: string, globalDataPath = ''): string {
   return normalizeGlobalDataPathForExtension(globalDataPath, workspaceRoot);
 }
@@ -141,71 +153,6 @@ function compactLine(value: string, maxLength = 260): string {
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
 
-export function isTrashOrLocalPrivate(candidate: {
-  summary: string;
-  appliesWhen: string;
-  doThis: string;
-  avoidThis: string;
-  evidenceRefs?: LearningEvidenceRef[];
-  promotionTarget?: string;
-}): boolean {
-  const textToCheck = `${candidate.summary}\n${candidate.appliesWhen}\n${candidate.doThis}\n${candidate.avoidThis}\n${(candidate.evidenceRefs || []).map((ref) => `${ref.type}:${ref.ref} ${ref.summary || ''}`).join('\n')}`.toLowerCase();
-  if (textToCheck.includes('run completed without explicit verification signal in captured tail')) {
-    return true;
-  }
-  if (isLowValueLearningText(textToCheck)) {
-    return true;
-  }
-  if (
-    candidate.promotionTarget === 'pattern' ||
-    candidate.promotionTarget === 'operating_rule' ||
-    candidate.promotionTarget === 'decision' ||
-    candidate.promotionTarget === 'domain' ||
-    !candidate.promotionTarget
-  ) {
-    if (
-      textToCheck.includes('/home/') ||
-      textToCheck.includes('/users/') ||
-      textToCheck.includes('/tmp/') ||
-      textToCheck.includes('__solo__') ||
-      textToCheck.includes('/agent-runs/')
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function isLowValueLearningText(value: string): boolean {
-  const text = String(value || '').toLowerCase();
-  if (!text) {
-    return true;
-  }
-  return (
-    text.includes('run completed without explicit verification signal')
-    || text.includes('/prompt.txt')
-    || text.includes('.solopreneur/agent-runs/')
-    || text.includes('agent-runs/<rungroup>')
-    || text.includes('agent-runs/<runGroup>'.toLowerCase())
-    || text.includes('__solo__')
-    || text.includes('__solo__/<runid>')
-    || text.includes('dangerously-bypass-approvals')
-    || text.includes('--skip-git-repo-check')
-    || text.includes(' codex exec ')
-    || text.includes("cat '<home>")
-    || text.includes('cat <home>')
-    || text.includes("cat '<projectroot>")
-    || text.includes('cat <projectroot>')
-  );
-}
-
-function isUsefulVerificationSignal(value: unknown): boolean {
-  const text = compactLine(String(value || ''), 360);
-  if (!text || isLowValueLearningText(text)) {
-    return false;
-  }
-  return /\b(test|tests|passed|passing|validated|validation|verify|verified|tsc|vitest|jest|playwright|pytest|npm run|npm test|node --test)\b/i.test(text);
-}
 
 function escapeRegExp(string: string) {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -735,14 +682,49 @@ function scoreCandidate(candidate: LessonCandidate, query: LearningRetrievalQuer
   return projectMatch + tokenScore + roleScore + statusScore;
 }
 
-export function buildLearningRetrievalContext(workspaceRoot: string, globalDataPath: string, query: LearningRetrievalQuery): string {
-  let paths: ReturnType<typeof getLearningLedgerPaths>;
+function lessonCandidateFromObject(object: DataObject, workspaceRoot: string, projectId: string): LessonCandidate {
+  const data = object.data;
+  const list = (field: string): any[] => {
+    if (data[field] == null) return [];
+    const value = JSON.parse(String(data[field]));
+    if (!Array.isArray(value)) throw new Error(`lesson_field_invalid: ${field}`);
+    return value;
+  };
+  return {
+    schemaVersion: 1, id: object.objectId, projectId: object.projectId || '',
+    projectPath: object.projectId === projectId ? workspaceRoot : '',
+    projectName: object.projectId === projectId ? path.basename(workspaceRoot) : '',
+    sourceEventIds: list('source_event_ids_json'),
+    sourceType: String(data.source_type || '') as LearningSourceType,
+    lessonType: String(data.lesson_type || '') as LessonType,
+    summary: String(data.summary || ''), appliesWhen: String(data.applies_when || ''),
+    doThis: String(data.do_this || ''), avoidThis: String(data.avoid_this || ''),
+    doesNotApplyWhen: String(data.does_not_apply_when || ''), verification: String(data.verification || ''),
+    evidenceRefs: list('evidence_refs_json'), confidence: ({ low: 0, medium: 0.5, high: 1 } as Record<string, number>)[String(data.external_confidence)] === data.confidence ? String(data.external_confidence) as LessonCandidate['confidence'] : Number(data.confidence),
+    status: String(data.status) as LessonCandidate['status'],
+    promotionTarget: String(data.promotion_target || '') as LessonCandidate['promotionTarget'],
+    createdAt: new Date(Number(data.external_created_at ?? object.createdAt)).toISOString(), updatedAt: new Date(Number(data.external_updated_at ?? object.updatedAt)).toISOString(),
+    sourceRef: { objectId: object.objectId, revision: object.revision }
+  };
+}
+
+export async function buildLearningRetrievalContext(workspaceRoot: string, globalDataPath: string, query: LearningRetrievalQuery): Promise<string> {
+  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
+  const { projectId } = await sendRuntimeDataRequest<{ projectId: string }>(globalRoot, { operation: 'register_project', input: { root: workspaceRoot } });
+  const source = runtimeMcpSource(globalRoot, projectId, true);
+  let objects: DataObject[];
   try {
-    paths = ensureLearningLedgerStore(workspaceRoot, globalDataPath);
-  } catch {
-    return '';
-  }
-  const scored = readCandidates(paths)
+    for (;;) {
+      const items: DataObject[] = []; let cursor: string | null = null; let changed = false;
+      do {
+        const page = await source.call('context', { project: projectId, kinds: ['lesson'], view: 'metadata', limit: 100, ...(cursor ? { cursor } : {}) }) as { items: DataObject[]; cursor: string | null; sourceChanged: boolean };
+        if (page.sourceChanged) { changed = true; break; }
+        items.push(...page.items); cursor = page.cursor;
+      } while (cursor);
+      if (!changed) { objects = items; break; }
+    }
+  } finally { await source.close?.(); }
+  const scored = objects.map(object => lessonCandidateFromObject(object, workspaceRoot, projectId))
     .map((candidate) => ({ candidate, score: scoreCandidate(candidate, query) }))
     .filter((entry) => entry.score >= 6 && !isTrashOrLocalPrivate(entry.candidate))
     .sort((a, b) => b.score - a.score || String(b.candidate.updatedAt || '').localeCompare(String(a.candidate.updatedAt || '')));
@@ -769,6 +751,7 @@ export function buildLearningRetrievalContext(workspaceRoot: string, globalDataP
     ...candidates.map((candidate, index) => [
       `${index + 1}. ${candidate.summary}`,
       `   - 经验标识：${candidate.id}`,
+      `   - 来源：solomap://objects/${candidate.sourceRef!.objectId} · revision=${candidate.sourceRef!.revision}`,
       `   - 类型：${candidate.lessonType} / 状态：${candidate.status} / 置信度：${candidate.confidence}`,
       `   - 适用：${candidate.appliesWhen}`,
       `   - 本轮应做：${candidate.doThis}`,

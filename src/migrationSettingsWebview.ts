@@ -2,6 +2,7 @@ export function getMigrationSettingsCardHtml(): string {
   return `<section class="settings-card" id="migration-settings-card" aria-labelledby="migration-card-title" hidden>
     <style>
       #migration-settings-card { color: var(--text-main, #e2e8f0); gap: 12px; padding: 14px; overflow: hidden; flex-shrink: 0; }
+      #migration-settings-card[hidden] { display: none; }
       #migration-settings-card .migration-heading { display: flex; align-items: flex-start; gap: 10px; }
       #migration-settings-card .migration-heading-icon { display: grid; flex: 0 0 32px; width: 32px; height: 32px; place-items: center; border-radius: 9px; color: #67e8f9; background: rgba(34, 211, 238, .11); border: 1px solid rgba(103, 232, 249, .2); }
       #migration-settings-card .migration-heading-copy { min-width: 0; flex: 1; }
@@ -86,6 +87,7 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
   let sequence = 0;
   let latest = '';
   let busy = false;
+  let notice = '';
   let timer: ReturnType<typeof setTimeout> | undefined;
   const visible = () => panel.style.display === 'block' || panel.style.display === 'flex';
   const button = (selector: string) => element(selector) as HTMLButtonElement;
@@ -94,6 +96,7 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     if (busy) return;
     if (timer) clearTimeout(timer);
     latest = 'migration-' + (++sequence);
+    notice = '';
     busy = command !== 'dataMigration.get';
     error.hidden = true;
     card!.setAttribute('aria-busy', 'true');
@@ -135,11 +138,12 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     const needsAttention = jobs.filter((job: any) => ['failed', 'completed_with_conflicts'].includes(job.status));
     const actionableJobs = jobs.filter((job: any) => ['failed', 'completed_with_conflicts', 'interrupted'].includes(job.status));
     const history = overview?.recycling || [];
+    const recoveryConflicts = overview?.recoveryConflicts || [];
     const unfinishedCleanup = history.filter((item: any) => ['approved', 'moving', 'held'].includes(item.status));
-    card!.hidden = !plan && !active && !failedMaintenance && !needsAttention.length && !Number(overview?.reviewableFiles || overview?.recyclableFiles || 0) && !history.length;
+    card!.hidden = !notice && !plan && !active && !failedMaintenance && !needsAttention.length && !recoveryConflicts.length && !Number(overview?.reviewableFiles || overview?.recyclableFiles || 0) && !history.length;
     const migrated = Number(overview?.migratedFiles || 0);
     const count = Number(overview?.capturedFiles || 0);
-    element('[data-migration-status]').textContent = !overview ? text('尚未读取当前状态。', 'Current status has not been loaded yet.')
+    element('[data-migration-status]').textContent = notice || (!overview ? text('尚未读取当前状态。', 'Current status has not been loaded yet.')
       : migrationAgentActive ? text('Agent 正在后台迁移旧数据，你可以照常使用。', 'Agent is migrating old data in the background. You can keep working.')
       : reviewAgentActive ? text('正在后台检查旧数据，你可以照常使用。', 'Old data is being checked in the background. You can keep working.')
       : recyclingAgentActive ? text('正在后台清理旧文件，你可以照常使用。', 'Old files are being cleaned up in the background. You can keep working.')
@@ -147,8 +151,9 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
       : activeJobs ? text('正在安全导入旧数据，你可以照常使用。', 'Old data is being imported safely. You can keep working.')
       : failedMaintenance ? text('有些内容尚未整理完成，可以重新检查。', 'Some items still need attention. You can check them again.')
       : needsAttention.length ? text('有些旧文件需要你确认，现有数据可正常使用。', 'Some old files need your review. Existing data is ready to use.')
+      : recoveryConflicts.length ? text('有些文件需要你确认，已恢复的文件可正常使用。', 'Some files need your review. Restored files are ready to use.')
       : unfinishedCleanup.length ? text('有清理操作等待继续。', 'A cleanup action is ready to continue.')
-      : jobs.length ? text('旧数据已经整理完成。', 'Old data cleanup is complete.') : text('无需整理旧数据。', 'No old data needs cleanup.');
+      : jobs.length ? text('旧数据已经整理完成。', 'Old data cleanup is complete.') : text('无需整理旧数据。', 'No old data needs cleanup.'));
     button('[data-migration-agent]').textContent = reviewAgentActive ? text('正在整理…', 'Organizing…')
       : activeReview ? text('继续整理', 'Continue cleanup')
       : (failedMaintenance || needsAttention.length) ? text('重新检查', 'Check again') : text('检查旧数据', 'Check old data');
@@ -163,8 +168,8 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     element('[data-migration-metrics]').hidden = !overview;
     element('[data-migration-saved]').textContent = String(count);
     element('[data-migration-imported]').textContent = String(migrated);
-    element('[data-migration-cleanable]').textContent = String(cleanable);
-    element('[data-migration-details]').hidden = !actionableJobs.length;
+    element('[data-migration-cleanable]').textContent = String(cleanable + recoveryConflicts.length);
+    element('[data-migration-details]').hidden = !actionableJobs.length && !recoveryConflicts.length;
     element('[data-migration-jobs]').innerHTML = actionableJobs.map((job: any) => {
       const name = ({
         intelligence: text('聊天记录', 'Chat history'),
@@ -176,7 +181,7 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
       return '<div class="migration-detail">' + '<strong>' + name + '</strong> · ' + escape(text(({ interrupted: '等待继续', completed_with_conflicts: '有文件需要确认', failed: '尚未完成' } as any)[job.status] || '', ({ interrupted: 'Ready to continue', completed_with_conflicts: 'Files need review', failed: 'Not finished' } as any)[job.status] || ''))
         + ' <button type="button" class="settings-action-btn test-btn" data-migration-retry="' + escape(job.jobId) + '">' + text('重新处理', 'Try again') + '</button>'
         + (errors.length || job.error ? '<details><summary>' + text('查看保留的文件', 'Review kept files') + '</summary><ul class="migration-files">' + errors.map((value: any) => '<li>' + escape(value.source) + '</li>').join('') + (job.error ? '<li>' + text('这部分尚未读取完成，可以重新处理。', 'This part was not fully read and can be tried again.') + '</li>' : '') + '</ul></details>' : '') + '</div>';
-    }).join('');
+    }).join('') + (recoveryConflicts.length ? '<details><summary>' + text('查看保留的文件', 'Review kept files') + '</summary><ul class="migration-files">' + recoveryConflicts.map((item: any) => '<li>' + escape(item.path) + '</li>').join('') + '</ul></details>' : '');
     element('[data-migration-plan]').hidden = !plan;
     if (plan) {
       element('[data-migration-plan-copy]').textContent = plan.files.length
@@ -228,7 +233,7 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
       const location = String(message.settings?.globalDataPath || '');
       const changed = savedLocation !== undefined && location !== savedLocation;
       savedLocation = location;
-      if (changed) { plan = undefined; overview = undefined; dataRoot = ''; latest = ''; busy = false; }
+      if (changed) { plan = undefined; overview = undefined; dataRoot = ''; latest = ''; busy = false; notice = ''; }
       render();
       if ((changed || !overview) && visible()) request('dataMigration.get');
       return;
@@ -237,10 +242,10 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     busy = false;
     if (message.dataRoot) dataRoot = message.dataRoot;
     if (message.overview) overview = message.overview;
+    notice = String(message.successMessage || '');
     plan = message.plan;
     render();
     if (message.error) { error.textContent = message.error; error.hidden = false; }
-    if (message.successMessage) element('[data-migration-status]').textContent = message.successMessage;
   });
   const observer = typeof MutationObserver === 'function' ? new MutationObserver(() => { if (visible()) { render(); request('dataMigration.get'); } else if (timer) clearTimeout(timer); }) : undefined;
   observer?.observe(panel, { attributes: true, attributeFilter: ['style'] });

@@ -5,10 +5,11 @@ import { CsvStore } from './db/csvStore';
 import { readTodayReview } from './dailyReview';
 import { IntelligenceConversationStore } from './intelligenceChat';
 import { createIntelligenceMcpSession } from './intelligenceMcp';
-import { runtimeProjectMcpSource } from './runtimeDataOperations';
+import { runtimeProjectMcpSource, RuntimeDataOperations } from './runtimeDataOperations';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import { EmbeddedPiAgentEngine } from './piAgentEngine';
-import { readProjectRegistry } from './projectRegistry';
+import { readProjectRegistry, refreshProjectRegistry } from './projectRegistry';
 import { createTelegramIntelligenceReply } from './telegramIntelligenceChat';
 import { executeTelegramExtensionCommand } from './telegramExtensionBridge';
 import { queueTelegramBackgroundNotification, readTelegramRuntimeConfig, telegramRuntimePath, writeTelegramRuntimeConfig, writeTelegramRuntimeJson } from './telegramRuntimeConfig';
@@ -22,7 +23,8 @@ interface TelegramRuntimeState {
   conversationIds: Record<string, string>;
 }
 
-export function startTelegramBackgroundRuntime(globalDataPath: string): { close(): void } {
+export function startTelegramBackgroundRuntime(globalDataPath: string, operation?: RuntimeDataOperations): { close(): Promise<void> } {
+  const call = (name: string, input: Record<string, unknown>) => operation ? operation({ operation: name, input }) : sendRuntimeDataRequest(globalDataPath, { operation: name, input });
   const statePath = telegramRuntimePath(globalDataPath, 'telegram-state.json');
   let state: TelegramRuntimeState = fs.existsSync(statePath)
     ? JSON.parse(fs.readFileSync(statePath, 'utf8'))
@@ -35,41 +37,40 @@ export function startTelegramBackgroundRuntime(globalDataPath: string): { close(
   let sending: Promise<void> | undefined;
   async function sendOutbox(): Promise<void> {
     if (sending) return sending;
-    const directory = telegramRuntimePath(globalDataPath, 'telegram-outbox');
-    if (closed || !fs.existsSync(directory)) return;
+    if (closed) return;
     sending = (async () => {
-      for (const name of fs.readdirSync(directory).filter(name => /^\d+-[0-9a-f-]{36}\.json$/.test(name)).sort()) {
-        if (closed) return;
-        const filePath = path.join(directory, name);
-        const message = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-        const config = readTelegramRuntimeConfig(globalDataPath);
-        if (message.replyGeneration !== config.replyGeneration || message.chatId !== config.chatId) {
-          fs.unlinkSync(filePath);
-          continue;
-        }
-        if (!config.enabled || !config.botToken) return;
-        try {
-          await observeLocalDiagnosticStage('telegram.delivery', () => callTelegramApi(config.botToken, 'sendMessage', {
-            chat_id: message.chatId, text: message.text, ...(message.parseMode === 'HTML' ? { parse_mode: 'HTML' } : {})
-          }));
-          fs.unlinkSync(filePath);
-        } catch (error) {
-          recordLocalDiagnosticError(globalDataPath, 'telegram.delivery', classifyDiagnosticFailure(error));
-          if (!(error instanceof Error) || !/HTTP 400:/.test(error.message)) return;
-          // Preserve the content when Telegram rejects notification formatting.
-          if (message.parseMode === 'HTML') {
-            delete message.parseMode;
-            message.text = String(message.text).replace(/<[^>]*>/g, '')
-              .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&');
-            writeTelegramRuntimeJson(filePath, message);
-          } else {
-            const failedPath = telegramRuntimePath(globalDataPath, `telegram-failed/${name}`);
-            fs.mkdirSync(path.dirname(failedPath), { recursive: true, mode: 0o700 });
-            fs.renameSync(filePath, failedPath);
+      let cursor: { createdAt: number; id: string } | null = null;
+      do {
+        const page = await call('list_notification_deliveries', { channel: 'telegram', ...(cursor ? { cursor } : {}) }) as { items: Array<{ id: string; revision: number; payload: { replyGeneration: number; chatId: string; text: string; parseMode?: 'HTML' } }>; nextCursor: { createdAt: number; id: string } | null };
+        for (const delivery of page.items) {
+          if (closed) return;
+          const message = delivery.payload;
+          const config = readTelegramRuntimeConfig(globalDataPath);
+          const settle = (state: string, extra: Record<string, unknown> = {}) => call('settle_notification_delivery', { id: delivery.id, expectedRevision: delivery.revision, state, ...extra, idempotencyKey: `notification:${delivery.id}:${delivery.revision}:${state}` });
+          if (message.replyGeneration !== config.replyGeneration || message.chatId !== config.chatId) {
+            await settle('cancelled');
+            continue;
           }
-          // A permanent content failure must not block unrelated replies.
+          if (!config.enabled || !config.botToken) return;
+          let response: unknown;
+          try {
+            response = await observeLocalDiagnosticStage('telegram.delivery', () => callTelegramApi(config.botToken, 'sendMessage', {
+              chat_id: message.chatId, text: message.text, ...(message.parseMode === 'HTML' ? { parse_mode: 'HTML' } : {})
+            }));
+          } catch (error) {
+            recordLocalDiagnosticError(globalDataPath, 'telegram.delivery', classifyDiagnosticFailure(error));
+            if (!(error instanceof Error) || !/HTTP 400:/.test(error.message)) return;
+            if (message.parseMode === 'HTML') {
+              const plain = { replyGeneration: message.replyGeneration, chatId: message.chatId, text: message.text.replace(/<[^>]*>/g, '')
+                .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&') };
+              await settle('queued', { payload: plain, error: error.message });
+            } else await settle('failed', { error: error.message });
+            continue;
+          }
+          await settle('delivered', { response });
         }
-      }
+        cursor = page.nextCursor;
+      } while (cursor && !closed);
     })().finally(() => { sending = undefined; });
     return sending;
   }
@@ -84,6 +85,7 @@ export function startTelegramBackgroundRuntime(globalDataPath: string): { close(
     return project ? new CsvStore(path.join(project.path, '.solopreneur', 'roadmap.csv')).readNodes() : [];
   };
   const store = new IntelligenceConversationStore(globalDataPath, async messages => {
+    await refreshProjectRegistry(globalDataPath, undefined, call);
     const config = readCognitiveRuntimeConfig(globalDataPath);
     if (config.mode !== 'agent_cli') throw new Error('请在 SoloMap 设置中选择用于聊天的 Agent。');
     const engine = new EmbeddedPiAgentEngine({ agentCli: config.agentCli, model: config.model,
@@ -92,14 +94,15 @@ export function startTelegramBackgroundRuntime(globalDataPath: string): { close(
     const projectForChat = selectedProject();
     const dataSource = await runtimeProjectMcpSource(globalDataPath, projectForChat?.path || '');
     const mcp = await observeLocalDiagnosticStage('mcp.connect', () => createIntelligenceMcpSession({
-      getProjects: projects,
+      getProjects: async () => { await refreshProjectRegistry(globalDataPath, undefined, call); return projects(); },
       getSelectedProjectPath: () => projectForChat?.path || '',
       getCurrentSteps: () => projectForChat ? new CsvStore(path.join(projectForChat.path, '.solopreneur', 'roadmap.csv')).readNodes().map(node => ({ title: node.title, status: node.status })) : null,
       getSettings: () => {
         const cognitive = readCognitiveRuntimeConfig(globalDataPath);
         return { language: readTelegramRuntimeConfig(globalDataPath).language, cognitiveAgent: cognitive.agentCli, cognitiveModel: cognitive.model };
       },
-      getTodayReview: () => {
+      getTodayReview: async () => {
+        await refreshProjectRegistry(globalDataPath, undefined, call);
         const review = readTodayReview(globalDataPath, projects());
         return review ? { summary: review.summary, items: review.todos.map(todo => todo.title) } : null;
       }
@@ -172,6 +175,7 @@ export function startTelegramBackgroundRuntime(globalDataPath: string): { close(
           if (command !== 'solopreneur.internalGetStatus') return executeTelegramExtensionCommand(globalDataPath, command, args);
           try { return await executeTelegramExtensionCommand(globalDataPath, command, args); }
           catch {
+            await refreshProjectRegistry(globalDataPath, undefined, call);
             const project = selectedProject();
             if (!project) return { activeProject: false };
             const steps = nodes();
@@ -200,7 +204,7 @@ export function startTelegramBackgroundRuntime(globalDataPath: string): { close(
         async sendReply(chatId: string, text: string) {
           const current = readTelegramRuntimeConfig(globalDataPath);
           if (!current.enabled || current.botToken !== config.botToken || current.chatId !== chatId) return;
-          queueTelegramBackgroundNotification(globalDataPath, text);
+          await queueTelegramBackgroundNotification(globalDataPath, text, undefined, undefined, operation);
           await sendOutbox();
         }
       };
@@ -216,10 +220,11 @@ export function startTelegramBackgroundRuntime(globalDataPath: string): { close(
     void synchronize();
     void sendOutbox().catch(error => recordLocalDiagnosticError(globalDataPath, 'telegram.delivery', classifyDiagnosticFailure(error)));
   }, 1000);
-  return { close() {
+  return { async close() {
     closed = true;
     clearInterval(timer);
     stopTelegramRemoteService();
     engines.forEach(engine => engine.cancel());
+    await sending;
   } };
 }

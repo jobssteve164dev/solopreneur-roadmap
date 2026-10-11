@@ -41,6 +41,27 @@ test('MCP exposes the six shared operations and retains the four existing read t
     const model = JSON.parse(schema.contents[0].text);
     assert.equal(model.kinds.memory.fields.content.type, 'content');
     assert.equal(model.kinds.memory.fields.category.required, true);
+    const eventField = model.kinds.lesson.fields.event_refs;
+    assert.deepEqual(Object.keys(eventField.items || {}).sort(), ['objectId', 'revision', 'sourceId']);
+    assert.equal(eventField.items.revision.integer, true);
+    assert.equal(eventField.items.revision.minimum, 1);
+    assert.equal(eventField.items.objectId.nullable, true);
+    assert.match(eventField.description, /null/);
+    assert.deepEqual(Object.keys(model.kinds.lesson_decision.fields.candidate_refs.items || {}).sort(), ['objectId', 'revision']);
+    const eventInput = writeTool.inputSchema.properties.data.properties.event_refs;
+    assert.equal(eventInput.type, 'array');
+    assert.deepEqual(eventInput.items.required.sort(), ['objectId', 'revision', 'sourceId']);
+    assert.equal(writeTool.inputSchema.properties.data.properties.candidate_refs.type, 'array');
+    const source = store.write({ kind: 'evidence', action: 'create', scope: project.objectId, idempotencyKey: 'formal-ref-source', data: { type: 'host_observation', source_actor_id: 'local-runtime', observed_at: Date.now(), content: 'Observed original outcome' } });
+    const event = store.write({ kind: 'learning_event', action: 'create', scope: project.objectId, idempotencyKey: 'formal-ref-event', data: { source_object_id: source.objectId, source_revision: 1, event_type: 'completed', summary: 'Original outcome', occurred_at: Date.now() } });
+    const refs = [{ sourceId: event.objectId, objectId: event.objectId, revision: 1 }];
+    const lesson = await call('solomap_write', { kind: 'lesson', action: 'create', idempotencyKey: 'formal-ref-lesson', data: { status: 'candidate', summary: 'Use the original outcome', event_refs: refs } });
+    assert.deepEqual((await call('solomap_read', { ref: lesson.objectId })).data.event_refs, refs);
+    for (const invalid of [{ objectId: event.objectId, revision: 1 }, { sourceId: event.objectId, objectId: event.objectId, revision: 0 }, { sourceId: event.objectId, objectId: null, revision: 1 }]) {
+      const failed = await session.client.callTool({ name: 'solomap_write', arguments: { kind: 'lesson', action: 'create', idempotencyKey: `invalid-formal-ref:${JSON.stringify(invalid)}`, data: { status: 'candidate', summary: 'Invalid reference', event_refs: [invalid] } } });
+      assert.equal(failed.isError, true);
+    }
+    assert.equal(store.search({ scope: project.objectId, kinds: ['lesson'] }).items.length, 1, 'invalid tool inputs must not create partial records');
     const created = await call('solomap_write', { kind: 'memory', action: 'create', scope: project.objectId, idempotencyKey: 'memory', data: { category: 'inbox', title: 'MCP目标', status: 'captured', content: '跨入口完整回读' } });
     assert.equal((await call('solomap_read', { ref: created.objectId })).data.content, '跨入口完整回读');
     assert.equal((await call('solomap_search', { scope: project.objectId, query: 'MCP目标' })).items[0].objectId, created.objectId);
@@ -48,6 +69,14 @@ test('MCP exposes the six shared operations and retains the four existing read t
     await call('solomap_link', { source: created.objectId, relation: 'source', target: second.objectId, expectedRevision: 1, idempotencyKey: 'link' });
     assert.equal((await call('solomap_read', { ref: created.objectId })).relations[0].target, second.objectId);
     assert.ok((await call('solomap_context', { project: project.objectId, query: 'MCP目标', budget: 1000 })).items.some(item => item.objectId === created.objectId));
+    const contextPages = []; let contextCursor;
+    do {
+      const page = await call('solomap_context', { view: 'metadata', kinds: ['memory'], terms: ['MCP目标', 'source'], budget: 1, limit: 1, ...(contextCursor ? { cursor: contextCursor } : {}) });
+      assert.equal(page.sourceChanged, false);
+      assert.ok(page.items.every(item => !Object.hasOwn(item.data, 'content')));
+      contextPages.push(...page.items); contextCursor = page.cursor;
+    } while (contextCursor);
+    assert.deepEqual(contextPages.map(item => item.objectId).sort(), [created.objectId, second.objectId].sort());
     const exported = await call('solomap_export', { ref: created.objectId, format: 'json', destination: path.join(root, 'exports', 'memory.json'), idempotencyKey: 'export' });
     assert.equal(JSON.parse(fs.readFileSync(exported.destination, 'utf8')).data.content, '跨入口完整回读');
     const privateProject = store.write({ kind: 'project', action: 'create', scope: null, idempotencyKey: 'private', data: { name: 'private' } });
