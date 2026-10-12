@@ -16,6 +16,20 @@ async function fixture(provider) {
   return { base, root, project, state, call, async close() { await operations.close(); store.close(); } };
 }
 
+test('Claude enables the whole-turn adapter only after observing supported native capabilities without invalidating older sessions', async () => {
+  const { prepareNativeAgentLaunch } = require('../out/agentRunPreflight.js');
+  for (const version of ['2.1.289 (Claude Code)', '2.1.286 (Claude Code)']) {
+    const f = await fixture('claude');
+    try {
+      const prepared = await prepareNativeAgentLaunch({ state: f.state, workspaceRoot: f.project, operation: f.call, prepareDatabase: false,
+        execute: async command => ({ code: 0, stdout: Buffer.from(command.endsWith('--version') ? version : '--session-id --plugin-dir'), stderr: Buffer.alloc(0) }) });
+      assert.equal(prepared.status.claudeNativeObserverCapable, version.startsWith('2.1.289'));
+      assert.equal(prepared.status.claudeNativeContract, 'transcript-v1', 'a supported version does not prove the user allows the adapter to load');
+      assert.equal((await f.call('read_run_binding', { root: f.project, executionLogId: 1 })).revisions.at(-1).state, 'planned');
+    } finally { await f.close(); }
+  }
+});
+
 for (const provider of ['claude', 'copilot', 'grok']) test(`${provider} preserves required official session capability before launching`, async () => {
   const modulePath = path.resolve(__dirname, '../out/agentRunPreflight.js');
   assert.ok(fs.existsSync(modulePath), 'shared launch must retain the native session capability preflight');

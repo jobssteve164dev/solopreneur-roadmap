@@ -60,7 +60,7 @@ async function readDigests(client, metadata, includeFull) {
 async function readLearningCandidates(client, projectRoot) {
   const lessons = await client.list(['lesson']);
   const result = [];
-  for (const object of lessons.filter(object => !['rejected', 'invalidated', 'superseded', 'expired'].includes(String(object.data.status)))) {
+  for (const object of lessons.filter(object => object.data.status === 'approved')) {
     const data = object.data;
     result.push({ ...object.data, id: object.objectId, revision: object.revision,
       sourceRef: { objectId: object.objectId, revision: object.revision }, projectPath: projectRoot,
@@ -206,7 +206,7 @@ function retrieveLessons(candidates, records, query, projectRoot, limit) {
         { text: evidenceText, weight: 5 }
       ]);
       const projectScore = path.resolve(String(candidate.projectPath || '')) === path.resolve(projectRoot) ? 3 : 0;
-      const statusScore = candidate.status === 'promoted' || candidate.status === 'approved' ? 5 : 0;
+      const statusScore = candidate.status === 'approved' ? 5 : 0;
       const confidenceScore = typeof candidate.confidence === 'number'
         ? candidate.confidence * 2
         : candidate.confidence === 'high' ? 2 : candidate.confidence === 'medium' ? 1 : 0;
@@ -381,6 +381,29 @@ function buildSummary(records, graph) {
   };
 }
 
+async function readRsiCycles(client, limit) {
+  const [uses, evaluations] = await Promise.all([client.list(['policy_use']), client.list(['evaluation'])]);
+  const byUse = new Map(evaluations.map(item => [String(item.data.policy_use_id), item]));
+  const cycles = [];
+  for (const use of uses.slice(0, limit)) {
+    const evaluation = byUse.get(use.objectId);
+    if (!evaluation) continue;
+    let baseline = {};
+    try { baseline = JSON.parse(String(evaluation.data.baseline_ref || '{}')); } catch {}
+    cycles.push({
+      policyUseRef: { objectId: use.objectId, revision: use.revision },
+      policyRef: { objectId: String(use.data.policy_id), revision: Number(use.data.policy_revision) },
+      lessonRef: use.data.lesson_id ? { objectId: String(use.data.lesson_id), revision: Number(use.data.lesson_revision) } : null,
+      runId: String(use.data.run_id), action: String(use.data.purpose), result: String(baseline.result || ''),
+      evidence: Array.isArray(baseline.evidence) ? baseline.evidence : [],
+      verdict: String(evaluation.data.verdict), reportedVerdict: String(baseline.reportedVerdict || 'unassessed'),
+      currentPolicyStatus: String(use.projection?.currentPolicyStatus || ''), currentLessonStatus: use.projection?.currentLessonStatus == null ? null : String(use.projection.currentLessonStatus),
+      evaluationRef: { objectId: evaluation.objectId, revision: evaluation.revision }
+    });
+  }
+  return { cycles, message: cycles.length ? '采用与评价均来自固定数据库版本；当前状态用于识别后续纠偏或撤销。' : '还没有记录实际采用；召回本身不会计入 RSI。' };
+}
+
 function renderMarkdown(title, payload) {
   const lines = [`# ${title}`, ''];
   if (payload && Array.isArray(payload.lessons) && Array.isArray(payload.evidenceLeads)) {
@@ -409,6 +432,19 @@ function renderMarkdown(title, payload) {
       if (item.files.length) lines.push(`  Files: ${item.files.join(', ')}`);
       if (item.digestFile) lines.push(`  Digest: ${item.digestFile}`);
       if (item.sourceRef) lines.push(`  Source: solomap://objects/${item.sourceRef.objectId} · revision=${item.sourceRef.revision}`);
+    });
+    return lines.join('\n');
+  }
+  if (payload && Array.isArray(payload.cycles)) {
+    lines.push(`- Guidance: ${payload.message}`, '');
+    if (!payload.cycles.length) lines.push('No actual adoption has been recorded.');
+    payload.cycles.forEach((item, index) => {
+      lines.push(`## ${index + 1}. ${item.verdict} · run ${item.runId}`);
+      lines.push(`- Policy: solomap://objects/${item.policyRef.objectId} · revision=${item.policyRef.revision} · current=${item.currentPolicyStatus}`);
+      if (item.lessonRef) lines.push(`- Experience: solomap://objects/${item.lessonRef.objectId} · revision=${item.lessonRef.revision} · current=${item.currentLessonStatus}`);
+      lines.push(`- Action: ${item.action}`, `- Result: ${item.result}`);
+      if (item.evidence.length) lines.push(`- Evidence: ${item.evidence.join(' / ')}`);
+      lines.push('');
     });
     return lines.join('\n');
   }
@@ -453,6 +489,7 @@ function printHelp() {
     '',
     'Commands:',
     '  retrieve         Find high-value lessons and evidence leads for a concrete task query.',
+    '  rsi              Show actual fixed-version adoption and subsequent evaluations.',
     '  handoff          Build a cross-agent handoff pack from formal run evidence.',
     '  summary          Show counts and latest execution signals.',
     '  history          Show recent execution records.',
@@ -486,6 +523,12 @@ async function main() {
   const limit = normalizeLimit(args.limit);
   const client = await openDataClient(globalRoot, projectRoot);
   try {
+  if (command === 'rsi') {
+    const payload = await readRsiCycles(client, limit);
+    if (args.json) console.log(JSON.stringify({ command, projectRoot, globalRoot, generatedAt: new Date().toISOString(), payload }, null, 2));
+    else console.log(renderMarkdown('SoloMap RSI Cycles', payload));
+    return;
+  }
   const metadata = await client.list(['evidence']);
   const digestHeaders = metadata.filter(object => object.data.type === 'run_digest_source');
   const digestLogIds = new Set(digestHeaders.map(object => object.projection.executionLogId));

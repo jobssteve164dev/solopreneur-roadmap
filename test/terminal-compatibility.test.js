@@ -44,6 +44,19 @@ test('terminal commands remain compatible with hosts that do not expose processI
   assert.deepEqual(delivered, [{ text: 'codex --version', addNewLine: false }]);
 });
 
+test('terminal command delivery does not wait forever when a compatible host never resolves processId', async () => {
+  const delivered = [];
+  const terminal = {
+    processId: new Promise(() => {}),
+    sendText(text, addNewLine) {
+      delivered.push({ text, addNewLine });
+    }
+  };
+
+  assert.equal(await sendTextWhenTerminalReady(terminal, 'agy --print=task', true, 10), true);
+  assert.deepEqual(delivered, [{ text: 'agy --print=task', addNewLine: true }]);
+});
+
 test('Codex continuation uses one explicit paste followed by submit outside the paste', async () => {
   const { sendAgentTextWhenTerminalReady } = require('../out/terminalCompatibility.js');
   const delivered = []; const terminal = { processId: Promise.resolve(123), sendText: (text, addNewLine) => delivered.push({ text, addNewLine }) };
@@ -52,7 +65,7 @@ test('Codex continuation uses one explicit paste followed by submit outside the 
 });
 
 test('all SoloMap-created command windows use the shared terminal readiness gate', () => {
-  for (const relativePath of ['src/extension.ts', 'src/dailyReview.ts', 'src/sidebarProvider.ts']) {
+  for (const relativePath of ['src/extension.ts', 'src/sidebarProvider.ts']) {
     const source = fs.readFileSync(path.join(projectRoot, relativePath), 'utf8');
     assert.doesNotMatch(source, /\bterminal\.sendText\(/, `${relativePath} bypasses terminal readiness`);
     assert.match(source, /sendTextWhenTerminalReady/);

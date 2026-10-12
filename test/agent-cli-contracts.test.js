@@ -96,13 +96,18 @@ test('review launches use the same automatic Agent permission contract as normal
   }
 });
 
-test('agy interactive commands bind the prompt to its flag before shell execution', () => {
+test('agy interactive commands bind the prompt to its flag before shell execution', t => {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-agy-argv-'));
   const fakeAgy = path.join(fixtureRoot, 'agy');
   const capturedArgsPath = path.join(fixtureRoot, 'args.json');
   fs.writeFileSync(fakeAgy, `#!/usr/bin/env node
 require('node:fs').writeFileSync(process.env.SOLOMAP_CAPTURE_ARGS, JSON.stringify(process.argv.slice(2)));
 `, { mode: 0o755 });
+  t.after(() => {
+    if (fs.existsSync(capturedArgsPath)) fs.unlinkSync(capturedArgsPath);
+    fs.unlinkSync(fakeAgy);
+    fs.rmdirSync(fixtureRoot);
+  });
 
   const cases = [
     {
@@ -143,13 +148,75 @@ require('node:fs').writeFileSync(process.env.SOLOMAP_CAPTURE_ARGS, JSON.stringif
   }
 });
 
-test('claude prompts precede the variadic add-dir option in every launch mode', () => {
+test('agy one-shot commands never let a following option become the print prompt', t => {
+  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-agy-print-argv-'));
+  const fakeAgy = path.join(fixtureRoot, 'agy');
+  const fixturePrompt = path.join(fixtureRoot, 'prompt.txt');
+  const capturedPath = path.join(fixtureRoot, 'capture.json');
+  fs.writeFileSync(fixturePrompt, 'Prompt from stdin');
+  fs.writeFileSync(fakeAgy, `#!/usr/bin/env node
+const fs = require('node:fs');
+let stdin = '';
+try { stdin = fs.readFileSync(0, 'utf8'); } catch {}
+fs.writeFileSync(process.env.SOLOMAP_CAPTURE_ARGS, JSON.stringify({ args: process.argv.slice(2), stdin }));
+`, { mode: 0o755 });
+  t.after(() => {
+    fs.unlinkSync(capturedPath);
+    fs.unlinkSync(fakeAgy);
+    fs.unlinkSync(fixturePrompt);
+    fs.rmdirSync(fixtureRoot);
+  });
+
+  const cases = [
+    {
+      command: agentCli.buildAgentCommand(fakeAgy, 'Direct prompt', fixtureRoot, '', 'never'),
+      expectedArgs: [`--add-dir=${fixtureRoot}`, '--print=Direct prompt'], expectedStdin: ''
+    },
+    {
+      command: agentCli.buildAgentCommandForPromptFile(fakeAgy, fixturePrompt, fixtureRoot, 'never', '', '', 'Wrapper prompt'),
+      expectedArgs: [`--add-dir=${fixtureRoot}`, '--print=Wrapper prompt'], expectedStdin: ''
+    },
+    {
+      command: agentCli.buildAgentCommandForPromptFile(fakeAgy, fixturePrompt, fixtureRoot, 'never'),
+      expectedArgs: [`--add-dir=${fixtureRoot}`, '--print'], expectedStdin: 'Prompt from stdin'
+    },
+    {
+      command: agentCli.buildReadOnlyAgentCommandForPromptFile(fakeAgy, fixturePrompt, fixtureRoot),
+      expectedArgs: ['--mode', 'plan', '--sandbox', '--print-timeout', '5m', `--add-dir=${fixtureRoot}`, '--print'], expectedStdin: 'Prompt from stdin'
+    },
+    {
+      command: agentCli.buildAgentContinuationCommandForPromptFile(fakeAgy, fixturePrompt, fixtureRoot, 'session-123', 'never'),
+      expectedArgs: ['--conversation', 'session-123', `--add-dir=${fixtureRoot}`, '--print'], expectedStdin: 'Prompt from stdin'
+    },
+    {
+      command: `agent_prompt='Shell variable prompt'; ${agentCli.buildAgentCommandFromShellVar(fakeAgy, 'agent_prompt', fixtureRoot, 'never')}`,
+      expectedArgs: [`--add-dir=${fixtureRoot}`, '--print=Shell variable prompt'], expectedStdin: ''
+    }
+  ];
+
+  for (const fixture of cases) {
+    const result = childProcess.spawnSync('/bin/sh', ['-c', fixture.command], {
+      encoding: 'utf8', env: { ...process.env, SOLOMAP_CAPTURE_ARGS: capturedPath }
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(fs.readFileSync(capturedPath, 'utf8')), {
+      args: fixture.expectedArgs, stdin: fixture.expectedStdin
+    });
+  }
+});
+
+test('claude prompts precede the variadic add-dir option in every launch mode', t => {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-claude-argv-'));
   const fakeClaude = path.join(fixtureRoot, 'claude');
   const capturedArgsPath = path.join(fixtureRoot, 'args.json');
   fs.writeFileSync(fakeClaude, `#!/usr/bin/env node
 require('node:fs').writeFileSync(process.env.SOLOMAP_CAPTURE_ARGS, JSON.stringify(process.argv.slice(2)));
 `, { mode: 0o755 });
+  t.after(() => {
+    if (fs.existsSync(capturedArgsPath)) fs.unlinkSync(capturedArgsPath);
+    fs.unlinkSync(fakeClaude);
+    fs.rmdirSync(fixtureRoot);
+  });
 
   const commands = [
     agentCli.buildAgentCommand(fakeClaude, 'Direct prompt', workspaceRoot, '', 'never'),
@@ -179,11 +246,17 @@ require('node:fs').writeFileSync(process.env.SOLOMAP_CAPTURE_ARGS, JSON.stringif
   }
 });
 
-test('Cursor installer verifies the official user-local binary before PATH is refreshed', () => {
+test('Cursor installer verifies the official user-local binary before PATH is refreshed', t => {
   const fixtureHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cursor-install-'));
   const installedCli = path.join(fixtureHome, '.local', 'bin', 'cursor-agent');
   fs.mkdirSync(path.dirname(installedCli), { recursive: true });
   fs.writeFileSync(installedCli, '#!/bin/sh\necho cursor-agent-test\n', { mode: 0o755 });
+  t.after(() => {
+    fs.unlinkSync(installedCli);
+    fs.rmdirSync(path.dirname(installedCli));
+    fs.rmdirSync(path.join(fixtureHome, '.local'));
+    fs.rmdirSync(fixtureHome);
+  });
 
   const installCommand = sidebarDependencies.buildAgentInstallCommand('cursor');
   const verificationCommand = installCommand.slice(installCommand.indexOf('; ') + 2);

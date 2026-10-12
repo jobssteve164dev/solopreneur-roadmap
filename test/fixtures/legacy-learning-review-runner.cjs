@@ -42,7 +42,7 @@ const crypto = __importStar(require("crypto"));
 const learningReview_js_1 = require("./legacy-learning-review.cjs");
 const learningReviewApply_js_1 = require("./legacy-learning-review-apply.cjs");
 const growthReports_js_1 = require("../../out/growthReports.js");
-const taskReport_js_1 = require("../../out/taskReport.js");
+const taskReport_js_1 = require("./legacy-task-report.cjs");
 const autonomousRuntimeControl_js_1 = require("../../out/autonomousRuntimeControl.js");
 const agentRunPreparation_js_1 = require("../../out/agentRunPreparation.js");
 async function runDatabaseLearningReview(input) {

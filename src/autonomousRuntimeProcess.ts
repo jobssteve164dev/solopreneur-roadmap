@@ -6,23 +6,26 @@ import {
   claimRuntimeLease,
   hasRuntimeLease,
   readCurrentRegisteredShadowDecision,
+  refreshShadowRuntimeState,
   runCognitiveShadowDecisionCycle,
   runShadowDecisionCycle,
+  persistShadowRuntimeState,
   updateRuntimeState
 } from './autonomousRuntime';
-import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
+import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig, refreshCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import { EmbeddedPiAgentEngine } from './piAgentEngine';
-import { initializeAutonomousExecutionRuntime } from './autonomousExecutionRuntime';
-import { startRuntimeControlServer } from './autonomousRuntimeControl';
+import { sendRuntimeControlCommand, startRuntimeControlServer } from './autonomousRuntimeControl';
 import { runtimeBuildId } from './runtimeBuildIdentity';
-import { classifyDiagnosticFailure, recordLocalDiagnosticError } from './localDiagnostics';
+import { classifyDiagnosticFailure, configureLocalDiagnosticPersistence, importLegacyLocalDiagnostics, recordLocalDiagnosticError } from './localDiagnostics';
 import { runPiMainPathRequestFile } from './piMainPathRuntime';
 import { startTelegramBackgroundRuntime } from './telegramRuntime';
 import { UnifiedDataStore } from './db/unifiedDataStore';
 import { createRuntimeDataOperations } from './runtimeDataOperations';
 import { normalizeGlobalDataPathForExtension, refreshProjectRegistry } from './projectRegistry';
-import { enqueueStartupDataMigrations } from './runtimeDatabaseBootstrap';
+import { enqueueStartupDataMigrations, historicalRunOwnerStateStamp, refreshHistoricalRunMigrations } from './runtimeDatabaseBootstrap';
 import { isAutonomousRuntimeDisabled } from './autonomousRuntimeService';
+import { importLegacyRuntimeState } from './runtimeStateMigration';
+import { readRuntimePauseState, writeRuntimePauseState } from './runtimePauseState';
 
 function argumentValue(name: string): string {
   const index = process.argv.indexOf(name);
@@ -43,25 +46,47 @@ async function main(): Promise<void> {
   }
   const deliveryRequestFile = argumentValue('--delivery-request-file');
   if (deliveryRequestFile) {
-    const result = await runPiMainPathRequestFile(globalDataPath, deliveryRequestFile);
-    process.stdout.write(`${JSON.stringify(result)}\n`);
+    const databaseRoot = normalizeGlobalDataPathForExtension(globalDataPath);
+    const runtimeId = crypto.randomUUID();
+    const lease = claimRuntimeLease(databaseRoot, { runtimeId, pid: process.pid });
+    if (lease.acquired) {
+      const store = lease.owner.databaseId || fs.existsSync(path.join(databaseRoot, 'solomap.db'))
+        ? UnifiedDataStore.open(databaseRoot, lease.owner.databaseId || undefined)
+        : new UnifiedDataStore(databaseRoot);
+      const operations = createRuntimeDataOperations(store);
+      try {
+        updateRuntimeState(databaseRoot, runtimeId, { databaseId: store.databaseId });
+        await refreshCognitiveRuntimeConfig(databaseRoot, (request) => operations(request));
+        const result = await runPiMainPathRequestFile(databaseRoot, deliveryRequestFile);
+        process.stdout.write(`${JSON.stringify(result)}\n`);
+      } finally {
+        await operations.close();
+        store.close();
+        updateRuntimeState(databaseRoot, runtimeId, { status: 'stopped' });
+      }
+    } else {
+      await refreshCognitiveRuntimeConfig(databaseRoot);
+      const result = await runPiMainPathRequestFile(databaseRoot, deliveryRequestFile);
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    }
     return;
   }
-  await initializeAutonomousExecutionRuntime({ globalDataPath });
   if (process.argv.includes('--once')) {
     const onceRuntimeId = crypto.randomUUID();
     const lease = claimRuntimeLease(globalDataPath, { runtimeId: onceRuntimeId, pid: process.pid });
     if (!lease.acquired) {
-      await refreshProjectRegistry(globalDataPath);
-      runShadowDecisionCycle({ globalDataPath });
+      await sendRuntimeControlCommand(globalDataPath, 'refresh', { expectedRuntimeId: lease.owner.runtimeId, timeoutMs: 10_000 });
       return;
     }
     const root = normalizeGlobalDataPathForExtension(globalDataPath);
     const store = fs.existsSync(path.join(root, 'solomap.db')) ? UnifiedDataStore.open(root) : new UnifiedDataStore(root);
+    importLegacyRuntimeState(store, root);
     const operations = createRuntimeDataOperations(store);
     try {
       await refreshProjectRegistry(root, undefined, (operation, input) => operations({ operation, input }));
-      runShadowDecisionCycle({ globalDataPath });
+      const decision = runShadowDecisionCycle({ globalDataPath });
+      if (!hasRuntimeLease(globalDataPath, onceRuntimeId, process.pid)) return;
+      await persistShadowRuntimeState(globalDataPath, operations);
     } finally {
       await operations.close(); store.close();
       updateRuntimeState(globalDataPath, onceRuntimeId, { status: 'stopped' });
@@ -77,20 +102,40 @@ async function main(): Promise<void> {
   const dataStore = databaseId || fs.existsSync(path.join(databaseRoot, 'solomap.db'))
     ? UnifiedDataStore.open(databaseRoot, databaseId || undefined)
     : new UnifiedDataStore(databaseRoot);
+  importLegacyRuntimeState(dataStore, databaseRoot);
   updateRuntimeState(globalDataPath, runtimeId, { databaseId: dataStore.databaseId });
   const dataOperations = createRuntimeDataOperations(dataStore);
+  configureLocalDiagnosticPersistence({
+    append: (_root, event) => dataOperations({ operation: 'append_diagnostic_event', input: event as unknown as Record<string, unknown> }).then(() => undefined),
+    read: (_root) => dataOperations({ operation: 'read_diagnostic_events', input: { limit: 250 } }) as Promise<{ items: Record<string, unknown>[] }>
+  }, databaseRoot);
+  await importLegacyLocalDiagnostics(databaseRoot,
+    event => dataOperations({ operation: 'append_diagnostic_event', input: event as unknown as Record<string, unknown> }).then(() => undefined),
+    (source, bytes) => dataStore.captureMigrationSource(source, bytes, { mimeType: 'application/json', encoding: 'utf8', pending: true }),
+    (source, result, error) => result === 'imported'
+      ? dataStore.markMigrationSourceImported(source.identity, source.key)
+      : dataStore.markMigrationSourceConflict(source.identity, source.key, error || 'legacy_diagnostic_invalid'));
+  const runtimeBuild = runtimeBuildId(path.dirname(path.dirname(path.resolve(process.argv[1]))));
+  const registeredRuntime = await dataOperations({ operation: 'register_runtime_instance', input: { runtimeId, pid: process.pid, processStartedAt: Date.parse(lease.owner.startedAt), processBirth: lease.owner.processBirth || '', status: 'running', buildId: runtimeBuild, idempotencyKey: `runtime-register:${runtimeId}` } }) as { generation: number };
+  const heartbeatRuntime = (status: 'running' | 'paused' | 'stopped' | 'failed') => {
+    const heartbeatAt = Date.now();
+    return dataOperations({ operation: 'heartbeat_runtime_instance', input: { runtimeId, generation: registeredRuntime.generation, status, heartbeatAt, idempotencyKey: `runtime-heartbeat:${runtimeId}:${status}:${heartbeatAt}` } });
+  };
+  await refreshCognitiveRuntimeConfig(databaseRoot, dataOperations);
+  await refreshShadowRuntimeState(databaseRoot, dataOperations);
   let outboxRecovery: Promise<unknown> | undefined;
   let startupMigration: Promise<void> | undefined;
+  let historicalOwnerStamp = '';
 
   let stopping = false;
-  let paused = isAutonomousRuntimeDisabled(globalDataPath);
+  let paused = await readRuntimePauseState(dataOperations, isAutonomousRuntimeDisabled(globalDataPath));
   let running = false;
   let rerunRequested = false;
   let timer: NodeJS.Timeout | undefined;
   let activeEngine: EmbeddedPiAgentEngine | undefined;
   let controlServer: { close(): Promise<void> } | undefined;
-  let telegram = paused ? undefined : startTelegramBackgroundRuntime(globalDataPath, dataOperations);
-  if (paused) updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' });
+  let telegram = startTelegramBackgroundRuntime(globalDataPath, dataOperations);
+  if (paused) { updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' }); await heartbeatRuntime('paused'); }
   const stop = () => {
     if (stopping) return;
     stopping = true;
@@ -102,6 +147,7 @@ async function main(): Promise<void> {
       await controlServer?.close();
       await telegramClosed;
       await startupMigration;
+      await heartbeatRuntime('stopped');
       await dataOperations.close();
       await outboxRecovery;
       dataStore?.close();
@@ -113,24 +159,35 @@ async function main(): Promise<void> {
     globalDataPath,
     runtimeId,
     entryPath: path.resolve(process.argv[1]),
-    buildId: runtimeBuildId(path.dirname(path.dirname(path.resolve(process.argv[1])))),
+    buildId: runtimeBuild,
     owner: argumentValue('--runtime-owner') === 'service' ? 'service' : 'fallback',
     onData: dataOperations,
-    onCommand(command) {
+    async onCommand(command) {
       if (command === 'pause' || command === 'drain') {
         paused = true;
+        if (command === 'pause') await writeRuntimePauseState(dataOperations, true);
         activeEngine?.cancel();
         updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' });
+        await heartbeatRuntime('paused');
         if (command === 'drain') setTimeout(stop, 25).unref();
         return { status: 'paused' };
       }
       if (command === 'resume') {
+        await writeRuntimePauseState(dataOperations, false);
         paused = false;
         telegram ||= startTelegramBackgroundRuntime(globalDataPath, dataOperations);
         updateRuntimeState(globalDataPath, runtimeId, { status: 'running' });
+        await heartbeatRuntime('running');
         if (running) rerunRequested = true;
         else runCycleObserved();
         return { status: 'running' };
+      }
+      if (command === 'refresh') {
+        if (!paused) {
+          if (running) rerunRequested = true;
+          else runCycleObserved();
+        }
+        return { status: paused ? 'paused' : 'running' };
       }
       if (command === 'stop') {
         stop();
@@ -140,6 +197,7 @@ async function main(): Promise<void> {
     }
   }); } catch (error) {
     telegram?.close();
+    await heartbeatRuntime('failed').catch(() => undefined);
     dataStore?.close();
     updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
     throw error;
@@ -149,6 +207,7 @@ async function main(): Promise<void> {
   outboxRecovery = dataStore?.recoverOutbox().catch(error => process.stderr.write(`SoloMap Runtime outbox recovery: ${String(error)}\n`));
   startupMigration = (async () => {
     await outboxRecovery;
+    if (!stopping) historicalOwnerStamp = await historicalRunOwnerStateStamp(dataStore, () => !stopping);
     if (!stopping) await enqueueStartupDataMigrations(dataStore, dataOperations, () => !stopping);
   })().catch(error => { process.stderr.write(`SoloMap Runtime memory migration: ${String(error)}\n`); });
   function runCycleObserved(): void {
@@ -169,6 +228,9 @@ async function main(): Promise<void> {
         return;
       }
       await refreshProjectRegistry(globalDataPath, undefined, (operation, input) => dataOperations({ operation, input }));
+      await refreshCognitiveRuntimeConfig(globalDataPath, dataOperations);
+      await startupMigration;
+      if (!stopping) historicalOwnerStamp = await refreshHistoricalRunMigrations(dataStore, dataOperations, () => !stopping, historicalOwnerStamp);
       const current = readCurrentRegisteredShadowDecision(globalDataPath);
       const cognitiveConfig = readCognitiveRuntimeConfig(globalDataPath);
       const cognitiveConfigRevision = cognitiveRuntimeConfigRevision(cognitiveConfig);
@@ -176,7 +238,7 @@ async function main(): Promise<void> {
         agentCli: cognitiveConfig.agentCli,
         model: cognitiveConfig.model,
         configRevision: cognitiveConfigRevision,
-        workingDirectory: path.join(globalDataPath, 'runtime', 'cognitive-work')
+        workingDirectory: globalDataPath
       }) : null;
       activeEngine = engine || undefined;
       const decision = engine
@@ -193,16 +255,15 @@ async function main(): Promise<void> {
         stop();
         return;
       }
-      updateRuntimeState(globalDataPath, runtimeId, {
-        status: 'running',
-        lastDecisionId: decision.decisionId,
-        error: ''
-      });
+      await persistShadowRuntimeState(globalDataPath, dataOperations);
+      updateRuntimeState(globalDataPath, runtimeId, { status: 'running' });
+      await heartbeatRuntime('running');
     } catch (error) {
       recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.cycle', classifyDiagnosticFailure(error));
       if (stopping) return;
       if (paused) {
         updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' });
+        await heartbeatRuntime('paused');
         return;
       }
       if (!hasRuntimeLease(globalDataPath, runtimeId, process.pid)) {
@@ -210,11 +271,13 @@ async function main(): Promise<void> {
         return;
       }
       const fallback = runShadowDecisionCycle({ globalDataPath });
-      updateRuntimeState(globalDataPath, runtimeId, {
-        status: 'running',
-        lastDecisionId: fallback.decisionId,
-        error: error instanceof Error ? error.message : String(error)
-      });
+      if (!hasRuntimeLease(globalDataPath, runtimeId, process.pid)) {
+        stop();
+        return;
+      }
+      await persistShadowRuntimeState(globalDataPath, dataOperations);
+      updateRuntimeState(globalDataPath, runtimeId, { status: 'running' });
+      await heartbeatRuntime('running');
     } finally {
       activeEngine = undefined;
       running = false;

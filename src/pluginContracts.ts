@@ -34,6 +34,7 @@ export interface SolopreneurSettings {
   enhancementStatuses?: SolomapEnhancementStatus[];
   skills?: any[];
   connectors?: any[];
+  capabilityOperations?: any[];
   telegramEnabled?: boolean;
   telegramBotToken?: string;
   telegramBotTokenConfigured?: boolean;
@@ -65,6 +66,10 @@ export interface SolomapScheduledAutomationTask {
   sourceTimePlanProjectPath?: string;
   sourceTimePlanGeneratedAt?: string;
   prompt?: string;
+  internalKind?: 'focus_reminder';
+  focusMinutes?: number;
+  notify?: boolean;
+  sound?: boolean;
 }
 
 export interface SolomapAutomationSettings {
@@ -73,4 +78,12 @@ export interface SolomapAutomationSettings {
   nextScheduledTaskAt?: string;
   scheduledTasks?: SolomapScheduledAutomationTask[];
   triggers?: Partial<Record<SolomapAutomationTrigger, SolomapAutomationTriggerSettings>>;
+  triggerPatches?: Partial<Record<SolomapAutomationTrigger, SolomapAutomationTriggerSettings>>;
+  scheduledTaskMutations?: Array<{
+    operation: 'add' | 'patch' | 'delete';
+    taskId: string;
+    task?: SolomapScheduledAutomationTask;
+    patch?: Partial<SolomapScheduledAutomationTask>;
+    expectedTask?: SolomapScheduledAutomationTask;
+  }>;
 }

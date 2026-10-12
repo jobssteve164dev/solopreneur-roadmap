@@ -4,9 +4,21 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { ensureTaskCheckpointRuntime } = require('../out/taskCheckpoint.js');
+const { ensureTaskCheckpointRuntime } = require('./fixtures/legacy-task-checkpoint.cjs');
+const projectRoot = path.resolve(__dirname, '..');
+const { validateTaskReport } = require('../out/taskReport.js');
 
 const reportBody = () => ({ schemaVersion: 1, summary: '导出已支持筛选，用户可以只保存需要的内容。', unmetRequirements: [], decisions: [], corrections: [], verification: [], commits: [], experienceUsage: [], lessons: [] });
+
+test('experience adoption requires a fixed revision and an explicit evaluability verdict', () => {
+  const valid = reportBody();
+  valid.experienceUsage = [{ experienceId: 'lesson-1', experienceRevision: 3, action: '先审计生产链', result: '回归通过', verdict: 'effective', evidence: ['node --test passed'] }];
+  assert.deepEqual(validateTaskReport(valid, projectRoot).experienceUsage, valid.experienceUsage);
+  for (const usage of [
+    { experienceId: 'lesson-1', action: '采用', result: '未知', verdict: 'unassessed', evidence: [] },
+    { experienceId: 'lesson-1', experienceRevision: 1, action: '采用', result: '未知', verdict: 'successful', evidence: [] }
+  ]) assert.throws(() => validateTaskReport({ ...reportBody(), experienceUsage: [usage] }, projectRoot), /experienceRevision|verdict/);
+});
 
 test('report intake rejects excess prose without truncation or blocking task completion', () => {
   for (const [field, value] of [['summary', '字'.repeat(121)], ['verification', ['字'.repeat(501)]], ['lessons', ['x'.repeat(501)]], ['extra', 'x'.repeat(2000)]]) {

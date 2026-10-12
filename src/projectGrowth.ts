@@ -1,9 +1,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { execFile, execFileSync } from 'child_process';
+import { randomUUID } from 'crypto';
 import { promisify } from 'util';
 import { CsvStore } from './db/csvStore';
-import { SqliteStore } from './db/sqliteStore';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
@@ -29,13 +29,10 @@ export interface ProjectGrowthScanOptions {
   globalDataPath?: string;
 }
 
-async function readProjectRunEntriesDuringMigration(projectPath: string, extensionPath: string, globalDataPath: string): Promise<RunIndexEntry[]> {
-  const entries = await sendRuntimeDataRequest<RunIndexEntry[]>(globalDataPath, { operation: 'read_project_run_indexes', input: { root: projectPath } });
-  if (entries.length) return entries;
-  const legacyPath = path.join(projectPath, '.solopreneur', 'project_journal.db');
-  if (!fs.existsSync(legacyPath)) return entries;
-  const legacy = new SqliteStore(legacyPath, extensionPath);
-  try { await legacy.initJournalReadOnly(); return legacy.getRunIndexEntries(); } finally { legacy.close(); }
+async function readProjectRunEntries(projectPath: string, globalDataPath: string): Promise<RunIndexEntry[]> {
+  return sendRuntimeDataRequest<RunIndexEntry[]>(globalDataPath, {
+    operation: 'read_project_run_indexes', input: { root: projectPath }
+  });
 }
 
 export interface ProjectGrowthSummaryNode {
@@ -2203,7 +2200,7 @@ export function buildProjectGrowthSnapshot(
   const startedAt = Date.now();
   const now = options.now || new Date();
   const nowIso = now.toISOString();
-  const snapshotId = `growth-${now.getTime().toString(36)}`;
+  const snapshotId = `growth-${now.getTime().toString(36)}-${randomUUID()}`;
   const gitHead = readGitHead(projectPath);
   const files = walkProjectFiles(projectPath, options.maxFiles || 4000);
   const nodes = new Map<string, GrowthNodeRecord>();
@@ -2315,15 +2312,17 @@ export async function refreshProjectGrowthSnapshot(
     await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
     const before = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: 1 } });
     const previous = before.latest;
+    const requestId = randomUUID();
+    const reservation = await sendRuntimeDataRequest<{ requestId: string; generation: number }>(globalDataPath, { operation: 'reserve_project_growth_refresh', input: { root: projectPath, requestId } });
     const roadmapNodes = new CsvStore(path.join(projectPath, '.solopreneur', 'roadmap.csv')).readNodes();
-    const runEntries = await readProjectRunEntriesDuringMigration(projectPath, extensionPath, globalDataPath);
+    const runEntries = await readProjectRunEntries(projectPath, globalDataPath);
     const snapshot = buildProjectGrowthSnapshot(projectPath, roadmapNodes, runEntries, options);
     await finalizeProjectGrowthSnapshot(snapshot, projectPath, extensionPath, roadmapNodes, runEntries);
-    await sendRuntimeDataRequest(globalDataPath, { operation: 'write_project_growth', input: { root: projectPath, data: snapshot, idempotencyKey: `growth:${snapshot.snapshot.id}` } });
+    await sendRuntimeDataRequest(globalDataPath, { operation: 'commit_project_growth_refresh', input: { root: projectPath, ...reservation, data: snapshot } });
     const stored = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: options.historyLimit || 12 } });
     if (!stored.latest) throw new Error('growth_snapshot_commit_missing');
     const view = buildProjectGrowthViewModel(stored.latest, { previous, history: stored.history });
-    projectGrowthViewCache.set(projectPath, view);
+    projectGrowthViewCache.set(projectGrowthCacheKey(globalDataPath, projectPath), view);
     return view;
   }
 }
@@ -2333,53 +2332,65 @@ export async function getProjectGrowthView(
   extensionPath: string,
   options: ProjectGrowthScanOptions = {}
 ): Promise<ProjectGrowthViewModel> {
-  if (!options.forceRefresh && projectGrowthViewCache.has(projectPath)) {
-    const cached = projectGrowthViewCache.get(projectPath)!;
-    const coverage = loadProjectCoverageSnapshot(projectPath);
-    return { ...cached, coverage: { ...cached.coverage, versionState: coverage ? coverageVersionState(projectPath, coverage) : 'unknown' } };
-  }
   const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath || '', projectPath);
   await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
   {
     const stored = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: options.historyLimit || 12 } });
+    const cacheKey = projectGrowthCacheKey(globalDataPath, projectPath);
+    const cached = projectGrowthViewCache.get(cacheKey);
+    if (!options.forceRefresh && cached && stored.latest?.snapshot.id === cached.snapshotId) {
+      const coverage = loadProjectCoverageSnapshot(projectPath);
+      return { ...cached, coverage: { ...cached.coverage, versionState: coverage ? coverageVersionState(projectPath, coverage) : 'unknown' } };
+    }
     if (options.forceRefresh || (options.refreshIfMissing !== false && !stored.latest)) {
       const previous = stored.latest;
+      const requestId = randomUUID();
+      const reservation = await sendRuntimeDataRequest<{ requestId: string; generation: number }>(globalDataPath, { operation: 'reserve_project_growth_refresh', input: { root: projectPath, requestId } });
       const roadmapNodes = new CsvStore(path.join(projectPath, '.solopreneur', 'roadmap.csv')).readNodes();
-      const runEntries = await readProjectRunEntriesDuringMigration(projectPath, extensionPath, globalDataPath);
+      const runEntries = await readProjectRunEntries(projectPath, globalDataPath);
       const snapshot = buildProjectGrowthSnapshot(projectPath, roadmapNodes, runEntries, {
         ...options,
         scanReason: options.scanReason || 'query_refresh'
       });
       await finalizeProjectGrowthSnapshot(snapshot, projectPath, extensionPath, roadmapNodes, runEntries);
-      await sendRuntimeDataRequest(globalDataPath, { operation: 'write_project_growth', input: { root: projectPath, data: snapshot, idempotencyKey: `growth:${snapshot.snapshot.id}` } });
+      await sendRuntimeDataRequest(globalDataPath, { operation: 'commit_project_growth_refresh', input: { root: projectPath, ...reservation, data: snapshot } });
       const committed = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: options.historyLimit || 12 } });
       if (!committed.latest) throw new Error('growth_snapshot_commit_missing');
       const view = buildProjectGrowthViewModel(committed.latest, { previous, history: committed.history });
-      projectGrowthViewCache.set(projectPath, view);
+      projectGrowthViewCache.set(cacheKey, view);
       return view;
     }
     const latest = stored.latest;
     if (!latest) {
       const view = emptyProjectGrowthViewModel();
       view.projectPath = projectPath;
-      projectGrowthViewCache.set(projectPath, view);
+      const coverage = loadProjectCoverageSnapshot(projectPath);
+      view.coverage.versionState = coverage ? coverageVersionState(projectPath, coverage) : 'unknown';
+      projectGrowthViewCache.set(cacheKey, view);
       return view;
     }
     const history = stored.history;
     const previous = history.find(item => item.snapshot.id !== latest.snapshot.id) || null;
     const view = buildProjectGrowthViewModel(latest, { previous, history });
-    projectGrowthViewCache.set(projectPath, view);
+    projectGrowthViewCache.set(cacheKey, view);
     return view;
   }
 }
 
 const projectGrowthViewCache = new Map<string, ProjectGrowthViewModel>();
 
-export function getCachedProjectGrowthView(projectPath: string): ProjectGrowthViewModel | null {
-  return projectGrowthViewCache.get(projectPath) || null;
+function projectGrowthCacheKey(globalDataPath: string, projectPath: string): string {
+  return `${normalizeGlobalDataPathForExtension(globalDataPath, projectPath)}\0${projectPath}`;
 }
 
-export function clearProjectGrowthViewCache(projectPath = ''): void {
-  if (projectPath) projectGrowthViewCache.delete(projectPath);
+export function getCachedProjectGrowthView(globalDataPath: string, projectPath: string): ProjectGrowthViewModel | null {
+  return projectGrowthViewCache.get(projectGrowthCacheKey(globalDataPath, projectPath)) || null;
+}
+
+export function clearProjectGrowthViewCache(projectPath = '', globalDataPath = ''): void {
+  if (projectPath && globalDataPath) projectGrowthViewCache.delete(projectGrowthCacheKey(globalDataPath, projectPath));
+  else if (projectPath) {
+    for (const key of projectGrowthViewCache.keys()) if (key.endsWith(`\0${projectPath}`)) projectGrowthViewCache.delete(key);
+  }
   else projectGrowthViewCache.clear();
 }

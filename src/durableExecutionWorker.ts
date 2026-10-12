@@ -2,11 +2,9 @@ import * as childProcess from 'child_process';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 
-import { readProjectAutonomyAuthorization } from './projectAutonomyAuthorization';
 
 interface WorkerRequest {
   statePath: string;
-  authorizationFile: string;
   projectPath: string;
   authorizationEpoch: number;
   timeoutMs: number;
@@ -67,12 +65,6 @@ async function main(): Promise<void> {
     return;
   }
   let state = readJson<WorkerState>(request.statePath);
-  const grant = readProjectAutonomyAuthorization(request.authorizationFile, request.projectPath);
-  if (!grant.enabled || grant.epoch !== request.authorizationEpoch) {
-    writeJson(request.statePath, { ...state, status: 'cancelled', terminationReason: 'authorization_revoked', finishedAt: new Date().toISOString() });
-    return;
-  }
-
   const stdoutFd = fs.openSync(String(state.stdoutPath), 'a', 0o600);
   const stderrFd = fs.openSync(String(state.stderrPath), 'a', 0o600);
   const child = childProcess.spawn(request.launch.command, request.launch.args, {
@@ -96,12 +88,9 @@ async function main(): Promise<void> {
     force.unref();
   };
   const interval = setInterval(() => {
-    try {
-      const current = readProjectAutonomyAuthorization(request.authorizationFile, request.projectPath);
-      if (fs.existsSync(request.cancelPath)) stopChild('cancelled_by_user');
-      else if (!current.enabled || current.epoch !== request.authorizationEpoch) stopChild('authorization_revoked');
-    } catch {
-      stopChild('state_unavailable');
+    if (fs.existsSync(request.cancelPath)) {
+      const requested = fs.readFileSync(request.cancelPath, 'utf8').trim();
+      stopChild(requested === 'authorization_revoked' ? requested : 'cancelled_by_user');
     }
   }, 100);
   interval.unref();

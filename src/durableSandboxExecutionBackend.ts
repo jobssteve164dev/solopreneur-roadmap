@@ -279,7 +279,6 @@ export class DurableSandboxExecutionBackend {
     writeJson(statePath, state);
     writeJson(requestPath, {
       statePath,
-      authorizationFile: this.authorization.filePath,
       projectPath: prepared.input.projectPath,
       authorizationEpoch: prepared.input.authorizationEpoch,
       timeoutMs: prepared.input.timeoutMs,
@@ -383,6 +382,9 @@ export class DurableSandboxExecutionBackend {
     while (true) {
       const state = this.readState(executionId);
       if (state.status !== 'running') return state;
+      if (!this.authorization.isCurrent(state.projectPath, state.authorizationEpoch) && !fs.existsSync(state.cancelPath)) {
+        fs.writeFileSync(state.cancelPath, 'authorization_revoked', { encoding: 'utf8', flag: 'a', mode: 0o600 });
+      }
       if (state.workerPid && !processAlive(state.workerPid)) return this.readState((await this.resume(executionId)).executionId);
       await new Promise(resolve => setTimeout(resolve, this.pollIntervalMs));
     }

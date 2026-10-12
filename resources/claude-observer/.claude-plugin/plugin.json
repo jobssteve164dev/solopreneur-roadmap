@@ -1,0 +1,6 @@
+{
+  "name": "solomap-observer",
+  "version": "1.0.0",
+  "description": "Keep SoloMap conversations available after each reply.",
+  "author": { "name": "SoloMap" }
+}

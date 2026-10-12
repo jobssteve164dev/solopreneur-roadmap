@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as childProcess from 'child_process';
-import { readWindowsProcessBirthMarker } from '../processIdentity.js';
+import { isProcessOwnerAlive, readWindowsProcessBirthMarker } from '../processIdentity.js';
 import { AsyncLocalStorage } from 'async_hooks';
 import { gzipSync, gunzipSync } from 'zlib';
 import { DiskDatabase, SqlValue } from './diskDatabase';
@@ -13,10 +13,11 @@ import { agentReadableObject, canAgentRead } from '../dataAuthorization';
 import { unifiedSchemaMigrations, runtimeEntityDefinitions as entityDefinitions } from './unifiedSchemaMigrations';
 import type { IntelligenceConversation } from '../intelligenceChat';
 import type { GrowthSnapshotData, GrowthSnapshotRecord } from './types';
-import type { AgentConversation, RunIndexEntry, RunIndexFile, RunIndexRecord, RunIndexSignal, RunImpactRecord } from './types';
+import type { AgentConversation, RoadmapNode, RunIndexEntry, RunIndexFile, RunIndexRecord, RunIndexSignal, RunImpactRecord } from './types';
 import type { PrepareRunInput, RunState, RunCheckpointInput, RunOutputFinalizationInput, RunLogInput, RunConsumerInput, RunConsumerLease, RunSettlementInput, RunEffect, RunEffectReference } from '../runLifecycleTypes';
 import { createSessionBindingValue, appendSessionBindingValue, confirmSessionBindingValue, assertVersion2Binding, getResumableSessionValue } from '../sessionIdentity';
 import { maintenanceRunKinds } from '../runLifecycleTypes';
+import { replaceRegularFileIfUnchanged } from '../safeFileReplace';
 import type { NativeSessionBinding, SessionBindingSeed, SessionBindingRevisionInput } from '../sessionIdentity';
 import { normalizeProjectsForStorage, projectName, ProjectRegistryFile, ProjectRegistryPatch, ProjectRegistrySnapshot, ProjectRegistryBootstrap } from '../projectRegistry';
 import { workspaceChanges, workspaceDocumentPurpose, WorkspaceSnapshot, gitEvidenceDocumentPurpose, RunGitEvidence } from '../runWorkspace';
@@ -26,12 +27,15 @@ import { parseStepMemorySource } from '../stepMemorySource.js';
 import { digestToRunIndex, executionQueryTokens, parseRunDigestSource, RunDigestReference } from '../runDigestData.js';
 import type { RunDigest, ExecutionExperienceQuery } from '../runDigest';
 import type { LearningOverview } from '../learningLedger';
-import { isTrashOrLocalPrivate, isUsefulVerificationSignal } from '../learningQuality.js';
+import { isTrashOrLocalPrivate } from '../learningQuality.js';
 import { extractTokenUsageFromOutput, normalizeTokenUsage } from '../tokenUsage';
 import { reportFiles } from '../growthReports.js';
 import { validateDirectGlobalPromptReview } from '../learningReviewApply.js';
 import { legacyReviewSourceBody } from '../learningReview.js';
 import type { ReviewManifest, ReviewSource } from '../learningReview.js';
+import { ClaudeNativeEvent, validateClaudeNativeEvent, claudeNativeEventPurpose } from '../claudeNativeEvent';
+import { parseExternalMemoryEntry } from '../externalMemory';
+import { parseRoadmapCsv, serializeRoadmapNodes } from './csvStore';
 
 export interface FlowSnapshot {
   projectId: string;
@@ -115,6 +119,24 @@ export interface WriteReceipt {
   status: 'committed';
   pendingEffects: string[];
 }
+export interface CapabilityOperation {
+  operationId: string;
+  ordinal: number;
+  kind: 'skill' | 'mcp' | 'enhancement';
+  action: 'install' | 'upgrade' | 'enable' | 'disable' | 'uninstall';
+  targetId: string | null;
+  requestKey: string;
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'stale';
+  resultPath: string | null;
+  runId: string | null;
+  expectedRevision: number;
+  sourceIntent: Record<string, any>;
+  resultIntegrationId: string | null;
+  resultRevision: number | null;
+  error: string;
+  createdAt: number;
+  updatedAt: number;
+}
 interface ImportedSource { identity: string; key: string; hash: string }
 interface ContentChunk { offset: number; byteLength: number; storedOffset: number; storedByteLength: number; sha256: string; compressed: boolean }
 export interface ContentPage {
@@ -131,6 +153,42 @@ export interface ContentPage {
   cursor: string | null;
 }
 
+export interface RoadmapSnapshot {
+  projectId: string;
+  bindingId: string;
+  revision: number;
+  acceptedHash: string;
+  generation: number;
+  projectedGeneration: number;
+  pending: boolean;
+  nodes: RoadmapNode[];
+}
+
+type PortableCell = string | number | null | { bytes: string } | { integer: string };
+interface PortableProjectArchive {
+  schemaVersion: 1;
+  projectId: string;
+  sourceSchemaVersion: number;
+  tables: Array<{ name: string; rows: Array<Record<string, PortableCell>> }>;
+}
+
+function quoteSqlIdentifier(value: string): string {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(value)) throw new Error('invalid_sql_identifier');
+  return `"${value}"`;
+}
+
+function encodePortableCell(value: SqlValue): PortableCell {
+  if (value instanceof Uint8Array) return { bytes: Buffer.from(value).toString('base64') };
+  if (typeof value === 'bigint') return { integer: value.toString() };
+  return value;
+}
+
+function decodePortableCell(value: PortableCell): SqlValue {
+  if (value && typeof value === 'object' && 'bytes' in value) return Buffer.from(value.bytes, 'base64');
+  if (value && typeof value === 'object' && 'integer' in value) return BigInt(value.integer);
+  return value;
+}
+
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
   if (value !== null && typeof value === 'object') {
@@ -141,12 +199,105 @@ function canonical(value: unknown): string {
   return encoded;
 }
 function digest(data: Uint8Array | string): string { return crypto.createHash('sha256').update(data).digest('hex'); }
+function digestFile(file: string): { sha256: string; bytes: number } {
+  const hash = crypto.createHash('sha256'), buffer = Buffer.allocUnsafe(8 * 1024 * 1024);
+  const descriptor = fs.openSync(file, 'r'); let bytes = 0;
+  try {
+    for (;;) {
+      const read = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+      if (!read) break;
+      hash.update(buffer.subarray(0, read)); bytes += read;
+    }
+  } finally { fs.closeSync(descriptor); }
+  return { sha256: hash.digest('hex'), bytes };
+}
+function inspectImmutableDatabase<T>(file: string, inspect: (database: DiskDatabase) => T): T {
+  let database: DiskDatabase | undefined;
+  try {
+    database = new DiskDatabase(file, { readOnly: true, immutable: true });
+    return inspect(database);
+  } finally { database?.close(); }
+}
+function stablePortableUuid(seed: string): string {
+  const value = digest(seed).slice(0, 32).split('');
+  value[12] = '4'; value[16] = ((parseInt(value[16], 16) & 3) | 8).toString(16);
+  return `${value.slice(0, 8).join('')}-${value.slice(8, 12).join('')}-${value.slice(12, 16).join('')}-${value.slice(16, 20).join('')}-${value.slice(20).join('')}`;
+}
+function portableContentReferences(value: unknown): string[] {
+  const references: string[] = [];
+  const visit = (item: unknown): void => {
+    if (Array.isArray(item)) { item.forEach(visit); return; }
+    if (!item || typeof item !== 'object') return;
+    for (const [key, child] of Object.entries(item)) {
+      const single = key === 'contentId' || key.endsWith('ContentId') || key === 'content_id' || key.endsWith('_content_id');
+      const multiple = key.endsWith('ContentIds') || key.endsWith('_content_ids');
+      if (single && typeof child === 'string') references.push(child);
+      else if (multiple && Array.isArray(child)) child.forEach(value => { if (typeof value === 'string') references.push(value); });
+      else if (key === 'sourceContents' && child && typeof child === 'object' && !Array.isArray(child)) Object.values(child).forEach(value => { if (typeof value === 'string') references.push(value); });
+      else visit(child);
+    }
+  };
+  visit(value);
+  return references;
+}
+function remapPortableContentReferences(value: unknown, remap: Map<string, string>): unknown {
+  if (Array.isArray(value)) return value.map(item => remapPortableContentReferences(item, remap));
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => {
+    const single = key === 'contentId' || key.endsWith('ContentId') || key === 'content_id' || key.endsWith('_content_id');
+    const multiple = key.endsWith('ContentIds') || key.endsWith('_content_ids');
+    if (single && typeof child === 'string') return [key, remap.get(child) || child];
+    if (multiple && Array.isArray(child)) return [key, child.map(item => typeof item === 'string' ? remap.get(item) || item : item)];
+    if (key === 'sourceContents' && child && typeof child === 'object' && !Array.isArray(child)) {
+      return [key, Object.fromEntries(Object.entries(child).map(([name, item]) => [name, typeof item === 'string' ? remap.get(item) || item : item]))];
+    }
+    return [key, remapPortableContentReferences(child, remap)];
+  }));
+}
+
+function mergeRoadmapNodes(base: RoadmapNode[], database: RoadmapNode[], file: RoadmapNode[]): { nodes: RoadmapNode[]; conflicts: string[] } {
+  const fields: Array<keyof RoadmapNode> = ['title', 'description', 'stage', 'dependencies', 'agentCli', 'agentPrompt', 'status', 'createdAt', 'completedAt'];
+  const baseById = new Map(base.map(node => [node.id, node]));
+  const databaseById = new Map(database.map(node => [node.id, node]));
+  const fileById = new Map(file.map(node => [node.id, node]));
+  const baseOrder = base.map(node => node.id), databaseOrder = database.map(node => node.id), fileOrder = file.map(node => node.id);
+  const databaseOrderChanged = canonical(databaseOrder) !== canonical(baseOrder), fileOrderChanged = canonical(fileOrder) !== canonical(baseOrder);
+  const order = fileOrderChanged ? fileOrder : databaseOrderChanged ? databaseOrder : baseOrder;
+  const nodes: RoadmapNode[] = [], conflicts: string[] = [];
+  if (databaseOrderChanged && fileOrderChanged && canonical(databaseOrder) !== canonical(fileOrder)) conflicts.push('__order__');
+  for (const id of new Set([...baseById.keys(), ...order])) {
+    const original = baseById.get(id), left = databaseById.get(id), right = fileById.get(id);
+    if (!original) {
+      if (left && right && canonical(left) !== canonical(right)) conflicts.push(`${id}.*`);
+      else if (left || right) nodes.push({ ...(left || right)! });
+      continue;
+    }
+    if (!left || !right) {
+      const remaining = left || right;
+      if (!remaining) continue;
+      if (canonical(remaining) === canonical(original)) continue;
+      conflicts.push(`${id}.*`); continue;
+    }
+    const merged = { ...original };
+    for (const field of fields) {
+      const leftChanged = left[field] !== original[field], rightChanged = right[field] !== original[field];
+      if (leftChanged && rightChanged && left[field] !== right[field]) conflicts.push(`${id}.${field}`);
+      else if (leftChanged) (merged as unknown as Record<string, unknown>)[field] = left[field];
+      else if (rightChanged) (merged as unknown as Record<string, unknown>)[field] = right[field];
+    }
+    nodes.push(merged);
+  }
+  const byId = new Map(nodes.map(node => [node.id, node]));
+  return { nodes: order.map(id => byId.get(id)).filter((node): node is RoadmapNode => Boolean(node)), conflicts: [...new Set(conflicts)].sort() };
+}
 
 /** Authoritative domain operations. Only Runtime exposes this owner to other processes. */
 export class UnifiedDataStore {
   private readonly capabilityReadEpoch = crypto.randomUUID();
   private capabilityLegacySkillsPending: boolean | undefined;
   private readonly projectRegistrations = new Map<string, Promise<{ projectId: string; locationId: string; identityPath: string }>>();
+  private readonly backupFlights = new Map<string, { inputHash: string; promise: Promise<{ destination: string; databaseId: string; sha256: string; bytes: number }> }>();
+  private readonly backupDestinationTails = new Map<string, Promise<void>>();
   public get databaseId(): string {
     return String(this.rows("SELECT value FROM database_meta WHERE key='database_id'")[0].value);
   }
@@ -242,6 +393,11 @@ export class UnifiedDataStore {
     const row = this.rows('SELECT * FROM migration_jobs WHERE id=?', [jobId])[0];
     if (!row) throw new Error('migration_job_missing');
     return { jobId: String(row.id), status: row.status as MigrationJob['status'], args: JSON.parse(String(row.args_json)), progress: JSON.parse(String(row.progress_json)), error: row.error === null ? null : String(row.error) };
+  }
+  public readMigrationJobStatus(jobId: string): Pick<MigrationJob, 'jobId' | 'status' | 'error'> {
+    const row = this.rows('SELECT id,status,error FROM migration_jobs WHERE id=?', [jobId])[0];
+    if (!row) throw new Error('migration_job_missing');
+    return { jobId: String(row.id), status: row.status as MigrationJob['status'], error: row.error === null ? null : String(row.error) };
   }
   public pendingMigrationJobs(): MigrationJob[] {
     return this.rows("SELECT id FROM migration_jobs WHERE status IN ('queued','running','interrupted') ORDER BY created_at,id").map(row => this.readMigrationJob(String(row.id)));
@@ -750,6 +906,12 @@ export class UnifiedDataStore {
     for (const [key, value] of Object.entries(object.data)) {
       if (value && (key.endsWith('_content_id') || key === 'content_id')) object.data[key === 'content_id' ? 'content' : key.slice(0, -3)] = this.decodedContent(String(value));
     }
+    if (object.kind === 'report' && typeof object.data.content === 'string') {
+      try {
+        const report = JSON.parse(object.data.content);
+        if (report && typeof report.summary === 'string') object.data.summary = report.summary;
+      } catch { /* Validation metadata retains malformed report bodies for diagnosis. */ }
+    }
     return object;
   }
   public readMetadata(ref: string, revision?: number): DataObject {
@@ -769,6 +931,11 @@ export class UnifiedDataStore {
       const refs = this.rows('SELECT source_id,event_id,event_revision FROM lesson_event_refs WHERE lesson_id=? AND lesson_revision=? ORDER BY ordinal', [result.objectId, result.revision]);
       const ids: string[] = result.data.source_event_ids_json ? JSON.parse(String(result.data.source_event_ids_json)) : [];
       result.data.event_refs = refs.length ? refs.map(row => ({ sourceId: String(row.source_id), objectId: row.event_id === null ? null : String(row.event_id), revision: row.event_revision === null ? null : Number(row.event_revision) })) : ids.map(sourceId => ({ sourceId, objectId: null, revision: null }));
+    }
+    if (result.kind === 'policy_use') {
+      const policy = this.current(String(result.data.policy_id), false);
+      const lesson = result.data.lesson_id ? this.current(String(result.data.lesson_id), false) : null;
+      result.projection = { currentPolicyStatus: String(policy.data.status || ''), currentLessonStatus: lesson ? String(lesson.data.status || '') : null };
     }
     const reviewControl = result.kind === 'review_batch' ? this.rows('SELECT input_content_id FROM learning_review_controls WHERE batch_id=?', [result.objectId])[0] : null;
     if (reviewControl) {
@@ -842,6 +1009,140 @@ export class UnifiedDataStore {
   public write(input: DataWrite): WriteReceipt {
     return this.writeMutation(input);
   }
+  private capabilityOperation(row: Record<string, SqlValue>): CapabilityOperation {
+    return {
+      operationId: String(row.id), ordinal: Number(row.ordinal), kind: row.kind as CapabilityOperation['kind'],
+      action: row.action as CapabilityOperation['action'], targetId: row.target_id === null ? null : String(row.target_id),
+      requestKey: String(row.request_key), status: row.status as CapabilityOperation['status'],
+      resultPath: row.result_path === null ? null : String(row.result_path), runId: row.run_id === null ? null : String(row.run_id),
+      expectedRevision: Number(row.expected_revision), resultIntegrationId: row.result_integration_id === null ? null : String(row.result_integration_id),
+      sourceIntent: JSON.parse(String(row.source_intent_json || '{}')),
+      resultRevision: row.result_revision === null ? null : Number(row.result_revision), error: String(row.error || ''),
+      createdAt: Number(row.created_at), updatedAt: Number(row.updated_at)
+    };
+  }
+  public beginCapabilityOperation(input: { operationId: string; kind: string; action: string; targetId?: string; requestKey: string; expectedRevision?: number; sourceIntent?: Record<string, unknown> }): CapabilityOperation {
+    if (!/^[a-f0-9-]{36}$/.test(input.operationId) || !['skill', 'mcp', 'enhancement'].includes(input.kind)) throw new Error('capability_operation_invalid');
+    if (!['install', 'upgrade', 'enable', 'disable', 'uninstall'].includes(input.action) || !input.requestKey.trim()) throw new Error('capability_operation_invalid');
+    if (input.targetId !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(input.targetId)) throw new Error('capability_identity_invalid');
+    const expectedRevision = Number(input.expectedRevision || 0);
+    const sourceIntent = input.sourceIntent && typeof input.sourceIntent === 'object' && !Array.isArray(input.sourceIntent) ? input.sourceIntent : {};
+    const sourceIntentJson = canonical(sourceIntent);
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) throw new Error('revision_conflict');
+    return this.transaction(() => {
+      const previous = this.rows('SELECT * FROM capability_operations WHERE request_key=? OR id=?', [input.requestKey, input.operationId])[0];
+      if (previous) {
+        const operation = this.capabilityOperation(previous);
+        if (operation.operationId !== input.operationId || operation.kind !== input.kind || operation.action !== input.action || operation.targetId !== (input.targetId || null) || operation.expectedRevision !== expectedRevision || canonical(operation.sourceIntent) !== sourceIntentJson) throw new Error('idempotency_conflict');
+        return operation;
+      }
+      const physicalLifecycle = ['install', 'upgrade', 'uninstall'].includes(input.action);
+      const activeUnknownLifecycle = physicalLifecycle
+        ? this.rows("SELECT id FROM capability_operations WHERE kind=? AND target_id IS NULL AND action IN ('install','upgrade','uninstall') AND status IN ('pending','running') ORDER BY ordinal LIMIT 1", [input.kind])[0]
+        : undefined;
+      if (activeUnknownLifecycle) throw new Error('capability_operation_in_progress');
+      if (physicalLifecycle && !input.targetId) {
+        const activeKindLifecycle = this.rows("SELECT id FROM capability_operations WHERE kind=? AND action IN ('install','upgrade','uninstall') AND status IN ('pending','running') ORDER BY ordinal LIMIT 1", [input.kind])[0];
+        if (activeKindLifecycle) throw new Error('capability_operation_in_progress');
+      }
+      if (input.targetId && physicalLifecycle) {
+        const activeLifecycle = this.rows("SELECT o.id,o.action FROM capability_physical_operation_heads h JOIN capability_operations o ON o.id=h.operation_id WHERE h.kind=? AND h.target_id=? AND o.status IN ('pending','running')", [input.kind, input.targetId])[0];
+        if (activeLifecycle) throw new Error(activeLifecycle.action === 'uninstall' ? 'capability_uninstall_in_progress' : 'capability_operation_in_progress');
+      }
+      if (input.targetId && !physicalLifecycle) {
+        const activeUninstall = this.rows("SELECT o.id FROM capability_physical_operation_heads h JOIN capability_operations o ON o.id=h.operation_id WHERE h.kind=? AND h.target_id=? AND o.action='uninstall' AND o.status IN ('pending','running')", [input.kind, input.targetId])[0];
+        if (activeUninstall) throw new Error('capability_uninstall_in_progress');
+      }
+      const now = Date.now();
+      this.db.run('INSERT INTO capability_operations(id,kind,action,target_id,request_key,status,expected_revision,created_at,updated_at,source_intent_json) VALUES(?,?,?,?,?,?,?,?,?,?)', [input.operationId, input.kind, input.action, input.targetId || null, input.requestKey, 'pending', expectedRevision, now, now, sourceIntentJson]);
+      const created = this.rows('SELECT * FROM capability_operations WHERE id=?', [input.operationId])[0];
+      if (input.targetId) this.db.run('INSERT INTO capability_operation_heads(kind,target_id,operation_id,operation_ordinal) VALUES(?,?,?,?) ON CONFLICT(kind,target_id) DO UPDATE SET operation_id=excluded.operation_id,operation_ordinal=excluded.operation_ordinal WHERE excluded.operation_ordinal>capability_operation_heads.operation_ordinal', [input.kind, input.targetId, input.operationId, created.ordinal]);
+      if (input.targetId && physicalLifecycle) this.db.run('INSERT INTO capability_physical_operation_heads(kind,target_id,operation_id,operation_ordinal) VALUES(?,?,?,?) ON CONFLICT(kind,target_id) DO UPDATE SET operation_id=excluded.operation_id,operation_ordinal=excluded.operation_ordinal WHERE excluded.operation_ordinal>capability_physical_operation_heads.operation_ordinal', [input.kind, input.targetId, input.operationId, created.ordinal]);
+      return this.capabilityOperation(created);
+    });
+  }
+  public attachCapabilityOperation(input: { operationId: string; resultPath: string; runId?: string }): CapabilityOperation {
+    if (!input.operationId || !path.isAbsolute(input.resultPath)) throw new Error('capability_operation_invalid');
+    return this.transaction(() => {
+      const row = this.rows('SELECT * FROM capability_operations WHERE id=?', [input.operationId])[0];
+      if (!row) throw new Error('capability_operation_missing');
+      const operation = this.capabilityOperation(row);
+      if (!['pending', 'running'].includes(operation.status)) {
+        if (operation.resultPath !== input.resultPath || operation.runId !== (input.runId || null)) throw new Error('capability_operation_settled');
+        return operation;
+      }
+      if ((operation.resultPath && operation.resultPath !== input.resultPath) || (operation.runId && operation.runId !== (input.runId || null))) throw new Error('capability_operation_identity_conflict');
+      this.db.run("UPDATE capability_operations SET status='running',result_path=?,run_id=?,updated_at=? WHERE id=?", [input.resultPath, input.runId || null, Date.now(), input.operationId]);
+      return this.capabilityOperation(this.rows('SELECT * FROM capability_operations WHERE id=?', [input.operationId])[0]);
+    });
+  }
+  public readCapabilityOperations(input: { activeOnly?: boolean; operationId?: string; recentLimit?: number } = {}): CapabilityOperation[] {
+    if (input.operationId) return this.rows('SELECT * FROM capability_operations WHERE id=?', [input.operationId]).map(row => this.capabilityOperation(row));
+    if (input.activeOnly) return this.rows("SELECT * FROM capability_operations WHERE status IN ('pending','running') ORDER BY ordinal").map(row => this.capabilityOperation(row));
+    const limit = input.recentLimit === undefined ? 0 : Math.max(1, Math.min(500, Number(input.recentLimit || 100)));
+    if (!limit) return this.rows('SELECT * FROM capability_operations ORDER BY ordinal').map(row => this.capabilityOperation(row));
+    const active = this.rows("SELECT * FROM capability_operations WHERE status IN ('pending','running') ORDER BY ordinal");
+    const recent = this.rows("SELECT * FROM capability_operations WHERE status NOT IN ('pending','running') ORDER BY ordinal DESC LIMIT ?", [limit]).reverse();
+    return [...active, ...recent].sort((left, right) => Number(left.ordinal) - Number(right.ordinal)).map(row => this.capabilityOperation(row));
+  }
+  public readCapabilityOperationRunState(input: { operationId: string }): { attached: boolean; terminal: boolean; status: string; exitCode: number | null } {
+    const row = this.rows('SELECT o.run_id,r.status,r.exit_code FROM capability_operations o LEFT JOIN runs r ON r.id=o.run_id WHERE o.id=?', [input.operationId])[0];
+    if (!row) throw new Error('capability_operation_missing');
+    const attached = row.run_id !== null;
+    const status = row.status === null ? '' : String(row.status);
+    return { attached, terminal: attached && Boolean(status) && !['Preparing', 'Running', 'Turn Started'].includes(status), status, exitCode: row.exit_code === null ? null : Number(row.exit_code) };
+  }
+  public readCapabilityOperationResult(input: { operationId: string }): { objectId: string; revision: number; bytes: string; hash: string; mimeType: string } | null {
+    const row = this.rows('SELECT rc.project_id,rc.execution_log_id,rc.generation FROM capability_operations o JOIN run_control rc ON rc.run_id=o.run_id WHERE o.id=?', [input.operationId])[0];
+    if (!row) return null;
+    return this.readRunDocument(String(row.project_id), Number(row.execution_log_id), `maintenance_result_${Number(row.generation)}`);
+  }
+  public failCapabilityOperation(input: { operationId: string; error: string }): CapabilityOperation {
+    return this.transaction(() => {
+      const row = this.rows('SELECT * FROM capability_operations WHERE id=?', [input.operationId])[0];
+      if (!row) throw new Error('capability_operation_missing');
+      const operation = this.capabilityOperation(row);
+      if (operation.status === 'succeeded' || operation.status === 'stale') return operation;
+      this.db.run("UPDATE capability_operations SET status='failed',error=?,updated_at=? WHERE id=?", [String(input.error || 'capability_operation_failed'), Date.now(), input.operationId]);
+      return this.capabilityOperation(this.rows('SELECT * FROM capability_operations WHERE id=?', [input.operationId])[0]);
+    });
+  }
+  public completeCapabilityOperation(input: { operationId: string; targetId: string; entry: Record<string, unknown>; installationReceiptId?: string; attachments?: Array<{ purpose: string; bytes: string; mimeType?: string }> }): { operation: CapabilityOperation; receipt?: WriteReceipt; stale?: true } {
+    return this.transaction(() => {
+      const row = this.rows('SELECT * FROM capability_operations WHERE id=?', [input.operationId])[0];
+      if (!row) throw new Error('capability_operation_missing');
+      let operation = this.capabilityOperation(row);
+      if (operation.status === 'succeeded') return { operation };
+      if (operation.status === 'stale') return { operation, stale: true };
+      if (!['pending', 'running'].includes(operation.status) || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(input.targetId) || input.entry.id !== input.targetId) throw new Error('capability_operation_invalid');
+      if (operation.targetId && operation.targetId !== input.targetId) throw new Error('capability_operation_identity_conflict');
+      const physicalLifecycle = !['enable', 'disable'].includes(operation.action);
+      const headTable = physicalLifecycle ? 'capability_physical_operation_heads' : 'capability_operation_heads';
+      const head = this.rows(`SELECT h.operation_ordinal,o.id,o.action,o.status FROM ${headTable} h JOIN capability_operations o ON o.id=h.operation_id WHERE h.kind=? AND h.target_id=?`, [operation.kind, input.targetId])[0];
+      const blockedByUninstall = head && head.id !== operation.operationId && head.action === 'uninstall' && ['pending', 'running'].includes(String(head.status));
+      if (head && (blockedByUninstall || Number(head.operation_ordinal) > operation.ordinal)) {
+        this.db.run("UPDATE capability_operations SET status='stale',target_id=?,error='superseded_by_newer_operation',updated_at=? WHERE id=?", [input.targetId, Date.now(), operation.operationId]);
+        return { operation: this.capabilityOperation(this.rows('SELECT * FROM capability_operations WHERE id=?', [operation.operationId])[0]), stale: true };
+      }
+      if (physicalLifecycle) this.db.run('INSERT INTO capability_physical_operation_heads(kind,target_id,operation_id,operation_ordinal) VALUES(?,?,?,?) ON CONFLICT(kind,target_id) DO UPDATE SET operation_id=excluded.operation_id,operation_ordinal=excluded.operation_ordinal', [operation.kind, input.targetId, operation.operationId, operation.ordinal]);
+      const binding = this.rows('SELECT integration_id FROM capability_registry WHERE kind=? AND legacy_id=?', [operation.kind, input.targetId])[0];
+      const current = binding ? this.read(String(binding.integration_id)) : undefined;
+      const currentEntry = current ? JSON.parse(String(current.data.config_content)) as Record<string, unknown> : {};
+      let entry = { ...currentEntry, ...input.entry };
+      if (['install', 'upgrade'].includes(operation.action) && current) {
+        if (currentEntry.status === 'disabled') entry.status = 'disabled';
+        if (currentEntry.enabled === false) entry.enabled = false;
+      }
+      if (operation.action === 'enable') { entry.status = 'installed'; entry.enabled = true; }
+      if (operation.action === 'disable') { entry.status = 'disabled'; entry.enabled = false; }
+      if (operation.action === 'uninstall') { entry.status = 'uninstalled'; entry.enabled = false; }
+      const receipt = this.patchCapabilityRegistry({ kind: operation.kind, entry, expectedRevision: current?.revision || 0,
+        idempotencyKey: `capability-operation:${operation.operationId}:settle`, ...(input.installationReceiptId ? { installationReceiptId: input.installationReceiptId } : {}), ...(input.attachments ? { attachments: input.attachments } : {}) });
+      this.db.run("UPDATE capability_operations SET status='succeeded',target_id=?,result_integration_id=?,result_revision=?,error='',updated_at=? WHERE id=?", [input.targetId, receipt.objectId, receipt.revision, Date.now(), operation.operationId]);
+      operation = this.capabilityOperation(this.rows('SELECT * FROM capability_operations WHERE id=?', [operation.operationId])[0]);
+      return { operation, receipt };
+    });
+  }
   public readCapabilityRegistry(input: { kind: string; knownSequence?: number; knownEpoch?: string }): { kind: string; sourceSequence: number; readEpoch: string; legacySkillsPending?: true; entries?: Array<{ objectId: string; revision: number; entry: Record<string, unknown> }>; unchanged?: true } {
     if (!['skill', 'mcp', 'enhancement'].includes(input.kind)) throw new Error('capability_kind_invalid');
     return this.transaction(() => {
@@ -867,7 +1168,7 @@ export class UnifiedDataStore {
     if (!['skill', 'mcp', 'enhancement'].includes(input.kind)) throw new Error('capability_kind_invalid');
     if (!input.entry || typeof input.entry.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(input.entry.id)) throw new Error('capability_identity_invalid');
     if (!Number.isInteger(input.expectedRevision) || input.expectedRevision < 0) throw new Error('revision_conflict');
-    if (input.attachments !== undefined && (!Array.isArray(input.attachments) || input.attachments.some(item => !item || !/^[a-zA-Z0-9_-]+$/.test(item.purpose) || typeof item.bytes !== 'string' || Buffer.from(item.bytes, 'base64').toString('base64') !== item.bytes))) throw new Error('capability_attachment_invalid');
+    if (input.attachments !== undefined && (!Array.isArray(input.attachments) || new Set(input.attachments.map(item => item?.purpose)).size !== input.attachments.length || input.attachments.some(item => !item || !/^[a-zA-Z0-9_-]+$/.test(item.purpose) || typeof item.bytes !== 'string' || Buffer.from(item.bytes, 'base64').toString('base64') !== item.bytes))) throw new Error('capability_attachment_invalid');
     if (input.installationReceiptId !== undefined && (!/^[a-f0-9]{64}$/.test(input.installationReceiptId) || !input.attachments?.some(item => item.purpose === 'result'))) throw new Error('capability_installation_receipt_invalid');
     // A receipt retry can observe a newer registry revision. Its immutable
     // payload still identifies the original intent; CAS applies only once.
@@ -894,15 +1195,58 @@ export class UnifiedDataStore {
         this.db.run('INSERT INTO integrations(id,project_id,kind,title,status,config_content_id,health_content_id) VALUES(?,NULL,?,?,?,?,?)', [id, input.kind, title, status, config, health]);
         this.db.run('INSERT INTO capability_registry VALUES(?,?,?)', [input.kind, input.entry.id as string, id]);
       }
+      const integrationRevision = current ? current.revision + 1 : 1;
       for (const [ordinal, attachment] of (input.attachments || []).entries()) {
         const receipt = this.writeMutation({ kind: 'evidence', action: 'create', scope: null, idempotencyKey: `${input.idempotencyKey}:attachment:${ordinal}`, data: {
           type: `installation:${attachment.purpose}`, source_actor_id: this.actorId, observed_at: time,
           content: { encoding: 'base64', data: attachment.bytes, mimeType: attachment.mimeType || 'application/octet-stream' }
         } });
         this.db.run("INSERT INTO relations VALUES(?,'evidence',?)", [id, receipt.objectId]);
+        this.db.run('INSERT INTO capability_evidence_versions VALUES(?,?,?,?)', [id, integrationRevision, attachment.purpose, receipt.objectId]);
       }
       return this.current(id);
     });
+  }
+  public readCapabilityEvidence(input: { kind: string; targetId: string; purpose: string; revision?: number; offset?: number; limit?: number }): { kind: string; targetId: string; purpose: string; revision: number; mimeType: string; sha256: string; byteLength: number; offset: number; bytes: string; nextOffset: number | null } {
+    if (!['skill', 'mcp', 'enhancement'].includes(input.kind) || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(input.targetId) || !/^[a-zA-Z0-9_-]+$/.test(input.purpose)) throw new Error('capability_evidence_invalid');
+    const binding = this.rows('SELECT integration_id FROM capability_registry WHERE kind=? AND legacy_id=?', [input.kind, input.targetId])[0];
+    if (!binding) throw new Error('capability_evidence_missing');
+    const params: SqlValue[] = [binding.integration_id, input.purpose];
+    let revision = input.revision;
+    if (revision !== undefined) {
+      if (!Number.isInteger(revision) || revision < 1) throw new Error('capability_evidence_invalid');
+      params.push(revision);
+    }
+    const row = this.rows(`SELECT v.integration_revision,v.evidence_id FROM capability_evidence_versions v WHERE v.integration_id=? AND v.purpose=?${revision === undefined ? '' : ' AND v.integration_revision=?'} ORDER BY v.integration_revision DESC LIMIT 1`, params)[0];
+    if (!row) throw new Error('capability_evidence_missing');
+    const evidence = this.read(String(row.evidence_id));
+    const content = evidence.data.content as { encoding?: string; data?: string; mimeType?: string };
+    if (!content || content.encoding !== 'base64' || typeof content.data !== 'string') throw new Error('capability_evidence_corrupt');
+    const complete = Buffer.from(content.data, 'base64');
+    const offset = Math.max(0, Number(input.offset || 0));
+    const limit = Math.max(1, Math.min(1024 * 1024, Number(input.limit || 65536)));
+    if (!Number.isSafeInteger(offset) || offset > complete.length) throw new Error('capability_evidence_invalid');
+    const page = complete.subarray(offset, Math.min(complete.length, offset + limit));
+    return { kind: input.kind, targetId: input.targetId, purpose: input.purpose, revision: Number(row.integration_revision), mimeType: String(content.mimeType || 'application/octet-stream'), sha256: digest(complete), byteLength: complete.length, offset, bytes: page.toString('base64'), nextOffset: offset + page.length < complete.length ? offset + page.length : null };
+  }
+  public writeInternalAttachment(projectId: string, input: { name: string; bytes: string; mimeType?: string; idempotencyKey: string }): WriteReceipt & { ref: string; sha256: string; byteLength: number } {
+    if (!input.name.trim() || input.name.length > 255 || typeof input.bytes !== 'string' || Buffer.from(input.bytes, 'base64').toString('base64') !== input.bytes) throw new Error('internal_attachment_invalid');
+    const bytes = Buffer.from(input.bytes, 'base64');
+    const sha256 = digest(bytes);
+    const receipt = this.write({ kind: 'asset', action: 'create', scope: projectId, idempotencyKey: input.idempotencyKey, data: {
+      name: input.name, content: { encoding: 'base64', data: input.bytes, mimeType: input.mimeType || 'application/octet-stream' }, origin: 'internal_message', sha256
+    } });
+    return { ...receipt, ref: `solomap://asset/${receipt.objectId}`, sha256, byteLength: bytes.length };
+  }
+  public readInternalAttachment(projectId: string, input: { assetId: string; offset?: number; limit?: number }): { ref: string; name: string; mimeType: string; sha256: string; byteLength: number; offset: number; bytes: string; nextOffset: number | null } {
+    const object = this.readMetadata(input.assetId);
+    if (object.kind !== 'asset' || object.projectId !== projectId || object.data.origin !== 'internal_message') throw new Error('internal_attachment_missing');
+    const row = this.rows('SELECT a.name,a.sha256,a.content_id,c.mime_type,c.byte_length,c.stored_byte_length,c.encoding,c.chunk_index_json FROM assets a JOIN contents c ON c.id=a.content_id WHERE a.id=?', [input.assetId])[0];
+    if (!row || !row.content_id) throw new Error('internal_attachment_missing');
+    const byteLength = Number(row.byte_length), offset = Math.max(0, Number(input.offset || 0)), limit = Math.max(1, Math.min(1024 * 1024, Number(input.limit || 65536)));
+    if (!Number.isSafeInteger(offset) || offset > byteLength) throw new Error('internal_attachment_invalid');
+    const page = this.contentRange(String(row.content_id), row, offset, Math.min(byteLength, offset + limit));
+    return { ref: `solomap://asset/${input.assetId}`, name: String(row.name), mimeType: String(row.mime_type), sha256: String(row.sha256), byteLength, offset, bytes: page.toString('base64'), nextOffset: offset + page.length < byteLength ? offset + page.length : null };
   }
   public importCapabilityEntry(kind: string, entry: Record<string, unknown>, source: ImportedSource, attachments: Array<{ purpose: string; bytes: string; mimeType?: string }> = []): { unchanged: boolean; receipt?: WriteReceipt } {
     return this.transaction(() => {
@@ -1435,6 +1779,965 @@ export class UnifiedDataStore {
     return { objectId: object.objectId, revision: object.revision, legacyContextImported: this.projectRegistryContextImported(), registry: JSON.parse(String(object.data.content)) };
   }
 
+  public readHostSettings(input: { namespace: string; ownerScope: string; secretStateRef?: string }): { items: Array<{ key: string; objectId: string; revision: number; value?: unknown; secretRef?: string }>; secretState?: { fingerprint: string; revision: number } } {
+    if (!input.namespace || !input.ownerScope) throw new Error('invalid_setting_scope');
+    const rows = this.rows("SELECT s.id,s.key,s.content_id,s.secret_ref,o.revision FROM settings s JOIN objects o ON o.id=s.id WHERE s.namespace=? AND s.owner_scope=? AND o.archived_at IS NULL ORDER BY s.key", [input.namespace, input.ownerScope]);
+    const result: { items: Array<{ key: string; objectId: string; revision: number; value?: unknown; secretRef?: string }>; secretState?: { fingerprint: string; revision: number } } = { items: rows.map(row => ({
+      key: String(row.key), objectId: String(row.id), revision: Number(row.revision),
+      ...(row.content_id ? { value: JSON.parse(this.content(String(row.content_id)).toString('utf8')) } : {}),
+      ...(row.secret_ref ? { secretRef: String(row.secret_ref) } : {})
+    })) };
+    if (input.secretStateRef) {
+      const row = this.rows('SELECT value FROM database_meta WHERE key=?', [`host_secret_state:${digest(input.secretStateRef)}`])[0];
+      if (row) {
+        const state = JSON.parse(String(row.value)) as { fingerprint?: unknown; revision?: unknown };
+        if (typeof state.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(state.fingerprint) || !Number.isInteger(state.revision) || Number(state.revision) < 1) throw new Error('host_secret_state_invalid');
+        result.secretState = { fingerprint: state.fingerprint, revision: Number(state.revision) };
+      }
+    }
+    return result;
+  }
+
+  public patchHostSettings(input: { namespace: string; ownerScope: string; patches: Array<{ key: string; expectedRevision: number; value?: unknown; secretRef?: string }>; secretState?: { secretRef: string; fingerprint: string; expectedRevision: number }; idempotencyKey: string }): { items: Array<{ key: string; objectId: string; revision: number; value?: unknown; secretRef?: string }>; secretState?: { fingerprint: string; revision: number } } {
+    if (!input.namespace || !input.ownerScope || !input.idempotencyKey || !Array.isArray(input.patches) || (!input.patches.length && !input.secretState)) throw new Error('invalid_setting_patch');
+    if (input.secretState && (!input.secretState.secretRef || !/^[a-f0-9]{64}$/.test(input.secretState.fingerprint)
+      || !Number.isInteger(input.secretState.expectedRevision) || input.secretState.expectedRevision < 0)) throw new Error('invalid_setting_patch');
+    const keys = new Set<string>();
+    for (const patch of input.patches) {
+      if (!patch || typeof patch.key !== 'string' || !patch.key || keys.has(patch.key) || !Number.isInteger(patch.expectedRevision) || patch.expectedRevision < 0
+        || (Object.prototype.hasOwnProperty.call(patch, 'value') === Object.prototype.hasOwnProperty.call(patch, 'secretRef'))
+        || (Object.prototype.hasOwnProperty.call(patch, 'value') && patch.value === undefined)
+        || (Object.prototype.hasOwnProperty.call(patch, 'secretRef') && (typeof patch.secretRef !== 'string' || !patch.secretRef))) throw new Error('invalid_setting_patch');
+      keys.add(patch.key);
+    }
+    this.recordMutation(input, input.idempotencyKey, 'host_settings', () => {
+      for (const patch of input.patches) {
+        const row = this.rows("SELECT s.id,o.revision FROM settings s JOIN objects o ON o.id=s.id WHERE s.namespace=? AND s.key=? AND s.owner_scope=? AND o.archived_at IS NULL", [input.namespace, patch.key, input.ownerScope])[0];
+        if (!row && patch.expectedRevision !== 0) throw new Error('revision_conflict');
+        const data = { namespace: input.namespace, key: patch.key, owner_scope: input.ownerScope,
+          ...(Object.prototype.hasOwnProperty.call(patch, 'value') ? { content: canonical(patch.value), secret_ref: null } : { content: null, secret_ref: patch.secretRef! }) };
+        this.write({ kind: 'setting', action: row ? 'patch' : 'create', scope: null,
+          ...(row ? { objectId: String(row.id), expectedRevision: patch.expectedRevision } : {}),
+          idempotencyKey: `${input.idempotencyKey}:setting:${patch.key}`, data });
+      }
+      if (input.secretState) {
+        const key = `host_secret_state:${digest(input.secretState.secretRef)}`;
+        const row = this.rows('SELECT value FROM database_meta WHERE key=?', [key])[0];
+        const current = row ? JSON.parse(String(row.value)) as { revision?: unknown } : undefined;
+        const revision = Number(current?.revision || 0);
+        if (!Number.isInteger(revision) || revision !== input.secretState.expectedRevision) throw new Error('revision_conflict');
+        this.db.run('INSERT INTO database_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', [key, canonical({ fingerprint: input.secretState.fingerprint, revision: revision + 1 })]);
+      }
+      return this.createNotificationEvidence('host_settings', { namespace: input.namespace, ownerScope: input.ownerScope, keys: [...keys] });
+    });
+    return this.readHostSettings({ namespace: input.namespace, ownerScope: input.ownerScope, ...(input.secretState ? { secretStateRef: input.secretState.secretRef } : {}) });
+  }
+
+  public migrateHostSecretState(input: { namespace: string; ownerScope: string; legacyKey: string; expectedRevision: number; secretRef: string; fingerprint: string; idempotencyKey: string }): { items: Array<{ key: string; objectId: string; revision: number; value?: unknown; secretRef?: string }>; secretState?: { fingerprint: string; revision: number } } {
+    if (!input.namespace || !input.ownerScope || !input.legacyKey || !input.secretRef || !input.idempotencyKey
+      || !Number.isInteger(input.expectedRevision) || input.expectedRevision < 1 || !/^[a-f0-9]{64}$/.test(input.fingerprint)) throw new Error('invalid_secret_state_migration');
+    this.recordMutation(input, input.idempotencyKey, 'host_secret_state_migration', () => {
+      const legacy = this.rows("SELECT s.id,s.content_id,o.revision FROM settings s JOIN objects o ON o.id=s.id WHERE s.namespace=? AND s.key=? AND s.owner_scope=? AND o.archived_at IS NULL", [input.namespace, input.legacyKey, input.ownerScope])[0];
+      if (!legacy || Number(legacy.revision) !== input.expectedRevision || !legacy.content_id
+        || JSON.parse(this.content(String(legacy.content_id)).toString('utf8')) !== input.fingerprint) throw new Error('revision_conflict');
+      const key = `host_secret_state:${digest(input.secretRef)}`;
+      if (!this.rows('SELECT 1 FROM database_meta WHERE key=?', [key]).length) {
+        this.db.run('INSERT INTO database_meta(key,value) VALUES(?,?)', [key, canonical({ fingerprint: input.fingerprint, revision: 1 })]);
+      }
+      this.write({ kind: 'setting', action: 'archive', scope: null, objectId: String(legacy.id), expectedRevision: Number(legacy.revision),
+        idempotencyKey: `${input.idempotencyKey}:archive`, data: {} });
+      return this.createNotificationEvidence('host_secret_state_migration', { namespace: input.namespace, ownerScope: input.ownerScope, key: input.legacyKey });
+    });
+    return this.readHostSettings({ namespace: input.namespace, ownerScope: input.ownerScope, secretStateRef: input.secretRef });
+  }
+
+  public projectCognitiveRuntimeConfig(input: {
+    expectedSourceRevisions: Record<string, number>;
+    values: { mode: 'agent_cli' | 'local_only'; agentCli: string; model: string };
+    idempotencyKey: string;
+  }): { items: Array<{ key: string; objectId: string; revision: number; value?: unknown; secretRef?: string }> } {
+    const sourceKeys = ['cliPath', 'agentModelPreferences', 'cognitiveEngineAgent'];
+    if (!input.idempotencyKey || !input.values || !['agent_cli', 'local_only'].includes(input.values.mode)
+      || typeof input.values.agentCli !== 'string' || typeof input.values.model !== 'string'
+      || sourceKeys.some(key => !Number.isInteger(input.expectedSourceRevisions?.[key]) || input.expectedSourceRevisions[key] < 0)) throw new Error('invalid_cognitive_projection');
+    return this.transaction(() => {
+      const source = new Map(this.readHostSettings({ namespace: 'extension', ownerScope: 'global' }).items.map(item => [item.key, item.revision]));
+      if (sourceKeys.some(key => Number(source.get(key) || 0) !== input.expectedSourceRevisions[key])) throw new Error('source_revision_conflict');
+      const current = this.readHostSettings({ namespace: 'cognitive', ownerScope: 'global' });
+      const revisions = new Map(current.items.map(item => [item.key, item.revision]));
+      const values: Record<string, unknown> = input.values;
+      const patches = Object.entries(values)
+        .filter(([key, value]) => JSON.stringify(current.items.find(item => item.key === key)?.value) !== JSON.stringify(value))
+        .map(([key, value]) => ({ key, expectedRevision: revisions.get(key) || 0, value }));
+      if (patches.length) return this.patchHostSettings({ namespace: 'cognitive', ownerScope: 'global', patches, idempotencyKey: input.idempotencyKey });
+      return current;
+    });
+  }
+
+  private autonomyProjectPath(value: string, requireExisting = false): string {
+    const candidate = String(value || '').trim();
+    try { return fs.realpathSync(candidate); }
+    catch (error) { if (requireExisting) throw error; return path.resolve(candidate); }
+  }
+
+  public readProjectAutonomyAuthorization(input: { projectPath: string }): Record<string, unknown> {
+    const projectPath = this.autonomyProjectPath(input.projectPath);
+    const projectId = digest(projectPath);
+    const current = this.readHostSettings({ namespace: 'project_autonomy', ownerScope: 'global' }).items.find(item => item.key === projectId);
+    if (current) return current.value as Record<string, unknown>;
+    const authorizationRoot = path.join(this.root, 'runtime', 'project-autonomy-authorizations');
+    const recordPath = path.join(authorizationRoot, `${projectId}.json`);
+    const combinedPath = `${authorizationRoot}.json`;
+    let bytes: Buffer | undefined, sourceKey = '', legacy: Record<string, unknown> | undefined;
+    if (fs.existsSync(recordPath)) {
+      bytes = fs.readFileSync(recordPath); sourceKey = `project-autonomy-authorizations/${projectId}.json`;
+      try { legacy = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('project_autonomy_source_invalid'); }
+    } else if (fs.existsSync(combinedPath)) {
+      bytes = fs.readFileSync(combinedPath); sourceKey = 'project-autonomy-authorizations.json';
+      try { legacy = JSON.parse(bytes.toString('utf8'))?.projects?.[projectId]; } catch { throw new Error('project_autonomy_source_invalid'); }
+    }
+    const value = { projectId, projectPath, enabled: Boolean(legacy?.enabled), toolNetworkDisabled: Boolean(legacy?.toolNetworkDisabled),
+      epoch: Math.max(0, Number(legacy?.epoch || 0)), updatedAt: String(legacy?.updatedAt || '') };
+    if (!legacy) return value;
+    this.captureMigrationSource({ identity: `project-autonomy:${this.root}`, key: sourceKey, hash: digest(bytes!) }, bytes!, { mimeType: 'application/json', encoding: 'utf8' });
+    try {
+      this.patchHostSettings({ namespace: 'project_autonomy', ownerScope: 'global', patches: [{ key: projectId, expectedRevision: 0, value }], idempotencyKey: `project-autonomy-import:${projectId}:${value.epoch}` });
+    } catch (error) { if (!(error instanceof Error) || error.message !== 'revision_conflict') throw error; }
+    return (this.readHostSettings({ namespace: 'project_autonomy', ownerScope: 'global' }).items.find(item => item.key === projectId)?.value || value) as Record<string, unknown>;
+  }
+
+  public patchProjectAutonomyAuthorization(input: { projectPath: string; registeredProjectPaths: string[]; enabled: boolean; toolNetworkDisabled: boolean; expectedEpoch: number; idempotencyKey: string }): Record<string, unknown> {
+    if (!Array.isArray(input.registeredProjectPaths) || !Number.isInteger(input.expectedEpoch) || input.expectedEpoch < 0 || !input.idempotencyKey) throw new Error('invalid_project_autonomy_patch');
+    const receipt = this.recordMutation(input, input.idempotencyKey, 'project_autonomy', () => {
+      const projectPath = this.autonomyProjectPath(input.projectPath, true);
+      const registered = new Set(input.registeredProjectPaths.map(value => { try { return this.autonomyProjectPath(value, true); } catch { return ''; } }).filter(Boolean));
+      if (!registered.has(projectPath)) throw new Error(`Project folder is not registered: ${input.projectPath}`);
+      const previous = this.readProjectAutonomyAuthorization({ projectPath });
+      if (Number(previous.epoch) !== input.expectedEpoch) throw new Error('revision_conflict');
+      if (Boolean(previous.enabled) === Boolean(input.enabled) && Boolean(previous.toolNetworkDisabled) === Boolean(input.toolNetworkDisabled)) return this.createNotificationEvidence('project_autonomy', previous);
+      const projectId = String(previous.projectId), current = this.readHostSettings({ namespace: 'project_autonomy', ownerScope: 'global' }).items.find(item => item.key === projectId);
+      const next = { projectId, projectPath, enabled: Boolean(input.enabled), toolNetworkDisabled: Boolean(input.toolNetworkDisabled), epoch: input.expectedEpoch + 1, updatedAt: new Date().toISOString() };
+      this.patchHostSettings({ namespace: 'project_autonomy', ownerScope: 'global', patches: [{ key: projectId, expectedRevision: current?.revision || 0, value: next }], idempotencyKey: `${input.idempotencyKey}:setting` });
+      return this.createNotificationEvidence('project_autonomy', next);
+    });
+    return JSON.parse(String(this.read(receipt.objectId, receipt.revision).data.content));
+  }
+
+  public revokeProjectAutonomyAuthorizations(input: { idempotencyKey: string }): { items: Record<string, unknown>[] } {
+    if (!input.idempotencyKey) throw new Error('invalid_project_autonomy_revoke');
+    const receipt = this.recordMutation(input, input.idempotencyKey, 'project_autonomy_revoke', () => {
+      const items = this.readHostSettings({ namespace: 'project_autonomy', ownerScope: 'global' }).items;
+      const changed: Record<string, unknown>[] = [];
+      for (const item of items) {
+        const previous = item.value as Record<string, unknown>;
+        if (!previous.enabled) continue;
+        const next = { ...previous, enabled: false, epoch: Number(previous.epoch || 0) + 1, updatedAt: new Date().toISOString() };
+        this.patchHostSettings({ namespace: 'project_autonomy', ownerScope: 'global', patches: [{ key: item.key, expectedRevision: item.revision, value: next }], idempotencyKey: `${input.idempotencyKey}:setting:${item.key}` });
+        changed.push(next);
+      }
+      return this.createNotificationEvidence('project_autonomy_revoke', { items: changed });
+    });
+    return JSON.parse(String(this.read(receipt.objectId, receipt.revision).data.content)) as { items: Record<string, unknown>[] };
+  }
+
+  public importLegacyTelegramRuntimeState(input: {
+    config?: { identity: string; key: string; hash: string; value: Record<string, unknown> & { botTokenSecretRef?: string; botTokenFingerprint?: string }; pending: boolean };
+    state?: { identity: string; key: string; hash: string; value: Record<string, unknown> };
+  }): void {
+    if (!input.config && !input.state) return;
+    this.transaction(() => {
+      let current = this.readHostSettings({ namespace: 'telegram', ownerScope: 'global' });
+      let configCompatible = !input.config;
+      if (input.config) {
+        if (!current.items.length) {
+          const value = input.config.value;
+          const patches = Object.entries(value).filter(([key, item]) => item !== undefined && !['botTokenSecretRef', 'botTokenFingerprint'].includes(key))
+            .map(([key, item]) => ({ key, expectedRevision: 0, value: item } as { key: string; expectedRevision: number; value?: unknown; secretRef?: string }));
+          if (value.botTokenSecretRef) patches.push({ key: 'botToken', expectedRevision: 0, secretRef: value.botTokenSecretRef });
+          if (patches.length) this.patchHostSettings({ namespace: 'telegram', ownerScope: 'global', patches,
+            ...(value.botTokenSecretRef && value.botTokenFingerprint ? { secretState: { secretRef: value.botTokenSecretRef, fingerprint: value.botTokenFingerprint, expectedRevision: 0 } } : {}),
+            idempotencyKey: `import-runtime-telegram-config:${input.config.hash}` });
+          configCompatible = true;
+        } else {
+          const items = new Map(current.items.map(item => [item.key, item.value]));
+          configCompatible = JSON.stringify(items.get('chatId') ?? '') === JSON.stringify(input.config.value.chatId ?? '')
+            && JSON.stringify(items.get('bindingGeneration') ?? 0) === JSON.stringify(input.config.value.bindingGeneration ?? 0)
+            && (!input.config.value.botTokenSecretRef || current.items.find(item => item.key === 'botToken')?.secretRef === input.config.value.botTokenSecretRef);
+        }
+        if (input.config.pending) {
+          if (configCompatible) this.markMigrationSourceImported(input.config.identity, input.config.key);
+          else this.markMigrationSourceConflict(input.config.identity, input.config.key, 'newer_database_revision');
+        }
+      }
+      if (input.state) {
+        current = this.readHostSettings({ namespace: 'telegram', ownerScope: 'global' });
+        const items = new Map(current.items.map(item => [item.key, item]));
+        const legacy = input.state.value;
+        const hasCurrentBinding = items.has('botToken') || items.has('chatId');
+        const legacyGeneration = legacy.bindingGeneration === undefined ? null : Number(legacy.bindingGeneration);
+        const currentGeneration = Number(items.get('bindingGeneration')?.value || 0);
+        const sameGeneration = legacyGeneration !== null && legacyGeneration === currentGeneration;
+        if (!configCompatible || (!input.config && hasCurrentBinding) || (legacyGeneration !== null && !sameGeneration)) {
+          this.markMigrationSourceConflict(input.state.identity, input.state.key, 'legacy_telegram_binding_mismatch');
+          return;
+        }
+        const legacyConversations = legacy.conversationIds && typeof legacy.conversationIds === 'object' ? legacy.conversationIds as Record<string, unknown> : {};
+        const currentConversations = items.get('conversationIds')?.value && typeof items.get('conversationIds')?.value === 'object' ? items.get('conversationIds')!.value as Record<string, unknown> : {};
+        const values: Record<string, unknown> = {
+          offset: Math.max(Number(items.get('offset')?.value || 0), Number(legacy.offset || 0)),
+          conversationIds: { ...legacyConversations, ...currentConversations },
+          bindingGeneration: Math.max(Number(items.get('bindingGeneration')?.value || 0), Number(legacy.bindingGeneration || 0)),
+          replyGeneration: Math.max(Number(items.get('replyGeneration')?.value || 0), Number(legacy.replyGeneration ?? legacy.bindingGeneration ?? 0))
+        };
+        const patches = Object.entries(values).filter(([key, value]) => JSON.stringify(items.get(key)?.value) !== JSON.stringify(value))
+          .map(([key, value]) => ({ key, expectedRevision: items.get(key)?.revision || 0, value }));
+        if (patches.length) this.patchHostSettings({ namespace: 'telegram', ownerScope: 'global', patches,
+          idempotencyKey: `import-runtime-telegram-state:${input.state.hash}` });
+        this.markMigrationSourceImported(input.state.identity, input.state.key);
+      }
+    });
+  }
+
+  public importLegacyHostSettings(input: {
+    source: { identity: string; key: string; hash: string };
+    namespace: string;
+    values: Record<string, unknown>;
+  }): { imported: boolean } {
+    if (!input.source?.identity || !input.source.key || !/^[a-f0-9]{64}$/.test(input.source.hash) || !input.namespace || !input.values || typeof input.values !== 'object') throw new Error('invalid_legacy_host_settings');
+    return this.transaction(() => {
+      const entries = Object.entries(input.values).filter(([, value]) => value !== undefined);
+      const targetKeys = new Set(entries.map(([key]) => key));
+      const current = this.readHostSettings({ namespace: input.namespace, ownerScope: 'global' });
+      if (current.items.some(item => targetKeys.has(item.key))) {
+        this.markMigrationSourceConflict(input.source.identity, input.source.key, 'newer_database_revision');
+        return { imported: false };
+      }
+      const patches = entries.map(([key, value]) => ({ key, expectedRevision: 0, value }));
+      if (patches.length) this.patchHostSettings({ namespace: input.namespace, ownerScope: 'global', patches,
+        idempotencyKey: `import-runtime-settings:${input.source.hash}:${input.namespace}` });
+      this.markMigrationSourceImported(input.source.identity, input.source.key);
+      return { imported: true };
+    });
+  }
+
+  public importLegacySchedules(input: {
+    source: { identity: string; key: string; hash: string };
+    schedules: Array<{ id: string; timezone: string; trigger: Record<string, unknown>; enabled: boolean; nextDueAt: number; task: Record<string, unknown> }>;
+    records: Array<{ scheduleId: string; occurrenceKey: string; dueAt: number; attempts: number; state: 'pending' | 'failed'; task: Record<string, unknown> }>;
+  }): { imported: boolean } {
+    if (!input.source?.identity || !input.source.key || !/^[a-f0-9]{64}$/.test(input.source.hash)) throw new Error('invalid_legacy_schedules');
+    return this.transaction(() => {
+      if (this.scheduleDefinitionCount() > 0) {
+        this.markMigrationSourceConflict(input.source.identity, input.source.key, 'newer_database_revision');
+        return { imported: false };
+      }
+      this.syncSchedules({ schedules: input.schedules, idempotencyKey: `import-runtime-schedules:${input.source.hash}` });
+      this.restoreLegacyScheduledOccurrences({ records: input.records, idempotencyKey: `import-runtime-occurrences:${input.source.hash}` });
+      this.markMigrationSourceImported(input.source.identity, input.source.key);
+      return { imported: true };
+    });
+  }
+
+  public importLegacyTelegramConversationIds(input: { sourceHash: string; ids: Record<string, string> }): { settled: boolean; imported: boolean } {
+    if (!/^[a-f0-9]{64}$/.test(input.sourceHash) || !input.ids || typeof input.ids !== 'object' || Array.isArray(input.ids)
+      || Object.entries(input.ids).some(([key, value]) => !key || typeof value !== 'string')) throw new Error('invalid_legacy_telegram_conversations');
+    const bytes = Buffer.from(canonical(input.ids));
+    if (digest(bytes) !== input.sourceHash) throw new Error('legacy_telegram_conversations_hash_mismatch');
+    const identity = `vscode-global-state:${this.deviceId}`;
+    const key = 'solopreneur.telegramIntelligenceConversations';
+    const existing = this.migrationSourceState(identity, key);
+    if (existing?.hash === input.sourceHash && ['imported', 'conflict'].includes(existing.stage)) return { settled: true, imported: existing.stage === 'imported' };
+    this.captureMigrationSource({ identity, key, hash: input.sourceHash }, bytes, { mimeType: 'application/json', encoding: 'utf8', pending: true });
+    const current = this.readHostSettings({ namespace: 'telegram', ownerScope: 'global' });
+    if (current.items.length) {
+      this.markMigrationSourceConflict(identity, key, 'newer_database_revision');
+      return { settled: true, imported: false };
+    }
+    this.patchHostSettings({ namespace: 'telegram', ownerScope: 'global', patches: [{ key: 'conversationIds', expectedRevision: 0, value: input.ids }], idempotencyKey: `import-vscode-telegram-conversations:${input.sourceHash}` });
+    this.markMigrationSourceImported(identity, key);
+    return { settled: true, imported: true };
+  }
+
+  public appendDiagnosticEvent(input: { kind: 'error' | 'operation'; occurredAt: string; scope: string; payload: Record<string, unknown>; idempotencyKey: string }): Record<string, unknown> {
+    if (!['error', 'operation'].includes(input.kind) || !input.occurredAt || !input.scope || !input.payload || typeof input.payload !== 'object' || !input.idempotencyKey) throw new Error('invalid_diagnostic_event');
+    const receipt = this.recordMutation(input, input.idempotencyKey, 'diagnostic_event', () => {
+      this.db.run('INSERT INTO diagnostic_events(kind,occurred_at,scope,payload_json) VALUES(?,?,?,?)', [input.kind, input.occurredAt, input.scope, canonical(input.payload)]);
+      return this.createNotificationEvidence('diagnostic_event', { kind: input.kind, occurredAt: input.occurredAt, scope: input.scope, payload: input.payload });
+    });
+    return JSON.parse(String(this.read(receipt.objectId, receipt.revision).data.content));
+  }
+
+  public readDiagnosticEvents(input: { kind?: 'error' | 'operation'; limit?: number } = {}): { items: Record<string, unknown>[] } {
+    const limit = input.limit ?? 200;
+    if (input.kind !== undefined && !['error', 'operation'].includes(input.kind) || !Number.isInteger(limit) || limit < 1 || limit > 1000) throw new Error('invalid_diagnostic_query');
+    const rows = this.rows(`SELECT kind,occurred_at,scope,payload_json FROM diagnostic_events${input.kind ? ' WHERE kind=?' : ''} ORDER BY sequence DESC LIMIT ?`, [...(input.kind ? [input.kind] : []), limit]);
+    return { items: rows.reverse().map(row => ({ kind: String(row.kind), occurredAt: String(row.occurred_at), scope: String(row.scope), payload: JSON.parse(String(row.payload_json)) })) };
+  }
+
+  public recordNativeProjection(input: { projectionId: string; settingKey: string; valueHash: string; createdAt?: number }): { recorded: boolean } {
+    const createdAt = input.createdAt ?? Date.now();
+    if (!input.projectionId || !input.settingKey || !/^[a-f0-9]{64}$/.test(input.valueHash) || !Number.isFinite(createdAt)) throw new Error('invalid_native_projection');
+    this.db.run('INSERT OR IGNORE INTO native_projection_receipts VALUES(?,?,?,?)', [input.projectionId, input.settingKey, input.valueHash, createdAt]);
+    return { recorded: true };
+  }
+
+  public supersedeNativeProjections(input: { settingKey: string; keepProjectionId?: string }): { superseded: boolean } {
+    if (!input.settingKey || (input.keepProjectionId !== undefined && !input.keepProjectionId)) throw new Error('invalid_native_projection_supersession');
+    return this.transaction(() => {
+      const parameters = [input.settingKey, ...(input.keepProjectionId ? [input.keepProjectionId] : [])];
+      const keep = input.keepProjectionId ? ' AND projection_id<>?' : '';
+      this.db.run(`DELETE FROM native_projection_consumptions WHERE projection_id IN (SELECT projection_id FROM native_projection_receipts WHERE setting_key=?${keep})`, parameters);
+      this.db.run(`DELETE FROM native_projection_receipts WHERE setting_key=?${keep}`, parameters);
+      return { superseded: true };
+    });
+  }
+
+  public isRecentNativeProjection(input: { settingKey: string; valueHash: string; after: number }): { projected: boolean } {
+    if (!input.settingKey || !/^[a-f0-9]{64}$/.test(input.valueHash) || !Number.isFinite(input.after)) throw new Error('invalid_native_projection_query');
+    return { projected: Boolean(this.rows('SELECT 1 AS found FROM native_projection_receipts WHERE setting_key=? AND value_hash=? AND created_at>=? LIMIT 1', [input.settingKey, input.valueHash, input.after])[0]) };
+  }
+
+  public consumeNativeProjection(input: { hostId: string; settingKey: string; valueHash: string; after: number; consumedAt?: number }): { projected: boolean; projectionId?: string } {
+    const consumedAt = input.consumedAt ?? Date.now();
+    if (!input.hostId || !input.settingKey || !/^[a-f0-9]{64}$/.test(input.valueHash) || !Number.isFinite(input.after) || !Number.isFinite(consumedAt)) throw new Error('invalid_native_projection_consumption');
+    return this.transaction(() => {
+      const rows = this.rows(`SELECT r.projection_id FROM native_projection_receipts r
+        WHERE r.setting_key=? AND r.value_hash=? AND r.created_at>=?
+        AND NOT EXISTS(SELECT 1 FROM native_projection_consumptions c WHERE c.projection_id=r.projection_id AND c.host_id=?)
+        ORDER BY r.created_at,r.projection_id`, [input.settingKey, input.valueHash, input.after, input.hostId]);
+      if (!rows.length) return { projected: false };
+      for (const row of rows) this.db.run('INSERT INTO native_projection_consumptions VALUES(?,?,?)', [String(row.projection_id), input.hostId, consumedAt]);
+      return { projected: true, projectionId: String(rows[0].projection_id) };
+    });
+  }
+
+  public cancelNativeProjection(input: { projectionId: string }): { cancelled: boolean } {
+    if (!input.projectionId) throw new Error('invalid_native_projection_cancellation');
+    return this.transaction(() => {
+      const exists = Boolean(this.rows('SELECT 1 AS found FROM native_projection_receipts WHERE projection_id=?', [input.projectionId])[0]);
+      if (!exists) return { cancelled: false };
+      this.db.run('DELETE FROM native_projection_consumptions WHERE projection_id=?', [input.projectionId]);
+      this.db.run('DELETE FROM native_projection_receipts WHERE projection_id=?', [input.projectionId]);
+      return { cancelled: true };
+    });
+  }
+
+  public readUiState(input: { view: string; scopeKey: string }): { items: Array<{ key: string; revision: number; value: unknown }> } {
+    if (!input.view || !input.scopeKey) throw new Error('invalid_ui_state_scope');
+    return { items: this.rows('SELECT key,value_json,revision FROM ui_state WHERE device_id=? AND view=? AND scope_key=? ORDER BY key', [this.deviceId, input.view, input.scopeKey])
+      .map(row => ({ key: String(row.key), revision: Number(row.revision), value: JSON.parse(String(row.value_json)) })) };
+  }
+
+  public patchUiState(input: { view: string; scopeKey: string; patches: Array<{ key: string; expectedRevision: number; value: unknown }>; idempotencyKey: string }): { items: Array<{ key: string; revision: number; value: unknown }> } {
+    if (!input.view || !input.scopeKey || !input.idempotencyKey || !Array.isArray(input.patches) || !input.patches.length) throw new Error('invalid_ui_state_patch');
+    const keys = new Set<string>();
+    for (const patch of input.patches) if (!patch || !patch.key || keys.has(patch.key) || !Number.isInteger(patch.expectedRevision) || patch.expectedRevision < 0 || patch.value === undefined) throw new Error('invalid_ui_state_patch'); else keys.add(patch.key);
+    this.recordMutation(input, input.idempotencyKey, 'ui_state', () => {
+      for (const patch of input.patches) {
+        const row = this.rows('SELECT revision FROM ui_state WHERE device_id=? AND view=? AND scope_key=? AND key=?', [this.deviceId, input.view, input.scopeKey, patch.key])[0];
+        if (Number(row?.revision || 0) !== patch.expectedRevision) throw new Error('revision_conflict');
+        if (row) this.db.run('UPDATE ui_state SET value_json=?,revision=revision+1 WHERE device_id=? AND view=? AND scope_key=? AND key=?', [canonical(patch.value), this.deviceId, input.view, input.scopeKey, patch.key]);
+        else this.db.run('INSERT INTO ui_state VALUES(?,?,?,?,?,1)', [this.deviceId, input.view, input.scopeKey, patch.key, canonical(patch.value)]);
+      }
+      return this.createNotificationEvidence('ui_state', { view: input.view, scopeKey: input.scopeKey, keys: [...keys] });
+    });
+    return this.readUiState(input);
+  }
+
+  public readScheduleSyncState(): { version: string } {
+    const rows = this.rows('SELECT b.external_id,o.revision,s.enabled,s.next_due_at FROM schedule_bindings b JOIN objects o ON o.id=b.schedule_id JOIN schedules s ON s.id=b.schedule_id ORDER BY b.external_id');
+    return { version: digest(canonical(rows.map(row => ({ id: String(row.external_id), revision: Number(row.revision), enabled: Boolean(row.enabled), nextDueAt: Number(row.next_due_at) })))) };
+  }
+
+  public syncSchedules(input: { schedules: Array<{ id: string; timezone: string; trigger: Record<string, unknown>; enabled: boolean; nextDueAt: number; task: Record<string, unknown> }>; expectedVersion?: string; idempotencyKey: string }): { schedules: Array<{ id: string; objectId: string; revision: number }> } {
+    if (!input.idempotencyKey || !Array.isArray(input.schedules) || input.schedules.some(item => !item?.id || !item.timezone || !item.trigger || typeof item.trigger !== 'object' || !Number.isFinite(item.nextDueAt) || !item.task || typeof item.task !== 'object')) throw new Error('invalid_schedule_sync');
+    this.recordMutation(input, input.idempotencyKey, 'schedule_sync', () => {
+      if (input.expectedVersion && this.readScheduleSyncState().version !== input.expectedVersion) throw new Error('revision_conflict');
+      const retained = new Set(input.schedules.map(item => item.id));
+      for (const item of input.schedules) {
+        const binding = this.rows('SELECT schedule_id FROM schedule_bindings WHERE external_id=?', [item.id])[0];
+        const current = binding ? this.readMetadata(String(binding.schedule_id)) : null;
+        const activeOccurrence = binding ? this.rows("SELECT occurrence_key,due_at FROM scheduled_occurrences WHERE schedule_id=? AND status IN ('pending','running') ORDER BY due_at,id LIMIT 1", [binding.schedule_id])[0] : null;
+        const scheduleShapeUnchanged = current && current.data.timezone === item.timezone && current.data.trigger_spec_json === canonical(item.trigger)
+          && Boolean(current.data.enabled) === item.enabled;
+        const effectiveDueAt = scheduleShapeUnchanged && activeOccurrence ? Number(activeOccurrence.due_at) : item.nextDueAt;
+        const data = { timezone: item.timezone, trigger_spec_json: item.trigger, enabled: item.enabled, next_due_at: effectiveDueAt, task_template_content: canonical(item.task) };
+        const unchanged = current && current.data.timezone === item.timezone && current.data.trigger_spec_json === canonical(item.trigger)
+          && Boolean(current.data.enabled) === item.enabled && Number(current.data.next_due_at) === effectiveDueAt
+          && String(this.read(current.objectId).data.task_template_content) === canonical(item.task);
+        let scheduleId = current?.objectId;
+        if (!unchanged) scheduleId = this.write({ kind: 'schedule', action: current ? 'patch' : 'create', scope: null,
+          ...(current ? { objectId: current.objectId, expectedRevision: current.revision } : {}), idempotencyKey: `${input.idempotencyKey}:schedule:${item.id}`, data }).objectId;
+        if (!binding) this.db.run('INSERT INTO schedule_bindings VALUES(?,?)', [item.id, scheduleId!]);
+        const occurrenceKey = `${item.id}@${effectiveDueAt}`;
+        if (current && !scheduleShapeUnchanged) this.db.run("UPDATE scheduled_occurrences SET status='cancelled',updated_at=? WHERE schedule_id=? AND status='pending' AND occurrence_key<>?", [Date.now(), scheduleId!, occurrenceKey]);
+        const occurrence = this.rows('SELECT id,status FROM scheduled_occurrences WHERE schedule_id=? AND occurrence_key=?', [scheduleId!, occurrenceKey])[0];
+        if (item.enabled && !occurrence) {
+          const now = Date.now();
+          this.db.run("INSERT INTO scheduled_occurrences VALUES(?,?,?,?,?,'pending',0,0,NULL,NULL,NULL,NULL,NULL,'',?,?)", [crypto.randomUUID(), scheduleId!, occurrenceKey, effectiveDueAt, this.putContent(canonical(item.task), 'application/json'), now, now]);
+        } else if (item.enabled && occurrence?.status === 'pending' && current && !unchanged) {
+          this.db.run('UPDATE scheduled_occurrences SET payload_content_id=?,updated_at=? WHERE id=?', [this.putContent(canonical(item.task), 'application/json'), Date.now(), occurrence.id]);
+        } else if (item.enabled && occurrence?.status === 'cancelled') {
+          this.db.run("UPDATE scheduled_occurrences SET status='pending',payload_content_id=?,attempts=0,generation=0,owner_id=NULL,owner_pid=NULL,owner_birth=NULL,claim_token=NULL,lease_expires_at=NULL,error='',updated_at=? WHERE id=?", [this.putContent(canonical(item.task), 'application/json'), Date.now(), occurrence.id]);
+        }
+      }
+      for (const row of this.rows('SELECT external_id,schedule_id FROM schedule_bindings')) if (!retained.has(String(row.external_id))) {
+        const schedule = this.readMetadata(String(row.schedule_id));
+        if (schedule.data.enabled) this.write({ kind: 'schedule', action: 'patch', scope: null, objectId: schedule.objectId, expectedRevision: schedule.revision, idempotencyKey: `${input.idempotencyKey}:disable:${row.external_id}`, data: { enabled: false } });
+        this.db.run("UPDATE scheduled_occurrences SET status='cancelled',updated_at=? WHERE schedule_id=? AND status='pending'", [Date.now(), row.schedule_id]);
+      }
+      return this.createNotificationEvidence('schedule_sync', { ids: [...retained] });
+    });
+    return { schedules: this.rows('SELECT b.external_id,b.schedule_id,o.revision FROM schedule_bindings b JOIN objects o ON o.id=b.schedule_id ORDER BY b.external_id').map(row => ({ id: String(row.external_id), objectId: String(row.schedule_id), revision: Number(row.revision) })) };
+  }
+
+  public scheduleDefinitionCount(): number {
+    return Number(this.rows('SELECT COUNT(*) AS count FROM schedule_bindings')[0].count);
+  }
+
+  public claimDueSchedules(input: { owner: { id: string; pid: number; birth: string }; now?: number; leaseMs?: number; limit?: number }): { items: Array<Record<string, unknown>> } {
+    const now = input.now ?? Date.now(), leaseMs = input.leaseMs ?? 300_000, limit = input.limit ?? 20;
+    if (!input.owner?.id || !Number.isInteger(input.owner.pid) || input.owner.pid < 1 || !input.owner.birth || !Number.isFinite(now) || !Number.isFinite(leaseMs) || leaseMs < 1 || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('invalid_schedule_claim');
+    return this.transaction(() => {
+      const rows = this.rows("SELECT x.*,b.external_id FROM scheduled_occurrences x JOIN schedule_bindings b ON b.schedule_id=x.schedule_id JOIN schedules s ON s.id=x.schedule_id WHERE s.enabled=1 AND x.due_at<=? AND (x.status='pending' OR (x.status='running' AND x.lease_expires_at<=?)) ORDER BY x.due_at,x.id LIMIT ?", [now, now, limit]);
+      const items = rows.map(row => {
+        const token = crypto.randomBytes(32).toString('hex'), generation = Number(row.generation) + 1;
+        this.db.run("UPDATE scheduled_occurrences SET status='running',attempts=attempts+1,generation=?,owner_id=?,owner_pid=?,owner_birth=?,claim_token=?,lease_expires_at=?,updated_at=? WHERE id=?", [generation, input.owner.id, input.owner.pid, input.owner.birth, token, now + leaseMs, now, row.id]);
+        return { occurrenceId: String(row.id), scheduleId: String(row.external_id), occurrenceKey: String(row.occurrence_key), dueAt: Number(row.due_at), task: JSON.parse(this.content(String(row.payload_content_id)).toString('utf8')), attempts: Number(row.attempts) + 1, generation, token };
+      });
+      return { items };
+    });
+  }
+
+  public readScheduleLedger(): { tasks: Array<Record<string, unknown>>; failures: Array<Record<string, unknown>> } {
+    const rows = this.rows("SELECT x.*,b.external_id FROM scheduled_occurrences x JOIN schedule_bindings b ON b.schedule_id=x.schedule_id WHERE x.status IN ('pending','running','failed') ORDER BY x.due_at,x.id");
+    const project = (row: Record<string, SqlValue>) => ({ occurrenceId: String(row.id), taskId: String(row.external_id), dueAt: new Date(Number(row.due_at)).toISOString(), status: String(row.status), attempts: Number(row.attempts), generation: Number(row.generation), task: JSON.parse(this.content(String(row.payload_content_id)).toString('utf8')) });
+    return { tasks: rows.filter(row => row.status !== 'failed').map(project), failures: rows.filter(row => row.status === 'failed').map(project) };
+  }
+
+  public restoreLegacyScheduledOccurrences(input: { records: Array<{ scheduleId: string; occurrenceKey: string; dueAt: number; attempts: number; state: 'pending' | 'failed'; task: Record<string, unknown> }>; idempotencyKey: string }): void {
+    if (!input.idempotencyKey || !Array.isArray(input.records) || input.records.some(record => !record.scheduleId || !record.occurrenceKey || !Number.isFinite(record.dueAt) || !Number.isInteger(record.attempts) || record.attempts < 0 || !['pending', 'failed'].includes(record.state) || !record.task || typeof record.task !== 'object')) throw new Error('invalid_legacy_schedule');
+    this.recordMutation(input, input.idempotencyKey, 'legacy_schedule', () => {
+      for (const record of input.records) {
+        const binding = this.rows('SELECT schedule_id FROM schedule_bindings WHERE external_id=?', [record.scheduleId])[0];
+        if (!binding) throw new Error('legacy_schedule_binding_missing');
+        const existing = this.rows('SELECT id FROM scheduled_occurrences WHERE schedule_id=? AND occurrence_key=?', [binding.schedule_id, record.occurrenceKey])[0];
+        const now = Date.now();
+        if (existing) this.db.run("UPDATE scheduled_occurrences SET due_at=?,payload_content_id=?,status=?,attempts=?,generation=0,owner_id=NULL,owner_pid=NULL,owner_birth=NULL,claim_token=NULL,lease_expires_at=NULL,error='',updated_at=? WHERE id=?", [record.dueAt, this.putContent(canonical(record.task), 'application/json'), record.state, record.attempts, now, existing.id]);
+        else this.db.run('INSERT INTO scheduled_occurrences VALUES(?,?,?,?,?,?,?,0,NULL,NULL,NULL,NULL,NULL,\'\',?,?)', [crypto.randomUUID(), binding.schedule_id, record.occurrenceKey, record.dueAt, this.putContent(canonical(record.task), 'application/json'), record.state, record.attempts, now, now]);
+      }
+      return this.createNotificationEvidence('legacy_schedule', { count: input.records.length });
+    });
+  }
+
+  public settleScheduleOccurrence(input: { occurrenceId: string; token: string; state: 'pending' | 'completed' | 'failed' | 'cancelled'; retryAt?: number; error?: string; idempotencyKey: string }): Record<string, unknown> {
+    if (!input.occurrenceId || !input.token || !input.idempotencyKey || !['pending', 'completed', 'failed', 'cancelled'].includes(input.state) || input.state === 'pending' && !Number.isFinite(input.retryAt)) throw new Error('invalid_schedule_settlement');
+    const receipt = this.recordMutation(input, input.idempotencyKey, 'schedule_settlement', () => {
+      const row = this.rows('SELECT * FROM scheduled_occurrences WHERE id=?', [input.occurrenceId])[0];
+      if (!row || row.status !== 'running' || row.claim_token !== input.token) throw new Error('schedule_lease_lost');
+      this.db.run('UPDATE scheduled_occurrences SET status=?,due_at=?,owner_id=NULL,owner_pid=NULL,owner_birth=NULL,claim_token=NULL,lease_expires_at=NULL,error=?,updated_at=? WHERE id=?', [input.state, input.state === 'pending' ? input.retryAt! : row.due_at, input.error || '', Date.now(), input.occurrenceId]);
+      if (input.state === 'completed') {
+        const schedule = this.read(String(row.schedule_id));
+        const trigger = JSON.parse(String(schedule.data.trigger_spec_json || '{}')) as { kind?: string; timeOfDay?: string };
+        if (Boolean(schedule.data.enabled) && trigger.kind !== 'once') {
+          const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(trigger.timeOfDay || '09:00'));
+          const next = new Date(Number(row.due_at));
+          next.setDate(next.getDate() + 1);
+          next.setHours(match ? Number(match[1]) : 9, match ? Number(match[2]) : 0, 0, 0);
+          const nextDueAt = next.getTime();
+          const occurrenceKey = `${String(this.rows('SELECT external_id FROM schedule_bindings WHERE schedule_id=?', [row.schedule_id])[0]?.external_id || row.schedule_id)}@${nextDueAt}`;
+          const nextSchedule = this.write({ kind: 'schedule', action: 'patch', scope: null, objectId: schedule.objectId, expectedRevision: schedule.revision,
+            idempotencyKey: `${input.idempotencyKey}:next-schedule`, data: { next_due_at: nextDueAt } });
+          const exists = this.rows('SELECT id FROM scheduled_occurrences WHERE schedule_id=? AND occurrence_key=?', [row.schedule_id, occurrenceKey])[0];
+          if (!exists) {
+            const now = Date.now();
+            const template = String(schedule.data.task_template_content || '{}');
+            this.db.run("INSERT INTO scheduled_occurrences VALUES(?,?,?,?,?,'pending',0,0,NULL,NULL,NULL,NULL,NULL,'',?,?)", [crypto.randomUUID(), row.schedule_id, occurrenceKey, nextDueAt, this.putContent(template, 'application/json'), now, now]);
+          }
+          void nextSchedule;
+        }
+      }
+      return this.createNotificationEvidence('schedule_settlement', { occurrenceId: input.occurrenceId, state: input.state, generation: Number(row.generation) });
+    });
+    return JSON.parse(String(this.read(receipt.objectId, receipt.revision).data.content));
+  }
+
+  public acceptInboxMessage(input: { channel: string; sourceId: string; generation: number; payload: Record<string, unknown>; idempotencyKey: string }): Record<string, unknown> {
+    if (!input.channel || !input.sourceId || !Number.isInteger(input.generation) || input.generation < 0 || !input.payload || typeof input.payload !== 'object' || !input.idempotencyKey) throw new Error('invalid_inbox_message');
+    const receipt = this.recordMutation(input, input.idempotencyKey, 'inbox_accept', () => {
+      const sourceKey = `${input.generation}:${input.sourceId}`;
+      const body = canonical(input.payload); const current = this.rows('SELECT * FROM inbox WHERE channel=? AND source_id=?', [input.channel, sourceKey])[0];
+      if (current) {
+        const saved = this.content(String(current.content_id)).toString('utf8');
+        if (saved !== body || Number(current.generation) !== input.generation) throw new Error('inbox_identity_conflict');
+      } else this.db.run("INSERT INTO inbox(channel,source_id,content_id,state,acknowledged_at,generation,revision) VALUES(?,?,?,'pending',NULL,?,1)", [input.channel, sourceKey, this.putContent(body, 'application/json'), input.generation]);
+      return this.createNotificationEvidence('inbox_accept', { channel: input.channel, sourceId: input.sourceId, generation: input.generation });
+    });
+    const row = this.rows('SELECT state,revision,acknowledged_at FROM inbox WHERE channel=? AND source_id=?', [input.channel, `${input.generation}:${input.sourceId}`])[0];
+    return { ...JSON.parse(String(this.read(receipt.objectId, receipt.revision).data.content)), state: String(row.state), revision: Number(row.revision), acknowledgedAt: row.acknowledged_at === null ? null : Number(row.acknowledged_at) };
+  }
+
+  public claimInboxMessages(input: { channel: string; generation: number; owner: { id: string; pid: number; birth: string }; sourceId?: string; limit?: number; now?: number; staleAfterMs?: number }): { items: Array<Record<string, unknown>> } {
+    const limit = input.limit ?? 20, now = input.now ?? Date.now(), staleAfterMs = input.staleAfterMs ?? 300_000;
+    if (!input.channel || !Number.isInteger(input.generation) || input.generation < 0 || !input.owner?.id || !Number.isInteger(input.owner.pid) || input.owner.pid < 1 || !input.owner.birth || !Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('invalid_inbox_claim');
+    return this.transaction(() => {
+      const rows = this.rows("SELECT * FROM inbox WHERE channel=? AND generation=?" + (input.sourceId ? ' AND source_id=?' : '') + " AND state IN ('pending','claimed') AND NOT EXISTS(SELECT 1 FROM inbox_action_attempts a WHERE a.channel=inbox.channel AND a.source_id=inbox.source_id) ORDER BY source_id", [input.channel, input.generation, ...(input.sourceId ? [`${input.generation}:${input.sourceId}`] : [])]);
+      const claimable = rows.filter(row => row.state === 'pending'
+        || (row.owner_id === input.owner.id && Number(row.owner_pid) === input.owner.pid && row.owner_birth === input.owner.birth)
+        || Number(row.claimed_at || 0) <= now - staleAfterMs
+        || !this.hasLiveRunProcess({ process_pid: row.owner_pid, process_birth: row.owner_birth })).slice(0, limit);
+      return { items: claimable.map(row => {
+        if (row.state === 'claimed' && row.owner_id === input.owner.id && Number(row.owner_pid) === input.owner.pid && row.owner_birth === input.owner.birth) {
+          return { channel: input.channel, sourceId: String(row.source_id).slice(String(input.generation).length + 1), generation: input.generation, revision: Number(row.revision), payload: JSON.parse(this.content(String(row.content_id)).toString('utf8')), token: String(row.claim_token) };
+        }
+        const token = crypto.randomBytes(32).toString('hex');
+        this.db.run("UPDATE inbox SET state='claimed',revision=revision+1,owner_id=?,owner_pid=?,owner_birth=?,claim_token=?,claimed_at=? WHERE channel=? AND source_id=?", [input.owner.id, input.owner.pid, input.owner.birth, token, now, input.channel, row.source_id]);
+        return { channel: input.channel, sourceId: String(row.source_id).slice(String(input.generation).length + 1), generation: input.generation, revision: Number(row.revision) + 1, payload: JSON.parse(this.content(String(row.content_id)).toString('utf8')), token };
+      }) };
+    });
+  }
+
+  public beginInboxAction(input: { channel: string; sourceId: string; generation: number; token: string; action: string; idempotencyKey: string }): Record<string, unknown> {
+    if (!input.channel || !input.sourceId || !Number.isInteger(input.generation) || input.generation < 0 || !input.token || !input.action || !input.idempotencyKey) throw new Error('invalid_inbox_action');
+    const receipt = this.recordMutation(input, input.idempotencyKey, 'inbox_action', () => {
+      const sourceKey = `${input.generation}:${input.sourceId}`;
+      const row = this.rows('SELECT * FROM inbox WHERE channel=? AND source_id=?', [input.channel, sourceKey])[0];
+      if (!row || row.state !== 'claimed' || row.claim_token !== input.token) throw new Error('inbox_lease_lost');
+      const current = this.rows('SELECT * FROM inbox_action_attempts WHERE channel=? AND source_id=? AND action=?', [input.channel, sourceKey, input.action])[0];
+      if (current) {
+        if (current.claim_token !== input.token) throw new Error('inbox_action_unknown');
+        return this.createNotificationEvidence('inbox_action', { channel: input.channel, sourceId: input.sourceId, action: input.action, state: 'started' });
+      }
+      this.db.run("INSERT INTO inbox_action_attempts(channel,source_id,action,claim_token,state,started_at) VALUES(?,?,?,?,'started',?)", [input.channel, sourceKey, input.action, input.token, Date.now()]);
+      return this.createNotificationEvidence('inbox_action', { channel: input.channel, sourceId: input.sourceId, action: input.action, state: 'started' });
+    });
+    return JSON.parse(String(this.read(receipt.objectId, receipt.revision).data.content));
+  }
+
+  public settleInboxAction(input: { channel: string; sourceId: string; generation: number; token: string; action: string; state: 'confirmed'; idempotencyKey: string }): Record<string, unknown> {
+    if (!input.channel || !input.sourceId || !Number.isInteger(input.generation) || input.generation < 0 || !input.token || !input.action || input.state !== 'confirmed' || !input.idempotencyKey) throw new Error('invalid_inbox_action_settlement');
+    const receipt = this.recordMutation(input, input.idempotencyKey, 'inbox_action_settlement', () => {
+      const sourceKey = `${input.generation}:${input.sourceId}`;
+      const row = this.rows('SELECT * FROM inbox WHERE channel=? AND source_id=?', [input.channel, sourceKey])[0];
+      const attempt = this.rows('SELECT * FROM inbox_action_attempts WHERE channel=? AND source_id=? AND action=?', [input.channel, sourceKey, input.action])[0];
+      if (!row || row.state !== 'claimed' || row.claim_token !== input.token || !attempt || attempt.claim_token !== input.token) throw new Error('inbox_action_lease_lost');
+      this.db.run("INSERT INTO inbox_action_outcomes(channel,source_id,action,state,updated_at) VALUES(?,?,?,'confirmed',?) ON CONFLICT(channel,source_id,action) DO UPDATE SET state='confirmed',updated_at=excluded.updated_at", [input.channel, sourceKey, input.action, Date.now()]);
+      return this.createNotificationEvidence('inbox_action_settlement', { channel: input.channel, sourceId: input.sourceId, action: input.action, state: 'confirmed' });
+    });
+    return JSON.parse(String(this.read(receipt.objectId, receipt.revision).data.content));
+  }
+
+  public reconcileUnknownInboxActions(input: { channel: string; generation?: number; recoveryGeneration?: number; now?: number }): { items: Array<Record<string, unknown>> } {
+    if (!input.channel || (input.generation !== undefined && (!Number.isInteger(input.generation) || input.generation < 0)) || (input.recoveryGeneration !== undefined && (!Number.isInteger(input.recoveryGeneration) || input.recoveryGeneration < 0))) throw new Error('invalid_inbox_action_reconcile');
+    return this.transaction(() => {
+      const now = input.now ?? Date.now();
+      const rows = this.rows("SELECT i.*,a.action,o.state AS outcome_state FROM inbox i JOIN inbox_action_attempts a ON a.channel=i.channel AND a.source_id=i.source_id LEFT JOIN inbox_action_outcomes o ON o.channel=a.channel AND o.source_id=a.source_id AND o.action=a.action WHERE i.channel=?" + (input.generation === undefined ? '' : ' AND i.generation=?') + " AND i.state='claimed'", [input.channel, ...(input.generation === undefined ? [] : [input.generation])]);
+      const abandoned = rows.filter(row => !this.hasLiveRunProcess({ process_pid: row.owner_pid, process_birth: row.owner_birth }));
+      return { items: abandoned.map(row => {
+        const unknown = !row.outcome_state;
+        if (unknown) this.db.run("INSERT INTO inbox_action_outcomes(channel,source_id,action,state,updated_at) VALUES(?,?,?,'unknown',?)", [input.channel, row.source_id, row.action, now]);
+        const generation = Number(row.generation);
+        const sourceId = String(row.source_id).slice(String(generation).length + 1);
+        const update = JSON.parse(this.content(String(row.content_id)).toString('utf8')) as { message?: { chat?: { id?: number | string } } };
+        const chatId = String(update.message?.chat?.id || '');
+        const intentId = `telegram-action-recovery:${generation}:${sourceId}:${String(row.action)}`;
+        const payload = { replyGeneration: input.recoveryGeneration ?? generation, chatId,
+          text: unknown ? '⚠️ 上一条远程指令的执行结果未能确认。请先用 /status 检查当前状态，再决定是否重试。' : 'ℹ️ 上一条远程指令已经执行。请用 /status 查看最新状态。',
+          audience: 'requester' };
+        if (chatId && !this.rows('SELECT 1 FROM notification_deliveries WHERE intent_id=?', [intentId])[0]) {
+          const intent = { channel: 'telegram', intentId, payload };
+          const evidence = this.createNotificationEvidence('notification', intent);
+          const id = crypto.randomUUID();
+          this.db.run('INSERT INTO notification_deliveries(id,intent_id,channel,object_id,original_hash,message_hash,payload_content_id,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)', [id, intentId, 'telegram', evidence.objectId, digest(canonical(intent)), digest(canonical({ parseMode: '', text: payload.text })), this.putContent(canonical(payload), 'application/json'), 'queued', now, now]);
+        }
+        this.db.run("UPDATE inbox SET state='acknowledged',revision=revision+1,acknowledged_at=?,owner_id=NULL,owner_pid=NULL,owner_birth=NULL,claim_token=NULL,claimed_at=NULL WHERE channel=? AND source_id=?", [now, input.channel, row.source_id]);
+        return { sourceId, action: String(row.action), state: unknown ? 'unknown' : 'confirmed' };
+      }) };
+    });
+  }
+
+  public acknowledgeInboxMessage(input: { channel: string; sourceId: string; generation: number; token: string; idempotencyKey: string }): Record<string, unknown> {
+    if (!input.channel || !input.sourceId || !Number.isInteger(input.generation) || input.generation < 0 || !input.token || !input.idempotencyKey) throw new Error('invalid_inbox_ack');
+    const receipt = this.recordMutation(input, input.idempotencyKey, 'inbox_ack', () => {
+      const sourceKey = `${input.generation}:${input.sourceId}`;
+      const row = this.rows('SELECT * FROM inbox WHERE channel=? AND source_id=?', [input.channel, sourceKey])[0];
+      if (!row || row.state !== 'claimed' || row.claim_token !== input.token) throw new Error('inbox_lease_lost');
+      this.db.run("UPDATE inbox SET state='acknowledged',revision=revision+1,acknowledged_at=?,owner_id=NULL,owner_pid=NULL,owner_birth=NULL,claim_token=NULL,claimed_at=NULL WHERE channel=? AND source_id=?", [Date.now(), input.channel, sourceKey]);
+      return this.createNotificationEvidence('inbox_ack', { channel: input.channel, sourceId: input.sourceId, generation: Number(row.generation) });
+    });
+    return JSON.parse(String(this.read(receipt.objectId, receipt.revision).data.content));
+  }
+
+  public releaseInboxMessage(input: { channel: string; sourceId: string; generation: number; recoveryGeneration?: number; token: string; idempotencyKey: string }): Record<string, unknown> {
+    if (!input.channel || !input.sourceId || !Number.isInteger(input.generation) || input.generation < 0 || (input.recoveryGeneration !== undefined && (!Number.isInteger(input.recoveryGeneration) || input.recoveryGeneration < 0)) || !input.token || !input.idempotencyKey) throw new Error('invalid_inbox_release');
+    const receipt = this.recordMutation(input, input.idempotencyKey, 'inbox_release', () => {
+      const sourceKey = `${input.generation}:${input.sourceId}`;
+      const row = this.rows('SELECT * FROM inbox WHERE channel=? AND source_id=?', [input.channel, sourceKey])[0];
+      if (!row || row.state !== 'claimed' || row.claim_token !== input.token) throw new Error('inbox_lease_lost');
+      const attempt = this.rows('SELECT * FROM inbox_action_attempts WHERE channel=? AND source_id=? ORDER BY started_at DESC LIMIT 1', [input.channel, sourceKey])[0];
+      if (attempt) {
+        const now = Date.now();
+        const outcome = this.rows('SELECT state FROM inbox_action_outcomes WHERE channel=? AND source_id=? AND action=?', [input.channel, sourceKey, attempt.action])[0];
+        const unknown = !outcome;
+        if (unknown) this.db.run("INSERT INTO inbox_action_outcomes(channel,source_id,action,state,updated_at) VALUES(?,?,?,'unknown',?)", [input.channel, sourceKey, attempt.action, now]);
+        const update = JSON.parse(this.content(String(row.content_id)).toString('utf8')) as { message?: { chat?: { id?: number | string } } };
+        const chatId = String(update.message?.chat?.id || '');
+        const intentId = `telegram-action-recovery:${input.generation}:${input.sourceId}:${String(attempt.action)}`;
+        const payload = { replyGeneration: input.recoveryGeneration ?? input.generation, chatId,
+          text: unknown ? '⚠️ 上一条远程指令的执行结果未能确认。请先用 /status 检查当前状态，再决定是否重试。' : 'ℹ️ 上一条远程指令已经执行。请用 /status 查看最新状态。',
+          audience: 'requester' };
+        if (chatId && !this.rows('SELECT 1 FROM notification_deliveries WHERE intent_id=?', [intentId])[0]) {
+          const intent = { channel: 'telegram', intentId, payload };
+          const evidence = this.createNotificationEvidence('notification', intent);
+          this.db.run('INSERT INTO notification_deliveries(id,intent_id,channel,object_id,original_hash,message_hash,payload_content_id,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)', [crypto.randomUUID(), intentId, 'telegram', evidence.objectId, digest(canonical(intent)), digest(canonical({ parseMode: '', text: payload.text })), this.putContent(canonical(payload), 'application/json'), 'queued', now, now]);
+        }
+        this.db.run("UPDATE inbox SET state='acknowledged',revision=revision+1,acknowledged_at=?,owner_id=NULL,owner_pid=NULL,owner_birth=NULL,claim_token=NULL,claimed_at=NULL WHERE channel=? AND source_id=?", [now, input.channel, sourceKey]);
+        return this.createNotificationEvidence('inbox_release', { channel: input.channel, sourceId: input.sourceId, generation: Number(row.generation), action: String(attempt.action), state: unknown ? 'unknown' : 'confirmed' });
+      }
+      if (input.recoveryGeneration !== undefined && input.recoveryGeneration !== input.generation) {
+        const recoveryKey = `${input.recoveryGeneration}:${input.sourceId}`;
+        const recovery = this.rows('SELECT * FROM inbox WHERE channel=? AND source_id=?', [input.channel, recoveryKey])[0];
+        if (recovery && this.content(String(recovery.content_id)).toString('utf8') !== this.content(String(row.content_id)).toString('utf8')) throw new Error('inbox_identity_conflict');
+        if (!recovery) this.db.run("INSERT INTO inbox(channel,source_id,content_id,state,acknowledged_at,generation,revision) VALUES(?,?,?,'pending',NULL,?,1)", [input.channel, recoveryKey, row.content_id, input.recoveryGeneration]);
+        const now = Date.now();
+        this.db.run("UPDATE inbox SET state='acknowledged',revision=revision+1,acknowledged_at=?,owner_id=NULL,owner_pid=NULL,owner_birth=NULL,claim_token=NULL,claimed_at=NULL WHERE channel=? AND source_id=?", [now, input.channel, sourceKey]);
+        return this.createNotificationEvidence('inbox_release', { channel: input.channel, sourceId: input.sourceId, generation: Number(row.generation), recoveryGeneration: input.recoveryGeneration, state: 'migrated' });
+      }
+      this.db.run("UPDATE inbox SET state='pending',revision=revision+1,owner_id=NULL,owner_pid=NULL,owner_birth=NULL,claim_token=NULL,claimed_at=NULL WHERE channel=? AND source_id=?", [input.channel, sourceKey]);
+      return this.createNotificationEvidence('inbox_release', { channel: input.channel, sourceId: input.sourceId, generation: Number(row.generation) });
+    });
+    return JSON.parse(String(this.read(receipt.objectId, receipt.revision).data.content));
+  }
+
+  public registerRuntimeInstance(input: { runtimeId: string; pid: number; processStartedAt: number; processBirth?: string; status: 'running' | 'paused'; buildId: string; heartbeatAt?: number; leaseMs?: number; idempotencyKey: string }): { instanceId: string; generation: number; expiresAt: number } {
+    const heartbeatAt = input.heartbeatAt ?? Date.now(), leaseMs = input.leaseMs ?? 90_000;
+    if (!input.runtimeId || !Number.isInteger(input.pid) || input.pid < 1 || !Number.isFinite(input.processStartedAt) || !['running', 'paused'].includes(input.status) || !input.buildId || !Number.isFinite(heartbeatAt) || !Number.isFinite(leaseMs) || leaseMs < 1 || !input.idempotencyKey) throw new Error('invalid_runtime_instance');
+    const receipt = this.recordMutation(input, input.idempotencyKey, 'runtime_instance_register', () => {
+      let resource = this.rows("SELECT s.id FROM settings s JOIN objects o ON o.id=s.id WHERE s.namespace='runtime' AND s.key='owner' AND s.owner_scope='global' AND o.archived_at IS NULL")[0];
+      if (!resource) {
+        const receipt = this.write({ kind: 'setting', action: 'create', scope: null, idempotencyKey: 'runtime-owner-resource', data: { namespace: 'runtime', key: 'owner', owner_scope: 'global', content: '{}' } });
+        resource = { id: receipt.objectId };
+      }
+      const binding = this.rows('SELECT instance_id FROM runtime_instance_bindings WHERE runtime_id=?', [input.runtimeId])[0];
+      let instanceId = binding ? String(binding.instance_id) : '';
+      if (!binding) {
+        const receipt = this.write({ kind: 'runtime_instance', action: 'create', scope: null, idempotencyKey: `${input.idempotencyKey}:instance`, data: { device_id: this.deviceId, pid: input.pid, process_started_at: input.processStartedAt, process_birth: input.processBirth || '', status: input.status, build_id: input.buildId, heartbeat_at: heartbeatAt } });
+        instanceId = receipt.objectId;
+        this.db.run('INSERT INTO runtime_instance_bindings VALUES(?,?)', [input.runtimeId, instanceId]);
+      } else {
+        const instance = this.readMetadata(instanceId);
+        if (Number(instance.data.pid) !== input.pid || Number(instance.data.process_started_at) !== input.processStartedAt || String(instance.data.process_birth || '') !== String(input.processBirth || '')) throw new Error('runtime_identity_conflict');
+        this.write({ kind: 'runtime_instance', action: 'patch', scope: null, objectId: instanceId, expectedRevision: instance.revision, idempotencyKey: `${input.idempotencyKey}:instance`, data: { status: input.status, build_id: input.buildId, heartbeat_at: heartbeatAt } });
+      }
+      const current = this.rows("SELECT * FROM leases WHERE resource_id=? AND purpose='runtime-owner'", [resource.id])[0];
+      if (current && current.owner_runtime_id !== instanceId && Number(current.expires_at) > heartbeatAt) {
+        const currentOwner = this.rows('SELECT pid,process_birth FROM runtime_instances WHERE id=?', [current.owner_runtime_id])[0];
+        if (currentOwner && isProcessOwnerAlive(Number(currentOwner.pid), String(currentOwner.process_birth || ''))) throw new Error('runtime_lease_held');
+      }
+      const generation = current ? Number(current.generation) + (current.owner_runtime_id === instanceId ? 0 : 1) : 1;
+      const expiresAt = heartbeatAt + leaseMs;
+      this.db.run("INSERT INTO leases VALUES(?,'runtime-owner',?,?,?) ON CONFLICT(resource_id,purpose) DO UPDATE SET owner_runtime_id=excluded.owner_runtime_id,generation=excluded.generation,expires_at=excluded.expires_at", [resource.id, instanceId, generation, expiresAt]);
+      return this.createNotificationEvidence('runtime_instance_register', { instanceId, generation, expiresAt });
+    });
+    return JSON.parse(String(this.read(receipt.objectId, receipt.revision).data.content));
+  }
+
+  public heartbeatRuntimeInstance(input: { runtimeId: string; generation: number; status: 'running' | 'paused' | 'stopped' | 'failed'; heartbeatAt?: number; leaseMs?: number; idempotencyKey: string }): { instanceId: string; generation: number; expiresAt: number } {
+    const heartbeatAt = input.heartbeatAt ?? Date.now(), leaseMs = input.leaseMs ?? 90_000;
+    if (!input.runtimeId || !Number.isInteger(input.generation) || input.generation < 1 || !['running', 'paused', 'stopped', 'failed'].includes(input.status) || !input.idempotencyKey) throw new Error('invalid_runtime_heartbeat');
+    const receipt = this.recordMutation(input, input.idempotencyKey, 'runtime_instance_heartbeat', () => {
+      const binding = this.rows('SELECT instance_id FROM runtime_instance_bindings WHERE runtime_id=?', [input.runtimeId])[0];
+      if (!binding) throw new Error('runtime_instance_missing');
+      const instanceId = String(binding.instance_id);
+      const lease = this.rows("SELECT * FROM leases WHERE owner_runtime_id=? AND purpose='runtime-owner'", [instanceId])[0];
+      if (!lease || Number(lease.generation) !== input.generation) throw new Error('runtime_lease_lost');
+      const instance = this.readMetadata(instanceId);
+      this.write({ kind: 'runtime_instance', action: 'patch', scope: null, objectId: instanceId, expectedRevision: instance.revision, idempotencyKey: `${input.idempotencyKey}:instance`, data: { status: input.status, heartbeat_at: heartbeatAt } });
+      const expiresAt = input.status === 'stopped' || input.status === 'failed' ? heartbeatAt : heartbeatAt + leaseMs;
+      this.db.run("UPDATE leases SET expires_at=? WHERE owner_runtime_id=? AND purpose='runtime-owner' AND generation=?", [expiresAt, instanceId, input.generation]);
+      return this.createNotificationEvidence('runtime_instance_heartbeat', { instanceId, generation: input.generation, expiresAt });
+    });
+    return JSON.parse(String(this.read(receipt.objectId, receipt.revision).data.content));
+  }
+
+  private roadmapSource(root: string): { csvPath: string; bytes: Buffer; hash: string; nodes: RoadmapNode[] } {
+    const controlBefore = this.assertProjectControlDirectory(root);
+    const csvPath = path.join(root, '.solopreneur', 'roadmap.csv');
+    const before = fs.lstatSync(csvPath);
+    if (!before.isFile() || before.isSymbolicLink()) throw new Error('roadmap_csv_invalid:file');
+    const bytes = fs.readFileSync(csvPath);
+    const after = fs.lstatSync(csvPath);
+    const controlAfter = this.assertProjectControlDirectory(root);
+    if (controlBefore.dev !== controlAfter.dev || controlBefore.ino !== controlAfter.ino
+      || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw new Error('roadmap_csv_changed_during_read');
+    return { csvPath, bytes, hash: digest(bytes), nodes: parseRoadmapCsv(bytes.toString('utf8'), { strictHeader: true }) };
+  }
+
+  private assertProjectControlDirectory(root: string, allowMissing = false): fs.Stats {
+    const physicalRoot = path.resolve(root), control = path.join(physicalRoot, '.solopreneur');
+    const rootStat = fs.lstatSync(physicalRoot);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || fs.realpathSync(physicalRoot) !== physicalRoot) throw new Error('project_control_path_invalid');
+    try {
+      const controlStat = fs.lstatSync(control);
+      if (!controlStat.isDirectory() || controlStat.isSymbolicLink() || fs.realpathSync(control) !== control) throw new Error('project_control_path_invalid');
+      return controlStat;
+    } catch (error) {
+      if (allowMissing && (error as NodeJS.ErrnoException).code === 'ENOENT') return rootStat;
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('project_control_path_invalid');
+      throw error;
+    }
+  }
+
+  private normalizeRoadmapNodes(nodes: RoadmapNode[]): RoadmapNode[] {
+    return parseRoadmapCsv(serializeRoadmapNodes(nodes)).map(node => ({
+      id: String(node.id), title: String(node.title), description: String(node.description || ''), stage: String(node.stage || ''),
+      dependencies: String(node.dependencies || ''), agentCli: String(node.agentCli || ''), agentPrompt: String(node.agentPrompt || ''),
+      status: String(node.status || 'Pending') as RoadmapNode['status'], createdAt: String(node.createdAt || ''), completedAt: String(node.completedAt || '')
+    }));
+  }
+
+  private roadmapBinding(projectId: string): Record<string, SqlValue> | undefined {
+    return this.rows("SELECT b.*,o.revision,s.accepted_content_id,s.accepted_hash AS state_accepted_hash,s.generation,s.projected_generation,s.pending_content_id,s.pending_hash,s.last_error AS state_last_error FROM file_bindings b JOIN objects o ON o.id=b.id LEFT JOIN roadmap_file_states s ON s.binding_id=b.id WHERE b.project_id=? AND b.role='roadmap' AND b.relative_path='.solopreneur/roadmap.csv' AND o.archived_at IS NULL", [projectId])[0];
+  }
+
+  private writeRoadmapNodes(projectId: string, nodes: RoadmapNode[], intent: string): void {
+    const existing = new Map(this.rows('SELECT r.id,r.local_node_id,o.archived_at FROM roadmap_nodes r JOIN objects o ON o.id=r.id WHERE r.project_id=?', [projectId]).map(row => [String(row.local_node_id), row]));
+    const active = new Set(nodes.map(node => node.id));
+    nodes.forEach((node, index) => {
+      const row = existing.get(node.id);
+      if (row?.archived_at !== null && row?.archived_at !== undefined) this.db.run('UPDATE objects SET archived_at=NULL WHERE id=?', [row.id]);
+      const completed = node.completedAt && Number.isFinite(Date.parse(node.completedAt)) ? Date.parse(node.completedAt) : null;
+      const data = { local_node_id: node.id, title: node.title, description: node.description || null, stage: node.stage || null,
+        order_key: index, status: node.status || 'Pending', agent_cli: node.agentCli || null, agent_prompt_content: node.agentPrompt || '', completed_at: completed };
+      if (!row) this.write({ kind: 'roadmap_node', action: 'create', scope: projectId, idempotencyKey: `${intent}:node:${node.id}:create`, data });
+      else {
+        const current = this.read(String(row.id));
+        const same = current.data.local_node_id === data.local_node_id && current.data.title === data.title
+          && current.data.description === data.description && current.data.stage === data.stage && Number(current.data.order_key) === data.order_key
+          && current.data.status === data.status && current.data.agent_cli === data.agent_cli
+          && String(current.data.agent_prompt_content || '') === data.agent_prompt_content && current.data.completed_at === data.completed_at;
+        if (!same || row.archived_at !== null) this.write({ kind: 'roadmap_node', action: 'patch', scope: projectId, objectId: String(row.id), expectedRevision: current.revision, idempotencyKey: `${intent}:node:${node.id}:patch:${current.revision}`, data });
+      }
+      const nodeId = String((existing.get(node.id) || this.rows('SELECT id FROM roadmap_nodes WHERE project_id=? AND local_node_id=?', [projectId, node.id])[0]).id);
+      this.db.run('INSERT INTO roadmap_node_fields(node_id,dependencies_text,created_at_text,completed_at_text) VALUES(?,?,?,?) ON CONFLICT(node_id) DO UPDATE SET dependencies_text=excluded.dependencies_text,created_at_text=excluded.created_at_text,completed_at_text=excluded.completed_at_text', [nodeId, node.dependencies || '', node.createdAt || '', node.completedAt || '']);
+    });
+    for (const [localId, row] of existing) if (!active.has(localId) && row.archived_at === null) {
+      const current = this.readMetadata(String(row.id));
+      this.write({ kind: 'roadmap_node', action: 'archive', scope: projectId, objectId: String(row.id), expectedRevision: current.revision, idempotencyKey: `${intent}:node:${localId}:archive:${current.revision}`, data: {} });
+    }
+    this.db.run('DELETE FROM roadmap_dependencies WHERE node_id IN (SELECT id FROM roadmap_nodes WHERE project_id=?)', [projectId]);
+    const ids = new Map(this.rows('SELECT id,local_node_id FROM roadmap_nodes WHERE project_id=?', [projectId]).map(row => [String(row.local_node_id), String(row.id)]));
+    for (const node of nodes) for (const dependency of String(node.dependencies || '').split(',').map(value => value.trim()).filter(Boolean)) {
+      this.db.run('INSERT INTO roadmap_dependencies VALUES(?,?)', [ids.get(node.id)!, ids.get(dependency)!]);
+    }
+  }
+
+  public readRoadmap(input: { root: string }): Promise<RoadmapSnapshot> {
+    return this.registerProject({ root: input.root }).then(({ projectId }) => this.readRoadmapByProject(projectId));
+  }
+
+  private readRoadmapByProject(projectId: string): RoadmapSnapshot {
+    const binding = this.roadmapBinding(projectId);
+    if (!binding || !binding.accepted_content_id) throw new Error('roadmap_import_required');
+    const rows = this.rows("SELECT r.id,r.local_node_id,r.title,r.description,r.stage,r.order_key,r.status,r.agent_cli,r.agent_prompt_content_id,r.completed_at,f.dependencies_text,f.created_at_text,f.completed_at_text FROM roadmap_nodes r JOIN objects o ON o.id=r.id LEFT JOIN roadmap_node_fields f ON f.node_id=r.id WHERE r.project_id=? AND o.archived_at IS NULL ORDER BY r.order_key,r.local_node_id", [projectId]);
+    const dependencies = this.rows('SELECT n.local_node_id AS node_id,d.local_node_id AS dependency_id FROM roadmap_dependencies x JOIN roadmap_nodes n ON n.id=x.node_id JOIN roadmap_nodes d ON d.id=x.dependency_id WHERE n.project_id=? ORDER BY n.order_key,d.order_key', [projectId]);
+    const dependencyMap = new Map<string, string[]>();
+    dependencies.forEach(row => { const values = dependencyMap.get(String(row.node_id)) || []; values.push(String(row.dependency_id)); dependencyMap.set(String(row.node_id), values); });
+    const nodes: RoadmapNode[] = rows.map(row => ({ id: String(row.local_node_id), title: String(row.title), description: String(row.description || ''), stage: String(row.stage || ''),
+      dependencies: String(row.dependencies_text || dependencyMap.get(String(row.local_node_id))?.join(',') || ''), agentCli: String(row.agent_cli || ''),
+      agentPrompt: row.agent_prompt_content_id ? this.content(String(row.agent_prompt_content_id)).toString('utf8') : '', status: String(row.status) as RoadmapNode['status'],
+      createdAt: String(row.created_at_text || ''), completedAt: String(row.completed_at_text || (row.completed_at ? new Date(Number(row.completed_at)).toISOString() : '')) }));
+    return { projectId, bindingId: String(binding.id), revision: Number(binding.revision), acceptedHash: String(binding.state_accepted_hash || binding.accepted_hash || ''),
+      generation: Number(binding.generation || 1), projectedGeneration: Number(binding.projected_generation || 1), pending: Boolean(binding.pending_content_id), nodes };
+  }
+
+  public async acceptRoadmapCsv(input: { root: string }): Promise<RoadmapSnapshot> {
+    const root = fs.realpathSync(input.root);
+    let source = this.roadmapSource(root);
+    const { projectId } = await this.registerProject({ root });
+    const registeredSource = this.roadmapSource(root);
+    if (registeredSource.hash !== source.hash) throw new Error('roadmap_csv_changed_during_read');
+    source = registeredSource;
+    let binding = this.roadmapBinding(projectId);
+    if (binding?.pending_content_id) {
+      const pending = String(binding.pending_hash), accepted = String(binding.state_accepted_hash || binding.accepted_hash || '');
+      if (source.hash !== accepted && source.hash !== pending) {
+        const base = parseRoadmapCsv(this.content(String(binding.accepted_content_id)).toString('utf8'));
+        const database = parseRoadmapCsv(this.content(String(binding.pending_content_id)).toString('utf8'));
+        const merged = mergeRoadmapNodes(base, database, source.nodes);
+        if (merged.conflicts.length) throw new Error(`roadmap_projection_conflict:${merged.conflicts.join(',')}`);
+        const nodes = this.normalizeRoadmapNodes(merged.nodes), bytes = Buffer.from(serializeRoadmapNodes(nodes)), pendingHash = digest(bytes);
+        const effectId = this.transaction(() => {
+          const current = this.roadmapBinding(projectId);
+          if (!current?.pending_content_id || Number(current.revision) !== Number(binding!.revision)) throw new Error('revision_conflict');
+          const acceptedContentId = this.putContent(source.bytes, 'text/csv'), pendingContentId = this.putContent(bytes, 'text/csv');
+          const generation = Number(current.generation) + 1;
+          this.writeRoadmapNodes(projectId, nodes, `roadmap-merge:${projectId}:${source.hash}:${pendingHash}`);
+          const receipt = this.write({ kind: 'file_binding', action: 'patch', scope: projectId, objectId: String(current.id), expectedRevision: Number(current.revision),
+            idempotencyKey: `roadmap-merge:${projectId}:${source.hash}:${pendingHash}`, data: { accepted_hash: source.hash, pending_revision: generation, last_error: null } });
+          this.db.run('UPDATE roadmap_file_states SET accepted_content_id=?,accepted_hash=?,generation=?,pending_content_id=?,pending_hash=?,last_error=? WHERE project_id=?', [acceptedContentId, source.hash, generation, pendingContentId, pendingHash, '', projectId]);
+          this.db.run("UPDATE outbox SET state='delivered',attempt=attempt+1 WHERE channel='roadmap_projection' AND destination_ref=? AND state<>'delivered'", [source.csvPath]);
+          const event = this.rows('SELECT id FROM events WHERE request_id=?', [receipt.requestId])[0], id = crypto.randomUUID();
+          this.db.run('INSERT INTO outbox VALUES(?,?,?,?,?,?,?,0,NULL)', [id, event.id, 'roadmap_projection', source.csvPath, pendingContentId, generation, 'pending']);
+          return id;
+        });
+        await this.deliverRoadmapProjection(effectId);
+        source = this.roadmapSource(root); binding = this.roadmapBinding(projectId);
+      }
+      const effect = this.rows("SELECT id FROM outbox WHERE channel='roadmap_projection' AND destination_ref=? AND state<>'delivered' ORDER BY rowid DESC LIMIT 1", [source.csvPath])[0];
+      if (effect) await this.deliverRoadmapProjection(String(effect.id));
+      source = this.roadmapSource(root); binding = this.roadmapBinding(projectId);
+    }
+    if (binding && String(binding.state_accepted_hash || binding.accepted_hash || '') === source.hash && !binding.pending_content_id) return this.readRoadmapByProject(projectId);
+    const nodes = this.normalizeRoadmapNodes(source.nodes);
+    this.transaction(() => {
+      const current = this.roadmapBinding(projectId);
+      const contentId = this.putContent(source.bytes, 'text/csv');
+      const generation = Number(current?.generation || 0) + 1;
+      const intent = `roadmap-accept:${projectId}:${Number(current?.revision || 0)}:${source.hash}`;
+      this.writeRoadmapNodes(projectId, nodes, intent);
+      let bindingId: string;
+      if (!current) bindingId = this.write({ kind: 'file_binding', action: 'create', scope: projectId, idempotencyKey: `${intent}:binding`, data: { role: 'roadmap', relative_path: '.solopreneur/roadmap.csv', accepted_hash: source.hash, exported_revision: generation, pending_revision: null, last_error: null } }).objectId;
+      else bindingId = this.write({ kind: 'file_binding', action: 'patch', scope: projectId, objectId: String(current.id), expectedRevision: Number(current.revision), idempotencyKey: `${intent}:binding`, data: { accepted_hash: source.hash, exported_revision: generation, pending_revision: null, last_error: null } }).objectId;
+      this.db.run('INSERT INTO roadmap_file_states(project_id,binding_id,accepted_content_id,accepted_hash,generation,projected_generation,pending_content_id,pending_hash,last_error) VALUES(?,?,?,?,?,?,NULL,NULL,?) ON CONFLICT(project_id) DO UPDATE SET binding_id=excluded.binding_id,accepted_content_id=excluded.accepted_content_id,accepted_hash=excluded.accepted_hash,generation=excluded.generation,projected_generation=excluded.projected_generation,pending_content_id=NULL,pending_hash=NULL,last_error=excluded.last_error', [projectId, bindingId, contentId, source.hash, generation, generation, '']);
+    });
+    return this.readRoadmapByProject(projectId);
+  }
+
+  public async updateRoadmap(input: { root: string; expectedRevision: number; nodes: RoadmapNode[]; idempotencyKey: string }): Promise<RoadmapSnapshot> {
+    if (!input.idempotencyKey || !Number.isInteger(input.expectedRevision)) throw new Error('invalid_roadmap_update');
+    const root = fs.realpathSync(input.root), { projectId } = await this.registerProject({ root });
+    const current = this.roadmapBinding(projectId);
+    if (!current || !current.accepted_content_id) throw new Error('roadmap_import_required');
+    const nodes = this.normalizeRoadmapNodes(input.nodes), bytes = Buffer.from(serializeRoadmapNodes(nodes)), pendingHash = digest(bytes);
+    const replay = this.rows('SELECT 1 FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, `${input.idempotencyKey}:binding`])[0];
+    if (replay) {
+      if ([current.pending_hash, current.state_accepted_hash, current.accepted_hash].some(value => String(value || '') === pendingHash)) return this.readRoadmapByProject(projectId);
+      throw new Error('idempotency_conflict');
+    }
+    if (Number(current.revision) !== input.expectedRevision) throw new Error('revision_conflict');
+    const source = this.roadmapSource(root);
+    if (source.hash !== String(current.state_accepted_hash || current.accepted_hash || '')) throw new Error('roadmap_source_changed');
+    const effectId = this.transaction(() => {
+      const contentId = this.putContent(bytes, 'text/csv');
+      const generation = Number(current.generation || 0) + 1;
+      this.writeRoadmapNodes(projectId, nodes, `roadmap-update:${projectId}:${input.idempotencyKey}`);
+      const receipt = this.write({ kind: 'file_binding', action: 'patch', scope: projectId, objectId: String(current.id), expectedRevision: input.expectedRevision,
+        idempotencyKey: `${input.idempotencyKey}:binding`, data: { pending_revision: generation, last_error: null } });
+      this.db.run('UPDATE roadmap_file_states SET generation=?,pending_content_id=?,pending_hash=?,last_error=? WHERE project_id=?', [generation, contentId, pendingHash, '', projectId]);
+      const event = this.rows('SELECT id FROM events WHERE request_id=?', [receipt.requestId])[0];
+      const previous = this.rows("SELECT id FROM outbox WHERE event_id=? AND channel='roadmap_projection'", [event.id])[0];
+      if (previous) return String(previous.id);
+      const id = crypto.randomUUID();
+      this.db.run("INSERT INTO outbox VALUES(?,?,?,?,?,?,?,0,NULL)", [id, event.id, 'roadmap_projection', source.csvPath, contentId, generation, 'pending']);
+      return id;
+    });
+    try { await this.deliverRoadmapProjection(effectId); } catch (error) {
+      this.db.run('UPDATE roadmap_file_states SET last_error=? WHERE project_id=?', [error instanceof Error ? error.message : String(error), projectId]);
+    }
+    return this.readRoadmapByProject(projectId);
+  }
+
+  public async resolveRoadmapConflict(input: { root: string; choice: 'file' | 'database'; expectedRevision: number; idempotencyKey: string }): Promise<RoadmapSnapshot> {
+    if (!['file', 'database'].includes(input.choice) || !Number.isInteger(input.expectedRevision) || !input.idempotencyKey) throw new Error('invalid_roadmap_conflict_resolution');
+    const root = fs.realpathSync(input.root), { projectId } = await this.registerProject({ root });
+    const source = this.roadmapSource(root);
+    let current = this.roadmapBinding(projectId);
+    const requestKey = `roadmap-conflict-resolution:${projectId}:${input.idempotencyKey}`;
+    const inputHash = digest(canonical({ projectId, choice: input.choice, expectedRevision: input.expectedRevision }));
+    const previous = this.rows('SELECT input_hash,result_content_id,status FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, requestKey])[0];
+    if (previous) {
+      if (previous.input_hash !== inputHash) throw new Error('idempotency_conflict');
+      if (previous.status === 'committed') return JSON.parse(this.content(String(previous.result_content_id)).toString('utf8')) as RoadmapSnapshot;
+    } else {
+      if (!current?.pending_content_id || Number(current.revision) !== input.expectedRevision) throw new Error('revision_conflict');
+      this.db.run('INSERT INTO requests(actor_id,idempotency_key,id,input_hash,status) VALUES(?,?,?,?,?)', [this.actorId, requestKey, crypto.randomUUID(), inputHash, 'pending']);
+    }
+    const finish = (result: RoadmapSnapshot): RoadmapSnapshot => {
+      this.db.run("UPDATE requests SET status='committed',result_content_id=?,committed_sequence=? WHERE actor_id=? AND idempotency_key=?", [this.putContent(canonical(result), 'application/json'), Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS value FROM events')[0].value), this.actorId, requestKey]);
+      return result;
+    };
+    if (!current?.pending_content_id) {
+      const result = input.choice === 'file' ? await this.acceptRoadmapCsv({ root }) : this.readRoadmapByProject(projectId);
+      return finish(result);
+    }
+    if (Number(current.revision) !== input.expectedRevision) {
+      if (input.choice !== 'database' || String(current.state_accepted_hash || '') !== source.hash) throw new Error('revision_conflict');
+      const effect = this.rows("SELECT id FROM outbox WHERE channel='roadmap_projection' AND destination_ref=? AND state<>'delivered' ORDER BY rowid DESC LIMIT 1", [source.csvPath])[0];
+      if (!effect) throw new Error('roadmap_projection_missing');
+      await this.deliverRoadmapProjection(String(effect.id));
+      return finish(this.readRoadmapByProject(projectId));
+    }
+    const pendingHash = String(current.pending_hash || '');
+    if (source.hash === pendingHash) return finish(await this.acceptRoadmapCsv({ root }));
+    if (input.choice === 'file') {
+      this.transaction(() => {
+        this.write({ kind: 'file_binding', action: 'patch', scope: projectId, objectId: String(current.id), expectedRevision: Number(current.revision),
+          idempotencyKey: `${input.idempotencyKey}:file`, data: { pending_revision: null, last_error: null } });
+        this.db.run("UPDATE outbox SET state='delivered',attempt=attempt+1,next_attempt_at=NULL WHERE channel='roadmap_projection' AND destination_ref=? AND state<>'delivered'", [source.csvPath]);
+        this.db.run('UPDATE roadmap_file_states SET pending_content_id=NULL,pending_hash=NULL,last_error=? WHERE project_id=?', ['', projectId]);
+      });
+      return finish(await this.acceptRoadmapCsv({ root }));
+    }
+    this.transaction(() => {
+      const now = this.roadmapBinding(projectId);
+      if (!now?.pending_content_id || Number(now.revision) !== input.expectedRevision) throw new Error('revision_conflict');
+      const sourceContentId = this.putContent(source.bytes, 'text/csv');
+      this.write({ kind: 'file_binding', action: 'patch', scope: projectId, objectId: String(now.id), expectedRevision: Number(now.revision),
+        idempotencyKey: `${input.idempotencyKey}:database`, data: { accepted_hash: source.hash, last_error: null } });
+      this.db.run('UPDATE roadmap_file_states SET accepted_content_id=?,accepted_hash=?,last_error=? WHERE project_id=?', [sourceContentId, source.hash, '', projectId]);
+    });
+    const effect = this.rows("SELECT id FROM outbox WHERE channel='roadmap_projection' AND destination_ref=? AND state<>'delivered' ORDER BY rowid DESC LIMIT 1", [source.csvPath])[0];
+    if (!effect) throw new Error('roadmap_projection_missing');
+    await this.deliverRoadmapProjection(String(effect.id));
+    return finish(this.readRoadmapByProject(projectId));
+  }
+
+  public async deliverRoadmapProjection(effectId: string): Promise<void> {
+    const effect = this.rows("SELECT * FROM outbox WHERE id=? AND channel='roadmap_projection'", [effectId])[0];
+    if (!effect || effect.state === 'delivered') return;
+    const binding = this.rows('SELECT b.id,o.revision,s.* FROM roadmap_file_states s JOIN file_bindings b ON b.id=s.binding_id JOIN objects o ON o.id=b.id WHERE s.pending_content_id=?', [effect.content_id])[0];
+    if (!binding || Number(effect.generation) !== Number(binding.generation) || String(effect.content_id) !== String(binding.pending_content_id)) throw new Error('roadmap_projection_superseded');
+    const destination = path.resolve(String(effect.destination_ref));
+    const location = this.rows("SELECT root_path FROM project_locations WHERE project_id=? AND device_id=? AND status='active'", [binding.project_id, this.deviceId]).find(row => path.join(String(row.root_path), '.solopreneur', 'roadmap.csv') === destination);
+    if (!location) throw new Error('roadmap_projection_destination_invalid');
+    const controlBefore = this.assertProjectControlDirectory(String(location.root_path));
+    const destinationBefore = fs.lstatSync(destination);
+    if (!destinationBefore.isFile() || destinationBefore.isSymbolicLink()) throw new Error('roadmap_projection_destination_invalid');
+    const currentBytes = fs.readFileSync(destination), currentHash = digest(currentBytes), acceptedHash = String(binding.accepted_hash), pendingHash = String(binding.pending_hash);
+    if (currentHash !== acceptedHash && currentHash !== pendingHash) throw new Error('roadmap_projection_conflict');
+    const bytes = this.content(String(binding.pending_content_id));
+    if (digest(bytes) !== pendingHash) throw new Error('content_integrity_error');
+    if (currentHash !== pendingHash) {
+      const temporary = `${destination}.solomap-${effectId}.tmp`;
+      const controlNow = this.assertProjectControlDirectory(String(location.root_path));
+      const destinationNow = fs.lstatSync(destination);
+      if (controlNow.dev !== controlBefore.dev || controlNow.ino !== controlBefore.ino
+        || destinationNow.dev !== destinationBefore.dev || destinationNow.ino !== destinationBefore.ino) throw new Error('roadmap_projection_destination_invalid');
+      const handle = fs.openSync(temporary, 'wx', 0o600);
+      try { fs.writeFileSync(handle, bytes); fs.fsyncSync(handle); } finally { fs.closeSync(handle); }
+      try {
+        const controlReady = this.assertProjectControlDirectory(String(location.root_path));
+        if (controlReady.dev !== controlBefore.dev || controlReady.ino !== controlBefore.ino) throw new Error('roadmap_projection_destination_invalid');
+        replaceRegularFileIfUnchanged(destination, temporary, currentBytes);
+        this.assertProjectControlDirectory(String(location.root_path));
+      }
+      catch (error) {
+        try { fs.unlinkSync(temporary); } catch {}
+        if ((error as Error).message === 'file_changed_during_write') throw new Error('roadmap_projection_conflict');
+        throw error;
+      }
+    }
+    this.transaction(() => {
+      const now = this.roadmapBinding(String(binding.project_id));
+      if (!now || String(now.pending_content_id) !== String(effect.content_id) || Number(now.generation) !== Number(effect.generation)) throw new Error('roadmap_projection_superseded');
+      this.write({ kind: 'file_binding', action: 'patch', scope: String(binding.project_id), objectId: String(binding.id), expectedRevision: Number(now.revision), idempotencyKey: `roadmap-projection:${effectId}`,
+        data: { accepted_hash: pendingHash, exported_revision: Number(effect.generation), pending_revision: null, last_error: null } });
+      this.db.run('UPDATE roadmap_file_states SET accepted_content_id=pending_content_id,accepted_hash=pending_hash,projected_generation=generation,pending_content_id=NULL,pending_hash=NULL,last_error=? WHERE project_id=?', ['', binding.project_id]);
+      this.db.run("UPDATE outbox SET state='delivered',attempt=attempt+1,next_attempt_at=NULL WHERE id=?", [effectId]);
+    });
+  }
+
   public async registerProject(input: { root: string; name?: string }): Promise<{ projectId: string; locationId: string; identityPath: string }> {
     if (!input.root || !fs.statSync(input.root).isDirectory()) throw new Error('project_root_required');
     const root = fs.realpathSync(input.root);
@@ -1458,9 +2761,15 @@ export class UnifiedDataStore {
   private async registerProjectOnce(input: { root: string; name?: string; registryRoot: string }): Promise<{ projectId: string; locationId: string; identityPath: string }> {
     const root = input.root;
     const identityPath = path.join(root, '.solopreneur', 'project.json');
+    this.assertProjectControlDirectory(root, true);
     let identityId: string | undefined;
     try {
+      const before = fs.lstatSync(identityPath);
+      if (!before.isFile() || before.isSymbolicLink()) throw new Error('project_identity_invalid');
       const value = JSON.parse(await fs.promises.readFile(identityPath, 'utf8')) as { schemaVersion: number; projectId: string };
+      const after = fs.lstatSync(identityPath);
+      this.assertProjectControlDirectory(root);
+      if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw new Error('project_identity_invalid');
       if (value.schemaVersion !== 1 || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value.projectId)) throw new Error('project_identity_invalid');
       identityId = value.projectId;
     } catch (error) {
@@ -1469,9 +2778,45 @@ export class UnifiedDataStore {
     const location = this.rows("SELECT * FROM project_locations WHERE device_id=? AND root_path=? AND status='active'", [this.deviceId, root])[0];
     if (identityId && location && identityId !== location.project_id) throw new Error('project_identity_conflict');
     const projectId = identityId || (location ? String(location.project_id) : crypto.randomUUID());
+    const liveIdentityAt = (previous: Record<string, SqlValue>): boolean => {
+      const previousRoot = String(previous.root_path), previousIdentity = path.join(previousRoot, '.solopreneur', 'project.json');
+      try {
+        const rootStat = fs.lstatSync(previousRoot), identityStat = fs.lstatSync(previousIdentity);
+        if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || !identityStat.isFile() || identityStat.isSymbolicLink()) return false;
+        const value = JSON.parse(fs.readFileSync(previousIdentity, 'utf8')) as { schemaVersion?: number; projectId?: string };
+        return value.schemaVersion === 1 && value.projectId === projectId;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT' || error instanceof SyntaxError) return false;
+        throw error;
+      }
+    };
+    const previousLocations = identityId && !location
+      ? this.rows("SELECT * FROM project_locations WHERE project_id=? AND device_id=? AND status='active' AND root_path<>?", [projectId, this.deviceId, root])
+      : [];
+    if (previousLocations.some(liveIdentityAt)) throw new Error('project_clone_identity_conflict');
+    await fs.promises.mkdir(path.dirname(identityPath), { recursive: true });
+    this.assertProjectControlDirectory(root);
     const registrationKey = `project-location:${this.deviceId}:${root}:${projectId}`;
     const identityBody = JSON.stringify({ schemaVersion: 1, projectId }) + '\n';
-    const receipt = this.recordMutation({ operation: 'register_project', root, projectId }, registrationKey, 'register', () => {
+    const identityExisted = fs.existsSync(identityPath);
+    if (!identityExisted) {
+      try {
+        const identityParent = this.captureSafeDestinationParent(identityPath, 'project_control_path_invalid');
+        this.writeFileAtStableParent(identityPath, Buffer.from(identityBody), identityParent, 'project_control_path_invalid');
+        this.assertProjectControlDirectory(root);
+      } catch (error) {
+        if ((error as Error).message === 'export_destination_symlink') throw new Error('project_control_path_invalid');
+        throw error;
+      }
+    } else this.assertProjectControlDirectory(root);
+    let receipt: WriteReceipt;
+    try { receipt = this.recordMutation({ operation: 'register_project', root, projectId }, registrationKey, 'register', () => {
+      const currentLocation = this.rows("SELECT * FROM project_locations WHERE device_id=? AND root_path=? AND status='active'", [this.deviceId, root])[0];
+      if (currentLocation && String(currentLocation.project_id) !== projectId) throw new Error('project_identity_conflict');
+      const currentPreviousLocations = identityId && !currentLocation
+        ? this.rows("SELECT * FROM project_locations WHERE project_id=? AND device_id=? AND status='active' AND root_path<>?", [projectId, this.deviceId, root])
+        : [];
+      if (currentPreviousLocations.some(liveIdentityAt)) throw new Error('project_clone_identity_conflict');
       const existing = this.rows('SELECT * FROM objects WHERE id=?', [projectId])[0];
       const time = Date.now();
       if (existing) {
@@ -1481,18 +2826,23 @@ export class UnifiedDataStore {
         this.db.run('INSERT INTO objects VALUES(?,?,NULL,?,?,?,NULL)', [projectId, 'project', 1, time, time]);
         this.db.run('INSERT INTO projects(id,name) VALUES(?,?)', [projectId, input.name || path.basename(root)]);
       }
-      if (!location) this.db.run('INSERT INTO project_locations VALUES(?,?,?,?,?)', [crypto.randomUUID(), projectId, this.deviceId, root, 'active']);
+      for (const previous of currentPreviousLocations) this.db.run("UPDATE project_locations SET status='moved' WHERE id=? AND status='active'", [previous.id]);
+      if (!currentLocation) this.db.run('INSERT INTO project_locations VALUES(?,?,?,?,?)', [crypto.randomUUID(), projectId, this.deviceId, root, 'active']);
+      if (currentPreviousLocations.length) this.db.run("UPDATE outbox SET destination_ref=? WHERE channel='roadmap_projection' AND state<>'delivered' AND content_id=(SELECT pending_content_id FROM roadmap_file_states WHERE project_id=?)", [path.join(root, '.solopreneur', 'roadmap.csv'), projectId]);
       return this.current(projectId);
     }, (eventId) => {
       this.db.run('INSERT INTO outbox VALUES(?,?,?,?,?,?,?,0,NULL)', [crypto.randomUUID(), eventId, 'project_identity', identityPath, this.putContent(identityBody, 'application/json'), 1, 'pending']);
-    });
-    await fs.promises.mkdir(path.dirname(identityPath), { recursive: true });
-    try { await fs.promises.writeFile(identityPath, identityBody, { flag: 'wx', mode: 0o600 }); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const current = JSON.parse(await fs.promises.readFile(identityPath, 'utf8')) as { schemaVersion: number; projectId: string };
-      if (current.schemaVersion !== 1 || current.projectId !== projectId) throw new Error('project_identity_conflict');
+    }); } catch (error) {
+      if (!identityExisted) try {
+        this.assertProjectControlDirectory(root);
+        const identity = fs.lstatSync(identityPath);
+        if (identity.isFile() && !identity.isSymbolicLink() && fs.readFileSync(identityPath, 'utf8') === identityBody) fs.unlinkSync(identityPath);
+      } catch {}
+      throw error;
     }
+    this.assertProjectControlDirectory(root);
+    const savedIdentity = fs.lstatSync(identityPath);
+    if (!savedIdentity.isFile() || savedIdentity.isSymbolicLink()) throw new Error('project_identity_invalid');
     this.db.run("UPDATE outbox SET state='delivered',attempt=attempt+1 WHERE state<>'delivered' AND event_id IN (SELECT id FROM events WHERE request_id=?)", [receipt.requestId]);
     const saved = this.rows("SELECT id FROM project_locations WHERE project_id=? AND device_id=? AND root_path=? AND status='active'", [projectId, this.deviceId, root])[0];
     if (!location) {
@@ -1709,6 +3059,123 @@ export class UnifiedDataStore {
       return { objectId: receipt.objectId, revision: receipt.revision };
     });
   }
+  public syncExternalMemory(projectId: string, input: { source: string; entry: Record<string, unknown>; authorized: boolean; idempotencyKey: string }): WriteReceipt {
+    if (!input.source?.trim() || typeof input.authorized !== 'boolean' || !input.idempotencyKey) throw new Error('invalid_external_memory');
+    const entry = parseExternalMemoryEntry(input.entry);
+    if (this.readMetadata(projectId).kind !== 'project') throw new Error('project_scope_required');
+    if (entry.scope === 'project') {
+      const suffix = entry.scopeId.slice('memory_scope:project:'.length);
+      const locations = this.rows("SELECT root_path FROM project_locations WHERE project_id=? AND status='active'", [projectId]);
+      const expected = new Set(locations.flatMap(location => {
+        const name = path.basename(String(location.root_path));
+        return [name, name.toLowerCase().replace(/[^a-z0-9._-]+/g, '-')];
+      }));
+      if (!expected.has(suffix)) throw new Error('external_memory_scope_mismatch');
+    }
+    const scope = entry.scope === 'project' ? projectId : null;
+    const matches = this.rows('SELECT m.id,o.project_id,m.external_entry_revision,m.canonical_hash FROM memories m JOIN objects o ON o.id=m.id WHERE o.archived_at IS NULL AND m.external_source=? ORDER BY o.created_at,m.id', [input.source]);
+    if (matches.length > 1) throw new Error('external_memory_identity_conflict');
+    const match = matches[0];
+    if (match && (match.project_id === null ? null : String(match.project_id)) !== scope) throw new Error('external_memory_scope_conflict');
+    if (match && Number(match.external_entry_revision) > entry.revision) throw new Error('external_memory_source_revision_conflict');
+    if (match && Number(match.external_entry_revision) === entry.revision && String(match.canonical_hash) !== entry.canonicalHash) throw new Error('external_memory_source_revision_conflict');
+    const existing = match ? this.readMetadata(String(match.id)) : null;
+    const desiredStatus = input.authorized ? entry.status : 'revoked';
+    if (existing && existing.data.canonical_hash === entry.canonicalHash && Number(existing.data.external_entry_revision) === entry.revision && existing.data.status === desiredStatus) {
+      const receipt = this.rows("SELECT r.result_content_id FROM events e JOIN requests r ON r.id=e.request_id WHERE e.subject_id=? AND r.status='committed' ORDER BY e.sequence DESC LIMIT 1", [existing.objectId])[0];
+      if (!receipt?.result_content_id) throw new Error('external_memory_receipt_missing');
+      return JSON.parse(this.content(String(receipt.result_content_id)).toString('utf8')) as WriteReceipt;
+    }
+    return this.write({
+      kind: 'memory', action: existing ? 'patch' : 'create', scope,
+      ...(existing ? { objectId: existing.objectId, expectedRevision: existing.revision } : {}),
+      idempotencyKey: `${input.idempotencyKey}:head:${existing?.revision || 0}`,
+      data: {
+        category: entry.category, title: entry.title, status: desiredStatus, confidence: 1,
+        content: entry.content, valid_from: entry.validFrom, valid_until: entry.validUntil,
+        external_source: input.source, external_revision: String(entry.revision), canonical_hash: entry.canonicalHash,
+        legacy_entry_id: entry.entryId, external_scope: entry.scopeId, layer: entry.layer,
+        external_entry_revision: entry.revision, tags_json: entry.tags, provenance_json: entry.provenance,
+        validity_json: entry.validity, supersedes_json: entry.supersedes, metadata_json: entry.metadata
+      }
+    });
+  }
+  private externalMemoryTargetPrefixes(projectId: string, target: string): { project: string; global: string } {
+    if (this.readMetadata(projectId).kind !== 'project' || !/^[A-Za-z0-9._-]+$/.test(target)) throw new Error('external_memory_target_identity_invalid');
+    return { project: `cloudmcp:project:${projectId}:${target}:`, global: `cloudmcp:global:${target}:` };
+  }
+  public readExternalMemoryTargets(projectId: string): { items: Array<{ target: string; active: number; total: number }> } {
+    if (this.readMetadata(projectId).kind !== 'project') throw new Error('project_scope_required');
+    const projectPrefix = `cloudmcp:project:${projectId}:`, globalPrefix = 'cloudmcp:global:';
+    const targets = new Map<string, { target: string; active: number; total: number }>();
+    for (const row of this.rows("SELECT m.external_source,m.status FROM memories m JOIN objects o ON o.id=m.id WHERE o.archived_at IS NULL AND m.external_source IS NOT NULL ORDER BY m.external_source")) {
+      const source = String(row.external_source || '');
+      const prefix = source.startsWith(projectPrefix) ? projectPrefix : source.startsWith(globalPrefix) ? globalPrefix : '';
+      if (!prefix) continue;
+      const target = source.slice(prefix.length).split(':')[0];
+      if (!target) continue;
+      const value = targets.get(target) || { target, active: 0, total: 0 };
+      value.total++; if (row.status === 'active') value.active++;
+      targets.set(target, value);
+    }
+    return { items: [...targets.values()].sort((a, b) => a.target.localeCompare(b.target)) };
+  }
+  private externalMemoryTargetReplay(projectId: string, idempotencyKey: string, intent: Record<string, unknown>): { revoked: number; total: number } | null {
+    if (!idempotencyKey.trim()) throw new Error('idempotency_key_required');
+    const request = this.rows('SELECT result_content_id FROM requests WHERE actor_id=? AND idempotency_key=? AND status=?', [this.actorId, `${idempotencyKey}:receipt`, 'committed'])[0];
+    if (!request?.result_content_id) return null;
+    const receipt = JSON.parse(this.content(String(request.result_content_id)).toString('utf8')) as WriteReceipt;
+    const marker = this.read(receipt.objectId, receipt.revision);
+    const body = JSON.parse(String(marker.data.content || '{}')) as { intentHash?: string; result?: { revoked: number; total: number } };
+    if (marker.kind !== 'evidence' || marker.projectId !== projectId || marker.data.type !== 'external_memory_target_action' || body.intentHash !== digest(canonical(intent)) || !body.result) throw new Error('idempotency_conflict');
+    return body.result;
+  }
+  private externalMemoryTargetReceipt(projectId: string, idempotencyKey: string, intent: Record<string, unknown>, result: { revoked: number; total: number }): void {
+    this.write({ kind: 'evidence', action: 'create', scope: projectId, idempotencyKey: `${idempotencyKey}:receipt`, data: {
+      type: 'external_memory_target_action', source_actor_id: this.actorId, observed_at: Date.now(), content: canonical({ intentHash: digest(canonical(intent)), result })
+    } });
+  }
+  public revokeExternalMemoryTarget(projectId: string, input: { target: string; idempotencyKey: string }): { revoked: number; total: number } {
+    const prefixes = this.externalMemoryTargetPrefixes(projectId, input.target);
+    return this.transaction(() => {
+      const intent = { operation: 'revoke', projectId, target: input.target };
+      const replay = this.externalMemoryTargetReplay(projectId, input.idempotencyKey, intent);
+      if (replay) return replay;
+      const ids = this.rows("SELECT m.id FROM memories m JOIN objects o ON o.id=m.id WHERE o.archived_at IS NULL AND (substr(m.external_source,1,?)=? OR substr(m.external_source,1,?)=?) ORDER BY m.id", [prefixes.project.length, prefixes.project, prefixes.global.length, prefixes.global]).map(row => String(row.id));
+      let revoked = 0;
+      for (const id of ids) {
+        const current = this.readMetadata(id);
+        if (current.data.status === 'revoked') continue;
+        this.write({ kind: 'memory', action: 'patch', scope: current.projectId, objectId: id, expectedRevision: current.revision, idempotencyKey: `external-memory-target-revoke:${projectId}:${input.target}:${id}:${current.revision}`, data: { status: 'revoked' } });
+        revoked++;
+      }
+      const result = { revoked, total: ids.length };
+      this.externalMemoryTargetReceipt(projectId, input.idempotencyKey, intent, result);
+      return result;
+    });
+  }
+  public reconcileExternalMemoryTarget(projectId: string, input: { target: string; sources: string[]; idempotencyKey: string }): { revoked: number; total: number } {
+    const prefixes = this.externalMemoryTargetPrefixes(projectId, input.target);
+    if (!Array.isArray(input.sources) || input.sources.some(source => typeof source !== 'string' || (!source.startsWith(prefixes.project) && !source.startsWith(prefixes.global))) || new Set(input.sources).size !== input.sources.length) throw new Error('external_memory_target_sources_invalid');
+    const retained = new Set(input.sources);
+    return this.transaction(() => {
+      const intent = { operation: 'reconcile', projectId, target: input.target, sources: [...input.sources].sort() };
+      const replay = this.externalMemoryTargetReplay(projectId, input.idempotencyKey, intent);
+      if (replay) return replay;
+      const ids = this.rows("SELECT m.id,m.external_source FROM memories m JOIN objects o ON o.id=m.id WHERE o.archived_at IS NULL AND (substr(m.external_source,1,?)=? OR substr(m.external_source,1,?)=?) ORDER BY m.id", [prefixes.project.length, prefixes.project, prefixes.global.length, prefixes.global]);
+      let revoked = 0;
+      for (const row of ids) {
+        if (retained.has(String(row.external_source))) continue;
+        const current = this.readMetadata(String(row.id));
+        if (current.data.status === 'revoked') continue;
+        this.write({ kind: 'memory', action: 'patch', scope: current.projectId, objectId: current.objectId, expectedRevision: current.revision, idempotencyKey: `external-memory-target-reconcile:${projectId}:${input.target}:${current.objectId}:${current.revision}`, data: { status: 'revoked' } });
+        revoked++;
+      }
+      const result = { revoked, total: ids.length };
+      this.externalMemoryTargetReceipt(projectId, input.idempotencyKey, intent, result);
+      return result;
+    });
+  }
   public prepareLearningReview(input: { runId: string; workspaceRoot: string; globalPrompt: string; persistedGlobalPrompt: string; owner?: { id: string; pid: number; birth: string } }): { objectId: string; revision: number; manifest: ReviewManifest; policy: { objectId: string; revision: number }; pending: any[] } {
     if (!input.runId || typeof input.globalPrompt !== 'string' || typeof input.persistedGlobalPrompt !== 'string') throw new Error('invalid_learning_review');
     return this.transaction(() => {
@@ -1893,7 +3360,38 @@ export class UnifiedDataStore {
       return { objectId: receipt.objectId, revision: receipt.revision, manifest, policy: policyRef, pending: pendingHeaders };
     });
   }
-  public applyLearningReview(input: { batchId: string; expectedRevision: number; manifestHash: string; result: any; idempotencyKey: string }): { application: WriteReceipt; policy: WriteReceipt } {
+  private applyDirectReviewLessons(batchId: string, saved: any, manifest: ReviewManifest, result: any, idempotencyKey: string): WriteReceipt[] {
+    const projectIds = new Map<string, string>(manifest.projects.map((root, index) => [root, String(saved.projectIds[index])]));
+    return result.lessons.map((lesson: any, index: number) => {
+      const projectId = projectIds.get(lesson.projectPath);
+      if (!projectId || this.readMetadata(projectId).kind !== 'project') throw new Error('learning_review_lesson_scope_invalid');
+      const sources = lesson.evidence.map((id: string) => manifest.sources.find(source => source.id === id)!);
+      const eventRefs = sources.filter((source: ReviewSource) => source.kind === 'learning_event').map((source: ReviewSource) => {
+        if (!source.ref) throw new Error('learning_review_lesson_event_missing');
+        const event = this.readMetadata(source.ref.objectId, source.ref.revision);
+        if (event.kind !== 'learning_event' || event.projectId !== projectId) throw new Error('learning_review_lesson_event_scope_mismatch');
+        return { sourceId: source.ref.objectId, objectId: source.ref.objectId, revision: source.ref.revision };
+      });
+      const receipt = this.write({ kind: 'lesson', action: 'create', scope: projectId, idempotencyKey: `${idempotencyKey}:lesson:${index}`, data: {
+        status: 'approved', summary: lesson.summary, applies_when: lesson.appliesWhen, does_not_apply_when: lesson.doesNotApplyWhen,
+        do_this: lesson.doThis, avoid_this: lesson.avoidThis, verification: lesson.verification, confidence: 1,
+        source_type: 'review', lesson_type: lesson.lessonType,
+        evidence_refs_json: sources.map((source: ReviewSource) => ({ type: 'trace', ref: source.ref ? `solomap://objects/${source.ref.objectId} · revision=${source.ref.revision}` : String(source.file || source.id), summary: lesson.reason })),
+        source_event_ids_json: eventRefs.map((ref: { sourceId: string }) => ref.sourceId), event_refs: eventRefs
+      } });
+      const primary = eventRefs[0];
+      this.write({ kind: 'lesson_decision', action: 'create', scope: projectId, idempotencyKey: `${idempotencyKey}:lesson:${index}:decision`, data: {
+        event_id: primary.objectId, event_revision: primary.revision, lesson_id: receipt.objectId, lesson_revision: receipt.revision,
+        decision: 'approved', reason: lesson.reason, actor_id: this.actorId, candidate_refs: [{ objectId: receipt.objectId, revision: receipt.revision }]
+      } });
+      this.write({ kind: 'application', action: 'create', scope: projectId, idempotencyKey: `${idempotencyKey}:lesson:${index}:application`, data: {
+        review_id: batchId, lesson_id: receipt.objectId, target_object_id: receipt.objectId, expected_revision: 0,
+        before_content: null, after_content: canonical(lesson), status: 'applied', applied_revision: receipt.revision
+      } });
+      return receipt;
+    });
+  }
+  public applyLearningReview(input: { batchId: string; expectedRevision: number; manifestHash: string; result: any; idempotencyKey: string }): { application: WriteReceipt; policy: WriteReceipt; lessons: WriteReceipt[] } {
     const batch = this.read(input.batchId);
     const control = this.rows('SELECT input_content_id FROM learning_review_controls WHERE batch_id=?', [input.batchId])[0];
     if (batch.kind !== 'review_batch' || !control) throw new Error('learning_review_batch_required');
@@ -1919,10 +3417,11 @@ export class UnifiedDataStore {
         if (accepted.acceptedIntent !== input.idempotencyKey) throw new Error('learning_review_already_accepted');
         if (currentBatch.data.proposal_content !== JSON.stringify(input.result)) throw new Error('idempotency_conflict');
         const policyReceipt = this.write({ kind: 'policy', action: 'patch', scope: null, objectId: saved.policy.objectId, expectedRevision: saved.policy.revision, idempotencyKey: `${input.idempotencyKey}:policy`, data: { content: input.result.globalPrompt } });
-        return { application, policy: policyReceipt };
+        return { application, policy: policyReceipt, lessons: this.applyDirectReviewLessons(batch.objectId, saved, manifest, input.result, input.idempotencyKey) };
       }
       if (currentBatch.revision !== input.expectedRevision) throw new Error('revision_conflict');
       const policy = this.write({ kind: 'policy', action: 'patch', scope: null, objectId: saved.policy.objectId, expectedRevision: saved.policy.revision, idempotencyKey: `${input.idempotencyKey}:policy`, data: { content: input.result.globalPrompt } });
+      const lessons = this.applyDirectReviewLessons(batch.objectId, saved, manifest, input.result, input.idempotencyKey);
       const sources = { ...saved.previous.sources }, deferred = new Set<string>(input.result.deferredSourceIds || []);
       for (const source of manifest.sources) {
         if (deferred.has(source.id)) delete sources[source.id];
@@ -1939,7 +3438,7 @@ export class UnifiedDataStore {
         this.write({ kind: 'application', action: 'patch', scope: this.read(disposition.applicationId).projectId, objectId: disposition.applicationId, expectedRevision: disposition.revision, idempotencyKey: `${input.idempotencyKey}:recovery:${disposition.applicationId}`, data: { status: disposition.decision, ...(target ? { target_object_id: target.objectId, applied_revision: target.revision } : {}) } });
       }
       this.write({ kind: 'review_batch', action: 'patch', scope: batch.projectId, objectId: batch.objectId, expectedRevision: input.expectedRevision, idempotencyKey: `${input.idempotencyKey}:batch`, data: { status: 'applying', proposal_content: JSON.stringify(input.result), review_content: JSON.stringify({ ...saved, acceptedIntent: input.idempotencyKey }) } });
-      return { application, policy };
+      return { application, policy, lessons };
     });
   }
   public finishLearningReview(input: { applicationId: string; expectedRevision: number; promptHash: string; idempotencyKey: string }): WriteReceipt {
@@ -2124,7 +3623,18 @@ export class UnifiedDataStore {
   public resolveRunConversation(projectId: string, executionLogId: number): { state: RunState; turnId: string } | null {
     if (!Number.isInteger(executionLogId) || executionLogId < 1) throw new Error('invalid_execution_log_id');
     const row = this.rows('SELECT run_control.execution_log_id,run_turn_journals.turn_id FROM run_turn_journals JOIN run_control ON run_control.run_id=run_turn_journals.run_id AND run_control.project_id=run_turn_journals.project_id WHERE run_turn_journals.project_id=? AND run_turn_journals.execution_log_id=?', [projectId, executionLogId])[0];
-    return row ? { state: this.readRunState(projectId, Number(row.execution_log_id)), turnId: String(row.turn_id) } : null;
+    if (!row) return null;
+    return { state: this.readRunState(projectId, Number(row.execution_log_id)), turnId: String(row.turn_id) };
+  }
+  public resolveRunConversationTurn(projectId: string, executionLogId: number): { state: RunState; turnId: string } | null {
+    if (!Number.isInteger(executionLogId) || executionLogId < 1) throw new Error('invalid_execution_log_id');
+    const row = this.rows('SELECT run_control.run_id,run_control.execution_log_id,run_control.current_turn_id,run_turn_journals.turn_id FROM run_turn_journals JOIN run_control ON run_control.run_id=run_turn_journals.run_id AND run_control.project_id=run_turn_journals.project_id WHERE run_turn_journals.project_id=? AND run_turn_journals.execution_log_id=?', [projectId, executionLogId])[0];
+    if (!row) return null;
+    const turnId = String(row.turn_id);
+    if (turnId === String(row.current_turn_id)) return { state: this.readRunState(projectId, Number(row.execution_log_id)), turnId };
+    const snapshot = this.rows('SELECT MAX(revision) AS revision FROM run_control_revisions WHERE run_id=? AND current_turn_id=?', [row.run_id, turnId])[0];
+    if (snapshot?.revision === null || snapshot?.revision === undefined || !Number.isInteger(Number(snapshot.revision))) throw new Error('run_turn_revision_missing');
+    return { state: this.readRunState(projectId, Number(row.execution_log_id), Number(snapshot.revision)), turnId };
   }
   public readRunIntent(projectId: string, launchIntentId: string): RunState | null {
     const row = this.rows('SELECT execution_log_id FROM run_launch_intents JOIN run_control ON run_control.run_id=run_launch_intents.run_id WHERE run_launch_intents.project_id=? AND launch_intent_id=?', [projectId, launchIntentId])[0];
@@ -2203,6 +3713,16 @@ export class UnifiedDataStore {
     const state = this.readRunState(projectId, executionLogId);
     return { ...state, proof: this.runProof(state.runId, state.generation) };
   }
+  public readRecentRunSession(projectId: string, nodeId: string, provider: string): ReturnType<typeof getResumableSessionValue> {
+    for (let offset = 0; ; offset += 100) {
+      const rows = this.rows('SELECT c.binding_content_id FROM run_control c JOIN runs r ON r.id=c.run_id WHERE c.project_id=? AND c.node_key=? AND c.binding_content_id IS NOT NULL ORDER BY r.started_at DESC,c.execution_log_id DESC LIMIT 100 OFFSET ?', [projectId, nodeId, offset]);
+      for (const row of rows) {
+        const session = getResumableSessionValue(JSON.parse(this.content(String(row.binding_content_id)).toString('utf8')));
+        if (session?.provider === provider) return session;
+      }
+      if (rows.length < 100) return null;
+    }
+  }
   public patchRunInputs(projectId: string, input: { executionLogId: number; generation: number; expectedRevision: number; prompt?: string; command?: string; status?: string; idempotencyKey: string }): RunState {
     const initial = this.runControl(projectId, input.executionLogId);
     if (initial.generation !== input.generation) throw new Error('run_owner_conflict');
@@ -2248,6 +3768,8 @@ export class UnifiedDataStore {
       const nativeTimestamp = input.action === 'start' ? input.nativeStartedAt : input.action === 'complete' ? input.nativeCompletedAt : undefined;
       const now = input.workspaceEvidenceSource === 'native' && Number.isFinite(nativeTimestamp) ? nativeTimestamp! : Date.now();
       const metadata = JSON.parse(this.content(String(row.metadata_content_id)).toString('utf8')) as Record<string, unknown>;
+      if (input.action === 'session-close' && metadata.interactiveSession && ['claude', 'codex'].includes(String(metadata.sessionProvider))
+        && Number(row.child_pid) > 0 && this.hasLiveRunProcess({ ...row, process_pid: 0 })) throw new Error('native_session_still_running');
       let status: string;
       let turnId = String(row.current_turn_id);
       let finishedAt: number | null = null;
@@ -2278,6 +3800,7 @@ export class UnifiedDataStore {
         if (input.preserveRoadmapState !== undefined) metadata.checkpointPreserveRoadmapState = input.preserveRoadmapState;
         delete metadata.turnLogEndOffsets;
         delete metadata.codexNativeAwaitingRequest;
+        delete metadata.claudeNativeAwaitingRequest;
         delete metadata.failureCode;
         delete metadata.failureReason;
         delete metadata.taskReportObjectId;
@@ -2324,8 +3847,12 @@ export class UnifiedDataStore {
         status = outcome === 'failed' ? 'Failed' : 'In Progress';
         finishedAt = now;
         Object.assign(metadata, { checkpointMessage: input.message || metadata.userMessage || '', checkpointOutcome: outcome, checkpointSummary: summary, checkpointNext: input.next || '', checkpointAt: new Date(now).toISOString() });
-        const reportInput = { report: input.report ?? null, availability: input.reportAvailability || 'missing', validationError: input.reportValidationError || '' };
-        const reportReceipt = this.recordMutation({ operation: 'checkpoint_report', projectId, runId: row.run_id, turnId, ...reportInput }, `${input.idempotencyKey}:report`, 'report', () => this.createRunReport(projectId, String(row.run_id), turnId, reportInput));
+        let reportInput: { report: unknown; availability: string; validationError: string } = { report: input.report ?? null, availability: input.reportAvailability || 'missing', validationError: input.reportValidationError || '' };
+        const existingReport = this.runReportHead(projectId, String(row.run_id), turnId);
+        const reportReceipt = input.report === undefined && existingReport
+          ? { objectId: existingReport.objectId, revision: existingReport.revision }
+          : this.recordMutation({ operation: 'checkpoint_report', projectId, runId: row.run_id, turnId, ...reportInput }, `${input.idempotencyKey}:report`, 'report', () => this.upsertRunReport(projectId, String(row.run_id), turnId, reportInput));
+        if (input.report === undefined && existingReport) reportInput = { report: existingReport.data.content, availability: String(existingReport.data.availability), validationError: String(existingReport.data.validation_error || '') };
         Object.assign(metadata, { taskReportObjectId: reportReceipt.objectId, taskReportRevision: reportReceipt.revision, taskReportStatus: reportInput.availability === 'available' ? 'recorded' : reportInput.availability, taskReportError: reportInput.validationError });
         }
       } else if (input.action === 'session-close') {
@@ -2338,7 +3865,10 @@ export class UnifiedDataStore {
           const summary = '会话已关闭，本轮尚未提交结果；已保留执行记录，可继续处理。';
           this.write({ kind: 'turn', action: 'patch', scope: projectId, objectId: turnId, expectedRevision: turn.revision, idempotencyKey: `${input.idempotencyKey}:turn`, data: { outcome: 'failed', summary_content: summary, finished_at: now } });
           const reportInput = { report: null, availability: 'missing', validationError: '' };
-          const reportReceipt = this.recordMutation({ operation: 'checkpoint_report', projectId, runId: row.run_id, turnId, ...reportInput }, `${input.idempotencyKey}:report`, 'report', () => this.createRunReport(projectId, String(row.run_id), turnId, reportInput));
+          const existingReport = this.runReportHead(projectId, String(row.run_id), turnId);
+          const reportReceipt = existingReport
+            ? { objectId: existingReport.objectId, revision: existingReport.revision }
+            : this.recordMutation({ operation: 'checkpoint_report', projectId, runId: row.run_id, turnId, ...reportInput }, `${input.idempotencyKey}:report`, 'report', () => this.upsertRunReport(projectId, String(row.run_id), turnId, reportInput));
           Object.assign(metadata, { failureCode: 'checkpoint_missing', failureReason: summary, checkpointOutcome: 'failed', checkpointSummary: summary, checkpointAt: new Date(now).toISOString(), taskReportObjectId: reportReceipt.objectId, taskReportRevision: reportReceipt.revision, taskReportStatus: 'missing', taskReportError: '' });
         }
         metadata.nativeOutputPending = false;
@@ -2398,21 +3928,26 @@ export class UnifiedDataStore {
         }
       }
       if (input.action === 'complete' && !metadata.interactiveSession && this.hasLiveRunProcess(row)) metadata.hostOutputPending = true;
-      if (input.action === 'complete' && metadata.interactiveSession && metadata.sessionProvider === 'codex' && input.workspaceEvidenceSource !== 'native' && input.exitCode === undefined && (metadata.codexNativeBoundTurnId === turnId || this.readRunBinding(projectId, input.executionLogId))) metadata.nativeOutputPending = true;
+      if (input.action === 'complete' && metadata.interactiveSession && ['codex', 'claude'].includes(String(metadata.sessionProvider)) && input.workspaceEvidenceSource !== 'native'
+        && (input.exitCode === undefined || Number(row.child_pid) > 0 && this.hasLiveRunProcess({ ...row, process_pid: 0 }))
+        && (metadata[`${String(metadata.sessionProvider)}NativeBoundTurnId`] === turnId || this.readRunBinding(projectId, input.executionLogId))) metadata.nativeOutputPending = true;
       if (input.action !== 'start') metadata.turnLogEndOffsets = logOffsets;
       if (input.workspaceEvidenceSource === 'native' && input.nativeLogRange) {
         const { start, end } = input.nativeLogRange;
-        const head = this.readRunLogHead(projectId, input.executionLogId, 'native:codex');
+        const stream = input.nativeLogRange.stream || 'native:codex';
+        if (!['native:codex', 'native:claude'].includes(stream) || stream !== `native:${String(metadata.sessionProvider)}`) throw new Error('native_source_range_invalid');
+        const head = this.readRunLogHead(projectId, input.executionLogId, stream);
         if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || end > head.totalBytes) throw new Error('native_source_range_invalid');
-        metadata.turnLogStartOffsets = { ...(metadata.turnLogStartOffsets as Record<string, unknown> || {}), 'native:codex': start };
-        metadata.turnLogEndOffsets = { ...(metadata.turnLogEndOffsets as Record<string, unknown> || {}), 'native:codex': end };
+        metadata.turnLogStartOffsets = { ...(metadata.turnLogStartOffsets as Record<string, unknown> || {}), [stream]: start };
+        metadata.turnLogEndOffsets = { ...(metadata.turnLogEndOffsets as Record<string, unknown> || {}), [stream]: end };
       }
       if (input.nativeSessionObservation && input.action !== 'session-close') {
         const observation = input.nativeSessionObservation;
         if (observation.provider !== 'claude' || observation.source !== 'CLAUDE_CODE_SESSION_ID' || typeof observation.sessionId !== 'string') throw new Error('invalid_native_session_observation');
         const binding = this.readRunBinding(projectId, input.executionLogId);
         const head = binding?.revisions[binding.headRevision - 1];
-        if (binding?.provider === observation.provider && path.resolve(binding.workspaceRoot) === path.resolve(String(metadata.workspaceRoot)) && head?.state === 'planned' && head.sessionId === metadata.plannedNativeSessionId) {
+        if (binding?.provider === observation.provider && path.resolve(binding.workspaceRoot) === path.resolve(String(metadata.workspaceRoot))
+          && (head?.state === 'planned' || head?.state === 'confirmed' && observation.sessionId !== head.sessionId) && head.sessionId === metadata.plannedNativeSessionId) {
           const evidence = { source: observation.source, turnId, generation: input.generation };
           const confirmed = this.writeRunBinding(projectId, {
             executionLogId: input.executionLogId, generation: input.generation, expectedHeadRevision: binding.headRevision,
@@ -2469,8 +4004,9 @@ export class UnifiedDataStore {
     return { ...this.readRunState(projectId, input.executionLogId, receipt.revision), receipt };
   }
   private checkpointIntent(projectId: string, input: RunCheckpointInput): unknown {
-    const { proof: _proof, expectedRevision: _expectedRevision, reportAvailability: _availability, reportValidationError: _validationError, workspaceSnapshot: _workspaceSnapshot, gitEvidence: _gitEvidence, gitBaseline: _gitBaseline, nativeWorkspaceObservation: _nativeObservation, nativeReply: _nativeReply, ...intent } = input;
-    return { operation: 'checkpoint_run', projectId, input: intent };
+    const { proof: _proof, expectedRevision: _expectedRevision, report: normalizedReport, reportIntent, reportAvailability: _availability, reportValidationError: _validationError, workspaceSnapshot: _workspaceSnapshot, gitEvidence: _gitEvidence, gitBaseline: _gitBaseline, nativeWorkspaceObservation: _nativeObservation, nativeReply: _nativeReply, ...intent } = input;
+    const rawReport = reportIntent === undefined ? normalizedReport : reportIntent;
+    return { operation: 'checkpoint_run', projectId, input: { ...intent, ...(rawReport === undefined ? {} : { report: rawReport }) } };
   }
   public readRunCheckpointReplay(projectId: string, input: RunCheckpointInput): RunState | null {
     this.verifyRunProof(projectId, input.executionLogId, input.generation, input.proof);
@@ -2521,7 +4057,7 @@ export class UnifiedDataStore {
       metadata.turnLogEndOffsets = Object.fromEntries(['output', 'stdout', 'stderr'].map(stream => [stream, this.readRunLogHead(projectId, input.executionLogId, stream).totalBytes]));
       metadata.hostOutputPending = false; metadata.hostOutputFinalizedAt = new Date(now).toISOString(); metadata.hostOutputSource = input.source;
       let exitCode = row.status === 'Failed' && Number(row.exit_code) !== 0 ? Number(row.exit_code) : input.exitCode;
-      const maintenanceResult = maintenanceRunKinds.includes(String(row.run_kind)) && this.readRunDocument(projectId, input.executionLogId, 'maintenance_result');
+      const maintenanceResult = maintenanceRunKinds.includes(String(row.run_kind)) && this.readRunDocument(projectId, input.executionLogId, `maintenance_result_${input.generation}`);
       const noDeliverable = exitCode === 0 && metadata.checkpointOutcome === 'partial' && !maintenanceResult && !(row.run_kind === 'agent_review' && metadata.agentLaunch?.readOnly) && !['solo', 'solo_background', 'solo_continue', 'step_continue', 'flow_planner', 'flow_verifier'].includes(String(row.run_kind)) && changes.length === 0 && !(row.run_kind === 'learning_review' && this.hasLearningReviewDeliverable(projectId, metadata));
       if (noDeliverable) exitCode = 125;
       const status = exitCode === 0 ? String(row.status) : 'Failed';
@@ -2570,6 +4106,114 @@ export class UnifiedDataStore {
     const row = this.runControl(projectId, input.executionLogId);
     this.db.run("UPDATE run_consumer_leases SET state='released' WHERE run_id=? AND token=? AND generation=? AND state='claimed'", [row.run_id, input.token, input.generation]);
   }
+  public recordRunVerification(projectId: string, input: { executionLogId: number; claim: string; result: 'pass' | 'fail'; evidence: string; idempotencyKey: string }): WriteReceipt {
+    if (!input.claim.trim() || !input.evidence.trim() || !['pass', 'fail'].includes(input.result)) throw new Error('run_verification_invalid');
+    const row = this.runControl(projectId, input.executionLogId);
+    const run = this.rows('SELECT task_id FROM runs WHERE id=? AND project_id=?', [row.run_id, projectId])[0];
+    if (!run) throw new Error('run_missing');
+    const intent = { projectId, executionLogId: input.executionLogId, claim: input.claim, result: input.result, evidence: input.evidence };
+    const inputHash = digest(canonical(intent));
+    return this.transaction(() => {
+      const previous = this.rows('SELECT input_hash,result_content_id FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, input.idempotencyKey])[0];
+      if (previous) {
+        if (previous.input_hash !== inputHash) throw new Error('idempotency_conflict');
+        return JSON.parse(this.content(String(previous.result_content_id)).toString('utf8')) as WriteReceipt;
+      }
+      const requestId = crypto.randomUUID();
+      this.db.run('INSERT INTO requests(actor_id,idempotency_key,id,input_hash,status) VALUES(?,?,?,?,?)', [this.actorId, input.idempotencyKey, requestId, inputHash, 'pending']);
+      const verifiedAt = Date.now();
+      const evidence = this.write({ kind: 'evidence', action: 'create', scope: projectId, idempotencyKey: `${input.idempotencyKey}:evidence`, data: {
+        run_id: row.run_id, type: 'host_verification', source_actor_id: this.actorId, content: input.evidence, observed_at: verifiedAt
+      } });
+      const verification = this.write({ kind: 'verification', action: 'create', scope: projectId, idempotencyKey: `${input.idempotencyKey}:verification`, data: {
+        task_id: run.task_id, run_id: row.run_id, verifier_actor_id: this.actorId, claim: input.claim,
+        result: input.result, evidence_id: evidence.objectId, verified_at: verifiedAt
+      } });
+      const evaluations = this.rows('SELECT e.id,e.baseline_ref,o.revision,e.feedback_event_id FROM evaluations e JOIN policy_uses p ON p.id=e.policy_use_id JOIN objects o ON o.id=e.id WHERE p.project_id=? AND p.run_id=? AND e.verdict=?', [projectId, row.run_id, 'unassessed']);
+      for (const evaluation of evaluations) {
+        let baseline: Record<string, unknown> = {};
+        try { baseline = JSON.parse(String(evaluation.baseline_ref || '{}')); } catch { /* Historical malformed claims stay unassessed. */ }
+        const evidenceRefs = Array.isArray(baseline.evidence) ? baseline.evidence : [];
+        if (baseline.reportedVerdict !== 'effective' || evidenceRefs.length === 0) continue;
+        const verdict = input.result === 'pass' ? 'effective' : 'ineffective';
+        this.write({ kind: 'evaluation', action: 'patch', scope: projectId, objectId: String(evaluation.id), expectedRevision: Number(evaluation.revision), idempotencyKey: `${input.idempotencyKey}:evaluation:${evaluation.id}`, data: { verification_id: verification.objectId, verdict, value: input.result === 'pass' ? 1 : 0 } });
+        if (evaluation.feedback_event_id) {
+          const event = this.readMetadata(String(evaluation.feedback_event_id));
+          this.write({ kind: 'learning_event', action: 'patch', scope: projectId, objectId: event.objectId, expectedRevision: event.revision, idempotencyKey: `${input.idempotencyKey}:event:${event.objectId}`, data: { event_type: input.result === 'pass' ? 'verified' : 'verified_failed', verification_signal: input.result === 'pass' } });
+        }
+      }
+      const sequence = Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS value FROM events')[0].value);
+      this.db.run("UPDATE requests SET status='committed',result_content_id=?,committed_sequence=? WHERE id=?", [this.putContent(canonical(verification), 'application/json'), sequence, requestId]);
+      return verification;
+    });
+  }
+  private recordRsiAdoptions(projectId: string, runId: string, turnId: string, metadata: Record<string, unknown>, learningEventId: string | null, verification: DataObject | null): void {
+    if (metadata.taskReportStatus !== 'recorded' || !metadata.taskReportObjectId || !Number.isInteger(Number(metadata.taskReportRevision)) || Number(metadata.taskReportRevision) < 1) return;
+    const report = this.read(String(metadata.taskReportObjectId), Number(metadata.taskReportRevision));
+    if (report.kind !== 'report' || report.projectId !== projectId || report.data.turn_id !== turnId || report.data.run_id !== runId) throw new Error('rsi_report_identity_mismatch');
+    const body = JSON.parse(String(report.data.content || 'null')) as { experienceUsage?: Array<Record<string, unknown>> } | null;
+    const usages = Array.isArray(body?.experienceUsage) ? body!.experienceUsage! : [];
+    if (!usages.length) return;
+    if (!learningEventId) throw new Error('rsi_evaluation_source_required');
+    const policyRef = metadata.globalPromptPolicyRef as { objectId?: unknown; revision?: unknown } | null;
+    if (!policyRef || typeof policyRef.objectId !== 'string' || !Number.isInteger(policyRef.revision) || Number(policyRef.revision) < 1) throw new Error('rsi_policy_reference_required');
+    const policy = this.readMetadata(policyRef.objectId, Number(policyRef.revision));
+    if (policy.kind !== 'policy') throw new Error('rsi_policy_reference_invalid');
+    const run = this.rows('SELECT prompt_content_id FROM runs WHERE id=? AND project_id=?', [runId, projectId])[0];
+    const deliveredPrompt = run?.prompt_content_id ? this.decodedContent(String(run.prompt_content_id)) : '';
+    const event = this.readMetadata(learningEventId);
+    const adverse = ['failed', 'blocked', 'no_effect', 'verified_failed'].includes(String(event.data.event_type));
+    const degraded = ['partial', 'deviated', 'needs_confirmation', 'implemented_unverified'].includes(String(event.data.event_type));
+    usages.forEach((usage, index) => {
+      const lessonId = String(usage.experienceId || '');
+      const lessonRevision = Number(usage.experienceRevision);
+      const lesson = this.readMetadata(lessonId, lessonRevision);
+      if (lesson.kind !== 'lesson' || ![null, projectId].includes(lesson.projectId)) throw new Error('rsi_lesson_reference_invalid');
+      if (lesson.data.status !== 'approved') throw new Error('rsi_lesson_not_approved');
+      const escapedLessonId = lesson.objectId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (typeof deliveredPrompt !== 'string' || !new RegExp(`solomap://objects/${escapedLessonId}\\s*·\\s*revision=${lesson.revision}(?!\\d)`).test(deliveredPrompt)) throw new Error('rsi_experience_not_delivered');
+      const evidence = Array.isArray(usage.evidence) ? usage.evidence.map(String) : [];
+      const reportedVerdict = String(usage.verdict || 'unassessed');
+      let verdict = reportedVerdict;
+      if (adverse) verdict = 'ineffective';
+      else if (degraded && verdict === 'effective') verdict = 'degraded';
+      else if (verdict === 'effective' && (verification?.data.result !== 'pass' || evidence.length === 0)) verdict = 'unassessed';
+      const use = this.write({ kind: 'policy_use', action: 'create', scope: projectId, idempotencyKey: `rsi:${report.objectId}:${report.revision}:${index}:use`, data: {
+        policy_id: policy.objectId, policy_revision: policy.revision, lesson_id: lesson.objectId, lesson_revision: lesson.revision, run_id: runId, purpose: String(usage.action || '')
+      } });
+      this.write({ kind: 'evaluation', action: 'create', scope: projectId, idempotencyKey: `rsi:${report.objectId}:${report.revision}:${index}:evaluation`, data: {
+        policy_use_id: use.objectId, feedback_event_id: learningEventId, verification_id: verification?.objectId || null, metric: 'task_outcome',
+        value: verdict === 'effective' ? 1 : verdict === 'degraded' ? 0.5 : verdict === 'ineffective' ? 0 : null,
+        unit: 'ratio', baseline_ref: canonical({ result: String(usage.result || ''), evidence, reportedVerdict }), verdict
+      } });
+    });
+  }
+  public readRsiCycles(projectId: string, input: { cursor?: number; limit?: number } = {}): { items: Array<Record<string, unknown>>; nextCursor: number | null } {
+    const cursor = input.cursor ?? 0, limit = input.limit ?? 100;
+    if (!Number.isInteger(cursor) || cursor < 0 || !Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error('invalid_rsi_page');
+    const rows = this.rows(`SELECT pu.id AS use_id,ou.revision AS use_revision,pu.policy_id,pu.policy_revision,pu.lesson_id,pu.lesson_revision,pu.run_id,pu.purpose,
+      e.id AS evaluation_id,oe.revision AS evaluation_revision,e.metric,e.value,e.unit,e.baseline_ref,e.verdict,e.feedback_event_id,e.verification_id
+      FROM policy_uses pu JOIN objects ou ON ou.id=pu.id
+      JOIN evaluations e ON e.policy_use_id=pu.id JOIN objects oe ON oe.id=e.id
+      WHERE pu.project_id=? AND ou.archived_at IS NULL AND oe.archived_at IS NULL
+      ORDER BY ou.created_at DESC,pu.id DESC LIMIT ? OFFSET ?`, [projectId, limit + 1, cursor]);
+    const items = rows.slice(0, limit).map(row => {
+      let baseline: Record<string, unknown> = {};
+      try { baseline = JSON.parse(String(row.baseline_ref || '{}')); } catch { /* Historical malformed metadata remains visible without inventing fields. */ }
+      const policy = this.readMetadata(String(row.policy_id));
+      const lesson = row.lesson_id ? this.readMetadata(String(row.lesson_id)) : null;
+      return {
+        policyUseRef: { objectId: String(row.use_id), revision: Number(row.use_revision) },
+        policyRef: { objectId: String(row.policy_id), revision: Number(row.policy_revision) },
+        lessonRef: lesson ? { objectId: String(row.lesson_id), revision: Number(row.lesson_revision) } : null,
+        runId: String(row.run_id), action: String(row.purpose), result: String(baseline.result || ''),
+        evidence: Array.isArray(baseline.evidence) ? baseline.evidence : [], reportedVerdict: String(baseline.reportedVerdict || 'unassessed'),
+        evaluation: { objectId: String(row.evaluation_id), revision: Number(row.evaluation_revision), metric: String(row.metric), value: row.value === null ? null : Number(row.value), unit: row.unit === null ? null : String(row.unit), verdict: String(row.verdict), feedbackEventId: row.feedback_event_id === null ? null : String(row.feedback_event_id), verificationId: row.verification_id === null ? null : String(row.verification_id) },
+        currentPolicyStatus: String(policy.data.status || ''), currentLessonStatus: lesson ? String(lesson.data.status || '') : null
+      };
+    });
+    return { items, nextCursor: rows.length > limit ? cursor + limit : null };
+  }
   public commitRunSettlement(projectId: string, input: RunSettlementInput): RunState {
     if (!input.journal || ['agentCli', 'command', 'output', 'status'].some(key => typeof input.journal[key as keyof typeof input.journal] !== 'string') || !input.digest || typeof input.digest !== 'object') throw new Error('invalid_run_settlement');
     const receipt = this.recordMutation({ operation: 'commit_run_settlement', projectId, input }, input.idempotencyKey, 'settle', () => {
@@ -2599,15 +4243,27 @@ export class UnifiedDataStore {
       this.saveRunDigestSource(projectId, `native:${row.run_id}:${input.expectedTurnId}:${source.checkpoint_sequence}`, Buffer.from(canonical(input.digest)), document.objectId);
       if (input.documentationAudit && !previousTurn) this.writeDocumentationManifest(projectId, input.documentationAudit.manifest, String(row.run_id), input.expectedRevision, `${input.idempotencyKey}:documentation`);
       let learningEventId: string | null = null;
+      let settlementVerification: DataObject | null = null;
+      if (input.verification) {
+        if (!Number.isInteger(input.verification.revision) || input.verification.revision < 1) throw new Error('run_verification_reference_invalid');
+        const verification = this.readMetadata(input.verification.objectId, input.verification.revision);
+        const runTask = this.rows('SELECT task_id FROM runs WHERE id=? AND project_id=?', [row.run_id, projectId])[0];
+        const evidence = verification.kind === 'verification' && verification.data.evidence_id ? this.readMetadata(String(verification.data.evidence_id)) : null;
+        if (verification.kind !== 'verification' || verification.projectId !== projectId || verification.data.run_id !== row.run_id || verification.data.task_id !== runTask?.task_id || !['pass', 'fail'].includes(String(verification.data.result)) || evidence?.kind !== 'evidence' || evidence.projectId !== projectId || evidence.data.run_id !== row.run_id || evidence.data.type !== 'host_verification') throw new Error('run_verification_reference_invalid');
+        settlementVerification = verification;
+      }
       if (input.learning) {
         if (!input.learning.eventType || typeof input.learning.summary !== 'string' || !input.learning.metadata) throw new Error('invalid_settlement_learning');
         const learningMetadata = input.learning.metadata;
-        const verification = Array.isArray(learningMetadata.verification) ? learningMetadata.verification : (learningMetadata.metadata as Record<string, unknown> | undefined)?.verification;
-        const verificationSignal = (input.learning.eventType === 'verified' && Array.isArray(verification) && verification.some(isUsefulVerificationSignal)) || learningMetadata.recommendedStatus === 'closed';
-        learningEventId = previousTurn?.learning_event_id ? String(previousTurn.learning_event_id) : this.write({ kind: 'learning_event', action: 'create', scope: projectId, data: { source_object_id: input.expectedTurnId, event_type: input.learning.eventType, summary: input.learning.summary, occurred_at: now, source_revision: this.readMetadata(input.expectedTurnId).revision, source_type: String(learningMetadata.sourceType || ''), verification_signal: verificationSignal }, idempotencyKey: `${input.idempotencyKey}:learning` }).objectId;
+        const flowScoring = learningMetadata.scoring && typeof learningMetadata.scoring === 'object' ? learningMetadata.scoring as Record<string, unknown> : null;
+        const formalFlowVerification = input.learning.eventType === 'verified' && learningMetadata.sourceType === 'flow_loop' && learningMetadata.recommendedStatus === 'closed' && flowScoring?.recommendedStatus === 'closed';
+        const eventType = settlementVerification?.data.result === 'pass' || formalFlowVerification ? 'verified' : settlementVerification?.data.result === 'fail' ? 'verified_failed' : input.learning.eventType === 'verified' ? 'completed' : input.learning.eventType;
+        const verificationSignal = settlementVerification?.data.result === 'pass' || formalFlowVerification;
+        learningEventId = previousTurn?.learning_event_id ? String(previousTurn.learning_event_id) : this.write({ kind: 'learning_event', action: 'create', scope: projectId, data: { source_object_id: input.expectedTurnId, event_type: eventType, summary: input.learning.summary, occurred_at: now, source_revision: this.readMetadata(input.expectedTurnId).revision, source_type: String(learningMetadata.sourceType || ''), verification_signal: verificationSignal }, idempotencyKey: `${input.idempotencyKey}:learning` }).objectId;
         this.db.run('INSERT INTO relations VALUES(?,?,?)', [learningEventId, 'source', document.objectId]);
         if (metadata.taskReportObjectId) this.db.run('INSERT OR IGNORE INTO relations VALUES(?,?,?)', [learningEventId, 'source', String(metadata.taskReportObjectId)]);
       }
+      this.recordRsiAdoptions(projectId, String(row.run_id), input.expectedTurnId, metadata, learningEventId, settlementVerification);
       if (input.handoff && !previousTurn) {
         this.db.run('INSERT INTO step_handoffs VALUES(?,?,?,?,?,?)', [projectId, row.node_key, row.run_id, input.expectedTurnId, source.checkpoint_sequence, handoffId]);
         this.recordMutation({ operation: 'settlement_step_memory', projectId, nodeId: row.node_key, sourceObjectId: document.objectId }, `${input.idempotencyKey}:step-memory`, 'step_memory', () => this.saveStepMemoryRevision(projectId, String(row.node_key), undefined, document.objectId));
@@ -3029,10 +4685,12 @@ export class UnifiedDataStore {
     return this.current(id);
   }
   private notificationDelivery(row: Record<string, SqlValue>): Record<string, unknown> {
-    return { id: String(row.id), intentId: String(row.intent_id), channel: String(row.channel), objectId: String(row.object_id), messageHash: String(row.message_hash), revision: Number(row.revision), state: String(row.state), payload: JSON.parse(this.content(String(row.payload_content_id)).toString('utf8')), response: row.response_content_id ? JSON.parse(this.content(String(row.response_content_id)).toString('utf8')) : null, error: String(row.error), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+    const attempt = this.rows("SELECT state,error FROM notification_delivery_attempts WHERE delivery_id=? AND delivery_revision=?", [row.id, row.revision])[0];
+    const state = row.state === 'queued' && attempt?.state === 'started' ? 'delivery_unknown' : String(row.state);
+    return { id: String(row.id), intentId: String(row.intent_id), channel: String(row.channel), objectId: String(row.object_id), messageHash: String(row.message_hash), revision: Number(row.revision), state, payload: JSON.parse(this.content(String(row.payload_content_id)).toString('utf8')), response: row.response_content_id ? JSON.parse(this.content(String(row.response_content_id)).toString('utf8')) : null, error: String(attempt?.error || row.error), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
   }
   private validateNotificationPayload(payload: Record<string, unknown>): void {
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).some(key => !['replyGeneration', 'chatId', 'text', 'parseMode'].includes(key)) || !Number.isInteger(payload.replyGeneration) || Number(payload.replyGeneration) < 0 || typeof payload.chatId !== 'string' || !payload.chatId || typeof payload.text !== 'string' || !payload.text || (payload.parseMode !== undefined && payload.parseMode !== 'HTML')) throw new Error('invalid_notification_payload');
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).some(key => !['replyGeneration', 'chatId', 'text', 'parseMode', 'audience'].includes(key)) || !Number.isInteger(payload.replyGeneration) || Number(payload.replyGeneration) < 0 || typeof payload.chatId !== 'string' || !payload.chatId || typeof payload.text !== 'string' || !payload.text || (payload.parseMode !== undefined && payload.parseMode !== 'HTML') || (payload.audience !== undefined && payload.audience !== 'requester')) throw new Error('invalid_notification_payload');
   }
   public readNotification(intentId: string): Record<string, unknown> | null {
     const row = this.rows('SELECT * FROM notification_deliveries WHERE intent_id=?', [intentId])[0];
@@ -3058,11 +4716,26 @@ export class UnifiedDataStore {
   public listNotificationDeliveries(input: { channel: string; cursor?: { createdAt: number; id: string }; limit?: number }): { items: Array<Record<string, unknown>>; nextCursor: { createdAt: number; id: string } | null } {
     const limit = input.limit ?? 100;
     if (input.channel !== 'telegram' || !Number.isInteger(limit) || limit < 1 || limit > 1000 || (input.cursor && (!Number.isInteger(input.cursor.createdAt) || !input.cursor.id))) throw new Error('invalid_notification_list');
-    const rows = this.rows(`SELECT * FROM notification_deliveries WHERE channel=? AND state='queued'${input.cursor ? ' AND (created_at,id)>(?,?)' : ''} ORDER BY created_at,id LIMIT ?`, [input.channel, ...(input.cursor ? [input.cursor.createdAt, input.cursor.id] : []), limit + 1]);
+    const rows = this.rows(`SELECT * FROM notification_deliveries d WHERE channel=? AND state='queued' AND NOT EXISTS(SELECT 1 FROM notification_delivery_attempts a WHERE a.delivery_id=d.id AND a.delivery_revision=d.revision AND a.state='started')${input.cursor ? ' AND (created_at,id)>(?,?)' : ''} ORDER BY created_at,id LIMIT ?`, [input.channel, ...(input.cursor ? [input.cursor.createdAt, input.cursor.id] : []), limit + 1]);
     const page = rows.slice(0, limit);
     return { items: page.map(row => this.notificationDelivery(row)), nextCursor: rows.length > limit ? { createdAt: Number(page[page.length - 1].created_at), id: String(page[page.length - 1].id) } : null };
   }
-  public settleNotificationDelivery(input: { id: string; expectedRevision: number; state: string; payload?: Record<string, unknown>; response?: unknown; error?: string; idempotencyKey: string }): Record<string, unknown> {
+  public beginNotificationDelivery(input: { id: string; expectedRevision: number; idempotencyKey: string }): Record<string, unknown> {
+    if (!input.id || !Number.isInteger(input.expectedRevision) || input.expectedRevision < 1 || !input.idempotencyKey) throw new Error('invalid_notification_attempt');
+    const receipt = this.recordMutation(input, input.idempotencyKey, 'notification_delivery_attempt', () => {
+      const current = this.rows('SELECT * FROM notification_deliveries WHERE id=?', [input.id])[0];
+      if (!current) throw new Error('notification_missing');
+      if (Number(current.revision) !== input.expectedRevision) throw new Error('revision_conflict');
+      if (current.state !== 'queued') throw new Error('notification_already_settled');
+      const previous = this.rows('SELECT * FROM notification_delivery_attempts WHERE delivery_id=? AND delivery_revision=?', [input.id, input.expectedRevision])[0];
+      if (previous?.state === 'started') throw new Error('notification_delivery_unknown');
+      const token = crypto.randomBytes(24).toString('hex'), now = Date.now();
+      this.db.run("INSERT INTO notification_delivery_attempts(delivery_id,attempt_token,delivery_revision,state,response_content_id,error,started_at,updated_at) VALUES(?,?,?,'started',NULL,'',?,?)", [input.id, token, input.expectedRevision, now, now]);
+      return this.createNotificationEvidence('notification_delivery_attempt', { id: input.id, revision: input.expectedRevision, token, state: 'started' });
+    });
+    return JSON.parse(String(this.read(receipt.objectId, receipt.revision).data.content));
+  }
+  public settleNotificationDelivery(input: { id: string; expectedRevision: number; state: string; payload?: Record<string, unknown>; response?: unknown; error?: string; attemptToken?: string; idempotencyKey: string }): Record<string, unknown> {
     if (!input.id || !Number.isInteger(input.expectedRevision) || input.expectedRevision < 1 || !['queued', 'delivered', 'cancelled', 'failed'].includes(input.state)) throw new Error('invalid_notification_settlement');
     if (input.payload) this.validateNotificationPayload(input.payload);
     const { expectedRevision: _expectedRevision, idempotencyKey, ...intent } = input;
@@ -3071,10 +4744,14 @@ export class UnifiedDataStore {
       if (!current) throw new Error('notification_missing');
       if (Number(current.revision) !== input.expectedRevision) throw new Error('revision_conflict');
       if (current.state !== 'queued') throw new Error('notification_already_settled');
+      const attempt = this.rows('SELECT * FROM notification_delivery_attempts WHERE delivery_id=? AND delivery_revision=?', [input.id, input.expectedRevision])[0];
+      if (attempt && (attempt.state !== 'started' || !input.attemptToken || input.attemptToken !== attempt.attempt_token)) throw new Error('notification_attempt_mismatch');
+      if (!attempt && input.attemptToken) throw new Error('notification_attempt_mismatch');
       const payload = input.payload || JSON.parse(this.content(String(current.payload_content_id)).toString('utf8'));
       const previous = JSON.parse(this.content(String(current.payload_content_id)).toString('utf8'));
       if (payload.chatId !== previous.chatId || payload.replyGeneration !== previous.replyGeneration) throw new Error('notification_binding_immutable');
       this.db.run('UPDATE notification_deliveries SET state=?,revision=revision+1,payload_content_id=?,response_content_id=?,error=?,updated_at=? WHERE id=?', [input.state, this.putContent(canonical(payload), 'application/json'), input.response === undefined ? null : this.putContent(canonical(input.response), 'application/json'), input.error || '', Date.now(), input.id]);
+      if (attempt) this.db.run("UPDATE notification_delivery_attempts SET state='confirmed',response_content_id=?,error=?,updated_at=? WHERE delivery_id=? AND delivery_revision=?", [input.response === undefined ? null : this.putContent(canonical(input.response), 'application/json'), input.error || '', Date.now(), input.id, input.expectedRevision]);
       return this.createNotificationEvidence('notification_delivery', this.notificationDelivery(this.rows('SELECT * FROM notification_deliveries WHERE id=?', [input.id])[0]));
     });
     return { ...JSON.parse(String(this.read(receipt.objectId, receipt.revision).data.content)), receipt };
@@ -3091,9 +4768,11 @@ export class UnifiedDataStore {
     return { receipt, replayed };
   }
   private automationDelivery(row: Record<string, SqlValue>, metadataOnly = false): Record<string, unknown> {
-    if (metadataOnly) return { id: String(row.id), projectId: String(row.project_id), intentId: String(row.intent_id), objectId: String(row.object_id), kind: String(row.kind), state: String(row.state), revision: Number(row.revision), payload: { kind: String(row.kind) }, event: { trigger: String(row.event_trigger), action: String(row.event_action) }, error: String(row.error) };
+    const started = row.state === 'claimed' && this.rows("SELECT 1 FROM automation_delivery_receipts WHERE delivery_id=? AND claim_token=? AND state='started'", [row.id, row.claim_token]).length > 0;
+    const state = started ? 'delivery_unknown' : String(row.state);
+    if (metadataOnly) return { id: String(row.id), projectId: String(row.project_id), intentId: String(row.intent_id), objectId: String(row.object_id), kind: String(row.kind), state, revision: Number(row.revision), payload: { kind: String(row.kind) }, event: { trigger: String(row.event_trigger), action: String(row.event_action) }, error: String(row.error) };
     const { delivery, ...event } = JSON.parse(this.content(String(row.payload_content_id)).toString('utf8'));
-    return { id: String(row.id), projectId: String(row.project_id), intentId: String(row.intent_id), objectId: String(row.object_id), kind: String(row.kind), state: String(row.state), revision: Number(row.revision), payload: delivery.payload, event, error: String(row.error) };
+    return { id: String(row.id), projectId: String(row.project_id), intentId: String(row.intent_id), objectId: String(row.object_id), kind: String(row.kind), state, revision: Number(row.revision), payload: delivery.payload, event, error: String(row.error) };
   }
   public prepareAutomationDelivery(projectId: string, input: { intentId: string; event: Record<string, unknown>; payload: Record<string, unknown>; metadataOnly?: boolean }): Record<string, unknown> {
     const payload = input.payload;
@@ -3118,7 +4797,7 @@ export class UnifiedDataStore {
   public listAutomationDeliveries(input: { cursor?: { createdAt: number; id: string }; limit?: number }): { items: Record<string, unknown>[]; nextCursor: { createdAt: number; id: string } | null } {
     const limit = input.limit ?? 100; const cursor = input.cursor;
     if (!Number.isInteger(limit) || limit < 1 || limit > 500 || (cursor && (!Number.isFinite(cursor.createdAt) || typeof cursor.id !== 'string'))) throw new Error('invalid_automation_delivery_page');
-    const rows = this.rows("SELECT id,project_id,kind,event_trigger,state,created_at FROM automation_deliveries WHERE state IN ('queued','claimed')" + (cursor ? ' AND (created_at>? OR (created_at=? AND id>?))' : '') + ' ORDER BY created_at,id LIMIT ?', [...(cursor ? [cursor.createdAt, cursor.createdAt, cursor.id] : []), limit + 1]);
+    const rows = this.rows("SELECT id,project_id,kind,event_trigger,state,created_at FROM automation_deliveries d WHERE (state='queued' OR (state='claimed' AND NOT EXISTS(SELECT 1 FROM automation_delivery_receipts r WHERE r.delivery_id=d.id AND r.claim_token=d.claim_token AND r.state='started')))" + (cursor ? ' AND (created_at>? OR (created_at=? AND id>?))' : '') + ' ORDER BY created_at,id LIMIT ?', [...(cursor ? [cursor.createdAt, cursor.createdAt, cursor.id] : []), limit + 1]);
     const page = rows.slice(0, limit);
     return { items: page.map(row => ({ id: String(row.id), projectId: String(row.project_id), kind: String(row.kind), trigger: String(row.event_trigger), state: String(row.state) })), nextCursor: rows.length > limit ? { createdAt: Number(page.at(-1)!.created_at), id: String(page.at(-1)!.id) } : null };
   }
@@ -3133,11 +4812,25 @@ export class UnifiedDataStore {
       if (row.state === 'claimed') {
         if (row.owner_id === input.owner.id && row.owner_pid === input.owner.pid && row.owner_birth === input.owner.birth) return { ...this.automationDelivery(row), token: String(row.claim_token) };
         if (this.hasLiveRunProcess({ process_pid: row.owner_pid, process_birth: row.owner_birth })) return null;
+        if (this.rows("SELECT 1 FROM automation_delivery_receipts WHERE delivery_id=? AND claim_token=? AND state='started'", [input.id, row.claim_token]).length) return null;
       }
       if (this.rows('SELECT 1 FROM automation_delivery_receipts WHERE delivery_id=? AND claim_token=? LIMIT 1', [input.id, input.token]).length) throw new Error('automation_delivery_token_reused');
       const now = Date.now();
       this.db.run("UPDATE automation_deliveries SET state='claimed',revision=revision+1,owner_id=?,owner_pid=?,owner_birth=?,claim_token=?,claimed_at=?,updated_at=? WHERE id=?", [input.owner.id, input.owner.pid, input.owner.birth, input.token, now, now, input.id]);
       return { ...this.automationDelivery(this.rows('SELECT * FROM automation_deliveries WHERE id=?', [input.id])[0]), token: input.token };
+    });
+  }
+  public beginAutomationDelivery(input: { id: string; token: string }): Record<string, unknown> {
+    if (!input.id || !input.token) throw new Error('invalid_automation_delivery_attempt');
+    return this.transaction(() => {
+      const previous = this.rows("SELECT content_id FROM automation_delivery_receipts WHERE delivery_id=? AND claim_token=? AND state='started'", [input.id, input.token])[0];
+      if (previous) return JSON.parse(this.content(String(previous.content_id)).toString('utf8'));
+      const current = this.rows('SELECT * FROM automation_deliveries WHERE id=?', [input.id])[0];
+      if (!current || current.state !== 'claimed' || current.claim_token !== input.token) throw new Error('automation_delivery_lease_lost');
+      const result = { id: input.id, token: input.token, state: 'started', revision: Number(current.revision) };
+      const contentId = this.putContent(canonical(result), 'application/json');
+      this.db.run('INSERT INTO automation_delivery_receipts VALUES(?,?,?,?)', [input.id, input.token, 'started', contentId]);
+      return result;
     });
   }
   public settleAutomationDelivery(input: { id: string; token: string; state: 'queued' | 'delivered' | 'cancelled'; error?: string }): Record<string, unknown> {
@@ -3167,7 +4860,7 @@ export class UnifiedDataStore {
       if (release && previous && previous.owner_id !== owner.id) return this.createNotificationEvidence('automation_ui_owner', { registered: false });
       if (!release && previous?.owner_id === owner.id && !previous.active) throw new Error('automation_ui_owner_obsolete');
       if (previous && (previous.owner_id !== owner.id || release)) {
-        this.db.run("UPDATE automation_deliveries SET state='queued',revision=revision+1,owner_id=NULL,owner_pid=NULL,owner_birth=NULL,claim_token=NULL,claimed_at=NULL,updated_at=? WHERE state='claimed' AND owner_id=? AND owner_pid=? AND owner_birth=?", [Date.now(), previous.owner_id, owner.pid, owner.birth]);
+        this.db.run("UPDATE automation_deliveries SET state='queued',revision=revision+1,owner_id=NULL,owner_pid=NULL,owner_birth=NULL,claim_token=NULL,claimed_at=NULL,updated_at=? WHERE state='claimed' AND owner_id=? AND owner_pid=? AND owner_birth=? AND NOT EXISTS(SELECT 1 FROM automation_delivery_receipts r WHERE r.delivery_id=automation_deliveries.id AND r.claim_token=automation_deliveries.claim_token AND r.state='started')", [Date.now(), previous.owner_id, owner.pid, owner.birth]);
       }
       this.db.run('INSERT INTO automation_ui_owners VALUES(?,?,?,?) ON CONFLICT(pid,birth) DO UPDATE SET owner_id=excluded.owner_id,active=excluded.active', [owner.pid, owner.birth, owner.id, release ? 0 : 1]);
       return this.createNotificationEvidence('automation_ui_owner', { registered: !release });
@@ -3178,15 +4871,61 @@ export class UnifiedDataStore {
     const row = this.rows("SELECT evidence.content_id FROM evidence JOIN objects ON objects.id=evidence.id WHERE evidence.project_id=? AND evidence.type='documentation_manifest' ORDER BY objects.updated_at DESC,objects.rowid DESC LIMIT 1", [projectId])[0];
     return row ? JSON.parse(this.content(String(row.content_id)).toString('utf8')) : { schemaVersion: 1, updatedAt: '', documents: [], pendingReview: [] };
   }
-  private writeDocumentationManifest(projectId: string, manifest: DocumentationManifest, runId: string, sourceRevision: number, idempotencyKey: string): void {
+  public syncDocumentationManifest(projectId: string, input: { manifest: DocumentationManifest; idempotencyKey: string }): DocumentationManifest {
+    return this.transaction(() => {
+      const current = this.readDocumentationManifest(projectId);
+      const comparable = (manifest: DocumentationManifest) => canonical({
+        schemaVersion: manifest.schemaVersion,
+        documents: manifest.documents,
+        pendingReview: manifest.pendingReview,
+        lastAudit: manifest.lastAudit || null
+      });
+      if (comparable(current) === comparable(input.manifest)) return current;
+      this.writeDocumentationManifest(projectId, input.manifest, null, -1, input.idempotencyKey);
+      return this.readDocumentationManifest(projectId);
+    });
+  }
+  public importDocumentationManifest(projectId: string, input: { manifest: DocumentationManifest; source: ImportedSource }): { unchanged: boolean } {
+    return this.transaction(() => {
+      const state = this.migrationSourceState(input.source.identity, input.source.key);
+      if (!state || state.hash !== input.source.hash) throw new Error('migration_source_missing');
+      if (state.stage === 'imported') return { unchanged: true };
+      const current = this.readDocumentationManifest(projectId);
+      if (current.documents.length || current.pendingReview.length || current.lastAudit) {
+        const head = this.rows("SELECT source_revision FROM evidence JOIN objects ON objects.id=evidence.id WHERE evidence.project_id=? AND evidence.type='documentation_manifest' ORDER BY objects.updated_at DESC,objects.rowid DESC LIMIT 1", [projectId])[0];
+        if (Number(head?.source_revision) !== -1) {
+          this.markMigrationSourceConflict(input.source.identity, input.source.key, 'newer_database_revision');
+          throw new Error('migration_conflict: newer_database_revision');
+        }
+        const currentDocuments = new Map(current.documents.map(document => [document.path, document]));
+        const historicalPaths = new Set(input.manifest.documents.map(document => document.path));
+        input = { ...input, manifest: {
+          ...input.manifest,
+          documents: [
+            ...input.manifest.documents.map(document => {
+              const scanned = currentDocuments.get(document.path);
+              return scanned ? { ...scanned, ...document, status: scanned.status, ...(scanned.lastTouchedAt ? { lastTouchedAt: scanned.lastTouchedAt } : {}) } : document;
+            }),
+            ...current.documents.filter(document => !historicalPaths.has(document.path))
+          ],
+          pendingReview: [...input.manifest.pendingReview, ...current.pendingReview],
+          ...(current.lastAudit ? { lastAudit: current.lastAudit } : {})
+        } };
+      }
+      this.writeDocumentationManifest(projectId, input.manifest, null, 0, `import-documentation:${input.source.hash}`, true);
+      this.markMigrationSourceImported(input.source.identity, input.source.key);
+      return { unchanged: false };
+    });
+  }
+  private writeDocumentationManifest(projectId: string, manifest: DocumentationManifest, runId: string | null, sourceRevision: number, idempotencyKey: string, replaceCurrent = false): void {
     if (!manifest || !Array.isArray(manifest.documents) || !Array.isArray(manifest.pendingReview)) throw new Error('invalid_documentation_manifest');
     const current = this.readDocumentationManifest(projectId);
-    const documents = new Map(current.documents.map(document => [document.path, document]));
+    const documents = new Map((replaceCurrent ? [] : current.documents).map(document => [document.path, document]));
     for (const document of manifest.documents) {
       const previous = documents.get(document.path);
       if (!previous || Date.parse(document.lastTouchedAt || manifest.updatedAt) >= Date.parse(previous.lastTouchedAt || current.updatedAt)) documents.set(document.path, document);
     }
-    const reviews = new Map([...current.pendingReview, ...manifest.pendingReview].map(review => [`${review.path}\n${review.reason}`, review]));
+    const reviews = new Map([...(replaceCurrent ? [] : current.pendingReview), ...manifest.pendingReview].map(review => [`${review.path}\n${review.reason}`, review]));
     manifest = { ...manifest, documents: [...documents.values()], pendingReview: [...reviews.values()] };
     for (let index = 0; index < manifest.documents.length; index++) {
       const value = manifest.documents[index];
@@ -3409,10 +5148,34 @@ export class UnifiedDataStore {
     if (row.generation !== input.generation) throw new Error('run_owner_conflict');
     if (!input.turnId) throw new Error('report_turn_required');
     if (!this.rows("SELECT 1 AS allowed FROM relations WHERE source_id=? AND relation='source' AND target_id=?", [row.run_id, input.turnId]).length || this.readMetadata(input.turnId).kind !== 'turn') throw new Error('report_turn_denied');
-    const receipt = this.recordMutation({ operation: 'submit_run_report', projectId, executionLogId: input.executionLogId, generation: input.generation, turnId: input.turnId, report: input.report, availability: input.availability, validationError: input.validationError || '' }, input.idempotencyKey, 'submit', () => this.createRunReport(projectId, String(row.run_id), input.turnId, input));
-    return { ...receipt, availability: String(this.current(receipt.objectId, false).data.availability) };
+    return this.transaction(() => {
+      const receipt = this.recordMutation({ operation: 'submit_run_report', projectId, executionLogId: input.executionLogId, generation: input.generation, turnId: input.turnId, report: input.report, availability: input.availability, validationError: input.validationError || '' }, input.idempotencyKey, 'submit', () => this.upsertRunReport(projectId, String(row.run_id), input.turnId, input));
+      if (String(row.current_turn_id) === input.turnId) {
+        this.recordMutation({ operation: 'bind_run_report', projectId, executionLogId: input.executionLogId, generation: input.generation, turnId: input.turnId, reportObjectId: receipt.objectId, reportRevision: receipt.revision }, `${input.idempotencyKey}:run`, 'report', () => {
+          const current = this.runControl(projectId, input.executionLogId);
+          const metadata = JSON.parse(this.content(String(current.metadata_content_id)).toString('utf8')) as Record<string, unknown>;
+          Object.assign(metadata, { taskReportObjectId: receipt.objectId, taskReportRevision: receipt.revision,
+            taskReportStatus: input.availability === 'available' ? 'recorded' : input.availability, taskReportError: input.validationError || '' });
+          this.db.run('UPDATE run_control SET metadata_content_id=? WHERE run_id=?', [this.putContent(canonical(metadata), 'application/json'), row.run_id]);
+          this.db.run('UPDATE objects SET revision=revision+1,updated_at=? WHERE id=?', [Date.now(), row.run_id]);
+          this.saveRunControlRevision(String(row.run_id));
+          return this.current(String(row.run_id), false);
+        }, undefined, false);
+      }
+      return { ...receipt, availability: String(this.current(receipt.objectId, false).data.availability) };
+    });
   }
-  private createRunReport(projectId: string, runId: string, turnId: string, input: { report: unknown; availability: string; validationError?: string }): DataObject {
+  private runReportHead(projectId: string, runId: string, turnId: string): DataObject | null {
+    const row = this.rows('SELECT r.id FROM reports r JOIN objects o ON o.id=r.id WHERE r.project_id=? AND r.run_id=? AND r.turn_id=? ORDER BY o.updated_at DESC,o.id DESC LIMIT 1', [projectId, runId, turnId])[0];
+    return row ? this.current(String(row.id)) : null;
+  }
+  private upsertRunReport(projectId: string, runId: string, turnId: string, input: { report: unknown; availability: string; validationError?: string }): DataObject {
+    const existing = this.runReportHead(projectId, runId, turnId);
+    if (existing) {
+      this.db.run('UPDATE reports SET content_id=?,availability=?,validation_error=? WHERE id=?', [this.putContent(canonical(input.report), 'application/json'), input.availability, input.validationError || null, existing.objectId]);
+      this.db.run('UPDATE objects SET revision=revision+1,updated_at=? WHERE id=? AND revision=?', [Date.now(), existing.objectId, existing.revision]);
+      return this.current(existing.objectId);
+    }
     const id = crypto.randomUUID(); const now = Date.now();
     this.db.run('INSERT INTO objects VALUES(?,?,?,?,?,?,NULL)', [id, 'report', projectId, 1, now, now]);
     this.db.run('INSERT INTO reports(id,project_id,turn_id,run_id,schema_version,content_id,availability,validation_error) VALUES(?,?,?,?,?,?,?,?)', [id, projectId, turnId, runId, 1, this.putContent(canonical(input.report), 'application/json'), input.availability, input.validationError || null]);
@@ -3511,6 +5274,128 @@ export class UnifiedDataStore {
     if (run.generation !== generation) throw new Error('run_owner_conflict');
     this.db.run('UPDATE run_input_materializations SET written=1 WHERE run_id=? AND generation=?', [run.run_id, generation]);
   }
+  public recordClaudeNativeReady(projectId: string, input: { executionLogId: number; generation: number; proof: string; sessionId: string }): RunState {
+    this.verifyRunExecutionProof(projectId, input.executionLogId, input.generation, input.proof);
+    return this.transaction(() => {
+      const state = this.readRunCheckpointState(projectId, input.executionLogId);
+      const binding = this.readRunBinding(projectId, input.executionLogId);
+      const head = binding?.revisions[binding.headRevision - 1];
+      if (state.status.sessionProvider !== 'claude' || state.status.claudeNativeObserverCapable !== true
+        || !head || !['planned', 'confirmed'].includes(head.state) || head.sessionId !== input.sessionId) throw new Error('identity_provider_mismatch');
+      if (state.status.claudeNativeObserverGeneration === input.generation && state.status.claudeNativeContract === 'mods-v1') return state;
+      if (state.status.interactiveSessionClosed) throw new Error('session_already_closed');
+      const key = `run:${state.runId}:${input.generation}:claude-ready`;
+      this.writeRunDocument(projectId, { executionLogId: input.executionLogId, generation: input.generation, purpose: `claude_ready_${input.generation}`,
+        bytes: Buffer.from(JSON.stringify({ schemaVersion: 1, sessionId: input.sessionId, generation: input.generation })).toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: `${key}:document` });
+      return this.patchRunState(projectId, { executionLogId: input.executionLogId, generation: input.generation, expectedRevision: state.revision,
+        patch: { claudeNativeContract: 'mods-v1', claudeNativeObserverGeneration: input.generation, claudeNativeEventHead: 0, claudeNativeEventCursor: 0 }, idempotencyKey: `${key}:state` });
+    });
+  }
+
+  public recordClaudeNativeEvent(projectId: string, input: { executionLogId: number; generation: number; proof: string; event: unknown }): RunState {
+    this.verifyRunExecutionProof(projectId, input.executionLogId, input.generation, input.proof);
+    const event = validateClaudeNativeEvent(input.event);
+    return this.transaction(() => {
+      const state = this.readRunCheckpointState(projectId, input.executionLogId);
+      const binding = this.readRunBinding(projectId, input.executionLogId);
+      const head = binding?.revisions[binding.headRevision - 1];
+      if (state.status.sessionProvider !== 'claude' || state.status.claudeNativeContract !== 'mods-v1'
+        || !head || !['planned', 'confirmed'].includes(head.state) || head.sessionId !== event.sessionId) throw new Error('identity_provider_mismatch');
+      const purpose = claudeNativeEventPurpose(input.generation, event.sequence);
+      const bytes = Buffer.from(JSON.stringify(event));
+      const existing = this.readRunDocument(projectId, input.executionLogId, purpose);
+      if (existing) {
+        if (existing.hash !== digest(bytes)) throw new Error('native_event_conflict');
+        return state;
+      }
+      if (state.status.interactiveSessionClosed) throw new Error('session_already_closed');
+      if (event.sequence !== Number(state.status.claudeNativeEventHead || 0) + 1) throw new Error('native_event_sequence_conflict');
+      if ((input.event as ClaudeNativeEvent).phase !== undefined) {
+        const previousDocument = event.sequence > 1 ? this.readRunDocument(projectId, input.executionLogId, claudeNativeEventPurpose(input.generation, event.sequence - 1)) : null;
+        const previous = previousDocument ? validateClaudeNativeEvent(JSON.parse(Buffer.from(previousDocument.bytes, 'base64').toString('utf8'))) : null;
+        if (event.phase === 'complete' && (!previous || previous.phase !== 'start'
+          || previous.providerTurnId !== event.providerTurnId || previous.userUuid !== event.userUuid || previous.startedAt !== event.startedAt)
+          || event.phase === 'start' && previous && (previous.phase !== 'complete'
+            || previous.providerTurnId === event.providerTurnId || previous.userUuid === event.userUuid
+            || Date.parse(event.startedAt) < Date.parse(previous.completedAt))) throw new Error('native_event_turn_conflict');
+      }
+      const key = `run:${state.runId}:${input.generation}:claude-machine:${event.sequence}`;
+      this.writeRunDocument(projectId, { executionLogId: input.executionLogId, generation: input.generation, purpose,
+        bytes: bytes.toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: `${key}:document` });
+      return this.patchRunState(projectId, { executionLogId: input.executionLogId, generation: input.generation,
+        expectedRevision: state.revision, patch: { claudeNativeEventHead: event.sequence }, idempotencyKey: `${key}:head` });
+    });
+  }
+
+  public acknowledgeClaudeNativeEvent(projectId: string, input: { executionLogId: number; generation: number; sequence: number }): RunState {
+    return this.transaction(() => {
+      const state = this.readRunCheckpointState(projectId, input.executionLogId);
+      if (state.generation !== input.generation) throw new Error('run_owner_conflict');
+      if (Number(state.status.claudeNativeEventCursor || 0) !== input.sequence - 1
+        || input.sequence > Number(state.status.claudeNativeEventHead || 0)) throw new Error('native_event_sequence_conflict');
+      const document = this.readRunDocument(projectId, input.executionLogId, claudeNativeEventPurpose(input.generation, input.sequence));
+      if (!document) throw new Error('native_event_missing');
+      const event = validateClaudeNativeEvent(JSON.parse(Buffer.from(document.bytes, 'base64').toString('utf8')));
+      if (state.status.claudeNativeTurnId !== event.userUuid || !state.status.claudeNativeBoundTurnId) throw new Error('native_event_turn_conflict');
+      const key = `run:${state.runId}:${input.generation}:claude-machine`;
+      this.link({ source: document.objectId, relation: 'source', target: String(state.status.claudeNativeBoundTurnId),
+        expectedRevision: document.revision, idempotencyKey: `${key}-link:${input.sequence}` });
+      return this.patchRunState(projectId, { executionLogId: input.executionLogId, generation: input.generation, expectedRevision: state.revision,
+        patch: { claudeNativeEventCursor: input.sequence }, idempotencyKey: `${key}-cursor:${input.sequence}` });
+    });
+  }
+
+  public recordClaudeNativeAppend(projectId: string, input: { executionLogId: number; generation: number; proof: string; event: unknown }): RunState {
+    this.verifyRunExecutionProof(projectId, input.executionLogId, input.generation, input.proof);
+    const event = input.event as { schemaVersion: number; kind: string; sessionId: string; uuid: string; userUuid?: string; providerTurnId?: string };
+    if (!event || event.schemaVersion !== 1 || !['prompt', 'assistant'].includes(event.kind) || typeof event.uuid !== 'string' || !event.uuid
+      || event.kind === 'assistant' && (!event.userUuid || !event.providerTurnId)) throw new Error('invalid_claude_native_append');
+    return this.transaction(() => {
+      const state = this.readRunCheckpointState(projectId, input.executionLogId);
+      const binding = this.readRunBinding(projectId, input.executionLogId);
+      const head = binding?.revisions[binding.headRevision - 1];
+      if (state.status.sessionProvider !== 'claude' || state.status.claudeNativeContract !== 'mods-v1' || head?.sessionId !== event.sessionId) throw new Error('identity_provider_mismatch');
+      const bytes = Buffer.from(JSON.stringify({ schemaVersion: 1, kind: event.kind, sessionId: event.sessionId, uuid: event.uuid,
+        ...(event.kind === 'assistant' ? { userUuid: event.userUuid, providerTurnId: event.providerTurnId } : {}) }));
+      const purpose = event.kind === 'prompt' ? `claude_pending_${input.generation}` : `ca_${input.generation}_${digest(event.providerTurnId!).slice(0, 16)}_${digest(event.uuid).slice(0, 16)}`;
+      const existing = this.readRunDocument(projectId, input.executionLogId, purpose);
+      if (existing?.hash === digest(bytes)) return state;
+      if (event.kind === 'assistant' && existing) throw new Error('native_event_conflict');
+      if (state.status.interactiveSessionClosed) throw new Error('session_already_closed');
+      const key = `run:${state.runId}:${input.generation}:claude-append:${event.kind}:${digest(event.uuid)}`;
+      const activeDocument = event.kind === 'assistant' ? this.readRunDocument(projectId, input.executionLogId,
+        claudeNativeEventPurpose(input.generation, Number(state.status.claudeNativeEventHead))) : null;
+      if (event.kind === 'assistant') {
+        const active = activeDocument && validateClaudeNativeEvent(JSON.parse(Buffer.from(activeDocument.bytes, 'base64').toString('utf8')));
+        if (!active || active.phase !== 'start' || active.userUuid !== event.userUuid || active.providerTurnId !== event.providerTurnId) throw new Error('native_event_turn_conflict');
+      }
+      const receipt = this.writeRunDocument(projectId, { executionLogId: input.executionLogId, generation: input.generation, purpose, bytes: bytes.toString('base64'),
+        mimeType: 'application/json', expectedRevision: existing?.revision || 0, idempotencyKey: key });
+      if (activeDocument) this.link({ source: receipt.objectId, relation: 'source', target: activeDocument.objectId, expectedRevision: receipt.revision, idempotencyKey: `${key}:source` });
+      return state;
+    });
+  }
+
+  public readClaudeNativeResume(projectId: string, executionLogId: number): { active?: Pick<ClaudeNativeEvent, 'providerTurnId' | 'userUuid' | 'assistantUuids' | 'startedAt'>; pendingUser: string } {
+    const state = this.readRunCheckpointState(projectId, executionLogId);
+    const document = Number(state.status.claudeNativeEventHead) > 0 ? this.readRunDocument(projectId, executionLogId,
+      claudeNativeEventPurpose(state.generation, Number(state.status.claudeNativeEventHead))) : null;
+    const event = document ? validateClaudeNativeEvent(JSON.parse(Buffer.from(document.bytes, 'base64').toString('utf8'))) : null;
+    const pendingDocument = this.readRunDocument(projectId, executionLogId, `claude_pending_${state.generation}`);
+    const pending = pendingDocument ? JSON.parse(Buffer.from(pendingDocument.bytes, 'base64').toString('utf8')) : null;
+    const pendingUser = pending?.uuid && pending.uuid !== event?.userUuid ? pending.uuid : '';
+    if (!event || event.phase !== 'start') return { pendingUser };
+    const prefix = `ca_${state.generation}_${digest(event.providerTurnId).slice(0, 16)}_`;
+    const documents = this.rows('SELECT purpose FROM run_documents WHERE run_id=? AND purpose>=? AND purpose<? ORDER BY purpose', [state.runId, prefix, `${prefix}\uffff`]);
+    const assistantUuids = documents.map(row => {
+      const stored = this.readRunDocument(projectId, executionLogId, String(row.purpose))!;
+      const value = JSON.parse(Buffer.from(stored.bytes, 'base64').toString('utf8'));
+      if (value.kind !== 'assistant' || value.providerTurnId !== event.providerTurnId || value.userUuid !== event.userUuid || value.sessionId !== event.sessionId) throw new Error('native_event_conflict');
+      return String(value.uuid);
+    });
+    return { pendingUser, active: { providerTurnId: event.providerTurnId, userUuid: event.userUuid, assistantUuids, startedAt: event.startedAt } };
+  }
+
   public writeRunDocument(projectId: string, input: { executionLogId: number; generation: number; turnId?: string; purpose: string; bytes: string; mimeType: string; expectedRevision: number; idempotencyKey: string }): WriteReceipt {
     const run = this.runControl(projectId, input.executionLogId);
     if (input.generation !== run.generation) throw new Error('run_owner_conflict');
@@ -3598,8 +5483,29 @@ export class UnifiedDataStore {
       return receipt;
     });
   }
+  public reserveProjectGrowthRefresh(projectId: string, requestId: string): { requestId: string; generation: number } {
+    if (!requestId.trim()) throw new Error('invalid_growth_refresh');
+    const current = this.readAnalysisState(projectId, 'growth-refresh', 'current');
+    const written = this.writeAnalysisState(projectId, {
+      namespace: 'growth-refresh', key: 'current', expectedRevision: current.revision,
+      value: { requestId }, idempotencyKey: `reserve:${requestId}`
+    });
+    return { requestId, generation: written.revision };
+  }
+  public commitProjectGrowthRefresh(projectId: string, input: { requestId: string; generation: number; data: GrowthSnapshotData }): { accepted: boolean; latest: GrowthSnapshotData | null } {
+    if (!String(input.requestId || '').trim() || !Number.isInteger(input.generation) || input.generation < 1 || !input.data) throw new Error('invalid_growth_refresh');
+    return this.transaction(() => {
+      const reservation = this.readAnalysisState(projectId, 'growth-refresh', 'current');
+      const reserved = reservation.value as { requestId?: string } | null;
+      if (reservation.revision !== input.generation || reserved?.requestId !== input.requestId) {
+        return { accepted: false, latest: this.readProjectGrowth(projectId, 1).latest };
+      }
+      this.writeProjectGrowth(projectId, input.data, `growth-refresh:${input.requestId}`);
+      return { accepted: true, latest: this.readProjectGrowth(projectId, 1).latest };
+    });
+  }
   public readProjectGrowth(projectId: string, historyLimit = 12): { latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] } {
-    const ids = this.rows('SELECT id FROM growth_snapshots WHERE project_id=? ORDER BY created_at DESC,id DESC LIMIT ?', [projectId, Math.max(1, Math.min(50, historyLimit))]).map(row => String(row.id));
+    const ids = this.rows('SELECT g.id FROM growth_snapshots g JOIN objects o ON o.id=g.id WHERE g.project_id=? ORDER BY o.rowid DESC LIMIT ?', [projectId, Math.max(1, Math.min(50, historyLimit))]).map(row => String(row.id));
     const read = (id: string): GrowthSnapshotData => {
       const row = this.rows('SELECT * FROM growth_snapshots WHERE id=? AND project_id=?', [id, projectId])[0];
       if (!row) throw new Error('growth_snapshot_missing');
@@ -3961,7 +5867,10 @@ export class UnifiedDataStore {
     const kinds = input.kinds ?? ['memory', 'lesson', 'policy'];
     if (!Array.isArray(kinds) || kinds.length === 0 || kinds.some(kind => !['memory', 'lesson', 'policy'].includes(kind))) throw new Error('invalid_context_kinds');
     const now = Date.now();
-    const eligible = (item: DataObject): boolean => canRead(item) && (!input.categories || input.categories.includes(String(item.data.category))) && !['rejected', 'invalidated', 'superseded', 'expired'].includes(String(item.data.status)) && (item.data.valid_from == null || Number(item.data.valid_from) <= now) && (item.data.valid_until == null || Number(item.data.valid_until) > now) && item.archivedAt === null;
+    const eligible = (item: DataObject): boolean => {
+      const externalInbox = item.kind === 'memory' && Boolean(item.data.external_source) && item.data.layer === 'candidate' && input.categories?.includes('inbox') === true;
+      return canRead(item) && (!input.categories || input.categories.includes(String(item.data.category)) || externalInbox) && !(item.kind === 'memory' && item.data.external_source && item.data.status !== 'active') && !(item.kind === 'memory' && item.data.external_source && item.data.layer === 'candidate' && !externalInbox) && !['rejected', 'invalidated', 'superseded', 'expired', 'revoked', 'disabled'].includes(String(item.data.status)) && (item.data.valid_from == null || Number(item.data.valid_from) <= now) && (item.data.valid_until == null || Number(item.data.valid_until) > now) && item.archivedAt === null;
+    };
     if (input.view && !['full', 'metadata'].includes(input.view)) throw new Error('unknown_context_view');
     if (input.view === 'metadata') {
       const limit = input.limit ?? 50;
@@ -4031,13 +5940,10 @@ export class UnifiedDataStore {
     });
     const bytes = this.content(stored.contentId);
     await fs.promises.mkdir(path.dirname(destination), { recursive: true });
-    this.validateExportPath(destination);
+    const destinationParent = this.captureSafeDestinationParent(destination, 'export_destination_invalid');
     projectObject?.(this.readMetadata(input.ref));
     // Existing user exports are never overwritten. A replay may accept only identical bytes.
-    try { await fs.promises.writeFile(destination, bytes, { flag: 'wx', mode: 0o600 }); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || digest(await fs.promises.readFile(destination)) !== stored.sha256) throw error;
-    }
+    this.writeFileAtStableParent(destination, bytes, destinationParent, 'export_destination_invalid');
     this.db.run("UPDATE outbox SET state='delivered',attempt=attempt+1 WHERE id=?", [stored.outboxId]);
     return { destination: stored.destination, sha256: stored.sha256, revision: stored.revision };
   }
@@ -4076,13 +5982,73 @@ export class UnifiedDataStore {
       }
     }
   }
+  private captureSafeDestinationParent(destination: string, code: string): fs.Stats {
+    this.validateExportPath(destination);
+    const parent = path.dirname(destination), stat = fs.lstatSync(parent);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(code);
+    return stat;
+  }
+  private assertSafeDestinationParent(destination: string, expected: fs.Stats, code: string): void {
+    this.validateExportPath(destination);
+    const parent = fs.lstatSync(path.dirname(destination));
+    if (!parent.isDirectory() || parent.isSymbolicLink() || parent.dev !== expected.dev || parent.ino !== expected.ino) throw new Error(code);
+  }
+  private openStableDestinationParent(destination: string, parent: fs.Stats, code: string): { descriptor: number; directory: string } {
+    const descriptor = fs.openSync(path.dirname(destination), fs.constants.O_RDONLY | (fs.constants.O_DIRECTORY || 0) | (fs.constants.O_NOFOLLOW || 0));
+    const opened = fs.fstatSync(descriptor);
+    if (opened.dev !== parent.dev || opened.ino !== parent.ino) { fs.closeSync(descriptor); throw new Error(code); }
+    const descriptorRoot = process.platform === 'linux' ? '/proc/self/fd' : process.platform === 'darwin' ? '/dev/fd' : '';
+    return { descriptor, directory: descriptorRoot ? `${descriptorRoot}/${descriptor}` : path.dirname(destination) };
+  }
+  private writeFileAtStableParent(destination: string, bytes: Buffer, parent: fs.Stats, code: string): void {
+    const noFollow = fs.constants.O_NOFOLLOW || 0;
+    const stableParent = this.openStableDestinationParent(destination, parent, code);
+    try {
+      const stableDestination = path.join(stableParent.directory, path.basename(destination));
+      let descriptor: number;
+      try { descriptor = fs.openSync(stableDestination, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | noFollow, 0o600); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        this.assertSafeDestinationParent(destination, parent, code);
+        const target = fs.lstatSync(stableDestination);
+        if (!target.isFile() || target.isSymbolicLink()) throw new Error(code);
+        const reader = fs.openSync(stableDestination, fs.constants.O_RDONLY | noFollow);
+        try {
+          const opened = fs.fstatSync(reader);
+          if (opened.dev !== target.dev || opened.ino !== target.ino || !fs.readFileSync(reader).equals(bytes)) throw error;
+          this.assertSafeDestinationParent(destination, parent, code);
+        } finally { fs.closeSync(reader); }
+        return;
+      }
+      const opened = fs.fstatSync(descriptor);
+      const cleanupOpenedFile = (): void => {
+        try {
+          const current = fs.lstatSync(stableDestination);
+          if (current.isFile() && !current.isSymbolicLink() && current.dev === opened.dev && current.ino === opened.ino) fs.unlinkSync(stableDestination);
+        } catch {}
+      };
+      try {
+        this.assertSafeDestinationParent(destination, parent, code);
+        fs.writeFileSync(descriptor, bytes); fs.fsyncSync(descriptor);
+        this.assertSafeDestinationParent(destination, parent, code);
+        const published = fs.lstatSync(stableDestination);
+        if (!published.isFile() || published.isSymbolicLink() || published.dev !== opened.dev || published.ino !== opened.ino) throw new Error(code);
+      } catch (error) { cleanupOpenedFile(); throw error; }
+      finally { fs.closeSync(descriptor); }
+    } finally { fs.closeSync(stableParent.descriptor); }
+  }
   public async recoverOutbox(): Promise<{ delivered: number; pending: Array<{ id: string; error: string }> }> {
-    const effects = this.rows("SELECT * FROM outbox WHERE state<>'delivered' AND channel IN ('project_identity','file_export') ORDER BY rowid");
+    const effects = this.rows("SELECT * FROM outbox WHERE state<>'delivered' AND channel IN ('project_identity','file_export','roadmap_projection') ORDER BY rowid");
     const pending: Array<{ id: string; error: string }> = [];
     let delivered = 0;
     for (const effect of effects) {
       const id = String(effect.id);
       try {
+        if (effect.channel === 'roadmap_projection') {
+          await this.deliverRoadmapProjection(id);
+          delivered++;
+          continue;
+        }
         const destination = String(effect.destination_ref);
         let authorize: (() => void) | undefined;
         if (effect.channel === 'file_export') {
@@ -4094,14 +6060,20 @@ export class UnifiedDataStore {
           if (path.basename(destination) !== 'project.json' || path.basename(path.dirname(destination)) !== '.solopreneur') throw new Error('project_identity_invalid');
           const projectRoot = fs.realpathSync(path.dirname(path.dirname(destination)));
           if (!this.rows("SELECT id FROM project_locations WHERE root_path=? AND status='active'", [projectRoot]).length) throw new Error('project_location_missing');
-          if (fs.existsSync(path.dirname(destination)) && fs.lstatSync(path.dirname(destination)).isSymbolicLink()) throw new Error('project_identity_symlink');
+          this.assertProjectControlDirectory(projectRoot);
         }
         const bytes = this.content(String(effect.content_id));
         await fs.promises.mkdir(path.dirname(destination), { recursive: true });
-        if (effect.channel === 'file_export') { this.validateExportPath(destination); authorize?.(); }
-        try { await fs.promises.writeFile(destination, bytes, { flag: 'wx', mode: 0o600 }); }
-        catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || fs.lstatSync(destination).isSymbolicLink() || digest(await fs.promises.readFile(destination)) !== digest(bytes)) throw error;
+        if (effect.channel === 'file_export') {
+          const destinationParent = this.captureSafeDestinationParent(destination, 'export_destination_invalid');
+          authorize?.();
+          this.writeFileAtStableParent(destination, bytes, destinationParent, 'export_destination_invalid');
+        } else {
+          const projectRoot = path.dirname(path.dirname(destination));
+          this.assertProjectControlDirectory(projectRoot);
+          const destinationParent = this.captureSafeDestinationParent(destination, 'project_control_path_invalid');
+          this.writeFileAtStableParent(destination, bytes, destinationParent, 'project_control_path_invalid');
+          this.assertProjectControlDirectory(projectRoot);
         }
         this.db.run("UPDATE outbox SET state='delivered',attempt=attempt+1,next_attempt_at=NULL WHERE id=?", [id]);
         delivered++;
@@ -4189,13 +6161,33 @@ export class UnifiedDataStore {
       return this.current(value.id);
     });
   }
+  public readProjectJournalMinimum(projectId: string): number | null {
+    const row = this.rows("SELECT content_id FROM settings WHERE namespace='project_journal' AND key='allocation' AND owner_scope=?", [projectId])[0];
+    return row ? Number(JSON.parse(String(this.decodedContent(String(row.content_id)))).minimumExecutionLogId) : null;
+  }
+
+  public reserveProjectJournalIds(projectId: string, minimumExecutionLogId: number): number {
+    if (!Number.isSafeInteger(minimumExecutionLogId) || minimumExecutionLogId < 1) throw new Error('invalid_journal_allocation');
+    return this.transaction(() => {
+      const existing = this.rows("SELECT id FROM settings WHERE namespace='project_journal' AND key='allocation' AND owner_scope=?", [projectId])[0];
+      const previous = existing ? this.read(String(existing.id)) : null;
+      const minimum = previous ? Number(JSON.parse(String(previous.data.content)).minimumExecutionLogId) : 0;
+      if (minimum >= minimumExecutionLogId) return minimum;
+      this.write({ kind: 'setting', scope: projectId, action: previous ? 'patch' : 'create',
+        ...(previous ? { objectId: previous.objectId, expectedRevision: previous.revision } : {}),
+        idempotencyKey: `journal-allocation:${projectId}:${minimumExecutionLogId}`,
+        data: { namespace: 'project_journal', key: 'allocation', owner_scope: projectId, content: JSON.stringify({ minimumExecutionLogId }) } });
+      return minimumExecutionLogId;
+    });
+  }
+
   public appendProjectJournal(projectId: string, idempotencyKey: string, entry: Omit<AgentConversation, 'id'>, requestedExecutionLogId = 0, minimumExecutionLogId = 1): { executionLogId: number } {
     if (!idempotencyKey || !entry || !entry.nodeId || !entry.timestamp) throw new Error('invalid_project_journal_entry');
     return this.transaction(() => {
       const existing = this.rows('SELECT execution_log_id FROM project_journal_entries WHERE project_id=? AND idempotency_key=?', [projectId, idempotencyKey])[0];
       if (existing) { this.syncProjectJournalSource(projectId, Number(existing.execution_log_id)); return { executionLogId: Number(existing.execution_log_id) }; }
       const nextDatabaseId = Number(this.rows('SELECT COALESCE(MAX(execution_log_id),0)+1 AS id FROM project_journal_entries WHERE project_id=?', [projectId])[0].id);
-      const executionLogId = requestedExecutionLogId || Math.max(nextDatabaseId, Math.max(1, Number(minimumExecutionLogId || 1)));
+      const executionLogId = requestedExecutionLogId || Math.max(nextDatabaseId, this.readProjectJournalMinimum(projectId) || 1, Math.max(1, Number(minimumExecutionLogId || 1)));
       this.db.run('INSERT INTO project_journal_entries(execution_log_id,project_id,idempotency_key,node_id,timestamp,agent_cli,command,output,status) VALUES(?,?,?,?,?,?,?,?,?)', [executionLogId, projectId, idempotencyKey, entry.nodeId, entry.timestamp, entry.agentCli || '', entry.command || '', entry.output || '', entry.status || 'Running']);
       this.syncProjectJournalSource(projectId, executionLogId);
       return { executionLogId };
@@ -4222,7 +6214,8 @@ export class UnifiedDataStore {
     this.transaction(() => {
       const journal = this.readProjectJournal(projectId, { executionLogId, limit: 1 }).logs[0];
       if (!journal) throw new Error('project_journal_entry_missing');
-      const body = canonical(journal);
+      const { dataState: _dataState, ...sourceJournal } = journal;
+      const body = canonical(sourceJournal);
       const previous = this.rows('SELECT o.*,e.content_id,c.sha256 FROM project_journal_sources s JOIN objects o ON o.id=s.object_id JOIN evidence e ON e.id=o.id JOIN contents c ON c.id=e.content_id WHERE s.project_id=? AND s.execution_log_id=?', [projectId, executionLogId])[0];
       if (previous?.sha256 === digest(body)) return;
       const receipt = this.write({ kind: 'evidence', scope: projectId, action: previous ? 'patch' : 'create', ...(previous ? { objectId: String(previous.id), expectedRevision: Number(previous.revision) } : {}), idempotencyKey: `project-journal-source:${canonical([projectId, executionLogId, previous?.revision || 0, digest(body)])}`, data: { type: 'project_journal', source_actor_id: this.actorId, observed_at: Date.now(), content: body } });
@@ -4233,20 +6226,53 @@ export class UnifiedDataStore {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error('invalid_project_journal_page');
     return this.rows('SELECT j.execution_log_id FROM project_journal_entries j LEFT JOIN project_journal_sources s ON s.project_id=j.project_id AND s.execution_log_id=j.execution_log_id WHERE j.project_id=? AND s.object_id IS NULL ORDER BY j.execution_log_id LIMIT ?', [projectId, limit]).map(row => Number(row.execution_log_id));
   }
+  public linkProjectJournal(projectId: string, executionLogId: number, nodeId: string, linkedAt: string): AgentConversation {
+    if (!Number.isSafeInteger(executionLogId) || executionLogId < 1 || !nodeId || !linkedAt || !Number.isFinite(Date.parse(linkedAt))) throw new Error('invalid_project_journal_link');
+    const source = this.rows('SELECT node_id FROM project_journal_entries WHERE project_id=? AND execution_log_id=?', [projectId, executionLogId])[0];
+    if (!source) throw new Error('project_journal_entry_missing');
+    if (String(source.node_id) === nodeId) throw new Error('project_journal_self_link');
+    this.db.run('INSERT OR IGNORE INTO project_journal_links(project_id,execution_log_id,node_id,linked_at) VALUES(?,?,?,?)', [projectId, executionLogId, nodeId, linkedAt]);
+    const linked = this.readProjectJournal(projectId, { nodeId, executionLogId, limit: 1 }).logs[0];
+    if (!linked) throw new Error('project_journal_link_missing');
+    return linked;
+  }
   public readProjectJournal(projectId: string, input: { nodeId?: string; executionLogId?: number; limit?: number; offset?: number } = {}): { logs: AgentConversation[]; hasMore: boolean } {
     const limit = Math.max(1, Math.min(500, Number(input.limit || 200)));
     const offset = Math.max(0, Number(input.offset || 0));
-    const clauses = ['project_id=?']; const values: SqlValue[] = [projectId];
-    if (input.nodeId) { clauses.push('node_id=?'); values.push(input.nodeId); }
-    if (input.executionLogId) { clauses.push('execution_log_id=?'); values.push(input.executionLogId); }
-    const rows = this.rows(`SELECT * FROM project_journal_entries WHERE ${clauses.join(' AND ')} ORDER BY execution_log_id DESC LIMIT ? OFFSET ?`, [...values, limit + 1, offset]);
+    let rows: Record<string, SqlValue>[];
+    if (input.nodeId) {
+      const executionClause = input.executionLogId ? ' AND j.execution_log_id=?' : '';
+      const executionValues: SqlValue[] = input.executionLogId ? [input.executionLogId] : [];
+      rows = this.rows(`SELECT j.*,NULL AS linked_at,0 AS linked FROM project_journal_entries j WHERE j.project_id=? AND j.node_id=?${executionClause}
+        UNION ALL SELECT j.*,l.linked_at,1 AS linked FROM project_journal_links l JOIN project_journal_entries j ON j.project_id=l.project_id AND j.execution_log_id=l.execution_log_id
+        WHERE l.project_id=? AND l.node_id=?${executionClause} ORDER BY execution_log_id DESC LIMIT ? OFFSET ?`,
+        [projectId, input.nodeId, ...executionValues, projectId, input.nodeId, ...executionValues, limit + 1, offset]);
+    } else {
+      const clauses = ['project_id=?']; const values: SqlValue[] = [projectId];
+      if (input.executionLogId) { clauses.push('execution_log_id=?'); values.push(input.executionLogId); }
+      rows = this.rows(`SELECT *,NULL AS linked_at,0 AS linked FROM project_journal_entries WHERE ${clauses.join(' AND ')} ORDER BY execution_log_id DESC LIMIT ? OFFSET ?`, [...values, limit + 1, offset]);
+    }
     return { logs: rows.slice(0, limit).map(row => {
       const id = Number(row.execution_log_id);
       const source = this.resolveRunConversation(projectId, id);
-      const binding = source ? this.readRunBinding(projectId, Number(source.state.status.rootExecutionLogId)) : null;
+      let binding: NativeSessionBinding | null = null;
+      try { if (source) binding = this.readRunBinding(projectId, Number(source.state.status.rootExecutionLogId)); }
+      catch (error) { if ((error as Error & { code?: string }).code !== 'identity_binding_invalid') throw error; }
       const resumable = binding ? getResumableSessionValue(binding) : null;
-      return { id, nodeId: String(row.node_id), timestamp: String(row.timestamp), agentCli: String(row.agent_cli), command: String(row.command), output: String(row.output), status: String(row.status),
-        dataState: { resumableSessionId: resumable?.sessionId || '', sessionOpen: Boolean(source?.state.status.interactiveSession && !source.state.status.interactiveSessionClosed) } };
+      const turn = source ? this.readMetadata(source.turnId) : null;
+      const nativeReply = source ? this.readRunDocument(projectId, Number(source.state.status.rootExecutionLogId), `native_reply_${source.turnId.replace(/-/g, '')}`) : null;
+      const presentation = turn ? {
+        requestPreview: turn.data.request_content_id ? String(this.decodedContent(String(turn.data.request_content_id))).replace(/\s+/g, ' ').slice(0, 120) : '',
+        conclusion: nativeReply ? Buffer.from(nativeReply.bytes, 'base64').toString('utf8') : turn.data.summary_content_id ? String(this.decodedContent(String(turn.data.summary_content_id))) : ''
+      } : {};
+      return { id, nodeId: row.linked ? String(input.nodeId) : String(row.node_id), timestamp: row.linked ? String(row.linked_at) : String(row.timestamp), agentCli: String(row.agent_cli), command: String(row.command), output: String(row.output), status: row.linked ? 'Linked' : String(row.status),
+        dataState: {
+          resumableSessionId: resumable?.sessionId || '',
+          sessionOpen: Boolean(source?.state.status.interactiveSession && !source.state.status.interactiveSessionClosed),
+          ...(row.linked ? { linkedFromNodeId: String(row.node_id) } : {}),
+          ...(source ? { runId: source.state.runId, turnId: source.turnId, runRevision: source.state.revision, hasExecutionLogs: true } : {}),
+          ...presentation
+        } };
     }), hasMore: rows.length > limit };
   }
   public upsertProjectRunIndex(projectId: string, record: RunIndexRecord, files: RunIndexFile[] = [], signals: RunIndexSignal[] = []): void {
@@ -4352,6 +6378,126 @@ export class UnifiedDataStore {
     const runs = Number(this.rows("SELECT count(DISTINCT COALESCE(json_extract(record_json,'$.nodeId'),'')) AS n FROM project_run_indexes WHERE project_id=?", [projectId])[0].n);
     return memories + runs;
   }
+  public readAnalysisState(projectId: string | null, namespace: string, key: string): { objectId: string | null; revision: number; value: unknown } {
+    if (!namespace.trim() || !key.trim()) throw new Error('invalid_analysis_state');
+    const ownerScope = projectId || 'global';
+    const row = this.rows('SELECT s.id FROM settings s JOIN objects o ON o.id=s.id WHERE s.namespace=? AND s.key=? AND s.owner_scope=? AND o.project_id IS ? AND o.archived_at IS NULL', [`analysis:${namespace}`, key, ownerScope, projectId])[0];
+    if (!row) return { objectId: null, revision: 0, value: null };
+    const object = this.read(String(row.id));
+    return { objectId: object.objectId, revision: object.revision, value: JSON.parse(String(object.data.content)) };
+  }
+  public writeAnalysisState(projectId: string | null, input: { namespace: string; key: string; expectedRevision: number; value: unknown; idempotencyKey: string; expectedSourceRevision?: string }): { objectId: string; revision: number; value: unknown } {
+    if (!String(input.namespace || '').trim() || !String(input.key || '').trim() || !Number.isInteger(input.expectedRevision) || input.expectedRevision < 0 || input.value === undefined || !String(input.idempotencyKey || '').trim()) throw new Error('invalid_analysis_state');
+    return this.transaction(() => {
+      const current = this.readAnalysisState(projectId, input.namespace, input.key);
+      const requestKey = `analysis-state:${projectId || 'global'}:${input.namespace}:${input.key}:${input.idempotencyKey}`;
+      const retried = this.rows('SELECT 1 FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, requestKey]).length > 0;
+      if (!retried && input.expectedSourceRevision !== undefined) {
+        if (!projectId || input.namespace !== 'sidebar' || input.key !== 'conversation') throw new Error('analysis_source_guard_invalid');
+        if (input.expectedSourceRevision !== this.readProjectAnalysisSource(projectId).conversationRevision) throw new Error('analysis_source_conflict');
+      }
+      if (input.expectedRevision === 0 && current.objectId && !retried) throw new Error('revision_conflict');
+      if (input.expectedRevision > 0 && (!current.objectId || current.revision !== input.expectedRevision) && !retried) throw new Error('revision_conflict');
+      const receipt = this.write({ kind: 'setting', action: input.expectedRevision === 0 ? 'create' : 'patch', scope: projectId,
+        ...(input.expectedRevision === 0 ? {} : { objectId: current.objectId || undefined, expectedRevision: input.expectedRevision }), idempotencyKey: requestKey,
+        data: { namespace: `analysis:${input.namespace}`, key: input.key, owner_scope: projectId || 'global', content: JSON.stringify(input.value) } });
+      return { objectId: receipt.objectId, revision: receipt.revision, value: JSON.parse(String(this.read(receipt.objectId, receipt.revision).data.content)) };
+    });
+  }
+  public reserveSidebarCoreRefresh(requestId: string): { requestId: string; generation: number } {
+    if (!requestId.trim()) throw new Error('invalid_sidebar_core_refresh');
+    const current = this.readAnalysisState(null, 'sidebar-core-refresh', 'current');
+    const written = this.writeAnalysisState(null, {
+      namespace: 'sidebar-core-refresh', key: 'current', expectedRevision: current.revision,
+      value: { requestId }, idempotencyKey: `reserve:${requestId}`
+    });
+    return { requestId, generation: written.revision };
+  }
+  public commitSidebarCoreRefresh(input: { requestId: string; generation: number; value: unknown }): { accepted: boolean; state: { objectId: string | null; revision: number; value: unknown } } {
+    if (!String(input.requestId || '').trim() || !Number.isInteger(input.generation) || input.generation < 1 || input.value === undefined) throw new Error('invalid_sidebar_core_refresh');
+    return this.transaction(() => {
+      const reservation = this.readAnalysisState(null, 'sidebar-core-refresh', 'current');
+      const reserved = reservation.value as { requestId?: string } | null;
+      const current = this.readAnalysisState(null, 'sidebar', 'core');
+      if (reservation.revision !== input.generation || reserved?.requestId !== input.requestId) return { accepted: false, state: current };
+      const state = this.writeAnalysisState(null, {
+        namespace: 'sidebar', key: 'core', expectedRevision: current.revision, value: input.value,
+        idempotencyKey: `commit:${input.requestId}`
+      });
+      return { accepted: true, state };
+    });
+  }
+  public reserveExternalRefresh(projectId: string, key: string, requestId: string): { requestId: string; generation: number } {
+    if (!key.trim() || !requestId.trim()) throw new Error('invalid_external_refresh');
+    const current = this.readAnalysisState(projectId, 'external-refresh', key);
+    const written = this.writeAnalysisState(projectId, {
+      namespace: 'external-refresh', key, expectedRevision: current.revision,
+      value: { requestId }, idempotencyKey: `reserve:${requestId}`
+    });
+    return { requestId, generation: written.revision };
+  }
+  public commitExternalRefresh(projectId: string, input: { key: string; requestId: string; generation: number; requestedAt: number; cache: unknown }): { accepted: boolean; state: { objectId: string | null; revision: number; value: unknown } } {
+    if (!String(input.key || '').trim() || !String(input.requestId || '').trim() || !Number.isInteger(input.generation) || input.generation < 1 || !Number.isFinite(input.requestedAt) || input.cache === undefined) throw new Error('invalid_external_refresh');
+    return this.transaction(() => {
+      const reservation = this.readAnalysisState(projectId, 'external-refresh', input.key);
+      const reserved = reservation.value as { requestId?: string } | null;
+      const current = this.readAnalysisState(projectId, 'external', input.key);
+      if (reservation.revision !== input.generation || reserved?.requestId !== input.requestId) return { accepted: false, state: current };
+      const state = this.writeAnalysisState(projectId, {
+        namespace: 'external', key: input.key, expectedRevision: current.revision,
+        value: { generation: input.generation, requestedAt: input.requestedAt, requestId: input.requestId, cache: input.cache },
+        idempotencyKey: `commit:${input.requestId}`
+      });
+      return { accepted: true, state };
+    });
+  }
+  public importAnalysisState(projectId: string | null, namespace: string, key: string, value: unknown, source: ImportedSource): { receipt?: WriteReceipt; unchanged: boolean } {
+    if (!namespace.trim() || !key.trim() || value === undefined) throw new Error('invalid_analysis_state');
+    return this.transaction(() => {
+      const current = this.readAnalysisState(projectId, namespace, key);
+      const binding = this.rows('SELECT object_id FROM migration_items WHERE source_identity=? AND source_key=?', [source.identity, source.key])[0];
+      if (current.objectId && binding?.object_id !== current.objectId) throw new Error('migration_conflict: existing_database_choice');
+      return this.importObject({ kind: 'setting', action: 'create', scope: projectId, idempotencyKey: `import-analysis:${canonical(source)}`,
+        data: { namespace: `analysis:${namespace}`, key, owner_scope: projectId || 'global', content: JSON.stringify(value) } }, source);
+    });
+  }
+  public readProjectAnalysisSource(projectId: string): { runCount: number; latestRunAt: string; recentActivityAt: string; conversationRevision: string } {
+    const runs = this.rows("SELECT record_json,files_json,signals_json,updated_at FROM project_run_indexes WHERE project_id=? ORDER BY execution_log_id", [projectId]);
+    const journal = this.rows('SELECT execution_log_id,node_id,timestamp,agent_cli,command,output,status FROM project_journal_entries WHERE project_id=? ORDER BY execution_log_id', [projectId]);
+    const links = this.rows('SELECT execution_log_id,node_id,linked_at FROM project_journal_links WHERE project_id=? ORDER BY execution_log_id,node_id', [projectId]);
+    const conversations = this.rows(`SELECT j.execution_log_id,j.run_id,j.turn_id,
+      rc.generation,rc.checkpoint_sequence,rc.current_turn_id,rc.metadata_content_id,rc.binding_content_id,rc.delivery_pending,rc.recovery_needed,
+      r.status AS run_status,r.started_at AS run_started_at,r.finished_at AS run_finished_at,r.exit_code,run_object.revision AS run_revision,
+      turn_object.revision AS turn_revision,t.request_content_id,t.summary_content_id,t.outcome,t.started_at AS turn_started_at,t.finished_at AS turn_finished_at
+      FROM run_turn_journals j
+      JOIN run_control rc ON rc.project_id=j.project_id AND rc.run_id=j.run_id
+      JOIN runs r ON r.id=j.run_id AND r.project_id=j.project_id
+      JOIN objects run_object ON run_object.id=j.run_id
+      JOIN turns t ON t.id=j.turn_id AND t.project_id=j.project_id
+      JOIN objects turn_object ON turn_object.id=j.turn_id
+      WHERE j.project_id=? ORDER BY j.execution_log_id,j.turn_id`, [projectId]);
+    const runDocuments = this.rows(`SELECT j.execution_log_id,d.purpose,d.object_id,o.revision,e.content_id,c.sha256
+      FROM run_turn_journals j
+      JOIN run_documents d ON d.run_id=j.run_id
+      JOIN objects o ON o.id=d.object_id
+      JOIN evidence e ON e.id=d.object_id
+      JOIN contents c ON c.id=e.content_id
+      WHERE j.project_id=? ORDER BY j.execution_log_id,d.purpose`, [projectId]);
+    const runDates = runs.flatMap(row => {
+      const record = JSON.parse(String(row.record_json));
+      return [String(record.finishedAt || ''), String(record.startedAt || '')];
+    }).filter(Boolean);
+    const journalDates = journal.map(row => String(row.timestamp || '')).filter(Boolean);
+    const latest = [...runDates, ...journalDates]
+      .map(value => Date.parse(value)).filter(Number.isFinite).reduce((current, value) => Math.max(current, value), 0);
+    const latestRun = runDates.map(value => Date.parse(value)).filter(Number.isFinite).reduce((current, value) => Math.max(current, value), 0);
+    return {
+      runCount: runs.length,
+      latestRunAt: latestRun ? new Date(latestRun).toISOString() : '',
+      recentActivityAt: latest ? new Date(latest).toISOString() : '',
+      conversationRevision: digest(canonical([journal, links, runs, conversations, runDocuments]))
+    };
+  }
   public readStrategyState(projectId: string | null): { objectId: string | null; revision: number; value: unknown } {
     const key = projectId === null ? 'cache' : 'preferences';
     const row = this.rows('SELECT s.id FROM settings s JOIN objects o ON o.id=s.id WHERE s.namespace=? AND s.key=? AND s.owner_scope=? AND o.project_id IS ? AND o.archived_at IS NULL', ['strategy', key, projectId || 'global', projectId])[0];
@@ -4399,11 +6545,719 @@ export class UnifiedDataStore {
     const row = this.rows('SELECT content_id,sha256,mime_type FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?', [projectId, executionLogId, relativePath])[0];
     return row ? { bytes: this.content(String(row.content_id)).toString('base64'), hash: String(row.sha256), mimeType: String(row.mime_type) } : null;
   }
-  public async backup(destination: string): Promise<void> {
+  public async backup(input: { destination: string; idempotencyKey: string }): Promise<{ destination: string; databaseId: string; sha256: string; bytes: number }> {
+    if (!input.idempotencyKey?.trim()) throw new Error('idempotency_key_required');
+    const destination = path.resolve(input.destination);
+    const requestKey = `database-backup:${input.idempotencyKey}`;
+    const inputHash = digest(canonical({ destination }));
+    const flightKey = `${this.actorId}\0${requestKey}`;
+    const current = this.backupFlights.get(flightKey);
+    if (current) {
+      if (current.inputHash !== inputHash) throw new Error('idempotency_conflict');
+      return current.promise;
+    }
+    const prior = this.backupDestinationTails.get(destination) || Promise.resolve();
+    const operation = prior.catch(() => undefined).then(() => this.backupOnce(input, destination, requestKey, inputHash));
+    const tail = operation.then(() => undefined, () => undefined);
+    this.backupDestinationTails.set(destination, tail);
+    const promise = operation.finally(() => {
+      if (this.backupDestinationTails.get(destination) === tail) this.backupDestinationTails.delete(destination);
+      if (this.backupFlights.get(flightKey)?.promise === promise) this.backupFlights.delete(flightKey);
+    });
+    this.backupFlights.set(flightKey, { inputHash, promise });
+    return promise;
+  }
+  private async backupOnce(input: { destination: string; idempotencyKey: string }, destination: string, requestKey: string, inputHash: string): Promise<{ destination: string; databaseId: string; sha256: string; bytes: number }> {
+    const activePaths = [this.filePath, `${this.filePath}-wal`, `${this.filePath}-shm`].map(file => path.resolve(file));
+    if (activePaths.includes(destination)) throw new Error('backup_destination_active_database');
+    if (fs.existsSync(destination) && fs.existsSync(this.filePath)) {
+      const target = fs.lstatSync(destination), active = fs.lstatSync(this.filePath);
+      if (target.dev === active.dev && target.ino === active.ino) throw new Error('backup_destination_active_database');
+    }
+    const assertDestinationInactive = (): void => {
+      if ([`${destination}-wal`, `${destination}-shm`].some(file => fs.existsSync(file) && fs.lstatSync(file).size > 0)) throw new Error('backup_destination_active_database');
+      if (path.basename(destination) !== 'solomap.db') return;
+      const control = path.join(path.dirname(destination), 'runtime', 'control.json');
+      try {
+        const state = JSON.parse(fs.readFileSync(control, 'utf8')) as { pid?: number; processBirth?: string; status?: string };
+        if ((state.status === 'running' || state.status === 'paused') && isProcessOwnerAlive(Number(state.pid), String(state.processBirth || ''))) throw new Error('backup_destination_active_database');
+      } catch (error) {
+        if ((error as Error).message === 'backup_destination_active_database') throw error;
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+      }
+    };
+    assertDestinationInactive();
+    this.validateExportPath(destination);
+    const temporary = `${destination}.solomap-backup-${digest(requestKey).slice(0, 24)}`;
+    const delivery = `${temporary}.delivery`;
+    type StoredBackupReceipt = { destination: string; databaseId: string; sha256: string; bytes: number; previousSha256: string | null };
+    const publicReceipt = (stored: StoredBackupReceipt) => ({ destination: stored.destination, databaseId: stored.databaseId, sha256: stored.sha256, bytes: stored.bytes });
+    const inspectSnapshot = (file: string): { sha256: string; bytes: number } | null => {
+      if (!fs.existsSync(file)) return null;
+      const stat = fs.lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink()) return null;
+      try {
+        const valid = inspectImmutableDatabase(file, database => database.exec('PRAGMA integrity_check')[0]?.values?.[0]?.[0] === 'ok'
+          && database.exec("SELECT value FROM database_meta WHERE key='database_id'")[0]?.values?.[0]?.[0] === this.databaseId);
+        if (!valid) return null;
+      } catch { return null; }
+      return digestFile(file);
+    };
+    const previous = this.rows('SELECT input_hash,result_content_id,status FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, requestKey])[0];
+    if (previous && previous.input_hash !== inputHash) throw new Error('idempotency_conflict');
+    const cleanupPublishedStage = (stored: StoredBackupReceipt): void => {
+      if (!fs.existsSync(temporary) || !fs.existsSync(destination)) return;
+      const stage = fs.lstatSync(temporary), target = fs.lstatSync(destination);
+      if (stage.isFile() && !stage.isSymbolicLink() && target.isFile() && !target.isSymbolicLink()
+        && stage.dev === target.dev && stage.ino === target.ino && digestFile(temporary).sha256 === stored.sha256) fs.unlinkSync(temporary);
+    };
+    if (previous?.status === 'committed') {
+      const stored = JSON.parse(this.content(String(previous.result_content_id)).toString('utf8')) as StoredBackupReceipt;
+      assertDestinationInactive();
+      const published = inspectSnapshot(destination);
+      if (!published || published.bytes !== stored.bytes || published.sha256 !== stored.sha256) throw new Error('backup_receipt_target_changed');
+      cleanupPublishedStage(stored);
+      try { if (fs.existsSync(delivery)) fs.unlinkSync(delivery); } catch {}
+      return publicReceipt(stored);
+    }
+    if (!previous) this.db.run('INSERT INTO requests(actor_id,idempotency_key,id,input_hash,status) VALUES(?,?,?,?,?)', [this.actorId, requestKey, crypto.randomUUID(), inputHash, 'pending']);
     fs.mkdirSync(path.dirname(destination), { recursive: true });
-    const fd = fs.openSync(destination, 'wx', 0o600);
-    fs.closeSync(fd);
-    await this.db.backup(destination);
+    const destinationParent = this.captureSafeDestinationParent(destination, 'backup_destination_invalid');
+    const stableParent = this.openStableDestinationParent(destination, destinationParent, 'backup_destination_invalid');
+    const stableDestination = path.join(stableParent.directory, path.basename(destination));
+    const stableTemporary = path.join(stableParent.directory, path.basename(temporary));
+    const stableDelivery = path.join(stableParent.directory, path.basename(delivery));
+    let stored = previous?.result_content_id ? JSON.parse(this.content(String(previous.result_content_id)).toString('utf8')) as StoredBackupReceipt : null;
+    let prepared = Boolean(stored);
+    try {
+      if (!stored) {
+        let snapshot = inspectSnapshot(stableTemporary);
+        if (!snapshot && fs.existsSync(stableTemporary)) fs.unlinkSync(stableTemporary);
+        if (fs.existsSync(stableDestination)) assertDestinationInactive();
+        const prior = fs.existsSync(stableDestination) ? inspectSnapshot(stableDestination) : null;
+        if (fs.existsSync(stableDestination) && !prior) throw new Error('backup_destination_exists');
+        if (!snapshot) {
+          this.assertSafeDestinationParent(destination, destinationParent, 'backup_destination_invalid');
+          const fd = fs.openSync(stableTemporary, 'wx', 0o600); fs.closeSync(fd);
+          try { await this.db.backup(stableTemporary); }
+          catch (error) { try { fs.unlinkSync(stableTemporary); } catch {} throw error; }
+          this.assertSafeDestinationParent(destination, destinationParent, 'backup_destination_invalid');
+          snapshot = inspectSnapshot(stableTemporary);
+          if (!snapshot) throw new Error('backup_verification_failed');
+        }
+        stored = { destination, databaseId: this.databaseId, sha256: snapshot.sha256, bytes: snapshot.bytes, previousSha256: prior?.sha256 || null };
+        this.db.run("UPDATE requests SET status='prepared',result_content_id=? WHERE actor_id=? AND idempotency_key=?", [this.putContent(canonical(stored), 'application/json'), this.actorId, requestKey]);
+        prepared = true;
+      }
+      if (fs.existsSync(stableDestination)) assertDestinationInactive();
+      const published = inspectSnapshot(stableDestination);
+      if (published?.sha256 === stored.sha256 && published.bytes === stored.bytes) {
+        this.assertSafeDestinationParent(destination, destinationParent, 'backup_destination_invalid');
+        this.db.run("UPDATE requests SET status='committed',committed_sequence=? WHERE actor_id=? AND idempotency_key=?", [Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS value FROM events')[0].value), this.actorId, requestKey]);
+        cleanupPublishedStage(stored);
+        return publicReceipt(stored);
+      }
+      if (stored.previousSha256 === null ? fs.existsSync(stableDestination) : !published || published.sha256 !== stored.previousSha256) throw new Error('backup_destination_changed');
+      const stage = inspectSnapshot(stableTemporary);
+      if (!stage || stage.sha256 !== stored.sha256 || stage.bytes !== stored.bytes) throw new Error('backup_staging_missing');
+      this.assertSafeDestinationParent(destination, destinationParent, 'backup_destination_invalid');
+      if (fs.existsSync(stableDelivery)) fs.unlinkSync(stableDelivery);
+      fs.linkSync(stableTemporary, stableDelivery);
+      this.assertSafeDestinationParent(destination, destinationParent, 'backup_destination_invalid');
+      assertDestinationInactive();
+      replaceRegularFileIfUnchanged(stableDestination, stableDelivery, stored.previousSha256 === null ? '' : { sha256: stored.previousSha256 });
+      this.assertSafeDestinationParent(destination, destinationParent, 'backup_destination_invalid');
+      this.db.run("UPDATE requests SET status='committed',committed_sequence=? WHERE actor_id=? AND idempotency_key=?", [Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS value FROM events')[0].value), this.actorId, requestKey]);
+      fs.unlinkSync(stableTemporary);
+      return publicReceipt(stored);
+    } catch (error) {
+      let boundaryValid = true;
+      try { this.assertSafeDestinationParent(destination, destinationParent, 'backup_destination_invalid'); } catch { boundaryValid = false; }
+      try { if (fs.existsSync(stableDelivery)) fs.unlinkSync(stableDelivery); } catch {}
+      if (!prepared || !boundaryValid) try { if (fs.existsSync(stableTemporary)) fs.unlinkSync(stableTemporary); } catch {}
+      if (!boundaryValid) this.db.run("UPDATE requests SET status='pending',result_content_id=NULL WHERE actor_id=? AND idempotency_key=?", [this.actorId, requestKey]);
+      if ((error as Error).message === 'file_changed_during_write') throw new Error('backup_destination_changed');
+      throw error;
+    } finally { fs.closeSync(stableParent.descriptor); }
+  }
+  public async exportProject(input: { root: string; destination: string; idempotencyKey: string }): Promise<{ destination: string; projectId: string; sha256: string; bytes: number; tableCount: number }> {
+    if (!input.idempotencyKey?.trim()) throw new Error('idempotency_key_required');
+    const root = fs.realpathSync(input.root);
+    const { projectId } = await this.registerProject({ root });
+    const destination = path.resolve(input.destination);
+    this.validateExportPath(destination);
+    const requestKey = `project-export:${input.idempotencyKey}`;
+    const inputHash = digest(canonical({ root, destination, projectId }));
+    const deliver = async (bytes: Buffer): Promise<void> => {
+      await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+      const parent = this.captureSafeDestinationParent(destination, 'project_export_destination_invalid');
+      this.writeFileAtStableParent(destination, bytes, parent, 'project_export_destination_invalid');
+    };
+    const previous = this.rows('SELECT input_hash,result_content_id,status FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, requestKey])[0];
+    if (previous) {
+      if (previous.input_hash !== inputHash) throw new Error('idempotency_conflict');
+      if (previous.status !== 'committed') throw new Error('project_export_pending');
+      const stored = JSON.parse(this.content(String(previous.result_content_id)).toString('utf8')) as { destination: string; projectId: string; sha256: string; bytes: number; tableCount: number; archiveContentId: string };
+      const archiveBytes = this.content(stored.archiveContentId);
+      if (archiveBytes.length !== stored.bytes || digest(archiveBytes) !== stored.sha256) throw new Error('project_export_receipt_invalid');
+      await deliver(archiveBytes);
+      const { archiveContentId: _archiveContentId, ...receipt } = stored;
+      return receipt;
+    }
+    const tableRows = new Map<string, Map<string, Record<string, SqlValue>>>();
+    const tables = this.rows("SELECT name FROM sqlite_master WHERE type='table' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY name")
+      .map(row => String(row.name)).filter(name => !name.startsWith('object_search'));
+    const columns = new Map(tables.map(table => [table, this.rows(`PRAGMA table_info(${quoteSqlIdentifier(table)})`).map(row => String(row.name))]));
+    const foreignKeys = new Map(tables.map(table => [table, this.rows(`PRAGMA foreign_key_list(${quoteSqlIdentifier(table)})`)]));
+    const rowKey = (row: Record<string, SqlValue>) => canonical(Object.fromEntries(Object.entries(row).map(([key, value]) => [key, encodePortableCell(value)])));
+    const add = (table: string, rows: Record<string, SqlValue>[]): boolean => {
+      let saved = tableRows.get(table); if (!saved) { saved = new Map(); tableRows.set(table, saved); }
+      let changed = false;
+      for (const row of rows) { const key = rowKey(row); if (!saved.has(key)) { saved.set(key, row); changed = true; } }
+      return changed;
+    };
+    const select = (table: string, where: string, values: SqlValue[]) => this.rows(`SELECT * FROM ${quoteSqlIdentifier(table)} WHERE ${where}`, values);
+    for (const table of tables) {
+      const fields = columns.get(table)!;
+      if (fields.includes('project_id')) add(table, select(table, 'project_id=?', [projectId]));
+      else if (table === 'projects') add(table, select(table, 'id=?', [projectId]));
+    }
+    add('objects', select('objects', 'id=? OR project_id=?', [projectId, projectId]));
+    if (tables.includes('project_locations')) add('project_locations', select('project_locations', 'project_id=?', [projectId]));
+    const fkGroups = (table: string) => {
+      const groups = new Map<number, Record<string, SqlValue>[]>();
+      for (const fk of foreignKeys.get(table) || []) { const id = Number(fk.id); const group = groups.get(id) || []; group.push(fk); groups.set(id, group); }
+      return [...groups.values()].map(group => group.sort((left, right) => Number(left.seq) - Number(right.seq)));
+    };
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [table, saved] of [...tableRows]) for (const row of [...saved.values()]) for (const group of fkGroups(table)) {
+        const parent = String(group[0].table);
+        if (!tables.includes(parent)) continue;
+        const values = group.map(fk => row[String(fk.from)]);
+        if (values.some(value => value === null || value === undefined)) continue;
+        const where = group.map(fk => `${quoteSqlIdentifier(String(fk.to))}=?`).join(' AND ');
+        const parents = select(parent, where, values as SqlValue[]).filter(parentRow => parent !== 'objects' || parentRow.project_id === null || String(parentRow.project_id) === projectId || String(parentRow.id) === projectId);
+        if (add(parent, parents)) changed = true;
+      }
+      const objectRows = [...(tableRows.get('objects')?.values() || [])];
+      const projectObjectIds = objectRows.filter(row => String(row.id) === projectId || String(row.project_id || '') === projectId).map(row => String(row.id));
+      for (const object of objectRows) {
+        const kind = String(object.kind), definition = entityDefinitions[kind];
+        if (definition && tables.includes(definition.table) && add(definition.table, select(definition.table, 'id=?', [String(object.id)]))) changed = true;
+        if (tables.includes('object_revisions') && add('object_revisions', select('object_revisions', 'object_id=?', [String(object.id)]))) changed = true;
+      }
+      for (const objectId of projectObjectIds) {
+        if (tables.includes('events') && add('events', select('events', 'subject_id=?', [objectId]))) changed = true;
+        if (tables.includes('migration_items') && add('migration_items', select('migration_items', 'object_id=?', [objectId]))) changed = true;
+      }
+      const selectedObjects = new Map(objectRows.map(row => [String(row.id), row]));
+      if (tables.includes('relations')) {
+        for (const objectId of projectObjectIds) {
+          const candidates = [...select('relations', 'source_id=?', [objectId]), ...select('relations', 'target_id=?', [objectId])]
+            .filter(row => {
+              const source = this.rows('SELECT project_id FROM objects WHERE id=?', [row.source_id])[0];
+              const target = this.rows('SELECT project_id FROM objects WHERE id=?', [row.target_id])[0];
+              return source && target && [source.project_id, target.project_id].every(scope => scope === null || String(scope) === projectId);
+            });
+          if (add('relations', candidates)) changed = true;
+        }
+      }
+      const excludedParents = new Set(['actors', 'devices', 'contents']);
+      for (const child of tables) for (const group of fkGroups(child)) {
+        const parent = String(group[0].table);
+        if (excludedParents.has(parent) || parent === 'objects' || child === 'relations' || child === 'events' || child === 'migration_items') continue;
+        const parents = tableRows.get(parent); if (!parents) continue;
+        for (const parentRow of parents.values()) {
+          const parentColumns = group.map(fk => String(fk.to));
+          const parentValues = parentColumns.map(column => parentRow[column]);
+          if (parentValues.some(value => value === null || value === undefined)) continue;
+          const where = group.map(fk => `${quoteSqlIdentifier(String(fk.from))}=?`).join(' AND ');
+          const children = select(child, where, parentValues as SqlValue[]).filter(row => (!columns.get(child)!.includes('project_id') || row.project_id === null || String(row.project_id) === projectId)
+            && (child !== 'outbox' || row.channel === 'roadmap_projection' && row.state === 'pending'));
+          if (add(child, children)) changed = true;
+        }
+      }
+      const eventIds = [...(tableRows.get('events')?.values() || [])].map(row => String(row.id));
+      for (const eventId of eventIds) if (tables.includes('outbox') && add('outbox', select('outbox', 'event_id=?', [eventId]).filter(row => row.channel === 'roadmap_projection' && row.state === 'pending'))) changed = true;
+      const contentIds = [...(tableRows.get('contents')?.values() || [])].map(row => String(row.id));
+      for (const contentId of contentIds) {
+        if (tables.includes('content_chunks') && add('content_chunks', select('content_chunks', 'content_id=?', [contentId]))) changed = true;
+      }
+      const formalReferenceContentIds = new Set([
+        ...[...(tableRows.get('object_revisions')?.values() || [])].map(row => String(row.content_id)),
+        ...[...(tableRows.get('learning_review_controls')?.values() || [])].map(row => String(row.input_content_id))
+      ]);
+      for (const contentId of formalReferenceContentIds) {
+        try {
+          const value = JSON.parse(this.content(contentId).toString('utf8'));
+          for (const candidate of portableContentReferences(value)) if (add('contents', select('contents', 'id=?', [candidate]))) changed = true;
+        } catch {}
+      }
+    }
+    const archive: PortableProjectArchive = {
+      schemaVersion: 1, projectId,
+      sourceSchemaVersion: Number(this.rows('SELECT COALESCE(MAX(version),0) AS version FROM schema_migrations')[0].version),
+      tables: [...tableRows].sort(([left], [right]) => left.localeCompare(right)).map(([name, saved]) => ({ name, rows: [...saved.values()].map(row => {
+        const sanitized = { ...row };
+        if (name === 'actors') sanitized.identity_ref = null;
+        if (name === 'devices') sanitized.credential_ref = null;
+        if (name === 'integrations') sanitized.secret_ref = null;
+        if (name === 'settings') sanitized.secret_ref = null;
+        if (name === 'project_locations') { sanitized.root_path = `solomap://project/${projectId}/${String(sanitized.id)}`; sanitized.status = 'moved'; }
+        if (name === 'outbox') sanitized.destination_ref = `solomap://project/${projectId}/effect/${String(sanitized.id)}`;
+        return Object.fromEntries(Object.entries(sanitized).map(([key, value]) => [key, encodePortableCell(value)]));
+      }) }))
+    };
+    const payload = canonical(archive), envelope = Buffer.from(canonical({ archive, sha256: digest(payload) }) + '\n');
+    const receipt = this.transaction(() => {
+      const archiveContentId = this.putContent(envelope, 'application/vnd.solomap.project+json');
+      const stored = { destination, projectId, sha256: digest(envelope), bytes: envelope.length, tableCount: archive.tables.length, archiveContentId };
+      this.db.run('INSERT INTO requests(actor_id,idempotency_key,id,input_hash,result_content_id,status,committed_sequence) VALUES(?,?,?,?,?,?,?)', [this.actorId, requestKey, crypto.randomUUID(), inputHash, this.putContent(canonical(stored), 'application/json'), 'committed', Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS value FROM events')[0].value)]);
+      return stored;
+    });
+    await deliver(envelope);
+    const { archiveContentId: _archiveContentId, ...result } = receipt;
+    return result;
+  }
+  private validatePortableProjectArchive(archive: PortableProjectArchive, tables: Map<string, Record<string, SqlValue>[]>): void {
+    if (archive.tables.length !== tables.size) throw new Error('project_archive_table_invalid');
+    const schemaTables = new Set(this.rows("SELECT name FROM sqlite_master WHERE type='table' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%'").map(row => String(row.name)).filter(name => !name.startsWith('object_search')));
+    const columns = new Map([...schemaTables].map(table => [table, this.rows(`PRAGMA table_info(${quoteSqlIdentifier(table)})`).map(row => String(row.name))]));
+    const foreignKeys = new Map([...schemaTables].map(table => [table, this.rows(`PRAGMA foreign_key_list(${quoteSqlIdentifier(table)})`)]));
+    for (const [table, rows] of tables) {
+      if (!schemaTables.has(table)) throw new Error('project_archive_table_invalid');
+      const expected = [...columns.get(table)!].sort().join('\0');
+      for (const row of rows) {
+        if (Object.keys(row).sort().join('\0') !== expected) throw new Error('project_archive_columns_invalid');
+        if ('project_id' in row && row.project_id !== null && String(row.project_id) !== archive.projectId) throw new Error('project_archive_scope_invalid');
+        if (table === 'projects' && String(row.id) !== archive.projectId) throw new Error('project_archive_scope_invalid');
+        if (table === 'settings' && row.secret_ref !== null || table === 'integrations' && row.secret_ref !== null
+          || table === 'actors' && row.identity_ref !== null || table === 'devices' && row.credential_ref !== null) throw new Error('project_archive_secret_invalid');
+        if (table === 'project_locations' && (String(row.project_id) !== archive.projectId || !String(row.root_path).startsWith(`solomap://project/${archive.projectId}/`))) throw new Error('project_archive_scope_invalid');
+        if (table === 'outbox' && (row.channel !== 'roadmap_projection' || row.state !== 'pending'
+          || String(row.destination_ref) !== `solomap://project/${archive.projectId}/effect/${String(row.id)}`)) throw new Error('project_archive_scope_invalid');
+      }
+    }
+    const projects = tables.get('projects') || [], objects = tables.get('objects') || [];
+    if (projects.length !== 1 || !objects.some(row => String(row.id) === archive.projectId && String(row.kind) === 'project')) throw new Error('project_archive_scope_invalid');
+    const chunks = tables.get('content_chunks') || [];
+    for (const content of tables.get('contents') || []) {
+      const contentId = String(content.id), encoding = String(content.encoding), ownChunks = chunks.filter(row => String(row.content_id) === contentId);
+      if (!encoding.startsWith('chunked:')) {
+        if (ownChunks.length || content.chunk_index_json !== null || !(content.data instanceof Uint8Array)
+          || Buffer.from(content.data).length !== Number(content.stored_byte_length)) throw new Error('project_archive_content_invalid');
+        continue;
+      }
+      let index: ContentChunk[];
+      try { index = JSON.parse(String(content.chunk_index_json)); } catch { throw new Error('project_archive_content_invalid'); }
+      if (!Array.isArray(index) || ownChunks.length !== index.length || !(content.data instanceof Uint8Array) || Buffer.from(content.data).length !== 0) throw new Error('project_archive_content_invalid');
+      const ordered = [...ownChunks].sort((left, right) => Number(left.ordinal) - Number(right.ordinal));
+      if (ordered.some((row, ordinal) => Number(row.ordinal) !== ordinal) || ordered.reduce((sum, row) => sum + Buffer.from(row.data as Uint8Array).length, 0) !== Number(content.stored_byte_length)) throw new Error('project_archive_content_invalid');
+      const bytes = Buffer.concat(index.map((part, ordinal) => {
+        const stored = Buffer.from(ordered[ordinal].data as Uint8Array), decoded = part.compressed ? gunzipSync(stored) : stored;
+        if (decoded.length !== part.byteLength || digest(decoded) !== part.sha256) throw new Error('project_archive_content_invalid');
+        return decoded;
+      }));
+      if (bytes.length !== Number(content.byte_length) || digest(bytes) !== String(content.sha256)) throw new Error('project_archive_content_invalid');
+    }
+    const marked = new Map<string, Set<number>>();
+    const mark = (table: string, index: number): boolean => {
+      const set = marked.get(table) || new Set<number>(); marked.set(table, set);
+      const changed = !set.has(index); set.add(index); return changed;
+    };
+    for (const [table, rows] of tables) rows.forEach((row, index) => {
+      if (table === 'projects' && String(row.id) === archive.projectId
+        || table === 'objects' && (String(row.id) === archive.projectId || String(row.project_id || '') === archive.projectId)
+        || 'project_id' in row && String(row.project_id || '') === archive.projectId) mark(table, index);
+    });
+    const groups = (table: string) => {
+      const result = new Map<number, Record<string, SqlValue>[]>();
+      for (const fk of foreignKeys.get(table) || []) { const group = result.get(Number(fk.id)) || []; group.push(fk); result.set(Number(fk.id), group); }
+      return [...result.values()].map(group => group.sort((a, b) => Number(a.seq) - Number(b.seq)));
+    };
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [table, indices] of marked) for (const index of [...indices]) for (const group of groups(table)) {
+        const row = tables.get(table)![index], parent = String(group[0].table), values = group.map(fk => row[String(fk.from)]);
+        if (values.some(value => value === null || value === undefined)) continue;
+        (tables.get(parent) || []).forEach((candidate, candidateIndex) => {
+          if (group.every((fk, ordinal) => candidate[String(fk.to)] === values[ordinal]) && mark(parent, candidateIndex)) changed = true;
+        });
+      }
+      const selectedObjectIds = new Set((tables.get('objects') || []).map((row, index) => marked.get('objects')?.has(index) ? String(row.id) : '').filter(Boolean));
+      const selectedEventIds = new Set((tables.get('events') || []).map((row, index) => marked.get('events')?.has(index) ? String(row.id) : '').filter(Boolean));
+      const selectedContentIds = new Set((tables.get('contents') || []).map((row, index) => marked.get('contents')?.has(index) ? String(row.id) : '').filter(Boolean));
+      const selectedRoadmapNodeIds = new Set((tables.get('roadmap_nodes') || []).map((row, index) => marked.get('roadmap_nodes')?.has(index) ? String(row.id) : '').filter(Boolean));
+      const entityTables = new Set(Object.values(entityDefinitions).map(definition => definition.table));
+      for (const [table, rows] of tables) rows.forEach((row, index) => {
+        if (marked.get(table)?.has(index)) return;
+        const belongs = table === 'object_revisions' && selectedObjectIds.has(String(row.object_id))
+          || table === 'events' && selectedObjectIds.has(String(row.subject_id))
+          || table === 'migration_items' && selectedObjectIds.has(String(row.object_id))
+          || table === 'relations' && selectedObjectIds.has(String(row.source_id)) && selectedObjectIds.has(String(row.target_id))
+          || entityTables.has(table) && selectedObjectIds.has(String(row.id))
+          || table === 'outbox' && selectedEventIds.has(String(row.event_id))
+          || table === 'content_chunks' && selectedContentIds.has(String(row.content_id))
+          || table === 'roadmap_dependencies' && selectedRoadmapNodeIds.has(String(row.node_id)) && selectedRoadmapNodeIds.has(String(row.dependency_id))
+          || table === 'roadmap_node_fields' && selectedRoadmapNodeIds.has(String(row.node_id));
+        if (belongs && mark(table, index)) changed = true;
+      });
+      const referencedContentIds = new Set<string>();
+      const formalReferenceContentIds = new Set([
+        ...(tables.get('object_revisions') || []).map((row, index) => marked.get('object_revisions')?.has(index) ? String(row.content_id) : '').filter(Boolean),
+        ...(tables.get('learning_review_controls') || []).map((row, index) => marked.get('learning_review_controls')?.has(index) ? String(row.input_content_id) : '').filter(Boolean)
+      ]);
+      for (const contentId of formalReferenceContentIds) {
+        const content = (tables.get('contents') || []).find(row => String(row.id) === contentId);
+        if (!content) continue;
+        try {
+          let bytes: Buffer;
+          if (String(content.encoding).startsWith('chunked:')) {
+            const chunks = (tables.get('content_chunks') || []).filter(row => String(row.content_id) === contentId).sort((a, b) => Number(a.ordinal) - Number(b.ordinal));
+            const index = JSON.parse(String(content.chunk_index_json)) as ContentChunk[];
+            bytes = Buffer.concat(index.map((chunk, ordinal) => chunk.compressed ? gunzipSync(Buffer.from(chunks[ordinal].data as Uint8Array)) : Buffer.from(chunks[ordinal].data as Uint8Array)));
+          } else {
+            const stored = Buffer.from(content.data as Uint8Array);
+            bytes = String(content.encoding).startsWith('gzip:') ? gunzipSync(stored) : stored;
+          }
+          portableContentReferences(JSON.parse(bytes.toString('utf8'))).forEach(id => referencedContentIds.add(id));
+        } catch {}
+      }
+      (tables.get('contents') || []).forEach((row, index) => { if (referencedContentIds.has(String(row.id)) && mark('contents', index)) changed = true; });
+    }
+    for (const [table, rows] of tables) if (rows.some((_row, index) => !marked.get(table)?.has(index))) throw new Error(`project_archive_unreachable_row:${table}`);
+  }
+  public async importProject(input: { source: string; root: string; idempotencyKey: string }): Promise<{ projectId: string; locationId: string; identityPath: string; roadmapPath: string }> {
+    if (!input.idempotencyKey?.trim()) throw new Error('idempotency_key_required');
+    const source = path.resolve(input.source), root = path.resolve(input.root);
+    const assertTargetBoundary = (): void => {
+      if (fs.existsSync(root)) {
+        const rootStat = fs.lstatSync(root);
+        if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('project_import_target_invalid');
+      }
+      const controlDirectory = path.join(root, '.solopreneur');
+      if (fs.existsSync(controlDirectory)) {
+        const controlStat = fs.lstatSync(controlDirectory);
+        if (!controlStat.isDirectory() || controlStat.isSymbolicLink()) throw new Error('project_import_target_invalid');
+        if (!fs.existsSync(root) || fs.realpathSync(controlDirectory) !== path.join(fs.realpathSync(root), '.solopreneur')) throw new Error('project_import_target_invalid');
+      }
+    };
+    assertTargetBoundary();
+    const stat = fs.lstatSync(source);
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('project_archive_invalid');
+    const envelope = JSON.parse(fs.readFileSync(source, 'utf8')) as { archive?: PortableProjectArchive; sha256?: string };
+    const archive = envelope.archive;
+    if (!archive || archive.schemaVersion !== 1 || typeof archive.projectId !== 'string'
+      || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(archive.projectId)
+      || envelope.sha256 !== digest(canonical(archive))) throw new Error('project_archive_invalid');
+    const requestKey = `project-import:${input.idempotencyKey}`;
+    const inputHash = digest(canonical({ sourceHash: envelope.sha256, root }));
+    const previous = this.rows('SELECT input_hash,result_content_id,status FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, requestKey])[0];
+    if (previous && previous.input_hash !== inputHash) throw new Error('idempotency_conflict');
+    if (archive.sourceSchemaVersion > Number(this.rows('SELECT COALESCE(MAX(version),0) AS version FROM schema_migrations')[0].version)) throw new Error('project_archive_schema_newer');
+    const tables = new Map(archive.tables.map(table => [table.name, table.rows.map(row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, decodePortableCell(value)])) as Record<string, SqlValue>)]));
+    const existingTables = new Set(this.rows("SELECT name FROM sqlite_master WHERE type='table'").map(row => String(row.name)));
+    if ([...tables.keys()].some(table => !existingTables.has(table) || table.startsWith('object_search'))) throw new Error('project_archive_table_invalid');
+    this.validatePortableProjectArchive(archive, tables);
+    const importedProjectionIds = new Set((tables.get('outbox') || []).filter(row => row.channel === 'roadmap_projection').map(row => String(row.id)));
+    const identityPath = path.join(root, '.solopreneur', 'project.json'), roadmapPath = path.join(root, '.solopreneur', 'roadmap.csv');
+    const state = tables.get('roadmap_file_states')?.find(row => String(row.project_id) === archive.projectId);
+    const contentRow = state ? tables.get('contents')?.find(row => String(row.id) === String(state.accepted_content_id)) : undefined;
+    if (!state || !contentRow) throw new Error('project_archive_roadmap_missing');
+    const decodePortableContent = (portable: Record<string, SqlValue>): Buffer => {
+      const encoding = String(portable.encoding), expected = String(portable.sha256);
+      let bytes: Buffer;
+      if (encoding.startsWith('chunked:')) {
+        const chunks = (tables.get('content_chunks') || []).filter(row => String(row.content_id) === String(portable.id)).sort((left, right) => Number(left.ordinal) - Number(right.ordinal));
+        const index = JSON.parse(String(portable.chunk_index_json)) as ContentChunk[];
+        bytes = Buffer.concat(index.map((chunk, ordinal) => {
+          const stored = Buffer.from(chunks[ordinal]?.data as Uint8Array || []);
+          const part = chunk.compressed ? gunzipSync(stored) : stored;
+          if (part.length !== chunk.byteLength || digest(part) !== chunk.sha256) throw new Error('project_archive_content_invalid');
+          return part;
+        }));
+      } else {
+        const stored = Buffer.from(portable.data as Uint8Array);
+        bytes = encoding.startsWith('gzip:') ? gunzipSync(stored) : stored;
+      }
+      if (bytes.length !== Number(portable.byte_length) || digest(bytes) !== expected) throw new Error('project_archive_content_invalid');
+      return bytes;
+    };
+    const roadmapBytes = decodePortableContent(contentRow); parseRoadmapCsv(roadmapBytes.toString('utf8'), { strictHeader: true });
+    const identityBytes = Buffer.from(JSON.stringify({ schemaVersion: 1, projectId: archive.projectId }) + '\n');
+    const matchingFiles = (): boolean => {
+      if (!fs.existsSync(identityPath) || !fs.existsSync(roadmapPath)
+        || !fs.lstatSync(identityPath).isFile() || fs.lstatSync(identityPath).isSymbolicLink()
+        || !fs.lstatSync(roadmapPath).isFile() || fs.lstatSync(roadmapPath).isSymbolicLink()
+        || !fs.readFileSync(identityPath).equals(identityBytes)) return false;
+      const currentRoadmap = fs.readFileSync(roadmapPath);
+      const accepted = this.rows('SELECT accepted_content_id,accepted_hash FROM roadmap_file_states WHERE project_id=?', [archive.projectId])[0];
+      if (!accepted?.accepted_content_id) return currentRoadmap.equals(roadmapBytes);
+      if (digest(currentRoadmap) !== String(accepted.accepted_hash || '')) return false;
+      return currentRoadmap.equals(this.content(String(accepted.accepted_content_id)));
+    };
+    const recoverImportedProjections = async (): Promise<void> => {
+      const recovery = await this.recoverOutbox();
+      const pending = recovery.pending.filter(item => importedProjectionIds.has(item.id));
+      if (pending.length) throw new Error(`project_import_projection_pending:${pending.map(item => item.error).join(',')}`);
+    };
+    const finish = (result: { projectId: string; locationId: string; identityPath: string; roadmapPath: string }) => {
+      this.db.run("UPDATE requests SET status='committed',result_content_id=?,committed_sequence=? WHERE actor_id=? AND idempotency_key=?", [this.putContent(canonical(result), 'application/json'), Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS value FROM events')[0].value), this.actorId, requestKey]);
+      return result;
+    };
+    if (previous?.status === 'committed') {
+      const result = JSON.parse(this.content(String(previous.result_content_id)).toString('utf8')) as { projectId: string; locationId: string; identityPath: string; roadmapPath: string };
+      if (!matchingFiles()) throw new Error('project_import_receipt_target_changed');
+      await recoverImportedProjections();
+      return result;
+    }
+    if (this.rows('SELECT 1 FROM projects WHERE id=?', [archive.projectId]).length) {
+      const realRoot = fs.existsSync(root) ? fs.realpathSync(root) : '';
+      const location = realRoot ? this.rows("SELECT id FROM project_locations WHERE project_id=? AND root_path=? AND status='active'", [archive.projectId, realRoot])[0] : undefined;
+      if (previous?.status === 'pending' && matchingFiles() && location) {
+        await recoverImportedProjections();
+        return finish({ projectId: archive.projectId, locationId: String(location.id), identityPath, roadmapPath });
+      }
+      throw new Error('project_import_identity_exists');
+    }
+    if (!previous) this.db.run('INSERT INTO requests(actor_id,idempotency_key,id,input_hash,status) VALUES(?,?,?,?,?)', [this.actorId, requestKey, crypto.randomUUID(), inputHash, 'pending']);
+    const identityExists = fs.existsSync(identityPath), roadmapExists = fs.existsSync(roadmapPath);
+    const identityMatches = identityExists && fs.lstatSync(identityPath).isFile() && !fs.lstatSync(identityPath).isSymbolicLink() && fs.readFileSync(identityPath).equals(identityBytes);
+    const roadmapMatches = roadmapExists && fs.lstatSync(roadmapPath).isFile() && !fs.lstatSync(roadmapPath).isSymbolicLink() && fs.readFileSync(roadmapPath).equals(roadmapBytes);
+    if (identityExists && !identityMatches || roadmapExists && !roadmapMatches
+      || (identityExists !== roadmapExists && previous?.status !== 'pending')) throw new Error('project_import_target_exists');
+    const resumedFiles = identityMatches && roadmapMatches;
+    const createdDirectories: string[] = [];
+    let createdIdentity = false, createdRoadmap = false;
+    let cursor = path.dirname(identityPath);
+    while (!fs.existsSync(cursor)) { createdDirectories.push(cursor); const parent = path.dirname(cursor); if (parent === cursor) break; cursor = parent; }
+    try { if (!resumedFiles) {
+      fs.mkdirSync(path.dirname(identityPath), { recursive: true, mode: 0o700 });
+      assertTargetBoundary();
+      if (!identityExists) {
+        const parent = this.captureSafeDestinationParent(identityPath, 'project_import_target_invalid');
+        this.writeFileAtStableParent(identityPath, identityBytes, parent, 'project_import_target_invalid'); createdIdentity = true;
+      }
+      assertTargetBoundary();
+      if (!roadmapExists) {
+        const parent = this.captureSafeDestinationParent(roadmapPath, 'project_import_target_invalid');
+        this.writeFileAtStableParent(roadmapPath, roadmapBytes, parent, 'project_import_target_invalid'); createdRoadmap = true;
+      }
+      assertTargetBoundary();
+    } } catch (error) {
+      let safeCleanup = false;
+      try { assertTargetBoundary(); safeCleanup = true; } catch {}
+      if (safeCleanup && !resumedFiles) {
+        try { if (createdRoadmap && fs.existsSync(roadmapPath) && fs.lstatSync(roadmapPath).isFile()) fs.unlinkSync(roadmapPath); } catch {}
+        try { if (createdIdentity && fs.existsSync(identityPath) && fs.lstatSync(identityPath).isFile()) fs.unlinkSync(identityPath); } catch {}
+        for (const directory of createdDirectories) { try { fs.rmdirSync(directory); } catch {} }
+      }
+      throw error;
+    }
+    const locationId = crypto.randomUUID();
+    let transactionStarted = false;
+    try {
+      this.db.run('PRAGMA foreign_keys=OFF');
+      this.db.run('BEGIN IMMEDIATE');
+      transactionStarted = true;
+      const importForeignKeys = new Map([...tables.keys()].map(table => [table, this.rows(`PRAGMA foreign_key_list(${quoteSqlIdentifier(table)})`)]));
+      const formalReferenceContentIds = new Set([
+        ...(tables.get('object_revisions') || []).map(row => String(row.content_id)),
+        ...(tables.get('learning_review_controls') || []).map(row => String(row.input_content_id))
+      ]);
+      const actorRemap = new Map<string, string>();
+      for (const actor of tables.get('actors') || []) {
+        const sourceActorId = String(actor.id);
+        let targetActorId = stablePortableUuid(`${archive.projectId}:${envelope.sha256}:actor:${sourceActorId}`), ordinal = 0;
+        while (this.rows('SELECT 1 FROM actors WHERE id=?', [targetActorId]).length || [...actorRemap.values()].includes(targetActorId)) {
+          targetActorId = stablePortableUuid(`${archive.projectId}:${envelope.sha256}:actor:${sourceActorId}:${++ordinal}`);
+        }
+        actorRemap.set(sourceActorId, targetActorId); actor.id = targetActorId;
+      }
+      for (const [table, rows] of tables) for (const row of rows) for (const fk of importForeignKeys.get(table) || []) {
+        if (String(fk.table) !== 'actors' || String(fk.to) !== 'id') continue;
+        const column = String(fk.from), mapped = actorRemap.get(String(row[column] || ''));
+        if (mapped) row[column] = mapped;
+      }
+      const contentRemap = new Map<string, string>();
+      let remapChanged = true;
+      while (remapChanged) {
+        remapChanged = false;
+        for (const portable of tables.get('contents') || []) {
+          const sourceId = String(portable.id);
+          if (contentRemap.has(sourceId)) continue;
+          const original = decodePortableContent(portable);
+          let bytes = original;
+          try {
+            const parsed = JSON.parse(original.toString('utf8'));
+            if (formalReferenceContentIds.has(sourceId) && portableContentReferences(parsed).some(id => contentRemap.has(id))) bytes = Buffer.from(canonical(remapPortableContentReferences(parsed, contentRemap)));
+          } catch {}
+          const mimeType = String(portable.mime_type), baseEncoding = String(portable.encoding).replace(/^(?:gzip|chunked):/, '');
+          const hash = digest(bytes);
+          const duplicate = this.rows('SELECT id FROM contents WHERE sha256=? AND mime_type=? AND encoding IN (?,?,?)', [hash, mimeType, baseEncoding, `gzip:${baseEncoding}`, `chunked:${baseEncoding}`])[0];
+          if (duplicate || !bytes.equals(original)) {
+            const targetId = this.putContent(bytes, mimeType, baseEncoding);
+            contentRemap.set(sourceId, targetId); remapChanged = true;
+          }
+        }
+      }
+      for (const [table, rows] of tables) for (const row of rows) {
+        if (table === 'contents' || table === 'content_chunks' && contentRemap.has(String(row.content_id))) continue;
+        for (const fk of importForeignKeys.get(table) || []) {
+          if (String(fk.table) !== 'contents' || String(fk.to) !== 'id') continue;
+          const column = String(fk.from), mapped = contentRemap.get(String(row[column] || ''));
+          if (mapped) row[column] = mapped;
+        }
+      }
+      const eventSequenceMap = new Map<number, number>();
+      let sequence = Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS sequence FROM events')[0].sequence);
+      const eventRows = tables.get('events') || [];
+      for (const row of eventRows.sort((left, right) => Number(left.sequence) - Number(right.sequence))) { const previous = Number(row.sequence); row.sequence = ++sequence; eventSequenceMap.set(previous, sequence); }
+      for (const row of tables.get('requests') || []) if (row.committed_sequence !== null) row.committed_sequence = eventSequenceMap.get(Number(row.committed_sequence)) || null;
+      for (const row of tables.get('project_locations') || []) row.status = 'moved';
+      for (const row of tables.get('outbox') || []) if (row.channel === 'roadmap_projection') row.destination_ref = roadmapPath;
+      const insertionOrder = [...tables].sort(([left], [right]) => {
+        const priority = (name: string) => name === 'objects' ? 0 : name === 'projects' ? 1 : 2;
+        return priority(left) - priority(right) || left.localeCompare(right);
+      });
+      for (const [table, rows] of insertionOrder) {
+        for (const row of rows) {
+          if (table === 'contents' && contentRemap.has(String(row.id)) || table === 'content_chunks' && contentRemap.has(String(row.content_id))) continue;
+          const keys = Object.keys(row), identifier = quoteSqlIdentifier(table);
+          const existing = keys.includes('id') ? this.rows(`SELECT * FROM ${identifier} WHERE id=?`, [row.id])[0] : undefined;
+          if (existing) {
+            if (table === 'devices') continue;
+            if (canonical(Object.fromEntries(Object.entries(existing).map(([key, value]) => [key, encodePortableCell(value)]))) === canonical(Object.fromEntries(Object.entries(row).map(([key, value]) => [key, encodePortableCell(value)])))) continue;
+            throw new Error(`project_import_collision:${table}`);
+          }
+          try { this.db.run(`INSERT INTO ${identifier}(${keys.map(quoteSqlIdentifier).join(',')}) VALUES(${keys.map(() => '?').join(',')})`, keys.map(key => row[key])); }
+          catch (error) { throw new Error(`project_import_row_failed:${table}:${error instanceof Error ? error.message : String(error)}`); }
+        }
+      }
+      this.db.run("UPDATE project_locations SET status='moved' WHERE project_id=?", [archive.projectId]);
+      this.db.run('INSERT INTO project_locations VALUES(?,?,?,?,?)', [locationId, archive.projectId, this.deviceId, fs.realpathSync(root), 'active']);
+      for (const row of this.rows('SELECT id FROM objects WHERE project_id=? OR id=?', [archive.projectId, archive.projectId])) this.indexSearchObject(this.read(String(row.id)));
+      const violations = this.db.exec('PRAGMA foreign_key_check');
+      if (violations.length && violations.some(result => result.values.length)) throw new Error('project_archive_foreign_key_error');
+      this.db.run('COMMIT');
+    } catch (error) {
+      if (transactionStarted) try { this.db.run('ROLLBACK'); } catch {}
+      let safeCleanup = false;
+      try { assertTargetBoundary(); safeCleanup = true; } catch {}
+      if (safeCleanup && !resumedFiles) {
+        try { if (createdRoadmap) fs.unlinkSync(roadmapPath); } catch {}
+        try { if (createdIdentity) fs.unlinkSync(identityPath); } catch {}
+        for (const directory of createdDirectories) { try { fs.rmdirSync(directory); } catch {} }
+      }
+      throw error;
+    } finally { this.db.run('PRAGMA foreign_keys=ON'); }
+    await recoverImportedProjections();
+    return finish({ projectId: archive.projectId, locationId, identityPath, roadmapPath });
+  }
+  public restoreBackup(input: { source: string; destinationRoot: string; idempotencyKey: string }): { destination: string; databaseId: string; sha256: string; bytes: number } {
+    if (!input.idempotencyKey?.trim()) throw new Error('idempotency_key_required');
+    const sourcePath = path.resolve(input.source), root = path.resolve(input.destinationRoot), destination = path.join(root, 'solomap.db');
+    const sourceStat = fs.lstatSync(sourcePath);
+    if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) throw new Error('backup_source_invalid');
+    const assertSourceInactive = (): void => {
+      if ([`${sourcePath}-wal`, `${sourcePath}-shm`].some(file => fs.existsSync(file) && fs.lstatSync(file).size > 0)) throw new Error('backup_source_active');
+    };
+    assertSourceInactive();
+    const inspect = (file: string, code: string): string => {
+      try {
+        return inspectImmutableDatabase(file, database => {
+          const integrity = database.exec('PRAGMA integrity_check')[0]?.values?.[0]?.[0];
+          const databaseId = database.exec("SELECT value FROM database_meta WHERE key='database_id'")[0]?.values?.[0]?.[0];
+          if (integrity !== 'ok' || typeof databaseId !== 'string' || !databaseId) throw new Error(code);
+          return databaseId;
+        });
+      } catch (error) { if ((error as Error).message === code) throw error; throw new Error(code); }
+    };
+    const databaseId = inspect(sourcePath, 'backup_source_invalid');
+    assertSourceInactive();
+    const sourceDigest = digestFile(sourcePath), created: string[] = [];
+    assertSourceInactive();
+    const receipt = { destination, databaseId, sha256: sourceDigest.sha256, bytes: sourceDigest.bytes };
+    const requestKey = `database-restore:${input.idempotencyKey}`;
+    const temporary = `${destination}.solomap-restore-${digest(requestKey).slice(0, 24)}`;
+    const inputHash = digest(canonical({ source: sourcePath, sourceHash: sourceDigest.sha256, destinationRoot: root }));
+    const previous = this.rows('SELECT input_hash,result_content_id,status FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, requestKey])[0];
+    if (previous && previous.input_hash !== inputHash) throw new Error('idempotency_conflict');
+    const finish = () => {
+      const resultContentId = this.putContent(canonical(receipt), 'application/json');
+      this.db.run("UPDATE requests SET status='committed',result_content_id=?,committed_sequence=? WHERE actor_id=? AND idempotency_key=?", [resultContentId, Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS value FROM events')[0].value), this.actorId, requestKey]);
+      return receipt;
+    };
+    const cleanupPublishedStage = (): void => {
+      if (!fs.existsSync(temporary) || !fs.existsSync(destination)) return;
+      const stage = fs.lstatSync(temporary), target = fs.lstatSync(destination);
+      if (stage.isFile() && !stage.isSymbolicLink() && target.isFile() && !target.isSymbolicLink()
+        && stage.dev === target.dev && stage.ino === target.ino && digestFile(temporary).sha256 === receipt.sha256) fs.unlinkSync(temporary);
+    };
+    if (previous?.status === 'committed') {
+      if (!fs.existsSync(root)) throw new Error('restore_receipt_target_changed');
+      const rootStat = fs.lstatSync(root);
+      if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || fs.realpathSync(root) !== root) throw new Error('restore_target_invalid');
+      const stored = JSON.parse(this.content(String(previous.result_content_id)).toString('utf8')) as typeof receipt;
+      if (!fs.existsSync(destination) || fs.lstatSync(destination).isSymbolicLink() || !fs.lstatSync(destination).isFile()
+        || digestFile(destination).sha256 !== stored.sha256 || inspect(destination, 'restore_target_exists') !== stored.databaseId) throw new Error('restore_receipt_target_changed');
+      cleanupPublishedStage();
+      return stored;
+    }
+    if (fs.existsSync(root)) {
+      const rootStat = fs.lstatSync(root);
+      if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('restore_target_invalid');
+      const allowed = previous?.status === 'pending' ? new Set([path.basename(temporary), path.basename(destination)]) : new Set<string>();
+      if (fs.readdirSync(root).some(name => !allowed.has(name))) throw new Error('restore_target_not_empty');
+      if (!previous && fs.readdirSync(root).length) throw new Error('restore_target_not_empty');
+    }
+    if (!previous) this.db.run('INSERT INTO requests(actor_id,idempotency_key,id,input_hash,status) VALUES(?,?,?,?,?)', [this.actorId, requestKey, crypto.randomUUID(), inputHash, 'pending']);
+    if (fs.existsSync(destination)) {
+      if (fs.lstatSync(destination).isSymbolicLink() || !fs.lstatSync(destination).isFile()
+        || inspect(destination, 'restore_target_exists') !== databaseId || digestFile(destination).sha256 !== sourceDigest.sha256) throw new Error('restore_target_exists');
+      cleanupPublishedStage();
+      return finish();
+    }
+    let cursor = root;
+    while (!fs.existsSync(cursor)) { created.push(cursor); const parent = path.dirname(cursor); if (parent === cursor) break; cursor = parent; }
+    if (fs.existsSync(root) && (!fs.lstatSync(root).isDirectory() || fs.lstatSync(root).isSymbolicLink())) throw new Error('restore_target_invalid');
+    fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+    if (fs.lstatSync(root).isSymbolicLink()) throw new Error('restore_target_invalid');
+    const unexpected = fs.readdirSync(root).filter(name => name !== path.basename(temporary));
+    if (unexpected.length) throw new Error('restore_target_not_empty');
+    const destinationParent = this.captureSafeDestinationParent(destination, 'restore_target_invalid');
+    const stableParent = this.openStableDestinationParent(destination, destinationParent, 'restore_target_invalid');
+    const stableDestination = path.join(stableParent.directory, path.basename(destination));
+    const stableTemporary = path.join(stableParent.directory, path.basename(temporary));
+    let createdDestination = false;
+    try {
+      if (fs.existsSync(stableTemporary)) {
+        const stage = fs.lstatSync(stableTemporary);
+        if (!stage.isFile() || stage.isSymbolicLink()) throw new Error('restore_staging_invalid');
+        const staged = digestFile(stableTemporary);
+        if (staged.sha256 !== sourceDigest.sha256 || staged.bytes !== sourceDigest.bytes) fs.unlinkSync(stableTemporary);
+      }
+      if (!fs.existsSync(stableTemporary)) fs.copyFileSync(sourcePath, stableTemporary, fs.constants.COPYFILE_EXCL);
+      this.assertSafeDestinationParent(destination, destinationParent, 'restore_target_invalid');
+      fs.chmodSync(stableTemporary, 0o600);
+      const staged = digestFile(stableTemporary);
+      if (staged.sha256 !== sourceDigest.sha256 || staged.bytes !== sourceDigest.bytes || inspect(stableTemporary, 'backup_source_invalid') !== databaseId) throw new Error('backup_source_invalid');
+      try { fs.linkSync(stableTemporary, stableDestination); createdDestination = true; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || inspect(stableDestination, 'restore_target_exists') !== databaseId || digestFile(stableDestination).sha256 !== sourceDigest.sha256) throw error;
+      }
+      this.assertSafeDestinationParent(destination, destinationParent, 'restore_target_invalid');
+      fs.unlinkSync(stableTemporary);
+      return finish();
+    } catch (error) {
+      try { if (fs.existsSync(stableTemporary) && fs.lstatSync(stableTemporary).isFile() && !fs.lstatSync(stableTemporary).isSymbolicLink()) fs.unlinkSync(stableTemporary); } catch {}
+      try { if (createdDestination && fs.existsSync(stableDestination) && fs.lstatSync(stableDestination).isFile() && !fs.lstatSync(stableDestination).isSymbolicLink()) fs.unlinkSync(stableDestination); } catch {}
+      if (!fs.existsSync(destination)) for (const directory of created) { try { fs.rmdirSync(directory); } catch {} }
+      throw error;
+    } finally { fs.closeSync(stableParent.descriptor); }
   }
   public close(): void { this.db.close(); }
 }

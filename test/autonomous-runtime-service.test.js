@@ -23,7 +23,7 @@ test('fallback runtime health requires a matching live control response', async 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-health-'));
   const globalRoot = path.join(root, '.solomap-global');
   const runtimeRoot = path.join(globalRoot, 'runtime');
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   t.after(() => {
     if (fs.existsSync(statePath)) fs.unlinkSync(statePath);
     if (fs.existsSync(runtimeRoot)) fs.rmdirSync(runtimeRoot);
@@ -75,7 +75,7 @@ test('a live runtime without control cannot be adopted or replaced', async t => 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-handoff-'));
   const globalRoot = path.join(root, '.solomap-global');
   const runtimeRoot = path.join(globalRoot, 'runtime');
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   fs.mkdirSync(runtimeRoot, { recursive: true });
   fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'legacy', pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
   t.after(() => { fs.unlinkSync(statePath); fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root); });
@@ -95,7 +95,7 @@ test('a verified SoloMap runtime without control is terminated before fallback r
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-recover-hung-'));
   const globalRoot = path.join(root, '.solomap-global');
   const runtimeRoot = path.join(globalRoot, 'runtime');
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   fs.mkdirSync(runtimeRoot, { recursive: true });
   fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'hung', pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
   let spawnedChild;
@@ -132,7 +132,7 @@ test('a verified SoloMap runtime with a stale heartbeat is terminated before fal
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-recover-stale-'));
   const globalRoot = path.join(root, '.solomap-global');
   const runtimeRoot = path.join(globalRoot, 'runtime');
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   fs.mkdirSync(runtimeRoot, { recursive: true });
   fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'stale', pid: process.pid, status: 'running', heartbeatAt: new Date(0).toISOString() }));
   let spawnedChild;
@@ -166,7 +166,7 @@ test('a healthy runtime is reused only after its control identity matches the le
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-reuse-'));
   const globalRoot = path.join(root, '.solomap-global');
   const runtimeRoot = path.join(globalRoot, 'runtime');
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   fs.mkdirSync(runtimeRoot, { recursive: true });
   fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'owner', pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
   t.after(() => { fs.unlinkSync(statePath); fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root); });
@@ -185,7 +185,7 @@ test('a healthy older build drains before the new fallback runtime takes its lea
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-upgrade-'));
   const globalRoot = path.join(root, '.solomap-global');
   const runtimeRoot = path.join(globalRoot, 'runtime');
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   fs.mkdirSync(runtimeRoot, { recursive: true });
   fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'old', pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
   t.after(() => { fs.unlinkSync(statePath); fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root); });
@@ -219,7 +219,7 @@ test('a verified older Runtime is terminated when acknowledged drain cannot fini
   const host = require('../out/autonomousRuntimeHost.js');
   const runtime = require('../out/autonomousRuntime.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-drain-stuck-'));
-  const globalRoot = path.join(root, '.solomap-global'); const runtimeRoot = path.join(globalRoot, 'runtime'); const statePath = path.join(runtimeRoot, 'state.json');
+  const globalRoot = path.join(root, '.solomap-global'); const runtimeRoot = path.join(globalRoot, 'runtime'); const statePath = path.join(runtimeRoot, 'control.json');
   fs.mkdirSync(runtimeRoot, { recursive: true });
   fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'old', pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
   let spawnedChild; let oldAlive = true; let terminated = 0; let drained = 0;
@@ -244,7 +244,7 @@ test('a known different runtime build is rejected without a startup wait', async
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-wrong-build-'));
   const globalRoot = path.join(root, '.solomap-global');
   const runtimeRoot = path.join(globalRoot, 'runtime');
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   fs.mkdirSync(runtimeRoot, { recursive: true });
   fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'old', pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
   t.after(() => { fs.unlinkSync(statePath); fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root); });
@@ -276,7 +276,7 @@ test('a competing live lease is not overwritten during fallback startup', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-race-'));
   const globalRoot = path.join(root, '.solomap-global');
   const runtimeRoot = path.join(globalRoot, 'runtime');
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   t.after(() => { fs.unlinkSync(statePath); fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root); });
   const result = host.ensureAutonomousRuntime({
     extensionPath: '/opt/solomap', globalDataPath: globalRoot,
@@ -309,7 +309,7 @@ test('Linux service manager skips the probe when its socket is missing', async (
   assert.equal(probes, 0);
 });
 
-test('a disabled runtime stays disabled until resume clears its marker', t => {
+test('a legacy disabled marker is import-only and resume does not delete it', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-disabled-'));
   const globalRoot = path.join(root, '.solomap-global');
   const runtimeRoot = path.join(globalRoot, 'runtime');
@@ -319,7 +319,8 @@ test('a disabled runtime stays disabled until resume clears its marker', t => {
   t.after(() => { if (fs.existsSync(markerPath)) fs.unlinkSync(markerPath); fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root); });
   assert.equal(service.isAutonomousRuntimeDisabled(globalRoot), true);
   service.enableAutonomousRuntime(globalRoot);
-  assert.equal(service.isAutonomousRuntimeDisabled(globalRoot), false);
+  assert.equal(service.isAutonomousRuntimeDisabled(globalRoot), true);
+  assert.equal(fs.readFileSync(markerPath, 'utf8'), 'disabled\n');
 });
 
 test('linux runtime service starts at login and restarts after crashes', () => {
@@ -426,7 +427,7 @@ test('service restart waits for the exact runtime observed after health failed',
   const runtimeRoot = path.join(globalRoot, 'runtime');
   const options = { platform: 'linux', homeDir, extensionPath: '/opt/solomap', globalDataPath: globalRoot };
   const plan = service.buildRuntimeServicePlan(options);
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   const registryPath = path.join(homeDir, '.config', 'solomap', 'runtime-service.json');
   fs.mkdirSync(path.dirname(plan.definitionPath), { recursive: true });
   fs.mkdirSync(runtimeRoot, { recursive: true });
@@ -462,7 +463,7 @@ test('an unchanged native definition drains an active fallback before service ta
   const runtimeRoot = path.join(globalRoot, 'runtime');
   const options = { platform: 'linux', homeDir, extensionPath: '/opt/solomap', globalDataPath: globalRoot };
   const plan = service.buildRuntimeServicePlan(options);
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   const registryPath = path.join(homeDir, '.config', 'solomap', 'runtime-service.json');
   fs.mkdirSync(path.dirname(plan.definitionPath), { recursive: true });
   fs.mkdirSync(runtimeRoot, { recursive: true });
@@ -498,7 +499,7 @@ test('an unresponsive live native runtime is not force restarted', async t => {
   const runtimeRoot = path.join(globalRoot, 'runtime');
   const options = { platform: 'linux', homeDir, extensionPath: '/opt/solomap', globalDataPath: globalRoot };
   const plan = service.buildRuntimeServicePlan(options);
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   const registryPath = path.join(homeDir, '.config', 'solomap', 'runtime-service.json');
   fs.mkdirSync(path.dirname(plan.definitionPath), { recursive: true });
   fs.mkdirSync(runtimeRoot, { recursive: true });
@@ -526,7 +527,7 @@ test('service install drains a live runtime, writes atomically and activates the
   const homeDir = path.join(root, 'home');
   const globalRoot = path.join(root, '.solomap-global');
   const runtimeRoot = path.join(globalRoot, 'runtime');
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   fs.mkdirSync(homeDir);
   fs.mkdirSync(runtimeRoot, { recursive: true });
   fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'fallback', pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
@@ -577,7 +578,7 @@ test('service activation cannot replace a live runtime without a drain response'
   const runtimeRoot = path.join(globalRoot, 'runtime');
   fs.mkdirSync(homeDir);
   fs.mkdirSync(runtimeRoot, { recursive: true });
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'legacy', pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
   t.after(() => {
     const registryPath = path.join(homeDir, '.config', 'solomap', 'runtime-service.json');
@@ -627,7 +628,7 @@ test('Windows rollback ends the failed task before starting and validating the r
     execPath: 'C:\\Code\\Code.exe', environment: { APPDATA: appData } };
   const plan = service.buildRuntimeServicePlan(options);
   const registryPath = path.join(appData, 'SoloMap', 'runtime-service.json');
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   fs.mkdirSync(path.dirname(plan.definitionPath), { recursive: true });
   fs.mkdirSync(runtimeRoot, { recursive: true });
   fs.writeFileSync(plan.definitionPath, 'old task definition');
@@ -673,7 +674,7 @@ test('a healthy unchanged Windows service is reused without draining or rerunnin
     execPath: 'C:\\Code\\Code.exe', environment: { APPDATA: appData } };
   const plan = service.buildRuntimeServicePlan(options);
   const registryPath = path.join(appData, 'SoloMap', 'runtime-service.json');
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   fs.mkdirSync(path.dirname(plan.definitionPath), { recursive: true });
   fs.mkdirSync(runtimeRoot, { recursive: true });
   fs.mkdirSync(outRoot, { recursive: true });
@@ -723,7 +724,7 @@ test('failed first Windows activation drains its own runtime and ends the task b
     execPath: 'C:\\Code\\Code.exe', environment: { APPDATA: appData } };
   const plan = service.buildRuntimeServicePlan(options);
   const registryPath = path.join(appData, 'SoloMap', 'runtime-service.json');
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   fs.mkdirSync(runtimeRoot, { recursive: true });
   let server;
   t.after(async () => {
@@ -764,7 +765,7 @@ test('first activation cleanup never drains a fallback that takes the lease afte
     execPath: 'C:\\Code\\Code.exe', environment: { APPDATA: appData } };
   const plan = service.buildRuntimeServicePlan(options);
   const registryPath = path.join(appData, 'SoloMap', 'runtime-service.json');
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   fs.mkdirSync(runtimeRoot, { recursive: true });
   const writeState = runtimeId => fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId,
     pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
@@ -801,7 +802,7 @@ test('uncertain Windows task cleanup retains registration and blocks fallback', 
   const homeDir = path.join(root, 'home');
   const globalRoot = path.join(root, '.solomap-global');
   const runtimeRoot = path.join(globalRoot, 'runtime');
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   const appData = path.join(homeDir, 'AppData', 'Roaming');
   const options = { platform: 'win32', homeDir, extensionPath: 'C:\\SoloMap', globalDataPath: globalRoot,
     execPath: 'C:\\Code\\Code.exe', environment: { APPDATA: appData } };
@@ -955,7 +956,7 @@ test('rollback accepts the restored old service through the real health contract
   const homeDir = path.join(root, 'home');
   const globalRoot = path.join(root, '.solomap-global');
   const runtimeRoot = path.join(globalRoot, 'runtime');
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   const options = { platform: 'linux', homeDir, extensionPath: '/opt/solomap-new', globalDataPath: globalRoot };
   const definitionPath = service.buildRuntimeServicePlan(options).definitionPath;
   const registryPath = path.join(homeDir, '.config', 'solomap', 'runtime-service.json');
@@ -972,7 +973,8 @@ test('rollback accepts the restored old service through the real health contract
   };
   t.after(async () => {
     if (server) await server.close();
-    fs.unlinkSync(statePath); fs.unlinkSync(definitionPath);
+    if (fs.existsSync(statePath)) fs.unlinkSync(statePath);
+    fs.unlinkSync(definitionPath);
     if (fs.existsSync(registryPath)) fs.unlinkSync(registryPath);
     for (const dir of [path.dirname(definitionPath), path.dirname(path.dirname(definitionPath)), path.dirname(registryPath), path.join(homeDir, '.config'), runtimeRoot, homeDir, globalRoot, root]) {
       if (fs.existsSync(dir)) fs.rmdirSync(dir);
@@ -1001,7 +1003,7 @@ test('failed first activation unregisters its service without stopping a competi
   const definitionPath = path.join(homeDir, '.config', 'systemd', 'user', 'solomap-runtime.service');
   const registryPath = path.join(homeDir, '.config', 'solomap', 'runtime-service.json');
   const runtimeRoot = path.join(globalRoot, 'runtime');
-  const statePath = path.join(runtimeRoot, 'state.json');
+  const statePath = path.join(runtimeRoot, 'control.json');
   try {
     await assert.rejects(service.ensureAutonomousRuntimeService({
       platform: 'linux', homeDir, extensionPath: '/opt/solomap', globalDataPath: globalRoot,

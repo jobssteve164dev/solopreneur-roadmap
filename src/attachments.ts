@@ -1,7 +1,10 @@
 import * as childProcess from 'child_process';
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import type * as vscode from 'vscode';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 
 export interface PastedImageAttachment {
   name?: string;
@@ -22,6 +25,7 @@ export function normalizeSupplementFiles(files: unknown): string[] {
 
 export function filterProjectRelativeFiles(workspaceRoot: string, files: string[]): string[] {
   return normalizeSupplementFiles(files).filter((relativePath) => {
+    if (/^solomap:\/\/asset\/[a-f0-9-]{36}$/.test(relativePath)) return true;
     const absolutePath = path.resolve(workspaceRoot, relativePath);
     const relativeToRoot = path.relative(workspaceRoot, absolutePath);
     return Boolean(relativeToRoot)
@@ -49,46 +53,21 @@ function imageExtensionFromMimeType(mimeType: string): string {
 }
 
 export function savePastedImageAttachments(projectRoot: string, scope: string, attachments: PastedImageAttachment[]): string[] {
-  if (!projectRoot || !Array.isArray(attachments) || attachments.length === 0) {
-    return [];
-  }
-
-  const safeScope = sanitizeAttachmentScope(scope);
-  const targetDir = path.join(projectRoot, '.solopreneur', 'attachments', safeScope);
-  fs.mkdirSync(targetDir, { recursive: true });
-
-  return attachments.slice(0, 10).map((attachment, index) => {
-    const dataUrl = String(attachment?.dataUrl || '');
-    const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([a-zA-Z0-9+/=\r\n]+)$/);
-    if (!match) {
-      return '';
-    }
-    const mimeType = String(attachment.mimeType || match[1] || 'image/png').toLowerCase();
-    if (!mimeType.startsWith('image/')) {
-      return '';
-    }
-    const extension = imageExtensionFromMimeType(mimeType);
-    const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
-    const randomId = Math.random().toString(16).slice(2, 8);
-    const fileName = `${timestamp}-${randomId}-${index + 1}.${extension}`;
-    const filePath = path.join(targetDir, fileName);
-    fs.writeFileSync(filePath, Buffer.from(match[2].replace(/\s/g, ''), 'base64'));
-    return path.relative(projectRoot, filePath).split(path.sep).join('/');
-  }).filter(Boolean);
+  throw new Error('internal_attachment_database_async_required');
 }
 
 export async function savePastedImageAttachmentsAsync(
   projectRoot: string,
   scope: string,
-  attachments: PastedImageAttachment[]
+  attachments: PastedImageAttachment[],
+  globalDataPath = ''
 ): Promise<string[]> {
   if (!projectRoot || !Array.isArray(attachments) || attachments.length === 0) {
     return [];
   }
 
   const safeScope = sanitizeAttachmentScope(scope);
-  const targetDir = path.join(projectRoot, '.solopreneur', 'attachments', safeScope);
-  await fs.promises.mkdir(targetDir, { recursive: true });
+  const dataRoot = normalizeGlobalDataPathForExtension(globalDataPath, projectRoot);
   const files = await Promise.all(attachments.slice(0, 10).map(async (attachment, index) => {
     const dataUrl = String(attachment?.dataUrl || '');
     const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([a-zA-Z0-9+/=\r\n]+)$/);
@@ -96,12 +75,14 @@ export async function savePastedImageAttachmentsAsync(
     const mimeType = String(attachment.mimeType || match[1] || 'image/png').toLowerCase();
     if (!mimeType.startsWith('image/')) return '';
     const extension = imageExtensionFromMimeType(mimeType);
-    const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
-    const randomId = Math.random().toString(16).slice(2, 8);
-    const fileName = `${timestamp}-${randomId}-${index + 1}.${extension}`;
-    const filePath = path.join(targetDir, fileName);
-    await fs.promises.writeFile(filePath, Buffer.from(match[2].replace(/\s/g, ''), 'base64'));
-    return path.relative(projectRoot, filePath).split(path.sep).join('/');
+    const bytes = match[2].replace(/\s/g, '');
+    const hash = crypto.createHash('sha256').update(Buffer.from(bytes, 'base64')).digest('hex');
+    const fileName = `${safeScope}-${index + 1}.${extension}`;
+    const saved = await sendRuntimeDataRequest<{ ref: string }>(dataRoot, { operation: 'write_internal_attachment', input: {
+      root: projectRoot, name: fileName, bytes, mimeType,
+      idempotencyKey: `internal-attachment:${safeScope}:${index}:${hash}`
+    } });
+    return saved.ref;
   }));
   return files.filter(Boolean);
 }

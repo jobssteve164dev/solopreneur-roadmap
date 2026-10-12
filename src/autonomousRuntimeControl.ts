@@ -5,7 +5,7 @@ import * as path from 'path';
 
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 
-export type RuntimeControlCommand = 'health' | 'pause' | 'resume' | 'drain' | 'stop';
+export type RuntimeControlCommand = 'health' | 'refresh' | 'pause' | 'resume' | 'drain' | 'stop';
 
 export interface RuntimeControlResponse {
   ok: boolean;
@@ -39,6 +39,11 @@ interface RuntimeControlEndpoint {
   port: number;
   token: string;
   entryPath?: string;
+  pid?: number;
+  status?: string;
+  startedAt?: string;
+  heartbeatAt?: string;
+  databaseId?: string;
 }
 
 interface RuntimeControlServerOptions {
@@ -55,10 +60,34 @@ function endpointPath(globalDataPath: string): string {
   return path.join(normalizeGlobalDataPathForExtension(globalDataPath), 'runtime', 'control.json');
 }
 
+async function readReadyEndpoint(globalDataPath: string, timeoutMs = 3_000, expectedRuntimeId?: string): Promise<RuntimeControlEndpoint> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown = new Error('Invalid Runtime endpoint.');
+  do {
+    try {
+      const endpoint = JSON.parse(await fs.promises.readFile(endpointPath(globalDataPath), 'utf8')) as RuntimeControlEndpoint;
+      if (expectedRuntimeId && endpoint.runtimeId && endpoint.runtimeId !== expectedRuntimeId) throw new Error('different_runtime');
+      if (endpoint.schemaVersion === 1 && endpoint.runtimeId && endpoint.host === '127.0.0.1' && Number.isInteger(endpoint.port) && endpoint.token) return endpoint;
+      lastError = new Error('Invalid Runtime endpoint.');
+    } catch (error) {
+      if ((error as Error).message === 'different_runtime') throw error;
+      lastError = error;
+    }
+    if (Date.now() >= deadline) break;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  } while (true);
+  throw lastError instanceof Error && (lastError as NodeJS.ErrnoException).code !== 'ENOENT' ? lastError : new Error('Invalid Runtime endpoint.');
+}
+
 function writeEndpoint(filePath: string, endpoint: RuntimeControlEndpoint): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(temporaryPath, JSON.stringify(endpoint), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  let previous: Partial<RuntimeControlEndpoint> = {};
+  try {
+    const value = JSON.parse(fs.readFileSync(filePath, 'utf8')) as RuntimeControlEndpoint;
+    if (value.runtimeId === endpoint.runtimeId) previous = value;
+  } catch { /* The first owner has no discovery record yet. */ }
+  fs.writeFileSync(temporaryPath, JSON.stringify({ ...previous, ...endpoint, pid: previous.pid || process.pid, status: previous.status || 'running', heartbeatAt: previous.heartbeatAt || new Date().toISOString() }), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   try {
     fs.renameSync(temporaryPath, filePath);
     fs.chmodSync(filePath, 0o600);
@@ -107,7 +136,7 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
           return;
         }
         const command = parsed.command;
-        if (!command || !['health', 'pause', 'resume', 'drain', 'stop', 'data', 'maintenance_data'].includes(command)) {
+        if (!command || !['health', 'refresh', 'pause', 'resume', 'drain', 'stop', 'data', 'maintenance_data'].includes(command)) {
           socket.end(JSON.stringify({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'Unknown Runtime control command.' }) + '\n');
           return;
         }
@@ -180,8 +209,7 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
 }
 
 export async function sendRuntimeDataRequest<T>(globalDataPath: string, request: RuntimeDataRequest): Promise<T> {
-  const endpoint = JSON.parse(await fs.promises.readFile(endpointPath(globalDataPath), 'utf8')) as RuntimeControlEndpoint;
-  if (endpoint.schemaVersion !== 1 || endpoint.host !== '127.0.0.1' || !Number.isInteger(endpoint.port) || !endpoint.token) throw new Error('Invalid Runtime endpoint.');
+  const endpoint = await readReadyEndpoint(globalDataPath);
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({ host: '127.0.0.1', port: endpoint.port });
     let response = '';
@@ -200,8 +228,7 @@ export async function sendRuntimeDataRequest<T>(globalDataPath: string, request:
 }
 
 export async function readMaintenanceRuntimeEndpoint(globalDataPath: string): Promise<MaintenanceRuntimeEndpoint> {
-  const endpoint = JSON.parse(await fs.promises.readFile(endpointPath(globalDataPath), 'utf8')) as RuntimeControlEndpoint;
-  if (endpoint.schemaVersion !== 1 || endpoint.host !== '127.0.0.1' || !Number.isInteger(endpoint.port) || !endpoint.runtimeId) throw new Error('Invalid Runtime endpoint.');
+  const endpoint = await readReadyEndpoint(globalDataPath);
   return { runtimeId: endpoint.runtimeId, host: endpoint.host, port: endpoint.port };
 }
 
@@ -224,13 +251,12 @@ export function sendRuntimeMaintenanceRequest<T>(endpoint: MaintenanceRuntimeEnd
   });
 }
 
-export function sendRuntimeControlCommand(
+export async function sendRuntimeControlCommand(
   globalDataPath: string,
   command: RuntimeControlCommand,
   overrides: { token?: string; timeoutMs?: number; expectedRuntimeId?: string } = {}
 ): Promise<RuntimeControlResponse> {
-  const endpoint = JSON.parse(fs.readFileSync(endpointPath(globalDataPath), 'utf8')) as RuntimeControlEndpoint;
-  if (overrides.expectedRuntimeId && endpoint.runtimeId !== overrides.expectedRuntimeId) return Promise.reject(new Error('different_runtime'));
+  const endpoint = await readReadyEndpoint(globalDataPath, overrides.timeoutMs || 3_000, overrides.expectedRuntimeId);
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({ host: endpoint.host, port: endpoint.port });
     let response = '';

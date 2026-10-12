@@ -18,7 +18,19 @@ async function fixture() {
   let store = new UnifiedDataStore(root); let ops = createRuntimeDataOperations(store);
   return { root, project, store: () => store, call: (operation, input) => ops({ operation, input }),
     async reopen() { await ops.close(); store.close(); store = new UnifiedDataStore(root); ops = createRuntimeDataOperations(store); },
-    async close() { await ops.close(); store.close(); } };
+    async close() {
+      await ops.close(); store.close();
+      const unlink = file => { try { fs.unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; } };
+      unlink(path.join(root, 'solomap.db-wal')); unlink(path.join(root, 'solomap.db-shm')); unlink(path.join(root, 'solomap.db'));
+      unlink(path.join(project, '.solopreneur', 'project.json'));
+      const second = path.join(base, 'second');
+      unlink(path.join(second, '.solopreneur', 'project.json'));
+      if (fs.existsSync(path.join(project, '.solopreneur'))) fs.rmdirSync(path.join(project, '.solopreneur'));
+      if (fs.existsSync(path.join(second, '.solopreneur'))) fs.rmdirSync(path.join(second, '.solopreneur'));
+      fs.rmdirSync(root); fs.rmdirSync(project);
+      if (fs.existsSync(second)) fs.rmdirSync(second);
+      fs.rmdirSync(base);
+    } };
 }
 
 test('a living UI owner remains exclusive beyond thirty seconds and a dead process is recoverable', async () => {
@@ -88,6 +100,21 @@ test('the original live UI instance recovers its committed claim after losing th
     assert.equal(await f.call('claim_automation_delivery', { id: action.id, owner: owner('different-live-window'), token: 'other-window' }), null);
     assert.equal(await f.call('claim_automation_delivery', { id: action.id, owner: { ...original, birth: 'proc:another-process' }, token: 'wrong-birth' }), null);
     assert.equal(await f.call('claim_automation_delivery', { id: action.id, owner: { ...original, pid: original.pid + 1 }, token: 'wrong-pid' }), null);
+  } finally { await f.close(); }
+});
+
+test('a UI effect started by a dead owner remains unknown and is never displayed by a replacement owner', async () => {
+  const f = await fixture();
+  try {
+    const action = await f.call('prepare_automation_delivery', { root: f.project, intentId: 'crash-after-visible', event: { trigger: 'completed', action: 'notify' }, payload: { kind: 'notification', message: '只显示一次', warning: false } });
+    const dead = { id: 'crashed-window', pid: 2147483647, birth: 'proc:dead' };
+    const claim = await f.call('claim_automation_delivery', { id: action.id, owner: dead, token: 'crashed-attempt' });
+    await f.call('begin_automation_delivery', { id: action.id, token: claim.token });
+    await f.reopen();
+    const replay = await f.call('prepare_automation_delivery', { root: f.project, intentId: 'crash-after-visible', event: { trigger: 'completed', action: 'notify' }, payload: { kind: 'notification', message: '只显示一次', warning: false } });
+    assert.equal(replay.state, 'delivery_unknown');
+    assert.equal((await f.call('list_automation_deliveries', {})).items.length, 0);
+    assert.equal(await f.call('claim_automation_delivery', { id: action.id, owner: owner('replacement-window'), token: 'replacement-attempt' }), null);
   } finally { await f.close(); }
 });
 

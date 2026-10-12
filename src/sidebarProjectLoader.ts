@@ -9,6 +9,7 @@ import { readProjectInvestmentStatsFromDatabase } from './projectAnalytics';
 import { readLearningOverview } from './learningLedger';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
+import type { DocumentationManifest } from './documentationManifest';
 
 interface SidebarProjectLoaderOptions {
   isAvailable: () => boolean;
@@ -86,9 +87,11 @@ export class SidebarProjectLoader {
             if (projectRequests.get(project.path) !== this.portfolioProjectRequests.get(project.path)) {
               continue;
             }
-            const [investment, sourceCount] = await Promise.all([
+            const [investment, sourceCount, documentationManifest, analysisSource] = await Promise.all([
               readProjectInvestmentStatsFromDatabase(project.path, this.options.getExtensionPath(), new Date(), globalDataPath),
-              sendRuntimeDataRequest<number>(normalizeGlobalDataPathForExtension(globalDataPath, project.path), { operation: 'read_project_reusable_source_count', input: { root: project.path } })
+              sendRuntimeDataRequest<number>(normalizeGlobalDataPathForExtension(globalDataPath, project.path), { operation: 'read_project_reusable_source_count', input: { root: project.path } }),
+              sendRuntimeDataRequest<DocumentationManifest>(normalizeGlobalDataPathForExtension(globalDataPath, project.path), { operation: 'read_documentation_manifest', input: { root: project.path } }),
+              sendRuntimeDataRequest<{ recentActivityAt: string }>(normalizeGlobalDataPathForExtension(globalDataPath, project.path), { operation: 'read_project_analysis_source', input: { root: project.path } })
             ]);
             if (!this.options.isAvailable() || requestId !== this.portfolioRequest) return;
             if (projectRequests.get(project.path) !== this.portfolioProjectRequests.get(project.path)) {
@@ -98,8 +101,11 @@ export class SidebarProjectLoader {
               includeReusableSignals: true,
               globalDataPath,
               learningOverview,
+              documentationManifestsByProjectPath: new Map([[project.path, documentationManifest]]),
               reusableSourceCountsByProjectPath: new Map([[project.path, sourceCount]]),
-              investmentStatsByProjectPath: { [project.path]: investment }
+              investmentStatsByProjectPath: { [project.path]: investment },
+              recentActivityAtByProjectPath: new Map([[project.path, analysisSource.recentActivityAt]]),
+              externalSignalsByProjectPath: summaries.get(project.path) ? new Map([[project.path, summaries.get(project.path)!]]) : undefined
             }));
             this.latestEnrichedPortfolio.set(project.path, summaries.get(project.path)!);
             const portfolio = projects.map((item) => summaries.get(item.path)).filter(Boolean) as ProjectPortfolioSummary[];
@@ -152,7 +158,7 @@ export class SidebarProjectLoader {
       const projectRequest = this.signalRequest('issues', project.path);
       setTimeout(() => {
         if (!this.options.isAvailable() || requestId !== this.issueRequest || projectRequest !== this.signalRequest('issues', project.path)) return;
-        void loadExternalIssueSummary(project.path).then((issues) => {
+        void loadExternalIssueSummary(project.path, { globalDataPath: this.options.getGlobalDataPath() }).then((issues) => {
           if (!this.options.isAvailable() || requestId !== this.issueRequest || projectRequest !== this.signalRequest('issues', project.path)) return;
           this.options.postMessage({ command: 'projectIssuesLoaded', projectPath: project.path, issues });
         }).catch((error) => console.error('SoloMap sidebar failed to refresh issue summary:', error));
@@ -166,7 +172,7 @@ export class SidebarProjectLoader {
       const projectRequest = this.signalRequest('pullRequests', project.path);
       setTimeout(() => {
         if (!this.options.isAvailable() || requestId !== this.pullRequestRequest || projectRequest !== this.signalRequest('pullRequests', project.path)) return;
-        void loadExternalPullRequestSummary(project.path).then((pullRequests) => {
+        void loadExternalPullRequestSummary(project.path, { globalDataPath: this.options.getGlobalDataPath() }).then((pullRequests) => {
           if (!this.options.isAvailable() || requestId !== this.pullRequestRequest || projectRequest !== this.signalRequest('pullRequests', project.path)) return;
           this.options.postMessage({ command: 'projectPullRequestsLoaded', projectPath: project.path, pullRequests });
         }).catch((error) => console.error('SoloMap sidebar failed to refresh pull request summary:', error));
@@ -180,7 +186,7 @@ export class SidebarProjectLoader {
       const projectRequest = this.signalRequest('delivery', project.path);
       setTimeout(() => {
         if (!this.options.isAvailable() || requestId !== this.deliveryRequest || projectRequest !== this.signalRequest('delivery', project.path)) return;
-        void loadExternalDeliverySummary(project.path).then((delivery) => {
+        void loadExternalDeliverySummary(project.path, { globalDataPath: this.options.getGlobalDataPath() }).then((delivery) => {
           if (!this.options.isAvailable() || requestId !== this.deliveryRequest || projectRequest !== this.signalRequest('delivery', project.path)) return;
           this.options.postMessage({ command: 'projectDeliveryLoaded', projectPath: project.path, delivery });
         }).catch((error) => console.error('SoloMap sidebar failed to refresh delivery summary:', error));
@@ -194,7 +200,7 @@ export class SidebarProjectLoader {
       const projectRequest = this.signalRequest('security', project.path);
       setTimeout(() => {
         if (!this.options.isAvailable() || requestId !== this.securityRequest || projectRequest !== this.signalRequest('security', project.path)) return;
-        void loadExternalSecuritySummary(project.path).then((security) => {
+        void loadExternalSecuritySummary(project.path, { globalDataPath: this.options.getGlobalDataPath() }).then((security) => {
           if (!this.options.isAvailable() || requestId !== this.securityRequest || projectRequest !== this.signalRequest('security', project.path)) return;
           this.options.postMessage({ command: 'projectSecurityLoaded', projectPath: project.path, security });
         }).catch((error) => console.error('SoloMap sidebar failed to refresh security summary:', error));

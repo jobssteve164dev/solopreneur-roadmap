@@ -2,15 +2,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { execFileSync } from 'child_process';
-import { SqliteStore } from './db/sqliteStore.js';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl.js';
 import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost.js';
-import { learningTasksRoot, readLearningJson } from './taskReport.js';
-import { extractContinuationParentConversationId } from './continuation.js';
+import { normalizeGlobalDataPathForExtension } from './projectRegistry.js';
 
 const hash = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 const array = (value: any): any[] => Array.isArray(value) ? value : [];
 const names = (dir: string): string[] => { try { return fs.readdirSync(dir); } catch { return []; } };
+const legacyLearningTasksRoot = (projectPath: string): string => path.join(projectPath, '.solopreneur', 'agent-runs', 'learning-tasks');
 const sourceCache = new Map<string, { signature: string; value: any; hash: string }>();
 function cachedSource(file: string): { value: any; hash: string } {
   const stat = fs.statSync(file);
@@ -44,7 +43,7 @@ export function reportRelativePath(value: any): string {
 }
 
 export function readRegisteredTaskSources(projectPath: string, taskId?: string, links: { id: number; parentId: number; nodeId: string }[] = []): { tasks: any[]; reports: any[]; observations: any[] } {
-  const root = learningTasksRoot(projectPath);
+  const root = legacyLearningTasksRoot(projectPath);
   const tasks: any[] = []; const reports: any[] = []; const observations: any[] = [];
   for (const name of (taskId ? [`${taskId}.json`] : names(root)).filter(name => /^task-[a-zA-Z0-9-]+\.json$/.test(name))) {
     const file = path.join(root, name);
@@ -113,126 +112,59 @@ function presentReport(value: any): any {
 export interface GrowthReportQuery { taskId?: string; offset?: number; limit?: number; unmetOnly?: boolean; moduleId?: string; capabilityId?: string }
 export interface GrowthReportPage { projectPath: string; tasks: any[]; turns: any[]; total: number; nextOffset: number | null }
 const queries = new Map<string, Promise<GrowthReportPage>>();
-const runFileCache = new Map<string, { signature: string; files: any[]; links: { id: number; parentId: number; nodeId: string }[] }>();
-async function runContext(projectPath: string, extensionPath: string): Promise<{ files: any[]; links: { id: number; parentId: number; nodeId: string }[] }> {
-  const file = path.join(projectPath, '.solopreneur/project_journal.db');
-  if (!fs.existsSync(file)) return { files: [], links: [] };
-  const stat = fs.statSync(file); const signature = `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
-  const cached = runFileCache.get(projectPath); if (cached?.signature === signature) return cached;
-  const journal = new SqliteStore(file, extensionPath); await journal.init();
-  try {
-    const result = { signature, files: journal.getGrowthRunFiles(), links: journal.getGrowthConversationHeaders().map(row => ({ id: row.id, parentId: extractContinuationParentConversationId(row.output), nodeId: row.nodeId })).filter(row => row.parentId > 0) };
-    runFileCache.set(projectPath, result); return result;
-  } finally { journal.close(); }
-}
 
 export async function readRegisteredProjectSources(projectPath: string, extensionPath: string, globalDataPath = ''): Promise<ReturnType<typeof readRegisteredTaskSources>> {
-  if (globalDataPath) {
-    await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
-    return sendRuntimeDataRequest(globalDataPath, { operation: 'read_registered_report_sources', input: { root: projectPath } });
-  }
-  return readRegisteredTaskSources(projectPath, undefined, (await runContext(projectPath, extensionPath)).links);
+  const dataRoot = normalizeGlobalDataPathForExtension(globalDataPath, projectPath);
+  await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath: dataRoot });
+  return sendRuntimeDataRequest<ReturnType<typeof readRegisteredTaskSources>>(dataRoot, { operation: 'read_registered_report_sources', input: { root: projectPath } });
 }
-function sourceStamp(projectPath: string, taskId?: string): string {
-  const parts: string[] = [];
-  const add = (file: string) => { try { const stat = fs.statSync(file); parts.push(`${file}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`); } catch { parts.push(`${file}:missing`); } };
-  for (const name of names(learningTasksRoot(projectPath)).filter(name => /^task-[A-Za-z0-9-]+\.json$/.test(name) && (!taskId || name === `${taskId}.json`)).sort()) {
-    const file = path.join(learningTasksRoot(projectPath), name); add(file);
-    if (!containedRegularPath(projectPath, file)) continue;
-    for (const run of array(cachedSource(file).value?.executions)) {
-      if (typeof run.runDir !== 'string' || !containedRegularPath(path.join(projectPath, '.solopreneur/agent-runs'), run.runDir, true)) continue;
-      add(run.runDir);
-      for (const report of names(run.runDir).filter(name => /^task-report-(?:status-)?\d+\.json$/.test(name)).sort()) add(path.join(run.runDir, report));
-    }
-  }
-  return hash(parts.join('\n'));
-}
-
 export function queryGrowthReports(projectPath: string, extensionPath: string, query: GrowthReportQuery, globalDataPath = ''): Promise<GrowthReportPage> {
-  const key = `${globalDataPath}:${projectPath}:${JSON.stringify(query)}:${globalDataPath ? '' : sourceStamp(projectPath, query.taskId)}`;
+  const dataRoot = normalizeGlobalDataPathForExtension(globalDataPath, projectPath);
+  const key = `${dataRoot}:${projectPath}:${JSON.stringify(query)}`;
   const existing = queries.get(key); if (existing) return existing;
-  const promise = readProjection(projectPath, extensionPath, query, globalDataPath).finally(() => queries.delete(key));
+  const promise = readProjection(projectPath, extensionPath, query, dataRoot).finally(() => queries.delete(key));
   queries.set(key, promise); return promise;
 }
 
-const volatileProjection = new Map<string, Map<string, any>>();
 async function readProjection(projectPath: string, extensionPath: string, query: GrowthReportQuery, globalDataPath: string): Promise<GrowthReportPage> {
-  if (globalDataPath) await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
-  const nativeSource = globalDataPath ? await sendRuntimeDataRequest<any>(globalDataPath, { operation: 'read_registered_report_sources', input: { root: projectPath, taskId: query.taskId, metadataOnly: true } }) : null;
-  const context: { files: any[]; links: { id: number; parentId: number; nodeId: string }[] } = nativeSource ? { files: nativeSource.runFiles || [], links: [] } : await runContext(projectPath, extensionPath); const runs = context.files;
-  const memory = volatileProjection.get(projectPath) || new Map<string, any>(); volatileProjection.set(projectPath, memory);
-  const readRows = async (prefix: string) => globalDataPath
-    ? sendRuntimeDataRequest<Array<{ key: string; value: any }>>(globalDataPath, { operation: 'read_growth_report_projection', input: { root: projectPath, prefix } })
-    : [...memory].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value }));
+  await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
+  const nativeSource = await sendRuntimeDataRequest<any>(globalDataPath, { operation: 'read_registered_report_sources', input: { root: projectPath, taskId: query.taskId, metadataOnly: true } });
+  const requestedTaskId = query.taskId
+    ? String(nativeSource.tasks.find((task: any) => task.taskId === query.taskId || task.sourceRef?.objectId === query.taskId || task.taskId === `task-${query.taskId}`)?.taskId || query.taskId)
+    : query.taskId;
+  const runs = nativeSource.runFiles || [];
+  const readRows = async (prefix: string) => sendRuntimeDataRequest<Array<{ key: string; value: any }>>(globalDataPath, { operation: 'read_growth_report_projection', input: { root: projectPath, prefix } });
   const writeRows = async (updates: { key: string; value: any }[]) => {
-    updates.forEach(update => memory.set(update.key, update.value));
-    if (globalDataPath && updates.length) await sendRuntimeDataRequest(globalDataPath, { operation: 'write_growth_report_projection', input: { root: projectPath, updates, ...(nativeSource ? { expectedSourceRevision: nativeSource.sourceRevision } : {}) } });
+    if (updates.length) await sendRuntimeDataRequest(globalDataPath, { operation: 'write_growth_report_projection', input: { root: projectPath, updates, expectedSourceRevision: nativeSource.sourceRevision } });
   };
   {
-    const sourceVersion = nativeSource ? '' : sourceStamp(projectPath, query.taskId);
-    const source: ReturnType<typeof readRegisteredTaskSources> = nativeSource || { tasks: [], reports: [], observations: [] };
-    for (const name of (nativeSource ? [] : names(learningTasksRoot(projectPath))).filter(name => /^task-[A-Za-z0-9-]+\.json$/.test(name) && (!query.taskId || name === `${query.taskId}.json`))) {
-      const item = readRegisteredTaskSources(projectPath, name.slice(0, -5), context.links);
-      source.tasks.push(...item.tasks); source.observations.push(...item.observations);
-      // Incremental indexing yields to the host between tasks; ordinary reads reuse unchanged bodies.
-      await new Promise<void>(resolve => setImmediate(resolve));
-    }
-    if (!nativeSource && sourceStamp(projectPath, query.taskId) !== sourceVersion) return readProjection(projectPath, extensionPath, query, globalDataPath);
-    const previous = new Map((nativeSource ? [] : await readRows(query.taskId ? `turn:${query.taskId}:` : 'turn:')).map(row => [row.key, row.value]));
-    const updates: { key: string; value: any }[] = [];
-    const seen = new Set<string>();
+    const source: ReturnType<typeof readRegisteredTaskSources> = nativeSource;
     const metadata: any[] = [];
-    if (nativeSource) {
-      const turns = new Map<string, any>();
-      for (const item of source.observations) {
-        const old = turns.get(item.turnId);
-        const recorded = item.availability === 'recorded' && !item.archived;
-        turns.set(item.turnId, { ...old, ...item, summary: recorded ? item.summary : old?.summary || '', unmet: recorded ? item.unmet : old?.unmet ?? null,
-          commits: recorded ? item.commits : old?.commits || [], files: recorded ? item.files : old?.files || [],
-          bodyKey: recorded ? item.versionKey : old?.bodyKey, versions: [...(old?.versions || []), ...(recorded ? [item.versionKey] : [])],
-          versionRefs: [...(old?.versionRefs || []), ...(recorded ? [item.sourceRef] : [])] });
-      }
-      metadata.push(...turns.values());
+    const turnMap = new Map<string, any>();
+    for (const item of source.observations) {
+      const old = turnMap.get(item.turnId);
+      const recorded = item.availability === 'recorded' && !item.archived;
+      turnMap.set(item.turnId, { ...old, ...item, summary: recorded ? item.summary : old?.summary || '', unmet: recorded ? item.unmet : old?.unmet ?? null,
+        commits: recorded ? item.commits : old?.commits || [], files: recorded ? item.files : old?.files || [],
+        bodyKey: recorded ? item.versionKey : old?.bodyKey, versions: [...(old?.versions || []), ...(recorded ? [item.versionKey] : [])],
+        versionRefs: [...(old?.versionRefs || []), ...(recorded ? [item.sourceRef] : [])] });
     }
-    for (const item of nativeSource ? [] : source.observations) {
-      const key = `turn:${item.taskId}:${item.executionLogId}:${item.turnId}`;
-      seen.add(key);
-      const old = previous.get(key);
-      const versionKey = `body:${item.taskId}:${item.executionLogId}:${item.turnId}:${item.hash}`;
-      const body = item.envelope?.report;
-      const value = body ? {
-        ...item, envelope: undefined, bodyKey: versionKey, summary: body.summary,
-        unmet: Array.isArray(body.unmetRequirements) ? body.unmetRequirements.length > 0 : null,
-        commits: array(body.commits), files: reportFiles(body),
-        versions: old?.versions?.[old.versions.length - 1] === item.hash ? old.versions : [...(old?.versions || []), item.hash]
-      } : { ...old, ...item, envelope: undefined, createdAt: old?.createdAt || item.createdAt || '', versions: old?.versions || [] };
-      if (!old || old.hash !== item.hash || old.availability !== item.availability) {
-        updates.push({ key, value });
-        if (body) updates.push({ key: versionKey, value: body });
-      }
-      metadata.push(value);
-    }
-    for (const [key, value] of previous) {
-      if (!seen.has(key) && source.tasks.some(task => task.taskId === value.taskId)
-        && !source.observations.some(item => item.file === value.file && item.availability === 'recorded')) metadata.push({ ...value, availability: containedRegularPath(projectPath, value.file) ? 'invalid' : 'missing' });
-    }
-    await writeRows(updates);
-    const snapshot = globalDataPath ? (await sendRuntimeDataRequest<{ latest: any }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: 1 } })).latest : null;
+    metadata.push(...turnMap.values());
+    const snapshot = (await sendRuntimeDataRequest<{ latest: any }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: 1 } })).latest;
     const nodes = new Map<string, any>(array(snapshot?.nodes).map((node: any) => [String(node.nodeId), node]));
     const moduleByPath = new Map<string, string>();
     for (const edge of snapshot?.edges || []) if (edge.kind === 'contains' && edge.sourceId.startsWith('module:')) {
       const file = nodes.get(edge.targetId); if (file) moduleByPath.set(file.path, edge.sourceId);
     }
-    const evidenceRoot = path.join(projectPath, '.solopreneur/agent-runs/learning-evidence');
-    const evidence = nativeSource ? (await readRows('github-summary:')).flatMap(row => array(row.value?.commits)) : names(evidenceRoot).filter(name => name.endsWith('.summary.json')).flatMap(name => array(cachedSource(path.join(evidenceRoot, name)).value?.commits));
+    const evidence = (await readRows('github-summary:')).flatMap(row => array(row.value?.commits));
     const associations = new Map((await readRows('association:')).map(row => [row.key, row.value]));
     const associationUpdates: { key: string; value: any }[] = [];
-    const rows = source.tasks.filter(task => !query.taskId || task.taskId === query.taskId).map(task => {
+    const rows = source.tasks.filter(task => !requestedTaskId || task.taskId === requestedTaskId).map(task => {
       const turns = metadata.filter(turn => turn.taskId === task.taskId).sort((a, b) => b.executionLogId - a.executionLogId || b.sequence - a.sequence);
       const latest = turns[0];
       const unmet = turns.find(turn => typeof turn.unmet === 'boolean')?.unmet ?? null;
       const modules = new Set<string>();
-      const runFiles = runs.filter(run => task.executions.some((execution: any) => execution.id === run.executionLogId) && ['changed', 'touched'].includes(run.role)).map(file => reportRelativePath(file.filePath)).filter(Boolean);
+      const runFiles = runs.filter((run: any) => task.executions.some((execution: any) => execution.id === run.executionLogId) && ['changed', 'touched'].includes(run.role)).map((file: any) => reportRelativePath(file.filePath)).filter(Boolean);
       const taskEvidence = evidence.filter(commit => array(commit.taskIds).includes(task.taskId));
       const diffFiles = taskEvidence.flatMap(commit => {
         const scope = array(commit.reportedScopes).filter(scope => scope.taskId === task.taskId).flatMap(scope => array(scope.files));
@@ -256,7 +188,8 @@ async function readProjection(projectPath: string, extensionPath: string, query:
       }
       const capabilities = new Set<string>();
       for (const edge of snapshot?.edges || []) if (edge.kind === 'implements' && modules.has(edge.sourceId) && /run|user|confirmed/.test(edge.evidence)) capabilities.add(edge.targetId);
-      return { taskId: task.taskId, title: String(task.userMessage || ''), latestSummary: latest?.summary || '',
+      const summary = latest?.summary || '';
+      return { taskId: task.taskId, title: String(task.userMessage || ''), summary, latestSummary: summary,
         latestSequence: turns.length || undefined, latestExecutionLogId: latest?.executionLogId, createdAt: latest?.createdAt || task.startedAt,
         availability: latest?.availability || (task.unreadableReports ? 'invalid' : 'missing'), unmet, turnCount: turns.length,
         modules: [...modules].map(id => ({ id, label: nodes.get(id)?.label || id })),
@@ -269,19 +202,19 @@ async function readProjection(projectPath: string, extensionPath: string, query:
       .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)) || b.taskId.localeCompare(a.taskId));
     const offset = Math.max(0, Number(query.offset) || 0); const limit = Math.max(1, Math.min(50, Number(query.limit) || 20));
     try { await writeRows(associationUpdates); }
-    catch (error) { if (nativeSource && String(error).includes('report_source_changed')) return readProjection(projectPath, extensionPath, query, globalDataPath); throw error; }
-    const taskTurns = metadata.filter(turn => turn.taskId === query.taskId).sort((a, b) => b.executionLogId - a.executionLogId || b.sequence - a.sequence);
+    catch (error) { if (String(error).includes('report_source_changed')) return readProjection(projectPath, extensionPath, query, globalDataPath); throw error; }
+    const taskTurns = metadata.filter(turn => turn.taskId === requestedTaskId).sort((a, b) => b.executionLogId - a.executionLogId || b.sequence - a.sequence);
     const selectedTurns = taskTurns.slice(offset, offset + limit);
-    const bodies = new Map<string, any>(nativeSource
-      ? query.taskId ? (await sendRuntimeDataRequest<Array<{ key: string; report: any }>>(globalDataPath, { operation: 'read_report_versions', input: { root: projectPath, refs: selectedTurns.flatMap(turn => turn.versionRefs || []) } })).map(row => [row.key, row.report]) : []
-      : (await readRows('body:')).map(row => [row.key, row.value]));
-    const turns = query.taskId && source.tasks.some(task => task.taskId === query.taskId)
+    const bodies = new Map<string, any>(query.taskId
+      ? (await sendRuntimeDataRequest<Array<{ key: string; report: any }>>(globalDataPath, { operation: 'read_report_versions', input: { root: projectPath, refs: selectedTurns.flatMap(turn => turn.versionRefs || []) } })).map(row => [row.key, row.report])
+      : []);
+    const turns = requestedTaskId && source.tasks.some(task => task.taskId === requestedTaskId)
       ? selectedTurns.map((turn, index) => ({
         ...turn, roundNumber: taskTurns.length - offset - index, report: turn.bodyKey ? presentReport(bodies.get(turn.bodyKey)) : null,
-        history: (turn.versions || []).map((version: string) => ({ version, report: presentReport(bodies.get(nativeSource ? version : `body:${turn.taskId}:${turn.executionLogId}:${turn.turnId}:${version}`)) }))
+        history: (turn.versions || []).map((version: string) => ({ version, report: presentReport(bodies.get(version)) }))
       })) : [];
     const total = query.taskId ? taskTurns.length : rows.length;
-    if (nativeSource && (await sendRuntimeDataRequest<{ revision: number }>(globalDataPath, { operation: 'read_report_source_revision', input: { root: projectPath } })).revision !== nativeSource.sourceRevision) return readProjection(projectPath, extensionPath, query, globalDataPath);
+    if ((await sendRuntimeDataRequest<{ revision: number }>(globalDataPath, { operation: 'read_report_source_revision', input: { root: projectPath } })).revision !== nativeSource.sourceRevision) return readProjection(projectPath, extensionPath, query, globalDataPath);
     return { projectPath, tasks: (query.taskId ? rows : rows.slice(offset, offset + limit)).map(task => ({ ...task, evidence: task.evidence.map(({ files, ...commit }) => ({ ...commit, versionState: commitVersionState(projectPath, commit.sha, array(files).map(file => file.filename)) })) })), turns, total, nextOffset: offset + limit < total ? offset + limit : null };
   }
 }

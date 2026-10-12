@@ -37,6 +37,11 @@ export class SqliteStore {
     return Boolean(this.db);
   }
 
+  public async backup(destination: string): Promise<void> {
+    if (!this.db) throw new Error('Database not initialized');
+    await this.db.backup(destination);
+  }
+
   /**
    * Opens a live disk connection; committed writes are visible to other readers.
    */

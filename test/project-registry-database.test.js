@@ -158,7 +158,11 @@ test('the standalone runtime reads the database registry after its legacy source
   const run = async () => {
     const result = await require('node:util').promisify(require('node:child_process').execFile)(process.execPath, [path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--once', '--global-data-path', root], { env: { ...process.env, SOLOMAP_GLOBAL_DATA_PATH: root } });
     assert.equal(result.stdout.includes('Error'), false);
-    return JSON.parse(fs.readFileSync(path.join(root, 'runtime', 'today-shadow.json'), 'utf8'));
+    const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+    const runtimeStore = UnifiedDataStore.open(root);
+    try {
+      return runtimeStore.readHostSettings({ namespace: 'runtime_shadow', ownerScope: 'global' }).items.find(item => item.key === 'decision').value;
+    } finally { runtimeStore.close(); }
   };
   assert.equal((await run()).recommendedProjectPath, beta);
   const isolation = path.join(base, 'source-isolation'); fs.mkdirSync(isolation); fs.renameSync(file, path.join(isolation, 'projects.json'));

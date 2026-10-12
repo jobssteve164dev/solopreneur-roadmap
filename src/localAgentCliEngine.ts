@@ -35,7 +35,7 @@ export function buildCognitiveCliInvocation(agentCli: string, model: string, pro
   } else if (family === 'cursor') {
     args = ['-p', '--mode', 'plan', '--sandbox', 'enabled', '--output-format', 'text', ...selectedModel];
   } else if (family === 'antigravity') {
-    args = ['--print', '--mode', 'plan', '--sandbox', '--disable-slash-commands', '--print-timeout', '5m', ...selectedModel];
+    args = ['--mode', 'plan', '--sandbox', '--disable-slash-commands', '--print-timeout', '5m', ...selectedModel, '--print'];
   } else {
     throw new Error(`${family || agentCli} does not expose a safe headless cognitive mode.`);
   }

@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as Papa from 'papaparse';
 
-import { summarizeDocumentationForReview } from './documentationManifest';
+import { summarizeDocumentationForReview, DocumentationManifest } from './documentationManifest';
 import { readLearningOverview, LearningOverview } from './learningLedger';
 import { assessProjectFoundation, ProjectFoundationAssessment } from './projectFoundation';
 import { ProjectInvestmentStats, readProjectInvestmentStatsFromDatabase } from './projectAnalytics';
@@ -17,11 +17,7 @@ import {
   createEmptyDeliverySummary,
   createEmptyIssueSummary,
   createEmptyPullRequestSummary,
-  createEmptySecuritySummary,
-  readCachedDeliverySummary,
-  readCachedIssueSummary,
-  readCachedPullRequestSummary,
-  readCachedSecuritySummary
+  createEmptySecuritySummary
 } from './projectExternalSignals';
 
 export interface SolopreneurProject {
@@ -102,6 +98,9 @@ export interface ProjectPortfolioBuildOptions {
   investmentStatsByProjectPath?: Map<string, ProjectInvestmentStats> | Record<string, ProjectInvestmentStats>;
   learningOverview?: LearningOverview;
   reusableSourceCountsByProjectPath?: Map<string, number>;
+  documentationManifestsByProjectPath?: Map<string, DocumentationManifest>;
+  recentActivityAtByProjectPath?: Map<string, string>;
+  externalSignalsByProjectPath?: Map<string, Pick<ProjectPortfolioSummary, 'issues' | 'pullRequests' | 'delivery' | 'security'>>;
   coreOnly?: boolean;
 }
 
@@ -334,25 +333,6 @@ export function getRecommendedNode(nodes: RoadmapNodeLike[]): RoadmapNodeLike | 
     || nodes[0];
 }
 
-function getProjectRecentActivityAt(projectPath: string): string {
-  const candidates = [
-    path.join(projectPath, '.solopreneur', 'roadmap.csv'),
-    path.join(projectPath, '.solopreneur', 'project_journal.db'),
-    path.join(projectPath, '.solopreneur', 'agent-runs')
-  ];
-  let latestMtime = 0;
-  for (const candidate of candidates) {
-    if (!fs.existsSync(candidate)) {
-      continue;
-    }
-    try {
-      const stat = fs.statSync(candidate);
-      latestMtime = Math.max(latestMtime, stat.mtimeMs);
-    } catch {}
-  }
-  return latestMtime ? new Date(latestMtime).toISOString() : '';
-}
-
 function detectProjectType(nodes: RoadmapNodeLike[]): string {
   const text = nodes.map((node) => `${node.stage} ${node.title}`).join(' ').toLowerCase();
   if (/能力|契约|接入|治理|infra|infrastructure|adapter|provider/.test(text)) return 'infra';
@@ -436,6 +416,7 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
         : inProgressNodes > 0
           ? 'In Progress'
           : 'Pending';
+  const existingSignals = options.externalSignalsByProjectPath?.get(project.path);
 
   const baseSummary = {
     name: project.name,
@@ -452,11 +433,11 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
     recommendedNodeTitle: recommendedNode?.title || '',
     recommendedStatus: recommendedNode?.status || '',
     overallStatus,
-    recentActivityAt: options.coreOnly ? '' : getProjectRecentActivityAt(project.path),
-    issues: options.coreOnly ? createEmptyIssueSummary() : readCachedIssueSummary(project.path),
-    pullRequests: options.coreOnly ? createEmptyPullRequestSummary() : readCachedPullRequestSummary(project.path),
-    delivery: options.coreOnly ? createEmptyDeliverySummary() : readCachedDeliverySummary(project.path),
-    security: options.coreOnly ? createEmptySecuritySummary() : readCachedSecuritySummary(project.path),
+    recentActivityAt: options.coreOnly ? '' : (options.recentActivityAtByProjectPath?.get(project.path) || ''),
+    issues: existingSignals?.issues || createEmptyIssueSummary(),
+    pullRequests: existingSignals?.pullRequests || createEmptyPullRequestSummary(),
+    delivery: existingSignals?.delivery || createEmptyDeliverySummary(),
+    security: existingSignals?.security || createEmptySecuritySummary(),
     foundation: options.coreOnly ? emptyFoundationAssessment() : assessProjectFoundation(project.path)
   };
   const inferredPriority = inferGlobalPriority(baseSummary);
@@ -464,7 +445,7 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
   const deliverySignal = inferDeliverySignal(baseSummary.delivery);
   const securitySignal = inferSecuritySignal(baseSummary.security);
   const needsRelease = baseSummary.delivery.available && totalNodes > 0 && completedNodes === totalNodes && !baseSummary.delivery.latestRelease;
-  const documentationSummary = options.coreOnly ? { documentCount: 0, pendingReviewCount: 0 } : summarizeDocumentationForReview(project.path);
+  const documentationSummary = options.coreOnly ? { documentCount: 0, pendingReviewCount: 0 } : summarizeDocumentationForReview(project.path, options.documentationManifestsByProjectPath?.get(project.path));
   const investment = options.coreOnly ? emptyInvestmentStats() : (getInvestmentOverride(project.path, options) || emptyInvestmentStats());
   const loopSummary = buildProjectLoopSummary(nodes, recommendedNode, stageSummary);
   return {
@@ -517,6 +498,7 @@ export async function buildProjectPortfolioSummariesFromDatabase(
 ): Promise<ProjectPortfolioSummary[]> {
   const investmentStatsByProjectPath = new Map<string, ProjectInvestmentStats>();
   const reusableSourceCountsByProjectPath = new Map<string, number>();
+  const documentationManifestsByProjectPath = new Map<string, DocumentationManifest>();
   const learningOverview = options.includeReusableSignals
     ? options.learningOverview || await readLearningOverview(projects[0]?.path || process.cwd(), options.globalDataPath || '')
     : undefined;
@@ -526,11 +508,13 @@ export async function buildProjectPortfolioSummariesFromDatabase(
       await readProjectInvestmentStatsFromDatabase(project.path, extensionPath, new Date(), options.globalDataPath || '')
     );
     if (options.includeReusableSignals) reusableSourceCountsByProjectPath.set(project.path, await sendRuntimeDataRequest<number>(normalizeGlobalDataPathForExtension(options.globalDataPath || '', project.path), { operation: 'read_project_reusable_source_count', input: { root: project.path } }));
+    documentationManifestsByProjectPath.set(project.path, await sendRuntimeDataRequest<DocumentationManifest>(normalizeGlobalDataPathForExtension(options.globalDataPath || '', project.path), { operation: 'read_documentation_manifest', input: { root: project.path } }));
   }));
   return buildProjectPortfolioSummaries(projects, {
     ...options,
     investmentStatsByProjectPath,
     learningOverview,
-    reusableSourceCountsByProjectPath
+    reusableSourceCountsByProjectPath,
+    documentationManifestsByProjectPath
   });
 }

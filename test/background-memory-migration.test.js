@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { unifiedSchemaMigrations } = require('../out/db/unifiedSchemaMigrations.js');
 
 test('database-backed initialization stops generating memory and example Markdown while preserving existing user files', () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-no-memory-md-'));
@@ -145,7 +146,7 @@ test('V1 databases upgrade in place with their original schema checksum and data
     assert.equal(audit.prepare('SELECT checksum FROM schema_migrations WHERE version=1').get().checksum, checksum);
     assert.equal(audit.prepare("SELECT value FROM database_meta WHERE key='database_id'").get().value, 'preserved-identity');
     assert.equal(audit.prepare("SELECT kind FROM actors WHERE id='old-owner'").get().kind, 'runtime');
-    assert.deepEqual(audit.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(row => row.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]);
+    assert.deepEqual(audit.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(row => row.version), [1, ...unifiedSchemaMigrations.map(migration => migration.version)]);
     assert.ok(store.enqueueMemoryMigration({ sourceRoot: 'old-memory' }, 'upgrade').jobId);
     assert.equal(audit.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   } finally { audit.close(); store.close(); }

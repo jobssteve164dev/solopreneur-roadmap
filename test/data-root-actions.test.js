@@ -3,10 +3,26 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const vm = require('node:vm');
 const Module = require('node:module');
 const { openAnalysisOwner } = require('./analysis-fixture.js');
 const { SyncEngine } = require('../out/db/syncEngine.js');
+
+function cleanupExact(root) {
+  if (!fs.existsSync(root)) return;
+  const directories = [root], files = [];
+  const inventory = directory => {
+    for (const name of fs.readdirSync(directory)) {
+      const target = path.join(directory, name), stat = fs.lstatSync(target);
+      if (stat.isDirectory() && !stat.isSymbolicLink()) { directories.push(target); inventory(target); }
+      else files.push(target);
+    }
+  };
+  inventory(root);
+  files.forEach(file => fs.unlinkSync(file));
+  directories.sort((left, right) => right.length - left.length).forEach(directory => fs.rmdirSync(directory));
+}
 
 function compiledFunction(name, next) {
   const compiled = fs.readFileSync(path.resolve(__dirname, '../out/extension.js'), 'utf8');
@@ -19,19 +35,24 @@ async function roots(t) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-data-root-actions-'));
   const project = path.join(base, 'project'), a = path.join(base, 'a', '.solomap-global'), b = path.join(base, 'b', '.solomap-global');
   fs.mkdirSync(path.join(project, '.solopreneur'), { recursive: true });
-  fs.writeFileSync(path.join(project, '.solopreneur', 'roadmap.csv'), 'id,title,description,stage,category,agentCli,agentPrompt,status,createdAt,completedAt\n1,Keep roadmap,,Stage,,claude,,Pending,,');
+  fs.writeFileSync(path.join(project, '.solopreneur', 'roadmap.csv'), 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n1,Keep roadmap,,Stage,,claude,,Pending,,');
   const closers = [], beforeClose = [], engines = new Set(), ownerContext = { after: close => closers.push(close) };
-  t.after(async () => { for (const close of beforeClose) await close(); for (const engine of engines) { await engine.historyLoad; engine.close(); } for (const close of closers.reverse()) await close(); });
-  return { project, a, b, engines, beforeClose, ownerA: await openAnalysisOwner(ownerContext, a, [{ path: project }]), ownerB: await openAnalysisOwner(ownerContext, b, [{ path: project }]) };
+  t.after(async () => {
+    try { for (const close of beforeClose) await close(); for (const engine of engines) { await engine.historyLoad; engine.close(); } for (const close of closers.reverse()) await close(); }
+    finally { cleanupExact(base); }
+  });
+  return { base, project, a, b, engines, beforeClose, ownerA: await openAnalysisOwner(ownerContext, a, [{ path: project }]), ownerB: await openAnalysisOwner(ownerContext, b, [{ path: project }]) };
 }
 
 function engineHost(t, f, Engine = SyncEngine) {
   class OwnedEngine extends Engine { constructor(...args) { super(...args); f.engines.add(this); } }
   const scope = { fs, path, console, setTimeout: () => {}, syncEngine: null, activeProjectRoot: '', syncEngineReady: false,
     syncEngineInitPromise: null, syncEngineInitProjectRoot: '', syncEngineInitDataRoot: '', syncEngineInitGeneration: 0,
-    projectSelectionGeneration: 0, sidebarProvider: null, root: f.a, project: f.project,
+    projectSelectionGeneration: 0, sidebarProvider: null, projectRegistryFileName: 'projects.json', root: f.a, project: f.project,
     getSelectedProjectPath: () => f.project, getPersistedSettings: () => ({ globalDataPath: scope.root }),
     normalizeGlobalDataPathForExtension: root => root,
+    autonomousRuntimeHost_1: { ensureHealthyAutonomousRuntime: async ({ globalDataPath }) => { scope.runtimeReadyRoot = globalDataPath; } },
+    projectRegistry_1: { readProjectRegistry: () => ({ projects: [{ path: f.project }], selectedProjectPath: f.project }) },
     syncEngine_1: { SyncEngine: OwnedEngine }, sendNodesToWebview() {}, setupFileSentinelWatcher() {},
     postRoadmapLoadFailed: (_project, error) => assert.fail(String(error)), formatLocalDataError: String,
     vscode: { window: { showErrorMessage: message => assert.fail(message) } }
@@ -52,6 +73,7 @@ test('changing the data root routes the real action engine to the new journal', 
   assert.deepEqual(a.logs.map(log => log.output), ['source A']);
   assert.deepEqual(b.logs.map(log => log.output), ['source B']);
   assert.notEqual(scope.syncEngine, previous);
+  assert.equal(scope.runtimeReadyRoot, f.b);
 });
 
 test('a late initialization from the previous root cannot replace the newer engine', async t => {
@@ -72,16 +94,17 @@ test('a late initialization from the previous root cannot replace the newer engi
   assert.deepEqual(f.ownerB.store.readProjectJournal(f.ownerB.projectIds.get(f.project)).logs.map(log => log.output), ['after root switch']);
 });
 
-function extensionHost(t, f) {
+function extensionHost(t, f, options = {}) {
   const extension = path.resolve(__dirname, '../out/extension.js');
   const source = fs.readFileSync(process.env.SOLOMAP_TEST_EXTENSION_FILE || extension, 'utf8'), localRequire = Module.createRequire(extension);
-  const messages = [], deliveries = [], failures = [], dataRequests = [];
+  const messages = [], deliveries = [], failures = [], dataRequests = [], globalStateValues = options.globalStateValues || new Map();
   const transport = localRequire('./autonomousRuntimeControl');
   const hostRequire = id => id === './agentCli' ? { ...localRequire(id), ensureAgentTaskAutomation: () => ({ ok: true }) } : id === './autonomousRuntimeControl' ? { ...transport, sendRuntimeDataRequest: async (root, request) => {
     dataRequests.push({ root, operation: request.operation, input: request.input });
     if (scope.requestHook) await scope.requestHook(root, request);
+    if (scope.requestHandler && !['read_host_settings', 'patch_host_settings'].includes(request.operation)) return scope.requestHandler(root, request);
     return transport.sendRuntimeDataRequest(root, request);
-  } } : localRequire(id);
+  } } : id === './autonomousRuntimeHost' && options.stubRuntimeHealth ? { ...localRequire(id), ensureHealthyAutonomousRuntime: async () => ({}) } : localRequire(id);
   const vscode = { ConfigurationTarget: { Global: 1 }, TerminalExitReason: { Shutdown: 4 }, ThemeIcon: class {}, ThemeColor: class {}, Uri: { joinPath: (uri, ...parts) => ({ fsPath: path.join(uri.fsPath, ...parts) }) }, workspace: { workspaceFolders: [{ uri: { fsPath: f.project } }],
       getConfiguration: () => ({ get: key => scope.settings[key], update: async () => {} }) },
     window: { terminals: [], showErrorMessage: message => failures.push(message), showWarningMessage: message => failures.push(message), showInformationMessage() {}, showInputBox: async () => '继续原任务' }
@@ -90,7 +113,10 @@ function extensionHost(t, f) {
     Buffer, URL, setTimeout, clearTimeout, setInterval, clearInterval, setImmediate,
     settings: { globalDataPath: f.a, cliPath: 'claude', globalPrompt: '来源库规则', enabledEnhancements: {}, taskPermissionMode: 'auto' },
     project: f.project, deliveries, failures, messages, dataRequests,
-    context: { extensionPath: path.resolve(__dirname, '..'), extensionUri: { fsPath: path.resolve(__dirname, '..') }, subscriptions: [], globalState: { get() {}, update: async (_key, value) => { scope.settings = value; } } },
+    context: { extensionPath: path.resolve(__dirname, '..'), extensionUri: { fsPath: path.resolve(__dirname, '..') }, subscriptions: [], globalState: { get: key => globalStateValues.get(key), keys: () => [...globalStateValues.keys()], update: async (key, value) => {
+      if (options.globalStateUpdate) return options.globalStateUpdate(globalStateValues, key, value);
+      if (value === undefined) globalStateValues.delete(key); else globalStateValues.set(key, value);
+    } } },
     retainEngine: engine => f.engines.add(engine)
   };
   const host = vm.createContext(scope), originalLoad = Module._load;
@@ -133,6 +159,8 @@ function extensionHost(t, f) {
     this.startReviewRevision = startAgentReviewRevisionRun;
     this.bindEngine = () => ensureSyncEngine(context);
     this.saveRoot = root => updatePersistedSettings(context, { globalDataPath: root });
+    this.runPortable = (root, operation, input) => runDurablePortableOperation(context, root, operation, input);
+    this.recoverPortable = root => recoverDurablePortableOperations(context, root);
     this.clearGrowthPanel = () => { activeProjectGrowthPanel = null; };
     this.mapTerminal = (id, name) => { agentTerminalNamesByConversationId.set(id, name); agentTerminalProjectRootsByConversationId.set(id, project); };
     if (typeof captureConversationLaunchTarget === 'function') {
@@ -151,14 +179,162 @@ function extensionHost(t, f) {
   assert.ok(begin > 0 && end > begin);
   vm.runInContext('this.dispatchGrowth = ' + source.slice(begin, end) + '\n}', host);
   const bind = scope.bindEngine; scope.bindEngine = async () => { const result = await bind(); f.engines.add(scope.hostEngine()); return result; };
-  return { scope, vscode, deliveries, failures, messages };
+  return { scope, vscode, deliveries, failures, messages, globalStateValues };
 }
+
+async function databasePortableOperations(f, root = f.a) {
+  const owner = root === f.a ? f.ownerA : f.ownerB;
+  const result = await owner.ops({ operation: 'read_host_settings', input: { namespace: 'portable_operations', ownerScope: 'global' } });
+  return result.items.map(item => item.value);
+}
+
+test('a portable operation reuses its persisted idempotency key after a host disconnect and restart', async t => {
+  const f = await roots(t), globalStateValues = new Map(), seen = [];
+  const first = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  first.scope.requestHandler = async (_root, request) => { seen.push(request.input.idempotencyKey); throw new Error('simulated_host_disconnect_after_commit'); };
+  await assert.rejects(first.scope.runPortable(f.a, 'backup', { destination: path.join(f.base, 'portable-restart.db') }), /simulated_host_disconnect_after_commit/);
+  assert.equal((await databasePortableOperations(f)).filter(item => item.status === 'pending').length, 1);
+  assert.equal([...globalStateValues.keys()].some(key => key.startsWith('solopreneur.pendingPortableOperation.v2.')), false);
+
+  const restarted = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  restarted.scope.requestHandler = async (_root, request) => { seen.push(request.input.idempotencyKey); return { bytes: 1 }; };
+  await restarted.scope.recoverPortable(f.a);
+  assert.equal(seen.length, 2);
+  assert.equal(seen[1], seen[0]);
+  assert.equal((await databasePortableOperations(f)).filter(item => item.status === 'pending').length, 0);
+});
+
+test('a completed portable operation gets a fresh identity when the user repeats it', async t => {
+  const f = await roots(t), seen = [];
+  const host = extensionHost(t, f, { stubRuntimeHealth: true });
+  host.scope.requestHandler = async (_root, request) => { seen.push(request.input.idempotencyKey); return { bytes: 1 }; };
+  const input = { destination: path.join(f.base, 'repeat-backup.db') };
+  await host.scope.runPortable(f.a, 'backup', input);
+  await host.scope.runPortable(f.a, 'backup', input);
+  assert.equal(seen.length, 2);
+  assert.notEqual(seen[1], seen[0]);
+});
+
+test('portable operation recovery upgrades a legacy shared ledger entry without changing its identity', async t => {
+  const f = await roots(t), globalStateValues = new Map(), seen = [];
+  const input = { destination: path.join(f.base, 'legacy-ledger-backup.db') };
+  const intent = crypto.createHash('sha256').update(JSON.stringify({ root: f.a, operation: 'backup', input })).digest('hex');
+  globalStateValues.set('solopreneur.pendingPortableOperations.v1', [{ id: 'legacy-portable-id', root: f.a, operation: 'backup', input, intent }]);
+  const host = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  host.scope.requestHandler = async (_root, request) => { seen.push(request.input.idempotencyKey); return { bytes: 1 }; };
+  await host.scope.recoverPortable(f.a);
+  assert.deepEqual(seen, ['portable-operation:legacy-portable-id']);
+  assert.equal(globalStateValues.has('solopreneur.pendingPortableOperations.v1'), false);
+  assert.equal([...globalStateValues.keys()].some(key => key.startsWith('solopreneur.pendingPortableOperation.v2.')), false);
+});
+
+test('separate extension hosts migrate the complete legacy portable ledger before consuming entries', async t => {
+  const f = await roots(t), globalStateValues = new Map(), seen = [];
+  const firstInput = { destination: path.join(f.base, 'legacy-first.db') };
+  const secondInput = { destination: path.join(f.base, 'legacy-second.db') };
+  const entry = (id, input) => ({ id, root: f.a, operation: 'backup', input,
+    intent: crypto.createHash('sha256').update(JSON.stringify({ root: f.a, operation: 'backup', input })).digest('hex') });
+  globalStateValues.set('solopreneur.pendingPortableOperations.v1', [entry('legacy-first', firstInput), entry('legacy-second', secondInput)]);
+  const options = { globalStateValues, stubRuntimeHealth: true,
+    globalStateUpdate: async (values, key, value) => {
+      if (key === 'solopreneur.pendingPortableOperations.v1') await new Promise(resolve => setTimeout(resolve, 30));
+      if (value === undefined) values.delete(key); else values.set(key, value);
+    }
+  };
+  const first = extensionHost(t, f, options), second = extensionHost(t, f, options);
+  first.scope.requestHandler = second.scope.requestHandler = async (_root, request) => { seen.push(request.input.idempotencyKey); return { bytes: 1 }; };
+  await Promise.all([
+    first.scope.runPortable(f.a, 'backup', firstInput),
+    second.scope.runPortable(f.a, 'backup', secondInput)
+  ]);
+  assert.equal(globalStateValues.has('solopreneur.pendingPortableOperations.v1'), false);
+  assert.equal([...globalStateValues.keys()].some(key => key.startsWith('solopreneur.pendingPortableOperation.v2.')), false);
+  assert.deepEqual(new Set(seen), new Set(['portable-operation:legacy-first', 'portable-operation:legacy-second']));
+  await first.scope.runPortable(f.a, 'backup', firstInput);
+  assert.notEqual(seen.at(-1), 'portable-operation:legacy-first');
+});
+
+test('a late legacy migration writer cannot resurrect an already completed portable identity', async t => {
+  const f = await roots(t), globalStateValues = new Map(), seen = [];
+  const firstInput = { destination: path.join(f.base, 'late-first.db') };
+  const secondInput = { destination: path.join(f.base, 'late-second.db') };
+  const entry = (id, input) => ({ id, root: f.a, operation: 'backup', input,
+    intent: crypto.createHash('sha256').update(JSON.stringify({ root: f.a, operation: 'backup', input })).digest('hex') });
+  globalStateValues.set('solopreneur.pendingPortableOperations.v1', [entry('late-first', firstInput), entry('late-second', secondInput)]);
+  const first = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  first.scope.requestHandler = async (_root, request) => {
+    seen.push(request.input.idempotencyKey);
+    return { bytes: 1 };
+  };
+  await first.scope.recoverPortable(f.a);
+  assert.deepEqual(new Set(seen), new Set(['portable-operation:late-first', 'portable-operation:late-second']));
+  globalStateValues.set('solopreneur.pendingPortableOperations.v1', [entry('late-first', firstInput)]);
+  await first.scope.recoverPortable(f.a);
+  assert.equal([...globalStateValues.values()].some(value => value?.id === 'late-first'), false);
+  assert.equal(seen.filter(value => value === 'portable-operation:late-first').length, 1);
+});
+
+test('a completed legacy portable operation leaves no authoritative operation in globalState', async t => {
+  const f = await roots(t), globalStateValues = new Map(), seen = [];
+  const input = { destination: path.join(f.base, 'cleanup-after-success.db') };
+  const intent = crypto.createHash('sha256').update(JSON.stringify({ root: f.a, operation: 'backup', input })).digest('hex');
+  globalStateValues.set('solopreneur.pendingPortableOperations.v1', [{ id: 'cleanup-after-success', root: f.a, operation: 'backup', input, intent }]);
+  const host = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  host.scope.requestHandler = async (_root, request) => { seen.push(request.input.idempotencyKey); return { bytes: 7 }; };
+  assert.deepEqual(await host.scope.runPortable(f.a, 'backup', input), { bytes: 7 });
+  assert.equal(globalStateValues.has('solopreneur.pendingPortableOperation.v2.cleanup-after-success'), false);
+  assert.equal((await databasePortableOperations(f))[0].status, 'completed');
+  assert.deepEqual(await host.scope.runPortable(f.a, 'backup', input), { bytes: 7 });
+  assert.notEqual(seen.at(-1), 'portable-operation:cleanup-after-success');
+});
+
+test('concurrent portable operations retain both recovery identities after host disconnects', async t => {
+  const f = await roots(t), globalStateValues = new Map();
+  const host = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true,
+    globalStateUpdate: async (values, key, value) => {
+      if (key === 'solopreneur.pendingPortableOperations.v1') await new Promise(resolve => setTimeout(resolve, 20));
+      if (value === undefined) values.delete(key); else values.set(key, value);
+    }
+  });
+  host.scope.requestHandler = async () => { throw new Error('simulated_disconnect_after_commit'); };
+  const results = await Promise.allSettled([
+    host.scope.runPortable(f.a, 'backup', { destination: path.join(f.base, 'first.db') }),
+    host.scope.runPortable(f.a, 'backup', { destination: path.join(f.base, 'second.db') })
+  ]);
+  assert.deepEqual(results.map(result => result.status), ['rejected', 'rejected']);
+  const pending = (await databasePortableOperations(f)).filter(item => item.status === 'pending');
+  assert.equal(pending.length, 2);
+  assert.equal(new Set(pending.map(item => item.id)).size, 2);
+});
+
+test('separate extension hosts retain both concurrent portable recovery identities', async t => {
+  const f = await roots(t), globalStateValues = new Map();
+  const options = { globalStateValues, stubRuntimeHealth: true,
+    globalStateUpdate: async (values, key, value) => {
+      if (key === 'solopreneur.pendingPortableOperations.v1') await new Promise(resolve => setTimeout(resolve, 20));
+      if (value === undefined) values.delete(key); else values.set(key, value);
+    }
+  };
+  const first = extensionHost(t, f, options), second = extensionHost(t, f, options);
+  first.scope.requestHandler = second.scope.requestHandler = async () => { throw new Error('simulated_disconnect_after_commit'); };
+  const results = await Promise.allSettled([
+    first.scope.runPortable(f.a, 'backup', { destination: path.join(f.base, 'host-first.db') }),
+    second.scope.runPortable(f.a, 'backup', { destination: path.join(f.base, 'host-second.db') })
+  ]);
+  assert.deepEqual(results.map(result => result.status), ['rejected', 'rejected']);
+  const pending = (await databasePortableOperations(f)).filter(item => item.status === 'pending');
+  assert.equal(pending.length, 2);
+  assert.equal(new Set(pending.map(item => item.id)).size, 2);
+});
 
 async function nativeSource(f, root, owner, label, launch = {}) {
   const { prepareAgentRun } = require('../out/agentRunPreparation.js');
   const { RunLifecycleClient, runStatusReference } = require('../out/runLifecycleClient.js');
   const call = (operation, input) => owner.ops({ operation, input });
-  const prepared = await prepareAgentRun({ agentCli: launch.agentCli || 'claude', selectedModel: 'source-model', prompt: `原任务 ${label}`,
+  // These root-routing fixtures exercise settlement ownership rather than a
+  // provider transcript. Use a caller-assigned provider without a native observer so the
+  // business checkpoint is immediately eligible for consumption.
+  const prepared = await prepareAgentRun({ agentCli: launch.agentCli || 'copilot', selectedModel: 'source-model', prompt: `原任务 ${label}`,
     workspaceRoot: f.project, nodeId: '__solo__', executionLogId: 1, userMessage: `用户目标 ${label}`, runKind: 'solo',
     globalDataPath: root, taskPermissionMode: 'auto', ...(launch.metadata ? { metadata: launch.metadata } : {}) }, call);
   const client = new RunLifecycleClient(call), reference = runStatusReference(f.project, 1);
@@ -338,9 +514,10 @@ test('the real continuation launcher and terminal close settle their captured ro
   const closedA = f.ownerA.store.readRunState(a.projectId, 2);
   assert.equal(closedA.status.interactiveSessionClosed, true);
   const settlements = f.ownerA.store.readRunSettlements(a.projectId, { executionLogId: 2 });
-  assert.equal(settlements.items.length, 1);
-  assert.match(JSON.stringify(settlements.items[0]), /继续来源 A 并保留记录/);
-  assert.doesNotMatch(JSON.stringify(settlements.items[0]), /独立 B 内容|另一个库的继续/);
+  assert.equal(settlements.items.length, 2, JSON.stringify(settlements.items));
+  assert.ok(settlements.items.every(item => JSON.stringify(item).includes('继续来源 A 并保留记录')));
+  assert.match(JSON.stringify(settlements.items), /Interactive session state: Closed/);
+  assert.doesNotMatch(JSON.stringify(settlements.items), /独立 B 内容|另一个库的继续/);
   assert.equal(fs.existsSync(path.join(f.project, '.solopreneur/agent-runs')), false);
 });
 
@@ -563,6 +740,12 @@ for (const restored of [false, true]) test(`closing a terminal that executed its
   const { RunLifecycleClient, runStatusReference } = require('../out/runLifecycleClient.js');
   const f = await roots(t);
   const cliDir = path.join(path.dirname(f.project), 'fake-cli'); fs.mkdirSync(cliDir);
+  const previousClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = cliDir;
+  t.after(() => {
+    if (previousClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previousClaudeConfigDir;
+  });
   const cli = path.join(cliDir, 'claude'); fs.writeFileSync(cli, '#!/bin/sh\nprintf -- "--session-id\\n"\n', { mode: 0o755 });
   const b = await nativeSource(f, f.b, f.ownerB, 'other owner', { agentCli: cli, metadata: { agentDatabaseConfigPath: path.join(cliDir, '.claude.json') } });
   const prepared = await prepareAgentRun({ agentCli: cli, selectedModel: '', prompt: '保持运行直到关闭终端', workspaceRoot: f.project,
@@ -570,7 +753,7 @@ for (const restored of [false, true]) test(`closing a terminal that executed its
     directExecutionCommand: `${shellQuote(process.execPath)} -e ${shellQuote("process.stdout.write('OWN_TERMINAL_READY\\n');setInterval(()=>{},1000)")}`,
     metadata: { agentDatabaseConfigPath: path.join(cliDir, '.claude.json') } }, (operation, input) => f.ownerA.ops({ operation, input }));
   const bRevision = f.ownerB.store.readRunState(b.projectId, 1).revision;
-  const { scope, vscode } = extensionHost(t, f); await scope.bindEngine();
+  const { scope, vscode } = extensionHost(t, f, { stubRuntimeHealth: true }); await scope.bindEngine();
   let child, closed; const stderr = [];
   const client = new RunLifecycleClient((operation, input) => f.ownerA.ops({ operation, input }), f.a), reference = runStatusReference(f.project, 1);
   f.beforeClose.unshift(async () => {
@@ -620,7 +803,9 @@ for (const restored of [false, true]) test(`closing a terminal that executed its
   await closed;
   assert.equal(f.ownerA.store.readRunState(prepared.projectId, 1).status.interactiveSessionClosed, true);
   assert.equal(f.ownerB.store.readRunState(b.projectId, 1).revision, bRevision);
-  assert.equal(f.ownerA.store.readRunSettlements(prepared.projectId, { executionLogId: 1 }).items.length, 1);
+  const settlements = f.ownerA.store.readRunSettlements(prepared.projectId, { executionLogId: 1 }).items;
+  assert.equal(settlements.length, 2);
+  assert.match(JSON.stringify(settlements), /Interactive session state: Closed/);
   assert.deepEqual(f.ownerA.store.readRunDocument(prepared.projectId, 1, 'launch_request'), originalLaunch);
   assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'agent-runs')), false);
 });
@@ -764,7 +949,7 @@ for (const changed of ['moved', 'replaced']) test(`pending Codex delivery still 
 });
 
 test('the compiled report Continue action resumes a migrated historical task after its old files are isolated', async t => {
-  const f = await roots(t), { registerLearningTask, writeLearningJson } = require('../out/taskReport.js');
+  const f = await roots(t), { registerLearningTask, writeLearningJson } = require('./fixtures/legacy-task-report.cjs');
   const { createSessionBindingValue, appendSessionBindingValue } = require('../out/sessionIdentity.js');
   const { importAgentRuns } = require('../out/projectDataMigration.js'), { prepareAgentRun } = require('../out/agentRunPreparation.js');
   const startedAt = '2026-09-01T10:00:00.000Z', endedAt = '2026-09-01T10:01:00.000Z', nonce = 'historical-source-nonce';

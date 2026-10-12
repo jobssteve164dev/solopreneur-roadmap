@@ -30,6 +30,8 @@ resources/logo_with_text.png
 resources/solomap_*.png
 resources/tools/validate-scheduled-tasks.cjs
 resources/tools/solomap-review.cjs
+out/activeConversationLedger.js
+resources/claude-observer/.claude-plugin/types/
 node_modules/sql.js/dist/**
 !node_modules/sql.js/dist/sql-wasm.js
 !node_modules/sql.js/dist/sql-wasm.wasm

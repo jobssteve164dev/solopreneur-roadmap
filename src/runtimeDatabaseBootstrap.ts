@@ -29,6 +29,52 @@ async function historicalRunSourceStamp(store: UnifiedDataStore, roots: string[]
   return hash.digest('hex');
 }
 
+/** Cheap owner-state probe used after startup; retained run payloads are scanned only when this stamp changes. */
+export async function historicalRunOwnerStateStamp(store: UnifiedDataStore, shouldContinue: () => boolean): Promise<string> {
+  const hash = crypto.createHash('sha256');
+  for (const projectRoot of store.registeredProjectRoots().sort()) {
+    const roots = [
+      { root: path.join(projectRoot, '.agent_status.json'), allFiles: true },
+      { root: path.join(projectRoot, '.solopreneur', 'agent-status'), allFiles: true },
+      { root: path.join(projectRoot, '.solopreneur', 'agent-runs'), allFiles: false }
+    ];
+    for (const source of roots) {
+      const capture = async (file: string, info: fs.Stats): Promise<void> => {
+        let ownerState: boolean | 'invalid' = 'invalid';
+        try { ownerState = store.historicalRunOwnerAlive(JSON.parse(await fs.promises.readFile(file, 'utf8'))); }
+        catch { /* The full importer reports malformed sources. */ }
+        hash.update(JSON.stringify([file, info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs, ownerState]));
+      };
+      let rootInfo: fs.Stats;
+      try { rootInfo = await fs.promises.lstat(source.root); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; continue; }
+      if (rootInfo.isFile() && !rootInfo.isSymbolicLink()) { await capture(source.root, rootInfo); continue; }
+      if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) continue;
+      const pending = [source.root];
+      while (pending.length) {
+        if (!shouldContinue()) return '';
+        const directory = pending.pop()!;
+        for (const entry of (await fs.promises.readdir(directory, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name))) {
+          if (entry.isSymbolicLink()) continue;
+          const file = path.join(directory, entry.name);
+          if (entry.isDirectory()) { pending.push(file); continue; }
+          if (!entry.isFile() || (!source.allFiles && entry.name !== '.agent_status.json')) continue;
+          await capture(file, await fs.promises.lstat(file));
+        }
+      }
+    }
+  }
+  return hash.digest('hex');
+}
+
+export async function refreshHistoricalRunMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, previousStamp: string): Promise<string> {
+  const currentStamp = await historicalRunOwnerStateStamp(store, shouldContinue);
+  if (previousStamp && currentStamp && currentStamp !== previousStamp && shouldContinue()) {
+    await enqueueAvailableDataMigrations(store, operations, shouldContinue);
+  }
+  return currentStamp;
+}
+
 export async function enqueueStartupDataMigrations(store: UnifiedDataStore, operations: RuntimeDataOperations, shouldContinue: () => boolean): Promise<void> {
   await enqueueAvailableDataMigrations(store, operations, shouldContinue);
 }
@@ -60,6 +106,8 @@ export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, op
   catch (error) { process.stderr.write(`SoloMap review migration startup: ${String(error)}\n`); }
   try { await enqueueStartupStrategyMigration(store, enqueue, shouldContinue); }
   catch (error) { process.stderr.write(`SoloMap strategy migration startup: ${String(error)}\n`); }
+  try { await enqueueStartupAnalysisMigration(store, enqueue, shouldContinue); }
+  catch (error) { process.stderr.write(`SoloMap analysis cache migration startup: ${String(error)}\n`); }
   if (!shouldContinue()) return { queued };
   const sourceRoot = path.join(store.root, 'intelligence-conversations');
   try {
@@ -68,6 +116,29 @@ export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, op
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`SoloMap intelligence migration startup: ${String(error)}\n`);
   }
   return { queued };
+}
+
+async function enqueueStartupAnalysisMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
+  const projectScopes: Record<string, string> = {};
+  const files = [path.join(store.root, 'usage', 'solomap-usage.json'), path.join(store.root, 'sidebar-core-snapshot-v1.json')];
+  for (const projectRoot of store.registeredProjectRoots()) {
+    if (!shouldContinue()) return;
+    const project = await store.registerProject({ root: projectRoot });
+    projectScopes[path.resolve(projectRoot)] = project.projectId;
+    const projectKey = crypto.createHash('sha1').update(projectRoot).digest('hex');
+    files.push(path.join(store.root, 'conversations', `sidebar-conversation-${projectKey}-v1.json`));
+    files.push(path.join(store.root, `sidebar-conversation-${projectKey}-v1.json`));
+    files.push(...['issues-cache.json', 'pull-requests-cache.json', 'delivery-cache.json', 'security-cache.json']
+      .map(name => path.join(projectRoot, '.solopreneur', name)));
+  }
+  const existing: Array<[string, number, number]> = [];
+  for (const file of files) {
+    try { const info = await fs.promises.lstat(file); if (info.isFile() && !info.isSymbolicLink()) existing.push([file, info.size, info.mtimeMs]); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
+  if (!existing.length || !shouldContinue()) return;
+  const signature = crypto.createHash('sha256').update(JSON.stringify({ projectScopes, existing })).digest('hex');
+  await operations({ operation: 'import_project_data', input: { collection: 'analysis-caches', sourceRoot: store.root, projectScopes, idempotencyKey: `startup-analysis-caches-v1:${signature}` } });
 }
 
 async function enqueueStartupLearningReviewMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
@@ -154,6 +225,7 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
       }
     } catch (error) { process.stderr.write(`SoloMap journal projection startup: ${projectRoot}: ${String(error)}\n`); }
     const sources = [
+      { collection: 'documentation', sourceRoot: path.join(projectRoot, '.solopreneur', 'documentation.json') },
       { collection: 'project-growth', sourceRoot: path.join(projectRoot, '.solopreneur', 'project_growth.db') },
       { collection: 'project-journal', sourceRoot: path.join(projectRoot, '.solopreneur', 'project_journal.db') },
       { collection: 'agent-runs', sourceRoot: path.join(projectRoot, '.solopreneur', 'agent-runs') },
@@ -161,10 +233,17 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
       { collection: 'run-digests', sourceRoot: path.join(projectRoot, '.solopreneur', 'run-digests') }
     ];
     for (const source of sources) {
-      try { if (!(await fs.promises.stat(source.sourceRoot))[['agent-runs', 'step-memory', 'run-digests'].includes(source.collection) ? 'isDirectory' : 'isFile']()) continue; }
+      try {
+        const info = await fs.promises.lstat(source.sourceRoot);
+        if (info.isSymbolicLink() || !info[['agent-runs', 'step-memory', 'run-digests'].includes(source.collection) ? 'isDirectory' : 'isFile']()) continue;
+      }
       catch { continue; }
       const version = source.collection === 'agent-runs' ? 6 : source.collection === 'project-journal' ? 2 : 1;
-      const stamp = source.collection === 'agent-runs' ? await historicalRunSourceStamp(store, [source.sourceRoot, path.join(projectRoot, '.solopreneur', 'agent-status'), path.join(projectRoot, '.agent_status.json')], shouldContinue) : '';
+      const stamp = source.collection === 'agent-runs'
+        ? await historicalRunSourceStamp(store, [source.sourceRoot, path.join(projectRoot, '.solopreneur', 'agent-status'), path.join(projectRoot, '.agent_status.json')], shouldContinue)
+        : source.collection === 'documentation'
+          ? crypto.createHash('sha256').update(await fs.promises.readFile(source.sourceRoot)).digest('hex')
+          : '';
       if (!shouldContinue()) return;
       await operations({ operation: 'import_project_data', input: { ...source, projectRoot, idempotencyKey: `startup-${source.collection}-v${version}:${projectRoot}${stamp ? `:${stamp}` : ''}` } });
     }

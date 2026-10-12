@@ -6,6 +6,18 @@ const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
 
+function prepareCodegraphFixture(base, version) {
+  const prefix = path.join(base, 'npm-prefix'), npmRoot = path.join(prefix, 'lib', 'node_modules');
+  const packagePath = path.join(npmRoot, '@colbymchenry', 'codegraph'), binTarget = path.join(packagePath, 'dist', 'cli.js');
+  const commandPath = path.join(prefix, 'bin', 'codegraph');
+  fs.mkdirSync(path.dirname(binTarget), { recursive: true }); fs.mkdirSync(path.dirname(commandPath), { recursive: true });
+  fs.writeFileSync(path.join(packagePath, 'package.json'), JSON.stringify({ name: '@colbymchenry/codegraph', version, bin: { codegraph: 'dist/cli.js' } }));
+  fs.writeFileSync(binTarget, `#!/usr/bin/env node\nprocess.stdout.write("codegraph ${version}\\n")\n`, { mode: 0o755 });
+  fs.symlinkSync(binTarget, commandPath);
+  return (file, args, options, execute) => file === 'npm' && args?.join(' ') === 'root -g' ? npmRoot + '\n'
+    : file === 'npm' && args?.join(' ') === 'prefix -g' ? prefix + '\n' : execute(file, args, options);
+}
+
 // Original host regression 166: capability registration must survive the move
 // from file registries without losing activation, permissions or install history.
 test('capability registration survives concurrent windows, exact replay and owner restart', async () => {
@@ -105,13 +117,7 @@ test('production capability candidates read database registrations without writi
     ] });
     const mcp = await global.buildSolomapMcpCandidateInstructions(project, root, 'Read GitHub Issue');
     assert.match(mcp, /GitHub Readonly/); assert.match(mcp, /issues\.list/); assert.doesNotMatch(mcp, /Email Sender/);
-    await global.writeSolomapEnhancementRegistry(project, root, { version: 1, updatedAt: '', enhancements: [
-      { id: 'command-output-optimizer', title: 'Command Output Optimizer', status: 'installed', enabled: true, version: '1.2.3', health: { ok: true }, adapter: { type: 'command_rewrite' }, activation: { keywords: ['token'] }, risk: { level: 'low' } }
-    ] });
-    const enabled = await global.buildSolomapEnhancementCandidateInstructions(project, root, 'Reduce token', { 'command-output-optimizer': true });
-    assert.match(enabled, /Command Output Optimizer/);
-    assert.doesNotMatch(await global.buildSolomapEnhancementCandidateInstructions(project, root, 'Reduce token', {}), /Command Output Optimizer/);
-    for (const kind of ['skills', 'mcp', 'enhancements']) assert.equal(fs.existsSync(path.join(root, kind, 'registry.json')), false);
+    for (const kind of ['skills', 'mcp']) assert.equal(fs.existsSync(path.join(root, kind, 'registry.json')), false);
     const before = (await operations({ operation: 'read_capability_registry', input: { kind: 'skill' } })).sourceSequence;
     for (let i = 0; i < 20; i++) await global.buildSolomapSkillCandidateInstructions(project, root, 'Build UI');
     assert.equal((await operations({ operation: 'read_capability_registry', input: { kind: 'skill' } })).sourceSequence, before);
@@ -154,24 +160,6 @@ test('validated skill installations retain complete receipt and lock evidence in
   } finally { transport.sendRuntimeDataRequest = original; await operations.close(); store.close(); }
 });
 
-test('enhancement uninstall returns its committed result and cannot be revived by a probe', async () => {
-  const global = require('../out/solomapGlobal.js'), transport = require('../out/autonomousRuntimeControl.js');
-  const original = transport.sendRuntimeDataRequest;
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-capability-uninstall-'));
-  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
-  const store = new UnifiedDataStore(root), operations = createRuntimeDataOperations(store);
-  transport.sendRuntimeDataRequest = (resolvedRoot, request) => { assert.equal(resolvedRoot, root); return operations(request); };
-  try {
-    await global.writeSolomapEnhancementRegistry(project, root, { version: 1, updatedAt: '', enhancements: [{ id: 'code-structure-assistant', title: 'Code Structure Assistant', status: 'installed', enabled: true, version: '1.2.3', health: { ok: true } }] });
-    const result = path.join(base, 'uninstall-result.json'); fs.writeFileSync(result, JSON.stringify({ ok: true, enhancementId: 'code-structure-assistant', remainingItems: [], health: { ok: true, message: 'Removed' } }));
-    assert.equal((await global.validateAndRegisterEnhancementUninstall(project, root, result)).ok, true);
-    const current = (await global.readSolomapEnhancementRegistry(project, root)).enhancements.find(item => item.id === 'code-structure-assistant');
-    assert.equal(current.status, 'uninstalled'); assert.equal(current.enabled, false);
-    assert.equal((await global.setSolomapEnhancementEnabled(project, root, 'code-structure-assistant', true)).ok, false);
-    assert.equal((await global.readSolomapEnhancementRegistry(project, root)).enhancements.find(item => item.id === 'code-structure-assistant').status, 'uninstalled');
-  } finally { transport.sendRuntimeDataRequest = original; await operations.close(); store.close(); }
-});
-
 test('startup instructions consume formal context and awaited promotion results', async () => {
   const global = require('../out/solomapGlobal.js'), transport = require('../out/autonomousRuntimeControl.js');
   const original = transport.sendRuntimeDataRequest;
@@ -189,36 +177,7 @@ test('startup instructions consume formal context and awaited promotion results'
   } finally { transport.sendRuntimeDataRequest = original; await operations.close(); store.close(); }
 });
 
-test('enhancement probes preserve formal versions without recreating file authority', async () => {
-  const global = require('../out/solomapGlobal.js'), transport = require('../out/autonomousRuntimeControl.js');
-  const childProcess = require('node:child_process');
-  const original = transport.sendRuntimeDataRequest, execute = childProcess.execFileSync;
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-capability-probe-'));
-  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'), bin = path.join(base, 'bin');
-  fs.mkdirSync(project); fs.mkdirSync(bin);
-  const executable = path.join(bin, 'codegraph'); fs.writeFileSync(executable, '#!/bin/bash\nprintf "ready\\n"\n', { mode: 0o755 });
-  const store = new UnifiedDataStore(root), operations = createRuntimeDataOperations(store);
-  transport.sendRuntimeDataRequest = (resolvedRoot, request) => { assert.equal(resolvedRoot, root); return operations(request); };
-  // Control only discovery of the external executable. The production probe's
-  // command, interpreter, exit status, registry operation and state stay real.
-  childProcess.execFileSync = (file, args, options) => {
-    if (file === 'bash' && args?.[0] === '-lc' && args[1].includes('command -v codegraph')) return execute('/bin/bash', ['--noprofile', '--norc', '-c', args[1]], { ...options, env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` } });
-    return execute(file, args, options);
-  };
-  try {
-    await global.writeSolomapEnhancementRegistry(project, root, { version: 1, updatedAt: '', enhancements: [{ id: 'code-structure-assistant', title: 'Code Structure Assistant', status: 'installed', enabled: true, version: '1.2.3', source: { commit: 'exact-source' }, health: { ok: true, version: '1.2.3', message: 'Installed' } }] });
-    assert.equal((await global.checkAndRegisterEnhancement(project, root, 'code-structure-assistant')).ok, true);
-    const installed = (await global.readSolomapEnhancementRegistry(project, root)).enhancements.find(item => item.id === 'code-structure-assistant');
-    assert.equal(installed.version, '1.2.3'); assert.equal(installed.enabled, true); assert.equal(installed.source.commit, 'exact-source');
-    for (const file of ['registry.json', 'installed/code-structure-assistant/health.json', 'installed/code-structure-assistant/solomap.enhancement.json', 'installed/code-structure-assistant/source.lock.json']) assert.equal(fs.existsSync(path.join(root, 'enhancements', file)), false, file);
-    assert.equal((await global.uninstallSolomapEnhancement(project, root, 'code-structure-assistant')).ok, true);
-    assert.equal((await global.checkAndRegisterEnhancement(project, root, 'code-structure-assistant')).ok, false);
-    const removed = (await global.readSolomapEnhancementRegistry(project, root)).enhancements.find(item => item.id === 'code-structure-assistant');
-    assert.equal(removed.status, 'uninstalled'); assert.equal(removed.enabled, false); assert.equal(removed.version, '1.2.3');
-  } finally { childProcess.execFileSync = execute; transport.sendRuntimeDataRequest = original; await operations.close(); store.close(); }
-});
-
-test('MCP and enhancement installs keep full internal evidence alongside their formal status', async () => {
+test('MCP installs keep full internal evidence alongside their formal status', async () => {
   const global = require('../out/solomapGlobal.js'), transport = require('../out/autonomousRuntimeControl.js');
   const original = transport.sendRuntimeDataRequest;
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-capability-install-evidence-'));
@@ -231,21 +190,11 @@ test('MCP and enhancement installs keep full internal evidence alongside their f
     fs.writeFileSync(path.join(packagePath, 'server.js'), 'console.log("fixture package");\n');
     const staging = path.join(root, 'tmp', 'installs', 'fixture'); fs.mkdirSync(staging, { recursive: true });
     const write = (name, value) => { const file = path.join(staging, name); fs.writeFileSync(file, JSON.stringify(value)); return file; };
-    const manifest = write('mcp-manifest.json', { id: 'github-readonly', title: 'GitHub Readonly', status: 'installed', activation: { keywords: ['GitHub'] }, permissions: { tools: ['issues.list'], writeAccess: false }, risk: { level: 'low' } });
+    const manifest = write('mcp-manifest.json', { id: 'github-readonly', title: 'GitHub Readonly', status: 'installed', server: { command: 'node', args: ['server.js'] }, activation: { keywords: ['GitHub'] }, permissions: { tools: ['issues.list'], writeAccess: false }, risk: { level: 'low' } });
     const lock = write('mcp-lock.json', { source: 'fixture/mcp', version: '2.3.4', integrity: '完整锁内容🌿'.repeat(10000) });
     const result = write('mcp-result.json', { ok: true, mcpId: 'github-readonly', installedPath: mcp, packagePath, solomapMcpJson: manifest, sourceLockJson: lock, profilesPath: profiles });
     assert.equal((await global.validateAndRegisterMcpInstall(project, root, result)).ok, true);
-    const enhancement = path.join(root, 'enhancements', 'installed', 'code-structure-assistant'); fs.mkdirSync(enhancement, { recursive: true });
-    fs.writeFileSync(path.join(enhancement, 'adapter.js'), 'module.exports = { fixture: true };\n');
-    const enhancementManifest = write('enhancement-manifest.json', { id: 'code-structure-assistant', title: 'Code Structure Assistant', version: '3.4.5', source: { version: '3.4.5' } });
-    const enhancementLock = write('enhancement-lock.json', { source: 'fixture/codegraph', version: '3.4.5', integrity: '完整来源🌿'.repeat(10000) });
-    const health = write('enhancement-health.json', { ok: true, version: '3.4.5', message: 'Controlled fixture verified' });
-    const enhancementResult = write('enhancement-result.json', { ok: true, enhancementId: 'code-structure-assistant', installedPath: enhancement, solomapEnhancementJson: enhancementManifest, sourceLockJson: enhancementLock, healthJson: health });
-    assert.equal((await global.validateAndRegisterEnhancementInstall(project, root, enhancementResult)).ok, true);
-    for (const [kind, id, files] of [
-      ['mcp', 'github-readonly', { result, manifest, source_lock: lock }],
-      ['enhancement', 'code-structure-assistant', { result: enhancementResult, manifest: enhancementManifest, source_lock: enhancementLock, health }]
-    ]) {
+    for (const [kind, id, files] of [['mcp', 'github-readonly', { result, manifest, source_lock: lock }]]) {
       const registered = (await operations({ operation: 'read_capability_registry', input: { kind } })).entries.find(item => item.entry.id === id);
       const object = store.read(registered.objectId);
       const captured = new Map(object.relations.filter(relation => relation.relation === 'evidence').map(relation => {
@@ -254,7 +203,6 @@ test('MCP and enhancement installs keep full internal evidence alongside their f
       for (const [purpose, file] of Object.entries(files)) assert.ok(captured.get(`installation:${purpose}`)?.equals(fs.readFileSync(file)), `complete ${kind} ${purpose} evidence must survive`);
     }
     assert.match(await global.buildSolomapMcpCandidateInstructions(project, root, 'Read GitHub Issue'), /GitHub Readonly/);
-    assert.equal((await global.readSolomapEnhancementRegistry(project, root)).enhancements.find(item => item.id === 'code-structure-assistant').version, '3.4.5');
   } finally { transport.sendRuntimeDataRequest = original; await operations.close(); store.close(); }
 });
 
@@ -386,85 +334,6 @@ test('startup migration preserves historical capability choices, full metadata a
     assert.equal(store.readCapabilityRegistry({ kind: 'mcp' }).entries[0].entry.status, 'disabled');
     assert.equal(store.readCapabilityRegistry({ kind: 'enhancement' }).entries[0].entry.status, 'uninstalled');
   } finally { await operations.close(); store.close(); }
-});
-
-test('a late enhancement toggle cannot revive another window uninstall', async () => {
-  const global = require('../out/solomapGlobal.js'), transport = require('../out/autonomousRuntimeControl.js');
-  const previous = transport.sendRuntimeDataRequest;
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-enhancement-choice-race-'));
-  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
-  const store = new UnifiedDataStore(root), operations = createRuntimeDataOperations(store);
-  let reads = 0, paused, resume;
-  transport.sendRuntimeDataRequest = async (resolved, request) => {
-    assert.equal(resolved, root);
-    if (request.operation === 'read_capability_registry' && request.input.kind === 'enhancement' && ++reads === 2) {
-      paused(); await new Promise(resolve => { resume = resolve; });
-    }
-    return operations(request);
-  };
-  try {
-    await operations({ operation: 'patch_capability_registry', input: { kind: 'enhancement', entry: { id: 'code-structure-assistant', title: 'Existing enhancement', status: 'installed', enabled: false, version: '1.2.3', health: { ok: true, version: '1.2.3' } }, expectedRevision: 0, idempotencyKey: 'race-initial' } });
-    const gate = new Promise(resolve => { paused = resolve; });
-    const late = global.setSolomapEnhancementEnabled(project, root, 'code-structure-assistant', true);
-    await gate;
-    assert.equal((await global.uninstallSolomapEnhancement(project, root, 'code-structure-assistant')).ok, true);
-    resume();
-    await assert.rejects(late, /revision_conflict/);
-    const final = (await global.readSolomapEnhancementRegistry(project, root)).enhancements.find(entry => entry.id === 'code-structure-assistant');
-    assert.equal(final.status, 'uninstalled'); assert.equal(final.enabled, false);
-  } finally { if (resume) resume(); transport.sendRuntimeDataRequest = previous; await operations.close(); store.close(); }
-});
-
-for (const kind of ['skill', 'mcp', 'enhancement']) test(`the generated ${kind} installer stages internal metadata and registers its complete result`, async () => {
-  const global = require('../out/solomapGlobal.js'), transport = require('../out/autonomousRuntimeControl.js');
-  const previous = transport.sendRuntimeDataRequest;
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), `solomap-generated-${kind}-install-`));
-  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
-  const run = path.join(root, 'tmp', `${kind}-installs`, 'one-install'); fs.mkdirSync(run, { recursive: true });
-  const resultPath = path.join(run, 'result.json');
-  const store = new UnifiedDataStore(root), operations = createRuntimeDataOperations(store);
-  transport.sendRuntimeDataRequest = (resolved, request) => { assert.equal(resolved, root); return operations(request); };
-  try {
-    const prompt = kind === 'skill' ? global.buildSkillInstallPrompt('fixture/package', project, root, resultPath)
-      : kind === 'mcp' ? global.buildMcpInstallPrompt('fixture/server', project, root, resultPath)
-      : global.buildEnhancementInstallPrompt('code-structure-assistant', project, root, resultPath);
-    const match = prompt.match(/结果 JSON (?:schema|格式)：\n(\{[\s\S]*?\n\})/);
-    assert.ok(match, 'the installer receives a complete executable result schema');
-    const result = JSON.parse(match[1]);
-    const manifestField = { skill: 'solomapSkillJson', mcp: 'solomapMcpJson', enhancement: 'solomapEnhancementJson' }[kind];
-    for (const field of [manifestField, 'sourceLockJson', ...(kind === 'enhancement' ? ['healthJson'] : []), ...(kind === 'mcp' ? ['profilesPath'] : [])]) {
-      assert.equal(path.dirname(path.resolve(path.dirname(root), result[field])), run, `${field} belongs to this temporary install`);
-    }
-    const id = result.skillId || result.mcpId || result.enhancementId;
-    const manifest = { id, title: `Generated ${kind} package`, status: 'installed', version: '1.2.3', activation: { keywords: ['fixture'] }, source: { repository: 'fixture/repo', version: '1.2.3' }, risk: { requiresExplicitEnable: false } };
-    result.metadata.version = '1.2.3';
-    const lock = Buffer.from('完整安装来源与锁定版本🌿'.repeat(3000));
-    const installer = path.join(run, 'controlled-installer.cjs');
-    fs.writeFileSync(installer, `const fs = require('node:fs'), path = require('node:path');
-      const result = ${JSON.stringify(result)}, manifest = ${JSON.stringify(manifest)};
-      const resolve = value => path.resolve(${JSON.stringify(path.dirname(root))}, value);
-      fs.mkdirSync(resolve(result.installedPath), { recursive: true });
-      if (result.packagePath) fs.mkdirSync(resolve(result.packagePath), { recursive: true });
-      if (result.entryFile) fs.writeFileSync(resolve(result.entryFile), '# Generated skill\\n');
-      fs.writeFileSync(resolve(result[${JSON.stringify(manifestField)}]), JSON.stringify(manifest));
-      fs.writeFileSync(resolve(result.sourceLockJson), Buffer.from(${JSON.stringify(lock.toString('base64'))}, 'base64'));
-      if (result.healthJson) fs.writeFileSync(resolve(result.healthJson), JSON.stringify({ ok: true, version: '1.2.3' }));
-      if (result.profilesPath) { fs.mkdirSync(resolve(result.profilesPath)); fs.writeFileSync(path.join(resolve(result.profilesPath), 'codex.json'), ${JSON.stringify(JSON.stringify({ full: '完整配置建议🌿'.repeat(3000) }))}); }
-      fs.writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify(result));`);
-    require('node:child_process').execFileSync(process.execPath, [installer], { cwd: run });
-    const validated = kind === 'skill' ? await global.validateAndRegisterSkillInstall(project, root, resultPath)
-      : kind === 'mcp' ? await global.validateAndRegisterMcpInstall(project, root, resultPath)
-      : await global.validateAndRegisterEnhancementInstall(project, root, resultPath);
-    assert.equal(validated.ok, true, validated.message);
-    const registration = store.readCapabilityRegistry({ kind }).entries.find(item => item.entry.id === id);
-    assert.ok(registration);
-    const evidence = store.read(registration.objectId).relations.filter(item => item.relation === 'evidence').map(item => store.read(item.target));
-    assert.ok(evidence.some(item => item.data.type === 'installation:source_lock' && Buffer.from(item.data.content.data, 'base64').equals(lock)));
-    if (kind === 'mcp') assert.ok(evidence.some(item => JSON.stringify(item.data.type).includes('profile') && Buffer.from(item.data.content.data, 'base64').toString() === fs.readFileSync(path.join(result.profilesPath, 'codex.json'), 'utf8')), 'complete generated profile is database evidence');
-    assert.equal(fs.existsSync(path.join(global.resolveSkillResultPath(root, result.installedPath), path.basename(result[manifestField]))), false);
-    assert.equal(fs.existsSync(path.join(root, 'maintenance', 'runs')), false);
-    assert.equal(fs.existsSync(path.join(root, { skill: 'skills', mcp: 'mcp', enhancement: 'enhancements' }[kind], 'registry.json')), false);
-  } finally { transport.sendRuntimeDataRequest = previous; await operations.close(); store.close(); }
 });
 
 test('install evidence rejects a path switched to a symlink before reading outside bytes', () => {

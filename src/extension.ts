@@ -7,29 +7,30 @@ import * as crypto from 'crypto';
 import { readWindowsProcessBirthMarker } from './processIdentity.js';
 import { automationSoundReady, deliverAutomationSound, disposeAutomationSoundView, handleAutomationSoundMessage } from './automationSound.js';
 import { createVscodeTelegramHost } from './telegramRemote';
-import { queueTelegramBackgroundNotification } from './telegramRuntimeConfig';
+import { queueTelegramBackgroundNotification, refreshTelegramRuntimeConfig, telegramBotTokenSecretStorageKey } from './telegramRuntimeConfig';
 import { createTelegramBackgroundConnection } from './telegramBackgroundConnection';
 import * as Papa from 'papaparse';
 import { SyncEngine } from './db/syncEngine';
 import { AgentConversation, RoadmapNode } from './db/types';
 import { buildFlowStatePayload, createFlowLoop, createFlowTrace, FlowLoopScoring, FlowLoopStatus, FlowRole, FlowTrace, readFlowTrace, saveFlowTrace, updateFlowTrace } from './flowStore';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
-import { confirmTimePlan, ensureTimePlanValidationScript, readTimePlan } from './timePlan';
+import { confirmTimePlan, readTimePlan } from './timePlan';
 import {
-  claimDueScheduledTasks,
-  completeScheduledTaskOccurrence,
-  failScheduledTaskOccurrence,
-  readScheduledTaskLedger,
-  syncScheduledTaskLedger
+  claimDueScheduledTaskDatabase,
+  completeScheduledTaskDatabase,
+  failScheduledTaskDatabase,
+  readScheduledTaskDatabase,
+  ScheduledTaskOccurrence,
+  syncScheduledTaskDatabase
 } from './scheduledTaskLedger';
 import { getAgentImpactStatusFromDatabase } from './agentImpact';
 import { buildAgentCliUpgradePrompt } from './agentCliUpgrade';
-import { auditDocumentationAfterRun, buildDocumentationAudit, buildDocumentationPromptContext, ensureDocumentationManifest } from './documentationManifest';
-import { appendLearningEvent, buildLearningRetrievalContext, readLearningSummary, LearningEvidenceRef } from './learningLedger';
+import { auditDocumentationAfterRun, buildDocumentationAudit, buildDocumentationPromptContext, refreshDocumentationManifest, type DocumentationManifest } from './documentationManifest';
+import { buildLearningRetrievalContext, LearningEvidenceRef } from './learningLedger';
 import { buildFeedbackIssueUrl, buildGithubDeliveryContext, buildGithubIssueContext, buildGithubSecurityContext } from './projectSignals';
 import { ExternalSignalResponseVersions } from './externalDataLoader';
+import { disconnectExternalMemoryTarget, syncExternalMemoryTarget } from './externalMemoryTarget';
 import { createPreSessionGitCommit } from './preSessionGit';
-import { buildTaskReportInstructions, registerLearningTask, recordTaskReport, readLearningJson } from './taskReport.js';
 import { reviewHash, collectGithubEvidence, projectGithubRepository } from './learningReview.js';
 import { queryGrowthReports, readRegisteredProjectSources, containedRegularPath, reportFiles, reportText } from './growthReports.js';
 import { observeGrowthReports } from './growthReportObserver.js';
@@ -62,14 +63,12 @@ import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './co
 import { EmbeddedPiAgentEngine } from './piAgentEngine';
 import { prepareAgentRun, resumePreparedAgentRun, getAgentRunDeliveryOwner, type AgentRunPreparationInput } from './agentRunPreparation';
 import { prepareMaintenanceAgentRun } from './maintenanceAgentRun';
-import { RunLifecycleClient, parseRunStatusReference, runStatusReference, runDataReference } from './runLifecycleClient';
+import { RunLifecycleClient, parseRunStatusReference, readConversationLogSnapshot, runStatusReference, runDataReference } from './runLifecycleClient';
 import { matchesRunFileEvidence } from './runWorkspace';
 import { createIntelligenceMcpSession, getIntelligenceMcpConnector } from './intelligenceMcp';
-import { ensureProjectFoundation } from './projectFoundation';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
 import { getProjectGrowthWebviewHtml } from './projectGrowthWebview';
 import { readCachedConversationSnapshot } from './sidebarSnapshotCache';
-import { pruneProjectOutputLogs, pruneProjectsOutputLogs } from './outputLogRetention';
 import {
   buildCrossAgentHandoffInstructions,
   buildExecutionExperiencePrompt,
@@ -83,48 +82,39 @@ import {
   parseStepHandoffEntries
 } from './runDigest';
 import {
-  buildEnhancementInstallPrompt,
-  buildEnhancementUninstallPrompt,
-  buildSolomapEnhancementCandidateInstructions,
-  buildSolomapEnhancementContextPreflight,
-  buildSolomapEnhancementRuntimeInstructions,
   buildSolomapLearningContext,
   buildSolomapMcpCandidateInstructions,
   buildSolomapStartupPackInstructions,
   buildMcpInstallPrompt,
   buildSkillInstallPrompt,
-  checkAndRegisterEnhancement,
-  ensureSolomapEnhancementRuntime,
-  ensureSolomapEnhancementStore,
+  buildCapabilityUninstallPrompt,
   ensureSolomapMaintenanceWorkspace,
   ensureSolomapMemoryStore,
   ensureSolomapMcpStore,
   ensureSolomapSkillStore,
-  getEnabledEnhancementMap,
-  getBuiltinEnhancementDefinition,
-  getSolomapEnhancementStatusSummaries,
   getSolomapCapabilityRevision,
   getSolomapMcpRoot,
   getSolomapSkillRegistryPath,
   getSolomapSkillsRoot,
   normalizeSolomapGlobalPath,
+  prepareCapabilityOperationFilesystemBaseline,
   readSolomapMcpRegistry,
   readSolomapMcpRegistrySnapshot,
   readSolomapSkillRegistry,
   readSolomapSkillRegistrySnapshot,
+  rollbackCapabilityOperationFilesystem,
+  reconcileCapabilityOperationFilesystems,
   recordSolomapLearningCycle,
   refreshSolomapCapabilityRegistries,
-  refreshSolomapEnhancementStatusSummaries,
-  setSolomapEnhancementEnabled,
-  uninstallSolomapEnhancement,
-  upsertEnhancementRegistryEntry,
-  validateAndRegisterEnhancementInstall,
-  validateAndRegisterEnhancementUninstall,
+  setSolomapSkillEnabled,
+  setSolomapMcpEnabled,
   validateAndRegisterMcpInstall,
   validateAndRegisterSkillInstall,
+  validateAndRegisterCapabilityUninstall,
   writeSolomapMcpRegistry,
   writeSolomapSkillRegistry
 } from './solomapGlobal';
+import { attachCapabilityOperation, beginCapabilityOperation, capabilityOperationNeedsLaunchRecovery, capabilityOperationSettlementDecision, failCapabilityOperation, readCapabilityOperationResult, readCapabilityOperationRunState, readCapabilityOperations, CapabilityOperation } from './capabilityRegistry';
 import {
   buildAgentCommand,
   buildAgentContinuationCommandForPromptFile,
@@ -151,11 +141,6 @@ import {
   shellQuote,
   supportsSdkContinuation
 } from './agentCli';
-import {
-  buildTaskCheckpointInstructions,
-  ensureTaskCheckpointRuntime,
-  isInteractiveConversationRunKind
-} from './taskCheckpoint';
 import { SolomapAutomationSettings, SolomapAutomationTrigger, SolomapScheduledAutomationTask, SolopreneurSettings } from './pluginContracts';
 import {
   buildOpenCodeTerminalEnvironment,
@@ -168,7 +153,7 @@ import {
 import { buildConversationPresentations, selectLatestConversationRoots } from './conversationPresentation';
 import { dispatchPluginAction, PluginActionRequest, PluginSurface } from './pluginActions';
 import { handleMigrationSettingsAction } from './migrationSettingsActions';
-import { applyNativeMigrationAgentBoundary, buildMigrationAgentSandboxCommand, buildMigrationMaintenancePrompt, MigrationMaintenanceKind } from './migrationAgentMaintenance';
+import { applyNativeMigrationAgentBoundary, buildMigrationAgentSandboxCommand, buildMigrationMaintenancePrompt, migrationAgentConfigurationEnvironmentKeys, migrationAgentConfigurationPaths, migrationAgentExecutablePaths, MigrationMaintenanceKind } from './migrationAgentMaintenance';
 import { LinuxBubblewrapSandbox } from './executionSandbox';
 import {
   buildAgentModelsLoadedMessage,
@@ -193,7 +178,6 @@ import {
   patchProjectRegistry,
   readProjectRegistry as readProjectRegistryFile
 } from './projectRegistry';
-import { ProjectAutonomyAuthorizationStore } from './projectAutonomyAuthorization';
 import {
   buildFeedbackUsageSummary as buildFeedbackUsageSummaryFromStats,
   LocalUsageEvent,
@@ -203,6 +187,7 @@ import {
 import {
   classifyDiagnosticFailure,
   createLocalDiagnosticTrace,
+  configureLocalDiagnosticPersistence,
   observeLocalDiagnosticStage,
   recordLocalDiagnosticError,
   withLocalDiagnosticTrace
@@ -210,12 +195,12 @@ import {
 import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost';
 import { agentDatabaseConfigPath, buildAgentDatabaseInstructions, databaseAgentProviders, databaseBridgeLauncher, DatabaseAgentProvider } from './agentDatabaseConfig';
 import { runtimeProjectMcpSource } from './runtimeDataOperations';
-import { readRuntimeState } from './autonomousRuntime';
+import { readRuntimeState, refreshShadowRuntimeState } from './autonomousRuntime';
 import { readMaintenanceRuntimeEndpoint, sendRuntimeControlCommand, sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { disableAutonomousRuntimeService, enableAutonomousRuntime, ensureAutonomousRuntimeService, isAutonomousRuntimeDisabled, isRuntimeServiceManagerAvailable } from './autonomousRuntimeService';
 import { IntelligenceConversationStore } from './intelligenceChat';
 import { readTodayReview } from './dailyReview';
-import { writeCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
+import { persistCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import {
   buildCollaborationInviteCode,
   createCollaborationLobbySession,
@@ -224,15 +209,6 @@ import {
   readCollaborationRooms,
   saveCollaborationRoom
 } from './collaborationRooms';
-import {
-  claimActiveConversation,
-  getActiveConversationMigrationMarkerPath,
-  listActiveConversations,
-  markActiveConversationMigrationComplete,
-  registerActiveConversation,
-  releaseActiveConversationLease,
-  unregisterActiveConversation
-} from './activeConversationLedger';
 import {
   buildPassportDeviceStartUrl,
   buildPassportDeviceVerifyUrl,
@@ -259,7 +235,6 @@ import {
   postWebviewMessage
 } from './panelMessages';
 import {
-  clearStoredAgentSession,
   extractCodexSessionIdFromOutputText,
   extractContinuationParentConversationId,
   extractContinuationSessionIdFromExecutionOutput,
@@ -269,17 +244,13 @@ import {
   findCodexTranscriptFile,
   getAgentSessionKey,
   getConversationRunDir,
-  getStepSessionFilePath,
-  getStoredAgentSession,
   readRunSessionId,
   readRunTextFile,
-  readStepSessionState,
   resolveContinuationLeafConversationFromList,
   resolveContinuationRootConversationFromList,
   resolveContinuationSessionConversationFromList,
   resolveNativeSessionIdForConversation as resolveNativeSessionIdForConversationFromWorkspace,
-  stripAnsiControlCodes,
-  updateStoredAgentSession
+  stripAnsiControlCodes
 } from './continuation';
 import { extractRunTokenUsage, normalizeTokenUsage } from './tokenUsage';
 import { sendTextWhenTerminalReady, sendAgentTextWhenTerminalReady } from './terminalCompatibility';
@@ -311,6 +282,8 @@ const growthReportActions = new Set<string>();
 let selectedProjectPathInMemory = '';
 const selectedProjectPathsByDataRoot = new Map<string, string>();
 let watcher: vscode.FileSystemWatcher | null = null;
+let roadmapWatcherTimer: NodeJS.Timeout | null = null;
+let roadmapConflictPromptActive = false;
 let statusPoller: NodeJS.Timeout | null = null;
 const activeRunConsumerPolls = new Map<string, Promise<void>>();
 const processingAgentStatusFiles = new Set<string>();
@@ -332,7 +305,57 @@ let persistedSettingsCacheSource = '';
 let persistedSettingsCacheWorkspaceRoot = '';
 let pendingPersistedSettings: SolopreneurSettings | null = null;
 let persistedSettingsWriteQueue: Promise<void> = Promise.resolve();
+const databaseSettingsByRoot = new Map<string, Partial<SolopreneurSettings>>();
+const databaseSettingRevisionsByRoot = new Map<string, Map<string, number>>();
+const uiStateRevisionsByRoot = new Map<string, Map<string, number>>();
+const projectAutonomyByRoot = new Map<string, Map<string, { enabled: boolean; toolNetworkDisabled: boolean; epoch: number }>>();
 let persistedGlobalDataPathWrite: { root: string; observedDifferentRoot: boolean } | undefined;
+const nativeConfigurationProjectionValues = new Map<string, string>();
+let nativeConfigurationHostId = '';
+let nativeConfigurationHostStartedAt = 0;
+const nativeConfigurationKeys: Array<keyof SolopreneurSettings> = [
+  'cliPath', 'language', 'globalPrompt', 'globalDataPath', 'reviewerCliPath',
+  'collaborationReviewMode', 'automationTasks', 'telegramEnabled', 'telegramChatId'
+];
+function nativeProjectionValueHash(value: unknown): string {
+  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+async function recordNativeConfigurationProjection(root: string, key: keyof SolopreneurSettings, value: unknown): Promise<string> {
+  const projectionId = crypto.randomUUID();
+  await sendRuntimeDataRequest(root, {
+    operation: 'record_native_projection',
+    input: {
+      projectionId,
+      settingKey: key,
+      valueHash: nativeProjectionValueHash(value),
+      createdAt: Date.now()
+    }
+  });
+  return projectionId;
+}
+
+async function consumeNativeConfigurationProjection(root: string, key: keyof SolopreneurSettings, value: unknown): Promise<boolean> {
+  const result = await sendRuntimeDataRequest<{ projected: boolean }>(root, {
+    operation: 'consume_native_projection',
+    input: {
+      hostId: nativeConfigurationHostId,
+      settingKey: key,
+      valueHash: nativeProjectionValueHash(value),
+      after: nativeConfigurationHostStartedAt,
+      consumedAt: Date.now()
+    }
+  });
+  return result.projected;
+}
+
+async function cancelNativeConfigurationProjection(root: string, projectionId: string): Promise<void> {
+  await sendRuntimeDataRequest(root, { operation: 'cancel_native_projection', input: { projectionId } });
+}
+
+async function supersedeNativeConfigurationProjections(root: string, key: keyof SolopreneurSettings, keepProjectionId?: string): Promise<void> {
+  await sendRuntimeDataRequest(root, { operation: 'supersede_native_projections', input: { settingKey: key, ...(keepProjectionId ? { keepProjectionId } : {}) } });
+}
 let passportCredentialMutationQueue: Promise<void> = Promise.resolve();
 const SOLOMAP_GIT_DIFF_SCHEME = 'solomap-git-diff';
 const solomapGitDiffContent = new Map<string, string>();
@@ -358,6 +381,31 @@ interface ProjectRegistryFile {
 }
 
 const settingsKey = 'solopreneur.settings';
+let telegramBotTokenConfigured = false;
+
+async function readTelegramBotToken(context: vscode.ExtensionContext): Promise<string> {
+  let token = String(await context.secrets.get(telegramBotTokenSecretStorageKey) || '').trim();
+  const saved = context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
+  const config = vscode.workspace.getConfiguration('solopreneur');
+  const legacy = String(saved.telegramBotToken || config.get('telegramBotToken') || '').trim();
+  if (!token && legacy) { await context.secrets.store(telegramBotTokenSecretStorageKey, legacy); token = legacy; }
+  if (Object.prototype.hasOwnProperty.call(saved, 'telegramBotToken')) {
+    const { telegramBotToken: _removed, ...withoutToken } = saved;
+    await context.globalState.update(settingsKey, withoutToken);
+  }
+  if (config.get('telegramBotToken') !== undefined && String(config.get('telegramBotToken') || '')) {
+    await config.update('telegramBotToken', undefined, vscode.ConfigurationTarget.Global);
+  }
+  telegramBotTokenConfigured = Boolean(token);
+  return token;
+}
+
+async function storeTelegramBotToken(context: vscode.ExtensionContext, value: string): Promise<void> {
+  const token = value.trim();
+  if (!token) return;
+  await context.secrets.store(telegramBotTokenSecretStorageKey, token);
+  telegramBotTokenConfigured = true;
+}
 const projectsKey = 'solopreneur.projects';
 const selectedProjectKey = 'solopreneur.selectedProjectPath';
 const hiddenProjectsKey = 'solopreneur.hiddenProjects';
@@ -371,6 +419,124 @@ const sidebarConversationQueryLimit = 200;
 const agentTerminalBaseName = 'solomap';
 const agentStatusDirName = 'agent-status';
 const automationRetryConversationIds = new Set<number>();
+const portableOperationStateKey = 'solopreneur.pendingPortableOperations.v1';
+const portableOperationStatePrefix = 'solopreneur.pendingPortableOperation.v2.';
+const completedLegacyPortableOperationPrefix = 'solopreneur.completedLegacyPortableOperation.v1.';
+const portableOperationRootsKey = 'solopreneur.portableOperationRoots.v1';
+type PortableOperationName = 'backup' | 'restore_backup' | 'export_project' | 'import_project';
+interface PendingPortableOperation { id: string; root: string; operation: PortableOperationName; input: Record<string, unknown>; intent: string; legacy?: true }
+interface DatabasePortableOperation extends PendingPortableOperation { status: 'pending' | 'completed'; updatedAt: number }
+
+function legacyPortableOperationCompleted(context: vscode.ExtensionContext, id: string): boolean {
+  return context.globalState.get<boolean>(`${completedLegacyPortableOperationPrefix}${id}`) === true;
+}
+
+function pendingPortableOperations(context: vscode.ExtensionContext): PendingPortableOperation[] {
+  const entries = (context.globalState.get<PendingPortableOperation[]>(portableOperationStateKey) || [])
+    .filter(entry => !legacyPortableOperationCompleted(context, entry.id));
+  for (const key of context.globalState.keys()) {
+    if (!key.startsWith(portableOperationStatePrefix)) continue;
+    const entry = context.globalState.get<PendingPortableOperation>(key);
+    if (entry && !legacyPortableOperationCompleted(context, entry.id)) entries.push(entry);
+  }
+  return [...new Map(entries.map(entry => [entry.id, entry])).values()];
+}
+
+async function discardCompletedLegacyPortableOperation(context: vscode.ExtensionContext, key: string): Promise<void> {
+  try { await context.globalState.update(key, undefined); } catch {}
+}
+
+async function migrateLegacyPortableOperations(context: vscode.ExtensionContext): Promise<void> {
+  for (const key of context.globalState.keys()) {
+    if (!key.startsWith(portableOperationStatePrefix)) continue;
+    const entry = context.globalState.get<PendingPortableOperation>(key);
+    if (entry && legacyPortableOperationCompleted(context, entry.id)) await discardCompletedLegacyPortableOperation(context, key);
+  }
+  const legacy = context.globalState.get<PendingPortableOperation[]>(portableOperationStateKey) || [];
+  const pending = legacy.filter(entry => !legacyPortableOperationCompleted(context, entry.id));
+  if (pending.length !== legacy.length) await context.globalState.update(portableOperationStateKey, pending.length ? pending : undefined);
+}
+
+async function rememberPortableOperationRoot(context: vscode.ExtensionContext, root: string): Promise<void> {
+  const normalized = normalizeGlobalDataPathForExtension(root);
+  const roots = [...new Set([...(context.globalState.get<string[]>(portableOperationRootsKey) || []), normalized])];
+  await context.globalState.update(portableOperationRootsKey, roots);
+}
+
+async function readDatabasePortableOperations(root: string): Promise<Array<{ key: string; revision: number; value: DatabasePortableOperation }>> {
+  const result = await sendRuntimeDataRequest<{ items: Array<{ key: string; revision: number; value: DatabasePortableOperation }> }>(root, {
+    operation: 'read_host_settings', input: { namespace: 'portable_operations', ownerScope: 'global' }
+  });
+  return result.items || [];
+}
+
+async function claimDatabasePortableOperation(context: vscode.ExtensionContext, root: string, operation: PortableOperationName, input: Record<string, unknown>, preferredId = ''): Promise<DatabasePortableOperation> {
+  const intent = crypto.createHash('sha256').update(JSON.stringify({ root, operation, input })).digest('hex');
+  await rememberPortableOperationRoot(context, root);
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const existing = (await readDatabasePortableOperations(root)).find(item => item.key === intent);
+    if (existing?.value.status === 'pending') return existing.value;
+    if (preferredId && existing?.value.status === 'completed' && existing.value.id === preferredId) return existing.value;
+    const value: DatabasePortableOperation = { id: preferredId || crypto.randomUUID(), root, operation, input, intent, status: 'pending', updatedAt: Date.now() };
+    try {
+      await sendRuntimeDataRequest(root, { operation: 'patch_host_settings', input: {
+        namespace: 'portable_operations', ownerScope: 'global',
+        patches: [{ key: intent, expectedRevision: existing?.revision || 0, value }],
+        idempotencyKey: `portable-operation-claim:${value.id}`
+      } });
+      return value;
+    } catch (error) {
+      if ((error as Error).message !== 'revision_conflict' || attempt === 4) throw error;
+    }
+  }
+  throw new Error('portable_operation_claim_failed');
+}
+
+async function completeDatabasePortableOperation(root: string, entry: DatabasePortableOperation): Promise<void> {
+  const current = (await readDatabasePortableOperations(root)).find(item => item.key === entry.intent);
+  if (!current || current.value.id !== entry.id || current.value.status === 'completed') return;
+  await sendRuntimeDataRequest(root, { operation: 'patch_host_settings', input: {
+    namespace: 'portable_operations', ownerScope: 'global',
+    patches: [{ key: entry.intent, expectedRevision: current.revision, value: { ...entry, status: 'completed', updatedAt: Date.now() } }],
+    idempotencyKey: `portable-operation-complete:${entry.id}`
+  } });
+}
+
+async function runDurablePortableOperation<T>(context: vscode.ExtensionContext, root: string, operation: PortableOperationName, input: Record<string, unknown>): Promise<T> {
+  await migrateLegacyPortableOperations(context);
+  const legacy = pendingPortableOperations(context).find(item => item.root === root && item.operation === operation
+    && item.intent === crypto.createHash('sha256').update(JSON.stringify({ root, operation, input })).digest('hex'));
+  let retainedEntry = await claimDatabasePortableOperation(context, root, operation, input, legacy?.id);
+  if (legacy) {
+    await discardCompletedLegacyPortableOperation(context, `${portableOperationStatePrefix}${legacy.id}`);
+    await context.globalState.update(portableOperationStateKey, (context.globalState.get<PendingPortableOperation[]>(portableOperationStateKey) || []).filter(item => item.id !== legacy.id));
+    if (retainedEntry.status === 'completed') retainedEntry = await claimDatabasePortableOperation(context, root, operation, input);
+  }
+  const result = await sendRuntimeDataRequest<T>(root, { operation, input: { ...retainedEntry.input, idempotencyKey: `portable-operation:${retainedEntry.id}` } });
+  await completeDatabasePortableOperation(root, retainedEntry);
+  return result;
+}
+
+async function recoverDurablePortableOperations(context: vscode.ExtensionContext, currentRoot: string): Promise<void> {
+  await migrateLegacyPortableOperations(context);
+  const roots = [...new Set([...(context.globalState.get<string[]>(portableOperationRootsKey) || []), currentRoot, ...pendingPortableOperations(context).map(item => item.root)])];
+  for (const root of roots) {
+    await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root });
+    for (const legacy of pendingPortableOperations(context).filter(item => item.root === root)) {
+      await claimDatabasePortableOperation(context, root, legacy.operation, legacy.input, legacy.id);
+      await discardCompletedLegacyPortableOperation(context, `${portableOperationStatePrefix}${legacy.id}`);
+      await context.globalState.update(portableOperationStateKey, (context.globalState.get<PendingPortableOperation[]>(portableOperationStateKey) || []).filter(item => item.id !== legacy.id));
+    }
+    for (const item of await readDatabasePortableOperations(root)) {
+      const entry = item.value;
+      if (entry.status !== 'pending') continue;
+      await sendRuntimeDataRequest(root, { operation: entry.operation, input: { ...entry.input, idempotencyKey: `portable-operation:${entry.id}` } });
+      await completeDatabasePortableOperation(root, entry);
+      if (entry.operation === 'import_project' && root === currentRoot) await refreshProjectRegistryForContext(context, root);
+    }
+  }
+  if (normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath) === currentRoot) sendProjectsToWebviews(context);
+}
 const automationPromptConversationIds = new Set<string>();
 let activeAgentTerminalName = '';
 let agentTerminalCounter = 0;
@@ -401,22 +567,39 @@ export async function activate(context: vscode.ExtensionContext) {
   persistedSettingsWriteQueue = Promise.resolve();
   selectedProjectPathsByDataRoot.clear();
   persistedGlobalDataPathWrite = undefined;
+  nativeConfigurationProjectionValues.clear();
+  nativeConfigurationHostId = crypto.randomUUID();
+  nativeConfigurationHostStartedAt = Date.now();
+  const diagnosticRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+  configureLocalDiagnosticPersistence({
+    append: (root, event) => sendRuntimeDataRequest(root, { operation: 'append_diagnostic_event', input: event as unknown as Record<string, unknown> }).then(() => undefined),
+    read: (root) => sendRuntimeDataRequest(root, { operation: 'read_diagnostic_events', input: { limit: 250 } }) as Promise<{ items: Record<string, unknown>[] }>
+  }, diagnosticRoot);
   if (typeof vscode.workspace.onDidChangeConfiguration === 'function') {
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration('solopreneur')) {
         persistedSettingsCache = null;
         persistedSettingsCacheSource = '';
         persistedSettingsCacheWorkspaceRoot = '';
-        if (event.affectsConfiguration('solopreneur.globalDataPath')) {
-          const configuredRoot = String(vscode.workspace.getConfiguration('solopreneur').get('globalDataPath') ?? '').trim();
-          const configuredDataRoot = normalizeGlobalDataPathForExtension(configuredRoot);
-          const ownWrite = persistedGlobalDataPathWrite;
-          if (ownWrite && configuredDataRoot !== ownWrite.root) ownWrite.observedDifferentRoot = true;
-          const ownEcho = ownWrite && configuredDataRoot === ownWrite.root && !ownWrite.observedDifferentRoot;
-          if (!ownEcho && normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath) !== configuredDataRoot) {
-            void updatePersistedSettings(context, { globalDataPath: configuredRoot }).catch((error) => console.error('SoloMap data directory configuration update failed:', error));
+        const config = vscode.workspace.getConfiguration('solopreneur');
+        void (async () => {
+          const patch: Partial<SolopreneurSettings> = {};
+          const root = normalizeGlobalDataPathForExtension(String(config.get('globalDataPath') || getPersistedSettings(context).globalDataPath));
+          await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root });
+          for (const key of nativeConfigurationKeys) {
+            if (!event.affectsConfiguration(`solopreneur.${key}`)) continue;
+            const value = config.get(key) as SolopreneurSettings[typeof key];
+            const serialized = JSON.stringify(value);
+            if (nativeConfigurationProjectionValues.get(key) === serialized) {
+              nativeConfigurationProjectionValues.delete(key);
+              if (await consumeNativeConfigurationProjection(root, key, value)) continue;
+            }
+            nativeConfigurationProjectionValues.delete(key);
+            if (await consumeNativeConfigurationProjection(root, key, value)) continue;
+            (patch as Record<string, unknown>)[key] = value;
           }
-        }
+          await (Object.keys(patch).length ? updatePersistedSettings(context, patch) : refreshSettingsAfterConfigurationChange(context));
+        })().catch(error => console.error('SoloMap settings configuration update failed:', error));
       }
     }));
   }
@@ -434,6 +617,64 @@ export async function activate(context: vscode.ExtensionContext) {
     }
   );
   context.subscriptions.push(showRoadmapDisposable);
+
+  const runtimeRoot = () => normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+  const assertRuntimeRootCurrent = (root: string) => {
+    if (runtimeRoot() !== root) throw new Error('data_root_changed_during_action');
+  };
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.backupDatabase', async () => {
+    const root = runtimeRoot();
+    const destination = await vscode.window.showSaveDialog({ title: 'Back up all SoloMap data', filters: { 'SQLite database': ['db'] }, saveLabel: 'Back Up' });
+    if (!destination) return;
+    assertRuntimeRootCurrent(root);
+    await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root });
+    assertRuntimeRootCurrent(root);
+    const result = await runDurablePortableOperation<{ bytes: number }>(context, root, 'backup', { destination: destination.fsPath });
+    assertRuntimeRootCurrent(root);
+    vscode.window.showInformationMessage(`SoloMap backup saved (${result.bytes.toLocaleString()} bytes).`);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.restoreDatabaseBackup', async () => {
+    const root = runtimeRoot();
+    const source = await vscode.window.showOpenDialog({ title: 'Choose a SoloMap backup', canSelectFiles: true, canSelectFolders: false, canSelectMany: false, filters: { 'SQLite database': ['db'] } });
+    if (!source?.[0]) return;
+    const destination = await vscode.window.showOpenDialog({ title: 'Choose an empty folder for the restored data', canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Restore Here' });
+    if (!destination?.[0]) return;
+    assertRuntimeRootCurrent(root);
+    await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root });
+    assertRuntimeRootCurrent(root);
+    await runDurablePortableOperation(context, root, 'restore_backup', { source: source[0].fsPath, destinationRoot: destination[0].fsPath });
+    assertRuntimeRootCurrent(root);
+    vscode.window.showInformationMessage('SoloMap backup restored to the selected folder.');
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.exportProjectArchive', async () => {
+    const root = runtimeRoot();
+    const projectRoot = getSelectedProjectPath(context);
+    if (!projectRoot) { vscode.window.showErrorMessage('Choose a SoloMap project first.'); return; }
+    const destination = await vscode.window.showSaveDialog({ title: 'Export current SoloMap project', defaultUri: vscode.Uri.file(`${path.basename(projectRoot)}.solomap-project.json`), filters: { 'SoloMap project archive': ['json'] }, saveLabel: 'Export' });
+    if (!destination) return;
+    assertRuntimeRootCurrent(root);
+    await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root });
+    assertRuntimeRootCurrent(root);
+    await runDurablePortableOperation(context, root, 'export_project', { root: projectRoot, destination: destination.fsPath });
+    assertRuntimeRootCurrent(root);
+    vscode.window.showInformationMessage('SoloMap project exported without stored secrets.');
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.importProjectArchive', async () => {
+    const root = runtimeRoot();
+    const source = await vscode.window.showOpenDialog({ title: 'Choose a SoloMap project archive', canSelectFiles: true, canSelectFolders: false, canSelectMany: false, filters: { 'SoloMap project archive': ['json'] } });
+    if (!source?.[0]) return;
+    const destination = await vscode.window.showOpenDialog({ title: 'Choose the project folder', canSelectFiles: false, canSelectFolders: true, canSelectMany: false, openLabel: 'Import Here' });
+    if (!destination?.[0]) return;
+    assertRuntimeRootCurrent(root);
+    await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root });
+    assertRuntimeRootCurrent(root);
+    await runDurablePortableOperation(context, root, 'import_project', { source: source[0].fsPath, root: destination[0].fsPath });
+    assertRuntimeRootCurrent(root);
+    await refreshProjectRegistryForContext(context, root);
+    sendProjectsToWebviews(context);
+    vscode.window.showInformationMessage('SoloMap project imported.');
+  }));
+  void recoverDurablePortableOperations(context, runtimeRoot()).catch(error => console.error('SoloMap portable operation recovery failed:', error));
 
   context.subscriptions.push(vscode.commands.registerCommand('solopreneur.pauseAutonomousRuntime', async () => {
     const settings = getPersistedSettings(context);
@@ -458,6 +699,37 @@ export async function activate(context: vscode.ExtensionContext) {
     });
     vscode.window.showInformationMessage(settings.language === 'en' ? 'SoloMap background service removed. Project files were kept.' : 'SoloMap 后台服务已移除，项目文件均已保留。');
   }));
+  const connectExternalMemory = async () => {
+    const workspaceRoot = getSelectedProjectPath(context) || getWorkspaceRoot();
+    if (!workspaceRoot) throw new Error('No SoloMap project is open.');
+    const selected = await vscode.window.showOpenDialog({ canSelectFiles: false, canSelectFolders: true, canSelectMany: false, title: 'Connect CloudMCP memory' });
+    if (!selected?.[0]) return;
+    await ensureTaskRuntimeReady(context);
+    const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, getPersistedSettings(context).globalDataPath);
+    const project = await sendRuntimeDataRequest<{ projectId: string }>(globalRoot, { operation: 'register_project', input: { root: workspaceRoot } });
+    const result = await syncExternalMemoryTarget({ projectId: project.projectId, targetRoot: selected[0].fsPath, authorized: true,
+      sync: input => sendRuntimeDataRequest(globalRoot, { operation: 'sync_external_memory', input }),
+      reconcile: input => sendRuntimeDataRequest(globalRoot, { operation: 'reconcile_external_memory_target', input }) });
+    vscode.window.showInformationMessage(`SoloMap connected ${result.entries.length} CloudMCP memories.`);
+  };
+  const disconnectExternalMemory = async () => {
+    const workspaceRoot = getSelectedProjectPath(context) || getWorkspaceRoot();
+    if (!workspaceRoot) throw new Error('No SoloMap project is open.');
+    await ensureTaskRuntimeReady(context);
+    const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, getPersistedSettings(context).globalDataPath);
+    const project = await sendRuntimeDataRequest<{ projectId: string }>(globalRoot, { operation: 'register_project', input: { root: workspaceRoot } });
+    const targets = await sendRuntimeDataRequest<{ items: Array<{ target: string; active: number; total: number }> }>(globalRoot, { operation: 'read_external_memory_targets', input: { projectId: project.projectId } });
+    const selected = await vscode.window.showQuickPick(targets.items.map(item => ({ label: item.target, description: `${item.active}/${item.total} active`, target: item.target })), { placeHolder: 'Choose CloudMCP memory to disconnect' });
+    if (!selected) return;
+    const result = await disconnectExternalMemoryTarget({
+      projectId: project.projectId,
+      target: selected.target,
+      revoke: input => sendRuntimeDataRequest(globalRoot, { operation: 'revoke_external_memory_target', input })
+    });
+    vscode.window.showInformationMessage(`SoloMap revoked ${result.revoked} CloudMCP memories.`);
+  };
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.connectExternalMemory', connectExternalMemory));
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.disconnectExternalMemory', disconnectExternalMemory));
 
   const showFlowDisposable = vscode.commands.registerCommand(
     'solopreneur.showFlow',
@@ -537,16 +809,10 @@ export async function activate(context: vscode.ExtensionContext) {
   // Register settings saved broadcast command to keep Sidebar and Webview synced
   const settingsSavedDisposable = vscode.commands.registerCommand(
     'solopreneur.settingsSavedBroadcast',
-    () => {
-      if (sidebarProvider) {
-        sidebarProvider.sendSettings();
-        sidebarProvider.sendProjects();
-      }
-      if (activePanel) {
-        activePanel.title = getRoadmapPanelTitle(context);
-        postSettingsLoaded(activePanel.webview, getSettingsWithRuntimeState(context));
-        postProjectsLoaded(activePanel.webview, getProjectState(context));
-      }
+    async () => {
+      await broadcastSettings(context, false, false);
+      if (sidebarProvider) void sidebarProvider.sendProjects();
+      if (activePanel) postProjectsLoaded(activePanel.webview, getProjectState(context));
       if (activeStrategyPyramidPanel) {
         activeStrategyPyramidPanel.title = getStrategyPyramidPanelTitle(context);
         void refreshStrategyPyramidPanel(context);
@@ -621,7 +887,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalApproveNode', async (nodeId: string) => {
     if (syncEngine) {
-      syncEngine.updateNode(nodeId, { status: 'Completed', completedAt: new Date().toISOString() });
+      await syncEngine.updateNode(nodeId, { status: 'Completed', completedAt: new Date().toISOString() });
       sendNodesToWebview();
       refreshSidebarProjectCards();
       postNodeConversations(nodeId);
@@ -632,7 +898,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalDenyNode', async (nodeId: string) => {
     if (syncEngine) {
-      syncEngine.updateNode(nodeId, { status: 'Failed' });
+      await syncEngine.updateNode(nodeId, { status: 'Failed' });
       sendNodesToWebview();
       refreshSidebarProjectCards();
       postNodeConversations(nodeId);
@@ -679,7 +945,7 @@ export async function activate(context: vscode.ExtensionContext) {
     let store = intelligenceConversationStores.get(globalDataPath);
     if (!store) {
       store = new IntelligenceConversationStore(globalDataPath, async (messages) => {
-        syncCognitiveRuntimeConfig(getPersistedSettings(context));
+        await syncCognitiveRuntimeConfig(context, getPersistedSettings(context));
         const config = readCognitiveRuntimeConfig(globalDataPath);
         if (config.mode !== 'agent_cli') throw new Error('Choose an Agent in SoloMap settings to start a conversation.');
         const getIntelligenceProjects = async () => {
@@ -693,7 +959,7 @@ export async function activate(context: vscode.ExtensionContext) {
           agentCli: config.agentCli,
           model: config.model,
           configRevision: config.revision,
-          workingDirectory: path.join(globalDataPath, 'runtime', 'cognitive-work')
+          workingDirectory: globalDataPath
         });
         const selectedProjectPathForChat = await getIntelligenceSelectedProjectPath();
         const dataSource = await runtimeProjectMcpSource(globalDataPath, selectedProjectPathForChat);
@@ -712,6 +978,7 @@ export async function activate(context: vscode.ExtensionContext) {
             };
           },
           getTodayReview: async () => {
+            await refreshShadowRuntimeState(globalDataPath);
             const review = readTodayReview(globalDataPath, await getIntelligenceProjects());
             return review ? { summary: review.summary, items: review.todos.map(item => item.title) } : null;
           }
@@ -728,10 +995,25 @@ export async function activate(context: vscode.ExtensionContext) {
   };
   telegramConnection = createTelegramBackgroundConnection({
     host: createVscodeTelegramHost(context),
+    loadSettings: async globalDataPath => {
+      const requestedRoot = normalizeGlobalDataPathForExtension(globalDataPath);
+      const readRequestedRoot = async () => {
+        const existing = await refreshTelegramRuntimeConfig(requestedRoot);
+        return { telegramEnabled: existing.enabled, telegramBotToken: existing.botToken, telegramChatId: existing.chatId };
+      };
+      if (normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath) !== requestedRoot) return readRequestedRoot();
+      await refreshExtensionSettingsFromDatabase(context, requestedRoot);
+      if (normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath) !== requestedRoot) return readRequestedRoot();
+      const settings = getPersistedSettings(context);
+      return {
+        telegramEnabled: Boolean(settings.telegramEnabled),
+        telegramBotToken: await readTelegramBotToken(context),
+        telegramChatId: String(settings.telegramChatId || '')
+      };
+    },
     bindChat: async chatId => {
       await updatePersistedSettings(context, { telegramChatId: chatId });
-      sidebarProvider?.sendSettings();
-      if (activePanel) postSettingsLoaded(activePanel.webview, getSettingsWithRuntimeState(context));
+      await broadcastSettings(context, false, false);
     },
     ensureRuntime: () => reconcileBackgroundIntelligenceService(context)
   });
@@ -776,18 +1058,12 @@ export async function activate(context: vscode.ExtensionContext) {
     const activationGlobalDataPath = getPersistedSettings(context).globalDataPath;
     if (activationProjectRoot) {
       try {
-        void ensureDataReady().then(() => ensureSolomapMemoryStore(activationProjectRoot, activationGlobalDataPath)).catch(error => console.error('SoloMap database initialization failed:', error));
+        void ensureDataReady().then(async () => { ensureSolomapMemoryStore(activationProjectRoot, activationGlobalDataPath); await resumeCapabilityOperations(context, activationProjectRoot); }).catch(error => console.error('SoloMap database initialization failed:', error));
       } catch (error) {
         console.error('SoloMap global runtime refresh failed during activation:', error);
       }
     }
-    recordLocalUsageEvent(context, 'activation');
-    const retentionResults = pruneProjectsOutputLogs(getProjects(context).map((project) => project.path));
-    for (const result of retentionResults) {
-      if (result.errors.length > 0) {
-        console.error(`SoloMap failed to clean some output logs for ${result.projectPath}:`, result.errors);
-      }
-    }
+    void recordLocalUsageEvent(context, 'activation').catch(error => console.error('SoloMap failed to record local usage:', error));
     ensureActiveConversationPoller(context);
     synchronizeTelegramChannel(context);
     scheduleFocusReminder(context);
@@ -798,20 +1074,34 @@ export async function activate(context: vscode.ExtensionContext) {
 function synchronizeTelegramChannel(context: vscode.ExtensionContext): void {
   if (!telegramConnection) return;
   const settings = getPersistedSettings(context);
+  const legacyConversationKey = 'solopreneur.telegramIntelligenceConversations';
+  const legacyConversationIds = context.globalState.get<Record<string, string>>(legacyConversationKey) || {};
   void telegramConnection.sync(
     normalizeGlobalDataPathForExtension(settings.globalDataPath), getSelectedProjectPath(context), settings.language,
-    context.globalState.get<Record<string, string>>('solopreneur.telegramIntelligenceConversations') || {}
-  ).catch(error => recordLocalDiagnosticError(settings.globalDataPath, 'telegram.configure', classifyDiagnosticFailure(error)));
+    legacyConversationIds
+  ).then(result => {
+    if (Object.keys(legacyConversationIds).length && result.legacySettled) return context.globalState.update(legacyConversationKey, undefined);
+    return undefined;
+  }).catch(error => recordLocalDiagnosticError(settings.globalDataPath, 'telegram.configure', classifyDiagnosticFailure(error)));
 }
 
 async function reconcileBackgroundIntelligenceService(context: vscode.ExtensionContext): Promise<void> {
   try {
     const runtimeSettings = getPersistedSettings(context);
-    syncCognitiveRuntimeConfig(runtimeSettings);
     const globalDataPath = normalizeGlobalDataPathForExtension(runtimeSettings.globalDataPath);
     await activateObservedBackgroundRuntime(context.extensionPath, globalDataPath);
+    await refreshExtensionSettingsFromDatabase(context, globalDataPath);
+    await syncCognitiveRuntimeConfig(context, getPersistedSettings(context));
     await refreshProjectRegistryForContext(context, globalDataPath);
+    await refreshProjectAutonomyAuthorizations(context, globalDataPath);
+    const deviceUi = await readUiState(context, 'extension', 'global');
+    const deviceSelection = String(deviceUi.selectedProjectPath || '');
+    if (deviceSelection && getProjects(context).some(project => project.path === deviceSelection)) {
+      selectedProjectPathInMemory = deviceSelection;
+      selectedProjectPathsByDataRoot.set(globalDataPath, deviceSelection);
+    }
     await refreshSolomapCapabilityRegistries(getSettingsEnhancementWorkspaceRoot(), globalDataPath);
+    await resumeCapabilityOperations(context, getSettingsEnhancementWorkspaceRoot());
     if (globalDataPath === normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) refreshSidebarProjectCards();
     sidebarProvider?.sendDailyReview();
   } catch (error) {
@@ -826,14 +1116,7 @@ async function activateObservedBackgroundRuntime(extensionPath: string, globalDa
   const startedAt = Date.now();
   await withLocalDiagnosticTrace(trace, async () => {
     try {
-      if (isAutonomousRuntimeDisabled(globalDataPath)) {
-        if (!resume) {
-          trace.record('runtime.disabled', 'ok');
-          await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
-          return;
-        }
-        enableAutonomousRuntime(globalDataPath);
-      }
+      if (resume) enableAutonomousRuntime(globalDataPath);
       const serviceAvailable = await observeLocalDiagnosticStage('runtime.manager', () => isRuntimeServiceManagerAvailable());
       if (serviceAvailable) {
         try {
@@ -983,8 +1266,7 @@ async function handleSharedWebviewAction(
       const detail = code === 'restore_target_exists' ? (language === 'en' ? 'A file already exists at the original location. It was kept.' : '原位置已有文件，已保留现有内容。')
         : code === 'data_location_changed' ? (language === 'en' ? 'The data location changed. Refresh before continuing.' : '数据位置已变更，请刷新后继续。')
           : code === 'recycling_source_changed' ? (language === 'en' ? 'The file changed. It was kept; refresh to review it.' : '文件内容已变化，已保留。请刷新后重新查看。')
-            : code === 'maintenance_agent_native_boundary_unsupported' ? (language === 'en' ? 'Automatic cleanup requires Claude Code. Select it in Agent settings, then try again.' : '自动整理需要使用 Claude Code。请先在 Agent 设置中选择，然后重试。')
-              : code === 'agent_cli_not_found' ? (language === 'en' ? 'The selected Agent is not available. Install it or update its path in Agent settings.' : '未找到当前选择的 Agent。请先安装，或在 Agent 设置中更新路径。')
+            : code === 'agent_cli_not_found' ? (language === 'en' ? 'The selected Agent is not available. Install it or update its path in Agent settings.' : '未找到当前选择的 Agent。请先安装，或在 Agent 设置中更新路径。')
                 : code === 'maintenance_task_in_use' ? (language === 'en' ? 'Cleanup is already running in another window. Update the status to see its progress.' : '另一窗口正在整理。请更新状态查看进度。')
                   : code === 'agent_cli_start_failed' ? (language === 'en' ? 'Cleanup could not start. Check the selected Agent, then try again.' : '未能开始整理。请检查当前选择的 Agent，然后重试。')
                     : code === 'maintenance_launch_denied' ? (language === 'en' ? 'The cleanup connection expired. Update the status, then continue.' : '整理连接已过期。请更新状态后继续。')
@@ -1001,6 +1283,16 @@ async function handleSharedWebviewAction(
   };
   try {
     return await dispatchPluginAction(message, surface, {
+    'uiState.load': async (request) => {
+      const scopeKey = String(request.scopeKey || 'global').slice(0, 1024);
+      await respond({ command: 'uiStateLoaded', view: surface, scopeKey, loadRequestId: String(request.loadRequestId || ''), state: await readUiState(context, surface, scopeKey) });
+    },
+    'uiState.patch': async (request) => {
+      const scopeKey = String(request.scopeKey || 'global').slice(0, 1024);
+      const key = String(request.key || '').slice(0, 1024);
+      if (!key || request.value === undefined) throw new Error('invalid_ui_state_patch');
+      await respond({ command: 'uiStateLoaded', view: surface, scopeKey, state: await patchUiState(context, surface, scopeKey, key, request.value, String(request.requestId || `ui-state:${crypto.randomUUID()}`)) });
+    },
     'conversation.runStep': async (request) => {
       await revealAgentStartupTerminal(
         context,
@@ -1062,11 +1354,24 @@ async function handleSharedWebviewAction(
         result.plan,
         currentAutomation.scheduledTasks || []
       );
+      const currentTasks = currentAutomation.scheduledTasks || [];
+      const nextById = new Map(scheduledTasks.map(task => [task.id, task]));
+      const currentById = new Map(currentTasks.map(task => [task.id, task]));
+      const scheduledTaskMutations: NonNullable<SolomapAutomationSettings['scheduledTaskMutations']> = [];
+      for (const task of currentTasks) {
+        if (task.sourceTimePlanProjectPath === projectPath && !nextById.has(task.id)) scheduledTaskMutations.push({ operation: 'delete', taskId: task.id, expectedTask: task });
+      }
+      for (const task of scheduledTasks) {
+        if (task.sourceTimePlanProjectPath !== projectPath) continue;
+        scheduledTaskMutations.push(currentById.has(task.id)
+          ? { operation: 'patch', taskId: task.id, expectedTask: currentById.get(task.id), patch: task }
+          : { operation: 'add', taskId: task.id, task });
+      }
       await updatePersistedSettings(context, {
-        automationTasks: { scheduledTasks }
+        automationTasks: { scheduledTaskMutations }
       });
       confirmTimePlan(projectPath);
-      sidebarProvider?.sendSettings();
+      await broadcastSettings(context, false, false);
       await respond({ command: 'timePlansLoaded', ...buildTimePlansPayload(context) });
     },
     'collaboration.getRooms': async () => {
@@ -1313,6 +1618,30 @@ async function handleSharedWebviewAction(
         }
       }
     },
+    'conversation.getLogs': async (request) => {
+      const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      const executionLogId = Number(request.conversationId || 0);
+      const nodeId = String(request.nodeId || '');
+      const requestId = String(request.requestId || '');
+      if (!projectPath || !getProjects(context).some(project => project.path === projectPath)
+        || !Number.isSafeInteger(executionLogId) || executionLogId < 1 || !nodeId || !requestId) return;
+      const globalDataPath = normalizeSolomapGlobalPath(projectPath, getPersistedSettings(context).globalDataPath);
+      try {
+        await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
+        const snapshot = await readConversationLogSnapshot(runLifecycleClient(projectPath, globalDataPath), projectPath, executionLogId, {
+          nodeId,
+          runId: String(request.runId || ''),
+          turnId: String(request.turnId || '')
+        });
+        await respond({
+          command: 'conversationLogsLoaded', requestId, projectPath, nodeId, conversationId: executionLogId,
+          runId: snapshot.runId, turnId: snapshot.turnId, revision: snapshot.revision,
+          stdout: snapshot.stdout.toString('utf8'), stderr: snapshot.stderr.toString('utf8')
+        });
+      } catch {
+        await respond({ command: 'conversationLogsLoaded', requestId, projectPath, nodeId, conversationId: executionLogId, error: '读取运行记录失败，请重新展开。' });
+      }
+    },
     'conversation.getProjectHistory': async (request) => {
       if (sidebarProvider) {
         await sidebarProvider.sendProjectConversationHistory(String(request.projectPath || getSelectedProjectPath(context) || ''));
@@ -1438,7 +1767,7 @@ async function handleSharedWebviewAction(
         return;
       }
       const scope = String(request.scope || request.targetId || request.nodeId || 'conversation');
-      const files = await savePastedImageAttachmentsAsync(projectPath, scope, request.attachments || []);
+      const files = await savePastedImageAttachmentsAsync(projectPath, scope, request.attachments || [], getPersistedSettings(context).globalDataPath);
       if (surface === 'sidebar') {
         await respond({
           command: 'pastedAttachmentsSaved',
@@ -1550,28 +1879,28 @@ async function handleSharedWebviewAction(
       });
     },
     'settings.update': async (request) => {
-      const openCodeProvider = normalizeOpenCodeProvider(request.openCodeProvider);
-      await updateOpenCodeApiKey(
-        context.secrets,
-        openCodeProvider,
-        request.openCodeApiKey,
-        request.openCodeRemoveApiKey === true
-      );
-      await updatePersistedSettings(context, {
-        cliPath: request.cliPath,
-        agentModelPreferences: request.agentModelPreferences,
-        cognitiveEngineAgent: request.cognitiveEngineAgent,
-        openCodeProvider: request.openCodeProvider,
-        language: request.language,
-        globalPrompt: request.globalPrompt,
-        globalDataPath: request.globalDataPath,
-        reviewerCliPath: request.reviewerCliPath,
-        collaborationReviewMode: request.collaborationReviewMode,
-        automationTasks: request.automationTasks,
-        ...(typeof request.telegramEnabled === 'boolean' ? { telegramEnabled: request.telegramEnabled } : {}),
-        ...(typeof request.telegramBotToken === 'string' && request.telegramBotToken.trim()
-          ? { telegramBotToken: request.telegramBotToken.trim() } : {})
-      });
+      const settingsRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+      await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: settingsRoot });
+      await refreshExtensionSettingsFromDatabase(context, settingsRoot);
+      if (Object.prototype.hasOwnProperty.call(request, 'openCodeApiKey') || request.openCodeRemoveApiKey === true) {
+        const openCodeProvider = normalizeOpenCodeProvider(request.openCodeProvider || getPersistedSettings(context).openCodeProvider);
+        await updateOpenCodeApiKey(context.secrets, openCodeProvider, request.openCodeApiKey, request.openCodeRemoveApiKey === true);
+      }
+      if (typeof request.telegramBotToken === 'string' && request.telegramBotToken.trim()) await storeTelegramBotToken(context, request.telegramBotToken);
+      const settingPatch: Partial<SolopreneurSettings> = {
+        ...(Object.prototype.hasOwnProperty.call(request, 'cliPath') ? { cliPath: request.cliPath } : {}),
+        ...(Object.prototype.hasOwnProperty.call(request, 'agentModelPreferences') ? { agentModelPreferences: request.agentModelPreferences } : {}),
+        ...(Object.prototype.hasOwnProperty.call(request, 'cognitiveEngineAgent') ? { cognitiveEngineAgent: request.cognitiveEngineAgent } : {}),
+        ...(Object.prototype.hasOwnProperty.call(request, 'openCodeProvider') ? { openCodeProvider: request.openCodeProvider } : {}),
+        ...(Object.prototype.hasOwnProperty.call(request, 'language') ? { language: request.language } : {}),
+        ...(Object.prototype.hasOwnProperty.call(request, 'globalPrompt') ? { globalPrompt: request.globalPrompt } : {}),
+        ...(Object.prototype.hasOwnProperty.call(request, 'globalDataPath') ? { globalDataPath: request.globalDataPath } : {}),
+        ...(Object.prototype.hasOwnProperty.call(request, 'reviewerCliPath') ? { reviewerCliPath: request.reviewerCliPath } : {}),
+        ...(Object.prototype.hasOwnProperty.call(request, 'collaborationReviewMode') ? { collaborationReviewMode: request.collaborationReviewMode } : {}),
+        ...(Object.prototype.hasOwnProperty.call(request, 'automationTasks') ? { automationTasks: request.automationTasks } : {}),
+        ...(typeof request.telegramEnabled === 'boolean' ? { telegramEnabled: request.telegramEnabled } : {})
+      };
+      await updatePersistedSettings(context, settingPatch);
       if (typeof request.telegramEnabled === 'boolean' || (typeof request.telegramBotToken === 'string' && request.telegramBotToken.trim())) {
         synchronizeTelegramChannel(context);
       }
@@ -1609,20 +1938,24 @@ async function handleSharedWebviewAction(
     },
     'ability.installSkill': async (request) => handleInstallSolomapSkill(context, request.skillInput || ''),
     'ability.installMcp': async (request) => handleInstallSolomapMcp(context, request.mcpInput || ''),
-    'ability.installEnhancement': async (request) => handleInstallSolomapEnhancement(context, request.enhancementId || ''),
-    'ability.checkEnhancement': async (request) => handleCheckSolomapEnhancement(context, request.enhancementId || ''),
-    'ability.setEnhancementEnabled': async (request) => handleSetSolomapEnhancementEnabled(context, request.enhancementId || '', Boolean(request.enabled)),
-    'ability.uninstallEnhancement': async (request) => handleUninstallSolomapEnhancement(context, request.enhancementId || ''),
+    'ability.upgradeSkill': async (request) => handleUpgradeSolomapSkill(context, request.skillId || ''),
+    'ability.upgradeMcp': async (request) => handleUpgradeSolomapMcp(context, request.mcpId || ''),
+    'ability.setSkillEnabled': async (request) => handleSetSolomapSkillEnabled(context, request.skillId || '', Boolean(request.enabled)),
+    'ability.setMcpEnabled': async (request) => handleSetSolomapMcpEnabled(context, request.mcpId || '', Boolean(request.enabled)),
     'ability.uninstallSkill': async (request) => handleUninstallSolomapSkill(context, request.skillId || ''),
     'ability.uninstallMcp': async (request) => handleUninstallSolomapMcp(context, request.mcpId || ''),
     'project.getAll': async () => {
+      const registryRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+      await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: registryRoot });
+      await refreshProjectRegistryForContext(context, registryRoot);
+      await refreshProjectAutonomyAuthorizations(context, registryRoot);
       if (surface === 'sidebar' && sidebarProvider) {
-        sidebarProvider.sendProjects();
+        await sidebarProvider.sendProjects();
       } else {
         const projectState = getProjectState(context);
         await postProjectsLoaded(target, projectState);
         if (surface === 'roadmap' && target && projectState.selectedProjectPath) {
-          const recentSnapshot = readCachedConversationSnapshot(
+          const recentSnapshot = await readCachedConversationSnapshot(
             getPersistedSettings(context).globalDataPath,
             projectState.selectedProjectPath
           );
@@ -1644,24 +1977,23 @@ async function handleSharedWebviewAction(
       const projectPath = String(request.projectPath || '');
       const updatesAutonomy = request.autonomyEnabled !== undefined || request.toolNetworkDisabled !== undefined;
       await updateProjectMetadata(context, projectPath, {
-        name: request.name,
-        type: request.projectType,
-        priority: request.priority,
-        description: request.description,
-        notes: request.notes
+        ...(Object.prototype.hasOwnProperty.call(request, 'name') ? { name: request.name } : {}),
+        ...(Object.prototype.hasOwnProperty.call(request, 'projectType') ? { type: request.projectType } : {}),
+        ...(Object.prototype.hasOwnProperty.call(request, 'priority') ? { priority: request.priority } : {}),
+        ...(Object.prototype.hasOwnProperty.call(request, 'description') ? { description: request.description } : {}),
+        ...(Object.prototype.hasOwnProperty.call(request, 'notes') ? { notes: request.notes } : {})
       }, !updatesAutonomy);
       if (updatesAutonomy) {
         const projects = getProjects(context);
-        const authorization = new ProjectAutonomyAuthorizationStore({
-          globalDataPath: normalizeGlobalDataPathForRegistry(getPersistedSettings(context).globalDataPath, getWorkspaceRoot())
-        });
-        const current = authorization.get(projectPath);
-        authorization.setPolicy(projectPath, {
+        const root = normalizeGlobalDataPathForRegistry(getPersistedSettings(context).globalDataPath, getWorkspaceRoot());
+        const current = await sendRuntimeDataRequest<{ enabled: boolean; toolNetworkDisabled: boolean; epoch: number }>(root, { operation: 'read_project_autonomy_authorization', input: { projectPath } });
+        await sendRuntimeDataRequest(root, { operation: 'patch_project_autonomy_authorization', input: {
+          projectPath, registeredProjectPaths: projects.map(project => project.path),
           enabled: request.autonomyEnabled === undefined ? current.enabled : Boolean(request.autonomyEnabled),
-          toolNetworkDisabled: request.toolNetworkDisabled === undefined
-            ? current.toolNetworkDisabled
-            : Boolean(request.toolNetworkDisabled)
-        }, projects.map(project => project.path));
+          toolNetworkDisabled: request.toolNetworkDisabled === undefined ? current.toolNetworkDisabled : Boolean(request.toolNetworkDisabled),
+          expectedEpoch: current.epoch, idempotencyKey: `project-autonomy:${crypto.randomUUID()}`
+        } });
+        await refreshProjectAutonomyAuthorizations(context, root, projects);
         sendLocalProjectsToWebviews(context);
       }
       await respond({ command: 'projectMetadataSaved', projectPath, requestId: String(request.requestId || '') });
@@ -1709,11 +2041,12 @@ async function handleSharedWebviewAction(
     'issue.getDetails': async (request) => {
       const projectPath = String(request.projectPath || '');
       const issueNumber = Number(request.issueNumber || 0);
-      const cached = readCachedIssueDetails(projectPath, issueNumber);
+      const signalDataPath = getPersistedSettings(context).globalDataPath;
+      const cached = await readCachedIssueDetails(projectPath, issueNumber, signalDataPath);
       if (cached) {
         await respond({ command: 'issueDetailsLoaded', projectPath, issueNumber, ...cached });
       }
-      await respond({ command: 'issueDetailsLoaded', projectPath, issueNumber, ...readProjectIssueDetails(projectPath, issueNumber) });
+      await respond({ command: 'issueDetailsLoaded', projectPath, issueNumber, ...await readProjectIssueDetails(projectPath, issueNumber, signalDataPath) });
     },
     'issue.create': async (request) => {
       const projectPath = String(request.projectPath || '');
@@ -1734,7 +2067,7 @@ async function handleSharedWebviewAction(
         sourceMessageId: String(request.sourceMessageId || '')
       });
       if (result.ok) {
-        const issues = await loadExternalIssueSummary(projectPath, { force: true }).catch(() => null);
+        const issues = await loadExternalIssueSummary(projectPath, { force: true, globalDataPath: getPersistedSettings(context).globalDataPath }).catch(() => null);
         if (issues && externalSignalResponseVersions.isCurrent(projectPath, 'issues', issueVersion)) {
           await respond({ command: 'projectIssuesLoaded', projectPath, issues });
         }
@@ -1747,7 +2080,7 @@ async function handleSharedWebviewAction(
       if (result.ok) sidebarProvider?.invalidateProjectSignals(projectPath, ['issues']);
       await respond({ command: 'issueActionCompleted', projectPath, success: result.ok, message: result.message });
       if (result.ok) {
-        const issues = await loadExternalIssueSummary(projectPath, { force: true }).catch(() => null);
+        const issues = await loadExternalIssueSummary(projectPath, { force: true, globalDataPath: getPersistedSettings(context).globalDataPath }).catch(() => null);
         if (issues && externalSignalResponseVersions.isCurrent(projectPath, 'issues', issueVersion)) {
           await respond({ command: 'projectIssuesLoaded', projectPath, issues });
         }
@@ -1759,7 +2092,7 @@ async function handleSharedWebviewAction(
       const pullRequestVersion = result.ok ? externalSignalResponseVersions.next(projectPath, ['pullRequests']).pullRequests : 0;
       if (result.ok) sidebarProvider?.invalidateProjectSignals(projectPath, ['pullRequests']);
       await respond({ command: 'pullRequestActionCompleted', projectPath, success: result.ok, message: result.message });
-      const pullRequests = await loadExternalPullRequestSummary(projectPath, { force: true }).catch(() => null);
+      const pullRequests = await loadExternalPullRequestSummary(projectPath, { force: true, globalDataPath: getPersistedSettings(context).globalDataPath }).catch(() => null);
       if (pullRequests && externalSignalResponseVersions.isCurrent(projectPath, 'pullRequests', pullRequestVersion)) {
         await respond({ command: 'projectPullRequestsLoaded', projectPath, pullRequests });
       }
@@ -1769,10 +2102,10 @@ async function handleSharedWebviewAction(
       const responseVersions = externalSignalResponseVersions.next(projectPath, ['issues', 'pullRequests', 'delivery', 'security']);
       sidebarProvider?.invalidateProjectSignals(projectPath, ['issues', 'pullRequests', 'delivery', 'security']);
       const [issues, pullRequests, delivery, security, runIndexHealth, growthView] = await Promise.all([
-        loadExternalIssueSummary(projectPath, { force: true }).catch(() => null),
-        loadExternalPullRequestSummary(projectPath, { force: true }).catch(() => null),
-        loadExternalDeliverySummary(projectPath, { force: true }).catch(() => null),
-        loadExternalSecuritySummary(projectPath, { force: true }).catch(() => null),
+        loadExternalIssueSummary(projectPath, { force: true, globalDataPath: getPersistedSettings(context).globalDataPath }).catch(() => null),
+        loadExternalPullRequestSummary(projectPath, { force: true, globalDataPath: getPersistedSettings(context).globalDataPath }).catch(() => null),
+        loadExternalDeliverySummary(projectPath, { force: true, globalDataPath: getPersistedSettings(context).globalDataPath }).catch(() => null),
+        loadExternalSecuritySummary(projectPath, { force: true, globalDataPath: getPersistedSettings(context).globalDataPath }).catch(() => null),
         backfillRunIndexFromDigests(projectPath, context.extensionPath, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)).catch((error) => {
           recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'project.refresh.run_index', error);
           console.error('SoloMap run index backfill failed during project refresh:', error);
@@ -1837,7 +2170,7 @@ async function handleSharedWebviewAction(
         request.title || '',
         request.body || '',
         request.category || '',
-        buildFeedbackUsageSummary(context)
+        await buildFeedbackUsageSummary(context)
       )));
     }
     });
@@ -1857,8 +2190,13 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
   }
   const saved = context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
   const config = vscode.workspace.getConfiguration('solopreneur');
+  const configuredDataPath = String(saved.globalDataPath ?? config.get('globalDataPath') ?? '');
+  const configuredRoot = normalizeGlobalDataPathForExtension(configuredDataPath);
+  const databaseLoaded = databaseSettingsByRoot.has(configuredRoot);
+  const database = databaseSettingsByRoot.get(configuredRoot) || {};
+  const legacy = databaseLoaded ? {} : saved;
   const settingsWorkspaceRoot = getSettingsEnhancementWorkspaceRoot();
-  const savedSource = JSON.stringify(saved) + ':' + getSolomapCapabilityRevision(settingsWorkspaceRoot, String(saved.globalDataPath ?? config.get('globalDataPath') ?? ''));
+  const savedSource = JSON.stringify({ globalDataPath: saved.globalDataPath, database }) + ':' + getSolomapCapabilityRevision(settingsWorkspaceRoot, configuredDataPath);
   if (
     persistedSettingsCache
     && persistedSettingsCacheSource === savedSource
@@ -1867,31 +2205,29 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
     return persistedSettingsCache;
   }
   const baseSettings = {
-    cliPath: saved.cliPath || config.get('cliPath') || 'agy',
-    agentModelPreferences: normalizeAgentModelPreferences(saved.agentModelPreferences),
-    cognitiveEngineAgent: String(saved.cognitiveEngineAgent && saved.cognitiveEngineAgent !== 'local_only' ? saved.cognitiveEngineAgent : 'follow_main'),
-    openCodeProvider: normalizeOpenCodeProvider(saved.openCodeProvider)
-      || getOpenCodeProviderFromModel(normalizeAgentModelPreferences(saved.agentModelPreferences).opencode),
-    language: saved.language || config.get('language') || 'zh',
-    globalPrompt: saved.globalPrompt ?? config.get('globalPrompt') ?? '',
+    cliPath: database.cliPath || legacy.cliPath || config.get('cliPath') || 'agy',
+    agentModelPreferences: normalizeAgentModelPreferences(database.agentModelPreferences || legacy.agentModelPreferences),
+    cognitiveEngineAgent: String((database.cognitiveEngineAgent || legacy.cognitiveEngineAgent) && (database.cognitiveEngineAgent || legacy.cognitiveEngineAgent) !== 'local_only' ? (database.cognitiveEngineAgent || legacy.cognitiveEngineAgent) : 'follow_main'),
+    openCodeProvider: normalizeOpenCodeProvider(database.openCodeProvider || legacy.openCodeProvider)
+      || getOpenCodeProviderFromModel(normalizeAgentModelPreferences(database.agentModelPreferences || legacy.agentModelPreferences).opencode),
+    language: database.language || legacy.language || config.get('language') || 'zh',
+    globalPrompt: database.globalPrompt ?? legacy.globalPrompt ?? config.get('globalPrompt') ?? '',
     globalDataPath: saved.globalDataPath ?? config.get('globalDataPath') ?? '',
     taskPermissionMode: 'auto',
-    reviewerCliPath: saved.reviewerCliPath ?? config.get('reviewerCliPath') ?? '',
-    collaborationReviewMode: normalizeCollaborationReviewMode(saved.collaborationReviewMode ?? config.get('collaborationReviewMode') ?? 'high_risk'),
-    // VS Code configuration is the durable, user-visible source for automation.
-    // globalState remains a fallback for installations created before the setting existed.
-    automationTasks: normalizeAutomationSettings(config.get('automationTasks') || saved.automationTasks || {}),
-    proEntitlements: saved.proEntitlements || {},
-    proAccount: normalizeProAccountStatus(saved.proAccount),
+    reviewerCliPath: database.reviewerCliPath ?? legacy.reviewerCliPath ?? config.get('reviewerCliPath') ?? '',
+    collaborationReviewMode: normalizeCollaborationReviewMode(database.collaborationReviewMode ?? legacy.collaborationReviewMode ?? config.get('collaborationReviewMode') ?? 'high_risk'),
+    automationTasks: normalizeAutomationSettings(database.automationTasks || legacy.automationTasks || config.get('automationTasks') || {}),
+    proEntitlements: database.proEntitlements || legacy.proEntitlements || {},
+    proAccount: normalizeProAccountStatus(database.proAccount || legacy.proAccount),
     enabledEnhancements: {},
-    telegramEnabled: saved.telegramEnabled ?? config.get('telegramEnabled') ?? false,
-    telegramBotToken: saved.telegramBotToken ?? config.get('telegramBotToken') ?? '',
-    telegramChatId: saved.telegramChatId ?? config.get('telegramChatId') ?? ''
+    telegramEnabled: database.telegramEnabled ?? legacy.telegramEnabled ?? config.get('telegramEnabled') ?? false,
+    telegramBotToken: '',
+    telegramChatId: database.telegramChatId ?? legacy.telegramChatId ?? config.get('telegramChatId') ?? ''
   };
   persistedSettingsCache = {
     ...baseSettings,
-    enhancementStatuses: getSolomapEnhancementStatusSummaries(settingsWorkspaceRoot, baseSettings.globalDataPath),
-    enabledEnhancements: getEnabledEnhancementMap(settingsWorkspaceRoot, baseSettings.globalDataPath),
+    enhancementStatuses: [],
+    enabledEnhancements: {},
     skills: readSolomapSkillRegistrySnapshot(settingsWorkspaceRoot, baseSettings.globalDataPath).skills || [],
     connectors: [
       getIntelligenceMcpConnector(),
@@ -1903,15 +2239,106 @@ function getPersistedSettings(context: vscode.ExtensionContext): SolopreneurSett
   return persistedSettingsCache;
 }
 
+const databaseSettingKeys: Array<keyof SolopreneurSettings> = [
+  'cliPath', 'agentModelPreferences', 'cognitiveEngineAgent', 'openCodeProvider', 'language', 'reviewerCliPath',
+  'collaborationReviewMode', 'automationTasks', 'proEntitlements', 'proAccount', 'telegramEnabled', 'telegramChatId'
+];
+
+async function refreshExtensionSettingsFromDatabase(context: vscode.ExtensionContext, root: string): Promise<void> {
+  const result = await sendRuntimeDataRequest<{ items: Array<{ key: string; revision: number; value?: unknown }> }>(root, { operation: 'read_host_settings', input: { namespace: 'extension', ownerScope: 'global' } });
+  const present = new Set(result.items.map(item => item.key));
+  const missing = databaseSettingKeys.filter(key => !present.has(key));
+  if (missing.length) {
+    const seed = getPersistedSettings(context);
+    const patches = missing.filter(key => seed[key] !== undefined).map(key => ({ key, expectedRevision: 0, value: seed[key] }));
+    if (patches.length) {
+      try {
+        await sendRuntimeDataRequest(root, { operation: 'patch_host_settings', input: { namespace: 'extension', ownerScope: 'global', patches, idempotencyKey: `extension-settings-bootstrap:${crypto.randomUUID()}` } });
+      } catch (error) {
+        if ((error as Error).message !== 'revision_conflict') throw error;
+      }
+      return refreshExtensionSettingsFromDatabase(context, root);
+    }
+  }
+  let policy = await sendRuntimeDataRequest<{ objectId?: string; revision?: number; data: { content: string } } | null>(root, { operation: 'read_global_prompt_policy', input: {} });
+  const legacy = context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
+  if (!policy && !databaseSettingsByRoot.has(root) && Object.prototype.hasOwnProperty.call(legacy, 'globalPrompt')) {
+    try {
+      await sendRuntimeDataRequest(root, { operation: 'save_global_prompt', input: { policy: null, content: String(legacy.globalPrompt || ''), source: 'user', idempotencyKey: `global-prompt-bootstrap:${nativeProjectionValueHash(String(legacy.globalPrompt || ''))}` } });
+    } catch (error) {
+      if (!['revision_conflict', 'global_prompt_revision_conflict'].includes((error as Error).message)) throw error;
+    }
+    policy = await sendRuntimeDataRequest<{ objectId?: string; revision?: number; data: { content: string } } | null>(root, { operation: 'read_global_prompt_policy', input: {} });
+  }
+  databaseSettingsByRoot.set(root, {
+    ...Object.fromEntries(result.items.filter(item => databaseSettingKeys.includes(item.key as keyof SolopreneurSettings)).map(item => [item.key, item.value])),
+    ...(policy ? { globalPrompt: String(policy.data.content || '') } : {})
+  } as Partial<SolopreneurSettings>);
+  databaseSettingRevisionsByRoot.set(root, new Map(result.items.map(item => [item.key, item.revision])));
+  invalidatePersistedSettingsCache();
+}
+
+async function persistExtensionSettingsToDatabase(context: vscode.ExtensionContext, root: string, settings: Partial<SolopreneurSettings>, sourcePatch: Partial<SolopreneurSettings>, keys: Array<keyof SolopreneurSettings>, idempotencyKey: string): Promise<void> {
+  const managed = keys.filter(key => databaseSettingKeys.includes(key));
+  await refreshExtensionSettingsFromDatabase(context, root);
+  if (!managed.length) return;
+  const revisions = databaseSettingRevisionsByRoot.get(root) || new Map<string, number>();
+  const latest = databaseSettingsByRoot.get(root) || {};
+  const valueFor = (key: keyof SolopreneurSettings): unknown => {
+    if (key === 'agentModelPreferences') return mergeAgentModelPreferences(latest.agentModelPreferences, sourcePatch.agentModelPreferences);
+    if (key === 'automationTasks') return mergeAutomationSettings(latest.automationTasks, sourcePatch.automationTasks);
+    return settings[key];
+  };
+  try {
+    await sendRuntimeDataRequest(root, { operation: 'patch_host_settings', input: { namespace: 'extension', ownerScope: 'global', patches: managed.map(key => ({ key, expectedRevision: revisions.get(key) || 0, value: valueFor(key) })), idempotencyKey } });
+  } catch (error) {
+    if ((error as Error).message !== 'revision_conflict') throw error;
+    await refreshExtensionSettingsFromDatabase(context, root);
+    return persistExtensionSettingsToDatabase(context, root, settings, sourcePatch, managed, idempotencyKey);
+  }
+  await refreshExtensionSettingsFromDatabase(context, root);
+}
+
+async function refreshSettingsAfterConfigurationChange(context: vscode.ExtensionContext): Promise<void> {
+  const root = normalizeGlobalDataPathForExtension(String(vscode.workspace.getConfiguration('solopreneur').get('globalDataPath') ?? getPersistedSettings(context).globalDataPath));
+  await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root });
+  await refreshExtensionSettingsFromDatabase(context, root);
+  await broadcastSettings(context);
+  synchronizeTelegramChannel(context);
+}
+
+async function readUiState(context: vscode.ExtensionContext, view: string, scopeKey: string): Promise<Record<string, unknown>> {
+  const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+  await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root });
+  const result = await sendRuntimeDataRequest<{ items: Array<{ key: string; revision: number; value: unknown }> }>(root, { operation: 'read_ui_state', input: { view, scopeKey } });
+  uiStateRevisionsByRoot.set(`${root}\n${view}\n${scopeKey}`, new Map(result.items.map(item => [item.key, item.revision])));
+  return Object.fromEntries(result.items.map(item => [item.key, item.value]));
+}
+
+async function patchUiState(context: vscode.ExtensionContext, view: string, scopeKey: string, key: string, value: unknown, idempotencyKey = `ui-state:${crypto.randomUUID()}`): Promise<Record<string, unknown>> {
+  const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+  const cacheKey = `${root}\n${view}\n${scopeKey}`;
+  await readUiState(context, view, scopeKey);
+  const revisions = uiStateRevisionsByRoot.get(cacheKey) || new Map<string, number>();
+  try {
+    const result = await sendRuntimeDataRequest<{ items: Array<{ key: string; revision: number; value: unknown }> }>(root, { operation: 'patch_ui_state', input: { view, scopeKey, patches: [{ key, expectedRevision: revisions.get(key) || 0, value }], idempotencyKey } });
+    uiStateRevisionsByRoot.set(cacheKey, new Map(result.items.map(item => [item.key, item.revision])));
+    return Object.fromEntries(result.items.map(item => [item.key, item.value]));
+  } catch (error) {
+    if ((error as Error).message !== 'revision_conflict') throw error;
+    await readUiState(context, view, scopeKey);
+    return patchUiState(context, view, scopeKey, key, value, idempotencyKey);
+  }
+}
+
 type ReviewLaunchSettings = Pick<SolopreneurSettings, 'cliPath' | 'globalPrompt' | 'globalDataPath' | 'taskPermissionMode'>;
 
 function getReviewLaunchSettings(context: vscode.ExtensionContext): ReviewLaunchSettings {
-  const saved = pendingPersistedSettings || context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
-  const config = vscode.workspace.getConfiguration('solopreneur');
+  const saved = pendingPersistedSettings || getPersistedSettings(context);
   return {
-    cliPath: saved.cliPath || config.get('cliPath') || 'agy',
-    globalPrompt: saved.globalPrompt ?? config.get('globalPrompt') ?? '',
-    globalDataPath: saved.globalDataPath ?? config.get('globalDataPath') ?? '',
+    cliPath: saved.cliPath || 'agy',
+    globalPrompt: saved.globalPrompt ?? '',
+    globalDataPath: saved.globalDataPath ?? '',
     taskPermissionMode: 'auto'
   };
 }
@@ -2010,7 +2437,7 @@ async function clearStoredProAccess(
     await context.secrets.delete(passportGrantSecretKey);
     const saved = getPersistedSettings(context);
     const proEntitlements = clearProEntitlements(saved.proEntitlements || {});
-    const stored = pendingPersistedSettings || context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
+    const stored = pendingPersistedSettings || getPersistedSettings(context);
     const account = stored.proAccount;
     const accountCleared = !account || (typeof account === 'object' && !account.authenticated && !account.allowed && !account.email && !account.expiresAt);
     if (accountCleared && JSON.stringify(saved.proEntitlements || {}) === JSON.stringify(proEntitlements)) return false;
@@ -2027,11 +2454,12 @@ async function clearStoredProAccess(
 }
 
 async function broadcastSettings(context: vscode.ExtensionContext, includeFlow = true, includeStrategy = true): Promise<void> {
+  const settings = await getSettingsWithOpenCodeSecretState(context);
   if (sidebarProvider) {
-    sidebarProvider.sendSettings();
+    sidebarProvider.sendSettings(settings);
   }
   if (activePanel) {
-    postSettingsLoaded(activePanel.webview, getSettingsWithRuntimeState(context));
+    postSettingsLoaded(activePanel.webview, settings);
     if (includeFlow) await postFlowStateToWebview(context);
   }
   if (includeStrategy && activeStrategyPyramidPanel) {
@@ -2489,22 +2917,62 @@ function mergeAutomationSettings(currentValue: unknown, nextValue: unknown): Sol
     ? source.triggers as Record<string, unknown>
     : {};
   const nextNormalized = normalizeAutomationSettings(source);
-  const scheduledTasks = Object.prototype.hasOwnProperty.call(source, 'scheduledTasks')
+  let scheduledTasks = Object.prototype.hasOwnProperty.call(source, 'scheduledTasks')
     ? nextNormalized.scheduledTasks || []
     : Object.prototype.hasOwnProperty.call(nextTriggers, 'scheduled_time')
       ? nextNormalized.scheduledTasks || []
       : current.scheduledTasks || [];
+  if (Array.isArray(source.scheduledTaskMutations)) {
+    scheduledTasks = [...(current.scheduledTasks || [])];
+    for (const raw of source.scheduledTaskMutations) {
+      if (!raw || typeof raw !== 'object') continue;
+      const mutation = raw as Record<string, unknown>;
+      const taskId = String(mutation.taskId || '').trim();
+      const operation = String(mutation.operation || '');
+      if (!taskId || !['add', 'patch', 'delete'].includes(operation)) continue;
+      const index = scheduledTasks.findIndex(task => task.id === taskId);
+      if (operation === 'delete') {
+        if (index >= 0 && mutation.expectedTask && JSON.stringify(scheduledTasks[index]) !== JSON.stringify(normalizeScheduledAutomationTask(mutation.expectedTask, index))) throw new Error('scheduled_task_revision_conflict');
+        if (index >= 0) scheduledTasks.splice(index, 1);
+        continue;
+      }
+      if (operation === 'patch') {
+        if (index < 0) continue;
+        if (mutation.expectedTask && JSON.stringify(scheduledTasks[index]) !== JSON.stringify(normalizeScheduledAutomationTask(mutation.expectedTask, index))) throw new Error('scheduled_task_revision_conflict');
+        const patch = mutation.patch && typeof mutation.patch === 'object' ? mutation.patch as Record<string, unknown> : {};
+        const normalized = normalizeScheduledAutomationTask({ ...scheduledTasks[index], ...patch, id: taskId }, index);
+        if (normalized) scheduledTasks[index] = normalized;
+        continue;
+      }
+      const normalized = normalizeScheduledAutomationTask({ ...(mutation.task && typeof mutation.task === 'object' ? mutation.task as Record<string, unknown> : {}), id: taskId }, scheduledTasks.length);
+      if (!normalized) continue;
+      if (index < 0) scheduledTasks.push(normalized);
+      else if (JSON.stringify(scheduledTasks[index]) !== JSON.stringify(normalized)) throw new Error('scheduled_task_identity_conflict');
+    }
+  }
+  const triggerPatches = source.triggerPatches && typeof source.triggerPatches === 'object'
+    ? source.triggerPatches as Record<string, unknown>
+    : {};
+  const mergeTrigger = (key: SolomapAutomationTrigger) => {
+    const base = Object.prototype.hasOwnProperty.call(nextTriggers, key)
+      ? normalizeAutomationTriggerSettings(nextTriggers[key])
+      : normalizeAutomationTriggerSettings(currentTriggers[key]);
+    const patch = triggerPatches[key] && typeof triggerPatches[key] === 'object'
+      ? triggerPatches[key] as Record<string, unknown>
+      : null;
+    return patch ? normalizeAutomationTriggerSettings({ ...base, ...patch }) : base;
+  };
   return {
     focusMinutes: Object.prototype.hasOwnProperty.call(source, 'focusMinutes')
       ? normalizeAutomationSettings(source).focusMinutes
       : current.focusMinutes,
     scheduledTasks,
     triggers: {
-      completed: Object.prototype.hasOwnProperty.call(nextTriggers, 'completed') ? normalizeAutomationTriggerSettings(nextTriggers.completed) : normalizeAutomationTriggerSettings(currentTriggers.completed),
-      failed: Object.prototype.hasOwnProperty.call(nextTriggers, 'failed') ? normalizeAutomationTriggerSettings(nextTriggers.failed) : normalizeAutomationTriggerSettings(currentTriggers.failed),
-      stopped: Object.prototype.hasOwnProperty.call(nextTriggers, 'stopped') ? normalizeAutomationTriggerSettings(nextTriggers.stopped) : normalizeAutomationTriggerSettings(currentTriggers.stopped),
-      focus_time: Object.prototype.hasOwnProperty.call(nextTriggers, 'focus_time') ? normalizeAutomationTriggerSettings(nextTriggers.focus_time) : normalizeAutomationTriggerSettings(currentTriggers.focus_time),
-      scheduled_time: firstScheduledTaskAsTrigger(scheduledTasks, Object.prototype.hasOwnProperty.call(nextTriggers, 'scheduled_time') ? nextTriggers.scheduled_time : currentTriggers.scheduled_time)
+      completed: mergeTrigger('completed'),
+      failed: mergeTrigger('failed'),
+      stopped: mergeTrigger('stopped'),
+      focus_time: mergeTrigger('focus_time'),
+      scheduled_time: firstScheduledTaskAsTrigger(scheduledTasks, mergeTrigger('scheduled_time'))
     }
   };
 }
@@ -2515,7 +2983,7 @@ function getSettingsWithRuntimeState(context: vscode.ExtensionContext): Solopren
   return {
     ...settings,
     telegramBotToken: '',
-    telegramBotTokenConfigured: Boolean(settings.telegramBotToken),
+    telegramBotTokenConfigured,
     automationTasks: {
       ...automationTasks,
       nextFocusReminderAt: focusReminderNextAt,
@@ -2527,11 +2995,14 @@ function getSettingsWithRuntimeState(context: vscode.ExtensionContext): Solopren
 async function getSettingsWithOpenCodeSecretState(context: vscode.ExtensionContext): Promise<SolopreneurSettings> {
   const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
   await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root });
+  await refreshExtensionSettingsFromDatabase(context, root);
   await refreshSolomapCapabilityRegistries(getSettingsEnhancementWorkspaceRoot(), root);
+  await readTelegramBotToken(context);
   const settings = getSettingsWithRuntimeState(context);
   const secretKey = getOpenCodeApiKeySecretKey(settings.openCodeProvider);
   return {
     ...settings,
+    capabilityOperations: await readCapabilityOperations(root, false, 100),
     openCodeApiKeyConfigured: Boolean(secretKey && await readOpenCodeApiKey(context.secrets, settings.openCodeProvider))
   };
 }
@@ -2552,6 +3023,7 @@ async function getOpenCodeTerminalEnvironment(
 }
 
 async function updatePersistedSettings(context: vscode.ExtensionContext, settings: Partial<SolopreneurSettings>, options: { globalPromptSource?: 'user' | 'review_projection' } = {}): Promise<void> {
+  const databaseWriteId = `extension-settings:${crypto.randomUUID()}`;
   const currentSettings = pendingPersistedSettings || getPersistedSettings(context);
   const hasSetting = (key: keyof SolopreneurSettings) => (
     Object.prototype.hasOwnProperty.call(settings, key)
@@ -2580,9 +3052,9 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
       : normalizeAutomationSettings(currentSettings.automationTasks),
     proEntitlements: hasSetting('proEntitlements') ? (settings.proEntitlements || {}) : (currentSettings.proEntitlements || {}),
     proAccount: hasSetting('proAccount') ? normalizeProAccountStatus(settings.proAccount) : currentSettings.proAccount,
-    enabledEnhancements: getEnabledEnhancementMap(getSettingsEnhancementWorkspaceRoot(), nextGlobalDataPath),
+    enabledEnhancements: {},
     telegramEnabled: hasSetting('telegramEnabled') ? !!settings.telegramEnabled : !!currentSettings.telegramEnabled,
-    telegramBotToken: hasSetting('telegramBotToken') ? String(settings.telegramBotToken ?? '').trim() : String(currentSettings.telegramBotToken ?? '').trim(),
+    telegramBotToken: '',
     telegramChatId: hasSetting('telegramChatId') ? String(settings.telegramChatId ?? '').trim() : String(currentSettings.telegramChatId ?? '').trim()
   };
   pendingPersistedSettings = nextSettings;
@@ -2597,18 +3069,6 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
     }
   }
 
-  const configKeys: Array<keyof SolopreneurSettings> = [
-    'cliPath',
-    'language',
-    'globalPrompt',
-    'globalDataPath',
-    'reviewerCliPath',
-    'collaborationReviewMode',
-    'automationTasks',
-    'telegramEnabled',
-    'telegramBotToken',
-    'telegramChatId'
-  ];
   const write = persistedSettingsWriteQueue
     .catch(() => {})
     .then(async () => {
@@ -2634,28 +3094,73 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
       if (supersededPrompt && !Object.keys(settings).some(key => key !== 'globalPrompt' && hasSetting(key as keyof SolopreneurSettings))) return;
       const latest = pendingPersistedSettings || getPersistedSettings(context);
       const persisted = supersededPrompt ? { ...nextSettings, globalPrompt: latest.globalPrompt, globalDataPath: latest.globalDataPath } : nextSettings;
-      await context.globalState.update(settingsKey, persisted);
+      const persistedRoot = normalizeGlobalDataPathForExtension(persisted.globalDataPath);
+      await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: persistedRoot });
+      await persistExtensionSettingsToDatabase(context, persistedRoot, persisted, settings, Object.keys(settings).filter(key => hasSetting(key as keyof SolopreneurSettings)) as Array<keyof SolopreneurSettings>, databaseWriteId);
+      const committedProjection = databaseSettingsByRoot.get(persistedRoot) || {};
+      const committed = { ...persisted, ...committedProjection, telegramBotToken: '' };
+      await context.globalState.update(settingsKey, { globalDataPath: committed.globalDataPath });
       const config = vscode.workspace.getConfiguration('solopreneur');
-      for (const key of configKeys) {
+      for (const key of nativeConfigurationKeys) {
         if (!hasSetting(key)) continue;
         if (key === 'globalPrompt' && !isCurrentPrompt()) continue;
-        if (JSON.stringify(currentSettings[key]) === JSON.stringify(nextSettings[key])) continue;
-        if (key === 'globalDataPath') {
-          const root = normalizeGlobalDataPathForExtension(nextSettings.globalDataPath);
-          // A newer user choice supersedes queued directory writes.
-          if (root !== normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) continue;
-          const ownWrite = { root, observedDifferentRoot: false };
-          persistedGlobalDataPathWrite = ownWrite;
-          try {
-            await config.update(key, nextSettings[key], vscode.ConfigurationTarget.Global);
-          } catch (error) {
-            if (persistedGlobalDataPathWrite === ownWrite) persistedGlobalDataPathWrite = undefined;
-            throw error;
+        const databaseProjected = key === 'globalPrompt' || databaseSettingKeys.includes(key);
+        let projectionValue = committed[key];
+        for (let attempt = 0; attempt < 5; attempt++) {
+          if (databaseProjected) {
+            await refreshExtensionSettingsFromDatabase(context, persistedRoot);
+            projectionValue = databaseSettingsByRoot.get(persistedRoot)?.[key] as SolopreneurSettings[typeof key];
           }
-        } else {
-          await config.update(key, nextSettings[key], vscode.ConfigurationTarget.Global);
+          const projectionRoots = new Set([persistedRoot]);
+          if (key === 'globalDataPath') projectionRoots.add(normalizeGlobalDataPathForExtension(currentSettings.globalDataPath));
+          if (JSON.stringify(config.get(key)) === JSON.stringify(projectionValue)) {
+            for (const root of projectionRoots) {
+              await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root });
+              await supersedeNativeConfigurationProjections(root, key);
+            }
+            break;
+          }
+          nativeConfigurationProjectionValues.set(key, JSON.stringify(projectionValue));
+          const projectionId = await recordNativeConfigurationProjection(persistedRoot, key, projectionValue);
+          if (key === 'globalDataPath') {
+            const root = normalizeGlobalDataPathForExtension(String(projectionValue || ''));
+            // A newer user choice supersedes queued directory writes.
+            if (root !== normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) {
+              nativeConfigurationProjectionValues.delete(key);
+              await cancelNativeConfigurationProjection(persistedRoot, projectionId).catch(() => undefined);
+              break;
+            }
+            const ownWrite = { root, observedDifferentRoot: false };
+            persistedGlobalDataPathWrite = ownWrite;
+            try {
+              await config.update(key, projectionValue, vscode.ConfigurationTarget.Global);
+            } catch (error) {
+              nativeConfigurationProjectionValues.delete(key);
+              if (persistedGlobalDataPathWrite === ownWrite) persistedGlobalDataPathWrite = undefined;
+              await cancelNativeConfigurationProjection(persistedRoot, projectionId).catch(() => undefined);
+              throw error;
+            }
+          } else {
+            try {
+              await config.update(key, projectionValue, vscode.ConfigurationTarget.Global);
+            } catch (error) {
+              nativeConfigurationProjectionValues.delete(key);
+              await cancelNativeConfigurationProjection(persistedRoot, projectionId).catch(() => undefined);
+              throw error;
+            }
+          }
+          for (const root of projectionRoots) {
+            await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root });
+            await supersedeNativeConfigurationProjections(root, key, root === persistedRoot ? projectionId : undefined);
+          }
+          if (!databaseProjected) break;
+          await refreshExtensionSettingsFromDatabase(context, persistedRoot);
+          const latestProjection = databaseSettingsByRoot.get(persistedRoot)?.[key];
+          if (JSON.stringify(latestProjection) === JSON.stringify(projectionValue)) break;
+          projectionValue = latestProjection as SolopreneurSettings[typeof key];
         }
       }
+      await refreshExtensionSettingsFromDatabase(context, persistedRoot);
     });
   persistedSettingsWriteQueue = write;
   try {
@@ -2666,34 +3171,53 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
       invalidatePersistedSettingsCache();
     }
   }
-  if (normalizeGlobalDataPathForExtension(nextSettings.globalDataPath) !== normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) return;
+  const committedSettings = getPersistedSettings(context);
+  if (normalizeGlobalDataPathForExtension(nextSettings.globalDataPath) !== normalizeGlobalDataPathForExtension(committedSettings.globalDataPath)) return;
   if (hasSetting('automationTasks') && settings.automationTasks && typeof settings.automationTasks === 'object') {
     const automationPatch = settings.automationTasks as SolomapAutomationSettings;
     const triggerPatch = automationPatch.triggers || {};
-    if (Object.prototype.hasOwnProperty.call(automationPatch, 'focusMinutes') || Object.prototype.hasOwnProperty.call(triggerPatch, 'focus_time')) {
+    if (Object.prototype.hasOwnProperty.call(automationPatch, 'focusMinutes') || Object.prototype.hasOwnProperty.call(triggerPatch, 'focus_time') || Object.prototype.hasOwnProperty.call(automationPatch.triggerPatches || {}, 'focus_time')) {
       scheduleFocusReminder(context);
     }
-    if (Object.prototype.hasOwnProperty.call(automationPatch, 'scheduledTasks') || Object.prototype.hasOwnProperty.call(triggerPatch, 'scheduled_time')) {
+    if (Object.prototype.hasOwnProperty.call(automationPatch, 'scheduledTasks') || automationPatch.scheduledTaskMutations?.length || Object.prototype.hasOwnProperty.call(triggerPatch, 'scheduled_time') || Object.prototype.hasOwnProperty.call(automationPatch.triggerPatches || {}, 'scheduled_time')) {
       scheduleTimedAutomationTask(context);
     }
   }
-  syncCognitiveRuntimeConfig(nextSettings);
-  synchronizeTelegramChannel(context);
   const previousRuntimeRoot = normalizeGlobalDataPathForExtension(currentSettings.globalDataPath);
-  const nextRuntimeRoot = normalizeGlobalDataPathForExtension(nextSettings.globalDataPath);
+  const nextRuntimeRoot = normalizeGlobalDataPathForExtension(committedSettings.globalDataPath);
+  await activateObservedBackgroundRuntime(context.extensionPath, nextRuntimeRoot);
+  await syncCognitiveRuntimeConfig(context, committedSettings);
+  synchronizeTelegramChannel(context);
   if (previousRuntimeRoot !== nextRuntimeRoot) {
-    writeCognitiveRuntimeConfig(previousRuntimeRoot, { mode: 'local_only', agentCli: '', model: 'auto' });
+    await activateObservedBackgroundRuntime(context.extensionPath, previousRuntimeRoot);
+    await persistCognitiveRuntimeConfig(previousRuntimeRoot, { mode: 'local_only', agentCli: '', model: 'auto' },
+      request => sendRuntimeDataRequest(previousRuntimeRoot, request));
     await activateObservedBackgroundRuntime(context.extensionPath, nextRuntimeRoot);
   }
 }
 
-function syncCognitiveRuntimeConfig(settings: SolopreneurSettings): void {
+async function syncCognitiveRuntimeConfig(context: vscode.ExtensionContext, settings: SolopreneurSettings): Promise<void> {
   const globalDataPath = normalizeGlobalDataPathForExtension(settings.globalDataPath);
-  const selection = String(settings.cognitiveEngineAgent || 'follow_main').trim();
-  const agentCli = selection === 'follow_main' || selection === 'local_only' ? String(settings.cliPath || 'agy') : selection;
-  const family = getAgentCliFamily(agentCli);
-  const model = String(settings.agentModelPreferences?.[family] || 'auto');
-  writeCognitiveRuntimeConfig(globalDataPath, { mode: 'agent_cli', agentCli, model });
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await refreshExtensionSettingsFromDatabase(context, globalDataPath);
+    const current = databaseSettingsByRoot.get(globalDataPath) || {};
+    const revisions = databaseSettingRevisionsByRoot.get(globalDataPath) || new Map<string, number>();
+    const selection = String(current.cognitiveEngineAgent || 'follow_main').trim();
+    const agentCli = selection === 'follow_main' || selection === 'local_only' ? String(current.cliPath || 'agy') : selection;
+    const family = getAgentCliFamily(agentCli);
+    const preferences = normalizeAgentModelPreferences(current.agentModelPreferences);
+    const model = String(preferences[family] || 'auto');
+    try {
+      await sendRuntimeDataRequest(globalDataPath, { operation: 'project_cognitive_runtime_config', input: {
+        expectedSourceRevisions: Object.fromEntries(['cliPath', 'agentModelPreferences', 'cognitiveEngineAgent'].map(key => [key, revisions.get(key) || 0])),
+        values: { mode: 'agent_cli', agentCli, model },
+        idempotencyKey: `cognitive-projection:${crypto.randomUUID()}`
+      } });
+      return;
+    } catch (error) {
+      if ((error as Error).message !== 'source_revision_conflict' || attempt === 4) throw error;
+    }
+  }
 }
 
 function projectName(projectPath: string): string {
@@ -2749,12 +3273,11 @@ function getSelectedProjectPath(context: vscode.ExtensionContext): string {
 
 function getProjectState(context: vscode.ExtensionContext): { projects: Array<SolopreneurProject & { autonomyEnabled: boolean; toolNetworkDisabled: boolean; autonomyEpoch: number }>; selectedProjectPath: string } {
   const projects = getProjects(context);
-  const authorization = new ProjectAutonomyAuthorizationStore({
-    globalDataPath: normalizeGlobalDataPathForRegistry(getPersistedSettings(context).globalDataPath, getWorkspaceRoot())
-  });
+  const root = normalizeGlobalDataPathForRegistry(getPersistedSettings(context).globalDataPath, getWorkspaceRoot());
+  const authorizations = projectAutonomyByRoot.get(root) || new Map();
   return {
     projects: projects.map(project => {
-      const grant = authorization.get(project.path);
+      const grant = authorizations.get(project.path) || { enabled: false, toolNetworkDisabled: false, epoch: 0 };
       return {
         ...project,
         autonomyEnabled: grant.enabled,
@@ -2765,6 +3288,12 @@ function getProjectState(context: vscode.ExtensionContext): { projects: Array<So
     selectedProjectPath: getSelectedProjectPathFromRegistry(projects, getSelectedProjectPathInMemory(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) || readProjectRegistry(context)?.selectedProjectPath || '')
   };
 }
+
+async function refreshProjectAutonomyAuthorizations(context: vscode.ExtensionContext, root: string, projects = getProjects(context)): Promise<void> {
+  const entries = await Promise.all(projects.map(async project => [project.path,
+    await sendRuntimeDataRequest<{ enabled: boolean; toolNetworkDisabled: boolean; epoch: number }>(root, { operation: 'read_project_autonomy_authorization', input: { projectPath: project.path } })] as const));
+  projectAutonomyByRoot.set(root, new Map(entries));
+}
 function getLocalUsageStatsOptions(context: vscode.ExtensionContext) {
   return {
     globalDataPath: getPersistedSettings(context).globalDataPath,
@@ -2773,11 +3302,11 @@ function getLocalUsageStatsOptions(context: vscode.ExtensionContext) {
   };
 }
 
-function recordLocalUsageEvent(context: vscode.ExtensionContext, event: LocalUsageEvent): LocalUsageStats {
+function recordLocalUsageEvent(context: vscode.ExtensionContext, event: LocalUsageEvent): Promise<LocalUsageStats> {
   return recordLocalUsageEventInStats(context, getLocalUsageStatsOptions(context), event);
 }
 
-function buildFeedbackUsageSummary(context: vscode.ExtensionContext): string {
+function buildFeedbackUsageSummary(context: vscode.ExtensionContext): Promise<string> {
   return buildFeedbackUsageSummaryFromStats(context, getLocalUsageStatsOptions(context), {
     appName: vscode.env.appName,
     version: vscode.version,
@@ -2813,6 +3342,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   selectedProjectPathsByDataRoot.set(root, projectPath);
   synchronizeTelegramChannel(context);
   const persistSelection = persistProjectSelection(root, projectPath);
+  const persistDeviceSelection = patchUiState(context, 'extension', 'global', 'selectedProjectPath', projectPath);
   syncEngine?.close?.();
   syncEngine = null;
   activeProjectRoot = null;
@@ -2833,7 +3363,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
     const copy = getProjectGrowthPanelCopy(context);
     activeProjectGrowthPath = projectPath;
     activeProjectGrowthPanel.title = copy.panelTitle;
-    const cachedGrowth = getCachedProjectGrowthView(projectPath);
+    const cachedGrowth = getCachedProjectGrowthView(getPersistedSettings(context).globalDataPath, projectPath);
     if (cachedGrowth) {
       const project = projects.find((item) => item.path === projectPath);
       activeProjectGrowthPanel.webview.html = getProjectGrowthWebviewHtml(
@@ -2859,7 +3389,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
       void postFlowStateToWebview(context);
     }
   });
-  await persistSelection;
+  await Promise.all([persistSelection, persistDeviceSelection]);
 }
 
 function scheduleProjectRunIndexBackfill(context: vscode.ExtensionContext, projectPath: string): void {
@@ -2923,7 +3453,7 @@ function buildSolopreneurDirectoryReadme(): string {
     '- `roadmap.csv`：路线图主数据，包括环节、依赖、状态和 Agent prompt。',
     '- `step-memory/`：每个路线图环节的 JSON 完成标准和交接总结。下一轮 Agent 对话会读取这里的结构化上下文。',
     '- `step-sessions/`：每个路线图环节按 Agent 保存原生会话 ID。后续对话会把这些会话 ID 作为可选参考交给 Agent，而不是强制续接。',
-    '- `documentation.json`：项目解释性文档的索引与审计状态。它由 SoloMap 维护，用来帮助 Agent 优先更新正确文档并识别文档噪音。',
+    '- 项目解释性文档的索引与审计状态保存在全局 SoloMap 数据库中，用来帮助 Agent 优先更新正确文档并识别文档噪音。',
     '- Agent 对话、执行索引、归档产物和项目生长数据统一保存在全局 SoloMap 数据库中，项目目录不再生成独立日志或生长数据库。',
     '- `agent-runs/`：仅保留任务运行、续聊恢复和报告读取仍需要的文件；已完整入库且不再使用的文件可在设置中回收。',
     '- `run-digests/`：每次 Agent 调用结束后的结构化执行摘要和跨 Agent 交接信号。下一轮相关任务会读取少量摘要来减少重复探索。',
@@ -2947,8 +3477,8 @@ function buildBootstrapRoadmapInstructions(cliPath: string): string {
     '你当前的任务是为这个项目生成真正可执行的定制化路线图，并直接重写 `.solopreneur/roadmap.csv`。',
     '',
     '## 必做前置阅读',
-    '- 阅读当前项目目录中的 README、docs、源码入口以及 `.solopreneur/README.md`（如果存在）。',
-    '- 阅读 `.solopreneur/roadmap-methodology.md`，按项目真实目标选择适用的推进框架。',
+    '- 阅读当前项目目录中的 README、docs 和源码入口。',
+    '- 按本轮提示中的路线图方法，结合项目真实目标选择适用的推进框架。',
     '- 理解这个项目当前要交付什么、服务谁、是否需要对外获客或销售，以及当前文件里已经有哪些线索。',
     '',
     '## 项目类别与路线图形态规范（核心精髓）',
@@ -3001,7 +3531,7 @@ function buildBootstrapRoadmapInstructions(cliPath: string): string {
     '',
     '## 结束前自检',
     '- 重新读取 `.solopreneur/roadmap.csv`。',
-    '- 必须运行 `node .solopreneur/validate-roadmap.cjs --mode bootstrap` 校验最终路线图。',
+    '- 必须运行本轮提示中 SoloMap 提供的共享路线图校验命令，以 bootstrap 模式校验最终路线图。',
     '- 如果校验失败，按终端输出修正 `.solopreneur/roadmap.csv` 后重新运行，直到通过。',
     '- 只有校验通过后，才允许在最终回复中说明任务完成。',
     '- 确认 CSV 中没有残留“生成初始路线图”、本文件原文或提示词模板。'
@@ -3249,34 +3779,6 @@ function buildRoadmapMethodologyInstructions(): string {
   ].join('\n');
 }
 
-function ensureSolopreneurReadme(solopreneurDir: string): void {
-  const readmePath = path.join(solopreneurDir, 'README.md');
-  if (!fs.existsSync(readmePath)) {
-    fs.writeFileSync(readmePath, buildSolopreneurDirectoryReadme(), 'utf8');
-  }
-}
-
-function ensureBootstrapRoadmapInstructions(solopreneurDir: string, cliPath: string): void {
-  const instructionsPath = path.join(solopreneurDir, 'bootstrap-roadmap-instructions.md');
-  fs.writeFileSync(instructionsPath, buildBootstrapRoadmapInstructions(cliPath), 'utf8');
-}
-
-function ensureRoadmapValidationScript(solopreneurDir: string): void {
-  const scriptPath = path.join(solopreneurDir, 'validate-roadmap.cjs');
-  fs.mkdirSync(solopreneurDir, { recursive: true });
-  fs.writeFileSync(scriptPath, buildRoadmapValidationScript(), { encoding: 'utf8', mode: 0o755 });
-  try {
-    fs.chmodSync(scriptPath, 0o755);
-  } catch {
-    // chmod is best-effort for platforms that support POSIX file modes.
-  }
-}
-
-function ensureRoadmapMethodologyInstructions(solopreneurDir: string): void {
-  const instructionsPath = path.join(solopreneurDir, 'roadmap-methodology.md');
-  fs.writeFileSync(instructionsPath, buildRoadmapMethodologyInstructions(), 'utf8');
-}
-
 function getStepMemoryFilePath(workspaceRoot: string, nodeId: string): string {
   return path.join(workspaceRoot, '.solopreneur', 'step-memory', `${nodeId}.json`);
 }
@@ -3406,9 +3908,8 @@ async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<v
       path: folder,
       type: projectType.value
     });
-    ensureProjectFoundation(folder, projectType.value);
     await patchProjectRegistry(getPersistedSettings(context).globalDataPath, { projectPatches: [{ path: folder, fields: { name: projectName(folder), type: projectType.value } }] });
-    recordLocalUsageEvent(context, 'projectAdded');
+    void recordLocalUsageEvent(context, 'projectAdded').catch(error => console.error('SoloMap failed to record local usage:', error));
   }
   await setProjectHidden(context, folder, false);
 
@@ -3436,25 +3937,21 @@ async function removeProject(context: vscode.ExtensionContext, projectPath: stri
   }
 
   const confirmed = await vscode.window.showWarningMessage(
-    `从 SoloMap 中删除项目“${project.name}”？这只会删除该项目里的 .solopreneur 文件夹，并把项目从插件列表中移除，不会删除项目本身的代码文件夹。`,
+    `从 SoloMap 列表中移除项目“${project.name}”？项目目录和其中的所有文件都会保留。`,
     { modal: true },
-    '确认删除'
+    '确认移除'
   );
-  if (confirmed !== '确认删除') {
+  if (confirmed !== '确认移除') {
     return;
   }
 
-  const authorization = new ProjectAutonomyAuthorizationStore({
-    globalDataPath: normalizeGlobalDataPathForRegistry(getPersistedSettings(context).globalDataPath, getWorkspaceRoot())
-  });
-  if (authorization.get(projectPath).enabled) {
-    authorization.setEnabled(projectPath, false, projects.map(candidate => candidate.path));
-  }
-
-  const solopreneurDir = path.join(projectPath, '.solopreneur');
-  if (fs.existsSync(solopreneurDir)) {
-    fs.rmSync(solopreneurDir, { recursive: true, force: true });
-  }
+  const authorizationRoot = normalizeGlobalDataPathForRegistry(getPersistedSettings(context).globalDataPath, getWorkspaceRoot());
+  const authorization = await sendRuntimeDataRequest<{ enabled: boolean; toolNetworkDisabled: boolean; epoch: number }>(authorizationRoot, { operation: 'read_project_autonomy_authorization', input: { projectPath } });
+  if (authorization.enabled) await sendRuntimeDataRequest(authorizationRoot, { operation: 'patch_project_autonomy_authorization', input: {
+    projectPath, registeredProjectPaths: projects.map(candidate => candidate.path), enabled: false,
+    toolNetworkDisabled: authorization.toolNetworkDisabled, expectedEpoch: authorization.epoch,
+    idempotencyKey: `project-autonomy-remove:${crypto.randomUUID()}`
+  } });
 
   const nextProjects = projects.filter((candidate) => candidate.path !== projectPath);
   await patchProjectRegistry(getPersistedSettings(context).globalDataPath, { projectPatches: [{ path: projectPath, remove: true }] });
@@ -3482,7 +3979,7 @@ async function removeProject(context: vscode.ExtensionContext, projectPath: stri
 
   sendProjectsToWebviews(context);
   sendNodesToWebview();
-  vscode.window.showInformationMessage(`SoloMap 已移除项目“${project.name}”。项目文件夹本身未删除。`);
+  vscode.window.showInformationMessage(`SoloMap 已移除项目“${project.name}”，项目文件保持不变。`);
 }
 
 function sendProjectsToWebviews(context: vscode.ExtensionContext): void {
@@ -3518,6 +4015,7 @@ async function getSoloConversationHistoryForProject(context: vscode.ExtensionCon
         : syncEngine.getAgentExecutionPage(soloConversationId, sidebarConversationQueryLimit, 0)).logs
     ), 1);
   }
+  await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath) });
   const page = await sendRuntimeDataRequest<{ logs: AgentConversation[] }>(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath), { operation: 'read_project_journal', input: { root: projectPath, nodeId: soloConversationId, limit: sidebarConversationQueryLimit, offset: 0 } });
   return selectLatestConversationRoots(buildConversationPresentations(projectPath, soloConversationId, page.logs), 1);
 }
@@ -3535,6 +4033,7 @@ async function getStepConversationHistoryForProject(context: vscode.ExtensionCon
         : syncEngine.getAgentExecutionPage(nodeId, sidebarConversationQueryLimit, 0)).logs
     ), 1);
   }
+  await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath) });
   const page = await sendRuntimeDataRequest<{ logs: AgentConversation[] }>(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath), { operation: 'read_project_journal', input: { root: projectPath, nodeId, limit: sidebarConversationQueryLimit, offset: 0 } });
   return selectLatestConversationRoots(buildConversationPresentations(projectPath, nodeId, page.logs), 1);
 }
@@ -3556,6 +4055,7 @@ async function getProjectConversationHistoryForProject(context: vscode.Extension
       .filter(isStepConversation)
       .slice(0, sidebarProjectConversationHistoryLimit);
   }
+  await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath) });
   const page = await sendRuntimeDataRequest<{ logs: AgentConversation[] }>(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath), { operation: 'read_project_journal', input: { root: projectPath, limit: sidebarConversationQueryLimit, offset: 0 } });
   return hydrateProjectConversationContinuations(projectPath, page.logs).filter(isStepConversation).slice(0, sidebarProjectConversationHistoryLimit);
 }
@@ -3608,6 +4108,7 @@ async function getProjectConversationSnapshotForProject(
     );
   }
   const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+  await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root });
   const [solo, project, revision] = await Promise.all([
     sendRuntimeDataRequest<{ logs: AgentConversation[] }>(root, { operation: 'read_project_journal', input: { root: projectPath, nodeId: soloConversationId, limit: sidebarConversationQueryLimit } }),
     sendRuntimeDataRequest<{ logs: AgentConversation[] }>(root, { operation: 'read_project_journal', input: { root: projectPath, limit: sidebarConversationQueryLimit } }),
@@ -3640,6 +4141,7 @@ function hydrateProjectConversationContinuations(projectPath: string, conversati
  */
 async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boolean> {
   const dataRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+  await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: dataRoot });
   if (!readProjectRegistryFile(dataRoot, projectRegistryFileName)) {
     await refreshProjectRegistryForContext(context, dataRoot);
     if (normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath) !== dataRoot) return false;
@@ -3698,14 +4200,23 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
       setTimeout(() => {
         if (!isCurrent()) return;
         try {
-          ensureSolopreneurReadme(solopreneurDir);
-          ensureRoadmapMethodologyInstructions(solopreneurDir);
-          ensureBootstrapRoadmapInstructions(solopreneurDir, getPersistedSettings(context).cliPath || 'agy');
-          ensureRoadmapValidationScript(solopreneurDir);
-          ensureDocumentationManifest(projectRoot);
+          const documentationDataRoot = normalizeSolomapGlobalPath(projectRoot, getPersistedSettings(context).globalDataPath);
+          void (async () => {
+            const current = await sendRuntimeDataRequest<DocumentationManifest>(documentationDataRoot, { operation: 'read_documentation_manifest', input: { root: projectRoot } });
+            const manifest = refreshDocumentationManifest(projectRoot, current);
+            const stableManifest = { ...manifest, updatedAt: '' };
+            await sendRuntimeDataRequest(documentationDataRoot, {
+              operation: 'sync_documentation_manifest',
+              input: {
+                root: projectRoot,
+                manifest,
+                idempotencyKey: `documentation-scan:${crypto.createHash('sha256').update(JSON.stringify(stableManifest)).digest('hex')}`
+              }
+            });
+          })().catch(error => console.error('SoloMap documentation index initialization failed:', error));
           void ensureCompletionCriteriaForNodes(projectRoot, nextSyncEngine.getNodes(), { globalDataPath: getPersistedSettings(context).globalDataPath }).catch(error => console.error('SoloMap completion criteria initialization failed:', error));
         } catch (error) {
-          console.error('SoloMap deferred project scaffolding failed:', error);
+          console.error('SoloMap deferred project indexing failed:', error);
         }
       }, 0);
       return true;
@@ -3742,7 +4253,7 @@ async function openRoadmapPanel(
     if (requestedNodeId) {
       postWebviewMessage(activePanel.webview, { command: 'focusRoadmapNode', nodeId: requestedNodeId });
     }
-    setTimeout(() => recordLocalUsageEvent(context, 'roadmapOpened'), 0);
+    setTimeout(() => void recordLocalUsageEvent(context, 'roadmapOpened').catch(error => console.error('SoloMap failed to record local usage:', error)), 0);
     return;
   }
 
@@ -3780,7 +4291,7 @@ async function openRoadmapPanel(
       postWebviewMessage(roadmapPanel.webview, { command: 'focusRoadmapNode', nodeId: requestedNodeId });
     }
   }, 80);
-  setTimeout(() => recordLocalUsageEvent(context, 'roadmapOpened'), 0);
+  setTimeout(() => void recordLocalUsageEvent(context, 'roadmapOpened').catch(error => console.error('SoloMap failed to record local usage:', error)), 0);
 
   // Handle messages from Webview
   activePanel.webview.onDidReceiveMessage(
@@ -3804,7 +4315,7 @@ async function openRoadmapPanel(
 
         case 'updateNode':
           if (syncEngine) {
-            syncEngine.updateNode(message.nodeId, message.updates);
+            await syncEngine.updateNode(message.nodeId, message.updates);
             sendNodesToWebview();
           }
           break;
@@ -3854,7 +4365,7 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
   if (activeProjectGrowthPanel) {
     activeProjectGrowthPanel.reveal(vscode.ViewColumn.One);
     activeProjectGrowthPanel.title = copy.panelTitle;
-    const cachedGrowth = getCachedProjectGrowthView(projectPath);
+    const cachedGrowth = getCachedProjectGrowthView(getPersistedSettings(context).globalDataPath, projectPath);
     activeProjectGrowthPanel.webview.html = cachedGrowth
       ? getProjectGrowthWebviewHtml(
           activeProjectGrowthPanel.webview,
@@ -3922,7 +4433,7 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
           growthReportActions.add(actionKey);
           try {
             const sources = await readRegisteredProjectSources(target, context.extensionPath, reportDataRoot);
-            const task = sources.tasks.find(item => item.taskId === message.taskId);
+            const task = sources.tasks.find(item => item.taskId === message.taskId || `task-${item.taskId}` === message.taskId);
             if (!task) throw new Error(isSoloMapLanguageZh(context) ? '原任务暂不可读取。' : 'The original task is unavailable.');
             if (message.kind === 'verify') {
               const evidence = await collectGithubEvidence({ projectPath: target, globalDataPath: reportDataRoot, repository: await projectGithubRepository(target), tasks: [task], reports: sources.reports.filter(item => item.taskId === task.taskId) });
@@ -4396,7 +4907,7 @@ async function sendNodesToWebview(): Promise<void> {
   finally { if (completionCriteriaViewFlights.get(engine)?.sequence === sequence) completionCriteriaViewFlights.delete(engine); }
 }
 
-function reconcileActiveProjectConversationLifecycle(): void {
+async function reconcileActiveProjectConversationLifecycle(): Promise<void> {
   if (!syncEngine || !activeProjectRoot) {
     return;
   }
@@ -4432,7 +4943,7 @@ function reconcileActiveProjectConversationLifecycle(): void {
       : latestStatus === 'Completed'
         ? 'Completed'
         : 'In Progress';
-    syncEngine.updateNode(node.id, {
+    await syncEngine.updateNode(node.id, {
       status: nextStatus as RoadmapNode['status'],
       completedAt: nextStatus === 'Completed' ? (node.completedAt || new Date().toISOString()) : ''
     });
@@ -4464,7 +4975,7 @@ async function completeNodeManually(nodeId: string): Promise<void> {
     return;
   }
 
-  syncEngine.updateNode(nodeId, {
+  await syncEngine.updateNode(nodeId, {
     status: 'Completed',
     completedAt: new Date().toISOString()
   });
@@ -4498,8 +5009,7 @@ async function buildInteractiveContinuationPrompt(
   completionDecisionFilePath = '',
   supplementFiles: string[] = [],
   globalPrompt = '',
-  globalDataPath = '',
-  nativeCheckpoint = false
+  globalDataPath = ''
 ): Promise<string> {
   const normalizedUserMessage = String(userMessage || '').trim();
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
@@ -4507,6 +5017,7 @@ async function buildInteractiveContinuationPrompt(
     ? [
       '用户为这次续聊附加了补充文件，开始前先读取这些文件：',
       ...attachedFiles.map((file) => `- ${file}`),
+      '- 以 `solomap://asset/` 开头的附件通过 `solomap_read` 分页读取完整内容；其他路径按项目文件读取。',
       '这些文件与本轮用户最新消息一起构成最高优先级上下文。'
     ].join('\n')
     : '';
@@ -4579,9 +5090,7 @@ async function buildInteractiveContinuationPrompt(
     '闭环要求：',
     '1. 保持这是同一次任务的续聊，不要把它改造成新的无关任务。',
     '2. 运行必要的最窄验证；如果无法验证，要说明原因。',
-    '3. 完成当前这一轮后不要退出交互式 CLI；结算后留在当前会话中等待用户继续。',
-    '',
-    nativeCheckpoint ? '' : buildTaskCheckpointInstructions(workspaceRoot, true)
+    '3. 完成当前这一轮后不要退出交互式 CLI；结算后留在当前会话中等待用户继续。'
   ].join('\n');
 }
 
@@ -4759,9 +5268,10 @@ async function buildAgentConversationPrompt(
   globalPrompt = '',
   githubIssueContext = '',
   globalDataPath = '',
-  enabledEnhancements: Record<string, boolean> = {},
+  _enabledEnhancements: Record<string, boolean> = {},
   includeLiveProjectSignals = true,
-  interactiveConversation = true
+  interactiveConversation = true,
+  roadmapValidationCommand = ''
 ): Promise<string> {
   const normalizedUserMessage = userMessage.trim();
   const normalizedGithubIssueContext = githubIssueContext.trim();
@@ -4773,6 +5283,7 @@ async function buildAgentConversationPrompt(
     ? [
       '用户为本次对话选择了补充文件，开始执行前必须先读取这些文件：',
       ...attachedFiles.map((file) => `- ${file}`),
+      '- 以 `solomap://asset/` 开头的附件通过 `solomap_read` 分页读取完整内容；其他路径按项目文件读取。',
       '这些文件是本轮任务的重要上下文；如果它们与历史记录或环节默认描述冲突，以这些文件和本次用户补充为准。'
     ].join('\n')
     : '';
@@ -4815,14 +5326,8 @@ async function buildAgentConversationPrompt(
     globalDataPath,
     startupContextText
   );
-  const solomapEnhancementInstructions = await buildSolomapEnhancementCandidateInstructions(
-    workspaceRoot,
-    globalDataPath,
-    startupContextText,
-    enabledEnhancements
-  );
-  const githubDeliveryContext = includeLiveProjectSignals ? buildGithubDeliveryContext(workspaceRoot) : '';
-  const githubSecurityContext = includeLiveProjectSignals ? buildGithubSecurityContext(workspaceRoot) : '';
+  const githubDeliveryContext = includeLiveProjectSignals ? await buildGithubDeliveryContext(workspaceRoot, globalDataPath) : '';
+  const githubSecurityContext = includeLiveProjectSignals ? await buildGithubSecurityContext(workspaceRoot, globalDataPath) : '';
   const solomapLearningContext = await buildSolomapLearningContext(workspaceRoot, globalDataPath);
   const solomapLearningRetrievalContext = await buildLearningRetrievalContext(workspaceRoot, globalDataPath, {
     projectPath: workspaceRoot,
@@ -4883,7 +5388,6 @@ async function buildAgentConversationPrompt(
     '',
     crossAgentHandoffInstructions,
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
-    ...(solomapEnhancementInstructions ? ['', solomapEnhancementInstructions] : []),
     ...(priorSessionInstructions ? ['', priorSessionInstructions] : []),
     memoryInstructions,
     '',
@@ -4891,15 +5395,14 @@ async function buildAgentConversationPrompt(
     '1. 直接在项目目录中完成本次能交付的文件改动或文档产出。除非用户明确要求，否则不要只输出计划或总结。',
     '2. 不要等待用户二次确认；如果任务过大，先交付一个可验证的小闭环，并在输出末尾说明下一次建议继续做什么。',
     '3. 运行你认为最窄且必要的验证命令；如果无法运行，说明原因。',
+    ...(roadmapValidationCommand ? [`4. 路线图变更必须使用 SoloMap 随发行包提供的校验命令：${roadmapValidationCommand}`] : []),
     ...(interactiveConversation ? [
-      '4. 不要因为本轮回答完成而退出交互式 CLI；结算后留在当前会话中等待用户继续。',
-      '',
-      buildTaskCheckpointInstructions(workspaceRoot, true)
+      `${roadmapValidationCommand ? '5' : '4'}. 不要因为本轮回答完成而退出交互式 CLI；结算后留在当前会话中等待用户继续。`
     ] : [
-      '4. 完成本轮后台任务后正常退出 CLI 进程。',
+      `${roadmapValidationCommand ? '5' : '4'}. 完成本轮后台任务后正常退出 CLI 进程。`,
       completionDecisionFilePath
-        ? `5. 如果你判断整个路线图环节已经达到完成标准，请向 ${toProjectRelativeRuntimePath(workspaceRoot, completionDecisionFilePath)} 写入 JSON：{"markCompleted":true,"reason":"一句话说明为什么这个环节已完成"}。如果还需要后续推进，不要写入完成。`
-        : '5. 如果你判断整个路线图环节已经达到完成标准，请在最终输出中明确说明。'
+        ? `${roadmapValidationCommand ? '6' : '5'}. 如果你判断整个路线图环节已经达到完成标准，请向 ${toProjectRelativeRuntimePath(workspaceRoot, completionDecisionFilePath)} 写入 JSON：{"markCompleted":true,"reason":"一句话说明为什么这个环节已完成"}。如果还需要后续推进，不要写入完成。`
+        : `${roadmapValidationCommand ? '6' : '5'}. 如果你判断整个路线图环节已经达到完成标准，请在最终输出中明确说明。`
     ])
   ].join('\n');
 }
@@ -4910,8 +5413,9 @@ async function buildRoadmapRevisionPrompt(
   globalPrompt = '',
   supplementFiles: string[] = [],
   globalDataPath = '',
-  enabledEnhancements: Record<string, boolean> = {},
-  includeLiveProjectSignals = true
+  _enabledEnhancements: Record<string, boolean> = {},
+  includeLiveProjectSignals = true,
+  roadmapValidationCommand = 'SoloMap 提供的路线图校验命令'
 ): Promise<string> {
   const normalizedUserMessage = userMessage.trim();
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
@@ -4919,15 +5423,15 @@ async function buildRoadmapRevisionPrompt(
     ? [
       '用户为本次路线图调整附加了补充文件，开始执行前必须先读取这些文件：',
       ...attachedFiles.map((file) => `- ${file}`),
+      '- 以 `solomap://asset/` 开头的附件通过 `solomap_read` 分页读取完整内容；其他路径按项目文件读取。',
       '这些文件是本轮调整的重要上下文；如果它们与历史路线图描述冲突，以这些文件和本次调整要求为准。'
     ].join('\n')
     : '';
   const solomapDocumentationInstructions = buildDocumentationPromptContext(workspaceRoot, await sendRuntimeDataRequest(globalDataPath || normalizeSolomapGlobalPath(workspaceRoot, ''), { operation: 'read_documentation_manifest', input: { root: workspaceRoot } }));
   const startupContextText = [normalizedUserMessage, attachedFiles.join('\n')].join('\n');
   const solomapMcpInstructions = await buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, startupContextText);
-  const solomapEnhancementInstructions = await buildSolomapEnhancementCandidateInstructions(workspaceRoot, globalDataPath, startupContextText, enabledEnhancements);
-  const githubDeliveryContext = includeLiveProjectSignals ? buildGithubDeliveryContext(workspaceRoot) : '';
-  const githubSecurityContext = includeLiveProjectSignals ? buildGithubSecurityContext(workspaceRoot) : '';
+  const githubDeliveryContext = includeLiveProjectSignals ? await buildGithubDeliveryContext(workspaceRoot, globalDataPath) : '';
+  const githubSecurityContext = includeLiveProjectSignals ? await buildGithubSecurityContext(workspaceRoot, globalDataPath) : '';
   const solomapLearningContext = await buildSolomapLearningContext(workspaceRoot, globalDataPath);
   const solomapLearningRetrievalContext = await buildLearningRetrievalContext(workspaceRoot, globalDataPath, {
     projectPath: workspaceRoot,
@@ -4969,17 +5473,16 @@ async function buildRoadmapRevisionPrompt(
     ...(githubDeliveryContext ? ['', githubDeliveryContext] : []),
     ...(githubSecurityContext ? ['', githubSecurityContext] : []),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
-    ...(solomapEnhancementInstructions ? ['', solomapEnhancementInstructions] : []),
     '',
     '执行要求：',
-    '1. 先读取当前 `.solopreneur/roadmap.csv`、`.solopreneur/roadmap-methodology.md`、`.solopreneur/validate-roadmap.cjs` 和项目已有文件，理解已经完成的工作与仍待推进的事项。',
+    '1. 先读取当前 `.solopreneur/roadmap.csv` 和项目已有文件，理解已经完成的工作与仍待推进的事项。',
     '2. 直接重写 `.solopreneur/roadmap.csv`，让后续环节反映本次调整要求；不要把本段提示词、解释文字或执行日志写进 CSV。',
     '3. 除非用户明确要求推翻已完成工作，否则保留已完成环节的事实和状态，并围绕新方向调整待推进环节、依赖与 Agent 任务。',
     '4. CSV 必须保留字段 `id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt`；每个依赖必须指向存在的环节 ID，且不能自依赖。',
     '5. 先判断项目最适配的类型（Core Product / Infrastructure / Content Product / Experiment & Research / Tools & Scaffolding / Archive & Maintenance）：如果是核心产品（商业化产品），待推进路线图必须完整覆盖问题、MVP、营销、反馈规模化等闭环阶段，不可长期只剩工程 Build 任务；若属于基础设施、工具、试验或内容类，按其相应的方法论规范去调整安排后续阶段（例如基础设施需包含设计契约/标准化接入/治理，试验项目包含原型/评估/总结沉淀，内容产品包含生产/分发），不可强行套用营销或销售任务，也不可虚构无关的商业化阶段。',
     '6. 用 Build -> Sell -> Learn -> Improve 作为底层闭环审查，针对性设计每一阶段的 `agentPrompt`。每一个被修改或新增的待推进环节，其 `agentPrompt` 都必须具有落地证据，要求 Agent 直接创建、修改或测试项目本地文件或配置，严禁生成务虚、没有本地产出物的研究或总结环节。',
     '7. 不要把方法论本身写成用户需要维护的说明环节；它只应用来决定后续路线图和下一步动作。',
-    '8. 完成后必须运行 `node .solopreneur/validate-roadmap.cjs --mode revision` 校验最终 CSV；如果失败，按输出修正后重新运行，直到通过。',
+    `8. 完成后必须运行 ${roadmapValidationCommand} 校验最终 CSV；如果失败，按输出修正后重新运行，直到通过。`,
     '9. 只有校验通过后，才允许在最终回复中说明路线图调整完成并正常退出 CLI。'
   ].join('\n');
 }
@@ -4990,7 +5493,7 @@ async function buildSoloConversationPrompt(
   globalPrompt = '',
   supplementFiles: string[] = [],
   globalDataPath = '',
-  enabledEnhancements: Record<string, boolean> = {},
+  _enabledEnhancements: Record<string, boolean> = {},
   interactiveConversation = true
 ): Promise<string> {
   const normalizedUserMessage = userMessage.trim();
@@ -4999,12 +5502,12 @@ async function buildSoloConversationPrompt(
     ? [
       '用户为本次 Solo 对话选择了补充文件：',
       ...attachedFiles.map((file) => `- ${file}`),
+      '- 以 `solomap://asset/` 开头的附件通过 `solomap_read` 分页读取完整内容；其他路径按项目文件读取。',
       '请先读取这些文件，并仅将它们作为本次问题的背景材料。'
     ].join('\n')
     : '';
   const startupContextText = [normalizedUserMessage, attachedFiles.join('\n')].join('\n');
   const solomapMcpInstructions = await buildSolomapMcpCandidateInstructions(workspaceRoot, globalDataPath, startupContextText);
-  const solomapEnhancementInstructions = await buildSolomapEnhancementCandidateInstructions(workspaceRoot, globalDataPath, startupContextText, enabledEnhancements);
   return [
     '你正在 SoloMap 的 Solo 模式中处理当前项目的一次直接对话。',
     '这次对话尚未归属于任何路线图环节；优先解决用户当前问题，不要要求用户先选择环节。',
@@ -5023,7 +5526,6 @@ async function buildSoloConversationPrompt(
     '',
     buildSoloContextIndex(workspaceRoot, globalDataPath),
     ...(solomapMcpInstructions ? ['', solomapMcpInstructions] : []),
-    ...(solomapEnhancementInstructions ? ['', solomapEnhancementInstructions] : []),
     '',
     '执行边界：',
     '1. 可以读取当前项目文件与 `.solopreneur/roadmap.csv` 了解背景，但不要自行修改路线图、环节状态、完成标准或环节交接记录。',
@@ -5031,9 +5533,7 @@ async function buildSoloConversationPrompt(
     '3. 如果用户明确要求实现或修复，直接交付可验证的最小改动并运行必要验证。',
     '4. 完成后在结论中用一句话说明本次对话更适合：仅保留在 Solo、关联某个已有环节（写明环节标题），或进入路线图调整。',
     ...(interactiveConversation ? [
-      '5. 本轮结算后不要退出交互式 CLI；留在当前会话中等待用户继续。',
-      '',
-      buildTaskCheckpointInstructions(workspaceRoot, true)
+      '5. 本轮结算后不要退出交互式 CLI；留在当前会话中等待用户继续。'
     ] : [
       '5. 这是无人值守的后台运行；完成本轮任务后正常退出 CLI 进程。'
     ])
@@ -5076,9 +5576,20 @@ async function runGlobalPromptReview(
     const settings = getReviewLaunchSettings(context);
     const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
     const agentCli = resolveAgentCli((settings.cliPath || 'agy').trim(), settings.cliPath);
-    if (!commandExists(agentCli)) throw new Error('找不到当前 Agent CLI，请检查 Agent 设置。');
+    if (!commandExists(agentCli)) {
+      const failureReason = '找不到当前 Agent CLI，请检查 Agent 设置。';
+      await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId: '__solo__', runKind: 'learning_review',
+        agentCli: settings.cliPath || agentCli, userMessage: '复盘经验并生成完整全局默认提示词。', failureCode: 'cli_not_found', failureReason,
+        globalDataPath: globalRoot, launchIntentId: `${runId}:unavailable` });
+      throw new Error(failureReason);
+    }
     const automation = ensureAgentTaskAutomation(agentCli);
-    if (!automation.ok) throw new Error(automation.message);
+    if (!automation.ok) {
+      await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId: '__solo__', runKind: 'learning_review',
+        agentCli, userMessage: '复盘经验并生成完整全局默认提示词。', failureCode: 'agent_automation_not_ready', failureReason: automation.message,
+        globalDataPath: globalRoot, launchIntentId: `${runId}:unavailable` });
+      throw new Error(automation.message);
+    }
     const terminal = createAgentTerminal(context.extensionPath, `prompt-review-${runId.slice(-6)}`);
     terminal.show(true);
     await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: globalRoot });
@@ -5451,16 +5962,14 @@ type PreparedAgentShellArguments = [
 ];
 
 async function buildPreparedAgentShellScript(...args: PreparedAgentShellArguments): Promise<Awaited<ReturnType<typeof prepareAgentRun>>> {
-  const [agentCli, selectedModel, prompt, workspaceRoot, nodeId, executionLogId, userMessage, _decisionPath, nativeSessionId = '', directExecutionCommand = '', runKind = 'step', roadmapBackupFilePath = '', configuredGlobalDataPath = '', taskPermissionMode = 'auto', reviewerCliPath = '', collaborationReviewMode = 'high_risk', enabledEnhancements = {}, _runDir, _statusPath, statusMetadata = {}] = args;
+  const [agentCli, selectedModel, prompt, workspaceRoot, nodeId, executionLogId, userMessage, _decisionPath, nativeSessionId = '', directExecutionCommand = '', runKind = 'step', roadmapBackupFilePath = '', configuredGlobalDataPath = '', taskPermissionMode = 'auto', reviewerCliPath = '', collaborationReviewMode = 'high_risk', _enabledEnhancements = {}, _runDir, _statusPath, statusMetadata = {}] = args;
   const globalDataPath = normalizeSolomapGlobalPath(workspaceRoot, configuredGlobalDataPath);
   const { globalPrompt: configuredGlobalPrompt, ...runMetadata } = statusMetadata;
   await ensureHealthyAutonomousRuntime({ extensionPath: path.resolve(__dirname, '..'), globalDataPath });
-  const enhancementRuntime = ensureSolomapEnhancementRuntime(workspaceRoot, globalDataPath, enabledEnhancements);
   const parentExecutionLogId = Number(statusMetadata.lineageRootExecutionLogId || 0);
   return prepareAgentRun({ ...(statusMetadata.flowRole ? { flowRole: statusMetadata.flowRole as AgentRunPreparationInput['flowRole'] } : {}), agentCli, selectedModel, prompt, ...(typeof configuredGlobalPrompt === 'string' ? { globalPrompt: configuredGlobalPrompt } : {}), workspaceRoot, nodeId, executionLogId, userMessage, runKind, globalDataPath, taskPermissionMode, nativeSessionId, ...(directExecutionCommand ? { directExecutionCommand } : {}), ...(parentExecutionLogId ? { parentExecutionLogId } : {}), metadata: {
-    ...runMetadata, roadmapBackupFilePath, reviewerCliPath, collaborationReviewMode, enabledEnhancements,
+    ...runMetadata, roadmapBackupFilePath, reviewerCliPath, collaborationReviewMode,
     commandPreview: directExecutionCommand || `${agentCli} [${nativeSessionId ? 'resume' : 'fresh'}]`,
-    enhancementEnvLines: enhancementRuntime.envLines, enhancementPreflightLines: enhancementRuntime.preflightLines,
   } }, (operation, input) => sendRuntimeDataRequest(globalDataPath, { operation, input }));
 }
 
@@ -5675,7 +6184,15 @@ async function startAgentReviewRun(input: {
   sourceRevision?: number;
   sourceTurnId?: string;
 }): Promise<boolean> {
-  if (!buildReadOnlyAgentCommandForPromptFile(input.reviewerCli, 'review-input', input.workspaceRoot)) throw new Error('reviewer_read_only_mode_unsupported');
+  if (!buildReadOnlyAgentCommandForPromptFile(input.reviewerCli, 'review-input', input.workspaceRoot)) {
+    if (!extensionContextRef) throw new Error('extension_context_unavailable');
+    await recordUndeliverableAgentRun(extensionContextRef, { workspaceRoot: input.workspaceRoot, nodeId: input.nodeId,
+      runKind: 'agent_review', agentCli: input.reviewerCli, userMessage: input.userMessage,
+      failureCode: 'reviewer_read_only_mode_unsupported', failureReason: 'Review Agent does not provide the required read-only mode.',
+      globalDataPath: input.globalDataPath, parentExecutionLogId: input.mainExecutionLogId,
+      launchIntentId: `${input.launchIntentId}:unsupported` });
+    return false;
+  }
   const operation = (operation: string, data: Record<string, unknown>) => sendRuntimeDataRequest(input.globalDataPath, { operation, input: data });
   const existing = await operation('read_run_intent', { root: input.workspaceRoot, launchIntentId: input.launchIntentId }) as import('./runLifecycleTypes').RunState | null;
   let prepared: Awaited<ReturnType<typeof prepareAgentRun>>;
@@ -5697,7 +6214,7 @@ async function startAgentReviewRun(input: {
     prepared = await prepareAgentRun({ agentCli: input.reviewerCli, selectedModel: '', prompt, workspaceRoot: input.workspaceRoot, nodeId: input.nodeId, executionLogId: 0, userMessage: input.userMessage, runKind: 'agent_review', globalDataPath: input.globalDataPath, taskPermissionMode: 'auto', parentExecutionLogId: Number(main.status.rootExecutionLogId), readOnlyReview: true, launchIntentId: input.launchIntentId, reviewEvidence: evidence, metadata: { launchSummary: `Agent review started.\nReview of execution: ${input.mainExecutionLogId}`, reviewOfExecutionLogId: input.mainExecutionLogId, reviewTargetStatus: input.targetStatus, reviewMainAgentCli: input.mainAgentCli, reviewMainNativeSessionId: input.mainNativeSessionId, reviewAttempt: input.reviewAttempt, reviewTaskGoal: input.taskGoal, reviewCompletionCriteria: input.completionCriteria, reviewerCliPath: input.reviewerCli, collaborationReviewMode: input.collaborationReviewMode } }, operation);
   }
   const executionLogId = Number(prepared.status.rootExecutionLogId);
-  await launchAgentConversationTerminal({ workspaceRoot: input.workspaceRoot, label: `review-${input.nodeId}-${executionLogId}`, conversationId: executionLogId, nodeId: input.nodeId, statusFilePath: runStatusReference(input.workspaceRoot, executionLogId), runKind: 'agent_review', globalDataPath: input.globalDataPath, context: extensionContextRef || undefined, agentCli: input.reviewerCli, command: prepared.finalCommand, refreshNodeId: input.nodeId });
+  await launchAgentConversationTerminal({ workspaceRoot: input.workspaceRoot, label: `review-${input.nodeId}-${executionLogId}`, conversationId: executionLogId, nodeId: input.nodeId, statusFilePath: runStatusReference(input.workspaceRoot, executionLogId), runKind: 'agent_review', globalDataPath: prepared.dataRoot, context: extensionContextRef || undefined, agentCli: input.reviewerCli, command: prepared.finalCommand, refreshNodeId: input.nodeId });
   return true;
 }
 
@@ -5719,7 +6236,6 @@ async function startAgentReviewRevisionRun(input: {
   launchIntentId: string;
   expectedMainTurnId?: string;
 }): Promise<boolean> {
-  if (!commandExists(input.mainAgentCli)) throw new Error('review_revision_cli_not_found');
   const operation = (operation: string, data: Record<string, unknown>) => sendRuntimeDataRequest(input.globalDataPath, { operation, input: data });
   const existing = await operation('read_run_intent', { root: input.workspaceRoot, launchIntentId: input.launchIntentId }) as import('./runLifecycleTypes').RunState | null;
   let prepared: Awaited<ReturnType<typeof prepareAgentRun>>;
@@ -5741,10 +6257,19 @@ async function startAgentReviewRevisionRun(input: {
       input.reviewResult.nextAction ? `验收动作：${input.reviewResult.nextAction}` : '', '',
       '直接完成必要修改和最窄验证。完成后正常结束；SoloMap 会对新增差异再次复核。'
     ].filter(Boolean).join('\n');
+    if (!commandExists(input.mainAgentCli)) {
+      if (!extensionContextRef) throw new Error('extension_context_unavailable');
+      await recordUndeliverableAgentRun(extensionContextRef, { workspaceRoot: input.workspaceRoot, nodeId: input.nodeId,
+        runKind: 'agent_review_revision', agentCli: input.mainAgentCli, selectedModel: String(main.status.selectedModel || ''), userMessage: request,
+        failureCode: 'review_revision_cli_not_found', failureReason: `Agent CLI not found for review revision: ${input.mainAgentCli}`,
+        globalDataPath: input.globalDataPath, parentExecutionLogId: Number(main.status.rootExecutionLogId),
+        expectedParentTurnId: input.expectedMainTurnId || String(main.status.turnId), launchIntentId: input.launchIntentId });
+      return false;
+    }
     prepared = await prepareAgentRun({ agentCli: input.mainAgentCli, selectedModel: String(main.status.selectedModel || ''), prompt: request, workspaceRoot: input.workspaceRoot, nodeId: input.nodeId, executionLogId: 0, userMessage: request, runKind: 'agent_review_revision', globalDataPath: input.globalDataPath, taskPermissionMode: sourceLaunch?.taskPermissionMode || input.taskPermissionMode, parentExecutionLogId: Number(main.status.rootExecutionLogId), ...(input.expectedMainTurnId ? { expectedParentTurnId: input.expectedMainTurnId } : {}), nativeSessionId: input.mainNativeSessionId, continuation: Boolean(input.mainNativeSessionId), launchIntentId: input.launchIntentId, metadata: { ...(providerContext ? { nativeResumeProviderContext: providerContext } : {}), ...(main.status.agentDatabaseConfigPath ? { agentDatabaseConfigPath: main.status.agentDatabaseConfigPath } : {}), launchSummary: `Agent review revision started.\nReview of execution: ${input.reviewOfExecutionLogId}\nReview attempt: ${input.reviewAttempt}`, reviewAttempt: input.reviewAttempt, reviewCycleRootExecutionLogId: input.reviewOfExecutionLogId, reviewTaskGoal: input.taskGoal, reviewCompletionCriteria: input.completionCriteria, reviewerCliPath: input.reviewerCliPath, collaborationReviewMode: input.collaborationReviewMode } }, operation);
   }
   const executionLogId = Number(prepared.status.rootExecutionLogId);
-  await launchAgentConversationTerminal({ workspaceRoot: input.workspaceRoot, label: `review-revision-${input.nodeId}-${executionLogId}`, conversationId: executionLogId, nodeId: input.nodeId, statusFilePath: runStatusReference(input.workspaceRoot, executionLogId), runKind: 'agent_review_revision', globalDataPath: input.globalDataPath, context: extensionContextRef || undefined, agentCli: input.mainAgentCli, command: prepared.finalCommand, refreshNodeId: input.nodeId });
+  await launchAgentConversationTerminal({ workspaceRoot: input.workspaceRoot, label: `review-revision-${input.nodeId}-${executionLogId}`, conversationId: executionLogId, nodeId: input.nodeId, statusFilePath: runStatusReference(input.workspaceRoot, executionLogId), runKind: 'agent_review_revision', globalDataPath: prepared.dataRoot, context: extensionContextRef || undefined, agentCli: input.mainAgentCli, command: prepared.finalCommand, refreshNodeId: input.nodeId });
   return true;
 }
 
@@ -5807,7 +6332,7 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
       stage: '目标与路径确认',
       dependencies: '',
       agentCli: cliPath,
-      agentPrompt: '阅读 .solopreneur/bootstrap-roadmap-instructions.md、.solopreneur/roadmap-methodology.md 和 .solopreneur/validate-roadmap.cjs，基于当前项目文件直接重写 .solopreneur/roadmap.csv。完成后必须运行 node .solopreneur/validate-roadmap.cjs --mode bootstrap；校验失败就修正 CSV 并重跑，直到通过后才算完成。',
+      agentPrompt: '读取当前项目文件并直接重写 .solopreneur/roadmap.csv。使用本轮任务中 SoloMap 提供的共享路线图校验命令，以 bootstrap 模式校验；失败就修正 CSV 并重跑，直到通过后才算完成。',
       status: 'Pending',
       createdAt: now,
       completedAt: '',
@@ -6444,26 +6969,16 @@ function getSkillInstallWorkspaceRoot(context: vscode.ExtensionContext): string 
 
 function postMcpInstallResult(context: vscode.ExtensionContext, success: boolean, message: string): void {
   invalidatePersistedSettingsCache();
-  const settings = getPersistedSettings(context);
-  activePanel?.webview.postMessage({ command: 'mcpInstallResult', success, message, settings });
+  activePanel?.webview.postMessage({ command: 'mcpInstallResult', success, message });
   sidebarProvider?.postMcpInstallResult(success, message);
-  vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+  void broadcastSettings(context, false, false).catch(error => console.error('SoloMap capability settings refresh failed:', error));
 }
 
 function postSkillInstallResult(context: vscode.ExtensionContext, success: boolean, message: string): void {
   invalidatePersistedSettingsCache();
-  const settings = getPersistedSettings(context);
-  activePanel?.webview.postMessage({ command: 'skillInstallResult', success, message, settings });
+  activePanel?.webview.postMessage({ command: 'skillInstallResult', success, message });
   sidebarProvider?.postSkillInstallResult(success, message);
-  vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
-}
-
-function postEnhancementInstallResult(context: vscode.ExtensionContext, success: boolean, message: string): void {
-  invalidatePersistedSettingsCache();
-  const settings = getPersistedSettings(context);
-  activePanel?.webview.postMessage({ command: 'enhancementInstallResult', success, message, settings });
-  sidebarProvider?.postEnhancementInstallResult(success, message);
-  vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
+  void broadcastSettings(context, false, false).catch(error => console.error('SoloMap capability settings refresh failed:', error));
 }
 
 function postAgentCliUpgradeResult(success: boolean, message: string, pending = false): void {
@@ -6485,7 +7000,6 @@ async function launchMigrationMaintenanceAgent(
   if (!databaseAgentProviders.includes(provider as DatabaseAgentProvider)) throw new Error('agent_database_provider_unsupported');
   const sandbox = new LinuxBubblewrapSandbox();
   const sandboxProbe = await sandbox.probe();
-  if (provider !== 'claude') throw new Error('maintenance_agent_native_boundary_unsupported');
 
   await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
   const configFile = agentDatabaseConfigPath(provider as DatabaseAgentProvider);
@@ -6514,7 +7028,7 @@ async function launchMigrationMaintenanceAgent(
     }
   });
   const agentCommand = applyNativeMigrationAgentBoundary(
-    buildAgentCommand(agentCli, buildMigrationMaintenancePrompt(kind, targetId), agentWorkspace, '', 'never'),
+    buildAgentCommand(agentCli, buildMigrationMaintenancePrompt(kind, targetId), agentWorkspace, '', settings.taskPermissionMode || 'auto'),
     agentCli,
     provider,
     maintenanceMcpConfig
@@ -6530,17 +7044,12 @@ async function launchMigrationMaintenanceAgent(
     SOLOMAP_MAINTENANCE_ENTRY_PATH: path.join(context.extensionPath, 'out', 'databaseMcpProcess.js'),
     ELECTRON_RUN_AS_NODE: '1'
   };
-  for (const key of ['CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_RUNTIME_DIR', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE']) {
+  for (const key of migrationAgentConfigurationEnvironmentKeys(provider)) {
     if (process.env[key]) maintenanceEnvironment[key] = String(process.env[key]);
   }
   const home = os.homedir();
-  const configParent = path.dirname(configFile);
-  const configPaths = [configParent === home ? configFile : configParent];
-  for (const candidate of [
-    path.join(home, '.claude'),
-    path.join(home, '.local', 'share', 'keyrings'),
-    process.env.XDG_RUNTIME_DIR || ''
-  ]) if (candidate && fs.existsSync(candidate)) configPaths.push(candidate);
+  const configPaths = [...migrationAgentConfigurationPaths(provider, configFile, home, process.env), ...migrationAgentExecutablePaths(agentCli)]
+    .filter(candidate => fs.existsSync(candidate));
   if (fs.existsSync(process.execPath)) configPaths.push(process.execPath);
   const constrainedCommand = sandboxProbe.available
     ? buildMigrationAgentSandboxCommand({
@@ -6561,12 +7070,191 @@ async function launchMigrationMaintenanceAgent(
   }
 }
 
-async function launchMaintenanceAgentRun(context: vscode.ExtensionContext, workspaceRoot: string, settings: SolopreneurSettings, agentCli: string, maintenanceRoot: string, runKind: string, request: string, buildPrompt: (resultPath: string) => string): Promise<string> {
+async function launchMaintenanceAgentRun(context: vscode.ExtensionContext, workspaceRoot: string, settings: SolopreneurSettings, agentCli: string, maintenanceRoot: string, runKind: string, request: string, buildPrompt: (resultPath: string) => string, capabilityOperationId = ''): Promise<string> {
   const globalDataPath = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
   await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
-  const prepared = await prepareMaintenanceAgentRun({ workspaceRoot, globalDataPath, agentCli, maintenanceRoot, runKind, request, buildPrompt, taskPermissionMode: settings.taskPermissionMode || 'auto' });
-  await launchAgentConversationTerminal({ workspaceRoot, globalDataPath, label: runKind, conversationId: Number(prepared.status.rootExecutionLogId), nodeId: '__solo__', statusFilePath: runStatusReference(workspaceRoot, Number(prepared.status.rootExecutionLogId)), runKind, context, agentCli, command: prepared.finalCommand });
-  return prepared.resultFilePath;
+  if (capabilityOperationId) await prepareCapabilityOperationFilesystemBaseline(globalDataPath, capabilityOperationId);
+  try {
+    const prepared = await prepareMaintenanceAgentRun({ workspaceRoot, globalDataPath, agentCli, maintenanceRoot, runKind, request, buildPrompt, taskPermissionMode: settings.taskPermissionMode || 'auto' });
+    if (capabilityOperationId) await attachCapabilityOperation(globalDataPath, capabilityOperationId, prepared.resultFilePath, prepared.runId);
+    await launchAgentConversationTerminal({ workspaceRoot, globalDataPath, label: runKind, conversationId: Number(prepared.status.rootExecutionLogId), nodeId: '__solo__', statusFilePath: runStatusReference(workspaceRoot, Number(prepared.status.rootExecutionLogId)), runKind, context, agentCli, command: prepared.finalCommand });
+    return prepared.resultFilePath;
+  } catch (error) {
+    if (capabilityOperationId) await rollbackCapabilityOperationFilesystem(globalDataPath, capabilityOperationId);
+    throw error;
+  }
+}
+
+const capabilityOperationPollers = new Map<string, NodeJS.Timeout>();
+const capabilityOperationLaunchRecoveryTimers = new Map<string, NodeJS.Timeout>();
+const capabilityOperationSettling = new Set<string>();
+
+function materializeCapabilityOperationResult(globalRoot: string, target: string, bytes: Buffer): void {
+  const temporaryRoot = path.resolve(globalRoot, 'tmp');
+  const resolvedTarget = path.resolve(target);
+  const relative = path.relative(temporaryRoot, resolvedTarget);
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('capability_result_path_invalid');
+  fs.mkdirSync(temporaryRoot, { recursive: true });
+  let ancestor = path.dirname(resolvedTarget);
+  while (!fs.existsSync(ancestor)) ancestor = path.dirname(ancestor);
+  const physicalRoot = fs.realpathSync(temporaryRoot), physicalAncestor = fs.realpathSync(ancestor);
+  const ancestorRelative = path.relative(physicalRoot, physicalAncestor);
+  if (ancestorRelative === '..' || ancestorRelative.startsWith(`..${path.sep}`) || path.isAbsolute(ancestorRelative)) throw new Error('capability_result_path_invalid');
+  fs.mkdirSync(path.dirname(resolvedTarget), { recursive: true });
+  const physicalParent = fs.realpathSync(path.dirname(resolvedTarget));
+  const parentRelative = path.relative(physicalRoot, physicalParent);
+  if (parentRelative === '..' || parentRelative.startsWith(`..${path.sep}`) || path.isAbsolute(parentRelative)) throw new Error('capability_result_path_invalid');
+  const descriptor = fs.openSync(resolvedTarget, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
+  try { fs.writeFileSync(descriptor, bytes); } finally { fs.closeSync(descriptor); }
+}
+
+function permanentCapabilitySettlementError(error: unknown): boolean {
+  const message = error && typeof error === 'object' && 'message' in error
+    ? String((error as { message: unknown }).message)
+    : String(error);
+  return /^(capability_result_(?:path_invalid|hash_mismatch)|capability_attachment_|capability_installation_)/.test(message);
+}
+
+function postCapabilityOperationResult(context: vscode.ExtensionContext, operation: CapabilityOperation, ok: boolean, message: string): void {
+  const visible = ok ? message : capabilityOperationUserError(message);
+  if (operation.kind === 'skill') postSkillInstallResult(context, ok, visible);
+  else if (operation.kind === 'mcp') postMcpInstallResult(context, ok, visible);
+}
+
+function capabilityOperationUserError(message: string): string {
+  if (message.startsWith('capability_result_missing')) return '安装进程已结束，但没有返回可核验的结果。请重试。';
+  if (/source|来源|npm 包|同名命令/i.test(message)) return '安装来源未通过核验。请确认来源后重试。';
+  if (/path|目录|文件|receipt|回执|attachment|hash|symlink/i.test(message)) return '安装结果不完整或不安全，未写入能力列表。请重试。';
+  return '本次能力操作未完成，请重试。';
+}
+
+async function failCapabilityOperationWithRollback(globalRoot: string, operation: CapabilityOperation, message: string): Promise<string> {
+  let finalMessage = message;
+  if ((operation.kind === 'skill' || operation.kind === 'mcp') && ['install', 'upgrade', 'uninstall'].includes(operation.action)) {
+    try { await rollbackCapabilityOperationFilesystem(globalRoot, operation.operationId); }
+    catch (error) { finalMessage = `${message}; capability_rollback_failed:${error instanceof Error ? error.message : String(error)}`; }
+  }
+  await failCapabilityOperation(globalRoot, operation.operationId, finalMessage);
+  return finalMessage;
+}
+
+async function settleCapabilityOperation(context: vscode.ExtensionContext, workspaceRoot: string, settings: SolopreneurSettings, operation: CapabilityOperation): Promise<boolean> {
+  if (capabilityOperationSettling.has(operation.operationId)) return false;
+  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
+  const persisted = (await readCapabilityOperations(globalRoot, false)).find(item => item.operationId === operation.operationId) || operation;
+  operation = persisted;
+  if (!operation.resultPath) return false;
+  const run = await readCapabilityOperationRunState(globalRoot, operation.operationId);
+  if (capabilityOperationSettlementDecision(run, fs.existsSync(operation.resultPath)) === 'wait') return false;
+  try {
+    if (!fs.existsSync(operation.resultPath)) {
+      const fixed = await readCapabilityOperationResult(globalRoot, operation.operationId);
+      if (fixed) {
+        const bytes = Buffer.from(fixed.bytes, 'base64');
+        if (crypto.createHash('sha256').update(bytes).digest('hex') !== fixed.hash) throw new Error('capability_result_hash_mismatch');
+        materializeCapabilityOperationResult(globalRoot, operation.resultPath, bytes);
+      }
+    }
+  } catch (error) {
+    if (!permanentCapabilitySettlementError(error)) {
+      console.warn(`SoloMap capability operation ${operation.operationId} will retry after a transient result recovery failure:`, error);
+      return false;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    const failedMessage = await failCapabilityOperationWithRollback(globalRoot, operation, message);
+    postCapabilityOperationResult(context, operation, false, failedMessage);
+    vscode.window.showErrorMessage(capabilityOperationUserError(failedMessage));
+    return true;
+  }
+  if (!fs.existsSync(operation.resultPath)) {
+    const message = `capability_result_missing:${run.status || 'unknown'}${run.exitCode === null ? '' : `:${run.exitCode}`}`;
+    const failedMessage = await failCapabilityOperationWithRollback(globalRoot, operation, message);
+    postCapabilityOperationResult(context, operation, false, failedMessage);
+    vscode.window.showErrorMessage(capabilityOperationUserError(failedMessage));
+    return true;
+  }
+  capabilityOperationSettling.add(operation.operationId);
+  try {
+    let result: { ok: boolean; message: string };
+    if (operation.kind === 'skill' && ['install', 'upgrade'].includes(operation.action)) result = await validateAndRegisterSkillInstall(workspaceRoot, settings.globalDataPath, operation.resultPath, operation.operationId);
+    else if (operation.kind === 'mcp' && ['install', 'upgrade'].includes(operation.action)) result = await validateAndRegisterMcpInstall(workspaceRoot, settings.globalDataPath, operation.resultPath, operation.operationId);
+    else if (operation.kind === 'enhancement') result = { ok: false, message: '执行增强已从 SoloMap 移除。' };
+    else if ((operation.kind === 'skill' || operation.kind === 'mcp') && operation.action === 'uninstall' && operation.targetId) {
+      const installedPath = operation.kind === 'skill' ? path.join(getSolomapSkillsRoot(workspaceRoot, settings.globalDataPath), 'installed', operation.targetId) : path.join(getSolomapMcpRoot(workspaceRoot, settings.globalDataPath), 'servers', operation.targetId);
+      result = await validateAndRegisterCapabilityUninstall(workspaceRoot, settings.globalDataPath, operation.kind, operation.targetId, installedPath, operation.resultPath, operation.operationId);
+    } else throw new Error('capability_operation_action_invalid');
+    const resultMessage = result.ok ? result.message : await failCapabilityOperationWithRollback(globalRoot, operation, result.message);
+    postCapabilityOperationResult(context, operation, result.ok, resultMessage);
+    if (result.ok) vscode.window.showInformationMessage(resultMessage); else vscode.window.showErrorMessage(capabilityOperationUserError(resultMessage));
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message === 'capability_operation_superseded') {
+      await rollbackCapabilityOperationFilesystem(globalRoot, operation.operationId);
+      return true;
+    }
+    if (message === 'capability_operation_action_invalid' || permanentCapabilitySettlementError(error)) {
+      const failedMessage = await failCapabilityOperationWithRollback(globalRoot, operation, message);
+      postCapabilityOperationResult(context, operation, false, failedMessage);
+      vscode.window.showErrorMessage(capabilityOperationUserError(failedMessage));
+      return true;
+    }
+    console.warn(`SoloMap capability operation ${operation.operationId} will retry after a transient settlement failure:`, error);
+    return false;
+  } finally { capabilityOperationSettling.delete(operation.operationId); }
+}
+
+function watchCapabilityOperation(context: vscode.ExtensionContext, workspaceRoot: string, settings: SolopreneurSettings, operation: CapabilityOperation): void {
+  const launchRecoveryTimer = capabilityOperationLaunchRecoveryTimers.get(operation.operationId);
+  if (launchRecoveryTimer) clearTimeout(launchRecoveryTimer);
+  capabilityOperationLaunchRecoveryTimers.delete(operation.operationId);
+  if (capabilityOperationPollers.has(operation.operationId)) return;
+  void broadcastSettings(context, false, false).catch(error => console.error('SoloMap capability settings refresh failed:', error));
+  const tick = async () => {
+    try {
+      if (!await settleCapabilityOperation(context, workspaceRoot, settings, operation)) return;
+      const timer = capabilityOperationPollers.get(operation.operationId);
+      if (timer) clearInterval(timer);
+      capabilityOperationPollers.delete(operation.operationId);
+    } catch (error) {
+      console.warn(`SoloMap capability operation ${operation.operationId} poll failed and will retry:`, error);
+    }
+  };
+  const timer = setInterval(() => void tick(), 2000);
+  timer.unref?.();
+  capabilityOperationPollers.set(operation.operationId, timer);
+  void tick();
+}
+
+async function resumeCapabilityOperations(context: vscode.ExtensionContext, workspaceRoot: string, settings = getPersistedSettings(context)): Promise<void> {
+  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
+  await reconcileCapabilityOperationFilesystems(globalRoot);
+  for (const operation of await readCapabilityOperations(globalRoot, true)) {
+    if (!operation.resultPath) {
+      if (capabilityOperationNeedsLaunchRecovery(operation)) {
+        await failCapabilityOperationWithRollback(globalRoot, operation, 'capability_operation_not_launched');
+        const timer = capabilityOperationLaunchRecoveryTimers.get(operation.operationId);
+        if (timer) clearTimeout(timer);
+        capabilityOperationLaunchRecoveryTimers.delete(operation.operationId);
+      } else if (!capabilityOperationLaunchRecoveryTimers.has(operation.operationId)) {
+        const delay = Math.max(1, operation.createdAt + 60_000 - Date.now());
+        const timer = setTimeout(() => {
+          capabilityOperationLaunchRecoveryTimers.delete(operation.operationId);
+          void resumeCapabilityOperations(context, workspaceRoot, settings).catch(error => console.error('SoloMap capability launch recovery failed:', error));
+        }, delay);
+        timer.unref?.();
+        capabilityOperationLaunchRecoveryTimers.set(operation.operationId, timer);
+      }
+      continue;
+    }
+    watchCapabilityOperation(context, workspaceRoot, settings, operation);
+  }
+}
+
+async function recordUnavailableMaintenanceRun(context: vscode.ExtensionContext, workspaceRoot: string, settings: SolopreneurSettings, runKind: string, request: string, agentCli: string, failureReason: string): Promise<void> {
+  await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId: '__solo__', runKind, agentCli, userMessage: request,
+    failureCode: 'cli_not_found', failureReason, globalDataPath: settings.globalDataPath,
+    launchIntentId: `maintenance-unavailable:${runKind}:${crypto.randomUUID()}` });
 }
 
 async function handleUpgradeAllAgentClis(context: vscode.ExtensionContext): Promise<void> {
@@ -6578,6 +7266,7 @@ async function handleUpgradeAllAgentClis(context: vscode.ExtensionContext): Prom
   if (!commandExists(agentCli)) {
     const candidates = getAgentCliCandidates(requestedAgentCli, settings.cliPath).join(', ');
     const message = `Agent CLI not found. Tried: ${candidates}.`;
+    await recordUnavailableMaintenanceRun(context, workspaceRoot, settings, 'agent_cli_upgrade', '检查并升级已安装的 Agent CLI。', requestedAgentCli || agentCli, message);
     vscode.window.showErrorMessage(message);
     postAgentCliUpgradeResult(false, message);
     return;
@@ -6609,10 +7298,10 @@ async function handleUpgradeAllAgentClis(context: vscode.ExtensionContext): Prom
   }, 2000);
 }
 
-async function handleInstallSolomapSkill(context: vscode.ExtensionContext, rawSkillInput: string): Promise<void> {
+async function handleInstallSolomapSkill(context: vscode.ExtensionContext, rawSkillInput: string, upgradeId = '', expectedRevision = 0, registrySource: Record<string, unknown> = {}): Promise<void> {
   const skillInput = String(rawSkillInput || '').trim();
   if (!skillInput) {
-    vscode.window.showWarningMessage('Paste a skill link or package name before installing.');
+    vscode.window.showWarningMessage('请先填写技能链接或包名。');
     return;
   }
   const workspaceRoot = getSkillInstallWorkspaceRoot(context);
@@ -6622,39 +7311,36 @@ async function handleInstallSolomapSkill(context: vscode.ExtensionContext, rawSk
   const agentCli = resolveAgentCli(requestedAgentCli, settings.cliPath);
   if (!commandExists(agentCli)) {
     const candidates = getAgentCliCandidates(requestedAgentCli, settings.cliPath).join(', ');
-    vscode.window.showErrorMessage(`Agent CLI not found. Tried: ${candidates}.`);
+    const detail = `Agent CLI not found. Tried: ${candidates}.`;
+    await recordUnavailableMaintenanceRun(context, workspaceRoot, settings, 'skill_install', `安装技能：${skillInput}`, requestedAgentCli || agentCli, detail);
+    vscode.window.showErrorMessage('当前选择的 Agent 暂时不可用。请在设置中检查 Agent 后重试。');
     return;
   }
   ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
-  const { skillsRoot, runsRoot } = await ensureSolomapSkillStore(workspaceRoot, settings.globalDataPath);
-  const resultFilePath = await launchMaintenanceAgentRun(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'skill_install', `安装技能：${skillInput}`, resultPath => buildSkillInstallPrompt(skillInput, workspaceRoot, settings.globalDataPath, resultPath));
+  await ensureSolomapSkillStore(workspaceRoot, settings.globalDataPath);
+  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
+  const operation = await beginCapabilityOperation(globalRoot, { kind: 'skill', action: upgradeId ? 'upgrade' : 'install', sourceIntent: { input: skillInput, ...(upgradeId ? { registrySource } : {}) }, ...(upgradeId ? { targetId: upgradeId, expectedRevision } : {}) });
+  let resultFilePath: string;
+  try { resultFilePath = await launchMaintenanceAgentRun(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'skill_install', `安装技能：${skillInput}`, resultPath => buildSkillInstallPrompt(skillInput, workspaceRoot, settings.globalDataPath, resultPath, upgradeId), operation.operationId); }
+  catch (error) { await failCapabilityOperation(globalRoot, operation.operationId, error instanceof Error ? error.message : String(error)); throw error; }
   vscode.window.showInformationMessage('技能安装已开始，可在 Agent 终端查看进度。');
-
-  const startedAt = Date.now();
-  const poller = setInterval(async () => {
-    if (!fs.existsSync(resultFilePath)) {
-      if (Date.now() - startedAt > 30 * 60 * 1000) {
-        clearInterval(poller);
-        vscode.window.showWarningMessage('SoloMap skill install is still waiting for result.json. Check the Agent terminal output.');
-      }
-      return;
-    }
-    clearInterval(poller);
-    const validation = await validateAndRegisterSkillInstall(workspaceRoot, settings.globalDataPath, resultFilePath);
-    if (validation.ok) {
-      vscode.window.showInformationMessage(validation.message);
-      postSkillInstallResult(context, true, validation.message);
-    } else {
-      vscode.window.showErrorMessage(`SoloMap skill install failed validation: ${validation.message}`);
-      postSkillInstallResult(context, false, validation.message);
-    }
-  }, 2000);
+  watchCapabilityOperation(context, workspaceRoot, settings, { ...operation, resultPath: resultFilePath });
 }
 
-async function handleInstallSolomapMcp(context: vscode.ExtensionContext, rawMcpInput: string): Promise<void> {
+async function handleUpgradeSolomapSkill(context: vscode.ExtensionContext, rawSkillId: string): Promise<void> {
+  const skillId = sanitizeAttachmentScope(String(rawSkillId || '').trim().toLowerCase());
+  const workspaceRoot = getSkillInstallWorkspaceRoot(context), settings = getPersistedSettings(context);
+  const registry = await readSolomapSkillRegistry(workspaceRoot, settings.globalDataPath);
+  const skill = registry.skills.find(item => item.id === skillId);
+  const source = String(skill?.source?.input || skill?.source?.url || skill?.source?.repo || skill?.source?.repository || '').trim();
+  if (!skill || skill.source?.type === 'builtin' || !source) { vscode.window.showWarningMessage('这个技能没有可用于更新的来源。'); return; }
+  await handleInstallSolomapSkill(context, source, skillId, registry.entryVersions?.[skillId] || 0, skill.source || {});
+}
+
+async function handleInstallSolomapMcp(context: vscode.ExtensionContext, rawMcpInput: string, upgradeId = '', expectedRevision = 0, registrySource: Record<string, unknown> = {}): Promise<void> {
   const mcpInput = String(rawMcpInput || '').trim();
   if (!mcpInput) {
-    vscode.window.showWarningMessage('Paste an MCP connector link, package, or config before installing.');
+    vscode.window.showWarningMessage('请先填写 MCP 链接、包名或配置。');
     return;
   }
   const workspaceRoot = getSkillInstallWorkspaceRoot(context);
@@ -6664,223 +7350,83 @@ async function handleInstallSolomapMcp(context: vscode.ExtensionContext, rawMcpI
   const agentCli = resolveAgentCli(requestedAgentCli, settings.cliPath);
   if (!commandExists(agentCli)) {
     const candidates = getAgentCliCandidates(requestedAgentCli, settings.cliPath).join(', ');
-    vscode.window.showErrorMessage(`Agent CLI not found. Tried: ${candidates}.`);
+    const detail = `Agent CLI not found. Tried: ${candidates}.`;
+    await recordUnavailableMaintenanceRun(context, workspaceRoot, settings, 'mcp_install', `安装 MCP：${mcpInput}`, requestedAgentCli || agentCli, detail);
+    vscode.window.showErrorMessage('当前选择的 Agent 暂时不可用。请在设置中检查 Agent 后重试。');
     return;
   }
   ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
-  const { mcpRoot, runsRoot } = ensureSolomapMcpStore(workspaceRoot, settings.globalDataPath);
-  const resultFilePath = await launchMaintenanceAgentRun(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'mcp_install', `安装 MCP：${mcpInput}`, resultPath => buildMcpInstallPrompt(mcpInput, workspaceRoot, settings.globalDataPath, resultPath));
+  ensureSolomapMcpStore(workspaceRoot, settings.globalDataPath);
+  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
+  const operation = await beginCapabilityOperation(globalRoot, { kind: 'mcp', action: upgradeId ? 'upgrade' : 'install', sourceIntent: { input: mcpInput, ...(upgradeId ? { registrySource } : {}) }, ...(upgradeId ? { targetId: upgradeId, expectedRevision } : {}) });
+  let resultFilePath: string;
+  try { resultFilePath = await launchMaintenanceAgentRun(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'mcp_install', `安装 MCP：${mcpInput}`, resultPath => buildMcpInstallPrompt(mcpInput, workspaceRoot, settings.globalDataPath, resultPath, upgradeId), operation.operationId); }
+  catch (error) { await failCapabilityOperation(globalRoot, operation.operationId, error instanceof Error ? error.message : String(error)); throw error; }
   vscode.window.showInformationMessage('MCP 安装已开始，可在 Agent 终端查看进度。');
+  watchCapabilityOperation(context, workspaceRoot, settings, { ...operation, resultPath: resultFilePath });
+}
 
-  const startedAt = Date.now();
-  const poller = setInterval(async () => {
-    if (!fs.existsSync(resultFilePath)) {
-      if (Date.now() - startedAt > 30 * 60 * 1000) {
-        clearInterval(poller);
-        vscode.window.showWarningMessage('SoloMap MCP install is still waiting for result.json. Check the Agent terminal output.');
-      }
-      return;
-    }
-    clearInterval(poller);
-    const validation = await validateAndRegisterMcpInstall(workspaceRoot, settings.globalDataPath, resultFilePath);
-    if (validation.ok) {
-      vscode.window.showInformationMessage(validation.message);
-      postMcpInstallResult(context, true, validation.message);
-    } else {
-      vscode.window.showErrorMessage(`SoloMap MCP install failed validation: ${validation.message}`);
-      postMcpInstallResult(context, false, validation.message);
-    }
-  }, 2000);
+async function handleUpgradeSolomapMcp(context: vscode.ExtensionContext, rawMcpId: string): Promise<void> {
+  const mcpId = sanitizeAttachmentScope(String(rawMcpId || '').trim().toLowerCase());
+  const workspaceRoot = getSkillInstallWorkspaceRoot(context), settings = getPersistedSettings(context);
+  const registry = await readSolomapMcpRegistry(workspaceRoot, settings.globalDataPath);
+  const connector = registry.connectors.find(item => item.id === mcpId);
+  const source = String(connector?.source?.input || connector?.source?.url || connector?.source?.repo || connector?.source?.repository || '').trim();
+  if (!connector || (connector.id === 'builtin:solomap-intelligence' && connector.source?.kind === 'builtin') || !source) { vscode.window.showWarningMessage('这个 MCP 没有可用于更新的来源。'); return; }
+  await handleInstallSolomapMcp(context, source, mcpId, registry.entryVersions?.[mcpId] || 0, connector.source || {});
 }
 
 async function handleUninstallSolomapSkill(context: vscode.ExtensionContext, skillId: string): Promise<void> {
   const settings = getPersistedSettings(context);
   const workspaceRoot = getSkillInstallWorkspaceRoot(context);
-  const globalDataPath = settings.globalDataPath || '';
-  
-  try {
-    const registry = await readSolomapSkillRegistry(workspaceRoot, globalDataPath);
-    if (!registry.skills.some((skill) => skill.id === skillId)) {
-      const message = `Skill is not installed: ${skillId}`;
-      vscode.window.showWarningMessage(message);
-      postSkillInstallResult(context, false, message);
-      return;
-    }
-    const nextSkills = registry.skills.filter((skill) => skill.id !== skillId);
-    await writeSolomapSkillRegistry(workspaceRoot, globalDataPath, { ...registry, skills: nextSkills });
-    
-    const skillsRoot = getSolomapSkillsRoot(workspaceRoot, globalDataPath);
-    const installedPath = path.join(skillsRoot, 'installed', skillId);
-    if (fs.existsSync(installedPath)) {
-      fs.rmSync(installedPath, { recursive: true, force: true });
-    }
-    
-    const message = `SoloMap skill uninstalled successfully: ${skillId}`;
-    vscode.window.showInformationMessage(message);
-    postSkillInstallResult(context, true, message);
-  } catch (error: any) {
-    const message = `Failed to uninstall skill: ${error.message || error}`;
-    vscode.window.showErrorMessage(message);
-    postSkillInstallResult(context, false, message);
-  }
+  const registry = await readSolomapSkillRegistry(workspaceRoot, settings.globalDataPath);
+  if (!registry.skills.some((skill) => skill.id === skillId)) { const message = '这个技能尚未安装。'; vscode.window.showWarningMessage(message); postSkillInstallResult(context, false, message); return; }
+  const requestedAgentCli = (settings.cliPath || 'agy').trim(), agentCli = resolveAgentCli(requestedAgentCli, settings.cliPath);
+  if (!commandExists(agentCli)) { const detail = `Agent CLI not found. Tried: ${getAgentCliCandidates(requestedAgentCli, settings.cliPath).join(', ')}.`; await recordUnavailableMaintenanceRun(context, workspaceRoot, settings, 'skill_uninstall', `卸载技能：${skillId}`, requestedAgentCli || agentCli, detail); vscode.window.showErrorMessage('当前选择的 Agent 暂时不可用。请在设置中检查 Agent 后重试。'); return; }
+  const { maintenanceRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, settings.globalDataPath);
+  const installedPath = path.join(getSolomapSkillsRoot(workspaceRoot, settings.globalDataPath), 'installed', skillId);
+  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
+  const operation = await beginCapabilityOperation(globalRoot, { kind: 'skill', action: 'uninstall', targetId: skillId, expectedRevision: registry.entryVersions?.[skillId] || 0 });
+  let resultFilePath: string;
+  try { resultFilePath = await launchMaintenanceAgentRun(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'skill_uninstall', `卸载技能：${skillId}`, resultPath => buildCapabilityUninstallPrompt('skill', skillId, installedPath, resultPath), operation.operationId); }
+  catch (error) { await failCapabilityOperation(globalRoot, operation.operationId, error instanceof Error ? error.message : String(error)); throw error; }
+  postSkillInstallResult(context, true, `正在卸载技能：${skillId}`);
+  watchCapabilityOperation(context, workspaceRoot, settings, { ...operation, resultPath: resultFilePath });
 }
 
 async function handleUninstallSolomapMcp(context: vscode.ExtensionContext, mcpId: string): Promise<void> {
   const settings = getPersistedSettings(context);
   const workspaceRoot = getSkillInstallWorkspaceRoot(context);
-  const globalDataPath = settings.globalDataPath || '';
-  
-  try {
-    const registry = await readSolomapMcpRegistry(workspaceRoot, globalDataPath);
-    if (!registry.connectors.some((connector) => connector.id === mcpId)) {
-      const message = `MCP connector is not installed: ${mcpId}`;
-      vscode.window.showWarningMessage(message);
-      postMcpInstallResult(context, false, message);
-      return;
-    }
-    const nextConnectors = registry.connectors.filter((connector) => connector.id !== mcpId);
-    await writeSolomapMcpRegistry(workspaceRoot, globalDataPath, { ...registry, connectors: nextConnectors });
-    
-    const mcpRoot = getSolomapMcpRoot(workspaceRoot, globalDataPath);
-    const installedPath = path.join(mcpRoot, 'servers', mcpId);
-    if (fs.existsSync(installedPath)) {
-      fs.rmSync(installedPath, { recursive: true, force: true });
-    }
-    
-    const message = `SoloMap MCP connector uninstalled successfully: ${mcpId}`;
-    vscode.window.showInformationMessage(message);
-    postMcpInstallResult(context, true, message);
-  } catch (error: any) {
-    const message = `Failed to uninstall MCP connector: ${error.message || error}`;
-    vscode.window.showErrorMessage(message);
-    postMcpInstallResult(context, false, message);
-  }
-}
-
-async function handleInstallSolomapEnhancement(context: vscode.ExtensionContext, rawEnhancementId: string): Promise<void> {
-  const enhancementId = sanitizeAttachmentScope(String(rawEnhancementId || '').trim().toLowerCase());
-  const builtin = getBuiltinEnhancementDefinition(enhancementId);
-  if (!builtin) {
-    vscode.window.showWarningMessage('选择一个执行增强后再安装。');
-    return;
-  }
-  const workspaceRoot = getSkillInstallWorkspaceRoot(context);
-  const settings = getPersistedSettings(context);
+  const registry = await readSolomapMcpRegistry(workspaceRoot, settings.globalDataPath);
+  if (!registry.connectors.some((connector) => connector.id === mcpId)) { const message = '这个 MCP 尚未安装。'; vscode.window.showWarningMessage(message); postMcpInstallResult(context, false, message); return; }
+  const requestedAgentCli = (settings.cliPath || 'agy').trim(), agentCli = resolveAgentCli(requestedAgentCli, settings.cliPath);
+  if (!commandExists(agentCli)) { const detail = `Agent CLI not found. Tried: ${getAgentCliCandidates(requestedAgentCli, settings.cliPath).join(', ')}.`; await recordUnavailableMaintenanceRun(context, workspaceRoot, settings, 'mcp_uninstall', `卸载 MCP：${mcpId}`, requestedAgentCli || agentCli, detail); vscode.window.showErrorMessage('当前选择的 Agent 暂时不可用。请在设置中检查 Agent 后重试。'); return; }
   const { maintenanceRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, settings.globalDataPath);
-  const requestedAgentCli = (settings.cliPath || 'agy').trim();
-  const agentCli = resolveAgentCli(requestedAgentCli, settings.cliPath);
-  if (!commandExists(agentCli)) {
-    const candidates = getAgentCliCandidates(requestedAgentCli, settings.cliPath).join(', ');
-    vscode.window.showErrorMessage(`Agent CLI not found. Tried: ${candidates}.`);
-    return;
-  }
-  ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
-  await ensureSolomapSkillStore(workspaceRoot, settings.globalDataPath);
-  const { enhancementsRoot, runsRoot } = ensureSolomapEnhancementStore(workspaceRoot, settings.globalDataPath);
-  await upsertEnhancementRegistryEntry(workspaceRoot, settings.globalDataPath, {
-    ...builtin,
-    status: 'installing',
-    enabled: false,
-    updatedAt: new Date().toISOString(),
-    health: { ok: false, message: '安装中' }
-  });
-  postEnhancementInstallResult(context, true, `正在安装执行增强：${builtin.title}`);
-  const resultFilePath = await launchMaintenanceAgentRun(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'enhancement_install', `安装执行增强：${builtin.title}`, resultPath => buildEnhancementInstallPrompt(enhancementId, workspaceRoot, settings.globalDataPath, resultPath));
-
-  const startedAt = Date.now();
-  const poller = setInterval(async () => {
-    if (!fs.existsSync(resultFilePath)) {
-      if (Date.now() - startedAt > 45 * 60 * 1000) {
-        clearInterval(poller);
-        postEnhancementInstallResult(context, false, '执行增强安装仍在等待 result.json，请查看 Agent 终端输出。');
-      }
-      return;
-    }
-    clearInterval(poller);
-    const validation = await validateAndRegisterEnhancementInstall(workspaceRoot, settings.globalDataPath, resultFilePath);
-    postEnhancementInstallResult(context, validation.ok, validation.message);
-    if (validation.ok) {
-      vscode.window.showInformationMessage(validation.message);
-    } else {
-      vscode.window.showErrorMessage(`执行增强安装复验失败：${validation.message}`);
-    }
-  }, 2000);
+  const installedPath = path.join(getSolomapMcpRoot(workspaceRoot, settings.globalDataPath), 'servers', mcpId);
+  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
+  ensureSolomapMcpStore(workspaceRoot, settings.globalDataPath);
+  const operation = await beginCapabilityOperation(globalRoot, { kind: 'mcp', action: 'uninstall', targetId: mcpId, expectedRevision: registry.entryVersions?.[mcpId] || 0 });
+  let resultFilePath: string;
+  try { resultFilePath = await launchMaintenanceAgentRun(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'mcp_uninstall', `卸载 MCP：${mcpId}`, resultPath => buildCapabilityUninstallPrompt('mcp', mcpId, installedPath, resultPath), operation.operationId); }
+  catch (error) { await failCapabilityOperation(globalRoot, operation.operationId, error instanceof Error ? error.message : String(error)); throw error; }
+  postMcpInstallResult(context, true, `正在卸载 MCP：${mcpId}`);
+  watchCapabilityOperation(context, workspaceRoot, settings, { ...operation, resultPath: resultFilePath });
 }
 
-async function handleCheckSolomapEnhancement(context: vscode.ExtensionContext, rawEnhancementId: string): Promise<void> {
-  const enhancementId = sanitizeAttachmentScope(String(rawEnhancementId || '').trim().toLowerCase());
-  const workspaceRoot = getSkillInstallWorkspaceRoot(context);
-  const settings = getPersistedSettings(context);
-  const result = await checkAndRegisterEnhancement(workspaceRoot, settings.globalDataPath, enhancementId);
-  postEnhancementInstallResult(context, result.ok, result.message);
-  if (result.ok) {
-    vscode.window.showInformationMessage(result.message);
-  } else {
-    vscode.window.showWarningMessage(result.message);
-  }
+async function handleSetSolomapSkillEnabled(context: vscode.ExtensionContext, rawSkillId: string, enabled: boolean): Promise<void> {
+  const skillId = sanitizeAttachmentScope(String(rawSkillId || '').trim().toLowerCase());
+  const workspaceRoot = getSkillInstallWorkspaceRoot(context), settings = getPersistedSettings(context);
+  const result = await setSolomapSkillEnabled(workspaceRoot, settings.globalDataPath, skillId, enabled);
+  postSkillInstallResult(context, result.ok, result.message);
+  if (result.ok) vscode.window.showInformationMessage(result.message); else vscode.window.showWarningMessage(result.message);
 }
 
-async function handleSetSolomapEnhancementEnabled(context: vscode.ExtensionContext, rawEnhancementId: string, enabled: boolean): Promise<void> {
-  const enhancementId = sanitizeAttachmentScope(String(rawEnhancementId || '').trim().toLowerCase());
-  const workspaceRoot = getSkillInstallWorkspaceRoot(context);
-  const settings = getPersistedSettings(context);
-  const result = await setSolomapEnhancementEnabled(workspaceRoot, settings.globalDataPath, enhancementId, enabled);
-  postEnhancementInstallResult(context, result.ok, result.message);
-  if (result.ok) {
-    vscode.window.showInformationMessage(result.message);
-  } else {
-    vscode.window.showWarningMessage(result.message);
-  }
-}
-
-async function handleUninstallSolomapEnhancement(context: vscode.ExtensionContext, rawEnhancementId: string): Promise<void> {
-  const enhancementId = sanitizeAttachmentScope(String(rawEnhancementId || '').trim().toLowerCase());
-  const builtin = getBuiltinEnhancementDefinition(enhancementId);
-  if (!builtin) {
-    vscode.window.showWarningMessage('选择一个执行增强后再卸载。');
-    return;
-  }
-  const workspaceRoot = getSkillInstallWorkspaceRoot(context);
-  const settings = getPersistedSettings(context);
-  const { maintenanceRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, settings.globalDataPath);
-  const requestedAgentCli = (settings.cliPath || 'agy').trim();
-  const agentCli = resolveAgentCli(requestedAgentCli, settings.cliPath);
-  if (!commandExists(agentCli)) {
-    const candidates = getAgentCliCandidates(requestedAgentCli, settings.cliPath).join(', ');
-    vscode.window.showErrorMessage(`Agent CLI not found. Tried: ${candidates}.`);
-    return;
-  }
-  ensureSolomapMemoryStore(workspaceRoot, settings.globalDataPath);
-  await ensureSolomapSkillStore(workspaceRoot, settings.globalDataPath);
-  const { enhancementsRoot, runsRoot } = ensureSolomapEnhancementStore(workspaceRoot, settings.globalDataPath);
-  await upsertEnhancementRegistryEntry(workspaceRoot, settings.globalDataPath, {
-    ...builtin,
-    status: 'uninstalling',
-    enabled: false,
-    updatedAt: new Date().toISOString(),
-    health: { ok: false, message: '卸载中' }
-  });
-  postEnhancementInstallResult(context, true, `正在卸载执行增强：${builtin.title}`);
-  const resultFilePath = await launchMaintenanceAgentRun(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'enhancement_uninstall', `卸载执行增强：${builtin.title}`, resultPath => buildEnhancementUninstallPrompt(enhancementId, workspaceRoot, settings.globalDataPath, resultPath));
-
-  const startedAt = Date.now();
-  const poller = setInterval(async () => {
-    if (!fs.existsSync(resultFilePath)) {
-      if (Date.now() - startedAt > 45 * 60 * 1000) {
-        clearInterval(poller);
-        postEnhancementInstallResult(context, false, '执行增强卸载仍在等待 result.json，请查看 Agent 终端输出。');
-      }
-      return;
-    }
-    clearInterval(poller);
-    const validation = await validateAndRegisterEnhancementUninstall(workspaceRoot, settings.globalDataPath, resultFilePath);
-    postEnhancementInstallResult(context, validation.ok, validation.message);
-    if (validation.ok) {
-      vscode.window.showInformationMessage(validation.message);
-    } else {
-      vscode.window.showErrorMessage(`执行增强卸载复验失败：${validation.message}`);
-    }
-  }, 2000);
+async function handleSetSolomapMcpEnabled(context: vscode.ExtensionContext, rawMcpId: string, enabled: boolean): Promise<void> {
+  const mcpId = sanitizeAttachmentScope(String(rawMcpId || '').trim().toLowerCase());
+  const workspaceRoot = getSkillInstallWorkspaceRoot(context), settings = getPersistedSettings(context);
+  const result = await setSolomapMcpEnabled(workspaceRoot, settings.globalDataPath, mcpId, enabled);
+  postMcpInstallResult(context, result.ok, result.message);
+  if (result.ok) vscode.window.showInformationMessage(result.message); else vscode.window.showWarningMessage(result.message);
 }
 
 function resolveContinuationLeafConversation(nodeId: string, conversationId: number): AgentConversation | null {
@@ -6936,13 +7482,13 @@ async function registerInteractiveConversationTurn(workspaceRoot: string, conver
   if (!request) return null;
   const started = await client.checkpoint(resolved.reference, resolved.status, {
     action: 'start', message: request, preserveRoadmapState,
-    idempotencyKey: `run:${resolved.turnId}:host-start:${crypto.createHash('sha256').update(JSON.stringify({ request, preserveRoadmapState })).digest('hex')}`
+    idempotencyKey: `run:${resolved.status.turnId}:host-start:${crypto.createHash('sha256').update(JSON.stringify({ request, preserveRoadmapState })).digest('hex')}`
   });
   if (engine && (globalDataPath !== undefined || activeProjectRoot === workspaceRoot)) {
     await engine.readAgentExecutionById(Number(started.executionLogId));
     if (!preserveRoadmapState && started.nodeId !== soloConversationId && started.nodeId !== roadmapRevisionId) {
       const node = engine.getNodes().find(candidate => candidate.id === started.nodeId);
-      if (node && node.status !== 'Completed') engine.updateNode(String(started.nodeId), { status: 'Running', completedAt: '' });
+      if (node && node.status !== 'Completed') await engine.updateNode(String(started.nodeId), { status: 'Running', completedAt: '' });
     }
   }
   const terminalName = String(started.terminalName || (globalDataPath === undefined ? agentTerminalNamesByConversationId.get(Number(started.rootExecutionLogId)) : '') || '');
@@ -6992,7 +7538,7 @@ async function handleContinueConversationTurn(
     return;
   }
   const client = runLifecycleClient(continuationProject, settings.globalDataPath);
-  const registered = await client.findConversation(continuationProject, parentConversationId);
+  const registered = await client.adoptConversationHistory(continuationProject, parentConversationId);
   if (registered) {
     if (registered.status.nodeId !== nodeId) throw new Error('run_conversation_node_mismatch');
     const conversations = continuationEngine.getAgentExecutions(nodeId);
@@ -7012,9 +7558,15 @@ async function handleContinueConversationTurn(
       return;
     }
     const leaf = resolveContinuationLeafConversationFromList(conversations, parentConversationId);
-    const source = leaf ? await client.findConversation(continuationProject, Number(leaf.id)) : registered;
+    let source = leaf ? await client.adoptConversationHistory(continuationProject, Number(leaf.id)) : registered;
     if (!source) throw new Error('run_conversation_missing');
-    const binding = await client.readBinding(source.reference, source.status);
+    let binding = await client.readBinding(source.reference, source.status);
+    if (binding && ['codex', 'claude'].includes(binding.provider) && ['preparing', 'planned'].includes(binding.revisions[binding.headRevision - 1].state)) {
+      await client.recoverNativeIdentity(source.reference, source.status);
+      source = await client.findConversation(continuationProject, Number(source.status.journalExecutionLogId || source.status.rootExecutionLogId));
+      if (!source) throw new Error('run_conversation_missing');
+      binding = await client.readBinding(source.reference, source.status);
+    }
     const session = getResumableSessionValue(binding);
     if (!session) throw new Error('尚未确认这段对话的原生会话，暂时无法接续。');
     const agentCli = resolveAgentCli(session.cliPath, '');
@@ -7023,10 +7575,19 @@ async function handleContinueConversationTurn(
     const providerContext = [...binding!.revisions].reverse().find(revision => revision.providerContext)?.providerContext;
     const transcriptPath = session.provider === 'codex' ? String(head.evidence?.transcriptPath || '') : '';
     if (session.provider === 'codex' && !transcriptPath) throw new Error('尚未确认这段 Codex 对话的原生记录，暂时无法接续。');
-    if (!commandExists(agentCli)) throw new Error(`Agent CLI not found for continuation: ${session.cliPath}`);
+    if (!commandExists(agentCli)) {
+      const failureReason = `Agent CLI not found for continuation: ${session.cliPath}`;
+      await recordUndeliverableAgentRun(context, { workspaceRoot: continuationProject, nodeId,
+        runKind: nodeId === soloConversationId ? 'solo_continue' : 'step_continue', agentCli: session.cliPath,
+        selectedModel: selectedModel || String(source.status.selectedModel || ''), userMessage: request,
+        failureCode: 'continuation_cli_not_found', failureReason, globalDataPath: settings.globalDataPath || '',
+        parentExecutionLogId: Number(source.status.rootExecutionLogId), expectedParentTurnId: String(source.status.turnId),
+        launchIntentId: target?.launchIntentId || `continue-unavailable:${source.runId}:${source.status.turnId}:${crypto.createHash('sha256').update(request).digest('hex')}` });
+      throw new Error(failureReason);
+    }
     const node = nodeId === soloConversationId ? null : continuationEngine.getNodes().find(candidate => candidate.id === nodeId) || null;
     const preGitHash = await createPreSessionGitCommit(continuationProject);
-    const prompt = await buildInteractiveContinuationPrompt(node, request, continuationProject, '', attachedFiles, settings.globalPrompt, settings.globalDataPath, true);
+    const prompt = await buildInteractiveContinuationPrompt(node, request, continuationProject, '', attachedFiles, settings.globalPrompt, settings.globalDataPath);
     const prepared = await prepareOrdinaryConversation(context, {
       agentCli, selectedModel: selectedModel || String(source.status.selectedModel || ''), prompt, globalPrompt: settings.globalPrompt,
       workspaceRoot: continuationProject, nodeId, executionLogId: 0, userMessage: request,
@@ -7040,168 +7601,20 @@ async function handleContinueConversationTurn(
         launchSummary: [preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '', 'Agent continuation started.', buildContinuationMetadataBlock(rootId, session.sessionId), `User supplement:\n${request}`].filter(Boolean).join('\n\n') }
     }, settings);
     if (!preserveRoadmapState && node && node.status !== 'Completed') {
-      continuationEngine.updateNode(nodeId, { status: 'Running' });
+      await continuationEngine.updateNode(nodeId, { status: 'Running' });
       if (syncEngine === continuationEngine) { sendNodesToWebview(); refreshSidebarProjectCards(); }
     }
     await deliverOrdinaryConversation(context, prepared);
     return;
   }
-  // This branch is retained only until historical lifecycle adoption is complete.
-  // Reserve unmigrated IDs before it can append an execution record.
-  await continuationEngine.initAndSync({ history: 'background' });
-  const parentConversation = continuationEngine.getAgentExecutions(nodeId).find((entry) => Number(entry.id) === Number(parentConversationId));
-  if (!parentConversation) {
-    vscode.window.showErrorMessage(`Conversation ${parentConversationId} not found for continuation.`);
-    return;
-  }
-  const rootConversation = resolveContinuationRootConversationFromList(continuationEngine.getAgentExecutions(nodeId), parentConversationId) || parentConversation;
-  const rootConversationId = Number(rootConversation.id || parentConversationId);
-  const requestedAgentCli = String(parentConversation.agentCli || settings.cliPath || '').trim();
-  const agentCli = resolveAgentCli(requestedAgentCli, requestedAgentCli ? '' : settings.cliPath);
-  if (!commandExists(agentCli)) {
-    vscode.window.showErrorMessage(`Agent CLI not found for continuation: ${requestedAgentCli || agentCli}`);
-    return;
-  }
-  const attachedFiles = filterProjectRelativeFiles(continuationProject, supplementFiles);
-  const terminalMessage = [
-    request,
-    attachedFiles.length > 0 ? `补充文件（开始前先读取）：\n${attachedFiles.map((file) => `- ${file}`).join('\n')}` : ''
-  ].filter(Boolean).join('\n\n');
-  const reusable = await findReusableContinuationTerminal(continuationProject, nodeId, rootConversationId, continuationEngine, settings.globalDataPath);
-  const activeTerminal = reusable?.terminal;
-  if (activeTerminal) {
-    const started = await registerInteractiveConversationTurn(continuationProject, reusable!.conversationId, terminalMessage, preserveRoadmapState, settings.globalDataPath, continuationEngine);
-    if (started) {
-      const deliveryMessage = [terminalMessage, `本轮已由 SoloMap 登记为执行中，无需再次运行 start。本轮 turnId：${started.turnId}。完成时运行 node "$SOLOMAP_TASK_COMMAND" complete --turn-id ${shellQuote(started.turnId)}，沿用原汇报要求。`].join('\n\n');
-      activeTerminal.show(true);
-      const delivered = await sendAgentTextWhenTerminalReady(activeTerminal, deliveryMessage, getAgentProvider(agentCli));
-      if (!delivered) {
-        vscode.window.showErrorMessage('无法把本轮消息发送到当前 Agent 终端。');
-      }
-      postNodeConversations(nodeId);
-    } else {
-      activeTerminal.show(true);
-      vscode.window.showInformationMessage('当前 Agent 终端仍在处理上一轮，已为你打开现有会话。');
-    }
-    return;
-  }
-  const sessionConversation = resolveContinuationSessionConversationFromList(continuationEngine.getAgentExecutions(nodeId), parentConversationId, conversation => Boolean(resolveNativeSessionIdForConversation(nodeId, conversation, continuationProject))) || parentConversation;
-  await recoverCodexSessionIdentityForConversation(nodeId, sessionConversation, continuationProject);
-  const sessionId = resolveNativeSessionIdForConversation(nodeId, sessionConversation, continuationProject);
-  if (!sessionId) {
-    vscode.window.showErrorMessage('No resumable native Agent session ID was recorded for this conversation.');
-    return;
-  }
-  const codexResumeContext = getAgentProvider(agentCli) === 'codex'
-    ? getConfirmedCodexResumeContext(continuationProject, nodeId, sessionConversation, sessionId, continuationEngine)
-    : null;
-  if (getAgentProvider(agentCli) === 'codex' && !codexResumeContext) {
-    vscode.window.showErrorMessage('No confirmed native Codex transcript was recorded for this conversation.');
-    return;
-  }
-
-  if (!preserveRoadmapState && nodeId !== roadmapRevisionId && nodeId !== soloConversationId) {
-    const currentNode = continuationEngine.getNodes().find((candidate) => candidate.id === nodeId);
-    if (currentNode && currentNode.status !== 'Completed') {
-      continuationEngine.updateNode(nodeId, { status: 'Running' });
-      sendNodesToWebview();
-      refreshSidebarProjectCards();
-    }
-  }
-
-  const preGitHash = await createPreSessionGitCommit(continuationProject);
-  const launchSummary = [
-    preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
-    'Agent continuation started.',
-    `Run started at: ${new Date().toISOString()}`,
-    buildContinuationMetadataBlock(rootConversationId, sessionId),
-    `User supplement:\n${request}`,
-    attachedFiles.length > 0 ? `Attached files:\n${attachedFiles.join('\n')}` : ''
-  ].filter(Boolean).join('\n\n');
-  const executionLogId = await continuationEngine.logAgentExecution(
-    nodeId,
-    agentCli,
-    `${agentCli} [preparing interactive continuation]`,
-    launchSummary,
-    'Running'
-  );
-  const runDir = path.join(continuationProject, '.solopreneur', 'agent-runs', nodeId, String(executionLogId));
-  const statusFilePath = getAgentStatusFilePath(continuationProject, executionLogId);
-  const completionDecisionFilePath = path.join(runDir, 'completion.json');
-  const node = nodeId === soloConversationId
-    ? null
-    : continuationEngine.getNodes().find((candidate) => candidate.id === nodeId) || null;
-  const continuationPrompt = await buildInteractiveContinuationPrompt(
-    node,
-    request,
-    continuationProject,
-    completionDecisionFilePath,
-    attachedFiles,
-    settings.globalPrompt,
-    settings.globalDataPath
-  );
-  fs.mkdirSync(runDir, { recursive: true });
-  const promptFilePath = path.join(runDir, 'prompt.txt');
-  fs.writeFileSync(promptFilePath, continuationPrompt, 'utf8');
-  const directExecutionCommand = buildInteractiveAgentContinuationCommandForPromptFile(
-    agentCli,
-    promptFilePath,
-    continuationProject,
-    sessionId,
-    settings.taskPermissionMode,
-    selectedModel
-  );
-  const displayCommand = buildSdkSentinelCommandLabel(agentCli, continuationProject, sessionId);
-  await continuationEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
-
-  const { finalCommand } = await buildPreparedAgentShellScript(
-    agentCli,
-    selectedModel,
-    continuationPrompt,
-    continuationProject,
-    nodeId,
-    executionLogId,
-    request,
-    completionDecisionFilePath,
-    sessionId,
-    directExecutionCommand,
-    nodeId === soloConversationId ? 'solo_continue' : 'step_continue',
-    '',
-    settings.globalDataPath,
-    settings.taskPermissionMode,
-    settings.reviewerCliPath,
-    settings.collaborationReviewMode,
-    settings.enabledEnhancements,
-    runDir,
-    statusFilePath,
-    {
-      ...(codexResumeContext ? { codexResumeTranscriptPath: codexResumeContext.transcriptPath } : {}),
-      globalPrompt: settings.globalPrompt,
-      lineageRootExecutionLogId: rootConversationId,
-      checkpointPreserveRoadmapState: preserveRoadmapState
-    }
-  );
-  await launchAgentConversationTerminal({
-    workspaceRoot: continuationProject,
-    label: `continue-${nodeId}-${executionLogId}`,
-    conversationId: executionLogId,
-    nodeId,
-    statusFilePath,
-    runKind: nodeId === soloConversationId ? 'solo_continue' : 'step_continue',
-    globalDataPath: settings.globalDataPath,
-    context,
-    agentCli,
-    model: selectedModel,
-    command: finalCommand,
-    refreshNodeId: nodeId
-  });
+  throw new Error('未找到这段对话的完整会话记录，无法继续。');
 }
 
 async function closeConversationProcessesForContinuation(
   workspaceRoot: string, nodeId: string, conversations: AgentConversation[], rootConversationId: number, sessionId: string, globalDataPath?: string
 ): Promise<void> {
   const client = runLifecycleClient(workspaceRoot, globalDataPath);
-  const registered = await client.findConversation(workspaceRoot, rootConversationId);
+  const registered = await client.adoptConversationHistory(workspaceRoot, rootConversationId);
   if (registered) {
     const related = (await client.listStatuses(workspaceRoot)).filter(({ status }) => status.nodeId === nodeId
       && (Number(status.rootExecutionLogId) === rootConversationId
@@ -7236,56 +7649,7 @@ async function closeConversationProcessesForContinuation(
     }
     return;
   }
-  const conversationIds = new Set(conversations.filter((entry) =>
-    Number(resolveContinuationRootConversationFromList(conversations, Number(entry.id))?.id || entry.id) === rootConversationId
-  ).map((entry) => Number(entry.id)));
-  conversationIds.add(rootConversationId);
-  const statuses = (await Promise.all((await getAgentStatusFilePaths(workspaceRoot)).map(async (statusFilePath) => ({
-    statusFilePath, status: await readAgentStatus(statusFilePath)
-  })))).filter(({ status }) => status && String(status.nodeId || '') === nodeId
-    && (!status.workspaceRoot || path.resolve(status.workspaceRoot) === path.resolve(workspaceRoot))
-    && (conversationIds.has(Number(status.executionLogId))
-      || conversationIds.has(Number(status.rootExecutionLogId))
-      || Number(status.lineageRootExecutionLogId) === rootConversationId
-      || (sessionId && String(status.nativeSessionId || status.previousNativeSessionId || '') === sessionId)));
-  // Older launch scripts invoke this shared runtime when their process exits.
-  ensureTaskCheckpointRuntime(workspaceRoot);
-  for (const { status } of statuses) {
-    if (readTrackedAgentProcess(String(status.agentProcessPidFilePath || '')).state === 'unverified') {
-      throw new Error('无法确认原会话进程身份，未启动新会话。');
-    }
-    conversationIds.add(Number(status.executionLogId));
-    conversationIds.add(Number(status.rootExecutionLogId));
-  }
-  const terminalNames = new Set<string>();
-  for (const { statusFilePath, status } of statuses) {
-    await writeAgentStatus(statusFilePath, { ...status, sessionRestartRequested: true });
-    if (status.terminalName) terminalNames.add(String(status.terminalName));
-  }
-  for (const { statusFilePath, status } of statuses) {
-    const pidFile = String(status.agentProcessPidFilePath || '');
-    const tracked = readTrackedAgentProcess(pidFile);
-    if (tracked.state === 'unverified') throw new Error('无法确认原会话进程身份，未启动新会话。');
-    await beginAgentProcessCleanup(workspaceRoot, [...conversationIds], pidFile);
-    const latest = await readAgentStatus(statusFilePath) || status;
-    await writeAgentStatus(statusFilePath, {
-      ...latest, sessionRestartRequested: true, interactiveSessionClosed: true,
-      status: ['In Progress', 'Failed', 'Completed'].includes(String(latest.status)) ? latest.status : 'Session Closed',
-      sessionClosePreviousStatus: String(status.status || ''),
-      finishedAt: new Date().toISOString()
-    });
-  }
-  for (const [id, name] of agentTerminalNamesByConversationId) {
-    if (conversationIds.has(id) && agentTerminalProjectRootsByConversationId.get(id) === workspaceRoot) {
-      terminalNames.add(name);
-      agentTerminalNamesByConversationId.delete(id);
-      agentTerminalProjectRootsByConversationId.delete(id);
-    }
-  }
-  const reservedTerminals = new Set([...reservedAgentTerminalsByProject.values()].flatMap((entries) => entries.map((entry) => entry.terminal)));
-  for (const terminal of vscode.window.terminals) {
-    if (terminalNames.has(terminal.name) && !reservedTerminals.has(terminal)) terminal.dispose();
-  }
+  throw new Error('未找到这段对话的完整会话记录，无法继续。');
 }
 
 async function handleContinueNativeConversation(context: vscode.ExtensionContext, nodeId: string, conversationId: number): Promise<void> {
@@ -7304,15 +7668,15 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
   const settings = getPersistedSettings(context);
   const globalDataPath = normalizeSolomapGlobalPath(workspaceRoot, projectSyncEngine.dataRoot || settings.globalDataPath);
   const client = runLifecycleClient(workspaceRoot, globalDataPath);
-  const registered = await client.findConversation(workspaceRoot, conversationId);
+  const registered = await client.adoptConversationHistory(workspaceRoot, conversationId);
   if (registered) {
     if (registered.status.nodeId !== nodeId) throw new Error('run_conversation_node_mismatch');
     const conversations = projectSyncEngine.getAgentExecutions(nodeId);
     const leaf = resolveContinuationLeafConversationFromList(conversations, conversationId);
-    let source = leaf ? await client.findConversation(workspaceRoot, Number(leaf.id)) : registered;
+    let source = leaf ? await client.adoptConversationHistory(workspaceRoot, Number(leaf.id)) : registered;
     if (!source) throw new Error('run_conversation_missing');
     let binding = await client.readBinding(source.reference, source.status);
-    if (binding?.provider === 'codex' && ['preparing', 'planned'].includes(binding.revisions[binding.headRevision - 1].state)) {
+    if (binding && ['codex', 'claude'].includes(binding.provider) && ['preparing', 'planned'].includes(binding.revisions[binding.headRevision - 1].state)) {
       await client.recoverNativeIdentity(source.reference, source.status);
       source = await client.findConversation(workspaceRoot, Number(source.status.journalExecutionLogId || source.status.rootExecutionLogId));
       if (!source) throw new Error('run_conversation_missing');
@@ -7322,7 +7686,16 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     if (!session) throw new Error('尚未确认这段对话的原生会话，暂时无法接续。');
     const agentCli = resolveAgentCli(session.cliPath, '');
     if (session.provider !== getAgentProvider(agentCli) || path.resolve(session.workspaceRoot) !== path.resolve(workspaceRoot)) throw new Error('run_session_identity_mismatch');
-    if (!commandExists(agentCli)) throw new Error(`Agent CLI not found for continuation: ${session.cliPath}`);
+    if (!commandExists(agentCli)) {
+      const failureReason = `Agent CLI not found for continuation: ${session.cliPath}`;
+      await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId,
+        runKind: nodeId === soloConversationId ? 'solo_continue' : 'step_continue', agentCli: session.cliPath,
+        selectedModel: String(source.status.selectedModel || ''), userMessage: '继续当前 Agent 对话',
+        failureCode: 'continuation_cli_not_found', failureReason, globalDataPath,
+        parentExecutionLogId: Number(source.status.rootExecutionLogId), expectedParentTurnId: String(source.status.turnId),
+        launchIntentId: `native-continue-unavailable:${source.runId}:${source.status.turnId}` });
+      throw new Error(failureReason);
+    }
     const head = binding!.revisions[binding!.headRevision - 1];
     const transcriptPath = session.provider === 'codex' ? String(head.evidence?.transcriptPath || '') : '';
     if (session.provider === 'codex' && !transcriptPath) throw new Error('尚未确认这段 Codex 对话的原生记录，暂时无法接续。');
@@ -7346,101 +7719,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     return;
   }
 
-  const conversation = resolveContinuationLeafConversation(nodeId, conversationId)
-    || projectSyncEngine.getAgentExecutions(nodeId).find((entry) => Number(entry.id) === Number(conversationId))
-    || null;
-  if (!conversation) {
-    vscode.window.showErrorMessage(`Conversation ${conversationId} not found for step ${nodeId}.`);
-    return;
-  }
-  const rootConversation = resolveContinuationRootConversation(nodeId, conversationId) || conversation;
-  const rootConversationId = Number(rootConversation.id || conversationId);
-  const sessionConversation = resolveContinuationSessionConversation(nodeId, conversationId) || conversation;
-  await recoverCodexSessionIdentityForConversation(nodeId, sessionConversation, workspaceRoot);
-  const sessionId = resolveNativeSessionIdForConversation(nodeId, sessionConversation, workspaceRoot);
-  if (!sessionId) {
-    vscode.window.showInformationMessage('No native Agent session ID was recorded for this conversation.');
-    return;
-  }
-
-  const agentCli = resolveAgentCli(sessionConversation.agentCli || conversation.agentCli || '', '');
-  if (!commandExists(agentCli)) {
-    vscode.window.showErrorMessage(`Agent CLI not found for native continuation: ${conversation.agentCli || agentCli}`);
-    return;
-  }
-  const codexResumeContext = getAgentProvider(agentCli) === 'codex'
-    ? getConfirmedCodexResumeContext(workspaceRoot, nodeId, sessionConversation, sessionId)
-    : null;
-  if (getAgentProvider(agentCli) === 'codex' && !codexResumeContext) {
-    vscode.window.showErrorMessage('No confirmed native Codex transcript was recorded for this conversation.');
-    return;
-  }
-
-  await closeConversationProcessesForContinuation(
-    workspaceRoot, nodeId, projectSyncEngine.getAgentExecutions(nodeId), rootConversationId, sessionId
-  );
-
-  const preGitHash = await createPreSessionGitCommit(workspaceRoot);
-  const launchSummary = [
-    preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
-    'Agent continuation started.',
-    `Run started at: ${new Date().toISOString()}`,
-    buildContinuationMetadataBlock(rootConversationId, sessionId),
-    'User supplement:\n继续当前 Agent 对话',
-    'Continuation mode: direct terminal with tracked sentinel recording.'
-  ].filter(Boolean).join('\n\n');
-  const executionLogId = await projectSyncEngine.logAgentExecution(
-    nodeId,
-    agentCli,
-    `${agentCli} [preparing tracked continuation terminal]`,
-    launchSummary,
-    'Running'
-  );
-  const runDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', nodeId, String(executionLogId));
-  const statusFilePath = getAgentStatusFilePath(workspaceRoot, executionLogId);
-  fs.mkdirSync(runDir, { recursive: true });
-  const directExecutionCommand = buildNativeContinueCommand(agentCli, sessionId, workspaceRoot);
-  const displayCommand = buildSdkSentinelCommandLabel(agentCli, workspaceRoot, sessionId);
-  await projectSyncEngine.updateAgentExecution(executionLogId, agentCli, displayCommand, launchSummary, 'Running');
-  const { finalCommand } = await buildPreparedAgentShellScript(
-    agentCli,
-    '',
-    'SoloMap tracked continuation terminal',
-    workspaceRoot,
-    nodeId,
-    executionLogId,
-    '继续当前 Agent 对话',
-    undefined,
-    sessionId,
-    directExecutionCommand,
-    nodeId === soloConversationId ? 'solo_continue' : 'step_continue',
-    '',
-    settings.globalDataPath,
-    settings.taskPermissionMode,
-    settings.reviewerCliPath,
-    settings.collaborationReviewMode,
-    settings.enabledEnhancements,
-    runDir,
-    statusFilePath,
-    {
-      ...(codexResumeContext ? { codexResumeTranscriptPath: codexResumeContext.transcriptPath } : {}),
-      globalPrompt: settings.globalPrompt,
-      lineageRootExecutionLogId: rootConversationId
-    }
-  );
-  await launchAgentConversationTerminal({
-    workspaceRoot,
-    label: `continue-${nodeId}-${executionLogId}`,
-    conversationId: executionLogId,
-    nodeId,
-    statusFilePath,
-    runKind: nodeId === soloConversationId ? 'solo_continue' : 'step_continue',
-    globalDataPath: settings.globalDataPath,
-    context,
-    agentCli,
-    command: finalCommand,
-    refreshNodeId: nodeId
-  });
+  throw new Error('未找到这段对话的完整会话记录，无法继续。');
 }
 
 async function readAgentStatus(statusFilePath: string): Promise<any | null> {
@@ -7458,7 +7737,7 @@ async function getAgentStatusFilePaths(workspaceRoot: string): Promise<string[]>
 }
 
 async function hasRunningAgentConversation(workspaceRoot: string, nodes: RoadmapNode[]): Promise<boolean> {
-  reconcileActiveProjectConversationLifecycle();
+  await reconcileActiveProjectConversationLifecycle();
   if (syncEngine?.getProjectAgentExecutions().some((conversation) => conversation.status === 'Running')) {
     return true;
   }
@@ -7495,6 +7774,7 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
 interface AgentLaunchTarget { workspaceRoot: string; engine?: SyncEngine; launchIntentId?: string; globalDataPath?: string; settings?: SolopreneurSettings }
 
 async function captureConversationLaunchTarget(context: vscode.ExtensionContext, workspaceRoot: string, globalDataPath: string, settings: SolopreneurSettings): Promise<AgentLaunchTarget> {
+  await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
   const directory = path.join(workspaceRoot, '.solopreneur');
   const engine = new SyncEngine(path.join(directory, 'roadmap.csv'), path.join(directory, 'project_journal.db'), context.extensionPath, globalDataPath);
   return { workspaceRoot, globalDataPath, engine, settings: { ...settings, globalDataPath }, launchIntentId: `user-action:${crypto.randomUUID()}` };
@@ -7519,8 +7799,45 @@ async function prepareOrdinaryConversation(context: vscode.ExtensionContext, inp
   if (existing) {
     return resumePreparedAgentRun(existing, operation, globalDataPath);
   }
-  const enhancement = ensureSolomapEnhancementRuntime(input.workspaceRoot, globalDataPath, settings.enabledEnhancements || {});
-  return prepareAgentRun({ ...input, globalDataPath, executionLogId: 0, launchIntentId: input.launchIntentId || `user-action:${crypto.randomUUID()}`, metadata: { ...input.metadata, reviewerCliPath: settings.reviewerCliPath || '', collaborationReviewMode: settings.collaborationReviewMode || 'high_risk', enabledEnhancements: settings.enabledEnhancements || {}, enhancementEnvLines: enhancement.envLines, enhancementPreflightLines: enhancement.preflightLines } }, operation);
+  return prepareAgentRun({ ...input, globalDataPath, executionLogId: 0,
+    ...(input.flowRole ? {} : { launchIntentId: input.launchIntentId || `user-action:${crypto.randomUUID()}` }),
+    metadata: { ...input.metadata, reviewerCliPath: settings.reviewerCliPath || '', collaborationReviewMode: settings.collaborationReviewMode || 'high_risk' } }, operation);
+}
+
+async function recordUndeliverableAgentRun(context: vscode.ExtensionContext, input: {
+  workspaceRoot: string;
+  nodeId: string;
+  runKind: string;
+  agentCli: string;
+  selectedModel?: string;
+  userMessage: string;
+  prompt?: string;
+  failureCode: string;
+  failureReason: string;
+  globalDataPath?: string;
+  launchIntentId?: string;
+  parentExecutionLogId?: number;
+  expectedParentTurnId?: string;
+  flowRole?: AgentRunPreparationInput['flowRole'];
+}): Promise<number> {
+  const globalDataPath = normalizeSolomapGlobalPath(input.workspaceRoot, input.globalDataPath || getPersistedSettings(context).globalDataPath);
+  const prepared = await prepareOrdinaryConversation(context, {
+    agentCli: input.agentCli, selectedModel: input.selectedModel || '', prompt: input.prompt || input.userMessage,
+    workspaceRoot: input.workspaceRoot, nodeId: input.nodeId, executionLogId: 0, userMessage: input.userMessage,
+    runKind: input.runKind, globalDataPath, taskPermissionMode: getPersistedSettings(context).taskPermissionMode || 'auto',
+    ...(input.parentExecutionLogId ? { parentExecutionLogId: input.parentExecutionLogId } : {}),
+    ...(input.expectedParentTurnId ? { expectedParentTurnId: input.expectedParentTurnId } : {}),
+    ...(input.flowRole ? { flowRole: input.flowRole } : { launchIntentId: input.launchIntentId || `launch-failure:${crypto.randomUUID()}` }),
+    metadata: { startWaiting: true, failureCode: input.failureCode, failureReason: input.failureReason,
+      launchSummary: `${input.userMessage}\n\nFailure category: ${input.failureCode}\n\nFailure reason:\n${input.failureReason}` }
+  });
+  const executionLogId = Number(prepared.status.rootExecutionLogId);
+  const client = runLifecycleClient(input.workspaceRoot, globalDataPath);
+  const source = await client.findConversation(input.workspaceRoot, executionLogId);
+  if (!source) throw new Error('run_conversation_missing');
+  const failed = await client.stop(source.reference, source.status, input.failureReason, `run:${source.runId}:launch-failure:${input.failureCode}`);
+  await processRegisteredStatusFile(context, source.reference, false, failed, globalDataPath);
+  return executionLogId;
 }
 
 async function deliverOrdinaryConversation(context: vscode.ExtensionContext, prepared: Awaited<ReturnType<typeof prepareAgentRun>>): Promise<number> {
@@ -7557,35 +7874,27 @@ async function handleRoadmapRevision(
   if (!commandExists(agentCli)) {
     const candidates = getAgentCliCandidates(requestedAgentCli, selectedAgentCli ? '' : settings.cliPath).join(', ');
     const failureReason = `Agent CLI not found. Tried: ${candidates}.`;
-    await projectSyncEngine.logAgentExecution(
-      roadmapRevisionId,
-      requestedAgentCli || agentCli,
-      requestedAgentCli || agentCli,
-      `User supplement:\n${revisionRequest}\n\nFailure category: cli_not_found\n\nFailure reason:\n${failureReason}`,
-      'Failed'
-    );
+    await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId: roadmapRevisionId, runKind: 'roadmap_revision',
+      agentCli: requestedAgentCli || agentCli, selectedModel, userMessage: revisionRequest, failureCode: 'cli_not_found', failureReason,
+      globalDataPath, launchIntentId: target?.launchIntentId });
     postNodeConversations(roadmapRevisionId);
     vscode.window.showErrorMessage(`${failureReason} Set SoloMap CLI Command or Path to an installed executable such as agy or codex.`);
     return;
   }
   const automation = ensureAgentTaskAutomation(agentCli);
   if (!automation.ok) {
-    await projectSyncEngine.logAgentExecution(
-      roadmapRevisionId,
-      agentCli,
-      agentCli,
-      `User supplement:\n${revisionRequest}\n\nFailure category: agent_automation_not_ready\n\nFailure reason:\n${automation.message}`,
-      'Failed'
-    );
+    await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId: roadmapRevisionId, runKind: 'roadmap_revision',
+      agentCli, selectedModel, userMessage: revisionRequest, failureCode: 'agent_automation_not_ready', failureReason: automation.message,
+      globalDataPath, launchIntentId: target?.launchIntentId });
     postNodeConversations(roadmapRevisionId);
     vscode.window.showErrorMessage(automation.message);
     return;
   }
 
-  recordLocalUsageEvent(context, 'roadmapRevision');
-  ensureRoadmapValidationScript(path.join(workspaceRoot, '.solopreneur'));
+  void recordLocalUsageEvent(context, 'roadmapRevision').catch(error => console.error('SoloMap failed to record local usage:', error));
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
-  const conversationPrompt = await buildRoadmapRevisionPrompt(revisionRequest, workspaceRoot, settings.globalPrompt, attachedFiles, globalDataPath, settings.enabledEnhancements, false);
+  const roadmapValidationCommand = `${shellQuote(process.execPath)} ${shellQuote(path.join(context.extensionPath, 'resources', 'tools', 'validate-roadmap.cjs'))} --mode revision`;
+  const conversationPrompt = await buildRoadmapRevisionPrompt(revisionRequest, workspaceRoot, settings.globalPrompt, attachedFiles, globalDataPath, settings.enabledEnhancements, false, roadmapValidationCommand);
   const launchSummary = [
     'Roadmap revision started.',
     `Run started at: ${new Date().toISOString()}`,
@@ -7599,7 +7908,6 @@ async function handleRoadmapRevision(
 
 async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirements: string, selectedAgentCli = '', selectedModel = '', language = 'zh', timeZone = '', localTime = ''): Promise<void> {
   if (!activeProjectRoot) return;
-  ensureTimePlanValidationScript(activeProjectRoot);
   const isEnglish = language === 'en';
   const userRequirements = requirements.trim() || (isEnglish
     ? 'Prioritize the most valuable work to move forward today.'
@@ -7617,7 +7925,7 @@ async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirem
     'Use exactly this JSON structure:',
     '{"version":1,"status":"draft","generatedAt":"ISO-8601","request":"user requirements","items":[{"id":"stable unique ID","title":"concise English user-facing task","startAt":"ISO-8601 with timezone","durationMinutes":25,"assignee":"user or agent","prompt":"required execution prompt only when assignee is agent"}]}',
     'Write every user-facing field in English. Times must be concrete and non-overlapping. Respect task dependencies, reasonable working hours, and stated deadlines. Do not assume the user has a full free day; when information is missing, create a conservative short plan and state the assumptions in the final response.',
-    'After writing the file, run `node .solopreneur/validate-time-plan.cjs`. If validation fails, fix the JSON from the reported errors and rerun until it prints PASS.',
+    `After writing the file, run ${shellQuote(process.execPath)} ${shellQuote(path.join(context.extensionPath, 'resources', 'tools', 'validate-time-plan.cjs'))}. If validation fails, fix the JSON from the reported errors and rerun until it prints PASS.`,
     'The final response should only say that the draft was generated and validated and is waiting for confirmation in SoloMap.'
   ] : [
     '请根据当前项目的真实进展和用户补充需求，生成一份可执行的时间安排草案。',
@@ -7627,10 +7935,15 @@ async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirem
     'JSON 必须使用以下结构：',
     '{"version":1,"status":"draft","generatedAt":"ISO-8601","request":"用户需求","items":[{"id":"稳定且唯一的 ID","title":"用户可读的事项","startAt":"带时区的 ISO-8601","durationMinutes":25,"assignee":"user 或 agent","prompt":"仅 assignee=agent 时必填的执行提示"}]}',
     '时间应具体、互不重叠，并结合当前日期、合理工作时段、任务依赖和用户截止时间；不要凭空假设用户有完整全天可用时间。信息不足时采用保守的短计划，并在最终回复中指出采用的假设。',
-    '写入后必须运行 `node .solopreneur/validate-time-plan.cjs`。如果校验失败，按输出修正 JSON 并重新运行，直到出现 PASS 后才结束。',
+    `写入后必须运行 ${shellQuote(process.execPath)} ${shellQuote(path.join(context.extensionPath, 'resources', 'tools', 'validate-time-plan.cjs'))}。如果校验失败，按输出修正 JSON 并重新运行，直到出现 PASS 后才结束。`,
     '最终回复只需说明草案已生成并通过校验，等待用户在 SoloMap 中确认。'
   ]).join('\n\n');
   await handleRunSoloConversation(context, prompt, selectedAgentCli, selectedModel, [], '', false);
+}
+
+async function readStoredNativeSessionId(workspaceRoot: string, nodeId: string, agentCli: string, globalDataPath: string): Promise<string> {
+  const session = await sendRuntimeDataRequest<{ sessionId: string } | null>(globalDataPath, { operation: 'read_recent_run_session', input: { root: workspaceRoot, nodeId, provider: getAgentProvider(agentCli) } });
+  return session?.sessionId || '';
 }
 
 async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = [], occurrenceId = '', interactiveConversation = true, target?: AgentLaunchTarget): Promise<number> {
@@ -7664,35 +7977,26 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   if (!commandExists(agentCli)) {
     const candidates = getAgentCliCandidates(requestedAgentCli, selectedAgentCli ? '' : settings.cliPath).join(', ');
     const failureReason = `Agent CLI not found. Tried: ${candidates}.`;
-    await projectSyncEngine.logAgentExecution(
-      soloConversationId,
-      requestedAgentCli || agentCli,
-      requestedAgentCli || agentCli,
-      `User supplement:\n${request}\n\nFailure category: cli_not_found\n\nFailure reason:\n${failureReason}`,
-      'Failed'
-    );
+    await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId: soloConversationId, runKind: interactiveConversation ? 'solo' : 'solo_background',
+      agentCli: requestedAgentCli || agentCli, selectedModel, userMessage: request, failureCode: 'cli_not_found', failureReason,
+      globalDataPath, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined) });
     postNodeConversations(soloConversationId);
     vscode.window.showErrorMessage(`${failureReason} Set SoloMap CLI Command or Path to an installed executable such as agy or codex.`);
     return 0;
   }
   const automation = ensureAgentTaskAutomation(agentCli);
   if (!automation.ok) {
-    await projectSyncEngine.logAgentExecution(
-      soloConversationId,
-      agentCli,
-      agentCli,
-      `User supplement:\n${request}\n\nFailure category: agent_automation_not_ready\n\nFailure reason:\n${automation.message}`,
-      'Failed'
-    );
+    await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId: soloConversationId, runKind: interactiveConversation ? 'solo' : 'solo_background',
+      agentCli, selectedModel, userMessage: request, failureCode: 'agent_automation_not_ready', failureReason: automation.message,
+      globalDataPath, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined) });
     postNodeConversations(soloConversationId);
     vscode.window.showErrorMessage(automation.message);
     return 0;
   }
 
-  recordLocalUsageEvent(context, 'soloConversation');
+  void recordLocalUsageEvent(context, 'soloConversation').catch(error => console.error('SoloMap failed to record local usage:', error));
 
-  const storedSession = getStoredAgentSession(workspaceRoot, soloConversationId, agentCli);
-  const nativeSessionId = storedSession?.sessionId || '';
+  const nativeSessionId = await readStoredNativeSessionId(workspaceRoot, soloConversationId, agentCli, globalDataPath);
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
   const runStartedAt = new Date().toISOString();
   const buildLaunchSummary = (preGitHash = '') => [
@@ -7731,20 +8035,30 @@ async function startFlowRoleRun(
   }
 ): Promise<void> {
   const settings = { ...getPersistedSettings(context), ...(input.globalDataPath ? { globalDataPath: input.globalDataPath } : {}) };
-  const requestedAgentCli = (input.selectedAgentCli || input.flow.source.selectedAgentCli || settings.cliPath || 'agy').trim();
-  const agentCli = resolveAgentCli(requestedAgentCli, input.selectedAgentCli ? '' : settings.cliPath);
-  if (!commandExists(agentCli)) {
-    throw new Error(`Flow Agent CLI not found: ${requestedAgentCli || agentCli}`);
-  }
-  const automation = ensureAgentTaskAutomation(agentCli);
-  if (!automation.ok) {
-    throw new Error(automation.message);
-  }
   const loop = input.flow.loops.find((candidate) => candidate.index === input.loopIndex);
   if (!loop) {
     throw new Error(`Flow loop ${input.loopIndex} not found.`);
   }
   const nodeId = buildFlowExecutionNodeId(input.flow.flowId, loop.loopId, input.role);
+  const globalDataPath = normalizeSolomapGlobalPath(input.projectPath, settings.globalDataPath);
+  const requestedAgentCli = (input.selectedAgentCli || input.flow.source.selectedAgentCli || settings.cliPath || 'agy').trim();
+  const agentCli = resolveAgentCli(requestedAgentCli, input.selectedAgentCli ? '' : settings.cliPath);
+  if (!commandExists(agentCli)) {
+    const failureReason = `Flow Agent CLI not found: ${requestedAgentCli || agentCli}`;
+    await recordUndeliverableAgentRun(context, { workspaceRoot: input.projectPath, nodeId, runKind: `flow_${input.role}`,
+      agentCli: requestedAgentCli || agentCli, selectedModel: input.selectedModel, userMessage: input.flow.goal, prompt: input.prompt,
+      failureCode: 'cli_not_found', failureReason, globalDataPath,
+      flowRole: { flowId: input.flow.flowId, loopId: loop.loopId, role: input.role, attempt: loop[input.role].retryCount || 0, ...(input.initialFlow ? { initialFlow: input.initialFlow } : {}) } });
+    throw new Error(failureReason);
+  }
+  const automation = ensureAgentTaskAutomation(agentCli);
+  if (!automation.ok) {
+    await recordUndeliverableAgentRun(context, { workspaceRoot: input.projectPath, nodeId, runKind: `flow_${input.role}`,
+      agentCli, selectedModel: input.selectedModel, userMessage: input.flow.goal, prompt: input.prompt,
+      failureCode: 'agent_automation_not_ready', failureReason: automation.message, globalDataPath,
+      flowRole: { flowId: input.flow.flowId, loopId: loop.loopId, role: input.role, attempt: loop[input.role].retryCount || 0, ...(input.initialFlow ? { initialFlow: input.initialFlow } : {}) } });
+    throw new Error(automation.message);
+  }
   const effectiveModel = input.selectedModel || input.flow.source.selectedModel || '';
   const prepared = await buildPreparedAgentShellScript(
     agentCli,
@@ -7778,7 +8092,7 @@ async function startFlowRoleRun(
     nodeId,
     statusFilePath,
     runKind: `flow_${input.role}`,
-    globalDataPath: settings.globalDataPath,
+    globalDataPath: prepared.dataRoot,
     context,
     agentCli,
     model: effectiveModel,
@@ -7847,37 +8161,13 @@ async function linkSoloConversationToNode(conversationId: number, nodeId: string
     vscode.window.showWarningMessage('This Solo conversation cannot be associated with that step.');
     return;
   }
-  const marker = `Solo reference ID: ${conversationId}`;
   const existingStepConversations = syncEngine.getAgentExecutions(nodeId);
-  if (existingStepConversations.some((entry) => String(entry.output || '').includes(marker))) {
+  if (existingStepConversations.some((entry) => Number(entry.id) === conversationId)) {
     vscode.window.showInformationMessage('This Solo conversation is already associated with that step.');
     return;
   }
-  const linkedAt = new Date().toISOString();
-  const linkedOutput = [
-    'Linked from Solo conversation.',
-    marker,
-    `Linked at: ${linkedAt}`,
-    `Original Solo status: ${conversation.status}`,
-    '',
-    conversation.output
-  ].join('\n');
-  const linkedLogId = await syncEngine.logAgentExecution(
-    nodeId,
-    conversation.agentCli,
-    conversation.command,
-    linkedOutput,
-    'Linked'
-  );
-  postNodeConversations(nodeId, [{
-    id: linkedLogId,
-    nodeId,
-    timestamp: linkedAt,
-    agentCli: conversation.agentCli,
-    command: conversation.command,
-    output: linkedOutput,
-    status: 'Linked'
-  }, ...existingStepConversations]);
+  const linked = await syncEngine.linkAgentExecution(conversationId, nodeId);
+  postNodeConversations(nodeId, [linked, ...existingStepConversations]);
   postNodeConversations(soloConversationId);
   vscode.window.showInformationMessage(`Solo conversation associated with step: ${node.title}`);
 }
@@ -8089,18 +8379,10 @@ async function handleRunAgent(
   if (!commandExists(agentCli)) {
     const candidates = getAgentCliCandidates(requestedAgentCli, selectedAgentCli ? '' : configuredCliPath).join(', ');
     const failureReason = `Agent CLI not found. Tried: ${candidates}.`;
-    projectSyncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
-    await projectSyncEngine.logAgentExecution(
-      nodeId,
-      requestedAgentCli || agentCli,
-      requestedAgentCli || agentCli,
-      [
-        userMessage.trim() ? `User supplement:\n${userMessage.trim()}` : '',
-        'Failure category: cli_not_found',
-        `Failure reason:\n${failureReason}`
-      ].filter(Boolean).join('\n\n'),
-      'Failed'
-    );
+    await projectSyncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
+    await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId, runKind: 'step', agentCli: requestedAgentCli || agentCli,
+      selectedModel, userMessage: userMessage.trim() || node.agentPrompt || node.title, failureCode: 'cli_not_found', failureReason,
+      globalDataPath, launchIntentId: target?.launchIntentId });
     sendNodesToWebview();
     postNodeConversations(nodeId);
     vscode.window.showErrorMessage(`${failureReason} Set SoloMap CLI Command or Path to an installed executable such as agy or codex.`);
@@ -8108,18 +8390,10 @@ async function handleRunAgent(
   }
   const automation = ensureAgentTaskAutomation(agentCli);
   if (!automation.ok) {
-    projectSyncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
-    await projectSyncEngine.logAgentExecution(
-      nodeId,
-      agentCli,
-      agentCli,
-      [
-        userMessage.trim() ? `User supplement:\n${userMessage.trim()}` : '',
-        'Failure category: agent_automation_not_ready',
-        `Failure reason:\n${automation.message}`
-      ].filter(Boolean).join('\n\n'),
-      'Failed'
-    );
+    await projectSyncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
+    await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId, runKind: 'step', agentCli, selectedModel,
+      userMessage: userMessage.trim() || node.agentPrompt || node.title, failureCode: 'agent_automation_not_ready', failureReason: automation.message,
+      globalDataPath, launchIntentId: target?.launchIntentId });
     sendNodesToWebview();
     postNodeConversations(nodeId);
     vscode.window.showErrorMessage(automation.message);
@@ -8127,13 +8401,12 @@ async function handleRunAgent(
   }
 
   // Update node status to Running
-  recordLocalUsageEvent(context, 'agentRun');
-  projectSyncEngine.updateNode(nodeId, { status: 'Running' });
+  void recordLocalUsageEvent(context, 'agentRun').catch(error => console.error('SoloMap failed to record local usage:', error));
+  await projectSyncEngine.updateNode(nodeId, { status: 'Running' });
   sendNodesToWebview();
   refreshSidebarProjectCards();
 
-  const storedSession = getStoredAgentSession(workspaceRoot, nodeId, agentCli);
-  const nativeSessionId = storedSession?.sessionId || '';
+  const nativeSessionId = await readStoredNativeSessionId(workspaceRoot, nodeId, agentCli, globalDataPath);
   const runStartedAt = new Date().toISOString();
   const buildLaunchSummary = (preGitHash = '') => [
     preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '',
@@ -8146,8 +8419,9 @@ async function handleRunAgent(
     attachedFiles.length ? `Attached files:\n${attachedFiles.join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
   const runKind = interactiveConversation ? 'step' : 'step_background';
-  ensureRoadmapValidationScript(path.join(workspaceRoot, '.solopreneur'));
-  const conversationPrompt = await buildAgentConversationPrompt(node, userMessage, workspaceRoot, '', '', '', nativeSessionId, attachedFiles, settings.globalPrompt, '', globalDataPath, settings.enabledEnhancements, false, interactiveConversation);
+  const roadmapValidationMode = node.title === '生成初始路线图' ? 'bootstrap' : 'revision';
+  const roadmapValidationCommand = `${shellQuote(process.execPath)} ${shellQuote(path.join(context.extensionPath, 'resources', 'tools', 'validate-roadmap.cjs'))} --mode ${roadmapValidationMode}`;
+  const conversationPrompt = await buildAgentConversationPrompt(node, userMessage, workspaceRoot, '', '', '', nativeSessionId, attachedFiles, settings.globalPrompt, '', globalDataPath, settings.enabledEnhancements, false, interactiveConversation, roadmapValidationCommand);
   const prepared = await prepareOrdinaryConversation(context, { agentCli, selectedModel, prompt: conversationPrompt, globalPrompt: settings.globalPrompt, workspaceRoot, nodeId, executionLogId: 0, userMessage: userMessage.trim(), runKind, globalDataPath, taskPermissionMode: settings.taskPermissionMode || 'auto', nativeSessionId, launchIntentId: target?.launchIntentId, metadata: { launchSummary: buildLaunchSummary(), preSessionGitBackup: true } });
   postNodeConversations(nodeId);
   onExecutionRegistered();
@@ -8267,7 +8541,7 @@ async function consumeAutomationUiDelivery(globalDataPath: string, id: string, s
   const existing = automationUiFlights.get(key); if (existing) return;
   let started!: () => void; const visible = new Promise<void>(resolve => { started = resolve; });
   const flight = (async () => {
-    let token: string = crypto.randomUUID(); let claimAttempted = false;
+    let token: string = crypto.randomUUID(); let claimAttempted = false; let effectStartAttempted = false;
     try {
       const pending = automationUiConfirmations.get(key);
       if (pending) { await confirmAutomationUiDelivery(key, pending); return; }
@@ -8287,11 +8561,19 @@ async function consumeAutomationUiDelivery(globalDataPath: string, id: string, s
         return;
       }
       if (claim.payload.kind === 'sound') {
+        if (!automationSoundReady(activePanel?.webview) && !automationSoundReady(sidebarProvider?.getWebview?.())) {
+          await confirmAutomationUiDelivery(key, { root, id, token, state: 'queued' });
+          return;
+        }
+        effectStartAttempted = true;
+        await sendRuntimeDataRequest(root, { operation: 'begin_automation_delivery', input: { id, token } });
         if (!await playAutomationSound(id, token, started)) {
           await confirmAutomationUiDelivery(key, { root, id, token, state: 'queued' });
           return;
         }
       } else {
+        effectStartAttempted = true;
+        await sendRuntimeDataRequest(root, { operation: 'begin_automation_delivery', input: { id, token } });
         const notice = claim.payload.warning ? vscode.window.showWarningMessage(claim.payload.message || '') : vscode.window.showInformationMessage(claim.payload.message || '');
         started();
         await notice;
@@ -8342,42 +8624,7 @@ function scheduleFocusReminder(context: vscode.ExtensionContext): void {
     clearTimeout(focusReminderTimer);
     focusReminderTimer = null;
   }
-  const settings = getPersistedSettings(context).automationTasks || normalizeAutomationSettings({});
-  const rule = settings.triggers?.focus_time || {};
-  if (!rule.notify && !rule.sound) {
-    focusReminderNextAt = '';
-    focusReminderIdentity = '';
-    return;
-  }
-  const minutes = Math.max(1, Math.min(240, Number(settings.focusMinutes || 25) || 25));
-  focusReminderNextAt = new Date(Date.now() + minutes * 60 * 1000).toISOString();
-  const workspaceRoot = activeProjectRoot || getSelectedProjectPath(context) || getWorkspaceRoot();
-  const globalDataPath = getPersistedSettings(context).globalDataPath;
-  const reminderAt = focusReminderNextAt;
-  const reminderId = crypto.randomUUID(); focusReminderIdentity = reminderId;
-  focusReminderTimer = setTimeout(() => {
-    void (async () => {
-      if (!workspaceRoot) return;
-      const stillValid = () => focusReminderIdentity === reminderId;
-      const event = { trigger: 'focus_time', action: 'reminder', status: 'ok', focusMinutes: minutes, reminderAt };
-      const deliveries = [
-        ...(rule.notify ? [{ intentId: `focus-reminder:${reminderId}:notify`, event, payload: { kind: 'notification', message: automationNotificationMessage('focus_time', ''), warning: false } }] : []),
-        ...(rule.sound ? [{ intentId: `focus-reminder:${reminderId}:sound`, event, payload: { kind: 'sound' } }] : [])
-      ];
-      const root = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
-      const prepared = await sendRuntimeDataRequest<AutomationUiDelivery[]>(root, { operation: 'prepare_automation_deliveries', input: { root: workspaceRoot, deliveries, metadataOnly: true } });
-      for (const delivery of prepared) if (!['delivered', 'cancelled'].includes(delivery.state)) {
-        try { await consumeAutomationUiDelivery(root, delivery.id, stillValid, delivery.payload.kind); }
-        catch (error) { console.warn('SoloMap focus reminder action could not yet be delivered:', error); }
-      }
-    })().catch(error => console.warn('SoloMap focus reminder failed:', error)).finally(() => {
-      if (focusReminderIdentity === reminderId) scheduleFocusReminder(context);
-    });
-  }, minutes * 60 * 1000);
-  if (focusReminderTimer && typeof focusReminderTimer.unref === 'function') {
-    focusReminderTimer.unref();
-  }
-  void broadcastSettings(context);
+  scheduleTimedAutomationTask(context);
 }
 
 function getScheduledAutomationProjectPath(task: SolomapScheduledAutomationTask, fallbackProjectPath: string): string {
@@ -8410,9 +8657,10 @@ function getScheduledAutomationLedgerReferenceRoot(context: vscode.ExtensionCont
   return getProjects(context)[0]?.path || getWorkspaceRoot() || process.cwd();
 }
 
-function deferOrFailScheduledOccurrence(context: vscode.ExtensionContext, occurrenceId: string, taskTitle = ''): void {
+async function deferOrFailScheduledOccurrence(context: vscode.ExtensionContext, occurrence: ScheduledTaskOccurrence, taskTitle = ''): Promise<void> {
   const settings = getPersistedSettings(context);
-  const result = failScheduledTaskOccurrence(getScheduledAutomationLedgerReferenceRoot(context), settings.globalDataPath, occurrenceId);
+  const result = await failScheduledTaskDatabase(getScheduledAutomationLedgerReferenceRoot(context), settings.globalDataPath, occurrence, new Date(),
+    (operation, input) => sendRuntimeDataRequest(settings.globalDataPath, { operation, input }));
   if (result === 'failed') {
     const label = taskTitle || (settings.language === 'en' ? 'Scheduled task' : '定时任务');
     vscode.window.showWarningMessage(settings.language === 'en'
@@ -8422,34 +8670,57 @@ function deferOrFailScheduledOccurrence(context: vscode.ExtensionContext, occurr
 }
 
 function scheduleTimedAutomationTask(context: vscode.ExtensionContext): void {
+  void scheduleTimedAutomationTaskAsync(context).catch(error => console.error('SoloMap scheduled task synchronization failed:', error));
+}
+
+async function scheduleTimedAutomationTaskAsync(context: vscode.ExtensionContext): Promise<void> {
   const settings = getPersistedSettings(context);
   const referenceRoot = getScheduledAutomationLedgerReferenceRoot(context);
-  const ledger = syncScheduledTaskLedger(referenceRoot, settings.globalDataPath, settings.automationTasks?.scheduledTasks || []);
-  scheduledAutomationNextAt = ledger.tasks[0]?.dueAt || '';
+  const operation = (name: string, input: Record<string, unknown>) => sendRuntimeDataRequest(settings.globalDataPath, { operation: name, input });
+  const current = await readScheduledTaskDatabase(referenceRoot, settings.globalDataPath, operation);
+  const automation = settings.automationTasks || normalizeAutomationSettings({});
+  const focusRule = automation.triggers?.focus_time || {};
+  const minutes = Math.max(1, Math.min(240, Number(automation.focusMinutes || 25) || 25));
+  const workspaceRoot = activeProjectRoot || getSelectedProjectPath(context) || getWorkspaceRoot() || referenceRoot;
+  const existingFocus = current.tasks.find(item => item.task.internalKind === 'focus_reminder');
+  const keepExistingFocus = existingFocus && existingFocus.task.focusMinutes === minutes && existingFocus.task.notify === Boolean(focusRule.notify)
+    && existingFocus.task.sound === Boolean(focusRule.sound) && existingFocus.task.projectPath === workspaceRoot;
+  const focusTask: SolomapScheduledAutomationTask | null = focusRule.notify || focusRule.sound ? (keepExistingFocus ? existingFocus!.task : {
+    id: '__solomap_focus_reminder__', title: '专注时间提醒', enabled: true, assignee: 'user', scheduleKind: 'once',
+    scheduledAt: new Date(Date.now() + minutes * 60 * 1000).toISOString(), projectPath: workspaceRoot,
+    internalKind: 'focus_reminder', focusMinutes: minutes, notify: Boolean(focusRule.notify), sound: Boolean(focusRule.sound)
+  }) : null;
+  const ledger = await syncScheduledTaskDatabase(referenceRoot, settings.globalDataPath, [...(settings.automationTasks?.scheduledTasks || []), ...(focusTask ? [focusTask] : [])], new Date(), operation);
+  focusReminderNextAt = ledger.tasks.find(item => item.task.internalKind === 'focus_reminder')?.dueAt || '';
+  focusReminderIdentity = ledger.tasks.find(item => item.task.internalKind === 'focus_reminder')?.occurrenceId || '';
+  scheduledAutomationNextAt = ledger.tasks.find(item => item.task.internalKind !== 'focus_reminder')?.dueAt || '';
   if (ledger.tasks.length > 0 && !scheduledAutomationPoller) {
     scheduledAutomationPoller = setInterval(() => void pollScheduledAutomationTasks(context), 60 * 1000);
   } else if (ledger.tasks.length === 0 && scheduledAutomationPoller) {
     clearInterval(scheduledAutomationPoller);
     scheduledAutomationPoller = null;
   }
-  void pollScheduledAutomationTasks(context);
+  await pollScheduledAutomationTasks(context);
   void broadcastSettings(context);
 }
 
 async function pollScheduledAutomationTasks(context: vscode.ExtensionContext): Promise<void> {
   const settings = getPersistedSettings(context);
   const referenceRoot = getScheduledAutomationLedgerReferenceRoot(context);
-  const claimed = claimDueScheduledTasks(referenceRoot, settings.globalDataPath, activeConversationOwnerInstanceId);
+  const operation = (name: string, input: Record<string, unknown>) => sendRuntimeDataRequest(settings.globalDataPath, { operation: name, input });
+  const claimed = await claimDueScheduledTaskDatabase(referenceRoot, settings.globalDataPath, activeConversationOwnerInstanceId, new Date(), operation);
   for (const occurrence of claimed) {
     try {
-      await runScheduledAutomationTask(context, occurrence.task, occurrence.occurrenceId);
+      await runScheduledAutomationTask(context, occurrence.task, occurrence);
     } catch (error: any) {
-      deferOrFailScheduledOccurrence(context, occurrence.occurrenceId, occurrence.task.title || '');
+      await deferOrFailScheduledOccurrence(context, occurrence, occurrence.task.title || '');
       console.error(`Scheduled task ${occurrence.taskId} failed to launch:`, error?.message || error);
     }
   }
-  const ledger = readScheduledTaskLedger(referenceRoot, settings.globalDataPath);
-  scheduledAutomationNextAt = ledger.tasks[0]?.dueAt || '';
+  const ledger = await readScheduledTaskDatabase(referenceRoot, settings.globalDataPath, operation);
+  focusReminderNextAt = ledger.tasks.find(item => item.task.internalKind === 'focus_reminder')?.dueAt || '';
+  focusReminderIdentity = ledger.tasks.find(item => item.task.internalKind === 'focus_reminder')?.occurrenceId || '';
+  scheduledAutomationNextAt = ledger.tasks.find(item => item.task.internalKind !== 'focus_reminder')?.dueAt || '';
   if (ledger.tasks.length === 0 && scheduledAutomationPoller) {
     clearInterval(scheduledAutomationPoller);
     scheduledAutomationPoller = null;
@@ -8457,16 +8728,38 @@ async function pollScheduledAutomationTasks(context: vscode.ExtensionContext): P
   void broadcastSettings(context);
 }
 
-async function runScheduledAutomationTask(context: vscode.ExtensionContext, task: SolomapScheduledAutomationTask, occurrenceId: string): Promise<void> {
+async function runScheduledAutomationTask(context: vscode.ExtensionContext, task: SolomapScheduledAutomationTask, occurrence: ScheduledTaskOccurrence): Promise<void> {
   const persisted = getPersistedSettings(context);
   const referenceRoot = getScheduledAutomationLedgerReferenceRoot(context);
+  const operation = (name: string, input: Record<string, unknown>) => sendRuntimeDataRequest(persisted.globalDataPath, { operation: name, input });
+  const occurrenceId = occurrence.occurrenceId;
   const prompt = String(task?.prompt || '').trim();
+  if (task.internalKind === 'focus_reminder') {
+    const workspaceRoot = task.projectPath || activeProjectRoot || getSelectedProjectPath(context) || referenceRoot;
+    const event = { trigger: 'focus_time', action: 'reminder', status: 'ok', focusMinutes: task.focusMinutes || 25, reminderAt: occurrence.dueAt };
+    const deliveries = [
+      ...(task.notify ? [{ intentId: `focus-reminder:${occurrenceId}:notify`, event, payload: { kind: 'notification' as const, message: automationNotificationMessage('focus_time', ''), warning: false } }] : []),
+      ...(task.sound ? [{ intentId: `focus-reminder:${occurrenceId}:sound`, event, payload: { kind: 'sound' as const } }] : [])
+    ];
+    const root = normalizeSolomapGlobalPath(workspaceRoot, persisted.globalDataPath);
+    const prepared = await sendRuntimeDataRequest<AutomationUiDelivery[]>(root, { operation: 'prepare_automation_deliveries', input: { root: workspaceRoot, deliveries, metadataOnly: true } });
+    for (const delivery of prepared) if (!['delivered', 'cancelled'].includes(delivery.state)) {
+      const stillValid = () => Boolean(getPersistedSettings(context).automationTasks?.triggers?.focus_time?.[delivery.payload.kind === 'sound' ? 'sound' : 'notify']);
+      try { await consumeAutomationUiDelivery(root, delivery.id, stillValid, delivery.payload.kind); }
+      catch (error) { console.warn('SoloMap focus reminder action could not yet be delivered:', error); }
+    }
+    await completeScheduledTaskDatabase(referenceRoot, persisted.globalDataPath, occurrence, operation);
+    scheduleTimedAutomationTask(context);
+    return;
+  }
   if (!task || task.enabled === false || (task.assignee !== 'user' && !prompt)) {
-    deferOrFailScheduledOccurrence(context, occurrenceId, task?.title || '');
+    await deferOrFailScheduledOccurrence(context, occurrence, task?.title || '');
     return;
   }
   const targetProjectPath = getScheduledAutomationProjectPath(task, activeProjectRoot || getSelectedProjectPath(context) || '');
   if (task.assignee === 'user') {
+    const reminderDataRoot = normalizeSolomapGlobalPath(targetProjectPath || referenceRoot, persisted.globalDataPath);
+    await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: reminderDataRoot });
     const projectLabel = task.projectName ? `（${task.projectName}）` : '';
     const message = persisted.language === 'en'
       ? `SoloMap reminder${task.projectName ? ` (${task.projectName})` : ''}: ${task.title || 'Scheduled task'}`
@@ -8478,8 +8771,8 @@ async function runScheduledAutomationTask(context: vscode.ExtensionContext, task
         taskId: task.id,
         title: task.title || ''
       }, { kind: 'notification', message, warning: false });
-    completeScheduledTaskOccurrence(referenceRoot, persisted.globalDataPath, occurrenceId);
-    if (readScheduledTaskLedger(referenceRoot, persisted.globalDataPath).tasks.some(occurrence => occurrence.occurrenceId === occurrenceId)) throw new Error('scheduled_completion_not_committed');
+    await completeScheduledTaskDatabase(referenceRoot, persisted.globalDataPath, occurrence, operation);
+    if ((await readScheduledTaskDatabase(referenceRoot, persisted.globalDataPath, operation)).tasks.some(candidate => candidate.occurrenceId === occurrenceId)) throw new Error('scheduled_completion_not_committed');
     if (task.scheduleKind === 'once') {
       await disableCompletedScheduledTask(context, task, persisted.globalDataPath);
     }
@@ -8487,20 +8780,21 @@ async function runScheduledAutomationTask(context: vscode.ExtensionContext, task
   }
   const workspaceRoot = targetProjectPath;
   if (!workspaceRoot) {
-    deferOrFailScheduledOccurrence(context, occurrenceId, task.title || '');
+    await deferOrFailScheduledOccurrence(context, occurrence, task.title || '');
     return;
   }
-  await ensureTaskRuntimeReady(context);
-  const engine = new SyncEngine(path.join(workspaceRoot, '.solopreneur', 'roadmap.csv'), path.join(workspaceRoot, '.solopreneur', 'project_journal.db'), context.extensionPath || path.resolve(__dirname, '..'), persisted.globalDataPath);
+  const scheduledDataRoot = normalizeSolomapGlobalPath(workspaceRoot, persisted.globalDataPath);
+  await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: scheduledDataRoot });
+  const engine = new SyncEngine(path.join(workspaceRoot, '.solopreneur', 'roadmap.csv'), path.join(workspaceRoot, '.solopreneur', 'project_journal.db'), context.extensionPath || path.resolve(__dirname, '..'), scheduledDataRoot);
   let executionLogId: number;
   try {
     await engine.initAndSync();
     await revealAgentStartupTerminal(context, workspaceRoot, 'solo-scheduled', persisted.cliPath || '');
-    executionLogId = await handleRunSoloConversation(context, prompt, persisted.cliPath || '', '', [], occurrenceId, false, { workspaceRoot, engine, globalDataPath: persisted.globalDataPath, launchIntentId: `scheduled:${occurrenceId}` });
+    executionLogId = await handleRunSoloConversation(context, prompt, persisted.cliPath || '', '', [], occurrenceId, false, { workspaceRoot, engine, globalDataPath: scheduledDataRoot, launchIntentId: `scheduled:${occurrenceId}` });
   } finally { engine.close(); }
   const timeOfDay = String(task.timeOfDay || '09:00');
   if (!executionLogId) {
-    deferOrFailScheduledOccurrence(context, occurrenceId, task.title || '');
+    await deferOrFailScheduledOccurrence(context, occurrence, task.title || '');
     return;
   }
   await recordAutomationTaskEvent(workspaceRoot, {
@@ -8511,8 +8805,8 @@ async function runScheduledAutomationTask(context: vscode.ExtensionContext, task
     title: task.title || '',
     timeOfDay
   }, `scheduled:${occurrenceId}:prompt`, persisted.globalDataPath);
-  completeScheduledTaskOccurrence(referenceRoot, persisted.globalDataPath, occurrenceId);
-  if (readScheduledTaskLedger(referenceRoot, persisted.globalDataPath).tasks.some(occurrence => occurrence.occurrenceId === occurrenceId)) throw new Error('scheduled_completion_not_committed');
+  await completeScheduledTaskDatabase(referenceRoot, persisted.globalDataPath, occurrence, operation);
+  if ((await readScheduledTaskDatabase(referenceRoot, persisted.globalDataPath, operation)).tasks.some(candidate => candidate.occurrenceId === occurrenceId)) throw new Error('scheduled_completion_not_committed');
   if (task.scheduleKind === 'once') {
     await disableCompletedScheduledTask(context, task, persisted.globalDataPath);
   }
@@ -8524,7 +8818,9 @@ async function disableCompletedScheduledTask(context: vscode.ExtensionContext, t
   const tasks = latest.automationTasks?.scheduledTasks || [];
   const unchanged = (candidate: SolomapScheduledAutomationTask) => candidate.id === task.id && JSON.stringify(candidate, Object.keys(candidate).sort()) === JSON.stringify(task, Object.keys(task).sort());
   if (!tasks.some(unchanged)) return;
-  await updatePersistedSettings(context, { automationTasks: { scheduledTasks: tasks.map(candidate => unchanged(candidate) ? { ...candidate, enabled: false } : candidate) } });
+  await updatePersistedSettings(context, { automationTasks: { scheduledTaskMutations: [{
+    operation: 'patch', taskId: task.id, expectedTask: task, patch: { enabled: false }
+  }] } });
 }
 
 function scheduleAutomationTasksAfterRun(context: vscode.ExtensionContext, input: {
@@ -8568,7 +8864,8 @@ async function runAutomationTasksAfterRun(context: vscode.ExtensionContext, trig
 }): Promise<void> {
   const settings = getPersistedSettings(context);
   const rule = settings.automationTasks?.triggers?.[trigger] || {};
-  const globalDataPath = input.globalDataPath || settings.globalDataPath;
+  const globalDataPath = normalizeSolomapGlobalPath(input.workspaceRoot, input.globalDataPath || settings.globalDataPath);
+  await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
   const intent = input.effectId ? `run-effect:${input.effectId}` : `automation:${path.resolve(input.workspaceRoot)}:${input.executionLogId}:${trigger}`;
   const record = (action: string, status: string) => recordAutomationTaskEvent(input.workspaceRoot, { trigger, nodeId: input.nodeId, executionLogId: input.executionLogId, action, status }, `${intent}:${action}:event`, globalDataPath);
   if (rule.notify) await queueAutomationUiDelivery(input.workspaceRoot, globalDataPath, `${intent}:notification:event`, { trigger, nodeId: input.nodeId, executionLogId: input.executionLogId, action: 'notification', status: 'ok' }, { kind: 'notification', message: automationNotificationMessage(trigger, input.nodeId), warning: input.nextStatus === 'Failed' || trigger === 'failed' });
@@ -9022,6 +9319,20 @@ async function promoteCompletedNativeCodexTurn(
 
 
 
+async function recordAcceptedReviewVerification(
+  client: RunLifecycleClient,
+  workspaceRoot: string,
+  reviewedExecutionLogId: number,
+  reviewTurnId: string,
+  reviewResult: ReturnType<typeof parseAgentReviewResult> | null
+): Promise<{ objectId: string; revision: number } | null> {
+  if (reviewResult?.status !== 'pass' || reviewedExecutionLogId < 1) return null;
+  return client.recordVerification(workspaceRoot, reviewedExecutionLogId, {
+    claim: reviewResult.summary || '独立复核通过', result: 'pass', evidence: JSON.stringify(reviewResult),
+    idempotencyKey: `review-verification:${reviewTurnId}:${reviewedExecutionLogId}`
+  });
+}
+
 async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any, capturedDataRoot?: string): Promise<void> {
   const normalizedStatusFilePath = statusFilePath;
   const identity = parseRunStatusReference(normalizedStatusFilePath);
@@ -9433,7 +9744,7 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
       }
     }
     let settledLearning: import('./runLifecycleTypes').RunSettlementInput['learning'];
-    if (workspaceRoot && !isContinuationRun) {
+    if (workspaceRoot) {
       const verificationSignals = extractVerificationSignals(outputTail, resolvedCommand, nextStatus);
       const failureSignals = extractFailureSignals(outputTail, failureCode, failureReason, nextStatus);
       const sourceType = isReviewRun
@@ -9443,7 +9754,7 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
           : runKind === 'roadmap_revision'
             ? 'roadmap_revision'
             : 'step_run';
-      const eventType = nextStatus === 'Completed'
+      const eventType = nextStatus === 'Completed' || nextStatus === 'Recorded' || reviewDeferredCompletion
         ? 'completed'
         : nextStatus === 'Failed'
           ? 'failed'
@@ -9460,7 +9771,6 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
             runDigestPath ? { type: 'run_digest' as const, ref: toProjectRelativeRuntimePath(workspaceRoot, runDigestPath), summary: 'Execution digest' } : null,
             outputFilePath ? { type: 'file' as const, ref: toProjectRelativeRuntimePath(workspaceRoot, String(outputFilePath)), summary: 'Agent output' } : null,
             changesFilePath ? { type: 'file' as const, ref: toProjectRelativeRuntimePath(workspaceRoot, String(changesFilePath)), summary: 'Workspace changes' } : null,
-            ...verificationSignals.slice(0, 3).map((signal) => ({ type: 'command' as const, ref: signal, summary: 'Verification signal' }))
           ].filter(Boolean) as LearningEvidenceRef[]),
           tags: [
             String(runKind || ''),
@@ -9473,11 +9783,11 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
             learningTaskId: statusData.learningTaskId || '',
             taskReportStatus: statusData.taskReportStatus || 'missing',
             taskReportPath: statusData.taskReportPath || '',
-            verificationSource: 'legacy_text_signal',
+            verificationSource: 'agent_output_untrusted',
             nodeId,
             runKind,
             status: nextStatus,
-            verification: verificationSignals,
+            reportedVerification: verificationSignals,
             failures: failureSignals,
             changedFiles: parseFileSummaryLines(changedFilesSummary),
             touchedFiles: parseFileSummaryLines(touchedFilesSummary)
@@ -9578,6 +9888,7 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
       ...(extensionContextRef && !isReviewRun && !isContinuationRun ? [{ kind: 'automation' as const, payload: effectPayload }] : []),
       { kind: 'refresh', payload: effectPayload }
     ];
+    await recordAcceptedReviewVerification(consumerClient, workspaceRoot, Number(reviewOfExecutionLogId || 0), consumerLease.expectedTurnId, reviewResult);
     await consumerClient.commitSettlement(normalizedStatusFilePath, statusData, consumerLease, {
       journal: { agentCli: String(agentCli || commandPreview || command || 'Unknown CLI'), command: resolvedCommand, output: executionSummary, status: nextStatus },
       digest: { ...settledDigest }, ...(handoffEntry ? { handoff: handoffEntry } : {}),
@@ -9660,7 +9971,7 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
     }
     if (effect.kind === 'roadmap' && committedStatus.turnId === effect.turnId) {
     if (shouldWriteNodeStatus && Number(committedStatus.executionLogId) === Number(executionLogId)) {
-      statusSyncEngine.refreshNodes();
+      await statusSyncEngine.refreshNodes();
       const latestNode = statusSyncEngine.getNodes().find(candidate => candidate.id === nodeId);
       if (!latestNode || latestNode.status === 'Completed') return;
       const hasRunningPeer = statusSyncEngine.getAgentExecutions(nodeId).some(conversation => conversation.status === 'Running' && Number(conversation.id) !== Number(executionLogId));
@@ -9672,7 +9983,7 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
           : '该环节仍有其他 Agent 对话正在运行。';
       }
       const completedAt = nodeStatus === 'Completed' ? new Date().toISOString() : '';
-      statusSyncEngine.updateNode(nodeId, {
+      await statusSyncEngine.updateNode(nodeId, {
         status: nodeStatus as RoadmapNode['status'],
         completedAt,
       });
@@ -9741,18 +10052,12 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
           collaborationReviewMode: String(collaborationReviewMode || 'high_risk')
         });
       } else {
-        await statusSyncEngine.logAgentExecution(
-          nodeId,
-          requestedReviewerCli || reviewerCli,
-          requestedReviewerCli || reviewerCli,
-          [
-            'Agent review could not start.',
-            `Review of execution: ${executionLogId || 0}`,
-            'Failure category: reviewer_cli_not_found',
-            `Failure reason:\nReview Agent CLI not found. Tried: ${getAgentCliCandidates(requestedReviewerCli || String(agentCli || 'agy'), requestedReviewerCli ? '' : String(agentCli || 'agy')).join(', ')}.`
-          ].join('\n\n'),
-          'Failed'
-        );
+        if (!extensionContextRef) throw new Error('extension_context_unavailable');
+        const failureReason = `Review Agent CLI not found. Tried: ${getAgentCliCandidates(requestedReviewerCli || String(agentCli || 'agy'), requestedReviewerCli ? '' : String(agentCli || 'agy')).join(', ')}.`;
+        await recordUndeliverableAgentRun(extensionContextRef, { workspaceRoot, nodeId, runKind: 'agent_review',
+          agentCli: requestedReviewerCli || reviewerCli, userMessage: String(reviewTaskGoal || userMessage || '复核本轮结果'),
+          failureCode: 'reviewer_cli_not_found', failureReason, globalDataPath: String(globalDataPath || ''),
+          parentExecutionLogId: Number(executionLogId || 0), launchIntentId: `run-effect:${effect.effectId}:review-unavailable` });
         if (isActiveProject) {
           postNodeConversations(nodeId);
         }
@@ -9764,7 +10069,7 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
       if (!flow) throw new Error('flow_trace_missing');
       if (!['paused', 'abandoned'].includes(flow.status)) {
         if (effect.payload.roadmapStepId && flow.status === 'completed' && flow.source.roadmapStepId === effect.payload.roadmapStepId) {
-          statusSyncEngine.updateNode(String(effect.payload.roadmapStepId), { status: 'Completed', completedAt: String(effect.payload.finishedAt) });
+          await statusSyncEngine.updateNode(String(effect.payload.roadmapStepId), { status: 'Completed', completedAt: String(effect.payload.finishedAt) });
         }
         const role = effect.payload.nextRole as FlowRole | undefined;
         const loop = flow.loops.find(candidate => candidate.index === Number(effect.payload.nextLoopIndex));
@@ -9786,7 +10091,7 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
     if (workspaceRoot && shouldRefreshRoadmap) {
       await statusSyncEngine.initAndSync();
       if (preserveCompletedNode && nodeId !== roadmapRevisionId && statusSyncEngine.getNodes().some((node) => node.id === nodeId)) {
-        statusSyncEngine.updateNode(nodeId, {
+        await statusSyncEngine.updateNode(nodeId, {
           status: 'Completed',
           completedAt: currentNode?.completedAt || new Date().toISOString()
         });
@@ -9897,6 +10202,7 @@ async function pollActiveConversations(context: vscode.ExtensionContext): Promis
   const active = activeRunConsumerPolls.get(key);
   if (active) return active;
   const flight = (async () => {
+    await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: key });
     const previousRegistry = readProjectRegistryFile(key, projectRegistryFileName);
     const registry = await refreshProjectRegistryForContext(context, key);
     if (previousRegistry?.updatedAt !== registry.registry.updatedAt && key === normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) refreshSidebarProjectCards();
@@ -9926,8 +10232,8 @@ async function pollActiveConversations(context: vscode.ExtensionContext): Promis
       await processRegisteredStatusFile(context, record.reference, false, record.status, client.dataRoot);
     }
     await pollRunSettlementEffects(client);
-    await pollAutomationUiDeliveries(settings.globalDataPath);
-    await refreshChangedCompletionCriteria(settings.globalDataPath);
+    await pollAutomationUiDeliveries(key);
+    await refreshChangedCompletionCriteria(key);
   })();
   activeRunConsumerPolls.set(key, flight);
   try { await flight; }
@@ -9956,7 +10262,37 @@ function ensureActiveConversationPoller(context: vscode.ExtensionContext): void 
 
 function setupFileSentinelWatcher(_workspaceRoot: string): void {
   watcher?.dispose();
-  watcher = null;
+  if (roadmapWatcherTimer) { clearTimeout(roadmapWatcherTimer); roadmapWatcherTimer = null; }
+  const workspaceRoot = _workspaceRoot;
+  watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(workspaceRoot, '.solopreneur/roadmap.csv'));
+  const refresh = () => {
+    if (roadmapWatcherTimer) clearTimeout(roadmapWatcherTimer);
+    roadmapWatcherTimer = setTimeout(() => {
+      roadmapWatcherTimer = null;
+      if (!syncEngine || activeProjectRoot !== workspaceRoot) return;
+      Promise.resolve(syncEngine.refreshNodes()).then(() => {
+        if (activeProjectRoot !== workspaceRoot) return;
+        sendNodesToWebview();
+      }).catch(async error => {
+        if (!/roadmap_projection_conflict/.test(error instanceof Error ? error.message : String(error)) || roadmapConflictPromptActive) return;
+        roadmapConflictPromptActive = true;
+        try {
+          const zh = extensionContextRef ? isSoloMapLanguageZh(extensionContextRef) : true;
+          const fileChoice = zh ? '保留 Git 文件' : 'Keep Git file';
+          const databaseChoice = zh ? '保留 SoloMap 修改' : 'Keep SoloMap changes';
+          const choice = await vscode.window.showWarningMessage(
+            zh ? '路线图文件和 SoloMap 中的修改发生冲突。请选择要保留的版本。' : 'The roadmap file conflicts with changes in SoloMap. Choose which version to keep.',
+            { modal: true }, fileChoice, databaseChoice);
+          if (!choice || !syncEngine || activeProjectRoot !== workspaceRoot) return;
+          await syncEngine.resolveRoadmapConflict(choice === fileChoice ? 'file' : 'database');
+          sendNodesToWebview();
+        } finally { roadmapConflictPromptActive = false; }
+      });
+    }, 150);
+  };
+  watcher.onDidCreate(refresh);
+  watcher.onDidChange(refresh);
+  watcher.onDidDelete(refresh);
   if (extensionContextRef) ensureActiveConversationPoller(extensionContextRef);
 }
 
@@ -9965,6 +10301,7 @@ function setupFileSentinelWatcher(_workspaceRoot: string): void {
  */
 export async function deactivate() {
   automationUiClosing = true;
+  if (roadmapWatcherTimer) { clearTimeout(roadmapWatcherTimer); roadmapWatcherTimer = null; }
   if (focusReminderTimer) { clearTimeout(focusReminderTimer); focusReminderTimer = null; }
   if (activePanel) disposeAutomationSoundView(activePanel.webview);
   const sidebar = sidebarProvider?.getWebview?.(); if (sidebar) disposeAutomationSoundView(sidebar);
@@ -9987,4 +10324,6 @@ export async function deactivate() {
     clearInterval(scheduledAutomationPoller);
     scheduledAutomationPoller = null;
   }
+  for (const timer of capabilityOperationPollers.values()) clearInterval(timer);
+  capabilityOperationPollers.clear();
 }

@@ -3,7 +3,7 @@ import type { WorkspaceSnapshot, RunGitEvidence } from './runWorkspace';
 import type { DocumentationAuditResult } from './documentationManifest';
 import type { FlowTrace } from './flowStore';
 
-export const maintenanceRunKinds = ['skill_install', 'mcp_install', 'enhancement_install', 'enhancement_uninstall', 'agent_cli_upgrade'];
+export const maintenanceRunKinds = ['skill_install', 'skill_uninstall', 'mcp_install', 'mcp_uninstall', 'agent_cli_upgrade'];
 
 export interface PrepareRunInput {
   root: string;
@@ -50,6 +50,7 @@ export interface RunCheckpointInput {
   next?: string;
   exitCode?: number;
   report?: unknown;
+  reportIntent?: unknown;
   reportAvailability?: string;
   reportValidationError?: string;
   workspaceSnapshot?: WorkspaceSnapshot;
@@ -61,7 +62,7 @@ export interface RunCheckpointInput {
   nativeTokenUsage?: import('./tokenUsage').AgentTokenUsage;
   nativeReply?: string;
   nativeSessionObservation?: { provider: 'claude'; sessionId: string; source: 'CLAUDE_CODE_SESSION_ID' };
-  nativeLogRange?: { start: number; end: number };
+  nativeLogRange?: { stream?: 'native:codex' | 'native:claude'; start: number; end: number };
   nativeWorkspaceObservation?: { workspaceSnapshot: WorkspaceSnapshot; gitEvidence: RunGitEvidence; observedAt: string };
   gitAfterHash?: string;
   requireDeliverable?: boolean;
@@ -102,6 +103,7 @@ export interface RunSettlementInput extends RunConsumerLease {
   flowUpdate?: { flow: FlowTrace; expectedRevision: number };
   handoff?: Record<string, unknown>;
   learning?: { eventType: string; summary: string; metadata: Record<string, unknown> };
+  verification?: { objectId: string; revision: number };
   index?: { record: Record<string, unknown>; files: Array<Record<string, unknown>>; signals: Array<Record<string, unknown>> };
   effects?: Array<{ kind: RunEffectKind; payload: Record<string, unknown> }>;
   idempotencyKey: string;

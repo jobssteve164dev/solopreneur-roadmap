@@ -26,7 +26,17 @@ export interface AgentConversation {
   command: string;
   output: string;
   status: string;
-  dataState?: { resumableSessionId: string; sessionOpen: boolean };
+  dataState?: {
+    resumableSessionId: string;
+    sessionOpen: boolean;
+    requestPreview?: string;
+    conclusion?: string;
+    runId?: string;
+    turnId?: string;
+    runRevision?: number;
+    hasExecutionLogs?: boolean;
+    linkedFromNodeId?: string;
+  };
 }
 
 export interface RunIndexRecord {

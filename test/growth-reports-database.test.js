@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { openAnalysisOwner } = require('./analysis-fixture.js');
 const { queryGrowthReports, readRegisteredProjectSources } = require('../out/growthReports.js');
+const { collectGithubEvidence } = require('../out/learningReview.js');
 
 async function fixture(t) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-native-reports-'));
@@ -26,16 +27,55 @@ test('ordinary report consumers resolve the current project database when no dat
   assert.equal(page.tasks.length, 1, 'omitting the optional root must use the authoritative project database rather than legacy files');
   assert.equal(page.tasks[0].summary, '正式完整报告');
   const sources = await readRegisteredProjectSources(f.project, f.extension);
-  assert.equal(sources.tasks.length, 1); assert.equal(sources.tasks[0].taskId, f.prepared.taskId);
+  assert.equal(sources.tasks.length, 1); assert.equal(sources.tasks[0].taskId, `task-${f.prepared.taskId}`);
   assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'agent-runs')), false);
   if (process.env.SOLOMAP_462_PACKAGE2_EVIDENCE) fs.writeFileSync(`${process.env.SOLOMAP_462_PACKAGE2_EVIDENCE}-default-root.json`, JSON.stringify({ page, sources, prepared: f.prepared }, null, 2));
+});
+
+test('native report identity stays canonical through the real verify action and GitHub trailer matching', async t => {
+  const f = await fixture(t);
+  submit(f, '等待验证的正式报告', 'canonical-report-task');
+  const taskId = `task-${f.prepared.taskId}`;
+  const sources = await readRegisteredProjectSources(f.project, f.extension, f.root);
+  assert.equal(sources.tasks[0].taskId, taskId);
+  assert.equal(sources.reports[0].taskId, taskId);
+
+  const sha = 'a'.repeat(40);
+  const evidence = await collectGithubEvidence({
+    projectPath: f.project, repository: 'owner/repository', tasks: sources.tasks, reports: sources.reports, persist: false,
+    api: async endpoint => {
+      if (/commits\?/.test(endpoint)) return [{ sha, commit: { message: `实现结果\n\nSoloMap-Task: ${taskId}` } }];
+      if (/check-runs/.test(endpoint)) return { check_runs: [] };
+      if (/\/status\?/.test(endpoint)) return { sha, statuses: [] };
+      return { sha, commit: { message: `实现结果\n\nSoloMap-Task: ${taskId}` }, files: [] };
+    }
+  });
+  assert.deepEqual(evidence.commits[0].taskIds, [taskId]);
+
+  const vm = require('node:vm');
+  const compiled = fs.readFileSync(path.join(f.extension, 'out/extension.js'), 'utf8');
+  const start = compiled.indexOf("case 'growth.reports':");
+  const branch = compiled.slice(start, compiled.indexOf("case 'project.select':", start));
+  const captured = []; const settled = [];
+  await new vm.Script(`(async () => { switch (message.command) { ${branch} } })()`)
+    .runInNewContext({
+      message: { command: 'growth.reportAction', projectPath: f.project, kind: 'verify', taskId, executionLogId: 1, turnId: f.prepared.turnId, actionId: 'verify-canonical' },
+      context: { extensionPath: f.extension }, activeProjectGrowthPanel: { webview: { postMessage: value => settled.push(value) } },
+      activeProjectGrowthPath: f.project, projectGrowthLoadSequence: 1, growthReportActions: new Set(),
+      getProjects: () => [{ path: f.project }], getPersistedSettings: () => ({ globalDataPath: f.root }), normalizeGlobalDataPathForExtension: value => value,
+      isSoloMapLanguageZh: () => true, growthReports_js_1: require('../out/growthReports.js'),
+      learningReview_js_1: { projectGithubRepository: async () => 'owner/repository', collectGithubEvidence: async input => { captured.push(input); return { gaps: [], commits: [] }; } }
+    });
+  assert.equal(settled[0]?.error, undefined);
+  assert.equal(captured[0].tasks.length, 1); assert.equal(captured[0].tasks[0].taskId, taskId);
+  assert.equal(captured[0].reports.length, 1); assert.equal(captured[0].reports[0].taskId, taskId);
 });
 
 test('default report reads preserve native fixed versions and ignore a conflicting legacy report directory', async t => {
   const f = await fixture(t);
   const first = submit(f, '库中原始全文', 'default-root-first');
   submit(f, '库中后续完整报告', 'default-root-next');
-  const { registerLearningTask, writeLearningJson } = require('../out/taskReport.js');
+  const { registerLearningTask, writeLearningJson } = require('./fixtures/legacy-task-report.cjs');
   const runDir = path.join(f.project, '.solopreneur', 'agent-runs', '__solo__', '1');
   const taskId = registerLearningTask(f.project, { executionLogId: 1, runDir, userMessage: '旧源不得覆盖新权威', startedAt: '' });
   const file = path.join(runDir, 'task-report-1.json');
@@ -62,7 +102,7 @@ async function continueReport(f, taskId, turnId, executionLogId) {
   const capture = new vm.Script(compiled.slice(captureStart, captureEnd) + '\ncaptureConversationLaunchTarget(context, workspaceRoot, globalDataPath, settings)');
   const branch = compiled.slice(compiled.indexOf("case 'growth.reports':"), compiled.indexOf("case 'project.select':", compiled.indexOf("case 'growth.reports':")));
   assert.ok(branch, 'exercise the compiled webview action handler');
-  const settled = []; const launches = [];
+  const settled = []; const launches = []; const runtimeRoots = [];
   const panel = { webview: { postMessage: value => settled.push(value) } };
   await new vm.Script(`(async () => { switch (message.command) { ${branch} } })()`)
     .runInNewContext({
@@ -74,9 +114,10 @@ async function continueReport(f, taskId, turnId, executionLogId) {
       growthReports_js_1: require('../out/growthReports.js'), path,
       vscode: { window: { showInputBox: async () => '继续完成日期选择' } },
       captureConversationLaunchTarget: (context, workspaceRoot, globalDataPath, settings) => capture.runInNewContext({ context, workspaceRoot, globalDataPath, settings,
-        path, crypto: require('node:crypto'), syncEngine_1: require('../out/db/syncEngine.js') }),
+        path, crypto: require('node:crypto'), syncEngine_1: require('../out/db/syncEngine.js'),
+        autonomousRuntimeHost_1: { ensureHealthyAutonomousRuntime: async input => { runtimeRoots.push(input.globalDataPath); } } }),
       ensureActionProject: async () => f.project, waitForAgentProcessCleanup: async () => {},
-      taskReport_1: require('../out/taskReport.js'),
+      taskReport_1: require('./fixtures/legacy-task-report.cjs'),
       handleContinueConversationTurn: async (...args) => { launches.push(args); }
     });
   assert.equal(settled[0]?.error, undefined, 'the actual report action must accept native execution bindings');
@@ -85,6 +126,7 @@ async function continueReport(f, taskId, turnId, executionLogId) {
   assert.match(launches[0][3], /继续完成日期选择/);
   assert.match(launches[0][3], /参考上一轮工作汇报/);
   assert.equal(launches[0][6], true, 'report continuation preserves roadmap state');
+  assert.deepEqual(runtimeRoots, [f.root], 'report continuation starts the Runtime that owns its captured data root before reading it');
   return launches[0];
 }
 
@@ -106,27 +148,28 @@ test('an archived report leaves ordinary results while its pinned full version r
   assert.equal(sources.observations[0].envelope.report.summary, '已经归档的结果', 'explicit full history preserves the original report');
 });
 
-test('archiving an older report object does not withdraw a newer result from the same turn', async t => {
-  const f = await fixture(t); const a = submit(f, '较早对象甲', 'archive-old-a'); submit(f, '仍然有效的乙', 'archive-old-b');
-  await archiveReport(f, a, 'archive-old-a-host');
+test('a stale revision cannot archive the authoritative report head', async t => {
+  const f = await fixture(t); const a = submit(f, '较早版本甲', 'archive-old-a'); submit(f, '仍然有效的乙', 'archive-old-b');
+  await assert.rejects(archiveReport(f, a, 'archive-old-a-host'), /revision_conflict/);
   const detail = await queryGrowthReports(f.project, f.extension, { taskId: `task-${f.prepared.taskId}` }, f.root);
   assert.equal(detail.tasks[0].latestSummary, '仍然有效的乙');
-  assert.deepEqual(detail.turns[0].history.map(item => item.report.summary), ['仍然有效的乙']);
+  assert.deepEqual(detail.turns[0].history.map(item => item.report.summary), ['较早版本甲', '仍然有效的乙']);
   const sources = await readRegisteredProjectSources(f.project, f.extension, f.root);
   assert.equal(sources.reports[0]?.report.summary, '仍然有效的乙');
   const launch = await continueReport(f, `task-${f.prepared.taskId}`, f.prepared.turnId, 1);
   assert.match(launch[3], /仍然有效的乙/); assert.doesNotMatch(launch[3], /较早对象甲/);
 });
 
-test('archiving the latest report object selects the remaining valid result for reading and continuation', async t => {
-  const f = await fixture(t); submit(f, '保留的结果甲', 'archive-new-a'); const b = submit(f, '撤出的结果乙', 'archive-new-b');
+test('archiving the report head withdraws ordinary actions while all fixed revisions stay readable', async t => {
+  const f = await fixture(t); submit(f, '保留的历史甲', 'archive-new-a'); const b = submit(f, '撤出的当前乙', 'archive-new-b');
   await archiveReport(f, b, 'archive-new-b-host');
+  const late = submit(f, '归档后的迟到结果丙', 'archive-late-c');
+  assert.equal(late.objectId, b.objectId, 'late intake must not create a second report authority after archive');
   const detail = await queryGrowthReports(f.project, f.extension, { taskId: `task-${f.prepared.taskId}` }, f.root);
-  assert.equal(detail.tasks[0].latestSummary, '保留的结果甲');
-  assert.deepEqual(detail.turns[0].history.map(item => item.report.summary), ['保留的结果甲']);
-  const launch = await continueReport(f, `task-${f.prepared.taskId}`, f.prepared.turnId, 1);
-  assert.match(launch[3], /保留的结果甲/); assert.doesNotMatch(launch[3], /撤出的结果乙/);
-  assert.equal(f.store.readReportVersions(f.projectId, [{ objectId: b.objectId, revision: 1 }])[0].report.summary, '撤出的结果乙');
+  assert.equal(detail.tasks[0].latestSummary, '');
+  assert.equal(detail.turns.length, 0);
+  assert.deepEqual(f.store.readReportVersions(f.projectId, [{ objectId: b.objectId, revision: 1 }, { objectId: b.objectId, revision: 2 }]).map(item => item.report.summary), ['保留的历史甲', '撤出的当前乙']);
+  assert.equal(f.store.readReportVersions(f.projectId, [{ objectId: b.objectId, revision: late.revision }])[0].report.summary, '归档后的迟到结果丙');
 });
 
 test('the real work-report continue action uses the native execution identity', async t => {
@@ -152,7 +195,7 @@ test('backfilling older report indexes cannot replace a later committed version'
   assert.equal(detail.tasks[0].latestSummary, '新提交', 'index creation order is not report commit order');
   assert.deepEqual(detail.turns[0].history.map(item => item.report.summary), ['旧提交', '新提交']);
   const savedRoot = path.join(f.root, 'exports', 'reopened');
-  await f.store.backup(path.join(savedRoot, 'solomap.db'));
+  await f.store.backup({ destination: path.join(savedRoot, 'solomap.db'), idempotencyKey: 'report-version-backup' });
   const reopened = require('../out/db/unifiedDataStore.js').UnifiedDataStore.open(savedRoot);
   try {
     const restored = reopened.readRegisteredReportSources(f.projectId);
@@ -175,7 +218,7 @@ test('report ordering seeks the exact revision event instead of every event for 
 
 test('history replay retains proven execution bindings when only the old run directory moves', async t => {
   const f = await fixture(t);
-  const { registerLearningTask, writeLearningJson } = require('../out/taskReport.js');
+  const { registerLearningTask, writeLearningJson } = require('./fixtures/legacy-task-report.cjs');
   const { importAgentRuns } = require('../out/projectDataMigration.js');
   const sourceRoot = path.join(f.project, '.solopreneur/agent-runs');
   const runDir = path.join(sourceRoot, '__solo__/71'); fs.mkdirSync(runDir, { recursive: true });
@@ -262,7 +305,7 @@ test('report retry rejects a changed availability intent rather than replaying a
 
 test('explicit history migration preserves registered report versions and unknown start times', async t => {
   const f = await fixture(t);
-  const { registerLearningTask, writeLearningJson } = require('../out/taskReport.js');
+  const { registerLearningTask, writeLearningJson } = require('./fixtures/legacy-task-report.cjs');
   const { importAgentRuns } = require('../out/projectDataMigration.js');
   const runDir = path.join(f.project, '.solopreneur/agent-runs/__solo__/71'); fs.mkdirSync(runDir, { recursive: true });
   const legacyTask = registerLearningTask(f.project, { executionLogId: 71, runDir, userMessage: '完整旧需求' + '丁'.repeat(1000), startedAt: '' });

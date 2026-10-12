@@ -47,6 +47,23 @@ export function validateDirectGlobalPromptReview(manifest: ReviewManifest, resul
   requireValue(processed.size === result.processedSourceIds.length && deferred.size === (result.deferredSourceIds || []).length
     && [...processed].every(id => !deferred.has(id))
     && [...sourceIds].every(id => processed.has(id) || deferred.has(id)), '每个增量来源必须明确标记为已处理或延期。');
+  requireValue(Array.isArray(result.lessons), '复盘 Agent 未提交经验审核结果。');
+  const lessonFingerprints = new Set<string>();
+  for (const [index, lesson] of result.lessons.entries()) {
+    requireValue(lesson && manifest.projects.includes(lesson.projectPath), `经验 ${index} 的项目范围无效。`);
+    for (const key of ['summary', 'appliesWhen', 'doesNotApplyWhen', 'doThis', 'avoidThis', 'verification', 'reason']) {
+      requireValue(typeof lesson[key] === 'string' && lesson[key].trim(), `经验 ${index} 缺少 ${key}。`);
+    }
+    requireValue(['verification_pattern', 'boundary_rule', 'planning_rule', 'risk_pattern', 'implementation_pattern', 'strategy_signal', 'user_preference'].includes(lesson.lessonType), `经验 ${index} 的类型无效。`);
+    requireValue(Array.isArray(lesson.evidence) && lesson.evidence.length > 0 && lesson.evidence.every((id: any) => typeof id === 'string' && processed.has(id)), `经验 ${index} 必须引用本轮已处理来源。`);
+    requireValue(new Set(lesson.evidence).size === lesson.evidence.length, `经验 ${index} 包含重复证据。`);
+    const evidence: ReviewManifest['sources'] = lesson.evidence.map((id: string) => manifest.sources.find(source => source.id === id)!);
+    requireValue(evidence.some((source: ReviewManifest['sources'][number]) => source.kind === 'learning_event' && source.ref && source.projectPath === lesson.projectPath), `经验 ${index} 必须引用同项目的真实学习事件。`);
+    requireValue(evidence.every((source: ReviewManifest['sources'][number]) => !source.projectPath || source.projectPath === lesson.projectPath), `经验 ${index} 引用了其他项目的私有来源。`);
+    const fingerprint = JSON.stringify([lesson.projectPath, lesson.summary.trim().toLowerCase(), lesson.appliesWhen.trim().toLowerCase()]);
+    requireValue(!lessonFingerprints.has(fingerprint), `经验 ${index} 与本轮其他经验重复。`);
+    lessonFingerprints.add(fingerprint);
+  }
   const beforeFragments: string[] = [];
   const afterFragments: string[] = [];
   for (const [index, change] of result.changes.entries()) {

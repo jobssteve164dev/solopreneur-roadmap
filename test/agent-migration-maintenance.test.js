@@ -170,7 +170,8 @@ test('a recycling Agent resumes the remaining exact files after Runtime interrup
 });
 
 test('Agent migration prompt uses only maintenance MCP tools and keeps its result in the database', () => {
-  const { applyNativeMigrationAgentBoundary, buildMigrationMaintenancePrompt, buildMigrationAgentSandboxCommand } = require('../out/migrationAgentMaintenance.js');
+  const { applyNativeMigrationAgentBoundary, buildMigrationMaintenancePrompt, buildMigrationAgentSandboxCommand, migrationAgentConfigurationEnvironmentKeys, migrationAgentConfigurationPaths, migrationAgentExecutablePaths } = require('../out/migrationAgentMaintenance.js');
+  const { buildAgentCommand } = require('../out/agentCli.js');
   const prompt = buildMigrationMaintenancePrompt('migration_review');
   for (const name of ['solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_maintenance_finish']) assert.match(prompt, new RegExp(name));
   assert.match(prompt, /不创建结果文件/);
@@ -192,12 +193,24 @@ test('Agent migration prompt uses only maintenance MCP tools and keeps its resul
   assert.match(command, /'SOLOMAP_MAINTENANCE_RUNTIME_PORT' '43123'/);
   assert.match(command, /'\/bin\/bash' '-lc'/);
   const inlineMcp = JSON.stringify({ mcpServers: { solomap_data: { command: process.execPath, args: ['bridge'] } } });
-  const native = applyNativeMigrationAgentBoundary("'/usr/local/bin/claude' -p 'prompt'", '/usr/local/bin/claude', 'claude', inlineMcp);
-  for (const flag of ['--restricted', '--safe-mode', '--strict-mcp-config', '--mcp-config', '--tools']) assert.match(native, new RegExp(flag));
-  assert.match(native, /--tools ''/);
-  assert.match(native, new RegExp(inlineMcp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  assert.throws(() => applyNativeMigrationAgentBoundary("'/usr/local/bin/agy' --print 'prompt'", '/usr/local/bin/agy', 'antigravity', inlineMcp), /native_boundary_unsupported/);
-  assert.throws(() => applyNativeMigrationAgentBoundary("'codex' exec 'prompt'", 'codex', 'codex'), /native_boundary_unsupported/);
+  for (const mode of ['never', 'auto', 'always']) {
+    const ordinary = buildAgentCommand('/usr/local/bin/claude', 'prompt', '/isolated/work', '', mode);
+    const native = applyNativeMigrationAgentBoundary(ordinary, '/usr/local/bin/claude', 'claude', inlineMcp);
+    assert.equal(native, ordinary, `maintenance must preserve the main task ${mode} permission mode`);
+  }
+  assert.equal(applyNativeMigrationAgentBoundary("'codex' exec 'prompt'", 'codex', 'codex', inlineMcp), "'codex' exec 'prompt'");
+  assert.equal(applyNativeMigrationAgentBoundary("'/usr/local/bin/agy' --print 'prompt'", '/usr/local/bin/agy', 'antigravity', inlineMcp), "'/usr/local/bin/agy' --print 'prompt'");
+  const home = '/home/user';
+  assert.deepEqual(migrationAgentConfigurationPaths('codex', path.join(home, '.codex', 'config.toml'), home), [path.join(home, '.codex')]);
+  assert.deepEqual(migrationAgentConfigurationPaths('claude', path.join(home, '.claude.json'), home), [
+    path.join(home, '.claude.json'),
+    path.join(home, '.claude')
+  ]);
+  assert.deepEqual(migrationAgentConfigurationPaths('opencode', '/private/shared/opencode.json', home, {}), ['/private/shared/opencode.json']);
+  assert.deepEqual(migrationAgentConfigurationEnvironmentKeys('codex'), ['CODEX_HOME']);
+  assert.deepEqual(migrationAgentConfigurationEnvironmentKeys('copilot'), ['COPILOT_HOME', 'GH_TOKEN', 'GITHUB_TOKEN']);
+  assert.ok(!migrationAgentConfigurationEnvironmentKeys('codex').includes('XDG_RUNTIME_DIR'));
+  assert.deepEqual(migrationAgentExecutablePaths(process.execPath), []);
 });
 
 test('migration Agent can discover and enqueue registered legacy sources before reviewing them', () => {

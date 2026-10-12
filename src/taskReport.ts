@@ -1,40 +1,5 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import * as crypto from 'crypto';
-
-export function writeLearningJson(file: string, value: unknown): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temp = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify(value, null, 2) + '\n', 'utf8');
-  fs.renameSync(temp, file);
-}
-
-export function readLearningJson(file: string): any {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
-}
-
-export function learningTasksRoot(workspaceRoot: string): string {
-  return path.join(workspaceRoot, '.solopreneur', 'agent-runs', 'learning-tasks');
-}
-
-export function registerLearningTask(workspaceRoot: string, input: {
-  executionLogId: number; runDir: string; userMessage: string; startedAt: string;
-  taskId?: string; parentExecutionLogId?: number;
-}): string {
-  const root = learningTasksRoot(workspaceRoot);
-  fs.mkdirSync(root, { recursive: true });
-  const tasks = fs.readdirSync(root).filter(name => name.endsWith('.json')).map(name => readLearningJson(path.join(root, name)));
-  const parent = tasks.find(task => task && (task.taskId === input.taskId || (input.parentExecutionLogId && task.executions?.some((run: any) => run.id === input.parentExecutionLogId))));
-  const taskId = parent?.taskId || `task-${crypto.randomUUID()}`;
-  const executions = [...(parent?.executions || [])].filter(run => run.id !== input.executionLogId);
-  executions.push({ id: input.executionLogId, runDir: input.runDir });
-  writeLearningJson(path.join(root, `${taskId}.json`), {
-    schemaVersion: 1, taskId, projectPath: workspaceRoot,
-    startedAt: parent?.startedAt || input.startedAt,
-    userMessage: parent?.userMessage || input.userMessage, executions
-  });
-  return taskId;
-}
 
 function text(value: unknown, field: string): string {
   if (typeof value !== 'string') throw new Error(`${field} must be a string`);
@@ -102,44 +67,11 @@ export function validateTaskReport(value: any, workspaceRoot = process.cwd()): a
   }
   for (const usage of result.experienceUsage) {
     text(usage.experienceId, 'experienceId'); text(usage.action, 'action'); text(usage.result, 'result');
-    if (!Array.isArray(usage.evidence)) throw new Error('experienceUsage evidence must be an array');
+    if (!Number.isInteger(usage.experienceRevision) || usage.experienceRevision < 1) throw new Error('experienceRevision must be a positive integer');
+    if (!['effective', 'ineffective', 'degraded', 'unassessed'].includes(usage.verdict)) throw new Error('experienceUsage verdict must be effective, ineffective, degraded, or unassessed');
+    if (!Array.isArray(usage.evidence) || usage.evidence.some((item: unknown) => typeof item !== 'string')) throw new Error('experienceUsage evidence must be a string array');
   }
   return result;
-}
-
-export function recordTaskReport(status: any, args: Record<string, string>, sequence: number): Record<string, string> {
-  const finish = (result: Record<string, string>) => {
-    try {
-      const runDir = path.dirname(status.outputFilePath || status.completionDecisionFilePath);
-      writeLearningJson(path.join(runDir, `task-report-status-${sequence}.json`), {
-        schemaVersion: 1, taskId: status.learningTaskId || '', projectPath: status.workspaceRoot,
-        executionLogId: status.executionLogId, turnId: `${sequence}:complete`, createdAt: new Date().toISOString(),
-        availability: result.taskReportStatus
-      });
-    } catch { /* A receipt failure cannot block the existing checkpoint. */ }
-    return result;
-  };
-  if (!args['report-file']) return finish({ taskReportStatus: 'missing', taskReportPath: '', taskReportError: '' });
-  let report: any;
-  try {
-    const file = path.resolve(status.workspaceRoot, args['report-file']);
-    if (fs.statSync(file).size > 1024 * 1024) throw new Error('report exceeds 1 MiB');
-    report = validateTaskReport(JSON.parse(fs.readFileSync(file, 'utf8')), status.workspaceRoot);
-  } catch (error: any) {
-    return finish({ taskReportStatus: 'invalid', taskReportPath: '', taskReportError: String(error.message) });
-  }
-  try {
-    const runDir = path.dirname(status.outputFilePath || status.completionDecisionFilePath);
-    const taskReportPath = path.join(runDir, `task-report-${sequence}.json`);
-    writeLearningJson(taskReportPath, {
-      schemaVersion: 1, taskId: status.learningTaskId || '', projectPath: status.workspaceRoot,
-      executionLogId: status.executionLogId, turnId: `${sequence}:complete`,
-      createdAt: new Date().toISOString(), outcome: args.outcome || 'partial', report
-    });
-    return finish({ taskReportStatus: 'recorded', taskReportPath, taskReportError: '' });
-  } catch (error: any) {
-    return finish({ taskReportStatus: 'save_failed', taskReportPath: '', taskReportError: String(error.message) });
-  }
 }
 
 export function buildTaskReportInstructions(taskId: string, reportFile: string, interactive: boolean): string {
@@ -157,7 +89,7 @@ export function buildTaskReportInstructions(taskId: string, reportFile: string, 
     '- summary 不复述任务要求，不罗列读文件、调用工具、执行命令、提交 SHA、路径或过程步骤。技术证据留在对应数组；未完成事项只写仍影响用户目标的缺口，明确是否需要用户介入，不把执行者后续工作转嫁给用户。',
     '- decisions 说明做法与理由；corrections 说明原要求、偏差、修正及来源消息；verification 说明实际检查、结果、证据位置、产物版本与未验证范围。',
     '- commits 每项为 {"repository":"owner/repo","sha":"完整40位提交SHA","files":["本任务相对文件路径"]}。无提交时留空。',
-    '- experienceUsage 每项为 {"experienceId":"已采用经验标识","action":"实际改变的动作","result":"观察结果","evidence":["证据引用"]}；召回不等于采用。lessons 说明条件、动作、结果、判断和反例，只是待复盘材料。',
+    '- experienceUsage 只记录实际采用，每项为 {"experienceId":"经验对象标识","experienceRevision":固定正整数版本,"action":"实际改变的动作","result":"观察结果","verdict":"effective|ineffective|degraded|unassessed","evidence":["证据引用"]}；召回不等于采用，无法验证必须填 unassessed。lessons 说明条件、动作、结果、判断和反例，只是待复盘材料。',
     interactive
       ? `- 沿原有 complete 命令结算，并附加 --report-file ${JSON.stringify(reportFile)}；报告问题不阻断原任务。不要为写报告额外调用一次 complete。`
       : '- 本轮结束时保存报告，插件在原有收尾路径读取；不需要改变原任务完成协议。',

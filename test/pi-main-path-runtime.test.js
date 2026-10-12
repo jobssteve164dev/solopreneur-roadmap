@@ -5,8 +5,10 @@ const path = require('node:path');
 const test = require('node:test');
 const childProcess = require('node:child_process');
 
-const { writeCognitiveRuntimeConfig } = require('../out/cognitiveRuntimeConfig.js');
+const { writeCognitiveRuntimeConfig, persistCognitiveRuntimeConfig } = require('../out/cognitiveRuntimeConfig.js');
 const { runConfiguredPiMainPath } = require('../out/piMainPathRuntime.js');
+const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
 
 function git(root, args) {
   return childProcess.execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
@@ -61,7 +63,11 @@ test('packaged autonomous Runtime process consumes a delivery request through a 
   const fakeCodex = path.join(fakeBin, 'codex');
   fs.writeFileSync(fakeCodex, `#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on('end',()=>process.stdout.write(JSON.stringify({summary:'runtime process',operations:[{type:'replace_text',path:'runtime.md',oldText:'before',newText:'after'}]})));\n`);
   fs.chmodSync(fakeCodex, 0o700);
-  writeCognitiveRuntimeConfig(root, { mode: 'agent_cli', agentCli: fakeCodex, model: 'auto' });
+  const store = new UnifiedDataStore(path.join(root, '.solomap-global'));
+  const operations = createRuntimeDataOperations(store);
+  await persistCognitiveRuntimeConfig(root, { mode: 'agent_cli', agentCli: fakeCodex, model: 'auto' }, request => operations(request), 'pi-runtime-config');
+  await operations.close();
+  store.close();
   const requestPath = path.join(root, 'request.json');
   fs.writeFileSync(requestPath, JSON.stringify({
     taskId: 'process-entry', projectPath: project, instruction: 'update',

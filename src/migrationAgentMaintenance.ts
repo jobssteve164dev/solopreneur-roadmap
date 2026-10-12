@@ -3,16 +3,49 @@ import * as path from 'path';
 import { shellQuote } from './agentCli';
 
 export type MigrationMaintenanceKind = 'migration_review' | 'migration_apply' | 'recycling_apply';
-const maintenanceTools = ['solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply', 'solomap_maintenance_finish'];
+const providerEnvironmentKeys: Record<string, readonly string[]> = {
+  codex: ['CODEX_HOME'], claude: ['CLAUDE_CONFIG_DIR'], copilot: ['COPILOT_HOME', 'GH_TOKEN', 'GITHUB_TOKEN'],
+  opencode: ['OPENCODE_CONFIG', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME'], cursor: ['CURSOR_API_KEY'],
+  grok: ['GROK_API_KEY'], antigravity: ['GEMINI_API_KEY', 'GOOGLE_API_KEY']
+};
+
+export function migrationAgentConfigurationEnvironmentKeys(provider: string): readonly string[] {
+  return providerEnvironmentKeys[provider] || [];
+}
+
+export function migrationAgentConfigurationPaths(provider: string, configFile: string, home: string, environment: NodeJS.ProcessEnv = process.env): string[] {
+  const configParent = path.dirname(configFile);
+  if (provider === 'claude') return [...new Set([configFile, path.join(home, '.claude'), ...(path.basename(configFile) === '.config.json' ? [configParent] : [])])];
+  if (provider === 'antigravity') return [path.join(home, '.gemini')];
+  if (provider === 'opencode') {
+    const paths = [configFile];
+    const dataRoot = path.join(environment.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'opencode');
+    if (fs.existsSync(dataRoot)) paths.push(dataRoot);
+    return paths;
+  }
+  return [configParent];
+}
+
+export function migrationAgentExecutablePaths(agentCli: string): string[] {
+  const requested = path.resolve(agentCli);
+  const real = fs.realpathSync.native(requested);
+  if (!fs.statSync(real).isFile()) throw new Error('maintenance_agent_cli_invalid');
+  const systemRoots = ['/usr/', '/bin/', '/lib/', '/lib64/'];
+  if (systemRoots.some(root => requested.startsWith(root)) && systemRoots.some(root => real.startsWith(root))) return [];
+  const parts = real.split(path.sep);
+  const nodeModules = parts.lastIndexOf('node_modules');
+  const packageDepth = nodeModules >= 0 && parts[nodeModules + 1]?.startsWith('@') ? nodeModules + 3 : nodeModules + 2;
+  const installRoot = nodeModules >= 0 ? parts.slice(0, packageDepth).join(path.sep) || path.sep : real;
+  return [...new Set([requested, installRoot])];
+}
 
 export function applyNativeMigrationAgentBoundary(command: string, agentCli: string, provider: string, mcpConfig: string): string {
   const executable = shellQuote(agentCli);
-  if (provider !== 'claude') throw new Error('maintenance_agent_native_boundary_unsupported');
   const configuration = JSON.parse(mcpConfig) as { mcpServers?: Record<string, unknown> };
   if (!configuration.mcpServers || Object.keys(configuration.mcpServers).length !== 1 || !configuration.mcpServers.solomap_data) throw new Error('maintenance_agent_mcp_boundary_invalid');
-  const restrictions = ` --restricted --safe-mode --strict-mcp-config --mcp-config ${shellQuote(mcpConfig)} --tools '' --allowedTools ${shellQuote(maintenanceTools.map(name => `mcp__solomap_data__${name}`).join(','))} --permission-mode dontAsk --permission-prompts none --disable-slash-commands --no-session-persistence`;
   if (!command.startsWith(executable)) throw new Error('maintenance_agent_command_invalid');
-  return executable + restrictions + command.slice(executable.length);
+  void provider;
+  return command;
 }
 
 function parentDirectories(file: string): string[] {

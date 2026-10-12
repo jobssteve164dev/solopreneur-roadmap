@@ -1,14 +1,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { createHash } from 'crypto';
+import { randomUUID } from 'crypto';
 import { AgentConversation } from './db/types';
 import { ProjectPortfolioSummary, SolopreneurProject } from './projectPortfolio';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 
-const cacheVersion = 2;
-const cacheFileName = 'sidebar-core-snapshot-v1.json';
-const conversationCacheDirectoryName = 'conversations';
-const conversationCacheFilePattern = /^sidebar-conversation-[a-f0-9]{40}-v1\.json$/;
-const conversationPresentationVersion = 3;
+const cacheVersion = 3;
 
 export interface SidebarConversationSnapshot {
   solo: AgentConversation[];
@@ -18,14 +16,21 @@ export interface SidebarConversationSnapshot {
 }
 
 interface CachedConversationSnapshot {
-  signature: string;
+  sourceRevision: string;
   snapshot: SidebarConversationSnapshot;
 }
+
+interface AnalysisState<T> { objectId: string | null; revision: number; value: T | null }
 
 export interface SidebarCoreSnapshotCache {
   version: number;
   projectSignature: string;
   portfolio: ProjectPortfolioSummary[];
+}
+
+export interface SidebarCoreSnapshotReservation {
+  requestId: string;
+  generation: number;
 }
 
 function statSignature(filePath: string): string {
@@ -48,109 +53,102 @@ export function buildSidebarProjectSignature(projects: SolopreneurProject[]): st
   })).join('|');
 }
 
-export function buildConversationDatabaseSignature(projectPath: string): string {
-  return `${conversationPresentationVersion}:${statSignature(path.join(projectPath, '.solopreneur', 'project_journal.db'))}`;
+function dataRoot(globalDataPath: string, projectPath = ''): string {
+  return normalizeGlobalDataPathForExtension(globalDataPath, projectPath || process.cwd());
 }
 
-function cachePath(globalDataPath: string): string {
-  return path.join(globalDataPath, cacheFileName);
+async function readState<T>(globalDataPath: string, projectPath: string | null, key: string): Promise<AnalysisState<T>> {
+  return sendRuntimeDataRequest<AnalysisState<T>>(dataRoot(globalDataPath, projectPath || ''), {
+    operation: 'read_analysis_state', input: { ...(projectPath ? { root: projectPath } : {}), namespace: 'sidebar', key }
+  });
 }
 
-function conversationCachePath(globalDataPath: string, projectPath: string): string {
-  const projectKey = createHash('sha1').update(projectPath).digest('hex');
-  return path.join(globalDataPath, conversationCacheDirectoryName, `sidebar-conversation-${projectKey}-v1.json`);
-}
-
-function nextConflictPath(targetPath: string): string {
-  let index = 1;
-  let candidate = `${targetPath}.legacy-${index}`;
-  while (fs.existsSync(candidate)) {
-    index += 1;
-    candidate = `${targetPath}.legacy-${index}`;
-  }
-  return candidate;
-}
-
-export function ensureConversationCacheDirectory(globalDataPath: string): string {
-  const directoryPath = path.join(globalDataPath, conversationCacheDirectoryName);
-  if (!globalDataPath) return directoryPath;
-  try {
-    fs.mkdirSync(directoryPath, { recursive: true });
-    for (const fileName of fs.readdirSync(globalDataPath)) {
-      if (!conversationCacheFilePattern.test(fileName)) continue;
-      const legacyPath = path.join(globalDataPath, fileName);
-      const targetPath = path.join(directoryPath, fileName);
-      fs.renameSync(legacyPath, fs.existsSync(targetPath) ? nextConflictPath(targetPath) : targetPath);
+async function writeState<T>(globalDataPath: string, projectPath: string | null, key: string, value: T, expectedSourceRevision?: string): Promise<void> {
+  const requestId = randomUUID();
+  const attempts = expectedSourceRevision === undefined ? 4 : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const current = await readState<T>(globalDataPath, projectPath, key);
+    try {
+      await sendRuntimeDataRequest(dataRoot(globalDataPath, projectPath || ''), {
+        operation: 'write_analysis_state', input: { ...(projectPath ? { root: projectPath } : {}), namespace: 'sidebar', key,
+          expectedRevision: current.revision, value, idempotencyKey: `sidebar:${requestId}:${attempt}`,
+          ...(expectedSourceRevision === undefined ? {} : { expectedSourceRevision }) }
+      });
+      return;
+    } catch (error) {
+      if (!/revision_conflict/.test(String(error)) || attempt === attempts - 1) throw error;
     }
-  } catch (error) {
-    console.error('SoloMap failed to organize conversation snapshots:', error);
   }
-  return directoryPath;
 }
 
-export function readSidebarCoreSnapshot(globalDataPath: string): SidebarCoreSnapshotCache | null {
+export async function buildConversationDatabaseSignature(globalDataPath: string, projectPath: string): Promise<string> {
+  const source = await sendRuntimeDataRequest<{ conversationRevision: string }>(dataRoot(globalDataPath, projectPath), {
+    operation: 'read_project_analysis_source', input: { root: projectPath }
+  });
+  return source.conversationRevision;
+}
+
+export async function readSidebarCoreSnapshot(globalDataPath: string): Promise<SidebarCoreSnapshotCache | null> {
   if (!globalDataPath) return null;
   try {
-    const parsed = JSON.parse(fs.readFileSync(cachePath(globalDataPath), 'utf8')) as SidebarCoreSnapshotCache;
-    if (parsed.version !== cacheVersion || !Array.isArray(parsed.portfolio)) return null;
+    const state = await readState<SidebarCoreSnapshotCache>(globalDataPath, null, 'core');
+    const parsed = state.value;
+    if (!parsed || parsed.version !== cacheVersion || !Array.isArray(parsed.portfolio)) return null;
     return parsed;
   } catch {
     return null;
   }
 }
 
-function writeSidebarCoreSnapshot(globalDataPath: string, cache: SidebarCoreSnapshotCache): void {
+export async function writeSidebarPortfolioSnapshot(globalDataPath: string, projectSignature: string, portfolio: ProjectPortfolioSummary[]): Promise<void> {
   if (!globalDataPath) return;
-  try {
-    fs.mkdirSync(globalDataPath, { recursive: true });
-    fs.writeFileSync(cachePath(globalDataPath), JSON.stringify(cache), 'utf8');
-  } catch (error) {
-    console.error('SoloMap failed to persist sidebar core snapshot:', error);
-  }
+  const reservation = await reserveSidebarPortfolioSnapshot(globalDataPath);
+  await commitSidebarPortfolioSnapshot(globalDataPath, reservation, projectSignature, portfolio);
 }
 
-export function writeSidebarPortfolioSnapshot(
-  globalDataPath: string,
-  projectSignature: string,
-  portfolio: ProjectPortfolioSummary[]
-): void {
-  writeSidebarCoreSnapshot(globalDataPath, {
-    version: cacheVersion,
-    projectSignature,
-    portfolio
+export async function reserveSidebarPortfolioSnapshot(globalDataPath: string): Promise<SidebarCoreSnapshotReservation> {
+  if (!globalDataPath) throw new Error('sidebar_data_root_missing');
+  const requestId = randomUUID();
+  return sendRuntimeDataRequest<SidebarCoreSnapshotReservation>(dataRoot(globalDataPath), {
+    operation: 'reserve_sidebar_core_refresh', input: { requestId }
   });
 }
 
-export function readCachedConversationSnapshot(globalDataPath: string, projectPath: string): SidebarConversationSnapshot | null {
+export async function commitSidebarPortfolioSnapshot(
+  globalDataPath: string,
+  reservation: SidebarCoreSnapshotReservation,
+  projectSignature: string,
+  portfolio: ProjectPortfolioSummary[]
+): Promise<boolean> {
+  if (!globalDataPath) return false;
+  const result = await sendRuntimeDataRequest<{ accepted: boolean }>(dataRoot(globalDataPath), {
+    operation: 'commit_sidebar_core_refresh', input: {
+      requestId: reservation.requestId,
+      generation: reservation.generation,
+      value: { version: cacheVersion, projectSignature, portfolio }
+    }
+  });
+  return result.accepted;
+}
+
+export async function readCachedConversationSnapshot(globalDataPath: string, projectPath: string): Promise<SidebarConversationSnapshot | null> {
   if (!globalDataPath || !projectPath) return null;
-  let cached: CachedConversationSnapshot;
   try {
-    ensureConversationCacheDirectory(globalDataPath);
-    cached = JSON.parse(fs.readFileSync(conversationCachePath(globalDataPath, projectPath), 'utf8')) as CachedConversationSnapshot;
+    const [state, sourceRevision] = await Promise.all([
+      readState<CachedConversationSnapshot>(globalDataPath, projectPath, 'conversation'),
+      buildConversationDatabaseSignature(globalDataPath, projectPath)
+    ]);
+    const cached = state.value;
+    if (!cached || cached.sourceRevision !== sourceRevision) return null;
+    if (!Array.isArray(cached.snapshot?.solo) || !Array.isArray(cached.snapshot?.project)
+      || !Array.isArray(cached.snapshot?.flow) || !Array.isArray(cached.snapshot?.revision)) return null;
+    return cached.snapshot;
   } catch {
     return null;
   }
-  if (!cached || cached.signature !== buildConversationDatabaseSignature(projectPath)) return null;
-  if (!Array.isArray(cached.snapshot?.solo)
-    || !Array.isArray(cached.snapshot?.project)
-    || !Array.isArray(cached.snapshot?.flow)
-    || !Array.isArray(cached.snapshot?.revision)) return null;
-  return cached.snapshot;
 }
 
-export function writeCachedConversationSnapshot(
-  globalDataPath: string,
-  projectPath: string,
-  snapshot: SidebarConversationSnapshot
-): void {
+export async function writeCachedConversationSnapshot(globalDataPath: string, projectPath: string, sourceRevision: string, snapshot: SidebarConversationSnapshot): Promise<void> {
   if (!globalDataPath || !projectPath) return;
-  try {
-    ensureConversationCacheDirectory(globalDataPath);
-    fs.writeFileSync(conversationCachePath(globalDataPath, projectPath), JSON.stringify({
-      signature: buildConversationDatabaseSignature(projectPath),
-      snapshot
-    }), 'utf8');
-  } catch (error) {
-    console.error('SoloMap failed to persist conversation snapshot:', error);
-  }
+  await writeState(globalDataPath, projectPath, 'conversation', { sourceRevision, snapshot }, sourceRevision);
 }

@@ -61,7 +61,7 @@ test('normal Runtime startup creates the database and automatically imports lega
     const { DatabaseSync } = require('node:sqlite');
     let db = new DatabaseSync(path.join(root, 'solomap.db'), { readOnly: true });
     const id = db.prepare("SELECT value FROM database_meta WHERE key='database_id'").get().value;
-    const events = db.prepare('SELECT count(*) AS total FROM events').get().total;
+    const domainEvents = db.prepare("SELECT count(*) AS total FROM events WHERE kind NOT LIKE 'runtime_instance.%' AND kind NOT LIKE 'evidence.runtime_instance_%' AND kind<>'evidence.host_settings' AND kind NOT IN ('setting.create','setting.patch')").get().total;
     const jobs = db.prepare('SELECT count(*) AS total FROM migration_jobs').get().total;
     db.close();
     run = launch(root);
@@ -69,7 +69,7 @@ test('normal Runtime startup creates the database and automatically imports lega
     await stop(run, root);
     db = new DatabaseSync(path.join(root, 'solomap.db'), { readOnly: true });
     assert.equal(db.prepare("SELECT value FROM database_meta WHERE key='database_id'").get().value, id);
-    assert.equal(db.prepare('SELECT count(*) AS total FROM events').get().total, events, 'unchanged startup must not replay domain mutations');
+    assert.equal(db.prepare("SELECT count(*) AS total FROM events WHERE kind NOT LIKE 'runtime_instance.%' AND kind NOT LIKE 'evidence.runtime_instance_%' AND kind<>'evidence.host_settings' AND kind NOT IN ('setting.create','setting.patch')").get().total, domainEvents, 'unchanged startup must not replay domain mutations');
     assert.equal(db.prepare('SELECT count(*) AS total FROM migration_jobs').get().total, jobs, 'unchanged startup must not create another import job');
     assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
     db.close();
@@ -206,7 +206,7 @@ test('Runtime imports legacy project growth history in the background without re
     const before = {
       snapshots: db.prepare('SELECT count(*) AS total FROM growth_snapshots').get().total,
       items: db.prepare('SELECT count(*) AS total FROM growth_items').get().total,
-      events: db.prepare('SELECT count(*) AS total FROM events').get().total
+      growthEvents: db.prepare("SELECT count(*) AS total FROM events WHERE kind='growth_snapshot.create'").get().total
     };
     assert.equal(before.snapshots, 51, 'all legacy growth history must migrate');
     db.close();
@@ -223,7 +223,7 @@ test('Runtime imports legacy project growth history in the background without re
     assert.deepEqual({
       snapshots: db.prepare('SELECT count(*) AS total FROM growth_snapshots').get().total,
       items: db.prepare('SELECT count(*) AS total FROM growth_items').get().total,
-      events: db.prepare('SELECT count(*) AS total FROM events').get().total
+      growthEvents: db.prepare("SELECT count(*) AS total FROM events WHERE kind='growth_snapshot.create'").get().total
     }, before, 'unchanged legacy growth must not be rewritten on restart');
     db.close();
   } finally { await stop(run, root); }

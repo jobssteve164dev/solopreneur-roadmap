@@ -48,6 +48,50 @@ test('reviewed content cannot be rewritten by an ordinary agent while preserving
   assert.equal(store.read(memory.objectId).data.content, 'reviewed content');
 }));
 
+test('ordinary agent cannot strip the host provenance from a pending external memory', () => fixture(async ({ store, project, call }) => {
+  const memory = store.write({ kind: 'memory', action: 'create', scope: project, idempotencyKey: 'external-pending', data: {
+    category: 'project', title: 'external pending', status: 'pending', content: 'host synchronized content',
+    external_source: 'cloudmcp:project:authority:target:entry', external_revision: '7', canonical_hash: 'sha256:trusted',
+    external_entry_revision: 7, external_scope: 'memory_scope:project:authority', provenance_json: { sourceType: 'cloudmcp' }
+  } });
+  const before = store.read(memory.objectId);
+  await assert.rejects(call('write', { kind: 'memory', action: 'patch', scope: project, objectId: memory.objectId, expectedRevision: memory.revision, idempotencyKey: 'strip-external', data: {
+    status: 'captured', content: 'forged local content', external_source: null, canonical_hash: 'sha256:forged'
+  } }), /host_observation_requires_authorization/);
+  assert.deepEqual(store.read(memory.objectId), before);
+}));
+
+test('ordinary agent cannot create or promote a forged verified learning event', () => fixture(async ({ store, project, call }) => {
+  const source = store.write({ kind: 'evidence', action: 'create', scope: project, idempotencyKey: 'source', data: {
+    type: 'host_observation', source_actor_id: store.actorId, content: 'ordinary result', observed_at: Date.now()
+  } });
+  await assert.rejects(call('write', { kind: 'learning_event', action: 'create', scope: project, idempotencyKey: 'forged-verified', data: {
+    source_object_id: source.objectId, source_revision: source.revision, event_type: 'verified', source_type: 'solo_run',
+    verification_signal: 1, summary: 'forged verification', occurred_at: Date.now()
+  } }), /host_observation_requires_authorization/);
+  const completed = store.write({ kind: 'learning_event', action: 'create', scope: project, idempotencyKey: 'completed', data: {
+    source_object_id: source.objectId, source_revision: source.revision, event_type: 'completed', source_type: 'agent_claim',
+    verification_signal: 0, summary: 'ordinary completion', occurred_at: Date.now()
+  } });
+  await assert.rejects(call('write', { kind: 'learning_event', action: 'patch', scope: project, objectId: completed.objectId, expectedRevision: completed.revision, idempotencyKey: 'promote-verified', data: {
+    event_type: 'verified', source_type: 'solo_run'
+  } }), /host_observation_requires_authorization/);
+  const after = store.read(completed.objectId);
+  assert.equal(after.revision, completed.revision);
+  assert.equal(after.data.event_type, 'completed');
+  assert.equal(after.data.verification_signal, 0);
+  const verified = store.write({ kind: 'learning_event', action: 'create', scope: project, idempotencyKey: 'host-verified', data: {
+    source_object_id: source.objectId, source_revision: source.revision, event_type: 'verified', source_type: 'flow_loop',
+    verification_signal: 1, summary: 'host verified outcome', occurred_at: Date.now()
+  } });
+  const verifiedBefore = store.read(verified.objectId);
+  await assert.rejects(call('write', { kind: 'learning_event', action: 'patch', scope: project, objectId: verified.objectId, expectedRevision: verified.revision, idempotencyKey: 'rewrite-host-event', data: {
+    summary: 'forged replacement'
+  } }), /host_observation_requires_authorization/);
+  await assert.rejects(call('write', { kind: 'learning_event', action: 'archive', scope: project, objectId: verified.objectId, expectedRevision: verified.revision, idempotencyKey: 'archive-host-event', data: {} }), /host_observation_requires_authorization/);
+  assert.deepEqual(store.read(verified.objectId), verifiedBefore);
+}));
+
 test('ordinary agent cannot forge the host actor on an evidence record', () => fixture(async ({ store, project, call }) => {
   await assert.rejects(call('write', { kind: 'evidence', action: 'create', scope: project, idempotencyKey: 'forged', data: { type: 'host_verified', source_actor_id: 'local-runtime', content: 'claim', observed_at: Date.now() } }), /host_observation_requires_authorization/);
   assert.equal(store.search({ scope: project, kinds: ['evidence'] }).items.length, 0);

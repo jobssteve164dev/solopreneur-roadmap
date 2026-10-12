@@ -76,8 +76,8 @@ export class ExternalDataLoadCoordinator {
   }
 }
 
-export function buildExternalDataKey(scope: string, projectPath = ''): string {
-  return `${String(scope || '').trim()}::${String(projectPath || '').trim()}`;
+export function buildExternalDataKey(scope: string, projectPath = '', globalDataPath = ''): string {
+  return `${String(scope || '').trim()}::${String(projectPath || '').trim()}::${String(globalDataPath || '').trim()}`;
 }
 
 export class ExternalSignalResponseVersions {
@@ -109,13 +109,16 @@ export function loadExternalData<T>(
   scope: string,
   projectPath: string,
   load: (isCurrent: () => boolean) => Promise<T>,
-  options: ExternalDataLoadOptions = {}
+  options: ExternalDataLoadOptions = {},
+  globalDataPath = ''
 ): Promise<T> {
-  return sharedExternalDataCoordinator.load(buildExternalDataKey(scope, projectPath), load, options);
+  return sharedExternalDataCoordinator.load(buildExternalDataKey(scope, projectPath, globalDataPath), load, options);
 }
 
-export function invalidateExternalData(scope: string, projectPath = ''): void {
-  sharedExternalDataCoordinator.invalidate(buildExternalDataKey(scope, projectPath));
+export function invalidateExternalData(scope: string, projectPath = '', globalDataPath?: string): void {
+  const prefix = `${String(scope || '').trim()}::${String(projectPath || '').trim()}::`;
+  if (globalDataPath === undefined) sharedExternalDataCoordinator.invalidatePrefix(prefix);
+  else sharedExternalDataCoordinator.invalidate(buildExternalDataKey(scope, projectPath, globalDataPath));
 }
 
 export function invalidateExternalDataScope(scope: string): void {

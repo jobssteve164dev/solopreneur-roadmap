@@ -9,12 +9,22 @@ export function sendAgentTextWhenTerminalReady(terminal: Terminal, text: string,
   return sendTextWhenTerminalReady(terminal, text);
 }
 
-async function deliverTerminalText(terminal: Terminal, text: string, addNewLine: boolean): Promise<boolean> {
+async function waitForTerminalProcess(terminal: Terminal, timeoutMs: number): Promise<void> {
+  const processId = terminal.processId;
+  if (!processId || typeof processId.then !== 'function') return;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    processId.then(() => undefined),
+    new Promise<void>(resolve => {
+      timeout = setTimeout(resolve, timeoutMs);
+    })
+  ]);
+  if (timeout) clearTimeout(timeout);
+}
+
+async function deliverTerminalText(terminal: Terminal, text: string, addNewLine: boolean, readinessTimeoutMs: number): Promise<boolean> {
   try {
-    const processId = terminal.processId;
-    if (processId && typeof processId.then === 'function') {
-      await processId;
-    }
+    await waitForTerminalProcess(terminal, readinessTimeoutMs);
     terminal.sendText(text, addNewLine);
     return true;
   } catch (error) {
@@ -23,7 +33,7 @@ async function deliverTerminalText(terminal: Terminal, text: string, addNewLine:
   }
 }
 
-export function sendTextWhenTerminalReady(terminal: Terminal, text: string, addNewLine = true): Promise<boolean> {
+export function sendTextWhenTerminalReady(terminal: Terminal, text: string, addNewLine = true, readinessTimeoutMs = 5_000): Promise<boolean> {
   // Older test doubles and compatible hosts may not expose processId. Their
   // sendText implementation is already immediately available.
   if (!terminal.processId) {
@@ -37,7 +47,7 @@ export function sendTextWhenTerminalReady(terminal: Terminal, text: string, addN
   }
 
   const previous = terminalInputQueues.get(terminal) || Promise.resolve(true);
-  const pending = previous.then(() => deliverTerminalText(terminal, text, addNewLine));
+  const pending = previous.then(() => deliverTerminalText(terminal, text, addNewLine, readinessTimeoutMs));
   terminalInputQueues.set(terminal, pending);
   void pending.then(() => {
     if (terminalInputQueues.get(terminal) === pending) {

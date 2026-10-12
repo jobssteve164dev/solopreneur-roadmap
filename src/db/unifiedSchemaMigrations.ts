@@ -7,7 +7,8 @@ export const runtimeEntityDefinitions: typeof entityDefinitions = {
   turn: { ...entityDefinitions.turn, columns: entityDefinitions.turn.columns.replace('request_content_id TEXT NOT NULL', 'request_content_id TEXT').replace('started_at INTEGER NOT NULL', 'started_at INTEGER') },
   conversation: { ...entityDefinitions.conversation, project: false },
   message: { ...entityDefinitions.message, project: false },
-  evidence: { ...entityDefinitions.evidence, project: false }
+  evidence: { ...entityDefinitions.evidence, project: false },
+  runtime_instance: { ...entityDefinitions.runtime_instance, columns: entityDefinitions.runtime_instance.columns.replace('process_started_at INTEGER NOT NULL', "process_started_at INTEGER NOT NULL, process_birth TEXT NOT NULL DEFAULT ''") }
 };
 
 function nullableConversationTable(kind: 'conversation' | 'message' | 'evidence'): string {
@@ -395,4 +396,103 @@ CREATE TABLE capability_registry(
  integration_id TEXT NOT NULL UNIQUE REFERENCES integrations(id),
  PRIMARY KEY(kind,legacy_id));
 CREATE INDEX capability_registry_kind ON capability_registry(kind,integration_id);
+` }, { version: 26, sql: `
+CREATE TABLE project_journal_links(
+ project_id TEXT NOT NULL,execution_log_id INTEGER NOT NULL,node_id TEXT NOT NULL,linked_at TEXT NOT NULL,
+ PRIMARY KEY(project_id,execution_log_id,node_id),
+ FOREIGN KEY(project_id,execution_log_id) REFERENCES project_journal_entries(project_id,execution_log_id));
+CREATE INDEX project_journal_links_node ON project_journal_links(project_id,node_id,execution_log_id DESC);
+` }, { version: 27, sql: `
+CREATE TABLE schedule_bindings(
+ external_id TEXT PRIMARY KEY,schedule_id TEXT NOT NULL UNIQUE REFERENCES schedules(id));
+CREATE TABLE scheduled_occurrences(
+ id TEXT PRIMARY KEY,schedule_id TEXT NOT NULL REFERENCES schedules(id),occurrence_key TEXT NOT NULL,
+ due_at INTEGER NOT NULL,payload_content_id TEXT NOT NULL REFERENCES contents(id),
+ status TEXT NOT NULL CHECK(status IN ('pending','running','completed','failed','cancelled')),
+ attempts INTEGER NOT NULL DEFAULT 0,generation INTEGER NOT NULL DEFAULT 0,
+ owner_id TEXT,owner_pid INTEGER,owner_birth TEXT,claim_token TEXT,lease_expires_at INTEGER,error TEXT NOT NULL DEFAULT '',
+ created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(schedule_id,occurrence_key));
+CREATE INDEX scheduled_occurrences_due ON scheduled_occurrences(status,due_at,id);
+ALTER TABLE inbox ADD COLUMN generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE inbox ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE inbox ADD COLUMN owner_id TEXT;
+ALTER TABLE inbox ADD COLUMN owner_pid INTEGER;
+ALTER TABLE inbox ADD COLUMN owner_birth TEXT;
+ALTER TABLE inbox ADD COLUMN claim_token TEXT;
+ALTER TABLE inbox ADD COLUMN claimed_at INTEGER;
+` }, { version: 28, sql: `
+CREATE TABLE runtime_instance_bindings(
+ runtime_id TEXT PRIMARY KEY,instance_id TEXT NOT NULL UNIQUE REFERENCES runtime_instances(id));
+` }, { version: 29, sql: `
+CREATE TABLE notification_delivery_attempts(
+ delivery_id TEXT NOT NULL REFERENCES notification_deliveries(id),attempt_token TEXT NOT NULL UNIQUE,
+ delivery_revision INTEGER NOT NULL,state TEXT NOT NULL CHECK(state IN ('started','retryable','confirmed')),
+ response_content_id TEXT REFERENCES contents(id),error TEXT NOT NULL DEFAULT '',started_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,
+ PRIMARY KEY(delivery_id,delivery_revision));
+` }, { version: 30, sql: `
+CREATE TABLE inbox_action_attempts(
+ channel TEXT NOT NULL,source_id TEXT NOT NULL,action TEXT NOT NULL,claim_token TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state='started'),started_at INTEGER NOT NULL,
+ PRIMARY KEY(channel,source_id,action),
+ FOREIGN KEY(channel,source_id) REFERENCES inbox(channel,source_id));
+` }, { version: 31, sql: `
+CREATE TABLE inbox_action_outcomes(
+ channel TEXT NOT NULL,source_id TEXT NOT NULL,action TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('confirmed','unknown')),updated_at INTEGER NOT NULL,
+ PRIMARY KEY(channel,source_id,action),
+ FOREIGN KEY(channel,source_id,action) REFERENCES inbox_action_attempts(channel,source_id,action));
+` }, { version: 32, sql: `
+CREATE TABLE diagnostic_events(
+ sequence INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL CHECK(kind IN ('error','operation')),
+ occurred_at TEXT NOT NULL,scope TEXT NOT NULL,payload_json TEXT NOT NULL);
+CREATE INDEX diagnostic_events_recent ON diagnostic_events(kind,sequence DESC);
+` }, { version: 33, sql: `
+CREATE TABLE native_projection_receipts(
+ projection_id TEXT PRIMARY KEY,setting_key TEXT NOT NULL,value_hash TEXT NOT NULL,created_at INTEGER NOT NULL);
+CREATE INDEX native_projection_receipts_lookup ON native_projection_receipts(setting_key,value_hash,created_at DESC);
+` }, { version: 34, sql: `
+CREATE TABLE native_projection_consumptions(
+ projection_id TEXT NOT NULL REFERENCES native_projection_receipts(projection_id),host_id TEXT NOT NULL,consumed_at INTEGER NOT NULL,
+ PRIMARY KEY(projection_id,host_id));
+` }, { version: 35, sql: `
+ALTER TABLE runtime_instances ADD COLUMN process_birth TEXT NOT NULL DEFAULT '';
+` }, { version: 36, sql: `
+CREATE TABLE capability_operations(
+ ordinal INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,
+ kind TEXT NOT NULL CHECK(kind IN ('skill','mcp','enhancement')),
+ action TEXT NOT NULL CHECK(action IN ('install','upgrade','enable','disable','uninstall')),
+ target_id TEXT,request_key TEXT NOT NULL UNIQUE,status TEXT NOT NULL CHECK(status IN ('pending','running','succeeded','failed','stale')),
+ result_path TEXT,run_id TEXT,expected_revision INTEGER NOT NULL DEFAULT 0,
+ result_integration_id TEXT REFERENCES integrations(id),result_revision INTEGER,
+ error TEXT NOT NULL DEFAULT '',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+CREATE INDEX capability_operations_active ON capability_operations(status,ordinal);
+CREATE INDEX capability_operations_target ON capability_operations(kind,target_id,ordinal DESC);
+CREATE TABLE capability_operation_heads(
+ kind TEXT NOT NULL CHECK(kind IN ('skill','mcp','enhancement')),target_id TEXT NOT NULL,
+ operation_id TEXT NOT NULL UNIQUE REFERENCES capability_operations(id),operation_ordinal INTEGER NOT NULL,
+ PRIMARY KEY(kind,target_id));
+CREATE TABLE capability_evidence_versions(
+ integration_id TEXT NOT NULL REFERENCES integrations(id),integration_revision INTEGER NOT NULL,
+ purpose TEXT NOT NULL,evidence_id TEXT NOT NULL REFERENCES evidence(id),
+ PRIMARY KEY(integration_id,integration_revision,purpose));
+CREATE INDEX capability_evidence_purpose ON capability_evidence_versions(integration_id,purpose,integration_revision DESC);
+` }, { version: 37, sql: `
+CREATE TABLE capability_physical_operation_heads(
+ kind TEXT NOT NULL CHECK(kind IN ('skill','mcp','enhancement')),target_id TEXT NOT NULL,
+ operation_id TEXT NOT NULL UNIQUE REFERENCES capability_operations(id),operation_ordinal INTEGER NOT NULL,
+ PRIMARY KEY(kind,target_id));
+INSERT INTO capability_physical_operation_heads(kind,target_id,operation_id,operation_ordinal)
+ SELECT kind,target_id,operation_id,operation_ordinal FROM capability_operation_heads;
+` }, { version: 38, sql: `
+ALTER TABLE capability_operations ADD COLUMN source_intent_json TEXT NOT NULL DEFAULT '{}';
+` }, { version: 39, sql: `
+CREATE TABLE roadmap_file_states(
+ project_id TEXT PRIMARY KEY REFERENCES projects(id),binding_id TEXT NOT NULL UNIQUE REFERENCES file_bindings(id),
+ accepted_content_id TEXT NOT NULL REFERENCES contents(id),accepted_hash TEXT NOT NULL,
+ generation INTEGER NOT NULL DEFAULT 1,projected_generation INTEGER NOT NULL DEFAULT 1,
+ pending_content_id TEXT REFERENCES contents(id),pending_hash TEXT,last_error TEXT NOT NULL DEFAULT '',
+ CHECK((pending_content_id IS NULL)=(pending_hash IS NULL)));
+CREATE TABLE roadmap_node_fields(
+ node_id TEXT PRIMARY KEY REFERENCES roadmap_nodes(id),dependencies_text TEXT NOT NULL DEFAULT '',
+ created_at_text TEXT NOT NULL DEFAULT '',completed_at_text TEXT NOT NULL DEFAULT '');
 ` }];

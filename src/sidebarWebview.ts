@@ -4563,9 +4563,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     <div class="settings-card">
       <div class="settings-card-title"><span class="codicon codicon-extensions"></span><span id="settings-section-abilities">Abilities</span></div>
       <div class="settings-field">
-        <label class="settings-lbl-title" id="label-enhancement-toggles">能力扩展与执行增强</label>
+        <label class="settings-lbl-title" id="label-enhancement-toggles">能力扩展</label>
         <div id="help-enhancement-toggles" style="font-size: 8.5px; color: var(--text-muted); margin-top: 2px;">
-          在这里管理您的已安装技能 (Skills)、连接器 (MCP Connectors) 与内置的执行增强 (Enhancements)。
+          在这里管理已安装的技能与 MCP 连接器。
         </div>
         
         <div id="settings-ability-url-input-container" style="display: none; margin-bottom: 6px; margin-top: 6px;">
@@ -4600,6 +4600,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
         <div class="enhancement-actions" style="margin-top: 8px;">
           <button class="settings-action-btn test-btn" id="btn-install-ability" disabled><span class="codicon codicon-cloud-download"></span><span id="text-install-ability">安装</span></button>
+          <button class="settings-action-btn test-btn" id="btn-toggle-ability" style="display:none"><span class="codicon codicon-circle-outline"></span><span>禁用</span></button>
           <button class="settings-action-btn test-btn" id="btn-uninstall-ability" disabled><span class="codicon codicon-trash"></span><span id="text-uninstall-ability">卸载</span></button>
         </div>
         
@@ -4841,6 +4842,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const abilityDetailStatus = document.getElementById('ability-detail-status');
     const abilityDetailMeta = document.getElementById('ability-detail-meta');
     const btnInstallAbility = document.getElementById('btn-install-ability');
+    const btnToggleAbility = document.getElementById('btn-toggle-ability');
     const btnUninstallAbility = document.getElementById('btn-uninstall-ability');
     const abilityActionBadge = document.getElementById('ability-action-badge');
     const settingFeedbackTitle = document.getElementById('setting-feedback-title');
@@ -4899,6 +4901,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const sidebarSoloConversationsByProject = {};
     const sidebarExpandedConversations = {};
     const sidebarLogsExpandedConversations = {};
+    const sidebarConversationLogSnapshots = {};
+    const sidebarConversationLogRequests = {};
     const sidebarStepConversations = {};
     const sidebarProjectConversations = {};
     const sidebarRoadmapRevisionConversations = {};
@@ -4950,6 +4954,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let settingsDataLoaded = false;
     let openCodeApiKeyRemovalRequested = false;
     let settingsFormDirty = false;
+    const settingsDirtyKeys = new Set();
+    const automationDirtyKeys = new Set();
+    const agentModelDirtyKeys = new Set();
     let settingsSavePending = false;
     let settingsEditRevision = 0;
     let pendingSettingsSave = null;
@@ -4978,6 +4985,87 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let focusedConversationCard = null;
     let projectComposerComposing = false;
     let pendingAsyncPortfolioRender = null;
+    const uiStateSaveTimers = new Map();
+    const uiStateLoadRevisions = new Map();
+    const uiStateLoadRequestIds = new Map();
+    const uiStateLeafEditRevisions = new Map();
+    let uiStateEditRevision = 0;
+    let uiStateLoadSequence = 0;
+    let lastSidebarInteractionFlat = new Map();
+    const sidebarProjectInteractionStates = new Map();
+
+    function saveSidebarUiState(key, value, scopeKey = currentProjects.selectedProjectPath || 'global') {
+      uiStateEditRevision += 1;
+      uiStateLeafEditRevisions.set(scopeKey + '\\n' + key, uiStateEditRevision);
+      const timerKey = scopeKey + ':' + key;
+      clearTimeout(uiStateSaveTimers.get(timerKey));
+      uiStateSaveTimers.set(timerKey, setTimeout(() => {
+        uiStateSaveTimers.delete(timerKey);
+        vscode.postMessage({ command: 'uiState.patch', scopeKey, key, value, requestId: 'sidebar-ui-' + Date.now() + '-' + key });
+      }, 120));
+    }
+
+    function currentSidebarInteractionState() {
+      return {
+        issueDraftTitle, issueDraftBody, issueDraftCategory, issueDraftPriority, quickIssueDraftTitle, expandedIssueNumber,
+        issuePanelExpanded, deliveryActionPanelExpanded, issueFormOpen,
+        expandedRoadmapRevisionProjectPath, roadmapRevisionDrafts: { ...roadmapRevisionDrafts },
+        projectContinueNodeSelections: { ...projectContinueNodeSelections },
+        projectConversationModes: { ...projectConversationModes },
+        projectConversationAgentSelections: { ...projectConversationAgentSelections },
+        projectConversationModelSelections: { ...projectConversationModelSelections },
+        projectContinueFiles: { ...projectContinueFiles }, projectSoloFiles: { ...projectSoloFiles },
+        projectSoloDrafts: { ...projectSoloDrafts }, projectContinueDrafts: { ...projectContinueDrafts },
+        intelligenceDrafts: Object.fromEntries(intelligenceDrafts), intelligenceView, intelligenceConversationId, activePortfolioFilter,
+        sidebarExpandedConversations: { ...sidebarExpandedConversations },
+        sidebarLogsExpandedConversations: { ...sidebarLogsExpandedConversations },
+        collaborationExpandedMessageIds: Object.fromEntries([...collaborationExpandedMessageIds].map(id => [id, true]))
+      };
+    }
+
+    function flattenSidebarInteraction(value, prefix = '', output = new Map()) {
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        Object.keys(value).forEach(key => { const segment = encodeURIComponent(key).replace(/\\./g, '%2E'); flattenSidebarInteraction(value[key], prefix ? prefix + '.' + segment : segment, output); });
+      } else if (prefix) output.set(prefix, value);
+      return output;
+    }
+
+    function sidebarInteractionFromState(state) {
+      const result = {};
+      Object.entries(state || {}).filter(([key]) => key.startsWith('interaction.')).forEach(([key, value]) => {
+        const parts = key.slice('interaction.'.length).split('.').map(decodeURIComponent);
+        let target = result;
+        parts.forEach((part, index) => {
+          if (index === parts.length - 1) { if (value !== null) target[part] = value; }
+          else target = target[part] || (target[part] = {});
+        });
+      });
+      return result;
+    }
+
+    function saveSidebarInteractionState() {
+      const next = flattenSidebarInteraction(currentSidebarInteractionState());
+      const keys = new Set([...lastSidebarInteractionFlat.keys(), ...next.keys()]);
+      keys.forEach(key => {
+        const value = next.has(key) ? next.get(key) : null;
+        if (JSON.stringify(value) !== JSON.stringify(lastSidebarInteractionFlat.get(key))) saveSidebarUiState('interaction.' + key, value);
+      });
+      lastSidebarInteractionFlat = next;
+    }
+
+    function loadSidebarUiState(scopeKey) {
+      const scope = scopeKey || 'global';
+      lastSidebarInteractionFlat = flattenSidebarInteraction(currentSidebarInteractionState());
+      uiStateLoadRevisions.set(scope, uiStateEditRevision);
+      const loadRequestId = 'sidebar-ui-load:' + (++uiStateLoadSequence);
+      uiStateLoadRequestIds.set(scope, loadRequestId);
+      vscode.postMessage({ command: 'uiState.load', scopeKey: scope, loadRequestId });
+    }
+
+    for (const eventName of ['input', 'change', 'click']) document.addEventListener(eventName, event => {
+      if (event && event.target && event.target.closest && event.target.closest('#feedback-panel')) return;
+      setTimeout(saveSidebarInteractionState, 0);
+    });
 
     function conversationsSignature(conversations) {
       return JSON.stringify(Array.isArray(conversations) ? conversations : []);
@@ -5616,12 +5704,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       }
       if (mode === 'solo') {
         projectSoloDrafts[projectPath] = input.value || '';
+        saveSidebarUiState('soloDraft', projectSoloDrafts[projectPath], projectPath || 'global');
       } else if (mode === 'flow') {
         projectContinueDrafts['flow:' + projectPath] = input.value || '';
+        saveSidebarUiState('flowDraft', projectContinueDrafts['flow:' + projectPath], projectPath || 'global');
       } else if (targetId) {
         projectContinueDrafts[targetId] = input.value || '';
         if (projectPath) {
           projectContinueDrafts[getProjectContinueDraftKey(projectPath)] = input.value || '';
+          saveSidebarUiState('continueDraft', input.value || '', projectPath);
         }
       }
     }
@@ -5840,46 +5931,42 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         mcpInstallHelp: '粘贴 MCP 来源，SoloMap 会注册到全局能力连接器库。',
         installMcp: '安装连接器',
         installingMcp: '正在启动安装...',
-        enhancementToggles: '执行增强',
-        enhancementTogglesHelp: '选择一个执行增强后安装或卸载。SoloMap 会让 Agent CLI 完成用户环境里的真实安装和彻底卸载；状态会自动检测。',
-        abilityManagerLabel: '能力扩展与执行增强',
-        abilityManagerHelp: '在这里管理您的已安装技能 (Skills)、连接器 (MCP Connectors) 与内置的执行增强 (Enhancements)。',
-        abilitySelectPlaceholder: '请选择能力或增强...',
+        abilityManagerLabel: '能力扩展',
+        abilityManagerHelp: '在这里管理已安装的技能与 MCP 连接器。',
+        abilitySelectPlaceholder: '选择一个技能或 MCP 连接器...',
         abilityGroupSkills: '技能 (Skills)',
         abilityGroupConnectors: '连接器 (MCP Connectors)',
-        abilityGroupEnhancements: '执行增强 (Enhancements)',
         addSkill: '➕ 新增技能...',
         addSkillDescription: '安装外部技能以扩展能力',
         addConnector: '➕ 新增连接器...',
         addConnectorDescription: '集成外部 MCP 服务生态',
         installedStatus: '已安装',
+        disabledStatus: '已禁用',
         readyStatus: '已就绪',
         notInstalledStatus: '未安装',
+        installingStatus: '正在安装',
+        uninstallingStatus: '正在卸载',
+        abilityFailedStatus: '操作失败',
+        abilityFailedHelp: '上次操作未完成，请重试。',
         skillMetaPrefix: '技能路径：',
         connectorMetaPrefix: '连接器类型：',
-        enhancementMetaPrefix: '内置增强 · 版本：',
         skillInstallInputHelp: '粘贴 skills.sh 或 GitHub 技能仓库链接。SoloMap 会将其安装到全局技能库中。',
         mcpInstallInputHelp: '粘贴 MCP 连接器源。SoloMap 将其注册为全局连接器。',
         skillInputRequired: '请先输入要安装的技能链接。',
         mcpInputRequired: '请先输入要安装的连接器源。',
         installingSkillMessage: '正在安装技能...',
         installingMcpMessage: '正在安装连接器...',
-        installingEnhancementMessage: '正在安装执行增强...',
         uninstallingSkillMessage: '正在卸载技能...',
         uninstallingMcpMessage: '正在卸载连接器...',
-        uninstallingEnhancementMessage: '正在卸载执行增强...',
-        selectEnhancement: '选择增强功能',
         installingEnhancement: '正在启动安装...',
         uninstallingEnhancement: '正在启动卸载...',
-        installEnhancement: '安装',
+        installAbility: '安装',
+        upgradeAbility: '更新',
+        upgradingAbilityMessage: '正在更新…',
         repairEnhancement: '修复',
         enableEnhancement: '启用',
         disableEnhancement: '禁用',
-        uninstallEnhancement: '卸载',
-        checkEnhancement: '重新检测',
-        enhancementVersion: '版本',
-        enhancementStateEnabled: '已启用',
-        enhancementStateDisabled: '未启用',
+        uninstallAbility: '卸载',
         stopRun: '停止',
         collaborationTitle: '临时共创',
         collaborationOpen: '打开临时共创',
@@ -6349,46 +6436,42 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         mcpInstallHelp: 'Paste an MCP source. SoloMap registers it in the global connector library.',
         installMcp: 'Install Connector',
         installingMcp: 'Starting install...',
-        enhancementToggles: 'Harness Enhancements',
-        enhancementTogglesHelp: 'Choose one enhancement, then install or uninstall it. SoloMap asks the Agent CLI to perform the real user-environment install or full uninstall; status is detected automatically.',
-        abilityManagerLabel: 'Ability Extensions & Execution Enhancements',
-        abilityManagerHelp: 'Manage installed Skills, MCP Connectors, and built-in execution enhancements here.',
-        abilitySelectPlaceholder: 'Select an ability or enhancement...',
+        abilityManagerLabel: 'Ability Extensions',
+        abilityManagerHelp: 'Manage installed skills and MCP connectors here.',
+        abilitySelectPlaceholder: 'Select a skill or MCP connector...',
         abilityGroupSkills: 'Skills',
         abilityGroupConnectors: 'MCP Connectors',
-        abilityGroupEnhancements: 'Execution Enhancements',
         addSkill: '➕ Add Skill...',
         addSkillDescription: 'Install an external skill to extend SoloMap.',
         addConnector: '➕ Add Connector...',
         addConnectorDescription: 'Connect an external MCP service.',
         installedStatus: 'Installed',
+        disabledStatus: 'Disabled',
         readyStatus: 'Ready',
         notInstalledStatus: 'Not installed',
+        installingStatus: 'Installing',
+        uninstallingStatus: 'Uninstalling',
+        abilityFailedStatus: 'Action failed',
+        abilityFailedHelp: 'The last action did not complete. Try again.',
         skillMetaPrefix: 'Skill path: ',
         connectorMetaPrefix: 'Connector type: ',
-        enhancementMetaPrefix: 'Built-in enhancement · Version: ',
         skillInstallInputHelp: 'Paste a skills.sh or GitHub skill repository link. SoloMap installs it into the global skill library.',
         mcpInstallInputHelp: 'Paste an MCP connector source. SoloMap registers it as a global connector.',
         skillInputRequired: 'Enter a skill link before installing.',
         mcpInputRequired: 'Enter a connector source before installing.',
         installingSkillMessage: 'Installing skill...',
         installingMcpMessage: 'Installing connector...',
-        installingEnhancementMessage: 'Installing execution enhancement...',
         uninstallingSkillMessage: 'Uninstalling skill...',
         uninstallingMcpMessage: 'Uninstalling connector...',
-        uninstallingEnhancementMessage: 'Uninstalling execution enhancement...',
-        selectEnhancement: 'Select enhancement',
         installingEnhancement: 'Starting install...',
         uninstallingEnhancement: 'Starting uninstall...',
-        installEnhancement: 'Install',
+        installAbility: 'Install',
+        upgradeAbility: 'Update',
+        upgradingAbilityMessage: 'Updating…',
         repairEnhancement: 'Repair',
         enableEnhancement: 'Enable',
         disableEnhancement: 'Disable',
-        uninstallEnhancement: 'Uninstall',
-        checkEnhancement: 'Check',
-        enhancementVersion: 'Version',
-        enhancementStateEnabled: 'Enabled',
-        enhancementStateDisabled: 'Disabled',
+        uninstallAbility: 'Uninstall',
         stopRun: 'Stop',
         collaborationTitle: 'Quick co-create',
         collaborationOpen: 'Open quick co-create',
@@ -6718,7 +6801,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     function resetProjectScopedState(projectPath, clearNodes) {
+      if (activeProjectPath) sidebarProjectInteractionStates.set(activeProjectPath, currentSidebarInteractionState());
       activeProjectPath = projectPath || '';
+      issueDraftTitle = '';
+      issueDraftBody = '';
+      issueDraftCategory = '';
+      issueDraftPriority = '';
+      quickIssueDraftTitle = '';
       expandedIssueNumber = 0;
       issueDetails = null;
       issuePanelExpanded = false;
@@ -6726,6 +6815,39 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       issueFormOpen = false;
       issueActionMessage = '';
       deliveryActionMessage = '';
+      for (const value of [roadmapRevisionDrafts, projectContinueNodeSelections, projectConversationModes,
+        projectConversationAgentSelections, projectConversationModelSelections, projectContinueFiles,
+        projectSoloFiles, projectSoloDrafts, projectContinueDrafts, sidebarExpandedConversations,
+        sidebarLogsExpandedConversations]) Object.keys(value).forEach(key => delete value[key]);
+      intelligenceDrafts.clear();
+      collaborationExpandedMessageIds.clear();
+      intelligenceView = 'home';
+      intelligenceConversationId = '';
+      const remembered = sidebarProjectInteractionStates.get(activeProjectPath) || {};
+      issueDraftTitle = remembered.issueDraftTitle || '';
+      issueDraftBody = remembered.issueDraftBody || '';
+      issueDraftCategory = remembered.issueDraftCategory || '';
+      issueDraftPriority = remembered.issueDraftPriority || '';
+      quickIssueDraftTitle = remembered.quickIssueDraftTitle || '';
+      expandedIssueNumber = Number(remembered.expandedIssueNumber || 0);
+      issuePanelExpanded = remembered.issuePanelExpanded === true;
+      deliveryActionPanelExpanded = remembered.deliveryActionPanelExpanded === true;
+      issueFormOpen = remembered.issueFormOpen === true;
+      Object.assign(roadmapRevisionDrafts, remembered.roadmapRevisionDrafts || {});
+      Object.assign(projectContinueNodeSelections, remembered.projectContinueNodeSelections || {});
+      Object.assign(projectConversationModes, remembered.projectConversationModes || {});
+      Object.assign(projectConversationAgentSelections, remembered.projectConversationAgentSelections || {});
+      Object.assign(projectConversationModelSelections, remembered.projectConversationModelSelections || {});
+      Object.assign(projectContinueFiles, remembered.projectContinueFiles || {});
+      Object.assign(projectSoloFiles, remembered.projectSoloFiles || {});
+      Object.assign(projectSoloDrafts, remembered.projectSoloDrafts || {});
+      Object.assign(projectContinueDrafts, remembered.projectContinueDrafts || {});
+      Object.entries(remembered.intelligenceDrafts || {}).forEach(([key, value]) => intelligenceDrafts.set(key, String(value || '')));
+      Object.assign(sidebarExpandedConversations, remembered.sidebarExpandedConversations || {});
+      Object.assign(sidebarLogsExpandedConversations, remembered.sidebarLogsExpandedConversations || {});
+      Object.entries(remembered.collaborationExpandedMessageIds || {}).forEach(([id, expanded]) => { if (expanded) collaborationExpandedMessageIds.add(id); });
+      intelligenceView = remembered.intelligenceView || 'home';
+      intelligenceConversationId = remembered.intelligenceConversationId || '';
       if (clearNodes) {
         currentNodes = [];
       }
@@ -6885,8 +7007,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       setText('text-account-logout', t('accountLogout'));
       setText('label-enhancement-toggles', t('abilityManagerLabel'));
       setText('help-enhancement-toggles', t('abilityManagerHelp'));
-      setText('text-install-ability', t('installEnhancement'));
-      setText('text-uninstall-ability', t('uninstallEnhancement'));
+      setText('text-install-ability', t('installAbility'));
+      setText('text-uninstall-ability', t('uninstallAbility'));
       if (settingFeedbackTitle) settingFeedbackTitle.placeholder = t('feedbackTitlePlaceholder');
       if (settingFeedbackBody) settingFeedbackBody.placeholder = t('feedbackBodyPlaceholder');
       setText('text-open-feedback', t('openFeedback'));
@@ -6909,6 +7031,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
       renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
       renderProAccount(currentSettings);
+      renderAbilitiesAndEnhancements(currentSettings);
       renderAutomationSettings(currentSettings);
       renderCollaborationPanel();
       renderIntelligenceRecent();
@@ -7262,7 +7385,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     bindSoloSelect(settingCognitiveEngineAgent, () => {});
     bindSoloSelect(settingTelegramEnabled, () => {});
     bindSoloSelect(settingOpenCodeProvider, (value) => {
-      currentSettings.openCodeProvider = value || '';
       currentSettings.openCodeApiKeyConfigured = false;
       openCodeApiKeyRemovalRequested = false;
       if (settingOpenCodeApiKey) settingOpenCodeApiKey.value = '';
@@ -7281,11 +7403,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       });
       settingOpenCodeApiKey.addEventListener('input', () => {
         if (settingOpenCodeApiKey.value.trim()) openCodeApiKeyRemovalRequested = false;
+        settingsDirtyKeys.add('openCodeSecret');
       });
     }
     if (btnRemoveOpenCodeApiKey) {
       btnRemoveOpenCodeApiKey.addEventListener('click', () => {
         openCodeApiKeyRemovalRequested = true;
+        settingsDirtyKeys.add('openCodeSecret');
         currentSettings.openCodeApiKeyConfigured = false;
         if (settingOpenCodeApiKey) settingOpenCodeApiKey.value = '';
         renderOpenCodeApiKeyStatus();
@@ -7644,6 +7768,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         detailStatus: abilityDetailStatus,
         detailMeta: abilityDetailMeta,
         installButton: btnInstallAbility,
+        toggleButton: btnToggleAbility,
         uninstallButton: btnUninstallAbility
       }
     });
@@ -8059,7 +8184,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       }
       updateAutomationScheduledEntry();
       if (shouldPersist) {
-        vscode.postMessage(buildSettingsUpdatePayload(collectAutomationSettings()));
+        vscode.postMessage({ command: 'settings.update', automationTasks: {
+          scheduledTaskMutations: [{ operation: 'patch', taskId, patch: updates }]
+        } });
       }
     }
 
@@ -8127,7 +8254,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             syncFirstScheduledTaskTrigger(automationDraftSettings);
             renderScheduledTasksView();
             updateAutomationScheduledEntry();
-            vscode.postMessage(buildSettingsUpdatePayload(collectAutomationSettings()));
+            vscode.postMessage({ command: 'settings.update', automationTasks: {
+              scheduledTaskMutations: [{ operation: 'delete', taskId }]
+            } });
           });
         }
       });
@@ -8145,9 +8274,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       const scheduledDate = scheduledTaskDateInput && scheduledTaskDateInput.value
         ? String(scheduledTaskDateInput.value)
         : new Date().toLocaleDateString('en-CA');
-      automationDraftSettings.scheduledTasks = [
-        ...(automationDraftSettings.scheduledTasks || []),
-        {
+      const addedTask = {
           id: createScheduledTaskId(),
           title: String(scheduledTaskTitleInput ? scheduledTaskTitleInput.value : '').trim(),
           enabled: true,
@@ -8157,14 +8284,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           scheduleKind,
           scheduledAt: scheduleKind === 'once' ? new Date(scheduledDate + 'T' + timeOfDay + ':00').toISOString() : '',
           prompt
-        }
-      ];
+        };
+      automationDraftSettings.scheduledTasks = [...(automationDraftSettings.scheduledTasks || []), addedTask];
       syncFirstScheduledTaskTrigger(automationDraftSettings);
       if (scheduledTaskTitleInput) scheduledTaskTitleInput.value = '';
       if (scheduledTaskPromptInput) scheduledTaskPromptInput.value = '';
       renderScheduledTasksView();
       updateAutomationScheduledEntry();
-      vscode.postMessage(buildSettingsUpdatePayload(collectAutomationSettings()));
+      vscode.postMessage({ command: 'settings.update', automationTasks: {
+        scheduledTaskMutations: [{ operation: 'add', taskId: addedTask.id, task: addedTask }]
+      } });
     }
 
     function isFocusTimerEnabled(settings) {
@@ -8229,10 +8358,31 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     function buildSettingsUpdatePayload(automationTasks) {
-      const payload = {
-        command: 'settings.update',
+      const payload = { command: 'settings.update' };
+      const currentAutomation = normalizeAutomationSettings({ automationTasks: currentSettings && currentSettings.automationTasks });
+      const automationPatch = {};
+      if (automationDirtyKeys.has('focusMinutes') && automationTasks.focusMinutes !== currentAutomation.focusMinutes) automationPatch.focusMinutes = automationTasks.focusMinutes;
+      if (automationDirtyKeys.has('scheduledTasks') && JSON.stringify(automationTasks.scheduledTasks || []) !== JSON.stringify(currentAutomation.scheduledTasks || [])) automationPatch.scheduledTasks = automationTasks.scheduledTasks || [];
+      Object.keys(automationTasks.triggers || {}).forEach(key => {
+        if (!automationDirtyKeys.has('trigger:' + key)) return;
+        const nextRule = automationTasks.triggers[key] || {};
+        const currentRule = currentAutomation.triggers[key] || {};
+        const leafPatch = {};
+        ['notify', 'sound', 'retry', 'prompt', 'timeOfDay'].forEach(leaf => {
+          if (JSON.stringify(nextRule[leaf]) !== JSON.stringify(currentRule[leaf])) leafPatch[leaf] = nextRule[leaf];
+        });
+        if (Object.keys(leafPatch).length) {
+          if (!automationPatch.triggerPatches) automationPatch.triggerPatches = {};
+          automationPatch.triggerPatches[key] = leafPatch;
+        }
+      });
+      const preferencePatch = {};
+      agentModelDirtyKeys.forEach(key => {
+        if (agentModelPreferenceMap[key] !== ((currentSettings && currentSettings.agentModelPreferences) || {})[key]) preferencePatch[key] = agentModelPreferenceMap[key];
+      });
+      const candidates = {
         cliPath: getEffectiveSettingCliPath(),
-        agentModelPreferences: agentModelPreferenceMap,
+        agentModelPreferences: preferencePatch,
         cognitiveEngineAgent: settingCognitiveEngineAgent ? getSoloSelectValue(settingCognitiveEngineAgent) : 'follow_main',
         openCodeProvider: getSoloSelectValue(settingOpenCodeProvider) || (currentSettings && currentSettings.openCodeProvider) || '',
         language: getSoloSelectValue(settingLanguage),
@@ -8240,12 +8390,20 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         globalDataPath: settingGlobalDataPath ? settingGlobalDataPath.value.trim() : '',
         reviewerCliPath: getEffectiveReviewerCliPath(),
         collaborationReviewMode: settingCollaborationReviewMode ? getSoloSelectValue(settingCollaborationReviewMode) : 'high_risk',
-        automationTasks
+        automationTasks: automationPatch
       };
-      if (settingOpenCodeApiKey && settingOpenCodeApiKey.value.trim()) {
+      Object.keys(candidates).forEach(key => {
+        if (!settingsDirtyKeys.has(key)) return;
+        if (key === 'automationTasks' || key === 'agentModelPreferences') {
+          if (Object.keys(candidates[key]).length) payload[key] = candidates[key];
+          return;
+        }
+        if (JSON.stringify(candidates[key]) !== JSON.stringify(currentSettings && currentSettings[key])) payload[key] = candidates[key];
+      });
+      if (settingsDirtyKeys.has('openCodeSecret') && settingOpenCodeApiKey && settingOpenCodeApiKey.value.trim()) {
         payload.openCodeApiKey = settingOpenCodeApiKey.value.trim();
       }
-      if (openCodeApiKeyRemovalRequested) {
+      if (settingsDirtyKeys.has('openCodeSecret') && openCodeApiKeyRemovalRequested) {
         payload.openCodeRemoveApiKey = true;
       }
       return payload;
@@ -8272,7 +8430,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       automationDraftSettings = automation;
       syncAutomationControlsFromTrigger();
       updateFocusTimerView();
-      vscode.postMessage(buildSettingsUpdatePayload(automation));
+      vscode.postMessage({
+        command: 'settings.update',
+        automationTasks: {
+          focusMinutes: minutes,
+          triggerPatches: {
+            focus_time: { notify: Boolean(enabled), sound: false, retry: false, prompt: '' }
+          }
+        }
+      });
     }
 
     async function playAutomationTone() {
@@ -8315,20 +8481,52 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       });
     }
 
+    function markSettingsDirty(target) {
+      const control = target && target.closest ? (target.closest('[data-solo-select]') || target) : target;
+      const id = String(control && control.id || target && target.id || '');
+      let key = '';
+      if (id === 'setting-cli-select' || id === 'setting-clipath-custom') key = 'cliPath';
+      else if (id === 'setting-agent-model-select') {
+        key = 'agentModelPreferences';
+        const family = getAgentFamilyKey(getEffectiveSettingCliPath());
+        if (family) agentModelDirtyKeys.add(family);
+      }
+      else if (id === 'setting-cognitive-engine-agent') key = 'cognitiveEngineAgent';
+      else if (id === 'setting-opencode-provider') key = 'openCodeProvider';
+      else if (id === 'setting-opencode-api-key') key = 'openCodeSecret';
+      else if (id === 'setting-language') key = 'language';
+      else if (id === 'setting-global-prompt') key = 'globalPrompt';
+      else if (id === 'setting-global-data-path') key = 'globalDataPath';
+      else if (id === 'setting-reviewer-cli-select' || id === 'setting-reviewer-clipath-custom') key = 'reviewerCliPath';
+      else if (id === 'setting-collaboration-review-mode') key = 'collaborationReviewMode';
+      else if (id === 'setting-telegram-enabled') key = 'telegramEnabled';
+      else if (id === 'setting-telegram-token') key = 'telegramBotToken';
+      else if (id.startsWith('automation-')) {
+        key = 'automationTasks';
+        if (id === 'automation-focus-minutes') automationDirtyKeys.add('focusMinutes');
+        else automationDirtyKeys.add('trigger:' + (getSoloSelectValue(automationTriggerSelect) || 'completed'));
+      }
+      if (key) settingsDirtyKeys.add(key);
+    }
+
     if (settingsPanel) {
       settingsPanel.addEventListener('input', event => {
         if (event && event.target && event.target.closest && event.target.closest('#feedback-panel')) return;
         settingsEditRevision += 1;
         settingsFormDirty = true;
+        markSettingsDirty(event.target);
       });
       settingsPanel.addEventListener('change', event => {
         if (event && event.target && event.target.closest && event.target.closest('#feedback-panel')) return;
         settingsEditRevision += 1;
         settingsFormDirty = true;
+        markSettingsDirty(event.target);
       });
       settingsPanel.addEventListener('click', event => {
         if (event.target && event.target.closest && event.target.closest('[data-solo-option-value]')) {
           settingsFormDirty = true;
+          settingsEditRevision += 1;
+          markSettingsDirty(event.target);
         }
       });
     }
@@ -8339,11 +8537,73 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     vscode.postMessage({ command: 'project.getAll' });
     vscode.postMessage({ command: 'collaboration.getRooms' });
     vscode.postMessage({ command: 'getDailyReview' });
+    loadSidebarUiState('global');
 
     // Handle messages
     window.addEventListener('message', event => {
       const message = event.data;
       switch (message.command) {
+        case 'uiStateLoaded': {
+          if (message.view !== 'sidebar') break;
+          if (message.loadRequestId && uiStateLoadRequestIds.get(message.scopeKey) !== message.loadRequestId) break;
+          const observedRevision = uiStateLoadRevisions.get(message.scopeKey) || 0;
+          const state = Object.fromEntries(Object.entries(message.state || {}).filter(([key]) => (uiStateLeafEditRevisions.get(message.scopeKey + '\\n' + key) || 0) <= observedRevision));
+          if (message.scopeKey === 'global') {
+            if (typeof state.portfolioFilter === 'string') activePortfolioFilter = state.portfolioFilter;
+            renderPortfolioFilters();
+            renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+            break;
+          }
+          if (message.scopeKey !== currentProjects.selectedProjectPath) break;
+          const storedInteraction = sidebarInteractionFromState(state);
+          const remoteInteraction = Object.keys(storedInteraction).length ? storedInteraction : (state.interactionState && typeof state.interactionState === 'object' ? state.interactionState : {});
+          const mergedFlat = flattenSidebarInteraction(remoteInteraction);
+          flattenSidebarInteraction(currentSidebarInteractionState()).forEach((value, key) => {
+            if ((uiStateLeafEditRevisions.get(message.scopeKey + '\\ninteraction.' + key) || 0) > observedRevision) mergedFlat.set(key, value);
+          });
+          const interaction = sidebarInteractionFromState(Object.fromEntries([...mergedFlat].map(([key, value]) => ['interaction.' + key, value])));
+          issueDraftTitle = typeof interaction.issueDraftTitle === 'string' ? interaction.issueDraftTitle : '';
+          issueDraftBody = typeof interaction.issueDraftBody === 'string' ? interaction.issueDraftBody : '';
+          issueDraftCategory = typeof interaction.issueDraftCategory === 'string' ? interaction.issueDraftCategory : '';
+          issueDraftPriority = typeof interaction.issueDraftPriority === 'string' ? interaction.issueDraftPriority : '';
+          quickIssueDraftTitle = typeof interaction.quickIssueDraftTitle === 'string' ? interaction.quickIssueDraftTitle : '';
+          expandedIssueNumber = Number.isFinite(Number(interaction.expandedIssueNumber)) ? Number(interaction.expandedIssueNumber) : 0;
+          issuePanelExpanded = interaction.issuePanelExpanded === true;
+          deliveryActionPanelExpanded = interaction.deliveryActionPanelExpanded === true;
+          issueFormOpen = interaction.issueFormOpen === true;
+          expandedRoadmapRevisionProjectPath = typeof interaction.expandedRoadmapRevisionProjectPath === 'string' ? interaction.expandedRoadmapRevisionProjectPath : expandedRoadmapRevisionProjectPath;
+          for (const value of [roadmapRevisionDrafts, projectContinueNodeSelections, projectConversationModes,
+            projectConversationAgentSelections, projectConversationModelSelections, projectContinueFiles, projectSoloFiles,
+            projectSoloDrafts, projectContinueDrafts, sidebarExpandedConversations, sidebarLogsExpandedConversations]) Object.keys(value).forEach(key => delete value[key]);
+          intelligenceDrafts.clear();
+          Object.assign(roadmapRevisionDrafts, interaction.roadmapRevisionDrafts || {});
+          Object.assign(projectContinueNodeSelections, interaction.projectContinueNodeSelections || {});
+          Object.assign(projectConversationModes, interaction.projectConversationModes || {});
+          Object.assign(projectConversationAgentSelections, interaction.projectConversationAgentSelections || {});
+          Object.assign(projectConversationModelSelections, interaction.projectConversationModelSelections || {});
+          Object.assign(projectContinueFiles, interaction.projectContinueFiles || {});
+          Object.assign(projectSoloFiles, interaction.projectSoloFiles || {});
+          Object.assign(projectSoloDrafts, interaction.projectSoloDrafts || {});
+          Object.assign(projectContinueDrafts, interaction.projectContinueDrafts || {});
+          Object.entries(interaction.intelligenceDrafts || {}).forEach(([key, value]) => intelligenceDrafts.set(key, String(value || '')));
+          Object.assign(sidebarExpandedConversations, interaction.sidebarExpandedConversations || {});
+          Object.assign(sidebarLogsExpandedConversations, interaction.sidebarLogsExpandedConversations || {});
+          collaborationExpandedMessageIds.clear();
+          Object.entries(interaction.collaborationExpandedMessageIds || {}).forEach(([id, expanded]) => { if (expanded) collaborationExpandedMessageIds.add(id); });
+          intelligenceView = typeof interaction.intelligenceView === 'string' ? interaction.intelligenceView : intelligenceView;
+          intelligenceConversationId = typeof interaction.intelligenceConversationId === 'string' ? interaction.intelligenceConversationId : intelligenceConversationId;
+          if (typeof interaction.activePortfolioFilter === 'string') activePortfolioFilter = interaction.activePortfolioFilter;
+          lastSidebarInteractionFlat = flattenSidebarInteraction(interaction);
+          const projectPath = String(message.scopeKey || '');
+          if (projectPath && projectPath !== 'global') {
+            if (typeof state.soloDraft === 'string') projectSoloDrafts[projectPath] = state.soloDraft;
+            if (typeof state.flowDraft === 'string') projectContinueDrafts['flow:' + projectPath] = state.flowDraft;
+            if (typeof state.continueDraft === 'string') projectContinueDrafts[getProjectContinueDraftKey(projectPath)] = state.continueDraft;
+            if (typeof state.conversationMode === 'string') projectConversationModes[projectPath] = state.conversationMode;
+          }
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath, false);
+          break;
+        }
         case 'intelligenceConversationsLoaded':
           intelligenceConversations = Array.isArray(message.conversations) ? message.conversations : [];
           renderIntelligenceRecent();
@@ -8420,6 +8680,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             break;
           }
           currentSettings = message.settings || {};
+          settingsDirtyKeys.clear();
+          automationDirtyKeys.clear();
+          agentModelDirtyKeys.clear();
           if (settingTelegramEnabled) setSoloSelectValue(settingTelegramEnabled, currentSettings.telegramEnabled ? 'on' : 'off');
           if (settingTelegramToken) settingTelegramToken.value = '';
           Object.keys(agentModelPreferenceMap).forEach(key => delete agentModelPreferenceMap[key]);
@@ -8447,6 +8710,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (!pendingSettingsSave || pendingSettingsSave.requestId !== message.requestId) break;
           settingsSavePending = false;
           settingsFormDirty = settingsEditRevision !== pendingSettingsSave.revision;
+          if (!settingsFormDirty) {
+            settingsDirtyKeys.clear();
+            automationDirtyKeys.clear();
+            agentModelDirtyKeys.clear();
+          }
           pendingSettingsSave = null;
           latestSettingsRequestId = '';
           syncAgentImpactSettings(message.settings || currentSettings);
@@ -8528,6 +8796,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }
           currentProjects.projects = message.projects.projects || [];
           currentProjects.selectedProjectPath = selectedProjectPath || '';
+          loadSidebarUiState(currentProjects.selectedProjectPath || 'global');
           currentProjects.portfolio = normalizePortfolioDerivedSignals(mergePortfolioUpdate(
             currentProjects.portfolio,
             message.projects.portfolio || [],
@@ -8792,14 +9061,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }
           if (message.settings) renderAbilitiesAndEnhancements(message.settings);
           break;
-        case 'enhancementInstallResult':
-          if (abilityActionBadge) {
-            abilityActionBadge.style.display = 'block';
-            abilityActionBadge.className = message.success ? 'cli-badge success' : 'cli-badge error';
-            abilityActionBadge.textContent = message.message || '';
-          }
-          if (message.settings) renderAbilitiesAndEnhancements(message.settings);
-          break;
         case 'soloSupplementFilesSelected':
           if (message.targetId) {
             if (String(message.targetId).startsWith('solo:')) {
@@ -8896,6 +9157,19 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
+        case 'conversationLogsLoaded': {
+          const key = message.projectPath + ':' + message.nodeId + ':' + message.conversationId;
+          const pending = sidebarConversationLogRequests[key];
+          if (!pending || pending.requestId !== message.requestId) return;
+          delete sidebarConversationLogRequests[key];
+          sidebarConversationLogSnapshots[key] = message.error
+            ? { sourceKey: pending.sourceKey, error: message.error }
+            : { sourceKey: pending.sourceKey, stdout: message.stdout || '', stderr: message.stderr || '' };
+          if (message.projectPath !== currentProjects.selectedProjectPath) return;
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          break;
+        }
+
         case 'issueDetailsLoaded':
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
           issueDetails = message.ok ? { issue: message.issue, comments: message.comments || [], stale: !!message.stale } : { error: message.message || '' };
@@ -8945,8 +9219,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         return;
       }
       const payload = buildSettingsUpdatePayload(collectAutomationSettings());
-      payload.telegramEnabled = getSoloSelectValue(settingTelegramEnabled) === 'on';
-      if (settingTelegramToken.value.trim()) payload.telegramBotToken = settingTelegramToken.value.trim();
+      const telegramEnabled = getSoloSelectValue(settingTelegramEnabled) === 'on';
+      if (settingsDirtyKeys.has('telegramEnabled')) payload.telegramEnabled = telegramEnabled;
+      if (settingsDirtyKeys.has('telegramBotToken') && settingTelegramToken.value.trim()) payload.telegramBotToken = settingTelegramToken.value.trim();
       payload.requestId = 'sidebar-settings-save-' + (++settingsRequestSeq);
       settingsSavePending = true;
       pendingSettingsSave = { requestId: payload.requestId, revision: settingsEditRevision };
@@ -9283,11 +9558,36 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       }).join('');
     }
 
+    function sidebarConversationLogSourceKey(conversation) {
+      const state = conversation && conversation.dataState || {};
+      return [state.runId || '', state.turnId || '', state.runRevision || 0].join(':');
+    }
+
+    function stepConversationKey(projectPath, nodeId) {
+      return String(projectPath || '') + ':' + String(nodeId || '');
+    }
+
+    function requestSidebarConversationLogs(projectPath, nodeId, conversation) {
+      const state = conversation && conversation.dataState || {};
+      if (!state.hasExecutionLogs) return;
+      const key = projectPath + ':' + nodeId + ':' + conversation.id;
+      const sourceKey = sidebarConversationLogSourceKey(conversation);
+      if (sidebarConversationLogRequests[key] || (conversation.status !== 'Running' && sidebarConversationLogSnapshots[key]?.sourceKey === sourceKey && !sidebarConversationLogSnapshots[key]?.error)) return;
+      const requestId = key + ':' + Date.now() + ':' + Math.random().toString(36).slice(2);
+      sidebarConversationLogRequests[key] = { requestId, sourceKey };
+      vscode.postMessage({ command: 'conversation.getLogs', requestId, projectPath, nodeId,
+        conversationId: conversation.id, runId: state.runId, turnId: state.turnId });
+    }
+
     function renderSidebarConversationCard(projectPath, nodeId, conversation, isSolo) {
       const convId = String(conversation.id || '');
       const statusKey = conversationStatusKey(conversation.status);
       const detailExpanded = !!sidebarExpandedConversations[convId];
       const logsExpanded = !!sidebarLogsExpandedConversations[convId];
+      const logKey = projectPath + ':' + nodeId + ':' + convId;
+      const logSourceKey = sidebarConversationLogSourceKey(conversation);
+      const loadedLogs = sidebarConversationLogSnapshots[logKey]?.sourceKey === logSourceKey ? sidebarConversationLogSnapshots[logKey] : null;
+      const logsLoading = sidebarConversationLogRequests[logKey]?.sourceKey === logSourceKey;
       const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
       const duration = formatSoloDuration(conversation);
       const outcomeText = statusKey === 'Running' ? (isSolo ? t('stillWorking') : t('continueWorking'))
@@ -9404,10 +9704,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
                       <div class="log-block-title">执行命令</div>
                       <pre class="log-pre command-pre">\${escapeHtml(conversation.command)}</pre>
                     \` : ''}
-                    \${conversation.output ? \`
+                    \${conversation.output || loadedLogs || logsLoading ? \`
                       <div class="log-block-title">控制台输出</div>
-                      <pre class="log-pre output-pre">\${escapeHtml(conversation.output)}</pre>
+                      <pre class="log-pre output-pre">\${escapeHtml(loadedLogs ? (loadedLogs.error || loadedLogs.stdout || '') : logsLoading ? '正在读取完整运行记录…' : conversation.output)}</pre>
                     \` : ''}
+                    \${loadedLogs && loadedLogs.stderr ? \`<div class="log-block-title">错误输出</div><pre class="log-pre output-pre">\${escapeHtml(loadedLogs.stderr)}</pre>\` : ''}
                   </div>
                 \` : ''}
               \` : ''}
@@ -9488,6 +9789,18 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       });
     }
 
+    function findSidebarConversation(projectPath, nodeId, conversationId) {
+      const step = sidebarStepConversations[stepConversationKey(projectPath, nodeId)] || [];
+      return [
+        ...(sidebarSoloConversationsByProject[projectPath] || []),
+        ...(sidebarProjectConversations[projectPath] || []),
+        ...(sidebarFlowConversations[projectPath] || []),
+        ...(sidebarRoadmapRevisionConversations[projectPath] || []),
+        ...step
+      ].find(conversation => String(conversation.id || '') === String(conversationId)
+        && String(conversation.nodeId || nodeId) === String(nodeId));
+    }
+
     function bindConversationsTree(container, projectPath, nodeId, isSolo) {
       function isConversationActionForTree(item) {
         return String(item.getAttribute('data-is-solo') || 'false') === String(!!isSolo);
@@ -9521,6 +9834,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           event.stopPropagation();
           const convId = btn.getAttribute('data-logs-toggle-id');
           sidebarLogsExpandedConversations[convId] = !sidebarLogsExpandedConversations[convId];
+          if (sidebarLogsExpandedConversations[convId]) {
+            const conversation = findSidebarConversation(projectPath, nodeId, convId);
+            if (conversation) requestSidebarConversationLogs(projectPath, nodeId, conversation);
+          }
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
@@ -9706,6 +10023,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       portfolioFilters.querySelectorAll('[data-portfolio-filter]').forEach(button => {
         button.addEventListener('click', () => {
           activePortfolioFilter = button.getAttribute('data-portfolio-filter') || 'all';
+          saveSidebarUiState('portfolioFilter', activePortfolioFilter, 'global');
           renderPortfolioFilters();
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
@@ -9864,6 +10182,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             rememberProjectConversationInput(input);
           }
           projectConversationModes[projectPath] = button.getAttribute('data-project-conversation-mode') || 'continue';
+          saveSidebarUiState('conversationMode', projectConversationModes[projectPath], projectPath || 'global');
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
@@ -9899,6 +10218,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             });
             if (input) input.value = '';
             projectSoloDrafts[projectPath] = '';
+            saveSidebarUiState('soloDraft', '', projectPath);
             projectSoloFiles[targetId] = [];
             renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
             return;
@@ -9915,6 +10235,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             });
             if (input) input.value = '';
             projectContinueDrafts['flow:' + projectPath] = '';
+            saveSidebarUiState('flowDraft', '', projectPath);
             projectContinueFiles['flow:' + projectPath] = [];
             renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
             return;
@@ -9924,6 +10245,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         if (input) input.value = '';
         projectContinueDrafts[nodeId] = '';
         projectContinueDrafts[getProjectContinueDraftKey(projectPath)] = '';
+        saveSidebarUiState('continueDraft', '', projectPath);
         projectContinueFiles[nodeId] = [];
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });

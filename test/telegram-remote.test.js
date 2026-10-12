@@ -124,8 +124,14 @@ test('Telegram chat records correlated receipt, model, and delivery stages witho
   const { createTelegramIntelligenceReply } = require('../out/telegramIntelligenceChat.js');
   const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
   const { observeLocalDiagnosticStage } = require('../out/localDiagnostics.js');
+  const diagnostics = require('../out/localDiagnostics.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-tg-trace-'));
   const globalRoot = path.join(root, '.solomap-global');
+  const entries = [];
+  diagnostics.configureLocalDiagnosticPersistence({ append(_root, event) {
+    entries.push({ at: event.occurredAt, traceId: event.payload.traceId, stage: event.scope,
+      status: event.payload.status, durationMs: event.payload.durationMs, ...(event.payload.message ? { message: event.payload.message } : {}) });
+  } }, globalRoot);
   let savedIds = {};
   let rounds = 0;
   const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async () =>
@@ -150,6 +156,7 @@ test('Telegram chat records correlated receipt, model, and delivery stages witho
       : {};
   } } };
   t.after(() => {
+    diagnostics.configureLocalDiagnosticPersistence(undefined);
     stopTelegramRemoteService();
     const conversationFile = path.join(globalRoot, 'intelligence-conversations', `${Object.values(savedIds)[0]}.json`);
     if (fs.existsSync(conversationFile)) fs.unlinkSync(conversationFile);
@@ -172,8 +179,6 @@ test('Telegram chat records correlated receipt, model, and delivery stages witho
   } });
   for (let attempt = 0; attempt < 20 && mockTelegramSentMessages.at(-1)?.text !== 'private answer'; attempt++) await wait(50);
   assert.equal(mockTelegramSentMessages.at(-1).text, 'private answer');
-  const directory = path.join(globalRoot, 'diagnostics', new Date().toISOString().slice(0, 10));
-  const entries = JSON.parse(fs.readFileSync(path.join(directory, fs.readdirSync(directory).find(name => /^recent-operations\.\d+-[a-f0-9]{8}\.json$/.test(name))), 'utf8')).entries;
   assert.ok([
     'telegram.poll', 'telegram.receive', 'telegram.queue', 'telegram.model', 'conversation.reply',
     'mcp.connect', 'mcp.list', 'mcp.get_current_project', 'mcp.close', 'pi.chat',
@@ -257,7 +262,7 @@ test('Telegram Remote Control Service handles start and polling', async () => {
   await wait(200);
 
   assert.equal(runAgentCounter, 1);
-  assert.ok(mockTelegramSentMessages[0].text.includes('正在启动'));
+  assert.ok(mockTelegramSentMessages[0].text.includes('已启动'));
 
   // Clear sent messages
   mockTelegramSentMessages.length = 0;

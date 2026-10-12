@@ -1,16 +1,20 @@
 import * as childProcess from 'child_process';
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-import { sendRuntimeControlCommand, RuntimeControlCommand } from './autonomousRuntimeControl';
+import { sendRuntimeControlCommand, sendRuntimeDataRequest, RuntimeControlCommand } from './autonomousRuntimeControl';
 import { inspectAutonomousRuntimeHealth, waitForAutonomousRuntimeHealth } from './autonomousRuntimeHost';
-import { readRuntimeState, RuntimeState } from './autonomousRuntime';
+import { claimRuntimeLease, readRuntimeState, RuntimeState, updateRuntimeState } from './autonomousRuntime';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import { cognitiveCliEnvironment } from './localAgentCliEngine';
-import { revokeAllProjectAutonomyAuthorizations } from './projectAutonomyAuthorization';
 import { sanitizeDiagnosticText } from './localDiagnostics';
 import { runtimeBuildId } from './runtimeBuildIdentity';
+import { UnifiedDataStore } from './db/unifiedDataStore';
+import { createRuntimeDataOperations } from './runtimeDataOperations';
+import { writeRuntimePauseState } from './runtimePauseState';
+import { isProcessOwnerAlive } from './processIdentity';
 
 type SupportedPlatform = 'linux' | 'darwin' | 'win32';
 type Command = [string, string[]];
@@ -67,8 +71,7 @@ export function isAutonomousRuntimeDisabled(globalDataPath: string): boolean {
 }
 
 export function enableAutonomousRuntime(globalDataPath: string): void {
-  const disabledPath = serviceDisabledPath(globalDataPath);
-  if (fs.existsSync(disabledPath)) fs.unlinkSync(disabledPath);
+  void globalDataPath;
 }
 
 function xmlEscape(value: string): string {
@@ -249,10 +252,6 @@ export async function ensureAutonomousRuntimeService(options: RuntimeServiceOpti
   const platform = (options.platform || process.platform) as SupportedPlatform;
   const homeDir = options.homeDir || os.homedir();
   const environment = options.environment || cognitiveCliEnvironment();
-  if (isAutonomousRuntimeDisabled(options.globalDataPath) && !options.ignoreDisabled) {
-    return { installed: false, definitionPath: plan.definitionPath, changed: false };
-  }
-  if (options.ignoreDisabled) enableAutonomousRuntime(options.globalDataPath);
   const previous = fs.existsSync(plan.definitionPath) ? fs.readFileSync(plan.definitionPath, 'utf8') : null;
   const changed = previous !== plan.definition;
   const runCommand = options.runCommand || runRuntimeServiceCommand;
@@ -448,18 +447,82 @@ export async function uninstallAutonomousRuntimeService(options: RuntimeServiceO
   if (fs.existsSync(registryPath)) fs.unlinkSync(registryPath);
 }
 
-export function revokePersistentRuntimeAuthorizations(globalDataPath: string): void {
-  revokeAllProjectAutonomyAuthorizations(normalizeGlobalDataPathForExtension(globalDataPath));
+export async function revokePersistentRuntimeAuthorizations(globalDataPath: string): Promise<void> {
+  const root = normalizeGlobalDataPathForExtension(globalDataPath);
+  let endpointError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await sendRuntimeDataRequest(root, { operation: 'revoke_project_autonomy_authorizations', input: { idempotencyKey: `project-autonomy-revoke:${Date.now()}` } });
+      return;
+    } catch (error) {
+      endpointError = error;
+      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 100));
+    }
+  }
+  const owner = readRuntimeState(root);
+  if (owner && isProcessOwnerAlive(owner.pid, owner.processBirth || '')) {
+    const failure = new Error('runtime_owner_unavailable');
+    (failure as Error & { cause?: unknown }).cause = endpointError;
+    throw failure;
+  }
+  await withOfflineRuntimeDataOwner(root, operations => operations({ operation: 'revoke_project_autonomy_authorizations', input: { idempotencyKey: `project-autonomy-revoke:${Date.now()}` } }));
+}
+
+async function waitForRuntimeOwnerStopped(globalDataPath: string, timeoutMs = 10_000): Promise<void> {
+  const root = normalizeGlobalDataPathForExtension(globalDataPath);
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const owner = readRuntimeState(root);
+    if (!owner || !isProcessOwnerAlive(owner.pid, owner.processBirth || '')) return;
+    if (Date.now() >= deadline) throw new Error('runtime_owner_still_running');
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+}
+
+async function withOfflineRuntimeDataOwner<T>(globalDataPath: string, action: (operations: ReturnType<typeof createRuntimeDataOperations>) => Promise<T>): Promise<T> {
+  const root = normalizeGlobalDataPathForExtension(globalDataPath);
+  const runtimeId = `offline-maintenance:${crypto.randomUUID()}`;
+  const lease = claimRuntimeLease(root, { runtimeId, pid: process.pid });
+  if (!lease.acquired) throw new Error('runtime_owner_unavailable');
+  let store: UnifiedDataStore | undefined;
+  let operations: ReturnType<typeof createRuntimeDataOperations> | undefined;
+  try {
+    store = fs.existsSync(path.join(root, 'solomap.db')) ? UnifiedDataStore.open(root) : new UnifiedDataStore(root);
+    operations = createRuntimeDataOperations(store);
+    return await action(operations);
+  } finally {
+    if (operations) await operations.close();
+    store?.close();
+    updateRuntimeState(root, runtimeId, { status: 'stopped' });
+  }
+}
+
+async function persistDisabledStateOffline(globalDataPath: string, revoke = true): Promise<void> {
+  await waitForRuntimeOwnerStopped(globalDataPath);
+  const root = normalizeGlobalDataPathForExtension(globalDataPath);
+  await withOfflineRuntimeDataOwner(root, async operations => {
+    await writeRuntimePauseState(operations, true);
+    if (revoke) await operations({ operation: 'revoke_project_autonomy_authorizations', input: { idempotencyKey: `project-autonomy-revoke:${Date.now()}` } });
+  });
 }
 
 export async function disableAutonomousRuntimeService(options: RuntimeServiceOptions): Promise<void> {
+  let persistedPause = false;
+  let revoked = false;
   try {
+    try {
+      await sendRuntimeControlCommand(options.globalDataPath, 'pause');
+      persistedPause = true;
+    } catch { /* A stopped Runtime is persisted after uninstall. */ }
+    try {
+      await revokePersistentRuntimeAuthorizations(options.globalDataPath);
+      revoked = true;
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== 'runtime_owner_unavailable') throw error;
+    }
     await uninstallAutonomousRuntimeService(options);
   } finally {
-    revokePersistentRuntimeAuthorizations(options.globalDataPath);
-    const disabledPath = serviceDisabledPath(options.globalDataPath);
-    fs.mkdirSync(path.dirname(disabledPath), { recursive: true });
-    fs.writeFileSync(disabledPath, 'disabled\n', { encoding: 'utf8', mode: 0o600 });
+    if (!persistedPause || !revoked) await persistDisabledStateOffline(options.globalDataPath, !revoked);
   }
 }
 
@@ -471,9 +534,16 @@ export async function uninstallRegisteredAutonomousRuntimeService(): Promise<voi
   const registryPath = serviceRegistryPath(platform, homeDir, environment);
   if (!fs.existsSync(registryPath)) return;
   const registration = JSON.parse(fs.readFileSync(registryPath, 'utf8')) as RuntimeServiceRegistration;
+  let revoked = false;
   try {
+    try {
+      await revokePersistentRuntimeAuthorizations(registration.globalDataPath);
+      revoked = true;
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== 'runtime_owner_unavailable') throw error;
+    }
     await uninstallAutonomousRuntimeService({ ...registration, environment });
   } finally {
-    revokePersistentRuntimeAuthorizations(registration.globalDataPath);
+    if (!revoked) await persistDisabledStateOffline(registration.globalDataPath, true);
   }
 }

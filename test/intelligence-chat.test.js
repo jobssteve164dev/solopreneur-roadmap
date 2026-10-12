@@ -16,6 +16,18 @@ function operationFile(globalRoot) {
   return path.join(directory, fs.readdirSync(directory).find(name => /^recent-operations\.\d+-[a-f0-9]{8}\.json$/.test(name)));
 }
 
+function captureDiagnosticEvents(t, diagnostics, globalRoot) {
+  const entries = [];
+  diagnostics.configureLocalDiagnosticPersistence({
+    append(_root, event) {
+      entries.push({ at: event.occurredAt, traceId: event.payload.traceId, stage: event.scope,
+        status: event.payload.status, durationMs: event.payload.durationMs, ...(event.payload.message ? { message: event.payload.message } : {}) });
+    }
+  }, globalRoot);
+  t.after(() => diagnostics.configureLocalDiagnosticPersistence(undefined));
+  return entries;
+}
+
 test('smart kernel read tools are discovered and called through standard MCP', async () => {
   const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
   const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
@@ -80,6 +92,7 @@ test('smart kernel chat answers a project question after reading current plugin 
   const diagnostics = require('../out/localDiagnostics.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-pi-trace-'));
   const globalRoot = path.join(root, '.solomap-global');
+  const events = captureDiagnosticEvents(t, diagnostics, globalRoot);
   t.after(() => {
     removeDiagnosticTrace(globalRoot);
     if (fs.existsSync(globalRoot)) fs.rmdirSync(globalRoot);
@@ -114,7 +127,6 @@ test('smart kernel chat answers a project question after reading current plugin 
   assert.match(prompts[1], /验证付费/);
   assert.doesNotMatch(prompts[0], /Alpha/);
   assert.doesNotMatch(prompts[1], /\/beta/);
-  const events = JSON.parse(fs.readFileSync(operationFile(globalRoot), 'utf8')).entries;
   assert.equal(events.filter(event => event.stage === 'model.cli' && event.status === 'ok').length, 2);
   assert.ok(events.some(event => event.stage === 'mcp.list' && event.status === 'ok'));
   assert.ok(events.some(event => event.stage === 'mcp.get_current_project' && event.status === 'ok'));
@@ -215,7 +227,7 @@ test('unlinking Telegram during a Pi answer cannot restore its old conversation'
   generation++;
   savedIds = {};
   release();
-  assert.equal(await pending, '旧答案');
+  await assert.rejects(pending, /intelligence_reply_revoked/);
   assert.deepEqual(savedIds, {});
 });
 
@@ -378,9 +390,10 @@ test('MCP tool error is recorded on the tool stage', async t => {
   const diagnostics = require('../out/localDiagnostics.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-mcp-error-'));
   const globalRoot = path.join(root, '.solomap-global');
+  const events = captureDiagnosticEvents(t, diagnostics, globalRoot);
   t.after(() => {
     removeDiagnosticTrace(globalRoot);
-    fs.rmdirSync(globalRoot);
+    if (fs.existsSync(globalRoot)) fs.rmdirSync(globalRoot);
     fs.rmdirSync(root);
   });
   let modelCalls = 0;
@@ -394,7 +407,6 @@ test('MCP tool error is recorded on the tool stage', async t => {
   const trace = diagnostics.createLocalDiagnosticTrace(globalRoot, 'sidebar.chat');
   await assert.rejects(() => diagnostics.withLocalDiagnosticTrace(trace, () => engine.chat([{ role: 'user', content: '查项目' }],
     { selectedProject: '', projects: [] }, tools)), /Intelligence read tool failed/);
-  const events = JSON.parse(fs.readFileSync(operationFile(globalRoot), 'utf8')).entries;
   assert.ok(events.some(event => event.stage === 'mcp.get_current_project' && event.status === 'error' && event.message === 'mcp_tool_error'));
   assert.ok(!events.some(event => event.stage === 'mcp.get_current_project' && event.status === 'ok'));
   assert.doesNotMatch(JSON.stringify(events), /private project detail/);

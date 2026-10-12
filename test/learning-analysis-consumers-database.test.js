@@ -7,9 +7,31 @@ const Module = require('node:module');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
+const { runtimeBuildId } = require('../out/runtimeBuildIdentity.js');
+const { claimRuntimeLease } = require('../out/autonomousRuntime.js');
 const portfolio = require('../out/projectPortfolio.js');
 const strategy = require('../out/strategyPyramid.js');
 const { SidebarProjectLoader } = require('../out/sidebarProjectLoader.js');
+
+function removeFixtureTree(root) {
+  if (!fs.existsSync(root)) return;
+  const files = [];
+  const directories = [];
+  const pending = [root];
+  while (pending.length) {
+    const current = pending.pop();
+    const stat = fs.lstatSync(current);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      files.push(current);
+      continue;
+    }
+    directories.push(current);
+    for (const name of fs.readdirSync(current)) pending.push(path.join(current, name));
+  }
+  for (const filePath of files) fs.unlinkSync(filePath);
+  directories.sort((left, right) => right.split(path.sep).length - left.split(path.sep).length || right.localeCompare(left));
+  for (const directoryPath of directories) fs.rmdirSync(directoryPath);
+}
 
 async function fixture(action) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-learning-analysis-'));
@@ -17,14 +39,26 @@ async function fixture(action) {
   fs.writeFileSync(path.join(workspace, '.solopreneur', 'roadmap.csv'), 'id,title,stage,status\n1,Verify demand,Learn,Pending\n');
   const root = path.join(base, '.solomap-global');
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
-  const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'learning-analysis-owner', onCommand: () => ({ status: 'running' }), onData: ops });
+  const runtimeEntry = path.resolve(__dirname, '../out/autonomousRuntimeProcess.js');
+  claimRuntimeLease(root, { runtimeId: 'learning-analysis-owner', pid: process.pid });
+  const onCommand = async command => {
+    if (command === 'refresh') {
+      const runtime = require('../out/autonomousRuntime.js');
+      await require('../out/projectRegistry.js').refreshProjectRegistry(root, undefined, (operation, input) => ops({ operation, input }));
+      runtime.runShadowDecisionCycle({ globalDataPath: root });
+      await runtime.persistShadowRuntimeState(root, ops);
+    }
+    return { status: 'running' };
+  };
+  const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'learning-analysis-owner', entryPath: runtimeEntry, buildId: runtimeBuildId(path.resolve(__dirname, '..')), onCommand, onData: ops });
   let owner = { store, ops, server };
   const closeOwner = async () => { const previous = owner; owner = null; if (previous) { await previous.server.close(); await previous.ops.close(); previous.store.close(); } };
   const restart = async () => {
     const id = store.databaseId;
     await closeOwner();
     const reopened = UnifiedDataStore.open(root, id); const operations = createRuntimeDataOperations(reopened);
-    owner = { store: reopened, ops: operations, server: await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'learning-analysis-restarted-owner', onCommand: () => ({ status: 'running' }), onData: operations }) };
+    claimRuntimeLease(root, { runtimeId: 'learning-analysis-owner', pid: process.pid });
+    owner = { store: reopened, ops: operations, server: await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'learning-analysis-owner', entryPath: runtimeEntry, buildId: runtimeBuildId(path.resolve(__dirname, '..')), onCommand, onData: operations }) };
     return owner;
   };
   const project = (await ops({ operation: 'register_project', input: { root: workspace } })).projectId;
@@ -32,7 +66,10 @@ async function fixture(action) {
   const event = store.write({ kind: 'learning_event', action: 'create', scope: project, idempotencyKey: 'analysis-event', data: { source_object_id: evidence.objectId, source_revision: 1, event_type: 'failed', source_type: 'solo', summary: 'A failed validation needs attention', occurred_at: Date.now() } });
   const lesson = store.write({ kind: 'lesson', action: 'create', scope: project, idempotencyKey: 'analysis-lesson', data: { status: 'candidate', summary: 'Check the actual outcome before continuing', applies_when: 'Completing a change', do_this: 'Run a meaningful check', avoid_this: 'Do not infer success', lesson_type: 'verification_pattern', source_event_ids_json: [event.objectId], confidence: 0.9 } });
   try { await action({ base, root, workspace, project, store, ops, event, lesson, restart, projects: [{ name: 'Project', path: workspace, type: 'core_product' }] }); }
-  finally { await closeOwner(); }
+  finally {
+    await closeOwner();
+    removeFixtureTree(base);
+  }
 }
 
 test('project portfolio uses committed learning signals without a legacy learning directory', () => fixture(async ({ workspace, root, projects }) => {
@@ -171,12 +208,16 @@ test('a superseded rules request cannot consume the cache revision before the la
   assert.equal((await strategy.readCachedStrategyPyramidSnapshot(projects, root)).generatedAt, latest.value.generatedAt);
 }));
 
-test('the existing daily review action receives committed learning counts before launching its agent', () => fixture(async ({ root, projects }) => {
+test('the existing daily review action receives committed learning counts from the Runtime owner', () => fixture(async ({ root, projects, ops }) => {
   const original = Module._load;
   Module._load = function(request, parent, isMain) {
     return request === 'vscode' ? { window: { createTerminal: () => ({ show() {}, sendText() {} }) } } : original.apply(this, arguments);
   };
   try {
+    const runtime = require('../out/autonomousRuntime.js');
+    await require('../out/projectRegistry.js').refreshProjectRegistry(root, undefined, (operation, input) => ops({ operation, input }));
+    runtime.runShadowDecisionCycle({ globalDataPath: root, projects });
+    await runtime.persistShadowRuntimeState(root, ops);
     const { startDailyReviewAgent } = require('../out/dailyReview.js');
     const review = await startDailyReviewAgent({ globalDataPath: root, cliPath: '/missing-solomap-analysis-test-agent', taskPermissionMode: 'ask' }, projects);
     assert.equal(review.inputSnapshot.ledgerEventCount, 1);

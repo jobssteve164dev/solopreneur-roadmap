@@ -55,6 +55,14 @@ test('supported cognitive adapters keep candidate data out of process arguments'
   );
 });
 
+test('Antigravity cognitive mode leaves print last so stdin remains the prompt', () => {
+  const invocation = buildCognitiveCliInvocation('agy', 'auto', 'private decision');
+  assert.equal(invocation.args.at(-1), '--print');
+  assert.deepEqual(invocation.args.slice(0, -1), [
+    '--mode', 'plan', '--sandbox', '--disable-slash-commands', '--print-timeout', '5m'
+  ]);
+});
+
 test('Runtime reloads a normalized local Agent CLI choice from its config file', () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cognitive-config-'));
   const root = path.join(parent, '.solomap-global');
@@ -68,7 +76,7 @@ test('Runtime reloads a normalized local Agent CLI choice from its config file',
     if (fs.existsSync(file)) fs.unlinkSync(file);
     const runtimeRoot = path.join(root, 'runtime');
     if (fs.existsSync(runtimeRoot)) fs.rmdirSync(runtimeRoot);
-    fs.rmdirSync(root);
+    if (fs.existsSync(root)) fs.rmdirSync(root);
     fs.rmdirSync(parent);
   }
 });
@@ -94,7 +102,7 @@ test('cognitive config epochs do not return to an earlier value after an A-B-A s
     if (fs.existsSync(file)) fs.unlinkSync(file);
     const runtimeRoot = path.join(root, 'runtime');
     if (fs.existsSync(runtimeRoot)) fs.rmdirSync(runtimeRoot);
-    fs.rmdirSync(root);
+    if (fs.existsSync(root)) fs.rmdirSync(root);
     fs.rmdirSync(parent);
   }
 });

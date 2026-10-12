@@ -87,8 +87,8 @@ export class RunStop {
     // The wrapper must finish committing accepted output before closure.
     while (await alive(wrapper)) { current(); await new Promise(resolve => setTimeout(resolve, 25)); }
     state = current();
-    if (state.status.interactiveSessionClosed) return state;
-    await new RunNativeObserver(this.store).observe(state);
+    if (state.status.interactiveSessionClosed) { new RunNativeObserver(this.store).forget(state); return state; }
+    await new RunNativeObserver(this.store).observe(state, false, 143);
     state = current();
     const workspaceSnapshot = state.status.finishedAt && !state.status.hostOutputPending && !state.status.nativeOutputPending ? undefined : await snapshotWorkspace(String(state.status.workspaceRoot));
     const gitEvidence = workspaceSnapshot ? await captureRunGitEvidence(String(state.status.workspaceRoot), String(state.status.baseGitHash || ''), workspaceSnapshot) : undefined;
@@ -99,6 +99,7 @@ export class RunStop {
       state = current();
       state = this.store.checkpointRun(projectId, { executionLogId: input.executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'session-close', exitCode: 143, ...(state.status.nativeOutputPending ? { workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery' as const } : {}), idempotencyKey: `${input.idempotencyKey}:close` });
     }
+    new RunNativeObserver(this.store).forget(state);
     return state;
   }
 

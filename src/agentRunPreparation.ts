@@ -7,7 +7,7 @@ import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { getAgentProvider, shellQuote } from './agentCli';
 import { assertCodexResumeTranscript } from './codexSessionIdentity';
 import { buildDatabaseAgentCommand, DatabaseAgentLaunch } from './agentDatabaseLaunch';
-import { buildAgentDatabaseInstructions } from './agentDatabaseConfig';
+import { agentDatabaseConfigPath, buildAgentDatabaseInstructions } from './agentDatabaseConfig';
 import { buildTaskReportInstructions } from './taskReport';
 import { isInteractiveConversationRunKind } from './taskCheckpoint';
 import type { NativeSessionBinding, SessionIdentityContract, SessionIdentityMethod } from './sessionIdentity';
@@ -142,11 +142,11 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
   if (String(state.status.status) === 'Preparing') {
     let binding = await call('read_run_binding', identity) as NativeSessionBinding | null;
     if ((interactive || continuation) && !binding) binding = await call('write_run_binding', {
-      ...identity, expectedHeadRevision: 0, seed: { runId: String(input.executionLogId), provider, workspaceRoot: input.workspaceRoot, cliPath: input.agentCli, bindingNonce: String(state.status.bindingNonce), createdAt: state.status.startedAt, ...identityPolicy(provider), ...(input.metadata?.nativeResumeProviderContext ? { providerContext: input.metadata.nativeResumeProviderContext } : provider === 'codex' ? { providerContext: { codex: { codexHome: path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), '.codex')) } } } : {}) }, idempotencyKey: `${prepareKey}:binding`
+      ...identity, expectedHeadRevision: 0, seed: { runId: String(input.executionLogId), provider, workspaceRoot: input.workspaceRoot, cliPath: input.agentCli, bindingNonce: String(state.status.bindingNonce), createdAt: state.status.startedAt, ...identityPolicy(provider), ...(input.metadata?.nativeResumeProviderContext ? { providerContext: input.metadata.nativeResumeProviderContext } : provider === 'codex' ? { providerContext: { codex: { codexHome: path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), '.codex')) } } } : provider === 'claude' ? { providerContext: { claude: { claudeHome: path.resolve(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')).normalize('NFC'), configDirOverride: process.env.CLAUDE_CONFIG_DIR ? path.resolve(process.env.CLAUDE_CONFIG_DIR) : null, configPath: agentDatabaseConfigPath('claude') } } } : {}) }, idempotencyKey: `${prepareKey}:binding`
     }) as NativeSessionBinding;
     const plannedSessionId = String(state.status.plannedNativeSessionId || '');
     if (binding && binding.headRevision === 1 && plannedSessionId) binding = await call('write_run_binding', {
-      ...identity, expectedHeadRevision: 1, revision: { sessionId: plannedSessionId, ...identityPolicy(provider), state: 'planned', createdAt: state.status.startedAt, evidence: { source: continuation ? 'confirmed_resume_target' : 'official_cli_parameter' } }, idempotencyKey: `${prepareKey}:planned-session`
+      ...identity, expectedHeadRevision: 1, revision: { sessionId: plannedSessionId, ...identityPolicy(provider), state: 'planned', createdAt: state.status.startedAt, ...(binding.revisions[binding.headRevision - 1].providerContext ? { providerContext: binding.revisions[binding.headRevision - 1].providerContext } : {}), evidence: { source: continuation ? 'confirmed_resume_target' : 'official_cli_parameter' } }, idempotencyKey: `${prepareKey}:planned-session`
     }) as NativeSessionBinding;
     let nativeSessionIdIsCurrent = false;
     const transcriptPath = String(input.metadata?.codexResumeTranscriptPath || '');

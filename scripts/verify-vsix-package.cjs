@@ -7,6 +7,9 @@ const MAX_COMPRESSED_BYTES = 16 * 1024 * 1024;
 const MAX_UNCOMPRESSED_BYTES = 40 * 1024 * 1024;
 const REQUIRED_FILES = [
   'extension/out/extension.js',
+  'extension/out/telegramChannelLease.js',
+  'extension/out/telegramHostPresence.js',
+  'extension/out/telegramRuntime.js',
   'extension/out/piAgentRuntime.mjs',
   'extension/out/autonomousRuntimeUninstall.js',
   'extension/resources/activitybar.svg',
@@ -14,6 +17,10 @@ const REQUIRED_FILES = [
   'extension/resources/logo_with_text.svg',
   'extension/resources/tools/solomap-experience.cjs',
   'extension/resources/tools/solomap-memory.cjs',
+  'extension/resources/claude-observer/.claude-plugin/plugin.json',
+  'extension/resources/claude-observer/hooks/hooks.json',
+  'extension/resources/claude-observer/hooks/register.js',
+  'extension/resources/claude-observer/jsconfig.json',
   'extension/node_modules/@vscode/codicons/dist/codicon.css',
   'extension/node_modules/c8/bin/c8.js',
   'extension/node_modules/dependency-cruiser/bin/dependency-cruise.mjs',
@@ -35,7 +42,8 @@ const FORBIDDEN_PREFIXES = [
   'extension/src/',
   'extension/test/',
   'extension/test-results/',
-  'extension/website/'
+  'extension/website/',
+  'extension/resources/claude-observer/.claude-plugin/types/'
 ];
 const FORBIDDEN_FILES = new Set([
   'extension/resources/tools/solomap-review.cjs',

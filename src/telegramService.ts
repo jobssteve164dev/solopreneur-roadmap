@@ -17,15 +17,57 @@ export interface TelegramSettings {
 export interface TelegramHost {
   getSettings(): TelegramSettings;
   authorizeChat(username: string, chatId: string): Promise<boolean>;
-  bindChat(chatId: string): Promise<void>;
+  bindChat(chatId: string, acceptedOffset?: number): Promise<void>;
   executeCommand(command: string, ...args: string[]): Promise<unknown>;
   offset?: number;
-  saveOffset?(offset: number): void;
+  saveOffset?(offset: number): void | Promise<void>;
   waitForReplies?: boolean;
-  acceptChatUpdate?(update: TelegramUpdate): void;
-  finishChatUpdate?(update: TelegramUpdate): void;
-  sendReply?(chatId: string, text: string): Promise<void>;
+  acceptChatUpdate?(update: TelegramUpdate): boolean | Promise<boolean>;
+  finishChatUpdate?(update: TelegramUpdate): void | Promise<void>;
+  releaseChatUpdate?(update: TelegramUpdate): void | Promise<void>;
+  sendReply?(chatId: string, text: string, options?: { intentId?: string; parseMode?: 'HTML'; audience?: 'binding' | 'requester' }): Promise<void>;
+  beginChatAction?(update: TelegramUpdate, action: string): Promise<void>;
+  confirmChatAction?(update: TelegramUpdate, action: string): Promise<void>;
   getBindingGeneration?(): number;
+}
+
+async function sendUpdateReply(context: TelegramHost, update: TelegramUpdate | undefined, chatId: string, kind: string, text: string, parseMode?: 'HTML', audience: 'binding' | 'requester' = 'binding'): Promise<void> {
+  if (context.sendReply && update) {
+    await context.sendReply(chatId, text, { intentId: `telegram-update:${update.update_id}:${kind}`, ...(parseMode ? { parseMode } : {}), audience });
+    return;
+  }
+  await callTelegramApi(currentToken, 'sendMessage', { chat_id: chatId, text, ...(parseMode ? { parse_mode: parseMode } : {}) });
+}
+
+async function beginUpdateAction(context: TelegramHost, update: TelegramUpdate | undefined, action: string): Promise<void> {
+  if (update) {
+    await context.beginChatAction?.(update, action);
+    activeUpdateActions(context).add(update);
+  }
+}
+
+async function confirmUpdateAction(context: TelegramHost, update: TelegramUpdate | undefined, action: string): Promise<void> {
+  if (update) {
+    await context.confirmChatAction?.(update, action);
+    activeUpdateActions(context).delete(update);
+  }
+}
+
+const updateActionsByHost = new WeakMap<TelegramHost, Set<TelegramUpdate>>();
+
+function activeUpdateActions(context: TelegramHost): Set<TelegramUpdate> {
+  let actions = updateActionsByHost.get(context);
+  if (!actions) {
+    actions = new Set<TelegramUpdate>();
+    updateActionsByHost.set(context, actions);
+  }
+  return actions;
+}
+
+async function releaseUnconfirmedUpdateAction(context: TelegramHost, update: TelegramUpdate | undefined): Promise<boolean> {
+  if (!update || !activeUpdateActions(context).delete(update)) return false;
+  await context.releaseChatUpdate?.(update);
+  return true;
 }
 
 function getSettings(host: TelegramHost): TelegramSettings {
@@ -34,6 +76,7 @@ function getSettings(host: TelegramHost): TelegramSettings {
 
 let isPolling = false;
 let pollingTimeout: NodeJS.Timeout | null = null;
+let pollingSuspended = false;
 let currentOffset = 0;
 let currentToken = '';
 let currentChatId = '';
@@ -43,6 +86,7 @@ let currentDiagnosticDataPath = '';
 const pendingChatReplies = new Map<string, Promise<void>>();
 const pendingAuthRequests = new Map<string, number>(); // chat_id -> date
 const activeRequests = new Set<ClientRequest>();
+const activePollingRequests = new Set<ClientRequest>();
 
 export interface TelegramUpdate {
   update_id: number;
@@ -140,7 +184,8 @@ export async function callTelegramApi(token: string, method: string, payload: an
       });
     });
     activeRequests.add(req);
-    req.once('close', () => activeRequests.delete(req));
+    if (method === 'getUpdates') activePollingRequests.add(req);
+    req.once('close', () => { activeRequests.delete(req); activePollingRequests.delete(req); });
 
     req.on('error', (err) => {
       finish(err);
@@ -199,6 +244,10 @@ export function startTelegramRemoteService(context: TelegramHost, chatReply?: (c
   if (isPolling && currentToken === settings.telegramBotToken && currentChatId === settings.telegramChatId) {
     currentChatReply = chatReply;
     currentDiagnosticDataPath = diagnosticDataPath;
+    if (pollingSuspended) {
+      pollingSuspended = false;
+      void pollUpdates(context, pollingGeneration);
+    }
     return;
   }
 
@@ -207,6 +256,7 @@ export function startTelegramRemoteService(context: TelegramHost, chatReply?: (c
   stopTelegramRemoteService();
 
   isPolling = true;
+  pollingSuspended = false;
   currentToken = settings.telegramBotToken;
   currentChatId = settings.telegramChatId;
   currentOffset = previousToken === currentToken ? previousOffset : 0;
@@ -228,11 +278,21 @@ export async function drainTelegramReplies(): Promise<void> {
   await new Promise<void>(resolve => setImmediate(resolve));
 }
 
+export function suspendTelegramRemotePolling(): void {
+  pollingSuspended = true;
+  activePollingRequests.forEach(request => request.destroy(new Error('Telegram polling suspended')));
+  if (pollingTimeout) {
+    clearTimeout(pollingTimeout);
+    pollingTimeout = null;
+  }
+}
+
 export function stopTelegramRemoteService(): void {
   pollingGeneration++;
   pendingChatReplies.clear();
   pendingAuthRequests.clear();
   isPolling = false;
+  pollingSuspended = false;
   currentToken = '';
   currentChatId = '';
   currentChatReply = undefined;
@@ -255,7 +315,7 @@ export function restartTelegramRemoteService(context: TelegramHost, chatReply?: 
  * Long Polling loop for updates.
  */
 async function pollUpdates(context: TelegramHost, generation: number): Promise<void> {
-  if (!isPolling || generation !== pollingGeneration) {
+  if (!isPolling || pollingSuspended || generation !== pollingGeneration) {
     return;
   }
 
@@ -269,7 +329,7 @@ async function pollUpdates(context: TelegramHost, generation: number): Promise<v
         await handleTelegramUpdate(context, update);
       }
     }
-    if (generation === pollingGeneration) pollingTimeout = setTimeout(() => pollUpdates(context, generation), 50);
+    if (!pollingSuspended && generation === pollingGeneration) pollingTimeout = setTimeout(() => pollUpdates(context, generation), 50);
     return;
   }
 
@@ -290,24 +350,25 @@ async function pollUpdates(context: TelegramHost, generation: number): Promise<v
         if (generation !== pollingGeneration) return;
         await handleTelegramUpdate(context, update, Date.now() - pollStartedAt);
         // A revoked reply is still a handled input; do not replay it under a new authorization.
-        context.saveOffset?.(update.update_id + 1);
+        await context.saveOffset?.(update.update_id + 1);
         if (generation !== pollingGeneration) return;
         currentOffset = Math.max(currentOffset, update.update_id + 1);
       }
     }
     
     // Normal loop continuation
-    if (isPolling && generation === pollingGeneration) {
+    if (isPolling && !pollingSuspended && generation === pollingGeneration) {
       pollingTimeout = setTimeout(() => pollUpdates(context, generation), 100);
     }
   } catch (error) {
+    if (pollingSuspended && generation === pollingGeneration) return;
     console.warn('Error in Telegram polling loop:', error);
     if (currentDiagnosticDataPath) {
       recordLocalDiagnosticError(currentDiagnosticDataPath, 'telegram.poll', error);
       createLocalDiagnosticTrace(currentDiagnosticDataPath, 'telegram.poll').record('telegram.poll', 'error', Date.now() - pollStartedAt, error);
     }
     // Wait longer if error occurred to prevent high frequency crash
-    if (isPolling && generation === pollingGeneration) {
+    if (isPolling && !pollingSuspended && generation === pollingGeneration) {
       pollingTimeout = setTimeout(() => pollUpdates(context, generation), classifyDiagnosticFailure(error) === 'timeout' ? 1_000 : 5_000);
     }
   }
@@ -326,66 +387,62 @@ export async function handleTelegramUpdate(context: TelegramHost, update: Telegr
   const generation = pollingGeneration;
   const text = message.text.trim();
   const settings = getSettings(context);
+  if (await context.acceptChatUpdate?.(update) === false) return;
 
   // If chatId is not set yet, enable dynamic authorization binding
   if (!settings.telegramChatId) {
     if (pendingAuthRequests.has(senderChatId)) {
+      await context.finishChatUpdate?.(update);
       return; // Already waiting for user response
     }
     pendingAuthRequests.set(senderChatId, generation);
     const username = message.from.username ? `@${message.from.username}` : message.from.first_name || 'Unknown User';
     
     let approved: boolean;
-    try { approved = await context.authorizeChat(username, senderChatId); }
+    try {
+      await beginUpdateAction(context, update, 'authorize_chat');
+      approved = await context.authorizeChat(username, senderChatId);
+    }
     catch (error) {
       pendingAuthRequests.delete(senderChatId);
-      if (generation === pollingGeneration) await callTelegramApi(currentToken, 'sendMessage', {
-        chat_id: senderChatId, text: error instanceof Error ? error.message : '请打开 SoloMap 确认 Telegram 绑定。'
-      });
+      const released = await releaseUnconfirmedUpdateAction(context, update).catch(() => false);
+      if (!released && generation === pollingGeneration) await sendUpdateReply(context, update, senderChatId, 'authorization-error', error instanceof Error ? error.message : '请打开 SoloMap 确认 Telegram 绑定。', undefined, 'requester');
       return;
     }
     if (generation !== pollingGeneration || pendingAuthRequests.get(senderChatId) !== generation) return;
     pendingAuthRequests.delete(senderChatId);
 
     if (approved) {
-      await context.bindChat(senderChatId);
-      // Reply to TG user
-      await callTelegramApi(currentToken, 'sendMessage', {
-        chat_id: senderChatId,
-        text: '🎉 <b>绑定成功！</b>\n现在可以直接发消息询问智能内核。输入 /help 查看其他指令。',
-        parse_mode: 'HTML'
-      });
+      await context.bindChat(senderChatId, update.update_id + 1);
+      await confirmUpdateAction(context, update, 'authorize_chat');
+      await sendUpdateReply(context, update, senderChatId, 'authorization-approved', '🎉 <b>绑定成功！</b>\n现在可以直接发消息询问智能内核。输入 /help 查看其他指令。', 'HTML');
+      await context.finishChatUpdate?.(update);
     } else {
-      await callTelegramApi(currentToken, 'sendMessage', {
-        chat_id: senderChatId,
-        text: '❌ <b>授权已被拒绝。</b>\n您无权访问此本地电脑。',
-        parse_mode: 'HTML'
-      });
+      await confirmUpdateAction(context, update, 'authorize_chat');
+      await sendUpdateReply(context, update, senderChatId, 'authorization-denied', '❌ <b>授权已被拒绝。</b>\n您无权访问此本地电脑。', 'HTML', 'requester');
+      await context.finishChatUpdate?.(update);
     }
     return;
   }
 
   // If chat ID is set but does not match, reject
   if (senderChatId !== settings.telegramChatId) {
-    await callTelegramApi(currentToken, 'sendMessage', {
-      chat_id: senderChatId,
-      text: '❌ <b>无访问权限。</b>\n该本地电脑已有绑定的管理员账户。',
-      parse_mode: 'HTML'
-    });
+    await sendUpdateReply(context, update, senderChatId, 'forbidden', '❌ <b>无访问权限。</b>\n该本地电脑已有绑定的管理员账户。', 'HTML', 'requester');
+    await context.finishChatUpdate?.(update);
     return;
   }
 
   // Process authorized command
+  const backgroundReply = !text.startsWith('/') && text.toLowerCase() !== 'approve' && text.toLowerCase() !== 'deny' && Boolean(currentChatReply);
   try {
     await dispatchTelegramCommand(context, senderChatId, text, message.date, pollDurationMs, update);
   } catch (err) {
     console.error('Failed to dispatch TG command:', err);
     if (currentDiagnosticDataPath) recordLocalDiagnosticError(currentDiagnosticDataPath, 'telegram.command', classifyDiagnosticFailure(err));
-    await callTelegramApi(currentToken, 'sendMessage', {
-      chat_id: senderChatId,
-      text: `⚠️ 执行失败：${err instanceof Error ? err.message : String(err)}`,
-      parse_mode: 'HTML'
-    });
+    const released = await releaseUnconfirmedUpdateAction(context, update).catch(() => false);
+    if (!released) await sendUpdateReply(context, update, senderChatId, 'command-error', `⚠️ 执行失败：${err instanceof Error ? err.message : String(err)}`, 'HTML');
+  } finally {
+    if (!backgroundReply && !activeUpdateActions(context).has(update)) await context.finishChatUpdate?.(update);
   }
 }
 
@@ -399,7 +456,6 @@ async function dispatchTelegramCommand(context: TelegramHost, chatId: string, te
     const token = currentToken;
     const generation = pollingGeneration;
     const bindingGeneration = context.getBindingGeneration?.();
-    if (update) context.acceptChatUpdate?.(update);
     const previous = pendingChatReplies.get(chatId) || Promise.resolve();
     const startedAt = Date.now();
     const diagnosticDataPath = currentDiagnosticDataPath;
@@ -419,7 +475,7 @@ async function dispatchTelegramCommand(context: TelegramHost, chatId: string, te
             && settings.telegramEnabled && settings.telegramBotToken === token && settings.telegramChatId === chatId
             && context.getBindingGeneration?.() === bindingGeneration;
         };
-        if (!canReply()) { if (update) context.finishChatUpdate?.(update); return; }
+        if (!canReply()) { if (update) await context.finishChatUpdate?.(update); return; }
         let typingObserved = false;
         let typingInFlight = false;
         const showTyping = () => {
@@ -444,9 +500,7 @@ async function dispatchTelegramCommand(context: TelegramHost, chatId: string, te
         try {
           const answer = await observeLocalDiagnosticStage('telegram.model', () => reply(chatId, text));
           if (canReply()) {
-            await observeLocalDiagnosticStage(context.sendReply ? 'telegram.enqueue' : 'telegram.send', () => context.sendReply
-              ? context.sendReply(chatId, answer)
-              : callTelegramApi(token, 'sendMessage', { chat_id: chatId, text: answer }));
+            await observeLocalDiagnosticStage(context.sendReply ? 'telegram.enqueue' : 'telegram.send', () => sendUpdateReply(context, update, chatId, 'intelligence-answer', answer));
             trace?.record('telegram.chat', 'ok', Date.now() - startedAt);
           } else {
             trace?.record('telegram.chat', 'cancel', Date.now() - startedAt);
@@ -456,10 +510,7 @@ async function dispatchTelegramCommand(context: TelegramHost, chatId: string, te
           if (diagnosticDataPath) recordLocalDiagnosticError(diagnosticDataPath, 'telegram.chat', classifyDiagnosticFailure(error));
           if (canReply()) {
             try {
-              await observeLocalDiagnosticStage('telegram.send_failure', () => callTelegramApi(token, 'sendMessage', {
-                chat_id: chatId,
-                text: `智能内核暂时无法回答：${error instanceof Error ? error.message : String(error)}`
-              }));
+              await observeLocalDiagnosticStage('telegram.send_failure', () => sendUpdateReply(context, update, chatId, 'intelligence-error', `智能内核暂时无法回答：${error instanceof Error ? error.message : String(error)}`));
             } catch (sendError) {
               console.warn('Failed to send Telegram intelligence reply:', sendError);
             }
@@ -467,7 +518,7 @@ async function dispatchTelegramCommand(context: TelegramHost, chatId: string, te
         } finally {
           clearTimeout(typingTimer);
           clearInterval(typingInterval);
-          if (update) context.finishChatUpdate?.(update);
+          if (update) await context.finishChatUpdate?.(update);
         }
       };
       return trace ? withLocalDiagnosticTrace(trace, execute) : execute();
@@ -491,22 +542,14 @@ async function dispatchTelegramCommand(context: TelegramHost, chatId: string, te
 • 🆗 <code>/approve</code> - 人在回路确认：批准完成当前进行中/复核环节
 • 🚫 <code>/deny</code> - 人在回路确认：拒绝并终止当前步骤`;
     
-    await callTelegramApi(currentToken, 'sendMessage', {
-      chat_id: chatId,
-      text: welcome,
-      parse_mode: 'HTML'
-    });
+    await sendUpdateReply(context, update, chatId, 'help', welcome, 'HTML');
     return;
   }
 
   if (lowercase === '/status') {
     const projectInfo = await context.executeCommand('solopreneur.internalGetStatus') as any;
     if (!projectInfo || !projectInfo.activeProject) {
-      await callTelegramApi(currentToken, 'sendMessage', {
-        chat_id: chatId,
-        text: '📭 <b>当前未选择/打开任何本地项目。</b>\n请在 VS Code 中先选定工作项目。',
-        parse_mode: 'HTML'
-      });
+      await sendUpdateReply(context, update, chatId, 'status-empty', '📭 <b>当前未选择/打开任何本地项目。</b>\n请在 VS Code 中先选定工作项目。', 'HTML');
       return;
     }
 
@@ -524,11 +567,7 @@ async function dispatchTelegramCommand(context: TelegramHost, chatId: string, te
 📜 <b>最近推进记录：</b>
 ${historyText}`;
 
-    await callTelegramApi(currentToken, 'sendMessage', {
-      chat_id: chatId,
-      text: reply,
-      parse_mode: 'HTML'
-    });
+    await sendUpdateReply(context, update, chatId, 'status', reply, 'HTML');
     return;
   }
 
@@ -539,31 +578,23 @@ ${historyText}`;
       throw new Error('请输入要运行的环节ID，例如: /run 12');
     }
 
-    await callTelegramApi(currentToken, 'sendMessage', {
-      chat_id: chatId,
-      text: `⏳ <b>正在启动本地 Agent 执行环节 ${nodeId}...</b>`,
-      parse_mode: 'HTML'
-    });
-
-    // Invoke command via VS Code
+    const action = `run:${nodeId}`;
+    await beginUpdateAction(context, update, action);
     await context.executeCommand('solopreneur.internalRunAgent', nodeId);
+    await confirmUpdateAction(context, update, action);
+    await sendUpdateReply(context, update, chatId, 'run-started', `⏳ <b>已启动本地 Agent 执行环节 ${nodeId}。</b>`, 'HTML');
     return;
   }
 
   if (lowercase === '/stop') {
+    const action = 'stop';
+    await beginUpdateAction(context, update, action);
     const stopped = await context.executeCommand('solopreneur.internalStopAgent') as boolean;
+    await confirmUpdateAction(context, update, action);
     if (stopped) {
-      await callTelegramApi(currentToken, 'sendMessage', {
-        chat_id: chatId,
-        text: '🛑 <b>已成功终止本地正在运行的 Agent 终端。</b>',
-        parse_mode: 'HTML'
-      });
+      await sendUpdateReply(context, update, chatId, 'stop-completed', '🛑 <b>已成功终止本地正在运行的 Agent 终端。</b>', 'HTML');
     } else {
-      await callTelegramApi(currentToken, 'sendMessage', {
-        chat_id: chatId,
-        text: 'ℹ️ <b>当前没有正在运行的 Agent 任务终端。</b>',
-        parse_mode: 'HTML'
-      });
+      await sendUpdateReply(context, update, chatId, 'stop-empty', 'ℹ️ <b>当前没有正在运行的 Agent 任务终端。</b>', 'HTML');
     }
     return;
   }
@@ -573,13 +604,12 @@ ${historyText}`;
     if (!projectInfo || !projectInfo.activeNodeId) {
       throw new Error('当前没有处于进行中或待复核的路线图环节。');
     }
+    const action = `approve:${projectInfo.activeNodeId}`;
+    await beginUpdateAction(context, update, action);
     const success = await context.executeCommand('solopreneur.internalApproveNode', projectInfo.activeNodeId);
+    await confirmUpdateAction(context, update, action);
     if (success) {
-      await callTelegramApi(currentToken, 'sendMessage', {
-        chat_id: chatId,
-        text: `✅ <b>已远程批准完成环节 ${projectInfo.activeNodeId}。</b>\n状态已更新为 Completed。`,
-        parse_mode: 'HTML'
-      });
+      await sendUpdateReply(context, update, chatId, 'approve-completed', `✅ <b>已远程批准完成环节 ${projectInfo.activeNodeId}。</b>\n状态已更新为 Completed。`, 'HTML');
     } else {
       throw new Error('批准操作失败。');
     }
@@ -591,13 +621,12 @@ ${historyText}`;
     if (!projectInfo || !projectInfo.activeNodeId) {
       throw new Error('当前没有处于进行中或待复核的路线图环节。');
     }
+    const action = `deny:${projectInfo.activeNodeId}`;
+    await beginUpdateAction(context, update, action);
     const success = await context.executeCommand('solopreneur.internalDenyNode', projectInfo.activeNodeId);
+    await confirmUpdateAction(context, update, action);
     if (success) {
-      await callTelegramApi(currentToken, 'sendMessage', {
-        chat_id: chatId,
-        text: `🚫 <b>已远程拒绝环节 ${projectInfo.activeNodeId}，终端执行已被终止。</b>\n状态已更新为 Failed。`,
-        parse_mode: 'HTML'
-      });
+      await sendUpdateReply(context, update, chatId, 'deny-completed', `🚫 <b>已远程拒绝环节 ${projectInfo.activeNodeId}，终端执行已被终止。</b>\n状态已更新为 Failed。`, 'HTML');
     } else {
       throw new Error('拒绝操作失败。');
     }
@@ -605,9 +634,5 @@ ${historyText}`;
   }
 
   // Fallback for unrecognized commands
-  await callTelegramApi(currentToken, 'sendMessage', {
-    chat_id: chatId,
-    text: '❓ <b>未识别的远程命令。</b>\n输入 /help 查看可用指令列表。',
-    parse_mode: 'HTML'
-  });
+  await sendUpdateReply(context, update, chatId, 'unknown-command', '❓ <b>未识别的远程命令。</b>\n输入 /help 查看可用指令列表。', 'HTML');
 }

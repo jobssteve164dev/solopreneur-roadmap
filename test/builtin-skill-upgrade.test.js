@@ -113,7 +113,7 @@ test('pending historical capability import cannot seed an enabled builtin over t
     const result = await f.call('migration_status', { jobId: job.jobId }); assert.equal(result.status, 'completed', JSON.stringify(result));
     const after = await global.readSolomapSkillRegistry(f.project, f.root), memory = after.skills.find(value => value.id === memoryId);
     assert.equal(memory.status, 'disabled'); assert.notEqual(memory.entry, old.entry.entry);
-    assert.equal(after.skills.length, 5); assert.deepEqual(fs.readFileSync(registryFile), bytes); assert.deepEqual(fs.readFileSync(old.file), old.bytes);
+    assert.equal(after.skills.length, 4); assert.deepEqual(fs.readFileSync(registryFile), bytes); assert.deepEqual(fs.readFileSync(old.file), old.bytes);
     await f.reopen(); assert.equal((await global.readSolomapSkillRegistry(f.project, f.root)).skills.find(value => value.id === memoryId).status, 'disabled');
   } finally { await f.close(); }
 });
@@ -128,32 +128,11 @@ test('a user-edited builtin document and its disabled registration remain unchan
   } finally { await f.close(); }
 });
 
-test('enhancement install and uninstall prompts read the actual upgraded builtin installer document', async () => {
-  const f = await fixture(), old = historicalSkill(f, 'solomap-enhancement-installer');
-  try {
-    await f.call('patch_capability_registry', { kind: 'skill', entry: old.entry, expectedRevision: 0, idempotencyKey: 'historical-installer' });
-    const registry = await global.readSolomapSkillRegistry(f.project, f.root);
-    const installed = registry.skills.find(value => value.id === old.entry.id);
-    const actual = path.join(f.root, 'skills', installed.entry);
-    const resultPath = path.join(f.root, 'tmp', 'enhancement-installs', 'current', 'result.json');
-    const installPrompt = global.buildEnhancementInstallPrompt('code-structure-assistant', f.project, f.root, resultPath);
-    const uninstallPrompt = global.buildEnhancementUninstallPrompt('code-structure-assistant', f.project, f.root, resultPath);
-    assert.ok(installPrompt.split('\n').includes(actual), 'installation must read the registered upgraded skill, rather than the historical default path');
-    assert.ok(uninstallPrompt.split('\n').includes(actual));
-    assert.notEqual(actual, old.file);
-    const document = fs.readFileSync(actual, 'utf8');
-    assert.ok(document.includes('exact temporary paths supplied by the current prompt'));
-    assert.equal(document.includes('/code-structure-assistant/solomap.enhancement.json'), false);
-    assert.deepEqual(fs.readFileSync(old.file), old.bytes);
-    if (process.env.SOLOMAP_462_BUILTIN_EVIDENCE) fs.writeFileSync(`${process.env.SOLOMAP_462_BUILTIN_EVIDENCE}-installer.json`, JSON.stringify({ installed, document, installPrompt, uninstallPrompt, oldFile: old.file, oldBytes: old.bytes.toString('base64') }, null, 2));
-  } finally { await f.close(); }
-});
-
 test('concurrent first provisioning records one complete builtin revision for both windows', async () => {
   const f = await fixture();
   try {
     const [a, b] = await Promise.all([global.readSolomapSkillRegistry(f.project, f.root), global.readSolomapSkillRegistry(f.project, f.root)]);
-    assert.deepEqual(a, b); assert.equal(a.skills.length, 5);
+    assert.deepEqual(a, b); assert.equal(a.skills.length, 4);
     const registry = f.store().readCapabilityRegistry({ kind: 'skill' });
     for (const item of registry.entries) {
       assert.equal(item.revision, 1);
@@ -208,47 +187,4 @@ test('an upgrade committed before a lost reply is recovered by rereading and doe
     assert.equal(record.revision, 2); assert.notEqual(record.entry.entry, old.entry.entry);
     const evidence = f.store().read(record.objectId).relations.filter(value => value.relation === 'evidence'); assert.equal(evidence.length, 2);
   } finally { await f.close(); }
-});
-
-test('installation during a pending historical import uses the current complete skill without reading the old installer path', async () => {
-  const f = await fixture(), old = historicalSkill(f, 'solomap-enhancement-installer');
-  try {
-    fs.writeFileSync(path.join(f.root, 'skills', 'registry.json'), JSON.stringify({ version: 1, skills: [old.entry] }));
-    const registry = await global.readSolomapSkillRegistry(f.project, f.root); assert.deepEqual(registry.skills, []);
-    const result = path.join(f.root, 'tmp', 'enhancement-installs', 'pending-import', 'result.json');
-    for (const prompt of [global.buildEnhancementInstallPrompt('code-structure-assistant', f.project, f.root, result), global.buildEnhancementUninstallPrompt('code-structure-assistant', f.project, f.root, result)]) {
-      assert.equal(prompt.split('\n').includes(old.file), false, 'a pending migration cannot route an explicit installation back to the old file-writing instructions');
-      assert.ok(prompt.includes('exact temporary paths supplied by the current prompt'));
-      assert.ok(prompt.includes(result));
-    }
-    assert.deepEqual(fs.readFileSync(old.file), old.bytes);
-  } finally { await f.close(); }
-});
-
-test('a historical builtin already imported before migration completion upgrades without supplying missing defaults', async () => {
-  const f = await fixture(), old = historicalSkill(f, 'solomap-enhancement-installer');
-  let job;
-  try {
-    fs.writeFileSync(path.join(f.root, 'skills', 'registry.json'), JSON.stringify({ version: 1, skills: [old.entry] }));
-    // Execute the coordinator's real import under its queued/running owner job,
-    // checking the window before the final job state is published.
-    job = f.store().enqueueMemoryMigration({ collection: 'capabilities', sourceRoot: f.root }, 'partial-builtin-import');
-    f.store().updateMigrationJob(job.jobId, 'running', {});
-    const { importCapabilityDirectory } = require('../out/capabilityDatabaseMigration.js');
-    const resultOfImport = await importCapabilityDirectory(f.store(), f.root); assert.deepEqual(resultOfImport.conflicts, []);
-    assert.equal((await f.call('migration_status', { jobId: job.jobId })).status, 'running');
-    const imported = f.store().readCapabilityRegistry({ kind: 'skill' }); assert.equal(imported.legacySkillsPending, true); assert.equal(imported.entries.length, 1);
-    assert.equal(imported.entries[0].entry.entry, old.entry.entry);
-    const registry = await global.readSolomapSkillRegistry(f.project, f.root); assert.equal(registry.skills.length, 1);
-    const installer = registry.skills[0]; assert.equal(installer.status, 'disabled'); assert.notEqual(installer.entry, old.entry.entry);
-    const file = path.join(f.root, 'skills', installer.entry), document = fs.readFileSync(file, 'utf8');
-    const result = path.join(f.root, 'tmp', 'enhancement-installs', 'partial', 'result.json');
-    const prompts = [global.buildEnhancementInstallPrompt('code-structure-assistant', f.project, f.root, result), global.buildEnhancementUninstallPrompt('code-structure-assistant', f.project, f.root, result)];
-    for (const prompt of prompts) { assert.ok(prompt.split('\n').includes(file)); assert.equal(prompt.split('\n').includes(old.file), false); }
-    assert.ok(document.includes('exact temporary paths supplied by the current prompt')); assert.deepEqual(fs.readFileSync(old.file), old.bytes);
-    f.store().updateMigrationJob(job.jobId, 'completed', resultOfImport);
-    assert.equal((await global.readSolomapSkillRegistry(f.project, f.root)).skills.length, 5);
-    await f.reopen(); assert.equal((await global.readSolomapSkillRegistry(f.project, f.root)).skills.find(value => value.id === old.entry.id).status, 'disabled');
-    if (process.env.SOLOMAP_462_BUILTIN_EVIDENCE) fs.writeFileSync(`${process.env.SOLOMAP_462_BUILTIN_EVIDENCE}-partial-import.json`, JSON.stringify({ job, imported, registry, installer, file, document, prompts, oldBytes: old.bytes.toString('base64') }, null, 2));
-  } finally { if (job && f.store().readMigrationJob(job.jobId).status === 'running') f.store().updateMigrationJob(job.jobId, 'completed', {}); await f.close(); }
 });

@@ -76,7 +76,7 @@ export class IntelligenceConversationStore {
       .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   }
 
-  send(text: string, conversationId = ''): Promise<IntelligenceConversation> {
+  send(text: string, conversationId = '', canCommit: () => boolean = () => true): Promise<IntelligenceConversation> {
     const content = String(text || '').trim();
     if (!content) return Promise.reject(new Error('Please enter a message.'));
     const trace = getCurrentLocalDiagnosticTrace() || createLocalDiagnosticTrace(this.globalDataPath, 'sidebar.chat');
@@ -99,6 +99,7 @@ export class IntelligenceConversationStore {
         const messages: IntelligenceMessage[] = [...(current?.messages || []), { role: 'user', content }];
         const answer = String(await observeLocalDiagnosticStage('conversation.reply', () => this.reply(messages))).trim();
         if (!answer) throw new Error('Intelligence did not return an answer.');
+        if (!canCommit()) throw new Error('intelligence_reply_revoked');
         if (!databaseBacked && this.databaseBacked) continue;
         const now = new Date().toISOString();
         const conversation: IntelligenceConversation = {

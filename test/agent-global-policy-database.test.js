@@ -83,7 +83,7 @@ test('a continued turn pins the newly saved policy without changing the first tu
   await prepareAgentRun(f.input(1, { agentCli: 'claude' }), f.call);
   const first = await f.plan(1);
   assert.deepEqual(first.status.globalPromptPolicyRef, original);
-  await f.call('checkpoint_run', { root: f.project, executionLogId: 1, generation: first.generation, proof: first.proof, expectedRevision: first.revision, expectedTurnId: first.turnId, action: 'complete', outcome: 'partial', message: '第一轮', summary: '第一轮结果', idempotencyKey: 'policy-first-complete' });
+  await f.call('checkpoint_run', { root: f.project, executionLogId: 1, generation: first.generation, proof: first.proof, expectedRevision: first.revision, expectedTurnId: first.turnId, action: 'complete', outcome: 'partial', message: '第一轮', summary: '第一轮结果', workspaceEvidenceSource: 'native', nativeStartedAt: Date.now(), nativeCompletedAt: Date.now(), idempotencyKey: 'policy-first-complete' });
   const newer = await f.save(original, '后续轮新要求\n', 'policy-next-turn');
   const current = await f.call('read_run_checkpoint_state', { root: f.project, executionLogId: 1 });
   const next = await f.call('checkpoint_run', { root: f.project, executionLogId: 1, generation: current.generation, proof: current.proof, expectedRevision: current.revision, expectedTurnId: current.turnId, action: 'start', message: '下一轮动作', idempotencyKey: 'policy-next-start' });

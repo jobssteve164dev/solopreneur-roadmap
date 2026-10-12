@@ -147,15 +147,15 @@ test('standalone runtime stays paused and resumes through its authenticated cont
     await waitFor(() => fs.existsSync(path.join(runtimeRoot, 'control.json')));
     assert.equal((await control.sendRuntimeControlCommand(globalRoot, 'health')).owner, 'fallback');
     await control.sendRuntimeControlCommand(globalRoot, 'pause');
-    assert.equal(JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'state.json'), 'utf8')).status, 'paused');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'control.json'), 'utf8')).status, 'paused');
     await control.sendRuntimeControlCommand(globalRoot, 'resume');
-    assert.equal(JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'state.json'), 'utf8')).status, 'running');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'control.json'), 'utf8')).status, 'running');
     await control.sendRuntimeControlCommand(globalRoot, 'stop');
     await events.once(child, 'exit');
-    assert.equal(JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'state.json'), 'utf8')).status, 'stopped');
+    assert.equal(fs.existsSync(path.join(runtimeRoot, 'control.json')), false);
   } finally {
     if (child.exitCode === null) child.kill('SIGTERM');
-    for (const fileName of ['control.json', 'events.jsonl', 'execution-runtime.json', 'state.json', 'today-shadow.json']) {
+    for (const fileName of ['control.json', 'owner.json', 'events.jsonl', 'execution-runtime.json', 'today-shadow.json']) {
       const filePath = path.join(runtimeRoot, fileName);
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     }
@@ -168,6 +168,15 @@ test('standalone runtime stays paused and resumes through its authenticated cont
     for (const name of ['solomap.db', 'solomap.db-wal', 'solomap.db-shm']) {
       const file = path.join(globalRoot, name);
       if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
+    const diagnosticsRoot = path.join(globalRoot, 'diagnostics');
+    const diagnosticsDay = path.join(diagnosticsRoot, new Date().toISOString().slice(0, 10));
+    if (fs.existsSync(diagnosticsDay)) {
+      const ownedDiagnostics = fs.readdirSync(diagnosticsDay);
+      assert.ok(ownedDiagnostics.length <= 2, 'the fixture must not delete unclassified diagnostic files');
+      if (ownedDiagnostics[0]) fs.unlinkSync(path.join(diagnosticsDay, ownedDiagnostics[0]));
+      if (ownedDiagnostics[1]) fs.unlinkSync(path.join(diagnosticsDay, ownedDiagnostics[1]));
+      fs.rmdirSync(diagnosticsDay); fs.rmdirSync(diagnosticsRoot);
     }
     fs.rmdirSync(globalRoot);
     fs.rmdirSync(root);

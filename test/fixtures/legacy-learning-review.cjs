@@ -43,7 +43,7 @@ const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const crypto = __importStar(require("crypto"));
 const childProcess = __importStar(require("child_process"));
-const taskReport_js_1 = require("../../out/taskReport.js");
+const taskReport_js_1 = require("./legacy-task-report.cjs");
 const growthReports_js_1 = require("../../out/growthReports.js");
 const autonomousRuntimeControl_js_1 = require("../../out/autonomousRuntimeControl.js");
 const reviewHash = (value) => crypto.createHash('sha256').update(value).digest('hex');
@@ -574,7 +574,7 @@ async function collectReviewManifest(input) {
             }
         }
         else {
-            const registered = await (0, growthReports_js_1.readRegisteredProjectSources)(project, path.resolve(__dirname, '..'));
+            const registered = (0, growthReports_js_1.readRegisteredTaskSources)(project);
             tasks = registered.tasks;
             reports = registered.reports;
             for (const task of tasks) {

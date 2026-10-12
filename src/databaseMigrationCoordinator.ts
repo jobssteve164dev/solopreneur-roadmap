@@ -5,6 +5,8 @@ import { importLearningDirectory, importLearningReviewDirectory } from './learni
 import { importStrategyDirectory } from './strategyDatabaseMigration';
 import { importCapabilityDirectory } from './capabilityDatabaseMigration';
 import { importAgentRuns, importProjectGrowth, importProjectJournal, importStepMemoryDirectory, importRunDigestDirectory } from './projectDataMigration';
+import { importAnalysisCaches } from './analysisDatabaseMigration';
+import { importDocumentationManifest } from './documentationDatabaseMigration';
 
 /** One background queue belongs to the existing Runtime database owner. */
 export class DatabaseMigrationCoordinator {
@@ -33,12 +35,14 @@ export class DatabaseMigrationCoordinator {
         let processed = 0;
         try {
           const collection = job.args.collection || 'memory';
-          if (!['memory', 'learning', 'learning-review', 'strategy', 'capabilities', 'intelligence', 'project-journal', 'agent-runs', 'project-growth', 'step-memory', 'run-digests'].includes(String(collection))) throw new Error('migration_collection_unsupported');
+          if (!['memory', 'learning', 'learning-review', 'strategy', 'capabilities', 'documentation', 'analysis-caches', 'intelligence', 'project-journal', 'agent-runs', 'project-growth', 'step-memory', 'run-digests'].includes(String(collection))) throw new Error('migration_collection_unsupported');
           const importer: (store: UnifiedDataStore, source: string, options: any) => Promise<MemoryImportResult> = job.args.collection === 'intelligence' ? importIntelligenceDirectory
             : job.args.collection === 'learning' ? importLearningDirectory
             : job.args.collection === 'learning-review' ? importLearningReviewDirectory
             : job.args.collection === 'strategy' ? importStrategyDirectory
             : job.args.collection === 'capabilities' ? importCapabilityDirectory
+            : job.args.collection === 'documentation' ? importDocumentationManifest
+            : job.args.collection === 'analysis-caches' ? importAnalysisCaches
             : job.args.collection === 'project-journal' ? importProjectJournal
             : job.args.collection === 'agent-runs' ? importAgentRuns
             : job.args.collection === 'project-growth' ? importProjectGrowth

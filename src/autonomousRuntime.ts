@@ -5,8 +5,13 @@ import * as path from 'path';
 import { buildProjectPortfolioSummaries, ProjectPortfolioSummary } from './projectPortfolio';
 import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import { getProjectsReadOnly, normalizeGlobalDataPathForExtension, SolopreneurProject } from './projectRegistry';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import type { RuntimeDataOperations } from './runtimeDataOperations';
+import { isProcessOwnerAlive, readProcessBirthMarker } from './processIdentity.js';
 
 const SHADOW_ALGORITHM_VERSION = 'today-shadow-v1';
+const shadowDecisions = new Map<string, ShadowDecision>();
+const shadowFeedback = new Map<string, Array<Record<string, unknown>>>();
 
 export interface ShadowRecommendation {
   id: string;
@@ -35,6 +40,10 @@ export interface ShadowDecision {
   recommendedProjectPath: string;
   summary: string;
   recommendations: ShadowRecommendation[];
+  learningCandidateCount?: number;
+  ledgerEventCount?: number;
+  ledgerCandidateCount?: number;
+  confirmedLearningCount?: number;
   engineId?: string;
   engineConfigRevision?: string;
   engineStatus?: 'completed' | 'failed' | 'unavailable';
@@ -88,6 +97,7 @@ export interface ShadowDecisionEvaluation {
 interface ShadowCycleOptions {
   globalDataPath: string;
   projectRegistryFileName?: string;
+  projects?: SolopreneurProject[];
   now?: Date;
   beforeCommit?: () => boolean;
   engineConfigRevision?: string;
@@ -97,39 +107,32 @@ export interface RuntimeState {
   schemaVersion: 1;
   runtimeId: string;
   pid: number;
+  processBirth?: string;
   status: 'running' | 'paused' | 'stopped' | 'failed';
   startedAt: string;
   heartbeatAt: string;
-  lastDecisionId?: string;
   databaseId?: string;
-  error?: string;
 }
 
 interface RuntimeLeaseOptions {
   runtimeId: string;
   pid: number;
+  processBirth?: string;
   now?: Date;
   isProcessAlive?: (pid: number) => boolean;
+  isProcessOwnerAlive?: (pid: number, birth: string) => boolean;
 }
 
 function runtimeRoot(globalDataPath: string): string {
   return path.join(normalizeGlobalDataPathForExtension(globalDataPath), 'runtime');
 }
 
-function shadowSnapshotPath(globalDataPath: string): string {
-  return path.join(runtimeRoot(globalDataPath), 'today-shadow.json');
-}
-
 function runtimeStatePath(globalDataPath: string): string {
-  return path.join(runtimeRoot(globalDataPath), 'state.json');
+  return path.join(runtimeRoot(globalDataPath), 'control.json');
 }
 
 function runtimeClaimPath(globalDataPath: string): string {
-  return path.join(runtimeRoot(globalDataPath), 'state.claim');
-}
-
-function shadowEvaluationPath(globalDataPath: string): string {
-  return path.join(runtimeRoot(globalDataPath), 'shadow-evaluation.json');
+  return path.join(runtimeRoot(globalDataPath), 'control.claim');
 }
 
 function stableHash(value: string): string {
@@ -249,49 +252,94 @@ function writeJsonAtomic(filePath: string, value: unknown): void {
   fs.renameSync(temporaryPath, filePath);
 }
 
-function defaultIsProcessAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export function readRuntimeState(globalDataPath: string): RuntimeState | null {
-  const statePath = runtimeStatePath(globalDataPath);
-  if (!fs.existsSync(statePath)) return null;
-  try {
-    const parsed = JSON.parse(fs.readFileSync(statePath, 'utf8')) as RuntimeState;
-    if (parsed.schemaVersion !== 1 || !parsed.runtimeId || !Number.isInteger(parsed.pid)) return null;
-    return parsed;
-  } catch {
-    return null;
+  const candidates = [
+    runtimeStatePath(globalDataPath),
+    path.join(runtimeRoot(globalDataPath), 'state.json'),
+    path.join(runtimeRoot(globalDataPath), 'owner.json')
+  ];
+  for (const statePath of candidates) {
+    if (!fs.existsSync(statePath)) continue;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(statePath, 'utf8')) as RuntimeState;
+      if (parsed.schemaVersion === 1 && parsed.runtimeId && Number.isInteger(parsed.pid)) return parsed;
+    } catch {
+      // Legacy state is import-only; continue to the next known location.
+    }
   }
+  return null;
 }
 
 export function claimRuntimeLease(globalDataPath: string, options: RuntimeLeaseOptions): { acquired: boolean; owner: RuntimeState } {
   fs.mkdirSync(runtimeRoot(globalDataPath), { recursive: true });
   const claimPath = runtimeClaimPath(globalDataPath);
-  let claimFd: number | undefined;
-  for (let attempt = 0; attempt < 100 && claimFd === undefined; attempt += 1) {
+  const claimOwnerPath = path.join(claimPath, 'owner.json');
+  const reclaimedPath = `${claimPath}.reclaimed`;
+  const processBirth = options.processBirth ?? readProcessBirthMarker(options.pid);
+  const ownerAlive = (pid: number, birth = '') => options.isProcessOwnerAlive
+    ? options.isProcessOwnerAlive(pid, birth)
+    : options.isProcessAlive
+      ? options.isProcessAlive(pid)
+      : isProcessOwnerAlive(pid, birth);
+  const claimToken = crypto.randomBytes(24).toString('hex');
+  let acquiredClaim = false;
+  for (let attempt = 0; attempt < 200 && !acquiredClaim; attempt += 1) {
     try {
-      claimFd = fs.openSync(claimPath, 'wx', 0o600);
+      fs.mkdirSync(claimPath, { mode: 0o700 });
+      fs.writeFileSync(claimOwnerPath, JSON.stringify({ schemaVersion: 1, runtimeId: options.runtimeId, pid: options.pid, processBirth, token: claimToken, createdAt: Date.now() }) + '\n', { mode: 0o600 });
+      acquiredClaim = true;
+      if (fs.existsSync(reclaimedPath)) {
+        const reclaimedOwner = path.join(reclaimedPath, 'owner.json');
+        if (fs.existsSync(reclaimedOwner)) fs.unlinkSync(reclaimedOwner);
+        fs.rmdirSync(reclaimedPath);
+      }
     } catch (error: any) {
       if (error?.code !== 'EEXIST') throw error;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+      let live = true;
+      let legacyFile = false;
+      try {
+        legacyFile = fs.statSync(claimPath).isFile();
+        const file = legacyFile ? claimPath : claimOwnerPath;
+        const claim = JSON.parse(fs.readFileSync(file, 'utf8')) as { pid?: number; processBirth?: string };
+        live = ownerAlive(Number(claim.pid || 0), String(claim.processBirth || ''));
+      } catch {
+        try { live = Date.now() - fs.statSync(claimPath).mtimeMs < 500; }
+        catch (statError: any) { if (statError?.code !== 'ENOENT') throw statError; }
+      }
+      if (live) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+        continue;
+      }
+      if (legacyFile) {
+        try { fs.unlinkSync(claimPath); } catch (unlinkError: any) { if (unlinkError?.code !== 'ENOENT') throw unlinkError; }
+        continue;
+      }
+      if (fs.existsSync(reclaimedPath)) {
+        try {
+          const current = JSON.parse(fs.readFileSync(claimOwnerPath, 'utf8')) as { pid?: number; processBirth?: string };
+          if (ownerAlive(Number(current.pid || 0), String(current.processBirth || ''))) continue;
+          const reclaimedOwner = path.join(reclaimedPath, 'owner.json');
+          if (fs.existsSync(reclaimedOwner)) fs.unlinkSync(reclaimedOwner);
+          fs.rmdirSync(reclaimedPath);
+        } catch (cleanupError: any) {
+          if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(cleanupError?.code)) throw cleanupError;
+          continue;
+        }
+      }
+      try { fs.renameSync(claimPath, reclaimedPath); }
+      catch (renameError: any) {
+        if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(renameError?.code)) throw renameError;
+      }
     }
   }
-  if (claimFd === undefined) throw new Error('SoloMap Runtime lease claim is busy.');
+  if (!acquiredClaim) throw new Error('SoloMap Runtime lease claim is busy.');
   try {
   const now = options.now || new Date();
-  const isProcessAlive = options.isProcessAlive || defaultIsProcessAlive;
   const current = readRuntimeState(globalDataPath);
   if (
     current
-    && (current.runtimeId !== options.runtimeId || current.pid !== options.pid)
-    && isProcessAlive(current.pid)
+    && (current.runtimeId !== options.runtimeId || current.pid !== options.pid || Boolean(current.processBirth && processBirth && current.processBirth !== processBirth))
+    && ownerAlive(current.pid, current.processBirth || '')
   ) {
     // A delayed heartbeat or closing endpoint does not release a live owner's database.
     return { acquired: false, owner: current };
@@ -300,6 +348,7 @@ export function claimRuntimeLease(globalDataPath: string, options: RuntimeLeaseO
     schemaVersion: 1,
     runtimeId: options.runtimeId,
     pid: options.pid,
+    ...(processBirth ? { processBirth } : {}),
     status: 'running',
     startedAt: now.toISOString(),
     heartbeatAt: now.toISOString(),
@@ -308,14 +357,18 @@ export function claimRuntimeLease(globalDataPath: string, options: RuntimeLeaseO
   writeJsonAtomic(runtimeStatePath(globalDataPath), owner);
   return { acquired: true, owner };
   } finally {
-    fs.closeSync(claimFd);
-    fs.unlinkSync(claimPath);
+    try {
+      const claim = JSON.parse(fs.readFileSync(claimOwnerPath, 'utf8')) as { token?: string };
+      if (claim.token === claimToken) { fs.unlinkSync(claimOwnerPath); fs.rmdirSync(claimPath); }
+    } catch (error: any) { if (error?.code !== 'ENOENT') throw error; }
   }
 }
 
 export function hasRuntimeLease(globalDataPath: string, runtimeId: string, pid: number): boolean {
   const current = readRuntimeState(globalDataPath);
-  return Boolean(current && current.runtimeId === runtimeId && current.pid === pid && (current.status === 'running' || current.status === 'paused'));
+  return Boolean(current && current.runtimeId === runtimeId && current.pid === pid
+    && (!current.processBirth || isProcessOwnerAlive(pid, current.processBirth))
+    && (current.status === 'running' || current.status === 'paused'));
 }
 
 export function updateRuntimeState(globalDataPath: string, runtimeId: string, patch: Partial<RuntimeState>, now = new Date()): RuntimeState | null {
@@ -333,33 +386,12 @@ export function updateRuntimeState(globalDataPath: string, runtimeId: string, pa
 }
 
 function appendDecisionEvent(globalDataPath: string, decision: ShadowDecision): void {
-  const eventPath = path.join(runtimeRoot(globalDataPath), 'events.jsonl');
-  let lastDecisionId = '';
-  if (fs.existsSync(eventPath)) {
-    const lines = fs.readFileSync(eventPath, 'utf8').trim().split('\n').filter(Boolean);
-    if (lines.length) {
-      try {
-        lastDecisionId = String(JSON.parse(lines[lines.length - 1]).decisionId || '');
-      } catch {
-        lastDecisionId = '';
-      }
-    }
-  }
-  if (lastDecisionId === decision.decisionId) return;
-  fs.mkdirSync(path.dirname(eventPath), { recursive: true });
-  fs.appendFileSync(eventPath, JSON.stringify({
-    type: 'shadow_decision_created',
-    decisionId: decision.decisionId,
-    generatedAt: decision.generatedAt,
-    sourceRevision: decision.sourceRevision,
-    baselineProjectPath: decision.baselineProjectPath,
-    recommendedProjectPath: decision.recommendedProjectPath
-  }) + '\n', { encoding: 'utf8', mode: 0o600 });
+  shadowDecisions.set(normalizeGlobalDataPathForExtension(globalDataPath), structuredClone(decision));
 }
 
 export function runShadowDecisionCycle(options: ShadowCycleOptions): ShadowDecision {
   const globalRoot = normalizeGlobalDataPathForExtension(options.globalDataPath);
-  const projects = getProjectsReadOnly({
+  const projects = options.projects || getProjectsReadOnly({
     globalDataPath: globalRoot,
     projectRegistryFileName: options.projectRegistryFileName || 'projects.json',
     legacyProjects: [],
@@ -369,7 +401,6 @@ export function runShadowDecisionCycle(options: ShadowCycleOptions): ShadowDecis
   const portfolio = buildProjectPortfolioSummaries(projects, { coreOnly: true });
   const decision = buildShadowDecision(projects, portfolio, sourceRevision, options.now || new Date());
   appendDecisionEvent(globalRoot, decision);
-  writeJsonAtomic(shadowSnapshotPath(globalRoot), decision);
   return decision;
 }
 
@@ -413,15 +444,13 @@ export async function runCognitiveShadowDecisionCycle(
     throw new Error('Cognitive decision lease is no longer current.');
   }
   appendDecisionEvent(options.globalDataPath, decision);
-  writeJsonAtomic(shadowSnapshotPath(options.globalDataPath), decision);
   return decision;
 }
 
 export function readCurrentShadowDecision(globalDataPath: string, projects: SolopreneurProject[]): ShadowDecision | null {
-  const snapshotPath = shadowSnapshotPath(globalDataPath);
-  if (!fs.existsSync(snapshotPath)) return null;
+  const parsed = shadowDecisions.get(normalizeGlobalDataPathForExtension(globalDataPath));
+  if (!parsed) return null;
   try {
-    const parsed = JSON.parse(fs.readFileSync(snapshotPath, 'utf8')) as ShadowDecision;
     if (parsed.schemaVersion !== 1 || parsed.source !== 'runtime_shadow' || parsed.status !== 'completed') return null;
     if (parsed.generatedAt.slice(0, 10) !== new Date().toISOString().slice(0, 10)) return null;
     if (parsed.sourceRevision !== buildProjectSourceRevision(projects)) return null;
@@ -470,7 +499,10 @@ export function projectShadowDecisionForToday(decision: ShadowDecision, feedback
     needsConfirmation: [],
     inputSnapshot: {
       projectCount: decision.projectCount,
-      learningCandidateCount: 0,
+      learningCandidateCount: decision.learningCandidateCount || 0,
+      ledgerEventCount: decision.ledgerEventCount || 0,
+      ledgerCandidateCount: decision.ledgerCandidateCount || 0,
+      confirmedLearningCount: decision.confirmedLearningCount || 0,
       blockedDependencyCount: 0,
       reviewMode: 'shadow_decision'
     },
@@ -483,27 +515,18 @@ export function projectShadowDecisionForToday(decision: ShadowDecision, feedback
 }
 
 export function readShadowDecisionFeedbackOutcome(globalDataPath: string, decisionId: string): string {
-  const feedbackPath = path.join(runtimeRoot(globalDataPath), 'shadow-feedback.jsonl');
-  if (!fs.existsSync(feedbackPath)) return '';
-  const rows = fs.readFileSync(feedbackPath, 'utf8').split('\n').filter(Boolean);
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    try {
-      const row = JSON.parse(rows[index]);
-      if (String(row.decisionId || '') === decisionId) return String(row.outcome || '');
-    } catch {
-      // Ignore malformed historical ledger rows.
-    }
-  }
+  const rows = shadowFeedback.get(normalizeGlobalDataPathForExtension(globalDataPath)) || [];
+  for (let index = rows.length - 1; index >= 0; index -= 1) if (String(rows[index].decisionId || '') === decisionId) return String(rows[index].outcome || '');
   return '';
 }
 
-export function recordShadowDecisionFeedback(globalDataPath: string, input: ShadowFeedback): void {
-  const feedbackPath = path.join(runtimeRoot(globalDataPath), 'shadow-feedback.jsonl');
+export async function recordShadowDecisionFeedback(globalDataPath: string, input: ShadowFeedback, operation?: RuntimeDataOperations): Promise<void> {
+  await refreshShadowRuntimeState(globalDataPath, operation);
+  const root = normalizeGlobalDataPathForExtension(globalDataPath);
   const operationId = String(input.operationId || '').trim();
   if (!operationId) throw new Error('Shadow feedback requires an operationId.');
-  const snapshotPath = shadowSnapshotPath(globalDataPath);
-  if (!fs.existsSync(snapshotPath)) throw new Error('Shadow feedback requires a current decision.');
-  const decision = JSON.parse(fs.readFileSync(snapshotPath, 'utf8')) as ShadowDecision;
+  const decision = shadowDecisions.get(root);
+  if (!decision) throw new Error('Shadow feedback requires a current decision.');
   if (decision.decisionId !== input.decisionId) throw new Error('Shadow feedback decision is no longer current.');
   if (readShadowDecisionFeedbackOutcome(globalDataPath, decision.decisionId) === 'ignored') return;
   const selectedProjectPath = String(input.selectedProjectPath || '');
@@ -513,18 +536,10 @@ export function recordShadowDecisionFeedback(globalDataPath: string, input: Shad
   }
   const recommendedProjectPath = decision.recommendedProjectPath;
   const outcome = ignored ? 'ignored' : recommendedProjectPath === selectedProjectPath ? 'accepted' : 'overridden';
-  const existing = fs.existsSync(feedbackPath)
-    ? fs.readFileSync(feedbackPath, 'utf8').split('\n').filter(Boolean).some((line) => {
-      try {
-        return String(JSON.parse(line).operationId || '') === operationId;
-      } catch {
-        return false;
-      }
-    })
-    : false;
+  const rows = shadowFeedback.get(root) || [];
+  const existing = rows.some(row => String(row.operationId || '') === operationId);
   if (existing) return;
-  fs.mkdirSync(path.dirname(feedbackPath), { recursive: true });
-  fs.appendFileSync(feedbackPath, JSON.stringify({
+  rows.push({
     operationId,
     decisionId: String(input.decisionId || ''),
     baselineProjectPath: decision.baselineProjectPath,
@@ -534,21 +549,13 @@ export function recordShadowDecisionFeedback(globalDataPath: string, input: Shad
     cognitive: decision.engineStatus === 'completed' && Boolean(decision.engineId),
     engineId: decision.engineId || '',
     recordedAt: String(input.recordedAt || new Date().toISOString())
-  }) + '\n', { encoding: 'utf8', mode: 0o600 });
-  writeJsonAtomic(shadowEvaluationPath(globalDataPath), buildShadowDecisionEvaluation(globalDataPath));
+  });
+  shadowFeedback.set(root, rows);
+  await persistShadowRuntimeState(root, operation, `shadow-feedback:${operationId}`);
 }
 
 function buildShadowDecisionEvaluation(globalDataPath: string): ShadowDecisionEvaluation {
-  const feedbackPath = path.join(runtimeRoot(globalDataPath), 'shadow-feedback.jsonl');
-  const rows = fs.existsSync(feedbackPath)
-    ? fs.readFileSync(feedbackPath, 'utf8').split('\n').filter(Boolean).flatMap((line) => {
-      try {
-        return [JSON.parse(line) as Record<string, unknown>];
-      } catch {
-        return [];
-      }
-    })
-    : [];
+  const rows = shadowFeedback.get(normalizeGlobalDataPathForExtension(globalDataPath)) || [];
   let cognitiveWins = 0;
   let baselineWins = 0;
   let ties = 0;
@@ -580,14 +587,67 @@ function buildShadowDecisionEvaluation(globalDataPath: string): ShadowDecisionEv
 }
 
 export function readShadowDecisionEvaluation(globalDataPath: string): ShadowDecisionEvaluation {
-  const evaluationPath = shadowEvaluationPath(globalDataPath);
-  if (fs.existsSync(evaluationPath)) {
+  return buildShadowDecisionEvaluation(globalDataPath);
+}
+
+function shadowOperation(globalDataPath: string, operation?: RuntimeDataOperations) {
+  return (name: string, input: Record<string, unknown>) => operation ? operation({ operation: name, input }) : sendRuntimeDataRequest(globalDataPath, { operation: name, input });
+}
+
+export async function refreshShadowRuntimeState(globalDataPath: string, operation?: RuntimeDataOperations): Promise<void> {
+  const root = normalizeGlobalDataPathForExtension(globalDataPath);
+  const result = await shadowOperation(root, operation)('read_host_settings', { namespace: 'runtime_shadow', ownerScope: 'global' }) as { items: Array<{ key: string; value?: unknown }> };
+  const values = new Map(result.items.map(item => [item.key, item.value]));
+  const decision = values.get('decision');
+  const feedback = values.get('feedback');
+  if (decision && typeof decision === 'object') shadowDecisions.set(root, decision as ShadowDecision);
+  if (Array.isArray(feedback)) shadowFeedback.set(root, feedback as Array<Record<string, unknown>>);
+}
+
+export async function persistShadowRuntimeState(globalDataPath: string, operation?: RuntimeDataOperations, idempotencyKey = `runtime-shadow:${crypto.randomUUID()}`): Promise<void> {
+  const root = normalizeGlobalDataPathForExtension(globalDataPath);
+  const call = shadowOperation(root, operation);
+  const desiredDecision = shadowDecisions.get(root) ? structuredClone(shadowDecisions.get(root)!) : undefined;
+  if (desiredDecision) {
+    const learning = await call('read_learning_overview', {}) as {
+      eventCount?: number;
+      candidateCount?: number;
+      approvedCount?: number;
+      promotedCount?: number;
+    };
+    desiredDecision.learningCandidateCount = Number(learning.candidateCount || 0);
+    desiredDecision.ledgerEventCount = Number(learning.eventCount || 0);
+    desiredDecision.ledgerCandidateCount = Number(learning.candidateCount || 0);
+    desiredDecision.confirmedLearningCount = Number(learning.approvedCount || 0) + Number(learning.promotedCount || 0);
+    shadowDecisions.set(root, structuredClone(desiredDecision));
+  }
+  const desiredFeedback = structuredClone(shadowFeedback.get(root) || []);
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const result = await call('read_host_settings', { namespace: 'runtime_shadow', ownerScope: 'global' }) as { items: Array<{ key: string; revision: number; value?: unknown }> };
+    const fields = new Map(result.items.map(item => [item.key, item]));
+    const remoteDecision = fields.get('decision')?.value as ShadowDecision | undefined;
+    const decision = !remoteDecision || desiredDecision && Date.parse(desiredDecision.generatedAt) >= Date.parse(remoteDecision.generatedAt)
+      ? desiredDecision
+      : remoteDecision;
+    const feedbackByOperation = new Map<string, Record<string, unknown>>();
+    const remoteFeedback = Array.isArray(fields.get('feedback')?.value) ? fields.get('feedback')!.value as Array<Record<string, unknown>> : [];
+    for (const row of [...remoteFeedback, ...desiredFeedback]) {
+      const operationId = String(row.operationId || '').trim();
+      if (operationId) feedbackByOperation.set(operationId, row);
+    }
+    const feedback = [...feedbackByOperation.values()];
+    if (decision) shadowDecisions.set(root, decision);
+    shadowFeedback.set(root, feedback);
+    const patches = [
+      ...(decision ? [{ key: 'decision', expectedRevision: fields.get('decision')?.revision || 0, value: decision }] : []),
+      { key: 'feedback', expectedRevision: fields.get('feedback')?.revision || 0, value: feedback },
+      { key: 'evaluation', expectedRevision: fields.get('evaluation')?.revision || 0, value: buildShadowDecisionEvaluation(root) }
+    ];
     try {
-      const parsed = JSON.parse(fs.readFileSync(evaluationPath, 'utf8')) as ShadowDecisionEvaluation;
-      if (parsed.schemaVersion === 1) return parsed;
-    } catch {
-      // Rebuild from the append-only feedback ledger below.
+      await call('patch_host_settings', { namespace: 'runtime_shadow', ownerScope: 'global', patches, idempotencyKey });
+      return;
+    } catch (error) {
+      if ((error as Error).message !== 'revision_conflict' || attempt === 4) throw error;
     }
   }
-  return buildShadowDecisionEvaluation(globalDataPath);
 }

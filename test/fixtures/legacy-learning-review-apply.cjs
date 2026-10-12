@@ -42,7 +42,7 @@ exports.buildLearningReviewCheckPrompt = buildLearningReviewCheckPrompt;
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const learningReview_js_1 = require("./legacy-learning-review.cjs");
-const taskReport_js_1 = require("../../out/taskReport.js");
+const taskReport_js_1 = require("./legacy-task-report.cjs");
 const attachments_js_1 = require("../../out/attachments.js");
 function requireValue(condition, message) {
     if (!condition)

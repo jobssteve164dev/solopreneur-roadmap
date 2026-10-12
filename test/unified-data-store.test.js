@@ -53,7 +53,7 @@ test('rollback, scope isolation, content integrity, backup and reopen preserve f
     try { sourceMigrations = source.prepare('SELECT version,checksum,applied_at FROM schema_migrations ORDER BY version').all(); }
     finally { source.close(); }
     const destination = path.join(root, 'exports', 'backup.db');
-    await store.backup(destination);
+    await store.backup({ destination, idempotencyKey: 'full-body-backup' });
     const backup = new DatabaseSync(destination, { readOnly: true });
     try {
       assert.equal(backup.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');

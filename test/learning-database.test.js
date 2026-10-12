@@ -331,7 +331,7 @@ test('ordinary learning metadata selects only lessons and rejects unrelated kind
 }));
 
 test('actual learning prompt recalls formal candidates with fixed sources and no legacy directories', () => fixture(async ({ root, workspace, write, store }) => {
-  const local = write('Keep the current user selection', { do_this: 'Retain the selected mode during asynchronous refresh', does_not_apply_when: 'The user explicitly selects another mode' });
+  const local = write('Keep the current user selection', { status: 'approved', do_this: 'Retain the selected mode during asynchronous refresh', does_not_apply_when: 'The user explicitly selects another mode' });
   write('Rejected mistake', { status: 'rejected' });
   write('Run completed without explicit verification signal in captured tail');
   write('Do check /home/ubuntu/project/.solopreneur/agent-runs/', { do_this: 'Do check /home/ubuntu/project/.solopreneur/agent-runs/' });
@@ -370,15 +370,14 @@ test('actual learning overview counts formal history without creating learning o
   assert.equal(fs.existsSync(path.join(root, 'learning')), false); assert.equal(fs.existsSync(path.join(root, 'metrics')), false);
 }));
 
-test('ordinary edits cannot carry an observed learning signal onto a new claim', () => fixture(async ({ store, client, project, write }) => {
+test('ordinary edits cannot rewrite an observed learning signal as a new claim', () => fixture(async ({ store, client, project, write }) => {
   const source = write('Keep the original verified conclusion attached to its evidence');
   const event = store.write({ kind: 'learning_event', action: 'create', scope: project, idempotencyKey: 'host-checked-event', data: { source_object_id: source.objectId, source_revision: 1, event_type: 'verified', summary: 'Original host observation', occurred_at: 0, verification_signal: 1 } });
   const input = { kind: 'learning_event', action: 'patch', scope: project, objectId: event.objectId, expectedRevision: 1, idempotencyKey: 'ordinary-event-edit', data: { summary: 'A different ordinary claim' } };
-  const next = await client.call('write', input);
-  assert.equal((await client.call('read', { ref: event.objectId })).data.verification_signal, 0);
+  await assert.rejects(client.call('write', input), /host_observation_requires_authorization/);
+  assert.equal((await client.call('read', { ref: event.objectId })).data.verification_signal, 1);
   assert.equal((await client.call('read', { ref: event.objectId, revision: 1 })).data.verification_signal, 1);
-  assert.equal((await client.call('write', input)).revision, next.revision);
-  assert.equal(store.readLearningOverview().projectSignals[0].verificationSignals, 0);
+  assert.equal(store.readLearningOverview().projectSignals[0].verificationSignals, 1);
 }));
 
 test('learning overview queries start from their own records and never decode unrelated history', () => fixture(async ({ store, ops, project, write }) => {
@@ -409,9 +408,9 @@ test('learning event claims cannot insert an unreadable date or claim an observe
 }));
 
 test('learning prompt finishes every lesson page and preserves role priority and duplicate suppression', () => fixture(async ({ root, workspace, write }) => {
-  const verification = write('Verify the user-visible outcome', { lesson_type: 'verification_pattern', evidence_refs_json: [{ type: 'command', ref: 'npm test', summary: 'Regression proved the response' }] });
-  write('Build the smallest complete change', { lesson_type: 'implementation_pattern' });
-  for (let i = 0; i < 105; i++) write('Repeated generic advice', { lesson_type: 'boundary_rule' });
+  const verification = write('Verify the user-visible outcome', { status: 'approved', lesson_type: 'verification_pattern', evidence_refs_json: [{ type: 'command', ref: 'npm test', summary: 'Regression proved the response' }] });
+  write('Build the smallest complete change', { status: 'approved', lesson_type: 'implementation_pattern' });
+  for (let i = 0; i < 105; i++) write('Repeated generic advice', { status: 'approved', lesson_type: 'boundary_rule' });
   const prompt = await ledger.buildLearningRetrievalContext(workspace, root, { projectPath: workspace, runKind: 'solo', role: 'verifier', contextText: 'unmatched', limit: 200 });
   assert.match(prompt, /^SoloMap[^\n]*\n1\. Verify the user-visible outcome/);
   assert.equal((prompt.match(/Repeated generic advice/g) || []).length, 1);
@@ -511,7 +510,7 @@ test('unmapped or malformed legacy lessons remain captured conflicts and never e
 
 test('startup discovers legacy learning without a memory directory and uses exact project scope', () => fixture(async ({ root, workspace, project, ops, store }) => {
   const sourceRoot = path.join(root, 'learning'); fs.mkdirSync(path.join(sourceRoot, 'candidates'), { recursive: true });
-  fs.writeFileSync(path.join(sourceRoot, 'candidates', 'lesson-startup.json'), JSON.stringify({ schemaVersion: 1, id: 'lesson-startup', projectPath: workspace, summary: 'Preserve the current selection', appliesWhen: 'Loading an asynchronous view', doThis: 'Keep the selected mode', avoidThis: 'Resetting the current choice', evidenceRefs: [], status: 'candidate', updatedAt: '2026-01-01' }));
+  fs.writeFileSync(path.join(sourceRoot, 'candidates', 'lesson-startup.json'), JSON.stringify({ schemaVersion: 1, id: 'lesson-startup', projectPath: workspace, summary: 'Preserve the current selection', appliesWhen: 'Loading an asynchronous view', doThis: 'Keep the selected mode', avoidThis: 'Resetting the current choice', evidenceRefs: [], status: 'approved', updatedAt: '2026-01-01' }));
   const { enqueueAvailableDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
   await enqueueAvailableDataMigrations(store, ops, () => true);
   const jobs = store.migrationJobs().filter(job => job.args.collection === 'learning');
@@ -539,8 +538,9 @@ test('unchanged invalid learning sources keep one captured revision on retry', (
   assert.deepEqual(retry.bytes, bytes);
 }));
 
-test('ordinary lesson dates reject unreadable create and patch values before prompt preparation', () => fixture(async ({ root, workspace, client, project }) => {
-  const valid = await client.call('write', { kind: 'lesson', action: 'create', scope: project, idempotencyKey: 'valid-dated-lesson', data: { status: 'candidate', summary: 'Keep the last meaningful user selection', external_updated_at: 0 } });
+test('ordinary lesson dates reject unreadable create and patch values before prompt preparation', () => fixture(async ({ root, workspace, client, project, store }) => {
+  const valid = await client.call('write', { kind: 'lesson', action: 'create', scope: project, idempotencyKey: 'valid-dated-lesson', data: { status: 'candidate', summary: 'Candidate used to verify date validation', external_updated_at: 0 } });
+  const visible = store.write({ kind: 'lesson', action: 'create', scope: project, idempotencyKey: 'approved-dated-lesson', data: { status: 'approved', summary: 'Keep the last meaningful user selection', external_updated_at: 0 } });
   for (const field of ['external_created_at', 'external_updated_at']) {
     for (const value of [1e20, 'invalid-date', 1.5]) {
       await assert.rejects(client.call('write', { kind: 'lesson', action: 'create', scope: project, idempotencyKey: `bad-create-${field}-${value}`, data: { status: 'candidate', summary: 'Unreadable date must not block any prompt', [field]: value } }), /lesson_timestamp_invalid/);
@@ -549,8 +549,8 @@ test('ordinary lesson dates reject unreadable create and patch values before pro
   }
   const prompt = await ledger.buildLearningRetrievalContext(workspace, root, { projectPath: workspace, runKind: 'solo', contextText: 'unmatched' });
   assert.match(prompt, /Keep the last meaningful user selection/);
-  assert.match(prompt, new RegExp(`${valid.objectId}.*revision=1`));
-  assert.equal((await client.call('search', { scope: project, kinds: ['lesson'] })).items.length, 1);
+  assert.match(prompt, new RegExp(`${visible.objectId}.*revision=1`));
+  assert.equal((await client.call('search', { scope: project, kinds: ['lesson'] })).items.length, 2);
 }));
 
 test('ordinary lesson writes cannot claim a manual review and revisions invalidate imported review provenance', () => fixture(async ({ client, project, store }) => {
@@ -577,7 +577,7 @@ test('one disconnected registered project cannot prevent available learning hist
   const disconnected = path.join(path.dirname(workspace), 'disconnected'); fs.mkdirSync(disconnected);
   await ops({ operation: 'register_project', input: { root: disconnected } });
   const sourceRoot = path.join(root, 'learning'); fs.mkdirSync(path.join(sourceRoot, 'candidates'), { recursive: true });
-  const lesson = { schemaVersion: 1, id: 'lesson-available', projectPath: workspace, summary: 'Keep user choices during asynchronous refresh', appliesWhen: 'Refreshing views', doThis: 'Keep the selected mode', avoidThis: 'Resetting user state', evidenceRefs: [], status: 'candidate', updatedAt: '2026-01-01' };
+  const lesson = { schemaVersion: 1, id: 'lesson-available', projectPath: workspace, summary: 'Keep user choices during asynchronous refresh', appliesWhen: 'Refreshing views', doThis: 'Keep the selected mode', avoidThis: 'Resetting user state', evidenceRefs: [], status: 'approved', updatedAt: '2026-01-01' };
   fs.writeFileSync(path.join(sourceRoot, 'candidates', 'available.json'), JSON.stringify(lesson));
   const bytes = Buffer.from(JSON.stringify({ ...lesson, id: 'lesson-disconnected', projectPath: disconnected }));
   fs.writeFileSync(path.join(sourceRoot, 'candidates', 'disconnected.json'), bytes);

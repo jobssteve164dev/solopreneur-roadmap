@@ -64,125 +64,25 @@ test('isArtifactOrTempFile correctly flags build artifacts and temporary files',
   assert.equal(runDigest.isArtifactOrTempFile('src/extension.ts'), false);
 });
 
-test('buildLearningRetrievalContext filters out trash, local private data and applies deduplication', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-retrieval-test-'));
-  const projectPath = path.join(root, 'app');
-  const globalRoot = path.join(root, '.solomap-global');
-  fs.mkdirSync(projectPath, { recursive: true });
-
-  const paths = ledger.ensureLearningLedgerStore(projectPath, globalRoot);
-  const summaries = ['Same duplicate rule to check', 'Same duplicate rule to check', 'Run completed without explicit verification signal in captured tail', 'Private /home/ubuntu/project'];
-  summaries.forEach((summary, i) => fs.writeFileSync(path.join(paths.candidatesRoot, `fixture-${i}.json`), JSON.stringify({ schemaVersion: 1, id: `fixture-${i}`, projectPath, summary, appliesWhen: 'Duplicate rule check', doThis: 'Check actual outcomes', avoidThis: 'Do not guess', evidenceRefs: [], status: 'candidate', promotionTarget: 'pattern', updatedAt: '2026-09-08' })));
-
-  const retrieval = await readFormalLearningContext(projectPath, globalRoot, {
-    projectPath,
-    runKind: 'solo',
-    contextText: 'Duplicate rule check Junk verification /home/ubuntu',
-    files: [],
-    limit: 10
-  });
-
-  // 检查：
-  // 1. "Same duplicate rule to check" 去重后应该只出现一次
-  const occurrences = (retrieval.match(/Same duplicate rule to check/g) || []).length;
-  assert.equal(occurrences, 1);
-
-  // 2. 包含垃圾占位符的 "Run completed without explicit verification signal..." 应该被过滤掉，不能出现在 context 中
-  assert.doesNotMatch(retrieval, /without explicit verification signal/);
-
-  // 3. 包含本地绝对路径 /home/ubuntu 的应该被过滤掉
-  assert.doesNotMatch(retrieval, /home\/ubuntu/);
-});
-
-test('agent dispatch commands and empty verification placeholders do not become learning candidates', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agent-dispatch-learning-'));
-  const projectPath = path.join(root, 'app');
-  const globalRoot = path.join(root, '.solomap-global');
-  fs.mkdirSync(projectPath, { recursive: true });
-
-  const dispatchCommand = "cat '/home/ubuntu/project/app/.solopreneur/agent-runs/__solo__/2/prompt.txt' | '/usr/local/bin/codex' exec --color always -C '/home/ubuntu/project/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -";
-  assert.deepEqual(
-    runDigest.extractVerificationSignals('', dispatchCommand, 'Completed'),
-    []
-  );
-  assert.deepEqual(
-    runDigest.extractVerificationSignals('', 'npm test', 'Completed'),
-    ['Command: npm test']
-  );
-
-  const placeholderEvent = ledger.appendLearningEvent(projectPath, globalRoot, {
-    sourceType: 'solo',
-    sourceRef: 'solo-placeholder',
-    eventType: 'verified',
-    summary: 'Solo conversation state: Completed',
-    evidenceRefs: [{ type: 'run_digest', ref: '.solopreneur/run-digests/__solo__-2.json' }],
-    tags: ['solo'],
-    metadata: {
-      verification: ['Run completed without explicit verification signal in captured tail.'],
-      failures: []
-    }
-  });
-  const dispatchEvent = ledger.appendLearningEvent(projectPath, globalRoot, {
-    sourceType: 'solo',
-    sourceRef: 'solo-dispatch-command',
-    eventType: 'verified',
-    summary: 'Solo conversation state: Completed',
-    evidenceRefs: [{ type: 'command', ref: dispatchCommand }],
-    tags: ['solo'],
-    metadata: {
-      verification: [`Command: ${dispatchCommand}`],
-      failures: []
-    }
-  });
-
-  const candidateDecisionFiles = fs.readdirSync(path.join(globalRoot, 'learning', 'candidate-decisions')).filter((name) => name.endsWith('.json'));
-  const decisions = candidateDecisionFiles
-    .map((name) => JSON.parse(fs.readFileSync(path.join(globalRoot, 'learning', 'candidate-decisions', name), 'utf8')));
-  assert.deepEqual(decisions, [], 'no semantic decisions before manual review');
-
-  const retrieval = await readFormalLearningContext(projectPath, globalRoot, {
-    projectPath,
-    runKind: 'solo',
-    contextText: 'codex agent dispatch verification',
-    files: [],
-    limit: 5
-  });
-  const promotionContext = ledger.buildLearningPromotionContext(projectPath, globalRoot);
-  const summary = ledger.readLearningSummary(projectPath, globalRoot);
-
-  assert.doesNotMatch(retrieval, /Run completed without explicit verification signal|codex' exec|agent-runs|prompt\.txt/);
-  assert.doesNotMatch(promotionContext, /Run completed without explicit verification signal|codex' exec|agent-runs|prompt\.txt/);
-  assert.equal(summary.candidateCount, 0);
-  assert.equal(summary.projectSignals[0].verificationSignals, 0);
-});
-
-test('ordinary prompt construction does not propose automatic promotion', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-promotion-test-'));
-  const projectPath = path.join(root, 'app');
-  const globalRoot = path.join(root, '.solomap-global');
-  fs.mkdirSync(projectPath, { recursive: true });
-
-  // 写入两个一模一样的高置信度 event 以生成晋升建议
-  for (let i = 0; i < 2; i++) {
-    ledger.appendLearningEvent(projectPath, globalRoot, {
-      sourceType: 'user_correction',
-      sourceRef: `ref-promo-${i}`,
-      eventType: 'corrected',
-      summary: 'Duplicate rule to promote',
-      evidenceRefs: [{ type: 'user', ref: 'user' }],
-      tags: ['test'],
-      metadata: {}
-    });
+test('the production learning module has no legacy file ledger producers', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src', 'learningLedger.ts'), 'utf8');
+  for (const name of ['ensureLearningLedgerStore', 'appendLearningEvent', 'readLearningSummary', 'buildLearningPromotionContext']) {
+    assert.equal(ledger[name], undefined);
+    assert.doesNotMatch(source, new RegExp(`export (?:async )?function ${name}\\b`));
   }
+  assert.doesNotMatch(source, /writeFile|appendFile|mkdirSync|events\.jsonl|promotion-suggestions/);
+})
 
-  const promotionContext = ledger.buildLearningPromotionContext(projectPath, globalRoot);
-  
-  // 检查：
-  // 1. 去重，"Duplicate rule to promote" 的晋升建议应该只出现一次
-  const occurrences = (promotionContext.match(/Duplicate rule to promote/g) || []).length;
-  assert.equal(occurrences, 0);
-  assert.equal(promotionContext, '');
-});
+test('agent dispatch commands and empty verification placeholders are not verification signals', () => {
+  const dispatchCommand = "cat '/home/ubuntu/project/app/.solopreneur/agent-runs/__solo__/2/prompt.txt' | codex exec --dangerously-bypass-approvals-and-sandbox -";
+  assert.deepEqual(runDigest.extractVerificationSignals('', dispatchCommand, 'Completed'), []);
+  assert.deepEqual(runDigest.extractVerificationSignals('', 'npm test', 'Completed'), ['Command: npm test']);
+})
+
+test('ordinary prompt construction cannot create a file promotion side channel', () => {
+  assert.equal(ledger.buildLearningPromotionContext, undefined);
+  assert.equal(ledger.appendLearningEvent, undefined);
+})
 
 test('buildExecutionExperiencePrompt filters compiler artifacts and temp files from file lists and commands', () => {
   const digestRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-digest-test-'));
@@ -253,28 +153,7 @@ test('sanitizeProjectPaths correctly sanitizes local absolute paths and temp dir
   assert.equal(cleaned.includes('<runId>'), true);
 });
 
-test('appendLearningEvent filters and rejects pure junk events from ledger index', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-junk-test-'));
-  const projectPath = path.join(root, 'app');
-  const globalRoot = path.join(root, '.solomap-global');
-  fs.mkdirSync(projectPath, { recursive: true });
-
-  const ret = ledger.appendLearningEvent(projectPath, globalRoot, {
-    sourceType: 'solo',
-    sourceRef: 'solo-junk',
-    eventType: 'verified',
-    summary: 'Run completed without explicit verification signal in captured tail',
-    evidenceRefs: [],
-    tags: [],
-    metadata: {}
-  });
-
-  assert.equal(ret.id, 'skipped-junk-event');
-  
-  // 确认 events.jsonl 文件中不包含该 skipped-junk-event
-  const eventsPath = path.join(globalRoot, 'learning', 'ledger', 'events.jsonl');
-  if (fs.existsSync(eventsPath)) {
-    const fileContent = fs.readFileSync(eventsPath, 'utf8');
-    assert.equal(fileContent.includes('skipped-junk-event'), false);
-  }
+test('legacy learning producer exports remain retired after compilation', () => {
+  const compiled = fs.readFileSync(path.join(projectRoot, 'out', 'learningLedger.js'), 'utf8');
+  assert.doesNotMatch(compiled, /exports\.(appendLearningEvent|ensureLearningLedgerStore|readLearningSummary|buildLearningPromotionContext)/);
 });

@@ -18,7 +18,7 @@ export async function runConfiguredPiMainPath(options: {
     agentCli: config.agentCli,
     model: config.model,
     configRevision: config.revision,
-    workingDirectory: path.join(options.globalDataPath, 'runtime', 'pi-main-path-work'),
+    workingDirectory: options.globalDataPath,
     runner: options.runner
   });
   return new PiMainPathDelivery({ engine, publisher: options.publisher }).run(options.request);
@@ -26,5 +26,6 @@ export async function runConfiguredPiMainPath(options: {
 
 export async function runPiMainPathRequestFile(globalDataPath: string, requestFile: string): Promise<PiMainPathResult> {
   const request = JSON.parse(fs.readFileSync(requestFile, 'utf8')) as PiMainPathRequest;
+  try { fs.unlinkSync(requestFile); } catch { /* The parent also owns exact-file cleanup. */ }
   return runConfiguredPiMainPath({ globalDataPath, request });
 }

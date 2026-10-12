@@ -392,8 +392,11 @@ function bootstrapSoloMapWebviewRuntime(): void {
         title: skill.title || skill.id,
         description: skill.description || '',
         installed: true,
-        statusLabel: config.t('installedStatus'),
-        statusClass: 'ready',
+        enabled: skill.status !== 'disabled' && skill.enabled !== false,
+        canUpgrade: skill.source?.type !== 'builtin' && Boolean(skill.source?.input || skill.source?.url || skill.source?.repo || skill.source?.repository),
+        canUninstall: skill.source?.type !== 'builtin',
+        statusLabel: skill.status === 'disabled' || skill.enabled === false ? config.t('disabledStatus') : config.t('installedStatus'),
+        statusClass: skill.status === 'disabled' || skill.enabled === false ? 'disabled' : 'ready',
         meta: config.t('skillMetaPrefix') + (skill.entry || '')
       }));
       items.push({
@@ -410,9 +413,11 @@ function bootstrapSoloMapWebviewRuntime(): void {
         title: connector.title || connector.id,
         description: connector.description || '',
         installed: true,
+        enabled: connector.status !== 'disabled' && connector.enabled !== false,
+        canUpgrade: !(connector.id === 'builtin:solomap-intelligence' && connector.source?.kind === 'builtin') && Boolean(connector.source?.input || connector.source?.url || connector.source?.repo || connector.source?.repository),
         canUninstall: !(connector.id === 'builtin:solomap-intelligence' && connector.source?.kind === 'builtin'),
-        statusLabel: config.t('installedStatus'),
-        statusClass: 'ready',
+        statusLabel: connector.status === 'disabled' || connector.enabled === false ? config.t('disabledStatus') : config.t('installedStatus'),
+        statusClass: connector.status === 'disabled' || connector.enabled === false ? 'disabled' : 'ready',
         meta: config.t('connectorMetaPrefix') + (connector.type || 'mcp')
       }));
       items.push({
@@ -422,21 +427,32 @@ function bootstrapSoloMapWebviewRuntime(): void {
         description: config.t('addConnectorDescription'),
         installed: false
       });
-      (Array.isArray(settings?.enhancementStatuses) ? settings.enhancementStatuses : []).forEach((enhancement: any) => {
-        const installed = enhancement.status === 'ready' || enhancement.installed;
-        items.push({
-          id: 'enhancement-' + enhancement.id,
-          type: 'enhancement',
-          originId: enhancement.id,
-          title: enhancement.title || enhancement.id,
-          description: enhancement.description || '',
-          installed,
-          statusLabel: enhancement.statusLabel || (installed ? config.t('readyStatus') : config.t('notInstalledStatus')),
-          statusClass: enhancement.status || (installed ? 'ready' : 'missing'),
-          meta: config.t('enhancementMetaPrefix') + (enhancement.version || 'unknown')
-        });
+      const operations = Array.isArray(settings?.capabilityOperations) ? settings.capabilityOperations : [];
+      const latestOperation = (kind: string, targetId: string | null) => {
+        const matching = operations
+          .filter((operation: any) => operation.kind === kind && (operation.targetId || null) === targetId)
+          .sort((left: any, right: any) => Number(right.ordinal || 0) - Number(left.ordinal || 0));
+        return matching.find((operation: any) => ['pending', 'running'].includes(operation.status) && ['install', 'upgrade', 'uninstall'].includes(operation.action))
+          || matching.find((operation: any) => ['pending', 'running'].includes(operation.status))
+          || matching[0];
+      };
+      return items.map((item) => {
+        const kind = item.type === 'skill' || item.type === 'add-new-skill' ? 'skill'
+          : item.type === 'connector' || item.type === 'add-new-connector' ? 'mcp' : '';
+        if (!kind) return item;
+        const operation = latestOperation(kind, item.originId || null);
+        if (!operation || !['pending', 'running', 'failed'].includes(operation.status)) return item;
+        const busy = operation.status === 'pending' || operation.status === 'running';
+        const uninstalling = operation.action === 'uninstall';
+        return {
+          ...item,
+          busy,
+          operationStatus: operation.status,
+          operationError: operation.status === 'failed' ? config.t('abilityFailedHelp') : '',
+          statusLabel: busy ? config.t(uninstalling ? 'uninstallingStatus' : 'installingStatus') : config.t('abilityFailedStatus'),
+          statusClass: busy ? (uninstalling ? 'uninstalling' : 'installing') : 'failed'
+        };
       });
-      return items;
     }
 
     function render(settings: any): void {
@@ -451,8 +467,7 @@ function bootstrapSoloMapWebviewRuntime(): void {
 
       const groups = [
         ['abilityGroupSkills', ['skill', 'add-new-skill']],
-        ['abilityGroupConnectors', ['connector', 'add-new-connector']],
-        ['abilityGroupEnhancements', ['enhancement']]
+        ['abilityGroupConnectors', ['connector', 'add-new-connector']]
       ];
       const menu = elements.select.querySelector('[data-solo-menu]');
       if (menu) {
@@ -477,24 +492,33 @@ function bootstrapSoloMapWebviewRuntime(): void {
         elements.urlInput.placeholder = skill
           ? 'e.g. https://skills.sh/owner/repo or owner/repo@skill'
           : 'e.g. GitHub MCP server URL, npm package, or config snippet';
-        elements.urlHelp.textContent = config.t(skill ? 'skillInstallInputHelp' : 'mcpInstallInputHelp');
-        elements.installButton.removeAttribute('disabled');
+        elements.urlHelp.textContent = selected.operationError || config.t(skill ? 'skillInstallInputHelp' : 'mcpInstallInputHelp');
+        if (selected.busy) elements.installButton.setAttribute('disabled', 'true');
+        else elements.installButton.removeAttribute('disabled');
+        const installLabel = elements.installButton.querySelector?.('span:last-child');
+        if (installLabel) installLabel.textContent = config.t('installAbility');
         elements.uninstallButton.setAttribute('disabled', 'true');
+        if (elements.toggleButton) elements.toggleButton.style.display = 'none';
       } else {
         elements.detailTitle.textContent = selected.title;
         elements.detailDescription.textContent = selected.description;
         elements.detailStatus.textContent = selected.statusLabel;
         elements.detailStatus.className = 'enhancement-status ' + selected.statusClass;
-        elements.detailMeta.textContent = selected.meta || '';
-        const canInstall = selected.type === 'enhancement' && !selected.installed;
-        if (canInstall) {
-          elements.installButton.removeAttribute('disabled');
-          elements.uninstallButton.setAttribute('disabled', 'true');
-        } else {
-          elements.installButton.setAttribute('disabled', 'true');
-          if (selected.canUninstall === false) elements.uninstallButton.setAttribute('disabled', 'true');
-          else elements.uninstallButton.removeAttribute('disabled');
+        elements.detailMeta.textContent = selected.operationError || selected.meta || '';
+        const canUpgrade = selected.installed && selected.canUpgrade === true;
+        const installLabel = elements.installButton.querySelector?.('span:last-child');
+        if (installLabel) installLabel.textContent = config.t(canUpgrade ? 'upgradeAbility' : 'installAbility');
+        if (elements.toggleButton) {
+          elements.toggleButton.style.display = selected.installed ? '' : 'none';
+          if (selected.busy) elements.toggleButton.setAttribute('disabled', 'true');
+          else elements.toggleButton.removeAttribute('disabled');
+          const label = elements.toggleButton.querySelector('span:last-child');
+          if (label) label.textContent = config.t(selected.enabled ? 'disableEnhancement' : 'enableEnhancement');
         }
+        if (!selected.busy && canUpgrade) elements.installButton.removeAttribute('disabled');
+        else elements.installButton.setAttribute('disabled', 'true');
+        if (!selected.busy && selected.installed && selected.canUninstall !== false) elements.uninstallButton.removeAttribute('disabled');
+        else elements.uninstallButton.setAttribute('disabled', 'true');
       }
       bindSoloSelect(elements.select, (value) => {
         selectedId = value || '';
@@ -505,6 +529,7 @@ function bootstrapSoloMapWebviewRuntime(): void {
     function install(): void {
       const value = String(config.elements.urlInput?.value || '').trim();
       if (!selectedId || !currentSettings) return;
+      if (buildItems(currentSettings).find((item) => item.id === selectedId)?.busy) return;
       if (selectedId === 'add-new-skill') {
         if (!value) return config.showMessage(config.t('skillInputRequired'), true);
         config.showMessage(config.t('installingSkillMessage'));
@@ -513,19 +538,22 @@ function bootstrapSoloMapWebviewRuntime(): void {
         if (!value) return config.showMessage(config.t('mcpInputRequired'), true);
         config.showMessage(config.t('installingMcpMessage'));
         config.postMessage({ command: 'ability.installMcp', mcpInput: value });
-      } else if (selectedId.startsWith('enhancement-')) {
-        config.showMessage(config.t('installingEnhancementMessage'));
-        config.postMessage({ command: 'ability.installEnhancement', enhancementId: selectedId.substring(12) });
+      } else if (selectedId.startsWith('skill-')) {
+        config.showMessage(config.t('upgradingAbilityMessage'));
+        config.postMessage({ command: 'ability.upgradeSkill', skillId: selectedId.substring(6) });
+      } else if (selectedId.startsWith('connector-')) {
+        config.showMessage(config.t('upgradingAbilityMessage'));
+        config.postMessage({ command: 'ability.upgradeMcp', mcpId: selectedId.substring(10) });
       }
     }
 
     function uninstall(): void {
       if (!selectedId || !currentSettings) return;
-      if (buildItems(currentSettings).find((item) => item.id === selectedId)?.canUninstall === false) return;
+      const selected = buildItems(currentSettings).find((item) => item.id === selectedId);
+      if (selected?.busy || selected?.canUninstall === false) return;
       const actions = [
         ['skill-', 'uninstallingSkillMessage', 'ability.uninstallSkill', 'skillId'],
-        ['connector-', 'uninstallingMcpMessage', 'ability.uninstallMcp', 'mcpId'],
-        ['enhancement-', 'uninstallingEnhancementMessage', 'ability.uninstallEnhancement', 'enhancementId']
+        ['connector-', 'uninstallingMcpMessage', 'ability.uninstallMcp', 'mcpId']
       ];
       const action = actions.find(([prefix]) => selectedId.startsWith(prefix));
       if (!action) return;
@@ -534,8 +562,23 @@ function bootstrapSoloMapWebviewRuntime(): void {
       config.postMessage({ command, [idKey]: selectedId.substring(prefix.length) });
     }
 
+    function toggle(): void {
+      if (!selectedId || !currentSettings) return;
+      const selected = buildItems(currentSettings).find((item) => item.id === selectedId);
+      if (!selected || selected.busy || !selected.installed) return;
+      const actions = [
+        ['skill-', 'ability.setSkillEnabled', 'skillId'],
+        ['connector-', 'ability.setMcpEnabled', 'mcpId']
+      ];
+      const action = actions.find(([prefix]) => selectedId.startsWith(prefix));
+      if (!action) return;
+      const [prefix, command, idKey] = action;
+      config.postMessage({ command, [idKey]: selectedId.substring(prefix.length), enabled: !selected.enabled });
+    }
+
     config.elements.installButton?.addEventListener('click', install);
     config.elements.uninstallButton?.addEventListener('click', uninstall);
+    config.elements.toggleButton?.addEventListener('click', toggle);
     return { render, buildItems };
   }
 

@@ -22,22 +22,79 @@ interface DiagnosticOperationEvent {
   durationMs: number;
   message?: string;
 }
+export interface LocalDiagnosticEvent {
+  kind: 'error' | 'operation';
+  occurredAt: string;
+  scope: string;
+  payload: Record<string, unknown>;
+  idempotencyKey: string;
+}
+interface LocalDiagnosticPersistence {
+  append(globalDataPath: string, event: LocalDiagnosticEvent): void | Promise<void>;
+  read?(globalDataPath: string): Promise<{ items: Record<string, unknown>[] }>;
+}
 export interface LocalDiagnosticTrace {
   id: string;
   record(stage: string, status: DiagnosticStageStatus, durationMs?: number, error?: unknown): void;
 }
 const activeTrace = new AsyncLocalStorage<LocalDiagnosticTrace>();
+let persistence: LocalDiagnosticPersistence | undefined;
+const currentErrors = new Map<string, DiagnosticEntry[]>();
+const currentOperations = new Map<string, DiagnosticOperationEvent[]>();
+const databaseErrors = new Map<string, DiagnosticEntry[]>();
+const databaseOperations = new Map<string, DiagnosticOperationEvent[]>();
+const loadingRoots = new Map<string, Promise<void>>();
+
+function diagnosticRoot(globalDataPath: string): string {
+  return normalizeGlobalDataPathForExtension(globalDataPath);
+}
+
+function remember<T>(map: Map<string, T[]>, globalDataPath: string, value: T, limit: number): void {
+  const root = diagnosticRoot(globalDataPath);
+  map.set(root, [...(map.get(root) || []), value].slice(-limit));
+}
+
+function loadDatabaseDiagnostics(globalDataPath: string): Promise<void> {
+  const root = diagnosticRoot(globalDataPath);
+  if (!persistence?.read) return Promise.resolve();
+  const active = loadingRoots.get(root);
+  if (active) return active;
+  const loading = persistence.read(root).then(result => {
+    const errors: DiagnosticEntry[] = [];
+    const operations: DiagnosticOperationEvent[] = [];
+    for (const item of result.items || []) {
+      const payload = item.payload && typeof item.payload === 'object' ? item.payload as Record<string, unknown> : {};
+      if (item.kind === 'error') errors.push({
+        at: String(item.occurredAt || ''), scope: String(item.scope || ''),
+        fingerprint: String(payload.fingerprint || ''), message: String(payload.message || '')
+      });
+      if (item.kind === 'operation') operations.push({
+        at: String(item.occurredAt || ''), traceId: String(payload.traceId || ''),
+        stage: String(item.scope || ''), status: String(payload.status || 'error') as DiagnosticStageStatus,
+        durationMs: Number(payload.durationMs || 0), ...(payload.message ? { message: String(payload.message) } : {})
+      });
+    }
+    databaseErrors.set(root, errors.slice(-MAX_ENTRIES));
+    databaseOperations.set(root, operations.slice(-MAX_OPERATION_EVENTS));
+  }).catch(error => console.warn('SoloMap diagnostics could not be loaded:', sanitizeDiagnosticText(error)))
+    .finally(() => loadingRoots.delete(root));
+  loadingRoots.set(root, loading);
+  return loading;
+}
+
+export function configureLocalDiagnosticPersistence(value: LocalDiagnosticPersistence | undefined, globalDataPath?: string): void {
+  persistence = value;
+  if (globalDataPath) void loadDatabaseDiagnostics(globalDataPath);
+}
+
+function appendDiagnostic(globalDataPath: string, event: LocalDiagnosticEvent): void {
+  if (!persistence) return;
+  void Promise.resolve(persistence.append(diagnosticRoot(globalDataPath), event))
+    .catch(error => console.warn('SoloMap diagnostics could not be saved:', sanitizeDiagnosticText(error)));
+}
 
 function diagnosticDirectory(globalDataPath: string, date = new Date()): string {
   return path.join(normalizeGlobalDataPathForExtension(globalDataPath), 'diagnostics', date.toISOString().slice(0, 10));
-}
-
-function getDiagnosticsPath(globalDataPath: string): string {
-  return path.join(diagnosticDirectory(globalDataPath), `recent-errors.${PROCESS_DIAGNOSTIC_ID}.json`);
-}
-
-function getOperationEventsPath(globalDataPath: string): string {
-  return path.join(diagnosticDirectory(globalDataPath), `recent-operations.${PROCESS_DIAGNOSTIC_ID}.json`);
 }
 
 function diagnosticFiles(globalDataPath: string, kind: 'errors' | 'operations'): string[] {
@@ -114,40 +171,29 @@ function readOperationEvents(filePath: string): DiagnosticOperationEvent[] {
 }
 
 function readRecentOperationEvents(globalDataPath: string): DiagnosticOperationEvent[] {
-  return diagnosticFiles(globalDataPath, 'operations')
-    .slice(0, 50)
-    .flatMap(readOperationEvents)
+  const root = diagnosticRoot(globalDataPath);
+  return [...(databaseOperations.get(root) || []), ...(currentOperations.get(root) || [])]
     .sort((a, b) => String(a.at).localeCompare(String(b.at)))
     .slice(-MAX_OPERATION_EVENTS);
 }
 
 export function createLocalDiagnosticTrace(globalDataPath: string, source: string): LocalDiagnosticTrace {
-  const filePath = getOperationEventsPath(globalDataPath);
   const id = crypto.randomBytes(8).toString('hex');
-  let writeFailureReported = false;
   const trace: LocalDiagnosticTrace = {
     id,
     record(stage, status, durationMs = 0, error) {
-      try {
-        const normalizedStage = String(stage || 'unknown').replace(/[^a-z0-9._-]/gi, '_').slice(0, 80);
-        const entry: DiagnosticOperationEvent = {
-          at: new Date().toISOString(),
-          traceId: id,
-          stage: normalizedStage,
-          status,
-          durationMs: Math.max(0, Math.round(Number(durationMs) || 0)),
-          ...(error === undefined ? {} : { message: diagnosticStageMessage(normalizedStage, error) })
-        };
-        const entries = [...readOperationEvents(filePath), entry].slice(-MAX_OPERATION_EVENTS);
-        fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-        const temporary = `${filePath}.tmp`;
-        fs.writeFileSync(temporary, JSON.stringify({ schemaVersion: 1, entries }, null, 2), { encoding: 'utf8', mode: 0o600 });
-        fs.chmodSync(temporary, 0o600);
-        fs.renameSync(temporary, filePath);
-      } catch (error) {
-        if (!writeFailureReported) console.warn('SoloMap operation diagnostics could not be saved:', sanitizeDiagnosticText(error));
-        writeFailureReported = true;
-      }
+      const normalizedStage = String(stage || 'unknown').replace(/[^a-z0-9._-]/gi, '_').slice(0, 80);
+      const entry: DiagnosticOperationEvent = {
+        at: new Date().toISOString(), traceId: id, stage: normalizedStage, status,
+        durationMs: Math.max(0, Math.round(Number(durationMs) || 0)),
+        ...(error === undefined ? {} : { message: diagnosticStageMessage(normalizedStage, error) })
+      };
+      remember(currentOperations, globalDataPath, entry, MAX_OPERATION_EVENTS);
+      appendDiagnostic(globalDataPath, {
+        kind: 'operation', occurredAt: entry.at, scope: normalizedStage,
+        payload: { traceId: id, status, durationMs: entry.durationMs, ...(entry.message ? { message: entry.message } : {}) },
+        idempotencyKey: `diagnostic-operation:${PROCESS_DIAGNOSTIC_ID}:${id}:${entry.at}:${normalizedStage}:${status}`
+      });
     }
   };
   trace.record(source, 'start');
@@ -189,37 +235,77 @@ function readStore(filePath: string): DiagnosticStore {
 }
 
 function readRecentErrors(globalDataPath: string): DiagnosticEntry[] {
-  return diagnosticFiles(globalDataPath, 'errors')
-    .slice(0, 50)
-    .flatMap(filePath => readStore(filePath).entries)
+  const root = diagnosticRoot(globalDataPath);
+  return [...(databaseErrors.get(root) || []), ...(currentErrors.get(root) || [])]
     .sort((a, b) => String(a.at).localeCompare(String(b.at)))
     .slice(-MAX_ENTRIES);
 }
 
-export function recordLocalDiagnosticError(globalDataPath: string, scope: string, error: unknown): void {
-  try {
-    const filePath = getDiagnosticsPath(globalDataPath);
-    const store = readStore(filePath);
-    const message = sanitizeDiagnosticText(error);
-    const normalizedScope = String(scope || 'unknown').replace(/[^a-z0-9._-]/gi, '_').slice(0, 80);
-    const fingerprint = crypto.createHash('sha256').update(`${normalizedScope}\n${message}`).digest('hex').slice(0, 12);
-    store.entries.push({ at: new Date().toISOString(), scope: normalizedScope, fingerprint, message });
-    store.entries = store.entries.slice(-MAX_ENTRIES);
-    fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-    const tempPath = `${filePath}.tmp`;
-    fs.writeFileSync(tempPath, JSON.stringify(store, null, 2), { encoding: 'utf8', mode: 0o600 });
-    fs.chmodSync(tempPath, 0o600);
-    fs.renameSync(tempPath, filePath);
-  } catch (error) {
-    console.warn('SoloMap error diagnostics could not be saved:', sanitizeDiagnosticText(error));
+export async function importLegacyLocalDiagnostics(
+  globalDataPath: string,
+  append: (event: LocalDiagnosticEvent) => void | Promise<void>,
+  capture: (source: { identity: string; key: string; hash: string }, bytes: Buffer) => { unchanged?: boolean; stage?: string } | void,
+  settle?: (source: { identity: string; key: string; hash: string }, result: 'imported' | 'conflict', error?: string) => void
+): Promise<{ files: number; events: number }> {
+  const root = diagnosticRoot(globalDataPath);
+  const files = [...new Set([...diagnosticFiles(root, 'errors'), ...diagnosticFiles(root, 'operations')])];
+  let events = 0;
+  for (const filePath of files) {
+    let source: { identity: string; key: string; hash: string } | undefined;
+    try {
+      const bytes = fs.readFileSync(filePath);
+      const hash = crypto.createHash('sha256').update(bytes).digest('hex');
+      const key = path.relative(root, filePath).split(path.sep).join('/');
+      source = { identity: `local-diagnostics:${root}`, key, hash };
+      const captured = capture(source, bytes);
+      if (captured?.unchanged && captured.stage === 'imported') continue;
+      const parsed = JSON.parse(bytes.toString('utf8')) as { entries?: unknown };
+      if (!Array.isArray(parsed?.entries)) throw new Error('legacy_diagnostic_entries_invalid');
+      const pending: LocalDiagnosticEvent[] = [];
+      if (/recent-errors/.test(path.basename(filePath))) for (const [index, raw] of parsed.entries.entries()) {
+        const entry = raw as DiagnosticEntry;
+        if (!entry?.at || !entry.scope || !entry.fingerprint || typeof entry.message !== 'string') throw new Error('legacy_diagnostic_error_invalid');
+        pending.push({ kind: 'error', occurredAt: entry.at, scope: entry.scope,
+          payload: { fingerprint: entry.fingerprint, message: entry.message },
+          idempotencyKey: `legacy-diagnostic:${hash}:error:${index}` });
+      }
+      if (/recent-operations/.test(path.basename(filePath))) for (const [index, raw] of parsed.entries.entries()) {
+        const entry = raw as DiagnosticOperationEvent;
+        if (!entry?.at || !entry.traceId || !entry.stage || !['start', 'ok', 'error', 'cancel'].includes(entry.status)) throw new Error('legacy_diagnostic_operation_invalid');
+        pending.push({ kind: 'operation', occurredAt: entry.at, scope: entry.stage,
+          payload: { traceId: entry.traceId, status: entry.status, durationMs: Math.max(0, Number(entry.durationMs || 0)), ...(entry.message ? { message: entry.message } : {}) },
+          idempotencyKey: `legacy-diagnostic:${hash}:operation:${index}` });
+      }
+      for (const event of pending) await append(event);
+      events += pending.length;
+      settle?.(source, 'imported');
+    } catch (error) {
+      if (source) {
+        try { settle?.(source, 'conflict', error instanceof Error ? error.message : String(error)); } catch { /* Legacy evidence cannot block the database runtime. */ }
+      }
+    }
   }
+  return { files: files.length, events };
 }
 
-export function buildLocalDiagnosticSummary(
+export function recordLocalDiagnosticError(globalDataPath: string, scope: string, error: unknown): void {
+  const message = sanitizeDiagnosticText(error);
+  const normalizedScope = String(scope || 'unknown').replace(/[^a-z0-9._-]/gi, '_').slice(0, 80);
+  const fingerprint = crypto.createHash('sha256').update(`${normalizedScope}\n${message}`).digest('hex').slice(0, 12);
+  const entry = { at: new Date().toISOString(), scope: normalizedScope, fingerprint, message };
+  remember(currentErrors, globalDataPath, entry, MAX_ENTRIES);
+  appendDiagnostic(globalDataPath, {
+    kind: 'error', occurredAt: entry.at, scope: normalizedScope, payload: { fingerprint, message },
+    idempotencyKey: `diagnostic-error:${PROCESS_DIAGNOSTIC_ID}:${entry.at}:${fingerprint}`
+  });
+}
+
+export async function buildLocalDiagnosticSummary(
   context: vscode.ExtensionContext,
   globalDataPath: string,
   host: { appName?: string; version?: string; remoteName?: string; uiKind?: number; uriScheme?: string }
-): string {
+): Promise<string> {
+  await loadDatabaseDiagnostics(globalDataPath);
   const entries = readRecentErrors(globalDataPath).slice(-10);
   const operationEvents = readRecentOperationEvents(globalDataPath).slice(-20);
   return [

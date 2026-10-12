@@ -14,7 +14,7 @@ import { buildReadOnlyAgentCommandForPromptFile } from './agentCli';
 import { getCodexSessionHome, NativeSessionBinding } from './sessionIdentity';
 import { readWindowsProcessBirthMarker } from './processIdentity.js';
 import { maintenanceRunKinds } from './runLifecycleTypes';
-import { captureInstallationFiles } from './capabilityRegistry';
+import { captureMaintenanceRunResult, maintenanceResultSignature } from './maintenanceRunResult';
 
 function argument(name: string): string {
   const index = process.argv.indexOf(name);
@@ -92,19 +92,10 @@ async function main(): Promise<void> {
   const maintenance = maintenanceRunKinds.includes(String(plan.status.runKind));
   const executionRoot = maintenance ? String(plan.status.maintenanceWorkspaceRoot || projectRoot) : projectRoot;
   const captureMaintenanceResult = async (): Promise<boolean> => {
-    if (!maintenance || !plan.status.maintenanceResultPath) return false;
-    const file = String(plan.status.maintenanceResultPath);
-    const temporaryRoot = path.join(globalDataPath, 'tmp');
-    const relative = path.relative(temporaryRoot, file);
-    if (!relative || relative.startsWith('..' + path.sep) || relative === '..' || path.isAbsolute(relative)) throw new Error('maintenance_result_path_invalid');
-    if (!fs.existsSync(file)) return false;
-    const [content] = captureInstallationFiles(temporaryRoot, { result: file });
-    if (!await request('read_run_document', { ...identity, purpose: 'maintenance_result' })) {
-      await request('write_run_document', { ...identity, generation, turnId: state.turnId, purpose: 'maintenance_result', bytes: content.bytes, mimeType: 'application/json', expectedRevision: 0, idempotencyKey: `run:${plan.runId}:${generation}:maintenance-result` });
-    }
-    return true;
+    return captureMaintenanceRunResult(globalDataPath, { ...state, generation }, request);
   };
   let codexHome = '';
+  let claudeConfigDirOverride: string | null | undefined;
   let child: childProcess.ChildProcess | undefined;
   let exited: Promise<[number | null, NodeJS.Signals | null]> | undefined;
   let captures: Promise<void>[] = [];
@@ -159,15 +150,18 @@ async function main(): Promise<void> {
     if (!command.trim()) throw new Error('run_command_required');
     const heads = await Promise.all(streams.map(stream => request<{ nextSequence: number; totalBytes: number }>('read_run_log_head', { ...identity, stream })));
     checkStopped();
-    const environment = Array.isArray(plan.status.enhancementEnvLines) ? plan.status.enhancementEnvLines.map(String).join('\n') : '';
-    const executionCommand = environment ? `${environment}\n${command}` : command;
-    const inner = terminal ? `if command -v script >/dev/null 2>&1; then exec script -q -f -e -c ${shellQuote(executionCommand)} /dev/null; else exec bash -c ${shellQuote(executionCommand)}; fi` : `exec bash -c ${shellQuote(executionCommand)}`;
+    const inner = terminal ? `if command -v script >/dev/null 2>&1; then exec script -q -f -e -c ${shellQuote(command)} /dev/null; else exec bash -c ${shellQuote(command)}; fi` : `exec bash -c ${shellQuote(command)}`;
     // The child cannot execute the Agent before its PID is durably registered.
     // If the wrapper dies before releasing fd 3, EOF exits this gate.
+    const env: NodeJS.ProcessEnv = { ...process.env, ...(codexHome ? { CODEX_HOME: codexHome } : {}), SOLOMAP_TASK_COMMAND: path.join(__dirname, 'taskCheckpointProcess.js'), SOLOMAP_GLOBAL_DATA_PATH: globalDataPath, SOLOMAP_PROJECT_ID: plan.projectId, SOLOMAP_EXECUTION_LOG_ID: String(executionLogId), SOLOMAP_RUN_GENERATION: String(generation), SOLOMAP_RUN_PROOF: proof, SOLOMAP_TASK_TURN_ID: state.turnId };
+    if (claudeConfigDirOverride === null) delete env.CLAUDE_CONFIG_DIR;
+    else if (claudeConfigDirOverride) env.CLAUDE_CONFIG_DIR = claudeConfigDirOverride;
+    env.SOLOMAP_NODE_EXECUTABLE = process.execPath;
+    env.ELECTRON_RUN_AS_NODE = '1';
     child = childProcess.spawn('bash', ['-c', `IFS= read -r solomap_launch_gate <&3 || exit 125; [ "$solomap_launch_gate" = launch ] || exit 125; exec 3<&-; ${inner}`], {
       cwd: executionRoot,
       stdio: ['inherit', 'pipe', 'pipe', 'pipe'],
-      env: { ...process.env, ...(codexHome ? { CODEX_HOME: codexHome } : {}), SOLOMAP_TASK_COMMAND: path.join(__dirname, 'taskCheckpointProcess.js'), SOLOMAP_GLOBAL_DATA_PATH: globalDataPath, SOLOMAP_PROJECT_ID: plan.projectId, SOLOMAP_EXECUTION_LOG_ID: String(executionLogId), SOLOMAP_RUN_GENERATION: String(generation), SOLOMAP_RUN_PROOF: proof, SOLOMAP_TASK_TURN_ID: state.turnId },
+      env,
       detached: process.platform !== 'win32'
     });
     exited = once(child, 'close') as Promise<[number | null, NodeJS.Signals | null]>;
@@ -227,8 +221,17 @@ async function main(): Promise<void> {
     await stdoutDisplay(bytes);
   };
   try {
+    if (maintenance && plan.status.maintenanceResultPath) {
+      await patch({ maintenanceResultGeneration: generation, maintenanceResultBaseline: maintenanceResultSignature(String(plan.status.maintenanceResultPath)) });
+    }
     if (getAgentProvider(String(plan.status.agentCli || (plan.status.agentLaunch as DatabaseAgentLaunch | undefined)?.agentCli || '')) === 'codex') {
       codexHome = getCodexSessionHome(await request<NativeSessionBinding | null>('read_run_binding', identity));
+    }
+    if (getAgentProvider(String(plan.status.agentCli || (plan.status.agentLaunch as DatabaseAgentLaunch | undefined)?.agentCli || '')) === 'claude') {
+      const binding = await request<NativeSessionBinding | null>('read_run_binding', identity);
+      const context = [...(binding?.revisions || [])].reverse().find(value => value.providerContext?.claude)?.providerContext?.claude as Record<string, unknown> | undefined;
+      claudeConfigDirOverride = context?.configDirOverride === null ? null : String(context?.configDirOverride || context?.claudeHome || '') || undefined;
+      if (claudeConfigDirOverride && !path.isAbsolute(claudeConfigDirOverride)) throw new Error('identity_provider_context_invalid');
     }
     if (!state.status.baseGitHash) {
       const baseGitHash = (plan.status.runKind === 'agent_review_revision' || plan.status.preSessionGitBackup === true)
@@ -242,9 +245,6 @@ async function main(): Promise<void> {
       await request('write_run_document', { ...identity, generation, turnId: state.turnId, purpose: baselinePurpose, bytes: Buffer.from(JSON.stringify(baseline)).toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: `run:${plan.runId}:${generation}:workspace:before:${state.turnId}` });
     }
     let command = plan.command;
-    if (Array.isArray(plan.status.enhancementPreflightLines) && plan.status.enhancementPreflightLines.length) {
-      await execute(plan.status.enhancementPreflightLines.map(String).join('\n'), ['preflight:enhancements:stdout', 'preflight:enhancements:stderr'], false, false);
-    }
     const launch = plan.status.agentLaunch as DatabaseAgentLaunch | undefined;
     if (launch?.readOnly) {
       const materialized = await request<{ path: string }>('materialize_run_prompt', { ...identity, generation, proof });
@@ -255,7 +255,7 @@ async function main(): Promise<void> {
       state = await prepareNativeAgentLaunch({ state, workspaceRoot: projectRoot, operation: request, execute: (command, stream) => execute(command, [`preflight:${stream}:stdout`, `preflight:${stream}:stderr`], false, false, true) });
       if (!launch.direct) {
         const sessionId = String(state.status.plannedNativeSessionId || '');
-        command = buildDatabaseAgentCommand({ ...launch, continuation: launch.continuation || (getAgentProvider(launch.agentCli) === 'cursor' && Boolean(sessionId)) }, plan.runId, plan.revision, executionRoot, interactive, sessionId, String(state.status.bindingNonce || ''));
+        command = buildDatabaseAgentCommand({ ...launch, continuation: launch.continuation || (getAgentProvider(launch.agentCli) === 'cursor' && Boolean(sessionId)) }, plan.runId, plan.revision, executionRoot, interactive, sessionId, String(state.status.bindingNonce || ''), state.status.claudeNativeObserverCapable === true);
       }
     }
     const initialHeads = await Promise.all(['stdout', 'stderr'].map(stream => request<{ totalBytes: number }>('read_run_log_head', { ...identity, stream })));
@@ -304,7 +304,8 @@ async function main(): Promise<void> {
     signalChild('SIGTERM');
     if (exited) await exited.catch(() => undefined);
     await Promise.allSettled(captures);
-    await captureMaintenanceResult();
+    try { await captureMaintenanceResult(); }
+    catch (captureError) { await writeHostOutput(`\n安装回执保存失败：${captureError instanceof Error ? captureError.message : String(captureError)}\n`); }
     state = await request<RunState>('read_run_state', identity);
     const exitCode = Number((error as Error & { exitCode?: number }).exitCode || 1);
     const stopSummary = requestedSignal && [130, 143].includes(exitCode) ? continuationStopSummary(exitCode) : undefined;

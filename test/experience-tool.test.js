@@ -44,7 +44,7 @@ test('experience retrieve returns structured lessons and rejects generic URL mat
     applies_when: 'Agent 需要历史经验但当前提示词应保持精简时。',
     do_this: '使用 retrieve 查询，并优先读取结构化经验和证据入口。',
     avoid_this: '不要把原始运行记录或无关历史任务注入首次提示词。',
-    does_not_apply_when: '没有可信原文时。', verification: '读取固定版本原文再验证。', confidence: 0.9, status: 'candidate'
+    does_not_apply_when: '没有可信原文时。', verification: '读取固定版本原文再验证。', confidence: 0.9, status: 'approved'
   } });
   store.write({ kind: 'lesson', action: 'create', scope: project.projectId, idempotencyKey: 'noise-lesson', data: {
     summary: '执行失败模式待复用排障：ERROR: You have hit your usage limit. https://example.com/usage',
@@ -126,7 +126,7 @@ test('typed confidence keeps the stronger lesson when equivalent candidates arri
   const server = await startRuntimeControlServer({ globalDataPath: globalRoot, runtimeId: 'confidence-owner', onCommand: () => ({ status: 'running' }), onData: ops });
   try {
     const project = await ops({ operation: 'register_project', input: { root: workspace } });
-    const data = { status: 'candidate', summary: 'OAuth 回调验证必须绑定完整 nonce 和当前会话。', applies_when: 'OAuth 回调验证时。', do_this: '先核对 nonce 再确认身份。' };
+    const data = { status: 'approved', summary: 'OAuth 回调验证必须绑定完整 nonce 和当前会话。', applies_when: 'OAuth 回调验证时。', do_this: '先核对 nonce 再确认身份。' };
     const strong = store.write({ kind: 'lesson', action: 'create', scope: project.projectId, idempotencyKey: 'strong', data: { ...data, confidence: 0.9 } });
     store.write({ kind: 'lesson', action: 'create', scope: project.projectId, idempotencyKey: 'weak', data: { ...data, confidence: 0.2 } });
     const result = JSON.parse((await promisify(childProcess.execFile)(process.execPath, [toolPath, 'retrieve', '--project', workspace, '--global', globalRoot, '--query', 'OAuth 回调验证 nonce', '--json'])).stdout);
@@ -143,7 +143,7 @@ test('real experience CLI preserves typed evidence, role filters and the origina
   const server = await startRuntimeControlServer({ globalDataPath: globalRoot, runtimeId: 'typed-experience-owner', onCommand: () => ({ status: 'running' }), onData: ops });
   try {
     const project = await ops({ operation: 'register_project', input: { root: workspace } });
-    const data = { status: 'candidate', summary: 'Validate the final generated script through its actual runtime output', applies_when: 'Changing executable generation', do_this: 'Run the generated script', confidence: 1, external_confidence: 'high', lesson_type: 'verification_pattern', evidence_refs_json: [{ type: 'command', ref: 'node --test stablereplaynonce.test.js', summary: 'The final regression passed' }] };
+    const data = { status: 'approved', summary: 'Validate the final generated script through its actual runtime output', applies_when: 'Changing executable generation', do_this: 'Run the generated script', confidence: 1, external_confidence: 'high', lesson_type: 'verification_pattern', evidence_refs_json: [{ type: 'command', ref: 'node --test stablereplaynonce.test.js', summary: 'The final regression passed' }] };
     const lesson = store.write({ kind: 'lesson', action: 'create', scope: project.projectId, idempotencyKey: 'typed-evidence', data });
     const invoke = async (query, json = true) => (await promisify(childProcess.execFile)(process.execPath, [toolPath, 'retrieve', '--project', workspace, '--global', globalRoot, '--query', query, ...(json ? ['--json'] : [])], { encoding: 'utf8' })).stdout;
     const result = JSON.parse(await invoke('stablereplaynonce 验证'));
@@ -154,7 +154,7 @@ test('real experience CLI preserves typed evidence, role filters and the origina
     const markdown = await invoke('stablereplaynonce 验证', false);
     assert.match(markdown, /node --test stablereplaynonce\.test\.js/);
     assert.match(markdown, new RegExp(`${lesson.objectId}.*revision[=: ]+1`));
-    const common = { status: 'candidate', summary: 'nativetypemismatch should retain the original relevance and quality boundary', applies_when: 'nativetypemismatch', confidence: 0.8 };
+    const common = { status: 'approved', summary: 'nativetypemismatch should retain the original relevance and quality boundary', applies_when: 'nativetypemismatch', confidence: 0.8 };
     store.write({ kind: 'lesson', action: 'create', scope: project.projectId, idempotencyKey: 'typed-verification-filter', data: { ...common, lesson_type: 'verification_pattern' } });
     store.write({ kind: 'lesson', action: 'create', scope: project.projectId, idempotencyKey: 'typed-risk-filter', data: { ...common, lesson_type: 'risk_pattern', summary: common.summary + ' for actual failures' } });
     assert.deepEqual(JSON.parse(await invoke('nativetypemismatch')).payload.lessons, [], 'verification and risk lessons keep their established query-type gates');
@@ -171,12 +171,12 @@ test('an ordinary revision uses its current confidence while preserving the orig
   const server = await startRuntimeControlServer({ globalDataPath: globalRoot, runtimeId: 'confidence-revision-owner', onCommand: () => ({ status: 'running' }), onData: ops }); let client;
   try {
     const { projectId } = await ops({ operation: 'register_project', input: { root: workspace } }); client = runtimeMcpSource(globalRoot, projectId, true);
-    const original = store.write({ kind: 'lesson', action: 'create', scope: projectId, idempotencyKey: 'original-high-source', data: { status: 'candidate', summary: 'currentconfidencerevision preserves observed applicability after a new result', applies_when: 'currentconfidencerevision', confidence: 1, external_confidence: 'high' } });
+    const original = store.write({ kind: 'lesson', action: 'create', scope: projectId, idempotencyKey: 'original-high-source', data: { status: 'approved', summary: 'currentconfidencerevision preserves observed applicability after a new result', applies_when: 'currentconfidencerevision', confidence: 1, external_confidence: 'high' } });
     const invoke = async () => JSON.parse((await promisify(childProcess.execFile)(process.execPath, [toolPath, 'retrieve', '--project', workspace, '--global', globalRoot, '--query', 'currentconfidencerevision', '--json'], { encoding: 'utf8' })).stdout).payload.lessons[0];
     assert.equal((await invoke()).confidence, 'high');
-    const next = await client.call('write', { kind: 'lesson', action: 'patch', scope: projectId, objectId: original.objectId, expectedRevision: 1, idempotencyKey: 'native-confidence-decrease', data: { confidence: 0.2 } });
+    const next = store.write({ kind: 'lesson', action: 'patch', scope: projectId, objectId: original.objectId, expectedRevision: 1, idempotencyKey: 'native-confidence-decrease', data: { confidence: 0.2 } });
     assert.equal((await invoke()).confidence, 0.2, 'the current value must not be shadowed by the original imported label');
-    await client.call('write', { kind: 'lesson', action: 'patch', scope: projectId, objectId: original.objectId, expectedRevision: next.revision, idempotencyKey: 'native-confidence-zero', data: { confidence: 0 } });
+    store.write({ kind: 'lesson', action: 'patch', scope: projectId, objectId: original.objectId, expectedRevision: next.revision, idempotencyKey: 'native-confidence-zero', data: { confidence: 0 } });
     assert.equal((await invoke()).confidence, 0);
     assert.equal((await client.call('read', { ref: original.objectId, revision: 1 })).data.external_confidence, 'high');
   } finally { if (client) await client.close(); await server.close(); await ops.close(); store.close(); }

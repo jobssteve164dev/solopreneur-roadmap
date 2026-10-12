@@ -3,6 +3,7 @@ import * as fs from 'fs';
 
 import { RoadmapNode } from './db/types';
 import { commandExists } from './agentCli';
+import { loadExternalDeliverySummary, loadExternalSecuritySummary } from './projectExternalSignals';
 
 const FEEDBACK_ISSUE_URL = 'https://github.com/jobssteve164dev/solopreneur-roadmap/issues/new';
 
@@ -27,7 +28,7 @@ export function buildFeedbackIssueUrl(title: string, body: string, category = ''
     '- [ ] Ran an Agent or Solo conversation',
     '',
     'Local usage summary:',
-    localUsageSummary || 'No local usage summary file was available.',
+    localUsageSummary || 'No local usage summary was available.',
     '',
     'What happened:',
     '',
@@ -172,129 +173,38 @@ export function buildGithubIssueContext(workspaceRoot: string, node: RoadmapNode
   return ['当前环节关联的 GitHub Issues：', ...sections].join('\n\n');
 }
 
-export function buildGithubDeliveryContext(workspaceRoot: string): string {
-  const repo = getGithubRepoSlug(workspaceRoot);
-  if (!repo || !commandExists('gh')) {
-    return '';
-  }
-  const releaseResult = childProcess.spawnSync('gh', [
-    'release',
-    'list',
-    '--repo',
-    repo,
-    '--limit',
-    '1',
-    '--json',
-    'tagName,name,publishedAt,url'
-  ], {
-    encoding: 'utf8',
-    timeout: 4500,
-    stdio: ['ignore', 'pipe', 'ignore']
-  });
-  const runResult = childProcess.spawnSync('gh', [
-    'run',
-    'list',
-    '--repo',
-    repo,
-    '--limit',
-    '3',
-    '--json',
-    'name,displayTitle,status,conclusion,createdAt,updatedAt,url'
-  ], {
-    encoding: 'utf8',
-    timeout: 4500,
-    stdio: ['ignore', 'pipe', 'ignore']
-  });
-  if (releaseResult.status !== 0 && runResult.status !== 0) {
-    return '';
-  }
-  let latestRelease = '';
+export async function buildGithubDeliveryContext(workspaceRoot: string, globalDataPath = ''): Promise<string> {
   try {
-    const releases = releaseResult.status === 0 ? JSON.parse(String(releaseResult.stdout || '[]')) : [];
-    const release = Array.isArray(releases) ? releases[0] : null;
-    if (release) {
-      latestRelease = [
-        `最新 Release：${String(release.tagName || release.name || '').trim()}`,
-        String(release.publishedAt || '').trim() ? `发布时间：${String(release.publishedAt).trim()}` : '',
-        String(release.url || '').trim() ? `链接：${String(release.url).trim()}` : ''
-      ].filter(Boolean).join('\n');
-    }
-  } catch {}
-  let workflowSummary = '';
-  try {
-    const runs = runResult.status === 0 ? JSON.parse(String(runResult.stdout || '[]')) : [];
-    const lines = Array.isArray(runs)
-      ? runs.slice(0, 3).map((run: any, index: number) => {
-        const name = String(run.displayTitle || run.name || `workflow-${index + 1}`).trim();
-        const state = [String(run.status || '').trim(), String(run.conclusion || '').trim()].filter(Boolean).join('/');
-        const when = String(run.updatedAt || run.createdAt || '').trim();
-        return `${index + 1}. ${name}：${state || 'unknown'}${when ? ` · ${when}` : ''}${run.url ? ` · ${String(run.url).trim()}` : ''}`;
+    const summary = await loadExternalDeliverySummary(workspaceRoot, { globalDataPath });
+    if (!summary.available) return '';
+    const latestRelease = summary.latestRelease ? [
+      `最新 Release：${summary.latestRelease}`,
+      summary.latestReleaseAt ? `发布时间：${summary.latestReleaseAt}` : '',
+      summary.latestReleaseUrl ? `链接：${summary.latestReleaseUrl}` : ''
+    ].filter(Boolean).join('\n') : '';
+    const workflowSummary = summary.recentWorkflowRuns.length ? [
+      '最近 GitHub Actions：',
+      ...summary.recentWorkflowRuns.slice(0, 3).map((run, index) => {
+        const name = run.displayTitle || run.name || `workflow-${index + 1}`;
+        const state = [run.status, run.conclusion].filter(Boolean).join('/');
+        const when = run.updatedAt || run.createdAt;
+        return `${index + 1}. ${name}：${state || 'unknown'}${when ? ` · ${when}` : ''}${run.url ? ` · ${run.url}` : ''}`;
       })
-      : [];
-    if (lines.length) {
-      workflowSummary = ['最近 GitHub Actions：', ...lines].join('\n');
-    }
-  } catch {}
-  const sections = [latestRelease, workflowSummary].filter(Boolean);
-  return sections.length ? ['当前项目交付信号：', ...sections].join('\n\n') : '';
+    ].join('\n') : '';
+    const sections = [latestRelease, workflowSummary].filter(Boolean);
+    return sections.length ? ['当前项目交付信号：', ...sections].join('\n\n') : '';
+  } catch { return ''; }
 }
 
-function normalizeSecuritySeverity(value: string): string {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (['critical', 'high', 'medium', 'low'].includes(normalized)) return normalized;
-  if (normalized === 'error') return 'high';
-  if (normalized === 'warning') return 'medium';
-  return normalized || 'unknown';
-}
-
-function readGithubApiJson(repo: string, endpoint: string): any[] {
-  const result = childProcess.spawnSync('gh', ['api', endpoint], {
-    encoding: 'utf8',
-    timeout: 4200,
-    stdio: ['ignore', 'pipe', 'ignore']
-  });
-  if (result.status !== 0) {
-    return [];
-  }
+export async function buildGithubSecurityContext(workspaceRoot: string, globalDataPath = ''): Promise<string> {
   try {
-    const parsed = JSON.parse(String(result.stdout || '[]'));
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-export function buildGithubSecurityContext(workspaceRoot: string): string {
-  const repo = getGithubRepoSlug(workspaceRoot);
-  if (!repo || !commandExists('gh')) {
-    return '';
-  }
-  const dependabotAlerts = readGithubApiJson(repo, `/repos/${repo}/dependabot/alerts?state=open&per_page=100`)
-    .map((alert: any) => ({
-      source: 'Dependabot',
-      title: String(alert?.security_advisory?.summary || alert?.dependency?.package?.name || 'Dependency alert'),
-      severity: normalizeSecuritySeverity(alert?.security_advisory?.severity || ''),
-      url: String(alert?.html_url || alert?.url || '')
-    }));
-  const codeScanningAlerts = readGithubApiJson(repo, `/repos/${repo}/code-scanning/alerts?state=open&per_page=100`)
-    .map((alert: any) => ({
-      source: String(alert?.tool?.name || 'Code scanning'),
-      title: String(alert?.rule?.description || alert?.rule?.name || alert?.rule?.id || 'Code scanning alert'),
-      severity: normalizeSecuritySeverity(alert?.rule?.security_severity_level || alert?.rule?.severity || ''),
-      url: String(alert?.html_url || alert?.url || '')
-    }));
-  const priorityAlerts = [...dependabotAlerts, ...codeScanningAlerts]
-    .filter((alert) => ['critical', 'high'].includes(alert.severity))
-    .slice(0, 5);
-  if (!priorityAlerts.length) {
-    return '';
-  }
-  return [
-    '当前项目安全审计信号：',
-    ...priorityAlerts.map((alert, index) => {
-      const url = alert.url ? ` · ${alert.url}` : '';
-      return `${index + 1}. ${alert.source}：${alert.severity} · ${alert.title}${url}`;
-    }),
-    '高危或严重安全告警应优先于普通推进动作处理；中低风险只作为背景。'
-  ].join('\n');
+    const summary = await loadExternalSecuritySummary(workspaceRoot, { globalDataPath });
+    const priorityAlerts = summary.alerts.filter(alert => ['critical', 'high'].includes(alert.severity)).slice(0, 5);
+    if (!summary.available || !priorityAlerts.length) return '';
+    return [
+      '当前项目安全审计信号：',
+      ...priorityAlerts.map((alert, index) => `${index + 1}. ${alert.source}：${alert.severity} · ${alert.title}${alert.url ? ` · ${alert.url}` : ''}`),
+      '高危或严重安全告警应优先于普通推进动作处理；中低风险只作为背景。'
+    ].join('\n');
+  } catch { return ''; }
 }

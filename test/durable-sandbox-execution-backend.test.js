@@ -6,6 +6,7 @@ const path = require('path');
 const test = require('node:test');
 
 const { ProjectAutonomyAuthorizationStore } = require('../out/projectAutonomyAuthorization.js');
+const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const {
   DurableSandboxExecutionBackend,
   recoverDurableExecutionStates
@@ -19,7 +20,8 @@ function setup() {
   const stateRoot = path.join(root, 'state');
   fs.mkdirSync(project);
   fs.mkdirSync(workspace, { recursive: true });
-  const authorization = new ProjectAutonomyAuthorizationStore({ globalDataPath: root });
+  const dataStore = new UnifiedDataStore(root);
+  const authorization = new ProjectAutonomyAuthorizationStore({ globalDataPath: root, dataStore });
   const grant = authorization.setEnabled(project, true, [project]);
   const sandboxInputs = [];
   const sandbox = {
@@ -37,7 +39,7 @@ function setup() {
     readBaseRevision: async () => 'base-1',
     pollIntervalMs: 20
   };
-  return { root, project, workspace, grant, options, authorization, sandboxInputs };
+  return { root, project, workspace, grant, options, authorization, sandboxInputs, dataStore };
 }
 
 test('backend derives tool network access from the current project policy', async () => {

@@ -13,12 +13,81 @@ import { assertVersion2Binding, NativeSessionBinding } from './sessionIdentity.j
 
 const digest = (bytes: Uint8Array) => crypto.createHash('sha256').update(bytes).digest('hex');
 
+async function resolveProjectDatabaseSource(projectRoot: string, source: string, fileName: string): Promise<{ projectRoot: string; source: string }> {
+  const declaredSource = await fs.promises.lstat(source);
+  if (!declaredSource.isFile() || declaredSource.isSymbolicLink()) throw new Error('migration_source_invalid');
+  const physicalProjectRoot = await fs.promises.realpath(projectRoot);
+  const physicalSource = await fs.promises.realpath(source);
+  if (physicalSource !== path.join(physicalProjectRoot, '.solopreneur', fileName)) {
+    throw new Error('migration_source_scope_mismatch');
+  }
+  const stat = await fs.promises.lstat(physicalSource);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('migration_source_invalid');
+  return { projectRoot: physicalProjectRoot, source: physicalSource };
+}
+
+async function captureSqliteSnapshot(
+  source: string,
+  initialize: (store: SqliteStore) => Promise<void>
+): Promise<{ source: string; snapshot: string; bytes: Buffer; hash: string; cleanup(): Promise<void> }> {
+  const before = await fs.promises.lstat(source);
+  if (!before.isFile() || before.isSymbolicLink()) throw new Error('migration_source_invalid');
+  const capturedSource = await stableFile(source);
+  const snapshot = path.join(os.tmpdir(), `solomap-migration-snapshot-${crypto.randomUUID()}.db`);
+  const cleanup = async () => {
+    for (const file of [`${snapshot}-shm`, `${snapshot}-wal`, snapshot]) {
+      try { await fs.promises.unlink(file); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    }
+  };
+  const legacy = new SqliteStore(source, path.resolve(__dirname, '..'));
+  try {
+    try {
+      await initialize(legacy);
+      await legacy.backup(snapshot);
+    } finally {
+      legacy.close();
+    }
+    const after = await fs.promises.lstat(source);
+    if (!after.isFile() || after.isSymbolicLink() || before.dev !== after.dev || before.ino !== after.ino
+      || before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw new Error('migration_source_changed');
+    const currentSource = await stableFile(source);
+    if (currentSource.hash !== capturedSource.hash) throw new Error('migration_source_changed');
+    await stableFile(snapshot);
+    return {
+      source,
+      snapshot,
+      ...capturedSource,
+      cleanup
+    };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+}
+
 async function stableFile(file: string): Promise<{ bytes: Buffer; hash: string }> {
   const before = await fs.promises.lstat(file);
   if (!before.isFile() || before.isSymbolicLink()) throw new Error('migration_source_invalid');
   const bytes = await fs.promises.readFile(file); const after = await fs.promises.lstat(file);
   if (before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw new Error('migration_source_changed');
   return { bytes, hash: digest(bytes) };
+}
+
+export async function initializeProjectJournalAllocation(store: UnifiedDataStore, projectRoot: string): Promise<number> {
+  const physicalProjectRoot = await fs.promises.realpath(projectRoot);
+  const project = await store.registerProject({ root: physicalProjectRoot });
+  const reserved = store.readProjectJournalMinimum(project.projectId);
+  if (reserved !== null) return reserved;
+  const declaredSource = path.join(projectRoot, '.solopreneur', 'project_journal.db');
+  try { const stat = await fs.promises.lstat(declaredSource); if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('migration_source_invalid'); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return store.reserveProjectJournalIds(project.projectId, 1); throw error; }
+  const source = (await resolveProjectDatabaseSource(projectRoot, declaredSource, 'project_journal.db')).source;
+  const legacy = new SqliteStore(source, path.resolve(__dirname, '..'));
+  try {
+    await legacy.initJournalReadOnly();
+    return store.reserveProjectJournalIds(project.projectId, legacy.getLastExecutionLogId() + 1);
+  } finally { legacy.close(); }
 }
 
 export async function importProjectJournal(store: UnifiedDataStore, source: string, options: any = {}): Promise<MemoryImportResult> {
@@ -39,12 +108,15 @@ export async function importProjectJournal(store: UnifiedDataStore, source: stri
       }
     }
   }
+  const { projectRoot: physicalProjectRoot, source: physicalSource } = await resolveProjectDatabaseSource(projectRoot, source, 'project_journal.db');
   store.markMigrationSourceRechecking(identity, path.basename(source));
-  const captured = await stableFile(source); result.originalBytes = captured.bytes.length;
+  const captured = await captureSqliteSnapshot(physicalSource, legacy => legacy.initJournalReadOnly()); result.originalBytes = captured.bytes.length;
+  try {
   store.captureMigrationSource({ identity, key: path.basename(source), hash: captured.hash }, captured.bytes, { mimeType: 'application/x-sqlite3', encoding: 'binary' });
-  const project = await store.registerProject({ root: projectRoot }); const legacy = new SqliteStore(source, path.resolve(__dirname, '..'));
+  const project = await store.registerProject({ root: physicalProjectRoot }); const legacy = new SqliteStore(captured.snapshot, path.resolve(__dirname, '..'));
   try {
     await legacy.initJournalReadOnly();
+    store.reserveProjectJournalIds(project.projectId, legacy.getLastExecutionLogId() + 1);
     for (let offset = 0; ; offset += 200) {
       const page = legacy.getExecutionJournalPageRaw({ limit: 200, offset });
       for (const entry of page.logs) {
@@ -70,6 +142,7 @@ export async function importProjectJournal(store: UnifiedDataStore, source: stri
   if (result.conflicts.length) store.markMigrationSourceConflict(identity, path.basename(source), JSON.stringify(result.conflicts));
   else store.markMigrationSourceImported(identity, path.basename(source));
   return result;
+  } finally { await captured.cleanup(); }
 }
 
 async function captureHistoricalOutput(store: UnifiedDataStore, projectId: string, projectRoot: string, file: string, executionLogId: number): Promise<string> {
@@ -172,6 +245,37 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
   const sourceInfo = await fs.promises.lstat(sourceRoot);
   if (sourceInfo.isSymbolicLink() || await fs.promises.realpath(sourceRoot) !== path.join(resolvedRoot, '.solopreneur', 'agent-runs')) throw new Error('migration_source_scope_mismatch');
   const files = await filesUnder(sourceRoot, (source, error) => result.conflicts.push({ source, error: String(error) }));
+  const statusRoot = path.join(projectRoot, '.solopreneur', 'agent-status');
+  const projectStatus = path.join(projectRoot, '.agent_status.json');
+  const statusFiles = files.filter(file => path.basename(file) === '.agent_status.json');
+  try { await fs.promises.lstat(projectStatus); statusFiles.push(projectStatus); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') result.conflicts.push({ source: projectStatus, error: String(error) }); }
+  try {
+    const statusInfo = await fs.promises.lstat(statusRoot);
+    if (statusInfo.isSymbolicLink() || !statusInfo.isDirectory() || await fs.promises.realpath(statusRoot) !== path.join(resolvedRoot, '.solopreneur', 'agent-status')) throw new Error('historical_run_status_scope_mismatch');
+    statusFiles.push(...await filesUnder(statusRoot, (source, error) => result.conflicts.push({ source, error: String(error) }), true));
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') result.conflicts.push({ source: statusRoot, error: String(error) }); }
+  const uniqueStatusFiles = [...new Set(statusFiles)];
+  const liveStatusFiles = new Set<string>();
+  const liveRunDirectories = new Set<string>();
+  for (const statusFile of uniqueStatusFiles) {
+    try {
+      const status = JSON.parse((await stableFile(statusFile)).bytes.toString('utf8'));
+      if (!status || typeof status !== 'object' || !store.historicalRunOwnerAlive(status)) continue;
+      const declared = ['sessionFilePath', 'promptFilePath', 'commandFilePath', 'outputFilePath']
+        .map(field => String(status[field] || '').trim()).filter(Boolean).map(file => path.dirname(path.resolve(file)));
+      if (new Set(declared).size !== 1) continue;
+      const directory = declared[0], relative = path.relative(sourceRoot, directory), parts = relative.split(path.sep);
+      const executionLogId = Number(status.rootExecutionLogId || status.executionLogId);
+      if (relative && !relative.startsWith('..') && !path.isAbsolute(relative) && parts[0] === status.nodeId
+        && (parts.length === 1 || parts.length === 2 && Number(parts[1]) === executionLogId)) {
+        liveRunDirectories.add(directory);
+        liveStatusFiles.add(statusFile);
+      }
+    } catch {
+      // Invalid sources are handled by the normal importer and remain visible as conflicts.
+    }
+  }
   const filesByNode = new Map<string, string[]>();
   for (const file of files) {
     const node = path.relative(sourceRoot, file).split(path.sep)[0];
@@ -183,6 +287,10 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
   const runDirectory = (relative: string) => { const parts = relative.split(path.sep); return parts.length >= 3 && /^\d+$/.test(parts[1]) ? parts.slice(0, 2).join(path.sep) : parts[0]; };
   for (const file of files) {
     if (options.shouldContinue && !options.shouldContinue()) return { ...result, interrupted: true };
+    if ([...liveRunDirectories].some(directory => file === directory || file.startsWith(`${directory}${path.sep}`))) {
+      const captured = await stableFile(file); result.originalBytes += captured.bytes.length; result.retainedFiles.push(file); result.unchanged++;
+      continue;
+    }
     try {
       const relativePath = path.relative(sourceRoot, file); const captured = await stableFile(file); result.originalBytes += captured.bytes.length; result.retainedFiles.push(file);
       store.captureMigrationSource({ identity, key: relativePath, hash: captured.hash }, captured.bytes, { mimeType: 'application/octet-stream', encoding: 'binary' });
@@ -241,18 +349,12 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
     } catch (error) { result.conflicts.push({ source: taskFile, error: String(error) }); }
     await new Promise<void>(resolve => setImmediate(resolve));
   }
-  const statusRoot = path.join(projectRoot, '.solopreneur', 'agent-status');
-  const projectStatus = path.join(projectRoot, '.agent_status.json');
-  const statusFiles = files.filter(file => path.basename(file) === '.agent_status.json');
-  try { await fs.promises.lstat(projectStatus); statusFiles.push(projectStatus); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') result.conflicts.push({ source: projectStatus, error: String(error) }); }
-  try {
-    const statusInfo = await fs.promises.lstat(statusRoot);
-    if (statusInfo.isSymbolicLink() || !statusInfo.isDirectory() || await fs.promises.realpath(statusRoot) !== path.join(resolvedRoot, '.solopreneur', 'agent-status')) throw new Error('historical_run_status_scope_mismatch');
-    statusFiles.push(...await filesUnder(statusRoot, (source, error) => result.conflicts.push({ source, error: String(error) }), true));
-  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') result.conflicts.push({ source: statusRoot, error: String(error) }); }
-  for (const file of statusFiles) {
+  for (const file of uniqueStatusFiles) {
     if (options.shouldContinue && !options.shouldContinue()) return { ...result, interrupted: true };
+    if (liveStatusFiles.has(file)) {
+      if (!files.includes(file)) { const captured = await stableFile(file); result.originalBytes += captured.bytes.length; result.retainedFiles.push(file); result.unchanged++; }
+      continue;
+    }
     const external = !files.includes(file), statusIdentity = file === projectStatus ? `project-agent-status:${projectRoot}` : external ? `agent-status:${projectRoot}` : identity;
     const key = file === projectStatus ? '.agent_status.json' : path.relative(external ? statusRoot : sourceRoot, file);
     let captured: Awaited<ReturnType<typeof stableFile>> | undefined;
@@ -329,7 +431,8 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         if (status.outputFilePath && path.basename(status.outputFilePath) !== 'output.log') throw new Error('historical_run_input_missing');
         const journal = store.readProjectJournal(project.projectId, { executionLogId: id, nodeId: String(status.nodeId), limit: 1 }).logs[0];
         if (!journal || !journal.output) throw new Error('historical_run_input_missing');
-        const bytes = Buffer.from(JSON.stringify(journal));
+        const { dataState: _dataState, ...sourceJournal } = journal;
+        const bytes = Buffer.from(JSON.stringify(sourceJournal));
         outputSource = { identity: `historical-journal-output:${projectRoot}`, key: String(id), hash: digest(bytes) };
         store.captureMigrationSource(outputSource, bytes, { mimeType: 'application/json', encoding: 'utf8' });
         output = Buffer.from(journal.output);
@@ -440,10 +543,12 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
 export async function importProjectGrowth(store: UnifiedDataStore, source: string, options: any = {}): Promise<MemoryImportResult> {
   const projectRoot = String(options.projectRoot || ''); const identity = `project-growth:${projectRoot}`;
   const result: MemoryImportResult = { imported: 0, unchanged: 0, originalBytes: 0, conflicts: [], retainedFiles: [source], interrupted: false };
-  const captured = await stableFile(source); result.originalBytes = captured.bytes.length;
+  const { projectRoot: physicalProjectRoot, source: physicalSource } = await resolveProjectDatabaseSource(projectRoot, source, 'project_growth.db');
+  const captured = await captureSqliteSnapshot(physicalSource, legacy => legacy.initReadOnly()); result.originalBytes = captured.bytes.length;
+  try {
   const sourceState = store.captureMigrationSource({ identity, key: path.basename(source), hash: captured.hash }, captured.bytes, { mimeType: 'application/x-sqlite3', encoding: 'binary' });
   if (sourceState.unchanged && sourceState.stage === 'imported') { result.unchanged = 1; return result; }
-  const project = await store.registerProject({ root: projectRoot }); const legacy = new SqliteStore(source, path.resolve(__dirname, '..'));
+  const project = await store.registerProject({ root: physicalProjectRoot }); const legacy = new SqliteStore(captured.snapshot, path.resolve(__dirname, '..'));
   try {
     await legacy.initReadOnly();
     for (const row of legacy.getAllGrowthSnapshotHistory().reverse()) {
@@ -457,6 +562,7 @@ export async function importProjectGrowth(store: UnifiedDataStore, source: strin
   } finally { legacy.close(); }
   store.markMigrationSourceImported(identity, path.basename(source));
   return result;
+  } finally { await captured.cleanup(); }
 }
 
 export async function importStepMemoryDirectory(store: UnifiedDataStore, sourceRoot: string, options: any = {}): Promise<MemoryImportResult> {

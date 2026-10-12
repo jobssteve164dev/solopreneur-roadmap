@@ -11,7 +11,16 @@ export interface DatabaseAgentLaunch {
   readOnly?: boolean;
 }
 
-export function buildDatabaseAgentCommand(launch: DatabaseAgentLaunch, runId: string, revision: number, workspaceRoot: string, interactive: boolean, sessionId = '', bindingNonce = ''): string {
+export function buildDatabaseAgentCommand(launch: DatabaseAgentLaunch, runId: string, revision: number, workspaceRoot: string, interactive: boolean, sessionId = '', bindingNonce = '', claudeObserver = false): string {
+  const command = buildUnobservedDatabaseAgentCommand(launch, runId, revision, workspaceRoot, interactive, sessionId, bindingNonce);
+  if (!claudeObserver || launch.readOnly || getAgentProvider(launch.agentCli) !== 'claude') return command;
+  const executable = `${shellQuote(launch.agentCli)} `;
+  const offset = command.indexOf(executable);
+  if (offset < 0) throw new Error('run_agent_launch_invalid');
+  return command.slice(0, offset) + executable + `--plugin-dir ${shellQuote(path.resolve(__dirname, '../resources/claude-observer'))} ` + command.slice(offset + executable.length);
+}
+
+function buildUnobservedDatabaseAgentCommand(launch: DatabaseAgentLaunch, runId: string, revision: number, workspaceRoot: string, interactive: boolean, sessionId = '', bindingNonce = ''): string {
   if (launch.schemaVersion !== 1 || !launch.agentCli || !/^[0-9a-f-]{36}$/.test(runId) || !Number.isInteger(revision) || revision < 1) throw new Error('run_agent_launch_invalid');
   if (launch.readOnly) {
     const command = buildReadOnlyAgentCommandForPromptFile(launch.agentCli, '{{SOLOMAP_REVIEW_INPUT}}', workspaceRoot, launch.selectedModel);

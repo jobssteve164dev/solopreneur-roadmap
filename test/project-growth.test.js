@@ -14,6 +14,20 @@ function writeFile(filePath, content) {
   fs.writeFileSync(filePath, content, 'utf8');
 }
 
+function unlinkExisting(files) {
+  for (const file of files) if (fs.existsSync(file)) fs.unlinkSync(file);
+}
+
+function removeEmptyDirectories(directories) {
+  for (const directory of directories) if (fs.existsSync(directory)) fs.rmdirSync(directory);
+}
+
+function cleanupRuntimeDataRoot(globalDataPath) {
+  unlinkExisting(['control.json', 'owner.json'].map(name => path.join(globalDataPath, 'runtime', name)));
+  unlinkExisting(['solomap.db-wal', 'solomap.db-shm', 'solomap.db'].map(name => path.join(globalDataPath, name)));
+  removeEmptyDirectories([path.join(globalDataPath, 'runtime'), globalDataPath, path.dirname(globalDataPath)]);
+}
+
 function createRoadmapNode(id, title) {
   return {
     id,
@@ -126,7 +140,23 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
 
   const runtime = launchRuntime(globalDataPath);
   await waitForRuntime(runtime, globalDataPath);
-  t.after(() => stopRuntime(runtime, globalDataPath));
+  t.after(async () => {
+    try { await stopRuntime(runtime, globalDataPath); }
+    finally {
+      unlinkExisting([
+        path.join(solopreneurDir, 'coverage', 'project-growth-coverage.json'),
+        path.join(solopreneurDir, 'project.json'), path.join(solopreneurDir, 'roadmap.csv'),
+        dbPath, `${dbPath}-wal`, `${dbPath}-shm`,
+        path.join(tempRoot, 'src', 'db', 'store.ts'), path.join(tempRoot, 'src', 'db', 'cache.ts'), path.join(tempRoot, 'src', 'db', 'queue.ts'),
+        path.join(tempRoot, 'src', 'extension.ts'), path.join(tempRoot, 'test', 'store.test.js'), path.join(tempRoot, 'docs', 'methodology.md')
+      ]);
+      removeEmptyDirectories([
+        path.join(solopreneurDir, 'coverage'), solopreneurDir,
+        path.join(tempRoot, 'src', 'db'), path.join(tempRoot, 'src'), path.join(tempRoot, 'test'), path.join(tempRoot, 'docs'), tempRoot
+      ]);
+      cleanupRuntimeDataRoot(globalDataPath);
+    }
+  });
 
   const view = await refreshProjectGrowthSnapshot(tempRoot, projectRoot, {
     globalDataPath,
@@ -162,10 +192,11 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   assert.ok(view.capabilityHealth.some((capability) => capability.nodeId === 'capability:roadmap:roadmap-data'));
   assert.ok(view.keyEdges.some((edge) => edge.kind === 'depends_on' && edge.targetId === 'package:papaparse'));
   assert.ok(view.keyEdges.some((edge) => edge.kind === 'tested_by'));
-  assert.ok(view.keyEdges.some((edge) => edge.kind === 'implements' && edge.targetId === 'capability:roadmap:roadmap-data'));
+  assert.equal(view.keyEdges.some((edge) => edge.kind === 'implements' && edge.targetId === 'capability:roadmap:roadmap-data'), false);
   assert.ok(view.keyEdges.every((edge) => edge.sourceId !== edge.targetId));
   assert.ok(view.keyEdges.every((edge) => !edge.sourceId.startsWith('file:') && !edge.targetId.startsWith('file:')));
-  assert.ok(view.gaps.some((gap) => gap.source === 'run_index' || gap.source === 'growth_rules'));
+  assert.equal(view.gaps.some((gap) => gap.source === 'run_index'), false,
+    'normal growth refresh must not read the legacy project journal outside the explicit importer');
 
   const growthDbPath = path.join(solopreneurDir, 'project_growth.db');
   assert.equal(fs.existsSync(growthDbPath), false);
@@ -193,12 +224,11 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
     && edge.sourceId === 'file:src/extension.ts'
     && edge.targetId === 'package:papaparse'
   )));
-  assert.ok(latest.edges.some((edge) => edge.kind === 'implements' && edge.targetId === 'capability:roadmap:roadmap-data'));
-  assert.ok(latest.signals.some((signal) => signal.type === 'failure' && ['attention', 'blocked'].includes(signal.level)));
+  assert.equal(latest.edges.some((edge) => edge.kind === 'implements' && edge.targetId === 'capability:roadmap:roadmap-data'), false);
+  assert.equal(latest.signals.some((signal) => signal.type === 'failure' && ['attention', 'blocked'].includes(signal.level)), false);
 
   const persistedView = buildProjectGrowthViewModel(latest);
   assert.equal(persistedView.totals.capabilities, 1);
-  assert.ok(persistedView.gaps.length > 0);
   writeFile(path.join(solopreneurDir, 'coverage', 'project-growth-coverage.json'), JSON.stringify({
     version: 1,
     provider: 'c8-istanbul',
@@ -269,7 +299,16 @@ test('parallel projects can write and immediately read isolated growth snapshots
   projects.forEach(root => fs.mkdirSync(root));
   const runtime = launchRuntime(globalDataPath);
   await waitForRuntime(runtime, globalDataPath);
-  t.after(() => stopRuntime(runtime, globalDataPath));
+  t.after(async () => {
+    try { await stopRuntime(runtime, globalDataPath); }
+    finally {
+      for (const root of projects) {
+        unlinkExisting([path.join(root, '.solopreneur', 'project.json')]);
+        removeEmptyDirectories([path.join(root, '.solopreneur'), root, path.dirname(root)]);
+      }
+      cleanupRuntimeDataRoot(globalDataPath);
+    }
+  });
   const snapshots = projects.map((root, index) => ({
     snapshot: { id: `snapshot-${index}`, projectPath: root, createdAt: `2026-01-0${index + 1}T00:00:00.000Z`, gitHead: '', scanReason: 'concurrent-test', status: 'completed', durationMs: index, error: '' },
     nodes: [{ snapshotId: `snapshot-${index}`, nodeId: 'directory:.', parentId: '', kind: 'directory', path: '.', label: path.basename(root), language: '', bytes: 1, loc: 1, fileCount: 1, testFileCount: 0, generated: false, excluded: false, primaryRole: 'root', confidence: 1 }],

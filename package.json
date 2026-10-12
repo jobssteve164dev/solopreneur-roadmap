@@ -42,6 +42,10 @@
     "onCommand:solopreneur.showRoadmap",
     "onCommand:solopreneur.showStrategyPyramid",
     "onCommand:solopreneur.refreshProjectGrowthData",
+    "onCommand:solopreneur.backupDatabase",
+    "onCommand:solopreneur.restoreDatabaseBackup",
+    "onCommand:solopreneur.exportProjectArchive",
+    "onCommand:solopreneur.importProjectArchive",
     "onUri"
   ],
   "main": "./out/extension.js",
@@ -75,6 +79,36 @@
       {
         "command": "solopreneur.removeAutonomousRuntimeService",
         "title": "SoloMap: Remove Background Service",
+        "category": "SoloMap"
+      },
+      {
+        "command": "solopreneur.connectExternalMemory",
+        "title": "SoloMap: Connect CloudMCP Memory",
+        "category": "SoloMap"
+      },
+      {
+        "command": "solopreneur.disconnectExternalMemory",
+        "title": "SoloMap: Disconnect CloudMCP Memory",
+        "category": "SoloMap"
+      },
+      {
+        "command": "solopreneur.backupDatabase",
+        "title": "SoloMap: Back Up All Data",
+        "category": "SoloMap"
+      },
+      {
+        "command": "solopreneur.restoreDatabaseBackup",
+        "title": "SoloMap: Restore Full Backup to a New Folder",
+        "category": "SoloMap"
+      },
+      {
+        "command": "solopreneur.exportProjectArchive",
+        "title": "SoloMap: Export Current Project",
+        "category": "SoloMap"
+      },
+      {
+        "command": "solopreneur.importProjectArchive",
+        "title": "SoloMap: Import Project",
         "category": "SoloMap"
       }
     ],

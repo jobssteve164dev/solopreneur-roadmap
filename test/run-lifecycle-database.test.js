@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { RunLifecycleClient, readConversationLogSnapshot } = require('../out/runLifecycleClient.js');
 
 function fixture() {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-run-lifecycle-'));
@@ -18,6 +19,119 @@ function fixture() {
 function request(project, executionLogId = 1) {
   return { root: project, executionLogId, nodeId: '__solo__', runKind: 'solo', prompt: '完整任务输入\n原始证据', command: 'codex', userMessage: '完成用户目标', status: 'Running', idempotencyKey: `prepare:${project}:${executionLogId}` };
 }
+
+test('expanded conversation logs read every fixed-turn stdout and stderr byte from the unified database', async () => {
+  const f = fixture();
+  try {
+    const run = await f.call('prepare_run', request(f.project));
+    const stdout = Buffer.from('前段🌿'.repeat(12000) + '\n末尾');
+    const stderr = Buffer.from('错误输出\n仍需保留');
+    const first = stdout.subarray(0, 65535), second = stdout.subarray(65535);
+    await f.call('append_run_log', { projectId: run.projectId, executionLogId: 1, generation: run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: first.toString('base64'), idempotencyKey: 'full-stdout-0' });
+    await f.call('append_run_log', { projectId: run.projectId, executionLogId: 1, generation: run.generation, stream: 'stdout', sequence: 1, offset: first.length, bytes: second.toString('base64'), idempotencyKey: 'full-stdout-1' });
+    await f.call('append_run_log', { projectId: run.projectId, executionLogId: 1, generation: run.generation, stream: 'stderr', sequence: 0, offset: 0, bytes: stderr.toString('base64'), idempotencyKey: 'full-stderr' });
+    const client = new RunLifecycleClient((operation, input) => f.operations({ operation, input }), f.root);
+    const snapshot = await readConversationLogSnapshot(client, f.project, 1, { runId: run.runId, turnId: run.turnId, revision: run.revision, nodeId: '__solo__' });
+    assert.deepEqual(snapshot.stdout, stdout);
+    assert.deepEqual(snapshot.stderr, stderr);
+    await assert.rejects(readConversationLogSnapshot(client, f.project, 1, { runId: 'late-source' }), /run_log_source_changed/);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('linked Solo conversation logs validate their durable source node and remain readable from the linked step', async () => {
+  const f = fixture();
+  try {
+    const run = await f.call('prepare_run', request(f.project));
+    const stdout = Buffer.from('关联后的完整 Solo 输出🌿');
+    await f.call('append_run_log', { projectId: run.projectId, executionLogId: 1, generation: run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: stdout.toString('base64'), idempotencyKey: 'linked-solo-output' });
+    await f.call('link_project_journal', { root: f.project, executionLogId: 1, nodeId: 'step-1', linkedAt: '2026-10-11T12:00:00.000Z' });
+    const client = new RunLifecycleClient((operation, input) => f.operations({ operation, input }), f.root);
+    const snapshot = await readConversationLogSnapshot(client, f.project, 1, { runId: run.runId, turnId: run.turnId, nodeId: 'step-1' });
+    assert.deepEqual(snapshot.stdout, stdout);
+    assert.equal(snapshot.nodeId, '__solo__');
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('historical output-only conversations expose their complete output as stdout', async () => {
+  const f = fixture();
+  try {
+    const run = await f.call('prepare_run', request(f.project));
+    const output = Buffer.from('迁移历史完整输出🌿\n'.repeat(7000));
+    const contentId = f.store.putContent(output, 'application/octet-stream', 'binary');
+    f.store.db.run('INSERT INTO log_chunks VALUES(?,?,?,?,?,?)', [run.runId, 'output', 0, contentId, Date.now(), 0]);
+    const client = new RunLifecycleClient((operation, input) => f.operations({ operation, input }), f.root);
+    const snapshot = await readConversationLogSnapshot(client, f.project, 1, { runId: run.runId, turnId: run.turnId, nodeId: '__solo__' });
+    assert.deepEqual(snapshot.stdout, output);
+    assert.deepEqual(snapshot.stderr, Buffer.alloc(0));
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('conversation log snapshots keep each historical turn inside its recorded byte range', async () => {
+  const f = fixture();
+  try {
+    const run = await f.call('prepare_run', request(f.project));
+    const first = Buffer.from('第一轮完整输出🌿\n'.repeat(7000));
+    await f.call('append_run_log', { projectId: run.projectId, executionLogId: 1, generation: run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: first.toString('base64'), idempotencyKey: 'turn-one-log' });
+    const completed = await f.call('checkpoint_run', { projectId: run.projectId, executionLogId: 1, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial', summary: '第一轮完成', idempotencyKey: 'turn-one-complete' });
+    const started = await f.call('checkpoint_run', { projectId: run.projectId, executionLogId: 1, generation: run.generation, proof: run.proof, expectedRevision: completed.revision, expectedTurnId: completed.turnId, action: 'start', message: '开始第二轮', idempotencyKey: 'turn-two-start' });
+    const second = Buffer.from('第二轮输出\n'.repeat(3000));
+    await f.call('append_run_log', { projectId: run.projectId, executionLogId: 1, generation: run.generation, stream: 'stdout', sequence: 1, offset: first.length, bytes: second.toString('base64'), idempotencyKey: 'turn-two-log' });
+    const secondJournalId = f.store.readRunTurnJournal(run.projectId, 1, started.turnId).executionLogId;
+    const client = new RunLifecycleClient((operation, input) => f.operations({ operation, input }), f.root);
+    const continuation = await client.findConversation(f.project, 1);
+    const historical = await readConversationLogSnapshot(client, f.project, 1, { runId: run.runId, turnId: run.turnId });
+    const current = await readConversationLogSnapshot(client, f.project, secondJournalId, { runId: run.runId, turnId: started.turnId });
+    assert.equal(continuation.turnId, run.turnId, 'journal projection keeps the selected historical turn');
+    assert.equal(continuation.status.turnId, started.turnId, 'lifecycle state remains on the current turn');
+    assert.equal(continuation.revision, started.revision);
+    assert.deepEqual(historical.stdout, first);
+    assert.deepEqual(current.stdout, second);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('dead maintenance owner recovery retains its full receipt before settling and reopening', async () => {
+  const f = fixture();
+  let closed = false;
+  const resultPath = path.join(f.root, 'tmp', 'owned-install', 'result.json');
+  fs.mkdirSync(path.dirname(resultPath), { recursive: true });
+  const bytes = Buffer.from(JSON.stringify({ success: true, detail: '已安装完整内容🌿'.repeat(10000) }) + '\n');
+  try {
+    const run = await f.call('prepare_run', { ...request(f.project), runKind: 'skill_install', metadata: { maintenanceResultPath: resultPath } });
+    const claimed = await f.call('claim_run', { root: f.project, executionLogId: 1, expectedRevision: run.revision, idempotencyKey: 'interrupted-maintenance-owner' });
+    await f.call('patch_run_state', { root: f.project, executionLogId: 1, generation: claimed.generation, expectedRevision: claimed.revision,
+      patch: { maintenanceResultGeneration: claimed.generation, maintenanceResultBaseline: null }, idempotencyKey: 'maintenance-started-without-receipt' });
+    fs.writeFileSync(resultPath, bytes);
+    await new (require('../out/runRecovery.js').RunRecovery)(f.store).recover();
+    const purpose = `maintenance_result_${claimed.generation}`;
+    const receipt = await f.call('read_run_document', { root: f.project, executionLogId: 1, purpose });
+    assert.ok(receipt, 'recovery must capture the completed external result before marking the interrupted process');
+    assert.deepEqual(Buffer.from(receipt.bytes, 'base64'), bytes);
+    const state = await f.call('read_run_state', { root: f.project, executionLogId: 1 });
+    assert.equal(state.status.status, 'Failed', 'a missing host exit receipt cannot invent a successful process exit');
+    await f.operations.close(); f.store.close(); closed = true;
+    const reopened = new UnifiedDataStore(f.root);
+    try { assert.deepEqual(reopened.readRunDocument(run.projectId, 1, purpose), receipt); }
+    finally { reopened.close(); }
+  } finally { if (!closed) { await f.operations.close(); f.store.close(); } }
+});
+
+test('dead maintenance recovery seals invalid evidence with its exact error', async () => {
+  const f = fixture();
+  const resultPath = path.join(f.root, 'tmp', 'invalid-install', 'result.json');
+  try {
+    const run = await f.call('prepare_run', { ...request(f.project), runKind: 'mcp_install', metadata: { maintenanceResultPath: resultPath } });
+    const claimed = await f.call('claim_run', { root: f.project, executionLogId: 1, expectedRevision: run.revision, idempotencyKey: 'invalid-maintenance-owner' });
+    await f.call('patch_run_state', { root: f.project, executionLogId: 1, generation: claimed.generation, expectedRevision: claimed.revision,
+      patch: { maintenanceResultGeneration: claimed.generation, maintenanceResultBaseline: null }, idempotencyKey: 'invalid-maintenance-started' });
+    fs.mkdirSync(resultPath, { recursive: true });
+    await new (require('../out/runRecovery.js').RunRecovery)(f.store).recover();
+    const state = await f.call('read_run_state', { root: f.project, executionLogId: 1 });
+    assert.equal(state.status.status, 'Failed'); assert.match(state.status.checkpointSummary, /capability_attachment_path_invalid/);
+    const log = await f.call('read_run_log', { root: f.project, executionLogId: 1, stream: 'stderr', offset: 0 });
+    assert.match(Buffer.from(log.bytes, 'base64').toString(), /capability_attachment_path_invalid/);
+    assert.equal(f.store.recoverableRunStates().items.length, 0);
+  } finally { await f.operations.close(); f.store.close(); }
+});
 
 test('an accepted checkpoint replays its original receipt after the project moves and rejects a changed intent', async () => {
   const f = fixture();
@@ -264,6 +378,27 @@ test('prepared inputs and state lists retain complete revisions and reject stale
     const ordinary = await f.call('open_mcp_session', { projectId: run.projectId });
     await assert.rejects(f.operations({ operation: 'list_run_states', input: {}, sessionToken: ordinary.sessionToken }), /action_denied/);
   } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('run verification replays the same receipt after a lost response and runtime restart', async () => {
+  const f = fixture();
+  let reopened;
+  try {
+    const run = await f.call('prepare_run', request(f.project));
+    const input = { projectId: run.projectId, executionLogId: 1, claim: 'independent review passed', result: 'pass', evidence: 'review evidence', idempotencyKey: 'verification-lost-response' };
+    const first = await f.call('record_run_verification', input);
+    await f.operations.close(); f.store.close();
+    reopened = UnifiedDataStore.open(f.root);
+    const operations = createRuntimeDataOperations(reopened);
+    try {
+      await new Promise(resolve => setTimeout(resolve, 5));
+      const replay = await operations({ operation: 'record_run_verification', input });
+      assert.deepEqual(replay, first);
+      assert.equal(reopened.rows("SELECT COUNT(*) AS n FROM evidence WHERE type='host_verification'")[0].n, 1);
+      assert.equal(reopened.rows('SELECT COUNT(*) AS n FROM verifications')[0].n, 1);
+      assert.equal(reopened.read(first.objectId).revision, first.revision);
+    } finally { await operations.close(); }
+  } finally { if (reopened) reopened.close(); else { await f.operations.close(); f.store.close(); } }
 });
 
 test('run documents retain full binary revisions and reject late owners or another project', async () => {
@@ -548,6 +683,44 @@ test('a report is tied to the actual run and turn without completing the task or
   } finally { await f.operations.close(); f.store.close(); }
 });
 
+test('checkpoint and late report submission share one authoritative report head and strip unknown fields', async () => {
+  const f = fixture();
+  try {
+    const run = await f.call('prepare_run', request(f.project));
+    const shape = summary => ({ schemaVersion: 1, summary, unmetRequirements: [], decisions: [], corrections: [], verification: [], commits: [], experienceUsage: [], lessons: [], taskId: 'forged-task' });
+    const artifact = path.join(f.project, 'artifact.txt');
+    fs.writeFileSync(artifact, 'durable output');
+    const checkpointReport = { ...shape('checkpoint-A'), decisions: ['x'.repeat(470)], outputs: ['artifact.txt'] };
+    const checkpointInput = {
+      root: f.project, executionLogId: 1, generation: run.generation, proof: run.proof,
+      expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial',
+      summary: '检查点结果', report: checkpointReport, idempotencyKey: 'one-report-checkpoint'
+    };
+    const checkpoint = await f.call('checkpoint_run', checkpointInput);
+    fs.renameSync(artifact, path.join(f.base, 'retained-artifact.txt'));
+    const checkpointReplay = await f.call('checkpoint_run', checkpointInput);
+    assert.equal(checkpointReplay.revision, checkpoint.revision, 'the original raw request must replay after its response is lost even when file-based validation changes');
+    const firstId = checkpoint.status.taskReportObjectId;
+    assert.equal(checkpoint.status.taskReportRevision, 1);
+    assert.equal(JSON.parse(f.store.read(firstId).data.content).taskId, undefined);
+
+    const late = await f.call('submit_run_report', {
+      root: f.project, executionLogId: 1, generation: run.generation, turnId: run.turnId,
+      report: shape('late-B'), idempotencyKey: 'one-report-late'
+    });
+    assert.equal(late.objectId, firstId, 'late intake must revise the checkpoint report instead of creating another authority');
+    assert.equal(late.revision, 2);
+    const current = await f.call('read_run_state', { root: f.project, executionLogId: 1 });
+    assert.equal(current.status.taskReportObjectId, firstId);
+    assert.equal(current.status.taskReportRevision, 2);
+    assert.equal(JSON.parse(f.store.read(firstId).data.content).taskId, undefined);
+    const sources = f.store.readRegisteredReportSources(run.projectId);
+    assert.deepEqual([...new Set(sources.observations.map(item => item.sourceRef.objectId))], [firstId]);
+    assert.deepEqual(sources.observations.map(item => item.envelope.report.summary), ['checkpoint-A', 'late-B']);
+    assert.equal(sources.reports[0].report.summary, 'late-B');
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
 test('a live execution cannot lose ownership', async () => {
   const f = fixture();
   try {
@@ -563,7 +736,8 @@ test('report retries still resolve their original turn after the next turn start
     const report = { schemaVersion: 1, summary: '第一轮结果', unmetRequirements: [], decisions: [], corrections: [], verification: [], commits: [], experienceUsage: [], lessons: [] };
     const reportInput = { root: f.project, executionLogId: 1, turnId: first.turnId, generation: first.generation, report, idempotencyKey: 'first-turn-report' };
     const saved = await f.call('submit_run_report', reportInput);
-    const settled = await f.call('checkpoint_run', { root: f.project, executionLogId: 1, generation: first.generation, proof: first.proof, expectedRevision: first.revision, action: 'complete', outcome: 'partial', summary: '第一轮', idempotencyKey: 'first-turn-complete' });
+    const reportState = await f.call('read_run_state', { root: f.project, executionLogId: 1 });
+    const settled = await f.call('checkpoint_run', { root: f.project, executionLogId: 1, generation: first.generation, proof: first.proof, expectedRevision: reportState.revision, action: 'complete', outcome: 'partial', summary: '第一轮', idempotencyKey: 'first-turn-complete' });
     await f.call('checkpoint_run', { root: f.project, executionLogId: 1, generation: first.generation, proof: first.proof, expectedRevision: settled.revision, action: 'start', message: '第二轮', idempotencyKey: 'second-turn-start' });
     const retried = await f.call('submit_run_report', reportInput);
     assert.equal(retried.objectId, saved.objectId);

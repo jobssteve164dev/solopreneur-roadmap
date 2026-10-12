@@ -5,7 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
-const { registerLearningTask, writeLearningJson } = require('../out/taskReport.js');
+const { registerLearningTask, writeLearningJson } = require('./fixtures/legacy-task-report.cjs');
 const { sendRuntimeControlCommand, sendRuntimeDataRequest } = require('../out/autonomousRuntimeControl.js');
 
 function launchRuntime(root) {
@@ -40,9 +40,19 @@ async function importReportFixture(globalDataPath, project) {
     const job = await sendRuntimeDataRequest(globalDataPath, { operation: 'migration_status', input: { jobId: queued.jobId } });
     if (job.status === 'completed') { assert.deepEqual(job.progress.conflicts || [], []); return; }
     assert.notEqual(job.status, 'failed', job.error || 'report fixture migration failed');
-    assert.ok(Date.now() < deadline, 'report fixture migration must finish');
+    assert.ok(Date.now() < deadline, `report fixture migration must finish: ${JSON.stringify(job)}`);
     await new Promise(resolve => setTimeout(resolve, 20));
   }
+}
+
+async function openImportedReportFixture(t, fixture) {
+  const globalDataPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'growth-reports-imported-')), '.solomap-global');
+  const runtime = launchRuntime(globalDataPath);
+  await readyRuntime(runtime, globalDataPath);
+  t.after(() => stopRuntime(runtime, globalDataPath));
+  const refresh = () => importReportFixture(globalDataPath, fixture.project);
+  await refresh();
+  return { globalDataPath, refresh };
 }
 
 function fixture() {
@@ -56,32 +66,22 @@ function fixture() {
   return { project, runDir, taskId, report };
 }
 
-test('ledger groups stable tasks, retains legacy unknown work and versions, and paginates locally', async () => {
+test('ledger groups stable imported tasks and paginates from the database', async t => {
   const { queryGrowthReports } = require('../out/growthReports.js');
   const f = fixture();
   f.report(1, { summary: '第一轮', unmetRequirements: ['尚缺实际验收'], decisions: ['保留导出入口', { action: '预览', reason: '减少误操作', custom: '兼容信息' }] });
-  let page = await queryGrowthReports(f.project, path.resolve(__dirname, '..'), {});
+  const database = await openImportedReportFixture(t, f);
+  let page = await queryGrowthReports(f.project, path.resolve(__dirname, '..'), {}, database.globalDataPath);
   assert.equal(page.tasks.length, 1);
   assert.equal(page.tasks[0].title, '设计导出体验');
   assert.equal(page.tasks[0].unmet, true);
   f.report(2, { summary: '', verification: [{ result: '通过', evidence: ['本地记录'] }] });
-  page = await queryGrowthReports(f.project, path.resolve(__dirname, '..'), { unmetOnly: true });
+  await database.refresh();
+  page = await queryGrowthReports(f.project, path.resolve(__dirname, '..'), { unmetOnly: true }, database.globalDataPath);
   assert.equal(page.tasks.length, 1, 'missing field and empty summary do not close earlier work');
   assert.equal(page.tasks[0].latestSummary, '');
-  let detail = await queryGrowthReports(f.project, path.resolve(__dirname, '..'), { taskId: f.taskId });
+  const detail = await queryGrowthReports(f.project, path.resolve(__dirname, '..'), { taskId: f.taskId }, database.globalDataPath);
   assert.equal(detail.turns.length, 2);
-  f.report(1, { summary: '修正第一轮', unmetRequirements: ['尚缺实际验收'] });
-  detail = await queryGrowthReports(f.project, path.resolve(__dirname, '..'), { taskId: f.taskId });
-  assert.equal(detail.turns.length, 2);
-  assert.equal(detail.turns.find(t => t.sequence === 1).versions.length, 2);
-  f.report(1, { summary: '第一轮', unmetRequirements: ['尚缺实际验收'], decisions: ['保留导出入口', { action: '预览', reason: '减少误操作', custom: '兼容信息' }] });
-  detail = await queryGrowthReports(f.project, path.resolve(__dirname, '..'), { taskId: f.taskId });
-  assert.deepEqual(detail.turns.find(t => t.sequence === 1).history.map(item => item.report.summary), ['第一轮', '修正第一轮', '第一轮']);
-  fs.writeFileSync(path.join(f.runDir, 'task-report-2.json'), '{');
-  detail = await queryGrowthReports(f.project, path.resolve(__dirname, '..'), { taskId: f.taskId });
-  assert.equal(detail.turns.length, 2);
-  assert.equal(detail.turns[0].availability, 'invalid');
-  assert.ok(detail.turns[0].report, 'previous valid material is retained');
 });
 
 test('report reading rejects cross-project directories, symlinks and forged turn identities', async () => {
@@ -155,14 +155,18 @@ test('coverage source identity detects same-size edits, including reopened cache
   assert.equal(reopened.coverage.versionState, 'stale');
 });
 
-test('large accumulated evidence remains readable without loading diff bodies into the page', async () => {
+test('large accumulated evidence remains readable without loading diff bodies into the page', async t => {
   const { queryGrowthReports } = require('../out/growthReports.js');
   const f = fixture(); f.report(1, { summary: '结果' });
   const dir = path.join(f.project, '.solopreneur/agent-runs/learning-evidence'); fs.mkdirSync(dir);
   const commits = Array.from({ length: 2000 }, (_, i) => ({ sha: i.toString(16).padStart(40, '0'), repository: 'owner/repo', taskIds: i === 0 ? [f.taskId] : ['task-other'], checks: [{ name: '检查'.repeat(250), conclusion: 'success' }], files: [] }));
   const file = path.join(dir, 'repo.summary.json'); fs.writeFileSync(file, JSON.stringify({ commits }));
   assert.ok(fs.statSync(file).size > 1024 * 1024);
-  const page = await queryGrowthReports(f.project, path.resolve(__dirname, '..'), {});
+  const database = await openImportedReportFixture(t, f);
+  await sendRuntimeDataRequest(database.globalDataPath, { operation: 'write_growth_report_projection', input: {
+    root: f.project, updates: [{ key: 'github-summary:owner/repo', value: { commits } }]
+  } });
+  const page = await queryGrowthReports(f.project, path.resolve(__dirname, '..'), {}, database.globalDataPath);
   assert.equal(page.tasks[0].evidence.length, 1);
   assert.equal(page.tasks[0].evidence[0].checks[0].conclusion, 'success');
 });
@@ -183,14 +187,15 @@ test('separately refreshed shared tasks retain scopes and never inherit the enti
   assert.deepEqual(facts.commits[0].reportedScopes.map(scope => scope.files), [['a.js'], ['b.js']]);
 });
 
-test('source changed while loading converges to the new turn and a snapshot writer preserves reports', async () => {
+test('a later imported source generation converges to the new turn and preserves reports', async t => {
   const { queryGrowthReports } = require('../out/growthReports.js');
   const f = fixture(); f.report(1, { summary: '旧结果', unmetRequirements: ['待办'] });
   const extension = path.resolve(__dirname, '..');
-  const pending = queryGrowthReports(f.project, extension, {});
-  setImmediate(() => f.report(2, { summary: '新结果', unmetRequirements: [] }));
-  assert.equal((await pending).tasks[0].latestSummary, '新结果');
-  const page = await queryGrowthReports(f.project, extension, { taskId: f.taskId });
+  const database = await openImportedReportFixture(t, f);
+  f.report(2, { summary: '新结果', unmetRequirements: [] });
+  await database.refresh();
+  assert.equal((await queryGrowthReports(f.project, extension, {}, database.globalDataPath)).tasks[0].latestSummary, '新结果');
+  const page = await queryGrowthReports(f.project, extension, { taskId: f.taskId }, database.globalDataPath);
   assert.equal(page.turns.length, 2);
 });
 
@@ -202,14 +207,15 @@ test('final serialized report script parses without interpreting report text as 
   assert.ok(!script.includes('</script>'));
 });
 
-test('missing and invalid report receipts remain distinct without blocking checkpoints', async () => {
-  const { recordTaskReport } = require('../out/taskReport.js');
+test('missing and invalid report receipts remain distinct without blocking checkpoints', async t => {
+  const { recordTaskReport } = require('./fixtures/legacy-task-report.cjs');
   const { queryGrowthReports } = require('../out/growthReports.js');
   const f = fixture(); const status = { workspaceRoot: f.project, learningTaskId: f.taskId, executionLogId: 1, outputFilePath: path.join(f.runDir, 'output.log') };
   assert.equal(recordTaskReport(status, {}, 1).taskReportStatus, 'missing');
   const invalid = path.join(f.runDir, 'invalid.json'); fs.writeFileSync(invalid, '{');
   assert.equal(recordTaskReport(status, { 'report-file': invalid }, 2).taskReportStatus, 'invalid');
-  const page = await queryGrowthReports(f.project, path.resolve(__dirname, '..'), { taskId: f.taskId });
+  const database = await openImportedReportFixture(t, f);
+  const page = await queryGrowthReports(f.project, path.resolve(__dirname, '..'), { taskId: f.taskId }, database.globalDataPath);
   assert.deepEqual(page.turns.map(turn => turn.availability), ['invalid', 'missing']);
 });
 
@@ -243,25 +249,27 @@ test('non-code reports paginate and module changes do not silently reassign hist
   assert.equal(first.total, 23);
 });
 
-test('interactive runs sharing one physical directory retain host-confirmed execution identities', async () => {
+test('interactive runs sharing one physical directory retain host-confirmed execution identities', async t => {
   const { queryGrowthReports } = require('../out/growthReports.js');
   const { SqliteStore } = require('../out/db/sqliteStore.js');
   const f = fixture(); f.report(1, { summary: '第一轮', unmetRequirements: ['待办'] });
   writeLearningJson(path.join(f.runDir, 'task-report-3.json'), { schemaVersion: 1, taskId: f.taskId, projectPath: f.project, executionLogId: 2, turnId: '3:complete', createdAt: '2026-09-03', report: { summary: '原会话第二轮', unmetRequirements: [] } });
+  registerLearningTask(f.project, { executionLogId: 2, runDir: f.runDir, userMessage: '继续', startedAt: '2026-09-03', taskId: f.taskId });
   const extension = path.resolve(__dirname, '..');
   const journal = new SqliteStore(path.join(f.project, '.solopreneur/project_journal.db'), extension); await journal.init();
   journal.logExecution('__solo__', 'codex', '', 'Initial task', 'Completed');
   journal.logExecution('__solo__', 'codex', '', 'Agent continuation started.\nContinuation parent conversation: 1\n\nUser supplement:\n继续', 'Completed');
   journal.close();
-  const page = await queryGrowthReports(f.project, extension, { taskId: f.taskId });
+  const database = await openImportedReportFixture(t, f);
+  const page = await queryGrowthReports(f.project, extension, { taskId: f.taskId }, database.globalDataPath);
   assert.equal(page.turns.length, 2);
   assert.deepEqual(page.turns.map(turn => turn.availability), ['recorded', 'recorded']);
   assert.deepEqual(page.turns.map(turn => turn.executionLogId), [2, 1]);
   assert.deepEqual(page.turns.map(turn => turn.roundNumber), [2, 1]);
   assert.equal(page.tasks[0].latestSummary, '原会话第二轮');
   fs.writeFileSync(path.join(f.runDir, 'task-report-3.json'), '{');
-  const partial = await queryGrowthReports(f.project, extension, { taskId: f.taskId });
-  assert.equal(partial.turns.length, 2, 'a partial write cannot invent a turn for each execution');
-  assert.equal(partial.turns[0].availability, 'invalid');
+  const partial = await queryGrowthReports(f.project, extension, { taskId: f.taskId }, database.globalDataPath);
+  assert.equal(partial.turns.length, 2, 'a post-import partial write cannot alter database authority');
+  assert.equal(partial.turns[0].availability, 'recorded');
   assert.equal(partial.turns[0].report.summary, '原会话第二轮');
 });

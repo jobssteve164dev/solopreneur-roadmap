@@ -161,12 +161,3 @@ for (let index = 1; index < items.length; index += 1) {
 console.log('PASS time plan validation (' + items.length + ' items)');
 `;
 }
-
-export function ensureTimePlanValidationScript(projectPath: string): string {
-  const solopreneurDir = path.join(projectPath, '.solopreneur');
-  const scriptPath = path.join(solopreneurDir, 'validate-time-plan.cjs');
-  fs.mkdirSync(solopreneurDir, { recursive: true });
-  fs.writeFileSync(scriptPath, buildTimePlanValidationScript(), { encoding: 'utf8', mode: 0o755 });
-  try { fs.chmodSync(scriptPath, 0o755); } catch { /* Best effort on non-POSIX platforms. */ }
-  return scriptPath;
-}

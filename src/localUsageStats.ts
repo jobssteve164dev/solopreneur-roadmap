@@ -1,9 +1,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import * as Papa from 'papaparse';
 import type * as vscode from 'vscode';
 import { normalizeGlobalDataPathForExtension, SolopreneurProject } from './projectRegistry';
 import { buildLocalDiagnosticSummary } from './localDiagnostics';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 
 export interface LocalUsageStats {
   schemaVersion: number;
@@ -50,10 +52,6 @@ export interface LocalUsageStatsOptions {
   globalDataPath: string;
   usageStatsFileName: string;
   projects: SolopreneurProject[];
-}
-
-function getUsageStatsPath(globalDataPath: string, usageStatsFileName: string): string {
-  return path.join(normalizeGlobalDataPathForExtension(globalDataPath), 'usage', usageStatsFileName);
 }
 
 function getExtensionVersion(context: vscode.ExtensionContext): string {
@@ -133,26 +131,17 @@ function normalizeUsageStats(context: vscode.ExtensionContext, raw: any): LocalU
   };
 }
 
-function readLocalUsageStats(context: vscode.ExtensionContext, options: LocalUsageStatsOptions): LocalUsageStats {
-  const statsPath = getUsageStatsPath(options.globalDataPath, options.usageStatsFileName);
-  if (!fs.existsSync(statsPath)) {
-    return createEmptyUsageStats(context);
-  }
-  try {
-    return normalizeUsageStats(context, JSON.parse(fs.readFileSync(statsPath, 'utf8')));
-  } catch {
-    return createEmptyUsageStats(context);
-  }
+interface AnalysisState<T> { objectId: string | null; revision: number; value: T | null }
+
+function dataRoot(options: LocalUsageStatsOptions): string {
+  return normalizeGlobalDataPathForExtension(options.globalDataPath, options.projects[0]?.path || process.cwd());
 }
 
-function writeLocalUsageStats(options: LocalUsageStatsOptions, stats: LocalUsageStats): void {
-  const statsPath = getUsageStatsPath(options.globalDataPath, options.usageStatsFileName);
-  fs.mkdirSync(path.dirname(statsPath), { recursive: true });
-  const payload = JSON.stringify(stats, null, 2);
-  const tempPath = `${statsPath}.tmp`;
-  fs.writeFileSync(tempPath, payload, 'utf8');
-  JSON.parse(fs.readFileSync(tempPath, 'utf8'));
-  fs.renameSync(tempPath, statsPath);
+async function readLocalUsageStats(context: vscode.ExtensionContext, options: LocalUsageStatsOptions): Promise<AnalysisState<LocalUsageStats>> {
+  const state = await sendRuntimeDataRequest<AnalysisState<LocalUsageStats>>(dataRoot(options), {
+    operation: 'read_analysis_state', input: { namespace: 'usage', key: 'local' }
+  });
+  return { ...state, value: state.value ? normalizeUsageStats(context, state.value) : createEmptyUsageStats(context) };
 }
 
 function readUsageRoadmapNodes(projectPath: string): Array<{ id: string; status: string }> {
@@ -176,35 +165,7 @@ function readUsageRoadmapNodes(projectPath: string): Array<{ id: string; status:
   }
 }
 
-function getLatestRunTimestamp(runsRoot: string): { count: number; latestAt: string } {
-  let count = 0;
-  let latest = 0;
-  try {
-    const runNames = fs.existsSync(runsRoot) ? fs.readdirSync(runsRoot) : [];
-    for (const runName of runNames) {
-      const runDir = path.join(runsRoot, runName);
-      if (!fs.existsSync(runDir) || !fs.statSync(runDir).isDirectory()) {
-        continue;
-      }
-      count += 1;
-      const startedAtPath = path.join(runDir, 'started_at');
-      let timestamp = 0;
-      if (fs.existsSync(startedAtPath)) {
-        const parsed = Date.parse(fs.readFileSync(startedAtPath, 'utf8').trim());
-        timestamp = Number.isFinite(parsed) ? parsed : 0;
-      }
-      if (!timestamp) {
-        timestamp = fs.statSync(runDir).mtimeMs;
-      }
-      latest = Math.max(latest, timestamp);
-    }
-  } catch {
-    return { count, latestAt: latest ? new Date(latest).toISOString() : '' };
-  }
-  return { count, latestAt: latest ? new Date(latest).toISOString() : '' };
-}
-
-function refreshLocalUsageSnapshot(context: vscode.ExtensionContext, options: LocalUsageStatsOptions, stats: LocalUsageStats): LocalUsageStats {
+async function refreshLocalUsageSnapshot(context: vscode.ExtensionContext, options: LocalUsageStatsOptions, stats: LocalUsageStats): Promise<LocalUsageStats> {
   let projectsWithRoadmap = 0;
   let roadmapNodeCount = 0;
   let completedNodeCount = 0;
@@ -217,7 +178,13 @@ function refreshLocalUsageSnapshot(context: vscode.ExtensionContext, options: Lo
   let agentRunDirectoryCount = 0;
   let latestAgentRunAtMs = 0;
 
-  for (const project of options.projects) {
+  const projectSources = await Promise.all(options.projects.map(async project => ({
+    project,
+    source: await sendRuntimeDataRequest<{ runCount: number; latestRunAt: string }>(dataRoot(options), { operation: 'read_project_analysis_source', input: { root: project.path } }),
+    issue: await sendRuntimeDataRequest<AnalysisState<unknown>>(dataRoot(options), { operation: 'read_analysis_state', input: { root: project.path, namespace: 'external', key: 'issues' } }),
+    delivery: await sendRuntimeDataRequest<AnalysisState<unknown>>(dataRoot(options), { operation: 'read_analysis_state', input: { root: project.path, namespace: 'external', key: 'delivery' } })
+  })));
+  for (const { project, source, issue, delivery } of projectSources) {
     const nodes = readUsageRoadmapNodes(project.path);
     if (nodes.length > 0) {
       projectsWithRoadmap += 1;
@@ -228,15 +195,10 @@ function refreshLocalUsageSnapshot(context: vscode.ExtensionContext, options: Lo
     runningNodeCount += nodes.filter((node) => node.status === 'Running').length;
     inProgressNodeCount += nodes.filter((node) => node.status === 'In Progress').length;
     pendingNodeCount += nodes.filter((node) => node.status === 'Pending').length;
-    if (fs.existsSync(path.join(project.path, '.solopreneur', 'issues-cache.json'))) {
-      issueCacheProjectCount += 1;
-    }
-    if (fs.existsSync(path.join(project.path, '.solopreneur', 'delivery-cache.json'))) {
-      deliveryCacheProjectCount += 1;
-    }
-    const runStats = getLatestRunTimestamp(path.join(project.path, '.solopreneur', 'agent-runs'));
-    agentRunDirectoryCount += runStats.count;
-    const runMs = runStats.latestAt ? Date.parse(runStats.latestAt) : 0;
+    if (issue.value) issueCacheProjectCount += 1;
+    if (delivery.value) deliveryCacheProjectCount += 1;
+    agentRunDirectoryCount += source.runCount;
+    const runMs = source.latestRunAt ? Date.parse(source.latestRunAt) : 0;
     latestAgentRunAtMs = Number.isFinite(runMs) ? Math.max(latestAgentRunAtMs, runMs) : latestAgentRunAtMs;
   }
 
@@ -261,48 +223,46 @@ function refreshLocalUsageSnapshot(context: vscode.ExtensionContext, options: Lo
   };
 }
 
-export function recordLocalUsageEvent(context: vscode.ExtensionContext, options: LocalUsageStatsOptions, event: LocalUsageEvent): LocalUsageStats {
-  const now = new Date().toISOString();
-  let stats = readLocalUsageStats(context, options);
-  const counters = { ...stats.counters };
-  if (event === 'activation') counters.activations += 1;
-  if (event === 'roadmapOpened') counters.roadmapOpens += 1;
-  if (event === 'projectAdded') counters.projectsAdded += 1;
-  if (event === 'agentRun') counters.agentRuns += 1;
-  if (event === 'soloConversation') counters.soloConversations += 1;
-  if (event === 'roadmapRevision') counters.roadmapRevisions += 1;
-  if (event === 'feedbackIssueOpened') counters.feedbackIssuesOpened += 1;
-  stats = {
-    ...stats,
-    updatedAt: now,
-    extensionVersion: getExtensionVersion(context) || stats.extensionVersion,
-    counters,
-    lastEventAt: {
-      ...stats.lastEventAt,
-      [event]: now
+export async function recordLocalUsageEvent(context: vscode.ExtensionContext, options: LocalUsageStatsOptions, event: LocalUsageEvent): Promise<LocalUsageStats> {
+  const requestNonce = crypto.randomUUID();
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const current = await readLocalUsageStats(context, options);
+    const now = new Date().toISOString();
+    let stats = current.value!;
+    const counters = { ...stats.counters };
+    if (event === 'activation') counters.activations += 1;
+    if (event === 'roadmapOpened') counters.roadmapOpens += 1;
+    if (event === 'projectAdded') counters.projectsAdded += 1;
+    if (event === 'agentRun') counters.agentRuns += 1;
+    if (event === 'soloConversation') counters.soloConversations += 1;
+    if (event === 'roadmapRevision') counters.roadmapRevisions += 1;
+    if (event === 'feedbackIssueOpened') counters.feedbackIssuesOpened += 1;
+    stats = { ...stats, updatedAt: now, extensionVersion: getExtensionVersion(context) || stats.extensionVersion, counters,
+      lastEventAt: { ...stats.lastEventAt, [event]: now } };
+    if (event === 'feedbackIssueOpened') stats = await refreshLocalUsageSnapshot(context, options, stats);
+    try {
+      const written = await sendRuntimeDataRequest<AnalysisState<LocalUsageStats>>(dataRoot(options), {
+        operation: 'write_analysis_state', input: { namespace: 'usage', key: 'local', expectedRevision: current.revision,
+          value: stats, idempotencyKey: `${event}:${requestNonce}:${attempt}` }
+      });
+      return normalizeUsageStats(context, written.value);
+    } catch (error) {
+      if (!/revision_conflict/.test(String(error)) || attempt === 3) throw error;
     }
-  };
-  if (event === 'feedbackIssueOpened') {
-    stats = refreshLocalUsageSnapshot(context, options, stats);
   }
-  try {
-    writeLocalUsageStats(options, stats);
-  } catch (error) {
-    console.error('SoloMap failed to write local usage stats:', error);
-  }
-  return stats;
+  throw new Error('usage_state_write_failed');
 }
 
-export function buildFeedbackUsageSummary(
+export async function buildFeedbackUsageSummary(
   context: vscode.ExtensionContext,
   options: LocalUsageStatsOptions,
   host: { appName?: string; version?: string; remoteName?: string; uiKind?: number; uriScheme?: string } = {}
-): string {
-  const stats = recordLocalUsageEvent(context, options, 'feedbackIssueOpened');
+): Promise<string> {
+  const stats = await recordLocalUsageEvent(context, options, 'feedbackIssueOpened');
   const snapshot = stats.snapshot;
   return [
     'This anonymous local summary is included only because the user opened a feedback issue.',
-    `Stats file: .solomap-global/usage/${options.usageStatsFileName}`,
+    'Storage: SoloMap local database',
     `Extension version: ${stats.extensionVersion || 'unknown'}`,
     `First opened: ${stats.createdAt || 'unknown'}`,
     `Last updated: ${stats.updatedAt || 'unknown'}`,
@@ -323,10 +283,10 @@ export function buildFeedbackUsageSummary(
     `- Project progress: ${snapshot.projectProgressPercent}%`,
     `- Projects with Issue cache: ${snapshot.issueCacheProjectCount}`,
     `- Projects with delivery cache: ${snapshot.deliveryCacheProjectCount}`,
-    `- Local Agent run directories: ${snapshot.agentRunDirectoryCount}`,
+    `- Indexed local Agent runs: ${snapshot.agentRunDirectoryCount}`,
     `- Latest local Agent run: ${snapshot.latestAgentRunAt || 'none'}`,
     '',
-    buildLocalDiagnosticSummary(context, options.globalDataPath, host),
+    await buildLocalDiagnosticSummary(context, options.globalDataPath, host),
     '',
     'Privacy:',
     '- No project paths, project names, Issue titles, Agent outputs, prompts, logs, or file contents are included.'

@@ -44,7 +44,9 @@ async function main(): Promise<void> {
       if (String(message.result?.thread?.id || '') !== sessionId) { failure = 'native_resume_target_mismatch'; stop(); return; }
       const binding = await operation<NativeSessionBinding>('read_run_binding', identity);
       if (!binding) throw new Error('run_native_binding_missing');
-      const confirmed = await operation<NativeSessionBinding>('write_run_binding', { ...identity, generation, expectedHeadRevision: binding.headRevision, confirmSessionId: sessionId, evidence: { source: 'codex_app_server', logRef: `solomap://run/${state.runId}/native:codex` }, idempotencyKey: `run:${state.runId}:${generation}:app-server-confirmed` });
+      const head = binding.revisions[binding.headRevision - 1];
+      const confirmed = head.state === 'confirmed' && head.sessionId === sessionId ? binding
+        : await operation<NativeSessionBinding>('write_run_binding', { ...identity, generation, expectedHeadRevision: binding.headRevision, confirmSessionId: sessionId, evidence: { source: 'codex_app_server', logRef: `solomap://run/${state.runId}/native:codex` }, idempotencyKey: `run:${state.runId}:${generation}:app-server-confirmed` });
       for (;;) {
         const current = await operation<RunState>('read_run_state', identity);
         if (current.generation !== generation || current.turnId !== state.turnId) throw new Error('run_owner_conflict');

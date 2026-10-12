@@ -14,29 +14,36 @@
 
 ## 当前交付状态
 
-更新时间：2026-10-11。**实施暂停，八包0/8，当前成果未作终态提交或发布。** 用户要求重新设计实施蓝图，并由新对话继续；本轮只整理文档和交接。[新版实施蓝图](../architecture/unified-database-execution-blueprint.zh.md)保持原八包范围，先完整验收包1，再依次推进其余包。
+更新时间：2026-10-12。**包1至包6已验收（未发布），八包6/8，尚未终态发布。** 公共 Agent CLI 链路由两个真实认证 CLI 覆盖，不要求用户提供所有受支持供应方的账号；未取得入口的适配器保留契约与负向验证范围说明。[新版实施蓝图](../architecture/unified-database-execution-blueprint.zh.md)保持原八包范围，当前推进包7。
 
 本节是唯一当前状态入口。后文“历史推进记录”“历史交付项记录”和各次验证日志全部保留用于定位证据，其进行中/待实施/最新闭环等旧措辞不覆盖本表。旧具体问题的闭环只证明其限定结果，不能累计成整包进度。
 
 | 包 / 固定检查项 | 状态 | 已有结果或证据范围 | 影响整包的剩余结果 / 下一验收 |
 | --- | --- | --- | --- |
-| 1 运行、会话、任务 / P1-A/B/C | 未闭环 | 正式运行、续聊、停止及复核等分支已有实现和定向证据；首次handoff工具定位具体问题已验收 | 全部入口、历史完整映射与活跃会话交接、其他CLI及冷宿主恢复、旧每轮writer退出；新对话先补齐真实入口合同并完整验收本包 |
-| 2 摘要、报告、学习消费者 / P2-A/B | 未闭环 | digest、步骤记忆、报告及学习来源已有数据库主链；当前新增两个默认根回归均失败 | 默认根仍走旧报告来源，旧报告生产代码未退役；包1身份合同成立后，完整验收全部消费者及固定版本/父子来源，不把两个用例修绿当整包完成 |
-| 3 记忆、经验、RSI / P3-A/B/C | 未闭环 | 复盘提案、应用及固定提示词版本已有隔离验证 | 真实复盘→后续任务实际采用→验证评价、外部记忆授权/切换/撤销、全部旧来源合同退出 |
-| 4 项目、设置、UI、后台 / P4-A/B | 未闭环 | 项目登记具体问题已有验收，部分设置与通知链已有实现 | 全部设置/UI状态、租约/调度/TG/inbox/outbox恢复去重及旧writer退出；生产认知配置误写事故仍无关闭证据 |
-| 5 能力、文档、附件 / P5-A/B | 未闭环 | 三类登记及成功安装回执去重已有验证；内置技能修正后编译116、能力30/30 | 内置技能修正后待独立复审；失败安装/卸载、poller与job恢复、文档索引和内部附件完整生命周期 |
-| 6 分析与兼容退出 / P6-A/B | 未闭环 | 多条分析链路已切库，部分兼容路径已退出 | 全部剩余分析/远端投影/领域记录消费者及旧回退、内部watcher退出；真实入口和完整宿主最终重跑 |
+| 1 运行、会话、任务 / P1-A/B/C | 已验收（未发布） | 正式 task/turn/run、历史承接、停止/续聊/恢复及用户界面主链已落库；活跃旧 owner 退出后自动导入，Solo 关联使用关系投影。7个物理历史源的194866字节及全文/hash/身份/关系/版本消费已总对账。并发直接读、历史 output-only 和关联日志三项缺口经有效RED修复，窄回归69/69、Webview回归及独审17 CLEAN。当前 `audited18` VSIX 6316文件审计通过并在全新真实宿主逐字显示两轮140019/198020字节日志和29字节stderr，互不串轮且不暴露内部ID。官方 Codex 0.160.0 真实认证模型经真实MCP读取，并在Runtime owner重启后由共享runner延续同一任务/会话/模型；Copilot真实 `gpt-6-luna` 在同一session完成两轮真实MCP调用和续接 | Claude/Cursor/OpenCode/Grok/Antigravity未提供真实认证入口，不要求用户补齐，适配器以已完成的正式合同、负向和受控原生边界验证为当前覆盖范围；不得宣称这些供应方的真实模型已验。夹具进程均已停止，物理证据目录已归类保留并按精确清单等待授权回收；发布仍统一留到包8 |
+| 2 摘要、报告、学习消费者 / P2-A/B | 已验收（未发布） | digest、handoff、执行图、步骤记忆、工作汇报、任务历史、学习采集与复盘统一读写数据库；默认/自定义数据根、固定版本、归档、迟交、项目移动重放、父子来源、并发重启和负向边界已覆盖。正式链为 `taskCheckpointProcess.js → checkpoint_run → upsertRunReport`，同一run+turn只修订一个报告对象；旧文件producer退出生产模块，仅保留显式历史importer与测试夹具。扩大回归285/285及消费者回归258/258，独立终审C0/I0/M0 Ready；最终VSIX 6316文件审计通过，SHA-256 `e94309851659ba0332f48ea5dd77ac03086b6bf67d7cc23c9df7d07428fb3337` | 源码与制品无已知尾项；发布统一留到包8 |
+| 3 记忆、经验、RSI / P3-A/B/C | 已验收（未发布） | 正式结果只经宿主验证形成可信学习事件；认证 Codex 真实完成结果核对、正式复盘、固定 approved revision 召回、后续任务采用与独立 Agent 评价。采用先保持 unassessed，宿主记录独立验证后升级 effective；纠偏、撤销及固定旧版审计成立，撤销后生产 CLI 不再召回。外部可选记忆的 project/global scope、revision/hash、候选/有效期、断连/重授权代次、重启幂等与普通 MCP 防伪造均闭合；旧 producer/consumer 退出。最终回归74/74、119/119、生产入口6/6，独立终审C0/I0/M0 Ready；当前VSIX 6318文件审计通过，SHA-256 `ff3901a791f919ef84714b10d6bbcfb746085c9ebc9216fbb8b32a971ae120cb` | 源码、真实链路与制品无已知尾项；一次 `agent_review` 专用CLI入口等待stdin的失败运行已按失败事实收口，正式独立复核改走单独Solo执行且全部新运行无待消费源；发布统一留到包8 |
+| 4 项目、设置、UI、后台 / P4-A/B | 已验收（未发布） | 项目登记、设置与设备UI叶子状态、多窗口CAS、Runtime单owner与暂停读写、调度/通知/TG inbox/outbox的接管和恢复幂等、旧runtime importer及producer退出已闭合。F17按现存原生宿主配置恢复权威来源，不猜测未知旧值。冻结回归41/41、Telegram 16/16、compiled Webview 11/11，独立终审C0/I0/M0 Ready；最终VSIX 6321文件审计并在全新code-server宿主安装、激活、渲染及数据库回读通过，SHA-256 `fa674fc8ea64c5cad47786eeb74e9f5fdee9e0c9139851bdfd336284f197e995` | 包内无已知尾项；Telegram secret/envelope按蓝图留包7联合验收，发布统一留到包8 |
+| 5 能力、文档、附件 / P5-A/B | 已验收（未发布） | Skill/MCP 安装、卸载、失败回滚、poller与job重启恢复、文档索引和内部附件生命周期已统一入库；RTK、CodeGraph、Caveman 已从插件产品面、运行路径和安装入口退役。冻结回归49/49、最终增量32/32；真实宿主完成10次 Skill/MCP 生命周期操作并回读，独立终审C0/I0/M0 Ready。最终VSIX 6323文件审计通过，SHA-256 `2434ef27f13eb8d7f2b0d08f07fd324d3473df622ddf0470f7296f18ad516eb6` | 包内无已知尾项；历史兼容schema仅供旧数据识别，不再形成用户入口；发布统一留到包8 |
+| 6 分析与兼容退出 / P6-A/B | 已验收（未发布） | 统计、投入、token、汇报、日报/战略、远端投影及领域记录均经统一操作读取；旧分析文件只保留显式历史导入，普通入口在旧来源不可用时仍成立。源版本、数据根和请求代次共同约束异步提交，迟到结果不能覆盖新根、新状态或当前界面。冻结回归92/92，独立终审C0/I0/M0 Ready；最终VSIX 6323文件审计通过，并在全新code-server宿主完成侧栏、生长报告、数据库回读及认证Codex真实MCP读取，SHA-256 `8bd29d7d2f3afdc9caef6aca8537f49295fbb629722f34eb0a2f23132722d3cf` | 包内无已知尾项；宿主文件watcher出现环境级EMFILE警告但目标界面、数据库和CLI链路均实际完成；发布统一留到包8 |
 | 7 CSV、数据带走与边界 / P7-A/B/C | 未闭环 | 数据库备份复制后隔离重开读回已有验证；旧schema数量断言已修正 | 完整CSV一致性与冲突恢复、正式全库恢复、单项目导出迁入、move/clone/旧ID、大附件、秘密及CLI配置边界 |
 | 8 总迁移、退役、回收、发布 / P8-A/B/C/D | 未闭环 | 异步迁移和回收框架存在，历史定向证据保留 | 包1–7整包验收后完成全源对账、真实存量性能/并发/恢复、精确历史回收授权及新鲜全量验证、双市场发布、干净主线 |
 
 ### 当前证据与交接限制
 
-- 文档修改前HEAD `69f1aead20d4bed6d7fed52f3c2ebcfb8c9a8e2b`，158条脏路径，暂存区为空。完整修改前路径/hash与文档原件保存在 `/tmp/solomap-462-blueprint-handoff-u8m_hhsu/baseline.json` 及同目录；本轮没有回退已有实现。
-- 包2最新有效失败日志：`/tmp/solomap-462-package2-default-root-red.log`，2项失败，无对应生产修复。停工留下的 `/tmp/solomap-462-package2-tests-7p53cx87` 仍存在，本轮未清理，后续先核对owner和引用。
-- 包5旧独审 C0/I1/M0；修正后编译116、能力30/30通过，尚未复审。证据前缀 `/tmp/solomap-462-builtin-upgrade-`，最终候选记录 `freeze3-pending-review.json`；旧29/29和freeze2只属此前版本。
+- 本轮包1候选统一记录：`.solopreneur/agent-runs/__solo__/464/evidence/package1-candidate.json`。最新制品为 `package1-install-host-audited18.vsix`（SHA-256 `501de8e59376852776e7b1eab1d275e82cba205b3481790de6596ab454b16bec`）；真实 Codex 与 Copilot 两个CLI的模型/MCP/续接证据、其余适配器验证边界、最终宿主、历史总对账、独审和夹具精确清单均在同目录。包1已据此整包验收，尚未发布。
+- 本轮包2候选统一记录：`.solopreneur/agent-runs/__solo__/464/evidence/package2-candidate.json`。最终制品为 `package2-final-candidate.vsix`（SHA-256 `e94309851659ba0332f48ea5dd77ac03086b6bf67d7cc23c9df7d07428fb3337`）；285项报告/历史主链、258项全部消费者、C0/I0/M0独立终审、包内生成物哈希及双生产依赖审计证据均在同目录。包2已据此整包验收，尚未发布。
+- 本轮包3正式证据位于同一 evidence 目录：`package3-real-rsi-result-final.json` 记录真实结果、正式复盘、采用、独立评价、纠偏/撤销与运行收口；`package3-independent-final-review.md` 为 C0/I0/M0 Ready 独立终审；`package3-final-{compile,core,review,production,vsix}.log` 为最后源码的编译、74/74、119/119、6/6和制品审计。最终制品 `package3-final-current.vsix` SHA-256 为 `ff3901a791f919ef84714b10d6bbcfb746085c9ebc9216fbb8b32a971ae120cb`。包3已据此整包验收，尚未发布。
+- 本轮包4候选统一记录：`.solopreneur/agent-runs/__solo__/464/evidence/package4-candidate.json`。最终制品为 `package4-frozen-final2.vsix`（SHA-256 `fa674fc8ea64c5cad47786eeb74e9f5fdee9e0c9139851bdfd336284f197e995`）；冻结回归、全新真实宿主、F17无猜测关闭、独立终审与自有进程/夹具收尾均在同目录。包4已据此整包验收，尚未发布。
+- 本轮包5候选统一记录：`output/acceptance-464/package5-candidate27.json`。最终制品为 `solopreneur-roadmap-0.0.511-package5-candidate27.vsix`（SHA-256 `2434ef27f13eb8d7f2b0d08f07fd324d3473df622ddf0470f7296f18ad516eb6`）；冻结回归、增量回归、制品内外哈希、退役增强零命中和C0/I0/M0独立终审均已记录。真实宿主10次Skill/MCP生命周期及其297445414字节夹具的精确清理证据见 `output/acceptance-464/package5-candidate26-host-acceptance.json` 与 `package5-candidate26-host-cleanup.json`。包5已据此整包验收，尚未发布。
+- 本轮包6候选统一记录：`output/acceptance-464/package6-candidate5.json`。最终制品为 `solopreneur-roadmap-0.0.511-package6-candidate5.vsix`（SHA-256 `8bd29d7d2f3afdc9caef6aca8537f49295fbb629722f34eb0a2f23132722d3cf`）；92项冻结回归、最终制品审计、全新宿主界面与数据库读回、认证Codex真实MCP读取、C0/I0/M0独立终审及全部本轮夹具精确清理均已记录。包6已据此整包验收，尚未发布。
+- 本轮开始HEAD `a2edff352a7e5cc006d430fc383272330b9e6fd6`、工作树干净，先前158条改动已在自动备份提交中保留。测试曾向上继承主仓Git并生成两次非正式本地提交，现HEAD `6399beeaa53be37decb4778b9b8cae7acafe3f6a`；未推送、未回退，事故证据在同候选记录。随后已核对独立Git边界；本轮夹具作为正式证据保留，旧462残留未回收。
+- 历史文档交接时HEAD `69f1aead20d4bed6d7fed52f3c2ebcfb8c9a8e2b`，158条脏路径，暂存区为空。完整修改前路径/hash与文档原件保存在 `/tmp/solomap-462-blueprint-handoff-u8m_hhsu/baseline.json` 及同目录；本轮没有回退已有实现。
+- 包2默认根修复证据：`.solopreneur/agent-runs/__solo__/464/evidence/package2-default-root-red-fresh.log` 到 `package2-default-root-green.log`；扩大定向结果见 `package2-focused-green.log`（21/21）。停工留下的 `/tmp/solomap-462-package2-tests-7p53cx87` 已核对owner记录且无活跃引用，属于前轮整包验收夹具；未取得精确物理清单删除授权，当前保留。
+- 包5早期独审 C0/I1/M0 及其 `freeze3-pending-review.json` 只属历史版本；当前候选27已经C0/I0/M0终审及真实宿主验收，不再以旧记录表示当前状态。
 - 首次handoff、成功安装回执去重、备份旧断言三个具体问题已有限定验收，证据分别在 `/tmp/solomap-462-command-builder-`、`/tmp/solomap-462-install-receipt-`、`/tmp/solomap-462-backup-schema-`。它们不关闭包1/5/7，也不代表已发布。
 - 最近完整宿主历史记录为257/321、64项失败；后续定向通过不等于整套已通过。旧账登记的30个具体问题不等于30个新增生产修复，其中包含测试迁移和验收补齐。
-- F17/P4-A记录生产认知配置误写，原真实选择尚需可信证据核对，本轮没有现场恢复核验；不能静默略去或猜测覆盖。原166完整条款仍需按实际归属映射八包，不以“只剩一个编号”描述总缺口。
+- F17/P4-A已按 `package4-f17-resolution.json` 关闭：未知事故前值不作反推，未改动的VS Code原生宿主配置作为当前权威来源，历史derivative保留到包8精确回收。原166完整条款仍需按实际归属映射八包，不以“只剩一个编号”描述总缺口。
 
 ### 维护方式
 

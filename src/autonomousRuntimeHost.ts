@@ -2,12 +2,14 @@ import * as childProcess from 'child_process';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 
 import { claimRuntimeLease, readRuntimeState } from './autonomousRuntime';
 import { RuntimeControlCommand, RuntimeControlResponse, sendRuntimeControlCommand } from './autonomousRuntimeControl';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import { PiMainPathRequest, PiMainPathResult } from './piMainPathDelivery';
 import { runtimeBuildId } from './runtimeBuildIdentity';
+import { isProcessOwnerAlive as processOwnerAlive } from './processIdentity.js';
 
 interface RuntimeChild {
   pid?: number;
@@ -21,6 +23,7 @@ interface RuntimeHostOptions {
   runtimeId?: string;
   now?: Date;
   isProcessAlive?: (pid: number) => boolean;
+  isProcessOwnerAlive?: (pid: number, birth: string) => boolean;
   spawnProcess?: (command: string, args: string[], options: childProcess.SpawnOptions) => RuntimeChild;
   sendHealth?: (dataPath: string) => Promise<RuntimeControlResponse>;
   sendControl?: (command: RuntimeControlCommand, expectedRuntimeId?: string) => Promise<unknown>;
@@ -169,7 +172,8 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
   const buildId = options.buildId || runtimeBuildId(options.extensionPath);
   const current = readRuntimeState(globalDataPath);
   const isProcessAlive = options.isProcessAlive || defaultIsProcessAlive;
-  if (current && isProcessAlive(current.pid)) {
+  const isOwnerAlive = options.isProcessOwnerAlive || (options.isProcessAlive ? ((pid: number) => options.isProcessAlive!(pid)) : processOwnerAlive);
+  if (current && isOwnerAlive(current.pid, current.processBirth || '')) {
     let health = await inspectAutonomousRuntimeHealth(globalDataPath, current.pid, Date.now(), options.sendHealth, entryPath, buildId);
     if (health.healthy) return { started: false, pid: current.pid, runtimeId: current.runtimeId };
     if (health.reason === 'control_unavailable' || health.reason === 'stale_heartbeat') {
@@ -211,10 +215,11 @@ export function ensureAutonomousRuntime(options: RuntimeHostOptions): { started:
   const now = options.now || new Date();
   const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath);
   const isProcessAlive = options.isProcessAlive || defaultIsProcessAlive;
+  const isOwnerAlive = options.isProcessOwnerAlive || (options.isProcessAlive ? ((pid: number) => options.isProcessAlive!(pid)) : processOwnerAlive);
   const current = readRuntimeState(globalDataPath);
   if (
     current
-    && isProcessAlive(current.pid)
+    && isOwnerAlive(current.pid, current.processBirth || '')
   ) {
     return { started: false, pid: current.pid, runtimeId: current.runtimeId };
   }
@@ -235,7 +240,7 @@ export function ensureAutonomousRuntime(options: RuntimeHostOptions): { started:
   });
   const pid = Number(child.pid || 0);
   if (!pid) throw new Error('SoloMap Runtime process did not return a process ID.');
-  const lease = claimRuntimeLease(globalDataPath, { runtimeId, pid, now, isProcessAlive });
+  const lease = claimRuntimeLease(globalDataPath, { runtimeId, pid, now, isProcessOwnerAlive: isOwnerAlive });
   child.unref();
   if (!lease.acquired) return { started: false, pid: lease.owner.pid, runtimeId: lease.owner.runtimeId };
   return { started: true, pid, runtimeId };
@@ -248,9 +253,7 @@ export function startPiMainPathDelivery(options: {
   execPath?: string;
 }): Promise<PiMainPathResult> {
   const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath);
-  const requestRoot = path.join(globalDataPath, 'runtime', 'pi-delivery-requests');
-  fs.mkdirSync(requestRoot, { recursive: true });
-  const requestPath = path.join(requestRoot, `${crypto.randomUUID()}.json`);
+  const requestPath = path.join(os.tmpdir(), `solomap-pi-delivery-${crypto.randomUUID()}.json`);
   fs.writeFileSync(requestPath, JSON.stringify(options.request), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   const entryPath = path.join(options.extensionPath, 'out', 'autonomousRuntimeProcess.js');
   return new Promise((resolve, reject) => {

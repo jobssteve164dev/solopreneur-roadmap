@@ -1332,6 +1332,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       color: #ffd7df;
     }
 
+    .conversation-conclusion {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
     .rollback-btn {
       border: 1px solid rgba(244, 67, 54, 0.4);
       border-radius: 4px;
@@ -2222,6 +2227,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     const abilityDetailStatus = document.getElementById('ability-detail-status');
     const abilityDetailMeta = document.getElementById('ability-detail-meta');
     const btnInstallAbility = document.getElementById('btn-install-ability');
+    const btnToggleAbility = document.getElementById('btn-toggle-ability');
     const btnUninstallAbility = document.getElementById('btn-uninstall-ability');
     const abilityActionBadge = document.getElementById('ability-action-badge');
     const settingFeedbackTitle = document.getElementById('setting-feedback-title');
@@ -2252,8 +2258,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     let activeMainView = 'roadmap';
     let currentSettings = {};
     let settingsRequestSeq = 0;
+    let latestSettingsRequestId = '';
+    const settingsDirtyKeys = new Set();
     const projectSettingsDrafts = new Map();
     const projectSettingsSaves = new Map();
+    const projectSettingsDirtyKeys = new Map();
     let renderedSettingsProjectPath = '';
 
     function captureProjectSettingsDraft() {
@@ -2268,6 +2277,22 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         type: getSoloSelectValue(projectTypeSelect),
         priority: getSoloSelectValue(projectPrioritySelect)
       });
+    }
+    function markProjectSettingDirty(target) {
+      if (!renderedSettingsProjectPath) return;
+      const control = target && target.closest ? (target.closest('[data-solo-select]') || target) : target;
+      const id = String(control && control.id || '');
+      const key = id === 'project-name-input' ? 'name'
+        : id === 'project-description-input' ? 'description'
+        : id === 'project-notes-input' ? 'notes'
+        : id === 'project-type-select' ? 'projectType'
+        : id === 'project-priority-select' ? 'priority'
+        : id === 'project-autonomy-enabled' ? 'autonomyEnabled'
+        : id === 'project-tool-network-disabled' ? 'toolNetworkDisabled' : '';
+      if (!key) return;
+      const dirty = projectSettingsDirtyKeys.get(renderedSettingsProjectPath) || new Set();
+      dirty.add(key);
+      projectSettingsDirtyKeys.set(renderedSettingsProjectPath, dirty);
     }
     let currentRoadmapLoading = false;
     let currentRoadmapError = '';
@@ -2286,6 +2311,10 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     const conversationDrafts = {};
     let conversationChildrenMap = {};
     const conversationLogScrollPositions = {};
+    const conversationLogsExpanded = {};
+    const conversationLogSnapshots = {};
+    const conversationLogRequests = {};
+    const conversationLogRefreshNeeded = {};
     const nodeAgentSelections = {};
     const agentModelCatalogs = {};
     const conversationModelSelections = {};
@@ -2296,8 +2325,76 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     const projectInteractionStates = new Map();
     let soloDraft = '';
     let flowDraft = '';
+    const uiStateSaveTimers = new Map();
+    const uiStateLoadRevisions = new Map();
+    const uiStateLoadRequestIds = new Map();
+    const uiStateLeafEditRevisions = new Map();
+    let uiStateEditRevision = 0;
+    let uiStateLoadSequence = 0;
+    let lastRoadmapInteractionFlat = new Map();
     let backgroundUpdate = false;
     const deferredRenders = new Map();
+
+    function saveRoadmapUiState(key, value, scopeKey = activeProjectPath || 'global') {
+      uiStateEditRevision += 1;
+      uiStateLeafEditRevisions.set(scopeKey + '\\n' + key, uiStateEditRevision);
+      const timerKey = scopeKey + ':' + key;
+      clearTimeout(uiStateSaveTimers.get(timerKey));
+      uiStateSaveTimers.set(timerKey, setTimeout(() => {
+        uiStateSaveTimers.delete(timerKey);
+        vscode.postMessage({ command: 'uiState.patch', scopeKey, key, value, requestId: 'roadmap-ui-' + Date.now() + '-' + key });
+      }, 120));
+    }
+
+    function currentRoadmapInteractionState() {
+      return {
+        soloDraft, flowDraft, roadmapRevisionDraft, activeMainView,
+        conversationDrafts: { ...conversationDrafts }, conversationLogsExpanded: { ...conversationLogsExpanded },
+        nodeSupplementFiles: { ...nodeSupplementFiles }, nodeAgentSelections: { ...nodeAgentSelections },
+        conversationModelSelections: { ...conversationModelSelections }, expandedNodeId, activeMethodologyStage,
+        roadmapRevisionExpanded, soloExpanded, flowExpanded,
+        soloAgentSelection, flowAgentSelection, roadmapRevisionAgentSelection
+      };
+    }
+
+    function flattenRoadmapInteraction(value, prefix = '', output = new Map()) {
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        Object.keys(value).forEach(key => { const segment = encodeURIComponent(key).replace(/\\./g, '%2E'); flattenRoadmapInteraction(value[key], prefix ? prefix + '.' + segment : segment, output); });
+      } else if (prefix) output.set(prefix, value);
+      return output;
+    }
+
+    function roadmapInteractionFromState(state) {
+      const result = {};
+      Object.entries(state || {}).filter(([key]) => key.startsWith('interaction.')).forEach(([key, value]) => {
+        const parts = key.slice('interaction.'.length).split('.').map(decodeURIComponent);
+        let target = result;
+        parts.forEach((part, index) => {
+          if (index === parts.length - 1) { if (value !== null) target[part] = value; }
+          else target = target[part] || (target[part] = {});
+        });
+      });
+      return result;
+    }
+
+    function saveRoadmapInteractionState() {
+      const next = flattenRoadmapInteraction(currentRoadmapInteractionState());
+      const keys = new Set([...lastRoadmapInteractionFlat.keys(), ...next.keys()]);
+      keys.forEach(key => {
+        const value = next.has(key) ? next.get(key) : null;
+        if (JSON.stringify(value) !== JSON.stringify(lastRoadmapInteractionFlat.get(key))) saveRoadmapUiState('interaction.' + key, value);
+      });
+      lastRoadmapInteractionFlat = next;
+    }
+
+    function loadRoadmapUiState(scopeKey) {
+      const scope = scopeKey || 'global';
+      lastRoadmapInteractionFlat = flattenRoadmapInteraction(currentRoadmapInteractionState());
+      uiStateLoadRevisions.set(scope, uiStateEditRevision);
+      const loadRequestId = 'roadmap-ui-load:' + (++uiStateLoadSequence);
+      uiStateLoadRequestIds.set(scope, loadRequestId);
+      vscode.postMessage({ command: 'uiState.load', scopeKey: scope, loadRequestId });
+    }
 
     function deferBackgroundRender(container, render) {
       const focused = document.activeElement;
@@ -2324,7 +2421,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         addProject: '添加项目文件夹',
         settingsTitle: '项目设置',
         language: '界面语言',
-        removeProject: '删除项目',
+        removeProject: '移除项目',
         projectName: '项目名称',
         projectNamePlaceholder: '用于在项目列表里识别这个项目',
         projectDescription: '一句话简介',
@@ -2400,46 +2497,42 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         mcpInstallHelp: '粘贴 MCP 来源，SoloMap 会注册到全局能力连接器库。',
         installMcp: '安装连接器',
         installingMcp: '正在启动安装...',
-        enhancementToggles: '执行增强',
-        enhancementTogglesHelp: '选择一个执行增强后安装或卸载。SoloMap 会让 Agent CLI 完成用户环境里的真实安装和彻底卸载；状态会自动检测。',
-        abilityManagerLabel: '能力扩展与执行增强',
-        abilityManagerHelp: '在这里管理您的已安装技能 (Skills)、连接器 (MCP Connectors) 与内置的执行增强 (Enhancements)。',
-        abilitySelectPlaceholder: '请选择能力或增强...',
+        abilityManagerLabel: '能力扩展',
+        abilityManagerHelp: '在这里管理已安装的技能与 MCP 连接器。',
+        abilitySelectPlaceholder: '选择一个技能或 MCP 连接器...',
         abilityGroupSkills: '技能 (Skills)',
         abilityGroupConnectors: '连接器 (MCP Connectors)',
-        abilityGroupEnhancements: '执行增强 (Enhancements)',
         addSkill: '➕ 新增技能...',
         addSkillDescription: '安装外部技能以扩展能力',
         addConnector: '➕ 新增连接器...',
         addConnectorDescription: '集成外部 MCP 服务生态',
         installedStatus: '已安装',
+        disabledStatus: '已禁用',
         readyStatus: '已就绪',
         notInstalledStatus: '未安装',
+        installingStatus: '正在安装',
+        uninstallingStatus: '正在卸载',
+        abilityFailedStatus: '操作失败',
+        abilityFailedHelp: '上次操作未完成，请重试。',
         skillMetaPrefix: '技能路径：',
         connectorMetaPrefix: '连接器类型：',
-        enhancementMetaPrefix: '内置增强 · 版本：',
         skillInstallInputHelp: '粘贴 skills.sh 或 GitHub 技能仓库链接。SoloMap 会将其安装到全局技能库中。',
         mcpInstallInputHelp: '粘贴 MCP 连接器源。SoloMap 将其注册为全局连接器。',
         skillInputRequired: '请先输入要安装的技能链接。',
         mcpInputRequired: '请先输入要安装的连接器源。',
         installingSkillMessage: '正在安装技能...',
         installingMcpMessage: '正在安装连接器...',
-        installingEnhancementMessage: '正在安装执行增强...',
         uninstallingSkillMessage: '正在卸载技能...',
         uninstallingMcpMessage: '正在卸载连接器...',
-        uninstallingEnhancementMessage: '正在卸载执行增强...',
-        selectEnhancement: '选择增强功能',
         installingEnhancement: '正在启动安装...',
         uninstallingEnhancement: '正在启动卸载...',
-        installEnhancement: '安装',
+        installAbility: '安装',
+        upgradeAbility: '更新',
+        upgradingAbilityMessage: '正在更新…',
         repairEnhancement: '修复',
         enableEnhancement: '启用',
         disableEnhancement: '禁用',
-        uninstallEnhancement: '卸载',
-        checkEnhancement: '重新检测',
-        enhancementVersion: '版本',
-        enhancementStateEnabled: '已启用',
-        enhancementStateDisabled: '未启用',
+        uninstallAbility: '卸载',
         feedback: '建议反馈',
         feedbackNotWorking: '没跑通',
         feedbackNextStep: '不懂下一步',
@@ -2519,6 +2612,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         },
         command: '命令',
         output: '输出',
+        viewExecutionLogs: '查看运行记录',
         changedFiles: '修改文件',
         openFile: '打开',
         testing: '正在测试连接...',
@@ -2620,46 +2714,42 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         mcpInstallHelp: 'Paste an MCP source. SoloMap registers it in the global connector library.',
         installMcp: 'Install Connector',
         installingMcp: 'Starting install...',
-        enhancementToggles: 'Harness Enhancements',
-        enhancementTogglesHelp: 'Choose one enhancement, then install or uninstall it. SoloMap asks the Agent CLI to perform the real user-environment install or full uninstall; status is detected automatically.',
-        abilityManagerLabel: 'Ability Extensions & Execution Enhancements',
-        abilityManagerHelp: 'Manage installed Skills, MCP Connectors, and built-in execution enhancements here.',
-        abilitySelectPlaceholder: 'Select an ability or enhancement...',
+        abilityManagerLabel: 'Ability Extensions',
+        abilityManagerHelp: 'Manage installed skills and MCP connectors here.',
+        abilitySelectPlaceholder: 'Select a skill or MCP connector...',
         abilityGroupSkills: 'Skills',
         abilityGroupConnectors: 'MCP Connectors',
-        abilityGroupEnhancements: 'Execution Enhancements',
         addSkill: '➕ Add Skill...',
         addSkillDescription: 'Install an external skill to extend SoloMap.',
         addConnector: '➕ Add Connector...',
         addConnectorDescription: 'Connect an external MCP service.',
         installedStatus: 'Installed',
+        disabledStatus: 'Disabled',
         readyStatus: 'Ready',
         notInstalledStatus: 'Not installed',
+        installingStatus: 'Installing',
+        uninstallingStatus: 'Uninstalling',
+        abilityFailedStatus: 'Action failed',
+        abilityFailedHelp: 'The last action did not complete. Try again.',
         skillMetaPrefix: 'Skill path: ',
         connectorMetaPrefix: 'Connector type: ',
-        enhancementMetaPrefix: 'Built-in enhancement · Version: ',
         skillInstallInputHelp: 'Paste a skills.sh or GitHub skill repository link. SoloMap installs it into the global skill library.',
         mcpInstallInputHelp: 'Paste an MCP connector source. SoloMap registers it as a global connector.',
         skillInputRequired: 'Enter a skill link before installing.',
         mcpInputRequired: 'Enter a connector source before installing.',
         installingSkillMessage: 'Installing skill...',
         installingMcpMessage: 'Installing connector...',
-        installingEnhancementMessage: 'Installing execution enhancement...',
         uninstallingSkillMessage: 'Uninstalling skill...',
         uninstallingMcpMessage: 'Uninstalling connector...',
-        uninstallingEnhancementMessage: 'Uninstalling execution enhancement...',
-        selectEnhancement: 'Select enhancement',
         installingEnhancement: 'Starting install...',
         uninstallingEnhancement: 'Starting uninstall...',
-        installEnhancement: 'Install',
+        installAbility: 'Install',
+        upgradeAbility: 'Update',
+        upgradingAbilityMessage: 'Updating…',
         repairEnhancement: 'Repair',
         enableEnhancement: 'Enable',
         disableEnhancement: 'Disable',
-        uninstallEnhancement: 'Uninstall',
-        checkEnhancement: 'Check',
-        enhancementVersion: 'Version',
-        enhancementStateEnabled: 'Enabled',
-        enhancementStateDisabled: 'Disabled',
+        uninstallAbility: 'Uninstall',
         feedback: 'Feedback',
         feedbackNotWorking: 'Not working',
         feedbackNextStep: 'Next step unclear',
@@ -2739,6 +2829,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         },
         command: 'Command',
         output: 'Output',
+        viewExecutionLogs: 'View run logs',
         changedFiles: 'Changed Files',
         openFile: 'Open',
         testing: 'Testing connection...',
@@ -2864,8 +2955,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         projectInteractionStates.set(activeProjectPath, {
           soloDraft, flowDraft, roadmapRevisionDraft, activeMainView, currentFlowState,
           conversationDrafts: { ...conversationDrafts },
+          conversationLogsExpanded: { ...conversationLogsExpanded },
+          conversationLogSnapshots: { ...conversationLogSnapshots },
           nodeSupplementFiles: { ...nodeSupplementFiles },
           nodeAgentSelections: { ...nodeAgentSelections },
+          conversationModelSelections: { ...conversationModelSelections },
           expandedNodeId, activeMethodologyStage,
           soloAgentSelection, flowAgentSelection, roadmapRevisionAgentSelection
         });
@@ -2894,16 +2988,27 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (roadmapRevisionBody) roadmapRevisionBody.innerHTML = '';
       Object.keys(nodeConversations).forEach(key => delete nodeConversations[key]);
       Object.keys(nodeConversationPaging).forEach(key => delete nodeConversationPaging[key]);
+      Object.keys(conversationLogsExpanded).forEach(key => delete conversationLogsExpanded[key]);
+      Object.keys(conversationLogSnapshots).forEach(key => delete conversationLogSnapshots[key]);
+      Object.keys(conversationLogRequests).forEach(key => delete conversationLogRequests[key]);
+      Object.keys(conversationLogRefreshNeeded).forEach(key => delete conversationLogRefreshNeeded[key]);
       Object.keys(nodeSupplementFiles).forEach(key => delete nodeSupplementFiles[key]);
       Object.keys(conversationDrafts).forEach(key => delete conversationDrafts[key]);
       Object.keys(nodeAgentSelections).forEach(key => delete nodeAgentSelections[key]);
+      Object.keys(conversationModelSelections).forEach(key => delete conversationModelSelections[key]);
       const remembered = projectInteractionStates.get(projectPath) || {};
       soloDraft = remembered.soloDraft || '';
       flowDraft = remembered.flowDraft || '';
       roadmapRevisionDraft = remembered.roadmapRevisionDraft || '';
       Object.assign(conversationDrafts, remembered.conversationDrafts || {});
+      Object.assign(conversationLogsExpanded, remembered.conversationLogsExpanded || {});
+      Object.assign(conversationLogSnapshots, remembered.conversationLogSnapshots || {});
+      Object.keys(conversationLogsExpanded).forEach(key => {
+        if (conversationLogsExpanded[key]) conversationLogRefreshNeeded[key] = true;
+      });
       Object.assign(nodeSupplementFiles, remembered.nodeSupplementFiles || {});
       Object.assign(nodeAgentSelections, remembered.nodeAgentSelections || {});
+      Object.assign(conversationModelSelections, remembered.conversationModelSelections || {});
       expandedNodeId = remembered.expandedNodeId || '';
       activeMethodologyStage = remembered.activeMethodologyStage || '';
       soloAgentSelection = remembered.soloAgentSelection || currentCliPath;
@@ -2974,8 +3079,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       setText('text-open-pro-authorization', t('proLogin'));
       setText('label-enhancement-toggles', t('abilityManagerLabel'));
       setText('help-enhancement-toggles', t('abilityManagerHelp'));
-      setText('text-install-ability', t('installEnhancement'));
-      setText('text-uninstall-ability', t('uninstallEnhancement'));
+      setText('text-install-ability', t('installAbility'));
+      setText('text-uninstall-ability', t('uninstallAbility'));
       if (settingFeedbackTitle) settingFeedbackTitle.placeholder = t('feedbackTitlePlaceholder');
       if (settingFeedbackBody) settingFeedbackBody.placeholder = t('feedbackBodyPlaceholder');
       setText('text-open-feedback', t('openFeedback'));
@@ -2999,6 +3104,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       renderFlowPanel();
       renderRoadmapRevisionPanel(currentNodes);
       renderProAccount(currentSettings);
+      renderAbilitiesAndEnhancements(currentSettings);
     }
 
     const currentProjects = { projects: [], selectedProjectPath: '' };
@@ -3070,6 +3176,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         feedbackPanel.style.display = 'none';
         settingsPanel.style.display = 'flex';
         renderProjectSettings();
+        settingsDirtyKeys.clear();
         requestSettings();
       }
     });
@@ -3081,6 +3188,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
 
     btnToggleRoadmapView.addEventListener('click', () => {
       setMainView('roadmap');
+      saveRoadmapInteractionState();
     });
 
     btnToggleSolo.addEventListener('click', () => {
@@ -3090,6 +3198,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       roadmapRevisionPanel.classList.remove('open');
       btnToggleRoadmapRevision.classList.remove('active');
       setMainView('solo');
+      saveRoadmapInteractionState();
     });
 
     if (btnToggleFlow) {
@@ -3104,6 +3213,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           return;
         }
         setMainView('flow');
+        saveRoadmapInteractionState();
       });
     }
 
@@ -3122,6 +3232,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         }
       }
       renderRoadmapRevisionPanel(currentNodes);
+      saveRoadmapInteractionState();
     });
 
     btnCloseRoadmapRevision.addEventListener('click', () => {
@@ -3130,6 +3241,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       roadmapRevisionPanel.classList.remove('open');
       btnToggleRoadmapRevision.classList.remove('active');
       renderRoadmapRevisionPanel(currentNodes);
+      saveRoadmapInteractionState();
     });
 
     bindSoloSelect(settingLanguage, (value) => {
@@ -3270,6 +3382,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         detailStatus: abilityDetailStatus,
         detailMeta: abilityDetailMeta,
         installButton: btnInstallAbility,
+        toggleButton: btnToggleAbility,
         uninstallButton: btnUninstallAbility
       }
     });
@@ -3297,18 +3410,41 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     });
 
     function requestSettings() {
+      latestSettingsRequestId = 'roadmap-settings-' + (++settingsRequestSeq);
       vscode.postMessage({
         command: 'settings.get',
-        requestId: 'roadmap-settings-' + (++settingsRequestSeq)
+        requestId: latestSettingsRequestId
       });
     }
 
+    function markGlobalSettingDirty(target) {
+      const control = target && target.closest ? (target.closest('[data-solo-select]') || target) : target;
+      const id = String(control && control.id || target && target.id || '');
+      if (id === 'setting-cli-select' || id === 'setting-clipath-custom') settingsDirtyKeys.add('cliPath');
+      else if (id === 'setting-agent-model-select') settingsDirtyKeys.add('agentModelPreferences');
+      else if (id === 'setting-language') settingsDirtyKeys.add('language');
+      else if (id === 'setting-global-prompt') settingsDirtyKeys.add('globalPrompt');
+      else if (id === 'setting-global-data-path') settingsDirtyKeys.add('globalDataPath');
+      else if (id === 'setting-reviewer-cli-select' || id === 'setting-reviewer-clipath-custom') settingsDirtyKeys.add('reviewerCliPath');
+      else if (id === 'setting-collaboration-review-mode') settingsDirtyKeys.add('collaborationReviewMode');
+    }
+
     if (settingsPanel) {
-      settingsPanel.addEventListener('input', () => {
+      settingsPanel.addEventListener('input', event => {
         captureProjectSettingsDraft();
+        markProjectSettingDirty(event.target);
+        markGlobalSettingDirty(event.target);
       });
-      settingsPanel.addEventListener('change', () => {
+      settingsPanel.addEventListener('change', event => {
         captureProjectSettingsDraft();
+        markProjectSettingDirty(event.target);
+        markGlobalSettingDirty(event.target);
+      });
+      settingsPanel.addEventListener('click', event => {
+        if (event.target && event.target.closest && event.target.closest('[data-solo-option-value]')) {
+          markProjectSettingDirty(event.target);
+          markGlobalSettingDirty(event.target);
+        }
       });
     }
 
@@ -3339,6 +3475,43 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       backgroundUpdate = true;
       try {
       switch (message.command) {
+        case 'uiStateLoaded':
+          if (message.view !== 'roadmap') break;
+          if (message.loadRequestId && uiStateLoadRequestIds.get(message.scopeKey) !== message.loadRequestId) break;
+          if (message.scopeKey === (activeProjectPath || 'global')) {
+            const observedRevision = uiStateLoadRevisions.get(message.scopeKey) || 0;
+            const safeState = Object.fromEntries(Object.entries(message.state || {}).filter(([key]) => (uiStateLeafEditRevisions.get(message.scopeKey + '\\n' + key) || 0) <= observedRevision));
+            const storedInteraction = roadmapInteractionFromState(safeState);
+            const remoteInteraction = Object.keys(storedInteraction).length ? storedInteraction : (safeState.interactionState && typeof safeState.interactionState === 'object' ? safeState.interactionState : {});
+            const mergedFlat = flattenRoadmapInteraction(remoteInteraction);
+            flattenRoadmapInteraction(currentRoadmapInteractionState()).forEach((value, key) => {
+              if ((uiStateLeafEditRevisions.get(message.scopeKey + '\\ninteraction.' + key) || 0) > observedRevision) mergedFlat.set(key, value);
+            });
+            const interaction = roadmapInteractionFromState(Object.fromEntries([...mergedFlat].map(([key, value]) => ['interaction.' + key, value])));
+            lastRoadmapInteractionFlat = flattenRoadmapInteraction(interaction);
+            soloDraft = typeof interaction.soloDraft === 'string' ? interaction.soloDraft : (typeof safeState.soloDraft === 'string' ? safeState.soloDraft : '');
+            flowDraft = typeof interaction.flowDraft === 'string' ? interaction.flowDraft : '';
+            roadmapRevisionDraft = typeof interaction.roadmapRevisionDraft === 'string' ? interaction.roadmapRevisionDraft : '';
+            for (const value of [conversationDrafts, conversationLogsExpanded, nodeSupplementFiles, nodeAgentSelections, conversationModelSelections]) Object.keys(value).forEach(key => delete value[key]);
+            Object.assign(conversationDrafts, interaction.conversationDrafts || {});
+            Object.assign(conversationLogsExpanded, interaction.conversationLogsExpanded || {});
+            Object.assign(nodeSupplementFiles, interaction.nodeSupplementFiles || {});
+            Object.assign(nodeAgentSelections, interaction.nodeAgentSelections || {});
+            Object.assign(conversationModelSelections, interaction.conversationModelSelections || {});
+            activeMethodologyStage = typeof interaction.activeMethodologyStage === 'string' ? interaction.activeMethodologyStage : '';
+            roadmapRevisionExpanded = interaction.roadmapRevisionExpanded === true;
+            soloExpanded = interaction.soloExpanded === true;
+            flowExpanded = interaction.flowExpanded === true;
+            soloAgentSelection = interaction.soloAgentSelection || currentCliPath;
+            flowAgentSelection = interaction.flowAgentSelection || currentCliPath;
+            roadmapRevisionAgentSelection = interaction.roadmapRevisionAgentSelection || currentCliPath;
+            if (typeof safeState.soloDraft === 'string') soloDraft = safeState.soloDraft;
+            expandedNodeId = typeof interaction.expandedNodeId === 'string' ? interaction.expandedNodeId : (typeof safeState.expandedNodeId === 'string' ? safeState.expandedNodeId : '');
+            setMainView(interaction.activeMainView || 'roadmap');
+            renderSoloPanel(currentNodes, false);
+            renderRoadmap(currentNodes);
+          }
+          break;
         case 'roadmapLoading':
           currentRoadmapLoading = true;
           currentRoadmapError = '';
@@ -3381,22 +3554,27 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           renderRoadmapRevisionPanel(currentNodes);
           break;
         case 'settingsLoaded':
-          currentSettings = message.settings || {};
-          Object.keys(agentModelPreferenceMap).forEach(key => delete agentModelPreferenceMap[key]);
-          Object.assign(agentModelPreferenceMap, (message.settings && message.settings.agentModelPreferences) || {});
-          applySettingCliPath(message.settings.cliPath || 'agy');
-          soloAgentSelection = getEffectiveSettingCliPath();
-          flowAgentSelection = getEffectiveSettingCliPath();
-          roadmapRevisionAgentSelection = getEffectiveSettingCliPath();
-          if (settingGlobalPrompt) settingGlobalPrompt.value = message.settings.globalPrompt || '';
-          if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
-          applyReviewerCliPath(message.settings.reviewerCliPath || '');
-          if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, message.settings.collaborationReviewMode || 'high_risk');
+          if (message.requestId && message.requestId !== latestSettingsRequestId) break;
+          currentSettings = { ...currentSettings, ...(message.settings || {}) };
+          if (!settingsDirtyKeys.has('agentModelPreferences')) {
+            Object.keys(agentModelPreferenceMap).forEach(key => delete agentModelPreferenceMap[key]);
+            Object.assign(agentModelPreferenceMap, (message.settings && message.settings.agentModelPreferences) || {});
+          }
+          if (!settingsDirtyKeys.has('cliPath')) {
+            applySettingCliPath(message.settings.cliPath || 'agy');
+            soloAgentSelection = getEffectiveSettingCliPath();
+            flowAgentSelection = getEffectiveSettingCliPath();
+            roadmapRevisionAgentSelection = getEffectiveSettingCliPath();
+          }
+          if (settingGlobalPrompt && !settingsDirtyKeys.has('globalPrompt')) settingGlobalPrompt.value = message.settings.globalPrompt || '';
+          if (settingGlobalDataPath && !settingsDirtyKeys.has('globalDataPath')) settingGlobalDataPath.value = message.settings.globalDataPath || '';
+          if (!settingsDirtyKeys.has('reviewerCliPath')) applyReviewerCliPath(message.settings.reviewerCliPath || '');
+          if (settingCollaborationReviewMode && !settingsDirtyKeys.has('collaborationReviewMode')) setSoloSelectValue(settingCollaborationReviewMode, message.settings.collaborationReviewMode || 'high_risk');
           syncSettingAgentModelSelect();
           ensureAgentModelsLoaded(getEffectiveSettingCliPath(), 'settings');
           renderProAccount(currentSettings);
           renderAbilitiesAndEnhancements(message.settings);
-          if (settingLanguage) setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
+          if (settingLanguage && !settingsDirtyKeys.has('language')) setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage) || currentLanguage;
           applyLanguage();
           renderFlowPanel();
@@ -3405,6 +3583,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           const pending = projectSettingsSaves.get(message.projectPath);
           if (!pending || pending.requestId !== message.requestId) break;
           projectSettingsSaves.delete(message.projectPath);
+          projectSettingsDirtyKeys.delete(message.projectPath);
           if (projectSettingsDrafts.get(message.projectPath) === pending.draft) {
             projectSettingsDrafts.delete(message.projectPath);
           }
@@ -3468,6 +3647,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           }
           currentProjects.projects = message.projects.projects || [];
           currentProjects.selectedProjectPath = message.projects.selectedProjectPath || '';
+          loadRoadmapUiState(currentProjects.selectedProjectPath || 'global');
           renderProjects(message.projects.projects, message.projects.selectedProjectPath);
           break;
         case 'nodeConversationsLoaded':
@@ -3503,11 +3683,25 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             renderRoadmap(currentNodes);
           }
           break;
+        case 'conversationLogsLoaded': {
+          if (message.projectPath && message.projectPath !== activeProjectPath) return;
+          const key = message.nodeId + ':' + message.conversationId;
+          const pending = conversationLogRequests[key];
+          if (!pending || pending.requestId !== message.requestId) return;
+          delete conversationLogRequests[key];
+          conversationLogSnapshots[key] = message.error
+            ? { sourceKey: pending.sourceKey, error: message.error }
+            : { sourceKey: pending.sourceKey, stdout: message.stdout || '', stderr: message.stderr || '' };
+          if (message.nodeId === soloConversationId) renderSoloPanel(currentNodes);
+          else if (message.nodeId === roadmapRevisionId) renderRoadmapRevisionPanel(currentNodes);
+          else renderRoadmap(currentNodes);
+          break;
+        }
         case 'supplementFilesSelected':
           if (message.nodeId && pendingPastedAttachments[message.nodeId]) {
             pendingPastedAttachments[message.nodeId].delete(String(message.requestId || ''));
           }
-          const soloDraft = message.nodeId === soloConversationId
+          const selectedSoloDraft = message.nodeId === soloConversationId
             ? (soloBody.querySelector('[data-solo-input]')?.value || '')
             : '';
           const revisionDraft = message.nodeId === roadmapRevisionId
@@ -3526,7 +3720,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             renderSoloPanel(currentNodes);
             const input = soloBody.querySelector('[data-solo-input]');
             if (input) {
-              input.value = soloDraft;
+              input.value = selectedSoloDraft;
             }
           }
           if (message.nodeId === roadmapRevisionId) {
@@ -3566,14 +3760,6 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           }
           if (message.settings) renderAbilitiesAndEnhancements(message.settings);
           break;
-        case 'enhancementInstallResult':
-          if (abilityActionBadge) {
-            abilityActionBadge.style.display = 'block';
-            abilityActionBadge.className = message.success ? 'cli-badge success' : 'cli-badge error';
-            abilityActionBadge.textContent = message.message || '';
-          }
-          if (message.settings) renderAbilitiesAndEnhancements(message.settings);
-          break;
       }
       } finally { backgroundUpdate = false; }
     });
@@ -3583,20 +3769,22 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       const projectPath = getSoloSelectValue(projectSelect);
       if (!projectPath) return;
       captureProjectSettingsDraft();
+      const dirty = projectSettingsDirtyKeys.get(projectPath) || new Set();
       const requestId = 'roadmap-project-save-' + (++settingsRequestSeq);
       projectSettingsSaves.set(projectPath, { requestId, draft: projectSettingsDrafts.get(projectPath) });
-      vscode.postMessage({
+      const payload = {
         command: 'project.updateMetadata',
         requestId,
-        projectPath,
-        name: projectNameInput ? projectNameInput.value.trim() : '',
-        description: projectDescriptionInput ? projectDescriptionInput.value.trim() : '',
-        notes: projectNotesInput ? projectNotesInput.value.trim() : '',
-        projectType: getSoloSelectValue(projectTypeSelect),
-        priority: getSoloSelectValue(projectPrioritySelect),
-        autonomyEnabled: Boolean(projectAutonomyEnabled && projectAutonomyEnabled.checked),
-        toolNetworkDisabled: Boolean(projectToolNetworkDisabled && projectToolNetworkDisabled.checked)
-      });
+        projectPath
+      };
+      if (dirty.has('name')) payload.name = projectNameInput ? projectNameInput.value.trim() : '';
+      if (dirty.has('description')) payload.description = projectDescriptionInput ? projectDescriptionInput.value.trim() : '';
+      if (dirty.has('notes')) payload.notes = projectNotesInput ? projectNotesInput.value.trim() : '';
+      if (dirty.has('projectType')) payload.projectType = getSoloSelectValue(projectTypeSelect);
+      if (dirty.has('priority')) payload.priority = getSoloSelectValue(projectPrioritySelect);
+      if (dirty.has('autonomyEnabled')) payload.autonomyEnabled = Boolean(projectAutonomyEnabled && projectAutonomyEnabled.checked);
+      if (dirty.has('toolNetworkDisabled')) payload.toolNetworkDisabled = Boolean(projectToolNetworkDisabled && projectToolNetworkDisabled.checked);
+      vscode.postMessage(payload);
       settingsPanel.style.display = 'none';
       if (cliTestBadge) cliTestBadge.style.display = 'none';
     });
@@ -3872,6 +4060,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         const selectStage = () => {
           const stage = card.getAttribute('data-methodology-stage') || '';
           activeMethodologyStage = activeMethodologyStage === stage ? '' : stage;
+          saveRoadmapInteractionState();
           renderRoadmap(currentNodes);
           if (activeMethodologyStage) {
             setTimeout(() => {
@@ -3897,6 +4086,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           roadmapRevisionExpanded = true;
+          saveRoadmapInteractionState();
           if (settingsPanel) settingsPanel.style.display = 'none';
           roadmapRevisionPanel.classList.add('open');
           btnToggleRoadmapRevision.classList.add('active');
@@ -4013,12 +4203,14 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             if (input) input.value = '';
             conversationDrafts[node.id] = '';
             nodeSupplementFiles[node.id] = [];
+            saveRoadmapInteractionState();
             renderRoadmap(currentNodes);
           });
         }
         row.querySelectorAll('[data-conversation-input-id]').forEach(input => {
           input.addEventListener('input', () => {
             conversationDrafts[node.id] = input.value;
+            saveRoadmapInteractionState();
           });
         });
         row.querySelectorAll('[data-attach-node-id]').forEach(item => {
@@ -4039,12 +4231,14 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             setTargetModelValue(node.id, nextCli, getTargetModelValue(node.id, nextCli), false);
             ensureAgentModelsLoaded(nextCli, node.id);
             renderRoadmap(currentNodes);
+            saveRoadmapInteractionState();
           });
         }
         if (modelSelect) {
           bindSoloSelect(modelSelect, (value) => {
             const cli = nodeAgentSelections[node.id] || node.agentCli || currentCliPath || 'agy';
             setTargetModelValue(node.id, cli, value, true);
+            saveRoadmapInteractionState();
           });
         }
         row.querySelectorAll('[data-remove-supplement-file]').forEach(item => {
@@ -4063,6 +4257,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             vscode.postMessage({ command: 'completeNode', nodeId: node.id });
           });
         }
+        bindConversationLogs(row, node.id);
         row.querySelectorAll('[data-conversation-id] .conversation-row').forEach(item => {
           item.addEventListener('click', (event) => {
             event.stopPropagation();
@@ -4151,12 +4346,12 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       \`;
     }
 
-    function renderSoloPanel(nodes) {
-      if (deferBackgroundRender(soloBody, () => renderSoloPanel(currentNodes))) return;
+    function renderSoloPanel(nodes, preserveComposerInput = true) {
+      if (deferBackgroundRender(soloBody, () => renderSoloPanel(currentNodes, preserveComposerInput))) return;
       if (!soloPanel || !soloBody) {
         return;
       }
-      const preservedInputState = captureComposerInputState(soloBody, '[data-solo-input]');
+      const preservedInputState = preserveComposerInput ? captureComposerInputState(soloBody, '[data-solo-input]') : null;
       if (preservedInputState) {
         soloDraft = preservedInputState.value;
       }
@@ -4232,6 +4427,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           });
           input.value = '';
           soloDraft = '';
+          saveRoadmapUiState('soloDraft', '');
           nodeSupplementFiles[soloConversationId] = [];
           renderSoloPanel(currentNodes);
         });
@@ -4247,6 +4443,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (soloInput) {
         soloInput.addEventListener('input', () => {
           soloDraft = soloInput.value || '';
+          saveRoadmapUiState('soloDraft', soloDraft);
         });
       }
       bindPastedImageAttachments(soloInput, soloConversationId, () => renderSoloPanel(currentNodes));
@@ -4257,11 +4454,13 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           soloAgentSelection = value || currentCliPath || 'agy';
           ensureAgentModelsLoaded(soloAgentSelection, soloConversationId);
           renderSoloPanel(currentNodes);
+          saveRoadmapInteractionState();
         });
       }
       if (soloModelSelect) {
         bindSoloSelect(soloModelSelect, (value) => {
           setTargetModelValue(soloConversationId, soloAgentSelection || currentCliPath || 'agy', value, true);
+          saveRoadmapInteractionState();
         });
       }
       bindSoloSelects(soloBody);
@@ -4412,6 +4611,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           flowDraft = '';
           nodeSupplementFiles[flowTargetId] = [];
           renderFlowPanel();
+          saveRoadmapInteractionState();
         });
       }
       flowBody.querySelectorAll('[data-remove-supplement-file]').forEach(item => {
@@ -4422,7 +4622,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         });
       });
       const flowInput = flowBody.querySelector('[data-flow-goal-input]');
-      if (flowInput) flowInput.addEventListener('input', () => { flowDraft = flowInput.value; });
+      if (flowInput) flowInput.addEventListener('input', () => { flowDraft = flowInput.value; saveRoadmapInteractionState(); });
       bindPastedImageAttachments(flowInput, flowTargetId, () => renderFlowPanel());
       const flowAgentSelect = flowBody.querySelector('[data-flow-agent]');
       const flowModelSelect = flowBody.querySelector('[data-flow-model]');
@@ -4431,11 +4631,13 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           flowAgentSelection = value || currentCliPath || 'agy';
           ensureAgentModelsLoaded(flowAgentSelection, 'flow');
           renderFlowPanel();
+          saveRoadmapInteractionState();
         });
       }
       if (flowModelSelect) {
         bindSoloSelect(flowModelSelect, (value) => {
           setTargetModelValue('flow', flowAgentSelection || currentCliPath || 'agy', value, true);
+          saveRoadmapInteractionState();
         });
       }
 
@@ -4553,12 +4755,14 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           roadmapRevisionDraft = '';
           nodeSupplementFiles[roadmapRevisionId] = [];
           renderRoadmapRevisionPanel(currentNodes);
+          saveRoadmapInteractionState();
         });
       }
       const revisionInput = roadmapRevisionBody.querySelector('[data-roadmap-revision-input]');
       if (revisionInput) {
         revisionInput.addEventListener('input', () => {
           roadmapRevisionDraft = revisionInput.value || '';
+          saveRoadmapInteractionState();
         });
       }
       bindPastedImageAttachments(revisionInput, roadmapRevisionId, () => renderRoadmapRevisionPanel(currentNodes));
@@ -4569,11 +4773,13 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           roadmapRevisionAgentSelection = value || currentCliPath || 'agy';
           ensureAgentModelsLoaded(roadmapRevisionAgentSelection, roadmapRevisionId);
           renderRoadmapRevisionPanel(currentNodes);
+          saveRoadmapInteractionState();
         });
       }
       if (revisionModelSelect) {
         bindSoloSelect(revisionModelSelect, (value) => {
           setTargetModelValue(roadmapRevisionId, roadmapRevisionAgentSelection || currentCliPath || 'agy', value, true);
+          saveRoadmapInteractionState();
         });
       }
       roadmapRevisionBody.querySelectorAll('[data-remove-supplement-file]').forEach(item => {
@@ -4588,7 +4794,46 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       restoreComposerInputState(roadmapRevisionBody, '[data-roadmap-revision-input]', preservedInputState);
     }
 
+    function conversationLogSourceKey(conversation) {
+      const state = conversation && conversation.dataState || {};
+      return [state.runId || '', state.turnId || '', state.runRevision || 0].join(':');
+    }
+
+    function requestConversationLogs(nodeId, conversation) {
+      const state = conversation && conversation.dataState || {};
+      if (!state.hasExecutionLogs) return;
+      const key = nodeId + ':' + conversation.id;
+      const sourceKey = conversationLogSourceKey(conversation);
+      if (conversationLogRequests[key] || (conversation.status !== 'Running' && conversationLogSnapshots[key]?.sourceKey === sourceKey && !conversationLogSnapshots[key]?.error)) return;
+      const requestId = key + ':' + Date.now() + ':' + Math.random().toString(36).slice(2);
+      conversationLogRequests[key] = { requestId, sourceKey };
+      vscode.postMessage({ command: 'conversation.getLogs', requestId, projectPath: activeProjectPath, nodeId,
+        conversationId: conversation.id, runId: state.runId, turnId: state.turnId });
+    }
+
+    function bindConversationLogs(container, nodeId) {
+      container.querySelectorAll('[data-conversation-logs]').forEach(item => {
+        const id = item.getAttribute('data-conversation-logs');
+        if (item.open && conversationLogRefreshNeeded[id]) {
+          delete conversationLogRefreshNeeded[id];
+          const conversation = (nodeConversations[nodeId] || []).find(candidate => String(nodeId + ':' + candidate.id) === id);
+          if (conversation) requestConversationLogs(nodeId, conversation);
+        }
+        item.addEventListener('toggle', () => {
+          if (!item.isConnected) return;
+          const wasOpen = conversationLogsExpanded[id] === true;
+          conversationLogsExpanded[id] = item.open;
+          saveRoadmapInteractionState();
+          if (item.open && !wasOpen) {
+            const conversation = (nodeConversations[nodeId] || []).find(candidate => String(nodeId + ':' + candidate.id) === id);
+            if (conversation) requestConversationLogs(nodeId, conversation);
+          }
+        });
+      });
+    }
+
     function bindConversationActions(container, nodeId) {
+      bindConversationLogs(container, nodeId);
       container.querySelectorAll('[data-link-solo-id]').forEach(item => {
         item.addEventListener('click', (event) => {
           event.stopPropagation();
@@ -4715,6 +4960,10 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       const open = activeConversationId === conversationId || hasActiveConversationDescendant(nodeId, conversation);
       const when = conversation.timestamp ? new Date(conversation.timestamp).toLocaleString() : '';
       const summary = summarizeConversation(conversation);
+      const logKey = nodeId + ':' + conversation.id;
+      const logSourceKey = conversationLogSourceKey(conversation);
+      const loadedLogs = conversationLogSnapshots[logKey]?.sourceKey === logSourceKey ? conversationLogSnapshots[logKey] : null;
+      const logsLoading = conversationLogRequests[logKey]?.sourceKey === logSourceKey;
       const duration = formatConversationDuration(conversation);
       const runtimeLabel = duration
         ? (conversation.status === 'Running' ? t('elapsed') : t('duration')) + ': ' + duration
@@ -4760,10 +5009,14 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
                 \${renderConversationOutcome(conversation, nodeId)}
                 \${renderConversationFiles(conversation)}
                 \${nodeId === soloConversationId && conversation.status !== 'Running' ? renderSoloClosure(conversation) : ''}
+                <details data-conversation-logs="\${escapeHtml(conversationId)}" \${conversationLogsExpanded[conversationId] ? 'open' : ''}>
+                <summary>\${escapeHtml(t('viewExecutionLogs'))}</summary>
                 <strong>\${t('command')}</strong>
                 <pre class="conversation-log-pre" data-log-scroll-key="\${escapeHtml(conversationId + ':command')}">\${escapeHtml(conversation.command)}</pre>
                 <strong>\${t('output')}</strong>
-                <pre class="conversation-log-pre" data-log-scroll-key="\${escapeHtml(conversationId + ':output')}">\${escapeHtml(conversation.output)}</pre>
+                <pre class="conversation-log-pre" data-log-scroll-key="\${escapeHtml(conversationId + ':output')}">\${escapeHtml(loadedLogs ? (loadedLogs.error || loadedLogs.stdout || '') : logsLoading ? '正在读取完整运行记录…' : conversation.output)}</pre>
+                \${loadedLogs && loadedLogs.stderr ? \`<strong>错误输出</strong><pre class="conversation-log-pre" data-log-scroll-key="\${escapeHtml(conversationId + ':stderr')}">\${escapeHtml(loadedLogs.stderr)}</pre>\` : ''}
+                </details>
               </div>
               \${renderConversationChildren(nodeId, conversation, children)}
             </div>
@@ -4941,7 +5194,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       return \`
         <div class="conversation-outcome \${conversation.status === 'Failed' ? 'failed' : ''}">
           <div><strong>\${escapeHtml(label)}:</strong> \${escapeHtml(result)}</div>
-          \${conclusion ? \`<div><strong>\${escapeHtml(t('agentConclusion'))}:</strong> \${escapeHtml(conclusion)}</div>\` : ''}
+          \${conclusion ? \`<div class="conversation-conclusion"><strong>\${escapeHtml(t('agentConclusion'))}:</strong> \${escapeHtml(conclusion)}</div>\` : ''}
         </div>
       \`;
     }
@@ -5053,6 +5306,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
 
     function toggleNode(nodeId) {
       expandedNodeId = expandedNodeId === nodeId ? '' : nodeId;
+      saveRoadmapUiState('expandedNodeId', expandedNodeId);
+      saveRoadmapInteractionState();
       activeConversationId = '';
       if (expandedNodeId && !nodeConversations[nodeId]) {
         vscode.postMessage({ command: 'conversation.getHistory', nodeId });

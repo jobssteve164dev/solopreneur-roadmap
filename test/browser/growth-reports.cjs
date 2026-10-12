@@ -14,7 +14,7 @@ const dataRoot=path.join(base,'.solomap-global');
  fs.mkdirSync(path.join(project,'src'),{recursive:true});
  const {store}=await require('../analysis-fixture.js').openAnalysisOwner({after:fn=>closers.push(fn)},dataRoot,[{path:project,name:'SoloMap'}]);
  for(let i=0;i<12;i++){const dir=path.join(project,'src',`module${i}WithLongNameThatMustRemainReadable`);fs.mkdirSync(dir);fs.writeFileSync(path.join(dir,'index.js'),'export const result = true;\n');}
- const {registerLearningTask,writeLearningJson}=require(path.join(root,'out/taskReport.js'));
+ const {registerLearningTask,writeLearningJson}=require(path.join(root,'test/fixtures/legacy-task-report.cjs'));
  const runDir=path.join(project,'.solopreneur/agent-runs/__solo__/1');
  const taskId=registerLearningTask(project,{executionLogId:1,runDir,userMessage:'原始需求必须按需查看。'.repeat(100),startedAt:'2026-09-08'});
  const body={summary:'导出可以按日期筛选，用户只需保存想要的内容。',unmetRequirements:['仍需确认导出时默认选择的日期。'],decisions:['保留用户选择。'],corrections:[],verification:['过程日志只在按需查看时显示。'.repeat(40)],commits:[],experienceUsage:[],lessons:[]};
@@ -37,15 +37,15 @@ const dataRoot=path.join(base,'.solomap-global');
  const captureTarget=new vm.Script(compiled.slice(captureStart,captureEnd)+'\ncaptureConversationLaunchTarget(context,workspaceRoot,globalDataPath,settings)');
  const start=compiled.indexOf("case 'growth.reports':");
  const handler=new vm.Script(`(async()=>{switch(message.command){${compiled.slice(start,compiled.indexOf("case 'project.select':",start))}}})()`);
- const launches=[],settled=[];
+ const launches=[],settled=[],runtimeRoots=[];
  const hostPanel={webview:{postMessage:message=>settled.push(message)}};
  const continueAction=message=>handler.runInNewContext({message,context:{extensionPath:root},path,
   activeProjectGrowthPanel:hostPanel,activeProjectGrowthPath:project,projectGrowthLoadSequence:1,growthReportActions:new Set(),
   getProjects:()=>[{path:project}],getPersistedSettings:()=>({globalDataPath:dataRoot}),normalizeGlobalDataPathForExtension:value=>value,isSoloMapLanguageZh:()=>true,
   growthReports_js_1:require(path.join(root,'out/growthReports.js')),vscode:{window:{showInputBox:async()=> '继续确认导出日期'}},
   captureConversationLaunchTarget:(context,workspaceRoot,globalDataPath,settings)=>captureTarget.runInNewContext({context,workspaceRoot,globalDataPath,settings,path,
-   crypto:require('crypto'),syncEngine_1:require(path.join(root,'out/db/syncEngine.js'))}),
-  ensureActionProject:async()=>project,waitForAgentProcessCleanup:async()=>{},handleContinueConversationTurn:async(...args)=>launches.push(args)});
+   crypto:require('crypto'),syncEngine_1:require(path.join(root,'out/db/syncEngine.js')),autonomousRuntimeHost_1:{ensureHealthyAutonomousRuntime:async input=>runtimeRoots.push(input.globalDataPath)}}),
+ ensureActionProject:async()=>project,waitForAgentProcessCleanup:async()=>{},handleContinueConversationTurn:async(...args)=>launches.push(args)});
  const browser=await chromium.launch({executablePath:process.env.CHROMIUM_PATH || '/usr/bin/chromium',headless:true});
  try {
  const errors=[],actions=[];
@@ -82,6 +82,7 @@ const dataRoot=path.join(base,'.solomap-global');
  check(continued.length===1 && continued[0].kind==='continue' && continued[0].taskId===task.taskId && continued[0].executionLogId===1 && continued[0].turnId===turns.turns[0].turnId, 'continue must target the latest original turn');
  check(launches.length===1 && launches[0][1]==='__solo__' && launches[0][2]===1 && launches[0][3].includes('继续确认导出日期') && launches[0][6]===true,'the real native action must preserve the execution and roadmap state');
  check(settled.length===1 && !settled[0].error,'continue action must settle successfully');
+ check(runtimeRoots.length===1 && runtimeRoots[0]===dataRoot,'report continuation must start the Runtime that owns the captured data root');
  check(!fs.existsSync(path.join(project,'.solopreneur/agent-runs')),'reading and acting must not recreate the old authority');
  await page.getByText('产出与依据',{exact:true}).first().click();
  check(await page.getByText('关键决策',{exact:true}).first().isVisible(),'evidence must remain available on request');

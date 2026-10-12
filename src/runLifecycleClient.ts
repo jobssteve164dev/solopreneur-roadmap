@@ -9,6 +9,37 @@ type Operation = (operation: string, input: Record<string, unknown>) => Promise<
 const runSnapshot = Symbol('runStatusSnapshot');
 type StatusSnapshot = Record<string, any> & { [runSnapshot]?: { reference: string; state: RunState; original: Record<string, unknown> } };
 
+export interface ConversationLogSnapshot {
+  runId: string;
+  turnId: string;
+  revision: number;
+  nodeId: string;
+  stdout: Buffer;
+  stderr: Buffer;
+}
+
+export async function readConversationLogSnapshot(
+  client: RunLifecycleClient,
+  root: string,
+  executionLogId: number,
+  expected?: { runId?: string; turnId?: string; revision?: number; nodeId?: string }
+): Promise<ConversationLogSnapshot> {
+  const source = await client.findConversationTurn(root, executionLogId);
+  if (!source) throw new Error('run_conversation_missing');
+  if (expected?.runId && expected.runId !== source.runId) throw new Error('run_log_source_changed');
+  if (expected?.turnId && expected.turnId !== source.turnId) throw new Error('run_log_source_changed');
+  if (expected?.revision !== undefined && expected.revision !== source.revision) throw new Error('run_log_source_changed');
+  const sourceNodeId = String(source.status.nodeId || '');
+  if (expected?.nodeId && expected.nodeId !== sourceNodeId
+    && !await client.hasConversationLink(root, executionLogId, expected.nodeId, sourceNodeId)) throw new Error('run_conversation_node_mismatch');
+  let [stdout, stderr] = await Promise.all([
+    client.readLog(source.reference, 'stdout', source.status),
+    client.readLog(source.reference, 'stderr', source.status)
+  ]);
+  if (!stdout.length && !stderr.length) stdout = await client.readLog(source.reference, 'output', source.status);
+  return { runId: source.runId, turnId: source.turnId, revision: source.revision, nodeId: sourceNodeId, stdout, stderr };
+}
+
 export function runStatusReference(root: string, executionLogId: number): string {
   if (!root || !Number.isInteger(executionLogId) || executionLogId < 1) throw new Error('run_reference_required');
   return `solomap://run-state/${executionLogId}?root=${encodeURIComponent(path.resolve(root))}`;
@@ -44,6 +75,15 @@ export function parseRunDataReference(reference: string): { reference: string; f
 export class RunLifecycleClient {
   constructor(private readonly operation: Operation, public readonly dataRoot?: string) {}
 
+  public async recordVerification(root: string, executionLogId: number, input: { claim: string; result: 'pass' | 'fail'; evidence: string; idempotencyKey: string }): Promise<{ objectId: string; revision: number }> {
+    return this.operation('record_run_verification', { root, executionLogId, ...input }) as Promise<{ objectId: string; revision: number }>;
+  }
+
+  public async hasConversationLink(root: string, executionLogId: number, nodeId: string, sourceNodeId: string): Promise<boolean> {
+    const page = await this.operation('read_project_journal', { root, executionLogId, nodeId, limit: 1 }) as { logs?: Array<{ dataState?: { linkedFromNodeId?: string } }> };
+    return page.logs?.[0]?.dataState?.linkedFromNodeId === sourceNodeId;
+  }
+
   private status(reference: string, state: RunState): StatusSnapshot {
     const status: StatusSnapshot = { ...state.status, turnId: state.turnId, executionLogId: state.status.journalExecutionLogId || state.status.executionLogId };
     for (const [key, field] of Object.entries({ outputFilePath: 'output', changesFilePath: 'changes', touchedFilesPath: 'changes', commandFilePath: 'command', promptFilePath: 'prompt', sessionFilePath: 'session', completionDecisionFilePath: 'decision', workspaceSnapshotPath: 'workspace', codexHomeFilePath: 'codex-home', agentProcessPidFilePath: 'process' })) status[key] = runDataReference(reference, field);
@@ -62,6 +102,37 @@ export class RunLifecycleClient {
     if (!result) return null;
     const reference = runStatusReference(root, Number(result.state.status.rootExecutionLogId));
     return { reference, status: this.status(reference, result.state), turnId: result.turnId, runId: result.state.runId, generation: result.state.generation, revision: result.state.revision };
+  }
+
+  public async findConversationTurn(root: string, executionLogId: number): ReturnType<RunLifecycleClient['findConversation']> {
+    const result = await this.operation('resolve_run_conversation_turn', { root, executionLogId }) as { state: RunState; turnId: string } | null;
+    if (!result) return null;
+    const reference = runStatusReference(root, Number(result.state.status.rootExecutionLogId));
+    return { reference, status: this.status(reference, result.state), turnId: result.turnId, runId: result.state.runId, generation: result.state.generation, revision: result.state.revision };
+  }
+
+  public async adoptConversationHistory(root: string, executionLogId: number): ReturnType<RunLifecycleClient['findConversation']> {
+    const existing = await this.findConversation(root, executionLogId);
+    if (existing) return existing;
+    const projectRoot = path.resolve(root);
+    const job = await this.operation('import_project_data', {
+      collection: 'agent-runs', sourceRoot: path.join(projectRoot, '.solopreneur', 'agent-runs'), projectRoot,
+      idempotencyKey: `conversation-history-adoption-v1:${projectRoot}`, refreshCompleted: true
+    }) as { jobId: string; status: string };
+    if (['failed', 'interrupted'].includes(job.status)) {
+      try { await this.operation('retry_migration', { jobId: job.jobId }); }
+      catch (error) { if ((error as Error).message !== 'migration_not_retryable') throw error; }
+    }
+    for (;;) {
+      const current = await this.operation('migration_status', { jobId: job.jobId, metadataOnly: true }) as { status: string; error: string | null };
+      if (!['queued', 'running'].includes(current.status)) {
+        const adopted = await this.findConversation(root, executionLogId);
+        if (adopted) return adopted;
+        if (current.error) throw new Error(current.error);
+        return null;
+      }
+      await new Promise<void>(resolve => setTimeout(resolve, 100));
+    }
   }
 
   private async selectedState(reference: string, status?: StatusSnapshot): Promise<RunState> {

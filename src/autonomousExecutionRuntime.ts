@@ -1,18 +1,11 @@
 import * as childProcess from 'child_process';
-import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 
 import { DurableSandboxExecutionBackend, recoverDurableExecutionStates } from './durableSandboxExecutionBackend';
 import { ExecutionSandbox, LinuxBubblewrapSandbox } from './executionSandbox';
 import { ProjectAutonomyAuthorizationStore } from './projectAutonomyAuthorization';
-
-function writeJson(filePath: string, value: unknown): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const temporaryPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
-  fs.writeFileSync(temporaryPath, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(temporaryPath, filePath);
-}
+import { UnifiedDataStore } from './db/unifiedDataStore';
 
 async function gitRevision(workspacePath: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -25,6 +18,7 @@ async function gitRevision(workspacePath: string): Promise<string> {
 
 export async function initializeAutonomousExecutionRuntime(options: {
   globalDataPath: string;
+  dataStore: UnifiedDataStore;
   sandbox?: ExecutionSandbox;
   readBaseRevision?: (workspacePath: string) => Promise<string>;
 }): Promise<{ backend: DurableSandboxExecutionBackend; recoveredExecutionIds: string[]; sandboxAvailable: boolean }> {
@@ -36,19 +30,12 @@ export async function initializeAutonomousExecutionRuntime(options: {
   const backend = new DurableSandboxExecutionBackend({
     isolationRoot,
     stateRoot,
-    authorization: new ProjectAutonomyAuthorizationStore({ globalDataPath: options.globalDataPath }),
+    authorization: new ProjectAutonomyAuthorizationStore({ globalDataPath: options.globalDataPath, dataStore: options.dataStore }),
     sandbox: options.sandbox || new LinuxBubblewrapSandbox(),
     readBaseRevision: options.readBaseRevision || gitRevision
   });
   const recovered = recoverDurableExecutionStates(stateRoot);
   const capabilities = await backend.probe();
-  writeJson(path.join(runtimeRoot, 'execution-runtime.json'), {
-    schemaVersion: 1,
-    checkedAt: new Date().toISOString(),
-    sandboxAvailable: capabilities.operatingSystemSandbox,
-    readyForAutonomousWrites: capabilities.readyForAutonomousWrites,
-    recoveredExecutions: recovered.map(handle => ({ executionId: handle.executionId, status: handle.status }))
-  });
   return {
     backend,
     recoveredExecutionIds: recovered.map(handle => handle.executionId),

@@ -8,8 +8,21 @@ const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const { IntelligenceConversationStore } = require('../out/intelligenceChat.js');
 
-test('sidebar and background chat share immediate durable history without producing conversation JSON files', async () => {
+function cleanupExact(root) {
+  if (!fs.existsSync(root)) return;
+  const directories = [root], files = [];
+  const visit = directory => fs.readdirSync(directory).forEach(name => {
+    const target = path.join(directory, name), stat = fs.lstatSync(target);
+    if (stat.isDirectory() && !stat.isSymbolicLink()) { directories.push(target); visit(target); }
+    else files.push(target);
+  });
+  visit(root); files.forEach(file => fs.unlinkSync(file));
+  directories.sort((left, right) => right.length - left.length).forEach(directory => fs.rmdirSync(directory));
+}
+
+test('sidebar and background chat share immediate durable history without producing conversation JSON files', async t => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-chat-database-'));
+  t.after(() => cleanupExact(fixture));
   const root = path.join(fixture, '.solomap-global');
   const database = new UnifiedDataStore(root);
   const operations = createRuntimeDataOperations(database);
@@ -31,8 +44,10 @@ test('sidebar and background chat share immediate durable history without produc
   } finally { await server.close(); await operations.close(); database.close(); }
 });
 
-test('a conversation transaction rolls back all message writes on conflict and unchanged retries add no history', () => {
-  const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-chat-atomic-')), '.solomap-global');
+test('a conversation transaction rolls back all message writes on conflict and unchanged retries add no history', t => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-chat-atomic-'));
+  t.after(() => cleanupExact(fixture));
+  const root = path.join(fixture, '.solomap-global');
   const database = new UnifiedDataStore(root);
   const conversation = { id: 'bb405aab-ff4c-41d5-b9f8-8d9fa025af81', title: 'Atomic chat', createdAt: '2026-09-22T08:00:00.000Z', updatedAt: '2026-09-22T08:00:00.000Z', messages: [] };
   try {
@@ -51,8 +66,9 @@ test('a conversation transaction rolls back all message writes on conflict and u
   } finally { database.close(); }
 });
 
-test('legacy conversation resumes with its original identity and full messages while its source remains untouched', async () => {
+test('legacy conversation resumes with its original identity and full messages while its source remains untouched', async t => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-chat-legacy-'));
+  t.after(() => cleanupExact(fixture));
   const root = path.join(fixture, '.solomap-global');
   const id = '8ea610cf-9db2-4c07-a7c0-5eb012d1fb45';
   const directory = path.join(root, 'intelligence-conversations');

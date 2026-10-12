@@ -5,6 +5,7 @@ import * as crypto from 'crypto';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import { applyEdits, modify, parse, ParseError } from 'jsonc-parser';
 import * as toml from '@iarna/toml';
+import { replaceRegularFileIfUnchanged } from './safeFileReplace';
 const { parseTOML } = require('toml-eslint-parser');
 
 export const databaseAgentProviders = ['codex', 'claude', 'cursor', 'copilot', 'opencode', 'grok', 'antigravity'] as const;
@@ -15,7 +16,11 @@ const end = '# SoloMap managed database MCP end';
 
 export function agentDatabaseConfigPath(provider: DatabaseAgentProvider): string {
   if (provider === 'codex') return path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'config.toml');
-  if (provider === 'claude') return path.join(process.env.CLAUDE_CONFIG_DIR || os.homedir(), '.claude.json');
+  if (provider === 'claude') {
+    const home = path.resolve(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')).normalize('NFC');
+    const legacy = path.join(home, '.config.json');
+    return fs.existsSync(legacy) ? legacy : path.join(process.env.CLAUDE_CONFIG_DIR || os.homedir(), '.claude.json');
+  }
   if (provider === 'copilot') return path.join(process.env.COPILOT_HOME || path.join(os.homedir(), '.copilot'), 'mcp-config.json');
   if (provider === 'grok') return path.join(os.homedir(), '.grok', 'config.toml');
   if (provider === 'antigravity') return path.join(os.homedir(), '.gemini', 'config', 'mcp_config.json');
@@ -31,6 +36,7 @@ export function agentDatabaseConfigPath(provider: DatabaseAgentProvider): string
 export function isAgentDatabaseConfigPath(provider: DatabaseAgentProvider, file: unknown): file is string {
   if (typeof file !== 'string' || !path.isAbsolute(file)) return false;
   if (provider === 'opencode') return /\.jsonc?$/.test(file);
+  if (provider === 'claude' && path.basename(file) === '.config.json') return true;
   const basename = provider === 'codex' || provider === 'grok' ? 'config.toml' : provider === 'claude' ? '.claude.json' : provider === 'copilot' ? 'mcp-config.json' : provider === 'antigravity' ? 'mcp_config.json' : 'mcp.json';
   return path.basename(file) === basename;
 }
@@ -60,7 +66,18 @@ export function configureAgentDatabase(options: { provider: DatabaseAgentProvide
       const owned = begin >= 0 ? (toml.parse(original.slice(begin, finish)) as any).mcp_servers?.solomap_data : inline && existing?.env?.SOLOMAP_MANAGED_BRIDGE === '1' ? existing : undefined;
       if (existing && !owned) throw new Error('solomap_mcp_config_name_conflict');
       const server = { ...owned, command: options.command, args, env: { ...owned?.env, ELECTRON_RUN_AS_NODE: '1', SOLOMAP_MANAGED_BRIDGE: '1' } };
-      if (options.provider === 'codex') Object.assign(server, { env_vars: [...(Array.isArray(owned?.env_vars) ? owned.env_vars : []), ...['SOLOMAP_EXECUTION_LOG_ID', 'SOLOMAP_RUN_GENERATION', 'SOLOMAP_RUN_PROOF'].filter(name => !owned?.env_vars?.includes(name))] });
+      if (options.provider === 'codex') Object.assign(server, { env_vars: [...(Array.isArray(owned?.env_vars) ? owned.env_vars : []), ...[
+        'SOLOMAP_PROJECT_ID',
+        'SOLOMAP_EXECUTION_LOG_ID',
+        'SOLOMAP_RUN_GENERATION',
+        'SOLOMAP_RUN_PROOF',
+        'SOLOMAP_MAINTENANCE_TASK_ID',
+        'SOLOMAP_MAINTENANCE_PROOF',
+        'SOLOMAP_MAINTENANCE_LAUNCH_TOKEN',
+        'SOLOMAP_MAINTENANCE_RUNTIME_ID',
+        'SOLOMAP_MAINTENANCE_RUNTIME_PORT',
+        'SOLOMAP_MAINTENANCE_ENTRY_PATH'
+      ].filter(name => !owned?.env_vars?.includes(name))] });
       const block = [start, toml.stringify({ mcp_servers: { solomap_data: server } }).trimEnd(), end].join('\n');
       if (inline) {
         const field = inline.body.find((node: any) => matchesKey(node.key, 'solomap_data'));
@@ -92,7 +109,11 @@ export function configureAgentDatabase(options: { provider: DatabaseAgentProvide
     if (next !== original) {
       fs.writeFileSync(temporary, next, { flag: 'wx', mode: fs.existsSync(file) ? fs.statSync(file).mode & 0o777 : 0o600 });
       if ((fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '') !== original) throw new Error('agent_mcp_config_changed_during_write');
-      fs.renameSync(temporary, file);
+      try { replaceRegularFileIfUnchanged(file, temporary, original); }
+      catch (error) {
+        if ((error as Error).message === 'file_changed_during_write') throw new Error('agent_mcp_config_changed_during_write');
+        throw error;
+      }
     }
     return file;
   } finally {

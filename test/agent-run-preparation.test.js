@@ -6,6 +6,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { shellQuote } = require('../out/agentCli.js');
 
 test('host preparation persists all task input and native identity without producing permanent per-run files', async () => {
   const modulePath = path.resolve(__dirname, '../out/agentRunPreparation.js');
@@ -54,7 +55,7 @@ test('host preparation persists all task input and native identity without produ
     assert.equal(resumed.status.agentLaunch.direct, false);
     const resumePlan = await call('read_run_execution_plan', { root: projectRoot, executionLogId: 2 });
     assert.match(resumePlan.command, new RegExp(`--resume '${nativeSessionId}'`));
-    assert.doesNotMatch(resumePlan.command, /cat |prompt\.txt|agent-runs/);
+    assert.doesNotMatch(resumePlan.command.replace(shellQuote(projectRoot), '<workspace>'), /cat |prompt\.txt|agent-runs/);
   } finally { await operations.close(); store.close(); }
 });
 
@@ -137,7 +138,7 @@ test('unattended review corrections continue the selected native session while k
       assert.equal(plan.status.plannedNativeSessionId, sessionId);
       assert.equal(plan.status.agentLaunch.continuation, true);
       assert.match(plan.command, agentCli === 'claude' ? /-p --resume/ : agentCli === 'codex' ? /runCodexContinuation\.js/ : /printf %s/);
-      assert.doesNotMatch(plan.command, /prompt\.txt|agent-runs/);
+      assert.doesNotMatch(plan.command.replace(shellQuote(project), '<workspace>'), /prompt\.txt|agent-runs/);
     }
   } finally { await ops.close(); store.close(); }
 });

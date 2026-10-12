@@ -32,8 +32,10 @@ function loadLoader(overrides = {}) {
     }
     if (parent?.filename === loaderPath && request === './autonomousRuntimeControl') {
       return { sendRuntimeDataRequest: async (_root, request) => {
-        assert.equal(request.operation, 'read_project_reusable_source_count');
-        return 0;
+        if (request.operation === 'read_project_reusable_source_count') return 0;
+        if (request.operation === 'read_documentation_manifest') return { documents: [] };
+        if (request.operation === 'read_project_analysis_source') return { recentActivityAt: '' };
+        assert.fail(`unexpected operation: ${request.operation}`);
       } };
     }
     if (parent?.filename === loaderPath && request === './projectPortfolio') {

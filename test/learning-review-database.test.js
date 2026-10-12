@@ -213,7 +213,7 @@ test('v2 fixed cursor inputs and every source body survive an actual backup rest
  const prior={id:'semantic-original',kind:'memory',hash:reviewHash('备份前的完整旧证据。'),content:'备份前的完整旧证据。'};
  const f=await semanticHistory(t,false,true,{previousVersions:[prior]});assert.equal((await f.importHistory('v2-backup-cursor')).status,'completed');
  const pinned=f.store.rows('SELECT * FROM legacy_learning_review_cursor_inputs'),restoredRoot=path.join(f.base,'restore','.solomap-global');
- fs.mkdirSync(restoredRoot,{recursive:true});await f.store.backup(path.join(restoredRoot,'solomap.db'));
+ fs.mkdirSync(restoredRoot,{recursive:true});await f.store.backup({destination:path.join(restoredRoot,'solomap.db'),idempotencyKey:'fixed-cursor-backup'});
  fs.renameSync(f.sourceRoot,f.sourceRoot+'-retained');fs.renameSync(path.join(f.root,'memory'),path.join(f.root,'memory-retained'));
  const restored=new UnifiedDataStore(restoredRoot),ops=createRuntimeDataOperations(restored);
  try {
@@ -246,7 +246,7 @@ async function fixture(t) {
   const call = (operation, input) => ops({ operation, input });
   const memory = (scope, text, title = '来源') => store.write({ kind: 'memory', action: 'create', scope, idempotencyKey: 'memory:' + title, data: { category: 'rules', title, status: 'captured', content: text } });
   const begin = (runId, prompt = '保留用户目标。') => call('prepare_learning_review', { runId, workspaceRoot: project, globalPrompt: prompt, persistedGlobalPrompt: prompt });
-  const proposal = (batch, globalPrompt = batch.manifest.globalPrompt) => ({ globalPrompt, changes: [], processedSourceIds: batch.manifest.sources.map(s => s.id), deferredSourceIds: [], unresolved: [], recovery: batch.pending.map(p => ({ applicationId: p.objectId, revision: p.revision, decision: 'resumed', reason: '承接原完整结果。' })) });
+  const proposal = (batch, globalPrompt = batch.manifest.globalPrompt) => ({ globalPrompt, changes: [], lessons: [], processedSourceIds: batch.manifest.sources.map(s => s.id), deferredSourceIds: [], unresolved: [], recovery: batch.pending.map(p => ({ applicationId: p.objectId, revision: p.revision, decision: 'resumed', reason: '承接原完整结果。' })) });
   const apply = (batch, result, key = 'apply:' + batch.manifest.runId) => call('apply_learning_review', { batchId: batch.objectId, expectedRevision: batch.revision, manifestHash: reviewHash(JSON.stringify(batch.manifest)), result, idempotencyKey: key });
   const reviewSession = async batch => {
     let state = await call('prepare_run', { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'learning_review', prompt: '完整提示词复盘。', command: 'formal-review', userMessage: '复盘经验', metadata: { learningReviewBatchId: batch.objectId }, idempotencyKey: 'prepare-review' });
@@ -445,7 +445,7 @@ test('an old unapplied proposal cannot serve as evidence for promoting its own i
   const f = await fixture(t), batch = await f.begin('proposal-self-evidence');
   const manifest = { ...batch.manifest, sources: [{ id: 'held-proposal', kind: 'review_proposal', content: '{"globalPrompt":"新增要求。"}', hash: reviewHash('{"globalPrompt":"新增要求。"}') }] };
   const { validateDirectGlobalPromptReview } = require('../out/learningReviewApply.js');
-  const result = { globalPrompt: '保留用户目标。\n新增要求。', changes: [{ type: 'add', before: [], after: '新增要求。', evidence: ['held-proposal'], reason: '承接旧提案。' }], processedSourceIds: ['held-proposal'], deferredSourceIds: [], unresolved: [], recovery: [] };
+  const result = { globalPrompt: '保留用户目标。\n新增要求。', changes: [{ type: 'add', before: [], after: '新增要求。', evidence: ['held-proposal'], reason: '承接旧提案。' }], lessons: [], processedSourceIds: ['held-proposal'], deferredSourceIds: [], unresolved: [], recovery: [] };
   assert.throws(() => validateDirectGlobalPromptReview(manifest, result), /不能只由旧提示词、索引或候选自证/);
 });
 
@@ -561,7 +561,7 @@ test('the background importer resumes a legacy partial review with full sources 
   const originalText = '核验实际交付。🌿\n完整历史原文。';
   const source = { id: 'legacy-full-source', kind: 'memory', projectPath: f.project, file: path.join(f.root, 'memory', 'projects', 'project.md'), hash: reviewHash(originalText), content: originalText };
   const manifest = { schemaVersion: 1, runId: 'legacy-partial', globalRoot: f.root, globalPrompt: '保留用户目标。', promptHash: reviewHash('保留用户目标。'), persistedPromptHash: reviewHash('当时实际保存的另一份指令。'), projects: [f.project], sources: [source], memory: [], gaps: [] };
-  const result = { globalPrompt: '保留用户目标。\n核验实际交付。', changes: [{ type: 'add', before: [], after: '核验实际交付。', evidence: [source.id], reason: '原始要求。' }], processedSourceIds: [source.id], deferredSourceIds: [], unresolved: [], recovery: [] };
+  const result = { globalPrompt: '保留用户目标。\n核验实际交付。', changes: [{ type: 'add', before: [], after: '核验实际交付。', evidence: [source.id], reason: '原始要求。' }], lessons: [], processedSourceIds: [source.id], deferredSourceIds: [], unresolved: [], recovery: [] };
   const recovered = { ...source, id: 'previously-recovered-source', content: '此前接续的完整原文。', hash: reviewHash('此前接续的完整原文。') };
   const application = { schemaVersion: 1, proposalHash: reviewHash(JSON.stringify(result)), targetPromptHash: reviewHash(result.globalPrompt), targetPrompt: result.globalPrompt, status: 'partial', items: {}, errors: ['旧宿主投影未完成。'], sourceCursor: [source, recovered], deferredSourceIds: [], deferredSources: [], recovery: [] };
   const files = { 'manifest.json': manifest, 'proposal.json': result, 'application.json': application };
@@ -604,7 +604,7 @@ async function legacyReview(t, status = 'partial') {
   const content = '历史用户要求：交付后核验。🌿\n';
   const source = { id: 'old-source', kind: 'memory', projectPath: f.project, hash: reviewHash(content), content };
   const manifest = { schemaVersion: 1, runId, globalRoot: f.root, globalPrompt: '保留用户目标。', promptHash: reviewHash('保留用户目标。'), projects: [f.project], sources: [source], memory: [], gaps: [] };
-  const proposal = { globalPrompt: '保留用户目标。\n交付后核验。', changes: [{ type: 'add', before: [], after: '交付后核验。', evidence: [source.id], reason: '用户原始要求。' }], processedSourceIds: [source.id], deferredSourceIds: [], unresolved: [], recovery: [] };
+  const proposal = { globalPrompt: '保留用户目标。\n交付后核验。', changes: [{ type: 'add', before: [], after: '交付后核验。', evidence: [source.id], reason: '用户原始要求。' }], lessons: [], processedSourceIds: [source.id], deferredSourceIds: [], unresolved: [], recovery: [] };
   fs.writeFileSync(path.join(run, 'manifest.json'), JSON.stringify(manifest));
   fs.writeFileSync(path.join(run, 'proposal.json'), JSON.stringify(proposal));
   if (status) fs.writeFileSync(path.join(run, 'application.json'), JSON.stringify({ schemaVersion: 1, status, proposalHash: reviewHash(JSON.stringify(proposal)), targetPromptHash: reviewHash(proposal.globalPrompt), targetPrompt: proposal.globalPrompt, sourceCursor: [source], deferredSourceIds: [], deferredSources: [], recovery: [], items: {}, errors: [] }));
@@ -1043,11 +1043,11 @@ test('a cursor with an omitted field cannot expose host review control input', a
 for (const format of ['json', 'md', 'text']) test(`a replayed ${format} export cannot reuse unprojected host review content`, async t => {
   const f = await fixture(t), batch = await f.begin('unsafe-cached-' + format), session = await f.reviewSession(batch);
   const input = { ref: batch.objectId, format, destination: path.join(f.root, 'exports', 'cached.' + format), idempotencyKey: 'unsafe-cached-export' };
-  const write = fs.promises.writeFile;
+  const write = f.store.writeFileAtStableParent;
   try {
-    fs.promises.writeFile = async (file, ...args) => { if (file === input.destination) throw new Error('fixture export delivery interrupted'); return write(file, ...args); };
+    f.store.writeFileAtStableParent = function (file, ...args) { if (file === input.destination) throw new Error('fixture export delivery interrupted'); return write.call(this, file, ...args); };
     await assert.rejects(f.store.withActor(session.actorId, () => f.store.export(input)), /fixture export delivery interrupted/);
-  } finally { fs.promises.writeFile = write; }
+  } finally { f.store.writeFileAtStableParent = write; }
   assert.equal(fs.existsSync(input.destination), false);
   await assert.rejects(f.request({ operation: 'export', sessionToken: session.sessionToken, input }), /export_authorization_changed/);
   assert.equal(fs.existsSync(input.destination), false, 'a saved unsafe request cannot deliver its old private payload');
@@ -1070,13 +1070,13 @@ test('an already archived project is excluded from fresh review scope and does n
 });
 for(const format of ['json','md','text'])test(`restart recovery cannot deliver an unprojected ${format} review export`,async t=>{
  const f=await fixture(t),batch=await f.begin('outbox-unsafe-'+format),session=await f.reviewSession(batch),input={ref:batch.objectId,format,destination:path.join(f.root,'exports','pending.'+format),idempotencyKey:'unsafe-pending'};
- const write=fs.promises.writeFile;
- try{fs.promises.writeFile=async(file,...args)=>{if(file===input.destination)throw Error('fixture delivery interrupted');return write(file,...args);};await assert.rejects(f.store.withActor(session.actorId,()=>f.store.export(input)),/fixture delivery interrupted/);}finally{fs.promises.writeFile=write;}
+ const write=f.store.writeFileAtStableParent;
+ try{f.store.writeFileAtStableParent=function(file,...args){if(file===input.destination)throw Error('fixture delivery interrupted');return write.call(this,file,...args);};await assert.rejects(f.store.withActor(session.actorId,()=>f.store.export(input)),/fixture delivery interrupted/);}finally{f.store.writeFileAtStableParent=write;}
  await f.restart();const recovered=await f.store.recoverOutbox();assert.equal(fs.existsSync(input.destination),false,'Runtime startup must enforce the same public projection as explicit export retry');assert.ok(recovered.pending.some(p=>p.error==='export_authorization_changed'));
 });
 for(const recover of [false,true])test(`${recover?'outbox':'explicit'} export rechecks source scope after asynchronous destination preparation`,async t=>{
  const f=await fixture(t),privateRoot=path.join(f.base,'private');fs.mkdirSync(privateRoot);const {projectId}=await f.call('register_project',{root:privateRoot});f.memory(projectId,'准备目录时撤销的私有来源。','delivery');const batch=await f.begin('delivery-race'),session=await f.reviewSession(batch),input={ref:batch.objectId,format:'json',destination:path.join(f.root,'exports','race.json'),idempotencyKey:'race-export'};
- if(recover){const write=fs.promises.writeFile;try{fs.promises.writeFile=async(file,...args)=>{if(file===input.destination)throw Error('fixture delivery interrupted');return write(file,...args);};await assert.rejects(f.request({operation:'export',sessionToken:session.sessionToken,input}),/fixture delivery interrupted/);}finally{fs.promises.writeFile=write;}}
+ if(recover){const write=f.store.writeFileAtStableParent;try{f.store.writeFileAtStableParent=function(file,...args){if(file===input.destination)throw Error('fixture delivery interrupted');return write.call(this,file,...args);};await assert.rejects(f.request({operation:'export',sessionToken:session.sessionToken,input}),/fixture delivery interrupted/);}finally{f.store.writeFileAtStableParent=write;}}
  const mkdir=fs.promises.mkdir;let revoked=false;
  try{fs.promises.mkdir=async(dir,...args)=>{const result=await mkdir(dir,...args);if(dir===path.dirname(input.destination)&&!revoked){revoked=true;const p=f.store.read(projectId);f.store.write({kind:'project',action:'patch',scope:null,objectId:p.objectId,expectedRevision:p.revision,idempotencyKey:'hide-during-mkdir',data:{hidden:1}});}return result;};
  if(recover){const result=await f.store.recoverOutbox();assert.ok(result.pending.some(p=>/scope_denied|scope_changed/.test(p.error)));}else await assert.rejects(f.request({operation:'export',sessionToken:session.sessionToken,input}),/scope_denied|scope_changed/);
@@ -1088,8 +1088,8 @@ for(const recover of [false,true])test(`${recover?'outbox':'explicit'} export re
 
 for (const revoked of [false, true]) test(`pending public export ${revoked ? 'retains a revoked connector grant' : 'survives session closure and restart'}`, async t => {
  const f=await fixture(t),batch=await f.begin('public-pending-grant'),session=await f.reviewSession(batch),input={ref:batch.objectId,format:'json',destination:path.join(f.root,'exports','grant.json'),idempotencyKey:'pending-grant'};
- const publicObject=await f.request({operation:'read',sessionToken:session.sessionToken,input:{ref:batch.objectId,view:'full'}}),write=fs.promises.writeFile;
- try{fs.promises.writeFile=async(file,...args)=>{if(file===input.destination)throw Error('fixture delivery interrupted');return write(file,...args);};await assert.rejects(f.request({operation:'export',sessionToken:session.sessionToken,input}),/fixture delivery interrupted/);}finally{fs.promises.writeFile=write;}
+ const publicObject=await f.request({operation:'read',sessionToken:session.sessionToken,input:{ref:batch.objectId,view:'full'}}),write=f.store.writeFileAtStableParent;
+ try{f.store.writeFileAtStableParent=function(file,...args){if(file===input.destination)throw Error('fixture delivery interrupted');return write.call(this,file,...args);};await assert.rejects(f.request({operation:'export',sessionToken:session.sessionToken,input}),/fixture delivery interrupted/);}finally{f.store.writeFileAtStableParent=write;}
  await f.call('close_mcp_session',{sessionToken:session.sessionToken});
  if(revoked){const grant=f.store.rows('SELECT id FROM grants WHERE actor_id=? AND target_id=?',[session.authorityActorId,f.projectId])[0],object=f.store.read(grant.id);f.store.write({kind:'grant',action:'archive',scope:f.projectId,objectId:object.objectId,expectedRevision:object.revision,idempotencyKey:'revoke-export-connector',data:{}});}
  await f.restart();const recovered=await f.store.recoverOutbox();
@@ -1312,6 +1312,6 @@ test('unchanged candidate after-image lookup uses indexed fixed versions without
 });
 
 test('a fixed full lesson after-image survives backup and restore without the original candidate',async t=>{
- const f=await candidateHistory(t);assert.equal((await f.importHistory('after-image-backup')).status,'completed');const app=lessonApplication(f),destination=path.join(f.base,'after-backup.db');await f.store.backup(destination);fs.renameSync(path.join(f.root,'learning'),path.join(f.root,'learning-retained'));
+ const f=await candidateHistory(t);assert.equal((await f.importHistory('after-image-backup')).status,'completed');const app=lessonApplication(f),destination=path.join(f.base,'after-backup.db');await f.store.backup({destination,idempotencyKey:'lesson-after-image-backup'});fs.renameSync(path.join(f.root,'learning'),path.join(f.root,'learning-retained'));
  const restoredRoot=path.join(f.base,'restored-after');fs.mkdirSync(restoredRoot);fs.copyFileSync(destination,path.join(restoredRoot,'solomap.db'));const restored=new UnifiedDataStore(restoredRoot);try{assert.deepEqual(JSON.parse(restored.read(app.objectId).data.after_content),f.value);const saved=restored.readMigrationSourceJsonVersion('learning:'+path.join(f.root,'learning'),'candidates/'+f.id+'.json',f.journal.pending['lesson:0']);assert.deepEqual(JSON.parse(saved.bytes),f.value);}finally{restored.close();}
 });

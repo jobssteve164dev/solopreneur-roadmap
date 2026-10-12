@@ -7,12 +7,54 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
+const sharedHostDefaultRoot = path.join(os.tmpdir(), `solomap-host-default-${process.pid}`);
+test.after(() => {
+  if (!fs.existsSync(sharedHostDefaultRoot)) return;
+  assert.deepEqual(fs.readdirSync(sharedHostDefaultRoot), [], 'shared host default fixture must remain empty');
+  fs.rmdirSync(sharedHostDefaultRoot);
+});
+
+for (const nodeId of ['__solo__', 'step']) test(`the actual new ${nodeId} handler takes its optional native reference from the database`, async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-new-session-reference-'));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+  fs.mkdirSync(path.join(project, '.solopreneur'));
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const store = new UnifiedDataStore(root), ops = createRuntimeDataOperations(store);
+  const transport = require('../out/autonomousRuntimeControl.js'), original = transport.sendRuntimeDataRequest;
+  transport.sendRuntimeDataRequest = (_root, request) => ops(request);
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur/roadmap.csv'), path.join(project, '.solopreneur/project_journal.db'), projectRoot, root);
+  engine.setNodes([{ id: 'step', title: '用户目标', status: 'Pending', agentCli: 'claude' }]); engine.refreshNodes = () => {};
+  const run = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId, runKind: 'solo', prompt: '原始输入', command: 'claude', userMessage: '原目标', metadata: { agentCli: 'claude' }, idempotencyKey: 'prior-formal-conversation' } });
+  let binding = await ops({ operation: 'write_run_binding', input: { projectId: run.projectId, executionLogId: 1, generation: run.generation, expectedHeadRevision: 0,
+    seed: { runId: '1', provider: 'claude', workspaceRoot: project, cliPath: 'claude', cliVersion: 'old-version', bindingNonce: 'a'.repeat(64), createdAt: run.status.startedAt, method: 'provider_callback', contract: 'official_stable' }, idempotencyKey: 'prior-binding' } });
+  binding = await ops({ operation: 'write_run_binding', input: { projectId: run.projectId, executionLogId: 1, generation: run.generation, expectedHeadRevision: binding.headRevision,
+    revision: { sessionId: 'confirmed-previous-session', method: 'provider_callback', contract: 'official_stable', state: 'planned' }, idempotencyKey: 'prior-session' } });
+  await ops({ operation: 'write_run_binding', input: { projectId: run.projectId, executionLogId: 1, generation: run.generation, expectedHeadRevision: binding.headRevision, confirmSessionId: 'confirmed-previous-session', evidence: { source: 'official-fixture' }, idempotencyKey: 'confirm-prior-session' } });
+  const inputs = [];
+  const host = loadCompiledModule('out/extension.js', `
+    module.exports.run = ${nodeId === '__solo__' ? 'handleRunSoloConversation' : 'handleRunAgent'};
+    module.exports.connect = (project, root, engine, inputs) => {
+      activeProjectRoot = project; syncEngine = engine; ensureTaskRuntimeReady = async () => {}; resumeOrdinaryConversation = async () => null;
+      getPersistedSettings = () => ({ cliPath: 'claude', globalDataPath: root, taskPermissionMode: 'auto' });
+      agentCli_1.resolveAgentCli = () => 'claude'; agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
+      continuation_1.getStoredAgentSession = () => { throw new Error('retired_step_session_read'); };
+      recordLocalUsageEvent = async () => ({}); postNodeConversations = () => {}; sendNodesToWebview = () => {}; refreshSidebarProjectCards = () => {}; ensureRoadmapValidationScript = () => {};
+      buildSoloConversationPrompt = buildAgentConversationPrompt = async () => '新任务';
+      prepareOrdinaryConversation = async (_context, input) => { inputs.push(input); return input; }; deliverOrdinaryConversation = async () => 2;
+    };
+  `, { './autonomousRuntimeControl': transport });
+  host.connect(project, root, engine, inputs);
+  try {
+    await host.run({ extensionPath: projectRoot }, ...(nodeId === '__solo__' ? ['新目标'] : ['step', '新目标']));
+    assert.equal(inputs.length, 1); assert.equal(inputs[0].nativeSessionId, 'confirmed-previous-session');
+    assert.equal(fs.existsSync(path.join(project, '.solopreneur/step-sessions')), false);
+  } finally { transport.sendRuntimeDataRequest = original; engine.close(); await ops.close(); store.close(); }
+});
 
 for (const [handler, kind, value] of [
   ['handleInstallSolomapSkill', 'skill_install', 'owner/package@skill'],
   ['handleInstallSolomapMcp', 'mcp_install', '@owner/connector'],
-  ['handleInstallSolomapEnhancement', 'enhancement_install', 'mcp-description-compressor'],
-  ['handleUninstallSolomapEnhancement', 'enhancement_uninstall', 'mcp-description-compressor'],
   ['handleUpgradeAllAgentClis', 'agent_cli_upgrade', undefined]
 ]) test(`the actual ${kind} entry launches one formal task through the shared runner`, async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
@@ -30,7 +72,7 @@ for (const [handler, kind, value] of [
       activeProjectRoot = project;
       getPersistedSettings = () => ({ cliPath: 'claude', globalDataPath: root, taskPermissionMode: 'auto', enabledEnhancements: {} });
       agentCli_1.resolveAgentCli = () => 'claude'; agentCli_1.commandExists = () => true;
-      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
       autonomousRuntimeControl_1.sendRuntimeDataRequest = call;
       createAgentTerminal = () => ({ name: 'isolated-maintenance', processId: Promise.resolve(process.pid), show() {}, sendText: text => commands.push(text) });
       setInterval = callback => { pollers.push(callback); return pollers.length; }; clearInterval = () => {};
@@ -60,11 +102,64 @@ for (const [handler, kind, value] of [
 test('production extension no longer carries the retired per-run file producer', () => {
   const extension = loadCompiledModule('out/extension.js', 'module.exports.retiredRunProducers = [typeof buildAgentShellScript, typeof buildSessionCaptureScript, typeof buildCodexContinuationRunnerScript];');
   assert.equal(JSON.stringify(extension.retiredRunProducers), JSON.stringify(['undefined', 'undefined', 'undefined']));
+  const source = fs.readFileSync(path.join(projectRoot, 'out', 'extension.js'), 'utf8');
+  for (const writer of ['updateStoredAgentSession', 'clearStoredAgentSession', 'getStepSessionFilePath', 'readStepSessionState']) {
+    assert.equal(source.includes(`continuation_1.${writer}`), false, `${writer} must remain outside the production extension call chain`);
+  }
 });
 
 test('production extension no longer carries unused file identity and turn producers', () => {
   const extension = loadCompiledModule('out/extension.js', 'module.exports.retiredHelpers = [typeof ensureInteractiveTurnExecution, typeof markSessionBindingUnavailable, typeof confirmPlannedSessionFromCheckpoint, typeof buildWorkspaceSnapshotScript];');
   assert.equal(JSON.stringify(extension.retiredHelpers), JSON.stringify(['undefined', 'undefined', 'undefined', 'undefined']));
+});
+
+test('persisted capability results materialize only below the managed tmp root', t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-capability-result-boundary-'));
+  const root = path.join(base, '.solomap-global'), managedTmp = path.join(root, 'tmp');
+  const outside = path.join(base, 'outside');
+  fs.mkdirSync(managedTmp, { recursive: true });
+  fs.mkdirSync(outside);
+  const extension = loadCompiledModule('out/extension.js',
+    'module.exports.__materializeCapabilityOperationResult = materializeCapabilityOperationResult; module.exports.__permanentCapabilitySettlementError = permanentCapabilitySettlementError;');
+  const result = path.join(managedTmp, 'operation', 'result.json');
+  t.after(() => {
+    if (fs.existsSync(result)) fs.unlinkSync(result);
+    const operation = path.dirname(result);
+    if (fs.existsSync(operation)) fs.rmdirSync(operation);
+    const linked = path.join(managedTmp, 'linked');
+    if (fs.existsSync(linked)) fs.unlinkSync(linked);
+    fs.rmdirSync(managedTmp); fs.rmdirSync(root); fs.rmdirSync(outside); fs.rmdirSync(base);
+  });
+  extension.__materializeCapabilityOperationResult(root, result, Buffer.from('{"ok":true}'));
+  assert.equal(fs.readFileSync(result, 'utf8'), '{"ok":true}');
+  assert.throws(() => extension.__materializeCapabilityOperationResult(root, path.join(outside, 'result.json'), Buffer.from('outside')), /capability_result_path_invalid/);
+  fs.symlinkSync(outside, path.join(managedTmp, 'linked'));
+  assert.throws(() => extension.__materializeCapabilityOperationResult(root, path.join(managedTmp, 'linked', 'result.json'), Buffer.from('linked')), /capability_result_path_invalid/);
+  assert.deepEqual(fs.readdirSync(outside), []);
+  assert.equal(extension.__permanentCapabilitySettlementError(new Error('capability_result_hash_mismatch')), true);
+  assert.equal(extension.__permanentCapabilitySettlementError(new Error('database_locked')), false);
+});
+
+for (const [name, handler, command, sidebarMethod] of [
+  ['skill', 'postSkillInstallResult', 'skillInstallResult', 'postSkillInstallResult'],
+  ['MCP', 'postMcpInstallResult', 'mcpInstallResult', 'postMcpInstallResult']
+]) test(`${name} completion publishes its result before one authoritative settings refresh`, async () => {
+  const panelMessages = [], sidebarCalls = [], broadcasts = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.run = ${handler};
+    module.exports.connect = (panelMessages, sidebarCalls, broadcasts) => {
+      activePanel = { webview: { postMessage: message => panelMessages.push(message) } };
+      sidebarProvider = { ${sidebarMethod}: (...args) => sidebarCalls.push(args) };
+      broadcastSettings = async (...args) => { broadcasts.push(args); };
+    };
+  `);
+  extension.connect(panelMessages, sidebarCalls, broadcasts);
+  extension.run({ globalState: { get: () => ({}) } }, true, 'Installed');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(JSON.stringify(panelMessages), JSON.stringify([{ command, success: true, message: 'Installed' }]));
+  assert.equal(JSON.stringify(sidebarCalls), JSON.stringify([[true, 'Installed']]));
+  assert.equal(Object.hasOwn(panelMessages[0], 'settings'), false, 'a result event must not project stale synchronous settings');
+  assert.equal(broadcasts.length, 1);
 });
 
 test('production Solo prompt creates no permanent global instruction mirror', async () => {
@@ -90,6 +185,28 @@ test('production Solo context uses the database before its first file exists', a
     const prompt = await extension.__soloPolicyPrompt('执行用户动作', project, '', [], root);
     assert.match(prompt, /SoloMap 数据库工具：/);
     assert.doesNotMatch(prompt, /solomap-memory\.cjs.*(?:route|retrieve)|documentation\.json|global-default-prompt\.md/);
+  } finally { await runtime.close(); }
+});
+
+for (const mode of ['solo', 'step']) test(`the final ${mode} conversation prompt uses only the shared database checkpoint contract`, async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-final-checkpoint-contract-'));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.__soloPrompt = buildSoloConversationPrompt; module.exports.__stepPrompt = buildAgentConversationPrompt;', { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
+  const runtime = isolatedCapabilityRuntime(root);
+  try {
+    const node = { id: 'step', title: '写入用户要求的产物', description: '保留原任务', stage: 'Build', status: 'In Progress', agentCli: 'claude', agentPrompt: '实现用户目标' };
+    const prompt = mode === 'solo' ? await extension.__soloPrompt('实现用户目标', project, '', [], root)
+      : await extension.__stepPrompt(node, '实现用户目标', project, '', '', '', '', [], '', '', root, {}, false, true);
+    const { prepareAgentRun } = require('../out/agentRunPreparation.js');
+    await prepareAgentRun({ agentCli: 'claude', selectedModel: '', prompt, workspaceRoot: project, nodeId: mode === 'solo' ? '__solo__' : 'step', executionLogId: 1, userMessage: '实现用户目标', runKind: mode, globalDataPath: root, taskPermissionMode: 'auto',
+      metadata: { nativeResumeProviderContext: { claude: { claudeHome: path.join(base, 'claude-home'), configDirOverride: path.join(base, 'claude-home'), configPath: path.join(base, 'claude-home/.claude.json') } } } });
+    const plan = await require('../out/autonomousRuntimeControl.js').sendRuntimeDataRequest(root, { operation: 'read_run_execution_plan', input: { root: project, executionLogId: 1 } });
+    assert.doesNotMatch(plan.prompt, /\.solopreneur\/runtime\/task-checkpoint\.cjs|检查点命令已由插件生成/);
+    assert.equal(plan.prompt.split('SoloMap 检查点命令：').length - 1, 1, 'the final database prompt must contain exactly one runnable checkpoint contract');
+    assert.ok(plan.prompt.includes(path.join(projectRoot, 'out/taskCheckpointProcess.js')));
+    assert.ok(plan.prompt.includes(`--turn-id ${plan.turnId}`));
+    assert.ok(plan.prompt.includes('实现用户目标'));
+    assert.equal(fs.existsSync(path.join(project, '.solopreneur/runtime/task-checkpoint.cjs')), false);
   } finally { await runtime.close(); }
 });
 
@@ -125,7 +242,7 @@ test('production review launch retries one formal run and full evidence without 
       autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
       activeProjectRoot = project; syncEngine = engine; extensionContextRef = context;
       getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'codex', taskPermissionMode: 'auto', enabledEnhancements: {} });
-      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
       agentCli_1.commandExists = () => true;
       createAgentTerminal = () => terminal;
     };
@@ -155,6 +272,8 @@ test('production review launch retries one formal run and full evidence without 
     const settlements = await ops({ operation: 'read_run_settlements', input: { projectId: registered.projectId, executionLogId: id } });
     assert.equal(settlements.items.length, 1); assert.equal(settlements.items[0].journal.status, 'Completed');
     assert.ok(settlements.items[0].journal.output.includes('完整标准24'));
+    const formalVerification = store.rows('SELECT v.id,v.run_id,v.result FROM verifications v WHERE v.project_id=? AND v.run_id=?', [registered.projectId, main.runId]);
+    assert.equal(formalVerification.length, 1); assert.equal(formalVerification[0].result, 'pass');
     assert.equal(engine.getNodes().find(node => node.id === 'step').status, 'Running', 'passing an old turn review cannot complete the newer running turn');
     const lateInput = { ...input, launchIntentId: 'effect:late-revise-review' };
     await extension.launchReview(lateInput);
@@ -196,7 +315,7 @@ test('production Flow role launch registers its formal run before attaching the 
       autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
       activeProjectRoot = project; syncEngine = engine; extensionContextRef = context;
       getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude', taskPermissionMode: 'auto', enabledEnhancements: {} });
-      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
       agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true, message: '' });
       createAgentTerminal = () => terminal;
     };
@@ -306,12 +425,16 @@ test('production polling resumes an undelivered task after its creating window a
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.poll = pollActiveConversations;
     const previousCall = autonomousRuntimeControl_1.sendRuntimeDataRequest;
+    const previousReady = autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime;
+    const previousRefreshRegistry = projectRegistry_1.refreshProjectRegistry;
     module.exports.connect = (call, root, project, factory) => {
       autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async ({ globalDataPath }) => ({ dataRoot: globalDataPath });
+      projectRegistry_1.refreshProjectRegistry = async () => ({ registry: { updatedAt: '', projects: [{ path: project }], selectedProjectPath: project } });
       getPersistedSettings = () => ({ globalDataPath: root }); getSelectedProjectPath = () => project;
       createAgentTerminal = (...args) => { const terminal = factory(...args); vscode.window.terminals = [terminal]; return terminal; };
     };
-    module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; };
+    module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = previousReady; projectRegistry_1.refreshProjectRegistry = previousRefreshRegistry; };
   `);
   extension.connect(call, root, project, () => { creates++; created(); return terminal; });
   try {
@@ -347,13 +470,14 @@ test('production polling recovers follow-up actions when the settlement reply is
   const prepared = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '完整任务', command: 'actual command', userMessage: '原始请求', metadata: { interactiveSession: true, agentCli: 'grok' }, idempotencyKey: 'effects-recovery-prepare' } });
   await ops({ operation: 'checkpoint_run', input: { root: project, executionLogId: 1, generation: prepared.generation, proof: prepared.proof, expectedRevision: prepared.revision, expectedTurnId: prepared.turnId, action: 'complete', outcome: 'partial', summary: '实际交付结果', idempotencyKey: 'effects-recovery-complete' } });
   const extension = loadCompiledModule('out/extension.js', `
-    module.exports.settle = processAgentStatusFile; module.exports.poll = pollActiveConversations;
+    module.exports.settle = processAgentStatusFile; module.exports.poll = () => pollActiveConversations(extensionContextRef);
     const previousCall = autonomousRuntimeControl_1.sendRuntimeDataRequest;
     module.exports.connect = (call, root, project, engine) => {
       autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
-      activeProjectRoot = project; syncEngine = engine; extensionContextRef = { extensionPath: path.resolve(__dirname, '..') };
+      activeProjectRoot = project; syncEngine = engine; extensionContextRef = { extensionPath: path.resolve(__dirname, '..'), globalState: { get: () => undefined } };
       getPersistedSettings = () => ({ globalDataPath: root });
       getSelectedProjectPath = () => project;
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
     };
     module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; };
   `);
@@ -382,6 +506,55 @@ test('production polling recovers follow-up actions when the settlement reply is
     assert.match(engine.getProjectAgentExecutions()[0].output, /Interactive session state: Closed/);
     assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
   } finally { extension.restore(); actualTransport.sendRuntimeDataRequest = previousTransport; engine.close(); await ops.close(); store.close(); }
+});
+
+test('production settlement cannot turn an agent-reported passing phrase into an effective adoption', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { SyncEngine } = require('../out/db/syncEngine.js');
+  const actualTransport = require('../out/autonomousRuntimeControl.js');
+  const previousTransport = actualTransport.sendRuntimeDataRequest;
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-production-rsi-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  await ops({ operation: 'save_global_prompt', input: { policy: null, content: '只记录真实采用。\n', source: 'user', idempotencyKey: 'production-rsi-policy' } });
+  const lesson = store.write({ kind: 'lesson', action: 'create', scope: null, idempotencyKey: 'production-rsi-lesson', data: { status: 'approved', summary: '先运行真实回归', confidence: 1 } });
+  const run = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: `原始目标\n来源：solomap://objects/${lesson.objectId} · revision=${lesson.revision}`, command: 'actual command', userMessage: '完整用户目标', metadata: { interactiveSession: true, agentCli: 'codex' }, idempotencyKey: 'production-rsi-run' } });
+  const output = Buffer.from('完整原始日志🌿\n'.repeat(200) + 'Tests: 5 passed\n');
+  await ops({ operation: 'append_run_log', input: { projectId: run.projectId, executionLogId: 1, generation: run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: output.toString('base64'), idempotencyKey: 'production-rsi-log' } });
+  const report = { schemaVersion: 1, summary: '已完成实际交付', unmetRequirements: [], decisions: [], corrections: [], verification: [], commits: [], experienceUsage: [{ experienceId: lesson.objectId, experienceRevision: lesson.revision, action: '先运行真实回归', result: '测试通过', verdict: 'effective', evidence: ['Tests: 5 passed'] }], lessons: [] };
+  await ops({ operation: 'checkpoint_run', input: { root: project, executionLogId: 1, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial', summary: '已提交完整结果', report, idempotencyKey: 'production-rsi-result' } });
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.settle = processAgentStatusFile;
+    module.exports.recordAcceptedReviewVerification = recordAcceptedReviewVerification;
+    module.exports.connect = (call, root, project, engine) => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+      activeProjectRoot = project; syncEngine = engine; extensionContextRef = { extensionPath: path.resolve(__dirname, '..'), globalState: { get: (_key, fallback) => fallback, update: async () => {} } };
+      getPersistedSettings = () => ({ globalDataPath: root }); getSelectedProjectPath = () => project;
+      sendNodesToWebview = async () => {};
+    };
+  `);
+  const engine = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  actualTransport.sendRuntimeDataRequest = (_root, request) => ops(request);
+  extension.connect(ops, root, project, engine);
+  try {
+    await extension.settle(`solomap://run-state/1?root=${encodeURIComponent(project)}`);
+    const history = await ops({ operation: 'read_run_settlements', input: { projectId: run.projectId, executionLogId: 1 } });
+    assert.equal(history.items.length, 1);
+    assert.equal(store.read(history.items[0].learningEventId).data.event_type, 'completed');
+    const cycles = await ops({ operation: 'read_rsi_cycles', input: { projectId: run.projectId } });
+    assert.equal(cycles.items[0].evaluation.verdict, 'unassessed');
+    assert.equal(cycles.items[0].evaluation.verificationId, null);
+    const { RunLifecycleClient } = require('../out/runLifecycleClient.js');
+    const client = new RunLifecycleClient((operation, input) => ops({ operation, input }), root);
+    await extension.recordAcceptedReviewVerification(client, project, 1, 'formal-review-turn', {
+      status: 'pass', summary: '独立复核确认真实回归通过', findings: [], nextAction: '', goalSatisfied: true, evidenceSufficient: true,
+      criteria: [{ criterion: '真实回归', status: 'pass', evidence: ['host:test'], reason: '宿主保存了完整复核结果' }]
+    });
+    const verifiedCycles = await ops({ operation: 'read_rsi_cycles', input: { projectId: run.projectId } });
+    assert.equal(verifiedCycles.items[0].evaluation.verdict, 'effective');
+    assert.ok(verifiedCycles.items[0].evaluation.verificationId);
+  } finally { actualTransport.sendRuntimeDataRequest = previousTransport; engine.close(); await ops.close(); store.close(); }
 });
 
 test('production settlement commits the accepted turn to durable history and creates no run, digest or learning files', async () => {
@@ -433,7 +606,7 @@ test('production settlement commits the accepted turn to durable history and cre
     const done = await ops({ operation: 'checkpoint_run', input: { projectId: run.projectId, executionLogId: 1, generation: next.generation, proof: next.proof, expectedRevision: next.revision, expectedTurnId: next.turnId, action: 'complete', outcome: 'partial', summary: '第二轮完整结果', report, idempotencyKey: 'production-queued-turn-complete' } });
     next = await ops({ operation: 'read_run_checkpoint_state', input: { projectId: run.projectId, executionLogId: 1 } });
     const latest = await ops({ operation: 'checkpoint_run', input: { projectId: run.projectId, executionLogId: 1, generation: next.generation, proof: next.proof, expectedRevision: next.revision, expectedTurnId: next.turnId, action: 'start', message: '第三轮进行中', idempotencyKey: 'production-running-next-turn' } });
-    await extension.poll({});
+    await extension.poll({ globalState: { get: (_key, fallback) => fallback, update: async () => {} } });
     const histories = await ops({ operation: 'read_run_settlements', input: { projectId: run.projectId, executionLogId: 1 } });
     assert.equal(histories.items.length, 2); assert.equal(histories.items[1].turnId, done.turnId);
     assert.match(histories.items[1].journal.output, /第二轮完整结果/);
@@ -455,7 +628,7 @@ test('the production Agent preparation entry commits to Runtime and creates no p
     const previousReady = autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime;
     module.exports.connect = call => {
       autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
-      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
     };
     module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = previousReady; };
   `);
@@ -629,7 +802,8 @@ test('the production terminal-close callback preserves a settled turn and closes
     assert.equal(await extension.closed('original terminal', 2), true);
     const closed = await ops({ operation: 'read_run_state', input: { projectId: run.projectId, executionLogId: 1 } });
     assert.equal(closed.status.interactiveSessionClosed, true); assert.equal(closed.status.checkpointSummary, '已提交的完整结果');
-    assert.equal(store.read(run.turnId).data.outcome, 'partial'); assert.equal(observed.length, 1);
+    assert.equal(store.read(run.turnId).data.outcome, 'partial'); assert.ok(observed.length >= 1);
+    assert.ok(observed.every(reference => reference === observed[0]));
     assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
   } finally { extension.restore(); await ops.close(); store.close(); }
 });
@@ -654,6 +828,54 @@ test('recent conversation snapshot bypasses pending full initialization and read
     const result = await Promise.race([extension.snapshot({}, '/fixture/recent'), new Promise(resolve => setTimeout(() => resolve(null), 100))]);
     assert.equal(result?.solo[0]?.id, 55, 'latest durable row must show without waiting for old initialization');
   } finally { release(); }
+});
+
+for (const kind of ['native', 'turn']) for (const unavailable of [false, true]) test(`the ${kind} continuation ${unavailable ? 'preserves an unavailable' : 'confirms a closed'} Claude session before its next recovery tick`, async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-claude-continue-host-'));
+  const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'), claudeHome = path.join(base, 'claude-home'); fs.mkdirSync(project);
+  const f = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  await engine.initAndSync(); t.after(() => engine.close());
+  const startedAt = new Date(Date.now() - 2000).toISOString(), finishedAt = new Date(Date.parse(startedAt) + 500).toISOString();
+  const sessionId = require('node:crypto').randomUUID();
+  const identity = require('../out/sessionIdentity.js');
+  let originalBinding = identity.appendSessionBindingValue(identity.createSessionBindingValue({ runId: '85', provider: 'claude', workspaceRoot: project, cliPath: 'claude', bindingNonce: require('node:crypto').randomBytes(32).toString('hex'), createdAt: startedAt, method: 'caller_assigned', contract: 'official_stable', providerContext: { claude: { claudeHome, configDirOverride: claudeHome, configPath: path.join(claudeHome, '.claude.json') } } }), 1, { sessionId, state: 'planned', method: 'caller_assigned', contract: 'official_stable', createdAt: startedAt });
+  if (unavailable) originalBinding = identity.appendSessionBindingValue(originalBinding, 2, { state: 'unavailable', supersedesRevision: 2, method: 'caller_assigned', contract: 'official_stable', errorCode: 'identity_not_observed', createdAt: finishedAt });
+  const status = { workspaceRoot: project, nodeId: '__solo__', executionLogId: 85, rootExecutionLogId: 85, runKind: 'solo', agentCli: 'claude', selectedModel: 'original-model', status: 'Failed', userMessage: '完整历史目标', interactiveSession: true, interactiveSessionClosed: true, startedAt, turnStartedAt: startedAt, finishedAt, checkpointSequence: 0, checkpointSummary: '完整历史结束说明', sessionProvider: 'claude', bindingNonce: originalBinding.bindingNonce, sessionBindingHeadRevision: originalBinding.headRevision };
+  const statusBytes = Buffer.from(JSON.stringify(status)); const source = { identity: `agent-status:${project}`, key: '85.json', hash: require('node:crypto').createHash('sha256').update(statusBytes).digest('hex') };
+  f.store.captureMigrationSource(source, statusBytes); const location = await f.store.registerProject({ root: project });
+  const run = f.store.adoptHistoricalRun(location.projectId, location.locationId, source, { status, binding: originalBinding, prompt: '完整历史提示词🌿', command: 'claude original command', output: Buffer.from('完整历史输出🌿'), unregisteredReports: [] }).state;
+  const closed = run;
+  const transcriptPath = path.join(claudeHome, 'projects', project.replace(/[^a-zA-Z0-9]/g, '-'), sessionId + '.jsonl'); fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+  const transcript = Buffer.from(JSON.stringify({ type: 'user', uuid: 'historical-user', sessionId, cwd: project, timestamp: run.status.startedAt, message: { role: 'user', content: '完整历史用户原文🌿' } }) + '\n'); fs.writeFileSync(transcriptPath, transcript);
+  const delivered = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.nativeContinue = handleContinueNativeConversation; module.exports.turnContinue = handleContinueConversationTurn;
+    module.exports.connect = (engine, project, root, prepare, deliver) => {
+      syncEngine = engine; activeProjectRoot = project; sidebarProvider = null; extensionContextRef = {};
+      getPersistedSettings = () => ({ globalDataPath: root, globalPrompt: '', taskPermissionMode: 'auto' });
+      agentCli_1.commandExists = () => true; createPreSessionGitCommit = async () => '';
+      prepareOrdinaryConversation = prepare; deliverOrdinaryConversation = deliver;
+    };
+  `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
+  extension.connect(engine, project, root, (_context, input) => require('../out/agentRunPreparation.js').prepareAgentRun({ ...input, launchIntentId: `closed-claude-${kind}` }, (operation, input) => f.ops({ operation, input })), async (_context, prepared) => delivered.push(prepared));
+  const invoke = () => kind === 'native' ? extension.nativeContinue({}, '__solo__', 85) : extension.turnContinue({}, '__solo__', 85, '继续完整目标🌿', '', [], true);
+  if (unavailable) {
+    await assert.rejects(invoke(), /尚未确认/); assert.equal(delivered.length, 0);
+    assert.deepEqual(f.store.readRunBinding(run.projectId, 85), originalBinding);
+    assert.equal(f.store.readRunCheckpointState(run.projectId, 85).revision, closed.revision);
+    return;
+  }
+  await invoke();
+  assert.equal(delivered.length, 1); const continuation = delivered[0];
+  assert.equal(continuation.taskId, run.taskId); assert.notEqual(continuation.turnId, run.turnId); assert.equal(continuation.status.selectedModel, 'original-model');
+  const binding = f.store.readRunBinding(run.projectId, 85); assert.equal(binding.revisions.at(-1).state, 'confirmed'); assert.equal(binding.revisions.at(-1).sessionId, sessionId);
+  const retained = f.store.readRunCheckpointState(run.projectId, 85); assert.equal(retained.turnId, closed.turnId); assert.equal(retained.status.interactiveSessionClosed, true); assert.equal(retained.status.checkpointSummary, closed.status.checkpointSummary);
+  assert.deepEqual(f.store.readRunBinding(run.projectId, 85, closed.revision), originalBinding);
+  assert.deepEqual(f.store.readMigrationSource(source.identity, source.key).bytes, statusBytes);
+  assert.equal(f.store.readRunLogHead(run.projectId, 85, 'native:claude').totalBytes, 0, 'identity recovery must not reopen or consume a closed turn');
+  assert.deepEqual(fs.readFileSync(transcriptPath), transcript);
+  assert.equal(fs.existsSync(path.join(project, '.solopreneur', 'agent-runs')), false);
 });
 
 test('project switching during historical reads cannot continue or display the other project conversation', async () => {
@@ -696,11 +918,11 @@ test('new Solo launch opens its terminal while a full history refresh is pending
       syncEngine = { initAndSync: () => { onHistory(); return new Promise(() => {}); }, getAgentExecutions: () => [] };
       getPersistedSettings = () => ({ cliPath: 'codex', globalDataPath: root, globalPrompt: '', enabledEnhancements: {} });
       ensureTaskRuntimeReady = async () => {};
-      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
       agentCli_1.resolveAgentCli = () => 'codex'; agentCli_1.commandExists = () => true;
       agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
-      recordLocalUsageEvent = () => {}; postNodeConversations = () => {};
-      solomapGlobal_1.ensureSolomapEnhancementRuntime = () => ({ envLines: [], preflightLines: [] });
+      recordLocalUsageEvent = async () => ({}); postNodeConversations = () => {};
+
       buildSoloConversationPrompt = () => 'prompt';
       createAgentTerminal = () => { calls.push('terminal'); return terminal; };
     };
@@ -722,12 +944,28 @@ test('new Solo launch opens its terminal while a full history refresh is pending
 });
 
 test('a cached sidebar snapshot is refreshed from the global journal after plugin restart', async () => {
-  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
-  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-global-snapshot-'));
-  const projectPath = path.join(fixture, 'project'); const root = path.join(fixture, 'global');
-  fs.mkdirSync(root); fs.writeFileSync(path.join(root, 'solomap.db'), 'global source');
   const cache = require('../out/sidebarSnapshotCache.js');
-  cache.writeCachedConversationSnapshot(root, projectPath, { solo: [], project: [], flow: [], revision: [] });
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '', { './sidebarSnapshotCache': cache });
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-global-snapshot-'));
+  const projectPath = path.join(fixture, 'project'); const root = path.join(fixture, 'global', '.solomap-global');
+  fs.mkdirSync(projectPath);
+  const runtime = isolatedCapabilityRuntime(root);
+  const sourceRevision = await cache.buildConversationDatabaseSignature(root, projectPath);
+  await cache.writeCachedConversationSnapshot(root, projectPath, sourceRevision, { solo: [], project: [], flow: [], revision: [] });
+  await require('../out/autonomousRuntimeControl.js').sendRuntimeDataRequest(root, {
+    operation: 'prepare_run',
+    input: {
+      root: projectPath,
+      executionLogId: 56,
+      nodeId: '__solo__',
+      runKind: 'solo',
+      prompt: 'Refresh the sidebar',
+      command: 'codex',
+      userMessage: 'Refresh the sidebar',
+      metadata: { agentCli: 'codex' },
+      idempotencyKey: 'sidebar-restart-refresh'
+    }
+  });
   const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
     getSettings: () => ({ globalDataPath: root }), updateSettings: async () => {},
     getProjects: () => ({ projects: [], selectedProjectPath: projectPath }),
@@ -735,8 +973,10 @@ test('a cached sidebar snapshot is refreshed from the global journal after plugi
   });
   const messages = [];
   provider._view = { webview: { postMessage: message => { messages.push(message); return Promise.resolve(true); } } };
-  await provider.sendProjectConversationSnapshot(projectPath);
-  assert.equal(messages.at(-1).soloConversations[0]?.id, 56);
+  try {
+    await provider.sendProjectConversationSnapshot(projectPath);
+    assert.equal(messages.at(-1).soloConversations[0]?.id, 56);
+  } finally { await runtime.close(); }
 });
 
 function getProcessBirthMarker(pid) {
@@ -747,6 +987,32 @@ function getProcessBirthMarker(pid) {
   } catch {}
   const startedAt = childProcess.execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }).trim();
   return `ps:${startedAt}`;
+}
+
+async function completeNativeInteractiveTurn(operation, { root, executionLogId, summary, sessionId, idempotencyKey }) {
+  const current = await operation('read_run_checkpoint_state', { root, executionLogId });
+  const observedAt = Date.now();
+  return operation('checkpoint_run', {
+    projectId: current.projectId,
+    executionLogId,
+    generation: current.generation,
+    proof: current.proof,
+    expectedRevision: current.revision,
+    expectedTurnId: current.turnId,
+    action: 'complete',
+    outcome: 'partial',
+    summary,
+    workspaceEvidenceSource: 'native',
+    nativeStartedAt: observedAt,
+    nativeCompletedAt: observedAt,
+    nativeSessionObservation: { provider: 'claude', sessionId, source: 'CLAUDE_CODE_SESSION_ID' },
+    idempotencyKey
+  });
+}
+
+function journalWithoutCurrentRunRevision(journal) {
+  const { runRevision: _currentRunRevision, ...dataState } = journal.entry.dataState;
+  return { ...journal, entry: { ...journal.entry, dataState } };
 }
 
 test('Agent CLI upgrade action delegates every installed CLI to the Agent', () => {
@@ -768,14 +1034,16 @@ test('settings maintenance tasks launch outside the current project', () => {
   const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
   const sidebarProvider = fs.readFileSync(path.join(projectRoot, 'src', 'sidebarProvider.ts'), 'utf8');
   assert.match(extension, /const \{ maintenanceRoot, runsRoot \} = ensureSolomapMaintenanceWorkspace/);
-  assert.match(extension, /buildAgentCommandForPromptFile\(agentCli, promptFilePath, maintenanceRoot, settings\.taskPermissionMode\)/);
-  assert.match(extension, /createAgentTerminal\(maintenanceRoot, `cli-upgrade-/);
-  assert.match(extension, /createAgentTerminal\(maintenanceRoot, `skill-/);
-  assert.match(extension, /createAgentTerminal\(maintenanceRoot, `mcp-/);
-  assert.match(extension, /createAgentTerminal\(maintenanceRoot, `enhance-/);
+  assert.match(extension, /launchMaintenanceAgentRun\(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'agent_cli_upgrade'/);
+  assert.match(extension, /launchMaintenanceAgentRun\(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'skill_install'/);
+  assert.match(extension, /launchMaintenanceAgentRun\(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'mcp_install'/);
+  assert.doesNotMatch(extension, /`enhance-/);
   assert.match(extension, /createAgentTerminal\(agentWorkspace, `migration-/);
-  assert.match(extension, /buildAgentCommand\(agentCli, buildMigrationMaintenancePrompt\(kind, targetId\), agentWorkspace, '', 'never'\)/);
-  assert.match(extension, /provider !== 'claude'/);
+  assert.match(extension, /const requestedAgentCli = \(settings\.cliPath \|\| 'agy'\)\.trim\(\)/);
+  assert.match(extension, /const agentCli = resolveAgentCli\(requestedAgentCli, settings\.cliPath\)/);
+  assert.match(extension, /buildAgentCommand\(agentCli, buildMigrationMaintenancePrompt\(kind, targetId\), agentWorkspace, '', settings\.taskPermissionMode \|\| 'auto'\)/);
+  assert.doesNotMatch(extension, /buildMigrationMaintenancePrompt\(kind, targetId\), agentWorkspace, '', 'never'/);
+  assert.doesNotMatch(extension, /maintenance_agent_native_boundary_unsupported/);
   assert.match(extension, /applyNativeMigrationAgentBoundary\([\s\S]*maintenanceMcpConfig/);
   assert.match(extension, /buildMigrationAgentSandboxCommand/);
   assert.match(sidebarProvider, /cwd: maintenanceRoot/);
@@ -793,7 +1061,7 @@ test('the final temporary migration card delegates maintenance to Agent and pres
   assert.match(webview, /data-migration-delegate/);
   assert.match(webview, /dataMigration\.delegate/);
   assert.match(webview, /交给 Agent 迁移/);
-  assert.match(fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8'), /自动整理需要使用 Claude Code/);
+  assert.doesNotMatch(fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8'), /自动整理需要使用 Claude Code/);
   assert.ok(sidebar.indexOf('${getMigrationSettingsCardHtml()}') > sidebar.indexOf('feedback-rating-card'));
 });
 
@@ -804,8 +1072,8 @@ test('extension activation refreshes bundled global memory tools', () => {
   assert.ok(activationStart >= 0 && activationEnd > activationStart);
   const activationBody = extension.slice(activationStart, activationEnd);
   assert.match(activationBody, /const activationProjectRoot = getSelectedProjectPath\(context\) \|\| getWorkspaceRoot\(\)/);
-  assert.match(activationBody, /ensureDataReady\(\)\.then\(\(\) => ensureSolomapMemoryStore\(activationProjectRoot, activationGlobalDataPath\)\)/);
-  assert.match(activationBody, /pruneProjectsOutputLogs\(getProjects\(context\)\.map\(\(project\) => project\.path\)\)/);
+  assert.match(activationBody, /ensureDataReady\(\)\.then\(async \(\) => \{ ensureSolomapMemoryStore\(activationProjectRoot, activationGlobalDataPath\); await resumeCapabilityOperations/);
+  assert.doesNotMatch(activationBody, /pruneProjectsOutputLogs\(/, 'activation must not physically remove retained historical logs');
 });
 
 test('time plan panel delegates an optional request through the structured time-plan contract', () => {
@@ -833,20 +1101,20 @@ test('time plan panel delegates an optional request through the structured time-
   assert.match(webview, /closeTimePlan: 'Close time plan'/);
 });
 
-test('scheduled tasks use the global file ledger and a one-minute on-demand poller', () => {
+test('scheduled tasks use the database ledger and a one-minute on-demand poller', () => {
   const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
   const ledger = fs.readFileSync(path.join(projectRoot, 'src', 'scheduledTaskLedger.ts'), 'utf8');
-  const validator = fs.readFileSync(path.join(projectRoot, 'resources', 'tools', 'validate-scheduled-tasks.cjs'), 'utf8');
-  assert.match(extension, /syncScheduledTaskLedger/);
+  assert.match(extension, /syncScheduledTaskDatabase/);
+  assert.match(extension, /claimDueScheduledTaskDatabase/);
+  assert.match(extension, /completeScheduledTaskDatabase/);
   assert.match(extension, /setInterval\(\(\) => void pollScheduledAutomationTasks\(context\), 60 \* 1000\)/);
   assert.match(extension, /if \(ledger\.tasks\.length > 0 && !scheduledAutomationPoller\)/);
-  assert.match(ledger, /scheduled-tasks\.json/);
+  assert.match(ledger, /operation: name, input/);
   assert.match(ledger, /status: 'pending' \| 'running'/);
-  assert.match(ledger, /completeScheduledTaskOccurrence/);
-  assert.match(validator, /occurrenceId is duplicated/);
+  assert.doesNotMatch(extension, /syncScheduledTaskLedger|completeScheduledTaskOccurrence/);
 });
 
-test('durable automation configuration restores tasks when extension global state is stale', () => {
+test('durable automation configuration restores tasks when legacy extension state has no task value', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     'module.exports.__getPersistedSettings = getPersistedSettings;'
@@ -860,7 +1128,7 @@ test('durable automation configuration restores tasks when extension global stat
   const context = {
     globalState: {
       get() {
-        return { automationTasks: { scheduledTasks: [] } };
+        return {};
       }
     }
   };
@@ -875,7 +1143,8 @@ test('settings capability refresh reads skills installed after the first cached 
     [
       'module.exports.__getPersistedSettings = getPersistedSettings;',
       'module.exports.__invalidatePersistedSettingsCache = invalidatePersistedSettingsCache;'
-    ].join('\n')
+    ].join('\n'),
+    { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') }
   );
   const { writeSolomapSkillRegistry } = require(path.join(projectRoot, 'out/solomapGlobal.js'));
   const globalRoot = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-settings-skills-')), '.solomap-global');
@@ -955,27 +1224,25 @@ test('settings follow a restored database at the same capability sequence withou
   let otherClosed = false;
   transport.sendRuntimeDataRequest = (resolved, request) => { assert.equal(resolved, root); return operations(request); };
   try {
-    const entry = { id: 'command-output-optimizer', status: 'installed', enabled: true, title: 'Before restore', version: '1.2.3', health: { ok: true } };
-    store.patchCapabilityRegistry({ kind: 'enhancement', entry, expectedRevision: 0, idempotencyKey: 'original-choice' });
-    other.patchCapabilityRegistry({ kind: 'enhancement', entry: { ...entry, title: 'Restored choice', enabled: false }, expectedRevision: 0, idempotencyKey: 'restored-choice' });
-    const oldSequence = store.readCapabilityRegistry({ kind: 'enhancement' }).sourceSequence;
-    assert.equal(other.readCapabilityRegistry({ kind: 'enhancement' }).sourceSequence, oldSequence);
+    const entry = { id: 'fixture-skill', status: 'installed', enabled: true, title: 'Before restore' };
+    store.patchCapabilityRegistry({ kind: 'skill', entry, expectedRevision: 0, idempotencyKey: 'original-skill' });
+    other.patchCapabilityRegistry({ kind: 'skill', entry: { ...entry, title: 'Restored skill', enabled: false }, expectedRevision: 0, idempotencyKey: 'restored-skill' });
+    assert.equal(other.readCapabilityRegistry({ kind: 'skill' }).sourceSequence, store.readCapabilityRegistry({ kind: 'skill' }).sourceSequence);
     other.close(); otherClosed = true;
     extensionModule.__vscodeTestState.configurationValues.globalDataPath = root;
     const context = { globalState: { get: () => ({}) } };
     await global.refreshSolomapCapabilityRegistries(projectRoot, root);
-    assert.equal(extensionModule.__getPersistedSettings(context).enabledEnhancements['command-output-optimizer'], true);
+    assert.equal(extensionModule.__getPersistedSettings(context).skills.find(item => item.id === entry.id).title, 'Before restore');
     await operations.close(); store.close();
     fs.renameSync(path.join(root, 'solomap.db'), path.join(base, 'original-solomap.db'));
     fs.copyFileSync(path.join(replacement, 'solomap.db'), path.join(root, 'solomap.db'));
     store = new UnifiedDataStore(root); operations = createRuntimeDataOperations(store);
     await global.refreshSolomapCapabilityRegistries(projectRoot, root);
     const settings = extensionModule.__getPersistedSettings(context);
-    assert.equal(settings.enabledEnhancements['command-output-optimizer'], false, 'restored user choice must reach the settings consumer');
-    assert.equal(settings.enhancementStatuses.find(item => item.id === entry.id).title, 'Restored choice');
+    assert.equal(settings.skills.find(item => item.id === entry.id).title, 'Restored skill');
     for (let i = 0; i < 20; i++) {
       await global.refreshSolomapCapabilityRegistries(projectRoot, root);
-      assert.strictEqual(extensionModule.__getPersistedSettings(context), settings, 'unchanged reads reuse the current settings projection');
+      assert.strictEqual(extensionModule.__getPersistedSettings(context), settings);
     }
   } finally { transport.sendRuntimeDataRequest = previous; await operations.close(); store.close(); if (!otherClosed) other.close(); }
 });
@@ -1054,13 +1321,25 @@ test('shared connector settings do not offer uninstall for a built-in MCP servic
   const controller = sandbox.globalThis.SoloMapWebview.createAbilityController({
     elements, t: key => key, postMessage: message => posted.push(message), showMessage() {}
   });
-  const settings = { connectors: [
+  const settings = { skills: [
+    { id: 'external-skill', title: 'External skill', source: { input: 'owner/skill' } }
+  ], connectors: [
     { id: 'builtin:solomap-intelligence', title: '项目与设置查询', source: { kind: 'builtin' } },
-    { id: 'github-readonly', title: 'GitHub', source: { kind: 'builtin' } }
+    { id: 'github-readonly', title: 'GitHub', source: { kind: 'builtin' } },
+    { id: 'external-mcp', title: 'External MCP', status: 'disabled', enabled: false, source: { input: 'owner/repo' } }
+  ], enhancementStatuses: [
+    { id: 'external-enhancement', title: 'External enhancement', status: 'ready', installed: true }
+  ], capabilityOperations: [
+    { operationId: 'skill-failed', ordinal: 4, kind: 'skill', action: 'install', targetId: null, status: 'failed' },
+    { operationId: 'mcp-running', ordinal: 5, kind: 'mcp', action: 'upgrade', targetId: 'external-mcp', status: 'running' },
+    { operationId: 'mcp-newer-disable', ordinal: 6, kind: 'mcp', action: 'disable', targetId: 'external-mcp', status: 'succeeded' }
   ] };
   const items = controller.buildItems(settings);
   assert.equal(items.find(item => item.originId === 'builtin:solomap-intelligence').canUninstall, false);
   assert.equal(items.find(item => item.originId === 'github-readonly').canUninstall, true);
+  assert.equal(items.find(item => item.id === 'add-new-skill').statusLabel, 'abilityFailedStatus');
+  assert.equal(items.find(item => item.originId === 'external-mcp').statusLabel, 'installingStatus');
+  assert.equal(items.find(item => item.originId === 'external-mcp').busy, true);
   controller.render(settings);
   const choose = id => select.listeners.click({
     stopPropagation() {},
@@ -1078,17 +1357,46 @@ test('shared connector settings do not offer uninstall for a built-in MCP servic
   assert.equal(posted.length, 1);
   assert.equal(posted[0].command, 'ability.uninstallMcp');
   assert.equal(posted[0].mcpId, 'github-readonly');
+  choose('external-mcp');
+  assert.equal(elements.detailStatus.textContent, 'installingStatus');
+  assert.equal(elements.installButton.getAttribute('disabled'), 'true');
+  assert.equal(elements.uninstallButton.getAttribute('disabled'), 'true');
+  elements.installButton.listeners.click();
+  assert.equal(posted.length, 1, 'a restored running operation must keep conflicting actions disabled');
+  const chooseValue = id => select.listeners.click({
+    stopPropagation() {},
+    target: { closest: selector => selector === '[data-solo-option-value]'
+      ? { getAttribute: () => id } : null }
+  });
+  chooseValue('skill-external-skill');
+  assert.equal(elements.installButton.getAttribute('disabled'), '');
+  assert.equal(elements.uninstallButton.getAttribute('disabled'), '');
+  chooseValue('enhancement-external-enhancement');
+  assert.equal(elements.installButton.getAttribute('disabled'), '');
+  assert.equal(elements.uninstallButton.getAttribute('disabled'), '');
+  chooseValue('add-new-skill');
+  assert.equal(elements.urlHelp.textContent, 'abilityFailedHelp');
+  assert.equal(elements.installButton.getAttribute('disabled'), '', 'a failed persisted operation must allow retry');
+});
+
+test('ability action labels are restored after language localization in both webviews', () => {
+  for (const relative of ['src/sidebarWebview.ts', 'src/roadmapWebview.ts']) {
+    const source = fs.readFileSync(path.join(projectRoot, relative), 'utf8');
+    const applyLanguage = source.slice(source.indexOf('function applyLanguage()'), source.indexOf('\n    function ', source.indexOf('function applyLanguage()') + 1));
+    assert.ok(applyLanguage.indexOf("setText('text-install-ability', t('installEnhancement'))")
+      < applyLanguage.lastIndexOf('renderAbilitiesAndEnhancements(currentSettings)'), relative);
+  }
 });
 
 test('time plan JSON is validated by both the plugin reader and the Agent-facing tool', () => {
   const source = fs.readFileSync(path.join(projectRoot, 'src', 'timePlan.ts'), 'utf8');
   assert.match(source, /validateTimePlanValue/);
   assert.match(source, /confirmTimePlan/);
-  assert.match(source, /validate-time-plan\.cjs/);
   assert.match(source, /assignee.*user.*agent/s);
   assert.match(source, /时间重叠/);
   const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
-  assert.match(extension, /node \.solopreneur\/validate-time-plan\.cjs/);
+  assert.match(extension, /resources.*tools.*validate-time-plan\.cjs/s);
+  assert.equal(fs.existsSync(path.join(projectRoot, 'resources', 'tools', 'validate-time-plan.cjs')), true);
   assert.match(extension, /如果校验失败，按输出修正 JSON 并重新运行/);
   assert.match(extension, /sourceTimePlanProjectPath/);
   assert.match(extension, /scheduleKind: 'once'/);
@@ -1126,7 +1434,65 @@ function isolatedCapabilityRuntime(root) {
   return { async close() { transport.sendRuntimeDataRequest = previous; if (operations) await operations.close(); store?.close(); } };
 }
 
+function makeSidebarSnapshotCacheStub(options = {}) {
+  const actual = require('../out/sidebarSnapshotCache.js');
+  const conversations = new Map();
+  let core = null;
+  let generation = 0;
+  const signature = options.buildConversationDatabaseSignature || (async (_globalDataPath, projectPath) => `fixture:${projectPath}`);
+  return {
+    buildSidebarProjectSignature: actual.buildSidebarProjectSignature,
+    buildConversationDatabaseSignature: signature,
+    async readSidebarCoreSnapshot() { return core; },
+    async reserveSidebarPortfolioSnapshot() {
+      generation += 1;
+      return { requestId: `fixture-${generation}`, generation };
+    },
+    async commitSidebarPortfolioSnapshot(_globalDataPath, reservation, projectSignature, portfolio) {
+      if (reservation.generation !== generation) return false;
+      core = { version: 3, projectSignature, portfolio: structuredClone(portfolio) };
+      return true;
+    },
+    async readCachedConversationSnapshot(_globalDataPath, projectPath) {
+      return conversations.has(projectPath) ? structuredClone(conversations.get(projectPath)) : null;
+    },
+    async writeCachedConversationSnapshot(_globalDataPath, projectPath, _sourceRevision, snapshot) {
+      conversations.set(projectPath, structuredClone(snapshot));
+    },
+    __setConversation(projectPath, snapshot) { conversations.set(projectPath, structuredClone(snapshot)); },
+    __getConversation(projectPath) { return conversations.has(projectPath) ? structuredClone(conversations.get(projectPath)) : null; },
+    __getCore() { return core ? structuredClone(core) : null; }
+  };
+}
+
+function settingsPersistenceUnitPatch() {
+  return `
+    refreshExtensionSettingsFromDatabase = async () => {};
+    persistExtensionSettingsToDatabase = async (_context, root, persisted) => {
+      databaseSettingsByRoot.set(root, { ...persisted });
+      databaseSettingRevisionsByRoot.set(root, new Map());
+    };
+    getSettingsWithOpenCodeSecretState = async context => getPersistedSettings(context);
+    activateObservedBackgroundRuntime = async () => {};
+    syncCognitiveRuntimeConfig = async () => {};
+  `;
+}
+
+async function claimScheduleOccurrence(ledger, operations, project, root, task, syncAt = new Date()) {
+  const call = (operation, input) => operations({ operation, input });
+  await ledger.syncScheduledTaskDatabase(project, root, [task], syncAt, call);
+  const claimed = await ledger.claimDueScheduledTaskDatabase(project, root, `webview-fixture:${task.id}`, new Date(), call);
+  assert.equal(claimed.length, 1, `fixture schedule ${task.id} must be due and claimed`);
+  return claimed[0];
+}
+
 function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
+  if (!Object.hasOwn(requireOverrides, '__sharedAutonomousRuntimeControl')) {
+    Object.defineProperty(requireOverrides, '__sharedAutonomousRuntimeControl', {
+      value: { ...require(path.join(projectRoot, 'out/autonomousRuntimeControl.js')) },
+      enumerable: false
+    });
+  }
   const filename = path.join(projectRoot, relativePath);
   const source = fs.readFileSync(filename, 'utf8') + `\n${exportPatch}`;
   const exports = {};
@@ -1141,7 +1507,7 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
     nextInformationChoice: undefined,
     nextInformationChoices: [],
     nextInputBoxValue: undefined,
-    configurationValues: { globalDataPath: fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-host-default-')) },
+    configurationValues: { globalDataPath: sharedHostDefaultRoot },
     fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) })
   };
   const context = {
@@ -1225,6 +1591,14 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
             }
           },
           workspace: {
+            createFileSystemWatcher() {
+              return {
+                onDidChange() { return { dispose() {} }; },
+                onDidCreate() { return { dispose() {} }; },
+                onDidDelete() { return { dispose() {} }; },
+                dispose() {}
+              };
+            },
             getConfiguration() {
               return {
                 get(key) {
@@ -1250,6 +1624,9 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
             executeCommand() { return Promise.resolve(); }
           },
           ConfigurationTarget: { Global: 1 },
+          RelativePattern: class RelativePattern {
+            constructor(base, pattern) { this.base = base; this.pattern = pattern; }
+          },
           TerminalExitReason: { Unknown: 0, Shutdown: 1, Process: 2, User: 3, Extension: 4 },
           ViewColumn: { One: 1 },
           ThemeIcon: class ThemeIcon {},
@@ -1293,7 +1670,7 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
           return require(path.join(projectRoot, 'out/projectSignals.js'));
         }
         if (id === './preSessionGit') {
-          return require(path.join(projectRoot, 'out/preSessionGit.js'));
+          return { ...require(path.join(projectRoot, 'out/preSessionGit.js')) };
         }
         if (id === './projectExternalSignals') {
           return require(path.join(projectRoot, 'out/projectExternalSignals.js'));
@@ -1308,7 +1685,7 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
           return require(path.join(projectRoot, 'out/activeConversationLedger.js'));
         }
         if (id === './projectRegistry') {
-          return require(path.join(projectRoot, 'out/projectRegistry.js'));
+          return { ...require(path.join(projectRoot, 'out/projectRegistry.js')) };
         }
         if (id === './projectAutonomyAuthorization') {
           return require(path.join(projectRoot, 'out/projectAutonomyAuthorization.js'));
@@ -1343,7 +1720,7 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
         if (id === './agentCli') {
           return { ...require(path.join(projectRoot, 'out/agentCli.js')) };
         }
-        if (id === './taskCheckpoint') {
+        if (id === './taskCheckpoint' || id === './taskCheckpoint.js') {
           return require(path.join(projectRoot, 'out/taskCheckpoint.js'));
         }
         if (id === './agentModels') {
@@ -1362,13 +1739,13 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
           return require(path.join(projectRoot, 'out/proAccount.js'));
         }
         if (id === './continuation') {
-          return require(path.join(projectRoot, 'out/continuation.js'));
+          return { ...require(path.join(projectRoot, 'out/continuation.js')) };
         }
         if (id === './tokenUsage') {
           return require(path.join(projectRoot, 'out/tokenUsage.js'));
         }
         if (id === './terminalCompatibility') {
-          return require(path.join(projectRoot, 'out/terminalCompatibility.js'));
+          return { ...require(path.join(projectRoot, 'out/terminalCompatibility.js')) };
         }
         if (id === './sessionIdentity') {
           return require(path.join(projectRoot, 'out/sessionIdentity.js'));
@@ -1416,6 +1793,18 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
           // These UI/identity fixtures isolate process creation; database startup
           // and the generated task consumer have separate real-owner acceptance.
           return { ensureHealthyAutonomousRuntime: async () => ({ started: false, pid: process.pid, runtimeId: 'isolated-ui-host' }) };
+        }
+        if (id === './autonomousRuntimeControl' || id === './autonomousRuntimeControl.js') {
+          return requireOverrides.__sharedAutonomousRuntimeControl;
+        }
+        if (id === './autonomousRuntimeService' || id === './autonomousRuntimeService.js') {
+          return { ...require(path.join(projectRoot, 'out/autonomousRuntimeService.js')) };
+        }
+        if (id === './autonomousRuntime' || id === './autonomousRuntime.js') {
+          return { ...require(path.join(projectRoot, 'out/autonomousRuntime.js')) };
+        }
+        if (id === './scheduledTaskLedger' || id === './scheduledTaskLedger.js') {
+          return { ...require(path.join(projectRoot, 'out/scheduledTaskLedger.js')) };
         }
         if (id === './automationSound.js') return require(path.join(projectRoot, 'out/automationSound.js'));
         if (id === './agentDatabaseConfig' || id === './runtimeDataOperations' || id === './maintenanceAgentRun') {
@@ -1536,7 +1925,7 @@ function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
       const option = createElement(`${element.id}-${value}`);
       option.setAttribute('data-solo-option-value', value);
       option.textContent = text;
-      option.closest = (selector) => selector === '[data-solo-option-value]' ? option : null;
+      option.closest = (selector) => selector === '[data-solo-option-value]' ? option : selector === '[data-solo-select]' ? element : null;
       return option;
     });
     Object.defineProperty(menu, 'innerHTML', {
@@ -1547,7 +1936,7 @@ function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
             const option = createElement(`${element.id}-${match[1]}`);
             option.setAttribute('data-solo-option-value', match[1]);
             option.textContent = match[2];
-            option.closest = (selector) => selector === '[data-solo-option-value]' ? option : null;
+            option.closest = (selector) => selector === '[data-solo-option-value]' ? option : selector === '[data-solo-select]' ? element : null;
             return option;
           });
         element.__options = options;
@@ -1824,17 +2213,18 @@ test('ability settings copy is localized in English webviews', () => {
   const sharedRuntimeSource = fs.readFileSync(path.join(projectRoot, 'src', 'webviewSharedRuntime.ts'), 'utf8');
 
   for (const source of sources) {
-    assert.match(source, /abilityManagerLabel:\s*'Ability Extensions & Execution Enhancements'/);
+    assert.match(source, /abilityManagerLabel:\s*'Ability Extensions'/);
+    assert.match(source, /abilityManagerHelp:\s*'Manage installed skills and MCP connectors here\.'/);
     assert.match(source, /abilityGroupSkills:\s*'Skills'/);
     assert.match(source, /abilityGroupConnectors:\s*'MCP Connectors'/);
-    assert.match(source, /abilityGroupEnhancements:\s*'Execution Enhancements'/);
+    assert.doesNotMatch(source, /abilityGroupEnhancements|Execution Enhancements|Harness Enhancements/);
     assert.match(source, /skillInputRequired:\s*'Enter a skill link before installing\.'/);
     assert.doesNotMatch(source, /setText\('label-enhancement-toggles',\s*'能力扩展与执行增强'\)/);
     assert.doesNotMatch(source, /setText\('text-install-ability',\s*'安装'\)/);
     assert.doesNotMatch(source, /statusLabel:\s*'已安装'/);
     assert.doesNotMatch(source, /showAbilityActionMessage\('正在安装/);
   }
-  assert.match(sharedRuntimeSource, /config\.showMessage\(config\.t\('installingEnhancementMessage'\)\)/);
+  assert.doesNotMatch(sharedRuntimeSource, /installingEnhancementMessage|ability\.installEnhancement|ability\.uninstallEnhancement/);
 });
 
 test('website-only changes do not trigger extension publishing', () => {
@@ -1894,15 +2284,19 @@ test('feedback issue URL includes local usage summary when provided', () => {
   assert.match(body, /No project paths included/);
 });
 
-test('feedback diagnostics include runtime and sanitized recent errors without local secrets', () => {
+test('feedback diagnostics include runtime and sanitized recent errors without local secrets', async t => {
   const diagnostics = require(path.join(projectRoot, 'out/localDiagnostics.js'));
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-diagnostics-'));
+  t.after(() => {
+    assert.deepEqual(fs.readdirSync(root), []);
+    fs.rmdirSync(root);
+  });
   const globalRoot = path.join(root, '.solomap-global');
   const secret = 'ghp-this_should_never_leave_the_device';
   diagnostics.recordLocalDiagnosticError(globalRoot, 'sidebar.action.project.refresh', new Error(
     `Failed at ${path.join(os.homedir(), 'private-project', 'roadmap.csv')}?token=${secret}`
   ));
-  const summary = diagnostics.buildLocalDiagnosticSummary(
+  const summary = await diagnostics.buildLocalDiagnosticSummary(
     { extensionMode: 1 },
     globalRoot,
     { appName: 'Visual Studio Code', version: '1.100.0', remoteName: '', uiKind: 1, uriScheme: 'vscode' }
@@ -1916,31 +2310,25 @@ test('feedback diagnostics include runtime and sanitized recent errors without l
   assert.doesNotMatch(summary, /private-project|roadmap\.csv|ghp-this_should_never_leave_the_device/);
 });
 
-test('pasted image attachments are saved as project-relative SoloMap files', () => {
+test('the retired synchronous pasted-image path cannot create project attachment files', () => {
   const attachments = require(path.join(projectRoot, 'out/attachments.js'));
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-pasted-attachment-'));
-  const files = attachments.savePastedImageAttachments(root, 'step:1', [{
+  assert.throws(() => attachments.savePastedImageAttachments(root, 'step:1', [{
     name: 'clipboard.png',
     mimeType: 'image/png',
     dataUrl: 'data:image/png;base64,aGVsbG8='
-  }]);
-
-  assert.equal(files.length, 1);
-  assert.match(files[0], /^\.solopreneur\/attachments\/step-1\/.+\.png$/);
-  assert.equal(fs.readFileSync(path.join(root, files[0]), 'utf8'), 'hello');
+  }]), /internal_attachment_database_async_required/);
+  assert.equal(fs.existsSync(path.join(root, '.solopreneur', 'attachments')), false);
+  fs.rmdirSync(root);
 });
 
-test('pasted image attachments have an async persistence path for the extension host', async () => {
+test('the async pasted-image path performs no project write when there is no attachment', async () => {
   const attachments = require(path.join(projectRoot, 'out/attachments.js'));
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-pasted-attachment-async-'));
-  const files = await attachments.savePastedImageAttachmentsAsync(root, 'solo', [{
-    name: 'clipboard.png',
-    mimeType: 'image/png',
-    dataUrl: 'data:image/png;base64,aGVsbG8='
-  }]);
-
-  assert.equal(files.length, 1);
-  assert.equal(fs.readFileSync(path.join(root, files[0]), 'utf8'), 'hello');
+  const files = await attachments.savePastedImageAttachmentsAsync(root, 'solo', []);
+  assert.deepEqual(files, []);
+  assert.equal(fs.existsSync(path.join(root, '.solopreneur', 'attachments')), false);
+  fs.rmdirSync(root);
 });
 
 test('attachment picker candidates are local project files and skip run artifacts', () => {
@@ -1981,6 +2369,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   const extensionSource = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
 
   assert.doesNotThrow(() => new vm.Script(script));
+  assert.match(script, /function stepConversationKey\(projectPath, nodeId\)/);
   assert.doesNotMatch(html, /<select\b|<option\b/);
   assert.match(html, /data-solo-select/);
   const mainAgentOptions = html.match(/id="setting-cli-select"[\s\S]*?<\/div>\s*<input/)?.[0] || '';
@@ -2470,7 +2859,14 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     target: elements['setting-cognitive-engine-agent'].__options.find(option => option.getAttribute('data-solo-option-value') === 'codex'),
     stopPropagation() {}
   });
-  elements['settings-panel'].listeners.input();
+  for (const target of [elements['setting-global-data-path'], elements['setting-telegram-token']]) {
+    elements['settings-panel'].listeners.input({ target });
+  }
+  for (const target of [
+    elements['setting-language'].__options[1],
+    elements['setting-telegram-enabled'].__options.find(option => option.getAttribute('data-solo-option-value') === 'on'),
+    elements['setting-cognitive-engine-agent'].__options.find(option => option.getAttribute('data-solo-option-value') === 'codex')
+  ]) elements['settings-panel'].listeners.click({ target });
   dispatchMessage({
     command: 'settingsLoaded',
     requestId: 'stale-settings-read',
@@ -2482,7 +2878,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     }
   });
   assert.equal(elements['setting-global-data-path'].value, '/workspace/.solomap-global');
-  elements['btn-save-settings'].listeners.click();
+  await elements['btn-save-settings'].listeners.click();
 
   assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) => message.command === 'settings.get'));
@@ -2661,8 +3057,8 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     message.command === 'settings.update'
     && message.automationTasks
     && message.automationTasks.focusMinutes === 15
-    && message.automationTasks.triggers.focus_time.notify === true
-    && message.automationTasks.triggers.focus_time.sound === false
+    && message.automationTasks.triggerPatches.focus_time.notify === true
+    && message.automationTasks.triggerPatches.focus_time.sound === false
   ));
   postedMessages.length = 0;
   elements['scheduled-task-title-input'].value = '早上规划';
@@ -2672,24 +3068,25 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.ok(postedMessages.some((message) =>
     message.command === 'settings.update'
     && message.automationTasks
-    && Array.isArray(message.automationTasks.scheduledTasks)
-    && message.automationTasks.scheduledTasks.some((task) =>
-      task.title === '早上规划'
+    && Array.isArray(message.automationTasks.scheduledTaskMutations)
+    && message.automationTasks.scheduledTaskMutations.some(({ operation, task }) =>
+      operation === 'add'
+      && task
+      && task.title === '早上规划'
       && task.timeOfDay === '08:45'
       && task.prompt === '规划今天最重要的一项任务'
       && task.enabled === true
       && task.projectPath === '/workspace/app'
       && task.projectName === 'app'
     )
-    && message.automationTasks.triggers.scheduled_time.timeOfDay === '08:45'
   ));
   postedMessages.length = 0;
   elements['btn-stop-focus-timer'].listeners.click();
   assert.ok(postedMessages.some((message) =>
     message.command === 'settings.update'
     && message.automationTasks
-    && message.automationTasks.triggers.focus_time.notify === false
-    && message.automationTasks.triggers.focus_time.sound === false
+    && message.automationTasks.triggerPatches.focus_time.notify === false
+    && message.automationTasks.triggerPatches.focus_time.sound === false
   ));
   postedMessages.length = 0;
   elements['automation-trigger-select'].listeners.click({
@@ -2700,14 +3097,16 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     target: elements['automation-action-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'retry'),
     stopPropagation() {}
   });
+  for (const target of [
+    elements['automation-trigger-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'stopped'),
+    elements['automation-action-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'retry')
+  ]) elements['settings-panel'].listeners.click({ target });
   elements['btn-save-settings'].listeners.click();
-  assert.ok(postedMessages.some((message) => message.command === 'settings.update' && message.cliPath === '/workspace/.solomap-global/agent-cli/agy'));
+  assert.ok(postedMessages.some((message) => message.command === 'settings.update' && !Object.prototype.hasOwnProperty.call(message, 'cliPath')));
   assert.ok(postedMessages.some((message) =>
     message.command === 'settings.update'
     && message.automationTasks
-    && message.automationTasks.triggers.completed.notify === false
-    && message.automationTasks.triggers.completed.sound === false
-    && message.automationTasks.triggers.stopped.retry === true
+    && message.automationTasks.triggerPatches.stopped.retry === true
   ));
   const automationSave = postedMessages.find(message => message.command === 'settings.update');
   dispatchMessage({ command: 'settingsSaved', requestId: automationSave.requestId, settings: automationSave });
@@ -2719,7 +3118,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.equal(elements['setting-cli-select'].getAttribute('data-value'), 'grok');
   assert.equal(elements['setting-cli-select'].querySelector('[data-solo-label]').textContent, 'grok');
   elements['btn-save-settings'].listeners.click();
-  assert.ok(postedMessages.some((message) => message.command === 'settings.update' && message.cliPath === 'grok'));
+  assert.ok(postedMessages.some((message) => message.command === 'settings.update' && !Object.prototype.hasOwnProperty.call(message, 'cliPath')));
   postedMessages.length = 0;
 
   const newProjectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-new-project-card-'));
@@ -3253,6 +3652,7 @@ test('sidebar discards stale account reads and refreshes them after changing the
   const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
   const postedMessages = [];
   const pendingReads = [];
+  const settingsPatches = [];
   let messageListener = null;
   let settings = { cliPath: 'codex', language: 'zh', globalPrompt: '', globalDataPath: '' };
   const webviewView = {
@@ -3269,7 +3669,7 @@ test('sidebar discards stale account reads and refreshes them after changing the
     { getNodes: () => [] },
     {
       getSettings: () => settings,
-      updateSettings: async next => { settings = next; },
+      updateSettings: async next => { settingsPatches.push(next); settings = { ...settings, ...next }; },
       getProjects: () => ({ projects: [], selectedProjectPath: '' }),
       readAgentAccountStatuses: (agents, options) => new Promise(resolve => pendingReads.push({ agents, options, resolve }))
     }
@@ -3282,6 +3682,8 @@ test('sidebar discards stale account reads and refreshes them after changing the
   const partialStatus = postedMessages.filter(message => message.command === 'dependenciesChecked').at(-1).status;
   assert.equal(partialStatus.supportedAgents.find(agent => agent.family === 'codex').account.plan, 'Pro');
   await messageListener({ command: 'agent.setDefault', cliPath: 'claude' });
+  assert.equal(JSON.stringify(settingsPatches), JSON.stringify([{ cliPath: 'claude' }]));
+  assert.equal(settings.language, 'zh');
   assert.equal(pendingReads.length, 2);
 
   pendingReads[0].options.onStatus({ family: 'codex', state: 'ready', plan: 'Stale incremental plan' });
@@ -3535,7 +3937,7 @@ test('sidebar sends an empty first portfolio so startup can finish without regis
   assert.ok(posted.some(message => message.command === 'projectsLoaded' && message.projects.projects.length === 0));
 });
 
-test('full roadmap webview runtime script parses and opens settings panel', () => {
+test('full roadmap webview runtime script parses and opens settings panel', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     'module.exports.__getWebviewHtml = roadmapWebview_1.getWebviewHtml;'
@@ -3564,7 +3966,7 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
   assert.match(script, /restoreConversationLogScrollPositions/);
   assert.match(script, /conversationLogScrollPositions/);
   assert.match(extensionSource, /resolveContinuationRootConversationFromList/);
-  assert.match(extensionSource, /buildContinuationMetadataBlock\(rootConversationId, sessionId\)/);
+  assert.match(extensionSource, /buildContinuationMetadataBlock\(rootId, session\.sessionId\)/);
   assert.match(script, /mousedown[\s\S]*stopPropagation/);
   assert.match(script, /touchstart[\s\S]*stopPropagation/);
   assert.match(script, /pointerdown[\s\S]*stopPropagation/);
@@ -3660,7 +4062,17 @@ test('full roadmap webview runtime script parses and opens settings panel', () =
     target: elements['project-priority-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'P0'),
     stopPropagation() {}
   });
-  elements['btn-save-settings'].listeners.click();
+  for (const target of [elements['project-name-input'], elements['project-description-input'], elements['project-notes-input']]) {
+    elements['settings-panel'].listeners.input({ target });
+  }
+  for (const target of [elements['project-autonomy-enabled'], elements['project-tool-network-disabled']]) {
+    elements['settings-panel'].listeners.change({ target });
+  }
+  for (const target of [
+    elements['project-type-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'content'),
+    elements['project-priority-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'P0')
+  ]) elements['settings-panel'].listeners.click({ target });
+  await elements['btn-save-settings'].listeners.click();
 
   assert.equal(elements['settings-panel'].style.display, 'none');
   assert.ok(postedMessages.some((message) =>
@@ -4290,10 +4702,10 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.match(html, /id="ability-action-badge"/);
   assert.match(html, /ability\.installSkill/);
   assert.match(html, /ability\.installMcp/);
-  assert.match(html, /ability\.installEnhancement/);
+  assert.doesNotMatch(html, /ability\.installEnhancement/);
   assert.match(html, /ability\.uninstallSkill/);
   assert.match(html, /ability\.uninstallMcp/);
-  assert.match(html, /ability\.uninstallEnhancement/);
+  assert.doesNotMatch(html, /ability\.uninstallEnhancement/);
   assert.match(html, /setting-ability-select/);
   assert.match(html, /btn-install-ability"/);
   assert.match(html, /btn-uninstall-ability"/);
@@ -4415,7 +4827,7 @@ test('full roadmap composers preserve active input while running durations updat
 
   assert.match(script, /function captureComposerInputState\(container, selector\)[\s\S]*?document\.activeElement === input/);
   assert.match(script, /function restoreComposerInputState\(container, selector, state\)[\s\S]*?input\.focus\(\)[\s\S]*?input\.setSelectionRange/);
-  assert.match(script, /function renderSoloPanel\(nodes\)[\s\S]*?captureComposerInputState\(soloBody, '\[data-solo-input\]'\)[\s\S]*?restoreComposerInputState\(soloBody, '\[data-solo-input\]'/);
+  assert.match(script, /function renderSoloPanel\(nodes, preserveComposerInput = true\)[\s\S]*?captureComposerInputState\(soloBody, '\[data-solo-input\]'\)[\s\S]*?restoreComposerInputState\(soloBody, '\[data-solo-input\]'/);
   assert.match(script, /function renderRoadmapRevisionPanel\(nodes\)[\s\S]*?captureComposerInputState\(roadmapRevisionBody, '\[data-roadmap-revision-input\]'\)[\s\S]*?restoreComposerInputState\(roadmapRevisionBody, '\[data-roadmap-revision-input\]'/);
   assert.match(script, /setInterval\(\(\) => \{[\s\S]*?updateRunningConversationDurations\(soloBody/);
   assert.doesNotMatch(script, /setInterval\(\(\) => \{[\s\S]*?soloRunning[\s\S]*?renderSoloPanel/);
@@ -4605,98 +5017,19 @@ test('sidebar keeps solo composer active and renders pasted attachments while th
   assert.doesNotMatch(elements['portfolio-list'].innerHTML, /正在添加截图/);
 });
 
-test('daily review prompt switches modes by engineering rhythm and signals', () => {
-  const sidebarModule = loadCompiledModule(
-    'out/dailyReview.js',
-    [
-      'module.exports.__getDailyReviewMode = getDailyReviewMode;',
-      'module.exports.__buildDailyReviewPrompt = buildDailyReviewPrompt;'
-    ].join('\n')
-  );
-  const baseProject = {
-    name: 'ME',
-    path: '/workspace/ME',
-    projectType: 'content',
-    globalPriority: 'P1',
-    overallStatus: 'In Progress',
-    progressPercent: 40,
-    blocker: '',
-    globalNextAction: '继续国际化渲染',
-    recommendedNodeId: '2',
-    recommendedNodeTitle: '继续国际化渲染',
-    recommendedStatus: 'In Progress',
-    failedNodes: 0,
-    runningNodes: 0,
-    inProgressNodes: 1,
-    pendingNodes: 2,
-    reusableSignals: 0,
-    stageGap: '',
-    issuePressure: '',
-    issues: { byPriority: {} },
-    delivery: { failedWorkflowRuns: 0 },
-    deliverySignal: ''
-  };
-  const globalStore = {
-    dataPath: '/workspace/.solomap-global',
-    dependencies: [],
-    learningCandidateCount: 0,
-    portfolio: []
-  };
-
-  assert.equal(sidebarModule.__getDailyReviewMode('monday', [baseProject], globalStore), 'weekly_planning');
-  assert.equal(sidebarModule.__getDailyReviewMode('friday', [{ ...baseProject, reusableSignals: 2 }], globalStore), 'learning_closeout');
-  assert.equal(sidebarModule.__getDailyReviewMode('monthEnd', [baseProject], globalStore), 'monthly_review');
-  assert.equal(sidebarModule.__getDailyReviewMode('daily', [{ ...baseProject, delivery: { failedWorkflowRuns: 1 } }], globalStore), 'exception_review');
-  assert.equal(sidebarModule.__getDailyReviewMode('daily', [{ ...baseProject, reusableSignals: 1 }], globalStore), 'daily_learning');
-
-  const prompt = sidebarModule.__buildDailyReviewPrompt({
-    resultPath: '/workspace/.solomap-global/daily/2026-06-01.json',
-    dateKey: '2026-06-01',
-    rhythm: 'monday',
-    reviewMode: 'weekly_planning',
-    portfolio: [baseProject],
-    globalStore,
-    learningSummary: {
-      eventCount: 2,
-      candidateCount: 1,
-      approvedCount: 1,
-      promotedCount: 0,
-      projectSignals: [{
-        projectName: 'ME',
-        projectPath: '/workspace/ME',
-        candidateCount: 1,
-        promotedCount: 0,
-        riskSignals: 1,
-        verificationSignals: 1,
-        strategySignals: 0,
-        eventCount: 2,
-        latestAt: '2026-06-01T00:00:00.000Z'
-      }],
-      recentEvents: [],
-      recentCandidates: [],
-      globalRoot: '/workspace/.solomap-global'
-    }
-  });
-  assert.match(prompt, /审视模式是：周一重点校准/);
-  assert.match(prompt, /先检查 P0；确认本周 P1；保留 P2 备选；扫描外部变化和跨项目模式/);
-  assert.match(prompt, /ledgerEventCount/);
-  assert.match(prompt, /projectLearningSignals/);
-  assert.match(prompt, /学习账本只作为行动证据/);
-  assert.match(prompt, /reviewMode/);
-  assert.match(prompt, /confirm_learning/);
-  assert.doesNotMatch(prompt, /portfolio\.csv|dependencies\.csv/);
+test('daily review delegates its user action to the durable Runtime decision', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src', 'dailyReview.ts'), 'utf8');
+  assert.match(source, /ensureHealthyAutonomousRuntime/);
+  assert.match(source, /refreshShadowRuntimeState/);
+  assert.match(source, /sendRuntimeControlCommand\(globalRoot, 'refresh'/);
+  assert.doesNotMatch(source, /buildDailyReviewPrompt|getDailyReviewMode|prompt\.txt|run\.sh/);
 });
 
-test('learning ledger keeps events as materials until manual review', () => {
+test('learning materials use the unified database and expose no legacy file producer', () => {
   const ledger = require(path.join(projectRoot, 'out', 'learningLedger.js'));
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-materials-'));
-  const globalRoot = path.join(root, '.solomap-global');
-  const event = ledger.appendLearningEvent(root, globalRoot, { sourceType: 'flow_loop', sourceRef: 'flow:1', eventType: 'deviated', summary: 'Final UI not rendered', evidenceRefs: [{ type: 'trace', ref: 'flow:1' }], tags: [], metadata: { role: 'verifier', recommendedStatus: 'implemented_unverified', failures: ['UI unverified'] } });
-  assert.ok(fs.readFileSync(path.join(globalRoot, 'learning/ledger/events.jsonl'), 'utf8').includes(event.id));
-  assert.equal(ledger.readLearningSummary(root, globalRoot).eventCount, 1);
-  assert.deepEqual(fs.readdirSync(path.join(globalRoot, 'learning/candidates')), []);
-  assert.deepEqual(fs.readdirSync(path.join(globalRoot, 'learning/candidate-decisions')), []);
-  assert.equal(ledger.buildLearningPromotionContext(root, globalRoot), '');
+  assert.equal(ledger.appendLearningEvent, undefined);
+  assert.equal(ledger.readLearningSummary, undefined);
+  assert.equal(ledger.buildLearningPromotionContext, undefined);
 });
 
 test('adding a project asks for a global methodology project type', () => {
@@ -4852,7 +5185,7 @@ test('closing an issue refreshes only that project issue data', () => {
   const action = source.match(/'issue\.close': async \(request\) => \{([\s\S]*?)\n    \},/);
   assert.ok(action);
   assert.match(action[1], /invalidateProjectSignals\(projectPath, \['issues'\]\)/);
-  assert.match(action[1], /loadExternalIssueSummary\(projectPath, \{ force: true \}\)/);
+  assert.match(action[1], /loadExternalIssueSummary\(projectPath, \{ force: true, globalDataPath: getPersistedSettings\(context\)\.globalDataPath \}\)/);
   assert.match(action[1], /projectIssuesLoaded/);
   assert.doesNotMatch(action[1], /sendProjectsToWebviews\(context\)/);
 });
@@ -4881,7 +5214,7 @@ test('closing the roadmap panel keeps the project sentinel alive for sidebar sta
       syncEngine = engine; syncEngineReady = true; syncEngineInitProjectRoot = project;
       getSelectedProjectPath = () => project;
       getPersistedSettings = () => ({ globalDataPath: root, language: 'zh' });
-      recordLocalUsageEvent = () => {};
+      recordLocalUsageEvent = async () => ({});
       processRegisteredStatusFile = async (_context, reference, _allow, status) => { received.push({ reference, status }); };
     };
     module.exports.start = setupFileSentinelWatcher;
@@ -4932,7 +5265,7 @@ test('database sentinel dispatches fixed formal results across projects without 
     };
   `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
   extension.connect(root, projects[0].path, received);
-  await extension.poll({});
+  await extension.poll({ globalState: { get: (_key, fallback) => fallback, update: async () => {} } });
   assert.equal(received.length, 2);
   const { RunLifecycleClient } = require('../out/runLifecycleClient.js');
   const client = new RunLifecycleClient((operation, input) => native.ops({ operation, input }), root);
@@ -5014,9 +5347,11 @@ test('sidebar local project refresh batches core cards before scheduling enrichm
 });
 
 test('sidebar core snapshot restarts when a new project roadmap appears during collection', async (t) => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
-    ''
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
   );
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-sidebar-roadmap-race-'));
   const projectPath = path.join(root, 'new-project');
@@ -5024,7 +5359,6 @@ test('sidebar core snapshot restarts when a new project roadmap appears during c
   const globalDataPath = path.join(root, 'global');
   t.after(() => {
     for (const filePath of [
-      path.join(globalDataPath, 'sidebar-core-snapshot-v1.json'),
       path.join(projectPath, '.solopreneur', 'roadmap.csv'),
       path.join(otherProjectPath, '.solopreneur', 'roadmap.csv')
     ]) {
@@ -5035,7 +5369,6 @@ test('sidebar core snapshot restarts when a new project roadmap appears during c
       path.join(otherProjectPath, '.solopreneur'),
       projectPath,
       otherProjectPath,
-      path.join(globalDataPath, 'conversations'),
       globalDataPath,
       root
     ]) {
@@ -5088,17 +5421,19 @@ test('sidebar core snapshot restarts when a new project roadmap appears during c
   provider.sendProjects();
   await Promise.race([completed, new Promise((resolve) => setTimeout(resolve, 500))]);
 
-  const cached = require(path.join(projectRoot, 'out/sidebarSnapshotCache.js'))
-    .readSidebarCoreSnapshot(globalDataPath);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const cached = snapshotCache.__getCore();
   assert.equal(roadmapCreated, true);
   assert.equal(cached.portfolio.find((project) => project.path === projectPath).totalNodes, 1);
   assert.equal(cached.portfolio.find((project) => project.path === projectPath).globalNextAction, '生成初始路线图');
 });
 
 test('sidebar conversation snapshots share one in-flight database read and only the latest request commits', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
-    ''
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
   );
   const postedMessages = [];
   let snapshotLoads = 0;
@@ -5147,9 +5482,11 @@ test('sidebar conversation snapshots share one in-flight database read and only 
 });
 
 test('sidebar conversation snapshot carries the current roadmap revision state', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
-    ''
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
   );
   const postedMessages = [];
   const revision = [{
@@ -5187,15 +5524,15 @@ test('sidebar conversation snapshot carries the current roadmap revision state',
 });
 
 test('sidebar sends a valid conversation snapshot even when the core portfolio cache is stale', async () => {
-  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
-  const snapshotCache = require(path.join(projectRoot, 'out/sidebarSnapshotCache.js'));
+  const snapshotCache = makeSidebarSnapshotCacheStub();
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '', { './sidebarSnapshotCache': snapshotCache });
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-independent-conversation-cache-'));
   const globalRoot = path.join(root, '.solomap-global');
   const projectPath = path.join(root, 'project');
   fs.mkdirSync(path.join(projectPath, '.solopreneur'), { recursive: true });
   fs.writeFileSync(path.join(projectPath, '.solopreneur', 'project_journal.db'), 'journal', 'utf8');
   const revision = [{ id: 81, nodeId: '__roadmap_revision__', status: 'Completed' }];
-  snapshotCache.writeCachedConversationSnapshot(globalRoot, projectPath, {
+  snapshotCache.__setConversation(projectPath, {
     solo: [], project: [], flow: [], revision
   });
   const postedMessages = [];
@@ -5221,20 +5558,22 @@ test('sidebar sends a valid conversation snapshot even when the core portfolio c
 
   provider.sendProjects();
 
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
   const conversationMessage = postedMessages.find((message) => message.command === 'sidebarProjectConversationSnapshotLoaded');
   assert.deepEqual(conversationMessage?.revisionConversations, revision);
 });
 
-test('sidebar restores roadmap revision snapshots for non-selected visible projects', () => {
-  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
-  const snapshotCache = require(path.join(projectRoot, 'out/sidebarSnapshotCache.js'));
+test('sidebar restores roadmap revision snapshots for non-selected visible projects', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '', { './sidebarSnapshotCache': snapshotCache });
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-all-project-revisions-'));
   const globalRoot = path.join(root, '.solomap-global');
   const projects = ['alpha', 'beta'].map((name) => {
     const projectPath = path.join(root, name);
     fs.mkdirSync(path.join(projectPath, '.solopreneur'), { recursive: true });
     fs.writeFileSync(path.join(projectPath, '.solopreneur', 'project_journal.db'), 'journal', 'utf8');
-    snapshotCache.writeCachedConversationSnapshot(globalRoot, projectPath, {
+    snapshotCache.__setConversation(projectPath, {
       solo: [], project: [], flow: [], revision: [{ id: name === 'alpha' ? 92 : 93, nodeId: '__roadmap_revision__', status: name === 'alpha' ? 'Running' : 'Completed' }]
     });
     return { name, path: projectPath };
@@ -5255,6 +5594,8 @@ test('sidebar restores roadmap revision snapshots for non-selected visible proje
 
   provider.sendProjects();
 
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
   const restoredPaths = postedMessages
     .filter((message) => message.command === 'sidebarProjectConversationSnapshotLoaded')
     .map((message) => message.projectPath);
@@ -5263,9 +5604,11 @@ test('sidebar restores roadmap revision snapshots for non-selected visible proje
 });
 
 test('terminal status refresh supersedes a stale running conversation snapshot', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
-    ''
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
   );
   const postedMessages = [];
   const snapshotResolvers = [];
@@ -5322,7 +5665,8 @@ test('terminal status refresh supersedes a stale running conversation snapshot',
 });
 
 test('a ledger refresh invalidates older per-conversation sidebar reads', async () => {
-  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const snapshotCache = makeSidebarSnapshotCacheStub();
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '', { './sidebarSnapshotCache': snapshotCache });
   const postedMessages = [];
   let resolveSoloHistory;
   const staleSoloHistory = new Promise((resolve) => {
@@ -5367,17 +5711,18 @@ test('a ledger refresh invalidates older per-conversation sidebar reads', async 
 });
 
 test('forced project refresh paints the valid local conversation snapshot before fresh loading finishes', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
-    ''
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
   );
-  const snapshotCache = require(path.join(projectRoot, 'out/sidebarSnapshotCache.js'));
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-snapshot-first-paint-'));
   const globalRoot = path.join(root, '.solomap-global');
   const projectPath = path.join(root, 'project');
   fs.mkdirSync(path.join(projectPath, '.solopreneur'), { recursive: true });
   fs.writeFileSync(path.join(projectPath, '.solopreneur', 'project_journal.db'), 'journal', 'utf8');
-  snapshotCache.writeCachedConversationSnapshot(globalRoot, projectPath, {
+  snapshotCache.__setConversation(projectPath, {
     solo: [{ id: 1, nodeId: '__solo__', summary: 'Cached now' }],
     project: [],
     flow: [],
@@ -5408,6 +5753,7 @@ test('forced project refresh paints the valid local conversation snapshot before
   };
 
   const loading = provider.sendProjectConversationSnapshot(projectPath, true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(postedMessages.length, 1);
   assert.equal(postedMessages[0].soloConversations[0].summary, 'Cached now');
 
@@ -5815,7 +6161,7 @@ test('selected project changes refresh an already open project growth panel', ()
   assert.match(extensionSource, /async function selectProject[\s\S]*?if \(activeProjectGrowthPanel\) \{[\s\S]*?activeProjectGrowthPath = projectPath;[\s\S]*?refreshProjectGrowthPanel\(context, projectPath\)/);
   assert.match(extensionSource, /async function openProjectGrowthPanel[\s\S]*?activeProjectGrowthPath = projectPath;/);
   assert.match(extensionSource, /const projectPathToRefresh = activeProjectGrowthPath \|\| getSelectedProjectPath\(context\) \|\| projectPath;/);
-  assert.match(extensionSource, /getCachedProjectGrowthView\(projectPath\)/);
+  assert.match(extensionSource, /getCachedProjectGrowthView\(getPersistedSettings\(context\)\.globalDataPath, projectPath\)/);
   assert.match(extensionSource, /activeProjectGrowthPath !== projectPath \|\| loadSequence !== projectGrowthLoadSequence/);
   assert.match(extensionSource, /activeProjectGrowthPath = '';/);
   assert.match(extensionSource, /case 'growth\.openRoadmapStep'/);
@@ -5862,7 +6208,7 @@ test('project panels open before project selection persistence completes', () =>
   const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
   assert.match(extensionSource, /'project\.openRoadmap': async[\s\S]*?void openRoadmapPanel\(context, 'roadmap', projectPath\);[\s\S]*?setTimeout\(\(\) => void selectProject\(context, projectPath\), 0\)/);
   assert.match(extensionSource, /'project\.openGrowth': async[\s\S]*?void openProjectGrowthPanel\(context, projectPath\);[\s\S]*?setTimeout\(\(\) => void selectProject\(context, projectPath\), 0\)/);
-  assert.match(extensionSource, /selectedProjectPathInMemory = projectPath;[\s\S]*?const persistSelection = context\.globalState\.update/);
+  assert.match(extensionSource, /selectedProjectPathInMemory = projectPath;[\s\S]*?const persistSelection = persistProjectSelection\(root, projectPath\);[\s\S]*?const persistDeviceSelection = patchUiState/);
 });
 
 test('local-first loading paints and launches before optional or durable work', () => {
@@ -5900,10 +6246,6 @@ test('local-first loading paints and launches before optional or durable work', 
     extensionSource.indexOf('async function openRoadmapPanel')
   );
   assert.ok(
-    syncBody.indexOf('sendNodesToWebview()') < syncBody.indexOf('ensureDocumentationManifest(projectRoot)'),
-    'CSV roadmap nodes must paint before database/scaffolding initialization'
-  );
-  assert.ok(
     syncBody.indexOf('sendNodesToWebview()') < syncBody.indexOf("await nextSyncEngine.initAndSync({ history: 'background' })"),
     'CSV roadmap nodes must paint before SQLite initialization'
   );
@@ -5928,7 +6270,7 @@ test('local-first loading paints and launches before optional or durable work', 
   assert.match(mainViewBody, /soloPanelDirty \|\| !soloBody \|\| !soloBody\.innerHTML/);
   assert.match(mainViewBody, /requestSoloConversationPage\(0\)/);
   const soloRenderBody = roadmapWebviewSource.slice(
-    roadmapWebviewSource.indexOf('function renderSoloPanel(nodes)'),
+    roadmapWebviewSource.indexOf('function renderSoloPanel(nodes'),
     roadmapWebviewSource.indexOf('function renderFlowPanel()')
   );
   assert.doesNotMatch(soloRenderBody, /if \(!soloExpanded\) \{\s*soloBody\.innerHTML = ''/);
@@ -6401,6 +6743,9 @@ test('strategy pyramid snapshot sends portfolio facts through the intelligent ke
     ]
   }, null, 2), 'utf8');
   const native = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, [{ name: 'SoloMap', path: coreProject }, { name: 'Content Engine', path: contentProject }]);
+  await require('../out/projectRegistry.js').refreshProjectRegistry(globalRoot, () => ({
+    legacyProjects: [{ name: 'SoloMap', path: coreProject, type: 'core_product' }, { name: 'Content Engine', path: contentProject, type: 'content' }]
+  }), (operation, input) => native.ops({ operation, input }));
   const scope = native.projectIds.get(coreProject);
   const evidence = native.store.write({ kind: 'evidence', action: 'create', scope, idempotencyKey: 'strategy-kernel-evidence', data: { type: 'host_observation', source_actor_id: 'local-runtime', content: 'node --test checkout-flow.test.js passed', observed_at: Date.now() } });
   native.store.write({ kind: 'learning_event', action: 'create', scope, idempotencyKey: 'strategy-kernel-event', data: { source_object_id: evidence.objectId, source_revision: 1, event_type: 'verified', source_type: 'flow_loop', summary: 'Verifier closed the checkout flow after running the final UI test.', verification_signal: 1, occurred_at: Date.now() } });
@@ -6509,6 +6854,8 @@ test('strategy pyramid rules entry preserves request eligibility through fallbac
   const globalRoot = path.join(root, 'global'); fs.mkdirSync(globalRoot);
   fs.writeFileSync(path.join(globalRoot, 'projects.json'), JSON.stringify({ projects: [{ name: 'Project', path: project }], hiddenProjects: [] }));
   const native = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, [{ name: 'Project', path: project }]);
+  await require('../out/projectRegistry.js').refreshProjectRegistry(globalRoot, () => ({ legacyProjects: [{ name: 'Project', path: project }] }),
+    (operation, input) => native.ops({ operation, input }));
   const context = { globalState: { get: key => key === 'solopreneur.settings' ? { globalDataPath: globalRoot } : undefined, update: async () => {} } };
   await assert.rejects(extension.build(context, undefined, () => false), /no longer current/);
   assert.equal(native.store.readStrategyState(null).revision, 0);
@@ -6529,7 +6876,8 @@ for (const cached of [true, false]) test(`strategy panel switches data roots whi
   const strategy = require('../out/strategyPyramid.js');
   for (let i = 0; i < roots.length; i++) {
     const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, roots[i], projects); owners.push(owner);
-    fs.writeFileSync(path.join(roots[i], 'projects.json'), JSON.stringify({ projects, hiddenProjects: [] }));
+    await require('../out/projectRegistry.js').refreshProjectRegistry(roots[i], () => ({ legacyProjects: projects }),
+      (operation, input) => owner.ops({ operation, input }));
     await strategy.buildStrategyPyramidSnapshotData(projects, roots[i], project);
     const state = owner.store.readStrategyState(null);
     owner.store.writeStrategyState(null, { expectedRevision: state.revision, value: { ...state.value, snapshot: { ...state.value.snapshot, mainJudgment: i ? '新目录结果' : '旧目录结果' } }, idempotencyKey: `root-snapshot-${i}` });
@@ -6541,8 +6889,9 @@ for (const cached of [true, false]) test(`strategy panel switches data roots whi
     module.exports.connect = panel => { activeStrategyPyramidPanel = panel; };
     hasLocalStrategyPyramidAccess = async () => true;
     syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {}; activateObservedBackgroundRuntime = async () => {};
+    getSettingsWithOpenCodeSecretState = async context => getPersistedSettings(context);
   `, {
-    './cognitiveRuntimeConfig': { readCognitiveRuntimeConfig: () => ({ mode: 'none' }), cognitiveRuntimeConfigRevision: () => '', writeCognitiveRuntimeConfig: () => {} },
+    './cognitiveRuntimeConfig': { ...require('../out/cognitiveRuntimeConfig.js'), readCognitiveRuntimeConfig: () => ({ mode: 'none' }), cognitiveRuntimeConfigRevision: () => '' },
     './strategyPyramidWebview': { getStrategyPyramidWebviewHtml: (_webview, _context, snapshot) => { paints.push(snapshot.mainJudgment); if (snapshot.mainJudgment === '新目录结果') rendered(); return snapshot.mainJudgment; } }
   });
   let settings = { globalDataPath: roots[0] };
@@ -6607,7 +6956,8 @@ test('a late failed strategy cache request cannot replace a newer successful pan
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const projects = [{ name: 'Project', path: project }];
   const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, projects);
-  fs.writeFileSync(path.join(root, 'projects.json'), JSON.stringify({ projects, hiddenProjects: [] }));
+  await require('../out/projectRegistry.js').refreshProjectRegistry(root, () => ({ legacyProjects: projects }),
+    (operation, input) => native.ops({ operation, input }));
   await require('../out/strategyPyramid.js').buildStrategyPyramidSnapshotData(projects, root, project);
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.refresh = refreshStrategyPyramidPanel;
@@ -6618,7 +6968,7 @@ test('a late failed strategy cache request cannot replace a newer successful pan
     './strategyPyramidWebview': { getStrategyPyramidWebviewHtml: () => '当前请求已成功' }
   });
   const context = { globalState: { get: key => key === 'solopreneur.settings' ? { globalDataPath: root } : undefined } };
-  const panel = { webview: { html: '正在加载', cspSource: 'fixture' } }; extension.connect(panel);
+  const panel = { webview: { html: '正在加载', cspSource: 'fixture', asWebviewUri: uri => String(uri.fsPath || uri) } }; extension.connect(panel);
   const original = native.store.readStrategyState.bind(native.store); let enter; let release; let reads = 0;
   const entered = new Promise(resolve => { enter = resolve; }); const gate = new Promise(resolve => { release = resolve; });
   native.store.readStrategyState = async (...args) => { if (++reads === 1) { enter(); await gate; throw new Error('old cache read unavailable'); } return original(...args); };
@@ -6636,15 +6986,16 @@ test('rechecking revoked Pro access preserves unrelated entitlements and does no
   let writes = 0;
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.clear = clearStoredProAccess;
+    module.exports.settings = getPersistedSettings;
     let broadcasts = 0; broadcastSettings = async () => { broadcasts++; };
     module.exports.broadcasts = () => broadcasts;
     syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {}; activateObservedBackgroundRuntime = async () => {};
-  `);
+  ` + settingsPersistenceUnitPatch());
   const context = { extensionPath: projectRoot, secrets: { get: async () => undefined, delete: async () => {} }, globalState: { get: (key, fallback) => key === 'solopreneur.settings' ? saved : fallback, update: async (_key, value) => { saved = value; writes++; } } };
   assert.equal(await extension.clear(context, { requireMissingCredential: true }), true);
-  assert.deepEqual(saved.proEntitlements, { unrelatedFeature: true });
-  assert.equal(saved.proAccount.authenticated, false);
-  assert.equal(saved.proAccount.allowed, false);
+  assert.deepEqual(extension.settings(context).proEntitlements, { unrelatedFeature: true });
+  assert.equal(extension.settings(context).proAccount.authenticated, false);
+  assert.equal(extension.settings(context).proAccount.allowed, false);
   const firstWrites = writes;
   for (let i = 0; i < 32; i++) assert.equal(await extension.clear(context, { requireMissingCredential: true }), false, 'an unchanged revoked state cannot recursively refresh the access check');
   assert.equal(writes, firstWrites);
@@ -6659,16 +7010,17 @@ test('checking strategy access updates other settings views without refreshing t
   const context = { extensionPath: projectRoot, secrets: { get: async () => secret, store: async (_key, value) => { secret = value; }, delete: async () => { secret = undefined; } }, globalState: { get: (key, fallback) => key === 'solopreneur.settings' ? saved : fallback, update: async (_key, value) => { saved = value; } } };
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.access = hasStrategyPyramidAccess;
+    module.exports.settings = getPersistedSettings;
     let refreshes = 0, settingsUpdates = 0;
     refreshStrategyPyramidPanel = async () => { refreshes++; };
     activeStrategyPyramidPanel = { title: '', webview: {} };
     sidebarProvider = { sendSettings: () => { settingsUpdates++; } };
     module.exports.counts = () => ({ refreshes, settingsUpdates });
     syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {}; activateObservedBackgroundRuntime = async () => {};
-  `);
+  ` + settingsPersistenceUnitPatch());
   extension.__vscodeTestState.fetchImpl = async () => ({ ok: true, json: async () => grant });
   assert.equal(await extension.access(context), true);
-  assert.equal(saved.proEntitlements.strategy_pyramid, true);
+  assert.equal(extension.settings(context).proEntitlements.strategy_pyramid, true);
   assert.equal(extension.counts().settingsUpdates, 1, 'other settings surfaces still receive the verified entitlement');
   assert.equal(extension.counts().refreshes, 0, 'the active access check must render its own result instead of scheduling itself again');
 });
@@ -6721,7 +7073,7 @@ test('strategy pyramid command blocks free users with a Pro upgrade action', asy
 test('strategy pyramid Pro upgrade supports device auth code entry', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
-    'module.exports.__handleManageProAuthorization = handleManageProAuthorization;'
+    'module.exports.__handleManageProAuthorization = handleManageProAuthorization;' + settingsPersistenceUnitPatch()
   );
   extensionModule.__vscodeTestState.nextInformationChoices = ['使用登录码'];
   extensionModule.__vscodeTestState.nextInputBoxValue = 'signed-device-code';
@@ -6801,7 +7153,7 @@ test('strategy pyramid Pro upgrade supports device auth code entry', async () =>
 test('SoloMap account login uses a device code and accepts a free signed-in account', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
-    'module.exports.__beginAccountAuthorization = beginAccountAuthorization;'
+    'module.exports.__beginAccountAuthorization = beginAccountAuthorization;' + settingsPersistenceUnitPatch()
   );
   extensionModule.__vscodeTestState.nextInputBoxValue = 'account-login-code';
   extensionModule.__vscodeTestState.fetchImpl = async (url, options = {}) => {
@@ -6874,7 +7226,7 @@ test('SoloMap account login uses a device code and accepts a free signed-in acco
 test('passport callback verifies and stores a user grant before unlocking Pro', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
-    'module.exports.__handlePassportUri = handlePassportUri;'
+    'module.exports.__handlePassportUri = handlePassportUri;' + settingsPersistenceUnitPatch()
   );
   extensionModule.__vscodeTestState.fetchImpl = async (_url, options) => {
     const body = JSON.parse(options.body);
@@ -6935,7 +7287,7 @@ test('passport callback verifies and stores a user grant before unlocking Pro', 
   assert.ok([...storedSecrets.values()].some((value) => String(value).includes('signed-grant')));
 });
 
-test('global engineering store writes git-friendly portfolio files', () => {
+test('global engineering snapshot stays in memory instead of creating parallel portfolio files', () => {
   const sidebarModule = loadCompiledModule(
     'out/globalEngineeringStore.js',
     [
@@ -6958,36 +7310,11 @@ test('global engineering store writes git-friendly portfolio files', () => {
   }]);
 
   assert.equal(snapshot.dataPath, globalRoot);
-  assert.ok(fs.existsSync(path.join(globalRoot, 'portfolio.csv')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'dependencies.csv')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'capability-registry.csv')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'decision-conflicts.csv')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'learning', 'candidates')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'learning', 'approved')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'learning', 'rejected')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'metrics', 'execution-speed.csv')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'metrics', 'reuse-rate.csv')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'metrics', 'priority-accuracy.csv')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'metrics', 'monthly-summary.md')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'README.md')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'profile.md')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'operating-rules.md')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'projects')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'patterns')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'decisions')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'domains')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'inbox')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'active')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'projects', '_example.md')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'patterns', '_example.md')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'decisions', '_example.md')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'domains', '_example.md')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'inbox', '_example.md')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'memory', 'active', '_example.md')));
-  assert.ok(fs.existsSync(path.join(globalRoot, 'learning', 'candidates', '_example.md')));
+  assert.equal(snapshot.portfolio.length, 1);
+  assert.equal(snapshot.portfolio[0].name, 'SoloMap');
+  assert.equal(snapshot.portfolio[0].nextAction, 'Build MVP');
+  assert.equal(fs.existsSync(globalRoot), false);
   assert.equal(snapshot.learningCandidateCount, 0);
-  assert.match(fs.readFileSync(path.join(globalRoot, 'portfolio.csv'), 'utf8'), /SoloMap/);
-  assert.match(fs.readFileSync(path.join(globalRoot, 'dependencies.csv'), 'utf8'), /Build MVP/);
   assert.equal(sidebarModule.__normalizeGlobalDataPath(root, []), globalRoot);
 });
 
@@ -7004,25 +7331,15 @@ test('default solomap global path avoids filesystem root when process cwd is roo
   }
 });
 
-test('sidebar GitHub issue cache is validated and ignored by git', () => {
+test('sidebar GitHub projections summarize database cache payloads', () => {
   const sidebarModule = loadCompiledModule(
     'out/projectExternalSignals.js',
     [
-      'module.exports.__getIssueCachePath = getIssueCachePath;',
-      'module.exports.__getPullRequestCachePath = getPullRequestCachePath;',
-      'module.exports.__getDeliveryCachePath = getDeliveryCachePath;',
-      'module.exports.__readIssueCache = readIssueCache;',
-      'module.exports.__writeIssueCache = writeIssueCache;',
-      'module.exports.__readPullRequestCache = readPullRequestCache;',
-      'module.exports.__writePullRequestCache = writePullRequestCache;',
-      'module.exports.__readDeliveryCache = readDeliveryCache;',
-      'module.exports.__writeDeliveryCache = writeDeliveryCache;',
       'module.exports.__summarizeDeliveryCache = summarizeDeliveryCache;',
       'module.exports.__summarizePullRequestItems = summarizePullRequestItems;',
       'module.exports.__summarizeIssueItems = summarizeIssueItems;'
     ].join('\n')
   );
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-issue-cache-'));
   const issue = {
     number: 12,
     title: '页面加载慢',
@@ -7050,15 +7367,7 @@ test('sidebar GitHub issue cache is validated and ignored by git', () => {
     }
   };
 
-  sidebarModule.__writeIssueCache(root, cache);
-
-  const cachePath = sidebarModule.__getIssueCachePath(root);
-  assert.equal(cachePath, path.join(root, '.solopreneur', 'issues-cache.json'));
-  assert.ok(fs.existsSync(cachePath));
-  assert.match(fs.readFileSync(path.join(root, '.solopreneur', '.gitignore'), 'utf8'), /issues-cache\.json/);
-  assert.equal(sidebarModule.__readIssueCache(root, 'other/repo'), null);
-
-  const read = sidebarModule.__readIssueCache(root, 'owner/repo');
+  const read = cache;
   assert.equal(read.repo, 'owner/repo');
   assert.equal(read.issues.length, 1);
   assert.equal(read.details['12'].comments[0].body, '仍然很慢');
@@ -7086,17 +7395,12 @@ test('sidebar GitHub issue cache is validated and ignored by git', () => {
     url: 'https://github.com/owner/repo/pull/7',
     updatedAt: '2026-05-29T00:02:00.000Z'
   };
-  sidebarModule.__writePullRequestCache(root, {
+  const pullRequestCache = {
     schemaVersion: 1,
     repo: 'owner/repo',
     syncedAt: '2026-05-29T00:02:00.000Z',
     pullRequests: [pullRequest]
-  });
-  const pullRequestPath = sidebarModule.__getPullRequestCachePath(root);
-  assert.equal(pullRequestPath, path.join(root, '.solopreneur', 'pull-requests-cache.json'));
-  assert.match(fs.readFileSync(path.join(root, '.solopreneur', '.gitignore'), 'utf8'), /pull-requests-cache\.json/);
-  assert.equal(sidebarModule.__readPullRequestCache(root, 'other/repo'), null);
-  const pullRequestCache = sidebarModule.__readPullRequestCache(root, 'owner/repo');
+  };
   const pullRequestSummary = sidebarModule.__summarizePullRequestItems('owner/repo', pullRequestCache.pullRequests, pullRequestCache.syncedAt, false);
   assert.equal(pullRequestSummary.available, true);
   assert.equal(pullRequestSummary.open, 1);
@@ -7104,7 +7408,7 @@ test('sidebar GitHub issue cache is validated and ignored by git', () => {
   assert.equal(pullRequestSummary.blocked, 1);
   assert.equal(pullRequestSummary.items[0].number, 7);
 
-  sidebarModule.__writeDeliveryCache(root, {
+  const deliveryCache = {
     schemaVersion: 1,
     repo: 'owner/repo',
     syncedAt: '2026-05-29T00:00:00.000Z',
@@ -7170,11 +7474,7 @@ test('sidebar GitHub issue cache is validated and ignored by git', () => {
         url: 'https://github.com/owner/repo/actions/runs/publish'
       }
     ]
-  });
-  const deliveryPath = sidebarModule.__getDeliveryCachePath(root);
-  assert.equal(deliveryPath, path.join(root, '.solopreneur', 'delivery-cache.json'));
-  assert.match(fs.readFileSync(path.join(root, '.solopreneur', '.gitignore'), 'utf8'), /delivery-cache\.json/);
-  const deliveryCache = sidebarModule.__readDeliveryCache(root, 'owner/repo');
+  };
   const deliverySummary = sidebarModule.__summarizeDeliveryCache('owner/repo', deliveryCache, true);
   assert.equal(deliverySummary.latestRelease, 'v1.2.3');
   assert.equal(deliverySummary.failedWorkflowRuns, 0);
@@ -7202,16 +7502,8 @@ test('project foundation writes only missing minimal baseline files', () => {
 test('sidebar security summary counts only live critical and high alerts', () => {
   const sidebarModule = loadCompiledModule(
     'out/projectExternalSignals.js',
-    [
-      'module.exports.__summarizeSecurityCache = summarizeSecurityCache;',
-      'module.exports.__writeSecurityCache = writeSecurityCache;',
-      'module.exports.__readSecurityCache = readSecurityCache;',
-      'module.exports.__getSecurityCachePath = getSecurityCachePath;'
-    ].join('\n')
+    'module.exports.__summarizeSecurityCache = summarizeSecurityCache;'
   );
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-security-'));
-  childProcess.execFileSync('git', ['init'], { cwd: root, stdio: 'ignore' });
-  childProcess.execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/repo.git'], { cwd: root, stdio: 'ignore' });
   const cache = {
     schemaVersion: 1,
     repo: 'owner/repo',
@@ -7226,10 +7518,7 @@ test('sidebar security summary counts only live critical and high alerts', () =>
     ]
   };
 
-  sidebarModule.__writeSecurityCache(root, cache);
-  assert.equal(sidebarModule.__getSecurityCachePath(root), path.join(root, '.solopreneur', 'security-cache.json'));
-  assert.match(fs.readFileSync(path.join(root, '.solopreneur', '.gitignore'), 'utf8'), /security-cache\.json/);
-  const read = sidebarModule.__readSecurityCache(root, 'owner/repo');
+  const read = cache;
   const live = sidebarModule.__summarizeSecurityCache('owner/repo', read, false);
   assert.equal(live.openCriticalHigh, 7);
   assert.equal(live.openTotal, 8);
@@ -7648,7 +7937,7 @@ test('account refresh preserves verified Pro state when live entitlement lookup 
     [
       'module.exports.__refreshProAccountStatus = refreshProAccountStatus;',
       'module.exports.__getPersistedSettings = getPersistedSettings;'
-    ].join('\n')
+    ].join('\n') + settingsPersistenceUnitPatch()
   );
   const originalGrant = JSON.stringify({
     grant: 'cached-pro-grant',
@@ -7701,7 +7990,7 @@ test('account refresh removes an expired credential and its visible login state'
     [
       'module.exports.__refreshProAccountStatus = refreshProAccountStatus;',
       'module.exports.__getPersistedSettings = getPersistedSettings;'
-    ].join('\n')
+    ].join('\n') + settingsPersistenceUnitPatch()
   );
   let saved = {
     proEntitlements: { strategy_pyramid: true },
@@ -7761,7 +8050,7 @@ test('a late refresh for an older grant cannot overwrite a newly signed-in accou
       'module.exports.__refreshProAccountStatus = refreshProAccountStatus;',
       'module.exports.__writePassportGrant = writePassportGrant;',
       'module.exports.__getPersistedSettings = getPersistedSettings;'
-    ].join('\n')
+    ].join('\n') + settingsPersistenceUnitPatch()
   );
   let saved = {
     proEntitlements: {},
@@ -7822,7 +8111,7 @@ test('account credential mutations serialize so stale cleanup cannot erase a new
       'module.exports.__clearStoredProAccess = clearStoredProAccess;',
       'module.exports.__writePassportGrant = writePassportGrant;',
       'module.exports.__getPersistedSettings = getPersistedSettings;'
-    ].join('\n')
+    ].join('\n') + settingsPersistenceUnitPatch()
   );
   let saved = {
     proEntitlements: {},
@@ -8369,6 +8658,11 @@ test('the active conversation poller does not fail a quiet long-running Agent', 
     prepared = await native.ops({ operation: 'prepare_run', input: { root: workspaceRoot, executionLogId: 73, nodeId: '__solo__', runKind: 'solo', prompt: 'Continue the user task', command: 'fixture-command', userMessage: 'Continue the user task', metadata: { interactiveSession: true, agentCli: 'claude' }, idempotencyKey: 'quiet-running' } });
   } finally { Date.now = actualNow; }
   const claimed = await native.ops({ operation: 'claim_run', input: { projectId: prepared.projectId, executionLogId: 73, expectedRevision: prepared.revision, agentPid: process.pid, idempotencyKey: 'quiet-owner' } });
+  await require('../out/projectRegistry.js').refreshProjectRegistry(
+    globalDataPath,
+    () => ({ legacyProjects: [{ name: 'Project', path: workspaceRoot }] }),
+    (operation, input) => native.ops({ operation, input })
+  );
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
@@ -8378,7 +8672,10 @@ test('the active conversation poller does not fail a quiet long-running Agent', 
     { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') }
   );
   extensionModule.__setActiveProjectForPollTest(workspaceRoot, globalDataPath);
-  await extensionModule.__pollActiveConversations({});
+  await extensionModule.__pollActiveConversations({
+    extensionPath: projectRoot,
+    globalState: { get: (_key, fallback) => fallback, update: async () => {} }
+  });
   const persisted = await native.ops({ operation: 'read_run_state', input: { root: workspaceRoot, executionLogId: 73 } });
   assert.equal(persisted.status.status, 'Running');
   assert.equal(persisted.status.failureCode, undefined);
@@ -8388,7 +8685,34 @@ test('the active conversation poller does not fail a quiet long-running Agent', 
   assert.equal(fs.existsSync(path.join(globalDataPath, 'active-conversations')), false);
 });
 
-test('agent command builder keeps background one-shot commands and uses native interactive user conversations', async () => {
+test('agent command builder keeps background one-shot commands and uses native interactive user conversations', async t => {
+  const capabilityStores = new Map();
+  const transportFixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-webview-composite-data-'));
+  const transportProjectRoot = path.join(transportFixtureRoot, 'project');
+  fs.mkdirSync(transportProjectRoot);
+  const capabilityTransport = require('../out/autonomousRuntimeControl.js');
+  const previousCapabilityTransport = capabilityTransport.sendRuntimeDataRequest;
+  capabilityTransport.sendRuntimeDataRequest = (root, request) => {
+    let owner = capabilityStores.get(root);
+    if (!owner) {
+      const dataRoot = path.resolve(root).startsWith(`${path.resolve(os.tmpdir())}${path.sep}`)
+        ? root
+        : path.join(transportFixtureRoot, String(capabilityStores.size), '.solomap-global');
+      const store = new (require('../out/db/unifiedDataStore.js').UnifiedDataStore)(dataRoot);
+      owner = { store, operations: require('../out/runtimeDataOperations.js').createRuntimeDataOperations(store) };
+      capabilityStores.set(root, owner);
+    }
+    const input = { ...(request.input || {}) };
+    if (typeof input.root === 'string' && input.root.startsWith('/workspace/') && !fs.existsSync(input.root)) input.root = transportProjectRoot;
+    return owner.operations({ ...request, input });
+  };
+  t.after(async () => {
+    capabilityTransport.sendRuntimeDataRequest = previousCapabilityTransport;
+    for (const owner of capabilityStores.values()) {
+      await owner.operations.close();
+      owner.store.close();
+    }
+  });
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
@@ -8443,34 +8767,17 @@ test('agent command builder keeps background one-shot commands and uses native i
       'module.exports.__buildSolomapMcpCandidateInstructions = solomapGlobal_1.buildSolomapMcpCandidateInstructions;',
       'module.exports.__buildMcpInstallPrompt = solomapGlobal_1.buildMcpInstallPrompt;',
       'module.exports.__validateAndRegisterMcpInstall = solomapGlobal_1.validateAndRegisterMcpInstall;',
-      'module.exports.__ensureSolomapEnhancementStore = solomapGlobal_1.ensureSolomapEnhancementStore;',
-      'module.exports.__readSolomapEnhancementRegistry = solomapGlobal_1.readSolomapEnhancementRegistry;',
-      'module.exports.__writeSolomapEnhancementRegistry = solomapGlobal_1.writeSolomapEnhancementRegistry;',
-      'module.exports.__buildSolomapEnhancementCandidateInstructions = solomapGlobal_1.buildSolomapEnhancementCandidateInstructions;',
-      'module.exports.__ensureSolomapEnhancementRuntime = solomapGlobal_1.ensureSolomapEnhancementRuntime;',
-      'module.exports.__buildEnhancementInstallPrompt = solomapGlobal_1.buildEnhancementInstallPrompt;',
-      'module.exports.__buildEnhancementUninstallPrompt = solomapGlobal_1.buildEnhancementUninstallPrompt;',
-      'module.exports.__validateAndRegisterEnhancementInstall = solomapGlobal_1.validateAndRegisterEnhancementInstall;',
-      'module.exports.__validateAndRegisterEnhancementUninstall = solomapGlobal_1.validateAndRegisterEnhancementUninstall;',
-      'module.exports.__getSolomapEnhancementStatusSummaries = solomapGlobal_1.getSolomapEnhancementStatusSummaries;',
-      'module.exports.__checkAndRegisterEnhancement = solomapGlobal_1.checkAndRegisterEnhancement;',
-      'module.exports.__setSolomapEnhancementEnabled = solomapGlobal_1.setSolomapEnhancementEnabled;',
-      'module.exports.__uninstallSolomapEnhancement = solomapGlobal_1.uninstallSolomapEnhancement;',
       'module.exports.__buildRoadmapMethodologyInstructions = buildRoadmapMethodologyInstructions;',
       'module.exports.__buildRoadmapValidationScript = buildRoadmapValidationScript;',
-      'module.exports.__ensureRoadmapValidationScript = ensureRoadmapValidationScript;',
       'module.exports.__getOutputTail = getOutputTail;',
       'module.exports.__buildRunHandoffEntry = runDigest_1.buildRunHandoffEntry;',
       'module.exports.__buildRunDigest = runDigest_1.buildRunDigest;',
-      'module.exports.__writeRunDigest = runDigest_1.writeRunDigest;',
-      'module.exports.__writeExecutionGraph = runDigest_1.writeExecutionGraph;',
+      'module.exports.__buildExecutionGraphFromDigests = runDigest_1.buildExecutionGraphFromDigests;',
       'module.exports.__buildExecutionExperiencePrompt = runDigest_1.buildExecutionExperiencePrompt;',
       'module.exports.__buildCrossAgentHandoffInstructions = runDigest_1.buildCrossAgentHandoffInstructions;',
       'module.exports.__buildBootstrapRoadmapInstructions = buildBootstrapRoadmapInstructions;',
       'module.exports.__parseStepHandoffEntries = runDigest_1.parseStepHandoffEntries;',
       'module.exports.__buildStepHandoffSummary = runDigest_1.buildStepHandoffSummary;',
-      'module.exports.__updateStepHandoffSummary = runDigest_1.updateStepHandoffSummary;',
-      'module.exports.__readStepHandoffSummary = runDigest_1.readStepHandoffSummary;',
       'module.exports.__buildSolopreneurDirectoryReadme = buildSolopreneurDirectoryReadme;',
       'module.exports.__buildCompletionCriteriaForNode = buildCompletionCriteriaForNode;',
       'module.exports.__ensureCompletionCriteriaForNodes = ensureCompletionCriteriaForNodes;',
@@ -8496,7 +8803,8 @@ test('agent command builder keeps background one-shot commands and uses native i
       'module.exports.__recordSolomapLearningCycle = solomapGlobal_1.recordSolomapLearningCycle;',
       'module.exports.__buildSolomapLearningContext = solomapGlobal_1.buildSolomapLearningContext;',
       'module.exports.__shellQuote = agentCli_1.shellQuote;'
-    ].join('\n')
+    ].join('\n'),
+    { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js'), './taskCheckpoint': require('./fixtures/legacy-task-checkpoint.cjs') }
   );
 
   assert.equal(
@@ -8530,15 +8838,15 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     extensionModule.__buildAgentCommand('antigravity-cli', 'Build landing page', '/workspace/app'),
-    "'antigravity-cli' --print --dangerously-skip-permissions --add-dir='/workspace/app' 'Build landing page'"
+    "'antigravity-cli' --dangerously-skip-permissions --add-dir='/workspace/app' --print='Build landing page'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('agy', 'Build landing page', '/workspace/app'),
-    "'agy' --print --dangerously-skip-permissions --add-dir='/workspace/app' 'Build landing page'"
+    "'agy' --dangerously-skip-permissions --add-dir='/workspace/app' --print='Build landing page'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('agy', 'Continue landing page', '/workspace/app', '3350a3b7-7761-4ed5-9661-2e9c9de8f924'),
-    "'agy' --print --dangerously-skip-permissions --add-dir='/workspace/app' 'Continue landing page'"
+    "'agy' --dangerously-skip-permissions --add-dir='/workspace/app' --print='Continue landing page'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('claude', 'Ship the MVP', '/workspace/app'),
@@ -8554,7 +8862,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
-    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'agy' --print --dangerously-skip-permissions --add-dir='/workspace/app'"
+    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'agy' --dangerously-skip-permissions --add-dir='/workspace/app' --print"
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('codex', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
@@ -8593,7 +8901,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'auto', 'Gemini 3.5 Flash (High)'),
-    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'agy' --print --dangerously-skip-permissions --model 'Gemini 3.5 Flash (High)' --add-dir='/workspace/app'"
+    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'agy' --dangerously-skip-permissions --model 'Gemini 3.5 Flash (High)' --add-dir='/workspace/app' --print"
   );
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('codex', 'agent_prompt', '/workspace/app'),
@@ -8601,7 +8909,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('agy', 'agent_prompt', '/workspace/app'),
-    "'agy' --print --dangerously-skip-permissions --add-dir='/workspace/app' \"$agent_prompt\""
+    "'agy' --dangerously-skip-permissions --add-dir='/workspace/app' --print=\"$agent_prompt\""
   );
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('copilot', 'agent_prompt', '/workspace/app'),
@@ -8712,7 +9020,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.equal(continuationOnlyRootSessionConversation && continuationOnlyRootSessionConversation.id, 60);
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('agy', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'never'),
-    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'agy' --print --add-dir='/workspace/app'"
+    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'agy' --add-dir='/workspace/app' --print"
   );
   assert.equal(
     extensionModule.__getTaskPermissionArgs('opencode', 'always'),
@@ -8723,11 +9031,11 @@ test('agent command builder keeps background one-shot commands and uses native i
   fs.writeFileSync(configuredAgyPath, '#!/bin/sh\nexec /usr/bin/agy --dangerously-skip-permissions "$@"\n', 'utf8');
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile(configuredAgyPath, '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'auto'),
-    `cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | '${configuredAgyPath}' --print --add-dir='/workspace/app'`
+    `cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | '${configuredAgyPath}' --add-dir='/workspace/app' --print`
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile(configuredAgyPath, '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'always'),
-    `cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | '${configuredAgyPath}' --print --dangerously-skip-permissions --add-dir='/workspace/app'`
+    `cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | '${configuredAgyPath}' --dangerously-skip-permissions --add-dir='/workspace/app' --print`
   );
   const configuredCursorDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-cursor-wrapper-'));
   const configuredCursorPath = path.join(configuredCursorDir, 'cursor-agent');
@@ -8776,19 +9084,32 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.equal(extensionModule.__getAgentProvider('claude'), 'claude');
   assert.equal(extensionModule.__getAgentProvider('copilot'), 'copilot');
   assert.equal(extensionModule.__getAgentProvider('opencode'), 'opencode');
-  const continuationPrompt = extensionModule.__buildInteractiveContinuationPrompt(
-    { id: '2', title: 'Ship MVP', description: '', stage: 'Build', dependencies: '', agentCli: 'codex', agentPrompt: '', status: 'In Progress', createdAt: '', completedAt: '' },
-    '继续把登录态和订阅校验打通',
-    '/workspace/app',
-    '/workspace/app/.solopreneur/agent-runs/2/99/completion.json',
-    [],
-    '',
-    '/workspace/.solomap-global'
-  );
+  const promptFixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-continuation-prompt-'));
+  const promptWorkspace = path.join(promptFixture, 'app'), promptRoot = path.join(promptFixture, '.solomap-global'); fs.mkdirSync(promptWorkspace);
+  const { UnifiedDataStore: PromptStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations: createPromptOperations } = require('../out/runtimeDataOperations.js');
+  const promptStore = new PromptStore(promptRoot), promptOperations = createPromptOperations(promptStore);
+  const promptTransport = require('../out/autonomousRuntimeControl.js'), previousPromptTransport = promptTransport.sendRuntimeDataRequest;
+  promptTransport.sendRuntimeDataRequest = (_root, request) => promptOperations(request);
+  let continuationPrompt;
+  try {
+    continuationPrompt = await extensionModule.__buildInteractiveContinuationPrompt(
+      { id: '2', title: 'Ship MVP', description: '', stage: 'Build', dependencies: '', agentCli: 'codex', agentPrompt: '', status: 'In Progress', createdAt: '', completedAt: '' },
+      '继续把登录态和订阅校验打通',
+      promptWorkspace,
+      path.join(promptWorkspace, '.solopreneur/agent-runs/2/99/completion.json'),
+      [],
+      '',
+      promptRoot
+    );
+  } finally {
+    promptTransport.sendRuntimeDataRequest = previousPromptTransport;
+    await promptOperations.close(); promptStore.close();
+  }
   assert.match(continuationPrompt, /继续 SoloMap 中已经存在的一段对话/);
   assert.match(continuationPrompt, /继续把登录态和订阅校验打通/);
-  assert.match(continuationPrompt, /SOLOMAP_TASK_COMMAND/);
-  assert.match(continuationPrompt, /不要直接编辑 .*completion\.json/);
+  assert.match(continuationPrompt, /SoloMap 启动包/);
+  assert.doesNotMatch(continuationPrompt, /SOLOMAP_TASK_COMMAND|completion\.json/, 'the shared preparation layer appends the single runnable checkpoint contract later');
   const runnerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-codex-runner-'));
   const runnerPath = path.join(runnerDir, 'run-codex-continuation.cjs');
   extensionModule.__buildCodexContinuationRunnerScript(
@@ -9124,39 +9445,21 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.equal(extensionModule.__getOutputTail(ttyOutputPath), 'Done\nFinished');
   assert.equal(typeof extensionModule.__processAgentStatusFile, 'function');
 
-  const memoryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-'));
-  const ensuredMemory = extensionModule.__ensureSolomapMemoryStore('/workspace/app', memoryRoot);
-  assert.equal(ensuredMemory.globalRoot, path.join(memoryRoot, '.solomap-global'));
-  assert.equal(ensuredMemory.memoryRoot, path.join(memoryRoot, '.solomap-global', 'memory'));
-  assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'README.md')));
-  assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'projects', 'app.md')));
-  assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'projects', '_example.md')));
-  assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'patterns', '_example.md')));
-  assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'decisions', '_example.md')));
-  assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'domains', '_example.md')));
-  assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'inbox', '_example.md')));
-  assert.ok(fs.existsSync(path.join(ensuredMemory.memoryRoot, 'active', '_example.md')));
-  assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'learning', 'candidates', '_example.md')));
-  assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'learning', 'approved')));
-  assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'learning', 'rejected')));
-  assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'metrics', 'execution-speed.csv')));
-  assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'metrics', 'reuse-rate.csv')));
-  assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'metrics', 'priority-accuracy.csv')));
-  assert.ok(fs.existsSync(path.join(ensuredMemory.globalRoot, 'metrics', 'monthly-summary.md')));
-  const globalToolsRoot = path.join(ensuredMemory.globalRoot, 'tools');
-  assert.ok(fs.existsSync(path.join(globalToolsRoot, 'solomap-memory.cjs')));
-  assert.ok(fs.existsSync(path.join(globalToolsRoot, 'solomap-experience.cjs')));
-  assert.ok(fs.existsSync(path.join(globalToolsRoot, 'node_modules', 'sql.js', 'package.json')));
-  assert.ok(fs.existsSync(path.join(globalToolsRoot, 'node_modules', 'sql.js', 'dist', 'sql-wasm.js')));
-  assert.ok(fs.existsSync(path.join(globalToolsRoot, 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm')));
-  const globalExperienceHelp = childProcess.execFileSync(
-    process.execPath,
-    [path.join(globalToolsRoot, 'solomap-experience.cjs'), '--help'],
-    { encoding: 'utf8' }
-  );
-  assert.match(globalExperienceHelp, /solomap-experience/);
-  extensionModule.__recordSolomapLearningCycle(
-    '/workspace/app',
+  const memoryBase = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-'));
+  const memoryWorkspace = path.join(memoryBase, 'app');
+  const memoryRoot = path.join(memoryBase, '.solomap-global');
+  fs.mkdirSync(memoryWorkspace);
+  const ensuredMemory = extensionModule.__ensureSolomapMemoryStore(memoryWorkspace, memoryRoot);
+  assert.equal(ensuredMemory.globalRoot, memoryRoot);
+  assert.equal(ensuredMemory.memoryRoot, path.join(memoryRoot, 'memory'));
+  assert.equal(fs.existsSync(ensuredMemory.memoryRoot), false, 'the compatibility locator must not recreate the retired Markdown producer');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const memoryStore = new UnifiedDataStore(memoryRoot); const memoryOps = createRuntimeDataOperations(memoryStore);
+  const memoryTransport = require('../out/autonomousRuntimeControl.js'); const previousMemoryTransport = memoryTransport.sendRuntimeDataRequest;
+  memoryTransport.sendRuntimeDataRequest = (_root, request) => memoryOps(request);
+  await extensionModule.__recordSolomapLearningCycle(
+    memoryWorkspace,
     memoryRoot,
     {
       id: '2',
@@ -9173,28 +9476,18 @@ test('agent command builder keeps background one-shot commands and uses native i
     1234,
     '2026-05-31T00:00:00.000Z'
   );
-  assert.match(fs.readFileSync(path.join(ensuredMemory.globalRoot, 'metrics', 'execution-speed.csv'), 'utf8'), /反馈与规模化.*1234/);
-  assert.equal(fs.readdirSync(path.join(ensuredMemory.globalRoot, 'learning', 'candidates')).some((name) => name.endsWith('.md') && name !== '_example.md'), false);
-  assert.match(extensionModule.__buildSolomapLearningContext('/workspace/app', memoryRoot), /待审核学习候选：0/);
-  assert.match(extensionModule.__buildSolomapLearningContext('/workspace/app', memoryRoot), /低频指标已记录/);
-  assert.doesNotMatch(extensionModule.__buildSolomapLearningContext('/workspace/app', memoryRoot), /最近执行速度记录|最近复用记录|反馈与规模化.*1234/);
-  const defaultMemoryPrompt = extensionModule.__buildSoloMapSystemMemoryPrompt('/workspace/app', memoryRoot);
-  assert.match(defaultMemoryPrompt, /SoloMap 默认系统提示词/);
-  assert.match(defaultMemoryPrompt, /\.solomap-global\/memory/);
-  assert.match(defaultMemoryPrompt, /projects\/app\.md/);
-  assert.match(defaultMemoryPrompt, /learning\/candidates/);
-  assert.match(defaultMemoryPrompt, /写入协议/);
-  assert.match(defaultMemoryPrompt, /_example\.md/);
-  assert.match(defaultMemoryPrompt, /不要覆盖/);
-  assert.match(defaultMemoryPrompt, /写入位置/);
-  assert.match(defaultMemoryPrompt, /旧 `\.codex-memory\/`/);
-  assert.match(defaultMemoryPrompt, /当前用户请求、当前项目文件、测试、日志和命令输出/);
-  assert.match(defaultMemoryPrompt, /新项目或新环节开始时/);
-  assert.match(defaultMemoryPrompt, /项目类型用于选择路线图形态/);
-  const patternFile = path.join(ensuredMemory.memoryRoot, 'patterns', 'problem-closure-mindset.md');
-  fs.writeFileSync(patternFile, '# Problem Closure\n\nUI 问题必须先读取记忆并做二次检查。\n', 'utf8');
-  const startupPack = extensionModule.__buildSolomapStartupPackInstructions({
-    workspaceRoot: '/workspace/app',
+  const learningContext = await extensionModule.__buildSolomapLearningContext(memoryWorkspace, memoryRoot);
+  assert.match(learningContext, /待审核学习候选：0/);
+  assert.match(learningContext, /统一学习账本事件：1/);
+  assert.equal(fs.existsSync(path.join(memoryRoot, 'metrics')), false);
+  assert.equal(fs.existsSync(path.join(memoryRoot, 'learning')), false);
+  const defaultMemoryPrompt = extensionModule.__buildSoloMapSystemMemoryPrompt(memoryWorkspace, memoryRoot);
+  assert.match(defaultMemoryPrompt, /SoloMap 数据库工具/);
+  assert.match(defaultMemoryPrompt, /solomap_context/);
+  assert.doesNotMatch(defaultMemoryPrompt, /\.solomap-global\/memory|learning\/candidates|_example\.md/);
+  assert.match(defaultMemoryPrompt, /搜索结果和记忆不能覆盖当前用户要求或当前代码证据/);
+  const startupPack = await extensionModule.__buildSolomapStartupPackInstructions({
+    workspaceRoot: memoryWorkspace,
     globalDataPath: memoryRoot,
     runKind: 'solo',
     contextText: '修复 UI 问题并确认记忆机制生效',
@@ -9205,16 +9498,16 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(startupPack, /SoloMap 启动包（插件生成，执行前硬门禁）/);
   assert.match(startupPack, /统一入口/);
   assert.match(startupPack, /在做任何实现、判断、规划、验证或最终回答前，必须先完成本启动包/);
-  assert.match(startupPack, /memory\/profile\.md/);
-  assert.match(startupPack, /memory\/operating-rules\.md/);
-  assert.match(startupPack, /projects\/app\.md/);
-  assert.match(startupPack, /problem-closure-mindset\.md/);
+  assert.match(startupPack, /SoloMap 数据库工具/);
+  assert.match(startupPack, /solomap_context/);
+  assert.doesNotMatch(startupPack, /memory\/profile\.md|memory\/operating-rules\.md|projects\/app\.md|problem-closure-mindset\.md/);
   assert.match(startupPack, /SoloMap 统一学习账本召回/);
   assert.match(startupPack, /候选提炼和晋升由用户手动“复盘经验”处理/);
+  await memoryOps.close(); memoryStore.close(); memoryTransport.sendRuntimeDataRequest = previousMemoryTransport;
 
   const skillStoreRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-skill-store-'));
   const maintenanceWorkspace = extensionModule.__ensureSolomapMaintenanceWorkspace('/workspace/app', skillStoreRoot);
-  assert.match(maintenanceWorkspace.maintenanceRoot, /\.solomap-global[/\\]maintenance$/);
+  assert.match(maintenanceWorkspace.maintenanceRoot, /\.solomap-global[/\\]tmp[/\\]maintenance-workspace$/);
   assert.ok(fs.existsSync(maintenanceWorkspace.runsRoot));
   const maintenanceAgentCommand = extensionModule.__buildAgentCommandForPromptFile(
     'codex',
@@ -9224,29 +9517,27 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.ok(maintenanceAgentCommand.includes(`-C '${maintenanceWorkspace.maintenanceRoot}'`));
   assert.doesNotMatch(maintenanceAgentCommand, /\/workspace\/app/);
-  const skillStore = extensionModule.__ensureSolomapSkillStore('/workspace/app', skillStoreRoot);
+  const skillStore = await extensionModule.__ensureSolomapSkillStore('/workspace/app', skillStoreRoot);
   assert.ok(fs.existsSync(path.join(skillStore.skillsRoot, 'installed')));
-  assert.ok(fs.existsSync(path.join(skillStore.skillsRoot, 'runs')));
+  assert.equal(skillStore.runsRoot, path.join(skillStoreRoot, '.solomap-global', 'tmp', 'skill-installs'));
   [
     'solomap-global-execution-guide',
     'solomap-roadmap-planning',
     'solomap-project-docs-lifecycle',
-    'solomap-cross-project-memory',
-    'solomap-enhancement-installer'
+    'solomap-cross-project-memory'
   ].forEach((skillId) => {
     const builtinSkillPath = path.join(skillStore.skillsRoot, 'installed', skillId);
     assert.ok(fs.existsSync(path.join(builtinSkillPath, 'package', 'SKILL.md')));
-    assert.ok(fs.existsSync(path.join(builtinSkillPath, 'solomap.skill.json')));
-    assert.ok(fs.existsSync(path.join(builtinSkillPath, 'source.lock.json')));
   });
-  const builtinRegistry = extensionModule.__readSolomapSkillRegistry('/workspace/app', skillStoreRoot);
+  const builtinRegistry = await extensionModule.__readSolomapSkillRegistry('/workspace/app', skillStoreRoot);
+  assert.equal(builtinRegistry.skills.length, 4);
+  assert.ok(builtinRegistry.skills.every(skill => skill.source?.type === 'builtin' && /^[a-f0-9]{64}$/.test(skill.source.builtinVersion)));
   assert.equal(builtinRegistry.skills.filter((skill) => skill.defaultCandidate).length, 4);
   assert.equal(builtinRegistry.skills.find((skill) => skill.id === 'solomap-global-execution-guide')?.defaultCandidate, true);
   assert.equal(builtinRegistry.skills.find((skill) => skill.id === 'solomap-roadmap-planning')?.defaultCandidate, true);
   assert.equal(builtinRegistry.skills.find((skill) => skill.id === 'solomap-project-docs-lifecycle')?.defaultCandidate, true);
   assert.equal(builtinRegistry.skills.find((skill) => skill.id === 'solomap-cross-project-memory')?.defaultCandidate, true);
-  assert.equal(builtinRegistry.skills.find((skill) => skill.id === 'solomap-enhancement-installer')?.defaultCandidate, false);
-  const builtinInstructions = extensionModule.__buildSolomapSkillCandidateInstructions('/workspace/app', skillStoreRoot, '调整路线图，更新项目文档，并沉淀跨项目记忆');
+  const builtinInstructions = await extensionModule.__buildSolomapSkillCandidateInstructions('/workspace/app', skillStoreRoot, '调整路线图，更新项目文档，并沉淀跨项目记忆');
   assert.match(builtinInstructions, /SoloMap Global Execution Guide/);
   assert.match(builtinInstructions, /installed\/solomap-global-execution-guide\/package\/SKILL\.md/);
   assert.match(builtinInstructions, /SoloMap Roadmap Planning/);
@@ -9255,7 +9546,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(builtinInstructions, /installed\/solomap-project-docs-lifecycle\/package\/SKILL\.md/);
   assert.match(builtinInstructions, /SoloMap Cross-Project Memory/);
   assert.match(builtinInstructions, /installed\/solomap-cross-project-memory\/package\/SKILL\.md/);
-  extensionModule.__writeSolomapSkillRegistry('/workspace/app', skillStoreRoot, {
+  await extensionModule.__writeSolomapSkillRegistry('/workspace/app', skillStoreRoot, {
     version: 1,
     updatedAt: '',
     skills: [{
@@ -9280,7 +9571,7 @@ test('agent command builder keeps background one-shot commands and uses native i
       risk: {}
     }]
   });
-  const skillInstructions = extensionModule.__buildSolomapSkillCandidateInstructions('/workspace/app', skillStoreRoot, '修复侧边栏 UI 交互问题');
+  const skillInstructions = await extensionModule.__buildSolomapSkillCandidateInstructions('/workspace/app', skillStoreRoot, '修复侧边栏 UI 交互问题');
   assert.match(skillInstructions, /Frontend UI/);
   assert.match(skillInstructions, /installed\/frontend-ui\/package\/SKILL\.md/);
   assert.match(skillInstructions, /必须在执行前判定 used \/ skipped-not-applicable/);
@@ -9291,7 +9582,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(installPrompt, /完整 skill package/);
   assert.match(installPrompt, /solomap\.skill\.json/);
   assert.match(installPrompt, /source\.lock\.json/);
-  assert.match(installPrompt, /DISABLE_TELEMETRY=1/);
+  assert.match(installPrompt, /单一来源结构/);
   assert.match(installPrompt, /系统维护任务，不是项目开发任务/);
   assert.match(installPrompt, /不要查找、读取或分析用户当前项目/);
   assert.doesNotMatch(installPrompt, /项目目录：\/workspace\/app/);
@@ -9311,6 +9602,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   }, null, 2), 'utf8');
   fs.writeFileSync(path.join(fakeSkillDir, 'source.lock.json'), JSON.stringify({ source: 'owner/repo' }, null, 2), 'utf8');
   const fakeResultPath = path.join(skillStore.runsRoot, 'fake-result.json');
+  fs.mkdirSync(path.dirname(fakeResultPath), { recursive: true });
   fs.writeFileSync(fakeResultPath, JSON.stringify({
     ok: true,
     skillId: 'frontend-ui',
@@ -9323,17 +9615,17 @@ test('agent command builder keeps background one-shot commands and uses native i
     source: { input: 'owner/repo' },
     risk: { hasScripts: false, hasExecutables: false }
   }, null, 2), 'utf8');
-  const validation = extensionModule.__validateAndRegisterSkillInstall('/workspace/app', skillStoreRoot, fakeResultPath);
+  const validation = await extensionModule.__validateAndRegisterSkillInstall('/workspace/app', skillStoreRoot, fakeResultPath);
   assert.equal(validation.ok, true);
-  const registryAfterValidation = extensionModule.__readSolomapSkillRegistry('/workspace/app', skillStoreRoot);
+  const registryAfterValidation = await extensionModule.__readSolomapSkillRegistry('/workspace/app', skillStoreRoot);
   assert.equal(registryAfterValidation.skills.some((skill) => skill.id === 'frontend-ui'), true);
 
   const mcpStoreRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-mcp-store-'));
   const mcpStore = extensionModule.__ensureSolomapMcpStore('/workspace/app', mcpStoreRoot);
   assert.ok(fs.existsSync(path.join(mcpStore.mcpRoot, 'servers')));
-  assert.ok(fs.existsSync(path.join(mcpStore.mcpRoot, 'runs')));
+  assert.equal(mcpStore.runsRoot, path.join(mcpStoreRoot, '.solomap-global', 'tmp', 'mcp-installs'));
   assert.ok(fs.existsSync(path.join(mcpStore.mcpRoot, 'profiles')));
-  extensionModule.__writeSolomapMcpRegistry('/workspace/app', mcpStoreRoot, {
+  await extensionModule.__writeSolomapMcpRegistry('/workspace/app', mcpStoreRoot, {
     version: 1,
     updatedAt: '',
     connectors: [{
@@ -9353,7 +9645,7 @@ test('agent command builder keeps background one-shot commands and uses native i
       risk: { level: 'high', canSendMessages: true, requiresExplicitEnable: true }
     }]
   });
-  const mcpInstructions = extensionModule.__buildSolomapMcpCandidateInstructions('/workspace/app', mcpStoreRoot, '读取 GitHub Issue 来判断当前任务背景');
+  const mcpInstructions = await extensionModule.__buildSolomapMcpCandidateInstructions('/workspace/app', mcpStoreRoot, '读取 GitHub Issue 来判断当前任务背景');
   assert.match(mcpInstructions, /GitHub Readonly/);
   assert.match(mcpInstructions, /issues\.list/);
   assert.match(mcpInstructions, /这些只是候选能力连接器/);
@@ -9370,17 +9662,20 @@ test('agent command builder keeps background one-shot commands and uses native i
   const fakeMcpDir = path.join(mcpStore.mcpRoot, 'servers', 'github-readonly');
   fs.mkdirSync(path.join(fakeMcpDir, 'package'), { recursive: true });
   fs.mkdirSync(path.join(fakeMcpDir, 'profiles'), { recursive: true });
+  fs.writeFileSync(path.join(fakeMcpDir, 'package', 'server.js'), 'process.stdin.resume();\n', 'utf8');
   fs.writeFileSync(path.join(fakeMcpDir, 'solomap.mcp.json'), JSON.stringify({
     id: 'github-readonly',
     title: 'GitHub Readonly',
     description: 'Read GitHub issues.',
     status: 'installed',
+    server: { command: 'node', entry: 'server.js' },
     activation: { keywords: ['GitHub'], useWhen: ['GitHub Issue context'] },
     permissions: { tools: ['issues.list'], requiresCredentials: false, externalAccess: true, writeAccess: false },
     risk: { level: 'low', requiresExplicitEnable: false }
   }, null, 2), 'utf8');
   fs.writeFileSync(path.join(fakeMcpDir, 'source.lock.json'), JSON.stringify({ source: 'owner/mcp-server' }, null, 2), 'utf8');
   const fakeMcpResultPath = path.join(mcpStore.runsRoot, 'fake-result.json');
+  fs.mkdirSync(path.dirname(fakeMcpResultPath), { recursive: true });
   fs.writeFileSync(fakeMcpResultPath, JSON.stringify({
     ok: true,
     mcpId: 'github-readonly',
@@ -9393,268 +9688,10 @@ test('agent command builder keeps background one-shot commands and uses native i
     permissions: { tools: ['issues.list'], requiresCredentials: false },
     risk: { level: 'low', requiresExplicitEnable: false }
   }, null, 2), 'utf8');
-  const mcpValidation = extensionModule.__validateAndRegisterMcpInstall('/workspace/app', mcpStoreRoot, fakeMcpResultPath);
+  const mcpValidation = await extensionModule.__validateAndRegisterMcpInstall('/workspace/app', mcpStoreRoot, fakeMcpResultPath);
   assert.equal(mcpValidation.ok, true);
-  const mcpRegistryAfterValidation = extensionModule.__readSolomapMcpRegistry('/workspace/app', mcpStoreRoot);
+  const mcpRegistryAfterValidation = await extensionModule.__readSolomapMcpRegistry('/workspace/app', mcpStoreRoot);
   assert.equal(mcpRegistryAfterValidation.connectors.some((connector) => connector.id === 'github-readonly'), true);
-
-  const enhancementStoreRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-enhancement-store-'));
-  const enhancementStore = extensionModule.__ensureSolomapEnhancementStore('/workspace/app', enhancementStoreRoot);
-  assert.ok(fs.existsSync(path.join(enhancementStore.enhancementsRoot, 'installed')));
-  assert.ok(fs.existsSync(path.join(enhancementStore.enhancementsRoot, 'runs')));
-  extensionModule.__writeSolomapEnhancementRegistry('/workspace/app', enhancementStoreRoot, {
-    version: 1,
-    updatedAt: '',
-    enhancements: [{
-      id: 'rtk-output-filter',
-      title: 'rtk Output Filter',
-      description: 'Compress command output before Agent reads it.',
-      status: 'installed',
-      configPath: 'installed/rtk-output-filter/solomap.enhancement.json',
-      benefit: 'Reduce noisy command output token usage.',
-      adapter: { type: 'command_rewrite', fallback: 'use_original_path' },
-      activation: { keywords: ['token', '命令输出'], useWhen: ['任务需要减少命令输出 token'] },
-      risk: { level: 'low', requiresExplicitEnable: false, hidesRawOutput: true },
-      evidencePolicy: { mustReadRawWhen: ['失败日志', '关键判断'] }
-    }, {
-      id: 'agent-config-writer',
-      title: 'Agent Config Writer',
-      status: 'installed',
-      activation: { keywords: ['agent'] },
-      adapter: { type: 'prompt_policy' },
-      risk: { level: 'high', modifiesAgentConfig: true, requiresExplicitEnable: true }
-    }]
-  });
-  const disabledBuiltinInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions('/workspace/app', enhancementStoreRoot, '需要减少命令输出 token，同时保留失败日志');
-  assert.doesNotMatch(disabledBuiltinInstructions, /Command Output Optimizer/);
-
-  const builtinInstalledRegistry = extensionModule.__readSolomapEnhancementRegistry('/workspace/app', enhancementStoreRoot);
-  extensionModule.__writeSolomapEnhancementRegistry('/workspace/app', enhancementStoreRoot, {
-    ...builtinInstalledRegistry,
-    enhancements: builtinInstalledRegistry.enhancements.concat([{
-      id: 'command-output-optimizer',
-      title: 'Command Output Optimizer',
-      status: 'installed',
-      enabled: true,
-      version: '1.0.0',
-      health: { ok: true, version: '1.0.0', message: 'Ready' }
-    }, {
-      id: 'code-structure-assistant',
-      title: 'Code Structure Assistant',
-      status: 'installed',
-      enabled: true,
-      version: '2.0.0',
-      health: { ok: true, version: '2.0.0', message: 'Ready' }
-    }, {
-      id: 'mcp-description-compressor',
-      title: 'MCP Description Compressor',
-      status: 'installed',
-      enabled: true,
-      version: '3.0.0',
-      health: { ok: true, version: '3.0.0', message: 'Ready' }
-    }])
-  });
-
-  const enabledBuiltinInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions(
-    '/workspace/app',
-    enhancementStoreRoot,
-    '需要减少命令输出 token，同时保留失败日志',
-    { 'command-output-optimizer': true, 'code-structure-assistant': true, 'mcp-description-compressor': true }
-  );
-  assert.match(enabledBuiltinInstructions, /Command Output Optimizer/);
-  assert.match(enabledBuiltinInstructions, /command_rewrite/);
-  assert.match(enabledBuiltinInstructions, /原始证据要求/);
-
-  const codeGraphInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions(
-    '/workspace/app',
-    enhancementStoreRoot,
-    '重构前需要检查函数引用和调用影响面',
-    { 'command-output-optimizer': true, 'code-structure-assistant': true, 'mcp-description-compressor': true }
-  );
-  assert.match(codeGraphInstructions, /Code Structure Assistant/);
-  assert.match(codeGraphInstructions, /mcp/);
-
-  const mcpShrinkInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions(
-    '/workspace/app',
-    enhancementStoreRoot,
-    'MCP tool description 和 schema 占用太多上下文',
-    { 'command-output-optimizer': true, 'code-structure-assistant': true, 'mcp-description-compressor': true }
-  );
-  assert.match(mcpShrinkInstructions, /MCP Description Compressor/);
-  assert.match(mcpShrinkInstructions, /external_mcp_proxy/);
-
-  const enhancementInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions('/workspace/app', enhancementStoreRoot, '需要减少命令输出 token，同时保留失败日志', { 'command-output-optimizer': true, 'code-structure-assistant': true, 'mcp-description-compressor': true });
-  assert.match(enhancementInstructions, /Command Output Optimizer/);
-  assert.match(enhancementInstructions, /command_rewrite/);
-  assert.match(enhancementInstructions, /原始证据要求/);
-  assert.doesNotMatch(enhancementInstructions, /Agent Config Writer/);
-
-  const enhancementRuntimeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-enhancement-runtime-'));
-  const runtime = extensionModule.__ensureSolomapEnhancementRuntime('/workspace/app', enhancementRuntimeRoot, {
-    'command-output-optimizer': true,
-    'code-structure-assistant': true,
-    'mcp-description-compressor': true
-  });
-  assert.ok(fs.existsSync(path.join(runtime.binRoot, 'git')));
-  assert.match(fs.readFileSync(path.join(runtime.binRoot, 'git'), 'utf8'), /exec rtk "\$cmd" "\$@"/);
-  assert.match(fs.readFileSync(path.join(runtime.binRoot, 'git'), 'utf8'), /SOLOMAP_RTK_BYPASS/);
-  assert.match(runtime.envLines.join('\n'), /SOLOMAP_RTK_OUTPUT_OPTIMIZER=1/);
-  assert.doesNotMatch(runtime.preflightLines.join('\n'), /codegraph init -i/);
-
-  const enhancementInstallPrompt = extensionModule.__buildEnhancementInstallPrompt(
-    'code-structure-assistant',
-    '/workspace/app',
-    enhancementRuntimeRoot,
-    path.join(enhancementRuntimeRoot, 'enhancements/runs/run/result.json')
-  );
-  assert.match(enhancementInstallPrompt, /solomap-enhancement-installer/);
-  assert.match(enhancementInstallPrompt, /code-structure-assistant/);
-  assert.match(enhancementInstallPrompt, /安装结果 JSON 必须写入/);
-  assert.match(enhancementInstallPrompt, /系统维护任务，不是项目开发任务/);
-  assert.doesNotMatch(enhancementInstallPrompt, /项目目录：\/workspace\/app/);
-  assert.doesNotMatch(enhancementInstallPrompt, /codegraph install --target=auto --location=global --yes\s*\|\| true/);
-
-  const validationEnhancementStore = extensionModule.__ensureSolomapEnhancementStore('/workspace/app', enhancementRuntimeRoot);
-  const fakeEnhancementRoot = path.join(validationEnhancementStore.installedRoot, 'code-structure-assistant');
-  fs.mkdirSync(fakeEnhancementRoot, { recursive: true });
-  const fakeEnhancementJson = path.join(fakeEnhancementRoot, 'solomap.enhancement.json');
-  const fakeSourceLock = path.join(fakeEnhancementRoot, 'source.lock.json');
-  const fakeHealth = path.join(fakeEnhancementRoot, 'health.json');
-  fs.writeFileSync(fakeEnhancementJson, JSON.stringify({
-    id: 'code-structure-assistant',
-    title: 'Code Structure Assistant',
-    description: 'Use code graph lookup.',
-    status: 'installed',
-    version: '1.2.3',
-    activation: { keywords: ['codegraph'] },
-    risk: { level: 'low' }
-  }, null, 2), 'utf8');
-  fs.writeFileSync(fakeSourceLock, JSON.stringify({ source: { name: 'CodeGraph' }, version: '1.2.3' }, null, 2), 'utf8');
-  fs.writeFileSync(fakeHealth, JSON.stringify({ ok: true, version: '1.2.3', message: 'Ready' }, null, 2), 'utf8');
-  const fakeEnhancementResult = path.join(enhancementRuntimeRoot, 'enhancement-result.json');
-  fs.writeFileSync(fakeEnhancementResult, JSON.stringify({
-    ok: true,
-    enhancementId: 'code-structure-assistant',
-    installedPath: fakeEnhancementRoot,
-    solomapEnhancementJson: fakeEnhancementJson,
-    sourceLockJson: fakeSourceLock,
-    healthJson: fakeHealth,
-    metadata: { version: '1.2.3' },
-    health: { ok: true, version: '1.2.3', message: 'Ready' }
-  }, null, 2), 'utf8');
-  const enhancementValidation = extensionModule.__validateAndRegisterEnhancementInstall('/workspace/app', enhancementRuntimeRoot, fakeEnhancementResult);
-  assert.equal(enhancementValidation.ok, true);
-  const enhancementStatuses = extensionModule.__getSolomapEnhancementStatusSummaries('/workspace/app', enhancementRuntimeRoot);
-  const codeGraphStatus = enhancementStatuses.find((item) => item.id === 'code-structure-assistant');
-  assert.equal(codeGraphStatus.installed, true);
-  assert.equal(codeGraphStatus.enabled, true);
-  assert.equal(codeGraphStatus.version, '1.2.3');
-
-  const enabledAfterInstallInstructions = extensionModule.__buildSolomapEnhancementCandidateInstructions(
-    '/workspace/app',
-    enhancementRuntimeRoot,
-    '重构前需要用 codegraph 检查函数引用和调用影响面',
-    { 'code-structure-assistant': true }
-  );
-  assert.match(enabledAfterInstallInstructions, /Code Structure Assistant/);
-  const enableCodeGraph = extensionModule.__setSolomapEnhancementEnabled('/workspace/app', enhancementRuntimeRoot, 'code-structure-assistant', true);
-  assert.equal(enableCodeGraph.ok, true);
-  const enabledCodeGraphStatus = extensionModule.__getSolomapEnhancementStatusSummaries('/workspace/app', enhancementRuntimeRoot).find((item) => item.id === 'code-structure-assistant');
-  assert.equal(enabledCodeGraphStatus.enabled, true);
-  const disableCodeGraph = extensionModule.__setSolomapEnhancementEnabled('/workspace/app', enhancementRuntimeRoot, 'code-structure-assistant', false);
-  assert.equal(disableCodeGraph.ok, true);
-  const enhancementUninstallPrompt = extensionModule.__buildEnhancementUninstallPrompt(
-    'code-structure-assistant',
-    '/workspace/app',
-    enhancementRuntimeRoot,
-    path.join(enhancementRuntimeRoot, 'enhancements/runs/run/uninstall-result.json')
-  );
-  assert.match(enhancementUninstallPrompt, /卸载结果 JSON 必须写入/);
-  assert.match(enhancementUninstallPrompt, /彻底移除该增强/);
-  const fakeEnhancementUninstallResult = path.join(enhancementRuntimeRoot, 'enhancement-uninstall-result.json');
-  fs.writeFileSync(fakeEnhancementUninstallResult, JSON.stringify({
-    ok: true,
-    enhancementId: 'code-structure-assistant',
-    removedItems: ['codegraph mcp profile'],
-    remainingItems: [],
-    health: { ok: true, message: 'Removed from user environment.' }
-  }, null, 2), 'utf8');
-  const uninstallCodeGraph = extensionModule.__validateAndRegisterEnhancementUninstall('/workspace/app', enhancementRuntimeRoot, fakeEnhancementUninstallResult);
-  assert.equal(uninstallCodeGraph.ok, true);
-  const uninstalledCodeGraph = extensionModule.__getSolomapEnhancementStatusSummaries('/workspace/app', enhancementRuntimeRoot).find((item) => item.id === 'code-structure-assistant');
-  assert.equal(uninstalledCodeGraph.installed, false);
-  assert.equal(uninstalledCodeGraph.enabled, false);
-  const fakeCodegraphBin = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-fake-codegraph-'));
-  const fakeCodegraph = path.join(fakeCodegraphBin, 'codegraph');
-  fs.writeFileSync(fakeCodegraph, '#!/usr/bin/env bash\nif [ "$1" = "--version" ]; then echo "codegraph 1.2.3"; else echo "ready"; fi\n', 'utf8');
-  fs.chmodSync(fakeCodegraph, 0o755);
-  const oldCodegraphPath = process.env.PATH;
-  process.env.PATH = `${fakeCodegraphBin}:/usr/bin:/bin`;
-  try {
-    const recheckUninstalledCodeGraph = extensionModule.__checkAndRegisterEnhancement('/workspace/app', enhancementRuntimeRoot, 'code-structure-assistant');
-    assert.equal(recheckUninstalledCodeGraph.ok, false);
-  } finally {
-    process.env.PATH = oldCodegraphPath;
-  }
-  const stillUninstalledCodeGraph = extensionModule.__getSolomapEnhancementStatusSummaries('/workspace/app', enhancementRuntimeRoot).find((item) => item.id === 'code-structure-assistant');
-  assert.equal(stillUninstalledCodeGraph.installed, false);
-  assert.equal(stillUninstalledCodeGraph.enabled, false);
-  assert.equal(stillUninstalledCodeGraph.status, 'uninstalled');
-
-  const mcpEnhancementRoot = path.join(validationEnhancementStore.installedRoot, 'mcp-description-compressor');
-  fs.mkdirSync(mcpEnhancementRoot, { recursive: true });
-  fs.writeFileSync(path.join(mcpEnhancementRoot, 'solomap.enhancement.json'), JSON.stringify({
-    id: 'mcp-description-compressor',
-    title: 'MCP Description Compressor',
-    description: 'Shrink MCP tool descriptions.',
-    status: 'installed',
-    version: '0.1.0',
-    source: { package: 'caveman-shrink' },
-    health: { ok: true, version: '0.1.0', message: 'Ready' }
-  }, null, 2), 'utf8');
-  fs.writeFileSync(path.join(mcpEnhancementRoot, 'health.json'), JSON.stringify({
-    ok: true,
-    version: '0.1.0',
-    message: 'Ready',
-    commandChecks: [{ command: 'npm list -g caveman-shrink', ok: true, version: '0.1.0' }]
-  }, null, 2), 'utf8');
-  fs.writeFileSync(path.join(mcpEnhancementRoot, 'source.lock.json'), JSON.stringify({
-    source: { package: 'caveman-shrink' },
-    packages: [{ name: 'caveman-shrink', version: '0.1.0' }],
-    installerCommandSummary: 'npm install -g caveman-installer caveman-shrink'
-  }, null, 2), 'utf8');
-  extensionModule.__writeSolomapEnhancementRegistry('/workspace/app', enhancementRuntimeRoot, {
-    ...extensionModule.__readSolomapEnhancementRegistry('/workspace/app', enhancementRuntimeRoot),
-    enhancements: [{
-      id: 'mcp-description-compressor',
-      title: 'MCP Description Compressor',
-      status: 'installed',
-      version: '0.1.0',
-      health: { ok: true, version: '0.1.0', message: 'Ready' },
-      installedPath: 'installed/mcp-description-compressor',
-      configPath: 'installed/mcp-description-compressor/solomap.enhancement.json'
-    }]
-  });
-  const fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-fake-caveman-'));
-  const fakeCaveman = path.join(fakeBin, 'caveman');
-  fs.writeFileSync(fakeCaveman, '#!/usr/bin/env bash\nexit 0\n', 'utf8');
-  fs.chmodSync(fakeCaveman, 0o755);
-  const fakeCheckWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-enhancement-check-workspace-'));
-  const oldPath = process.env.PATH;
-  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  try {
-    const recheck = extensionModule.__checkAndRegisterEnhancement(fakeCheckWorkspace, enhancementRuntimeRoot, 'mcp-description-compressor');
-    assert.equal(recheck.ok, true);
-  } finally {
-    process.env.PATH = oldPath;
-  }
-  const mcpStatus = extensionModule.__getSolomapEnhancementStatusSummaries(fakeCheckWorkspace, enhancementRuntimeRoot).find((item) => item.id === 'mcp-description-compressor');
-  assert.equal(mcpStatus.installed, true);
-  assert.equal(mcpStatus.version, '0.1.0');
-  const preservedMcpHealth = JSON.parse(fs.readFileSync(path.join(mcpEnhancementRoot, 'health.json'), 'utf8'));
-  const preservedMcpSourceLock = JSON.parse(fs.readFileSync(path.join(mcpEnhancementRoot, 'source.lock.json'), 'utf8'));
-  assert.equal(preservedMcpHealth.version, '0.1.0');
-  assert.equal(preservedMcpSourceLock.packages[0].version, '0.1.0');
 
   const agyShellRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-agy-shell-'));
   const agyShellScript = extensionModule.__buildAgentShellScript(
@@ -9676,38 +9713,16 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /agy' --print .*"\$\(cat/);
   assert.doesNotMatch(fs.readFileSync(agyShellScript.runScriptPath, 'utf8'), /@prompt-file/);
 
-  const enhancedShellRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-enhanced-shell-'));
-  const enhancedShellScript = extensionModule.__buildAgentShellScript(
-    'agy',
-    'Ship the MVP',
-    enhancedShellRoot,
-    '2',
-    46,
-    '检查函数引用和影响面',
-    undefined,
-    '',
-    '',
-    'step',
-    '',
-    enhancementRuntimeRoot,
-    'auto',
-    '',
-    'high_risk',
-    { 'command-output-optimizer': true, 'code-structure-assistant': true }
+  const retiredEnhancementShell = extensionModule.__buildAgentShellScript(
+    'agy', 'Ship the MVP', fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-retired-enhancement-shell-')),
+    '2', 46, '检查函数引用和影响面', undefined, '', '', 'step', '', skillStoreRoot, 'auto', '', 'high_risk',
+    { 'command-output-optimizer': true, 'code-structure-assistant': true, 'mcp-description-compressor': true }
   );
-  const enhancedRunScript = fs.readFileSync(enhancedShellScript.runScriptPath, 'utf8');
-  const enhancedPrompt = fs.readFileSync(enhancedShellScript.promptFilePath, 'utf8');
-  assert.match(enhancedRunScript, /SOLOMAP_RTK_OUTPUT_OPTIMIZER=1/);
-  assert.match(enhancedRunScript, /export PATH=.*enhancements\/runtime\/bin/);
-  assert.doesNotMatch(enhancedRunScript, /codegraph init -i/);
-  assert.match(enhancedRunScript, /harness-enhancements\.md/);
-  assert.match(enhancedRunScript, /timeout 6s/);
-  assert.match(enhancedRunScript, /codegraph status/);
-  assert.match(enhancedRunScript, /codegraph query/);
-  assert.match(enhancedRunScript, /codegraph affected --stdin --quiet/);
-  assert.match(enhancedPrompt, /SoloMap Harness 增强运行时/);
-  assert.match(enhancedPrompt, /SOLOMAP_RTK_BYPASS=1/);
-  childProcess.execFileSync('bash', ['-n', enhancedShellScript.runScriptPath]);
+  const retiredRunScript = fs.readFileSync(retiredEnhancementShell.runScriptPath, 'utf8');
+  const retiredPrompt = fs.readFileSync(retiredEnhancementShell.promptFilePath, 'utf8');
+  assert.doesNotMatch(retiredRunScript, /SOLOMAP_RTK|codegraph|caveman|harness-enhancements/);
+  assert.doesNotMatch(retiredPrompt, /Command Output Optimizer|Code Structure Assistant|MCP Description Compressor|Harness 增强/);
+  childProcess.execFileSync('bash', ['-n', retiredEnhancementShell.runScriptPath]);
 
   const claudeShellScript = extensionModule.__buildAgentShellScript(
     'claude',
@@ -9733,7 +9748,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.doesNotMatch(fs.readFileSync(copilotShellScript.runScriptPath, 'utf8'), /\$\(cat .*prompt\.txt/);
   assert.doesNotMatch(fs.readFileSync(copilotShellScript.runScriptPath, 'utf8'), /copilot' .*"\$agent_prompt"/);
 
-  const prompt = extensionModule.__buildAgentConversationPrompt(
+  const prompt = await extensionModule.__buildAgentConversationPrompt(
     {
       title: 'Build onboarding',
       stage: '产品与 MVP',
@@ -9742,21 +9757,22 @@ test('agent command builder keeps background one-shot commands and uses native i
       status: 'In Progress'
     },
     'Use a small smoke test.',
-    '/workspace/app',
-    '/workspace/app/.solopreneur/step-memory/2.json',
-    '/workspace/app/.solopreneur/agent-runs/2',
-    '/workspace/app/.solopreneur/agent-runs/2/completion.json'
+    transportProjectRoot,
+    path.join(transportProjectRoot, '.solopreneur', 'step-memory', '2.json'),
+    path.join(transportProjectRoot, '.solopreneur', 'agent-runs', '2'),
+    path.join(transportProjectRoot, '.solopreneur', 'agent-runs', '2', 'completion.json')
   );
   assert.match(prompt, /Use a small smoke test/);
   assert.match(prompt, /最高优先级规则/);
   assert.match(prompt, /唯一最高优先级指令/);
-  assert.match(prompt, /必须先读取 SoloMap 为本环节保存的项目上下文文件/);
-  assert.match(prompt, /\.solopreneur\/step-memory\/2\.json/);
-  assert.match(prompt, /\.solopreneur\/agent-runs\/2/);
-  assert.doesNotMatch(prompt, /\/workspace\/app\/\.solopreneur\/agent-runs\/2\/completion\.json/);
+  assert.match(prompt, /SoloMap 数据库工具/);
+  assert.match(prompt, /solomap_context/);
+  assert.doesNotMatch(prompt, /\.solopreneur\/step-memory\/2\.json/);
+  assert.doesNotMatch(prompt, /\.solopreneur\/agent-runs\/2/);
+  assert.doesNotMatch(prompt, new RegExp(path.join(transportProjectRoot, '.solopreneur', 'agent-runs', '2', 'completion.json').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.doesNotMatch(prompt, /该环节交接总结 JSON/);
   assert.doesNotMatch(prompt, /Created README and ran npm test/);
-  assert.match(prompt, /SOLOMAP_TASK_COMMAND/);
+  assert.doesNotMatch(prompt, /SOLOMAP_TASK_COMMAND/);
   assert.match(prompt, /本环节完成标准/);
   assert.match(prompt, /MVP 或产品切片已经能被运行/);
   assert.match(prompt, /本轮交付和最终完成判断必须对照这些标准/);
@@ -9765,10 +9781,10 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(prompt, /SoloMap/);
   assert.match(prompt, /SoloMap 启动包（插件生成，执行前硬门禁）/);
   assert.match(prompt, /运行类型：step/);
-  assert.match(prompt, /\.solomap-global\/memory/);
+  assert.doesNotMatch(prompt, /\.solomap-global\/memory/);
   assert.doesNotMatch(prompt, /学习候选的晋升不要求用户手工确认/);
 
-  const followupPrompt = extensionModule.__buildAgentConversationPrompt(
+  const followupPrompt = await extensionModule.__buildAgentConversationPrompt(
     {
       title: 'Build onboarding',
       stage: '产品与 MVP',
@@ -9777,10 +9793,10 @@ test('agent command builder keeps background one-shot commands and uses native i
       status: 'In Progress'
     },
     'Keep the original novel ending.',
-    '/workspace/app',
-    '/workspace/app/.solopreneur/step-memory/2.json',
-    '/workspace/app/.solopreneur/agent-runs/2',
-    '/workspace/app/.solopreneur/agent-runs/2/completion.json',
+    transportProjectRoot,
+    path.join(transportProjectRoot, '.solopreneur', 'step-memory', '2.json'),
+    path.join(transportProjectRoot, '.solopreneur', 'agent-runs', '2'),
+    path.join(transportProjectRoot, '.solopreneur', 'agent-runs', '2', 'completion.json'),
     '3350a3b7-7761-4ed5-9661-2e9c9de8f924'
   );
   assert.match(followupPrompt, /Keep the original novel ending/);
@@ -9790,14 +9806,14 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(followupPrompt, /上一轮会话 ID：3350a3b7-7761-4ed5-9661-2e9c9de8f924/);
   assert.match(followupPrompt, /这只是可选参考，不是强制续接命令/);
   assert.match(followupPrompt, /只有在你判断确实需要查看上一轮对话细节时/);
-  assert.match(followupPrompt, /项目目录：\/workspace\/app/);
+  assert.match(followupPrompt, new RegExp(`项目目录：${transportProjectRoot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   assert.match(followupPrompt, /环节说明：Create the first usable onboarding path/);
-  assert.match(followupPrompt, /\.solopreneur\/step-memory\/2\.json/);
+  assert.doesNotMatch(followupPrompt, /\.solopreneur\/step-memory\/2\.json/);
 
   const attachedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-attached-files-'));
   fs.mkdirSync(path.join(attachedRoot, 'docs'), { recursive: true });
   fs.writeFileSync(path.join(attachedRoot, 'docs', 'brief.md'), 'Brief', 'utf8');
-  const attachedPrompt = extensionModule.__buildAgentConversationPrompt(
+  const attachedPrompt = await extensionModule.__buildAgentConversationPrompt(
     {
       title: 'Build onboarding',
       stage: '产品与 MVP',
@@ -9819,13 +9835,13 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(attachedPrompt, /用户为本次对话选择了补充文件/);
   assert.match(attachedPrompt, /docs\/brief\.md/);
   assert.doesNotMatch(attachedPrompt, /\.\.\/outside\.md/);
-  assert.match(attachedPrompt, /用户设置的全局默认要求/);
-  assert.match(attachedPrompt, /Always preserve public API compatibility/);
+  assert.doesNotMatch(attachedPrompt, /用户设置的全局默认要求/);
+  assert.doesNotMatch(attachedPrompt, /Always preserve public API compatibility/);
   assert.match(attachedPrompt, /本次用户补充为准/);
   assert.match(attachedPrompt, /本环节完成标准/);
   assert.match(attachedPrompt, /SoloMap 启动包（插件生成，执行前硬门禁）/);
-  assert.match(attachedPrompt, /\.solomap-global\/memory/);
-  const issueContextPrompt = extensionModule.__buildAgentConversationPrompt(
+  assert.match(attachedPrompt, /SoloMap 数据库工具/);
+  const issueContextPrompt = await extensionModule.__buildAgentConversationPrompt(
     {
       title: 'Fix onboarding bug',
       stage: '产品与 MVP',
@@ -9845,18 +9861,21 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.match(issueContextPrompt, /当前环节关联的 GitHub Issues/);
   assert.match(issueContextPrompt, /Issue #12: 页面加载慢/);
-  assert.match(followupPrompt, /\.solopreneur\/agent-runs\/2/);
-  assert.doesNotMatch(followupPrompt, /\/workspace\/app\/\.solopreneur\/agent-runs\/2\/completion\.json/);
+  assert.doesNotMatch(followupPrompt, /\.solopreneur\/agent-runs\/2/);
+  assert.doesNotMatch(followupPrompt, new RegExp(path.join(transportProjectRoot, '.solopreneur', 'agent-runs', '2', 'completion.json').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.doesNotMatch(followupPrompt, /该环节交接总结 JSON/);
   assert.doesNotMatch(followupPrompt, /Old handoff should not be injected/);
   assert.doesNotMatch(followupPrompt, /继续当前路线图环节的原生 Agent 会话/);
 
-  const revisionPrompt = extensionModule.__buildRoadmapRevisionPrompt(
+  const revisionPrompt = await extensionModule.__buildRoadmapRevisionPrompt(
     '将发布准备提前，并增加支付验证环节。',
-    '/workspace/app',
+    transportProjectRoot,
     'Always run focused checks.',
     [],
-    '/workspace/.solomap-global'
+    path.join(transportFixtureRoot, 'revision-global', '.solomap-global'),
+    {},
+    true,
+    'node /extension/resources/tools/validate-roadmap.cjs --mode revision'
   );
   assert.match(revisionPrompt, /本次路线图调整要求（最高优先级）/);
   assert.match(revisionPrompt, /将发布准备提前，并增加支付验证环节/);
@@ -9865,14 +9884,14 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(revisionPrompt, /validate-roadmap\.cjs --mode revision/);
   assert.match(revisionPrompt, /核心产品（商业化产品）/);
   assert.match(revisionPrompt, /不可强行套用营销或销售任务/);
-  assert.match(revisionPrompt, /Always run focused checks/);
+  assert.doesNotMatch(revisionPrompt, /Always run focused checks/);
   assert.match(revisionPrompt, /SoloMap 启动包（插件生成，执行前硬门禁）/);
   assert.match(revisionPrompt, /运行类型：roadmap_revision/);
-  assert.match(revisionPrompt, /\/workspace\/\.solomap-global\/memory/);
+  assert.match(revisionPrompt, /SoloMap 数据库工具/);
 
   const soloPromptRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-solo-prompt-'));
   const soloGlobalRoot = path.join(soloPromptRoot, 'shared global', '.solomap-global');
-  const soloPrompt = extensionModule.__buildSoloConversationPrompt(
+  const soloPrompt = await extensionModule.__buildSoloConversationPrompt(
     '帮我判断这个文案方向。',
     soloPromptRoot,
     'Keep answers brief.',
@@ -9886,31 +9905,17 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.doesNotMatch(soloPrompt, /Keep answers brief/);
   assert.match(soloPrompt, /本轮执行内核/);
   assert.match(soloPrompt, /SoloMap 按需上下文索引/);
-  assert.match(soloPrompt, /global-default-prompt\.md/);
-  assert.equal(fs.readFileSync(path.join(soloGlobalRoot, 'context', 'global-default-prompt.md'), 'utf8'), 'Keep answers brief.\n');
-  assert.match(soloPrompt, /普通首次任务不默认读取/);
-  assert.match(soloPrompt, /solomap-experience\.cjs.*retrieve.*--query/);
   assert.match(soloPrompt, /技能目录/);
-  assert.match(soloPrompt, /记忆系统：.*solomap-memory\.cjs.*retrieve.*--query.*--limit 5/);
-  assert.match(soloPrompt, new RegExp(path.join(soloGlobalRoot, 'tools', 'solomap-memory.cjs').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  assert.match(soloPrompt, new RegExp(path.join(soloGlobalRoot, 'tools', 'solomap-experience.cjs').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  assert.match(soloPrompt, /node "[^"]*shared global[^"]*solomap-memory\.cjs" retrieve/);
-  assert.match(soloPrompt, /node "[^"]*shared global[^"]*solomap-experience\.cjs" retrieve/);
-  assert.doesNotMatch(soloPrompt, new RegExp(path.join(soloPromptRoot, 'resources', 'tools').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  assert.match(soloPrompt, /按返回的精确文件与行号读取原文/);
-  assert.match(soloPrompt, /普通简单任务不默认查询/);
-  assert.doesNotMatch(soloPrompt, /用户偏好：.*profile\.md/);
-  assert.doesNotMatch(soloPrompt, /已确认决策：.*memory[\\/]decisions/);
-  assert.doesNotMatch(soloPrompt, /可复用模式：.*memory[\\/]patterns/);
-  assert.doesNotMatch(soloPrompt, /领域知识：.*memory[\\/]domains/);
-  assert.doesNotMatch(soloPrompt, /临时观察：.*memory[\\/]inbox/);
-  assert.match(soloPrompt, /记忆处置门禁/);
-  assert.match(soloPrompt, /solomap-memory\.cjs.*route.*--kind.*--title/);
-  assert.match(soloPrompt, /先读取返回的目标文件/);
-  assert.match(soloPrompt, /不要盲目追加/);
-  assert.match(soloPrompt, /不要默认把所有内容写入项目记忆/);
-  assert.match(soloPrompt, /写入 projects\/ 前先确认它不应进入 decisions\/、patterns\/ 或 domains\//);
-  assert.match(soloPrompt, /documentation\.json/);
+  assert.match(soloPrompt, /SoloMap 数据库工具/);
+  assert.match(soloPrompt, /solomap_context/);
+  assert.match(soloPrompt, /solomap_search/);
+  assert.match(soloPrompt, /solomap_read/);
+  assert.match(soloPrompt, /solomap_write/);
+  assert.doesNotMatch(soloPrompt, /global-default-prompt\.md/);
+  assert.equal(fs.existsSync(path.join(soloGlobalRoot, 'context', 'global-default-prompt.md')), false);
+  assert.doesNotMatch(soloPrompt, /solomap-memory\.cjs/);
+  assert.doesNotMatch(soloPrompt, /solomap-experience\.cjs/);
+  assert.doesNotMatch(soloPrompt, /documentation\.json/);
   assert.doesNotMatch(soloPrompt, /SoloMap 启动包（插件生成，执行前硬门禁）/);
   assert.doesNotMatch(soloPrompt, /SoloMap 跨项目学习信号/);
   assert.doesNotMatch(soloPrompt, /SoloMap 相关执行经验/);
@@ -9922,7 +9927,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   const soloAttachmentRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-solo-attached-files-'));
   fs.mkdirSync(path.join(soloAttachmentRoot, 'docs'), { recursive: true });
   fs.writeFileSync(path.join(soloAttachmentRoot, 'docs', 'brief.md'), 'Brief', 'utf8');
-  const attachedSoloPrompt = extensionModule.__buildSoloConversationPrompt(
+  const attachedSoloPrompt = await extensionModule.__buildSoloConversationPrompt(
     '根据补充资料判断方向。',
     soloAttachmentRoot,
     '',
@@ -9931,43 +9936,41 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(attachedSoloPrompt, /用户为本次 Solo 对话选择了补充文件/);
   assert.match(attachedSoloPrompt, /docs\/brief\.md/);
   assert.doesNotMatch(attachedSoloPrompt, /\.\.\/outside\.md/);
-  const flowPlannerPrompt = extensionModule.__buildFlowPlannerPrompt({
+  const flowPlannerPrompt = await extensionModule.__buildFlowPlannerPrompt({
     goal: '让 Flow 使用统一记忆机制',
-    workspaceRoot: '/workspace/app',
+    workspaceRoot: transportProjectRoot,
     flowId: 'flow-1',
     loopId: 'loop-1',
-    globalDataPath: '/workspace/.solomap-global'
+    globalDataPath: path.join(transportFixtureRoot, 'flow-global', '.solomap-global')
   });
   assert.match(flowPlannerPrompt, /SoloMap 启动包（插件生成，执行前硬门禁）/);
   assert.match(flowPlannerPrompt, /运行类型：flow \/ 角色：planner/);
-  const flowBuilderPrompt = extensionModule.__buildFlowBuilderPrompt({
+  const flowBuilderPrompt = await extensionModule.__buildFlowBuilderPrompt({
     goal: '让 Flow 使用统一记忆机制',
-    workspaceRoot: '/workspace/app',
+    workspaceRoot: transportProjectRoot,
     flowId: 'flow-1',
     loopId: 'loop-1',
     planner: { plan: ['wire startup pack'] },
-    globalDataPath: '/workspace/.solomap-global'
+    globalDataPath: path.join(transportFixtureRoot, 'flow-global', '.solomap-global')
   });
   assert.match(flowBuilderPrompt, /运行类型：flow \/ 角色：builder/);
-  const flowVerifierPrompt = extensionModule.__buildFlowVerifierPrompt({
+  const flowVerifierPrompt = await extensionModule.__buildFlowVerifierPrompt({
     goal: '让 Flow 使用统一记忆机制',
-    workspaceRoot: '/workspace/app',
+    workspaceRoot: transportProjectRoot,
     flowId: 'flow-1',
     loopId: 'loop-1',
     planner: { plan: ['wire startup pack'] },
     builder: { actions: ['changed prompt builder'] },
     evidence: { changedFilesSummary: 'M src/extension.ts', touchedFilesSummary: 'src/extension.ts', outputTail: 'ok' },
-    globalDataPath: '/workspace/.solomap-global'
+    globalDataPath: path.join(transportFixtureRoot, 'flow-global', '.solomap-global')
   });
   assert.match(flowVerifierPrompt, /运行类型：flow \/ 角色：verifier/);
 
   const manifestPath = path.join(soloAttachmentRoot, '.solopreneur', 'documentation.json');
-  assert.ok(fs.existsSync(manifestPath));
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  assert.ok(Array.isArray(manifest.documents));
+  assert.equal(fs.existsSync(manifestPath), false);
 
   const criteriaRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-criteria-'));
-  const criteriaNodes = extensionModule.__ensureCompletionCriteriaForNodes(criteriaRoot, [{
+  const criteriaNodes = await extensionModule.__ensureCompletionCriteriaForNodes(criteriaRoot, [{
     id: '2',
     title: '构建第一个可用 MVP 切片',
     stage: '产品与 MVP',
@@ -9982,13 +9985,11 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.ok(Array.isArray(criteriaNodes[0].completionCriteria));
   assert.ok(criteriaNodes[0].completionCriteria.length >= 3);
   const criteriaFilePath = extensionModule.__getStepMemoryFilePath(criteriaRoot, '2');
-  assert.ok(fs.existsSync(criteriaFilePath));
-  const criteriaFile = JSON.parse(fs.readFileSync(criteriaFilePath, 'utf8'));
-  assert.ok(criteriaFile.completionCriteria.some((line) => /MVP|产品切片/.test(line)));
-  assert.ok(Array.isArray(criteriaFile.entries));
+  assert.equal(fs.existsSync(criteriaFilePath), false);
+  assert.ok(criteriaNodes[0].completionCriteria.some((line) => /MVP|产品切片/.test(line)));
   assert.equal(
-    JSON.stringify(extensionModule.__readCompletionCriteria(criteriaRoot, criteriaNodes[0])),
-    JSON.stringify(criteriaFile.completionCriteria)
+    JSON.stringify(await extensionModule.__readCompletionCriteria(criteriaRoot, criteriaNodes[0])),
+    JSON.stringify(criteriaNodes[0].completionCriteria)
   );
 
   const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-session-'));
@@ -10054,11 +10055,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(digest.handoff.nextAgentBrief, /相关执行经验已接入 prompt/);
   assert.ok(digest.handoff.filesToInspectFirst.includes('src/extension.ts'));
   assert.ok(digest.handoff.commandsToRunNext.includes('npm test'));
-  const digestPath = extensionModule.__writeRunDigest(digestRoot, digest);
-  assert.ok(fs.existsSync(digestPath));
-  const graphPath = path.join(digestRoot, '.solopreneur', 'execution-graph.json');
-  assert.ok(fs.existsSync(graphPath));
-  const graphFile = JSON.parse(fs.readFileSync(graphPath, 'utf8'));
+  const graphFile = extensionModule.__buildExecutionGraphFromDigests([digest]);
   assert.equal(graphFile.runCount, 1);
   assert.ok(graphFile.indexes.byFile['src/extension.ts'].includes(digest.runId));
   assert.equal(graphFile.schemaVersion, 2);
@@ -10070,12 +10067,26 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.equal(verificationNode.stats.uses, 0);
   assert.equal(verificationNode.stats.winRate, 0.5);
   assert.ok(graphFile.indexes.byExperience[verificationNode.id].includes(digest.runId));
-  const experiencePrompt = extensionModule.__buildExecutionExperiencePrompt(digestRoot, {
+  const digestGlobalRoot = path.join(digestRoot, '.solomap-global');
+  const digestRegistration = await capabilityTransport.sendRuntimeDataRequest(digestGlobalRoot, {
+    operation: 'register_project',
+    input: { root: digestRoot }
+  });
+  const digestBytes = Buffer.from(JSON.stringify(digest));
+  const digestSource = {
+    identity: `run-digests:${digestRegistration.projectId}`,
+    key: `${digest.runId}.json`,
+    hash: require('node:crypto').createHash('sha256').update(digestBytes).digest('hex')
+  };
+  const digestOwner = capabilityStores.get(digestGlobalRoot);
+  digestOwner.store.captureMigrationSource(digestSource, digestBytes, { mimeType: 'application/json', encoding: 'utf8' });
+  digestOwner.store.importRunDigestSource(digestRegistration.projectId, { source: digestSource, bytes: digestBytes });
+  const experiencePrompt = await extensionModule.__buildExecutionExperiencePrompt(digestRoot, {
     nodeId: '2',
     runKind: 'step',
     contextText: '继续修复 src/extension.ts 的 SoloMap prompt 注入。',
     supplementFiles: ['src/extension.ts']
-  });
+  }, digestGlobalRoot);
   assert.match(experiencePrompt, /SoloMap 相关执行经验/);
   assert.match(experiencePrompt, /修复 src\/extension\.ts/);
   assert.match(experiencePrompt, /src\/extension\.ts/);
@@ -10088,56 +10099,6 @@ test('agent command builder keeps background one-shot commands and uses native i
   const crossAgentGlobalRoot = path.join(digestRoot, 'shared global');
   const crossAgentInstructions = extensionModule.__buildCrossAgentHandoffInstructions(digestRoot, '2', 'step', crossAgentGlobalRoot);
   assertBundledHandoffInstructions(crossAgentInstructions, path.join(crossAgentGlobalRoot, '.solomap-global'));
-
-  const SQL = await require('sql.js')();
-  const cliDbPath = path.join(digestRoot, '.solopreneur', 'project_journal.db');
-  const db = new SQL.Database();
-  db.run('CREATE TABLE execution_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, nodeId TEXT, timestamp TEXT, agentCli TEXT, command TEXT, output TEXT, status TEXT)');
-  db.run(
-    'INSERT INTO execution_logs (nodeId, timestamp, agentCli, command, output, status) VALUES (?, ?, ?, ?, ?, ?)',
-    [
-      '2',
-      '2026-06-02T00:01:00.000Z',
-      'codex',
-      'npm test',
-      [
-        'User supplement:',
-        '继续修复 prompt 注入',
-        '',
-        'Workspace changes:',
-        'M src/extension.ts',
-        '',
-        'Completion decision:',
-        '相关执行经验已接入 prompt。',
-        '',
-        'Agent output tail:',
-        'RAW_SQLITE_LOG_SHOULD_NOT_APPEAR',
-        'npm test passed'
-      ].join('\n'),
-      'Completed'
-    ]
-  );
-  fs.writeFileSync(cliDbPath, Buffer.from(db.export()));
-  db.close();
-  const cliOutput = childProcess.execFileSync(
-    process.execPath,
-    [
-      path.join(projectRoot, 'resources/tools/solomap-experience.cjs'),
-      'handoff',
-      '--project',
-      digestRoot,
-      '--node',
-      '2',
-      '--json'
-    ],
-    { encoding: 'utf8' }
-  );
-  const cliJson = JSON.parse(cliOutput);
-  assert.equal(cliJson.command, 'handoff');
-  assert.equal(cliJson.payload[0].executionLogId, 42);
-  assert.match(cliJson.payload[0].brief, /相关执行经验已接入 prompt/);
-  assert.ok(cliJson.payload[0].filesToInspectFirst.includes('src/extension.ts'));
-  assert.doesNotMatch(cliOutput, /RAW_SQLITE_LOG_SHOULD_NOT_APPEAR/);
 
   const dirtySummary = [
     '# 环节交接总结',
@@ -10170,24 +10131,16 @@ test('agent command builder keeps background one-shot commands and uses native i
     'First run complete.'
   ].join('\n');
   const parsedDirty = extensionModule.__parseStepHandoffEntries(dirtySummary);
-  assert.equal(parsedDirty.length, 1);
+  assert.equal(parsedDirty.length, 2);
   assert.equal(JSON.stringify(parsedDirty[0].changedFiles), JSON.stringify(['docs/implementation-plan.md']));
   assert.match(parsedDirty[0].usefulSignals, /Created implementation plan/);
 
-  const handoffPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-handoff-')), '2.json');
-  const firstSummary = extensionModule.__updateStepHandoffSummary(handoffPath, handoff);
-  const secondSummary = extensionModule.__updateStepHandoffSummary(handoffPath, handoff);
-  assert.equal(extensionModule.__parseStepHandoffEntries(secondSummary).length, 1);
-  assert.doesNotMatch(secondSummary, /# 环节交接总结/);
-  assert.doesNotMatch(secondSummary, /\n\n---\n\n/);
-  assert.equal(JSON.parse(secondSummary).entries.length, 1);
-  assert.equal(extensionModule.__readStepHandoffSummary(handoffPath), secondSummary);
-  assert.match(firstSummary, /solopreneur\.stepHandoff/);
-
-  const legacyHandoffPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-handoff-legacy-')), '2.json');
-  fs.writeFileSync(legacyHandoffPath.replace(/\.json$/, '.md'), dirtySummary, 'utf8');
-  const migrated = extensionModule.__readStepHandoffSummary(legacyHandoffPath);
-  assert.equal(JSON.parse(migrated).entries.length, 1);
+  const handoffSummary = extensionModule.__buildStepHandoffSummary([handoff]);
+  assert.equal(extensionModule.__parseStepHandoffEntries(handoffSummary).length, 1);
+  assert.doesNotMatch(handoffSummary, /# 环节交接总结/);
+  assert.doesNotMatch(handoffSummary, /\n\n---\n\n/);
+  assert.equal(JSON.parse(handoffSummary).entries.length, 1);
+  assert.match(handoffSummary, /solopreneur\.stepHandoff/);
 
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-noop-agent-'));
   const noopRun = extensionModule.__buildAgentShellScript('agy', 'printf ok', tempRoot, 'noop', 7, '', undefined, '', 'printf ok');
@@ -10211,10 +10164,14 @@ test('agent command builder keeps background one-shot commands and uses native i
   fs.mkdirSync(path.join(writeRoot, '.solopreneur'), { recursive: true });
   fs.writeFileSync(path.join(writeRoot, '.solopreneur', 'roadmap.csv'), 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n', 'utf8');
   const writeCommand = `node -e ${extensionModule.__shellQuote('const fs=require("fs"); fs.appendFileSync(".solopreneur/roadmap.csv","1,Init,,问题与客户发现,,codex,Prompt,Pending,2026-01-01T00:00:00.000Z,\\n");')}`;
-  const writeRun = extensionModule.__buildAgentShellScript('codex', '', writeCommand, writeRoot, 'write', 8, '', undefined, '', writeCommand, 'maintenance');
+  const writeRun = extensionModule.__buildAgentShellScript('codex', '', writeCommand, writeRoot, 'write', 8, '', undefined, '', writeCommand, 'maintenance', '', path.join(writeRoot, '.isolated-global'));
   childProcess.execSync(writeRun.finalCommand, { cwd: writeRoot, stdio: 'ignore' });
   const touchedFiles = fs.readFileSync(path.join(writeRoot, '.solopreneur/agent-runs/write/touched-files.txt'), 'utf8');
-  assert.match(touchedFiles, /[AM] \.solopreneur\/roadmap\.csv/);
+  assert.match(touchedFiles, /[AM] \.solopreneur\/roadmap\.csv/, JSON.stringify({
+    status: JSON.parse(fs.readFileSync(path.join(writeRoot, '.agent_status.json'), 'utf8')),
+    roadmap: fs.readFileSync(path.join(writeRoot, '.solopreneur', 'roadmap.csv'), 'utf8'),
+    snapshot: JSON.parse(fs.readFileSync(path.join(writeRoot, '.solopreneur', 'agent-runs', 'write', 'workspace-before.json'), 'utf8'))
+  }));
 
   const attributedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-attributed-agent-'));
   childProcess.execFileSync('git', ['init', '-q'], { cwd: attributedRoot });
@@ -10242,7 +10199,9 @@ test('agent command builder keeps background one-shot commands and uses native i
     undefined,
     '',
     attributedCommand,
-    'maintenance'
+    'maintenance',
+    '',
+    path.join(attributedRoot, '.isolated-global')
   );
   childProcess.execSync(attributedRun.finalCommand, { cwd: attributedRoot, stdio: 'ignore' });
   const attributedChanges = fs.readFileSync(attributedRun.changesFilePath, 'utf8');
@@ -10271,7 +10230,9 @@ test('agent command builder keeps background one-shot commands and uses native i
     undefined,
     '',
     nonGitCommand,
-    'maintenance'
+    'maintenance',
+    '',
+    path.join(nonGitRoot, '.isolated-global')
   );
   childProcess.execSync(nonGitRun.finalCommand, { cwd: nonGitRoot, stdio: 'ignore' });
   const nonGitChanges = fs.readFileSync(nonGitRun.changesFilePath, 'utf8');
@@ -10351,32 +10312,33 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(dataReadme, /全局 SoloMap 数据库/);
   assert.match(dataReadme, /Git\/GitHub/);
   assert.match(bootstrapInstructions, /Bootstrap Roadmap Instructions/);
-  assert.match(bootstrapInstructions, /roadmap-methodology\.md/);
-  assert.match(bootstrapInstructions, /validate-roadmap\.cjs --mode bootstrap/);
+  assert.match(bootstrapInstructions, /本轮提示中的路线图方法/);
+  assert.match(bootstrapInstructions, /共享路线图校验命令/);
+  assert.doesNotMatch(bootstrapInstructions, /\.solopreneur\/(?:roadmap-methodology\.md|validate-roadmap\.cjs)/);
   assert.match(bootstrapInstructions, /按项目真实目标选择适用的推进框架/);
   assert.match(bootstrapInstructions, /6 个类别/);
   assert.match(bootstrapInstructions, /Build->Sell->Learn->Improve/);
   assert.match(bootstrapInstructions, /不要把本文件内容、提示词模板或解释性说明写回 CSV/);
   assert.match(extensionModule.__buildRoadmapValidationScript(), /--mode bootstrap/);
   assert.match(extensionModule.__buildRoadmapValidationScript(), /--mode revision/);
-  assert.match(extensionModule.__buildLocalRoadmap('SaaS app', 'codex')[0].agentPrompt, /validate-roadmap\.cjs --mode bootstrap/);
+  assert.match(extensionModule.__buildLocalRoadmap('SaaS app', 'codex')[0].agentPrompt, /共享路线图校验命令/);
   const scriptRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-roadmap-script-'));
   const scriptSolopreneurDir = path.join(scriptRoot, '.solopreneur');
   fs.mkdirSync(scriptSolopreneurDir, { recursive: true });
-  extensionModule.__ensureRoadmapValidationScript(scriptSolopreneurDir);
   fs.writeFileSync(path.join(scriptSolopreneurDir, 'roadmap.csv'), [
     'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
     '10,梳理目标客户,整理 ICP 与定价假设,问题与客户发现,,agy,创建 docs/icp.md 并补充访谈假设,Pending,2026-01-01T00:00:00.000Z,',
     '20,实现首个 MVP 切片,完成最小闭环,产品与 MVP,10,agy,修改 src/app.js 并运行 npm test,Pending,2026-01-01T00:00:00.000Z,'
   ].join('\n'), 'utf8');
-  const scriptPassOutput = childProcess.execFileSync(process.execPath, ['.solopreneur/validate-roadmap.cjs', '--mode', 'bootstrap'], { cwd: scriptRoot, encoding: 'utf8' });
+  const packagedValidator = path.join(projectRoot, 'resources', 'tools', 'validate-roadmap.cjs');
+  const scriptPassOutput = childProcess.execFileSync(process.execPath, [packagedValidator, '--mode', 'bootstrap'], { cwd: scriptRoot, encoding: 'utf8' });
   assert.match(scriptPassOutput, /PASS roadmap validation: bootstrap/);
   fs.writeFileSync(path.join(scriptSolopreneurDir, 'roadmap.csv'), [
     'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
     '10,生成初始路线图,desc,问题与客户发现,,agy,"你的唯一主任务是直接重写 .solopreneur/roadmap.csv",Pending,2026-01-01T00:00:00.000Z,'
   ].join('\n'), 'utf8');
   assert.throws(
-    () => childProcess.execFileSync(process.execPath, ['.solopreneur/validate-roadmap.cjs', '--mode', 'bootstrap'], { cwd: scriptRoot, encoding: 'utf8', stdio: 'pipe' }),
+    () => childProcess.execFileSync(process.execPath, [packagedValidator, '--mode', 'bootstrap'], { cwd: scriptRoot, encoding: 'utf8', stdio: 'pipe' }),
     /FAIL roadmap validation/
   );
   assert.match(methodologyInstructions, /商业化产品的默认四阶段/);
@@ -10425,7 +10387,7 @@ test('tracked native continuation creates a version 2 binding for the exact resu
     directCommand,
     'solo_continue',
     '',
-    '',
+    path.join(workspaceRoot, '.isolated-global'),
     'auto',
     '',
     'off',
@@ -10527,7 +10489,7 @@ test('generated Codex launchers recover once without the daemon after its readin
       input.directCommand,
       input.runKind,
       '',
-      '',
+      path.join(workspaceRoot, '.isolated-global'),
       'auto',
       '',
       'off',
@@ -10560,7 +10522,7 @@ test('generated Codex launchers recover once without the daemon after its readin
     '',
     'solo',
     '',
-    '',
+    path.join(workspaceRoot, '.isolated-global'),
     'auto',
     '',
     'off',
@@ -10618,7 +10580,9 @@ test('generated Cursor launcher passes the provider-created chat ID into the nat
     undefined,
     '',
     '',
-    'solo'
+    'solo',
+    '',
+    path.join(workspaceRoot, '.isolated-global')
   );
 
   const result = childProcess.spawnSync('bash', [shell.runScriptPath], {
@@ -10671,7 +10635,9 @@ test('Cursor creation failures finalize the version 2 binding as unavailable', (
       undefined,
       '',
       '',
-      'solo'
+      'solo',
+      '',
+      path.join(workspaceRoot, '.isolated-global')
     );
 
     const result = childProcess.spawnSync('bash', [shell.runScriptPath], {
@@ -10707,7 +10673,7 @@ test('documentation manifest indexes project docs and flags noisy docs after run
   ].join('\n'), 'utf8');
 
   const manifest = documentation.ensureDocumentationManifest(tempRoot, '2026-06-01T00:00:00.000Z');
-  assert.ok(fs.existsSync(path.join(tempRoot, '.solopreneur', 'documentation.json')));
+  assert.equal(fs.existsSync(path.join(tempRoot, '.solopreneur', 'documentation.json')), false);
   assert.ok(manifest.documents.some((document) => document.path === 'README.md' && document.role === 'direction'));
   assert.ok(manifest.documents.some((document) => document.path === 'docs/methodology/methodology.zh.md' && document.role === 'methodology'));
 
@@ -10730,14 +10696,20 @@ test('documentation manifest indexes project docs and flags noisy docs after run
     changedFilesSummary: 'A docs/summary.md\nM src/app.ts\n',
     touchedFilesSummary: 'A docs/summary.md\n',
     finishedAt: '2026-06-01T01:00:00.000Z'
-  });
+  }, manifest);
 
   assert.match(audit.summary, /建议确认/);
   assert.ok(audit.pendingReview.some((item) => /低语义/.test(item.reason)));
   assert.ok(audit.pendingReview.some((item) => /prompt|终端输出|执行流水/.test(item.reason)));
-  const written = JSON.parse(fs.readFileSync(path.join(tempRoot, '.solopreneur', 'documentation.json'), 'utf8'));
-  assert.equal(written.lastAudit.action, 'needs_review');
-  assert.ok(written.pendingReview.length >= 2);
+  assert.equal(audit.manifest.lastAudit.action, 'needs_review');
+  assert.ok(audit.manifest.pendingReview.length >= 2);
+  fs.unlinkSync(path.join(tempRoot, 'docs', 'summary.md'));
+  fs.unlinkSync(path.join(tempRoot, 'docs', 'methodology', 'methodology.zh.md'));
+  fs.unlinkSync(path.join(tempRoot, 'README.md'));
+  fs.rmdirSync(path.join(tempRoot, 'docs', 'methodology'));
+  fs.rmdirSync(path.join(tempRoot, 'docs'));
+  fs.rmdirSync(path.join(tempRoot, '.solopreneur'));
+  fs.rmdirSync(tempRoot);
 });
 
 test('failed conversations render retry action in roadmap webview', () => {
@@ -10771,10 +10743,12 @@ test('failed conversations render retry action in roadmap webview', () => {
   assert.match(source, /vscode\.commands\.executeCommand\('vscode\.diff'/);
   assert.match(source, /rollbackChange/);
   const projectSignalsSource = fs.readFileSync(path.join(projectRoot, 'src', 'projectSignals.ts'), 'utf8');
+  const externalSignalsSource = fs.readFileSync(path.join(projectRoot, 'src', 'projectExternalSignals.ts'), 'utf8');
   assert.match(projectSignalsSource, /当前项目交付信号/);
-  assert.match(projectSignalsSource, /'3'/);
-  assert.match(projectSignalsSource, /'run',\s*'list'/);
-  assert.match(projectSignalsSource, /'release',\s*'list'/);
+  assert.match(projectSignalsSource, /'20'/);
+  assert.match(projectSignalsSource, /slice\(0, 3\)/);
+  assert.match(externalSignalsSource, /'run',\s*'list'/);
+  assert.match(externalSignalsSource, /'release',\s*'list'/);
 });
 
 test('local roadmap fallback produces runnable dependent tasks', () => {
@@ -10887,7 +10861,11 @@ test('agent impact button reads committed contribution from the configured data 
   const project = path.join(base, 'project'); fs.mkdirSync(project);
   const root = path.join(base, 'configured', '.solomap-global'); const projects = [{ name: 'Project', path: project }];
   const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, projects);
-  fs.writeFileSync(path.join(root, 'projects.json'), JSON.stringify({ projects, hiddenProjects: [] }));
+  await require('../out/projectRegistry.js').refreshProjectRegistry(
+    root,
+    () => ({ legacyProjects: projects }),
+    (operation, input) => native.ops({ operation, input })
+  );
   native.store.upsertProjectRunIndex(native.projectIds.get(project), { executionLogId: 1, nodeId: '__solo__', runKind: 'solo', agentCli: 'codex', status: 'Completed', startedAt: '2026-10-09T09:00:00Z', finishedAt: '2026-10-09T09:10:00Z', durationMs: 600000, totalTokens: 88 }, [{ filePath: 'result.js', role: 'changed' }]);
   const extension = loadCompiledModule('out/extension.js', 'module.exports.handle = handleSharedWebviewAction;');
   const context = { extensionPath: projectRoot, globalState: { get: key => key === 'solopreneur.settings' ? { globalDataPath: root } : undefined } };
@@ -10989,7 +10967,6 @@ test('agent impact disconnected entry resolves with a safe failure and recovers 
   server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'impact-restored', onCommand: () => ({ status: 'running' }), onData: ops });
   await extension.handle({ extensionPath: projectRoot }, { command: 'agentImpact.get', requestId: 'restored' }, 'sidebar', view);
   assert.equal(messages[1].status.impact.totalTokens, 88); assert.equal(messages[1].requestId, 'restored');
-  fs.writeFileSync('/tmp/solomap-462-impact-entry-failure-responses.json', JSON.stringify(messages));
 });
 
 test('agent impact discards late snapshots after a newer read or data-root change', async t => {
@@ -11257,10 +11234,10 @@ test('step conversations can start independently while dependencies or other run
     module.exports.connect = (engine, project, root, launches) => {
       syncEngine = engine; activeProjectRoot = project; extensionContextRef = null;
       getPersistedSettings = () => ({ cliPath: 'claude', globalPrompt: '', globalDataPath: root, enabledEnhancements: {}, taskPermissionMode: 'auto' });
-      ensureTaskRuntimeReady = async () => {}; autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      ensureTaskRuntimeReady = async () => {}; autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
       agentCli_1.resolveAgentCli = value => value; agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
       preSessionGit_1.createPreSessionGitCommit = async () => '';
-      recordLocalUsageEvent = () => {}; sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {};
+      recordLocalUsageEvent = async () => ({}); sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {};
       launchAgentConversationTerminal = async input => launches.push(input);
     };
   `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
@@ -11406,9 +11383,17 @@ test('cold roadmap initialization uses the database selected project before cons
   const f = await openProviderCheckpointFixture(t, 'claude', 972);
   const selected = path.join(path.dirname(f.project), 'selected-project'); fs.mkdirSync(selected);
   await f.ops({ operation: 'register_project', input: { root: selected } });
-  const csv = Buffer.from('id,title,stage,status,dependencies\nselected,已选择项目的任务,实施,Pending,\n');
+  const csv = Buffer.from([
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    'selected,已选择项目的任务,,实施,,claude,,Pending,2026-10-12T00:00:00.000Z,'
+  ].join('\n'));
   fs.writeFileSync(path.join(selected, '.solopreneur', 'roadmap.csv'), csv);
   await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: '工作区', path: f.project }, { name: '已选择', path: selected }], legacySelectedProjectPath: selected } });
+  await require('../out/projectRegistry.js').refreshProjectRegistry(
+    f.root,
+    undefined,
+    (operation, input) => f.ops({ operation, input })
+  );
   const actualSync = require('../out/db/syncEngine.js');
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.initialize = ensureSyncEngine;
@@ -11423,16 +11408,17 @@ test('cold roadmap initialization uses the database selected project before cons
       setupFileSentinelWatcher = () => {};
       ensureSolopreneurReadme = ensureRoadmapMethodologyInstructions = ensureBootstrapRoadmapInstructions = ensureRoadmapValidationScript = () => {};
       ensureCompletionCriteriaForNodes = async (_root, nodes) => nodes;
+      vscode.window.showErrorMessage = message => { module.exports.__lastInitError = message; };
     };
   `, { './projectRegistry': require('../out/projectRegistry.js'), './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js'), './db/syncEngine': actualSync });
   extension.connect(f.project, f.root); t.after(() => extension.close());
   const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback } };
-  assert.equal(await extension.initialize(context), true);
+  assert.equal(await extension.initialize(context), true, extension.__lastInitError);
   assert.equal(extension.currentRoot(), selected, 'the opened workspace must not override the database saved selection');
   assert.equal(extension.currentEngine().dataRoot, f.root);
   await extension.currentEngine().loadHistory();
   await extension.drainNodes();
-  assert.deepEqual(fs.readdirSync(path.join(selected, '.solopreneur')).sort(), ['documentation.json', 'project.json', 'roadmap.csv'], 'the existing documentation index remains tracked under P5; registry and journal files must not return');
+  assert.deepEqual(fs.readdirSync(path.join(selected, '.solopreneur')).sort(), ['project.json', 'roadmap.csv'], 'registry and journal files must not return to the project directory');
   assert.deepEqual(fs.readFileSync(path.join(selected, '.solopreneur', 'roadmap.csv')), csv);
   assert.equal(fs.existsSync(path.join(f.root, 'projects.json')), false);
   await new Promise(resolve => setImmediate(resolve));
@@ -11481,7 +11467,8 @@ function loadProjectManagementHost(workspace, root) {
     module.exports.connect = (workspace, root) => {
       fixtureDataRoot = root; selectedProjectPathInMemory = ''; activeProjectRoot = workspace; syncEngine = null; sidebarProvider = null; activePanel = null;
       getWorkspaceRoot = () => workspace; getPersistedSettings = () => ({ globalDataPath: fixtureDataRoot, cliPath: 'claude' });
-      synchronizeTelegramChannel = scheduleProjectRunIndexBackfill = recordLocalUsageEvent = sendNodesToWebview = () => {};
+      synchronizeTelegramChannel = scheduleProjectRunIndexBackfill = sendNodesToWebview = () => {};
+      recordLocalUsageEvent = async () => ({});
       ensureSyncEngine = async () => false;
     };
   `, { './projectRegistry': require('../out/projectRegistry.js'), './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js'), './projectFoundation': require('../out/projectFoundation.js') });
@@ -11601,7 +11588,7 @@ async function openProviderCheckpointFixture(t, provider, executionLogId, nodeId
   const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
   await engine.initAndSync(); t.after(() => engine.close());
   if (nodeId !== '__solo__') engine.setNodes([{ id: nodeId, title: '原任务', description: '原目标', stage: '实施', dependencies: '', agentCli: provider, agentPrompt: '原任务', status: 'Pending', createdAt: new Date().toISOString(), completedAt: '' }]);
-  let run = await require('../out/agentRunPreparation.js').prepareAgentRun({ agentCli: provider, selectedModel: '', prompt: '完成用户任务', workspaceRoot: project, nodeId, executionLogId, userMessage: '完成用户任务', runKind, globalDataPath: root, taskPermissionMode: 'auto', collaborationReviewMode: 'off' }, (operation, input) => native.ops({ operation, input }));
+  let run = await require('../out/agentRunPreparation.js').prepareAgentRun({ agentCli: provider, selectedModel: '', prompt: '完成用户任务', workspaceRoot: project, nodeId, executionLogId, userMessage: '完成用户任务', runKind, globalDataPath: root, taskPermissionMode: 'auto', collaborationReviewMode: 'off', ...(provider === 'claude' ? { metadata: { nativeResumeProviderContext: { claude: { claudeHome: path.join(base, 'claude-home') } } } } : {}) }, (operation, input) => native.ops({ operation, input }));
   if (provider === 'cursor-agent') run = await require('../out/agentRunPreflight.js').prepareNativeAgentLaunch({ state: run, workspaceRoot: project, prepareDatabase: false, operation: (operation, input) => native.ops({ operation, input }), execute: async command => ({ code: 0, stdout: Buffer.from(command.endsWith('create-chat') ? 'official-cursor-host-chat-73\n' : '--resume supported'), stderr: Buffer.alloc(0) }) });
   const reference = require('../out/runLifecycleClient.js').runStatusReference(project, executionLogId);
   const checkpoint = async (action, fields, reportedSessionId) => {
@@ -11610,10 +11597,70 @@ async function openProviderCheckpointFixture(t, provider, executionLogId, nodeId
     delete env.CLAUDE_CODE_SESSION_ID;
     if (reportedSessionId !== undefined) env.CLAUDE_CODE_SESSION_ID = reportedSessionId;
     const argv = [path.resolve(__dirname, '../out/taskCheckpointProcess.js'), action, ...Object.entries(fields).flatMap(([key, value]) => [`--${key}`, String(value)])];
-    return JSON.parse((await require('node:util').promisify(childProcess.execFile)(process.execPath, argv, { env })).stdout);
+    const receipt = JSON.parse((await require('node:util').promisify(childProcess.execFile)(process.execPath, argv, { env })).stdout);
+    if (provider === 'claude' && action === 'complete') await finishControlledClaudeTurn(native.ops, project, executionLogId, fields.summary, native.store);
+    return receipt;
   };
   return { ...native, engine, root, project, run, reference, checkpoint };
 }
+
+async function finishControlledClaudeTurn(operations, project, executionLogId, text, store) {
+  const input={root:project,executionLogId};
+  const state=await operations({operation:'read_run_state',input});
+  const binding=await operations({operation:'read_run_binding',input});
+  const home=[...binding.revisions].reverse().find(revision=>revision.providerContext?.claude)?.providerContext.claude.claudeHome;
+  assert.ok(home&&path.relative(path.dirname(project),home).split(path.sep)[0]!=='..','native fixture home must belong to its isolated root');
+  const sessionId=binding.revisions.at(-1).sessionId;
+  const dir=path.join(home,'projects',project.replace(/[^a-zA-Z0-9]/g,'-'));fs.mkdirSync(dir,{recursive:true});
+  const user={type:'user',uuid:`owned-user-${state.turnId}`,sessionId,cwd:project,timestamp:new Date().toISOString(),isSidechain:false,message:{role:'user',content:String(state.status.userMessage)}};
+  const reply={...user,type:'assistant',uuid:`owned-reply-${state.turnId}`,parentUuid:user.uuid,message:{id:`owned-message-${state.turnId}`,role:'assistant',content:[{type:'text',text:String(text)}],stop_reason:'end_turn'}};
+  const boundary={...user,type:'system',subtype:'turn_duration',uuid:`owned-duration-${state.turnId}`,parentUuid:reply.uuid,durationMs:1};delete boundary.message;
+  fs.appendFileSync(path.join(dir,sessionId+'.jsonl'),[user,reply,boundary].map(JSON.stringify).join('\n')+'\n');
+  await new (require('../out/runNativeObserver.js').RunNativeObserver)(store).observe(state);
+}
+
+async function prepareControlledClaudeRun(input, operation) {
+  const home=path.join(input.globalDataPath,'acceptance-claude-home',String(input.executionLogId||input.launchIntentId));
+  return require('../out/agentRunPreparation.js').prepareAgentRun({...input,metadata:{...input.metadata,nativeResumeProviderContext:input.metadata?.nativeResumeProviderContext||{claude:{claudeHome:home,configDirOverride:home,configPath:path.join(home,'.claude.json')}}}},operation);
+}
+
+for (const mode of ['native', 'message']) test(`the ${mode} Continue action adopts retained history before using the shared database runner`, async t => {
+  const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-retained-continue-'));
+  const project=path.join(base,'project'),root=path.join(base,'.solomap-global');fs.mkdirSync(project);
+  const native=await require('./analysis-fixture.js').openAnalysisOwner(t,root,[{path:project}]);
+  const dir=path.join(project,'.solopreneur','agent-runs','__solo__','71');fs.mkdirSync(dir,{recursive:true});
+  const sessionId=require('node:crypto').randomUUID(),startedAt='2026-09-01T10:00:00.000Z',finishedAt='2026-09-01T10:01:00.000Z';
+  const identity=require('../out/sessionIdentity.js');
+  let binding=identity.createSessionBindingValue({runId:'71',provider:'claude',workspaceRoot:project,cliPath:'claude',bindingNonce:'retained-host-binding',method:'caller_assigned',contract:'official_stable',createdAt:startedAt});
+  binding=identity.appendSessionBindingValue(binding,1,{sessionId,method:'caller_assigned',contract:'official_stable',state:'planned',createdAt:startedAt});
+  binding=identity.appendSessionBindingValue(binding,2,{sessionId,supersedesRevision:2,method:'caller_assigned',contract:'official_stable',state:'confirmed',createdAt:finishedAt,confirmedAt:finishedAt,evidence:{source:'official_native_observation'}});
+  const task=require('./fixtures/legacy-task-report.cjs');const taskId=task.registerLearningTask(project,{executionLogId:71,runDir:dir,userMessage:'保留用户原始目标',startedAt});
+  fs.writeFileSync(path.join(dir,'session.json'),JSON.stringify(binding));fs.writeFileSync(path.join(dir,'prompt.txt'),'原始完整历史提示🌿'.repeat(1000));fs.writeFileSync(path.join(dir,'command.txt'),'claude original arguments');fs.writeFileSync(path.join(dir,'output.log'),'原始完整历史回复🌿'.repeat(1000));fs.writeFileSync(path.join(dir,'started_at'),startedAt);
+  const statusDir=path.join(project,'.solopreneur','agent-status');fs.mkdirSync(statusDir);
+  const status={workspaceRoot:project,nodeId:'__solo__',executionLogId:71,rootExecutionLogId:71,runKind:'solo',agentCli:'claude',selectedModel:'retained-model',learningTaskId:taskId,status:'Waiting',interactiveSession:true,interactiveSessionClosed:true,startedAt,turnStartedAt:startedAt,finishedAt,checkpointSequence:1,checkpointOutcome:'partial',checkpointSummary:'保留首轮结果',bindingNonce:'retained-host-binding',sessionProvider:'claude',nativeSessionId:sessionId,nativeSessionIdIsCurrent:true,sessionBindingHeadRevision:3,...Object.fromEntries([['sessionFilePath','session.json'],['promptFilePath','prompt.txt'],['commandFilePath','command.txt'],['outputFilePath','output.log']].map(([key,name])=>[key,path.join(dir,name)]))};
+  fs.writeFileSync(path.join(statusDir,'71.json'),JSON.stringify(status));
+  native.store.importProjectJournal(native.projectIds.get(project),{id:71,nodeId:'__solo__',timestamp:startedAt,agentCli:'claude',command:'claude original arguments',output:'原始结果',status:'Waiting'});
+  const engine=new(require('../out/db/syncEngine.js').SyncEngine)(path.join(project,'.solopreneur','roadmap.csv'),path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync({history:'skip'});t.after(()=>engine.close());
+  const originals=new Map([...fs.readdirSync(dir).map(name=>path.join(dir,name)),path.join(statusDir,'71.json')].map(file=>[file,fs.readFileSync(file)]));
+  const delivered=[];
+  const extension=loadCompiledModule('out/extension.js',`
+    module.exports.nativeContinue=handleContinueNativeConversation; module.exports.messageContinue=handleContinueConversationTurn;
+    module.exports.connect=(engine,project,root,prepare,deliver,sessionId)=>{
+      syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef={};
+      getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto'});
+      agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';
+      prepareOrdinaryConversation=prepare;deliverOrdinaryConversation=deliver;
+      findReusableContinuationTerminal=async()=>undefined;
+      resolveNativeSessionIdForConversation=()=>sessionId;recoverCodexSessionIdentityForConversation=async()=>true;
+      launchAgentConversationTerminal=async()=>{throw new Error('legacy file producer reached instead of shared delivery');};
+    };`,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js')});
+  extension.connect(engine,project,root,(_context,input)=>require('../out/agentRunPreparation.js').prepareAgentRun({...input,launchIntentId:`retained-host-action:${mode}`},(operation,input)=>native.ops({operation,input})),async(_context,prepared)=>{delivered.push(prepared);},sessionId);
+  if(mode==='native')await extension.nativeContinue({},'__solo__',71);else await extension.messageContinue({},'__solo__',71,'继续原始目标','',[],true);
+  assert.equal(delivered.length,1);const prior=native.store.readRunState(native.projectIds.get(project),71);
+  assert.equal(delivered[0].taskId,prior.taskId);assert.notEqual(delivered[0].turnId,prior.turnId);assert.equal(delivered[0].status.plannedNativeSessionId,sessionId);assert.equal(delivered[0].status.selectedModel,'retained-model');
+  assert.deepEqual(fs.readdirSync(path.dirname(dir)),['71']);for(const[file,bytes]of originals)assert.deepEqual(fs.readFileSync(file),bytes);
+  assert.match(delivered[0].finalCommand,/runAgentProcess\.js/);
+});
 
 test('the native Continue button resumes a database-bound conversation without old session files', async t => {
   const f = await openProviderCheckpointFixture(t, 'claude', 79);
@@ -11668,13 +11715,13 @@ test('interactive start checkpoint confirms the caller-assigned native session b
     assert.notEqual(started.status.interactiveSessionClosed, true);
     assert.equal(started.status.nativeSessionId, matches ? expected : '');
     assert.equal(started.status.nativeSessionIdIsCurrent, matches);
-    assert.equal(binding.version, 2); assert.equal(binding.headRevision, 3);
-    assert.equal(binding.revisions[2].state, matches ? 'confirmed' : 'conflict');
+    assert.equal(binding.version, 2); assert.equal(binding.headRevision, matches ? 3 : 4);
+    assert.equal(binding.revisions.at(-1).state, matches ? 'confirmed' : 'conflict');
     if (matches) {
       assert.equal(binding.resumableRevision, 3); assert.equal(binding.revisions[2].sessionId, expected);
       assert.equal(binding.revisions[2].method, provider === 'claude' ? 'caller_assigned' : 'provider_created');
     } else {
-      assert.equal(binding.resumableRevision, undefined); assert.equal(binding.revisions[2].errorCode, 'identity_provider_mismatch');
+      assert.equal(binding.resumableRevision, undefined); assert.equal(binding.revisions.at(-1).errorCode, 'identity_provider_mismatch');
     }
     const journal = await new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation, input) => f.ops({ operation, input })).readJournal(f.reference);
     assert.equal(journal.entry.status, 'Running');
@@ -11696,7 +11743,8 @@ test('the pre-registered first completion confirms its planned native session', 
   assert.equal(stored.provider, 'claude'); assert.equal(stored.sessionId, f.run.status.plannedNativeSessionId);
   assert.equal(stored.runId, '79'); assert.equal(stored.revision, 3);
   const journal = await client.readJournal(f.reference);
-  assert.equal(journal.entry.status, 'Completed'); assert.match(journal.entry.output, /First native turn completed\./);
+  assert.equal(journal.entry.status, 'Completed');
+  assert.equal((await client.readLog(f.reference, 'stdout')).toString('utf8'), 'First native turn completed.\n');
   for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', dir)), false);
 });
 
@@ -12111,7 +12159,9 @@ test('a damaged version 2 binding never falls back to a stale native session ID'
   await assert.rejects(host.nativeContinue({}, '__solo__', 841), /Session binding revision sequence is invalid/);
   assert.deepEqual(fs.readFileSync(walPath), wal);
   assert.deepEqual(await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 841 } }), source);
-  assert.deepEqual(await f.ops({ operation: 'read_run_turn_journal', input: { root: f.project, executionLogId: 841 } }), journal);
+  const readable = await f.ops({ operation: 'read_run_turn_journal', input: { root: f.project, executionLogId: 841 } });
+  assert.deepEqual({ ...readable, entry: { ...readable.entry, dataState: undefined } }, { ...journal, entry: { ...journal.entry, dataState: undefined } });
+  assert.equal(readable.entry.dataState.resumableSessionId, '', 'damaged identity cannot expose the previous resume target');
   assert.equal((await f.ops({ operation: 'list_run_states', input: { root: f.project } })).items.length, 1);
   assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'step-sessions', '__solo__.json')), false);
   assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'agent-runs')), false);
@@ -12150,7 +12200,11 @@ test('interactive completion recovers a distinct ledger turn when the Agent omit
   const second = await client.readJournal(f.reference); const status = await client.readStatus(f.reference);
   const entries = await f.engine.readAgentExecutions('__solo__');
   assert.equal(entries.length, 2); assert.equal(second.executionLogId, 62); assert.match(second.entry.output, /检查遗漏的账本记录/);
-  assert.equal(second.entry.status, 'Completed'); assert.deepEqual(await f.ops({ operation: 'read_run_turn_journal', input: { ...f.scope, turnId: f.run.turnId } }), first, 'the previous completed turn must not be overwritten');
+  const preservedFirst = await f.ops({ operation: 'read_run_turn_journal', input: { ...f.scope, turnId: f.run.turnId } });
+  const { runRevision: firstRevision, ...firstDataState } = first.entry.dataState;
+  const { runRevision: preservedRevision, ...preservedDataState } = preservedFirst.entry.dataState;
+  assert.deepEqual({ ...preservedFirst, entry: { ...preservedFirst.entry, dataState: preservedDataState } }, { ...first, entry: { ...first.entry, dataState: firstDataState } }, 'the previous completed turn must not be overwritten');
+  assert.ok(preservedRevision > firstRevision, 'the presentation records the current root run revision separately from immutable turn content');
   assert.equal(status.executionLogId, 62); assert.equal(status.status, 'Waiting'); assert.notEqual(status.checkpointImplicitTurn, true);
   assert.notEqual(second.turnId, first.turnId); assert.equal((await f.ops({ operation: 'read_run_state', input: f.scope })).taskId, f.run.taskId);
   for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', dir)), false);
@@ -12170,7 +12224,11 @@ test('a long-waiting interactive session can still register a new turn before de
   assert.ok(registered); assert.equal(registered.status, 'Running'); assert.equal(registered.executionLogId, 72);
   const second = await client.readJournal(f.reference);
   assert.equal(second.entry.status, 'Running'); assert.match(second.entry.output, /等待十分钟后继续/);
-  assert.deepEqual(await f.ops({ operation: 'read_run_turn_journal', input: { root: f.project, executionLogId: 71, turnId: f.run.turnId } }), prior);
+  const preservedPrior = await f.ops({ operation: 'read_run_turn_journal', input: { root: f.project, executionLogId: 71, turnId: f.run.turnId } });
+  const { runRevision: priorRevision, ...priorDataState } = prior.entry.dataState;
+  const { runRevision: currentRevision, ...currentDataState } = preservedPrior.entry.dataState;
+  assert.deepEqual({ ...preservedPrior, entry: { ...preservedPrior.entry, dataState: currentDataState } }, { ...prior, entry: { ...prior.entry, dataState: priorDataState } });
+  assert.ok(currentRevision > priorRevision);
   const state = await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 71 } });
   assert.equal(state.status.status, 'Running'); assert.equal(state.status.journalExecutionLogId, 72); assert.equal(state.taskId, f.run.taskId);
   for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', dir)), false);
@@ -12330,7 +12388,7 @@ for (const late of [false, true]) test(`invalid Agent completion state is record
   const completion = Buffer.from('{broken-json'), output = Buffer.from('Implemented a working draft.\n完整输出🌿');
   for (const [name, bytes] of [['completion.json', completion], ['output.log', output], ['prompt.txt', Buffer.from('完成原始用户目标')], ['command.txt', Buffer.from('claude original arguments')], ['changes.txt', Buffer.from('M docs/work.md\n')]]) if (!late || name !== 'completion.json') fs.writeFileSync(path.join(runDir, name), bytes);
   const startedAt = '2026-05-24T00:00:00.000Z';
-  const taskId = require('../out/taskReport.js').registerLearningTask(project, { executionLogId: 9, runDir, userMessage: '完成原始用户目标', startedAt });
+  const taskId = require('./fixtures/legacy-task-report.cjs').registerLearningTask(project, { executionLogId: 9, runDir, userMessage: '完成原始用户目标', startedAt });
   const statusFilePath = path.join(project, '.agent_status.json');
   const status = { learningTaskId: taskId, workspaceRoot: project, nodeId: '2', runKind: 'step', status: 'In Progress', agentCli: 'claude', executionLogId: 9, rootExecutionLogId: 9, userMessage: '完成原始用户目标', outputFilePath: path.join(runDir, 'output.log'), changesFilePath: path.join(runDir, 'changes.txt'), completionDecisionFilePath: path.join(runDir, 'completion.json'), startedAt, finishedAt: '2026-05-24T00:01:00.000Z' };
   if (late) delete status.completionDecisionFilePath;
@@ -12379,7 +12437,7 @@ for (const historical of [false, true]) test(`completed step starts read-only Ag
   if (historical) {
     const sourceRoot = path.join(project, '.solopreneur', 'agent-runs'), runDir = path.join(sourceRoot, '2', '12'); fs.mkdirSync(runDir, { recursive: true });
     const startedAt = '2026-05-24T00:00:00.000Z';
-    const taskId = require('../out/taskReport.js').registerLearningTask(project, { executionLogId: 12, runDir, userMessage: '完成 MVP', startedAt });
+    const taskId = require('./fixtures/legacy-task-report.cjs').registerLearningTask(project, { executionLogId: 12, runDir, userMessage: '完成 MVP', startedAt });
     const raw = { learningTaskId: taskId, workspaceRoot: project, nodeId: '2', runKind: 'step', status: 'In Progress', agentCli: 'claude', reviewerCliPath: reviewer, collaborationReviewMode: 'high_risk', executionLogId: 12, rootExecutionLogId: 12, userMessage: '完成 MVP', completionDecisionFilePath: path.join(runDir, 'completion.json'), outputFilePath: path.join(runDir, 'output.log'), changesFilePath: path.join(runDir, 'changes.txt'), startedAt, finishedAt: '2026-05-24T00:01:00.000Z' };
     fs.writeFileSync(path.join(project, '.agent_status.json'), JSON.stringify(raw));
     for (const [file, body] of [['completion.json', '{"markCompleted":true,"reason":"实现已完成"}'], ['prompt.txt', '完成 MVP'], ['command.txt', 'claude original arguments'], ['output.log', '完整结果🌿\n'.repeat(10000)], ['changes.txt', 'A result.txt\n'], ['workspace-before.json', JSON.stringify(await require('../out/runWorkspace.js').snapshotWorkspace(project))]]) fs.writeFileSync(path.join(runDir, file), body);
@@ -12405,7 +12463,7 @@ for (const historical of [false, true]) test(`completed step starts read-only Ag
       syncEngine = engine; activeProjectRoot = project; extensionContextRef = null;
       getPersistedSettings = () => ({ globalDataPath: root, automationTasks: {} });
       agentCli_1.commandExists = () => true;
-      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
       createAgentTerminal = () => terminal;
       sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {};
     };
@@ -12442,7 +12500,7 @@ for (const historical of [false, true]) test(`completed step starts read-only Ag
   const exit = await new Promise((resolve, reject) => { runner.once('error', reject); runner.once('exit', resolve); });
   assert.equal(exit, 0, Buffer.concat(runnerOutput).toString('utf8'));
   const received = JSON.parse(fs.readFileSync(captured, 'utf8'));
-  assert.deepEqual(received.args.slice(0, 4), ['--print', '--mode', 'plan', '--sandbox']);
+  assert.deepEqual(received.args, ['--mode', 'plan', '--sandbox', '--print-timeout', '5m', `--add-dir=${project}`, '--print']);
   assert.ok(!received.args.some(arg => arg.includes('dangerously'))); assert.equal(received.prompt, plan.prompt);
   assert.deepEqual(await require('../out/runWorkspace.js').snapshotWorkspace(project), beforeReview, 'review execution must preserve the project files');
   await extension.settle(require('../out/runLifecycleClient.js').runStatusReference(project, id), undefined, root);
@@ -12468,7 +12526,7 @@ for (const { mode, historical } of [{ mode: 'all', historical: false }, { mode: 
   if (historical) {
     const sourceRoot = path.join(project, '.solopreneur', 'agent-runs'), runDir = path.join(sourceRoot, '__solo__', '21'); fs.mkdirSync(runDir, { recursive: true });
     const startedAt = '2026-05-24T00:00:00.000Z';
-    const taskId = require('../out/taskReport.js').registerLearningTask(project, { executionLogId: 21, runDir, userMessage: '检查 Solo 任务复核', startedAt });
+    const taskId = require('./fixtures/legacy-task-report.cjs').registerLearningTask(project, { executionLogId: 21, runDir, userMessage: '检查 Solo 任务复核', startedAt });
     const raw = { learningTaskId: taskId, workspaceRoot: project, nodeId: '__solo__', runKind: 'solo', status: 'In Progress', agentCli: 'claude', reviewerCliPath: 'agy', collaborationReviewMode: mode, executionLogId: 21, rootExecutionLogId: 21, userMessage: '检查 Solo 任务复核', outputFilePath: path.join(runDir, 'output.log'), changesFilePath: path.join(runDir, 'changes.txt'), startedAt, finishedAt: '2026-05-24T00:01:00.000Z' };
     fs.writeFileSync(path.join(project, '.agent_status.json'), JSON.stringify(raw));
     for (const [file, body] of [['prompt.txt', '检查 Solo 任务复核'], ['command.txt', 'claude original arguments'], ['output.log', 'Solo task completed.\n完整对话结果🌿\n'.repeat(10000)], ['changes.txt', ''], ['workspace-before.json', JSON.stringify(await require('../out/runWorkspace.js').snapshotWorkspace(project))]]) fs.writeFileSync(path.join(runDir, file), body);
@@ -12493,7 +12551,7 @@ for (const { mode, historical } of [{ mode: 'all', historical: false }, { mode: 
       syncEngine = engine; activeProjectRoot = project; extensionContextRef = null;
       getPersistedSettings = () => ({ globalDataPath: root, automationTasks: {} });
       agentCli_1.commandExists = () => true;
-      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
       createAgentTerminal = () => terminal;
       sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {};
     };
@@ -12540,7 +12598,7 @@ for (const historical of [false, true]) test(`completed conversation does not st
   if (historical) {
     const sourceRoot = path.join(project, '.solopreneur', 'agent-runs'), runDir = path.join(sourceRoot, '2', '12'); fs.mkdirSync(runDir, { recursive: true });
     const startedAt = '2026-05-24T00:00:00.000Z';
-    const taskId = require('../out/taskReport.js').registerLearningTask(project, { executionLogId: 12, runDir, userMessage: '完成 MVP', startedAt });
+    const taskId = require('./fixtures/legacy-task-report.cjs').registerLearningTask(project, { executionLogId: 12, runDir, userMessage: '完成 MVP', startedAt });
     const raw = { learningTaskId: taskId, workspaceRoot: project, nodeId: '2', runKind: 'step', status: 'In Progress', agentCli: 'claude', reviewerCliPath: reviewer, collaborationReviewMode: 'off', executionLogId: 12, rootExecutionLogId: 12, userMessage: '完成 MVP', completionDecisionFilePath: path.join(runDir, 'completion.json'), outputFilePath: path.join(runDir, 'output.log'), changesFilePath: path.join(runDir, 'changes.txt'), startedAt, finishedAt: '2026-05-24T00:01:00.000Z' };
     fs.writeFileSync(path.join(project, '.agent_status.json'), JSON.stringify(raw));
     for (const [file, body] of [['completion.json', '{"markCompleted":true,"reason":"实现已完成"}'], ['prompt.txt', '完成 MVP'], ['command.txt', 'claude original arguments'], ['output.log', '完整结果🌿\n'.repeat(10000)], ['changes.txt', 'A result.txt\n'], ['workspace-before.json', JSON.stringify(await require('../out/runWorkspace.js').snapshotWorkspace(project))]]) fs.writeFileSync(path.join(runDir, file), body);
@@ -12569,7 +12627,7 @@ for (const historical of [false, true]) test(`completed conversation does not st
       syncEngine = engine; activeProjectRoot = project; extensionContextRef = { extensionPath: path.resolve(__dirname, '..') };
       getPersistedSettings = readSettings;
       agentCli_1.commandExists = () => true;
-      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
       createAgentTerminal = () => terminal;
       sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {};
     };
@@ -12632,7 +12690,7 @@ test('passing Agent review completes the deferred roadmap step', async t => {
       syncEngine = engine; activeProjectRoot = project; extensionContextRef = null;
       getPersistedSettings = () => ({ globalDataPath: root, automationTasks: {} });
       agentCli_1.commandExists = () => true;
-      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
       createAgentTerminal = () => terminal;
       sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {};
     };
@@ -12669,7 +12727,7 @@ test('passing Agent review completes the deferred roadmap step', async t => {
   const exit = await new Promise((resolve, reject) => { runner.once('error', reject); runner.once('exit', resolve); });
   assert.equal(exit, 0, Buffer.concat(runnerOutput).toString('utf8'));
   const received = JSON.parse(fs.readFileSync(captured, 'utf8'));
-  assert.deepEqual(received.args.slice(0, 4), ['--print', '--mode', 'plan', '--sandbox']);
+  assert.deepEqual(received.args, ['--mode', 'plan', '--sandbox', '--print-timeout', '5m', `--add-dir=${project}`, '--print']);
   assert.ok(!received.args.some(arg => arg.includes('dangerously'))); assert.equal(received.prompt, plan.prompt);
   assert.deepEqual(await require('../out/runWorkspace.js').snapshotWorkspace(project), beforeReview, 'review execution must preserve the project files');
   const capturedResult = await native.ops({ operation: 'read_run_state', input: { root: project, executionLogId: id } });
@@ -12797,7 +12855,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
     module.exports.connect = (engine, project, root, terminal) => {
       syncEngine = engine; activeProjectRoot = project; extensionContextRef = {extensionPath: ${JSON.stringify(projectRoot)}, globalState:{get:(_key,fallback)=>fallback}};
       getPersistedSettings = () => ({globalDataPath:root,taskPermissionMode:'${permission === 'never' ? 'auto' : 'never'}',collaborationReviewMode:'off',automationTasks:{}});
-      agentCli_1.commandExists = () => true; autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      agentCli_1.commandExists = () => true; autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
       ensureActiveConversationPoller = () => {};
       createAgentTerminal = () => terminal; sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {};
     };
@@ -12855,7 +12913,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
   fs.writeFileSync(response, JSON.stringify({ status: 'pass', summary: '修正后复核通过', findings: [], nextAction: '', goalSatisfied: true, evidenceSufficient: true, criteria: manifest.completionCriteria.map(criterion => ({ criterion, status: 'pass', evidence: ['output:main'], reason: '实际修正结果已检查' })) }));
   const beforeReview = await require('../out/runWorkspace.js').snapshotWorkspace(project); await execute(commands[2]);
   assert.deepEqual(await require('../out/runWorkspace.js').snapshotWorkspace(project), beforeReview);
-  const secondReceived = JSON.parse(fs.readFileSync(reviewInput, 'utf8')); assert.equal(secondReceived.prompt, secondPlan.prompt); assert.deepEqual(secondReceived.args.slice(0, 4), ['--print', '--mode', 'plan', '--sandbox']);
+  const secondReceived = JSON.parse(fs.readFileSync(reviewInput, 'utf8')); assert.equal(secondReceived.prompt, secondPlan.prompt); assert.deepEqual(secondReceived.args, ['--mode', 'plan', '--sandbox', '--print-timeout', '5m', `--add-dir=${project}`, '--print']);
   for (const close of closes.splice(0).reverse()) await close();
   native = await require('./analysis-fixture.js').openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: project }]);
   fs.renameSync(cliDir, path.join(base, 'retained-cli')); fs.renameSync(response, path.join(base, 'retained-response.json'));
@@ -13142,6 +13200,8 @@ test('continuation runs are recorded without task status judgment while preservi
     const root = path.join(base,'.solomap-global'), closes = [];
     let native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
     t.after(async()=>{for(const close of closes.splice(0).reverse())await close();});
+    await native.ops({operation:'save_global_prompt',input:{policy:null,content:'续聊也如实记录采用。\n',source:'user',idempotencyKey:`continuation-rsi-policy:${mode}`}});
+    const lesson = await native.ops({operation:'write',input:{kind:'lesson',action:'create',scope:null,idempotencyKey:`continuation-rsi-lesson:${mode}`,data:{status:'approved',summary:'续聊保留采用记录',confidence:1}}});
     const csvPath = path.join(project,'.solopreneur','roadmap.csv'), otherCsvPath = path.join(other,'.solopreneur','roadmap.csv');
     const originalCsv = [
       'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
@@ -13151,7 +13211,7 @@ test('continuation runs are recorded without task status judgment while preservi
     const artifactPath = path.join(project,'src','extension.ts');fs.mkdirSync(path.dirname(artifactPath));fs.writeFileSync(artifactPath,'export const result = "before";\n');
     const engine = new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);
     await engine.initAndSync();t.after(()=>engine.close());const originalNodes = engine.getNodes().map(node=>({...node}));
-    const prepare = (workspace,id,kind,extra={})=>native.ops({operation:'prepare_run',input:{root:workspace,executionLogId:id,nodeId:'2',runKind:kind,prompt:'继续原任务并保留文件修改，不判断环节状态',command:'fixture never executes',userMessage:'继续讨论并保留本轮修改',metadata:{agentCli:'fixture-cli',collaborationReviewMode:'off',interactiveSession:true,...(id===88?{checkpointPreserveRoadmapState:true}:{}),...(mode==='closed-failed'&&id===88?{failureCode:'agent_exit_failed',failureReason:'Native terminal closed.'}: {})},...extra,idempotencyKey:`continuation-record:${workspace}:${id}`}});
+    const prepare = (workspace,id,kind,extra={})=>native.ops({operation:'prepare_run',input:{root:workspace,executionLogId:id,nodeId:'2',runKind:kind,prompt:`继续原任务并保留文件修改，不判断环节状态\n来源：solomap://objects/${lesson.objectId} · revision=${lesson.revision}`,command:'fixture never executes',userMessage:'继续讨论并保留本轮修改',metadata:{agentCli:'fixture-cli',collaborationReviewMode:'off',interactiveSession:true,...(id===88?{checkpointPreserveRoadmapState:true}:{}),...(mode==='closed-failed'&&id===88?{failureCode:'agent_exit_failed',failureReason:'Native terminal closed.'}: {})},...extra,idempotencyKey:`continuation-record:${workspace}:${id}`}});
     const parentRun = await prepare(project,12,'step');await prepare(project,13,'step');await prepare(other,88,'step_continue');
     const run = await prepare(project,88,'step_continue',{parentExecutionLogId:12,expectedParentTurnId:parentRun.turnId});
     assert.equal(run.taskId,parentRun.taskId);assert.equal(run.conversationId,parentRun.conversationId);assert.notEqual(run.turnId,parentRun.turnId);
@@ -13166,7 +13226,8 @@ test('continuation runs are recorded without task status judgment while preservi
     await native.ops({operation:'append_run_log',input:{projectId:run.projectId,executionLogId:88,generation:run.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:'continuation-record-output'}});
     fs.writeFileSync(artifactPath,artifact);
     const checkpoint = async extra => {const head = await native.ops({operation:'read_run_checkpoint_state',input:{root:project,executionLogId:88}});return native.ops({operation:'checkpoint_run',input:{projectId:run.projectId,executionLogId:88,generation:head.generation,proof:head.proof,expectedRevision:head.revision,expectedTurnId:head.turnId,...extra}});};
-    await checkpoint({action:'complete',outcome:mode==='closed-failed'?'failed':'partial',summary:'续聊已记录，保留修改，不判断环节状态',idempotencyKey:'continuation-record-finish'});
+    const continuationReport={schemaVersion:1,summary:'续聊已记录',unmetRequirements:[],decisions:[],corrections:[],verification:[],commits:[],experienceUsage:[{experienceId:lesson.objectId,experienceRevision:lesson.revision,action:'续聊中继续采用',result:'本轮结果已保存',verdict:'effective',evidence:['Agent claimed continuation result']}],lessons:[]};
+    await checkpoint({action:'complete',outcome:mode==='closed-failed'?'failed':'partial',summary:'续聊已记录，保留修改，不判断环节状态',report:continuationReport,idempotencyKey:'continuation-record-finish'});
     if(mode==='closed-failed')await checkpoint({action:'session-close',exitCode:1,idempotencyKey:'continuation-record-close'});
     const accepted = await read(project,88);assert.equal(accepted.taskId,parentRun.taskId);assert.equal(accepted.status.interactiveSessionClosed===true,mode==='closed-failed');
     for(const close of closes.splice(0).reverse())await close();
@@ -13184,6 +13245,7 @@ test('continuation runs are recorded without task status judgment while preservi
     assert.equal(journal.entry.status,'Recorded');assert.match(journal.entry.output,/Continuation record state: Recorded/);assert.match(journal.entry.output,/续聊已记录；不参与任务完成、失败或进行中判断。/);assert.match(journal.entry.output,/Workspace changes:\n\nM src\/extension\.ts/);assert.doesNotMatch(journal.entry.output,/Failure category: agent_exit_failed/);assert.match(journal.entry.output,/Execution digest saved: solomap:\/\/run-settlement\//);
     const settled = await read(project,88);assert.equal(settled.taskId,parentRun.taskId);assert.equal(settled.conversationId,parentRun.conversationId);assert.equal(settled.status.status,mode==='closed-failed'?'Processed':'Waiting');assert.equal(settled.status.interactiveSessionClosed===true,mode==='closed-failed');assert.equal(settled.status.sourceParentRunId,parentRun.runId);assert.equal(settled.status.sourceParentTurnId,parentRun.turnId);
     const settlements = await client.readSettlements(reference,await client.readStatus(reference));assert.equal(settlements.length,mode==='closed-failed'?2:1);assert.equal(settlements[0].digest.projectPath,project);assert.equal(settlements[0].digest.nodeId,'2');assert.equal(settlements[0].digest.runKind,'step_continue');assert.equal(settlements[0].digest.executionLogId,88);assert.equal(settlements[0].digest.status,'Recorded');assert.deepEqual(settlements[0].digest.failures,[]);if(mode==='closed-failed')assert.deepEqual(settlements[1].digest,settlements[0].digest);assert.match(JSON.stringify(settlements[0].digest),/src\/extension\.ts/);
+    const continuationCycles=await native.ops({operation:'read_rsi_cycles',input:{projectId:run.projectId}});assert.equal(continuationCycles.items.length,1);assert.equal(continuationCycles.items[0].evaluation.verdict,'unassessed');
     assert.equal((await client.readLog(reference,'stdout')).toString('utf8'),output);assert.equal(fs.readFileSync(csvPath,'utf8'),originalCsv);assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(fs.readFileSync(artifactPath,'utf8'),artifact);
     const wal = fs.readFileSync(path.join(root,'solomap.db-wal'));await Promise.all([extension.settle(reference,undefined,root),extension.settle(reference,undefined,root)]);await extension.drain();
     assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),wal);assert.equal(fs.readFileSync(csvPath,'utf8'),originalCsv);assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(fs.readFileSync(artifactPath,'utf8'),artifact);
@@ -13221,9 +13283,9 @@ test('linking a Solo conversation records a reference without changing the step 
       }
       return [];
     },
-    logAgentExecution: (nodeId, agentCli, command, output, status) => {
-      linkedRecord = { nodeId, agentCli, command, output, status };
-      return 88;
+    linkAgentExecution: (executionLogId, nodeId) => {
+      linkedRecord = { executionLogId, nodeId };
+      return { id: executionLogId, nodeId, timestamp: '2026-10-11T10:01:00.000Z', agentCli: 'codex', command: 'codex exec', output: '结论：关联实现 MVP。', status: 'Linked' };
     }
   }, '/workspace/app', {
     webview: {
@@ -13236,12 +13298,10 @@ test('linking a Solo conversation records a reference without changing the step 
   await extensionModule.__linkSoloConversationToNode(12, '2');
 
   assert.equal(linkedRecord.nodeId, '2');
-  assert.equal(linkedRecord.status, 'Linked');
-  assert.match(linkedRecord.output, /Linked from Solo conversation/);
-  assert.match(linkedRecord.output, /Solo reference ID: 12/);
+  assert.equal(linkedRecord.executionLogId, 12);
   const stepRefresh = postedMessages.find((message) => message.command === 'nodeConversationsLoaded' && message.nodeId === '2');
   assert.equal(stepRefresh.conversations.length, 2);
-  assert.equal(stepRefresh.conversations[0].id, 88);
+  assert.equal(stepRefresh.conversations[0].id, 12);
   assert.equal(stepRefresh.conversations[0].status, 'Linked');
   assert.equal(stepRefresh.conversations[1].id, 7);
 });
@@ -13383,7 +13443,7 @@ test('continuing a stopped interactive conversation opens a new terminal and set
   const engine = new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);
   await engine.initAndSync();t.after(()=>engine.close());const originalNodes = engine.getNodes().map(node=>({...node}));
   const operation = (operation,input)=>native.ops({operation,input});
-  const run = await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'继续原用户任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:336,userMessage:'保留原任务继续',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',metadata:{terminalName:'solomap stopped terminal'}},operation);
+  const run = await prepareControlledClaudeRun({agentCli:'claude',selectedModel:'',prompt:'继续原用户任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:336,userMessage:'保留原任务继续',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',metadata:{terminalName:'solomap stopped terminal'}},operation);
   const preparePeer = (workspace,id)=>native.ops({operation:'prepare_run',input:{root:workspace,executionLogId:id,nodeId:'__solo__',runKind:'solo',prompt:'另一段对话',command:'fixture never executes',userMessage:'其他目标',metadata:{interactiveSession:true,agentCli:'claude',sessionProvider:'claude',nativeSessionId:workspace===other?run.status.plannedNativeSessionId:'unrelated-native-session'},idempotencyKey:`stopped-continue-peer:${workspace}:${id}`}});
   await preparePeer(project,13);await preparePeer(other,336);
   const read = (workspace,id)=>native.ops({operation:'read_run_state',input:{root:workspace,executionLogId:id}});
@@ -13396,6 +13456,7 @@ test('continuing a stopped interactive conversation opens a new terminal and set
   const head = await native.ops({operation:'read_run_checkpoint_state',input:{root:project,executionLogId:336}});
   const env = {...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:'336',SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId};
   await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'complete','--outcome','partial','--summary','上一轮完整结果'],{env});
+  await finishControlledClaudeTurn(request=>operation(request.operation,request.input),project,336,'受控原生完整回复🌿',native.store);
   const sent = [], created = [], posted = [], errors = [], preparedRuns = [];
   let staleShown = 0, staleDisposed = 0;
   const stale = {name:'solomap stopped terminal',show(){staleShown++;},dispose(){staleDisposed++;}};
@@ -13414,7 +13475,7 @@ test('continuing a stopped interactive conversation opens a new terminal and set
       const factory=create;vscode.window.createTerminal=options=>{const terminal=factory(options);vscode.window.terminals.push(terminal);return terminal;};};
   `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
   extension.connect(engine,project,root,stale,options=>{const terminal={name:options.name,show(){terminal.shown=(terminal.shown||0)+1;},sendText(text){sent.push({terminal,text});},dispose(){terminal.disposed=true;}};created.push({options,terminal});return terminal;},
-    async(_context,input)=>{const prepared=await require('../out/agentRunPreparation.js').prepareAgentRun({...input,launchIntentId:'stopped-continue-button'},operation);preparedRuns.push(prepared);return prepared;},message=>errors.push(message));
+    async(_context,input)=>{const prepared=await prepareControlledClaudeRun({...input,launchIntentId:'stopped-continue-button'},operation);preparedRuns.push(prepared);return prepared;},message=>errors.push(message));
   await extension.settle(reference,undefined,root);await extension.drain();
   assert.equal((await client.getResumableSession(reference)).sessionId,run.status.plannedNativeSessionId);
   await client.stop(reference,await client.readStatus(reference),'用户停止当前对话','stopped-continue-user-stop');
@@ -13473,7 +13534,7 @@ test('continuing an earlier turn opens a new session terminal once for concurren
   const engine = new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);
   await engine.initAndSync();t.after(()=>engine.close());const originalNodes = engine.getNodes().map(node=>({...node}));
   const operation = (operation,input)=>native.ops({operation,input}), client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)(operation,root), ref = id=>require('../out/runLifecycleClient.js').runStatusReference(project,id);
-  const run = await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'保留原任务继续讨论',workspaceRoot:project,nodeId:'__solo__',executionLogId:336,userMessage:'原用户完整任务',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',metadata:{terminalName:'solomap open root terminal'}},operation);
+  const run = await prepareControlledClaudeRun({agentCli:'claude',selectedModel:'',prompt:'保留原任务继续讨论',workspaceRoot:project,nodeId:'__solo__',executionLogId:336,userMessage:'原用户完整任务',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',metadata:{terminalName:'solomap open root terminal'}},operation);
   for(const [workspace,id] of [[project,13],[other,338]])await operation('prepare_run',{root:workspace,executionLogId:id,nodeId:'__solo__',runKind:'solo',prompt:'其他目标',command:'fixture never executes',userMessage:'其他对话',metadata:{interactiveSession:true,agentCli:'claude',sessionProvider:'claude',nativeSessionId:workspace===other?run.status.plannedNativeSessionId:'unrelated-native-session'},idempotencyKey:`earlier-turn-peer:${workspace}:${id}`});
   const read = (workspace,id)=>operation('read_run_state',{root:workspace,executionLogId:id}), peer = await read(project,13), foreign = await read(other,338);
   const sent = [], created = [], posted = [], errors = [], preparedRuns = [], registrations = [];
@@ -13495,7 +13556,7 @@ test('continuing an earlier turn opens a new session terminal once for concurren
       vscode.window.createTerminal=options=>{const terminal=create(options);vscode.window.terminals.push(terminal);return terminal;};};
   `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
   extension.connect(engine,project,root,oldTerminal,options=>{const terminal={name:options.name,show(){terminal.shown=(terminal.shown||0)+1;},sendText(text){sent.push({terminal,text});},dispose(){terminal.disposed=true;}};created.push({options,terminal});return terminal;},
-    async(_context,input)=>{const prepared=await require('../out/agentRunPreparation.js').prepareAgentRun({...input,launchIntentId:'earlier-turn-button'},operation);preparedRuns.push(prepared);return prepared;},message=>errors.push(message),args=>registrations.push(args));
+    async(_context,input)=>{const prepared=await prepareControlledClaudeRun({...input,launchIntentId:'earlier-turn-button'},operation);preparedRuns.push(prepared);return prepared;},message=>errors.push(message),args=>registrations.push(args));
   const outputs = new Map();
   const finish = async state => {
     const id = Number(state.status.rootExecutionLogId), before = await require('../out/runWorkspace.js').snapshotWorkspace(project), output = `第${id}轮完整原文保留🌿\n`.repeat(10000);outputs.set(id,output);
@@ -13504,12 +13565,13 @@ test('continuing an earlier turn opens a new session terminal once for concurren
     const head = await operation('read_run_checkpoint_state',{root:project,executionLogId:id});
     const env = {...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:String(id),SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId};
     await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'complete','--outcome','partial','--summary',`第${id}轮完成等待继续`],{env});
+    await finishControlledClaudeTurn(request=>operation(request.operation,request.input),project,id,'受控原生完整回复🌿',native.store);
     await extension.settle(ref(id),undefined,root);await extension.drain();
   };
   await finish(run);
   let parent = run;const children = [];
   for(const id of [338,340]){
-    const child = await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:`第${id}轮继续原任务`,workspaceRoot:project,nodeId:'__solo__',executionLogId:0,launchIntentId:`earlier-turn-history:${id}`,userMessage:`第${id}轮补充`,runKind:'solo_continue',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',nativeSessionId:run.status.plannedNativeSessionId,continuation:true,parentExecutionLogId:Number(parent.status.rootExecutionLogId),expectedParentTurnId:parent.turnId,metadata:{lineageRootExecutionLogId:336,terminalName:oldTerminal.name,launchSummary:`Agent continuation started.\n\nContinuation parent conversation: ${Number(parent.status.rootExecutionLogId)}\nContinuation session id: ${run.status.plannedNativeSessionId}\n\nUser supplement:\n第${id}轮补充`}},operation);
+    const child = await prepareControlledClaudeRun({agentCli:'claude',selectedModel:'',prompt:`第${id}轮继续原任务`,workspaceRoot:project,nodeId:'__solo__',executionLogId:0,launchIntentId:`earlier-turn-history:${id}`,userMessage:`第${id}轮补充`,runKind:'solo_continue',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',nativeSessionId:run.status.plannedNativeSessionId,continuation:true,parentExecutionLogId:Number(parent.status.rootExecutionLogId),expectedParentTurnId:parent.turnId,metadata:{lineageRootExecutionLogId:336,terminalName:oldTerminal.name,launchSummary:`Agent continuation started.\n\nContinuation parent conversation: ${Number(parent.status.rootExecutionLogId)}\nContinuation session id: ${run.status.plannedNativeSessionId}\n\nUser supplement:\n第${id}轮补充`}},operation);
     assert.equal(child.taskId,run.taskId);assert.equal(child.conversationId,run.conversationId);await finish(child);children.push(Number(child.status.rootExecutionLogId));parent=child;
   }
   const ids = [336,...children], earlierId = children[0], latestId = children[1], initial = new Map();assert.equal(latestId,338);
@@ -13566,7 +13628,7 @@ test('native continuation stops old lineage processes before launching the same 
     const operation=(operation,input)=>native.ops({operation,input}), read=(workspace,id)=>operation('read_run_state',{root:workspace,executionLogId:id});
     const client=new (require('../out/runLifecycleClient.js').RunLifecycleClient)(operation,root), ref=id=>require('../out/runLifecycleClient.js').runStatusReference(project,id);
     const runnerOutput='第336轮完整结果保留🌿\n'.repeat(10000), quote=require('../out/agentCli.js').shellQuote;
-    const run=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'原任务完整输入',workspaceRoot:project,nodeId:'__solo__',executionLogId:336,userMessage:'保持原会话继续讨论',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',...(mode==='running'?{directExecutionCommand:`exec ${quote(process.execPath)} -e ${quote(`process.stdout.write('第336轮完整结果保留🌿\\n'.repeat(10000));setInterval(()=>{},1000)`)}`} : {}),metadata:{terminalName:'old window',...(mode==='verified'?identity(wrappers[0]):mode==='unverified'?{agentPid:wrappers[2].pid,processBirth:'proc:wrong-birth-marker'}:{})}},operation);
+    const run=await prepareControlledClaudeRun({agentCli:'claude',selectedModel:'',prompt:'原任务完整输入',workspaceRoot:project,nodeId:'__solo__',executionLogId:336,userMessage:'保持原会话继续讨论',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',...(mode==='running'?{directExecutionCommand:`exec ${quote(process.execPath)} -e ${quote(`process.stdout.write('第336轮完整结果保留🌿\\n'.repeat(10000));setInterval(()=>{},1000)`)}`} : {}),metadata:{terminalName:'old window',...(mode==='verified'?identity(wrappers[0]):mode==='unverified'?{agentPid:wrappers[2].pid,processBirth:'proc:wrong-birth-marker'}:{})}},operation);
     if(mode==='running'){
       const runner=childProcess.spawn(process.execPath,[path.join(projectRoot,'out/runAgentProcess.js'),'--global-data-path',root,'--project-path',project,'--execution-log-id','336'],{cwd:project,stdio:'pipe'});wrappers[0]=runner;
       t.after(async()=>{if(live(runner)){const ended=once(runner,'exit');runner.kill('SIGTERM');await ended;}});
@@ -13596,7 +13658,7 @@ test('native continuation stops old lineage processes before launching the same 
     `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
     extension.connect(engine,project,root,oldTerminal,startup,async(_context,input)=>{
       if(mode!=='unverified'){assert.equal(live(wrappers[0]),false);assert.equal(live(wrappers[1]),false);}
-      const prepared=await require('../out/agentRunPreparation.js').prepareAgentRun({...input,launchIntentId:'lineage-resume-button'},operation);preparedRuns.push(prepared);return prepared;
+      const prepared=await prepareControlledClaudeRun({...input,launchIntentId:'lineage-resume-button'},operation);preparedRuns.push(prepared);return prepared;
     });
     const outputs=new Map(), finish=async (state,complete=true)=>{
       const id=Number(state.status.rootExecutionLogId), before=await require('../out/runWorkspace.js').snapshotWorkspace(project), output=`第${id}轮完整结果保留🌿\n`.repeat(10000);outputs.set(id,output);
@@ -13606,10 +13668,11 @@ test('native continuation stops old lineage processes before launching the same 
       if(!complete)return;
       const head=await operation('read_run_checkpoint_state',{root:project,executionLogId:id});
       await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'complete','--outcome','partial','--summary','saved result'],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:String(id),SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId}});
+      await finishControlledClaudeTurn(request=>operation(request.operation,request.input),project,id,'受控原生完整回复🌿',native.store);
       await extension.settle(ref(id),undefined,root);await extension.drain();
     };
     await finish(run,mode!=='running');
-    const child=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'补充原任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:0,launchIntentId:'lineage-history-child',userMessage:'原任务后续轮',runKind:'solo_continue',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',nativeSessionId:run.status.plannedNativeSessionId,continuation:true,parentExecutionLogId:336,expectedParentTurnId:run.turnId,metadata:{lineageRootExecutionLogId:336,terminalName:'old window',...identity(wrappers[1]),launchSummary:`Agent continuation started.\n\nContinuation parent conversation: 336\nContinuation session id: ${run.status.plannedNativeSessionId}`}},operation);
+    const child=await prepareControlledClaudeRun({agentCli:'claude',selectedModel:'',prompt:'补充原任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:0,launchIntentId:'lineage-history-child',userMessage:'原任务后续轮',runKind:'solo_continue',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',nativeSessionId:run.status.plannedNativeSessionId,continuation:true,parentExecutionLogId:336,expectedParentTurnId:run.turnId,metadata:{lineageRootExecutionLogId:336,terminalName:'old window',...identity(wrappers[1]),launchSummary:`Agent continuation started.\n\nContinuation parent conversation: 336\nContinuation session id: ${run.status.plannedNativeSessionId}`}},operation);
     const childId=Number(child.status.rootExecutionLogId);assert.equal(childId,337);await finish(child);
     const ids=[336,childId], initial=new Map();
     for(const id of ids){const state=await read(project,id);assert.equal(state.status.status,mode==='running'&&id===336?'Running':'Waiting');if(mode!=='running'||id!==336)assert.equal(state.status.checkpointSummary,'saved result');assert.equal(state.status.failureCode,undefined);initial.set(id,{state,binding:await client.readBinding(ref(id)),journal:await client.readJournal(ref(id)),settlements:await client.readSettlements(ref(id),await client.readStatus(ref(id)))});assert.equal(initial.get(id).settlements.length,mode==='running'&&id===336?0:1);}
@@ -13660,7 +13723,7 @@ test('continuing a conversation never reuses a same-numbered terminal from anoth
   const client=new (require('../out/runLifecycleClient.js').RunLifecycleClient)(operation,root),ref=(project,id)=>require('../out/runLifecycleClient.js').runStatusReference(project,id),runs=[];
   for(let i=0;i<2;i++){
     const project=[projectA,projectB][i],wrapper=wrappers[i];
-    const run=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'保留本项目原任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:336,userMessage:'本项目原用户任务',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',...(i?{nativeSessionId:runs[0].status.plannedNativeSessionId,continuation:true}:{}),metadata:{terminalName:i?'project B terminal':'project A terminal',agentPid:wrapper.pid,processBirth:getProcessBirthMarker(wrapper.pid)}},operation);runs.push(run);
+    const run=await prepareControlledClaudeRun({agentCli:'claude',selectedModel:'',prompt:'保留本项目原任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:336,userMessage:'本项目原用户任务',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',...(i?{nativeSessionId:runs[0].status.plannedNativeSessionId,continuation:true}:{}),metadata:{terminalName:i?'project B terminal':'project A terminal',agentPid:wrapper.pid,processBirth:getProcessBirthMarker(wrapper.pid)}},operation);runs.push(run);
   }
   assert.notEqual(runs[0].taskId,runs[1].taskId);assert.notEqual(runs[0].conversationId,runs[1].conversationId);assert.equal(runs[0].status.plannedNativeSessionId,runs[1].status.plannedNativeSessionId);
   await operation('prepare_run',{root:projectB,executionLogId:13,nodeId:'__solo__',runKind:'solo',prompt:'其他本项目任务',command:'not executed',userMessage:'其他任务',metadata:{interactiveSession:true},idempotencyKey:'cross-project-peer'});
@@ -13678,13 +13741,14 @@ test('continuing a conversation never reuses a same-numbered terminal from anoth
       agentTerminalNamesByConversationId.set(336,terminalA.name);agentTerminalProjectRootsByConversationId.set(336,projectA);vscode.window.terminals.push(terminalA,terminalB);
       vscode.window.createTerminal=options=>{const terminal=create(options);vscode.window.terminals.push(terminal);return terminal;};};
   `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
-  extension.connect(engine,projectA,projectB,root,terminalA,terminalB,options=>{const terminal={name:options.name,show(){terminal.shown=(terminal.shown||0)+1;},sendText(text){if(text.includes('SOLOMAP_TERMINAL_DELIVERY_ID=')){assert.equal(live(wrappers[0]),true);assert.equal(live(wrappers[1]),false);}sent.push({terminal,text});},dispose(){terminal.disposed=true;}};created.push({options,terminal});return terminal;},async(_context,input)=>{assert.equal(input.workspaceRoot,projectB);assert.equal(live(wrappers[0]),true);assert.equal(live(wrappers[1]),false);const prepared=await require('../out/agentRunPreparation.js').prepareAgentRun({...input,launchIntentId:'cross-project-resume-button'},operation);preparedRuns.push(prepared);return prepared;},message=>errors.push(message));
+  extension.connect(engine,projectA,projectB,root,terminalA,terminalB,options=>{const terminal={name:options.name,show(){terminal.shown=(terminal.shown||0)+1;},sendText(text){if(text.includes('SOLOMAP_TERMINAL_DELIVERY_ID=')){assert.equal(live(wrappers[0]),true);assert.equal(live(wrappers[1]),false);}sent.push({terminal,text});},dispose(){terminal.disposed=true;}};created.push({options,terminal});return terminal;},async(_context,input)=>{assert.equal(input.workspaceRoot,projectB);assert.equal(live(wrappers[0]),true);assert.equal(live(wrappers[1]),false);const prepared=await prepareControlledClaudeRun({...input,launchIntentId:'cross-project-resume-button'},operation);preparedRuns.push(prepared);return prepared;},message=>errors.push(message));
   const outputs=new Map();
   for(const [i,project] of [projectA,projectB].entries()){
     const run=runs[i],output=`项目${i}第336轮完整原文🌿\n`.repeat(10000);outputs.set(project,output);
     await operation('write_run_document',{projectId:run.projectId,executionLogId:336,generation:run.generation,turnId:run.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId,'before'),bytes:Buffer.from(JSON.stringify(await require('../out/runWorkspace.js').snapshotWorkspace(project))).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:`cross-project-before:${i}`});
     await operation('append_run_log',{projectId:run.projectId,executionLogId:336,generation:run.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:`cross-project-output:${i}`});
     const head=await operation('read_run_checkpoint_state',{root:project,executionLogId:336});await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'complete','--outcome','partial','--summary',`项目${i}保存的结果`],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:'336',SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId}});
+    await finishControlledClaudeTurn(request=>operation(request.operation,request.input),project,336,'受控原生完整回复🌿',native.store);
     // Finish the foreign source using its own real engine; it remains an open Waiting session.
     if(i===0){const foreignEngine=new (require('../out/db/syncEngine.js').SyncEngine)(csvA,path.join(projectA,'.solopreneur','project_journal.db'),projectRoot,root);await foreignEngine.initAndSync();try{extension.select(foreignEngine,projectA);await extension.settle(ref(project,336),undefined,root);await extension.drain();}finally{extension.select(engine,projectB);foreignEngine.close();}}
     else{await extension.settle(ref(project,336),undefined,root);await extension.drain();}
@@ -13702,7 +13766,7 @@ test('continuing a conversation never reuses a same-numbered terminal from anoth
   const prepared=preparedRuns[0],newId=Number(prepared.status.rootExecutionLogId),delivered=await read(projectB,newId);assert.equal(delivered.taskId,runs[1].taskId);assert.equal(delivered.conversationId,runs[1].conversationId);assert.notEqual(delivered.taskId,runs[0].taskId);assert.equal(delivered.status.sourceParentRunId,runs[1].runId);assert.equal(delivered.status.sourceParentTurnId,beforeB.state.turnId);assert.equal(delivered.status.plannedNativeSessionId,runs[1].status.plannedNativeSessionId);assert.ok(delivered.status.terminalDeliveryId);assert.ok(delivered.status.terminalCommandSubmittedAt);
   assert.equal(sent.filter(x=>x.text.includes('SOLOMAP_TERMINAL_DELIVERY_ID=')).length,1);assert.ok(sent.some(x=>x.text.endsWith(prepared.finalCommand)));assert.equal(posted.filter(x=>x.command==='conversationActionSettled'&&x.projectPath===projectB&&Number(x.conversationId)===336).length,2);
   await extension.settle(ref(projectB,336),undefined,root);await extension.drain();if(mode==='new-turn'){await extension.settle(ref(projectB,336),undefined,root);await extension.drain();}const closedB={state:await read(projectB,336),journal:await client.readJournal(ref(projectB,336)),binding:await client.readBinding(ref(projectB,336)),settlements:await client.readSettlements(ref(projectB,336),await client.readStatus(ref(projectB,336)))};
-  assert.equal(closedB.state.status.interactiveSessionClosed,true);assert.equal(closedB.state.status.checkpointSummary,mode==='saved'?'项目1保存的结果':'正在原会话中继续处理。');assert.equal(closedB.settlements.length,2);if(beforeB.settlements.length)assert.deepEqual(closedB.settlements[0],beforeB.settlements[0]);else{assert.equal(closedB.settlements[0].digest.status,'Completed');assert.deepEqual(closedB.settlements[0].digest.failures,[]);}assert.deepEqual(closedB.settlements[1].digest,closedB.settlements[0].digest);assert.deepEqual(closedB.binding,beforeB.binding);if(mode==='new-turn'){const expectedSavedJournal=structuredClone(savedBJournal);assert.match(expectedSavedJournal.entry.output,/Interactive session state: Waiting/);expectedSavedJournal.entry.output=expectedSavedJournal.entry.output.replace(/Interactive session state:\s*(?:Open|Waiting|Running)/gi,'Interactive session state: Closed');assert.deepEqual(await client.readJournal(ref(projectB,336),savedBStatus),expectedSavedJournal);assert.deepEqual(await client.readSettlements(ref(projectB,336),savedBStatus),savedBSettlements);}
+  assert.equal(closedB.state.status.interactiveSessionClosed,true);assert.equal(closedB.state.status.checkpointSummary,mode==='saved'?'项目1保存的结果':'正在原会话中继续处理。');assert.equal(closedB.settlements.length,2);if(beforeB.settlements.length)assert.deepEqual(closedB.settlements[0],beforeB.settlements[0]);else{assert.equal(closedB.settlements[0].digest.status,'Completed');assert.deepEqual(closedB.settlements[0].digest.failures,[]);}assert.deepEqual(closedB.settlements[1].digest,closedB.settlements[0].digest);assert.deepEqual(closedB.binding,beforeB.binding);if(mode==='new-turn'){const expectedSavedJournal=structuredClone(savedBJournal);expectedSavedJournal.entry.dataState.sessionOpen=false;assert.match(expectedSavedJournal.entry.output,/Interactive session state: Waiting/);expectedSavedJournal.entry.output=expectedSavedJournal.entry.output.replace(/Interactive session state:\s*(?:Open|Waiting|Running)/gi,'Interactive session state: Closed');assert.deepEqual(journalWithoutCurrentRunRevision(await client.readJournal(ref(projectB,336),savedBStatus)),journalWithoutCurrentRunRevision(expectedSavedJournal));assert.deepEqual(await client.readSettlements(ref(projectB,336),savedBStatus),savedBSettlements);}
   assert.deepEqual({...extension.owned(336)},{name:terminalA.name,root:projectA},'closing project B must preserve project A terminal ownership even when both conversation numbers match');
   assert.deepEqual(await read(projectA,336),beforeA.state);assert.deepEqual(await client.readJournal(ref(projectA,336)),beforeA.journal);assert.deepEqual(await client.readBinding(ref(projectA,336)),beforeA.binding);assert.deepEqual(await client.readSettlements(ref(projectA,336),await client.readStatus(ref(projectA,336))),beforeA.settlements);assert.equal((await client.readLog(ref(projectA,336),'stdout')).toString(),outputs.get(projectA));assert.equal((await client.readLog(ref(projectB,336),'stdout')).toString(),outputs.get(projectB));assert.deepEqual(await read(projectB,13),peer);assert.equal(live(wrappers[0]),true);assert.equal(live(wrappers[1]),false);
   for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:projectA},{path:projectB}]);await engine.initAndSync();assert.deepEqual(await read(projectA,336),beforeA.state);assert.deepEqual(await read(projectB,336),closedB.state);assert.deepEqual(await read(projectB,newId),delivered);assert.deepEqual(await client.readJournal(ref(projectB,336)),closedB.journal);assert.deepEqual(await client.readBinding(ref(projectB,336)),closedB.binding);assert.deepEqual(await client.readSettlements(ref(projectB,336),await client.readStatus(ref(projectB,336))),closedB.settlements);
@@ -13748,11 +13812,12 @@ test('window reload keeps a running Agent conversation recoverable', async t => 
   engine.close();for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await operation('recover_run_executions',{});engine=new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();assert.deepEqual(await read(project,51),before.state);assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,51),foreign);
   const window2=loadWindow();window2.connect(engine,project,root,[terminal],()=>assert.fail('restored Running conversation must use its recorded terminal'));window2.subscribe({subscriptions:[]});assert.deepEqual({...window2.owned()},{names:0,roots:0,targets:0});assert.deepEqual(Array.from(await window2.emit(terminal)),[false]);assert.equal(await window2.find(project,51),terminal);assert.equal(await window2.find(project,51,root),terminal);assert.equal(await window2.find(other,51,root),undefined);
   const snapshot=await window2.snapshot({},project);assert.equal(snapshot.solo.length,1);assert.equal(snapshot.solo[0].id,51);assert.equal(snapshot.solo[0].status,'Running');assert.ok(snapshot.solo[0].output.includes('保留这段正在进行的对话'));assert.equal((await client.readLog(reference,'stdout')).toString(),firstOutput);assert.equal(commands.length,1);
-  const checkpoint=async(action,args)=>{const current=await operation('read_run_checkpoint_state',{root:project,executionLogId:51});await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),action,...args],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:current.projectId,SOLOMAP_EXECUTION_LOG_ID:'51',SOLOMAP_RUN_GENERATION:String(current.generation),SOLOMAP_RUN_PROOF:current.proof,SOLOMAP_TASK_TURN_ID:current.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId}});};
+  let nativeCheckpointSequence=0;
+  const checkpoint=async(action,args)=>{if(action==='complete'){const values=Object.fromEntries(Array.from({length:args.length/2},(_,index)=>[String(args[index*2]).replace(/^--/,''),args[index*2+1]]));return completeNativeInteractiveTurn(operation,{root:project,executionLogId:51,summary:values.summary,sessionId:run.status.plannedNativeSessionId,idempotencyKey:`window-reload-native-complete:${++nativeCheckpointSequence}`});}const current=await operation('read_run_checkpoint_state',{root:project,executionLogId:51});await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),action,...args],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:current.projectId,SOLOMAP_EXECUTION_LOG_ID:'51',SOLOMAP_RUN_GENERATION:String(current.generation),SOLOMAP_RUN_PROOF:current.proof,SOLOMAP_TASK_TURN_ID:current.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId}});};
   await checkpoint('complete',['--outcome','partial','--summary','重载后保存的完整结果']);await window2.settle(reference,undefined,root);await window2.drain();const firstStatus=await client.readStatus(reference),firstJournal=await client.readJournal(reference,firstStatus),firstSettlements=await client.readSettlements(reference,firstStatus);assert.equal(firstStatus.status,'Waiting');assert.equal(firstStatus.checkpointSummary,'重载后保存的完整结果');assert.equal(firstSettlements.length,1);assert.equal((await client.readLog(reference,'stdout',firstStatus)).toString(),firstOutput);assert.equal((await client.getResumableSession(reference)).sessionId,run.status.plannedNativeSessionId);
   await checkpoint('start',['--message','窗口重载后继续原任务，保留补充🌿']);const next=await read(project,51);assert.equal(next.taskId,run.taskId);assert.equal(next.runId,run.runId);assert.equal(next.conversationId,run.conversationId);assert.notEqual(next.turnId,before.state.turnId);assert.equal(next.status.status,'Running');assert.equal(next.status.userMessage,'窗口重载后继续原任务，保留补充🌿');assert.equal(next.status.interactiveSessionClosed,undefined);assert.equal(await window2.find(project,51,root),terminal);
-  const secondOutput='窗口重载后新轮完整输出🌿\n'.repeat(10000);await operation('append_run_log',{projectId:run.projectId,executionLogId:51,generation:next.generation,stream:'stdout',sequence:1,offset:Buffer.byteLength(firstOutput),bytes:Buffer.from(secondOutput).toString('base64'),idempotencyKey:'reload-second-output'});await checkpoint('complete',['--outcome','partial','--summary','继续原任务后的结果']);await window2.settle(reference,undefined,root);await window2.drain();const finalStatus=await client.readStatus(reference),finalState=await read(project,51),finalJournal=await client.readJournal(reference),finalBinding=await client.readBinding(reference),finalSettlements=await client.readSettlements(reference,finalStatus);assert.equal(finalStatus.status,'Waiting');assert.equal(finalStatus.checkpointSummary,'继续原任务后的结果');assert.equal((await client.readLog(reference,'stdout',finalStatus)).toString(),secondOutput);assert.deepEqual(await client.readJournal(reference,firstStatus),firstJournal);assert.deepEqual(await client.readSettlements(reference,firstStatus),firstSettlements);assert.equal(finalSettlements.length,1);assert.equal(commands.length,1);assert.ok(wrappers.every(child=>child.exitCode===null&&child.signalCode===null));
-  for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await read(project,51),finalState);assert.deepEqual(await client.readJournal(reference),finalJournal);assert.deepEqual(await client.readBinding(reference),finalBinding);assert.deepEqual(await client.readSettlements(reference,await client.readStatus(reference)),finalSettlements);assert.deepEqual(await client.readJournal(reference,firstStatus),firstJournal);assert.equal((await client.readLog(reference,'stdout',firstStatus)).toString(),firstOutput);assert.equal((await client.readLog(reference,'stdout',await client.readStatus(reference))).toString(),secondOutput);
+  const secondOutput='窗口重载后新轮完整输出🌿\n'.repeat(10000);await operation('append_run_log',{projectId:run.projectId,executionLogId:51,generation:next.generation,stream:'stdout',sequence:1,offset:Buffer.byteLength(firstOutput),bytes:Buffer.from(secondOutput).toString('base64'),idempotencyKey:'reload-second-output'});await checkpoint('complete',['--outcome','partial','--summary','继续原任务后的结果']);await window2.settle(reference,undefined,root);await window2.drain();const finalStatus=await client.readStatus(reference),finalState=await read(project,51),finalJournal=await client.readJournal(reference),finalBinding=await client.readBinding(reference),finalSettlements=await client.readSettlements(reference,finalStatus);assert.equal(finalStatus.status,'Waiting');assert.equal(finalStatus.checkpointSummary,'继续原任务后的结果');assert.equal((await client.readLog(reference,'stdout',finalStatus)).toString(),secondOutput);assert.deepEqual(journalWithoutCurrentRunRevision(await client.readJournal(reference,firstStatus)),journalWithoutCurrentRunRevision(firstJournal));assert.deepEqual(await client.readSettlements(reference,firstStatus),firstSettlements);assert.equal(finalSettlements.length,1);assert.equal(commands.length,1);assert.ok(wrappers.every(child=>child.exitCode===null&&child.signalCode===null));
+  for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await read(project,51),finalState);assert.deepEqual(await client.readJournal(reference),finalJournal);assert.deepEqual(await client.readBinding(reference),finalBinding);assert.deepEqual(await client.readSettlements(reference,await client.readStatus(reference)),finalSettlements);assert.deepEqual(journalWithoutCurrentRunRevision(await client.readJournal(reference,firstStatus)),journalWithoutCurrentRunRevision(firstJournal));assert.equal((await client.readLog(reference,'stdout',firstStatus)).toString(),firstOutput);assert.equal((await client.readLog(reference,'stdout',await client.readStatus(reference))).toString(),secondOutput);
   const walAfter=fs.readFileSync(path.join(root,'solomap.db-wal'));await Promise.all([window2.settle(reference,undefined,root),window2.settle(reference,undefined,root)]);await window2.drain();assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),walAfter);assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,51),foreign);assert.equal(fs.readFileSync(csvPath,'utf8'),csv);assert.equal(fs.readFileSync(otherCsv,'utf8'),csv);assert.deepEqual(engine.getNodes(),originalNodes);for(const workspace of [project,other])assert.deepEqual(fs.readdirSync(path.join(workspace,'.solopreneur')).sort(),['project.json','roadmap.csv']);
   await client.stop(reference,await client.readStatus(reference),'关闭本轮临时测试会话','window-reload-temporary-stop');assert.equal((await read(project,51)).status.interactiveSessionClosed,true);
 });
@@ -13798,7 +13863,7 @@ test('closing an interactive terminal terminates its tracked Agent process befor
     const peer=await read(project,13),foreign=await read(other,52),initialBinding=await client.readBinding(reference);
     let saved;
     if(mode==='waiting'){
-      const current=await operation('read_run_checkpoint_state',{root:project,executionLogId:52});await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'complete','--outcome','partial','--summary','已经保存的原结果'],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:current.projectId,SOLOMAP_EXECUTION_LOG_ID:'52',SOLOMAP_RUN_GENERATION:String(current.generation),SOLOMAP_RUN_PROOF:current.proof,SOLOMAP_TASK_TURN_ID:current.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId}});
+      await completeNativeInteractiveTurn(operation,{root:project,executionLogId:52,summary:'已经保存的原结果',sessionId:run.status.plannedNativeSessionId,idempotencyKey:'terminal-close-native-complete'});
       await extension.settle(reference,undefined,root);await extension.drain();const status=await client.readStatus(reference);assert.equal(status.status,'Waiting');saved={status,journal:await client.readJournal(reference,status),settlements:await client.readSettlements(reference,status),binding:await client.readBinding(reference)};assert.equal(saved.settlements.length,1);assert.equal(live(runner),true);
     }else{assert.equal((await read(project,52)).status.status,'Running');assert.equal((await client.readSettlements(reference,await client.readStatus(reference))).length,0);}
     assert.deepEqual({...extension.owned()},{names:1,roots:1,targets:1});
@@ -13848,7 +13913,7 @@ test('closing a terminal after switching projects keeps the persisted conversati
     const id=Number(state.status.rootExecutionLogId),reference=ref(workspace,id),output=`原项目${path.basename(workspace)}会话${id}完整结果🌿\n`.repeat(10000);outputs.set(reference,output);
     const before=await require('../out/runWorkspace.js').snapshotWorkspace(workspace);await operation('write_run_document',{projectId:state.projectId,executionLogId:id,generation:state.generation,turnId:state.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(state.turnId,'before'),bytes:Buffer.from(JSON.stringify(before)).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:`switch-cleanup-before:${reference}`});
     await operation('append_run_log',{projectId:state.projectId,executionLogId:id,generation:state.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:`switch-cleanup-output:${reference}`});
-    const head=await operation('read_run_checkpoint_state',{root:workspace,executionLogId:id});await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'complete','--outcome','partial','--summary','已经保存的原项目结果'],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:String(id),SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:state.status.plannedNativeSessionId}});
+    await completeNativeInteractiveTurn(operation,{root:workspace,executionLogId:id,summary:'已经保存的原项目结果',sessionId:state.status.plannedNativeSessionId,idempotencyKey:`switch-cleanup-native-complete:${workspace}:${id}`});
     await extension.settle(reference,undefined,root);await extension.drain();assert.equal((await read(workspace,id)).status.status,'Waiting');
   };
   const parentA=await prepare(projectA,53);await finish(parentA,projectA);
@@ -13899,10 +13964,10 @@ test('continuing a root conversation immediately after its continuation terminal
       sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
       vscode.window.createTerminal=options=>{const terminal=create(options);vscode.window.terminals.push(terminal);return terminal;};vscode.window.onDidCloseTerminal=callback=>{closeCallback=callback;return {dispose(){}};};};
   `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
-  extension.connect(engine,project,root,options=>{const terminal={name:options.name,exitStatus:{reason:3},show(){terminal.shown=(terminal.shown||0)+1;},sendText(text){sent.push({terminal,text});},dispose(){terminal.disposed=(terminal.disposed||0)+1;}};created.push({options,terminal,writerAliveAtCreation:live(writers[0])});return terminal;},async(_context,input)=>{assert.equal(closingSeen,true,'continue must overlap the previous writer cleanup');assert.equal(live(writers[0]),false,'new preparation must wait until the old writer exits');assert.ok(writers.slice(1).every(live));prepareObservations.push({old:await read(project,54),parent:input.parentExecutionLogId,turn:input.expectedParentTurnId});assert.equal(prepareObservations[0].old.status.interactiveSessionClosed,true);const prepared=await require('../out/agentRunPreparation.js').prepareAgentRun({...input,launchIntentId:'close-continue-button'},operation);preparedRuns.push(prepared);return prepared;},message=>errors.push(message));extension.subscribe({subscriptions:[]});
-  const parent=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'原完整任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:53,userMessage:'原对话',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off'},operation);
-  const outputs=new Map(),finish=async state=>{const id=Number(state.status.rootExecutionLogId),output=`第${id}轮完整结果保留🌿\n`.repeat(10000);outputs.set(id,output);const before=await require('../out/runWorkspace.js').snapshotWorkspace(project);await operation('write_run_document',{projectId:state.projectId,executionLogId:id,generation:state.generation,turnId:state.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(state.turnId,'before'),bytes:Buffer.from(JSON.stringify(before)).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:`close-continue-before:${id}`});await operation('append_run_log',{projectId:state.projectId,executionLogId:id,generation:state.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:`close-continue-output:${id}`});const head=await operation('read_run_checkpoint_state',{root:project,executionLogId:id});await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'complete','--outcome','partial','--summary',`第${id}轮已保存`],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:String(id),SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:parent.status.plannedNativeSessionId}});await extension.settle(ref(id),undefined,root);await extension.drain();};
-  await finish(parent);const child=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'补充原任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:0,launchIntentId:'close-continue-history',userMessage:'继续原对话',runKind:'solo_continue',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',nativeSessionId:parent.status.plannedNativeSessionId,continuation:true,parentExecutionLogId:53,expectedParentTurnId:parent.turnId,metadata:{lineageRootExecutionLogId:53,launchSummary:`Agent continuation started.\n\nContinuation parent conversation: 53\nContinuation session id: ${parent.status.plannedNativeSessionId}`}},operation);
+  extension.connect(engine,project,root,options=>{const terminal={name:options.name,exitStatus:{reason:3},show(){terminal.shown=(terminal.shown||0)+1;},sendText(text){sent.push({terminal,text});},dispose(){terminal.disposed=(terminal.disposed||0)+1;}};created.push({options,terminal,writerAliveAtCreation:live(writers[0])});return terminal;},async(_context,input)=>{assert.equal(closingSeen,true,'continue must overlap the previous writer cleanup');assert.equal(live(writers[0]),false,'new preparation must wait until the old writer exits');assert.ok(writers.slice(1).every(live));prepareObservations.push({old:await read(project,54),parent:input.parentExecutionLogId,turn:input.expectedParentTurnId});assert.equal(prepareObservations[0].old.status.interactiveSessionClosed,true);const prepared=await prepareControlledClaudeRun({...input,launchIntentId:'close-continue-button'},operation);preparedRuns.push(prepared);return prepared;},message=>errors.push(message));extension.subscribe({subscriptions:[]});
+  const parent=await prepareControlledClaudeRun({agentCli:'claude',selectedModel:'',prompt:'原完整任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:53,userMessage:'原对话',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off'},operation);
+  const outputs=new Map(),finish=async state=>{const id=Number(state.status.rootExecutionLogId),output=`第${id}轮完整结果保留🌿\n`.repeat(10000);outputs.set(id,output);const before=await require('../out/runWorkspace.js').snapshotWorkspace(project);await operation('write_run_document',{projectId:state.projectId,executionLogId:id,generation:state.generation,turnId:state.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(state.turnId,'before'),bytes:Buffer.from(JSON.stringify(before)).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:`close-continue-before:${id}`});await operation('append_run_log',{projectId:state.projectId,executionLogId:id,generation:state.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:`close-continue-output:${id}`});const head=await operation('read_run_checkpoint_state',{root:project,executionLogId:id});await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'complete','--outcome','partial','--summary',`第${id}轮已保存`],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:String(id),SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:parent.status.plannedNativeSessionId}});await finishControlledClaudeTurn(request=>operation(request.operation,request.input),project,id,'受控原生完整回复🌿',native.store);await extension.settle(ref(id),undefined,root);await extension.drain();};
+  await finish(parent);const child=await prepareControlledClaudeRun({agentCli:'claude',selectedModel:'',prompt:'补充原任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:0,launchIntentId:'close-continue-history',userMessage:'继续原对话',runKind:'solo_continue',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',nativeSessionId:parent.status.plannedNativeSessionId,continuation:true,parentExecutionLogId:53,expectedParentTurnId:parent.turnId,metadata:{lineageRootExecutionLogId:53,launchSummary:`Agent continuation started.\n\nContinuation parent conversation: 53\nContinuation session id: ${parent.status.plannedNativeSessionId}`}},operation);
   assert.equal(Number(child.status.rootExecutionLogId),54);const oldTerminal=await extension.launch({workspaceRoot:project,label:'solo',conversationId:54,nodeId:'__solo__',statusFilePath:ref(54),runKind:'solo_continue',globalDataPath:root,command:child.finalCommand,agentCli:'claude'});const deliveredStatus=await client.readStatus(ref(54));await client.writeStatus(ref(54),{...deliveredStatus,...identity(writers[0])});await finish(child);
   for(const [workspace,id,writer] of [[project,13,writers[1]],[other,54,writers[2]]])await operation('prepare_run',{root:workspace,executionLogId:id,nodeId:'__solo__',runKind:'solo',prompt:'其他目标',command:'controlled fixture',userMessage:'其他对话',metadata:{interactiveSession:true,agentCli:'claude',sessionProvider:'claude',nativeSessionId:workspace===other?parent.status.plannedNativeSessionId:'unrelated-session',...identity(writer)},idempotencyKey:`close-continue-peer:${workspace}:${id}`});
   const peer=await read(project,13),foreign=await read(other,54),snapshot=async id=>{const state=await read(project,id),status=await client.readStatus(ref(id));return {state,status,journal:await client.readJournal(ref(id),status),binding:await client.readBinding(ref(id)),settlements:await client.readSettlements(ref(id),status)};},saved=new Map();for(const id of [53,54]){saved.set(id,await snapshot(id));assert.equal(saved.get(id).settlements.length,1);assert.equal(saved.get(id).state.status.status,'Waiting');}
@@ -13926,7 +13991,7 @@ test('a delayed terminal close preserves a checkpoint arriving during process cl
   const csv=['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt','2,实现 MVP,保原任务,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'].join('\n'),csvPath=path.join(project,'.solopreneur','roadmap.csv'),otherCsv=path.join(other,'.solopreneur','roadmap.csv');fs.writeFileSync(csvPath,csv);fs.writeFileSync(otherCsv,csv);
   let engine=new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();t.after(()=>engine.close());const originalNodes=engine.getNodes().map(node=>({...node}));
   const initialOutput='关闭前完整输出🌿\n'.repeat(10000),report={schemaVersion:1,summary:'关闭时保存的原结果',unmetRequirements:[],decisions:[],corrections:[],verification:[],commits:[],experienceUsage:[],lessons:[]},summary='completed while closing';
-  const checkpointPath=path.join(projectRoot,'out/taskCheckpointProcess.js'),program=`let closing=false;const close=()=>{if(closing)return;closing=true;process.stdout.write('closing\\n');setTimeout(()=>process.exit(0),700);};process.on('SIGTERM',close);process.stdin.once('data',()=>{process.stdout.write(${JSON.stringify(initialOutput.slice(0,initialOutput.indexOf('\n')+1))}.repeat(10000)+'ready\\n');});setInterval(()=>{},1000);`;
+  const checkpointPath=path.join(projectRoot,'out/taskCheckpointProcess.js'),releasePath=path.join(base,'release-writer'),program=`const fs=require('fs');let closing=false;const close=()=>{if(closing)return;closing=true;process.stdout.write('closing\\n');const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(releasePath)})){clearInterval(timer);process.exit(0);}},5);};process.on('SIGTERM',close);process.stdin.once('data',()=>{process.stdout.write(${JSON.stringify(initialOutput.slice(0,initialOutput.indexOf('\n')+1))}.repeat(10000)+'ready\\n');});setInterval(()=>{},1000);`;
   const quote=require('../out/agentCli.js').shellQuote,run=await require('../out/agentRunPreparation.js').prepareAgentRun({agentCli:'claude',selectedModel:'',prompt:'保留原用户完整任务',workspaceRoot:project,nodeId:'__solo__',executionLogId:53,userMessage:'关闭当前交互终端',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',directExecutionCommand:`exec ${quote(process.execPath)} -e ${quote(program)}`},operation);
   const created=[],sent=[],consumerEntries=[],compiled=fs.readFileSync(path.join(projectRoot,'out/extension.js'),'utf8'),start=compiled.indexOf("    if (typeof vscode.window.onDidCloseTerminal === 'function') {"),end=compiled.indexOf('\n    // Register settings saved broadcast',start);assert.ok(start>=0&&end>start);const registration=compiled.slice(start,end);let runner;
   const extension=loadCompiledModule('out/extension.js',`
@@ -13947,10 +14012,10 @@ test('a delayed terminal close preserves a checkpoint arriving during process cl
   for(const [workspace,id] of [[project,13],[other,53]]){const child=childProcess.spawn(process.execPath,['-e',"process.stdout.write('ready');setInterval(()=>{},1000)"],{cwd:workspace,stdio:'pipe'});processes.push(child);await once(child.stdout,'data');child.stdout.resume();child.stderr.resume();await operation('prepare_run',{root:workspace,executionLogId:id,nodeId:'__solo__',runKind:'solo',prompt:'其他目标',command:'controlled fixture',userMessage:'其他对话',metadata:{interactiveSession:true,agentPid:child.pid,processBirth:getProcessBirthMarker(child.pid)},idempotencyKey:`delayed-close-peer:${workspace}:${id}`});}
   const peer=await read(project,13),foreign=await read(other,53);
   const closing=closeResult=extension.emit(terminal);closing.catch(()=>undefined);const closingDeadline=Date.now()+10000;while(!rendered().includes('closing\n')){assert.equal(live(runner),true,Buffer.concat(stderr).toString());assert.ok(Date.now()<closingDeadline,'close must signal the tracked real child');await new Promise(resolve=>setTimeout(resolve,5));}const during=await read(project,53);assert.equal(during.status.stopRequested,true);assert.equal(Boolean(during.status.finishedAt),false,'the checkpoint must arrive after close has begun');assert.equal(live(runner),true);
-  const checkpoint=await require('node:util').promisify(childProcess.execFile)(process.execPath,[checkpointPath,'complete','--outcome','partial','--summary',summary,'--report-json',JSON.stringify(report)],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:claimed.projectId,SOLOMAP_EXECUTION_LOG_ID:'53',SOLOMAP_RUN_GENERATION:String(claimed.generation),SOLOMAP_RUN_PROOF:claimed.proof,SOLOMAP_TASK_TURN_ID:claimed.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId}});const accepted=JSON.parse(checkpoint.stdout);assert.equal(accepted.turnId,run.turnId);assert.equal(accepted.status.checkpointSummary,summary);assert.equal(accepted.status.stopRequested,true);assert.equal(Boolean(accepted.status.interactiveSessionClosed),false);assert.equal(live(runner),true,'late completion must be accepted while process cleanup is still pending');
-  assert.deepEqual(Array.from(await closing),[true]);await ended;await captured;await extension.drain();assert.equal(consumerEntries.length,2);assert.match(consumerEntries[0][3].checkpointEventId,/:complete$/);assert.match(consumerEntries[1][3].checkpointEventId,/:session-close$/);assert.equal(live(runner),false);assert.equal(Buffer.concat(stderr).length,0);
+  const checkpoint=await require('node:util').promisify(childProcess.execFile)(process.execPath,[checkpointPath,'complete','--outcome','partial','--summary',summary,'--report-json',JSON.stringify(report)],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:claimed.projectId,SOLOMAP_EXECUTION_LOG_ID:'53',SOLOMAP_RUN_GENERATION:String(claimed.generation),SOLOMAP_RUN_PROOF:claimed.proof,SOLOMAP_TASK_TURN_ID:claimed.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId}});const accepted=JSON.parse(checkpoint.stdout);assert.equal(accepted.turnId,run.turnId);assert.equal(accepted.status.checkpointSummary,summary);assert.equal(accepted.status.stopRequested,true);assert.equal(Boolean(accepted.status.interactiveSessionClosed),false);assert.equal(live(runner),true,'late completion must be accepted while process cleanup is still pending');fs.writeFileSync(releasePath,'release');
+  assert.deepEqual(Array.from(await closing),[true]);await ended;await captured;await extension.drain();assert.equal(consumerEntries.length,1);assert.match(consumerEntries[0][3].checkpointEventId,/:session-close$/);assert.equal(live(runner),false);assert.equal(Buffer.concat(stderr).length,0);
   const expected=initialOutput+'ready\nclosing\n';assert.equal(hash(rendered()),hash(expected));const fullOutput=(await client.readLog(reference,'stdout')).toString('utf8');assert.equal(hash(fullOutput.replace(/\r\n/g,'\n')),hash(expected));
-  const status=await client.readStatus(reference),final=await read(project,53),journal=await client.readJournal(reference,status),settlements=await client.readSettlements(reference,status),binding=await client.readBinding(reference),savedReport=await client.readReport(reference,status);assert.equal(final.status.status,'Processed');assert.equal(final.status.interactiveSessionClosed,true);assert.equal(final.status.checkpointOutcome,'partial');assert.equal(final.status.checkpointSummary,summary);assert.equal(final.status.stopReason,'用户已关闭当前对话终端。');assert.equal(final.taskId,run.taskId);assert.equal(final.runId,run.runId);assert.equal(final.turnId,run.turnId);assert.deepEqual(savedReport.report,report);assert.equal(savedReport.availability,'available');assert.equal(settlements.length,2);assert.deepEqual(settlements[1].digest,settlements[0].digest);assert.deepEqual(settlements[0].digest.failures,[]);assert.doesNotMatch(journal.entry.output,/Failure category: stopped_by_user|Failure category: agent_exit_failed/);assert.match(journal.entry.output,/Interactive session state: Closed/);assert.ok(journal.entry.output.includes(summary));assert.deepEqual({...extension.owned()},{names:0,roots:0,targets:0});
+  const status=await client.readStatus(reference),final=await read(project,53),journal=await client.readJournal(reference,status),settlements=await client.readSettlements(reference,status),binding=await client.readBinding(reference),savedReport=await client.readReport(reference,status);assert.equal(final.status.status,'Processed');assert.equal(final.status.interactiveSessionClosed,true);assert.equal(final.status.checkpointOutcome,'partial');assert.equal(final.status.checkpointSummary,summary);assert.equal(final.status.stopReason,'用户已关闭当前对话终端。');assert.equal(final.taskId,run.taskId);assert.equal(final.runId,run.runId);assert.equal(final.turnId,run.turnId);assert.deepEqual(savedReport.report,report);assert.equal(savedReport.availability,'available');assert.equal(settlements.length,1);assert.deepEqual(settlements[0].digest.failures,[]);assert.doesNotMatch(journal.entry.output,/Failure category: stopped_by_user|Failure category: agent_exit_failed/);assert.match(journal.entry.output,/Interactive session state: Closed/);assert.ok(journal.entry.output.includes(summary));assert.deepEqual({...extension.owned()},{names:0,roots:0,targets:0});
   for(const source of consumerEntries){const fixed=source[3];assert.equal((await client.readReport(reference,fixed)).objectId,savedReport.objectId);assert.deepEqual((await client.readReport(reference,fixed)).report,report);assert.equal(hash(await client.readLog(reference,'stdout',fixed)),hash(Buffer.from(fullOutput)));}
   assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,53),foreign);assert.ok(processes.slice(1).every(live));assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(created.length,1);assert.equal(sent.length,1);
   for(let restart=0;restart<2;restart++){engine.close();for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);engine=new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();assert.deepEqual(await read(project,53),final);assert.deepEqual(await client.readJournal(reference),journal);assert.deepEqual(await client.readSettlements(reference,await client.readStatus(reference)),settlements);assert.deepEqual(await client.readBinding(reference),binding);assert.deepEqual(await client.readReport(reference,await client.readStatus(reference)),savedReport);assert.equal(hash(await client.readLog(reference,'stdout',status)),hash(Buffer.from(fullOutput)));const wal=hash(fs.readFileSync(path.join(root,'solomap.db-wal')));assert.deepEqual(Array.from(await extension.emit(terminal)),[false]);await Promise.all([extension.settle(reference,undefined,root),extension.settle(reference,undefined,root)]);await extension.drain();assert.equal(hash(fs.readFileSync(path.join(root,'solomap.db-wal'))),wal);assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,53),foreign);assert.ok(processes.slice(1).every(live));assert.deepEqual(engine.getNodes(),originalNodes);for(const workspace of [project,other]){assert.equal(fs.readFileSync(path.join(workspace,'.solopreneur','roadmap.csv'),'utf8'),csv);assert.deepEqual(fs.readdirSync(path.join(workspace,'.solopreneur')).sort(),['project.json','roadmap.csv']);}}
@@ -14223,7 +14288,8 @@ test('posting a newly created conversation supersedes stale sidebar snapshots on
 });
 
 test('a new solo conversation cannot be overwritten by a sidebar snapshot started before its ledger row', async () => {
-  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const snapshotCache = makeSidebarSnapshotCacheStub();
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '', { './sidebarSnapshotCache': snapshotCache });
   const projectPath = '/workspace/project';
   const snapshotResolvers = [];
   const postedMessages = [];
@@ -14280,12 +14346,13 @@ test('a new solo conversation cannot be overwritten by a sidebar snapshot starte
   assert.equal(postedMessages[0].soloConversations[0].id, 42);
 });
 
-test('project registry persists projects and pin state in the global SoloMap file', async () => {
+test('project registry persists projects and pin state in the global database', async () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
       'module.exports.__getProjects = getProjects;',
-      'module.exports.__toggleProjectPinned = toggleProjectPinned;'
+      'module.exports.__toggleProjectPinned = toggleProjectPinned;',
+      'module.exports.__refreshProjectRegistry = refreshProjectRegistryForContext;'
     ].join('\n')
   );
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-project-registry-'));
@@ -14310,21 +14377,34 @@ test('project registry persists projects and pin state in the global SoloMap fil
     };
   };
 
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const transport = require('../out/autonomousRuntimeControl.js'); const previous = transport.sendRuntimeDataRequest;
+  const store = new UnifiedDataStore(globalRoot); const operations = createRuntimeDataOperations(store);
+  transport.sendRuntimeDataRequest = (_root, request) => operations(request);
   const firstContext = makeContext([
     { name: 'Alpha', path: '/workspace/alpha' },
     { name: 'Beta', path: '/workspace/beta' }
   ]);
-  assert.equal(extensionModule.__getProjects(firstContext).length, 2);
-  await extensionModule.__toggleProjectPinned(firstContext, '/workspace/beta');
+  try {
+    await extensionModule.__refreshProjectRegistry(firstContext);
+    assert.equal(extensionModule.__getProjects(firstContext).length, 2);
+    await extensionModule.__toggleProjectPinned(firstContext, '/workspace/beta');
+    const registry = await operations({ operation: 'read_project_registry', input: {} });
+    assert.equal(registry.registry.projects.find((project) => project.path === '/workspace/beta').pinnedAt.length > 0, true);
+    assert.equal(fs.existsSync(path.join(globalRoot, 'projects.json')), false);
 
-  const registryPath = path.join(globalRoot, 'projects.json');
-  const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
-  assert.equal(registry.projects.find((project) => project.path === '/workspace/beta').pinnedAt.length > 0, true);
-
-  const secondContext = makeContext([]);
-  const sharedProjects = extensionModule.__getProjects(secondContext);
-  assert.equal(sharedProjects[0].path, '/workspace/beta');
-  assert.equal(sharedProjects[1].path, '/workspace/alpha');
+    const secondContext = makeContext([]);
+    await extensionModule.__refreshProjectRegistry(secondContext);
+    const sharedProjects = extensionModule.__getProjects(secondContext);
+    assert.equal(sharedProjects[0].path, '/workspace/beta');
+    assert.equal(sharedProjects[1].path, '/workspace/alpha');
+  } finally {
+    transport.sendRuntimeDataRequest = previous; await operations.close(); store.close();
+    const unlink = file => { try { fs.unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; } };
+    unlink(path.join(globalRoot, 'solomap.db-wal')); unlink(path.join(globalRoot, 'solomap.db-shm')); unlink(path.join(globalRoot, 'solomap.db'));
+    fs.rmdirSync(globalRoot); fs.rmdirSync(tempRoot);
+  }
 });
 
 test('partial settings updates preserve existing user settings after extension upgrades', async () => {
@@ -14332,17 +14412,20 @@ test('partial settings updates preserve existing user settings after extension u
     'out/extension.js',
     [
       'module.exports.__updatePersistedSettings = updatePersistedSettings;',
+      'module.exports.__readTelegramBotToken = readTelegramBotToken;',
       'module.exports.__getPersistedSettings = getPersistedSettings;',
       'module.exports.__getSettingsWithRuntimeState = getSettingsWithRuntimeState;',
       'module.exports.__isSoloMapLanguageZh = isSoloMapLanguageZh;',
       'module.exports.__getRoadmapPanelTitle = getRoadmapPanelTitle;',
       'module.exports.__getStrategyPyramidPanelTitle = getStrategyPyramidPanelTitle;',
-      'module.exports.__getProjectGrowthPanelCopy = getProjectGrowthPanelCopy;'
+      'module.exports.__getProjectGrowthPanelCopy = getProjectGrowthPanelCopy;',
+      'module.exports.__connectSettingsDatabase = (call) => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request); autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false }); activateObservedBackgroundRuntime = async () => {}; scheduleFocusReminder = () => {}; scheduleTimedAutomationTask = () => {}; };'
     ].join('\n')
   );
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-partial-settings-'));
   const globalRoot = path.join(tempRoot, '.solomap-global');
   const settingsWrites = [];
+  const secrets = new Map();
   const savedSettings = {
     cliPath: 'codex',
     agentModelPreferences: { codex: 'gpt-5' },
@@ -14382,9 +14465,22 @@ test('partial settings updates preserve existing user settings after extension u
         if (key === 'solopreneur.settings') settingsWrites.push(value);
         return Promise.resolve();
       }
+    },
+    secrets: {
+      get(key) { return Promise.resolve(secrets.get(key)); },
+      store(key, value) { secrets.set(key, value); return Promise.resolve(); },
+      delete(key) { secrets.delete(key); return Promise.resolve(); }
     }
   };
 
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const store = new UnifiedDataStore(globalRoot); const operations = createRuntimeDataOperations(store);
+  extensionModule.__connectSettingsDatabase(operations);
+
+  try {
+  assert.equal(await extensionModule.__readTelegramBotToken(context), 'private-bot-token');
+  assert.equal(secrets.get('solopreneur.telegramBotToken'), 'private-bot-token');
   await extensionModule.__updatePersistedSettings(context, {
     cliPath: undefined,
     language: undefined,
@@ -14399,11 +14495,13 @@ test('partial settings updates preserve existing user settings after extension u
     }
   });
 
-  const persisted = settingsWrites.at(-1);
+  const locatorWrite = settingsWrites.at(-1);
+  assert.deepEqual(Object.keys(locatorWrite).sort(), ['globalDataPath']);
+  const persisted = extensionModule.__getPersistedSettings(context);
   assert.equal(persisted.cliPath, 'codex');
   assert.equal(persisted.language, 'en');
   assert.equal(persisted.globalPrompt, 'Keep my durable instruction.');
-  assert.equal(persisted.telegramBotToken, 'private-bot-token');
+  assert.equal(persisted.telegramBotToken, '');
   assert.equal(persisted.telegramChatId, '123456');
   const settingsForWebview = extensionModule.__getSettingsWithRuntimeState(context);
   assert.equal(settingsForWebview.telegramBotToken, '');
@@ -14422,20 +14520,28 @@ test('partial settings updates preserve existing user settings after extension u
   assert.equal(persisted.automationTasks.scheduledTasks[1].enabled, false);
   assert.equal(persisted.automationTasks.triggers.scheduled_time.prompt, 'Start the daily task');
 
-  map.set('solopreneur.settings', { ...savedSettings, language: 'zh' });
+  await extensionModule.__updatePersistedSettings(context, { language: 'zh' });
   assert.equal(extensionModule.__isSoloMapLanguageZh(context), true);
   assert.equal(extensionModule.__getRoadmapPanelTitle(context), 'SoloMap 项目路线图');
   assert.equal(extensionModule.__getStrategyPyramidPanelTitle(context), 'solomap 战略金字塔');
   assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).panelTitle, 'solomap 项目生长图');
   assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).refreshNoProject, '请先选择一个项目文件夹再刷新项目生长数据。');
   assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).refreshDone(4, 3), '项目生长数据已刷新：4 个文件，3 个模块。');
-  map.set('solopreneur.settings', { ...savedSettings, language: 'en' });
+  await extensionModule.__updatePersistedSettings(context, { language: 'en' });
   assert.equal(extensionModule.__isSoloMapLanguageZh(context), false);
   assert.equal(extensionModule.__getRoadmapPanelTitle(context), 'SoloMap - AI Coding Agent Roadmap');
   assert.equal(extensionModule.__getStrategyPyramidPanelTitle(context), 'solomap Strategy Pyramid');
   assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).panelTitle, 'solomap Project Growth Graph');
   assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).refreshNoProject, 'Choose a project folder before refreshing project growth data.');
   assert.equal(extensionModule.__getProjectGrowthPanelCopy(context).refreshDone(4, 3), 'Project growth data refreshed: 4 files, 3 modules.');
+  } finally {
+    await operations.close(); store.close();
+    const unlink = file => { try { fs.unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; } };
+    unlink(path.join(globalRoot, 'solomap.db-wal')); unlink(path.join(globalRoot, 'solomap.db-shm')); unlink(path.join(globalRoot, 'solomap.db'));
+    try { fs.rmdirSync(path.join(globalRoot, 'skills', 'installed')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    try { fs.rmdirSync(path.join(globalRoot, 'skills')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    fs.rmdirSync(globalRoot); fs.rmdirSync(tempRoot);
+  }
 });
 
 test('cognitive Runtime config uses the same normalized data root as the detached Runtime', () => {
@@ -14444,8 +14550,9 @@ test('cognitive Runtime config uses the same normalized data root as the detache
   const end = extension.indexOf('\nfunction projectName', start);
   const body = extension.slice(start, end);
   assert.match(body, /const globalDataPath = normalizeGlobalDataPathForExtension\(settings\.globalDataPath\)/);
-  assert.match(body, /writeCognitiveRuntimeConfig\(globalDataPath,/);
-  assert.doesNotMatch(body, /writeCognitiveRuntimeConfig\(settings\.globalDataPath,/);
+  assert.match(body, /operation: 'project_cognitive_runtime_config'/);
+  assert.match(body, /expectedSourceRevisions/);
+  assert.doesNotMatch(body, /sendRuntimeDataRequest\(settings\.globalDataPath,/);
 });
 
 test('manual experience review is routed from the existing settings action', async () => {
@@ -14470,13 +14577,26 @@ test('concurrent settings patches serialize without restoring stale values', asy
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'concurrent-settings-'));
   const globalRoot = path.join(tempRoot, '.solomap-global');
   const store = new UnifiedDataStore(globalRoot), operations = createRuntimeDataOperations(store);
-  t.after(async () => { await operations.close(); store.close(); });
+  t.after(async () => {
+    await operations.close(); store.close();
+    const unlinkOwned = file => { try { fs.unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; } };
+    unlinkOwned(path.join(globalRoot, 'solomap.db-wal')); unlinkOwned(path.join(globalRoot, 'solomap.db-shm')); unlinkOwned(path.join(globalRoot, 'solomap.db'));
+    const diagnosticsRoot = path.join(globalRoot, 'diagnostics');
+    if (fs.existsSync(diagnosticsRoot)) {
+      const dayNames = fs.readdirSync(diagnosticsRoot); assert.equal(dayNames.length, 1);
+      const dayRoot = path.join(diagnosticsRoot, dayNames[0]); const files = fs.readdirSync(dayRoot);
+      assert.ok(files.length <= 2 && files.every(file => /^recent-(?:errors|operations)\.[^.]+\.json$/.test(file)));
+      if (files[0]) unlinkOwned(path.join(dayRoot, files[0])); if (files[1]) unlinkOwned(path.join(dayRoot, files[1]));
+      fs.rmdirSync(dayRoot); fs.rmdirSync(diagnosticsRoot);
+    }
+    fs.rmdirSync(globalRoot); fs.rmdirSync(tempRoot);
+  });
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
       'module.exports.__updatePersistedSettings = updatePersistedSettings;',
       'module.exports.__getPersistedSettings = getPersistedSettings;',
-      'module.exports.__connectSettingsDatabase = (call) => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request); autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {}; };'
+      'module.exports.__connectSettingsDatabase = (call) => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request); autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false }); };'
     ].join('\n')
   );
   const saved = {
@@ -14523,10 +14643,259 @@ test('concurrent settings patches serialize without restoring stale values', asy
   releaseFirstWrite();
   await Promise.all([languageWrite, promptWrite]);
   assert.equal(writes.length, 2);
-  assert.equal(writes[1].language, 'zh');
-  assert.equal(writes[1].globalPrompt, 'Keep the newer prompt');
+  assert.ok(writes.every(value => Object.keys(value).every(key => ['globalDataPath', 'telegramBotToken'].includes(key))));
+  const finalSettings = extensionModule.__getPersistedSettings(context);
+  assert.equal(finalSettings.language, 'zh');
+  assert.equal(finalSettings.globalPrompt, 'Keep the newer prompt');
   const policy = await operations({ operation: 'read_global_prompt_policy', input: {} });
   assert.equal(policy.data.content, 'Keep the newer prompt');
+});
+
+test('two settings windows project the committed agent and model combination after crossed writes', async t => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cognitive-settings-windows-'));
+  const root = path.join(base, '.solomap-global');
+  const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
+  t.after(async () => {
+    await operations.close(); store.close();
+    const unlinkOwned = file => { try { fs.unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; } };
+    unlinkOwned(path.join(root, 'solomap.db-wal')); unlinkOwned(path.join(root, 'solomap.db-shm')); unlinkOwned(path.join(root, 'solomap.db'));
+    const diagnosticsRoot = path.join(root, 'diagnostics');
+    if (fs.existsSync(diagnosticsRoot)) {
+      const dayNames = fs.readdirSync(diagnosticsRoot); assert.equal(dayNames.length, 1);
+      const dayRoot = path.join(diagnosticsRoot, dayNames[0]); const files = fs.readdirSync(dayRoot);
+      assert.ok(files.length <= 2 && files.every(file => /^recent-(?:errors|operations)\.[^.]+\.json$/.test(file)));
+      if (files[0]) unlinkOwned(path.join(dayRoot, files[0])); if (files[1]) unlinkOwned(path.join(dayRoot, files[1]));
+      fs.rmdirSync(dayRoot); fs.rmdirSync(diagnosticsRoot);
+    }
+    fs.rmdirSync(root); fs.rmdirSync(base);
+  });
+  const requests = [];
+  let firstCommitted; const firstCommittedPromise = new Promise(resolve => { firstCommitted = resolve; });
+  let releaseFirst; const firstRelease = new Promise(resolve => { releaseFirst = resolve; });
+  const openWindow = (saved, holdCliWrite = false) => {
+    const transport = { ...require('../out/autonomousRuntimeControl.js') };
+    const extension = loadCompiledModule('out/extension.js', `
+      module.exports.update = updatePersistedSettings;
+      module.exports.connect = (call, hooks) => {
+        autonomousRuntimeControl_1.sendRuntimeDataRequest = async (_root, request) => {
+          hooks.requests.push({ operation: request.operation, keys: (request.input.patches || []).map(patch => patch.key) });
+          const result = await call(request);
+          if (${holdCliWrite ? 'true' : 'false'} && request.operation === 'patch_host_settings' && request.input.namespace === 'extension' && request.input.patches.some(patch => patch.key === 'cliPath')) {
+            hooks.firstCommitted(); await hooks.firstRelease;
+          }
+          return result;
+        };
+        autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
+      };
+    `, { './autonomousRuntimeControl': transport });
+    extension.connect(operations, { firstCommitted, firstRelease, requests });
+    return { extension, context: { extensionPath: projectRoot, globalState: { get: () => saved, update: async (_key, value) => Object.assign(saved, value) } } };
+  };
+  const original = { cliPath: 'codex', cognitiveEngineAgent: 'follow_main', agentModelPreferences: { codex: 'auto' }, language: 'zh', globalDataPath: root };
+  const first = openWindow({ ...original, agentModelPreferences: { ...original.agentModelPreferences } }, true);
+  const second = openWindow({ ...original, agentModelPreferences: { ...original.agentModelPreferences } });
+  try {
+    const firstWrite = first.extension.update(first.context, { cliPath: 'claude' });
+    await Promise.race([firstCommittedPromise, new Promise((_, reject) => setTimeout(() => reject(new Error(`first settings write did not commit: ${JSON.stringify(requests)}`)), 1000))]);
+    await second.extension.update(second.context, { agentModelPreferences: { claude: 'claude-opus-4-1' } });
+    releaseFirst(); await firstWrite;
+    const settings = await operations({ operation: 'read_host_settings', input: { namespace: 'extension', ownerScope: 'global' } });
+    assert.equal(settings.items.find(item => item.key === 'cliPath').value, 'claude');
+    assert.equal(settings.items.find(item => item.key === 'agentModelPreferences').value.claude, 'claude-opus-4-1');
+    const cognitive = await operations({ operation: 'read_host_settings', input: { namespace: 'cognitive', ownerScope: 'global' } });
+    assert.equal(cognitive.items.find(item => item.key === 'agentCli').value, 'claude');
+    assert.equal(cognitive.items.find(item => item.key === 'model').value, 'claude-opus-4-1');
+  } finally {
+    releaseFirst?.();
+  }
+});
+
+test('two independent settings hosts cannot restore an older global instruction while saving another field', async t => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-prompt-settings-windows-'));
+  const root = path.join(base, '.solomap-global');
+  const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
+  t.after(async () => {
+    await operations.close(); store.close();
+    const unlink = file => { try { fs.unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; } };
+    unlink(path.join(root, 'solomap.db-wal')); unlink(path.join(root, 'solomap.db-shm')); unlink(path.join(root, 'solomap.db'));
+    fs.rmdirSync(root); fs.rmdirSync(base);
+  });
+  let promptCommitted; const promptCommittedPromise = new Promise(resolve => { promptCommitted = resolve; });
+  let releasePrompt; const promptRelease = new Promise(resolve => { releasePrompt = resolve; });
+  const openHost = (saved, holdPrompt = false) => {
+    const transport = { ...require('../out/autonomousRuntimeControl.js') };
+    const extension = loadCompiledModule('out/extension.js', `
+      module.exports.update = updatePersistedSettings; module.exports.get = getPersistedSettings;
+      module.exports.connect = (call, hooks) => {
+        autonomousRuntimeControl_1.sendRuntimeDataRequest = async (_root, request) => {
+          const result = await call(request);
+          if (${holdPrompt ? 'true' : 'false'} && request.operation === 'save_global_prompt') { hooks.committed(); await hooks.release; }
+          return result;
+        };
+        autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
+      };
+    `, { './autonomousRuntimeControl': transport });
+    extension.connect(operations, { committed: promptCommitted, release: promptRelease });
+    return { extension, saved, context: { extensionPath: projectRoot, globalState: { get: () => saved, update: async (_key, value) => Object.assign(saved, value) } } };
+  };
+  const original = { cliPath: 'codex', language: 'en', globalPrompt: '旧指令', globalDataPath: root };
+  const first = openHost({ ...original }, true); const second = openHost({ ...original });
+  try {
+    const promptWrite = first.extension.update(first.context, { globalPrompt: '正式新指令' });
+    await promptCommittedPromise;
+    await second.extension.update(second.context, { language: 'zh' });
+    assert.equal(second.extension.get(second.context).globalPrompt, '正式新指令');
+    assert.equal(second.extension.get(second.context).language, 'zh');
+    releasePrompt(); await promptWrite;
+    const policy = await operations({ operation: 'read_global_prompt_policy', input: {} });
+    assert.equal(policy.data.content, '正式新指令');
+    assert.equal(first.extension.get(first.context).globalPrompt, '正式新指令');
+  } finally { releasePrompt?.(); }
+});
+
+test('a committed global instruction remains authoritative after the host loses the post-policy response', async t => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-prompt-policy-restart-'));
+  const root = path.join(base, '.solomap-global');
+  const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
+  t.after(async () => {
+    await operations.close(); store.close();
+    const unlink = file => { try { fs.unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; } };
+    unlink(path.join(root, 'solomap.db-wal')); unlink(path.join(root, 'solomap.db-shm')); unlink(path.join(root, 'solomap.db'));
+    fs.rmdirSync(root); fs.rmdirSync(base);
+  });
+  const saved = { cliPath: 'codex', language: 'zh', globalPrompt: '旧指令', globalDataPath: root };
+  const context = { extensionPath: projectRoot, globalState: { get: () => saved, update: async (_key, value) => Object.assign(saved, value) } };
+  const hooks = { interrupted: false };
+  const first = loadCompiledModule('out/extension.js', `
+    module.exports.update = updatePersistedSettings;
+    module.exports.connect = (call, hooks) => { autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false }); autonomousRuntimeControl_1.sendRuntimeDataRequest = async (_root, request) => { const result = await call(request); if (!hooks.interrupted && request.operation === 'save_global_prompt') { hooks.interrupted = true; throw new Error('host_lost_after_policy_commit'); } return result; }; };
+  `);
+  first.connect(operations, hooks);
+  await assert.rejects(first.update(context, { globalPrompt: '中断后仍有效的新指令' }), /host_lost_after_policy_commit/);
+  assert.equal(saved.globalPrompt, '旧指令');
+  const restarted = loadCompiledModule('out/extension.js', `
+    module.exports.refresh = refreshExtensionSettingsFromDatabase; module.exports.get = getPersistedSettings;
+    module.exports.connect = call => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request); };
+  `);
+  restarted.connect(operations); await restarted.refresh(context, root);
+  assert.equal(restarted.get(context).globalPrompt, '中断后仍有效的新指令');
+});
+
+test('two fresh settings hosts converge when both bootstrap the same empty database', async t => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-settings-bootstrap-race-'));
+  const root = path.join(base, '.solomap-global');
+  const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
+  t.after(async () => {
+    await operations.close(); store.close();
+    const unlink = file => { try { fs.unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; } };
+    unlink(path.join(root, 'solomap.db-wal')); unlink(path.join(root, 'solomap.db-shm')); unlink(path.join(root, 'solomap.db'));
+    fs.rmdirSync(root); fs.rmdirSync(base);
+  });
+  let emptyReads = 0; let releaseEmptyReads; const bothRead = new Promise(resolve => { releaseEmptyReads = resolve; });
+  const call = async request => {
+    if (request.operation === 'read_host_settings' && emptyReads < 2) {
+      const result = await operations(request); emptyReads += 1;
+      if (emptyReads === 2) releaseEmptyReads(); else await bothRead;
+      return result;
+    }
+    return operations(request);
+  };
+  const openHost = seed => {
+    const extension = loadCompiledModule('out/extension.js', `module.exports.refresh = refreshExtensionSettingsFromDatabase; module.exports.get = getPersistedSettings; module.exports.connect = call => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request); };`);
+    extension.connect(call);
+    return { extension, context: { extensionPath: projectRoot, globalState: { get: () => seed, update: async () => {} } } };
+  };
+  const first = openHost({ cliPath: 'codex', language: 'zh', globalPrompt: '同一指令', globalDataPath: root });
+  const second = openHost({ cliPath: 'claude', language: 'en', globalPrompt: '同一指令', globalDataPath: root });
+  await Promise.all([first.extension.refresh(first.context, root), second.extension.refresh(second.context, root)]);
+  const firstSettings = first.extension.get(first.context), secondSettings = second.extension.get(second.context);
+  assert.equal(firstSettings.cliPath, secondSettings.cliPath);
+  assert.equal(firstSettings.language, secondSettings.language);
+});
+
+test('roadmap UI persistence debounces each field independently', async () => {
+  const html = require('../out/roadmapWebview.js').getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  const script = extractLastScript(html);
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { context, postedMessages } = runScriptWithMinimalDom(script, ids, 'globalThis.__saveRoadmapUiState = saveRoadmapUiState;');
+  context.__saveRoadmapUiState('draft', '保留草稿', '/project');
+  context.__saveRoadmapUiState('expanded', ['step-2'], '/project');
+  await new Promise(resolve => setTimeout(resolve, 160));
+  const patches = postedMessages.filter(message => message.command === 'uiState.patch' && message.scopeKey === '/project');
+  assert.deepEqual(patches.map(message => message.key).sort(), ['draft', 'expanded']);
+});
+
+test('roadmap ignores an older UI load response for the same project', () => {
+  const html = require('../out/roadmapWebview.js').getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { context, postedMessages, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), ids, `
+    globalThis.__loadRoadmapState = (scope) => { activeProjectPath = scope; loadRoadmapUiState(scope); };
+    globalThis.__roadmapDraft = () => soloDraft;
+  `);
+  context.__loadRoadmapState('/project'); context.__loadRoadmapState('/project');
+  const reads = postedMessages.filter(message => message.command === 'uiState.load' && message.scopeKey === '/project');
+  assert.equal(reads.length, 2);
+  dispatchMessage({ command: 'uiStateLoaded', view: 'roadmap', scopeKey: '/project', loadRequestId: reads[1].loadRequestId, state: { 'interaction.soloDraft': 'newest' } });
+  assert.equal(context.__roadmapDraft(), 'newest');
+  dispatchMessage({ command: 'uiStateLoaded', view: 'roadmap', scopeKey: '/project', loadRequestId: reads[0].loadRequestId, state: { 'interaction.soloDraft': 'stale' } });
+  assert.equal(context.__roadmapDraft(), 'newest');
+});
+
+test('sidebar ignores an older UI load response for the same project', () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { context, postedMessages, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), ids, `
+    globalThis.__loadSidebarState = (scope) => { currentProjects.selectedProjectPath = scope; loadSidebarUiState(scope); };
+    globalThis.__sidebarDraft = () => issueDraftTitle;
+  `);
+  context.__loadSidebarState('/project'); context.__loadSidebarState('/project');
+  const reads = postedMessages.filter(message => message.command === 'uiState.load' && message.scopeKey === '/project');
+  assert.equal(reads.length, 2);
+  dispatchMessage({ command: 'uiStateLoaded', view: 'sidebar', scopeKey: '/project', loadRequestId: reads[1].loadRequestId, state: { 'interaction.issueDraftTitle': 'newest' } });
+  assert.equal(context.__sidebarDraft(), 'newest');
+  dispatchMessage({ command: 'uiStateLoaded', view: 'sidebar', scopeKey: '/project', loadRequestId: reads[0].loadRequestId, state: { 'interaction.issueDraftTitle': 'stale' } });
+  assert.equal(context.__sidebarDraft(), 'newest');
+});
+
+test('two extension windows persist independent draft, expanded and selected UI fields', async t => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-ui-state-windows-'));
+  const root = path.join(base, '.solomap-global');
+  const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
+  t.after(async () => {
+    await operations.close(); store.close();
+    const unlinkOwned = file => { try { fs.unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; } };
+    unlinkOwned(path.join(root, 'solomap.db-wal')); unlinkOwned(path.join(root, 'solomap.db-shm')); unlinkOwned(path.join(root, 'solomap.db'));
+    fs.rmdirSync(root); fs.rmdirSync(base);
+  });
+  const openWindow = () => {
+    const extension = loadCompiledModule('out/extension.js', `
+      module.exports.read = readUiState; module.exports.patch = patchUiState;
+      module.exports.connect = (call, root) => {
+        autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+        autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
+        getPersistedSettings = () => ({ globalDataPath: root });
+      };
+    `);
+    extension.connect(operations, root); return extension;
+  };
+  const first = openWindow(), second = openWindow(), context = { extensionPath: projectRoot };
+  await Promise.all([
+    first.patch(context, 'roadmap', 'project-a', 'draft', '保留中的草稿', 'window-a-draft'),
+    second.patch(context, 'roadmap', 'project-a', 'expanded', ['step-2'], 'window-b-expanded'),
+    first.patch(context, 'roadmap', 'project-a', 'selected', 'step-2', 'window-a-selected')
+  ]);
+  assert.equal(JSON.stringify(await second.read(context, 'roadmap', 'project-a')), JSON.stringify({ draft: '保留中的草稿', expanded: ['step-2'], selected: 'step-2' }));
+  assert.equal(fs.existsSync(path.join(root, 'ui-state.json')), false);
 });
 
 test('scheduled automation computes the next daily trigger time', () => {
@@ -14536,7 +14905,8 @@ test('scheduled automation computes the next daily trigger time', () => {
       'module.exports.__getNextScheduledAutomationAt = getNextScheduledAutomationAt;',
       'module.exports.__getNextScheduledAutomationTask = getNextScheduledAutomationTask;',
       'module.exports.__getScheduledAutomationProjectPath = getScheduledAutomationProjectPath;',
-      'module.exports.__buildScheduledTasksFromTimePlan = buildScheduledTasksFromTimePlan;'
+      'module.exports.__buildScheduledTasksFromTimePlan = buildScheduledTasksFromTimePlan;',
+      'module.exports.__mergeAutomationSettings = mergeAutomationSettings;'
     ].join('\n')
   );
   const beforeTime = new Date('2026-06-30T08:00:00.000Z');
@@ -14595,6 +14965,14 @@ test('scheduled automation computes the next daily trigger time', () => {
     extensionModule.__getScheduledAutomationProjectPath({ id: 'legacy' }, '/workspace/b'),
     '/workspace/b'
   );
+  const sourceTask = { id: 'plan-task', title: 'Plan version', enabled: true, sourceTimePlanProjectPath: '/workspace/a', scheduleKind: 'once', scheduledAt: '2026-06-30T09:00:00.000Z', assignee: 'agent', prompt: 'Build it' };
+  const userEditedTask = { ...sourceTask, title: 'User changed this while confirmation waited' };
+  for (const mutation of [
+    { operation: 'delete', taskId: sourceTask.id, expectedTask: sourceTask },
+    { operation: 'patch', taskId: sourceTask.id, expectedTask: sourceTask, patch: { ...sourceTask, title: 'Generated replacement' } }
+  ]) {
+    assert.throws(() => extensionModule.__mergeAutomationSettings({ scheduledTasks: [userEditedTask] }, { scheduledTaskMutations: [mutation] }), /scheduled_task_revision_conflict/);
+  }
 });
 
 test('Flow pause and abandon commands work correctly', async t => {
@@ -14832,7 +15210,7 @@ test('Flow role output validation error triggers self-correction loop', async t 
       module.exports.connect = (engine, project, root, context, terminals, commands) => {
         syncEngine = engine; activeProjectRoot = project; extensionContextRef = context;
         getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude', taskPermissionMode: 'auto', enabledEnhancements: {} });
-        autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+        autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
         agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
         ensureActiveConversationPoller = () => {};
         sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {}; postFlowStateToWebview = async () => {};
@@ -14965,7 +15343,7 @@ const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcon
   for(const s of sources){const value=await full({ref,revision,view:'content',field:'review_source:'+s.id});receipts.push({id:s.id,content:value.text,pages:value.pages});if(value.text.includes('用户确认：完成当前目标后核验完整结果。')){evidence=s.id;assert.equal(crypto.createHash('sha256').update(JSON.parse(value.text).content).digest('hex'),${JSON.stringify(hash(fullSource))});assert.ok(value.pages>1);}}
   assert.ok(evidence,'the actual pinned formal source must be read in full');
   const denied=await mcp.callTool({name:'solomap_write',arguments:{kind:'policy',action:'patch',objectId:${JSON.stringify(protectedPolicy.objectId)},expectedRevision:${protectedPolicy.revision},idempotencyKey:'settings-review-denied-policy',data:{content:'越权结果'}}});assert.equal(denied.isError,true);
-  const proposal={globalPrompt:${JSON.stringify(reviewed)},changes:[{type:'add',before:[],after:${JSON.stringify(addition)},evidence:[evidence],reason:'用户要求在目标完成后核验完整结果。'}],processedSourceIds:sources.map(s=>s.id),deferredSourceIds:[],unresolved:[],recovery:[]};
+  const proposal={globalPrompt:${JSON.stringify(reviewed)},changes:[{type:'add',before:[],after:${JSON.stringify(addition)},evidence:[evidence],reason:'用户要求在目标完成后核验完整结果。'}],lessons:[],processedSourceIds:sources.map(s=>s.id),deferredSourceIds:[],unresolved:[],recovery:[]};
   const schema=await tool('solomap_read',{ref:'solomap://schema'});assert.ok(schema);
   const current=await tool('solomap_read',{ref,view:'metadata'});
   const committed=await tool('solomap_write',{kind:'review_batch',action:'patch',scope:process.env.SOLOMAP_PROJECT_ID,objectId:ref,expectedRevision:current.revision,idempotencyKey:'settings-review-proposal:'+ref,data:{proposal_content:JSON.stringify(proposal)}});
@@ -14994,22 +15372,23 @@ module.exports.setup=(project, terminal, saved, order, counts)=>{
  activeProjectRoot=project;
  createAgentTerminal=()=>{counts.open();order.push('terminal');return terminal;};
  agentCli_1.commandExists=()=>true;agentCli_1.ensureAgentTaskAutomation=()=>({ok:true});
- autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime=async()=>{};
- getPersistedSettings=()=>{order.push('settings');return {...saved};};
+ autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime=async()=>({started:false});
+ getPersistedSettings=()=>{order.push('settings');const configuredPrompt=vscode.workspace.getConfiguration('solopreneur').get('globalPrompt');return {...saved,...(configuredPrompt===undefined?{}:{globalPrompt:configuredPrompt})};};
  getEnabledEnhancementMap=()=>saved.enabledEnhancements;
  syncCognitiveRuntimeConfig=()=>{};synchronizeTelegramChannel=()=>{};broadcastSettings=async()=>{};
 };
 `, { './autonomousRuntimeControl': transport, './projectRegistry': { ...registry, getProjectsReadOnly() { oldRegistryReads++; return []; } } });
     const context = { extensionPath: projectRoot, globalState: { get(key) { if (key === 'solopreneur.settings') return structuredClone(saved); if (key === 'solopreneur.projects') return [{ name: 'Legacy only', path: '/legacy/not-visible-to-agent' }]; }, async update(key, value) { writes.push({ key, value: structuredClone(value) }); Object.assign(saved, value); } } };
     extension.setup(workspace, terminal, saved, order, { open() { terminalCount++; } });
+    extension.__vscodeTestState.configurationValues.globalPrompt = saved.globalPrompt;
     const view = target => ({ postMessage(value) { target.push(value); return Promise.resolve(true); } });
     const review = extension.review(context, draft, view(messages));
     assert.equal(terminalCount, 1, 'the terminal opens in the click turn');
     const duplicate = extension.review(context, draft, view(duplicateMessages));
     await extension.review(context, 'A different unsaved instruction.', view(differentDraftMessages));
-    assert.equal(terminalCount, 1); assert.equal(commands.length, 0, 'a not-ready terminal must not receive the run'); assert.equal(order.includes('settings'), false);
+    assert.equal(terminalCount, 1); assert.equal(commands.length, 0, 'a not-ready terminal must not receive the run'); assert.equal(order.includes('settings'), true, 'the launch must pin its CLI and data root before waiting for terminal readiness');
     const rejected = differentDraftMessages.find(m => m.command === 'globalPromptReviewCompleted'); assert.equal(rejected?.success, false); assert.match(rejected.message, /草稿保持不变/);
-    if (changedDuringReview) saved.globalPrompt = '用户后来保存的新提示词。';
+    if (changedDuringReview) extension.__vscodeTestState.configurationValues.globalPrompt = '用户后来保存的新提示词。';
     ready(process.pid); await Promise.all([review, duplicate]);
     assert.equal(commands.length, 1, JSON.stringify(messages)); assert.match(commands[0], /runAgentProcess\.js/); assert.equal(terminalCount, 1); assert.equal(oldRegistryReads, 0);
     const executed = await childResult; assert.equal(executed.code, 0, executed.stderr); assert.equal(executed.signal, null);
@@ -15023,14 +15402,14 @@ module.exports.setup=(project, terminal, saved, order, counts)=>{
     assert.ok(stdout.includes('完整复盘输出🌿\n'.repeat(10000))); assert.ok(stdout.includes('SETTINGS_REVIEW_RECEIPT='));
     const batch = native.store.read(receipt.batchId); assert.equal(batch.data.proposal_content, JSON.stringify(receipt.proposal));
     const final = messages.find(m => m.command === 'globalPromptReviewCompleted'), duplicateFinal = duplicateMessages.find(m => m.command === 'globalPromptReviewCompleted');
-    assert.equal(final?.success, !changedDuringReview, final?.message); assert.equal(duplicateFinal?.success, !changedDuringReview);
+    assert.equal(final?.success, !changedDuringReview, JSON.stringify({ final, warnings: extension.__vscodeTestState.warningMessages })); assert.equal(duplicateFinal?.success, !changedDuringReview);
     let policy, applications;
     if (changedDuringReview) {
-      assert.match(final.message, /默认指令已被修改/); assert.equal(saved.globalPrompt, '用户后来保存的新提示词。'); assert.equal(writes.length, 0); assert.equal(order.includes('settings'), false);
+      assert.match(final.message, /默认指令已被修改/); assert.equal(extension.__vscodeTestState.configurationValues.globalPrompt, '用户后来保存的新提示词。'); assert.equal(writes.length, 0); assert.equal(order.includes('settings'), true);
       assert.equal(batch.data.status, 'interrupted'); assert.equal(native.store.readGlobalPromptPolicy().data.content, savedBefore.globalPrompt);
     } else {
-      assert.equal(final.globalPrompt, reviewed); assert.equal(duplicateFinal.globalPrompt, reviewed); assert.equal(saved.globalPrompt, reviewed); assert.equal(extension.__vscodeTestState.configurationValues.globalPrompt, reviewed);
-      assert.ok(order.indexOf('agent-command') < order.indexOf('settings')); assert.equal(writes.length, 1); assert.equal(batch.data.status, 'applied');
+      assert.equal(final.globalPrompt, reviewed); assert.equal(duplicateFinal.globalPrompt, reviewed); assert.equal(extension.__vscodeTestState.configurationValues.globalPrompt, reviewed);
+      assert.ok(order.indexOf('agent-command') < order.lastIndexOf('settings')); assert.equal(writes.length, 1); assert.equal(batch.data.status, 'applied');
       policy = native.store.readGlobalPromptPolicy(); assert.equal(policy.data.content, reviewed);
       applications = native.store.search({ scope: native.projectIds.get(workspace), kinds: ['application'] }).items.map(a => native.store.read(a.objectId)); assert.equal(applications.length, 1); assert.equal(applications[0].data.status, 'applied'); assert.equal(applications[0].data.after_content, reviewed);
       for (const key of ['cliPath', 'globalDataPath', 'language', 'reviewerCliPath', 'collaborationReviewMode', 'telegramEnabled', 'telegramBotToken', 'telegramChatId', 'cognitiveEngineAgent']) assert.deepEqual(saved[key], savedBefore[key], key);
@@ -15072,7 +15451,8 @@ test('settings review reports terminal startup failures back to the requesting v
 });
 
 test('slow forced conversation refresh reuses its in-flight read until an actual state write', async () => {
-  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const snapshotCache = makeSidebarSnapshotCacheStub();
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '', { './sidebarSnapshotCache': snapshotCache });
   let release;
   let reads = 0;
   const snapshot = new Promise(resolve => { release = resolve; });
@@ -15084,8 +15464,10 @@ test('slow forced conversation refresh reuses its in-flight read until an actual
   const messages = [];
   provider._view = { webview: { postMessage: m => { messages.push(m); return Promise.resolve(true); } } };
   const first = provider.sendProjectConversationSnapshot('/fixture/slow', true);
-  provider._conversationSnapshotLoads.get('/fixture/slow').startedAt -= 3000;
+  await new Promise(resolve => setImmediate(resolve));
+  [...provider._conversationSnapshotLoads.values()][0].startedAt -= 3000;
   const second = provider.sendProjectConversationSnapshot('/fixture/slow', true);
+  await new Promise(resolve => setImmediate(resolve));
   release({ solo: [], project: [], flow: [] });
   await Promise.all([first, second]);
   assert.equal(reads, 1);
@@ -15113,12 +15495,13 @@ test('Flow authorization finishing after project selection cannot publish the ol
 });
 
 test('conversation snapshots re-read when the database changes during their read', async () => {
-  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-refresh-source-'));
   const projectPath = path.join(tempRoot, 'project');
   fs.mkdirSync(path.join(projectPath, '.solopreneur'), { recursive: true });
   const database = path.join(projectPath, '.solopreneur/project_journal.db');
   fs.writeFileSync(database, 'before');
+  const snapshotCache = makeSidebarSnapshotCacheStub({ buildConversationDatabaseSignature: async () => fs.readFileSync(database, 'utf8') });
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '', { './sidebarSnapshotCache': snapshotCache });
   let reads = 0;
   const messages = [];
   const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
@@ -15133,7 +15516,7 @@ test('conversation snapshots re-read when the database changes during their read
   provider._view = { webview: { postMessage: m => { messages.push(m); return Promise.resolve(true); } } };
   await provider.sendProjectConversationSnapshot(projectPath, true);
   assert.equal(messages.at(-1).soloConversations[0].status, 'Completed');
-  const cached = require('../out/sidebarSnapshotCache.js').readCachedConversationSnapshot(path.join(tempRoot, 'global'), projectPath);
+  const cached = snapshotCache.__getConversation(projectPath);
   assert.equal(cached.solo[0].status, 'Completed');
   assert.equal(reads, 2);
 });
@@ -15242,22 +15625,26 @@ const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcon
 
 test('old project initialization failure cannot replace the newly selected roadmap', async () => {
   const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-old-init-'));
+  const registry = require('../out/projectRegistry.js');
   const extension = loadCompiledModule('out/extension.js', `
-    module.exports.startOldInit = (projectPath, panel, gate) => {
+    module.exports.startOldInit = async (projectPath, panel, gate, entered) => {
       selectedProjectPathInMemory = projectPath; activePanel = panel;
       getSelectedProjectPath = () => selectedProjectPathInMemory;
       const Original = syncEngine_1.SyncEngine;
-      syncEngine_1.SyncEngine = class { getNodes() { return []; } initAndSync() { return gate; } };
-      try { return ensureSyncEngine({ extensionPath: ${JSON.stringify(projectRoot)}, globalState: { get() {} } }); }
+      syncEngine_1.SyncEngine = class { getNodes() { return []; } initAndSync() { entered(); return gate; } close() {} };
+      try { return await ensureSyncEngine({ extensionPath: ${JSON.stringify(projectRoot)}, globalState: { get() {} } }); }
       finally { syncEngine_1.SyncEngine = Original; }
     };
     module.exports.switchToReady = () => { selectedProjectPathInMemory = '/fixture/new'; activeProjectRoot = '/fixture/new'; projectSelectionGeneration += 1; syncEngineReady = true; };
     module.exports.isReady = () => syncEngineReady;
-  `);
+  `, { './projectRegistry': { ...registry, readProjectRegistry: () => ({ schemaVersion: 1, updatedAt: '', projects: [{ name: 'Old', path: projectPath }], hiddenProjects: [], selectedProjectPath: projectPath }) } });
   let reject;
   const gate = new Promise((_, fail) => { reject = fail; });
+  let entered;
+  const initEntered = new Promise(resolve => { entered = resolve; });
   const messages = [];
-  const pending = extension.startOldInit(projectPath, { webview: { postMessage: m => { messages.push(m); return Promise.resolve(true); } } }, gate);
+  const pending = extension.startOldInit(projectPath, { webview: { postMessage: m => { messages.push(m); return Promise.resolve(true); } } }, gate, entered);
+  await initEntered;
   messages.length = 0;
   extension.switchToReady();
   reject(new Error('Old project failed'));
@@ -15368,19 +15755,19 @@ for (const scenario of ['__solo__', 'step', 'unavailable-cli', 'missing-node']) 
       module.exports.connect = (ops, root, project, active, engine, calls, SyncEngine, scenario) => {
         syncEngine_1.SyncEngine = SyncEngine;
         autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request);
-        autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+        autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
         ensureTaskRuntimeReady = async () => {};
         activeProjectRoot = active; syncEngine = engine;
         getPersistedSettings = () => ({ cliPath: 'claude', globalDataPath: root, taskPermissionMode: 'auto', enabledEnhancements: {}, automationTasks: { triggers: { completed: { prompt: '继续来源项目的原目标' } } } });
         agentCli_1.resolveAgentCli = value => value; agentCli_1.commandExists = () => scenario !== 'unavailable-cli';
         agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
-        recordLocalUsageEvent = () => {}; postNodeConversations = () => {};
+        recordLocalUsageEvent = async () => ({}); postNodeConversations = () => {};
         buildSoloConversationPrompt = () => '来源项目的固定正式输入';
         buildAgentConversationPrompt = () => '来源项目的固定正式输入';
         ensureRoadmapValidationScript = () => {};
         sendNodesToWebview = () => {}; refreshSidebarProjectCards = () => {};
         solomapGlobal_1.ensureSolomapMemoryStore = () => {};
-        solomapGlobal_1.ensureSolomapEnhancementRuntime = () => ({ envLines: [], preflightLines: [] });
+
         preSessionGit_1.createPreSessionGitCommit = async () => '';
         launchAgentConversationTerminal = async input => { calls.push(input); };
       };
@@ -15393,7 +15780,16 @@ for (const scenario of ['__solo__', 'step', 'unavailable-cli', 'missing-node']) 
   try {
     await engine.initAndSync();
     let extension = connect();
-    if (scenario === 'unavailable-cli' || scenario === 'missing-node') {
+    if (scenario === 'unavailable-cli') {
+      await extension.runAutomatic({}, 'completed', input);
+      assert.equal(calls.length, 0);
+      const failed = await ops({ operation: 'read_run_intent', input: { root: project, launchIntentId: 'run-effect:same-stable-effect:prompt' } });
+      assert.ok(failed); assert.equal(failed.status.status, 'Failed'); assert.equal(failed.status.failureCode, 'cli_not_found');
+      extension = connect(); extension.failCli(); await extension.runAutomatic({}, 'completed', input);
+      assert.equal((await ops({ operation: 'read_project_journal', input: { root: project } })).logs.length, 1, 'the failed durable intent must be reused after restart');
+      return;
+    }
+    if (scenario === 'missing-node') {
       await assert.rejects(extension.runAutomatic({}, 'completed', input), /automation_launch_not_registered/);
       assert.equal(calls.length, 0);
       assert.equal(await ops({ operation: 'read_run_intent', input: { root: project, launchIntentId: 'run-effect:same-stable-effect:prompt' } }), null);
@@ -15485,7 +15881,7 @@ for (const continuation of [false, true]) test(`the actual ${continuation ? 'con
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
   const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'actual-step-prompt', onCommand: () => ({ status: 'running' }), onData: ops });
   const identity = await ops({ operation: 'register_project', input: { root: project } });
-  const lesson = store.write({ kind: 'lesson', action: 'create', scope: identity.projectId, idempotencyKey: 'step-prompt-formal-lesson', data: { status: 'candidate', summary: '保留用户当前选择', applies_when: '刷新界面', do_this: '保留选中的模式', avoid_this: '异步回包重置选择', confidence: 0.8, lesson_type: 'boundary_rule' } });
+  const lesson = store.write({ kind: 'lesson', action: 'create', scope: identity.projectId, idempotencyKey: 'step-prompt-formal-lesson', data: { status: 'approved', summary: '保留用户当前选择', applies_when: '刷新界面', do_this: '保留选中的模式', avoid_this: '异步回包重置选择', confidence: 0.8, lesson_type: 'boundary_rule' } });
   const sourceRoot = path.join(project, '.solopreneur', 'step-memory'); fs.mkdirSync(sourceRoot);
   const source = { completionCriteria: Array.from({ length: 31 }, (_, index) => `原用户标准-${index}`), entries: [{ usefulSignals: '完整历史信号必须通过正式引用读取🌿'.repeat(20000) }] };
   fs.writeFileSync(path.join(sourceRoot, 'step.json'), JSON.stringify(source));
@@ -15496,7 +15892,7 @@ for (const continuation of [false, true]) test(`the actual ${continuation ? 'con
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.stepPrompt = buildAgentConversationPrompt; module.exports.continuationPrompt = buildInteractiveContinuationPrompt;
     module.exports.connect = (call, root) => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request); extensionContextRef = {}; getPersistedSettings = () => ({ globalDataPath: root }); };
-  `);
+  `, { './autonomousRuntimeControl': { ...require('../out/autonomousRuntimeControl.js'), sendRuntimeDataRequest: (_root, request) => ops(request) } });
   extension.connect(request => { if (request.operation === 'read_step_memory') { reads++; assert.equal(request.input.includeEntries, false); } return ops(request); }, root);
   const node = { id: 'step', title: '用户当前目标', description: '完成实际任务', stage: '实施', agentCli: 'claude', agentPrompt: '交付用户所需结果', status: 'In Progress' };
   try {
@@ -15631,7 +16027,7 @@ for (const refused of [false, true]) test(`scheduled reminder ${refused ? 'prese
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
   const task = { id: 'reminder', title: '发布提醒', enabled: true, projectPath: project, scheduleKind: 'daily', timeOfDay: '09:00', assignee: 'user' };
   const now = new Date(Date.now() - 2 * 86400000);
-  const occurrence = ledger.syncScheduledTaskLedger(project, root, [task], now).tasks[0];
+  const occurrence = await claimScheduleOccurrence(ledger, ops, project, root, task, now);
   let release; const gate = new Promise(resolve => { release = resolve; }); let entered; const started = new Promise(resolve => { entered = resolve; });
   let settled; const commitFinished = new Promise(resolve => { settled = resolve; });
   const call = async request => {
@@ -15653,17 +16049,17 @@ for (const refused of [false, true]) test(`scheduled reminder ${refused ? 'prese
     };
   `);
   extension.connect(call, root, project, task, ledger);
-  const pending = extension.run({}, task, occurrence.occurrenceId);
+  const pending = extension.run({}, task, occurrence);
   const outcome = pending.then(() => null, error => error);
   try {
     await Promise.race([started, outcome.then(error => { if (error) throw error; throw new Error('scheduled occurrence completed before requesting its event commit'); })]);
-    const remainedBeforeCommit = ledger.readScheduledTaskLedger(project, root).tasks.some(row => row.occurrenceId === occurrence.occurrenceId);
+    const remainedBeforeCommit = (await ledger.readScheduledTaskDatabase(project, root, (operation, input) => ops({ operation, input }))).tasks.some(row => row.occurrenceId === occurrence.occurrenceId);
     release();
     await commitFinished;
     const error = await outcome;
     assert.equal(remainedBeforeCommit, true, 'a pending event commit cannot complete the scheduled occurrence');
-    if (refused) { assert.equal(error?.message, 'event_commit_refused'); assert.equal(ledger.readScheduledTaskLedger(project, root).tasks[0].occurrenceId, occurrence.occurrenceId); }
-    else { assert.equal(error, null); assert.ok(ledger.readScheduledTaskLedger(project, root).tasks.every(row => row.occurrenceId !== occurrence.occurrenceId)); }
+    if (refused) { assert.equal(error?.message, 'event_commit_refused'); assert.equal((await ledger.readScheduledTaskDatabase(project, root, (operation, input) => ops({ operation, input }))).tasks[0].occurrenceId, occurrence.occurrenceId); }
+    else { assert.equal(error, null); assert.ok((await ledger.readScheduledTaskDatabase(project, root, (operation, input) => ops({ operation, input }))).tasks.every(row => row.occurrenceId !== occurrence.occurrenceId)); }
   } finally { release(); await outcome; await ops.close(); store.close(); }
 });
 
@@ -15671,9 +16067,13 @@ for (const scenario of ['accepted', 'refused', 'cancelled']) test(`focus reminde
   const refused = scenario === 'refused';
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const ledger = require('../out/scheduledTaskLedger.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-focus-commit-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'A'); const selectedLater = path.join(base, 'B'); fs.mkdirSync(project); fs.mkdirSync(selectedLater);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const task = { id: '__solomap_focus_reminder__', title: '专注时间提醒', enabled: true, assignee: 'user', scheduleKind: 'once', scheduledAt: new Date(Date.now() - 1000).toISOString(), projectPath: project, internalKind: 'focus_reminder', focusMinutes: 25, notify: true, sound: false };
+  const occurrence = await claimScheduleOccurrence(ledger, ops, project, root, task);
+  const state = { settings: { globalDataPath: root, automationTasks: { triggers: { focus_time: { notify: true, sound: false } } } } };
   let release; const gate = new Promise(resolve => { release = resolve; }); let entered; const started = new Promise(resolve => { entered = resolve; });
   let settled; const finished = new Promise(resolve => { settled = resolve; }); const eventRoots = [];
   const call = async request => {
@@ -15684,31 +16084,32 @@ for (const scenario of ['accepted', 'refused', 'cancelled']) test(`focus reminde
     }
     return ops(request);
   };
-  const timers = []; const warnings = [];
   const extension = loadCompiledModule('out/extension.js', `
-    module.exports.schedule = scheduleFocusReminder;
-    module.exports.cancel = root => { getPersistedSettings = () => ({ globalDataPath: root, automationTasks: { triggers: { focus_time: {} } } }); scheduleFocusReminder({}); };
+    module.exports.run = runScheduledAutomationTask;
+    module.exports.cancel = state => { state.settings.automationTasks.triggers.focus_time.notify = false; };
     module.exports.select = project => { activeProjectRoot = project; };
-    module.exports.connect = (ops, root, project, timers, warnings) => {
+    module.exports.connect = (ops, root, project, state) => {
       autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request);
-      getPersistedSettings = () => ({ globalDataPath: root, automationTasks: { focusMinutes: 25, triggers: { focus_time: { notify: true } } } });
-      activeProjectRoot = project; broadcastSettings = async () => {};
-      setTimeout = callback => { timers.push(callback); return { unref() {} }; }; clearTimeout = () => {};
-      console = { ...console, warn: (...args) => warnings.push(args) };
+      getPersistedSettings = () => state.settings;
+      getScheduledAutomationLedgerReferenceRoot = () => project;
+      scheduleTimedAutomationTask = () => {};
+      activeProjectRoot = project;
     };
   `);
-  extension.connect(call, root, project, timers, warnings);
+  extension.connect(call, root, project, state);
+  const pending = extension.run({}, task, occurrence);
+  const outcome = pending.then(() => null, error => error);
   try {
-    extension.schedule({}); extension.select(selectedLater); timers[0](); await started;
+    extension.select(selectedLater); await started;
     const noticesBeforeCommit = extension.__vscodeTestState.informationMessages.length;
-    if (scenario === 'cancelled') extension.cancel(root);
+    if (scenario === 'cancelled') extension.cancel(state);
     release(); await finished; await new Promise(resolve => setImmediate(resolve));
+    const error = await outcome;
     assert.equal(noticesBeforeCommit, 0, 'the focus reminder cannot notify while its event is still uncommitted');
     assert.deepEqual(eventRoots, [project], 'changing the selected project must not move a pending focus reminder');
     assert.equal(extension.__vscodeTestState.informationMessages.length, scenario === 'accepted' ? 1 : 0);
-    assert.equal(warnings.length, refused ? 1 : 0);
-    assert.equal(timers.length, scenario === 'cancelled' ? 1 : 2, 'only an active reminder may schedule another callback');
-  } finally { release(); await finished; await ops.close(); store.close(); }
+    assert.equal(error?.message || null, refused ? 'focus_commit_refused' : null);
+  } finally { release(); await finished; await outcome; await ops.close(); store.close(); }
 });
 
 for (const mutation of ['add', 'edit', 'delete', 'unchanged']) test(`a completed one-time reminder preserves current scheduled settings after ${mutation}`, async () => {
@@ -15719,7 +16120,7 @@ for (const mutation of ['add', 'edit', 'delete', 'unchanged']) test(`a completed
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
   const task = { id: 'once', title: '原提醒', enabled: true, projectPath: project, scheduleKind: 'once', scheduledAt: new Date(Date.now() - 1000).toISOString(), assignee: 'user' };
-  const occurrence = ledger.syncScheduledTaskLedger(project, root, [task]).tasks[0];
+  const occurrence = await claimScheduleOccurrence(ledger, ops, project, root, task);
   const state = { settings: { globalDataPath: root, language: 'zh', automationTasks: { scheduledTasks: [task] } } };
   let release; const gate = new Promise(resolve => { release = resolve; }); let entered; const started = new Promise(resolve => { entered = resolve; });
   const call = async request => { if (['append_automation_event', 'prepare_automation_delivery'].includes(request.operation)) { entered(); await gate; } return ops(request); };
@@ -15730,11 +16131,11 @@ for (const mutation of ['add', 'edit', 'delete', 'unchanged']) test(`a completed
       autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => ops(request);
       getPersistedSettings = () => state.settings;
       getScheduledAutomationLedgerReferenceRoot = () => project;
-      updatePersistedSettings = async (_context, patch) => { state.settings = { ...state.settings, automationTasks: { ...state.settings.automationTasks, ...patch.automationTasks } }; };
+      updatePersistedSettings = async (_context, patch) => { state.settings = { ...state.settings, automationTasks: mergeAutomationSettings(state.settings.automationTasks, patch.automationTasks) }; };
     };
   `);
   extension.connect(call, root, project, state, ledger);
-  const pending = extension.run({}, task, occurrence.occurrenceId);
+  const pending = extension.run({}, task, occurrence);
   try {
     await started;
     const added = { ...task, id: 'new', title: '用户新任务' };
@@ -15743,7 +16144,10 @@ for (const mutation of ['add', 'edit', 'delete', 'unchanged']) test(`a completed
     state.settings = { ...state.settings, automationTasks: { scheduledTasks: current } };
     release(); await pending;
     const expected = mutation === 'add' ? [{ ...task, enabled: false }, added] : mutation === 'edit' ? [edited] : mutation === 'delete' ? [] : [{ ...task, enabled: false }];
-    assert.equal(JSON.stringify(state.settings.automationTasks.scheduledTasks), JSON.stringify(expected));
+    const visibleTaskState = tasks => tasks.map(({ id, title, enabled, projectPath, scheduleKind, scheduledAt, assignee }) => ({
+      id, title, enabled, projectPath, scheduleKind, scheduledAt, assignee
+    }));
+    assert.equal(JSON.stringify(visibleTaskState(state.settings.automationTasks.scheduledTasks)), JSON.stringify(visibleTaskState(expected)));
   } finally { release(); await pending; await ops.close(); store.close(); }
 });
 
@@ -15758,7 +16162,7 @@ test('an actual scheduled prompt remains in project A when the user selects B du
   const engineA = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
   const engineB = new SyncEngine(path.join(selected, '.solopreneur', 'roadmap.csv'), path.join(selected, '.solopreneur', 'project_journal.db'), projectRoot, root);
   const task = { id: 'scheduled-agent', title: '原任务', enabled: true, projectPath: project, scheduleKind: 'daily', timeOfDay: '09:00', assignee: 'agent', prompt: '推进来源项目' };
-  const occurrence = ledger.syncScheduledTaskLedger(project, root, [task], new Date(Date.now() - 2 * 86400000)).tasks[0];
+  const occurrence = await claimScheduleOccurrence(ledger, ops, project, root, task, new Date(Date.now() - 2 * 86400000));
   let release; const gate = new Promise(resolve => { release = resolve; }); let entered; const started = new Promise(resolve => { entered = resolve; }); const launches = [];
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.run = runScheduledAutomationTask;
@@ -15771,12 +16175,12 @@ test('an actual scheduled prompt remains in project A when the user selects B du
       getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude', taskPermissionMode: 'auto', enabledEnhancements: {}, automationTasks: { scheduledTasks: [task] } });
       getScheduledAutomationLedgerReferenceRoot = () => project;
       ensureActionProject = async () => project;
-      ensureTaskRuntimeReady = async () => {}; autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      ensureTaskRuntimeReady = async () => {}; autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
       revealAgentStartupTerminal = async () => { entered(); await gate; };
       agentCli_1.resolveAgentCli = value => value; agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
-      recordLocalUsageEvent = () => {}; postNodeConversations = () => {}; buildSoloConversationPrompt = () => '来源项目固定输入';
+      recordLocalUsageEvent = async () => ({}); postNodeConversations = () => {}; buildSoloConversationPrompt = () => '来源项目固定输入';
       ensureRoadmapValidationScript = () => {}; sendNodesToWebview = () => {}; refreshSidebarProjectCards = () => {};
-      solomapGlobal_1.ensureSolomapMemoryStore = () => {}; solomapGlobal_1.ensureSolomapEnhancementRuntime = () => ({ envLines: [], preflightLines: [] });
+      solomapGlobal_1.ensureSolomapMemoryStore = () => {};
       preSessionGit_1.createPreSessionGitCommit = async () => '';
       launchAgentConversationTerminal = async input => { launches.push(input); };
     };
@@ -15785,7 +16189,7 @@ test('an actual scheduled prompt remains in project A when the user selects B du
   let pending;
   try {
     await engineA.initAndSync(); await engineB.initAndSync();
-    pending = extension.run({}, task, occurrence.occurrenceId); await started; extension.select(selected, engineB); release(); await pending;
+    pending = extension.run({}, task, occurrence); await started; extension.select(selected, engineB); release(); await pending;
     assert.equal(launches.length, 1); assert.equal(launches[0].workspaceRoot, project);
     assert.ok(await ops({ operation: 'read_run_intent', input: { root: project, launchIntentId: `scheduled:${occurrence.occurrenceId}` } }));
     assert.equal((await ops({ operation: 'list_run_states', input: { root: selected } })).items.length, 0);
@@ -15793,14 +16197,20 @@ test('an actual scheduled prompt remains in project A when the user selects B du
   } finally { release(); if (pending) await pending; transport.sendRuntimeDataRequest = previous; engineA.close(); engineB.close(); await ops.close(); store.close(); }
 });
 
-test('replaying a committed scheduled reminder after a window restart does not notify again', async () => {
+test('replaying a committed scheduled reminder after a window restart does not notify again', async t => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js'); const ledger = require('../out/scheduledTaskLedger.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reminder-replay-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  t.after(() => {
+    const unlinkOwned = file => { try { fs.unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; } };
+    unlinkOwned(path.join(root, 'solomap.db-wal')); unlinkOwned(path.join(root, 'solomap.db-shm')); unlinkOwned(path.join(root, 'solomap.db'));
+    unlinkOwned(path.join(project, '.solopreneur', 'project.json'));
+    fs.rmdirSync(path.join(project, '.solopreneur')); fs.rmdirSync(project); fs.rmdirSync(root); fs.rmdirSync(base);
+  });
   let store = new UnifiedDataStore(root); let ops = createRuntimeDataOperations(store);
   const task = { id: 'reminder', title: '只提醒一次', enabled: true, projectPath: project, scheduleKind: 'daily', timeOfDay: '09:00', assignee: 'user' };
-  const occurrence = ledger.syncScheduledTaskLedger(project, root, [task], new Date(Date.now() - 2 * 86400000)).tasks[0];
+  const occurrence = await claimScheduleOccurrence(ledger, ops, project, root, task, new Date(Date.now() - 2 * 86400000));
   const connect = () => {
     const extension = loadCompiledModule('out/extension.js', `
       module.exports.run = runScheduledAutomationTask;
@@ -15813,24 +16223,23 @@ test('replaying a committed scheduled reminder after a window restart does not n
     `); extension.connect(ops, root, project, task, ledger); return extension;
   };
   try {
-    const first = connect(); await first.run({}, task, occurrence.occurrenceId);
+    const first = connect(); await first.run({}, task, occurrence);
     assert.equal(first.__vscodeTestState.informationMessages.length, 1);
     await ops.close(); store.close(); store = new UnifiedDataStore(root); ops = createRuntimeDataOperations(store);
-    const restarted = connect(); await restarted.run({}, task, occurrence.occurrenceId);
+    const restarted = connect(); await restarted.run({}, task, occurrence);
     assert.equal(restarted.__vscodeTestState.informationMessages.length, 0);
   } finally { await ops.close(); store.close(); }
 });
 
-for (const edited of [false, true]) test(`a scheduled reminder does not acknowledge occurrence completion when another window holds the ledger lock${edited ? ' and settings are later edited' : ''}`, async () => {
+for (const edited of [false, true]) test(`a scheduled reminder does not acknowledge occurrence completion when another window holds the database lease${edited ? ' and settings are later edited' : ''}`, async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js'); const ledger = require('../out/scheduledTaskLedger.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reminder-lock-contention-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
   const task = { id: 'reminder', title: '保留待完成提醒', enabled: true, projectPath: project, scheduleKind: 'daily', timeOfDay: '09:00', assignee: 'user' };
-  const occurrence = ledger.syncScheduledTaskLedger(project, root, [task], new Date(Date.now() - 2 * 86400000)).tasks[0];
-  const lockPath = path.join(path.dirname(ledger.getScheduledTaskLedgerPath(project, root)), 'scheduled-tasks.lock');
-  fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, claimedAt: new Date().toISOString() }));
+  const occurrence = await claimScheduleOccurrence(ledger, ops, project, root, task, new Date(Date.now() - 2 * 86400000));
+  const staleOccurrence = { ...occurrence, token: 'another-window-does-not-own-this-lease' };
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.run = runScheduledAutomationTask;
     module.exports.connect = (ops, root, project, task, ledger) => {
@@ -15841,26 +16250,31 @@ for (const edited of [false, true]) test(`a scheduled reminder does not acknowle
     };
   `); extension.connect(ops, root, project, task, ledger);
   try {
-    await assert.rejects(extension.run({}, task, occurrence.occurrenceId), /scheduled_completion_not_committed/);
-    assert.equal(ledger.readScheduledTaskLedger(project, root).tasks[0].occurrenceId, occurrence.occurrenceId);
+    await assert.rejects(extension.run({}, task, staleOccurrence), /schedule_lease_lost/);
+    assert.equal((await ledger.readScheduledTaskDatabase(project, root, (operation, input) => ops({ operation, input }))).tasks[0].occurrenceId, occurrence.occurrenceId);
     assert.equal(extension.__vscodeTestState.informationMessages.length, 1);
-    fs.renameSync(lockPath, `${lockPath}.retained-fixture`);
     const retryTask = edited ? { ...task, title: '用户后来修改的标题' } : task;
-    if (edited) ledger.syncScheduledTaskLedger(project, root, [retryTask]);
-    await extension.run({}, retryTask, occurrence.occurrenceId);
-    assert.ok(ledger.readScheduledTaskLedger(project, root).tasks.every(row => row.occurrenceId !== occurrence.occurrenceId));
+    if (edited) await ledger.syncScheduledTaskDatabase(project, root, [retryTask], new Date(), (operation, input) => ops({ operation, input }));
+    await extension.run({}, retryTask, occurrence);
+    assert.ok((await ledger.readScheduledTaskDatabase(project, root, (operation, input) => ops({ operation, input }))).tasks.every(row => row.occurrenceId !== occurrence.occurrenceId));
     assert.equal(extension.__vscodeTestState.informationMessages.length, 1, 'retrying completion must not repeat the already committed reminder');
   } finally { await ops.close(); store.close(); }
 });
 
-test('a scheduled reminder committed before a lost window reply is displayed after restart rather than silently completed', async () => {
+test('a scheduled reminder committed before a lost window reply is displayed after restart rather than silently completed', async t => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js'); const ledger = require('../out/scheduledTaskLedger.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reminder-lost-reply-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  t.after(() => {
+    const unlinkOwned = file => { try { fs.unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; } };
+    unlinkOwned(path.join(root, 'solomap.db-wal')); unlinkOwned(path.join(root, 'solomap.db-shm')); unlinkOwned(path.join(root, 'solomap.db'));
+    unlinkOwned(path.join(project, '.solopreneur', 'project.json'));
+    fs.rmdirSync(path.join(project, '.solopreneur')); fs.rmdirSync(project); fs.rmdirSync(root); fs.rmdirSync(base);
+  });
   let store = new UnifiedDataStore(root); let ops = createRuntimeDataOperations(store);
   const task = { id: 'reminder', title: '关闭窗口后仍应显示', enabled: true, projectPath: project, scheduleKind: 'daily', timeOfDay: '09:00', assignee: 'user' };
-  const occurrence = ledger.syncScheduledTaskLedger(project, root, [task], new Date(Date.now() - 2 * 86400000)).tasks[0];
+  const occurrence = await claimScheduleOccurrence(ledger, ops, project, root, task, new Date(Date.now() - 2 * 86400000));
   let loseReply = true;
   const call = async request => {
     const result = await ops(request);
@@ -15879,13 +16293,13 @@ test('a scheduled reminder committed before a lost window reply is displayed aft
     `); extension.connect(call, root, project, task, ledger); return extension;
   };
   try {
-    const first = connect(); await assert.rejects(first.run({}, task, occurrence.occurrenceId), /window_closed_after_commit/);
+    const first = connect(); await assert.rejects(first.run({}, task, occurrence), /window_closed_after_commit/);
     assert.equal(first.__vscodeTestState.informationMessages.length, 0);
-    assert.equal(ledger.readScheduledTaskLedger(project, root).tasks[0].occurrenceId, occurrence.occurrenceId);
+    assert.equal((await ledger.readScheduledTaskDatabase(project, root, (operation, input) => ops({ operation, input }))).tasks[0].occurrenceId, occurrence.occurrenceId);
     await ops.close(); store.close(); store = new UnifiedDataStore(root); ops = createRuntimeDataOperations(store);
-    const restarted = connect(); await restarted.run({}, task, occurrence.occurrenceId);
+    const restarted = connect(); await restarted.run({}, task, occurrence);
     assert.equal(restarted.__vscodeTestState.informationMessages.length, 1);
-    assert.ok(ledger.readScheduledTaskLedger(project, root).tasks.every(row => row.occurrenceId !== occurrence.occurrenceId));
+    assert.ok((await ledger.readScheduledTaskDatabase(project, root, (operation, input) => ops({ operation, input }))).tasks.every(row => row.occurrenceId !== occurrence.occurrenceId));
   } finally { await ops.close(); store.close(); }
 });
 
@@ -15914,9 +16328,9 @@ test('a queued automation sound remains pending without a view and completes thr
     await extension.message({ command: 'automationSoundReady', pageId: 'actual-sidebar-page' }, sidebar._view.webview);
     await extension.drain(root);
     assert.equal(messages.length, 1);
-    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 1, 'postMessage(true) is not a playback acknowledgement');
+    assert.deepEqual(store.rows('SELECT state FROM automation_deliveries').map(row => row.state), ['claimed'], 'postMessage(true) is not a playback acknowledgement');
     await extension.message({ command: 'automationSoundPlayed', pageId: messages[0].pageId, deliveryId: messages[0].deliveryId, token: 'wrong', played: true }, sidebar._view.webview);
-    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 1);
+    assert.deepEqual(store.rows('SELECT state FROM automation_deliveries').map(row => row.state), ['claimed']);
     await extension.message({ command: 'automationSoundPlayed', pageId: messages[0].pageId, deliveryId: messages[0].deliveryId, token: messages[0].token, played: true }, sidebar._view.webview);
     await extension.idle();
     assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 0, 'the actual view acknowledgement must settle the preserved sound action');
@@ -15931,10 +16345,10 @@ test('a queued automation sound remains pending without a view and completes thr
     assert.equal(messages.length, 3); assert.equal(messages[2].deliveryId, messages[1].deliveryId);
     assert.equal(messages[2].pageId, 'sidebar-page-reloaded');
     await extension.message({ command: 'automationSoundPlayed', pageId: messages[1].pageId, deliveryId: messages[1].deliveryId, token: messages[1].token, played: true }, sidebar._view.webview);
-    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 1, 'a late reply from the reloaded page cannot settle the renewed claim');
+    assert.deepEqual(store.rows('SELECT state,claim_token FROM automation_deliveries WHERE id=?', [messages[2].deliveryId]).map(row => ({ state: row.state, token: row.claim_token })), [{ state: 'claimed', token: messages[2].token }], 'a late reply from the reloaded page cannot settle the renewed claim');
     await extension.message({ command: 'automationSoundPlayed', pageId: messages[2].pageId, deliveryId: messages[2].deliveryId, token: messages[2].token, played: true }, sidebar._view.webview);
     await extension.idle();
-    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 0);
+    assert.deepEqual(store.rows('SELECT state FROM automation_deliveries WHERE id=?', [messages[2].deliveryId]).map(row => row.state), ['delivered']);
   } finally { await ops.close(); store.close(); }
 });
 
@@ -15997,7 +16411,7 @@ for (const scenario of ['lost-claim-reply', 'delivered-ack-outage']) test(`a liv
     const launch = extension.queue(project, root, 'one-notice', { trigger: 'completed', action: 'notify' }, { kind: 'notification', message: '原提醒', warning: false });
     if (scenario === 'lost-claim-reply') await assert.rejects(launch, /runtime_temporarily_unavailable/); else await launch;
     await extension.idle();
-    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items[0].state, 'claimed');
+    assert.deepEqual(store.rows('SELECT state FROM automation_deliveries').map(row => row.state), ['claimed']);
     offline = false;
     await extension.drain(root); await extension.idle();
     await extension.drain(root); await extension.idle();
@@ -16034,9 +16448,12 @@ test('an asynchronously rejected notification remains recoverable while an open 
 
 test('a focus reminder preserves both actions when the enqueue reply is lost after commit', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const ledger = require('../out/scheduledTaskLedger.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-focus-batch-loss-'));
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
-  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store); const timers = [];
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const task = { id: '__solomap_focus_reminder__', title: '专注时间提醒', enabled: true, assignee: 'user', scheduleKind: 'once', scheduledAt: new Date(Date.now() - 1000).toISOString(), projectPath: project, internalKind: 'focus_reminder', focusMinutes: 25, notify: true, sound: true };
+  const occurrence = await claimScheduleOccurrence(ledger, ops, project, root, task);
   let committed; const done = new Promise(resolve => { committed = resolve; });
   const call = async request => {
     const result = await ops(request);
@@ -16044,15 +16461,16 @@ test('a focus reminder preserves both actions when the enqueue reply is lost aft
     return result;
   };
   const extension = loadCompiledModule('out/extension.js', `
-    module.exports.schedule = scheduleFocusReminder;
-    module.exports.connect = (call, root, project, timers) => {
+    module.exports.run = runScheduledAutomationTask;
+    module.exports.connect = (call, root, project) => {
       autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request); activeProjectRoot = project;
       getPersistedSettings = () => ({ globalDataPath: root, automationTasks: { focusMinutes: 25, triggers: { focus_time: { notify: true, sound: true } } } });
-      setTimeout = fn => { timers.push(fn); return { unref() {} }; }; clearTimeout = () => {}; broadcastSettings = async () => {};
+      getScheduledAutomationLedgerReferenceRoot = () => project; scheduleTimedAutomationTask = () => {};
     };
-  `); extension.connect(call, root, project, timers);
+  `); extension.connect(call, root, project);
   try {
-    extension.schedule({}); timers[0](); await done; await new Promise(resolve => setImmediate(resolve));
+    const outcome = extension.run({}, task, occurrence).then(() => null, error => error);
+    await done; assert.equal((await outcome)?.message, 'focus_enqueue_reply_lost');
     const page = await ops({ operation: 'list_automation_deliveries', input: {} });
     assert.equal(page.items.length, 2, 'a committed reminder must retain every enabled action despite the lost reply');
     assert.deepEqual(page.items.map(item => item.kind).sort(), ['notification', 'sound']);
@@ -16100,19 +16518,20 @@ for (const delayed of [true, false]) test(`database-only step criteria migration
     return result;
   };
   const messages = [];
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => {} } };
   const sidebarWrapper = fs.readFileSync(path.join(projectRoot, 'out/extension.js'), 'utf8').match(/const syncEngineWrapper = \{[\s\S]*?\n    \};/)[0];
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.makeSidebarEngine = () => { ${sidebarWrapper} return syncEngineWrapper; };
     module.exports.send = sendNodesToWebview; module.exports.poll = pollActiveConversations;
-    module.exports.connect = (call, root, project, engine, messages) => {
+    module.exports.connect = (call, root, project, engine, messages, context) => {
       autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
       getPersistedSettings = () => ({ globalDataPath: root }); getSelectedProjectPath = () => project;
-      extensionContextRef = {}; activeProjectRoot = project; syncEngine = engine;
+      extensionContextRef = context; activeProjectRoot = project; syncEngine = engine;
       activePanel = { webview: { postMessage: message => messages.push(message) } };
       postFlowStateToWebview = async () => {};
     };
   `);
-  extension.connect(call, root, project, engine, messages);
+  extension.connect(call, root, project, engine, messages, context);
   const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
   const sidebar = new SolopreneurSidebarProvider(createUri(projectRoot), extension.makeSidebarEngine(), { getSettings: () => ({ globalDataPath: root }), updateSettings: async () => {}, getProjects: () => ({ projects: [], selectedProjectPath: project }) });
   sidebar._view = { webview: { postMessage: message => { messages.push(message); return Promise.resolve(true); } } };
@@ -16124,7 +16543,7 @@ for (const delayed of [true, false]) test(`database-only step criteria migration
     const criteria = Array.from({ length: 31 }, (_, index) => `迁移后的原用户标准${index}`);
     fs.writeFileSync(path.join(sourceRoot, 'step.json'), JSON.stringify({ completionCriteria: criteria, largeUnknownMetadata: '必须完整保留的历史元数据🌿'.repeat(40000), entries: [{ signal: '全部原历史' }] }));
     await ops({ operation: 'import_project_data', input: { collection: 'step-memory', projectRoot: project, sourceRoot, idempotencyKey: 'refresh-only-database' } }); await ops.waitForMigrations();
-    if (delayed) { release(); await firstPaint; } else await extension.poll({});
+    if (delayed) { release(); await firstPaint; } else await extension.poll(context);
     assert.deepEqual(messages.filter(message => message.command === 'nodesUpdated').at(-1).nodes[0].completionCriteria, criteria, 'the latest standards must appear with only a database migration, without sending another node update');
     assert.deepEqual(fs.readFileSync(path.join(project, '.solopreneur', 'roadmap.csv')), csvBefore);
     sidebar.sendNodesToWebview();
@@ -16134,7 +16553,7 @@ for (const delayed of [true, false]) test(`database-only step criteria migration
     const retainedIds = new Set(store.rows('SELECT content_id,source_refs_content_id FROM project_step_memory_revisions').flatMap(row => [row.content_id, row.source_refs_content_id]));
     for (const row of store.rows("SELECT content_id FROM evidence WHERE type IN ('step_memory','step_memory_source')")) retainedIds.add(row.content_id);
     store.content = function(id, ...args) { decoded++; if (retainedIds.has(id)) retainedDecodes++; return content.call(this, id, ...args); };
-    for (let iteration = 0; iteration < 12; iteration++) await extension.poll({});
+    for (let iteration = 0; iteration < 12; iteration++) await extension.poll(context);
     store.content = content;
     t.diagnostic(JSON.stringify({ unchangedPolls: 12, metadataReads: metadataReads - stableReads, allContentDecodes: decoded, retainedMetadataDecodes: retainedDecodes }));
     assert.equal(metadataReads, stableReads, 'unchanged polling must not rehydrate the retained metadata');
@@ -16214,7 +16633,7 @@ for (const [changeRoot, transientFailure] of [[false, false], [true, false], [fa
       agentCli_1.resolveAgentCli = value => value; agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
       getPersistedSettings = () => readSettings(); getReviewLaunchSettings = () => ({ ...readSettings(), taskPermissionMode: 'auto' });
       updatePersistedSettings = async (_context, patch) => writeSettings(patch); broadcastSettings = async () => {};
-      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {}; createAgentTerminal = () => ({ show() {}, processId: Promise.resolve(991) });
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false }); createAgentTerminal = () => ({ show() {}, processId: Promise.resolve(991) });
       terminalCompatibility_1.sendTextWhenTerminalReady = async (_terminal, command) => send(command);
     };
   `);
@@ -16225,7 +16644,7 @@ for (const [changeRoot, transientFailure] of [[false, false], [true, false], [fa
     assert.match(plan.prompt, /完整全局默认提示词/);
     const batchId = plan.status.learningReviewBatchId; assert.ok(batchId);
     const batch = store.read(batchId), index = batch.projection;
-    const result = { globalPrompt: '保留用户目标。', changes: [], processedSourceIds: index.sources.map(source => source.id), deferredSourceIds: [], unresolved: [], recovery: [] };
+    const result = { globalPrompt: '保留用户目标。', changes: [], lessons: [], processedSourceIds: index.sources.map(source => source.id), deferredSourceIds: [], unresolved: [], recovery: [] };
     if (changeRoot) { result.globalPrompt += '\n交付前核验真实结果。'; result.changes = [{ type: 'add', before: [], after: '交付前核验真实结果。', evidence: [index.sources.find(source => source.kind === 'memory').id], reason: '已记录的用户要求。' }]; }
     let state = await ops({ operation: 'claim_run', input: { root: project, executionLogId: id, expectedRevision: plan.revision, agentPid: process.pid, processBirth: '', idempotencyKey: 'host-review-claim' } });
     const proof = state.proof;
@@ -16256,28 +16675,28 @@ for (const appliedFirst of [true, false]) test(`production default instruction s
   const store = new UnifiedDataStore(root), ops = createRuntimeDataOperations(store);
   const call = (operation, input) => ops({ operation, input });
   let saved = { globalDataPath: root, globalPrompt: '保留用户目标。', cliPath: 'fixture' };
-  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async (_key, value) => { saved = { ...saved, ...value }; } } };
+  const context = { extensionPath: projectRoot, globalState: { get: () => saved, update: async (_key, value) => { saved = { ...saved, ...value }; } } };
   const extension = loadCompiledModule('out/extension.js', `
-    module.exports.save = updatePersistedSettings;
-    module.exports.connect = (call, root, project, readSettings) => {
-      activeProjectRoot = project; getPersistedSettings = readSettings;
+    module.exports.save = updatePersistedSettings; module.exports.readActual = getPersistedSettings;
+    module.exports.connect = (call, root, project) => {
+      activeProjectRoot = project;
       autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request.operation, request.input);
-      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
       syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {};
     };
   `);
-  extension.connect(call, root, project, () => saved);
+  extension.connect(call, root, project);
   try {
     await call('register_project', { root: project });
     const batch = await call('prepare_learning_review', { runId: 'initial-settings-review', workspaceRoot: project, globalPrompt: saved.globalPrompt, persistedGlobalPrompt: saved.globalPrompt });
     if (appliedFirst) {
-      const result = { globalPrompt: saved.globalPrompt, changes: [], processedSourceIds: batch.manifest.sources.map(source => source.id), deferredSourceIds: [], unresolved: [], recovery: [] };
+      const result = { globalPrompt: saved.globalPrompt, changes: [], lessons: [], processedSourceIds: batch.manifest.sources.map(source => source.id), deferredSourceIds: [], unresolved: [], recovery: [] };
       const applied = await call('apply_learning_review', { batchId: batch.objectId, expectedRevision: batch.revision, manifestHash: reviewHash(JSON.stringify(batch.manifest)), result, idempotencyKey: 'settings-first-apply' });
       await call('finish_learning_review', { applicationId: applied.application.objectId, expectedRevision: applied.application.revision, promptHash: reviewHash(result.globalPrompt), idempotencyKey: 'settings-first-finish' });
     } else await call('interrupt_learning_review', { batchId: batch.objectId });
     const edited = '保留用户目标。\n用户新增的长期要求。';
     await extension.save(context, { globalPrompt: edited });
-    assert.equal(saved.globalPrompt, edited);
+    assert.equal(extension.readActual(context).globalPrompt, edited);
     const next = await call('prepare_learning_review', { runId: 'after-user-settings-save', workspaceRoot: project, globalPrompt: edited, persistedGlobalPrompt: edited });
     assert.equal(next.manifest.globalPrompt, edited);
     assert.equal(store.read(next.policy.objectId, next.policy.revision).data.content, edited);
@@ -16291,8 +16710,7 @@ for (const unchanged of [true, false]) test(`production default instruction save
   const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root), ops = createRuntimeDataOperations(store);
   let saved = { globalDataPath: root, globalPrompt: '保留用户目标。', cliPath: 'fixture' };
-  const writes = [];
-  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async (_key, value) => { writes.push(value.globalPrompt); saved = { ...saved, ...value }; } } };
+  const context = { extensionPath: projectRoot, globalState: { get: () => saved, update: async (_key, value) => { saved = { ...saved, ...value }; } } };
   let release, announce, held = false;
   const ready = new Promise(resolve => { announce = resolve; });
   const blocked = new Promise(resolve => { release = resolve; });
@@ -16301,15 +16719,15 @@ for (const unchanged of [true, false]) test(`production default instruction save
     return ops({ operation, input });
   };
   const extension = loadCompiledModule('out/extension.js', `
-    module.exports.save = updatePersistedSettings;
-    module.exports.connect = (call, project, readSettings) => {
-      activeProjectRoot = project; getPersistedSettings = readSettings;
+    module.exports.save = updatePersistedSettings; module.exports.readActual = getPersistedSettings;
+    module.exports.connect = (call, project) => {
+      activeProjectRoot = project;
       autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request.operation, request.input);
-      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {};
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
       syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {};
     };
   `);
-  extension.connect(call, project, () => saved);
+  extension.connect(call, project);
   try {
     await ops({ operation: 'register_project', input: { root: project } });
     const batch = await ops({ operation: 'prepare_learning_review', input: { runId: 'settings-order-baseline', workspaceRoot: project, globalPrompt: saved.globalPrompt, persistedGlobalPrompt: saved.globalPrompt } });
@@ -16325,8 +16743,8 @@ for (const unchanged of [true, false]) test(`production default instruction save
       const newer = extension.save(context, { globalPrompt: latest });
       release();
       await Promise.all([first, newer]);
-      assert.deepEqual(writes, [latest], 'a delayed review mirror cannot persist its superseded text');
-      assert.equal(saved.globalPrompt, latest); assert.equal(store.read(initial.objectId).data.content, latest);
+      assert.equal(extension.readActual(context).globalPrompt, latest, 'a delayed review mirror cannot persist its superseded text');
+      assert.equal(store.read(initial.objectId).data.content, latest);
     }
   } finally { release(); await ops.close(); store.close(); }
 });
@@ -16341,17 +16759,17 @@ for(const mixed of [false,true]) test(mixed?'production default instruction save
  let release,announce,held=false;const ready=new Promise(r=>{announce=r}),blocked=new Promise(r=>{release=r});
  const call=async(operation,input)=>{if(mixed&&!held&&operation==='read_global_prompt_policy'){held=true;announce();await blocked;}return ops({operation,input})};
  const extension=loadCompiledModule('out/extension.js',`module.exports.save=updatePersistedSettings;module.exports.readActual=getPersistedSettings;
- module.exports.connect=(call,project,readSettings)=>{activeProjectRoot=project;getPersistedSettings=readSettings;autonomousRuntimeControl_1.sendRuntimeDataRequest=(_root,request)=>call(request.operation,request.input);autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime=async()=>{};syncCognitiveRuntimeConfig=()=>{};synchronizeTelegramChannel=()=>{};scheduleFocusReminder=()=>{};};`);
- extension.__vscodeTestState.configurationValues.automationTasks={focusMinutes:10};extension.connect(call,project,()=>saved);
+ module.exports.connect=(call,project)=>{activeProjectRoot=project;autonomousRuntimeControl_1.sendRuntimeDataRequest=(_root,request)=>call(request.operation,request.input);autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime=async()=>({started:false});syncCognitiveRuntimeConfig=()=>{};synchronizeTelegramChannel=()=>{};scheduleFocusReminder=()=>{};};`);
+ extension.__vscodeTestState.configurationValues.automationTasks={focusMinutes:10};extension.connect(call,project);
  try{
   const registered=await call('register_project',{root:project});
   store.write({kind:'memory',action:'create',scope:registered.projectId,idempotencyKey:'new-rule-source',data:{category:'rules',title:'完整要求',status:'captured',content:'新增要求。'}});
   const batch=await call('prepare_learning_review',{runId:'boundary',workspaceRoot:project,globalPrompt:saved.globalPrompt,persistedGlobalPrompt:saved.globalPrompt});
   if(!mixed){
    const target='保留用户目标。\n新增要求。\n'.replace(/\\n/g,'\n');
-   const result={globalPrompt:target,changes:[{type:'add',before:[],after:'新增要求。\n'.replace(/\\n/g,'\n'),evidence:[batch.manifest.sources[0].id],reason:'保留完整用户要求。'}],processedSourceIds:batch.manifest.sources.map(s=>s.id),deferredSourceIds:[],unresolved:[],recovery:[]};
+   const result={globalPrompt:target,changes:[{type:'add',before:[],after:'新增要求。\n'.replace(/\\n/g,'\n'),evidence:[batch.manifest.sources[0].id],reason:'保留完整用户要求。'}],lessons:[],processedSourceIds:batch.manifest.sources.map(s=>s.id),deferredSourceIds:[],unresolved:[],recovery:[]};
    await call('apply_learning_review',{batchId:batch.objectId,expectedRevision:batch.revision,manifestHash:reviewHash(JSON.stringify(batch.manifest)),result,idempotencyKey:'boundary-apply'});
-   await assert.doesNotReject(extension.save(context,{globalPrompt:target},{globalPromptSource:'review_projection'}));assert.equal(saved.globalPrompt,target);
+   await assert.doesNotReject(extension.save(context,{globalPrompt:target},{globalPromptSource:'review_projection'}));assert.equal(extension.readActual(context).globalPrompt,target);
   }else{
    await call('interrupt_learning_review',{batchId:batch.objectId});
    const first=extension.save(context,{globalPrompt:'较早的指令。',automationTasks:{focusMinutes:25}});await ready;
@@ -16380,15 +16798,15 @@ for (const kind of ['step', 'solo', 'roadmap_revision']) test(`the actual automa
     module.exports.runAutomatic = runAutomationTasksAfterRun;
     module.exports.connect = (call, selectedRoot, project, engine, launches) => {
       autonomousRuntimeControl_1.sendRuntimeDataRequest = call;
-      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => {}; ensureTaskRuntimeReady = async () => {};
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false }); ensureTaskRuntimeReady = async () => {};
       activeProjectRoot = project; syncEngine = engine;
       getPersistedSettings = () => ({ cliPath: 'claude', globalDataPath: selectedRoot, taskPermissionMode: 'auto', enabledEnhancements: {}, automationTasks: { triggers: { completed: { prompt: '推进原任务的下一步' } } } });
       agentCli_1.resolveAgentCli = value => value; agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
-      recordLocalUsageEvent = () => {}; postNodeConversations = () => {}; ensureRoadmapValidationScript = () => {}; sendNodesToWebview = () => {}; refreshSidebarProjectCards = () => {};
-      solomapGlobal_1.ensureSolomapMemoryStore = () => {}; solomapGlobal_1.ensureSolomapEnhancementRuntime = () => ({ envLines: [], preflightLines: [] });
+      recordLocalUsageEvent = async () => ({}); postNodeConversations = () => {}; ensureRoadmapValidationScript = () => {}; sendNodesToWebview = () => {}; refreshSidebarProjectCards = () => {};
+      solomapGlobal_1.ensureSolomapMemoryStore = () => {};
       preSessionGit_1.createPreSessionGitCommit = async () => ''; launchAgentConversationTerminal = async input => launches.push(input);
     };
-  `);
+  `, { './autonomousRuntimeControl': transport });
   extension.connect(call, roots[1], project, engine, launches);
   try {
     await engine.initAndSync();
@@ -16397,7 +16815,7 @@ for (const kind of ['step', 'solo', 'roadmap_revision']) test(`the actual automa
     const run = (await operations[0]({ operation: 'list_run_states', input: { root: project } })).items[0];
     const document = await operations[0]({ operation: 'read_run_document', input: { projectId: run.projectId, executionLogId: run.status.rootExecutionLogId, purpose: 'launch_request', revision: 1 } });
     const prepared = JSON.parse(Buffer.from(document.bytes, 'base64').toString('utf8'));
-    assert.ok(prepared.prompt.includes(roots[0]), 'actual startup context must pin the original task data root');
+    assert.equal(prepared.globalDataPath, roots[0], 'actual startup context must pin the original task data root');
     assert.ok(!prepared.prompt.includes(roots[1]), 'the selected data root cannot leak into the original task prompt');
     if (kind === 'step') {
       assert.ok(prepared.prompt.includes('原任务所属目录的完整标准')); assert.ok(prepared.prompt.includes(memory[0].objectId));

@@ -69,6 +69,23 @@ async function runRoute(workspace, globalRoot, kind, title = '') {
   return JSON.parse(result.stdout);
 }
 
+async function runExternalSync(fixture, target, authorized = true) {
+  const { syncExternalMemoryTarget } = require('../out/externalMemoryTarget.js');
+  return syncExternalMemoryTarget({
+    projectId: fixture.project, targetRoot: target, authorized,
+    sync: input => fixture.ops({ operation: 'sync_external_memory', input }),
+    reconcile: input => fixture.ops({ operation: 'reconcile_external_memory_target', input })
+  });
+}
+
+async function runExternalDisconnect(fixture, target) {
+  const { disconnectExternalMemoryTarget } = require('../out/externalMemoryTarget.js');
+  return disconnectExternalMemoryTarget({
+    projectId: fixture.project, target,
+    revoke: input => fixture.ops({ operation: 'revoke_external_memory_target', input })
+  });
+}
+
 async function openFixture(workspace, globalRoot) {
   fs.mkdirSync(workspace, { recursive: true });
   const store = new UnifiedDataStore(globalRoot); const ops = createRuntimeDataOperations(store);
@@ -185,6 +202,132 @@ test('memory retrieve preserves migrated structured metadata, validity and candi
 
   const candidates = await runTool(workspace, globalRoot, '侧边栏启动候选观察', ['--sources', 'inbox']);
   assert.equal(candidates.payload.results[0].memoryId, 'mem_candidate');
+  } finally { await fixture.close(); }
+});
+
+test('the host adapter synchronizes an explicitly selected CloudMCP JSON target with hash, scope, revision and authorization boundaries', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-external-'));
+  const workspace = path.join(root, 'demo-app');
+  const globalRoot = path.join(root, '.solomap-global');
+  const target = path.join(root, 'cloudmcp-target');
+  fs.mkdirSync(path.join(target, 'entries'), { recursive: true });
+  write(path.join(target, 'contract.json'), JSON.stringify({ schemaVersion: 1, target: 'solomap', format: 'json', targetId: 'fixture-target' }));
+  const entryPath = path.join(target, 'entries', 'entry.json');
+  writeJsonMemory(entryPath, { revision: 2 });
+  let fixture = await openFixture(workspace, globalRoot);
+  try {
+    const synced = await runExternalSync(fixture, target);
+    assert.equal(synced.entries.length, 1);
+    let found = await runTool(workspace, globalRoot, 'JSON startup boundary');
+    assert.ok(found.payload.results.some(item => item.memoryId === 'mem_json_test'));
+
+    writeJsonMemory(entryPath, { revision: 1 });
+    await assert.rejects(runExternalSync(fixture, target), /external_memory_source_revision_conflict/);
+    writeJsonMemory(entryPath, { revision: 2 });
+    const targets = await fixture.ops({ operation: 'read_external_memory_targets', input: { projectId: fixture.project } });
+    assert.deepEqual(targets.items, [{ target: 'fixture-target', active: 1, total: 1 }]);
+    const firstDisconnect = await runExternalDisconnect(fixture, 'fixture-target');
+    assert.equal(firstDisconnect.revoked, 1);
+    found = await runTool(workspace, globalRoot, 'JSON startup boundary');
+    assert.ok(!found.payload.results.some(item => item.memoryId === 'mem_json_test'));
+    await runExternalSync(fixture, target);
+
+    const loopPath = path.join(target, 'entries', 'loop.json');
+    writeJsonMemory(loopPath, { id: 'loop-external', revision: 1, title: 'Loop source', content: '来源集合回环必须撤销已经移除的来源。' });
+    await runExternalSync(fixture, target);
+    fs.renameSync(loopPath, `${loopPath}.retained`);
+    await runExternalSync(fixture, target);
+    assert.equal(fixture.store.rows("SELECT status FROM memories WHERE external_source LIKE '%loop-external'")[0].status, 'revoked', 'A→A+B→A must perform a new reconciliation action');
+
+    const secondDisconnect = await runExternalDisconnect(fixture, 'fixture-target');
+    assert.ok(secondDisconnect.revoked >= 1, 'a new disconnect after reauthorization must revoke the current active generation');
+    found = await runTool(workspace, globalRoot, 'JSON startup boundary');
+    assert.ok(!found.payload.results.some(item => item.memoryId === 'mem_json_test'));
+    await runExternalSync(fixture, target);
+
+    const candidatePath = path.join(target, 'entries', 'candidate.json');
+    writeJsonMemory(candidatePath, { id: 'candidate-external', revision: 1, layer: 'candidate', kind: 'observation', title: 'External candidate', content: '外部候选观察不进入默认上下文。' });
+    const pendingPath = path.join(target, 'entries', 'pending.json');
+    writeJsonMemory(pendingPath, { id: 'pending-external', revision: 1, layer: 'stable', status: 'pending', kind: 'observation', title: 'External pending', content: '外部未生效观察不能进入任何检索。' });
+    await runExternalSync(fixture, target, true);
+    const defaultContext = await fixture.ops({ operation: 'context', input: { project: fixture.project, kinds: ['memory'], terms: ['外部候选观察'] } });
+    assert.ok(!defaultContext.items.some(item => item.data.legacy_entry_id === 'candidate-external'));
+    const inbox = await runTool(workspace, globalRoot, '外部候选观察', ['--sources', 'inbox']);
+    assert.ok(inbox.payload.results.some(item => item.memoryId === 'candidate-external'));
+    const pendingDefault = await runTool(workspace, globalRoot, '外部未生效观察');
+    const pendingInbox = await runTool(workspace, globalRoot, '外部未生效观察', ['--sources', 'inbox']);
+    assert.ok(!pendingDefault.payload.results.some(item => item.memoryId === 'pending-external'));
+    assert.ok(!pendingInbox.payload.results.some(item => item.memoryId === 'pending-external'));
+    fs.renameSync(candidatePath, `${candidatePath}.retained`);
+    await runExternalSync(fixture, target);
+    const reconciledInbox = await runTool(workspace, globalRoot, '外部候选观察', ['--sources', 'inbox']);
+    assert.ok(!reconciledInbox.payload.results.some(item => item.memoryId === 'candidate-external'), 'entries removed upstream are revoked during reconciliation');
+
+    const damagedBeforeDisconnect = JSON.parse(fs.readFileSync(entryPath, 'utf8')); damagedBeforeDisconnect.content = 'damaged before disconnect'; write(entryPath, JSON.stringify(damagedBeforeDisconnect));
+    await fixture.ops({ operation: 'revoke_external_memory_target', input: { projectId: fixture.project, target: 'fixture-target', idempotencyKey: 'fixture-target-disconnect-damaged' } });
+    found = await runTool(workspace, globalRoot, 'JSON startup boundary');
+    assert.ok(!found.payload.results.some(item => item.memoryId === 'mem_json_test'), 'disconnect revokes retained history without rereading damaged files');
+    writeJsonMemory(entryPath, { revision: 2 });
+    await runExternalSync(fixture, target);
+
+    await fixture.close();
+    fixture = await openFixture(workspace, globalRoot);
+    found = await runTool(workspace, globalRoot, 'JSON startup boundary');
+    assert.ok(found.payload.results.some(item => item.memoryId === 'mem_json_test'), 'authorized external memory survives a cold restart');
+
+    const damaged = JSON.parse(fs.readFileSync(entryPath, 'utf8')); damaged.content = 'tampered'; write(entryPath, JSON.stringify(damaged));
+    await assert.rejects(runExternalSync(fixture, target), /external_memory_hash_mismatch/);
+    writeJsonMemory(entryPath, { revision: 3, scopeId: 'memory_scope:project:another-project' });
+    await assert.rejects(runExternalSync(fixture, target), /external_memory_scope_mismatch/);
+  } finally { await fixture.close(); }
+});
+
+test('external targets require an explicit identity and never collapse separate directories into one target', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-target-missing-id-'));
+  const workspace = path.join(root, 'demo-app'); const globalRoot = path.join(root, '.solomap-global');
+  const fixture = await openFixture(workspace, globalRoot);
+  try {
+    for (const name of ['first', 'second']) {
+      const target = path.join(root, name); fs.mkdirSync(path.join(target, 'entries'), { recursive: true });
+      write(path.join(target, 'contract.json'), JSON.stringify({ schemaVersion: 1, target: 'solomap', format: 'json' }));
+      writeJsonMemory(path.join(target, 'entries', 'entry.json'), { id: `${name}-entry`, content: `${name} directory` });
+      await assert.rejects(runExternalSync(fixture, target), /external_memory_target_identity_invalid/);
+    }
+    assert.deepEqual((await fixture.ops({ operation: 'read_external_memory_targets', input: { projectId: fixture.project } })).items, []);
+  } finally { await fixture.close(); }
+});
+
+test('external target identity is global for global entries and exact for adjacent project target names', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-target-identity-'));
+  const workspace = path.join(root, 'demo-app'); const globalRoot = path.join(root, '.solomap-global');
+  const fixture = await openFixture(workspace, globalRoot);
+  try {
+    const otherRoot = path.join(root, 'other-app');
+    const other = await fixture.ops({ operation: 'register_project', input: { root: otherRoot } });
+    const shared = path.join(root, 'shared-global'); fs.mkdirSync(path.join(shared, 'entries'), { recursive: true });
+    write(path.join(shared, 'contract.json'), JSON.stringify({ schemaVersion: 1, target: 'solomap', format: 'json', targetId: 'shared_global' }));
+    writeJsonMemory(path.join(shared, 'entries', 'global.json'), { id: 'shared-entry', scopeId: 'memory_scope:global', kind: 'global', title: 'Shared global memory', content: '两个项目读取同一条全局记忆。', revision: 1 });
+    await runExternalSync(fixture, shared);
+    await runExternalSync({ project: other.projectId, ops: fixture.ops }, shared);
+    assert.equal(fixture.store.rows("SELECT COUNT(*) AS n FROM memories WHERE external_source='cloudmcp:global:shared_global:shared-entry'")[0].n, 1);
+    const otherContext = await fixture.ops({ operation: 'context', input: { project: other.projectId, kinds: ['memory'], terms: ['两个项目读取'] } });
+    assert.equal(otherContext.items.length, 1);
+
+    for (const [targetId, entryId, title] of [['foo_bar', 'under-entry', 'Underscore target'], ['fooXbar', 'letter-entry', 'Letter target']]) {
+      const target = path.join(root, targetId); fs.mkdirSync(path.join(target, 'entries'), { recursive: true });
+      write(path.join(target, 'contract.json'), JSON.stringify({ schemaVersion: 1, target: 'solomap', format: 'json', targetId }));
+      writeJsonMemory(path.join(target, 'entries', 'entry.json'), { id: entryId, scopeId: 'memory_scope:project:demo-app', title, content: `${title} remains exact.`, revision: 1 });
+      await runExternalSync(fixture, target);
+    }
+    await fixture.ops({ operation: 'revoke_external_memory_target', input: { projectId: fixture.project, target: 'foo_bar', idempotencyKey: 'revoke-foo-bar' } });
+    const exact = await fixture.ops({ operation: 'context', input: { project: fixture.project, kinds: ['memory'], terms: ['Letter target remains exact'] } });
+    assert.ok(exact.items.some(item => item.data.title === 'Letter target'));
+    assert.equal(fixture.store.rows("SELECT status FROM memories WHERE external_source LIKE '%under-entry'")[0].status, 'revoked');
+    assert.equal(fixture.store.rows("SELECT status FROM memories WHERE external_source LIKE '%letter-entry'")[0].status, 'active');
+
+    await fixture.ops({ operation: 'revoke_external_memory_target', input: { projectId: fixture.project, target: 'shared_global', idempotencyKey: 'revoke-shared-global' } });
+    const revokedGlobal = await fixture.ops({ operation: 'context', input: { project: other.projectId, kinds: ['memory'], terms: ['两个项目读取'] } });
+    assert.equal(revokedGlobal.items.length, 0);
   } finally { await fixture.close(); }
 });
 

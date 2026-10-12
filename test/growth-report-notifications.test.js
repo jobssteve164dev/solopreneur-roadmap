@@ -148,12 +148,15 @@ test('the first successful observation after connection failure refreshes an alr
 function growthSettingsScope(context, initialSettings, changed) {
   const compiled = fs.readFileSync(path.resolve(__dirname, '../out/extension.js'), 'utf8');
   const start = compiled.indexOf('async function refreshProjectGrowthPanel('), end = compiled.indexOf('async function handleOpenStrategyPyramid(', start);
-  const settingsStart = compiled.indexOf('async function updatePersistedSettings('), settingsEnd = compiled.indexOf('function syncCognitiveRuntimeConfig(', settingsStart);
-  const scope = { context, path, setTimeout, console, currentSettings: initialSettings,
+  const settingsStart = compiled.indexOf('async function updatePersistedSettings('), settingsEnd = compiled.indexOf('async function syncCognitiveRuntimeConfig(', settingsStart);
+  const nativeProjections = new Map();
+  const scope = { context, path, setTimeout, console, crypto: require('node:crypto'), currentSettings: initialSettings,
     activeProjectGrowthPanel: { visible: true, webview: { postMessage: m => changed.push(m), html: '' } }, activeProjectGrowthPath: '',
     projectGrowthLoadSequence: 0, growthReportWatchPath: '', growthReportWatcher: null,
     persistedSettingsWriteQueue: Promise.resolve(), pendingPersistedSettings: null, persistedSettingsCache: null,
     persistedGlobalDataPathWrite: undefined,
+    databaseSettingsByRoot: new Map(), databaseSettingKeys: [], nativeConfigurationKeys: ['globalDataPath'],
+    nativeConfigurationProjectionValues: new Map(),
     syncEngine: null, syncEngineInitPromise: null,
     getPersistedSettings: () => scope.pendingPersistedSettings || scope.currentSettings,
     normalizeGlobalDataPathForExtension: value => value, getProjects: () => [], isSoloMapLanguageZh: () => true,
@@ -165,8 +168,23 @@ function growthSettingsScope(context, initialSettings, changed) {
     normalizeCollaborationReviewMode: x => x || 'high_risk', mergeAutomationSettings: (old, patch) => ({ ...old, ...patch }), normalizeAutomationSettings: x => x || {},
     getEnabledEnhancementMap: () => ({}), getSettingsEnhancementWorkspaceRoot: () => '', normalizeProAccountStatus: x => x,
     invalidatePersistedSettingsCache: () => {}, syncCognitiveRuntimeConfig: () => {}, synchronizeTelegramChannel: () => {},
-    cognitiveRuntimeConfig_1: { writeCognitiveRuntimeConfig: () => {} }, activateObservedBackgroundRuntime: async () => {},
-    settingsKey: 'settings', vscode: { ConfigurationTarget: { Global: 1 }, workspace: { getConfiguration: () => ({ update: async () => {} }) }, window: { showInformationMessage: () => {} } }
+    persistExtensionSettingsToDatabase: async () => {}, refreshExtensionSettingsFromDatabase: async () => {},
+    recordNativeConfigurationProjection: async (root, key, value) => {
+      const id = `fixture-projection-${nativeProjections.size + 1}`;
+      nativeProjections.set(id, { root, key, value: JSON.stringify(value) }); return id;
+    },
+    consumeNativeConfigurationProjection: async (root, key, value) => {
+      const match = [...nativeProjections].find(([, item]) => item.root === root && item.key === key && item.value === JSON.stringify(value));
+      if (!match) return false; nativeProjections.delete(match[0]); return true;
+    },
+    supersedeNativeConfigurationProjections: async (root, key, keep) => {
+      for (const [id, item] of nativeProjections) if (id !== keep && item.root === root && item.key === key) nativeProjections.delete(id);
+    },
+    cancelNativeConfigurationProjection: async (_root, id) => { nativeProjections.delete(id); },
+    refreshSettingsAfterConfigurationChange: async () => {},
+    cognitiveRuntimeConfig_1: { persistCognitiveRuntimeConfig: async () => {} }, activateObservedBackgroundRuntime: async () => {},
+    autonomousRuntimeHost_1: { ensureHealthyAutonomousRuntime: async () => ({ started: false }) },
+    settingsKey: 'settings', vscode: { ConfigurationTarget: { Global: 1 }, workspace: { getConfiguration: () => ({ get: () => undefined, update: async () => {} }) }, window: { showInformationMessage: () => {} } }
   };
   scope.localDataLoader_1 = { postLocalDataLoad: scope.postLocalDataLoad };
   scope.projectGrowth_1 = { getProjectGrowthView: (...args) => scope.getProjectGrowthView(...args) };

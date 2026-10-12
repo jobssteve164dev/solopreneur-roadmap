@@ -32,8 +32,10 @@ export async function prepareNativeAgentLaunch(input: {
     }
   };
   if (input.prepareDatabase !== false && databaseAgentProviders.includes(provider as DatabaseAgentProvider)) {
-    const codexHome = provider === 'codex' ? getCodexSessionHome(await input.operation('read_run_binding', scope) as NativeSessionBinding | null) : '';
-    const configPath = codexHome ? path.join(codexHome, 'config.toml') : String(state.status.agentDatabaseConfigPath || agentDatabaseConfigPath(provider as DatabaseAgentProvider));
+    const binding = ['codex', 'claude'].includes(provider) ? await input.operation('read_run_binding', scope) as NativeSessionBinding | null : null;
+    const codexHome = provider === 'codex' ? getCodexSessionHome(binding) : '';
+    const claude = provider === 'claude' ? [...(binding?.revisions || [])].reverse().find(value => value.providerContext?.claude)?.providerContext?.claude as Record<string, unknown> | undefined : undefined;
+    const configPath = codexHome ? path.join(codexHome, 'config.toml') : String(claude?.configPath || state.status.agentDatabaseConfigPath || agentDatabaseConfigPath(provider as DatabaseAgentProvider));
     await input.operation('prepare_agent_database', { root: input.workspaceRoot, provider, command: process.execPath, configPath });
   }
   if (state.status.interactiveSession !== true) return state;
@@ -54,6 +56,16 @@ export async function prepareNativeAgentLaunch(input: {
   if (['claude', 'copilot', 'grok'].includes(provider)) {
     const help = await input.execute(`${shellQuote(cli)} --help`, 'identity-help');
     if (help.code !== 0 || !Buffer.concat([help.stdout, help.stderr]).includes(Buffer.from('--session-id'))) await fail('identity_capability_missing', '当前 Agent CLI 不支持本次会话需要的会话标识参数，请升级后重试。', 'official_cli_help');
+    if (provider === 'claude') {
+      let supported = false;
+      if (Buffer.concat([help.stdout, help.stderr]).includes(Buffer.from('--plugin-dir'))) {
+        const version = await input.execute(`${shellQuote(cli)} --version`, 'native-version');
+        const match = Buffer.concat([version.stdout, version.stderr]).toString('utf8').match(/\b(\d+)\.(\d+)\.(\d+)\b/);
+        supported = version.code === 0 && Boolean(match && (Number(match[1]) > 2 || Number(match[1]) === 2 && (Number(match[2]) > 1 || Number(match[2]) === 1 && Number(match[3]) >= 287)));
+      }
+      await patch({ claudeNativeObserverCapable: supported,
+        ...(state.status.claudeNativeObserverGeneration === state.generation ? {} : { claudeNativeContract: 'transcript-v1', claudeNativeEventHead: 0, claudeNativeEventCursor: 0 }) });
+    }
   }
   if (provider === 'cursor') {
     state = await input.operation('read_run_state', scope) as RunState;

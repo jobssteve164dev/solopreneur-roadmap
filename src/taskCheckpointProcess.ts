@@ -6,7 +6,7 @@ import type { RunState } from './runLifecycleTypes';
 
 async function main(): Promise<void> {
   const action = String(process.argv[2] || '');
-  if (!['start', 'complete', 'session-close'].includes(action)) throw new Error('invalid_checkpoint_action');
+  if (!['start', 'complete', 'session-close', 'native-event', 'native-ready', 'native-append'].includes(action)) throw new Error('invalid_checkpoint_action');
   const args: Record<string, string> = {};
   for (let index = 3; index < process.argv.length; index += 2) {
     const key = process.argv[index]; const value = process.argv[index + 1];
@@ -21,6 +21,24 @@ async function main(): Promise<void> {
   if (!globalDataPath || !projectId || !Number.isInteger(executionLogId) || executionLogId < 1 || !Number.isInteger(generation) || generation < 1 || !proof) throw new Error('checkpoint_identity_required');
   const identity = { projectId, executionLogId };
   const call = <T>(operation: string, input: Record<string, unknown>) => sendRuntimeDataRequest<T>(globalDataPath, { operation, input });
+  if (action === 'native-event' || action === 'native-ready' || action === 'native-append') {
+    const parts: Buffer[] = [];
+    for await (const part of process.stdin) parts.push(Buffer.from(part));
+    const event = JSON.parse(Buffer.concat(parts).toString('utf8'));
+    for (;;) {
+      try {
+        const result = await call<RunState & { claudeNativeResume?: unknown }>(action === 'native-ready' ? 'record_claude_native_ready' : action === 'native-append' ? 'record_claude_native_append' : 'record_claude_native_event',
+          { ...identity, generation, proof, ...(action === 'native-ready' ? { sessionId: event.sessionId } : { event }) });
+        process.stdout.write(`${JSON.stringify({ runId: result.runId, revision: result.revision, nextSequence: Number(result.status.claudeNativeEventHead || 0) + 1,
+          ...(result.claudeNativeResume ? { resume: result.claudeNativeResume } : {}) })}\n`);
+        return;
+      } catch (error) {
+        if (!['ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE'].includes(String((error as NodeJS.ErrnoException).code))
+          && !(error instanceof SyntaxError) && (error as Error).message !== 'different_runtime') throw error;
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+    }
+  }
   let state = await call<RunState>('read_run_state', identity);
   let report: unknown;
   if (args['report-json'] !== undefined) {
@@ -62,5 +80,5 @@ async function main(): Promise<void> {
 
 void main().catch(error => {
   process.stderr.write(`SoloMap checkpoint: ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 2;
+  process.exitCode = ['native-event', 'native-ready', 'native-append'].includes(String(process.argv[2])) ? 3 : 2;
 });

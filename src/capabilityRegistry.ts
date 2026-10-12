@@ -14,6 +14,14 @@ export interface CapabilitySnapshot {
 export interface CapabilityRegistryVersion {
   entryVersions?: Record<string, number>;
 }
+export interface CapabilityOperation {
+  operationId: string; ordinal: number; kind: CapabilityKind;
+  action: 'install' | 'upgrade' | 'enable' | 'disable' | 'uninstall';
+  targetId: string | null; requestKey: string; status: 'pending' | 'running' | 'succeeded' | 'failed' | 'stale';
+  resultPath: string | null; runId: string | null; expectedRevision: number;
+  sourceIntent: Record<string, any>;
+  resultIntegrationId: string | null; resultRevision: number | null; error: string; createdAt: number; updatedAt: number;
+}
 const snapshots = new Map<string, CapabilitySnapshot>();
 const reads = new Map<string, { issued: number; committed: number }>();
 const key = (root: string, kind: CapabilityKind) => JSON.stringify([root, kind]);
@@ -80,6 +88,104 @@ export async function writeCapabilityEntries(root: string, kind: CapabilityKind,
     } });
   }
   await refreshCapabilityRegistry(root, kind);
+}
+
+export async function beginCapabilityOperation(root: string, input: { operationId?: string; kind: CapabilityKind; action: CapabilityOperation['action']; targetId?: string; expectedRevision?: number; requestKey?: string; sourceIntent?: Record<string, any> }): Promise<CapabilityOperation> {
+  const operationId = input.operationId || crypto.randomUUID();
+  return sendRuntimeDataRequest(root, { operation: 'begin_capability_operation', input: {
+    operationId, kind: input.kind, action: input.action, ...(input.targetId ? { targetId: input.targetId } : {}),
+    expectedRevision: input.expectedRevision || 0, requestKey: input.requestKey || `capability:${operationId}`,
+    sourceIntent: input.sourceIntent || {}
+  } });
+}
+
+export async function attachCapabilityOperation(root: string, operationId: string, resultPath: string, runId?: string): Promise<CapabilityOperation> {
+  return sendRuntimeDataRequest(root, { operation: 'attach_capability_operation', input: { operationId, resultPath, ...(runId ? { runId } : {}) } });
+}
+
+export async function readCapabilityOperations(root: string, activeOnly = false, recentLimit?: number): Promise<CapabilityOperation[]> {
+  return sendRuntimeDataRequest(root, { operation: 'read_capability_operations', input: { activeOnly, ...(recentLimit ? { recentLimit } : {}) } });
+}
+
+export async function readCapabilityOperation(root: string, operationId: string): Promise<CapabilityOperation> {
+  const rows = await sendRuntimeDataRequest<CapabilityOperation[]>(root, { operation: 'read_capability_operations', input: { operationId } });
+  if (rows.length !== 1) throw new Error('capability_operation_missing');
+  return rows[0];
+}
+
+export async function readCapabilityOperationRunState(root: string, operationId: string): Promise<{ attached: boolean; terminal: boolean; status: string; exitCode: number | null }> {
+  return sendRuntimeDataRequest(root, { operation: 'read_capability_operation_run_state', input: { operationId } });
+}
+
+export async function readCapabilityOperationResult(root: string, operationId: string): Promise<{ objectId: string; revision: number; bytes: string; hash: string; mimeType: string } | null> {
+  return sendRuntimeDataRequest(root, { operation: 'read_capability_operation_result', input: { operationId } });
+}
+
+export function capabilityOperationSettlementDecision(
+  run: { attached: boolean; terminal: boolean; status: string; exitCode: number | null },
+  resultExists: boolean
+): 'wait' | 'settle' | 'fail_missing_result' {
+  if (run.attached && !run.terminal) return 'wait';
+  if (!resultExists) return run.attached ? 'fail_missing_result' : 'wait';
+  return 'settle';
+}
+
+export function capabilityOperationNeedsLaunchRecovery(
+  operation: Pick<CapabilityOperation, 'resultPath' | 'createdAt'>,
+  now = Date.now(),
+  graceMs = 60_000
+): boolean {
+  return !operation.resultPath && now - operation.createdAt >= graceMs;
+}
+
+export async function failCapabilityOperation(root: string, operationId: string, error: string): Promise<CapabilityOperation> {
+  return sendRuntimeDataRequest(root, { operation: 'fail_capability_operation', input: { operationId, error } });
+}
+
+export async function completeCapabilityEntry(root: string, operationId: string, kind: CapabilityKind, entry: Record<string, any> & { id: string }, installationFiles?: Record<string, string>): Promise<{ operation: CapabilityOperation; stale?: true }> {
+  const attachments = installationFiles ? captureInstallationFiles(root, installationFiles) : undefined;
+  const receipt = attachments?.find(item => item.purpose === 'result');
+  if (attachments && !receipt) throw new Error('capability_installation_receipt_required');
+  const installationReceiptId = receipt ? crypto.createHash('sha256').update(canonicalMetadata([
+    path.relative(root, installationFiles!.result), receipt.bytes
+  ])).digest('hex') : undefined;
+  const request = { operation: 'complete_capability_operation', input: {
+    operationId, targetId: entry.id, entry, ...(attachments ? { attachments, installationReceiptId } : {})
+  } } as const;
+  let result: { operation: CapabilityOperation; stale?: true };
+  try {
+    result = await sendRuntimeDataRequest<{ operation: CapabilityOperation; stale?: true }>(root, request);
+  } catch (error) {
+    // The owner may commit durably before the transport reply is lost. The
+    // operation row is the authority, so never turn that committed install
+    // back into a filesystem rollback merely because its first reply vanished.
+    let persisted: CapabilityOperation;
+    try { persisted = await readCapabilityOperation(root, operationId); }
+    catch {
+      const uncertain = new Error('capability_commit_state_unknown');
+      (uncertain as Error & { cause?: unknown }).cause = error;
+      throw uncertain;
+    }
+    if (persisted.status !== 'succeeded') throw error;
+    result = { operation: persisted };
+  }
+  if (result.stale) throw new Error('capability_operation_superseded');
+  try { await refreshCapabilityRegistry(root, kind); }
+  catch (error) {
+    const persisted = await readCapabilityOperation(root, operationId).catch(() => undefined);
+    if (persisted?.status !== 'succeeded') throw error;
+  }
+  return result;
+}
+
+export async function setCapabilityEnabled(root: string, kind: CapabilityKind, targetId: string, enabled: boolean): Promise<CapabilityOperation> {
+  const snapshot = await refreshCapabilityRegistry(root, kind);
+  const current = snapshot.entries.find(item => item.entry.id === targetId);
+  if (current?.entry.status === 'uninstalled') throw new Error('revision_conflict');
+  if (!current) throw new Error('capability_not_installed');
+  const operation = await beginCapabilityOperation(root, { kind, action: enabled ? 'enable' : 'disable', targetId, expectedRevision: current.revision });
+  const completed = await completeCapabilityEntry(root, operation.operationId, kind, current.entry as Record<string, any> & { id: string });
+  return completed.operation;
 }
 
 export function captureInstallationFiles(root: string, files: Record<string, string>): Array<{ purpose: string; bytes: string; mimeType: string }> {

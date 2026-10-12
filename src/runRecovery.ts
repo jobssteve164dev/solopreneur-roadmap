@@ -3,6 +3,7 @@ import { snapshotWorkspace, captureRunGitEvidence } from './runWorkspace';
 import { RunNativeObserver } from './runNativeObserver';
 import { RunStop } from './runStop';
 import { RunInputMaterialization } from './runInputMaterialization';
+import { captureMaintenanceRunResult } from './maintenanceRunResult';
 
 export class RunRecovery {
   private recovery: Promise<void> | undefined;
@@ -41,19 +42,32 @@ export class RunRecovery {
           if (this.store.runProcessAlive(observed.projectId, executionLogId)) continue;
           const before = this.store.readRunCheckpointState(observed.projectId, executionLogId);
           if (before.generation !== observed.generation) continue;
+          let maintenanceCaptureError = '';
+          try {
+            await captureMaintenanceRunResult(this.store.root, before, async (operation, input) => operation === 'read_run_document'
+              ? this.store.readRunDocument(before.projectId, executionLogId, String(input.purpose))
+              : this.store.writeRunDocument(before.projectId, input as unknown as Parameters<UnifiedDataStore['writeRunDocument']>[1]));
+          } catch (error) {
+            maintenanceCaptureError = error instanceof Error ? error.message : String(error);
+            const head = this.store.readRunLogHead(before.projectId, executionLogId, 'stderr');
+            this.store.appendRunLog(before.projectId, { executionLogId, generation: before.generation, stream: 'stderr', sequence: head.nextSequence, offset: head.totalBytes,
+              bytes: Buffer.from(`安装回执保存失败：${maintenanceCaptureError}\n`).toString('base64'), idempotencyKey: `run:${before.runId}:${before.generation}:recovery-maintenance-error` });
+          }
           const workspaceSnapshot = before.status.finishedAt && !before.status.hostOutputPending && !before.status.nativeOutputPending ? undefined : await snapshotWorkspace(String(before.status.workspaceRoot));
           const gitEvidence = workspaceSnapshot ? await captureRunGitEvidence(String(before.status.workspaceRoot), String(before.status.baseGitHash || ''), workspaceSnapshot) : undefined;
           const state = this.store.readRunCheckpointState(observed.projectId, executionLogId);
           if (state.generation !== before.generation || state.turnId !== before.turnId || this.store.runProcessAlive(observed.projectId, executionLogId)) continue;
           if (state.status.hostOutputPending) {
             this.store.finalizeRunOutput(state.projectId, { executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, exitCode: 1, source: 'recovery', workspaceSnapshot, gitEvidence, idempotencyKey: `run:${state.runId}:${state.generation}:recover-output:${state.turnId}` });
+            new RunNativeObserver(this.store).forget(state);
             continue;
           }
           this.store.checkpointRun(state.projectId, {
             executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId,
-            action: state.status.finishedAt ? 'session-close' : 'complete', ...(state.status.nativeOutputPending ? { exitCode: 1, workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery' as const } : {}), ...(state.status.finishedAt ? {} : { outcome: 'failed', summary: '执行已中断，完整已提交记录已保留，可重新继续。', exitCode: 1, workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery' }),
+            action: state.status.finishedAt ? 'session-close' : 'complete', ...(state.status.nativeOutputPending ? { exitCode: 1, workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery' as const } : {}), ...(state.status.finishedAt ? {} : { outcome: 'failed', summary: maintenanceCaptureError || '执行已中断，完整已提交记录已保留，可重新继续。', exitCode: 1, workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery' }),
             idempotencyKey: `run:${state.runId}:${state.generation}:recover:${state.revision}`
           });
+          new RunNativeObserver(this.store).forget(state);
         } catch (error) { errors.push(error); }
         await new Promise<void>(resolve => setImmediate(resolve));
       }

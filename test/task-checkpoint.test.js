@@ -11,7 +11,7 @@ const {
 } = require('../out/agentCli.js');
 const {
   ensureTaskCheckpointRuntime
-} = require('../out/taskCheckpoint.js');
+} = require('./fixtures/legacy-task-checkpoint.cjs');
 
 test('replacing a running session closes it without reporting a missing checkpoint failure', () => {
   const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-session-restart-'));

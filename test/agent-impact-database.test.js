@@ -8,6 +8,21 @@ const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const { buildAgentImpactSummaryFromDatabase } = require('../out/agentImpact.js');
 
+function cleanupExact(root) {
+  if (!fs.existsSync(root)) return;
+  const directories = [root], files = [];
+  const inventory = directory => {
+    for (const name of fs.readdirSync(directory)) {
+      const target = path.join(directory, name);
+      if (fs.lstatSync(target).isDirectory()) { directories.push(target); inventory(target); }
+      else files.push(target);
+    }
+  };
+  inventory(root);
+  files.forEach(file => fs.unlinkSync(file));
+  directories.sort((left, right) => right.length - left.length).forEach(directory => fs.rmdirSync(directory));
+}
+
 async function fixture(action) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-impact-native-'));
   const root = path.join(base, '.solomap-global'); const workspace = path.join(base, 'project'); fs.mkdirSync(workspace);
@@ -22,7 +37,7 @@ async function fixture(action) {
   const record = (id, durationMs = 600000) => ({ executionLogId: id, nodeId: '__solo__', runKind: 'solo', agentCli: 'codex', status: 'Completed', startedAt: '2026-10-09T09:00:00Z', finishedAt: '2026-10-09T09:10:00Z', durationMs, totalTokens: 17, outputTail: 'full evidence remains retained', outputPath: '', outputBytes: 0, commandPath: '', promptPath: '', changesPath: '', touchedFilesPath: '', updatedAt: '2026-10-09T09:10:00Z' });
   const read = () => buildAgentImpactSummaryFromDatabase(projects, path.resolve(__dirname, '..'), new Date('2026-10-09T12:00:00Z'), root);
   try { await action({ root, workspace, project, projects, store, ops, record, read, closeEndpoint, closeOwner }); }
-  finally { await closeOwner(); }
+  finally { await closeOwner(); cleanupExact(base); }
 }
 
 test('agent contribution uses committed native runs, tokens and all changed files', () => fixture(async ({ workspace, project, store, record, read }) => {
@@ -244,6 +259,7 @@ for (const family of ['codex', 'claude']) for (const finished of ['valid', 'miss
     try{legacy.close();}catch{}
     await ops.close();store.close();
     if(previousHome===undefined)delete process.env.HOME;else process.env.HOME=previousHome;
+    cleanupExact(base);
   }
 });
 
@@ -265,7 +281,7 @@ test('normal upgrade catches up previously completed raw archives once without m
   const jobs=store.migrationJobCount();const sourceState=store.rows('SELECT source_identity,source_key,source_hash,source_capture_revision FROM migration_items ORDER BY source_key');
   await enqueueStartupDataMigrations(store,ops,()=>true);await ops.waitForMigrations();
   assert.equal(store.migrationJobCount(),jobs);assert.deepEqual(store.rows('SELECT source_identity,source_key,source_hash,source_capture_revision FROM migration_items ORDER BY source_key'),sourceState);
- }finally{await ops.close();store.close();}
+ }finally{await ops.close();store.close();cleanupExact(base);}
 });
 
 
@@ -313,7 +329,7 @@ test('published unmarked native index survives reconciliation even when it equal
     assert.equal((await new MigrationRecycling(store).prepare()).files.length,0);
     await ops.close();store.close();store=new UnifiedDataStore(root);ops=createRuntimeDataOperations(store);
     assert.equal(store.readProjectRunIndexes(project)[0].totalTokens,0);
-  }finally{await ops.close();store.close();}
+  }finally{await ops.close();store.close();cleanupExact(base);}
 });
 
 

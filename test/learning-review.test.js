@@ -20,17 +20,17 @@ function writeEmptyAgentReview({ runDir, resultFile, globalRoot, globalPrompt = 
 }
 
 test('review retains legacy reports even when current intake limits are stricter', async () => {
-  const { registerLearningTask, writeLearningJson } = require('../out/taskReport.js');
+  const { registerLearningTask, writeLearningJson } = require('./fixtures/legacy-task-report.cjs');
   const { collectReviewManifest } = require('./fixtures/legacy-learning-review.cjs');
-  const { queryGrowthReports } = require('../out/growthReports.js');
+  const { readRegisteredTaskSources } = require('../out/growthReports.js');
   const project = root(); const runDir = path.join(project, '.solopreneur/agent-runs/__solo__/1');
   const taskId = registerLearningTask(project, { executionLogId: 1, runDir, userMessage: '改进导出', startedAt: '2026-09-08' });
   const reports = [{ summary: '导出可按日期筛选。', verification: ['检查日志'.repeat(400)] }, { summary: '已补齐筛选测试。' }, { summary: '导出已改进。', commits: [{ repository: 'owner/repo', sha: 'a'.repeat(40), files: ['src/app.js'], note: '字'.repeat(501) }] }, { summary: '字'.repeat(120), verification: ['字'.repeat(380)], outputs: ['这是详细过程说明。'.repeat(40)] }];
   reports.forEach((report, index) => writeLearningJson(path.join(runDir, `task-report-${index + 1}.json`), { schemaVersion: 1, projectPath: project, taskId, executionLogId: 1, turnId: `${index + 1}:complete`, createdAt: '2026-09-08', report }));
   const manifest = await collectReviewManifest({ runId: 'bounded', globalRoot: path.join(project, '.global'), globalPrompt: '', projects: [project], repositoryForProject: async () => '' });
   assert.equal(manifest.sources.filter(s => s.kind === 'agent_report').length, 4);
-  const page = await queryGrowthReports(project, path.resolve(__dirname, '..'), { taskId });
-  assert.equal(page.turns.length, 4, 'archive remains readable in the growth view');
+  const archive = readRegisteredTaskSources(project, taskId);
+  assert.equal(archive.reports.length, 4, 'the explicit migration reader retains every legacy report');
   assert.equal(JSON.parse(fs.readFileSync(path.join(runDir, 'task-report-1.json'))).report.verification[0], reports[0].verification[0]);
 });
 
@@ -1100,15 +1100,10 @@ test('post-Agent validation does not repeat remote GitHub collection', async () 
   assert.equal(apiCalls, 0);
 });
 
-test('normal event writes and reads do not generate semantic candidates or promotion suggestions', async () => {
-  const project = root(); const global = path.join(project, '.solomap-global');
-  ledger.appendLearningEvent(project, global, { sourceType: 'user_correction', sourceRef: 'test', eventType: 'corrected', summary: '保持用户选择', evidenceRefs: [{ type: 'user', ref: 'message:1' }] });
-  ledger.readLearningSummary(project, global);
-  await readFormalLearningContext(project, global, { projectPath: project, contextText: '保持用户选择' });
-  ledger.buildLearningPromotionContext(project, global);
-  assert.deepEqual(fs.readdirSync(path.join(global, 'learning/candidates')), []);
-  assert.deepEqual(fs.readdirSync(path.join(global, 'learning/candidate-decisions')), []);
-  assert.deepEqual(fs.readdirSync(path.join(global, 'learning/promotion-suggestions')), []);
+test('normal learning collection has no file-ledger production API', () => {
+  assert.equal(ledger.appendLearningEvent, undefined);
+  assert.equal(ledger.readLearningSummary, undefined);
+  assert.equal(ledger.buildLearningPromotionContext, undefined);
 });
 
 test('passive discovery finds task trailers without reports and reads exact failed checks', async () => {
@@ -1471,7 +1466,7 @@ test('read-only GitHub verification leaves no shared evidence cache files', asyn
 });
 
 test('report registration preserves explicit task lineage across CLI runs and separates new Solo tasks', () => {
-  const { registerLearningTask } = require('../out/taskReport.js');
+  const { registerLearningTask } = require('./fixtures/legacy-task-report.cjs');
   const project = root();
   const first = registerLearningTask(project, { executionLogId: 1, runDir: path.join(project, 'run1'), userMessage: 'fix', startedAt: '2026-09-08' });
   const second = registerLearningTask(project, { executionLogId: 2, parentExecutionLogId: 1, runDir: path.join(project, 'run2'), userMessage: 'continue', startedAt: '2026-09-09' });
@@ -1507,7 +1502,7 @@ function applicationFixture() {
   return { manifest, proposal, runDir, makeReview, project, globalRoot };
 }
 
-test('actual legacy review application retains its file evidence through background import and the distributed CLI', async () => {
+test('actual legacy review application retains candidate evidence after import without making it executable', async () => {
   const { applyLearningReview } = require('./fixtures/legacy-learning-review-apply.cjs');
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
@@ -1529,11 +1524,13 @@ test('actual legacy review application retains its file evidence through backgro
     const tool = path.resolve(__dirname, '../resources/tools/solomap-experience.cjs');
     const invoke = async json => (await promisify(cp.execFile)(process.execPath, [tool, 'retrieve', '--project', f.project, '--global', f.globalRoot, '--query', 'reviewfileprovenance', ...(json ? ['--json'] : [])], { encoding: 'utf8' })).stdout;
     const result = JSON.parse(await invoke(true));
-    assert.equal(result.payload.lessons.length, 1);
-    assert.deepEqual(result.payload.lessons[0].evidence, old.evidenceRefs, 'the actual reviewed file evidence must remain available after its old source is moved');
-    assert.ok((await invoke(false)).includes(old.evidenceRefs[0].ref));
-    const lesson = store.read(result.payload.lessons[0].id);
+    assert.deepEqual(result.payload.lessons, [], 'a legacy candidate is retained as history but is not executable experience');
+    assert.ok(!(await invoke(false)).includes(old.evidenceRefs[0].ref));
+    const lesson = store.search({ scope: projectId, kinds: ['lesson'], terms: ['reviewfileprovenance'] }).items[0];
+    assert.ok(lesson);
+    assert.equal(lesson.data.status, 'candidate');
     assert.deepEqual(JSON.parse(lesson.data.semantic_review_json), old.semanticReview);
+    assert.deepEqual(JSON.parse(lesson.data.evidence_refs_json), old.evidenceRefs);
     assert.equal(fs.existsSync(sourceRoot), false);
   } finally { await server.close(); await ops.close(); store.close(); }
 });
@@ -1564,13 +1561,12 @@ test('stale prompt, path traversal and symlink targets cause zero application wr
   }
 });
 
-test('promoted semantic lesson is retrievable with identity and evidence, rejected revision disappears', async () => {
+test('legacy promoted lesson files never bypass the unified approved lesson boundary', async () => {
   const { applyLearningReview } = require('./fixtures/legacy-learning-review-apply.cjs');
   const f = applicationFixture(); let prompt = 'Keep intent.';
   f.proposal.lessons = [{ projectPath: f.project, summary: 'Verify login outcomes', appliesWhen: 'Changing login', doesNotApplyWhen: 'No login behavior change', doThis: 'Run login regression', avoidThis: 'Claim success from exit code', verification: 'Observe login response', reason: 'Evidence supports it', evidence: ['evidence-1'], status: 'promoted', target: 'operating-rules.md' }];
   assert.equal((await applyLearningReview({ ...f, review: f.makeReview(), getGlobalPrompt: () => prompt, setGlobalPrompt: async value => { prompt = value; } })).status, 'applied');
-  const retrieval = await readFormalLearningContext(f.project, f.globalRoot, { projectPath: f.project, contextText: 'login' });
-  assert.match(retrieval, /Verify login outcomes/);
+  assert.equal(await readFormalLearningContext(f.project, f.globalRoot, { projectPath: f.project, contextText: 'login' }), '');
   const candidates = path.join(f.globalRoot, 'learning/candidates');
   const file = path.join(candidates, fs.readdirSync(candidates)[0]); const candidate = JSON.parse(fs.readFileSync(file));
   assert.match(candidate.evidenceRefs[0].ref, /^maintenance\/runs\//);

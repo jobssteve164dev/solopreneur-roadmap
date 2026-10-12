@@ -65,13 +65,15 @@ for (const exitCode of [0, 7]) test(`maintenance execution captures its full res
       patch: { maintenanceResultPath: resultPath, maintenanceWorkspaceRoot: directory }, idempotencyKey: 'owned-install-paths' });
     const agent = f.startAgent({ ...process.env, FIXTURE_RESULT_FILE: resultPath });
     const [code] = await once(agent, 'exit'); assert.equal(code, exitCode, f.stderr().toString());
-    const recorded = await f.call('read_run_document', { purpose: 'maintenance_result' });
+    const final = await f.call('read_run_state');
+    const purpose = `maintenance_result_${final.generation}`;
+    const recorded = await f.call('read_run_document', { purpose });
     assert.ok(recorded, 'the shared host must capture the exact receipt before settling the run');
     assert.deepEqual(Buffer.from(recorded.bytes, 'base64'), resultBytes);
     assert.equal(f.stdout().toString(), output);
     await f.stopRuntime(); await f.startRuntime();
-    assert.deepEqual(await f.call('read_run_document', { purpose: 'maintenance_result' }), recorded);
-    const final = await f.call('read_run_state'); assert.equal(final.status.exitCode, exitCode);
+    assert.deepEqual(await f.call('read_run_document', { purpose }), recorded);
+    assert.equal((await f.call('read_run_state')).status.exitCode, exitCode);
     assert.deepEqual(fs.readdirSync(path.join(f.projectRoot, '.solopreneur')), ['project.json']);
   } finally { await f.close(); }
 });
@@ -80,7 +82,8 @@ async function executionFixture(command, metadata = {}, initialOutput = '', runK
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "solomap-shared-runner-case-'🌿-"));
   const root = path.join(base, '.solomap-global');
   const projectRoot = path.join(base, 'project'); fs.mkdirSync(projectRoot);
-  fs.mkdirSync(path.join(projectRoot, '.git'));
+  require('node:child_process').execFileSync('git', ['init', '-q', projectRoot]);
+  assert.equal(require('node:child_process').execFileSync('git', ['-C', projectRoot, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim(), projectRoot);
   const seed = new UnifiedDataStore(root);
   const project = await seed.registerProject({ root: projectRoot });
   const prepared = seed.prepareRun(project.projectId, project.locationId, { root: projectRoot, executionLogId: 1, nodeId: '__solo__', runKind, prompt: '任务原文', command, userMessage: '用户目标', metadata, idempotencyKey: 'prepare' });
@@ -116,6 +119,76 @@ async function executionFixture(command, metadata = {}, initialOutput = '', runK
   };
 }
 
+test('the shared runner preserves the captured Claude native home after the process default changes', async () => {
+  const program = "process.stdout.write(process.env.CLAUDE_CONFIG_DIR); require('fs').writeFileSync('result.txt','actual result');";
+  const f = await executionFixture(`${shellQuote(process.execPath)} -e ${shellQuote(program)}`, { agentCli: 'claude', sessionProvider: 'claude', interactiveSession: false });
+  const home = path.join(f.root, 'native-home'); const other = path.join(f.root, 'other-native-home');
+  try {
+    await f.call('write_run_binding', { generation: f.prepared.generation, expectedHeadRevision: 0, seed: { runId: '1', provider: 'claude', workspaceRoot: f.projectRoot, cliPath: 'claude', bindingNonce: '2'.repeat(64), method: 'caller_assigned', contract: 'official_stable', providerContext: { claude: { claudeHome: home } } }, idempotencyKey: 'claude-home-seed' });
+    const agent = f.startAgent({ ...process.env, CLAUDE_CONFIG_DIR: other });
+    assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
+    assert.equal(f.stdout().toString(), home);
+    assert.equal(fs.existsSync(other), false);
+  } finally { await f.close(); }
+});
+
+test('Claude preflight preserves the source native MCP configuration after the default root changes', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-claude-config-pin-'));
+  const original = path.join(base, 'source', '.claude.json'); const other = path.join(base, 'other', '.claude.json');
+  fs.mkdirSync(path.dirname(original), { recursive: true }); fs.writeFileSync(original, JSON.stringify({ theme: 'user-choice', mcpServers: { existing: { command: 'user-command' } } }));
+  const program = "require('fs').writeFileSync('result.txt','actual result');";
+  const f = await executionFixture(`${shellQuote(process.execPath)} -e ${shellQuote(program)}`, {
+    agentCli: 'claude', sessionProvider: 'claude', interactiveSession: false, agentDatabaseConfigPath: other,
+    agentLaunch: { schemaVersion: 1, agentCli: 'claude', selectedModel: '', taskPermissionMode: 'auto', continuation: false, direct: true }
+  });
+  try {
+    await f.call('write_run_binding', { generation: f.prepared.generation, expectedHeadRevision: 0, seed: { runId: '1', provider: 'claude', workspaceRoot: f.projectRoot, cliPath: 'claude', bindingNonce: '3'.repeat(64), method: 'caller_assigned', contract: 'official_stable', providerContext: { claude: { claudeHome: path.dirname(original), configPath: original } } }, idempotencyKey: 'claude-config-seed' });
+    const agent = f.startAgent({ ...process.env, CLAUDE_CONFIG_DIR: path.dirname(other) });
+    assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
+    const configured = JSON.parse(fs.readFileSync(original, 'utf8'));
+    assert.equal(configured.mcpServers.solomap_data?.env.SOLOMAP_MANAGED_BRIDGE, '1');
+    assert.equal(configured.theme, 'user-choice'); assert.deepEqual(configured.mcpServers.existing, { command: 'user-command' });
+    assert.equal(fs.existsSync(other), false);
+  } finally { await f.close(); }
+});
+
+test('a default Claude native context keeps the config override unset when the runner inherits another override', async () => {
+  const program = "process.stdout.write(String(process.env.CLAUDE_CONFIG_DIR || 'unset')); require('fs').writeFileSync('result.txt','actual result');";
+  const f = await executionFixture(`${shellQuote(process.execPath)} -e ${shellQuote(program)}`, { agentCli: 'claude', sessionProvider: 'claude', interactiveSession: false });
+  try {
+    await f.call('write_run_binding', { generation: f.prepared.generation, expectedHeadRevision: 0, seed: { runId: '1', provider: 'claude', workspaceRoot: f.projectRoot, cliPath: 'claude', bindingNonce: '4'.repeat(64), method: 'caller_assigned', contract: 'official_stable', providerContext: { claude: { claudeHome: path.join(f.root, 'default-home'), configDirOverride: null } } }, idempotencyKey: 'claude-default-seed' });
+    const agent = f.startAgent({ ...process.env, CLAUDE_CONFIG_DIR: path.join(f.root, 'other-home') });
+    assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
+    assert.equal(f.stdout().toString(), 'unset');
+  } finally { await f.close(); }
+});
+
+for (const kind of ['unchanged-old', 'new-receipt', 'invalid-directory']) test(`maintenance recovery identity and failed sealing preserve ${kind}`, async () => {
+  const program = kind === 'new-receipt' ? "require('fs').writeFileSync(process.env.FIXTURE_RESULT_FILE,'new receipt🌿')" : kind === 'invalid-directory' ? "require('fs').mkdirSync(process.env.FIXTURE_RESULT_FILE)" : "process.stdout.write('no receipt produced')";
+  const f = await executionFixture(`${shellQuote(process.execPath)} -e ${shellQuote(program)}`, {}, '', 'mcp_install');
+  const resultPath = path.join(f.root, 'tmp', 'owned-operation', 'result.json'); fs.mkdirSync(path.dirname(resultPath), { recursive: true });
+  try {
+    if (kind !== 'invalid-directory') fs.writeFileSync(resultPath, 'previous receipt🌿');
+    const oldPurpose = `maintenance_result_${f.prepared.generation}`;
+    const old = await f.call('write_run_document', { generation: f.prepared.generation, turnId: f.prepared.turnId, purpose: oldPurpose,
+      bytes: Buffer.from('previous receipt🌿').toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: 'previous-maintenance-receipt' });
+    let state = await f.call('read_run_state');
+    await f.call('patch_run_state', { generation: state.generation, expectedRevision: state.revision, patch: { maintenanceResultPath: resultPath }, idempotencyKey: 'maintenance-result-target' });
+    const agent = f.startAgent({ ...process.env, FIXTURE_RESULT_FILE: resultPath }); const [code] = await once(agent, 'exit');
+    state = await f.call('read_run_state');
+    assert.ok(state.generation > f.prepared.generation);
+    const current = await f.call('read_run_document', { purpose: `maintenance_result_${state.generation}` });
+    assert.equal(code, kind === 'new-receipt' ? 0 : 1, f.stderr().toString());
+    if (kind === 'new-receipt') assert.equal(Buffer.from(current.bytes, 'base64').toString(), 'new receipt🌿');
+    else {
+      assert.equal(current, null); assert.equal(state.status.status, 'Failed');
+      assert.match(String(state.status.summary || state.status.checkpointSummary), kind === 'unchanged-old' ? /maintenance_result_missing/ : /capability_attachment_path_invalid/);
+    }
+    assert.equal((await f.call('read_run_document', { purpose: oldPurpose })).objectId, old.objectId);
+    assert.equal(fs.existsSync(resultPath), true, 'old and failed physical evidence must be retained');
+  } finally { await f.close(); }
+});
+
 test('the packaged review runner preserves native read-only flags, seals full JSON, and retires its path input', async () => {
   for (const mode of ['valid', 'writes', 'invalid']) {
     const cliRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-review-cli-'));
@@ -139,7 +212,7 @@ test('the packaged review runner preserves native read-only flags, seals full JS
   }
 });
 
-for (const mode of ['auto', 'never']) test(`an unattended Codex correction preserves ${mode} permissions and official native identity`, async () => {
+for (const mode of ['auto', 'never']) for (const preconfirmed of [false, true]) test(`an unattended Codex correction preserves ${mode} permissions and official native identity${preconfirmed ? ' when preconfirmed' : ''}`, async () => {
   const cliRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-codex-correction-cli-'));
   const cli = path.join(cliRoot, 'codex'); const sessionId = 'cc70ea64-51ec-41ef-842b-72f62bb8b7b3';
   const home = path.join(cliRoot, 'source-codex-home'); fs.mkdirSync(home);
@@ -152,7 +225,8 @@ for (const mode of ['auto', 'never']) test(`an unattended Codex correction prese
   const f = await executionFixture('placeholder', { agentLaunch: launch, agentCli: cli, plannedNativeSessionId: sessionId, agentDatabaseConfigPath: path.join(cliRoot, 'config.toml'), bindingNonce: '1'.repeat(64) }, '', 'agent_review_revision');
   try {
     const binding = await f.call('write_run_binding', { generation: f.prepared.generation, expectedHeadRevision: 0, seed: { runId: '1', provider: 'codex', workspaceRoot: f.projectRoot, cliPath: cli, bindingNonce: '1'.repeat(64), createdAt: f.prepared.status.startedAt, providerContext: { codex: { codexHome: home } }, method: 'provider_callback', contract: 'official_stable' }, idempotencyKey: 'revision-binding-seed' });
-    await f.call('write_run_binding', { generation: f.prepared.generation, expectedHeadRevision: binding.headRevision, revision: { sessionId, method: 'provider_callback', contract: 'official_stable', state: 'planned', createdAt: f.prepared.status.startedAt, evidence: { source: 'confirmed_resume_target' } }, idempotencyKey: 'revision-binding-planned' });
+    const planned = await f.call('write_run_binding', { generation: f.prepared.generation, expectedHeadRevision: binding.headRevision, revision: { sessionId, method: 'provider_callback', contract: 'official_stable', state: 'planned', createdAt: f.prepared.status.startedAt, evidence: { source: 'confirmed_resume_target' } }, idempotencyKey: 'revision-binding-planned' });
+    if (preconfirmed) await f.call('write_run_binding', { generation: f.prepared.generation, expectedHeadRevision: planned.headRevision, confirmSessionId: sessionId, evidence: { source: 'confirmed_resume_transcript' }, idempotencyKey: 'revision-binding-preconfirmed' });
     const agent = f.startAgent({ ...process.env, CODEX_HOME: path.join(cliRoot, 'other-codex-home') }); const [code] = await once(agent, 'exit');
     assert.equal(code, 0, f.stderr().toString()); assert.ok(f.stdout().toString().includes(text));
     assert.match(fs.readFileSync(path.join(home, 'config.toml'), 'utf8'), /model = "original-provider-model"/);
@@ -160,6 +234,7 @@ for (const mode of ['auto', 'never']) test(`an unattended Codex correction prese
     assert.equal(fs.existsSync(path.join(cliRoot, 'other-codex-home')), false, 'the current default must not receive the source session configuration');
     const confirmed = await f.call('read_run_binding');
     assert.equal(confirmed.revisions.at(-1).state, 'confirmed'); assert.equal(confirmed.revisions.at(-1).sessionId, sessionId);
+    assert.equal(confirmed.headRevision, 3, 'the native handshake must retain a matching confirmation without adding another revision');
     assert.equal((await f.call('read_run_state')).status.nativeSessionIdIsCurrent, true);
     assert.deepEqual(fs.readdirSync(path.join(f.projectRoot, '.solopreneur')), ['project.json']);
   } finally { await f.close(); }
@@ -251,16 +326,17 @@ test('a newer parent turn after wrapper claim prevents an old automatic correcti
   } finally { await f.close(); }
 });
 
-test('the shared runner preserves enhancement environment and full preflight output in the database', async () => {
+test('the shared runner ignores retired execution enhancement metadata', async () => {
   const f = await executionFixture('printf "feature=%s" "$SOLOMAP_RTK_OUTPUT_OPTIMIZER"', {
     enhancementEnvLines: ['export SOLOMAP_RTK_OUTPUT_OPTIMIZER=1'],
     enhancementPreflightLines: ['printf "full enhancement preflight🌿\\n"']
   });
   try {
     const agent = f.startAgent(); const [code] = await once(agent, 'exit'); assert.equal(code, 0, f.stderr().toString());
-    assert.equal(f.stdout().toString(), 'feature=1');
+    assert.equal(f.stdout().toString(), 'feature=');
     const page = await f.call('read_run_log', { stream: 'preflight:enhancements:stdout' });
-    assert.equal(Buffer.from(page.bytes, 'base64').toString(), 'full enhancement preflight🌿\n');
+    assert.equal(page.totalBytes, 0);
+    assert.equal(Buffer.from(page.bytes, 'base64').toString(), '');
     assert.deepEqual(fs.readdirSync(path.join(f.projectRoot, '.solopreneur')), ['project.json']);
   } finally { await f.close(); }
 });
@@ -641,6 +717,7 @@ test('an Agent checkpoint does not bypass the unattended step deliverable check 
 
 test('Codex resume latency cannot start a correction after the parent entered a new turn', async () => {
   const cliRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-codex-late-resume-'));
+  const codexHome = path.join(cliRoot, 'native-home');
   const cli = path.join(cliRoot, 'codex'); const sessionId = 'cc70ea64-51ec-41ef-842b-72f62bb8b7b3';
   const source = `const fs=require('fs');const rl=require('readline').createInterface({input:process.stdin});const send=m=>process.stdout.write(JSON.stringify(m)+'\\n');rl.on('line',line=>{const m=JSON.parse(line);if(m.method==='initialize')send({id:0,result:{}});if(m.method==='thread/resume'){fs.writeFileSync('resume-waiting','');const timer=setInterval(()=>{if(fs.existsSync('release-resume')){clearInterval(timer);send({id:1,result:{thread:{id:m.params.threadId}}});}},10);}if(m.method==='turn/start'){fs.writeFileSync('obsolete-correction.txt','started');send({id:2,result:{turn:{id:'native-late'}}});send({method:'turn/completed',params:{threadId:${JSON.stringify(sessionId)},turn:{id:'native-late',status:'completed'}}});}});`;
   fs.writeFileSync(cli, `#!/bin/bash\nexec ${shellQuote(process.execPath)} -e ${shellQuote(source)} "$@"\n`, { mode: 0o755 });
@@ -649,7 +726,7 @@ test('Codex resume latency cannot start a correction after the parent entered a 
     const parent = await f.call('read_run_checkpoint_state');
     await f.call('checkpoint_run', { generation: parent.generation, proof: parent.proof, expectedRevision: parent.revision, expectedTurnId: parent.turnId, action: 'complete', outcome: 'partial', summary: '原轮完成', idempotencyKey: 'late-parent-complete' });
     const run = await f.call('prepare_run', { root: f.projectRoot, executionLogId: 2, parentExecutionLogId: 1, expectedParentTurnId: parent.turnId, nodeId: '__solo__', runKind: 'agent_review_revision', prompt: '修正原轮', command: 'placeholder', userMessage: '原目标', metadata: { agentLaunch: { schemaVersion: 1, agentCli: cli, selectedModel: '', taskPermissionMode: 'auto', continuation: true, direct: false }, plannedNativeSessionId: sessionId, agentCli: cli, bindingNonce: '2'.repeat(64) }, idempotencyKey: 'late-resume-revision' });
-    const seed = await f.call('write_run_binding', { executionLogId: 2, generation: run.generation, expectedHeadRevision: 0, seed: { runId: '2', provider: 'codex', workspaceRoot: f.projectRoot, cliPath: cli, bindingNonce: '2'.repeat(64), createdAt: run.status.startedAt, method: 'provider_callback', contract: 'official_stable' }, idempotencyKey: 'late-resume-binding' });
+    const seed = await f.call('write_run_binding', { executionLogId: 2, generation: run.generation, expectedHeadRevision: 0, seed: { runId: '2', provider: 'codex', workspaceRoot: f.projectRoot, cliPath: cli, bindingNonce: '2'.repeat(64), createdAt: run.status.startedAt, method: 'provider_callback', contract: 'official_stable', providerContext: { codex: { codexHome } } }, idempotencyKey: 'late-resume-binding' });
     await f.call('write_run_binding', { executionLogId: 2, generation: run.generation, expectedHeadRevision: seed.headRevision, revision: { sessionId, method: 'provider_callback', contract: 'official_stable', state: 'planned' }, idempotencyKey: 'late-resume-planned' });
     const agent = f.startAgent(process.env, 2); const exited = once(agent, 'exit');
     const deadline = Date.now() + 15000;

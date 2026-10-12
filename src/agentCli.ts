@@ -432,7 +432,7 @@ export function buildAgentCommand(agentCli: string, agentPrompt: string, workspa
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} ${quotedPrompt}`;
+    return `${quotedCli}${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} --print=${quotedPrompt}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
     return `${quotedCli} -p${permissionSegment}${modelSegment} ${quotedPrompt} --add-dir ${shellQuote(workspaceRoot)}`;
@@ -470,8 +470,8 @@ export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath:
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    if (promptInstruction) return `${quotedCli} --print${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} ${quotedPromptFileInstruction}`;
-    return `cat ${quotedPromptFile} | ${quotedCli} --print${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)}`;
+    if (promptInstruction) return `${quotedCli}${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} --print=${quotedPromptFileInstruction}`;
+    return `cat ${quotedPromptFile} | ${quotedCli}${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} --print`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
     return `${quotedCli} -p${permissionSegment}${modelSegment} ${quotedPromptFileInstruction} --add-dir ${shellQuote(workspaceRoot)}`;
@@ -593,7 +593,7 @@ export function buildReadOnlyAgentCommandForPromptFile(agentCli: string, promptF
     return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --sandbox read-only --ask-for-approval never${modelSegment} -`;
   }
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `cat ${quotedPromptFile} | ${quotedCli} --print --mode plan --sandbox --print-timeout 5m${modelSegment} --add-dir=${shellQuote(workspaceRoot)}`;
+    return `cat ${quotedPromptFile} | ${quotedCli} --mode plan --sandbox --print-timeout 5m${modelSegment} --add-dir=${shellQuote(workspaceRoot)} --print`;
   }
   if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `${quotedCli} -p --mode plan --sandbox enabled${modelSegment} --output-format text ${quotedInstruction}`;
@@ -622,7 +622,7 @@ export function buildAgentContinuationCommandForPromptFile(agentCli: string, pro
     return buildAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, taskPermissionMode, selectedModel);
   }
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${inlineInstruction ? `printf %s ${quotedInstruction}` : `cat ${quotedPromptFile}`} | ${quotedCli} --print --conversation ${quotedSessionId}${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)}`;
+    return `${inlineInstruction ? `printf %s ${quotedInstruction}` : `cat ${quotedPromptFile}`} | ${quotedCli} --conversation ${quotedSessionId}${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} --print`;
   }
   if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `${quotedCli} -p --resume ${quotedSessionId}${permissionSegment}${modelSegment} --output-format text ${quotedInstruction}`;
@@ -655,7 +655,7 @@ export function buildAgentCommandFromShellVar(agentCli: string, promptVarName: s
   }
 
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
-    return `${quotedCli} --print${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} ${promptExpression}`;
+    return `${quotedCli}${permissionSegment}${modelSegment} --add-dir=${shellQuote(workspaceRoot)} --print=${promptExpression}`;
   }
   if (executableName === 'claude' || executableName === 'claude-code' || executableName === 'claude-code-cli') {
     return `${quotedCli} -p${permissionSegment}${modelSegment} ${promptExpression} --add-dir ${shellQuote(workspaceRoot)}`;

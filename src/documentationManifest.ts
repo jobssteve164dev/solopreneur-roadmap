@@ -84,10 +84,13 @@ export function getDocumentationManifestPath(workspaceRoot: string): string {
 }
 
 export function ensureDocumentationManifest(workspaceRoot: string, now = new Date().toISOString()): DocumentationManifest {
-  const manifestPath = getDocumentationManifestPath(workspaceRoot);
-  const existing = readDocumentationManifest(workspaceRoot);
+  return refreshDocumentationManifest(workspaceRoot, { schemaVersion: 1, updatedAt: '', documents: [], pendingReview: [] }, now);
+}
+
+export function refreshDocumentationManifest(workspaceRoot: string, existing: DocumentationManifest, now = new Date().toISOString()): DocumentationManifest {
+  if (!existing || !Array.isArray(existing.documents) || !Array.isArray(existing.pendingReview)) throw new Error('documentation_source_required');
   const scannedDocuments = scanProjectDocuments(workspaceRoot, now);
-  const documents = mergeDocuments(existing.documents, scannedDocuments, now);
+  const documents = mergeDocuments(existing.documents, scannedDocuments, now, true);
   const manifest: DocumentationManifest = {
     schemaVersion: 1,
     updatedAt: now,
@@ -95,12 +98,6 @@ export function ensureDocumentationManifest(workspaceRoot: string, now = new Dat
     pendingReview: dedupePendingReviews(existing.pendingReview || []),
     ...(existing.lastAudit ? { lastAudit: existing.lastAudit } : {})
   };
-  try {
-    fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
-    writeDocumentationManifest(workspaceRoot, manifest);
-  } catch {
-    return manifest;
-  }
   return manifest;
 }
 
@@ -126,13 +123,10 @@ export function buildDocumentationPromptContext(workspaceRoot: string, source: D
   ].join('\n');
 }
 
-export function auditDocumentationAfterRun(workspaceRoot: string, options: DocumentationAuditOptions): DocumentationAuditResult {
+export function auditDocumentationAfterRun(workspaceRoot: string, options: DocumentationAuditOptions, source?: DocumentationManifest): DocumentationAuditResult {
   const finishedAt = options.finishedAt || new Date().toISOString();
-  const manifest = ensureDocumentationManifest(workspaceRoot, finishedAt);
-  const result = buildDocumentationAudit(workspaceRoot, manifest, options);
-  try { writeDocumentationManifest(workspaceRoot, result.manifest); }
-  catch { return { manifest, touchedDocuments: result.touchedDocuments, pendingReview: [], summary: '文档：审计状态无法写入，主任务已保留' }; }
-  return result;
+  const manifest = source || ensureDocumentationManifest(workspaceRoot, finishedAt);
+  return buildDocumentationAudit(workspaceRoot, manifest, options);
 }
 
 export function buildDocumentationAudit(workspaceRoot: string, manifest: DocumentationManifest, options: DocumentationAuditOptions): DocumentationAuditResult {
@@ -174,13 +168,13 @@ export function buildDocumentationAudit(workspaceRoot: string, manifest: Documen
   };
 }
 
-export function summarizeDocumentationForReview(workspaceRoot: string): {
+export function summarizeDocumentationForReview(workspaceRoot: string, source?: DocumentationManifest): {
   documentCount: number;
   pendingReviewCount: number;
   pendingReview: DocumentationManifestPendingReview[];
   staleDocuments: DocumentationManifestDocument[];
 } {
-  const manifest = ensureDocumentationManifest(workspaceRoot);
+  const manifest = source || ensureDocumentationManifest(workspaceRoot);
   const staleBefore = Date.now() - 90 * 24 * 60 * 60 * 1000;
   const staleDocuments = manifest.documents.filter((document) => {
     const reviewedAt = Date.parse(document.lastReviewedAt || document.lastTouchedAt || '');
@@ -192,31 +186,6 @@ export function summarizeDocumentationForReview(workspaceRoot: string): {
     pendingReview: manifest.pendingReview.slice(0, 5),
     staleDocuments: staleDocuments.slice(0, 5)
   };
-}
-
-function readDocumentationManifest(workspaceRoot: string): DocumentationManifest {
-  const manifestPath = getDocumentationManifestPath(workspaceRoot);
-  if (!fs.existsSync(manifestPath)) {
-    return { schemaVersion: 1, updatedAt: '', documents: [], pendingReview: [] };
-  }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    return {
-      schemaVersion: Number(parsed.schemaVersion || 1),
-      updatedAt: String(parsed.updatedAt || ''),
-      documents: Array.isArray(parsed.documents) ? parsed.documents.map(normalizeDocument).filter((item: DocumentationManifestDocument) => item.path) : [],
-      pendingReview: Array.isArray(parsed.pendingReview) ? parsed.pendingReview.map(normalizePendingReview).filter((item: DocumentationManifestPendingReview) => item.path && item.reason) : [],
-      ...(parsed.lastAudit ? { lastAudit: parsed.lastAudit } : {})
-    };
-  } catch {
-    return { schemaVersion: 1, updatedAt: '', documents: [], pendingReview: [] };
-  }
-}
-
-function writeDocumentationManifest(workspaceRoot: string, manifest: DocumentationManifest): void {
-  const manifestPath = getDocumentationManifestPath(workspaceRoot);
-  fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 }
 
 function normalizeDocument(value: any): DocumentationManifestDocument {
@@ -285,7 +254,7 @@ function buildDocumentEntry(workspaceRoot: string, relativePath: string, now: st
   };
 }
 
-function mergeDocuments(existing: DocumentationManifestDocument[], scanned: DocumentationManifestDocument[], now: string): DocumentationManifestDocument[] {
+function mergeDocuments(existing: DocumentationManifestDocument[], scanned: DocumentationManifestDocument[], now: string, markMissing = false): DocumentationManifestDocument[] {
   const byPath = new Map<string, DocumentationManifestDocument>();
   for (const document of existing || []) {
     const normalized = normalizeDocument(document);
@@ -303,6 +272,12 @@ function mergeDocuments(existing: DocumentationManifestDocument[], scanned: Docu
       lastTouchedAt: document.lastTouchedAt || previous?.lastTouchedAt || now,
       status: 'active'
     });
+  }
+  if (markMissing) {
+    const scannedPaths = new Set(scanned.map(document => document.path));
+    for (const [documentPath, document] of byPath) {
+      if (!scannedPaths.has(documentPath)) byPath.set(documentPath, { ...document, status: 'missing' });
+    }
   }
   return sortDocuments(Array.from(byPath.values()));
 }

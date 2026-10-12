@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { pathToFileURL } from 'url';
 
 export type SqlValue = string | number | bigint | null | Uint8Array;
 type Row = Record<string, SqlValue>;
@@ -49,11 +50,13 @@ export class DiskDatabase {
   private native: NativeDatabase;
   private changes = 0;
   private readonly runStatements = new Map<string, NativeStatement>();
-  constructor(public readonly filePath: string, options: { foreignKeys?: boolean; journalMode?: 'WAL' | 'DELETE'; readOnly?: boolean } = {}) {
+  constructor(public readonly filePath: string, options: { foreignKeys?: boolean; journalMode?: 'WAL' | 'DELETE'; readOnly?: boolean; immutable?: boolean } = {}) {
     if (!options.readOnly) fs.mkdirSync(path.dirname(filePath), { recursive: true });
     // Node's bundled driver avoids platform-specific extension ABI binaries.
-    const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: new (file: string, options?: { readOnly?: boolean }) => NativeDatabase };
-    this.native = new DatabaseSync(filePath, options.readOnly ? { readOnly: true } : {});
+    const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: new (file: string | URL, options?: { readOnly?: boolean }) => NativeDatabase };
+    let location: string | URL = filePath;
+    if (options.immutable) { const url = pathToFileURL(filePath); url.searchParams.set('immutable', '1'); location = url; }
+    this.native = new DatabaseSync(location, options.readOnly ? { readOnly: true } : {});
     try {
       this.native.exec(options.readOnly
         ? `PRAGMA busy_timeout=10000; PRAGMA query_only=ON; PRAGMA foreign_keys=${options.foreignKeys === false ? 'OFF' : 'ON'};`
