@@ -3,12 +3,14 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 
 function cleanupExact(root) {
-  if (!fs.existsSync(root)) return;
-  const stat = fs.lstatSync(root);
+  let stat;
+  try { stat = fs.lstatSync(root); }
+  catch (error) { if (error.code === 'ENOENT') return; throw error; }
   if (!stat.isDirectory() || stat.isSymbolicLink()) { fs.unlinkSync(root); return; }
   for (const name of fs.readdirSync(root)) cleanupExact(path.join(root, name));
   fs.rmdirSync(root);
@@ -28,13 +30,13 @@ function fixture(t) {
   return { base, root, store, operations, call: (operation, input = {}) => operations({ operation, input }) };
 }
 
-async function formalMigrationSession(f, kind, executionLogId = 1, targetId) {
+async function formalMigrationSession(f, kind, executionLogId = 1, targetId, projectRoot) {
   const project = path.join(f.base, 'project');
   fs.mkdirSync(project, { recursive: true });
   const run = await f.call('prepare_run', {
     root: project, executionLogId, nodeId: '__solo__', runKind: kind,
     prompt: 'migration task', command: 'codex', userMessage: 'migration task', status: 'Running',
-    metadata: targetId ? { migrationTargetId: targetId } : {},
+    metadata: { ...(targetId ? { migrationTargetId: targetId } : {}), ...(projectRoot ? { migrationProjectRoot: projectRoot } : {}) },
     idempotencyKey: `shared-migration-run:${executionLogId}`
   });
   const session = await f.call('open_mcp_session', {
@@ -44,11 +46,132 @@ async function formalMigrationSession(f, kind, executionLogId = 1, targetId) {
   return { project, run, session };
 }
 
+test('a project-scoped migration discovers, reports, retries, and previews only that physical project', async t => {
+  const f = fixture(t);
+  try {
+    const projectA = path.join(f.base, 'project');
+    const projectB = path.join(f.base, 'project-b');
+    for (const root of [projectA, projectB]) {
+      fs.mkdirSync(path.join(root, '.solopreneur'), { recursive: true });
+      fs.writeFileSync(path.join(root, '.solopreneur', 'documentation.json'), JSON.stringify({ schemaVersion: 1, files: [] }));
+      await f.store.registerProject({ root });
+    }
+    const migration = await formalMigrationSession(f, 'migration_apply', 1, undefined, projectA);
+    await f.operations({ operation: 'discover_migrations', input: { projectRoot: projectA }, sessionToken: migration.session.sessionToken });
+    await f.operations.waitForMigrations();
+    const overview = await f.operations({ operation: 'migration_overview', input: { projectRoot: projectA }, sessionToken: migration.session.sessionToken });
+    assert.ok(overview.jobs.length > 0);
+    assert.ok(overview.jobs.every(job => path.resolve(job.args.projectRoot) === path.resolve(projectA)));
+    await assert.rejects(f.operations({ operation: 'migration_overview', input: { projectRoot: projectB }, sessionToken: migration.session.sessionToken }), /maintenance_scope_denied/);
+    const foreign = f.store.enqueueMemoryMigration({ collection: 'documentation', sourceRoot: path.join(projectB, '.solopreneur', 'documentation.json'), projectRoot: projectB }, 'foreign-project');
+    f.store.updateMigrationJob(foreign.jobId, 'failed', {}, 'fixture');
+    await assert.rejects(f.operations({ operation: 'migration_status', input: { jobId: foreign.jobId, projectRoot: projectA }, sessionToken: migration.session.sessionToken }), /maintenance_scope_denied/);
+    await assert.rejects(f.operations({ operation: 'retry_migration', input: { jobId: foreign.jobId, projectRoot: projectA }, sessionToken: migration.session.sessionToken }), /maintenance_scope_denied/);
+
+    for (const [root, body] of [[projectA, Buffer.from('project-a')], [projectB, Buffer.from('project-b')]]) {
+      const file = path.join(root, '.solopreneur', 'project_growth.db');
+      fs.writeFileSync(file, body);
+      const identity = `project-growth:${root}`;
+      const hash = crypto.createHash('sha256').update(body).digest('hex');
+      f.store.captureMigrationSource({ identity, key: 'project_growth.db', hash }, body, { mimeType: 'application/x-sqlite3', encoding: 'binary' });
+      f.store.markMigrationSourceImported(identity, 'project_growth.db');
+    }
+    const mixedPlan = await f.call('prepare_recycling');
+    assert.equal(mixedPlan.files.length, 2);
+    const ready = await f.operations({ operation: 'migration_overview', input: { projectRoot: projectA }, sessionToken: migration.session.sessionToken });
+    assert.equal(ready.reviewableFiles, 1, 'an unconfirmed cross-project plan cannot hide this project from its own review');
+    const plan = await f.operations({ operation: 'prepare_recycling', input: { projectRoot: projectA }, sessionToken: migration.session.sessionToken });
+    assert.equal(plan.files.length, 1);
+    assert.equal(plan.files[0].path, path.join(projectA, '.solopreneur', 'project_growth.db'));
+    assert.notEqual(plan.planId, mixedPlan.planId);
+    assert.equal((await f.operations({ operation: 'prepare_recycling', input: { projectRoot: projectA }, sessionToken: migration.session.sessionToken })).planId, plan.planId, 'the host must retrieve the exact project plan prepared by the Agent');
+    await assert.rejects(f.operations({ operation: 'read_recycling_plan', input: { planId: plan.planId, projectRoot: projectB }, sessionToken: migration.session.sessionToken }), /maintenance_scope_denied/);
+    const foreignItem = mixedPlan.files.find(file => file.path === path.join(projectB, '.solopreneur', 'project_growth.db'));
+    assert.ok(foreignItem);
+    await assert.rejects(f.call('restore_recycling_file', { itemId: foreignItem.itemId, projectRoot: projectA }), /maintenance_scope_denied/);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('a formal migration session rejects project metadata that does not belong to its run', async t => {
+  const f = fixture(t);
+  try {
+    const projectA = path.join(f.base, 'project');
+    const projectB = path.join(f.base, 'project-b');
+    fs.mkdirSync(projectA, { recursive: true });
+    fs.mkdirSync(projectB, { recursive: true });
+    await f.store.registerProject({ root: projectB });
+    const run = await f.call('prepare_run', {
+      root: projectA, executionLogId: 1, nodeId: '__solo__', runKind: 'migration_apply',
+      prompt: 'migration task', command: 'codex', userMessage: 'migration task', status: 'Running',
+      metadata: { migrationProjectRoot: projectB }, idempotencyKey: 'wrong-project-metadata'
+    });
+    await assert.rejects(f.call('open_mcp_session', { projectId: run.projectId, runIdentity: { executionLogId: 1, generation: run.generation, proof: run.proof } }), /maintenance_scope_denied/);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('a project-scoped migration session rejects a symlink retargeted after authorization', async t => {
+  const f = fixture(t);
+  try {
+    const projectA = path.join(f.base, 'project-a');
+    const projectB = path.join(f.base, 'project-b');
+    const alias = path.join(f.base, 'selected-project');
+    fs.mkdirSync(projectA);
+    fs.mkdirSync(projectB);
+    fs.symlinkSync(projectA, alias, 'dir');
+    const identityA = await f.store.registerProject({ root: projectA });
+    await f.store.registerProject({ root: projectB });
+    const run = f.store.prepareRun(identityA.projectId, identityA.locationId, {
+      root: projectA, executionLogId: 1, nodeId: '__solo__', runKind: 'migration_apply',
+      prompt: 'migration task', command: 'codex', userMessage: 'migration task',
+      metadata: { migrationProjectRoot: alias }, idempotencyKey: 'symlink-scope'
+    });
+    const session = await f.call('open_mcp_session', {
+      projectId: identityA.projectId,
+      runIdentity: { executionLogId: 1, generation: run.generation, proof: run.proof }
+    });
+    fs.unlinkSync(alias);
+    fs.symlinkSync(projectB, alias, 'dir');
+    await assert.rejects(f.operations({ operation: 'migration_overview', input: { projectRoot: alias }, sessionToken: session.sessionToken }), /maintenance_scope_denied/);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('scoped maintenance history uses immutable project identity after metadata paths change', async t => {
+  const f = fixture(t);
+  try {
+    const projectA = path.join(f.base, 'project-a');
+    const projectB = path.join(f.base, 'project-b');
+    const alias = path.join(f.base, 'selected-project');
+    fs.mkdirSync(projectA);
+    fs.mkdirSync(projectB);
+    fs.symlinkSync(projectA, alias, 'dir');
+    const identityA = await f.store.registerProject({ root: projectA });
+    const identityB = await f.store.registerProject({ root: projectB });
+    const runA = f.store.prepareRun(identityA.projectId, identityA.locationId, {
+      root: projectA, executionLogId: 1, nodeId: '__solo__', runKind: 'migration_review',
+      prompt: 'review a', command: 'codex', userMessage: 'review a',
+      metadata: { migrationProjectRoot: alias }, idempotencyKey: 'history-a'
+    });
+    const runB = f.store.prepareRun(identityB.projectId, identityB.locationId, {
+      root: projectB, executionLogId: 2, nodeId: '__solo__', runKind: 'migration_review',
+      prompt: 'review b', command: 'codex', userMessage: 'review b', metadata: {}, idempotencyKey: 'history-b'
+    });
+    fs.unlinkSync(alias);
+    fs.symlinkSync(projectB, alias, 'dir');
+    const overviewA = await f.call('migration_overview', { projectRoot: projectA });
+    const overviewB = await f.call('migration_overview', { projectRoot: projectB });
+    assert.ok(overviewA.maintenanceTasks.some(task => task.taskId === runA.taskId));
+    assert.ok(!overviewA.maintenanceTasks.some(task => task.taskId === runB.taskId));
+    assert.ok(overviewB.maintenanceTasks.some(task => task.taskId === runB.taskId));
+    assert.ok(!overviewB.maintenanceTasks.some(task => task.taskId === runA.taskId));
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
 test('a formal migration run receives migration tools through the ordinary run identity', async t => {
   const f = fixture(t);
   try {
     const migration = await formalMigrationSession(f, 'migration_apply');
     assert.ok(Array.isArray((await f.operations({ operation: 'migration_overview', input: {}, sessionToken: migration.session.sessionToken })).jobs));
+    assert.deepEqual(await f.operations({ operation: 'prepare_recycling', input: {}, sessionToken: migration.session.sessionToken }), { planId: null, files: [] });
     const ordinary = await f.call('prepare_run', {
       root: migration.project, executionLogId: 2, nodeId: '__solo__', runKind: 'solo',
       prompt: 'task', command: 'codex', userMessage: 'task', status: 'Running', idempotencyKey: 'ordinary-run'
@@ -154,6 +277,9 @@ test('migration prompt supplies tools without defining a private runtime or resu
   const apply = buildMigrationMaintenancePrompt('migration_apply');
   assert.match(apply, /solomap_migration_start/);
   assert.match(apply, /solomap_migration_status/);
+  const scoped = buildMigrationMaintenancePrompt('migration_apply', '', '/workspace/packer');
+  assert.match(scoped, /projectRoot="\/workspace\/packer"/);
+  assert.match(scoped, /不得读取或处理其他项目/);
 });
 
 test('external Agent CLI receives migration tools from the ordinary managed MCP bridge', async t => {
@@ -165,11 +291,11 @@ test('external Agent CLI receives migration tools from the ordinary managed MCP 
   const seed = new UnifiedDataStore(root);
   const identity = await seed.registerProject({ root: project });
   const retainedFiles = Array.from({ length: 500 }, (_, index) => `history/${index}.log`);
-  const job = seed.enqueueMemoryMigration({ sourceRoot: path.join(root, 'memory') }, 'stdio-detail');
+  const job = seed.enqueueMemoryMigration({ collection: 'documentation', sourceRoot: path.join(project, '.solopreneur', 'documentation.json'), projectRoot: project }, 'stdio-detail');
   seed.updateMigrationJob(job.jobId, 'completed', { retainedFiles, conflicts: [], imported: 500 });
   const prepared = seed.prepareRun(identity.projectId, identity.locationId, {
     root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'migration_apply', prompt: 'migrate', command: 'codex',
-    userMessage: 'migrate', metadata: {}, idempotencyKey: 'stdio-migration-run'
+    userMessage: 'migrate', metadata: { migrationProjectRoot: project }, idempotencyKey: 'stdio-migration-run'
   });
   seed.close();
   const runtime = spawn(process.execPath, [path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root, '--runtime-id', 'migration-owner'], { stdio: 'pipe' });
@@ -197,12 +323,17 @@ test('external Agent CLI receives migration tools from the ordinary managed MCP 
       cwd: project, stderr: 'pipe'
     });
     await client.connect(transport);
-    const names = (await client.listTools()).tools.map(tool => tool.name).sort();
+    const listedTools = (await client.listTools()).tools;
+    const names = listedTools.map(tool => tool.name).sort();
     assert.deepEqual(names, ['solomap_migration_retry', 'solomap_migration_start', 'solomap_migration_status', 'solomap_recycling_apply', 'solomap_recycling_preview']);
+    assert.ok(listedTools.every(tool => tool.inputSchema.properties.projectRoot), 'every migration tool must carry the explicit project boundary');
     assert.ok(!names.includes('solomap_write'));
-    const status = await client.callTool({ name: 'solomap_migration_status', arguments: { jobId: job.jobId } });
+    const status = await client.callTool({ name: 'solomap_migration_status', arguments: { jobId: job.jobId, projectRoot: project } });
     assert.equal(status.isError, undefined, JSON.stringify(status.content));
     assert.deepEqual(JSON.parse(status.content[0].text).progress.retainedFiles, retainedFiles);
+    const preview = await client.callTool({ name: 'solomap_recycling_preview', arguments: { projectRoot: project } });
+    assert.equal(preview.isError, undefined, JSON.stringify(preview.content));
+    assert.deepEqual(JSON.parse(preview.content[0].text), { planId: null, files: [] });
   } finally {
     if (client) await client.close();
     if (transport) await transport.close();

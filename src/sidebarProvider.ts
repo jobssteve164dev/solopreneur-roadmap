@@ -386,11 +386,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       this._view.webview.postMessage({
         command: 'settingsLoaded',
         settings,
+        projectRoot: this._getProjects().selectedProjectPath || '',
         supportedAgents: getSupportedAgentStatuses(settings.cliPath || 'agy')
       });
     } catch (error) {
       console.error('SoloMap sidebar failed to send settings:', error);
     }
+  }
+
+  public sendProjectSelection(projectRoot: string, generation: number) {
+    this._view?.webview.postMessage({ command: 'projectSelectionChanged', projectRoot, generation });
   }
 
   public postSkillInstallResult(success: boolean, message: string) {

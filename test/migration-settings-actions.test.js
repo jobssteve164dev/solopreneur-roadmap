@@ -41,6 +41,23 @@ test('delegating migration launches the Agent migration task instead of only rev
   assert.deepEqual(calls, ['migration_overview']);
 });
 
+test('settings migration actions stay bound to the selected project without exposing another user choice', async () => {
+  const calls = [];
+  const launches = [];
+  const dependencies = {
+    getRoot: () => '/isolated',
+    getProjectRoot: () => '/workspace/packer',
+    ready: async () => {},
+    call: async (_root, operation, input) => { calls.push({ operation, input }); return { jobs: [] }; },
+    confirm: async () => false,
+    launchAgent: async (root, kind, targetId, projectRoot) => launches.push({ root, kind, targetId, projectRoot })
+  };
+  const result = await handleMigrationSettingsAction({ command: 'dataMigration.delegate', dataRoot: '/isolated' }, dependencies);
+  assert.equal(result.projectRoot, '/workspace/packer');
+  assert.deepEqual(calls, [{ operation: 'migration_overview', input: { projectRoot: '/workspace/packer' } }]);
+  assert.deepEqual(launches, [{ root: '/isolated', kind: 'migration_apply', targetId: undefined, projectRoot: '/workspace/packer' }]);
+});
+
 test('recycling approval sends the exact displayed files and refuses a changed preview', async () => {
   const files = [{ itemId: 'item', path: '/physical/old.db', hash: 'snapshot-hash', bytes: 42 }];
   const calls = [];

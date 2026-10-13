@@ -466,7 +466,12 @@ export class UnifiedDataStore {
       this.markMigrationSourceRechecking(`${args.collection}:${args.projectRoot}`, args.collection === 'project-journal' ? 'project_journal.db' : 'project_growth.db');
     }
   }
-  public migrationSourceOverview(intelligenceIdentity: string): { capturedFiles: number; migratedFiles: number; reviewableFiles: number } {
+  public migrationSourceOverview(intelligenceIdentity: string, sourceIdentities?: string[]): { capturedFiles: number; migratedFiles: number; reviewableFiles: number } {
+    const identityFilter = sourceIdentities ? ` AND source_identity IN (${sourceIdentities.map(() => '?').join(',')})` : '';
+    const recyclingStatuses = sourceIdentities
+      ? "'approved','moving','held','restoring','trashed','changed'"
+      : "'prepared','approved','moving','held','restoring','trashed','changed'";
+    if (sourceIdentities?.length === 0) return { capturedFiles: 0, migratedFiles: 0, reviewableFiles: 0 };
     const row = this.rows(`SELECT
       COUNT(*) AS captured_files,
       COALESCE(SUM(CASE WHEN stage='imported' OR (
@@ -482,9 +487,9 @@ export class UnifiedDataStore {
       ) AND NOT EXISTS(
         SELECT 1 FROM migration_recycling WHERE migration_recycling.source_identity=migration_items.source_identity
           AND migration_recycling.source_key=migration_items.source_key
-          AND migration_recycling.status IN ('prepared','approved','moving','held','restoring','trashed','changed')
+          AND migration_recycling.status IN (${recyclingStatuses})
       ) THEN 1 ELSE 0 END),0) AS reviewable_files
-      FROM migration_items WHERE source_content_id IS NOT NULL`, [intelligenceIdentity, intelligenceIdentity])[0];
+      FROM migration_items WHERE source_content_id IS NOT NULL${identityFilter}`, [intelligenceIdentity, intelligenceIdentity, ...(sourceIdentities || [])])[0];
     return { capturedFiles: Number(row.captured_files), migratedFiles: Number(row.migrated_files), reviewableFiles: Number(row.reviewable_files) };
   }
   public markMigrationSourceImported(identity: string, key: string): void {
@@ -502,13 +507,14 @@ export class UnifiedDataStore {
   public recyclingItems(): RecyclingItem[] {
     return this.rows('SELECT * FROM migration_recycling ORDER BY created_at,id').map(row => ({ itemId: String(row.id), planId: String(row.plan_id), identity: String(row.source_identity), key: String(row.source_key), hash: String(row.source_hash), path: String(row.authorized_path ?? row.original_path), restorePath: row.restore_path === null ? null : String(row.restore_path), bytes: Number(row.byte_count), status: row.status as RecyclingItem['status'], error: row.error === null ? null : String(row.error) }));
   }
-  public createRecyclingPlan(files: Array<Omit<RecyclingItem, 'itemId' | 'planId' | 'status' | 'error'>>): { planId: string; files: RecyclingItem[] } {
+  public createRecyclingPlan(files: Array<Omit<RecyclingItem, 'itemId' | 'planId' | 'status' | 'error'>>): { planId: string | null; files: RecyclingItem[] } {
     return this.transaction(() => {
       const prepared = this.recyclingItems().filter(item => item.status === 'prepared');
       for (const existing of new Set(prepared.map(item => item.planId))) {
         const items = prepared.filter(item => item.planId === existing);
         if (items.length === files.length && items.every(item => files.some(file => file.path === item.path && file.hash === item.hash))) return { planId: existing, files: items };
       }
+      if (!files.length) return { planId: null, files: [] };
       const planId = crypto.randomUUID();
       for (const file of files) {
         const snapshot = this.rows('SELECT source_content_id FROM migration_items JOIN contents ON contents.id=source_content_id WHERE source_identity=? AND source_key=? AND contents.sha256=?', [file.identity, file.key, file.hash])[0];
@@ -2757,6 +2763,10 @@ export class UnifiedDataStore {
   public registeredProjectRoots(): string[] {
     return this.rows("SELECT root_path FROM project_locations WHERE device_id=? AND status='active' ORDER BY root_path", [this.deviceId])
       .map(row => String(row.root_path));
+  }
+  public registeredProjectScopes(): Array<{ root: string; projectId: string }> {
+    return this.rows("SELECT root_path,project_id FROM project_locations WHERE device_id=? AND status='active' ORDER BY root_path", [this.deviceId])
+      .map(row => ({ root: String(row.root_path), projectId: String(row.project_id) }));
   }
   private learningReviewManifest(saved: any): ReviewManifest {
     const restore = (source: ReviewSource): ReviewSource => ({ ...source, content: this.content(String(saved.sourceContents[`${source.id}:${source.hash}:${source.contentHash}`] || saved.sourceContents[`${source.id}:${source.hash}`])).toString('utf8'), ...(source.previousVersions ? { previousVersions: source.previousVersions.map(restore) } : {}) });

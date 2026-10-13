@@ -152,7 +152,7 @@ test('jobs created in the same millisecond use commit order rather than UUID sor
 
 test('migration overview aggregates source counts without materializing every captured file', () => {
   const source = fs.readFileSync(path.resolve(__dirname, '../src/migrationRecycling.ts'), 'utf8');
-  const body = source.slice(source.indexOf('public async overview()'), source.indexOf('public async prepare()'));
+  const body = source.slice(source.indexOf('public async overview('), source.indexOf('public async prepare('));
   assert.doesNotMatch(body, /capturedMigrationSources/);
   assert.match(body, /migrationSourceOverview/);
 });

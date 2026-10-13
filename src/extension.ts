@@ -1301,6 +1301,7 @@ async function handleSharedWebviewAction(
     try {
       const result = await handleMigrationSettingsAction(message, {
         getRoot: () => normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath),
+        getProjectRoot: () => getMigrationProjectRoot(context),
         ready: async root => { await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root }); },
         call: (root, operation, input) => sendRuntimeDataRequest(root, { operation, input }),
         confirm: async files => {
@@ -1312,7 +1313,7 @@ async function handleSharedWebviewAction(
           ) === confirm;
         },
         chooseRestorePath: async () => (await vscode.window.showSaveDialog({ title: language === 'en' ? 'Restore file to' : '选择文件恢复位置', saveLabel: language === 'en' ? 'Restore file' : '恢复文件' }))?.fsPath,
-        launchAgent: (root, kind, targetId) => launchMigrationMaintenanceAgent(context, root, kind, targetId)
+        launchAgent: (root, kind, targetId, projectRoot) => launchMigrationMaintenanceAgent(context, root, kind, targetId, projectRoot)
       });
       const successMessage = result.cancelled ? undefined : result.agentStarted
         ? (language === 'en' ? 'Cleanup started in the background. You can keep using SoloMap.' : '已开始在后台整理，你可以继续使用 SoloMap。')
@@ -1331,7 +1332,7 @@ async function handleSharedWebviewAction(
                     : code === 'maintenance_launch_denied' ? (language === 'en' ? 'The cleanup connection expired. Update the status, then continue.' : '整理连接已过期。请更新状态后继续。')
             : (language === 'en' ? 'This action did not finish. Your data is kept; refresh and retry.' : '本次操作未完成，数据已保留。请刷新后重试。');
       recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'data.migration.settings', error);
-      await respond({ command: 'dataMigrationLoaded', requestId: String(message.requestId || ''), error: detail });
+      await respond({ command: 'dataMigrationLoaded', requestId: String(message.requestId || ''), projectRoot: getMigrationProjectRoot(context) || '', error: detail });
     }
     return true;
   }
@@ -1921,6 +1922,7 @@ async function handleSharedWebviewAction(
       await respond({
         command: 'settingsLoaded',
         settings: await getSettingsWithOpenCodeSecretState(context),
+        projectRoot: getMigrationProjectRoot(context) || '',
         requestId: String(request.requestId || ''),
         editRevision: Number(request.editRevision || 0)
       });
@@ -1966,6 +1968,7 @@ async function handleSharedWebviewAction(
       await respond({
         command: 'settingsSaved',
         settings: await getSettingsWithOpenCodeSecretState(context),
+        projectRoot: getMigrationProjectRoot(context) || '',
         requestId: String(request.requestId || '')
       });
       vscode.window.showInformationMessage('SoloMap settings saved successfully!');
@@ -2518,7 +2521,7 @@ async function broadcastSettings(context: vscode.ExtensionContext, includeFlow =
     sidebarProvider.sendSettings(settings);
   }
   if (activePanel) {
-    postSettingsLoaded(activePanel.webview, settings);
+    postSettingsLoaded(activePanel.webview, settings, getMigrationProjectRoot(context) || '');
     if (includeFlow) await postFlowStateToWebview(context);
   }
   if (includeStrategy && activeStrategyPyramidPanel) {
@@ -3330,6 +3333,10 @@ function getSelectedProjectPath(context: vscode.ExtensionContext): string {
   );
 }
 
+function getMigrationProjectRoot(context: vscode.ExtensionContext): string | undefined {
+  return getSelectedProjectPath(context) || activeProjectRoot || undefined;
+}
+
 function getProjectState(context: vscode.ExtensionContext): { projects: Array<SolopreneurProject & { autonomyEnabled: boolean; toolNetworkDisabled: boolean; autonomyEpoch: number }>; selectedProjectPath: string } {
   const projects = getProjects(context);
   const root = normalizeGlobalDataPathForRegistry(getPersistedSettings(context).globalDataPath, getWorkspaceRoot());
@@ -3386,6 +3393,11 @@ async function persistProjectSelection(dataRoot: string, projectPath: string): P
     () => selectedProjectPathsByDataRoot.get(dataRoot) === projectPath);
 }
 
+function broadcastProjectSelection(projectRoot: string, generation: number): void {
+  sidebarProvider?.sendProjectSelection(projectRoot, generation);
+  postWebviewMessage(activePanel?.webview, { command: 'projectSelectionChanged', projectRoot, generation });
+}
+
 async function selectProject(context: vscode.ExtensionContext, projectPath: string): Promise<void> {
   const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
   if (!readProjectRegistryFile(root, projectRegistryFileName)) await refreshProjectRegistryForContext(context, root);
@@ -3399,6 +3411,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   const selectionGeneration = ++projectSelectionGeneration;
   selectedProjectPathInMemory = projectPath;
   selectedProjectPathsByDataRoot.set(root, projectPath);
+  broadcastProjectSelection(projectPath, selectionGeneration);
   synchronizeTelegramChannel(context);
   const persistSelection = persistProjectSelection(root, projectPath);
   const persistDeviceSelection = patchUiState(context, 'extension', 'global', 'selectedProjectPath', projectPath);
@@ -3976,6 +3989,7 @@ async function addProjectFromDialog(context: vscode.ExtensionContext): Promise<v
   selectedProjectPathInMemory = folder;
   selectedProjectPathsByDataRoot.set(selectionRoot, folder);
   ++projectSelectionGeneration;
+  broadcastProjectSelection(folder, projectSelectionGeneration);
   await persistProjectSelection(selectionRoot, folder);
   synchronizeTelegramChannel(context);
   syncEngine?.close?.();
@@ -4021,6 +4035,7 @@ async function removeProject(context: vscode.ExtensionContext, projectPath: stri
   selectedProjectPathInMemory = nextSelectedProjectPath;
   selectedProjectPathsByDataRoot.set(selectionRoot, nextSelectedProjectPath);
   ++projectSelectionGeneration;
+  broadcastProjectSelection(nextSelectedProjectPath, projectSelectionGeneration);
   await persistProjectSelection(selectionRoot, nextSelectedProjectPath);
   synchronizeTelegramChannel(context);
 
@@ -7048,9 +7063,10 @@ async function launchMigrationMaintenanceAgent(
   context: vscode.ExtensionContext,
   globalDataPath: string,
   kind: MigrationMaintenanceKind,
-  targetId?: string
+  targetId?: string,
+  selectedProjectRoot?: string
 ): Promise<void> {
-  const workspaceRoot = getSkillInstallWorkspaceRoot(context);
+  const workspaceRoot = selectedProjectRoot || getSkillInstallWorkspaceRoot(context);
   const settings = { ...getPersistedSettings(context), globalDataPath };
   const { maintenanceRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, globalDataPath);
   const requestedAgentCli = (settings.cliPath || 'agy').trim();
@@ -7059,7 +7075,12 @@ async function launchMigrationMaintenanceAgent(
   const request = kind === 'migration_review' ? '检查旧数据迁移状态。'
     : kind === 'migration_apply' ? '迁移已登记的旧数据。' : '回收已确认的旧文件。';
   await launchMaintenanceAgentRun(context, workspaceRoot, settings, agentCli, maintenanceRoot, kind, request,
-    () => buildMigrationMaintenancePrompt(kind, targetId), '', { expectsResult: false, launchSlotId: `settings:${kind}:${targetId || 'all'}`, launchSlotScope: 'global', metadata: { migrationTargetId: targetId || '' } });
+    () => buildMigrationMaintenancePrompt(kind, targetId, selectedProjectRoot || ''), '', {
+      expectsResult: false,
+      launchSlotId: `settings:${kind}:${targetId || 'current'}`,
+      launchSlotScope: selectedProjectRoot ? 'project' : 'global',
+      metadata: { migrationTargetId: targetId || '', ...(selectedProjectRoot ? { migrationProjectRoot: selectedProjectRoot } : {}) }
+    });
 }
 
 async function launchMaintenanceAgentRun(context: vscode.ExtensionContext, workspaceRoot: string, settings: SolopreneurSettings, agentCli: string, maintenanceRoot: string, runKind: string, request: string, buildPrompt: (resultPath: string) => string, capabilityOperationId = '', options: { expectsResult?: boolean; metadata?: Record<string, unknown>; launchSlotId?: string; launchSlotScope?: 'project' | 'global' } = {}): Promise<string> {

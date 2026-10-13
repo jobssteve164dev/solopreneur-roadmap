@@ -9,7 +9,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { RunInputMaterialization } from './runInputMaterialization';
 import { configureAgentDatabase, databaseAgentProviders, DatabaseAgentProvider, isAgentDatabaseConfigPath } from './agentDatabaseConfig';
-import { MigrationRecycling } from './migrationRecycling';
+import { MigrationProjectScope, MigrationRecycling } from './migrationRecycling';
 import { isRetirableRunArtifact, initializeProjectJournalAllocation } from './projectDataMigration';
 import { enqueueAvailableDataMigrations } from './runtimeDatabaseBootstrap';
 import { validateTaskReport } from './taskReport';
@@ -45,8 +45,21 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
   const runStops = new RunStop(store);
   const runs = new RunRecovery(store, runStops);
   const runInputs = new RunInputMaterialization(store);
-  type ProjectSession = { kind: 'project'; actorId: string; scope: string; runIdentity?: McpRunIdentity; reviewBatchId?: string; migrationKind?: MigrationRunKind; migrationTargetId?: string | null };
+  type ProjectSession = { kind: 'project'; actorId: string; scope: string; runIdentity?: McpRunIdentity; reviewBatchId?: string; migrationKind?: MigrationRunKind; migrationTargetId?: string | null; migrationProjectRoot?: string | null; migrationProjectId?: string | null; migrationPhysicalRoot?: string | null };
   const sessions = new Map<string, ProjectSession>();
+  const samePhysicalRoot = (left: string, right: string): boolean => {
+    try { return fs.realpathSync(left) === fs.realpathSync(right); } catch { return path.resolve(left) === path.resolve(right); }
+  };
+  const migrationScope = async (input: Record<string, unknown>): Promise<MigrationProjectScope | undefined> => {
+    if (input.projectRoot === undefined) return undefined;
+    const requested = String(input.projectRoot || '');
+    if (!path.isAbsolute(requested)) throw new Error('project_scope_required');
+    const registered = store.registeredProjectScopes().find(candidate => samePhysicalRoot(candidate.root, requested));
+    if (!registered) throw new Error('project_scope_denied');
+    let physicalRoot: string;
+    try { physicalRoot = fs.realpathSync(registered.root); } catch { throw new Error('project_scope_denied'); }
+    return { root: path.resolve(registered.root), projectId: registered.projectId, physicalRoot };
+  };
   const allowedRead = (object: DataObject, session: ProjectSession): boolean => canAgentRead(object, session.scope, session.reviewBatchId, store.learningReviewScopeCurrent(object));
   const runProject = async (input: Record<string, unknown>): Promise<{ projectId: string }> => {
     if (input.projectId) {
@@ -79,10 +92,17 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const authorizedRun = runIdentity ? store.authorizedRunState(scope, runIdentity) : undefined;
         const runKind = String(authorizedRun?.status.runKind || '');
         const migrationKind = migrationRunKinds.includes(runKind as MigrationRunKind) ? runKind as MigrationRunKind : undefined;
+        const migrationProjectRoot = migrationKind ? String(authorizedRun?.status.migrationProjectRoot || '') || null : null;
+        const migrationProject = migrationProjectRoot ? await migrationScope({ projectRoot: migrationProjectRoot }) : undefined;
+        if (migrationProject && migrationProject.projectId !== scope) throw new Error('maintenance_scope_denied');
         const reviewBatchId = runIdentity ? store.authorizedLearningReviewBatch(scope, runIdentity) : undefined;
         const identity = store.establishMcpActor(scope, input.resume as { actorId: string; proof: string } | undefined);
         const sessionToken = crypto.randomBytes(32).toString('hex');
-        sessions.set(sessionToken, { kind: 'project', actorId: identity.actorId, scope, runIdentity, reviewBatchId, migrationKind, migrationTargetId: migrationKind ? String(authorizedRun?.status.migrationTargetId || '') || null : undefined });
+        sessions.set(sessionToken, { kind: 'project', actorId: identity.actorId, scope, runIdentity, reviewBatchId, migrationKind,
+          migrationTargetId: migrationKind ? String(authorizedRun?.status.migrationTargetId || '') || null : undefined,
+          migrationProjectRoot: migrationProject?.root || null,
+          migrationProjectId: migrationProject?.projectId || null,
+          migrationPhysicalRoot: migrationProject?.physicalRoot || null });
         return { ...identity, sessionToken, migrationKind: migrationKind || null };
       }
       case 'close_mcp_session': {
@@ -634,10 +654,18 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       case 'read_intelligence_conversation': return store.readIntelligenceConversation(String(input.id || ''));
       case 'list_intelligence_conversations': return store.listIntelligenceConversations();
       case 'write_intelligence_conversation': return store.writeIntelligenceConversation(input as unknown as Parameters<UnifiedDataStore['writeIntelligenceConversation']>[0]);
-      case 'migration_status': return input.metadataOnly === true ? store.readMigrationJobStatus(String(input.jobId || '')) : store.readMigrationJob(String(input.jobId || ''));
-      case 'discover_migrations': return enqueueAvailableDataMigrations(store, operations, () => true, true);
+      case 'migration_status': {
+        const scope = await migrationScope(input); const job = store.readMigrationJob(String(input.jobId || ''));
+        if (scope && !recycling.jobBelongsToProject(job, scope)) throw new Error('maintenance_scope_denied');
+        return input.metadataOnly === true ? store.readMigrationJobStatus(job.jobId) : job;
+      }
+      case 'discover_migrations': {
+        const scope = await migrationScope(input);
+        return enqueueAvailableDataMigrations(store, operations, () => true, true, scope?.root);
+      }
       case 'migration_overview': {
-        const formalRuns = store.migrationAgentRuns();
+        const scope = await migrationScope(input);
+        const formalRuns = store.migrationAgentRuns().filter(run => !scope || run.projectId === scope.projectId);
         const projectedRuns = formalRuns.map(run => {
           const active = !run.status.finishedAt;
           return {
@@ -652,22 +680,27 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
           };
         });
         return {
-          ...(await recycling.overview()),
+          ...(await recycling.overview(scope)),
           maintenanceTasks: projectedRuns,
           activeMaintenanceTaskIds: projectedRuns.filter(task => ['ready', 'running'].includes(task.status)).map(task => task.taskId),
           launchingMaintenanceTaskIds: []
         };
       }
-      case 'prepare_recycling': return recycling.prepare();
-      case 'read_recycling_plan': return recycling.readPlan(String(input.planId || ''));
-      case 'retry_migration': return migrations.retry(String(input.jobId || ''));
-      case 'confirm_recycling': return recycling.confirm(String(input.planId || ''), input.files as Array<{ itemId: string; path: string; hash: string; bytes: number }> | undefined);
+      case 'prepare_recycling': return recycling.prepare(await migrationScope(input));
+      case 'read_recycling_plan': return recycling.readPlan(String(input.planId || ''), await migrationScope(input));
+      case 'retry_migration': {
+        const scope = await migrationScope(input); const job = store.readMigrationJob(String(input.jobId || ''));
+        if (scope && !recycling.jobBelongsToProject(job, scope)) throw new Error('maintenance_scope_denied');
+        return migrations.retry(job.jobId);
+      }
+      case 'confirm_recycling': return recycling.confirm(String(input.planId || ''), input.files as Array<{ itemId: string; path: string; hash: string; bytes: number }> | undefined, await migrationScope(input));
       case 'hold_recycling_file': return recycling.hold(String(input.itemId || ''));
       case 'finish_recycling_file': return recycling.finish(String(input.itemId || ''));
       case 'retire_recycling_file': return recycling.retire(String(input.itemId || ''));
-      case 'restore_recycling_file': return recycling.restore(String(input.itemId || ''), input.destination === undefined ? undefined : String(input.destination));
+      case 'restore_recycling_file': return recycling.restore(String(input.itemId || ''), input.destination === undefined ? undefined : String(input.destination), await migrationScope(input));
       case 'execute_recycling_plan': {
-        const plan = recycling.readPlan(String(input.planId || ''));
+        const scope = await migrationScope(input);
+        const plan = recycling.readPlan(String(input.planId || ''), scope);
         const failures: string[] = [];
         for (const file of plan.files) {
           if (['trashed', 'restored'].includes(file.status)) continue;
@@ -678,7 +711,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
           } catch { failures.push(file.itemId); }
         }
         if (failures.length) throw new Error(`recycling_items_retained:${failures.join(',')}`);
-        return recycling.overview();
+        return recycling.overview(scope);
       }
       case 'write': return store.write(input as unknown as DataWrite);
       case 'read': {
@@ -729,6 +762,10 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       const migrationActions = ['discover_migrations', ...reviewActions];
       const recyclingActions = ['migration_overview', 'read_recycling_plan', 'execute_recycling_plan'];
       if (!(session.migrationKind === 'migration_apply' ? migrationActions : session.migrationKind === 'migration_review' ? reviewActions : recyclingActions).includes(request.operation)) throw new Error('action_denied');
+      if (session.migrationProjectRoot) {
+        const scope = await migrationScope(input);
+        if (!scope || scope.projectId !== session.migrationProjectId || scope.physicalRoot !== session.migrationPhysicalRoot) throw new Error('maintenance_scope_denied');
+      }
       if (session.migrationKind === 'recycling_apply' && ['read_recycling_plan', 'execute_recycling_plan'].includes(request.operation) && String(input.planId || '') !== session.migrationTargetId) throw new Error('maintenance_target_denied');
       return dispatch(request);
     }

@@ -6,6 +6,7 @@ import { isRetirableRunArtifact } from './projectDataMigration';
 
 const hash = (bytes: Buffer) => crypto.createHash('sha256').update(bytes).digest('hex');
 const conversationKey = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.json$/i;
+export interface MigrationProjectScope { root: string; projectId: string; physicalRoot: string }
 
 /** Only collections whose writers and readers use the database may be retired. */
 export class MigrationRecycling {
@@ -13,6 +14,17 @@ export class MigrationRecycling {
   private matches = new Map<string, { hash: string; revision: number; matches: boolean }>();
   private fileChecks = new Map<string, { hash: string; inode: number; size: number; mtime: number; ctime: number }>();
   constructor(private readonly store: UnifiedDataStore) {}
+
+  private sourceIdentities(scope: MigrationProjectScope): string[] {
+    const roots = [...new Set([path.resolve(scope.root), scope.physicalRoot])];
+    return [...roots.flatMap(root => [
+      `documentation:${root}`, `project-journal:${root}`, `project-growth:${root}`, `agent-runs:${root}`,
+      `project-agent-status:${root}`, `agent-status:${root}`, `native-session-history:${root}`, `historical-journal-output:${root}`
+    ]), `step-memory:${scope.projectId}`, `run-digests:${scope.projectId}`];
+  }
+  private belongsToProject(identity: string, scope?: MigrationProjectScope): boolean {
+    return !scope || this.sourceIdentities(scope).includes(identity);
+  }
 
   private sourcePath(identity: string, key: string): string | null {
     if (identity.startsWith('intelligence:')) return path.join(identity.slice('intelligence:'.length), key);
@@ -98,8 +110,10 @@ export class MigrationRecycling {
     this.matches.set(cacheKey, { hash: source.hash, revision, matches });
     return matches;
   }
-  private async candidates(): Promise<Array<Omit<RecyclingItem, 'itemId' | 'planId' | 'status' | 'error'>>> {
-    const active = this.store.recyclingItems().filter(item => ['approved', 'moving', 'held', 'restoring'].includes(item.status));
+  private async candidates(scope?: MigrationProjectScope): Promise<Array<Omit<RecyclingItem, 'itemId' | 'planId' | 'status' | 'error'>>> {
+    const identities = scope ? new Set(this.sourceIdentities(scope)) : undefined;
+    const belongs = (identity: string) => !identities || identities.has(identity);
+    const active = this.store.recyclingItems().filter(item => belongs(item.identity) && ['approved', 'moving', 'held', 'restoring'].includes(item.status));
     const occupied = new Set<string>();
     for (const item of active) {
       // The approved path is already physical for new plans. Older receipts
@@ -107,7 +121,7 @@ export class MigrationRecycling {
       try { occupied.add(this.physicalPath(item.path)); } catch { occupied.add(item.path); }
     }
     const files = [];
-    for (const source of this.store.capturedMigrationSources()) {
+    for (const source of this.store.capturedMigrationSources().filter(source => belongs(source.identity))) {
       const file = this.sourcePath(source.identity, source.key);
       if (!file || active.some(item => item.path === file)) continue;
       if (source.identity.startsWith('intelligence:')) {
@@ -126,11 +140,11 @@ export class MigrationRecycling {
     }
     return files;
   }
-  public async overview() {
-    const jobs = this.store.migrationJobSummaries();
-    const allRecycling = this.store.recyclingItems();
+  public async overview(scope?: MigrationProjectScope) {
+    const jobs = this.store.migrationJobSummaries().filter(job => !scope || this.jobBelongsToProject(job, scope));
+    const allRecycling = this.store.recyclingItems().filter(item => this.belongsToProject(item.identity, scope));
     const intelligenceIdentity = `intelligence:${path.join(this.store.root, 'intelligence-conversations')}`;
-    const sourceOverview = this.store.migrationSourceOverview(intelligenceIdentity);
+    const sourceOverview = this.store.migrationSourceOverview(intelligenceIdentity, scope ? this.sourceIdentities(scope) : undefined);
     const recycling: RecyclingItem[] = [];
     for (const item of allRecycling) {
       if (item.status === 'prepared') continue;
@@ -145,10 +159,15 @@ export class MigrationRecycling {
       recycledFiles: recycling.filter(item => item.status === 'trashed').length,
       heldFiles: recycling.filter(item => ['moving', 'held'].includes(item.status)).length,
       recycling: recycling.map(({ identity, key, hash: _hash, ...item }) => item),
-      recoveryConflicts: this.store.recyclingRestoreConflicts() };
+      recoveryConflicts: this.store.recyclingRestoreConflicts().filter(conflict => allRecycling.some(item => item.itemId === conflict.itemId)) };
   }
-  public async prepare() { return this.store.createRecyclingPlan(await this.candidates()); }
-  public readPlan(planId: string) {
+  public jobBelongsToProject(job: { args: Record<string, unknown> }, scope: MigrationProjectScope): boolean {
+    const root = typeof job.args.projectRoot === 'string' ? job.args.projectRoot : '';
+    if (!root) return false;
+    try { return fs.realpathSync(root) === scope.physicalRoot; } catch { return path.resolve(root) === path.resolve(scope.root); }
+  }
+  public async prepare(scope?: MigrationProjectScope) { return this.store.createRecyclingPlan(await this.candidates(scope)); }
+  public readPlan(planId: string, scope?: MigrationProjectScope) {
     let requiresConfirmation = false;
     const files = this.store.recyclingItems().filter(item => item.planId === planId).map(item => {
       const declared = this.sourcePath(item.identity, item.key);
@@ -159,12 +178,13 @@ export class MigrationRecycling {
       return item;
     });
     if (!files.length) throw new Error('recycling_plan_missing');
+    if (scope && files.some(item => !this.belongsToProject(item.identity, scope))) throw new Error('maintenance_scope_denied');
     return { planId, files, requiresConfirmation };
   }
-  public confirm(planId: string, reviewed?: Array<{ itemId: string; path: string; hash: string; bytes: number }>) {
+  public confirm(planId: string, reviewed?: Array<{ itemId: string; path: string; hash: string; bytes: number }>, scope?: MigrationProjectScope) {
     const files = this.store.recyclingItems().filter(item => item.planId === planId);
     if (!files.length) throw new Error('recycling_plan_missing');
-    const preview = this.readPlan(planId);
+    const preview = this.readPlan(planId, scope);
     if (preview.requiresConfirmation && !reviewed) throw new Error('recycling_path_identity_unavailable');
     if (reviewed && (reviewed.length !== preview.files.length || new Set(reviewed.map(file => file.itemId)).size !== reviewed.length || preview.files.some(file => !reviewed.some(value => value.itemId === file.itemId && value.path === file.path && value.hash === file.hash && value.bytes === file.bytes)))) throw new Error('recycling_source_changed');
     const approvals = files.filter(item => ['prepared', 'approved'].includes(item.status)).map(item => {
@@ -284,7 +304,10 @@ export class MigrationRecycling {
       return { recycled: true };
     });
   }
-  public async restore(itemId: string, destination?: string) {
+  public async restore(itemId: string, destination?: string, scope?: MigrationProjectScope) {
+    const scopedItem = this.store.recyclingItems().find(item => item.itemId === itemId);
+    if (!scopedItem) throw new Error('recycling_item_missing');
+    if (scope && !this.belongsToProject(scopedItem.identity, scope)) throw new Error('maintenance_scope_denied');
     return this.exclusive(itemId, async () => {
       if (destination !== undefined) {
         if (!path.isAbsolute(destination) || path.resolve(destination) !== destination || this.physicalPath(destination) !== destination) throw new Error('recycling_path_invalid');

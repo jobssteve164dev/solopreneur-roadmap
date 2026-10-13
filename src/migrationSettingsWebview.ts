@@ -84,6 +84,9 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
   let plan: any;
   let dataRoot = '';
   let savedLocation: string | undefined;
+  let savedProjectRoot: string | undefined;
+  let authoritativeProjectRoot: string | undefined;
+  let selectionGeneration = -1;
   let sequence = 0;
   let latest = '';
   let busy = false;
@@ -105,7 +108,7 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     card!.querySelectorAll('button').forEach(control => { control.disabled = true; });
     const working = command !== 'dataMigration.get';
     element('[data-migration-status]').textContent = text(working ? '正在处理…' : '正在读取进度…', working ? 'Working…' : 'Loading progress…');
-    vscode.postMessage({ command, requestId: latest, dataRoot, ...input });
+    vscode.postMessage({ command, requestId: latest, dataRoot, ...(savedProjectRoot === undefined ? {} : { projectRoot: savedProjectRoot }), ...input });
   }
   function render(): void {
     element('#migration-card-title').textContent = text('旧数据整理', 'Old data cleanup');
@@ -232,16 +235,37 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
   });
   window.addEventListener('message', event => {
     const message = event.data;
+    if (message?.command === 'projectsLoaded' || message?.command === 'projectSelectionChanged') {
+      const authoritative = message.command === 'projectSelectionChanged';
+      const projectRoot = String(authoritative ? message.projectRoot || '' : message.projects?.selectedProjectPath || '');
+      if (authoritative) {
+        const generation = Number(message.generation);
+        if (Number.isFinite(generation) && generation < selectionGeneration) return;
+        if (Number.isFinite(generation)) selectionGeneration = generation;
+        authoritativeProjectRoot = projectRoot;
+      } else if (authoritativeProjectRoot !== undefined && projectRoot !== authoritativeProjectRoot) return;
+      const changed = savedProjectRoot !== undefined && projectRoot !== savedProjectRoot;
+      savedProjectRoot = projectRoot;
+      if (changed) { plan = undefined; overview = undefined; dataRoot = ''; latest = ''; busy = false; notice = ''; error.textContent = ''; error.hidden = true; }
+      render();
+      if ((changed || !overview) && visible()) request('dataMigration.get');
+      return;
+    }
     if (message?.command === 'settingsLoaded' || message?.command === 'settingsSaved') {
       const location = String(message.settings?.globalDataPath || '');
-      const changed = savedLocation !== undefined && location !== savedLocation;
+      const projectRoot = String(message.projectRoot || '');
+      const changed = (savedLocation !== undefined && location !== savedLocation)
+        || (savedProjectRoot !== undefined && projectRoot !== savedProjectRoot);
       savedLocation = location;
-      if (changed) { plan = undefined; overview = undefined; dataRoot = ''; latest = ''; busy = false; notice = ''; }
+      savedProjectRoot = projectRoot;
+      authoritativeProjectRoot = projectRoot;
+      if (changed) { plan = undefined; overview = undefined; dataRoot = ''; latest = ''; busy = false; notice = ''; error.textContent = ''; error.hidden = true; }
       render();
       if ((changed || !overview) && visible()) request('dataMigration.get');
       return;
     }
     if (message?.command !== 'dataMigrationLoaded' || message.requestId !== latest) return;
+    if (savedProjectRoot !== undefined && message.projectRoot !== undefined && String(message.projectRoot || '') !== savedProjectRoot) return;
     busy = false;
     if (message.dataRoot) dataRoot = message.dataRoot;
     if (message.overview) overview = message.overview;

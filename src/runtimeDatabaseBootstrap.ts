@@ -80,12 +80,17 @@ export async function enqueueStartupDataMigrations(store: UnifiedDataStore, oper
 }
 
 /** Discovers current legacy sources without blocking the caller on their import. */
-export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, refreshCompleted = false): Promise<{ queued: number }> {
+export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, refreshCompleted = false, projectRoot?: string): Promise<{ queued: number }> {
   let queued = 0;
   const enqueue = async (request: Parameters<RuntimeDataOperations>[0]): Promise<void> => {
     const result = await operations(refreshCompleted ? { ...request, input: { ...request.input, refreshCompleted: true } } : request) as MigrationAcknowledgement;
     if (result.scheduled) queued++;
   };
+  if (projectRoot) {
+    try { await enqueueStartupProjectMigrations(store, enqueue, shouldContinue, projectRoot); }
+    catch (error) { process.stderr.write(`SoloMap project data migration startup: ${String(error)}\n`); }
+    return { queued };
+  }
   try {
     const registries = ['skills', 'mcp', 'enhancements'].map(directory => path.join(store.root, directory, 'registry.json'));
     const existing: Array<{ file: string; hash: string }> = [];
@@ -229,7 +234,7 @@ async function enqueueStartupLearningMigration(store: UnifiedDataStore, operatio
   if (shouldContinue()) await operations({ operation: 'import_project_data', input: { collection: 'learning', sourceRoot, projectScopes, idempotencyKey: `startup-learning-v1:${signature}` } });
 }
 
-async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
+async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, selectedProjectRoot?: string): Promise<void> {
   let projects: Array<{ path: string }> = store.registeredProjectRoots().map(projectPath => ({ path: projectPath }));
   try {
     const registry = (await store.initializeProjectRegistry()).registry;
@@ -240,6 +245,12 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`SoloMap growth project registry: ${String(error)}\n`);
+  }
+  if (selectedProjectRoot) {
+    const selectedPhysical = await fs.promises.realpath(selectedProjectRoot);
+    projects = projects.filter(project => {
+      try { return fs.realpathSync(project.path) === selectedPhysical; } catch { return false; }
+    });
   }
   for (const project of projects) {
     if (!shouldContinue()) return;

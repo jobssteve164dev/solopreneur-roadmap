@@ -11,8 +11,8 @@ export function postWebviewMessage(target: WebviewMessageTarget, message: Record
   return target.postMessage(message);
 }
 
-export function postSettingsLoaded(target: WebviewMessageTarget, settings: unknown): Thenable<boolean> | Promise<boolean> {
-  return postWebviewMessage(target, { command: 'settingsLoaded', settings });
+export function postSettingsLoaded(target: WebviewMessageTarget, settings: unknown, projectRoot?: string): Thenable<boolean> | Promise<boolean> {
+  return postWebviewMessage(target, { command: 'settingsLoaded', settings, ...(projectRoot === undefined ? {} : { projectRoot }) });
 }
 
 export function postProjectsLoaded(target: WebviewMessageTarget, projects: unknown): Thenable<boolean> | Promise<boolean> {
@@ -47,4 +47,3 @@ export async function dispatchWebviewMessage(
   }
   return false;
 }
-

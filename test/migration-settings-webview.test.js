@@ -1,5 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const vm = require('node:vm');
 const { getSidebarWebviewHtml } = require('../out/sidebarWebview.js');
 const { getWebviewHtml } = require('../out/roadmapWebview.js');
@@ -171,4 +173,39 @@ test('a failed migration status read keeps the card and its error visible', () =
   assert.equal(card.hidden, false);
   assert.equal(element('[data-migration-error]').hidden, false);
   assert.equal(element('[data-migration-error]').textContent, '运行时暂时不可用');
+});
+
+test('real project scope events clear a previous project plan and ignore its late response', () => {
+  const elements = new Map(); const listeners = new Map(); const messages = []; let observe;
+  const element = selector => {
+    if (!elements.has(selector)) elements.set(selector, { hidden: false, disabled: false, style: {}, textContent: '', innerHTML: '', setAttribute() {}, removeAttribute() {} });
+    return elements.get(selector);
+  };
+  const panel = { style: { display: 'block' } };
+  const card = { querySelector: element, querySelectorAll: () => [], setAttribute() {}, addEventListener: (name, listener) => listeners.set(name, listener) };
+  vm.runInNewContext(getMigrationSettingsScript(), { currentLanguage: 'zh', vscode: { postMessage: message => messages.push(message) }, document: { getElementById: id => id === 'settings-panel' ? panel : card }, window: { addEventListener: (name, listener) => listeners.set('window-' + name, listener) }, MutationObserver: class { constructor(callback) { observe = callback; } observe() {} disconnect() {} }, setTimeout, clearTimeout });
+  const deliver = data => listeners.get('window-message')({ data: { command: 'dataMigrationLoaded', ...data } });
+  listeners.get('window-message')({ data: { command: 'projectsLoaded', projects: { selectedProjectPath: '/project/a' } } });
+  const first = messages.at(-1);
+  deliver({ requestId: first.requestId, projectRoot: '/project/a', dataRoot: '/isolated', plan: { planId: 'a-plan', files: [{ itemId: 'a', path: '/project/a/old.db' }] }, overview: { reviewableFiles: 1, jobs: [], recycling: [] } });
+  assert.equal(element('[data-migration-plan]').hidden, false);
+  listeners.get('window-message')({ data: { command: 'projectSelectionChanged', projectRoot: '/project/b', generation: 2 } });
+  assert.equal(element('[data-migration-plan]').hidden, true);
+  const second = messages.at(-1);
+  assert.equal(second.projectRoot, '/project/b');
+  listeners.get('window-message')({ data: { command: 'projectsLoaded', projects: { selectedProjectPath: '/project/a' } } });
+  assert.equal(messages.at(-1).requestId, second.requestId, 'a late project list cannot override the authoritative selection');
+  assert.equal(messages.at(-1).projectRoot, '/project/b');
+  deliver({ requestId: first.requestId, projectRoot: '/project/a', dataRoot: '/isolated', plan: { planId: 'late-a', files: [{ itemId: 'a', path: '/project/a/old.db' }] } });
+  assert.equal(element('[data-migration-plan]').hidden, true, 'a late response from the previous project stays discarded');
+  assert.ok(messages.at(-1).requestId !== first.requestId, 'the new project starts its own status request');
+});
+
+test('the host sends the Sidebar migration binder each authoritative project selection', () => {
+  const extension = fs.readFileSync(path.resolve(__dirname, '../src/extension.ts'), 'utf8');
+  const provider = fs.readFileSync(path.resolve(__dirname, '../src/sidebarProvider.ts'), 'utf8');
+  const selectProject = extension.slice(extension.indexOf('async function selectProject('), extension.indexOf('function scheduleProjectRunIndexBackfill('));
+  assert.match(selectProject, /selectedProjectPathsByDataRoot\.set\(root, projectPath\);\s*broadcastProjectSelection\(projectPath, selectionGeneration\);/);
+  assert.ok((extension.match(/broadcastProjectSelection\(/g) || []).length >= 4, 'selection, addition, and removal must all publish the authoritative scope');
+  assert.match(provider, /sendProjectSelection\(projectRoot: string, generation: number\)[\s\S]*?command: 'projectSelectionChanged', projectRoot, generation/);
 });

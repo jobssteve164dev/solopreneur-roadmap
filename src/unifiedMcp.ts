@@ -14,18 +14,19 @@ export const migrationToolNames = ['solomap_migration_start', 'solomap_migration
 
 function registerMigrationTools(server: McpServer, source: UnifiedMcpSource): void {
   const z = require('zod') as typeof import('zod');
+  const projectRoot = z.string().min(1).optional();
   const register = (name: string, description: string, inputSchema: Record<string, any>, readOnly: boolean, operation: (input: any) => Promise<unknown>): void => {
     server.registerTool(name, { description, inputSchema, annotations: { readOnlyHint: readOnly, destructiveHint: name === 'solomap_recycling_apply' } }, async input => {
       try { return { content: [{ type: 'text' as const, text: JSON.stringify(await operation(input)) }] }; }
       catch (error) { return { isError: true, content: [{ type: 'text' as const, text: error instanceof Error ? error.message : String(error) }] }; }
     });
   };
-  register('solomap_migration_start', '发现已登记项目中的旧数据并幂等加入后台迁移队列。', {}, false, () => source.call('discover_migrations', {}));
-  register('solomap_migration_status', '读取当前迁移进度、待处理项目和回收状态；提供 jobId 可读取该任务的完整来源和处理记录。', { jobId: z.string().min(1).optional() }, true, input => input.jobId
-    ? source.call('migration_status', { jobId: input.jobId }) : source.call('migration_overview', {}));
-  register('solomap_migration_retry', '重试一个明确失败或中断的迁移任务。', { jobId: z.string().min(1) }, false, input => source.call('retry_migration', input));
-  register('solomap_recycling_preview', '生成并读取可回收文件的精确清单；本工具不会回收文件。', {}, false, () => source.call('prepare_recycling', {}));
-  register('solomap_recycling_apply', '执行插件界面中已由用户逐项确认并绑定到本任务的回收清单。', { planId: z.string().min(1) }, false, input => source.call('execute_recycling_plan', input));
+  register('solomap_migration_start', '发现指定已登记项目中的旧数据并幂等加入后台迁移队列。', { projectRoot }, false, input => source.call('discover_migrations', input));
+  register('solomap_migration_status', '读取指定项目的迁移进度和回收状态；提供 jobId 可读取该任务的完整来源和处理记录。', { jobId: z.string().min(1).optional(), projectRoot }, true, input => input.jobId
+    ? source.call('migration_status', input) : source.call('migration_overview', input));
+  register('solomap_migration_retry', '重试指定项目中一个明确失败或中断的迁移任务。', { jobId: z.string().min(1), projectRoot }, false, input => source.call('retry_migration', input));
+  register('solomap_recycling_preview', '生成指定项目可回收文件的精确清单；本工具不会回收文件。', { projectRoot }, false, input => source.call('prepare_recycling', input));
+  register('solomap_recycling_apply', '执行插件界面中已由用户逐项确认并绑定到本任务的回收清单。', { planId: z.string().min(1), projectRoot }, false, input => source.call('execute_recycling_plan', input));
 }
 
 export function registerMigrationMcpTools(server: McpServer, source: UnifiedMcpSource): void { registerMigrationTools(server, source); }
