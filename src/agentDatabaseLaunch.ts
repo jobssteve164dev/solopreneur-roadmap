@@ -27,8 +27,8 @@ function buildUnobservedDatabaseAgentCommand(launch: DatabaseAgentLaunch, runId:
     if (!command) throw new Error('reviewer_read_only_mode_unsupported');
     return command;
   }
-  const read = JSON.stringify({ ref: runId, revision, view: 'content', field: 'prompt_content' });
-  const instruction = `Read the complete SoloMap task prompt using the solomap_data MCP tool solomap_read with ${read}. Keep reading every base64 data page with its cursor until cursor=null; join all decoded bytes before decoding the complete UTF-8 text. Follow the complete prompt exactly; its user request has highest priority. ${interactive ? 'Stay in this interactive session after completing the current turn.' : 'Do not answer this wrapper sentence.'}${bindingNonce ? ` SoloMap binding nonce: ${bindingNonce}.` : ''}`;
+  const read = JSON.stringify({ ref: runId, revision, view: 'full' });
+  const instruction = `Read the complete SoloMap task prompt in one call using the solomap_data MCP tool solomap_read with ${read}, then follow data.prompt_content exactly; its user request has highest priority. ${interactive ? 'Stay in this interactive session after completing the current turn.' : 'Do not answer this wrapper sentence.'}${bindingNonce ? ` SoloMap binding nonce: ${bindingNonce}.` : ''}`;
   if (launch.continuation && !interactive) return getAgentProvider(launch.agentCli) === 'codex'
     ? `ELECTRON_RUN_AS_NODE=1 ${shellQuote(process.execPath)} ${shellQuote(path.join(__dirname, 'runCodexContinuation.js'))}`
     : buildAgentContinuationCommandForPromptFile(launch.agentCli, '', workspaceRoot, sessionId, launch.taskPermissionMode, launch.selectedModel, instruction);

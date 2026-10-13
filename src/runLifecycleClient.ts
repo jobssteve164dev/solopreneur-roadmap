@@ -378,6 +378,37 @@ export class RunLifecycleClient {
     return Buffer.concat(buffers);
   }
 
+  public async readLogTailInfo(reference: string, stream: string, maxBytes: number, status?: StatusSnapshot): Promise<{ bytes: Buffer; totalBytes: number }> {
+    if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 1048576) throw new Error('run_log_tail_limit_invalid');
+    const identity = parseRunStatusReference(reference);
+    const state = await this.selectedState(reference, status);
+    if (stream === 'output' && status && state.status.nativeReplyObjectId) {
+      const reply = await this.operation('read_run_document', { projectId: state.projectId, executionLogId: identity.executionLogId, purpose: `native_reply_${state.turnId.replace(/-/g, '')}`, revision: Number(state.status.nativeReplyRevision), tailBytes: maxBytes }) as { objectId: string; bytes: string; totalBytes: number } | null;
+      if (!reply || reply.objectId !== state.status.nativeReplyObjectId) throw new Error('run_native_reply_mismatch');
+      const bytes = Buffer.from(reply.bytes, 'base64');
+      if (!Number.isInteger(reply.totalBytes) || reply.totalBytes < bytes.length) throw new Error('run_native_reply_mismatch');
+      return { bytes, totalBytes: reply.totalBytes };
+    }
+    const scope = { projectId: state.projectId, executionLogId: identity.executionLogId, stream };
+    const head = await this.operation('read_run_log_head', scope) as { totalBytes: number };
+    const turnStart = status ? Number((state.status.turnLogStartOffsets as Record<string, unknown> | undefined)?.[stream] || 0) : 0;
+    const end = status ? Number((state.status.turnLogEndOffsets as Record<string, unknown> | undefined)?.[stream] ?? head.totalBytes) : head.totalBytes;
+    if (!Number.isInteger(turnStart) || !Number.isInteger(end) || turnStart < 0 || end < turnStart || end > head.totalBytes) throw new Error('run_log_snapshot_invalid');
+    const start = Math.max(turnStart, end - maxBytes);
+    const buffers: Buffer[] = []; let offset = start;
+    while (offset < end) {
+      const page = await this.operation('read_run_log', { ...scope, offset, limit: Math.min(65536, end - offset) }) as { bytes: string };
+      const bytes = Buffer.from(page.bytes, 'base64');
+      if (!bytes.length || bytes.length > end - offset) throw new Error('run_log_read_incomplete');
+      buffers.push(bytes); offset += bytes.length;
+    }
+    return { bytes: Buffer.concat(buffers), totalBytes: end - turnStart };
+  }
+
+  public async readLogTail(reference: string, stream: string, maxBytes: number, status?: StatusSnapshot): Promise<Buffer> {
+    return (await this.readLogTailInfo(reference, stream, maxBytes, status)).bytes;
+  }
+
   public async readField(reference: string, field: 'prompt' | 'command' | 'changes' | 'workspace', status?: StatusSnapshot): Promise<string> {
     const identity = parseRunStatusReference(reference);
     const state = await this.selectedState(reference, status);

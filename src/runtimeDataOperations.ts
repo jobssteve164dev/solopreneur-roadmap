@@ -504,7 +504,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       }
       case 'read_run_document': {
         const project = await runProject(input);
-        return store.readRunDocument(project.projectId, Number(input.executionLogId), String(input.purpose || ''), input.revision === undefined ? undefined : Number(input.revision));
+        return store.readRunDocument(project.projectId, Number(input.executionLogId), String(input.purpose || ''), input.revision === undefined ? undefined : Number(input.revision), input.tailBytes === undefined ? undefined : Number(input.tailBytes));
       }
       case 'recover_run_executions': {
         if (input.identityOnly === true) {

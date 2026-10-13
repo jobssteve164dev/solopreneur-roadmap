@@ -5389,14 +5389,18 @@ export class UnifiedDataStore {
     });
     return receipt;
   }
-  public readRunDocument(projectId: string, executionLogId: number, purpose: string, revision?: number): { objectId: string; revision: number; bytes: string; hash: string; mimeType: string } | null {
+  public readRunDocument(projectId: string, executionLogId: number, purpose: string, revision?: number, tailBytes?: number): { objectId: string; revision: number; bytes: string; hash: string; mimeType: string; byteOffset: number; totalBytes: number } | null {
     const run = this.runControl(projectId, executionLogId);
     const row = this.rows('SELECT object_id FROM run_documents WHERE run_id=? AND purpose=?', [run.run_id, purpose])[0];
     if (!row) return null;
     const object = this.readMetadata(String(row.object_id), revision);
     const contentId = String(object.data.content_id);
-    const content = this.rows('SELECT sha256,mime_type FROM contents WHERE id=?', [contentId])[0];
-    return { objectId: object.objectId, revision: object.revision, bytes: this.content(contentId).toString('base64'), hash: String(content.sha256), mimeType: String(content.mime_type) };
+    const content = this.rows('SELECT sha256,mime_type,byte_length,stored_byte_length,encoding,chunk_index_json FROM contents WHERE id=?', [contentId])[0];
+    const totalBytes = Number(content.byte_length);
+    if (tailBytes !== undefined && (!Number.isInteger(tailBytes) || tailBytes < 1 || tailBytes > 1048576)) throw new Error('invalid_run_document_tail');
+    const byteOffset = tailBytes === undefined ? 0 : Math.max(0, totalBytes - tailBytes);
+    const bytes = tailBytes === undefined ? this.content(contentId) : this.contentRange(contentId, content, byteOffset, totalBytes);
+    return { objectId: object.objectId, revision: object.revision, bytes: bytes.toString('base64'), hash: String(content.sha256), mimeType: String(content.mime_type), byteOffset, totalBytes };
   }
   public writeProjectGrowth(projectId: string, data: GrowthSnapshotData, idempotencyKey: string): WriteReceipt {
     if (!data?.snapshot?.id || data.snapshot.projectPath === '') throw new Error('invalid_growth_snapshot');

@@ -49,6 +49,7 @@ test('the shared packaged runner commits complete output and host completion wit
   } finally {
     if (agent && agent.exitCode === null) { const exited = once(agent, 'exit'); agent.kill('SIGTERM'); await exited; }
     if (runtime.exitCode === null) { const exited = once(runtime, 'exit'); await sendRuntimeControlCommand(root, 'stop'); await exited; }
+    fs.rmSync(base, { recursive: true, force: true });
   }
 });
 
@@ -162,6 +163,7 @@ async function executionFixture(command, metadata = {}, initialOutput = '', runK
     async close() {
       if (agent?.exitCode === null && agent.signalCode === null) { const exited = once(agent, 'exit'); agent.kill('SIGTERM'); await exited; }
       await stopRuntime();
+      fs.rmSync(base, { recursive: true, force: true });
     }
   };
 }
@@ -196,7 +198,7 @@ test('Claude preflight preserves the source native MCP configuration after the d
     assert.equal(configured.mcpServers.solomap_data?.env.SOLOMAP_MANAGED_BRIDGE, '1');
     assert.equal(configured.theme, 'user-choice'); assert.deepEqual(configured.mcpServers.existing, { command: 'user-command' });
     assert.equal(fs.existsSync(other), false);
-  } finally { await f.close(); }
+  } finally { await f.close(); fs.rmSync(base, { recursive: true, force: true }); }
 });
 
 test('a default Claude native context keeps the config override unset when the runner inherits another override', async () => {
@@ -255,7 +257,7 @@ test('the packaged review runner preserves native read-only flags, seals full JS
       } else assert.equal(state.status.failureCode, mode === 'writes' ? 'reviewer_workspace_modified' : 'agent_review_failed');
       assert.deepEqual(fs.readdirSync(path.join(f.projectRoot, '.solopreneur')), ['project.json']);
       assert.deepEqual(fs.readdirSync(path.join(f.root, 'tmp')), []);
-    } finally { await f.close(); }
+    } finally { await f.close(); fs.rmSync(cliRoot, { recursive: true, force: true }); }
   }
 });
 
@@ -284,7 +286,7 @@ for (const mode of ['auto', 'never']) for (const preconfirmed of [false, true]) 
     assert.equal(confirmed.headRevision, 3, 'the native handshake must retain a matching confirmation without adding another revision');
     assert.equal((await f.call('read_run_state')).status.nativeSessionIdIsCurrent, true);
     assert.deepEqual(fs.readdirSync(path.join(f.projectRoot, '.solopreneur')), ['project.json']);
-  } finally { await f.close(); }
+  } finally { await f.close(); fs.rmSync(cliRoot, { recursive: true, force: true }); }
 });
 
 test('an automatic correction preserves the pre-session commit and seals its own complete Git diff', async () => {
@@ -315,7 +317,7 @@ test('an automatic correction preserves the pre-session commit and seals its own
 test('an unattended AGY correction receives its fixed database instruction through stdin and resumes the original conversation', async () => {
   const cliRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-agy-correction-cli-'));
   const cli = path.join(cliRoot, 'agy'); const sessionId = 'agy-original-conversation';
-  const source = `const args=process.argv.slice(1);if(!args.includes('--print')||args[args.indexOf('--conversation')+1]!==${JSON.stringify(sessionId)})process.exit(9);const instruction=require('fs').readFileSync(0,'utf8');if(!instruction.includes('solomap_read')||!instruction.includes('"view":"content"')||!instruction.includes('cursor=null'))process.exit(8);require('fs').writeFileSync('correction.txt',instruction);process.stdout.write('原会话已完整修正');`;
+  const source = `const args=process.argv.slice(1);if(!args.includes('--print')||args[args.indexOf('--conversation')+1]!==${JSON.stringify(sessionId)})process.exit(9);const instruction=require('fs').readFileSync(0,'utf8');if(!instruction.includes('solomap_read')||!instruction.includes('"view":"full"')||!instruction.includes('data.prompt_content')||instruction.includes('cursor=null'))process.exit(8);require('fs').writeFileSync('correction.txt',instruction);process.stdout.write('原会话已完整修正');`;
   fs.writeFileSync(cli, `#!/bin/bash\nexec ${shellQuote(process.execPath)} -e ${shellQuote(source)} -- "$@"\n`, { mode: 0o755 });
   const f = await executionFixture('placeholder', { agentLaunch: { schemaVersion: 1, agentCli: cli, selectedModel: '', taskPermissionMode: 'auto', continuation: true, direct: false }, plannedNativeSessionId: sessionId, agentCli: cli, agentDatabaseConfigPath: path.join(cliRoot, 'mcp_config.json') }, '', 'agent_review_revision');
   try {
@@ -323,7 +325,7 @@ test('an unattended AGY correction receives its fixed database instruction throu
     assert.equal(code, 0, f.stderr().toString()); assert.ok(f.stdout().toString().includes('原会话已完整修正'));
     const state = await f.call('read_run_state'); assert.equal(state.status.status, 'In Progress');
     assert.deepEqual(fs.readdirSync(path.join(f.projectRoot, '.solopreneur')), ['project.json']);
-  } finally { await f.close(); }
+  } finally { await f.close(); fs.rmSync(cliRoot, { recursive: true, force: true }); }
 });
 
 test('a Flow paused after wrapper claim keeps its child gated and resumes the same accepted role', async () => {
@@ -495,17 +497,18 @@ const {Client}=require(${JSON.stringify(require.resolve('@modelcontextprotocol/s
 const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcontextprotocol/sdk/client/stdio.js'))});
 async function main(){
  const instruction=process.argv.slice(2).find(value=>value.startsWith('Read the complete SoloMap'));
- const match=instruction?.match(/solomap_read with (\\{.*?\\})\\./);
+ const match=instruction?.match(/solomap_read with (\\{.*?\\}),/);
  if(!match)throw Error('database prompt instruction missing');
  const parameters=JSON.parse(match[1]);
+ if(parameters.view!=='full')throw Error('database prompt must use one full read');
  const configured=JSON.parse(fs.readFileSync(process.env.SOLOMAP_TEST_MCP_CONFIG,'utf8')).mcpServers.solomap_data;
  const client=new Client({name:'real-cli-prompt-reader',version:'1'});
  const transport=new StdioClientTransport({...configured,cwd:process.cwd(),stderr:'pipe'});
- try {await client.connect(transport);let cursor;const parts=[];do{
-  const response=await client.callTool({name:'solomap_read',arguments:{...parameters,...(cursor?{cursor}:{}),limit:8192}});
+ try {await client.connect(transport);
+  const response=await client.callTool({name:'solomap_read',arguments:parameters});
   if(response.isError)throw Error(response.content[0].text);
-  const page=JSON.parse(response.content[0].text);parts.push(Buffer.from(page.data,'base64'));cursor=page.cursor;
- }while(cursor!==null);await new Promise(resolve=>process.stdout.write(Buffer.concat(parts),resolve));}
+  const result=JSON.parse(response.content[0].text);if(typeof result?.data?.prompt_content!=='string')throw Error('complete prompt missing');
+  await new Promise(resolve=>process.stdout.write(result.data.prompt_content,resolve));}
  finally {await client.close();await transport.close();}
 }
 main().catch(error=>{process.stderr.write(String(error));process.exitCode=1});`;
@@ -786,5 +789,5 @@ test('Codex resume latency cannot start a correction after the parent entered a 
     assert.notEqual(code, 0, f.stderr().toString());
     assert.equal((await f.call('read_run_state')).status.status, 'Running');
     assert.equal((await f.call('read_run_state', { executionLogId: 2 })).status.status, 'Failed');
-  } finally { await f.close(); }
+  } finally { await f.close(); fs.rmSync(cliRoot, { recursive: true, force: true }); }
 });

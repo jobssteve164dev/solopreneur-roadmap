@@ -9511,7 +9511,8 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
     const binding = await consumerClient.readBinding(normalizedStatusFilePath, statusData);
     const resumableBinding = getResumableSessionValue(binding);
     const redactNonce = (value: string) => binding?.bindingNonce ? value.split(binding.bindingNonce).join('[SoloMap session binding]') : value;
-    const outputText = (await consumerClient.readData(String(outputFilePath), statusData)).toString('utf8');
+    const outputSnapshot = await consumerClient.readLogTailInfo(normalizedStatusFilePath, 'output', 64 * 1024, statusData);
+    const outputText = outputSnapshot.bytes.toString('utf8');
     const outputTail = redactNonce(cleanTerminalControlSequences(outputText).trim().slice(-4000));
     const capturedSessionId = resumableBinding?.sessionId || '';
     const recordedCodexHome = (await consumerClient.readData(String(codexHomeFilePath), statusData)).toString('utf8').trim();
@@ -9708,7 +9709,7 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
     if (workspaceRoot && executionLogId) {
       try {
         const toRuntimePath = (candidate: string | undefined) => String(candidate || '');
-        const outputBytes = Buffer.byteLength(outputText);
+        const outputBytes = outputSnapshot.totalBytes;
         const changedFiles = parseFileSummaryLines(changedFilesSummary).map((filePath) => ({
           filePath,
           role: 'changed'

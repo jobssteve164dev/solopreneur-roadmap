@@ -73,3 +73,12 @@ test('only a supported managed Claude launch adds the shared plugin flag to its 
     assert.match(observed, /claude-observer/);
   }
 });
+
+test('a normal database launch claims its complete prompt with one full read', () => {
+  const launch = { schemaVersion: 1, agentCli: '/native path/claude', selectedModel: '', taskPermissionMode: 'auto', continuation: false, direct: false };
+  const command = buildDatabaseAgentCommand(launch, '11111111-1111-4111-8111-111111111111', 7, '/workspace path', true);
+  assert.match(command, /solomap_read/);
+  assert.match(command, /"view":"full"/);
+  assert.match(command, /data\.prompt_content/);
+  assert.doesNotMatch(command, /"view":"content"|cursor=null|base64 data page|decoded bytes/);
+});

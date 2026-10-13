@@ -12,7 +12,7 @@ async function fixture() {
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
   const call = (operation, input) => ops({ operation, input });
   const state = await call('prepare_run', { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: 'original 🌿 input\n'.repeat(10000), command: 'original command', userMessage: '用户目标', metadata: { interactiveSession: true }, idempotencyKey: 'client-prepare' });
-  return { base, root, project, state, store, call, async close() { await ops.close(); store.close(); } };
+  return { base, root, project, state, store, call, async close() { await ops.close(); store.close(); fs.rmSync(base, { recursive: true, force: true }); } };
 }
 
 test('review consumption pins the complete formal decision and launch evidence while later document revisions change', async () => {
@@ -93,6 +93,51 @@ test('settlement output reads keep the accepted turn boundaries while a later tu
     const current = await client.readStatus(ref);
     assert.deepEqual(await client.readData(current.outputFilePath, current), second);
     assert.deepEqual(await client.readLog(ref, 'output'), Buffer.concat([first, second]));
+  } finally { await f.close(); }
+});
+
+test('settlement tail reads fetch only the bounded end of the accepted turn', async () => {
+  const { RunLifecycleClient, runStatusReference } = require('../out/runLifecycleClient.js');
+  const f = await fixture();
+  try {
+    const ref = runStatusReference(f.project, 1);
+    const first = Buffer.concat([Buffer.alloc(256 * 1024, 65), Buffer.from('第一轮结尾🌿')]);
+    const identity = { projectId: f.state.projectId, executionLogId: 1, generation: f.state.generation, stream: 'stdout' };
+    await f.call('append_run_log', { ...identity, sequence: 0, offset: 0, bytes: first.toString('base64'), idempotencyKey: 'bounded-tail-first' });
+    const complete = await new RunLifecycleClient(f.call).checkpoint(ref, await new RunLifecycleClient(f.call).readStatus(ref), { action: 'complete', outcome: 'partial', summary: '第一轮结论', idempotencyKey: 'bounded-tail-complete' });
+    const reads = [];
+    const client = new RunLifecycleClient(async (operation, input) => {
+      if (operation === 'read_run_log') reads.push({ offset: input.offset, limit: input.limit });
+      return f.call(operation, input);
+    });
+    const expected = first.subarray(first.length - 4096);
+    assert.deepEqual(await client.readLogTail(ref, 'output', 4096, complete), expected);
+    assert.deepEqual(await client.readLogTailInfo(ref, 'output', 4096, complete), { bytes: expected, totalBytes: first.length });
+    assert.deepEqual(reads, [
+      { offset: first.length - 4096, limit: 4096 },
+      { offset: first.length - 4096, limit: 4096 }
+    ]);
+  } finally { await f.close(); }
+});
+
+test('a native reply tail reads only the requested suffix and retains its full byte length', async () => {
+  const { RunLifecycleClient, runStatusReference } = require('../out/runLifecycleClient.js');
+  const f = await fixture();
+  try {
+    const reply = Buffer.concat([Buffer.alloc(256 * 1024, 66), Buffer.from('原生回复结尾🌿')]);
+    const complete = await f.call('checkpoint_run', {
+      projectId: f.state.projectId, executionLogId: 1, generation: f.state.generation, proof: f.state.proof,
+      expectedRevision: f.state.revision, expectedTurnId: f.state.turnId, action: 'complete', outcome: 'partial',
+      summary: '原生回复完成', workspaceEvidenceSource: 'native', nativeReply: reply.toString(), idempotencyKey: 'native-tail-complete'
+    });
+    const reads = [];
+    const client = new RunLifecycleClient(async (operation, input) => {
+      if (operation === 'read_run_document') reads.push({ tailBytes: input.tailBytes, purpose: input.purpose });
+      return f.call(operation, input);
+    });
+    const info = await client.readLogTailInfo(runStatusReference(f.project, 1), 'output', 4096, await client.readStatus(runStatusReference(f.project, 1), complete.revision));
+    assert.deepEqual(info, { bytes: reply.subarray(reply.length - 4096), totalBytes: reply.length });
+    assert.deepEqual(reads, [{ tailBytes: 4096, purpose: `native_reply_${f.state.turnId.replace(/-/g, '')}` }]);
   } finally { await f.close(); }
 });
 

@@ -579,12 +579,18 @@ test('production settlement commits the accepted turn to durable history and cre
       activeProjectRoot = project; syncEngine = engine; extensionContextRef = { extensionPath: path.resolve(__dirname, '..') };
       getPersistedSettings = () => ({ globalDataPath: root });
       getSelectedProjectPath = () => project;
+      sendNodesToWebview = async () => {};
     };
     module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; };
   `);
   const engine = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
+  const outputReads = [];
+  const tracedOps = request => {
+    if (request.operation === 'read_run_log' && request.input.stream === 'output') outputReads.push({ offset: request.input.offset, limit: request.input.limit });
+    return ops(request);
+  };
   actualTransport.sendRuntimeDataRequest = (_root, request) => ops(request);
-  extension.connect(ops, root, project, engine);
+  extension.connect(tracedOps, root, project, engine);
   try {
     const ref = `solomap://run-state/1?root=${encodeURIComponent(project)}`;
     // Runtime receives the explicit data root from the run even without an active window.
@@ -593,11 +599,14 @@ test('production settlement commits the accepted turn to durable history and cre
     assert.equal(current.status.status, 'Waiting');
     const history = await ops({ operation: 'read_run_settlements', input: { projectId: run.projectId, executionLogId: 1 } });
     assert.equal(history.items.length, 1); assert.match(history.items[0].journal.output, /已提交完整结果🌿/);
+    assert.deepEqual(outputReads, [{ offset: output.length - 64 * 1024, limit: 64 * 1024 }]);
     assert.equal(history.items[0].reportObjectId, current.status.taskReportObjectId);
     assert.match(history.items[0].journal.command, /actual command/);
     assert.ok(history.items[0].learningEventId);
     assert.deepEqual(store.readRunLog(run.projectId, { executionLogId: 1, stream: 'output', offset: output.length - 30 }).bytes, output.subarray(output.length - 30).toString('base64'));
     assert.equal(engine.getProjectAgentExecutions()[0].output, history.items[0].journal.output);
+    const indexes = await ops({ operation: 'read_project_run_indexes', input: { root: project, limit: 10, offset: 0 } });
+    assert.equal(indexes[0].outputBytes, output.length);
     await extension.settle(ref);
     assert.equal((await ops({ operation: 'read_run_settlements', input: { projectId: run.projectId, executionLogId: 1 } })).items.length, 1);
     let next = await ops({ operation: 'read_run_checkpoint_state', input: { projectId: run.projectId, executionLogId: 1 } });
@@ -613,7 +622,7 @@ test('production settlement commits the accepted turn to durable history and cre
     const stillRunning = await ops({ operation: 'read_run_state', input: { projectId: run.projectId, executionLogId: 1 } });
     assert.equal(stillRunning.turnId, latest.turnId); assert.equal(stillRunning.status.status, 'Running');
     assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
-  } finally { extension.restore(); actualTransport.sendRuntimeDataRequest = previousTransport; engine.close(); await ops.close(); store.close(); }
+  } finally { extension.restore(); actualTransport.sendRuntimeDataRequest = previousTransport; engine.close(); await ops.close(); store.close(); fs.rmSync(base, { recursive: true, force: true }); }
 });
 
 test('the production Agent preparation entry commits to Runtime and creates no permanent run or status files', async () => {
@@ -15200,7 +15209,7 @@ test('Verifier successful close auto-attributes roadmap step status to Completed
     fs.mkdirSync(project); fs.mkdirSync(other);
     const closes = [], fixture = require('./analysis-fixture.js');
     let native = await fixture.openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: project }, { path: other }]);
-    t.after(async () => { for (const close of closes.splice(0).reverse()) await close(); });
+    t.after(async () => { try { for (const close of closes.splice(0).reverse()) await close(); } finally { fs.rmSync(base, { recursive: true, force: true }); } });
     const transport = require('../out/autonomousRuntimeControl.js'), operation = async (operation, input) => { try { return await transport.sendRuntimeDataRequest(root, { operation, input }); } catch (error) { error.message = `${operation} root=${input.root || ''} flow=${input.flowId || ''}: ${error.message}`; throw error; } };
     const { SyncEngine } = require('../out/db/syncEngine.js'), engines = [];
     const csv = ['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt', '3,交付真实结果,验证后完成,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,', '4,另一个任务,不能误改,实施,,claude,Keep,In Progress,2026-01-01T00:00:00.000Z,'].join('\n');
@@ -15431,7 +15440,7 @@ test('settings review executes one Agent and persists its generated global promp
     for (const dir of [workspace, other, config]) fs.mkdirSync(dir);
     const closes = [], fixture = require('./analysis-fixture.js');
     let native = await fixture.openAnalysisOwner({ after: close => closes.push(close) }, root, [{ path: workspace }, { path: other }]);
-    t.after(async () => { for (const close of closes.splice(0).reverse()) await close(); });
+    t.after(async () => { try { for (const close of closes.splice(0).reverse()) await close(); } finally { fs.rmSync(base, { recursive: true, force: true }); } });
     const transport = require('../out/autonomousRuntimeControl.js'), { RunLifecycleClient, runStatusReference } = require('../out/runLifecycleClient.js');
     const call = (operation, input) => transport.sendRuntimeDataRequest(root, { operation, input }), client = new RunLifecycleClient(call, root);
     const hash = bytes => require('node:crypto').createHash('sha256').update(bytes).digest('hex');
@@ -15449,17 +15458,17 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),crypto=require(
 const {Client}=require(${JSON.stringify(require.resolve('@modelcontextprotocol/sdk/client/index.js'))});
 const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcontextprotocol/sdk/client/stdio.js'))});
 (async()=>{
- const wrapper=process.argv.find(a=>a.includes('Read the complete SoloMap task prompt using'));
+ const wrapper=process.argv.find(a=>a.includes('Read the complete SoloMap task prompt in one call using'));
  assert.ok(wrapper,'the actual generated native command must supply the database wrapper');
- const read=JSON.parse(wrapper.match(/with (\\{.*?\\})\\. Keep reading/)[1]);
+ const read=JSON.parse(wrapper.match(/with (\\{.*?\\}), then follow/)[1]);
  const config=JSON.parse(fs.readFileSync(process.env.CLAUDE_CONFIG_DIR+'/.claude.json','utf8')).mcpServers.solomap_data;
  const mcp=new Client({name:'settings-review-controlled-cli',version:'1.0.0'});
  await mcp.connect(new StdioClientTransport({command:config.command,args:config.args,cwd:process.cwd(),env:{...process.env,...config.env},stderr:'pipe'}));
  const tool=async(name,args)=>{const r=await mcp.callTool({name,arguments:args});assert.notEqual(r.isError,true,JSON.stringify(r.content));return JSON.parse(r.content[0].text);};
  const full=async(args)=>{let cursor,parts=[],pages=0,sha;do{const page=await tool('solomap_read',{...args,...(cursor?{cursor}:{})});parts.push(Buffer.from(page.data,'base64'));cursor=page.cursor;sha=page.sha256;pages++;}while(cursor);const bytes=Buffer.concat(parts);assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),sha);return {text:bytes.toString('utf8'),pages};};
  try{
-  const prompt=await full(read);assert.ok(prompt.text.includes('完整全局默认提示词'));
-  const batch=prompt.text.match(/本次固定复盘批次=([0-9a-f-]+)，初始revision=(\\d+)/);assert.ok(batch);
+  const prompt=await tool('solomap_read',read);assert.ok(prompt.data.prompt_content.includes('完整全局默认提示词'));
+  const batch=prompt.data.prompt_content.match(/本次固定复盘批次=([0-9a-f-]+)，初始revision=(\\d+)/);assert.ok(batch);
   const ref=batch[1],revision=Number(batch[2]),meta=await tool('solomap_read',{ref,revision,view:'metadata'});
   const sources=meta.projection.sources,receipts=[];let evidence;
   for(const s of sources){const value=await full({ref,revision,view:'content',field:'review_source:'+s.id});receipts.push({id:s.id,content:value.text,pages:value.pages});if(value.text.includes('用户确认：完成当前目标后核验完整结果。')){evidence=s.id;assert.equal(crypto.createHash('sha256').update(JSON.parse(value.text).content).digest('hex'),${JSON.stringify(hash(fullSource))});assert.ok(value.pages>1);}}
@@ -15471,7 +15480,7 @@ const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcon
   const committed=await tool('solomap_write',{kind:'review_batch',action:'patch',scope:process.env.SOLOMAP_PROJECT_ID,objectId:ref,expectedRevision:current.revision,idempotencyKey:'settings-review-proposal:'+ref,data:{proposal_content:JSON.stringify(proposal)}});
   const result=await full({ref,revision:committed.revision,view:'content',field:'proposal_content'});assert.equal(result.text,JSON.stringify(proposal));
   process.stdout.write('完整复盘输出🌿\\n'.repeat(10000));
-  process.stdout.write('SETTINGS_REVIEW_RECEIPT='+JSON.stringify({pid:process.pid,runId:read.ref,runRevision:read.revision,prompt:prompt.text,promptPages:prompt.pages,batchId:ref,batchRevision:revision,proposal,proposalRevision:committed.revision,sources:receipts,policyWriteDenied:true})+'\\n');
+  process.stdout.write('SETTINGS_REVIEW_RECEIPT='+JSON.stringify({pid:process.pid,runId:read.ref,runRevision:read.revision,prompt:prompt.data.prompt_content,promptReads:1,batchId:ref,batchRevision:revision,proposal,proposalRevision:committed.revision,sources:receipts,policyWriteDenied:true})+'\\n');
  }finally{await mcp.close();}
 })().catch(error=>{process.stderr.write(error.stack+'\\n');process.exitCode=1;});
 `);
