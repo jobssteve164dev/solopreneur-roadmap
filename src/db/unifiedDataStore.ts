@@ -6792,7 +6792,9 @@ export class UnifiedDataStore {
     const usedPages = Number(this.rows('PRAGMA page_count')[0]?.page_count || 0) - Number(this.rows('PRAGMA freelist_count')[0]?.freelist_count || 0);
     const stat = (fs as typeof fs & { statfsSync(target: string): { bavail: number | bigint; bsize: number | bigint } }).statfsSync(this.root);
     const available = Number(stat.bavail) * Number(stat.bsize);
-    if (available < usedPages * pageSize * 1.2 + 64 * 1024 * 1024) throw new Error('database_compaction_space_insufficient');
+    // WAL-mode VACUUM needs room for both its temporary database image and the
+    // transaction WAL that copies that image back into the live database.
+    if (available < usedPages * pageSize * 2.2 + 64 * 1024 * 1024) throw new Error('database_compaction_space_insufficient');
     this.db.run('VACUUM');
     this.db.run('PRAGMA optimize');
     this.db.run('PRAGMA wal_checkpoint(TRUNCATE)');

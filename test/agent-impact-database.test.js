@@ -169,6 +169,19 @@ test('every direct content reference has a leading index for bounded cleanup', (
   assert.deepEqual(missing, []);
 }));
 
+test('database compaction reserves space for both the vacuum image and WAL commit', () => fixture(async ({ store }) => {
+  const pageSize = Number(store.rows('PRAGMA page_size')[0].page_size);
+  const usedPages = Number(store.rows('PRAGMA page_count')[0].page_count) - Number(store.rows('PRAGMA freelist_count')[0].freelist_count);
+  const available = Math.ceil(usedPages * pageSize * 1.5 + 64 * 1024 * 1024);
+  const originalStatfs = fs.statfsSync;
+  fs.statfsSync = () => ({ bavail: available, bsize: 1 });
+  try {
+    assert.throws(() => store.compactDatabaseStorage(), /database_compaction_space_insufficient/);
+  } finally {
+    fs.statfsSync = originalStatfs;
+  }
+}));
+
 test('storage maintenance retires empty vanished SoloMap test projects before future startup discovery', () => fixture(async ({ workspace, store, ops }) => {
   const staleRoot = path.join(path.dirname(workspace), 'solomap-old-init-Ab12cd');
   fs.mkdirSync(staleRoot);
