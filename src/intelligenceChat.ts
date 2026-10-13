@@ -1,6 +1,4 @@
 import * as crypto from 'crypto';
-import * as fs from 'fs';
-import * as path from 'path';
 
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
@@ -24,56 +22,32 @@ export interface IntelligenceConversation {
   messages: IntelligenceMessage[];
 }
 
+type IntelligenceDataRequest = <T>(root: string, request: { operation: string; input: Record<string, unknown> }) => Promise<T>;
+
 export class IntelligenceConversationStore {
-  private readonly directory: string;
   private readonly pending = new Map<string, Promise<unknown>>();
 
   constructor(
     private readonly globalDataPath: string,
-    private readonly reply: (messages: IntelligenceMessage[]) => Promise<string>
-  ) {
-    this.directory = path.join(normalizeGlobalDataPathForExtension(globalDataPath), 'intelligence-conversations');
-  }
+    private readonly reply: (messages: IntelligenceMessage[]) => Promise<string>,
+    private readonly dataRequest: IntelligenceDataRequest = sendRuntimeDataRequest
+  ) {}
 
-  private filePath(id: string): string {
+  private validateId(id: string): void {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
       throw new Error('Invalid intelligence conversation ID.');
     }
-    return path.join(this.directory, `${id}.json`);
   }
 
   private get databaseRoot(): string { return normalizeGlobalDataPathForExtension(this.globalDataPath); }
-  private get databaseBacked(): boolean { return fs.existsSync(path.join(this.databaseRoot, 'solomap.db')); }
 
-  get(id: string): IntelligenceConversation | null | Promise<IntelligenceConversation | null> {
-    this.filePath(id);
-    if (this.databaseBacked) return sendRuntimeDataRequest<{ conversation: IntelligenceConversation } | null>(this.databaseRoot, { operation: 'read_intelligence_conversation', input: { id } }).then(state => state?.conversation || null);
-    return this.getLegacy(id);
+  get(id: string): Promise<IntelligenceConversation | null> {
+    this.validateId(id);
+    return this.dataRequest<{ conversation: IntelligenceConversation } | null>(this.databaseRoot, { operation: 'read_intelligence_conversation', input: { id } }).then(state => state?.conversation || null);
   }
 
-  private getLegacy(id: string): IntelligenceConversation | null {
-    const filePath = this.filePath(id);
-    if (!fs.existsSync(filePath)) return null;
-    const value = JSON.parse(fs.readFileSync(filePath, 'utf8')) as IntelligenceConversation;
-    if (value.id !== id || !Array.isArray(value.messages)) throw new Error('Intelligence conversation data is invalid.');
-    return value;
-  }
-
-  list(): Array<Pick<IntelligenceConversation, 'id' | 'title' | 'updatedAt'>> | Promise<Array<Pick<IntelligenceConversation, 'id' | 'title' | 'updatedAt'>>> {
-    if (this.databaseBacked) return sendRuntimeDataRequest(this.databaseRoot, { operation: 'list_intelligence_conversations', input: {} });
-    if (!fs.existsSync(this.directory)) return [];
-    return fs.readdirSync(this.directory)
-      .filter(name => /^[0-9a-f-]{36}\.json$/i.test(name))
-      .map(name => {
-        try {
-          const conversation = this.getLegacy(name.slice(0, -5));
-          return conversation && { id: conversation.id, title: conversation.title, updatedAt: conversation.updatedAt };
-        } catch {
-          return null;
-        }
-      })
-      .filter((item): item is Pick<IntelligenceConversation, 'id' | 'title' | 'updatedAt'> => Boolean(item))
-      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  list(): Promise<Array<Pick<IntelligenceConversation, 'id' | 'title' | 'updatedAt'>>> {
+    return this.dataRequest(this.databaseRoot, { operation: 'list_intelligence_conversations', input: {} });
   }
 
   send(text: string, conversationId = '', canCommit: () => boolean = () => true): Promise<IntelligenceConversation> {
@@ -84,23 +58,19 @@ export class IntelligenceConversationStore {
       const startedAt = Date.now();
       trace.record('conversation.queue', 'start');
       const id = conversationId || crypto.randomUUID();
-      this.filePath(id);
+      this.validateId(id);
       const previous = this.pending.get(id) || Promise.resolve();
       const operation = previous.catch(() => undefined).then(async () => {
-        trace.record('conversation.queue', 'ok', Date.now() - startedAt);
-        const requestId = crypto.randomUUID();
-        for (;;) {
-        const databaseBacked = this.databaseBacked;
-        const state = databaseBacked
-          ? await sendRuntimeDataRequest<{ conversation: IntelligenceConversation; revision: number } | null>(this.databaseRoot, { operation: 'read_intelligence_conversation', input: { id } })
-          : null;
-        const current = databaseBacked ? state?.conversation || null : this.getLegacy(id);
+      trace.record('conversation.queue', 'ok', Date.now() - startedAt);
+      const requestId = crypto.randomUUID();
+      for (;;) {
+        const state = await this.dataRequest<{ conversation: IntelligenceConversation; revision: number } | null>(this.databaseRoot, { operation: 'read_intelligence_conversation', input: { id } });
+        const current = state?.conversation || null;
         if (conversationId && !current) throw new Error('Intelligence conversation was not found.');
         const messages: IntelligenceMessage[] = [...(current?.messages || []), { role: 'user', content }];
         const answer = String(await observeLocalDiagnosticStage('conversation.reply', () => this.reply(messages))).trim();
         if (!answer) throw new Error('Intelligence did not return an answer.');
         if (!canCommit()) throw new Error('intelligence_reply_revoked');
-        if (!databaseBacked && this.databaseBacked) continue;
         const now = new Date().toISOString();
         const conversation: IntelligenceConversation = {
           id,
@@ -110,17 +80,9 @@ export class IntelligenceConversationStore {
           messages: [...messages, { role: 'assistant', content: answer }]
         };
         try { await observeLocalDiagnosticStage('conversation.persist', async () => {
-          if (databaseBacked) {
-            await sendRuntimeDataRequest(this.databaseRoot, { operation: 'write_intelligence_conversation', input: { conversation, expectedRevision: state?.revision || 0, idempotencyKey: `${requestId}:${state?.revision || 0}` } });
-            return;
-          }
-          fs.mkdirSync(this.directory, { recursive: true, mode: 0o700 });
-          const filePath = this.filePath(id);
-          const temporaryPath = `${filePath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
-          fs.writeFileSync(temporaryPath, JSON.stringify(conversation), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-          fs.renameSync(temporaryPath, filePath);
+          await this.dataRequest(this.databaseRoot, { operation: 'write_intelligence_conversation', input: { conversation, expectedRevision: state?.revision || 0, idempotencyKey: `${requestId}:${state?.revision || 0}` } });
         }); } catch (error) {
-          if (databaseBacked && error instanceof Error && error.message === 'revision_conflict') continue;
+          if (error instanceof Error && error.message === 'revision_conflict') continue;
           throw error;
         }
         return conversation;

@@ -16,6 +16,19 @@ function operationFile(globalRoot) {
   return path.join(directory, fs.readdirSync(directory).find(name => /^recent-operations\.\d+-[a-f0-9]{8}\.json$/.test(name)));
 }
 
+function cleanupExact(root) {
+  if (!fs.existsSync(root)) return;
+  const directories = [root], files = [];
+  const visit = directory => fs.readdirSync(directory).forEach(name => {
+    const target = path.join(directory, name), state = fs.lstatSync(target);
+    if (state.isDirectory() && !state.isSymbolicLink()) { directories.push(target); visit(target); }
+    else files.push(target);
+  });
+  visit(root);
+  files.forEach(file => fs.unlinkSync(file));
+  directories.sort((left, right) => right.length - left.length).forEach(directory => fs.rmdirSync(directory));
+}
+
 function captureDiagnosticEvents(t, diagnostics, globalRoot) {
   const entries = [];
   diagnostics.configureLocalDiagnosticPersistence({
@@ -26,6 +39,28 @@ function captureDiagnosticEvents(t, diagnostics, globalRoot) {
   }, globalRoot);
   t.after(() => diagnostics.configureLocalDiagnosticPersistence(undefined));
   return entries;
+}
+
+function createConversationDataRequest() {
+  const values = new Map();
+  return async (_root, request) => {
+    if (request.operation === 'read_intelligence_conversation') {
+      const value = values.get(request.input.id);
+      return value ? { conversation: structuredClone(value.conversation), revision: value.revision } : null;
+    }
+    if (request.operation === 'list_intelligence_conversations') {
+      return [...values.values()].map(value => ({ id: value.conversation.id, title: value.conversation.title, updatedAt: value.conversation.updatedAt }))
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    }
+    if (request.operation === 'write_intelligence_conversation') {
+      const current = values.get(request.input.conversation.id);
+      if ((current?.revision || 0) !== request.input.expectedRevision) throw new Error('revision_conflict');
+      const revision = (current?.revision || 0) + 1;
+      values.set(request.input.conversation.id, { conversation: structuredClone(request.input.conversation), revision });
+      return { revision };
+    }
+    throw new Error(`unexpected intelligence operation: ${request.operation}`);
+  };
 }
 
 test('smart kernel read tools are discovered and called through standard MCP', async () => {
@@ -158,15 +193,7 @@ test('Telegram replies continue in the sidebar Pi conversation and can use read-
   const { createTelegramIntelligenceReply } = require('../out/telegramIntelligenceChat.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-tg-pi-'));
   t.after(() => {
-    const globalRoot = path.join(root, '.solomap-global');
-    const directory = path.join(globalRoot, 'intelligence-conversations');
-    if (fs.existsSync(directory)) {
-      for (const name of fs.readdirSync(directory)) fs.unlinkSync(path.join(directory, name));
-      fs.rmdirSync(directory);
-      removeDiagnosticTrace(globalRoot);
-      fs.rmdirSync(globalRoot);
-    }
-    fs.rmdirSync(root);
+    cleanupExact(root);
   });
   const prompts = [];
   const engine = new EmbeddedPiAgentEngine({
@@ -176,6 +203,7 @@ test('Telegram replies continue in the sidebar Pi conversation and can use read-
       return prompts.length === 2 ? '当前项目 Beta 尚需验证付费。' : '先验证付费流程。';
     }
   });
+  const dataRequest = createConversationDataRequest();
   const store = new IntelligenceConversationStore(root, async messages => {
     const session = await createIntelligenceMcpSession({
       getProjects: () => [{ name: 'Beta', path: '/private/beta' }],
@@ -188,13 +216,13 @@ test('Telegram replies continue in the sidebar Pi conversation and can use read-
     } finally {
       await session.close();
     }
-  });
+  }, dataRequest);
   let savedIds = {};
   const reply = createTelegramIntelligenceReply(() => store, () => savedIds, async ids => { savedIds = ids; }, () => 0);
   assert.equal(await reply('123456', '当前项目还要做什么？'), '当前项目 Beta 尚需验证付费。');
   assert.equal(await reply('123456', '先做哪一步？'), '先验证付费流程。');
-  assert.equal(store.list().length, 1);
-  assert.equal(store.get(savedIds['123456']).messages.length, 4);
+  assert.equal((await store.list()).length, 1);
+  assert.equal((await store.get(savedIds['123456'])).messages.length, 4);
   assert.match(prompts[1], /TOOLRESULT:/);
   assert.match(prompts[1], /验证付费/);
   assert.match(prompts[2], /当前项目 Beta 尚需验证付费/);
@@ -206,19 +234,11 @@ test('unlinking Telegram during a Pi answer cannot restore its old conversation'
   const { createTelegramIntelligenceReply } = require('../out/telegramIntelligenceChat.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-tg-unlink-'));
   t.after(() => {
-    const globalRoot = path.join(root, '.solomap-global');
-    const directory = path.join(globalRoot, 'intelligence-conversations');
-    if (fs.existsSync(directory)) {
-      for (const name of fs.readdirSync(directory)) fs.unlinkSync(path.join(directory, name));
-      fs.rmdirSync(directory);
-      removeDiagnosticTrace(globalRoot);
-      fs.rmdirSync(globalRoot);
-    }
-    fs.rmdirSync(root);
+    cleanupExact(root);
   });
   let release;
   const waiting = new Promise(resolve => { release = resolve; });
-  const store = new IntelligenceConversationStore(root, async () => { await waiting; return '旧答案'; });
+  const store = new IntelligenceConversationStore(root, async () => { await waiting; return '旧答案'; }, createConversationDataRequest());
   let savedIds = {};
   let generation = 0;
   const reply = createTelegramIntelligenceReply(() => store, () => savedIds,
@@ -417,18 +437,13 @@ test('smart kernel chat saves a separate durable conversation and resumes its hi
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-intelligence-chat-'));
   const replies = [];
   let conversationId = '';
+  const dataRequest = createConversationDataRequest();
   const store = new IntelligenceConversationStore(root, async messages => {
     replies.push(messages.map(message => message.content));
     return replies.length === 1 ? '先确认影响范围。' : '查看最近的登录失败反馈。';
-  });
+  }, dataRequest);
   t.after(() => {
-    const globalRoot = path.join(root, '.solomap-global');
-    const folder = path.join(globalRoot, 'intelligence-conversations');
-    if (conversationId) fs.unlinkSync(path.join(folder, `${conversationId}.json`));
-    fs.rmdirSync(folder);
-    removeDiagnosticTrace(globalRoot);
-    fs.rmdirSync(globalRoot);
-    fs.rmdirSync(root);
+    cleanupExact(root);
   });
   const first = await store.send('先修登录还是做导出？');
   conversationId = first.id;
@@ -437,21 +452,18 @@ test('smart kernel chat saves a separate durable conversation and resumes its hi
   assert.equal(second.id, first.id);
   assert.equal(second.messages.length, 4);
   assert.deepEqual(replies[1], ['先修登录还是做导出？', '先确认影响范围。', '怎么确认影响范围？']);
-  const reopened = new IntelligenceConversationStore(root, async () => 'unused');
-  assert.equal(reopened.list()[0].id, first.id);
-  assert.deepEqual(reopened.get(first.id).messages, second.messages);
+  const reopened = new IntelligenceConversationStore(root, async () => 'unused', dataRequest);
+  assert.equal((await reopened.list())[0].id, first.id);
+  assert.deepEqual((await reopened.get(first.id)).messages, second.messages);
 });
 
 test('smart kernel chat keeps the draft available when generation fails', async t => {
   const { IntelligenceConversationStore } = require('../out/intelligenceChat.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-intelligence-chat-failure-'));
   t.after(() => {
-    const globalRoot = path.join(root, '.solomap-global');
-    removeDiagnosticTrace(globalRoot);
-    if (fs.existsSync(globalRoot)) fs.rmdirSync(globalRoot);
-    fs.rmdirSync(root);
+    cleanupExact(root);
   });
-  const store = new IntelligenceConversationStore(root, async () => { throw new Error('model unavailable'); });
+  const store = new IntelligenceConversationStore(root, async () => { throw new Error('model unavailable'); }, createConversationDataRequest());
   await assert.rejects(() => store.send('继续这个问题'), /model unavailable/);
-  assert.deepEqual(store.list(), []);
+  assert.deepEqual(await store.list(), []);
 });

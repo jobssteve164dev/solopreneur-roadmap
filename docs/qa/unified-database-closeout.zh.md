@@ -14,7 +14,7 @@
 
 ## 当前交付状态
 
-更新时间：2026-10-12。**包1至包6已验收（未发布），八包6/8，尚未终态发布。** 公共 Agent CLI 链路由两个真实认证 CLI 覆盖，不要求用户提供所有受支持供应方的账号；未取得入口的适配器保留契约与负向验证范围说明。[新版实施蓝图](../architecture/unified-database-execution-blueprint.zh.md)保持原八包范围，当前推进包7。
+更新时间：2026-10-13。**包1至包8已验收（未发布），八包8/8，等待统一生产发布。** 公共 Agent CLI 链路由两个真实认证 CLI 覆盖，不要求用户提供所有受支持供应方的账号；未取得入口的适配器保留契约与负向验证范围说明。[新版实施蓝图](../architecture/unified-database-execution-blueprint.zh.md)保持原八包范围。
 
 本节是唯一当前状态入口。后文“历史推进记录”“历史交付项记录”和各次验证日志全部保留用于定位证据，其进行中/待实施/最新闭环等旧措辞不覆盖本表。旧具体问题的闭环只证明其限定结果，不能累计成整包进度。
 
@@ -26,8 +26,8 @@
 | 4 项目、设置、UI、后台 / P4-A/B | 已验收（未发布） | 项目登记、设置与设备UI叶子状态、多窗口CAS、Runtime单owner与暂停读写、调度/通知/TG inbox/outbox的接管和恢复幂等、旧runtime importer及producer退出已闭合。F17按现存原生宿主配置恢复权威来源，不猜测未知旧值。冻结回归41/41、Telegram 16/16、compiled Webview 11/11，独立终审C0/I0/M0 Ready；最终VSIX 6321文件审计并在全新code-server宿主安装、激活、渲染及数据库回读通过，SHA-256 `fa674fc8ea64c5cad47786eeb74e9f5fdee9e0c9139851bdfd336284f197e995` | 包内无已知尾项；Telegram secret/envelope按蓝图留包7联合验收，发布统一留到包8 |
 | 5 能力、文档、附件 / P5-A/B | 已验收（未发布） | Skill/MCP 安装、卸载、失败回滚、poller与job重启恢复、文档索引和内部附件生命周期已统一入库；RTK、CodeGraph、Caveman 已从插件产品面、运行路径和安装入口退役。冻结回归49/49、最终增量32/32；真实宿主完成10次 Skill/MCP 生命周期操作并回读，独立终审C0/I0/M0 Ready。最终VSIX 6323文件审计通过，SHA-256 `2434ef27f13eb8d7f2b0d08f07fd324d3473df622ddf0470f7296f18ad516eb6` | 包内无已知尾项；历史兼容schema仅供旧数据识别，不再形成用户入口；发布统一留到包8 |
 | 6 分析与兼容退出 / P6-A/B | 已验收（未发布） | 统计、投入、token、汇报、日报/战略、远端投影及领域记录均经统一操作读取；旧分析文件只保留显式历史导入，普通入口在旧来源不可用时仍成立。源版本、数据根和请求代次共同约束异步提交，迟到结果不能覆盖新根、新状态或当前界面。冻结回归92/92，独立终审C0/I0/M0 Ready；最终VSIX 6323文件审计通过，并在全新code-server宿主完成侧栏、生长报告、数据库回读及认证Codex真实MCP读取，SHA-256 `8bd29d7d2f3afdc9caef6aca8537f49295fbb629722f34eb0a2f23132722d3cf` | 包内无已知尾项；宿主文件watcher出现环境级EMFILE警告但目标界面、数据库和CLI链路均实际完成；发布统一留到包8 |
-| 7 CSV、数据带走与边界 / P7-A/B/C | 未闭环 | 数据库备份复制后隔离重开读回已有验证；旧schema数量断言已修正 | 完整CSV一致性与冲突恢复、正式全库恢复、单项目导出迁入、move/clone/旧ID、大附件、秘密及CLI配置边界 |
-| 8 总迁移、退役、回收、发布 / P8-A/B/C/D | 未闭环 | 异步迁移和回收框架存在，历史定向证据保留 | 包1–7整包验收后完成全源对账、真实存量性能/并发/恢复、精确历史回收授权及新鲜全量验证、双市场发布、干净主线 |
+| 7 CSV、数据带走与边界 / P7-A/B/C | 已验收（未发布） | CSV 接受、Git checkout、数据库投影、字段级合并与语义冲突恢复；全库备份/恢复及并发、失败、路径替换边界；单项目导出迁入、move/clone、旧身份、完整大附件、Telegram secret 与 Agent CLI 配置边界均已闭合。最终冻结范围214/214、0失败、0跳过，独立终审C0/I0；真实宿主完成VSIX安装、侧栏、数据库回读和秘密边界验收 | 包内无已知尾项；最终制品与发布统一留到包8 |
+| 8 总迁移、退役、回收、发布 / P8-A/B/C/D | 已验收（未发布） | 全源对账、9.81GB生产库备份恢复与原位升级、并发恢复、秘密边界、永久文件数和新鲜全量验证已完成。迁移设置只提供工具与提示词，复用主 Agent CLI、正式 run、通用终端和生命周期；跨项目窗口由通用全局运行槽原子去重。最终全量2000通过、0失败、1跳过，双依赖审计0漏洞，独立终审C0/I0/M0 Ready。最终VSIX 6328文件，SHA-256 `03948dc6f62cd9cb2d78f0b0e9a8b3e3215070d2b091eab621d2fd53fd4a9429`；全新code-server宿主通过设置入口启动已认证Codex，正式`migration_review` run完成MCP重试与回收预览，旧源哈希和工作区均未改变 | 实现与八包验收无已知尾项；等待推送后统一完成CI、安全、自动发布及双市场精确版本回读。历史实验残留已有精确清单，依规等待用户单独授权物理回收，不阻塞生产发布 |
 
 ### 当前证据与交接限制
 
@@ -37,6 +37,7 @@
 - 本轮包4候选统一记录：`.solopreneur/agent-runs/__solo__/464/evidence/package4-candidate.json`。最终制品为 `package4-frozen-final2.vsix`（SHA-256 `fa674fc8ea64c5cad47786eeb74e9f5fdee9e0c9139851bdfd336284f197e995`）；冻结回归、全新真实宿主、F17无猜测关闭、独立终审与自有进程/夹具收尾均在同目录。包4已据此整包验收，尚未发布。
 - 本轮包5候选统一记录：`output/acceptance-464/package5-candidate27.json`。最终制品为 `solopreneur-roadmap-0.0.511-package5-candidate27.vsix`（SHA-256 `2434ef27f13eb8d7f2b0d08f07fd324d3473df622ddf0470f7296f18ad516eb6`）；冻结回归、增量回归、制品内外哈希、退役增强零命中和C0/I0/M0独立终审均已记录。真实宿主10次Skill/MCP生命周期及其297445414字节夹具的精确清理证据见 `output/acceptance-464/package5-candidate26-host-acceptance.json` 与 `package5-candidate26-host-cleanup.json`。包5已据此整包验收，尚未发布。
 - 本轮包6候选统一记录：`output/acceptance-464/package6-candidate5.json`。最终制品为 `solopreneur-roadmap-0.0.511-package6-candidate5.vsix`（SHA-256 `8bd29d7d2f3afdc9caef6aca8537f49295fbb629722f34eb0a2f23132722d3cf`）；92项冻结回归、最终制品审计、全新宿主界面与数据库读回、认证Codex真实MCP读取、C0/I0/M0独立终审及全部本轮夹具精确清理均已记录。包6已据此整包验收，尚未发布。
+- 本轮包7候选制品为 `output/acceptance-464/solopreneur-roadmap-0.0.511-package7-candidate.vsix`（SHA-256 `cb88fe611966bd3f6546eaa2495ba196ec046955dbc68a70d6edfa3ad2bc098d`）；真实宿主安装、侧栏、数据库回读和秘密边界见 `output/acceptance-464/package7-host-acceptance.json`。最终冻结范围在新增边界覆盖后为214/214，证据见 `.solopreneur/agent-runs/__solo__/464/evidence/package7-final-freeze.log`，本轮夹具已精确清理且根目录不存在。当前全代码终审为C0/I0。包7已据此整包验收，尚未发布。
 - 本轮开始HEAD `a2edff352a7e5cc006d430fc383272330b9e6fd6`、工作树干净，先前158条改动已在自动备份提交中保留。测试曾向上继承主仓Git并生成两次非正式本地提交，现HEAD `6399beeaa53be37decb4778b9b8cae7acafe3f6a`；未推送、未回退，事故证据在同候选记录。随后已核对独立Git边界；本轮夹具作为正式证据保留，旧462残留未回收。
 - 历史文档交接时HEAD `69f1aead20d4bed6d7fed52f3c2ebcfb8c9a8e2b`，158条脏路径，暂存区为空。完整修改前路径/hash与文档原件保存在 `/tmp/solomap-462-blueprint-handoff-u8m_hhsu/baseline.json` 及同目录；本轮没有回退已有实现。
 - 包2默认根修复证据：`.solopreneur/agent-runs/__solo__/464/evidence/package2-default-root-red-fresh.log` 到 `package2-default-root-green.log`；扩大定向结果见 `package2-focused-green.log`（21/21）。停工留下的 `/tmp/solomap-462-package2-tests-7p53cx87` 已核对owner记录且无活跃引用，属于前轮整包验收夹具；未取得精确物理清单删除授权，当前保留。

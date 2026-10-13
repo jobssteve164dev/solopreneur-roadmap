@@ -76,6 +76,29 @@ test('normal Runtime startup creates the database and automatically imports lega
   } finally { await stop(run, root); }
 });
 
+test('first database creation is durably indexed before later runtime activation can fail', async () => {
+  const { ensurePersistentRuntimeDatabaseAuthority } = require('../out/databaseAuthorityBootstrap.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-authority-index-'));
+  const root = path.join(base, '.solomap-global');
+  const events = [];
+  try {
+    await ensurePersistentRuntimeDatabaseAuthority(root, async normalizedRoot => {
+      fs.mkdirSync(normalizedRoot, { recursive: true });
+      fs.writeFileSync(path.join(normalizedRoot, 'solomap.db'), 'database');
+      events.push('database-created');
+    }, async normalizedRoot => {
+      assert.equal(fs.existsSync(path.join(normalizedRoot, 'solomap.db')), true);
+      events.push('authority-persisted');
+    });
+    events.push('later-service-failed');
+    assert.deepEqual(events, ['database-created', 'authority-persisted', 'later-service-failed']);
+  } finally {
+    if (fs.existsSync(path.join(root, 'solomap.db'))) fs.unlinkSync(path.join(root, 'solomap.db'));
+    if (fs.existsSync(root)) fs.rmdirSync(root);
+    fs.rmdirSync(base);
+  }
+});
+
 test('memory startup uses database project identities without recreating a legacy registry', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
@@ -242,7 +265,7 @@ test('a previously initialized Runtime refuses to silently replace a missing aut
     run = launch(root);
     const exited = once(run.child, 'exit');
     let timer;
-    const result = await Promise.race([exited, new Promise(resolve => { timer = setTimeout(() => resolve(null), 2000); })]);
+    const result = await Promise.race([exited, new Promise(resolve => { timer = setTimeout(() => resolve(null), 10000); })]);
     clearTimeout(timer);
     assert.ok(result, 'a missing initialized authority must fail instead of starting without the data service');
     const [code] = result;
@@ -251,6 +274,48 @@ test('a previously initialized Runtime refuses to silently replace a missing aut
     assert.equal(fs.existsSync(path.join(root, 'solomap.db')), false);
     assert.equal(fs.existsSync(path.join(root, 'retained-original.db')), true);
   } finally { await stop(run, root); }
+});
+
+test('a registered data root refuses to create an empty authority when its entire mount is unavailable', () => {
+  const root = path.join(os.tmpdir(), `solomap-offline-authority-${crypto.randomUUID()}`, '.solomap-global');
+  const runtime = require('../out/autonomousRuntime.js');
+  const host = require('../out/autonomousRuntimeHost.js');
+  runtime.registerRuntimeDatabaseAuthority(root);
+  let spawned = false;
+  assert.throws(() => host.ensureAutonomousRuntime({
+    extensionPath: path.resolve(__dirname, '..'),
+    globalDataPath: root,
+    spawnProcess: () => { spawned = true; return { pid: 12345, unref() {} }; }
+  }), /database_restore_required/);
+  assert.equal(spawned, false);
+  assert.equal(fs.existsSync(root), false);
+});
+
+test('an unknown new data root with an empty Runtime directory can initialize its first database', () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-empty-runtime-root-'));
+  const root = path.join(parent, '.solomap-global');
+  fs.mkdirSync(path.join(root, 'runtime'), { recursive: true });
+  const runtime = require('../out/autonomousRuntime.js');
+  assert.equal(runtime.runtimeRootRequiresExistingDatabase(root), false);
+});
+
+test('an unknown legacy data root with an empty Runtime directory can initialize its migration database', () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-legacy-empty-runtime-root-'));
+  const root = path.join(parent, '.solomap-global');
+  fs.mkdirSync(path.join(root, 'runtime'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'memory'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'memory', 'profile.md'), 'retained legacy history');
+  const runtime = require('../out/autonomousRuntime.js');
+  assert.equal(runtime.runtimeRootRequiresExistingDatabase(root), false);
+});
+
+test('a data root with a retained database artifact but no Runtime directory cannot initialize an empty authority', () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-retained-database-root-'));
+  const root = path.join(parent, '.solomap-global');
+  fs.mkdirSync(root);
+  fs.writeFileSync(path.join(root, 'retained-original.db'), 'retained authority');
+  const runtime = require('../out/autonomousRuntime.js');
+  assert.equal(runtime.runtimeRootRequiresExistingDatabase(root), true);
 });
 
 test('a damaged project registry cannot block global memory import or assign unproven project memory globally', async () => {
@@ -408,6 +473,7 @@ test('the extension chat readiness gate reconnects after owner exit and preserve
     getPersistedSettings: () => ({ globalDataPath: root }),
     normalizeGlobalDataPathForExtension: require('../out/projectRegistry.js').normalizeGlobalDataPathForExtension,
     autonomousRuntimeHost_1: host,
+    rememberDatabaseAuthorityRoot: async () => {},
     reconcileBackgroundIntelligenceService: () => host.ensureHealthyAutonomousRuntime(options).then(() => undefined)
   });
   let pid;

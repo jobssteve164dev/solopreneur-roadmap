@@ -6,7 +6,7 @@ import * as path from 'path';
 
 import { sendRuntimeControlCommand, sendRuntimeDataRequest, RuntimeControlCommand } from './autonomousRuntimeControl';
 import { inspectAutonomousRuntimeHealth, waitForAutonomousRuntimeHealth } from './autonomousRuntimeHost';
-import { claimRuntimeLease, readRuntimeState, RuntimeState, updateRuntimeState } from './autonomousRuntime';
+import { claimRuntimeLease, readRuntimeState, registerRuntimeDatabaseAuthority, runtimeDatabaseAuthorityRegistered, runtimeRootRequiresExistingDatabase, RuntimeState, updateRuntimeState } from './autonomousRuntime';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import { cognitiveCliEnvironment } from './localAgentCliEngine';
 import { sanitizeDiagnosticText } from './localDiagnostics';
@@ -62,6 +62,28 @@ function serviceRegistryPath(platform: NodeJS.Platform, homeDir: string, environ
   return path.join(homeDir, '.config', 'solomap', 'runtime-service.json');
 }
 
+interface RuntimeServiceRegistryLocation {
+  platform?: NodeJS.Platform;
+  homeDir?: string;
+  environment?: NodeJS.ProcessEnv;
+}
+
+function readServiceRegistration(options: RuntimeServiceRegistryLocation = {}): RuntimeServiceRegistration | null {
+  const platform = options.platform || process.platform;
+  if (!['linux', 'darwin', 'win32'].includes(platform)) return null;
+  const homeDir = options.homeDir || os.homedir();
+  const environment = options.environment || cognitiveCliEnvironment();
+  const registryPath = serviceRegistryPath(platform, homeDir, environment);
+  if (!fs.existsSync(registryPath)) return null;
+  const registration = JSON.parse(fs.readFileSync(registryPath, 'utf8')) as RuntimeServiceRegistration;
+  if (registration.schemaVersion !== 1 || !registration.globalDataPath) throw new Error('runtime_service_registration_invalid');
+  return registration;
+}
+
+export function registeredAutonomousRuntimeDataRoot(options: RuntimeServiceRegistryLocation = {}): string {
+  return readServiceRegistration(options)?.globalDataPath || '';
+}
+
 function serviceDisabledPath(globalDataPath: string): string {
   return path.join(normalizeGlobalDataPathForExtension(globalDataPath), 'runtime', 'service-disabled');
 }
@@ -83,7 +105,12 @@ function powerShellLiteral(value: string): string {
 }
 
 function runtimeArguments(extensionPath: string, globalDataPath: string): string[] {
-  return [path.join(extensionPath, 'out', 'autonomousRuntimeProcess.js'), '--global-data-path', globalDataPath, '--runtime-owner', 'service'];
+  return [
+    path.join(extensionPath, 'out', 'autonomousRuntimeProcess.js'),
+    '--global-data-path', globalDataPath,
+    '--runtime-owner', 'service',
+    '--database-required'
+  ];
 }
 
 export function buildRuntimeServicePlan(options: RuntimeServiceOptions): RuntimeServicePlan {
@@ -248,6 +275,8 @@ async function waitUntil(check: () => Promise<boolean> | boolean, message: strin
 }
 
 export async function ensureAutonomousRuntimeService(options: RuntimeServiceOptions): Promise<{ installed: boolean; definitionPath: string; changed: boolean }> {
+  const root = normalizeGlobalDataPathForExtension(options.globalDataPath);
+  if (runtimeDatabaseAuthorityRegistered(root) && !fs.existsSync(path.join(root, 'solomap.db'))) throw new Error('database_restore_required');
   const plan = buildRuntimeServicePlan(options);
   const platform = (options.platform || process.platform) as SupportedPlatform;
   const homeDir = options.homeDir || os.homedir();
@@ -449,6 +478,7 @@ export async function uninstallAutonomousRuntimeService(options: RuntimeServiceO
 
 export async function revokePersistentRuntimeAuthorizations(globalDataPath: string): Promise<void> {
   const root = normalizeGlobalDataPathForExtension(globalDataPath);
+  if (runtimeDatabaseAuthorityRegistered(root) && !fs.existsSync(path.join(root, 'solomap.db'))) throw new Error('database_restore_required');
   let endpointError: unknown;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
@@ -481,13 +511,14 @@ async function waitForRuntimeOwnerStopped(globalDataPath: string, timeoutMs = 10
 
 async function withOfflineRuntimeDataOwner<T>(globalDataPath: string, action: (operations: ReturnType<typeof createRuntimeDataOperations>) => Promise<T>): Promise<T> {
   const root = normalizeGlobalDataPathForExtension(globalDataPath);
+  const runtimeWasInitialized = runtimeRootRequiresExistingDatabase(root);
   const runtimeId = `offline-maintenance:${crypto.randomUUID()}`;
   const lease = claimRuntimeLease(root, { runtimeId, pid: process.pid });
   if (!lease.acquired) throw new Error('runtime_owner_unavailable');
   let store: UnifiedDataStore | undefined;
   let operations: ReturnType<typeof createRuntimeDataOperations> | undefined;
   try {
-    store = fs.existsSync(path.join(root, 'solomap.db')) ? UnifiedDataStore.open(root) : new UnifiedDataStore(root);
+    store = runtimeWasInitialized || fs.existsSync(path.join(root, 'solomap.db')) ? UnifiedDataStore.open(root) : new UnifiedDataStore(root);
     operations = createRuntimeDataOperations(store);
     return await action(operations);
   } finally {
@@ -498,8 +529,9 @@ async function withOfflineRuntimeDataOwner<T>(globalDataPath: string, action: (o
 }
 
 async function persistDisabledStateOffline(globalDataPath: string, revoke = true): Promise<void> {
-  await waitForRuntimeOwnerStopped(globalDataPath);
   const root = normalizeGlobalDataPathForExtension(globalDataPath);
+  if (runtimeDatabaseAuthorityRegistered(root) && !fs.existsSync(path.join(root, 'solomap.db'))) throw new Error('database_restore_required');
+  await waitForRuntimeOwnerStopped(root);
   await withOfflineRuntimeDataOwner(root, async operations => {
     await writeRuntimePauseState(operations, true);
     if (revoke) await operations({ operation: 'revoke_project_autonomy_authorizations', input: { idempotencyKey: `project-autonomy-revoke:${Date.now()}` } });
@@ -526,14 +558,11 @@ export async function disableAutonomousRuntimeService(options: RuntimeServiceOpt
   }
 }
 
-export async function uninstallRegisteredAutonomousRuntimeService(): Promise<void> {
-  const platform = process.platform as SupportedPlatform;
-  if (!['linux', 'darwin', 'win32'].includes(platform)) return;
-  const homeDir = os.homedir();
-  const environment = cognitiveCliEnvironment();
-  const registryPath = serviceRegistryPath(platform, homeDir, environment);
-  if (!fs.existsSync(registryPath)) return;
-  const registration = JSON.parse(fs.readFileSync(registryPath, 'utf8')) as RuntimeServiceRegistration;
+export async function uninstallRegisteredAutonomousRuntimeService(options: RuntimeServiceRegistryLocation = {}): Promise<void> {
+  const registration = readServiceRegistration(options);
+  if (!registration) return;
+  const environment = options.environment || cognitiveCliEnvironment();
+  registerRuntimeDatabaseAuthority(registration.globalDataPath);
   let revoked = false;
   try {
     try {

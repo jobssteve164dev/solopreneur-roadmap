@@ -9,6 +9,8 @@ const {
   revokeAllProjectAutonomyAuthorizations
 } = require('../out/projectAutonomyAuthorization.js');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { enqueueAvailableDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-auth-'));
@@ -115,4 +117,45 @@ test('global revocation preserves database records and advances the current epoc
   assert.equal(revoked.enabled, false);
   assert.equal(revoked.epoch, granted.epoch + 1);
   assert.equal(dataStore.readHostSettings({ namespace: 'project_autonomy', ownerScope: 'global' }).items.length, 1);
+});
+
+test('ordinary authorization reads ignore legacy files after the database becomes authoritative', t => {
+  const { root, project, dataStore } = fixture(t);
+  const projectId = require('crypto').createHash('sha256').update(fs.realpathSync(project)).digest('hex');
+  const legacyRoot = path.join(root, 'runtime', 'project-autonomy-authorizations');
+  fs.mkdirSync(legacyRoot, { recursive: true });
+  fs.writeFileSync(path.join(legacyRoot, `${projectId}.json`), JSON.stringify({
+    projectId, projectPath: fs.realpathSync(project), enabled: true, toolNetworkDisabled: false, epoch: 7, updatedAt: '2026-10-12T00:00:00.000Z'
+  }));
+
+  const authorization = new ProjectAutonomyAuthorizationStore({ globalDataPath: root, dataStore }).get(project);
+
+  assert.equal(authorization.enabled, false);
+  assert.equal(authorization.epoch, 0);
+  assert.equal(dataStore.readHostSettings({ namespace: 'project_autonomy', ownerScope: 'global' }).items.length, 0);
+});
+
+test('startup migration imports legacy authorization once without making it a live source', async t => {
+  const { root, project, dataStore } = fixture(t);
+  const projectId = require('crypto').createHash('sha256').update(fs.realpathSync(project)).digest('hex');
+  const legacyFile = path.join(root, 'runtime', 'project-autonomy-authorizations.json');
+  fs.mkdirSync(path.dirname(legacyFile), { recursive: true });
+  fs.writeFileSync(legacyFile, JSON.stringify({ schemaVersion: 1, projects: {
+    [projectId]: { projectId, projectPath: fs.realpathSync(project), enabled: true, toolNetworkDisabled: true, epoch: 4, updatedAt: '2026-10-12T00:00:00.000Z' }
+  } }));
+  const operations = createRuntimeDataOperations(dataStore);
+  t.after(async () => operations.close());
+
+  await enqueueAvailableDataMigrations(dataStore, operations, () => true);
+  await operations.waitForMigrations();
+  const authorization = new ProjectAutonomyAuthorizationStore({ globalDataPath: root, dataStore });
+  assert.deepEqual(authorization.get(project), {
+    projectId, projectPath: fs.realpathSync(project), enabled: true, toolNetworkDisabled: true, epoch: 4, updatedAt: '2026-10-12T00:00:00.000Z'
+  });
+
+  fs.writeFileSync(legacyFile, JSON.stringify({ schemaVersion: 1, projects: {
+    [projectId]: { projectId, projectPath: fs.realpathSync(project), enabled: false, toolNetworkDisabled: false, epoch: 9, updatedAt: '2026-10-12T01:00:00.000Z' }
+  } }));
+  assert.equal(authorization.get(project).enabled, true);
+  assert.equal(authorization.get(project).epoch, 4);
 });

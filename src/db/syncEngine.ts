@@ -20,6 +20,7 @@ export class SyncEngine {
   private readonly conversationRevisions = new Map<string, number>();
   private readonly indexRevisions = new Map<number, number>();
   private roadmapRevision = 0;
+  private roadmapRefreshGeneration = 0;
   private roadmapWrites: Promise<void> = Promise.resolve();
 
   constructor(
@@ -53,11 +54,8 @@ export class SyncEngine {
       } else await this.loadHistory();
     } else await this.sqliteStore!.init();
 
-    if (this.globalDataPath) {
-      const snapshot = await this.readOrAcceptRoadmap();
-      this.nodeCache = snapshot.nodes;
-      this.roadmapRevision = snapshot.revision;
-    } else this.refreshNodes();
+    if (this.globalDataPath) await this.refreshNodes();
+    else this.refreshNodes();
   }
 
   private async readOrAcceptRoadmap(): Promise<{ nodes: RoadmapNode[]; revision: number }> {
@@ -75,13 +73,17 @@ export class SyncEngine {
 
   /** Refreshes the Git source of truth without reading conversation history. */
   public refreshNodes(): void | Promise<void> {
-    if (this.globalDataPath && this.roadmapRevision > 0) {
+    if (this.globalDataPath) {
+      const generation = ++this.roadmapRefreshGeneration;
       const immediate = this.csvStore.readNodes();
       if (immediate.length) this.nodeCache = immediate;
-      return this.readOrAcceptRoadmap().then(snapshot => {
-        if (this.closed) return;
+      return this.roadmapWrites.then(() => this.readOrAcceptRoadmap()).then(snapshot => {
+        if (this.closed || generation !== this.roadmapRefreshGeneration) return;
         this.nodeCache = snapshot.nodes;
         this.roadmapRevision = snapshot.revision;
+      }, error => {
+        if (this.closed || generation !== this.roadmapRefreshGeneration) return;
+        throw error;
       });
     }
     // 2. Read nodes from CSV (Git source of truth)
@@ -111,9 +113,11 @@ export class SyncEngine {
 
   public async resolveRoadmapConflict(choice: 'file' | 'database'): Promise<void> {
     if (!this.globalDataPath || this.roadmapRevision < 1) throw new Error('roadmap_conflict_unavailable');
+    const generation = ++this.roadmapRefreshGeneration;
     const snapshot: { nodes: RoadmapNode[]; revision: number } = await sendRuntimeDataRequest(this.globalDataPath, {
       operation: 'resolve_roadmap_conflict', input: { root: this.projectRoot, choice, expectedRevision: this.roadmapRevision, idempotencyKey: `roadmap-conflict:${choice}:${crypto.randomUUID()}` }
     });
+    if (this.closed || generation !== this.roadmapRefreshGeneration) return;
     this.nodeCache = snapshot.nodes;
     this.roadmapRevision = snapshot.revision;
   }
@@ -257,6 +261,7 @@ export class SyncEngine {
     nodes[targetIdx] = updatedNode;
 
     this.nodeCache = nodes;
+    ++this.roadmapRefreshGeneration;
     if (!this.globalDataPath || this.roadmapRevision === 0) {
       this.sqliteStore?.syncNodesFromList(nodes);
       this.csvStore.writeNodes(nodes);
@@ -270,6 +275,7 @@ export class SyncEngine {
    */
   public setNodes(nodes: RoadmapNode[]): void | Promise<void> {
     this.nodeCache = nodes;
+    ++this.roadmapRefreshGeneration;
     if (!this.globalDataPath || this.roadmapRevision === 0) {
       this.sqliteStore?.syncNodesFromList(nodes);
       this.csvStore.writeNodes(nodes);
@@ -280,10 +286,11 @@ export class SyncEngine {
 
   private enqueueRoadmapMutation(change: (nodes: RoadmapNode[]) => RoadmapNode[]): Promise<void> {
     const requestKey = crypto.randomUUID();
+    const generation = this.roadmapRefreshGeneration;
     const run = this.roadmapWrites.then(async () => {
       const current = await sendRuntimeDataRequest<{ nodes: RoadmapNode[]; revision: number }>(this.globalDataPath, { operation: 'read_roadmap', input: { root: this.projectRoot } });
       const result = await sendRuntimeDataRequest<{ nodes: RoadmapNode[]; revision: number }>(this.globalDataPath, { operation: 'update_roadmap', input: { root: this.projectRoot, expectedRevision: current.revision, nodes: change(current.nodes), idempotencyKey: `sync-engine:${requestKey}` } });
-      if (!this.closed) { this.nodeCache = result.nodes; this.roadmapRevision = result.revision; }
+      if (!this.closed && generation === this.roadmapRefreshGeneration) { this.nodeCache = result.nodes; this.roadmapRevision = result.revision; }
     });
     this.roadmapWrites = run.catch(() => {});
     return run;
@@ -409,7 +416,7 @@ export class SyncEngine {
         stage: '目标与路径确认',
         dependencies: '',
         agentCli: 'agy',
-        agentPrompt: '阅读 .solopreneur/bootstrap-roadmap-instructions.md 和 .solopreneur/roadmap-methodology.md，基于当前项目文件直接重写 .solopreneur/roadmap.csv。完成后按指令文件中的自检要求重新读取并校验该 CSV。',
+        agentPrompt: '基于当前项目文件直接重写 .solopreneur/roadmap.csv，按本轮提示中的路线图方法完成自检，并使用随 SoloMap 安装的共享路线图校验器验证结果。',
         status: 'Pending',
         createdAt: now,
         completedAt: '',

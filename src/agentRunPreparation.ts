@@ -35,6 +35,8 @@ export interface AgentRunPreparationInput {
   expectedParentTurnId?: string;
   metadata?: Record<string, unknown>;
   launchIntentId?: string;
+  launchSlotId?: string;
+  launchSlotScope?: 'project' | 'global';
   readOnlyReview?: boolean;
   reviewEvidence?: Record<string, unknown>;
   flowRole?: { flowId: string; loopId: string; role: 'planner' | 'builder' | 'verifier'; attempt: number; initialFlow?: FlowTrace };
@@ -105,9 +107,12 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
     delete input.globalPrompt;
   }
   const call: Operation = operation || ((name, data) => sendRuntimeDataRequest(input.globalDataPath, { operation: name, input: data }));
-  const scope = { root: input.workspaceRoot, executionLogId: input.executionLogId };
-  const intentHash = crypto.createHash('sha256').update(JSON.stringify((input.flowRole || input.launchIntentId) ? { ...input, executionLogId: 0 } : input)).digest('hex');
-  const prepareKey = input.launchIntentId ? `prepare-run-intent:${input.launchIntentId}` : input.flowRole ? `prepare-flow-role:${input.flowRole.flowId}:${input.flowRole.loopId}:${input.flowRole.role}:${input.flowRole.attempt}` : `prepare-agent-run:${input.executionLogId}:${crypto.createHash('sha256').update(input.workspaceRoot).digest('hex')}`;
+  let scope: { root?: string; projectId?: string; executionLogId: number } = { root: input.workspaceRoot, executionLogId: input.executionLogId };
+  const intent = input.launchSlotId && input.launchSlotScope === 'global'
+    ? { launchSlotId: input.launchSlotId, launchSlotScope: input.launchSlotScope, runKind: input.runKind, prompt: input.prompt, userMessage: input.userMessage }
+    : (input.flowRole || input.launchIntentId || input.launchSlotId) ? { ...input, executionLogId: 0 } : input;
+  const intentHash = crypto.createHash('sha256').update(JSON.stringify(intent)).digest('hex');
+  let prepareKey = input.launchSlotId ? `prepare-run-slot:${input.launchSlotId}` : input.launchIntentId ? `prepare-run-intent:${input.launchIntentId}` : input.flowRole ? `prepare-flow-role:${input.flowRole.flowId}:${input.flowRole.loopId}:${input.flowRole.role}:${input.flowRole.attempt}` : `prepare-agent-run:${input.executionLogId}:${crypto.createHash('sha256').update(input.workspaceRoot).digest('hex')}`;
   const provider = getAgentProvider(input.agentCli);
   const interactive = isInteractiveConversationRunKind(input.runKind);
   const continuation = (interactive || input.runKind === 'agent_review_revision') && Boolean(input.nativeSessionId?.trim()) && (input.continuation ?? Boolean(input.directExecutionCommand));
@@ -115,7 +120,8 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
     await assertCodexResumeTranscript(String(input.metadata.codexResumeTranscriptPath), input.workspaceRoot, String(input.nativeSessionId).trim());
   }
   let state: RunState | undefined;
-  try { if (input.launchIntentId) state = await call('read_run_intent', { root: input.workspaceRoot, launchIntentId: input.launchIntentId }) as RunState | undefined;
+  try { if (input.launchSlotId) state = await call('read_run_slot', { root: input.workspaceRoot, launchSlotId: input.launchSlotId, launchSlotScope: input.launchSlotScope || 'project' }) as RunState | undefined;
+    else if (input.launchIntentId) state = await call('read_run_intent', { root: input.workspaceRoot, launchIntentId: input.launchIntentId }) as RunState | undefined;
     else if (!input.flowRole) state = await call('read_run_state', scope) as RunState; }
   catch (error) { if ((error as Error).message !== 'run_missing') throw error; }
   if (!state) {
@@ -129,13 +135,19 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
       agentLaunch: { schemaVersion: 1, agentCli: input.agentCli, selectedModel: input.selectedModel, taskPermissionMode: input.taskPermissionMode, continuation, direct: Boolean(input.directExecutionCommand), ...(input.readOnlyReview ? { readOnly: true } : {}) }
     };
     try {
-      state = await call(input.flowRole ? 'prepare_flow_role' : input.launchIntentId ? 'prepare_run_intent' : 'prepare_run', { ...scope, ...(input.launchIntentId ? { launchIntentId: input.launchIntentId } : {}), ...(input.flowRole || {}), ...(input.parentExecutionLogId ? { parentExecutionLogId: input.parentExecutionLogId } : {}), ...(input.expectedParentTurnId ? { expectedParentTurnId: input.expectedParentTurnId } : {}), nodeId: input.nodeId, runKind: input.runKind, prompt: input.prompt, ...(input.globalPrompt !== undefined ? { globalPrompt: input.globalPrompt } : {}), command: input.directExecutionCommand || '', userMessage: input.userMessage, status: 'Preparing', metadata, deliveryOwner: await getAgentRunDeliveryOwner(), launchRequest: input as unknown as Record<string, unknown>, idempotencyKey: prepareKey }) as RunState;
+      state = await call(input.flowRole ? 'prepare_flow_role' : input.launchSlotId ? 'prepare_run_slot' : input.launchIntentId ? 'prepare_run_intent' : 'prepare_run', { ...scope, ...(input.launchSlotId ? { launchSlotId: input.launchSlotId, launchSlotScope: input.launchSlotScope || 'project' } : {}), ...(input.launchIntentId ? { launchIntentId: input.launchIntentId } : {}), ...(input.flowRole || {}), ...(input.parentExecutionLogId ? { parentExecutionLogId: input.parentExecutionLogId } : {}), ...(input.expectedParentTurnId ? { expectedParentTurnId: input.expectedParentTurnId } : {}), nodeId: input.nodeId, runKind: input.runKind, prompt: input.prompt, ...(input.globalPrompt !== undefined ? { globalPrompt: input.globalPrompt } : {}), command: input.directExecutionCommand || '', userMessage: input.userMessage, status: 'Preparing', metadata, deliveryOwner: await getAgentRunDeliveryOwner(), launchRequest: input as unknown as Record<string, unknown>, idempotencyKey: prepareKey }) as RunState;
     } catch (error) {
-      if (input.launchIntentId || !['idempotency_conflict', 'execution_identity_conflict'].includes((error as Error).message)) throw error;
+      if (input.launchIntentId || input.launchSlotId || !['idempotency_conflict', 'execution_identity_conflict'].includes((error as Error).message)) throw error;
       state = await call('read_run_state', scope) as RunState;
     }
   }
-  if (input.flowRole || input.launchIntentId) { input = { ...input, executionLogId: Number(state.status.rootExecutionLogId) }; scope.executionLogId = input.executionLogId; }
+  if (input.flowRole || input.launchIntentId || input.launchSlotId) {
+    input = { ...input, executionLogId: Number(state.status.rootExecutionLogId) };
+    scope = input.launchSlotId && input.launchSlotScope === 'global'
+      ? { projectId: state.projectId, executionLogId: input.executionLogId }
+      : { root: input.workspaceRoot, executionLogId: input.executionLogId };
+  }
+  if (input.launchSlotId) prepareKey = `${prepareKey}:${state.runId}`;
   if (state.status.launchIntentHash !== intentHash) throw new Error('execution_identity_conflict');
   const identity = { projectId: state.projectId, ...scope, generation: state.generation };
   try {
@@ -170,8 +182,8 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
     state = await call('patch_run_inputs', { ...identity, expectedRevision: state.revision, prompt, command, status: input.metadata?.startWaiting === true ? 'Waiting' : 'Running', idempotencyKey: `${prepareKey}:ready:${state.revision}` }) as RunState;
   }
   } catch (error) {
-    if ((input.flowRole || input.launchIntentId) && ['revision_conflict', 'idempotency_conflict'].includes((error as Error).message)) return prepareAgentRun(input, call);
+    if ((input.flowRole || input.launchIntentId || input.launchSlotId) && ['revision_conflict', 'idempotency_conflict'].includes((error as Error).message)) return prepareAgentRun(input, call);
     throw error;
   }
-  return preparedRunResult(state, input.workspaceRoot, input.executionLogId, input.globalDataPath);
+  return preparedRunResult(state, String(state.status.workspaceRoot || input.workspaceRoot), input.executionLogId, input.globalDataPath);
 }

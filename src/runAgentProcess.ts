@@ -153,7 +153,7 @@ async function main(): Promise<void> {
     const inner = terminal ? `if command -v script >/dev/null 2>&1; then exec script -q -f -e -c ${shellQuote(command)} /dev/null; else exec bash -c ${shellQuote(command)}; fi` : `exec bash -c ${shellQuote(command)}`;
     // The child cannot execute the Agent before its PID is durably registered.
     // If the wrapper dies before releasing fd 3, EOF exits this gate.
-    const env: NodeJS.ProcessEnv = { ...process.env, ...(codexHome ? { CODEX_HOME: codexHome } : {}), SOLOMAP_TASK_COMMAND: path.join(__dirname, 'taskCheckpointProcess.js'), SOLOMAP_GLOBAL_DATA_PATH: globalDataPath, SOLOMAP_PROJECT_ID: plan.projectId, SOLOMAP_EXECUTION_LOG_ID: String(executionLogId), SOLOMAP_RUN_GENERATION: String(generation), SOLOMAP_RUN_PROOF: proof, SOLOMAP_TASK_TURN_ID: state.turnId };
+    const env: NodeJS.ProcessEnv = { ...process.env, ...(codexHome ? { CODEX_HOME: codexHome } : {}), SOLOMAP_TASK_COMMAND: path.join(__dirname, 'taskCheckpointProcess.js'), SOLOMAP_GLOBAL_DATA_PATH: globalDataPath, SOLOMAP_PROJECT_ID: plan.projectId, SOLOMAP_EXECUTION_LOG_ID: String(executionLogId), SOLOMAP_RUN_GENERATION: String(generation), SOLOMAP_RUN_PROOF: proof, SOLOMAP_RUN_KIND: String(plan.status.runKind || ''), SOLOMAP_TASK_TURN_ID: state.turnId };
     if (claudeConfigDirOverride === null) delete env.CLAUDE_CONFIG_DIR;
     else if (claudeConfigDirOverride) env.CLAUDE_CONFIG_DIR = claudeConfigDirOverride;
     env.SOLOMAP_NODE_EXECUTABLE = process.execPath;
@@ -261,7 +261,7 @@ async function main(): Promise<void> {
     const initialHeads = await Promise.all(['stdout', 'stderr'].map(stream => request<{ totalBytes: number }>('read_run_log_head', { ...identity, stream })));
     const execution = await execute(command, ['stdout', 'stderr'], interactive, true, Boolean(launch?.readOnly));
     let { code } = execution;
-    if (maintenance && !await captureMaintenanceResult() && code === 0) throw new Error('maintenance_result_missing');
+    if (maintenance && plan.status.maintenanceResultPath && !await captureMaintenanceResult() && code === 0) throw new Error('maintenance_result_missing');
     if (launch?.readOnly) {
       const baseline = await request<{ bytes: string }>('read_run_document', { ...identity, purpose: baselinePurpose });
       const after = await snapshotWorkspace(projectRoot);

@@ -6,6 +6,31 @@ const test = require('node:test');
 
 const service = require('../out/autonomousRuntimeService.js');
 
+test('a registered service root is restored as database authority before uninstall cleanup', async t => {
+  const runtime = require('../out/autonomousRuntime.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-uninstall-authority-'));
+  const homeDir = path.join(root, 'home');
+  const globalRoot = path.join(root, 'missing-volume', '.solomap-global');
+  const registryPath = path.join(homeDir, '.config', 'solomap', 'runtime-service.json');
+  fs.mkdirSync(path.dirname(registryPath), { recursive: true });
+  fs.writeFileSync(registryPath, JSON.stringify({ schemaVersion: 1, platform: 'linux', homeDir, extensionPath: '/opt/solomap', globalDataPath: globalRoot, execPath: process.execPath }));
+  t.after(() => {
+    const statePath = path.join(globalRoot, 'runtime', 'control.json');
+    if (fs.existsSync(statePath)) fs.unlinkSync(statePath);
+    for (const directory of [path.join(globalRoot, 'runtime'), globalRoot, path.dirname(globalRoot)]) {
+      if (fs.existsSync(directory)) fs.rmdirSync(directory);
+    }
+    fs.unlinkSync(registryPath);
+    fs.rmdirSync(path.dirname(registryPath));
+    fs.rmdirSync(path.join(homeDir, '.config'));
+    fs.rmdirSync(homeDir);
+    fs.rmdirSync(root);
+  });
+  await assert.rejects(service.uninstallRegisteredAutonomousRuntimeService({ platform: 'linux', homeDir, environment: {} }), /database_restore_required/);
+  assert.equal(runtime.runtimeDatabaseAuthorityRegistered(globalRoot), true);
+  assert.equal(fs.existsSync(globalRoot), false);
+});
+
 test('runtime service command failure retains the service manager reason without command arguments', async () => {
   const privateArgument = 'private-credential';
   await assert.rejects(
@@ -340,6 +365,7 @@ test('linux runtime service starts at login and restarts after crashes', () => {
   assert.match(plan.definition, /PATH=\/home\/alice\/\.local\/bin:\/usr\/bin/);
   assert.match(plan.definition, /autonomousRuntimeProcess\.js/);
   assert.match(plan.definition, /"--runtime-owner" "service"/);
+  assert.match(plan.definition, /"--database-required"/, 'a persisted service must never recreate a missing authority');
   assert.deepEqual(plan.installCommand, ['systemctl', ['--user', 'enable', '--now', 'solomap-runtime.service']]);
   assert.deepEqual(plan.statusCommand, ['systemctl', ['--user', 'is-active', '--quiet', 'solomap-runtime.service']]);
 });
@@ -901,6 +927,20 @@ test('sidebar registration and initial data request do not wait for background i
   assert.match(activation.slice(0, providerRegistration), /onInitialDataReady: reconcileIntelligenceServiceOnce/);
   assert.ok(activation.indexOf('ensureSolomapMemoryStore(activationProjectRoot') > providerRegistration);
   assert.match(activation.slice(providerRegistration), /reconcileIntelligenceServiceOnce\(\);/);
+});
+
+test('the first persistent service definition is written only after the database authority exists', () => {
+  const projectRoot = path.resolve(__dirname, '..');
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  const authoritySource = fs.readFileSync(path.join(projectRoot, 'src', 'databaseAuthorityBootstrap.ts'), 'utf8');
+  const start = extensionSource.indexOf('async function activateObservedBackgroundRuntime(');
+  const end = extensionSource.indexOf('\nasync function ensureTaskRuntimeReady(', start);
+  const activation = extensionSource.slice(start, end);
+  const authority = activation.indexOf('ensurePersistentRuntimeDatabaseAuthority(');
+  const serviceInstall = activation.indexOf('ensureAutonomousRuntimeService({');
+  assert.ok(authority >= 0, 'activation must use the durable database authority bootstrap');
+  assert.ok(authority < serviceInstall, 'the durable service definition must be generated after authority registration');
+  assert.match(authoritySource, /if \(!fs\.existsSync\(path\.join\(root, 'solomap\.db'\)\)\) await ensureDatabase\(root\);\s*await rememberAuthority\(root\);/s);
 });
 
 test('failed service upgrade restores and restarts the previous definition', async () => {

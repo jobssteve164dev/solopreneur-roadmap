@@ -127,6 +127,16 @@ function runtimeRoot(globalDataPath: string): string {
   return path.join(normalizeGlobalDataPathForExtension(globalDataPath), 'runtime');
 }
 
+const registeredDatabaseAuthorities = new Set<string>();
+
+export function registerRuntimeDatabaseAuthority(globalDataPath: string): void {
+  registeredDatabaseAuthorities.add(path.resolve(normalizeGlobalDataPathForExtension(globalDataPath)));
+}
+
+export function runtimeDatabaseAuthorityRegistered(globalDataPath: string): boolean {
+  return registeredDatabaseAuthorities.has(path.resolve(normalizeGlobalDataPathForExtension(globalDataPath)));
+}
+
 function runtimeStatePath(globalDataPath: string): string {
   return path.join(runtimeRoot(globalDataPath), 'control.json');
 }
@@ -268,6 +278,42 @@ export function readRuntimeState(globalDataPath: string): RuntimeState | null {
     }
   }
   return null;
+}
+
+export function runtimeRootRequiresExistingDatabase(globalDataPath: string): boolean {
+  if (runtimeDatabaseAuthorityRegistered(globalDataPath)) return true;
+  const root = normalizeGlobalDataPathForExtension(globalDataPath);
+  if (!fs.existsSync(root)) return false;
+  const runtimePath = runtimeRoot(globalDataPath);
+  try {
+    const rootEntries = fs.readdirSync(root);
+    if (rootEntries.some(entry => entry !== 'solomap.db' && /(?:^solomap(?:\.|-)|\.(?:db|sqlite|sqlite3)$)/i.test(entry))) return true;
+    if (!fs.existsSync(runtimePath)) return false;
+    const entries = fs.readdirSync(runtimePath);
+    if (entries.length === 0) return false;
+    const legacyFiles = new Set([
+      'cognitive-config.json',
+      'service-disabled',
+      'shadow-evaluation.json',
+      'shadow-feedback.jsonl',
+      'state.json',
+      'telegram-config.json',
+      'telegram-state.json',
+      'today-shadow.json'
+    ]);
+    return entries.some(entry => {
+      const entryPath = path.join(runtimePath, entry);
+      const info = fs.lstatSync(entryPath);
+      if (legacyFiles.has(entry)) return !info.isFile() || info.isSymbolicLink();
+      if (entry !== 'scheduled-tasks' || !info.isDirectory() || info.isSymbolicLink()) return true;
+      const scheduledEntries = fs.readdirSync(entryPath);
+      return scheduledEntries.some(name => name !== 'scheduled-tasks.json'
+        || !fs.lstatSync(path.join(entryPath, name)).isFile()
+        || fs.lstatSync(path.join(entryPath, name)).isSymbolicLink());
+    });
+  } catch {
+    return true;
+  }
 }
 
 export function claimRuntimeLease(globalDataPath: string, options: RuntimeLeaseOptions): { acquired: boolean; owner: RuntimeState } {

@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-import { claimRuntimeLease, readRuntimeState } from './autonomousRuntime';
+import { claimRuntimeLease, readRuntimeState, runtimeDatabaseAuthorityRegistered, runtimeRootRequiresExistingDatabase } from './autonomousRuntime';
 import { RuntimeControlCommand, RuntimeControlResponse, sendRuntimeControlCommand } from './autonomousRuntimeControl';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import { PiMainPathRequest, PiMainPathResult } from './piMainPathDelivery';
@@ -158,11 +158,13 @@ export function ensureHealthyAutonomousRuntime(options: RuntimeHostOptions): Pro
   const buildId = options.buildId || runtimeBuildId(options.extensionPath);
   const key = JSON.stringify([globalDataPath, path.resolve(options.extensionPath), buildId]);
   let pending = runtimeHealthRequests.get(key);
-  if (!pending) {
-    pending = ensureHealthyAutonomousRuntimeOnce({ ...options, globalDataPath, buildId })
-      .finally(() => { runtimeHealthRequests.delete(key); });
-    runtimeHealthRequests.set(key, pending);
+  if (pending) return pending;
+  if (runtimeDatabaseAuthorityRegistered(globalDataPath) && !fs.existsSync(path.join(globalDataPath, 'solomap.db'))) {
+    return Promise.reject(new Error('database_restore_required'));
   }
+  pending = ensureHealthyAutonomousRuntimeOnce({ ...options, globalDataPath, buildId })
+    .finally(() => { runtimeHealthRequests.delete(key); });
+  runtimeHealthRequests.set(key, pending);
   return pending;
 }
 
@@ -217,6 +219,8 @@ export function ensureAutonomousRuntime(options: RuntimeHostOptions): { started:
   const isProcessAlive = options.isProcessAlive || defaultIsProcessAlive;
   const isOwnerAlive = options.isProcessOwnerAlive || (options.isProcessAlive ? ((pid: number) => options.isProcessAlive!(pid)) : processOwnerAlive);
   const current = readRuntimeState(globalDataPath);
+  const databaseRequired = runtimeRootRequiresExistingDatabase(globalDataPath);
+  if (runtimeDatabaseAuthorityRegistered(globalDataPath) && !fs.existsSync(path.join(globalDataPath, 'solomap.db'))) throw new Error('database_restore_required');
   if (
     current
     && isOwnerAlive(current.pid, current.processBirth || '')
@@ -230,7 +234,8 @@ export function ensureAutonomousRuntime(options: RuntimeHostOptions): { started:
   const args = [
     entryPath,
     '--global-data-path', globalDataPath,
-    '--runtime-id', runtimeId
+    '--runtime-id', runtimeId,
+    ...(databaseRequired ? ['--database-required'] : [])
   ];
   const child = spawnProcess(options.execPath || process.execPath, args, {
     detached: true,

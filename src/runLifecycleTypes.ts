@@ -3,7 +3,9 @@ import type { WorkspaceSnapshot, RunGitEvidence } from './runWorkspace';
 import type { DocumentationAuditResult } from './documentationManifest';
 import type { FlowTrace } from './flowStore';
 
-export const maintenanceRunKinds = ['skill_install', 'skill_uninstall', 'mcp_install', 'mcp_uninstall', 'agent_cli_upgrade'];
+export const maintenanceResultRunKinds = ['skill_install', 'skill_uninstall', 'mcp_install', 'mcp_uninstall', 'agent_cli_upgrade'];
+export const migrationRunKinds = ['migration_review', 'migration_apply', 'recycling_apply'] as const;
+export const maintenanceRunKinds = [...maintenanceResultRunKinds, ...migrationRunKinds];
 
 export interface PrepareRunInput {
   root: string;

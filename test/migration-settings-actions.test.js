@@ -15,11 +15,11 @@ test('an approved batch launches the Agent for the exact plan; changed roots can
   const calls = [];
   const files = [{ itemId: 'first', path: '/isolated/old1.json' }, { itemId: 'second', path: '/isolated/old2.json' }];
   const launches = [];
-  const dependencies = { getRoot: () => '/isolated', ready: async () => {}, call: async (_root, operation) => { calls.push(operation); if (operation === 'read_recycling_plan') return { files }; if (operation === 'migration_overview') return { jobs: [] }; return {}; }, confirm: async () => true, trash: async () => { throw new Error('must not trash in the webview action'); }, launchAgent: async (kind, targetId) => launches.push({ kind, targetId }) };
+  const dependencies = { getRoot: () => '/isolated', ready: async () => {}, call: async (_root, operation) => { calls.push(operation); if (operation === 'read_recycling_plan') return { files }; if (operation === 'migration_overview') return { jobs: [] }; return {}; }, confirm: async () => true, trash: async () => { throw new Error('must not trash in the webview action'); }, launchAgent: async (root, kind, targetId) => launches.push({ root, kind, targetId }) };
   const result = await handleMigrationSettingsAction({ command: 'dataMigration.recycle', planId: 'plan', dataRoot: '/isolated' }, dependencies);
   assert.equal(result.agentStarted, true);
   assert.deepEqual(calls, ['read_recycling_plan', 'confirm_recycling', 'migration_overview']);
-  assert.deepEqual(launches, [{ kind: 'recycling_apply', targetId: 'plan' }]);
+  assert.deepEqual(launches, [{ root: '/isolated', kind: 'recycling_apply', targetId: 'plan' }]);
   calls.length = 0;
   await assert.rejects(handleMigrationSettingsAction({ command: 'dataMigration.recycle', planId: 'plan', dataRoot: '/previous' }, dependencies), /data_location_changed/);
   assert.deepEqual(calls, []);
@@ -33,11 +33,11 @@ test('delegating migration launches the Agent migration task instead of only rev
     ready: async () => {},
     call: async (_root, operation) => { calls.push(operation); return { jobs: [] }; },
     confirm: async () => false,
-    launchAgent: async (kind, targetId) => launches.push({ kind, targetId })
+    launchAgent: async (root, kind, targetId) => launches.push({ root, kind, targetId })
   };
   const result = await handleMigrationSettingsAction({ command: 'dataMigration.delegate', dataRoot: '/isolated' }, dependencies);
   assert.equal(result.agentStarted, true);
-  assert.deepEqual(launches, [{ kind: 'migration_apply', targetId: undefined }]);
+  assert.deepEqual(launches, [{ root: '/isolated', kind: 'migration_apply', targetId: undefined }]);
   assert.deepEqual(calls, ['migration_overview']);
 });
 
@@ -61,4 +61,35 @@ test('cancelling a restore location never changes or publishes a file', async ()
   const dependencies = { getRoot: () => '/isolated', ready: async () => {}, call: async (_root, operation) => { calls.push(operation); throw new Error('recycling_path_identity_unavailable'); }, chooseRestorePath: async () => undefined };
   assert.equal((await handleMigrationSettingsAction({ command: 'dataMigration.restore', itemId: 'item', dataRoot: '/isolated' }, dependencies)).cancelled, true);
   assert.deepEqual(calls, ['restore_recycling_file']);
+});
+
+test('a migration action cannot launch after readiness changes the selected data root', async () => {
+  let root = '/isolated';
+  const launches = [];
+  const dependencies = {
+    getRoot: () => root,
+    ready: async () => { root = '/replacement'; },
+    call: async () => { throw new Error('must not call the replacement root'); },
+    confirm: async () => false,
+    launchAgent: async (...args) => launches.push(args)
+  };
+  await assert.rejects(handleMigrationSettingsAction({ command: 'dataMigration.delegate', dataRoot: '/isolated' }, dependencies), /data_location_changed/);
+  assert.deepEqual(launches, []);
+});
+
+test('a recycling action cannot approve or launch after confirmation changes the selected data root', async () => {
+  let root = '/isolated';
+  const files = [{ itemId: 'item', path: '/isolated/old.json', bytes: 42 }];
+  const calls = [];
+  const launches = [];
+  const dependencies = {
+    getRoot: () => root,
+    ready: async () => {},
+    call: async (_root, operation) => { calls.push(operation); return { files }; },
+    confirm: async () => { root = '/replacement'; return true; },
+    launchAgent: async (...args) => launches.push(args)
+  };
+  await assert.rejects(handleMigrationSettingsAction({ command: 'dataMigration.recycle', planId: 'plan', dataRoot: '/isolated' }, dependencies), /data_location_changed/);
+  assert.deepEqual(calls, ['read_recycling_plan']);
+  assert.deepEqual(launches, []);
 });

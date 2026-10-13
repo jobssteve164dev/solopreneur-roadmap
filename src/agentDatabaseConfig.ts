@@ -10,7 +10,7 @@ const { parseTOML } = require('toml-eslint-parser');
 
 export const databaseAgentProviders = ['codex', 'claude', 'cursor', 'copilot', 'opencode', 'grok', 'antigravity'] as const;
 export type DatabaseAgentProvider = typeof databaseAgentProviders[number];
-const databaseToolNames = ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply', 'solomap_maintenance_finish'];
+const databaseToolNames = ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply'];
 const start = '# SoloMap managed database MCP begin';
 const end = '# SoloMap managed database MCP end';
 
@@ -42,7 +42,7 @@ export function isAgentDatabaseConfigPath(provider: DatabaseAgentProvider, file:
 }
 
 export function databaseBridgeLauncher(): string {
-  return 'const fs=require("node:fs"),path=require("node:path");const root=process.argv[1];try{const isolated=process.env.SOLOMAP_MAINTENANCE_ENTRY_PATH;let entry;if(isolated){entry=isolated;process.argv=[process.execPath,entry];}else{const endpoint=JSON.parse(fs.readFileSync(path.join(root,"runtime","control.json"),"utf8"));if(endpoint.schemaVersion!==1||!endpoint.entryPath||!path.isAbsolute(endpoint.entryPath)||path.basename(endpoint.entryPath)!=="autonomousRuntimeProcess.js")throw new Error("solomap_runtime_discovery_invalid");entry=path.join(path.dirname(endpoint.entryPath),"databaseMcpProcess.js");process.argv=[process.execPath,entry,"--global-data-path",root];}require(entry);}catch(error){process.stderr.write(String(error.message||error)+"\\n");process.exitCode=1;}';
+  return 'const fs=require("node:fs"),path=require("node:path");const root=process.argv[1];try{const endpoint=JSON.parse(fs.readFileSync(path.join(root,"runtime","control.json"),"utf8"));if(endpoint.schemaVersion!==1||!endpoint.entryPath||!path.isAbsolute(endpoint.entryPath)||path.basename(endpoint.entryPath)!=="autonomousRuntimeProcess.js")throw new Error("solomap_runtime_discovery_invalid");const entry=path.join(path.dirname(endpoint.entryPath),"databaseMcpProcess.js");process.argv=[process.execPath,entry,"--global-data-path",root];require(entry);}catch(error){process.stderr.write(String(error.message||error)+"\\n");process.exitCode=1;}';
 }
 
 /** Runtime serializes these patches; retain the CLI's native permission policy. */
@@ -71,12 +71,7 @@ export function configureAgentDatabase(options: { provider: DatabaseAgentProvide
         'SOLOMAP_EXECUTION_LOG_ID',
         'SOLOMAP_RUN_GENERATION',
         'SOLOMAP_RUN_PROOF',
-        'SOLOMAP_MAINTENANCE_TASK_ID',
-        'SOLOMAP_MAINTENANCE_PROOF',
-        'SOLOMAP_MAINTENANCE_LAUNCH_TOKEN',
-        'SOLOMAP_MAINTENANCE_RUNTIME_ID',
-        'SOLOMAP_MAINTENANCE_RUNTIME_PORT',
-        'SOLOMAP_MAINTENANCE_ENTRY_PATH'
+        'SOLOMAP_RUN_KIND'
       ].filter(name => !owned?.env_vars?.includes(name))] });
       const block = [start, toml.stringify({ mcp_servers: { solomap_data: server } }).trimEnd(), end].join('\n');
       if (inline) {

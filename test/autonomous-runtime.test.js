@@ -498,7 +498,8 @@ test('extension host starts one detached runtime and reuses its live instance', 
     assert.deepEqual(launches[0].args, [
       '/opt/solomap/out/autonomousRuntimeProcess.js',
       '--global-data-path', fixture.globalRoot,
-      '--runtime-id', 'host-runtime'
+      '--runtime-id', 'host-runtime',
+      '--database-required'
     ]);
     assert.equal(launches[0].options.detached, true);
     assert.equal(launches[0].options.stdio, 'ignore');

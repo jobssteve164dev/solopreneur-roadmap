@@ -116,7 +116,6 @@ import {
 } from './solomapGlobal';
 import { attachCapabilityOperation, beginCapabilityOperation, capabilityOperationNeedsLaunchRecovery, capabilityOperationSettlementDecision, failCapabilityOperation, readCapabilityOperationResult, readCapabilityOperationRunState, readCapabilityOperations, CapabilityOperation } from './capabilityRegistry';
 import {
-  buildAgentCommand,
   buildAgentContinuationCommandForPromptFile,
   buildAgentCommandForPromptFile,
   buildInteractiveAgentCommandForPromptFile,
@@ -136,6 +135,7 @@ import {
   getCliVersionArgs,
   getTaskPermissionArgs,
   resolveAgentCli,
+  resolveAgentCliWithinFamily,
   resolveExecutableIdentityPath,
   resolveExecutablePath,
   shellQuote,
@@ -153,8 +153,7 @@ import {
 import { buildConversationPresentations, selectLatestConversationRoots } from './conversationPresentation';
 import { dispatchPluginAction, PluginActionRequest, PluginSurface } from './pluginActions';
 import { handleMigrationSettingsAction } from './migrationSettingsActions';
-import { applyNativeMigrationAgentBoundary, buildMigrationAgentSandboxCommand, buildMigrationMaintenancePrompt, migrationAgentConfigurationEnvironmentKeys, migrationAgentConfigurationPaths, migrationAgentExecutablePaths, MigrationMaintenanceKind } from './migrationAgentMaintenance';
-import { LinuxBubblewrapSandbox } from './executionSandbox';
+import { buildMigrationMaintenancePrompt, MigrationMaintenanceKind } from './migrationAgentMaintenance';
 import {
   buildAgentModelsLoadedMessage,
   mergeAgentModelPreferences,
@@ -193,11 +192,12 @@ import {
   withLocalDiagnosticTrace
 } from './localDiagnostics';
 import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost';
-import { agentDatabaseConfigPath, buildAgentDatabaseInstructions, databaseAgentProviders, databaseBridgeLauncher, DatabaseAgentProvider } from './agentDatabaseConfig';
+import { ensurePersistentRuntimeDatabaseAuthority } from './databaseAuthorityBootstrap';
+import { buildAgentDatabaseInstructions } from './agentDatabaseConfig';
 import { runtimeProjectMcpSource } from './runtimeDataOperations';
-import { readRuntimeState, refreshShadowRuntimeState } from './autonomousRuntime';
-import { readMaintenanceRuntimeEndpoint, sendRuntimeControlCommand, sendRuntimeDataRequest } from './autonomousRuntimeControl';
-import { disableAutonomousRuntimeService, enableAutonomousRuntime, ensureAutonomousRuntimeService, isAutonomousRuntimeDisabled, isRuntimeServiceManagerAvailable } from './autonomousRuntimeService';
+import { readRuntimeState, refreshShadowRuntimeState, registerRuntimeDatabaseAuthority, runtimeDatabaseAuthorityRegistered } from './autonomousRuntime';
+import { sendRuntimeControlCommand, sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import { disableAutonomousRuntimeService, enableAutonomousRuntime, ensureAutonomousRuntimeService, isAutonomousRuntimeDisabled, isRuntimeServiceManagerAvailable, registeredAutonomousRuntimeDataRoot } from './autonomousRuntimeService';
 import { IntelligenceConversationStore } from './intelligenceChat';
 import { readTodayReview } from './dailyReview';
 import { persistCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
@@ -423,21 +423,39 @@ const portableOperationStateKey = 'solopreneur.pendingPortableOperations.v1';
 const portableOperationStatePrefix = 'solopreneur.pendingPortableOperation.v2.';
 const completedLegacyPortableOperationPrefix = 'solopreneur.completedLegacyPortableOperation.v1.';
 const portableOperationRootsKey = 'solopreneur.portableOperationRoots.v1';
+const portableOperationRootPrefix = 'solopreneur.portableOperationRoot.v2.';
+const databaseAuthorityRootPrefix = 'solopreneur.databaseAuthorityRoot.v1.';
 type PortableOperationName = 'backup' | 'restore_backup' | 'export_project' | 'import_project';
 interface PendingPortableOperation { id: string; root: string; operation: PortableOperationName; input: Record<string, unknown>; intent: string; legacy?: true }
 interface DatabasePortableOperation extends PendingPortableOperation { status: 'pending' | 'completed'; updatedAt: number }
+
+function indexedDatabaseAuthorityRoots(context: vscode.ExtensionContext): string[] {
+  const roots: string[] = [];
+  for (const key of context.globalState.keys()) {
+    if (!key.startsWith(databaseAuthorityRootPrefix)) continue;
+    const root = context.globalState.get<string>(key);
+    if (root) roots.push(normalizeGlobalDataPathForExtension(root));
+  }
+  return [...new Set(roots)];
+}
+
+async function rememberDatabaseAuthorityRoot(context: vscode.ExtensionContext, root: string): Promise<void> {
+  const normalized = normalizeGlobalDataPathForExtension(root);
+  const key = `${databaseAuthorityRootPrefix}${crypto.createHash('sha256').update(normalized).digest('hex')}`;
+  await context.globalState.update(key, normalized);
+  registerRuntimeDatabaseAuthority(normalized);
+}
 
 function legacyPortableOperationCompleted(context: vscode.ExtensionContext, id: string): boolean {
   return context.globalState.get<boolean>(`${completedLegacyPortableOperationPrefix}${id}`) === true;
 }
 
-function pendingPortableOperations(context: vscode.ExtensionContext): PendingPortableOperation[] {
-  const entries = (context.globalState.get<PendingPortableOperation[]>(portableOperationStateKey) || [])
-    .filter(entry => !legacyPortableOperationCompleted(context, entry.id));
+function legacyPortableOperations(context: vscode.ExtensionContext): PendingPortableOperation[] {
+  const entries = [...(context.globalState.get<PendingPortableOperation[]>(portableOperationStateKey) || [])];
   for (const key of context.globalState.keys()) {
     if (!key.startsWith(portableOperationStatePrefix)) continue;
     const entry = context.globalState.get<PendingPortableOperation>(key);
-    if (entry && !legacyPortableOperationCompleted(context, entry.id)) entries.push(entry);
+    if (entry) entries.push(entry);
   }
   return [...new Map(entries.map(entry => [entry.id, entry])).values()];
 }
@@ -446,21 +464,51 @@ async function discardCompletedLegacyPortableOperation(context: vscode.Extension
   try { await context.globalState.update(key, undefined); } catch {}
 }
 
-async function migrateLegacyPortableOperations(context: vscode.ExtensionContext): Promise<void> {
-  for (const key of context.globalState.keys()) {
-    if (!key.startsWith(portableOperationStatePrefix)) continue;
-    const entry = context.globalState.get<PendingPortableOperation>(key);
-    if (entry && legacyPortableOperationCompleted(context, entry.id)) await discardCompletedLegacyPortableOperation(context, key);
+async function importLegacyPortableOperations(context: vscode.ExtensionContext): Promise<PendingPortableOperation[]> {
+  const legacy = legacyPortableOperations(context);
+  for (const entry of legacy) {
+    registerRuntimeDatabaseAuthority(entry.root);
+    try {
+      await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: entry.root });
+      const claimed = await claimDatabasePortableOperation(context, entry.root, entry.operation, entry.input, entry.id);
+      if (legacyPortableOperationCompleted(context, entry.id)) await completeDatabasePortableOperation(entry.root, claimed);
+      await discardCompletedLegacyPortableOperation(context, `${portableOperationStatePrefix}${entry.id}`);
+      if (legacyPortableOperationCompleted(context, entry.id)) {
+        await discardCompletedLegacyPortableOperation(context, `${completedLegacyPortableOperationPrefix}${entry.id}`);
+      }
+    } catch (error) {
+      console.error('SoloMap legacy portable operation recovery failed:', entry.root, error);
+    }
   }
-  const legacy = context.globalState.get<PendingPortableOperation[]>(portableOperationStateKey) || [];
-  const pending = legacy.filter(entry => !legacyPortableOperationCompleted(context, entry.id));
-  if (pending.length !== legacy.length) await context.globalState.update(portableOperationStateKey, pending.length ? pending : undefined);
+  // The old shared array has no compare-and-swap operation. Retaining it as an
+  // import-only source prevents an older extension window from losing a late
+  // identity while every operation's authority lives in its root database.
+  return legacy;
+}
+
+function indexedPortableOperationRoots(context: vscode.ExtensionContext): string[] {
+  const roots = [...(context.globalState.get<string[]>(portableOperationRootsKey) || [])];
+  for (const key of context.globalState.keys()) {
+    if (!key.startsWith(portableOperationRootPrefix)) continue;
+    const root = context.globalState.get<string>(key);
+    if (root) roots.push(normalizeGlobalDataPathForExtension(root));
+  }
+  return [...new Set(roots)];
 }
 
 async function rememberPortableOperationRoot(context: vscode.ExtensionContext, root: string): Promise<void> {
   const normalized = normalizeGlobalDataPathForExtension(root);
-  const roots = [...new Set([...(context.globalState.get<string[]>(portableOperationRootsKey) || []), normalized])];
-  await context.globalState.update(portableOperationRootsKey, roots);
+  const key = `${portableOperationRootPrefix}${crypto.createHash('sha256').update(normalized).digest('hex')}`;
+  await context.globalState.update(key, normalized);
+  const legacyRoots = context.globalState.get<string[]>(portableOperationRootsKey) || [];
+  if (legacyRoots.length) {
+    for (const legacyRoot of legacyRoots) {
+      const value = normalizeGlobalDataPathForExtension(legacyRoot);
+      await context.globalState.update(`${portableOperationRootPrefix}${crypto.createHash('sha256').update(value).digest('hex')}`, value);
+    }
+    await context.globalState.update(portableOperationRootsKey, undefined);
+  }
+  registerRuntimeDatabaseAuthority(normalized);
 }
 
 async function readDatabasePortableOperations(root: string): Promise<Array<{ key: string; revision: number; value: DatabasePortableOperation }>> {
@@ -474,15 +522,23 @@ async function claimDatabasePortableOperation(context: vscode.ExtensionContext, 
   const intent = crypto.createHash('sha256').update(JSON.stringify({ root, operation, input })).digest('hex');
   await rememberPortableOperationRoot(context, root);
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const existing = (await readDatabasePortableOperations(root)).find(item => item.key === intent);
-    if (existing?.value.status === 'pending') return existing.value;
-    if (preferredId && existing?.value.status === 'completed' && existing.value.id === preferredId) return existing.value;
-    const value: DatabasePortableOperation = { id: preferredId || crypto.randomUUID(), root, operation, input, intent, status: 'pending', updatedAt: Date.now() };
+    const items = await readDatabasePortableOperations(root);
+    const exact = preferredId ? items.find(item => item.value.id === preferredId) : undefined;
+    if (exact) return exact.value;
+    const existing = preferredId ? items.find(item => item.key === `legacy:${preferredId}`) : items.find(item => item.key === intent);
+    if (!preferredId && existing?.value.status === 'pending') return existing.value;
+    const value: DatabasePortableOperation = { id: preferredId || crypto.randomUUID(), root, operation, input, intent, status: 'pending', updatedAt: preferredId ? 0 : Date.now() };
+    const key = preferredId ? `legacy:${preferredId}` : intent;
+    const patches: Array<{ key: string; expectedRevision: number; value: DatabasePortableOperation }> = [];
+    if (!preferredId && existing?.value.status === 'completed' && !items.some(item => item.value.id === existing.value.id && item.key !== existing.key)) {
+      patches.push({ key: `history:${existing.value.id}`, expectedRevision: 0, value: existing.value });
+    }
+    patches.push({ key, expectedRevision: existing?.revision || 0, value });
     try {
       await sendRuntimeDataRequest(root, { operation: 'patch_host_settings', input: {
         namespace: 'portable_operations', ownerScope: 'global',
-        patches: [{ key: intent, expectedRevision: existing?.revision || 0, value }],
-        idempotencyKey: `portable-operation-claim:${value.id}`
+        patches,
+        idempotencyKey: `portable-operation-claim:${preferredId ? 'legacy:' : ''}${value.id}`
       } });
       return value;
     } catch (error) {
@@ -493,46 +549,44 @@ async function claimDatabasePortableOperation(context: vscode.ExtensionContext, 
 }
 
 async function completeDatabasePortableOperation(root: string, entry: DatabasePortableOperation): Promise<void> {
-  const current = (await readDatabasePortableOperations(root)).find(item => item.key === entry.intent);
+  const current = (await readDatabasePortableOperations(root)).find(item => item.value.id === entry.id);
   if (!current || current.value.id !== entry.id || current.value.status === 'completed') return;
   await sendRuntimeDataRequest(root, { operation: 'patch_host_settings', input: {
     namespace: 'portable_operations', ownerScope: 'global',
-    patches: [{ key: entry.intent, expectedRevision: current.revision, value: { ...entry, status: 'completed', updatedAt: Date.now() } }],
-    idempotencyKey: `portable-operation-complete:${entry.id}`
+    patches: [{ key: current.key, expectedRevision: current.revision, value: { ...entry, status: 'completed', updatedAt: entry.updatedAt } }],
+    idempotencyKey: `portable-operation-complete:${current.key}:${entry.id}`
   } });
 }
 
 async function runDurablePortableOperation<T>(context: vscode.ExtensionContext, root: string, operation: PortableOperationName, input: Record<string, unknown>): Promise<T> {
-  await migrateLegacyPortableOperations(context);
-  const legacy = pendingPortableOperations(context).find(item => item.root === root && item.operation === operation
+  const importedLegacy = await importLegacyPortableOperations(context);
+  const legacy = importedLegacy.find(item => item.root === root && item.operation === operation
     && item.intent === crypto.createHash('sha256').update(JSON.stringify({ root, operation, input })).digest('hex'));
   let retainedEntry = await claimDatabasePortableOperation(context, root, operation, input, legacy?.id);
-  if (legacy) {
-    await discardCompletedLegacyPortableOperation(context, `${portableOperationStatePrefix}${legacy.id}`);
-    await context.globalState.update(portableOperationStateKey, (context.globalState.get<PendingPortableOperation[]>(portableOperationStateKey) || []).filter(item => item.id !== legacy.id));
-    if (retainedEntry.status === 'completed') retainedEntry = await claimDatabasePortableOperation(context, root, operation, input);
-  }
+  if (legacy && retainedEntry.status === 'completed') retainedEntry = await claimDatabasePortableOperation(context, root, operation, input);
   const result = await sendRuntimeDataRequest<T>(root, { operation, input: { ...retainedEntry.input, idempotencyKey: `portable-operation:${retainedEntry.id}` } });
   await completeDatabasePortableOperation(root, retainedEntry);
   return result;
 }
 
 async function recoverDurablePortableOperations(context: vscode.ExtensionContext, currentRoot: string): Promise<void> {
-  await migrateLegacyPortableOperations(context);
-  const roots = [...new Set([...(context.globalState.get<string[]>(portableOperationRootsKey) || []), currentRoot, ...pendingPortableOperations(context).map(item => item.root)])];
+  const knownRoots = [...new Set([...indexedPortableOperationRoots(context), ...legacyPortableOperations(context).map(item => normalizeGlobalDataPathForExtension(item.root))])];
+  knownRoots.forEach(registerRuntimeDatabaseAuthority);
+  const importedLegacy = await importLegacyPortableOperations(context);
+  const roots = [...new Set([...knownRoots, currentRoot, ...importedLegacy.map(item => normalizeGlobalDataPathForExtension(item.root))])];
   for (const root of roots) {
-    await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root });
-    for (const legacy of pendingPortableOperations(context).filter(item => item.root === root)) {
-      await claimDatabasePortableOperation(context, root, legacy.operation, legacy.input, legacy.id);
-      await discardCompletedLegacyPortableOperation(context, `${portableOperationStatePrefix}${legacy.id}`);
-      await context.globalState.update(portableOperationStateKey, (context.globalState.get<PendingPortableOperation[]>(portableOperationStateKey) || []).filter(item => item.id !== legacy.id));
-    }
-    for (const item of await readDatabasePortableOperations(root)) {
-      const entry = item.value;
-      if (entry.status !== 'pending') continue;
-      await sendRuntimeDataRequest(root, { operation: entry.operation, input: { ...entry.input, idempotencyKey: `portable-operation:${entry.id}` } });
-      await completeDatabasePortableOperation(root, entry);
-      if (entry.operation === 'import_project' && root === currentRoot) await refreshProjectRegistryForContext(context, root);
+    try {
+      await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root });
+      if (root === currentRoot) await rememberPortableOperationRoot(context, root);
+      for (const item of await readDatabasePortableOperations(root)) {
+        const entry = item.value;
+        if (entry.status !== 'pending') continue;
+        await sendRuntimeDataRequest(root, { operation: entry.operation, input: { ...entry.input, idempotencyKey: `portable-operation:${entry.id}` } });
+        await completeDatabasePortableOperation(root, entry);
+        if (entry.operation === 'import_project' && root === currentRoot) await refreshProjectRegistryForContext(context, root);
+      }
+    } catch (error) {
+      console.error('SoloMap portable operation recovery failed for data root:', root, error);
     }
   }
   if (normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath) === currentRoot) sendProjectsToWebviews(context);
@@ -559,6 +613,11 @@ const nativeContinuationByConversationKey = new Map<string, Promise<void>>();
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('SoloMap extension is now active!');
+  indexedDatabaseAuthorityRoots(context).forEach(registerRuntimeDatabaseAuthority);
+  const registeredServiceDataRoot = registeredAutonomousRuntimeDataRoot();
+  if (registeredServiceDataRoot) registerRuntimeDatabaseAuthority(registeredServiceDataRoot);
+  [...indexedPortableOperationRoots(context), ...legacyPortableOperations(context).map(item => item.root)]
+    .forEach(registerRuntimeDatabaseAuthority);
   extensionContextRef = context;
   persistedSettingsCache = null;
   persistedSettingsCacheSource = '';
@@ -684,7 +743,7 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(vscode.commands.registerCommand('solopreneur.resumeAutonomousRuntime', async () => {
     const settings = getPersistedSettings(context);
     const globalDataPath = normalizeGlobalDataPathForExtension(settings.globalDataPath);
-    await activateObservedBackgroundRuntime(context.extensionPath, globalDataPath, true);
+    await activateObservedBackgroundRuntime(context, globalDataPath, true);
     const runtime = readRuntimeState(globalDataPath);
     if (runtime?.status === 'paused') {
       await sendRuntimeControlCommand(globalDataPath, 'resume', { expectedRuntimeId: runtime.runtimeId });
@@ -795,13 +854,6 @@ export async function activate(context: vscode.ExtensionContext) {
   }));
   if (typeof vscode.window.onDidCloseTerminal === 'function') {
     context.subscriptions.push(vscode.window.onDidCloseTerminal((terminal) => {
-      const maintenance = maintenanceAgentTerminals.get(terminal.name);
-      if (maintenance) {
-        maintenanceAgentTerminals.delete(terminal.name);
-        void sendRuntimeDataRequest(maintenance.globalDataPath, {
-          operation: 'fail_maintenance_task', input: { taskId: maintenance.taskId, error: 'agent_cli_stopped' }
-        }).catch(() => {});
-      }
       void handleAgentTerminalClosed(terminal.name, terminal.exitStatus?.reason, agentTerminalRunTargets.get(terminal));
     }));
   }
@@ -928,7 +980,8 @@ export async function activate(context: vscode.ExtensionContext) {
     if (!pending) {
       pending = (dataInitialized.has(root)
         ? ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root }).then(() => undefined)
-        : reconcileBackgroundIntelligenceService(context).then(() => { dataInitialized.add(root); }))
+        : reconcileBackgroundIntelligenceService(context))
+        .then(async () => { dataInitialized.add(root); await rememberDatabaseAuthorityRoot(context, root); })
         .finally(() => { dataReadiness.delete(root); });
       dataReadiness.set(root, pending);
     }
@@ -1089,7 +1142,7 @@ async function reconcileBackgroundIntelligenceService(context: vscode.ExtensionC
   try {
     const runtimeSettings = getPersistedSettings(context);
     const globalDataPath = normalizeGlobalDataPathForExtension(runtimeSettings.globalDataPath);
-    await activateObservedBackgroundRuntime(context.extensionPath, globalDataPath);
+    await activateObservedBackgroundRuntime(context, globalDataPath);
     await refreshExtensionSettingsFromDatabase(context, globalDataPath);
     await syncCognitiveRuntimeConfig(context, getPersistedSettings(context));
     await refreshProjectRegistryForContext(context, globalDataPath);
@@ -1111,16 +1164,23 @@ async function reconcileBackgroundIntelligenceService(context: vscode.ExtensionC
   }
 }
 
-async function activateObservedBackgroundRuntime(extensionPath: string, globalDataPath: string, resume = false): Promise<void> {
+async function activateObservedBackgroundRuntime(context: vscode.ExtensionContext, globalDataPath: string, resume = false): Promise<void> {
   const trace = createLocalDiagnosticTrace(globalDataPath, 'runtime.reconcile');
   const startedAt = Date.now();
   await withLocalDiagnosticTrace(trace, async () => {
     try {
       if (resume) enableAutonomousRuntime(globalDataPath);
+      const normalizedRoot = normalizeGlobalDataPathForExtension(globalDataPath);
+      await observeLocalDiagnosticStage('runtime.database', () => ensurePersistentRuntimeDatabaseAuthority(
+        normalizedRoot,
+        root => ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root }),
+        root => rememberDatabaseAuthorityRoot(context, root)
+      ));
+      if (!runtimeDatabaseAuthorityRegistered(normalizedRoot)) throw new Error('database_authority_registration_failed');
       const serviceAvailable = await observeLocalDiagnosticStage('runtime.manager', () => isRuntimeServiceManagerAvailable());
       if (serviceAvailable) {
         try {
-          await observeLocalDiagnosticStage('runtime.service', () => ensureAutonomousRuntimeService({ extensionPath, globalDataPath }));
+          await observeLocalDiagnosticStage('runtime.service', () => ensureAutonomousRuntimeService({ extensionPath: context.extensionPath, globalDataPath: normalizedRoot }));
           trace.record('runtime.reconcile', 'ok', Date.now() - startedAt);
           return;
         } catch (serviceError) {
@@ -1133,7 +1193,7 @@ async function activateObservedBackgroundRuntime(extensionPath: string, globalDa
         trace.record('runtime.manager.unavailable', 'ok');
       }
       const fallback = await observeLocalDiagnosticStage('runtime.fallback', () =>
-        ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath }));
+        ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: normalizedRoot }));
       trace.record(fallback.started ? 'runtime.fallback.started' : 'runtime.fallback.reused', 'ok');
       trace.record('runtime.reconcile', 'ok', Date.now() - startedAt);
     } catch (error) {
@@ -1252,7 +1312,7 @@ async function handleSharedWebviewAction(
           ) === confirm;
         },
         chooseRestorePath: async () => (await vscode.window.showSaveDialog({ title: language === 'en' ? 'Restore file to' : '选择文件恢复位置', saveLabel: language === 'en' ? 'Restore file' : '恢复文件' }))?.fsPath,
-        launchAgent: (kind, targetId) => launchMigrationMaintenanceAgent(context, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath), kind, targetId)
+        launchAgent: (root, kind, targetId) => launchMigrationMaintenanceAgent(context, root, kind, targetId)
       });
       const successMessage = result.cancelled ? undefined : result.agentStarted
         ? (language === 'en' ? 'Cleanup started in the background. You can keep using SoloMap.' : '已开始在后台整理，你可以继续使用 SoloMap。')
@@ -1267,8 +1327,7 @@ async function handleSharedWebviewAction(
         : code === 'data_location_changed' ? (language === 'en' ? 'The data location changed. Refresh before continuing.' : '数据位置已变更，请刷新后继续。')
           : code === 'recycling_source_changed' ? (language === 'en' ? 'The file changed. It was kept; refresh to review it.' : '文件内容已变化，已保留。请刷新后重新查看。')
             : code === 'agent_cli_not_found' ? (language === 'en' ? 'The selected Agent is not available. Install it or update its path in Agent settings.' : '未找到当前选择的 Agent。请先安装，或在 Agent 设置中更新路径。')
-                : code === 'maintenance_task_in_use' ? (language === 'en' ? 'Cleanup is already running in another window. Update the status to see its progress.' : '另一窗口正在整理。请更新状态查看进度。')
-                  : code === 'agent_cli_start_failed' ? (language === 'en' ? 'Cleanup could not start. Check the selected Agent, then try again.' : '未能开始整理。请检查当前选择的 Agent，然后重试。')
+                : code === 'agent_cli_start_failed' ? (language === 'en' ? 'Cleanup could not start. Check the selected Agent, then try again.' : '未能开始整理。请检查当前选择的 Agent，然后重试。')
                     : code === 'maintenance_launch_denied' ? (language === 'en' ? 'The cleanup connection expired. Update the status, then continue.' : '整理连接已过期。请更新状态后继续。')
             : (language === 'en' ? 'This action did not finish. Your data is kept; refresh and retry.' : '本次操作未完成，数据已保留。请刷新后重试。');
       recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'data.migration.settings', error);
@@ -3185,14 +3244,14 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
   }
   const previousRuntimeRoot = normalizeGlobalDataPathForExtension(currentSettings.globalDataPath);
   const nextRuntimeRoot = normalizeGlobalDataPathForExtension(committedSettings.globalDataPath);
-  await activateObservedBackgroundRuntime(context.extensionPath, nextRuntimeRoot);
+  await activateObservedBackgroundRuntime(context, nextRuntimeRoot);
   await syncCognitiveRuntimeConfig(context, committedSettings);
   synchronizeTelegramChannel(context);
   if (previousRuntimeRoot !== nextRuntimeRoot) {
-    await activateObservedBackgroundRuntime(context.extensionPath, previousRuntimeRoot);
+    await activateObservedBackgroundRuntime(context, previousRuntimeRoot);
     await persistCognitiveRuntimeConfig(previousRuntimeRoot, { mode: 'local_only', agentCli: '', model: 'auto' },
       request => sendRuntimeDataRequest(previousRuntimeRoot, request));
-    await activateObservedBackgroundRuntime(context.extensionPath, nextRuntimeRoot);
+    await activateObservedBackgroundRuntime(context, nextRuntimeRoot);
   }
 }
 
@@ -6593,7 +6652,6 @@ const reservedAgentTerminalsByProject = new Map<string, Array<{
   terminal: vscode.Terminal;
   environmentSignature: string;
 }>>();
-const maintenanceAgentTerminals = new Map<string, { globalDataPath: string; taskId: string }>();
 
 async function revealAgentStartupTerminal(
   context: vscode.ExtensionContext,
@@ -6992,92 +7050,31 @@ async function launchMigrationMaintenanceAgent(
   kind: MigrationMaintenanceKind,
   targetId?: string
 ): Promise<void> {
-  const settings = getPersistedSettings(context);
+  const workspaceRoot = getSkillInstallWorkspaceRoot(context);
+  const settings = { ...getPersistedSettings(context), globalDataPath };
+  const { maintenanceRoot } = ensureSolomapMaintenanceWorkspace(workspaceRoot, globalDataPath);
   const requestedAgentCli = (settings.cliPath || 'agy').trim();
   const agentCli = resolveAgentCli(requestedAgentCli, settings.cliPath);
   if (!commandExists(agentCli)) throw new Error('agent_cli_not_found');
-  const provider = getAgentProvider(agentCli);
-  if (!databaseAgentProviders.includes(provider as DatabaseAgentProvider)) throw new Error('agent_database_provider_unsupported');
-  const sandbox = new LinuxBubblewrapSandbox();
-  const sandboxProbe = await sandbox.probe();
-
-  await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
-  const configFile = agentDatabaseConfigPath(provider as DatabaseAgentProvider);
-  await sendRuntimeDataRequest(globalDataPath, {
-    operation: 'prepare_agent_database',
-    input: { root: getSkillInstallWorkspaceRoot(context), provider, configPath: configFile, command: process.execPath }
-  });
-  const overview = await sendRuntimeDataRequest<{ maintenanceTasks?: Array<{ taskId: string; kind: string; targetId: string | null; status: string; validUntil: number }> }>(globalDataPath, { operation: 'migration_overview', input: {} });
-  const existing = overview.maintenanceTasks?.find(item => item.kind === kind && item.targetId === (targetId || null)
-    && ['ready', 'running'].includes(item.status) && item.validUntil > Date.now());
-  const task = existing
-    ? await sendRuntimeDataRequest<{ taskId: string; proof: string; launchToken: string }>(globalDataPath, { operation: 'claim_maintenance_task', input: { taskId: existing.taskId } })
-    : await sendRuntimeDataRequest<{ taskId: string; proof: string; launchToken: string }>(globalDataPath, {
-      operation: 'create_maintenance_task', input: { kind, ...(targetId ? { targetId } : {}) }
-    });
-  const endpoint = await readMaintenanceRuntimeEndpoint(globalDataPath);
-  const agentWorkspace = path.join(context.globalStorageUri.fsPath, 'maintenance-agent');
-  fs.mkdirSync(agentWorkspace, { recursive: true, mode: 0o700 });
-  const runId = `migration-${kind}-${Date.now()}`;
-  const maintenanceMcpConfig = JSON.stringify({
-    mcpServers: {
-      solomap_data: {
-        type: 'stdio', command: process.execPath, args: ['-e', databaseBridgeLauncher()],
-        env: { ELECTRON_RUN_AS_NODE: '1', SOLOMAP_MANAGED_BRIDGE: '1' }
-      }
-    }
-  });
-  const agentCommand = applyNativeMigrationAgentBoundary(
-    buildAgentCommand(agentCli, buildMigrationMaintenancePrompt(kind, targetId), agentWorkspace, '', settings.taskPermissionMode || 'auto'),
-    agentCli,
-    provider,
-    maintenanceMcpConfig
-  );
-  const maintenanceEnvironment: Record<string, string> = {
-    PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
-    HOME: os.homedir(),
-    SOLOMAP_MAINTENANCE_TASK_ID: task.taskId,
-    SOLOMAP_MAINTENANCE_PROOF: task.proof,
-    SOLOMAP_MAINTENANCE_LAUNCH_TOKEN: task.launchToken,
-    SOLOMAP_MAINTENANCE_RUNTIME_ID: endpoint.runtimeId,
-    SOLOMAP_MAINTENANCE_RUNTIME_PORT: String(endpoint.port),
-    SOLOMAP_MAINTENANCE_ENTRY_PATH: path.join(context.extensionPath, 'out', 'databaseMcpProcess.js'),
-    ELECTRON_RUN_AS_NODE: '1'
-  };
-  for (const key of migrationAgentConfigurationEnvironmentKeys(provider)) {
-    if (process.env[key]) maintenanceEnvironment[key] = String(process.env[key]);
-  }
-  const home = os.homedir();
-  const configPaths = [...migrationAgentConfigurationPaths(provider, configFile, home, process.env), ...migrationAgentExecutablePaths(agentCli)]
-    .filter(candidate => fs.existsSync(candidate));
-  if (fs.existsSync(process.execPath)) configPaths.push(process.execPath);
-  const constrainedCommand = sandboxProbe.available
-    ? buildMigrationAgentSandboxCommand({
-      command: agentCommand,
-      workspacePath: agentWorkspace,
-      extensionPath: context.extensionPath,
-      configPaths: [...new Set(configPaths)],
-      environment: maintenanceEnvironment
-    })
-    : agentCommand;
-  const terminal = createAgentTerminal(agentWorkspace, `migration-${runId.slice(-6)}`, 0, maintenanceEnvironment);
-  maintenanceAgentTerminals.set(terminal.name, { globalDataPath, taskId: task.taskId });
-  terminal.show(true);
-  if (!await sendTextWhenTerminalReady(terminal, `${constrainedCommand}; exit`)) {
-    maintenanceAgentTerminals.delete(terminal.name);
-    await sendRuntimeDataRequest(globalDataPath, { operation: 'fail_maintenance_task', input: { taskId: task.taskId, error: 'agent_cli_start_failed' } });
-    throw new Error('agent_cli_start_failed');
-  }
+  const request = kind === 'migration_review' ? '检查旧数据迁移状态。'
+    : kind === 'migration_apply' ? '迁移已登记的旧数据。' : '回收已确认的旧文件。';
+  await launchMaintenanceAgentRun(context, workspaceRoot, settings, agentCli, maintenanceRoot, kind, request,
+    () => buildMigrationMaintenancePrompt(kind, targetId), '', { expectsResult: false, launchSlotId: `settings:${kind}:${targetId || 'all'}`, launchSlotScope: 'global', metadata: { migrationTargetId: targetId || '' } });
 }
 
-async function launchMaintenanceAgentRun(context: vscode.ExtensionContext, workspaceRoot: string, settings: SolopreneurSettings, agentCli: string, maintenanceRoot: string, runKind: string, request: string, buildPrompt: (resultPath: string) => string, capabilityOperationId = ''): Promise<string> {
+async function launchMaintenanceAgentRun(context: vscode.ExtensionContext, workspaceRoot: string, settings: SolopreneurSettings, agentCli: string, maintenanceRoot: string, runKind: string, request: string, buildPrompt: (resultPath: string) => string, capabilityOperationId = '', options: { expectsResult?: boolean; metadata?: Record<string, unknown>; launchSlotId?: string; launchSlotScope?: 'project' | 'global' } = {}): Promise<string> {
   const globalDataPath = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
   await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
   if (capabilityOperationId) await prepareCapabilityOperationFilesystemBaseline(globalDataPath, capabilityOperationId);
   try {
-    const prepared = await prepareMaintenanceAgentRun({ workspaceRoot, globalDataPath, agentCli, maintenanceRoot, runKind, request, buildPrompt, taskPermissionMode: settings.taskPermissionMode || 'auto' });
+    const prepared = await prepareMaintenanceAgentRun({ workspaceRoot, globalDataPath, agentCli, maintenanceRoot, runKind, request, buildPrompt, taskPermissionMode: settings.taskPermissionMode || 'auto', ...options });
     if (capabilityOperationId) await attachCapabilityOperation(globalDataPath, capabilityOperationId, prepared.resultFilePath, prepared.runId);
-    await launchAgentConversationTerminal({ workspaceRoot, globalDataPath, label: runKind, conversationId: Number(prepared.status.rootExecutionLogId), nodeId: '__solo__', statusFilePath: runStatusReference(workspaceRoot, Number(prepared.status.rootExecutionLogId)), runKind, context, agentCli, command: prepared.finalCommand });
+    if (path.resolve(String(prepared.status.workspaceRoot || workspaceRoot)) !== path.resolve(workspaceRoot)) return prepared.resultFilePath;
+    try {
+      await launchAgentConversationTerminal({ workspaceRoot, globalDataPath, label: runKind, conversationId: Number(prepared.status.rootExecutionLogId), nodeId: '__solo__', statusFilePath: runStatusReference(workspaceRoot, Number(prepared.status.rootExecutionLogId)), runKind, context, agentCli, command: prepared.finalCommand });
+    } catch (error) {
+      if (!['run_delivery_owner_alive', 'run_already_delivered'].includes(error instanceof Error ? error.message : String(error))) throw error;
+    }
     return prepared.resultFilePath;
   } catch (error) {
     if (capabilityOperationId) await rollbackCapabilityOperationFilesystem(globalDataPath, capabilityOperationId);
@@ -8420,7 +8417,8 @@ async function handleRunAgent(
   ].filter(Boolean).join('\n\n');
   const runKind = interactiveConversation ? 'step' : 'step_background';
   const roadmapValidationMode = node.title === '生成初始路线图' ? 'bootstrap' : 'revision';
-  const roadmapValidationCommand = `${shellQuote(process.execPath)} ${shellQuote(path.join(context.extensionPath, 'resources', 'tools', 'validate-roadmap.cjs'))} --mode ${roadmapValidationMode}`;
+  const extensionPath = context.extensionPath || path.resolve(__dirname, '..');
+  const roadmapValidationCommand = `${shellQuote(process.execPath)} ${shellQuote(path.join(extensionPath, 'resources', 'tools', 'validate-roadmap.cjs'))} --mode ${roadmapValidationMode}`;
   const conversationPrompt = await buildAgentConversationPrompt(node, userMessage, workspaceRoot, '', '', '', nativeSessionId, attachedFiles, settings.globalPrompt, '', globalDataPath, settings.enabledEnhancements, false, interactiveConversation, roadmapValidationCommand);
   const prepared = await prepareOrdinaryConversation(context, { agentCli, selectedModel, prompt: conversationPrompt, globalPrompt: settings.globalPrompt, workspaceRoot, nodeId, executionLogId: 0, userMessage: userMessage.trim(), runKind, globalDataPath, taskPermissionMode: settings.taskPermissionMode || 'auto', nativeSessionId, launchIntentId: target?.launchIntentId, metadata: { launchSummary: buildLaunchSummary(), preSessionGitBackup: true } });
   postNodeConversations(nodeId);

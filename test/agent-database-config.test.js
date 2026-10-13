@@ -1,6 +1,6 @@
 const test = require('node:test');
 
-test('Codex forwards current run and maintenance credentials without storing their values or dropping existing environment declarations', () => {
+test('Codex forwards the ordinary run identity and kind without storing their values or dropping existing environment declarations', () => {
   const root = fixtureRoot('solomap-config-run-forward-');
   const file = path.join(root, 'config.toml');
   const module = require('../out/agentDatabaseConfig.js'), toml = require('@iarna/toml');
@@ -14,13 +14,9 @@ test('Codex forwards current run and maintenance credentials without storing the
     'SOLOMAP_EXECUTION_LOG_ID',
     'SOLOMAP_RUN_GENERATION',
     'SOLOMAP_RUN_PROOF',
-    'SOLOMAP_MAINTENANCE_TASK_ID',
-    'SOLOMAP_MAINTENANCE_PROOF',
-    'SOLOMAP_MAINTENANCE_LAUNCH_TOKEN',
-    'SOLOMAP_MAINTENANCE_RUNTIME_ID',
-    'SOLOMAP_MAINTENANCE_RUNTIME_PORT',
-    'SOLOMAP_MAINTENANCE_ENTRY_PATH'
+    'SOLOMAP_RUN_KIND'
   ]) assert.ok(server.env_vars.includes(name), name);
+  assert.ok(server.env_vars.every(name => !name.startsWith('SOLOMAP_MAINTENANCE_')));
   assert.equal(Object.hasOwn(server.env, 'SOLOMAP_RUN_PROOF'), false);
   const once = fs.readFileSync(file, 'utf8');
   module.configureAgentDatabase({ provider: 'codex', configPath: file, command: process.execPath, globalDataPath: '/global/.solomap-global' });
@@ -108,14 +104,14 @@ test('all built-in Agent families receive their native MCP format without changi
         assert.equal(server.command, '/native/node');
         if (provider === 'copilot') {
           assert.equal(server.type, 'local');
-          assert.deepEqual(server.tools, ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply', 'solomap_maintenance_finish']);
+          assert.deepEqual(server.tools, ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply']);
         }
       }
     }
   }
 });
 
-test('managed Copilot configuration gains maintenance tools on upgrade', () => {
+test('managed Copilot configuration gains migration tools on upgrade without a private lifecycle tool', () => {
   const { configureAgentDatabase } = require('../out/agentDatabaseConfig.js');
   const root = fixtureRoot('solomap-copilot-upgrade-');
   const file = path.join(root, 'mcp-config.json');
@@ -125,7 +121,8 @@ test('managed Copilot configuration gains maintenance tools on upgrade', () => {
   configureAgentDatabase({ provider: 'copilot', configPath: file, command: '/new/node', globalDataPath: '/shared/.solomap-global' });
   const tools = JSON.parse(fs.readFileSync(file, 'utf8')).mcpServers.solomap_data.tools;
   assert.ok(tools.includes('solomap_recycling_apply'));
-  assert.ok(tools.includes('solomap_maintenance_finish'));
+  assert.ok(tools.includes('solomap_migration_start'));
+  assert.ok(!tools.includes('solomap_maintenance_finish'));
 });
 
 test('native TOML conflicts remain byte-identical and managed server restrictions survive updates', () => {

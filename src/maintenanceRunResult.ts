@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { captureInstallationFiles } from './capabilityRegistry';
-import { maintenanceRunKinds, RunState } from './runLifecycleTypes';
+import { maintenanceResultRunKinds, RunState } from './runLifecycleTypes';
 
 export function maintenanceResultSignature(file: string): string | null {
   try {
@@ -12,7 +12,7 @@ export function maintenanceResultSignature(file: string): string | null {
 
 export async function captureMaintenanceRunResult(dataRoot: string, state: RunState,
   operation: (name: string, input: Record<string, unknown>) => Promise<unknown>): Promise<boolean> {
-  if (!maintenanceRunKinds.includes(String(state.status.runKind)) || !state.status.maintenanceResultPath) return false;
+  if (!maintenanceResultRunKinds.includes(String(state.status.runKind)) || !state.status.maintenanceResultPath) return false;
   const identity = { projectId: state.projectId, executionLogId: Number(state.status.rootExecutionLogId || state.status.executionLogId) };
   const purpose = `maintenance_result_${state.generation}`;
   if (await operation('read_run_document', { ...identity, purpose })) return true;

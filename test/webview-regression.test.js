@@ -1030,22 +1030,21 @@ test('Agent CLI upgrade action delegates every installed CLI to the Agent', () =
   assert.match(webview, /command: 'agent\.upgradeAll'/);
 });
 
-test('settings maintenance tasks launch outside the current project', () => {
+test('settings migration delegates to the same shared Agent CLI runner as Agent CLI upgrade', () => {
   const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
   const sidebarProvider = fs.readFileSync(path.join(projectRoot, 'src', 'sidebarProvider.ts'), 'utf8');
   assert.match(extension, /const \{ maintenanceRoot, runsRoot \} = ensureSolomapMaintenanceWorkspace/);
   assert.match(extension, /launchMaintenanceAgentRun\(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'agent_cli_upgrade'/);
   assert.match(extension, /launchMaintenanceAgentRun\(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'skill_install'/);
   assert.match(extension, /launchMaintenanceAgentRun\(context, workspaceRoot, settings, agentCli, maintenanceRoot, 'mcp_install'/);
+  const migrationLauncher = extension.slice(extension.indexOf('async function launchMigrationMaintenanceAgent'), extension.indexOf('\nasync function launchMaintenanceAgentRun'));
   assert.doesNotMatch(extension, /`enhance-/);
-  assert.match(extension, /createAgentTerminal\(agentWorkspace, `migration-/);
-  assert.match(extension, /const requestedAgentCli = \(settings\.cliPath \|\| 'agy'\)\.trim\(\)/);
-  assert.match(extension, /const agentCli = resolveAgentCli\(requestedAgentCli, settings\.cliPath\)/);
-  assert.match(extension, /buildAgentCommand\(agentCli, buildMigrationMaintenancePrompt\(kind, targetId\), agentWorkspace, '', settings\.taskPermissionMode \|\| 'auto'\)/);
-  assert.doesNotMatch(extension, /buildMigrationMaintenancePrompt\(kind, targetId\), agentWorkspace, '', 'never'/);
-  assert.doesNotMatch(extension, /maintenance_agent_native_boundary_unsupported/);
-  assert.match(extension, /applyNativeMigrationAgentBoundary\([\s\S]*maintenanceMcpConfig/);
-  assert.match(extension, /buildMigrationAgentSandboxCommand/);
+  assert.match(migrationLauncher, /resolveAgentCli\(requestedAgentCli, settings\.cliPath\)/);
+  assert.match(migrationLauncher, /launchMaintenanceAgentRun\(context, workspaceRoot, settings, agentCli, maintenanceRoot, kind/);
+  assert.match(migrationLauncher, /launchSlotId: `settings:\$\{kind\}:\$\{targetId \|\| 'all'\}`/);
+  assert.match(migrationLauncher, /launchSlotScope: 'global'/);
+  assert.doesNotMatch(migrationLauncher, /maintenance_task_in_use|migration_overview/);
+  for (const fork of ['createAgentTerminal', 'LinuxBubblewrapSandbox', 'buildMigrationAgentSandboxCommand', 'SOLOMAP_MAINTENANCE_', 'maintenanceAgentTerminals']) assert.doesNotMatch(migrationLauncher, new RegExp(fork));
   assert.match(sidebarProvider, /cwd: maintenanceRoot/);
 });
 
@@ -1792,7 +1791,20 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
         if (id === './autonomousRuntimeHost') {
           // These UI/identity fixtures isolate process creation; database startup
           // and the generated task consumer have separate real-owner acceptance.
-          return { ensureHealthyAutonomousRuntime: async () => ({ started: false, pid: process.pid, runtimeId: 'isolated-ui-host' }) };
+          const ensureHealthyAutonomousRuntime = async () => ({ started: false, pid: process.pid, runtimeId: 'isolated-ui-host' });
+          return {
+            ensureHealthyAutonomousRuntime,
+            ensurePersistentRuntimeDatabaseAuthority: async (options, rememberAuthority) => {
+              await ensureHealthyAutonomousRuntime(options);
+              await rememberAuthority(options.globalDataPath);
+            }
+          };
+        }
+        if (id === './databaseAuthorityBootstrap') {
+          return { ensurePersistentRuntimeDatabaseAuthority: async (root, ensureDatabase) => {
+            await ensureDatabase(root);
+            require(path.join(projectRoot, 'out/autonomousRuntime.js')).registerRuntimeDatabaseAuthority(root);
+          } };
         }
         if (id === './autonomousRuntimeControl' || id === './autonomousRuntimeControl.js') {
           return requireOverrides.__sharedAutonomousRuntimeControl;
@@ -7331,6 +7343,26 @@ test('default solomap global path avoids filesystem root when process cwd is roo
   }
 });
 
+test('explicit relative data paths resolve to one absolute Runtime authority', () => {
+  const projectRegistry = require(path.join(projectRoot, 'out', 'projectRegistry.js'));
+  assert.equal(
+    projectRegistry.normalizeGlobalDataPathForExtension('relative-data'),
+    path.join(process.cwd(), 'relative-data', '.solomap-global')
+  );
+  assert.equal(path.isAbsolute(projectRegistry.normalizeGlobalDataPathForExtension('relative-data')), true);
+});
+
+test('activation restores proven database authorities without treating a new configured root as existing', () => {
+  const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  const start = extension.indexOf('export async function activate(context: vscode.ExtensionContext)');
+  const end = extension.indexOf('  extensionContextRef = context;', start);
+  const bootstrap = extension.slice(start, end);
+  assert.doesNotMatch(bootstrap, /configuredDataPathAuthority/);
+  assert.match(bootstrap, /indexedDatabaseAuthorityRoots\(context\).*forEach\(registerRuntimeDatabaseAuthority\)/s);
+  assert.match(bootstrap, /registeredAutonomousRuntimeDataRoot\(\).*registerRuntimeDatabaseAuthority/s);
+  assert.match(extension, /rememberDatabaseAuthorityRoot\(context, root\)/);
+});
+
 test('sidebar GitHub projections summarize database cache payloads', () => {
   const sidebarModule = loadCompiledModule(
     'out/projectExternalSignals.js',
@@ -10315,7 +10347,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(bootstrapInstructions, /本轮提示中的路线图方法/);
   assert.match(bootstrapInstructions, /共享路线图校验命令/);
   assert.doesNotMatch(bootstrapInstructions, /\.solopreneur\/(?:roadmap-methodology\.md|validate-roadmap\.cjs)/);
-  assert.match(bootstrapInstructions, /按项目真实目标选择适用的推进框架/);
+  assert.match(bootstrapInstructions, /结合项目真实目标选择适用的推进框架/);
   assert.match(bootstrapInstructions, /6 个类别/);
   assert.match(bootstrapInstructions, /Build->Sell->Learn->Improve/);
   assert.match(bootstrapInstructions, /不要把本文件内容、提示词模板或解释性说明写回 CSV/);
@@ -10765,7 +10797,8 @@ test('local roadmap fallback produces runnable dependent tasks', () => {
   assert.equal(nodes[3].dependencies, '3');
   assert.ok(nodes.every((node) => node.agentCli === 'codex'));
   assert.match(nodes[0].title, /生成初始路线图/);
-  assert.match(nodes[0].agentPrompt, /\.solopreneur\/bootstrap-roadmap-instructions\.md/);
+  assert.match(nodes[0].agentPrompt, /共享路线图校验命令/);
+  assert.doesNotMatch(nodes[0].agentPrompt, /bootstrap-roadmap-instructions\.md/);
   assert.doesNotMatch(nodes[0].agentPrompt, /字段顺序必须严格是/);
   assert.ok(nodes.some((node) => node.agentPrompt.includes('docs/project-brief.md')));
   assert.deepEqual([...new Set(nodes.map((node) => node.stage))], ['目标与路径确认', '交付与验证', '结果反馈与迭代']);

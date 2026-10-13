@@ -118,6 +118,25 @@ function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function createConversationDataRequest() {
+  const values = new Map();
+  return async (_root, request) => {
+    if (request.operation === 'read_intelligence_conversation') {
+      const value = values.get(request.input.id);
+      return value ? { conversation: structuredClone(value.conversation), revision: value.revision } : null;
+    }
+    if (request.operation === 'write_intelligence_conversation') {
+      const current = values.get(request.input.conversation.id);
+      if ((current?.revision || 0) !== request.input.expectedRevision) throw new Error('revision_conflict');
+      const revision = (current?.revision || 0) + 1;
+      values.set(request.input.conversation.id, { conversation: structuredClone(request.input.conversation), revision });
+      return { revision };
+    }
+    if (request.operation === 'list_intelligence_conversations') return [...values.values()].map(value => value.conversation);
+    throw new Error(`unexpected intelligence operation: ${request.operation}`);
+  };
+}
+
 test('Telegram chat records correlated receipt, model, and delivery stages without message content', async t => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
   const { IntelligenceConversationStore } = require('../out/intelligenceChat.js');
@@ -148,7 +167,7 @@ test('Telegram chat records correlated receipt, model, and delivery stages witho
     } finally {
       await observeLocalDiagnosticStage('mcp.close', () => session.close());
     }
-  });
+  }, createConversationDataRequest());
   const reply = createTelegramIntelligenceReply(() => store, () => savedIds, async ids => { savedIds = ids; }, () => 0);
   const contextMock = { globalState: { get(key) {
     return key === 'solopreneur.settings'

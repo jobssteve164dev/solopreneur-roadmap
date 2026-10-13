@@ -76,6 +76,87 @@ test('changing the data root routes the real action engine to the new journal', 
   assert.equal(scope.runtimeReadyRoot, f.b);
 });
 
+test('a default roadmap does not direct the Agent to retired project support files', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-default-roadmap-'));
+  t.after(() => cleanupExact(base));
+  const csv = path.join(base, '.solopreneur', 'roadmap.csv');
+  const db = path.join(base, '.solopreneur', 'project_journal.db');
+  fs.mkdirSync(path.dirname(csv), { recursive: true });
+  const engine = new SyncEngine(csv, db, path.resolve(__dirname, '..'));
+  t.after(() => engine.close());
+  await engine.initAndSync();
+  const prompt = engine.getNodes()[0].agentPrompt;
+  assert.doesNotMatch(prompt, /bootstrap-roadmap-instructions\.md|roadmap-methodology\.md/);
+  assert.match(prompt, /共享路线图校验器/);
+});
+
+test('a late roadmap refresh cannot overwrite a newer revision, including from revision zero', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-roadmap-refresh-order-'));
+  t.after(() => cleanupExact(base));
+  const csv = path.join(base, '.solopreneur', 'roadmap.csv');
+  fs.mkdirSync(path.dirname(csv), { recursive: true });
+  fs.writeFileSync(csv, 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n1,Initial,,Stage,,codex,,Pending,,');
+  const engine = new SyncEngine(csv, path.join(base, '.solopreneur', 'project_journal.db'), path.resolve(__dirname, '..'), path.join(base, '.solomap-global'));
+  t.after(() => engine.close());
+  let releaseFirst;
+  const firstSnapshot = new Promise(resolve => { releaseFirst = resolve; });
+  let calls = 0;
+  engine.readOrAcceptRoadmap = () => ++calls === 1
+    ? firstSnapshot
+    : Promise.resolve({ nodes: [{ id: 'new', title: 'New snapshot' }], revision: 2 });
+  const first = engine.refreshNodes();
+  await engine.refreshNodes();
+  assert.equal(engine.getNodes()[0].title, 'New snapshot');
+  releaseFirst({ nodes: [{ id: 'old', title: 'Old snapshot' }], revision: 1 });
+  await first;
+  assert.equal(engine.getNodes()[0].title, 'New snapshot');
+});
+
+test('a roadmap mutation invalidates an older refresh before it can overwrite the committed state', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-roadmap-refresh-write-order-'));
+  t.after(() => cleanupExact(base));
+  const csv = path.join(base, '.solopreneur', 'roadmap.csv');
+  fs.mkdirSync(path.dirname(csv), { recursive: true });
+  fs.writeFileSync(csv, 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n1,Initial,,Stage,,codex,,Pending,,');
+  const engine = new SyncEngine(csv, path.join(base, '.solopreneur', 'project_journal.db'), path.resolve(__dirname, '..'), path.join(base, '.solomap-global'));
+  t.after(() => engine.close());
+  let releaseRefresh;
+  engine.readOrAcceptRoadmap = () => new Promise(resolve => { releaseRefresh = resolve; });
+  engine.roadmapRevision = 1;
+  const refresh = engine.refreshNodes();
+  engine.enqueueRoadmapMutation = async change => {
+    engine.nodeCache = change([{ id: '1', title: 'Initial', status: 'Pending' }]);
+    engine.roadmapRevision = 2;
+  };
+  await engine.updateNode('1', { status: 'Completed' });
+  releaseRefresh({ nodes: [{ id: '1', title: 'Initial', status: 'Pending' }], revision: 1 });
+  await refresh;
+  assert.equal(engine.getNodes()[0].status, 'Completed');
+  assert.equal(engine.roadmapRevision, 2);
+});
+
+test('a superseded roadmap refresh cannot surface its stale conflict after a local mutation', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-roadmap-refresh-error-order-'));
+  t.after(() => cleanupExact(base));
+  const csv = path.join(base, '.solopreneur', 'roadmap.csv');
+  fs.mkdirSync(path.dirname(csv), { recursive: true });
+  fs.writeFileSync(csv, 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n1,Initial,,Stage,,codex,,Pending,,');
+  const engine = new SyncEngine(csv, path.join(base, '.solopreneur', 'project_journal.db'), path.resolve(__dirname, '..'), path.join(base, '.solomap-global'));
+  t.after(() => engine.close());
+  let rejectRefresh;
+  engine.readOrAcceptRoadmap = () => new Promise((_resolve, reject) => { rejectRefresh = reject; });
+  engine.roadmapRevision = 1;
+  const refresh = engine.refreshNodes();
+  engine.enqueueRoadmapMutation = async change => {
+    engine.nodeCache = change([{ id: '1', title: 'Initial', status: 'Pending' }]);
+    engine.roadmapRevision = 2;
+  };
+  await engine.updateNode('1', { status: 'Completed' });
+  rejectRefresh(new Error('roadmap_projection_conflict'));
+  await assert.doesNotReject(refresh);
+  assert.equal(engine.getNodes()[0].status, 'Completed');
+});
+
 test('a late initialization from the previous root cannot replace the newer engine', async t => {
   const f = await roots(t); let releaseA, beganA;
   const startedA = new Promise(resolve => { beganA = resolve; }), gateA = new Promise(resolve => { releaseA = resolve; });
@@ -104,7 +185,11 @@ function extensionHost(t, f, options = {}) {
     if (scope.requestHook) await scope.requestHook(root, request);
     if (scope.requestHandler && !['read_host_settings', 'patch_host_settings'].includes(request.operation)) return scope.requestHandler(root, request);
     return transport.sendRuntimeDataRequest(root, request);
-  } } : id === './autonomousRuntimeHost' && options.stubRuntimeHealth ? { ...localRequire(id), ensureHealthyAutonomousRuntime: async () => ({}) } : localRequire(id);
+  } } : id === './autonomousRuntimeHost' && options.stubRuntimeHealth ? { ...localRequire(id), ensureHealthyAutonomousRuntime: async input => {
+    scope.runtimeHealthCalls.push(input.globalDataPath);
+    if (scope.runtimeHealthHandler) return scope.runtimeHealthHandler(input);
+    return {};
+  } } : localRequire(id);
   const vscode = { ConfigurationTarget: { Global: 1 }, TerminalExitReason: { Shutdown: 4 }, ThemeIcon: class {}, ThemeColor: class {}, Uri: { joinPath: (uri, ...parts) => ({ fsPath: path.join(uri.fsPath, ...parts) }) }, workspace: { workspaceFolders: [{ uri: { fsPath: f.project } }],
       getConfiguration: () => ({ get: key => scope.settings[key], update: async () => {} }) },
     window: { terminals: [], showErrorMessage: message => failures.push(message), showWarningMessage: message => failures.push(message), showInformationMessage() {}, showInputBox: async () => '继续原任务' }
@@ -112,7 +197,7 @@ function extensionHost(t, f, options = {}) {
   const scope = { require: hostRequire, exports: {}, __dirname: path.dirname(extension), process, console,
     Buffer, URL, setTimeout, clearTimeout, setInterval, clearInterval, setImmediate,
     settings: { globalDataPath: f.a, cliPath: 'claude', globalPrompt: '来源库规则', enabledEnhancements: {}, taskPermissionMode: 'auto' },
-    project: f.project, deliveries, failures, messages, dataRequests,
+    project: f.project, deliveries, failures, messages, dataRequests, runtimeHealthCalls: [], runtimeHealthHandler: null,
     context: { extensionPath: path.resolve(__dirname, '..'), extensionUri: { fsPath: path.resolve(__dirname, '..') }, subscriptions: [], globalState: { get: key => globalStateValues.get(key), keys: () => [...globalStateValues.keys()], update: async (key, value) => {
       if (options.globalStateUpdate) return options.globalStateUpdate(globalStateValues, key, value);
       if (value === undefined) globalStateValues.delete(key); else globalStateValues.set(key, value);
@@ -215,6 +300,39 @@ test('a completed portable operation gets a fresh identity when the user repeats
   assert.notEqual(seen[1], seen[0]);
 });
 
+test('two extension hosts can finish the same portable identity without a false failure', async t => {
+  const f = await roots(t), globalStateValues = new Map();
+  const first = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  const second = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  let arrivals = 0, releaseOperation, completionReads = 0, releaseCompletionReads;
+  const operationGate = new Promise(resolve => { releaseOperation = resolve; });
+  const completionReadGate = new Promise(resolve => { releaseCompletionReads = resolve; });
+  first.scope.requestHandler = second.scope.requestHandler = async () => {
+    arrivals += 1;
+    if (arrivals === 2) {
+      vm.runInContext('Date.now = () => 1000', first.scope);
+      vm.runInContext('Date.now = () => 2000', second.scope);
+      releaseOperation();
+    }
+    await operationGate;
+    return { bytes: 1 };
+  };
+  first.scope.requestHook = second.scope.requestHook = async (_root, request) => {
+    if (arrivals < 2 || request.operation !== 'read_host_settings') return;
+    completionReads += 1;
+    if (completionReads === 2) releaseCompletionReads();
+    await completionReadGate;
+  };
+  const input = { destination: path.join(f.base, 'same-concurrent-backup.db') };
+  const results = await Promise.allSettled([
+    first.scope.runPortable(f.a, 'backup', input),
+    second.scope.runPortable(f.a, 'backup', input)
+  ]);
+  assert.deepEqual(results.map(result => result.status), ['fulfilled', 'fulfilled']);
+  const operations = await databasePortableOperations(f);
+  assert.equal(operations.filter(item => item.status === 'completed').length, 1);
+});
+
 test('portable operation recovery upgrades a legacy shared ledger entry without changing its identity', async t => {
   const f = await roots(t), globalStateValues = new Map(), seen = [];
   const input = { destination: path.join(f.base, 'legacy-ledger-backup.db') };
@@ -224,8 +342,48 @@ test('portable operation recovery upgrades a legacy shared ledger entry without 
   host.scope.requestHandler = async (_root, request) => { seen.push(request.input.idempotencyKey); return { bytes: 1 }; };
   await host.scope.recoverPortable(f.a);
   assert.deepEqual(seen, ['portable-operation:legacy-portable-id']);
-  assert.equal(globalStateValues.has('solopreneur.pendingPortableOperations.v1'), false);
+  assert.equal(globalStateValues.has('solopreneur.pendingPortableOperations.v1'), true, 'the non-CAS legacy source stays import-only so a late old writer cannot be erased');
   assert.equal([...globalStateValues.keys()].some(key => key.startsWith('solopreneur.pendingPortableOperation.v2.')), false);
+});
+
+test('a completed legacy portable identity is imported into the database before its marker is retired', async t => {
+  const f = await roots(t), globalStateValues = new Map(), seen = [];
+  const input = { destination: path.join(f.base, 'legacy-completed.db') };
+  const entry = { id: 'legacy-completed', root: f.a, operation: 'backup', input,
+    intent: crypto.createHash('sha256').update(JSON.stringify({ root: f.a, operation: 'backup', input })).digest('hex') };
+  globalStateValues.set('solopreneur.pendingPortableOperations.v1', [entry]);
+  globalStateValues.set('solopreneur.completedLegacyPortableOperation.v1.legacy-completed', true);
+  const host = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  host.scope.requestHandler = async (_root, request) => { seen.push(request.input.idempotencyKey); return { bytes: 1 }; };
+  await host.scope.recoverPortable(f.a);
+  const operations = await databasePortableOperations(f);
+  assert.equal(operations.filter(item => item.id === entry.id && item.status === 'completed').length, 1);
+  assert.deepEqual(seen, []);
+  assert.equal(globalStateValues.has('solopreneur.completedLegacyPortableOperation.v1.legacy-completed'), false);
+});
+
+test('a late legacy shared-ledger writer remains recoverable during migration', async t => {
+  const f = await roots(t), globalStateValues = new Map(), seen = [];
+  const inputA = { destination: path.join(f.base, 'legacy-race-a.db') };
+  const inputB = { destination: path.join(f.base, 'legacy-race-b.db') };
+  const entry = (id, input) => ({ id, root: f.a, operation: 'backup', input,
+    intent: crypto.createHash('sha256').update(JSON.stringify({ root: f.a, operation: 'backup', input })).digest('hex') });
+  const firstEntry = entry('legacy-race-a', inputA), lateEntry = entry('legacy-race-b', inputB);
+  globalStateValues.set('solopreneur.pendingPortableOperations.v1', [firstEntry]);
+  let injected = false;
+  const host = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  host.scope.requestHook = async (_root, request) => {
+    if (!injected && request.operation === 'patch_host_settings') {
+      injected = true;
+      globalStateValues.set('solopreneur.pendingPortableOperations.v1', [firstEntry, lateEntry]);
+    }
+  };
+  host.scope.requestHandler = async (_root, request) => { seen.push(request.input.idempotencyKey); return { bytes: 1 }; };
+  await host.scope.recoverPortable(f.a);
+  await host.scope.recoverPortable(f.a);
+  assert.deepEqual(new Set(seen), new Set(['portable-operation:legacy-race-a', 'portable-operation:legacy-race-b']));
+  const operations = await databasePortableOperations(f);
+  assert.equal(operations.filter(item => item.id === lateEntry.id && item.status === 'completed').length, 1);
 });
 
 test('separate extension hosts migrate the complete legacy portable ledger before consuming entries', async t => {
@@ -247,11 +405,105 @@ test('separate extension hosts migrate the complete legacy portable ledger befor
     first.scope.runPortable(f.a, 'backup', firstInput),
     second.scope.runPortable(f.a, 'backup', secondInput)
   ]);
-  assert.equal(globalStateValues.has('solopreneur.pendingPortableOperations.v1'), false);
+  assert.equal(globalStateValues.has('solopreneur.pendingPortableOperations.v1'), true, 'the shared legacy source is retained only for compatibility');
   assert.equal([...globalStateValues.keys()].some(key => key.startsWith('solopreneur.pendingPortableOperation.v2.')), false);
   assert.deepEqual(new Set(seen), new Set(['portable-operation:legacy-first', 'portable-operation:legacy-second']));
   await first.scope.runPortable(f.a, 'backup', firstInput);
   assert.notEqual(seen.at(-1), 'portable-operation:legacy-first');
+});
+
+test('separate extension hosts retain different data roots in the portable recovery index', async t => {
+  const f = await roots(t), globalStateValues = new Map();
+  const first = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  const second = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  first.scope.requestHandler = second.scope.requestHandler = async () => { throw new Error('simulated_host_disconnect_after_commit'); };
+  const results = await Promise.allSettled([
+    first.scope.runPortable(f.a, 'backup', { destination: path.join(f.base, 'root-a.db') }),
+    second.scope.runPortable(f.b, 'backup', { destination: path.join(f.base, 'root-b.db') })
+  ]);
+  assert.deepEqual(results.map(result => result.status), ['rejected', 'rejected']);
+  const indexedRoots = [...globalStateValues.entries()].filter(([key]) => key.startsWith('solopreneur.portableOperationRoot.v2.')).map(([, value]) => value);
+  assert.deepEqual(new Set(indexedRoots), new Set([f.a, f.b]));
+  const restarted = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  restarted.scope.requestHandler = async () => ({ bytes: 1 });
+  await restarted.scope.recoverPortable(f.a);
+  assert.equal((await databasePortableOperations(f, f.a)).filter(item => item.status === 'pending').length, 0);
+  assert.equal((await databasePortableOperations(f, f.b)).filter(item => item.status === 'pending').length, 0);
+});
+
+test('an unavailable indexed root is not recreated and cannot block another root recovery', async t => {
+  const f = await roots(t), globalStateValues = new Map(), seen = [];
+  const missingRoot = path.join(f.base, 'offline-volume', '.solomap-global');
+  const missingKey = `solopreneur.portableOperationRoot.v2.${crypto.createHash('sha256').update(missingRoot).digest('hex')}`;
+  globalStateValues.set(missingKey, missingRoot);
+  const first = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  first.scope.requestHandler = async (_root, request) => {
+    if (request.operation === 'backup') throw new Error('simulated_host_disconnect_after_commit');
+    return { bytes: 1 };
+  };
+  await assert.rejects(first.scope.runPortable(f.b, 'backup', { destination: path.join(f.base, 'healthy-root.db') }), /simulated_host_disconnect_after_commit/);
+
+  const restarted = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  restarted.scope.runtimeHealthHandler = async ({ globalDataPath }) => {
+    if (globalDataPath === missingRoot) throw new Error('database_restore_required');
+    return {};
+  };
+  restarted.scope.requestHandler = async (root, request) => { if (request.operation === 'backup') seen.push(root); return { bytes: 1 }; };
+  await restarted.scope.recoverPortable(f.a);
+  assert.equal(fs.existsSync(missingRoot), false);
+  assert.deepEqual(seen, [f.b]);
+  assert.equal((await databasePortableOperations(f, f.b)).filter(item => item.status === 'pending').length, 0);
+});
+
+test('legacy portable operations with the same intent retain every historical identity', async t => {
+  const f = await roots(t), globalStateValues = new Map(), seen = [];
+  const input = { destination: path.join(f.base, 'same-intent.db') };
+  const intent = crypto.createHash('sha256').update(JSON.stringify({ root: f.a, operation: 'backup', input })).digest('hex');
+  globalStateValues.set('solopreneur.pendingPortableOperations.v1', [
+    { id: 'same-intent-first', root: f.a, operation: 'backup', input, intent },
+    { id: 'same-intent-second', root: f.a, operation: 'backup', input, intent }
+  ]);
+  const host = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  host.scope.requestHandler = async (_root, request) => { seen.push(request.input.idempotencyKey); return { bytes: 1 }; };
+  await host.scope.recoverPortable(f.a);
+  assert.deepEqual(new Set(seen), new Set(['portable-operation:same-intent-first', 'portable-operation:same-intent-second']));
+  const operations = await databasePortableOperations(f);
+  assert.deepEqual(new Set(operations.map(item => item.id)), new Set(['same-intent-first', 'same-intent-second']));
+  assert.ok(operations.every(item => item.status === 'completed'));
+  assert.equal(globalStateValues.has('solopreneur.pendingPortableOperations.v1'), true, 'all identities remain replayable from the import-only legacy source');
+});
+
+test('a late legacy writer cannot block recovery after a newer same-intent operation', async t => {
+  const f = await roots(t), globalStateValues = new Map(), seen = [];
+  const input = { destination: path.join(f.base, 'late-same-intent.db') };
+  const intent = crypto.createHash('sha256').update(JSON.stringify({ root: f.a, operation: 'backup', input })).digest('hex');
+  const legacy = { id: 'late-same-intent', root: f.a, operation: 'backup', input, intent };
+  globalStateValues.set('solopreneur.pendingPortableOperations.v1', [legacy]);
+  const host = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  host.scope.requestHandler = async (_root, request) => { seen.push(request.input.idempotencyKey); return { bytes: 1 }; };
+  await host.scope.recoverPortable(f.a);
+  await host.scope.runPortable(f.a, 'backup', input);
+  globalStateValues.set('solopreneur.pendingPortableOperations.v1', [legacy]);
+  await host.scope.recoverPortable(f.a);
+  assert.equal(seen.filter(value => value === 'portable-operation:late-same-intent').length, 1);
+  assert.equal(globalStateValues.has('solopreneur.pendingPortableOperations.v1'), true, 'the database result makes the retained legacy source non-authoritative');
+});
+
+test('a repeated portable operation archives the completed identity before accepting a late legacy writer', async t => {
+  const f = await roots(t), globalStateValues = new Map(), seen = [];
+  const input = { destination: path.join(f.base, 'current-history.db') };
+  const intent = crypto.createHash('sha256').update(JSON.stringify({ root: f.a, operation: 'backup', input })).digest('hex');
+  const host = extensionHost(t, f, { globalStateValues, stubRuntimeHealth: true });
+  host.scope.requestHandler = async (_root, request) => { seen.push(request.input.idempotencyKey); return { bytes: 1 }; };
+  await host.scope.runPortable(f.a, 'backup', input);
+  const firstId = (await databasePortableOperations(f))[0].id;
+  await host.scope.runPortable(f.a, 'backup', input);
+  const afterRepeat = await databasePortableOperations(f);
+  assert.equal(afterRepeat.filter(item => item.id === firstId && item.status === 'completed').length, 1);
+  assert.equal(afterRepeat.filter(item => item.intent === intent && item.status === 'completed').length, 2);
+  globalStateValues.set('solopreneur.pendingPortableOperations.v1', [{ id: firstId, root: f.a, operation: 'backup', input, intent }]);
+  await host.scope.recoverPortable(f.a);
+  assert.equal(seen.filter(value => value === `portable-operation:${firstId}`).length, 1);
 });
 
 test('a late legacy migration writer cannot resurrect an already completed portable identity', async t => {

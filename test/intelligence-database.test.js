@@ -20,6 +20,15 @@ function cleanupExact(root) {
   directories.sort((left, right) => right.length - left.length).forEach(directory => fs.rmdirSync(directory));
 }
 
+test('chat fails closed when the database owner is unavailable and never recreates legacy JSON', async t => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-chat-no-authority-'));
+  t.after(() => cleanupExact(fixture));
+  const root = path.join(fixture, '.solomap-global');
+  const store = new IntelligenceConversationStore(root, async () => 'must not be persisted outside the database');
+  await assert.rejects(store.send('Question without a database owner'));
+  assert.equal(fs.existsSync(path.join(root, 'intelligence-conversations')), false);
+});
+
 test('sidebar and background chat share immediate durable history without producing conversation JSON files', async t => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-chat-database-'));
   t.after(() => cleanupExact(fixture));
@@ -42,6 +51,23 @@ test('sidebar and background chat share immediate durable history without produc
     assert.equal(database.search({ scope: null, kinds: ['conversation'] }).items.length, 1);
     assert.equal(database.search({ scope: null, kinds: ['message'] }).items.length, 4);
   } finally { await server.close(); await operations.close(); database.close(); }
+});
+
+test('ordinary conversation reads ignore legacy JSON added after startup migration', async t => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-chat-no-live-json-'));
+  t.after(() => cleanupExact(fixture));
+  const root = path.join(fixture, '.solomap-global');
+  const database = new UnifiedDataStore(root);
+  const operations = createRuntimeDataOperations(database);
+  const id = '6b272a87-a937-4e9a-aa09-13ef93c6b92c';
+  const directory = path.join(root, 'intelligence-conversations');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, id + '.json'), JSON.stringify({ id, title: 'Late legacy file', createdAt: '2026-09-22T08:00:00.000Z', updatedAt: '2026-09-22T08:01:00.000Z', messages: [] }));
+  try {
+    assert.equal(await operations({ operation: 'read_intelligence_conversation', input: { id } }), null);
+    assert.deepEqual(await operations({ operation: 'list_intelligence_conversations', input: {} }), []);
+    assert.equal(database.readIntelligenceConversation(id), null);
+  } finally { await operations.close(); database.close(); }
 });
 
 test('a conversation transaction rolls back all message writes on conflict and unchanged retries add no history', t => {
@@ -78,6 +104,8 @@ test('legacy conversation resumes with its original identity and full messages w
   fs.writeFileSync(source, original);
   const database = new UnifiedDataStore(root);
   const operations = createRuntimeDataOperations(database);
+  await operations({ operation: 'import_intelligence', input: { sourceRoot: directory, idempotencyKey: `test-import:${id}` } });
+  await operations.waitForMigrations();
   const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'legacy-chat-owner', onCommand: () => ({ status: 'running' }), onData: operations });
   try {
     const store = new IntelligenceConversationStore(root, async messages => {

@@ -78,6 +78,20 @@ for (const exitCode of [0, 7]) test(`maintenance execution captures its full res
   } finally { await f.close(); }
 });
 
+test('a migration run completes through the shared runner without a private result file', async () => {
+  const f = await executionFixture(`${shellQuote(process.execPath)} -e ${shellQuote("process.stdout.write('migration tools finished')")}`, {}, '', 'migration_apply');
+  try {
+    const agent = f.startAgent();
+    const [code] = await once(agent, 'exit');
+    assert.equal(code, 0, f.stderr().toString());
+    const state = await f.call('read_run_state');
+    assert.equal(state.status.maintenanceResultPath, undefined);
+    assert.equal(await f.call('read_run_document', { purpose: `maintenance_result_${state.generation}` }), null);
+    assert.equal(f.stdout().toString(), 'migration tools finished');
+    assert.deepEqual(fs.readdirSync(path.join(f.projectRoot, '.solopreneur')), ['project.json']);
+  } finally { await f.close(); }
+});
+
 async function executionFixture(command, metadata = {}, initialOutput = '', runKind = 'solo') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "solomap-shared-runner-case-'🌿-"));
   const root = path.join(base, '.solomap-global');

@@ -16,7 +16,7 @@ import type { GrowthSnapshotData, GrowthSnapshotRecord } from './types';
 import type { AgentConversation, RoadmapNode, RunIndexEntry, RunIndexFile, RunIndexRecord, RunIndexSignal, RunImpactRecord } from './types';
 import type { PrepareRunInput, RunState, RunCheckpointInput, RunOutputFinalizationInput, RunLogInput, RunConsumerInput, RunConsumerLease, RunSettlementInput, RunEffect, RunEffectReference } from '../runLifecycleTypes';
 import { createSessionBindingValue, appendSessionBindingValue, confirmSessionBindingValue, assertVersion2Binding, getResumableSessionValue } from '../sessionIdentity';
-import { maintenanceRunKinds } from '../runLifecycleTypes';
+import { maintenanceResultRunKinds, migrationRunKinds } from '../runLifecycleTypes';
 import { replaceRegularFileIfUnchanged } from '../safeFileReplace';
 import type { NativeSessionBinding, SessionBindingSeed, SessionBindingRevisionInput } from '../sessionIdentity';
 import { normalizeProjectsForStorage, projectName, ProjectRegistryFile, ProjectRegistryPatch, ProjectRegistrySnapshot, ProjectRegistryBootstrap } from '../projectRegistry';
@@ -77,17 +77,6 @@ export interface RecyclingItem {
   itemId: string; planId: string; identity: string; key: string; hash: string; path: string;
   restorePath?: string | null;
   bytes: number; status: 'prepared' | 'approved' | 'moving' | 'held' | 'trashed' | 'restoring' | 'restored' | 'changed'; error: string | null;
-}
-
-export interface MaintenanceTask {
-  taskId: string;
-  kind: 'migration_review' | 'migration_apply' | 'recycling_apply';
-  targetId: string | null;
-  status: 'ready' | 'running' | 'completed' | 'failed' | 'revoked';
-  error: string | null;
-  createdAt: number;
-  updatedAt: number;
-  validUntil: number;
 }
 
 export interface DataWrite {
@@ -650,75 +639,6 @@ export class UnifiedDataStore {
     const proof = crypto.randomBytes(32).toString('hex');
     this.db.run('INSERT INTO actors(id,kind,provider,identity_ref,authority_id) VALUES(?,?,?,?,?)', [actorId, 'mcp', 'solomap-stdio', digest(proof), authorityActorId]);
     return { actorId, proof, authorityActorId };
-  }
-
-  private maintenanceProof(taskId: string): string {
-    const secret = String(this.rows("SELECT value FROM database_meta WHERE key='maintenance_secret'")[0]?.value || '');
-    if (!secret) throw new Error('maintenance_authority_missing');
-    return crypto.createHmac('sha256', secret).update(taskId).digest('hex');
-  }
-  public readMaintenanceTask(taskId: string): MaintenanceTask {
-    const row = this.rows('SELECT * FROM maintenance_tasks WHERE id=?', [taskId])[0];
-    if (!row) throw new Error('maintenance_task_missing');
-    return {
-      taskId: String(row.id), kind: row.kind as MaintenanceTask['kind'], targetId: row.target_id === null ? null : String(row.target_id),
-      status: row.status as MaintenanceTask['status'], error: row.error === null ? null : String(row.error),
-      createdAt: Number(row.created_at), updatedAt: Number(row.updated_at), validUntil: Number(row.valid_until)
-    };
-  }
-  public maintenanceTasks(limit = 10): MaintenanceTask[] {
-    this.db.run("UPDATE maintenance_tasks SET status='failed',error='maintenance_task_expired',updated_at=? WHERE status IN ('ready','running') AND valid_until<=?", [Date.now(), Date.now()]);
-    const historyLimit = Math.max(1, Math.min(100, limit));
-    const active = this.rows("SELECT id FROM maintenance_tasks WHERE status IN ('ready','running') ORDER BY created_at DESC,id DESC");
-    const history = this.rows("SELECT id FROM maintenance_tasks WHERE status NOT IN ('ready','running') ORDER BY created_at DESC,id DESC LIMIT ?", [historyLimit]);
-    return [...active, ...history]
-      .map(row => this.readMaintenanceTask(String(row.id)));
-  }
-  public createMaintenanceTask(kind: MaintenanceTask['kind'], targetId?: string): MaintenanceTask & { proof: string } {
-    if (!['migration_review', 'migration_apply', 'recycling_apply'].includes(kind) || (kind === 'recycling_apply' && !targetId)) throw new Error('invalid_maintenance_task');
-    const now = Date.now();
-    this.db.run("UPDATE maintenance_tasks SET status='failed',error='maintenance_task_expired',updated_at=? WHERE status IN ('ready','running') AND valid_until<=?", [now, now]);
-    const active = this.rows("SELECT id FROM maintenance_tasks WHERE kind=? AND COALESCE(target_id,'')=? AND status IN ('ready','running') LIMIT 1", [kind, targetId || '']);
-    if (active.length) throw new Error('maintenance_task_in_use');
-    if (kind === 'recycling_apply') {
-      const rows = this.rows('SELECT status FROM migration_recycling WHERE plan_id=?', [String(targetId)]);
-      if (!rows.length || rows.some(row => row.status === 'prepared')) throw new Error('maintenance_target_unconfirmed');
-    }
-    const taskId = crypto.randomUUID();
-    this.db.run('INSERT INTO maintenance_tasks VALUES(?,?,?,?,?,?,?,?)', [taskId, kind, targetId || null, 'ready', null, now, now, now + 7 * 24 * 60 * 60 * 1000]);
-    return { ...this.readMaintenanceTask(taskId), proof: this.maintenanceProof(taskId) };
-  }
-  public resumeMaintenanceTask(taskId: string): MaintenanceTask & { proof: string } {
-    const task = this.readMaintenanceTask(taskId);
-    if (!['ready', 'running'].includes(task.status) || task.validUntil <= Date.now()) throw new Error('maintenance_task_expired');
-    return { ...task, proof: this.maintenanceProof(taskId) };
-  }
-  public establishMaintenanceTask(taskId: string, proof: string): MaintenanceTask {
-    const task = this.verifyMaintenanceTaskProof(taskId, proof);
-    this.db.run("UPDATE maintenance_tasks SET status='running',updated_at=? WHERE id=?", [Date.now(), taskId]);
-    return this.readMaintenanceTask(taskId);
-  }
-  public verifyMaintenanceTaskIdentity(taskId: string, proof: string): MaintenanceTask {
-    const task = this.readMaintenanceTask(taskId);
-    const expected = this.maintenanceProof(taskId);
-    if (!proof || proof.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(proof), Buffer.from(expected))) throw new Error('maintenance_resume_denied');
-    return task;
-  }
-  public verifyMaintenanceTaskProof(taskId: string, proof: string): MaintenanceTask {
-    const task = this.verifyMaintenanceTaskIdentity(taskId, proof);
-    if (!['ready', 'running'].includes(task.status) || task.validUntil <= Date.now()) throw new Error('maintenance_task_expired');
-    return task;
-  }
-  public authorizeMaintenanceTask(taskId: string, kind: MaintenanceTask['kind'], targetId: string | null): MaintenanceTask {
-    const task = this.readMaintenanceTask(taskId);
-    if (task.status !== 'running' || task.validUntil <= Date.now() || task.kind !== kind || task.targetId !== targetId) throw new Error('maintenance_task_inactive');
-    return task;
-  }
-  public completeMaintenanceTask(taskId: string, error: string | null = null): MaintenanceTask {
-    const task = this.readMaintenanceTask(taskId);
-    if (!['ready', 'running'].includes(task.status)) throw new Error('maintenance_task_not_active');
-    this.db.run('UPDATE maintenance_tasks SET status=?,error=?,updated_at=? WHERE id=?', [error ? 'failed' : 'completed', error, Date.now(), taskId]);
-    return this.readMaintenanceTask(taskId);
   }
 
   private rows(sql: string, values: SqlValue[] = []): Record<string, SqlValue>[] {
@@ -1885,25 +1805,7 @@ export class UnifiedDataStore {
     const projectId = digest(projectPath);
     const current = this.readHostSettings({ namespace: 'project_autonomy', ownerScope: 'global' }).items.find(item => item.key === projectId);
     if (current) return current.value as Record<string, unknown>;
-    const authorizationRoot = path.join(this.root, 'runtime', 'project-autonomy-authorizations');
-    const recordPath = path.join(authorizationRoot, `${projectId}.json`);
-    const combinedPath = `${authorizationRoot}.json`;
-    let bytes: Buffer | undefined, sourceKey = '', legacy: Record<string, unknown> | undefined;
-    if (fs.existsSync(recordPath)) {
-      bytes = fs.readFileSync(recordPath); sourceKey = `project-autonomy-authorizations/${projectId}.json`;
-      try { legacy = JSON.parse(bytes.toString('utf8')); } catch { throw new Error('project_autonomy_source_invalid'); }
-    } else if (fs.existsSync(combinedPath)) {
-      bytes = fs.readFileSync(combinedPath); sourceKey = 'project-autonomy-authorizations.json';
-      try { legacy = JSON.parse(bytes.toString('utf8'))?.projects?.[projectId]; } catch { throw new Error('project_autonomy_source_invalid'); }
-    }
-    const value = { projectId, projectPath, enabled: Boolean(legacy?.enabled), toolNetworkDisabled: Boolean(legacy?.toolNetworkDisabled),
-      epoch: Math.max(0, Number(legacy?.epoch || 0)), updatedAt: String(legacy?.updatedAt || '') };
-    if (!legacy) return value;
-    this.captureMigrationSource({ identity: `project-autonomy:${this.root}`, key: sourceKey, hash: digest(bytes!) }, bytes!, { mimeType: 'application/json', encoding: 'utf8' });
-    try {
-      this.patchHostSettings({ namespace: 'project_autonomy', ownerScope: 'global', patches: [{ key: projectId, expectedRevision: 0, value }], idempotencyKey: `project-autonomy-import:${projectId}:${value.epoch}` });
-    } catch (error) { if (!(error instanceof Error) || error.message !== 'revision_conflict') throw error; }
-    return (this.readHostSettings({ namespace: 'project_autonomy', ownerScope: 'global' }).items.find(item => item.key === projectId)?.value || value) as Record<string, unknown>;
+    return { projectId, projectPath, enabled: false, toolNetworkDisabled: false, epoch: 0, updatedAt: '' };
   }
 
   public patchProjectAutonomyAuthorization(input: { projectPath: string; registeredProjectPaths: string[]; enabled: boolean; toolNetworkDisabled: boolean; expectedEpoch: number; idempotencyKey: string }): Record<string, unknown> {
@@ -3577,6 +3479,10 @@ export class UnifiedDataStore {
     return this.hasLiveRunProcess({ process_pid: row.delivery_pid, process_birth: row.delivery_birth });
   }
   public verifyRunExecutionProof(projectId: string, executionLogId: number, generation: number, proof: string): void { this.verifyRunProof(projectId, executionLogId, generation, proof); }
+  public authorizedRunState(projectId: string, input: { executionLogId: number; generation: number; proof: string }): RunState {
+    this.verifyRunProof(projectId, input.executionLogId, input.generation, input.proof);
+    return this.readRunState(projectId, input.executionLogId);
+  }
   public authorizedLearningReviewBatch(projectId: string, input: { executionLogId: number; generation: number; proof: string }): string | undefined {
     const run = this.verifyRunProof(projectId, input.executionLogId, input.generation, input.proof);
     const control = this.rows('SELECT batch_id FROM learning_review_controls WHERE request_project_id=? AND run_id=?', [projectId, run.run_id])[0];
@@ -3652,6 +3558,40 @@ export class UnifiedDataStore {
       const { executionLogId } = this.appendProjectJournal(projectId, key, { nodeId: input.nodeId, timestamp: new Date().toISOString(), agentCli: String(input.metadata?.agentCli || ''), command: input.command, output: String(input.metadata?.launchSummary || input.userMessage), status: input.status || 'Preparing' });
       const state = this.prepareRun(projectId, locationId, { ...input, executionLogId, ...(input.launchRequest ? { launchRequest: { ...input.launchRequest, executionLogId } } : {}), idempotencyKey: key });
       this.db.run('INSERT INTO run_launch_intents VALUES(?,?,?)', [projectId, input.launchIntentId, state.runId]);
+      return state;
+    });
+  }
+  private readRunSlotCandidate(projectId: string, launchSlotId: string, scope: 'project' | 'global'): RunState | null {
+    if (scope === 'project') return this.readRunIntent(projectId, launchSlotId);
+    const row = this.rows(`SELECT run_control.project_id,run_control.execution_log_id
+      FROM run_launch_intents
+      JOIN run_control ON run_control.run_id=run_launch_intents.run_id
+      JOIN runs ON runs.id=run_control.run_id
+      WHERE run_launch_intents.launch_intent_id=?
+      ORDER BY CASE WHEN runs.finished_at IS NULL THEN 0 ELSE 1 END,runs.started_at DESC,runs.id DESC LIMIT 1`, [launchSlotId])[0];
+    return row ? this.readRunCheckpointState(String(row.project_id), Number(row.execution_log_id)) : null;
+  }
+  public readRunSlot(projectId: string, launchSlotId: string, scope: 'project' | 'global' = 'project'): RunState | null {
+    const state = this.readRunSlotCandidate(projectId, launchSlotId, scope);
+    return state && !state.status.finishedAt ? state : null;
+  }
+  public prepareRunSlot(projectId: string, locationId: string, input: Omit<PrepareRunInput, 'executionLogId'> & { launchSlotId: string; launchSlotScope?: 'project' | 'global' }): RunState {
+    const scope = input.launchSlotScope || 'project';
+    if (!input.launchSlotId || !input.metadata?.launchIntentHash || !['project', 'global'].includes(scope)) throw new Error('invalid_launch_slot');
+    return this.transaction(() => {
+      const previous = this.readRunSlotCandidate(projectId, input.launchSlotId, scope);
+      if (previous && !previous.status.finishedAt) {
+        if (previous.status.launchIntentHash !== input.metadata?.launchIntentHash) throw new Error('execution_identity_conflict');
+        return previous;
+      }
+      const key = `run-launch-slot:${input.launchSlotId}:${previous?.runId || 'initial'}`;
+      const { executionLogId } = this.appendProjectJournal(projectId, key, { nodeId: input.nodeId, timestamp: new Date().toISOString(), agentCli: String(input.metadata?.agentCli || ''), command: input.command, output: String(input.metadata?.launchSummary || input.userMessage), status: input.status || 'Preparing' });
+      const state = this.prepareRun(projectId, locationId, { ...input, executionLogId, ...(input.launchRequest ? { launchRequest: { ...input.launchRequest, executionLogId } } : {}), idempotencyKey: key });
+      if (scope === 'global') {
+        this.db.run('DELETE FROM run_launch_intents WHERE launch_intent_id=?', [input.launchSlotId]);
+        this.db.run('INSERT INTO run_launch_intents VALUES(?,?,?)', [projectId, input.launchSlotId, state.runId]);
+      } else if (previous) this.db.run('UPDATE run_launch_intents SET run_id=? WHERE project_id=? AND launch_intent_id=?', [state.runId, projectId, input.launchSlotId]);
+      else this.db.run('INSERT INTO run_launch_intents VALUES(?,?,?)', [projectId, input.launchSlotId, state.runId]);
       return state;
     });
   }
@@ -3752,6 +3692,13 @@ export class UnifiedDataStore {
       : this.rows(`SELECT rowid,project_id,execution_log_id FROM run_control WHERE rowid>?${input.projectId ? ' AND project_id=?' : ''} ORDER BY rowid LIMIT ?`, [cursor, ...(input.projectId ? [input.projectId] : []), limit + 1]);
     const page = rows.slice(0, limit);
     return { items: page.map(row => this.readRunState(String(row.project_id), Number(row.execution_log_id), input.pendingConsumer ? Number(row.source_revision) : undefined)), nextCursor: rows.length > limit ? Number(page[page.length - 1].rowid) : null };
+  }
+  public migrationAgentRuns(limit = 10): RunState[] {
+    const historyLimit = Math.max(1, Math.min(100, limit));
+    const placeholders = migrationRunKinds.map(() => '?').join(',');
+    const active = this.rows(`SELECT run_control.project_id,run_control.execution_log_id FROM run_control JOIN runs ON runs.id=run_control.run_id WHERE runs.run_kind IN (${placeholders}) AND runs.finished_at IS NULL ORDER BY runs.started_at DESC,runs.id DESC`, [...migrationRunKinds]);
+    const history = this.rows(`SELECT run_control.project_id,run_control.execution_log_id FROM run_control JOIN runs ON runs.id=run_control.run_id WHERE runs.run_kind IN (${placeholders}) AND runs.finished_at IS NOT NULL ORDER BY runs.started_at DESC,runs.id DESC LIMIT ?`, [...migrationRunKinds, historyLimit]);
+    return [...active, ...history].map(row => this.readRunState(String(row.project_id), Number(row.execution_log_id)));
   }
   private saveRunGitEvidence(projectId: string, executionLogId: number, generation: number, turnId: string, evidence: RunGitEvidence, metadata: Record<string, unknown>, key: string): void {
     const purpose = gitEvidenceDocumentPurpose(turnId);
@@ -4057,8 +4004,8 @@ export class UnifiedDataStore {
       metadata.turnLogEndOffsets = Object.fromEntries(['output', 'stdout', 'stderr'].map(stream => [stream, this.readRunLogHead(projectId, input.executionLogId, stream).totalBytes]));
       metadata.hostOutputPending = false; metadata.hostOutputFinalizedAt = new Date(now).toISOString(); metadata.hostOutputSource = input.source;
       let exitCode = row.status === 'Failed' && Number(row.exit_code) !== 0 ? Number(row.exit_code) : input.exitCode;
-      const maintenanceResult = maintenanceRunKinds.includes(String(row.run_kind)) && this.readRunDocument(projectId, input.executionLogId, `maintenance_result_${input.generation}`);
-      const noDeliverable = exitCode === 0 && metadata.checkpointOutcome === 'partial' && !maintenanceResult && !(row.run_kind === 'agent_review' && metadata.agentLaunch?.readOnly) && !['solo', 'solo_background', 'solo_continue', 'step_continue', 'flow_planner', 'flow_verifier'].includes(String(row.run_kind)) && changes.length === 0 && !(row.run_kind === 'learning_review' && this.hasLearningReviewDeliverable(projectId, metadata));
+      const maintenanceResult = maintenanceResultRunKinds.includes(String(row.run_kind)) && this.readRunDocument(projectId, input.executionLogId, `maintenance_result_${input.generation}`);
+      const noDeliverable = exitCode === 0 && metadata.checkpointOutcome === 'partial' && !maintenanceResult && !maintenanceResultRunKinds.includes(String(row.run_kind)) && !migrationRunKinds.includes(String(row.run_kind) as typeof migrationRunKinds[number]) && !(row.run_kind === 'agent_review' && metadata.agentLaunch?.readOnly) && !['solo', 'solo_background', 'solo_continue', 'step_continue', 'flow_planner', 'flow_verifier'].includes(String(row.run_kind)) && changes.length === 0 && !(row.run_kind === 'learning_review' && this.hasLearningReviewDeliverable(projectId, metadata));
       if (noDeliverable) exitCode = 125;
       const status = exitCode === 0 ? String(row.status) : 'Failed';
       if ((input.exitCode !== 0 || noDeliverable) && metadata.checkpointOutcome !== 'failed') {

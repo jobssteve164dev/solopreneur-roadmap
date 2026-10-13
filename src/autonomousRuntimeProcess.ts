@@ -9,6 +9,7 @@ import {
   refreshShadowRuntimeState,
   runCognitiveShadowDecisionCycle,
   runShadowDecisionCycle,
+  runtimeRootRequiresExistingDatabase,
   persistShadowRuntimeState,
   updateRuntimeState
 } from './autonomousRuntime';
@@ -47,10 +48,11 @@ async function main(): Promise<void> {
   const deliveryRequestFile = argumentValue('--delivery-request-file');
   if (deliveryRequestFile) {
     const databaseRoot = normalizeGlobalDataPathForExtension(globalDataPath);
+    const runtimeWasInitialized = runtimeRootRequiresExistingDatabase(databaseRoot);
     const runtimeId = crypto.randomUUID();
     const lease = claimRuntimeLease(databaseRoot, { runtimeId, pid: process.pid });
     if (lease.acquired) {
-      const store = lease.owner.databaseId || fs.existsSync(path.join(databaseRoot, 'solomap.db'))
+      const store = lease.owner.databaseId || runtimeWasInitialized || fs.existsSync(path.join(databaseRoot, 'solomap.db'))
         ? UnifiedDataStore.open(databaseRoot, lease.owner.databaseId || undefined)
         : new UnifiedDataStore(databaseRoot);
       const operations = createRuntimeDataOperations(store);
@@ -73,13 +75,15 @@ async function main(): Promise<void> {
   }
   if (process.argv.includes('--once')) {
     const onceRuntimeId = crypto.randomUUID();
+    const databaseRoot = normalizeGlobalDataPathForExtension(globalDataPath);
+    const runtimeWasInitialized = runtimeRootRequiresExistingDatabase(databaseRoot);
     const lease = claimRuntimeLease(globalDataPath, { runtimeId: onceRuntimeId, pid: process.pid });
     if (!lease.acquired) {
       await sendRuntimeControlCommand(globalDataPath, 'refresh', { expectedRuntimeId: lease.owner.runtimeId, timeoutMs: 10_000 });
       return;
     }
-    const root = normalizeGlobalDataPathForExtension(globalDataPath);
-    const store = fs.existsSync(path.join(root, 'solomap.db')) ? UnifiedDataStore.open(root) : new UnifiedDataStore(root);
+    const root = databaseRoot;
+    const store = runtimeWasInitialized || fs.existsSync(path.join(root, 'solomap.db')) ? UnifiedDataStore.open(root) : new UnifiedDataStore(root);
     importLegacyRuntimeState(store, root);
     const operations = createRuntimeDataOperations(store);
     try {
@@ -95,11 +99,13 @@ async function main(): Promise<void> {
   }
 
   const runtimeId = argumentValue('--runtime-id') || crypto.randomUUID();
+  const databaseRoot = normalizeGlobalDataPathForExtension(globalDataPath);
+  const runtimeWasInitialized = process.argv.includes('--database-required')
+    || (!argumentValue('--runtime-id') && runtimeRootRequiresExistingDatabase(databaseRoot));
   const lease = claimRuntimeLease(globalDataPath, { runtimeId, pid: process.pid });
   if (!lease.acquired) return;
-  const databaseRoot = normalizeGlobalDataPathForExtension(globalDataPath);
   const databaseId = argumentValue('--database-id') || lease.owner.databaseId;
-  const dataStore = databaseId || fs.existsSync(path.join(databaseRoot, 'solomap.db'))
+  const dataStore = databaseId || runtimeWasInitialized || fs.existsSync(path.join(databaseRoot, 'solomap.db'))
     ? UnifiedDataStore.open(databaseRoot, databaseId || undefined)
     : new UnifiedDataStore(databaseRoot);
   importLegacyRuntimeState(dataStore, databaseRoot);

@@ -26,7 +26,7 @@ test('a maintenance CLI reads its formal task from an isolated cwd using the ver
     const client = new Client({ name: 'maintenance-fixture', version: '1' });
     const transport = new StdioClientTransport({ command: process.execPath,
       args: [path.resolve(__dirname, '../out/databaseMcpProcess.js'), '--global-data-path', root], cwd,
-      env: { ...process.env, CLAUDE_PROJECT_DIR: cwd, SOLOMAP_MAINTENANCE_TASK_ID: '', SOLOMAP_PROJECT_ID: projectId, SOLOMAP_EXECUTION_LOG_ID: '1', SOLOMAP_RUN_GENERATION: String(prepared.generation), SOLOMAP_RUN_PROOF: proof }, stderr: 'pipe' });
+      env: { ...process.env, CLAUDE_PROJECT_DIR: cwd, SOLOMAP_PROJECT_ID: projectId, SOLOMAP_EXECUTION_LOG_ID: '1', SOLOMAP_RUN_GENERATION: String(prepared.generation), SOLOMAP_RUN_PROOF: proof }, stderr: 'pipe' });
     let errors = ''; transport.stderr?.on('data', chunk => { errors += chunk; });
     try {
       if (proof !== head.proof) {

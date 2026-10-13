@@ -96,6 +96,8 @@ export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, op
     }
     if (existing.length) await enqueue({ operation: 'import_project_data', input: { collection: 'capabilities', sourceRoot: store.root, idempotencyKey: `startup-capabilities-v1:${crypto.createHash('sha256').update(JSON.stringify(existing)).digest('hex')}` } });
   } catch (error) { process.stderr.write(`SoloMap capability migration startup: ${String(error)}\n`); }
+  try { await enqueueStartupProjectAutonomyMigration(store, enqueue, shouldContinue); }
+  catch (error) { process.stderr.write(`SoloMap project autonomy migration startup: ${String(error)}\n`); }
   try { await enqueueStartupMemoryMigration(store, enqueue, shouldContinue); }
   catch (error) { process.stderr.write(`SoloMap memory migration startup: ${String(error)}\n`); }
   try { await enqueueStartupProjectMigrations(store, enqueue, shouldContinue); }
@@ -116,6 +118,31 @@ export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, op
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`SoloMap intelligence migration startup: ${String(error)}\n`);
   }
   return { queued };
+}
+
+async function enqueueStartupProjectAutonomyMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
+  const root = path.join(store.root, 'runtime');
+  const files: string[] = [path.join(root, 'project-autonomy-authorizations.json')];
+  const recordsRoot = path.join(root, 'project-autonomy-authorizations');
+  try {
+    for (const entry of await fs.promises.readdir(recordsRoot, { withFileTypes: true })) {
+      if (entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith('.json')) files.push(path.join(recordsRoot, entry.name));
+    }
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  const sources: Array<[string, string]> = [];
+  for (const file of files.sort()) {
+    if (!shouldContinue()) return;
+    try {
+      const info = await fs.promises.lstat(file);
+      if (!info.isFile() || info.isSymbolicLink()) continue;
+      sources.push([path.relative(store.root, file).split(path.sep).join('/'), crypto.createHash('sha256').update(await fs.promises.readFile(file)).digest('hex')]);
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
+  if (!sources.length || !shouldContinue()) return;
+  const signature = crypto.createHash('sha256').update(JSON.stringify(sources)).digest('hex');
+  await operations({ operation: 'import_project_data', input: {
+    collection: 'project-autonomy', sourceRoot: store.root, idempotencyKey: `startup-project-autonomy-v1:${signature}`
+  } });
 }
 
 async function enqueueStartupAnalysisMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {

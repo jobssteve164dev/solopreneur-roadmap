@@ -1,88 +1,4 @@
-import * as fs from 'fs';
-import * as path from 'path';
-import { shellQuote } from './agentCli';
-
 export type MigrationMaintenanceKind = 'migration_review' | 'migration_apply' | 'recycling_apply';
-const providerEnvironmentKeys: Record<string, readonly string[]> = {
-  codex: ['CODEX_HOME'], claude: ['CLAUDE_CONFIG_DIR'], copilot: ['COPILOT_HOME', 'GH_TOKEN', 'GITHUB_TOKEN'],
-  opencode: ['OPENCODE_CONFIG', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME'], cursor: ['CURSOR_API_KEY'],
-  grok: ['GROK_API_KEY'], antigravity: ['GEMINI_API_KEY', 'GOOGLE_API_KEY']
-};
-
-export function migrationAgentConfigurationEnvironmentKeys(provider: string): readonly string[] {
-  return providerEnvironmentKeys[provider] || [];
-}
-
-export function migrationAgentConfigurationPaths(provider: string, configFile: string, home: string, environment: NodeJS.ProcessEnv = process.env): string[] {
-  const configParent = path.dirname(configFile);
-  if (provider === 'claude') return [...new Set([configFile, path.join(home, '.claude'), ...(path.basename(configFile) === '.config.json' ? [configParent] : [])])];
-  if (provider === 'antigravity') return [path.join(home, '.gemini')];
-  if (provider === 'opencode') {
-    const paths = [configFile];
-    const dataRoot = path.join(environment.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'opencode');
-    if (fs.existsSync(dataRoot)) paths.push(dataRoot);
-    return paths;
-  }
-  return [configParent];
-}
-
-export function migrationAgentExecutablePaths(agentCli: string): string[] {
-  const requested = path.resolve(agentCli);
-  const real = fs.realpathSync.native(requested);
-  if (!fs.statSync(real).isFile()) throw new Error('maintenance_agent_cli_invalid');
-  const systemRoots = ['/usr/', '/bin/', '/lib/', '/lib64/'];
-  if (systemRoots.some(root => requested.startsWith(root)) && systemRoots.some(root => real.startsWith(root))) return [];
-  const parts = real.split(path.sep);
-  const nodeModules = parts.lastIndexOf('node_modules');
-  const packageDepth = nodeModules >= 0 && parts[nodeModules + 1]?.startsWith('@') ? nodeModules + 3 : nodeModules + 2;
-  const installRoot = nodeModules >= 0 ? parts.slice(0, packageDepth).join(path.sep) || path.sep : real;
-  return [...new Set([requested, installRoot])];
-}
-
-export function applyNativeMigrationAgentBoundary(command: string, agentCli: string, provider: string, mcpConfig: string): string {
-  const executable = shellQuote(agentCli);
-  const configuration = JSON.parse(mcpConfig) as { mcpServers?: Record<string, unknown> };
-  if (!configuration.mcpServers || Object.keys(configuration.mcpServers).length !== 1 || !configuration.mcpServers.solomap_data) throw new Error('maintenance_agent_mcp_boundary_invalid');
-  if (!command.startsWith(executable)) throw new Error('maintenance_agent_command_invalid');
-  void provider;
-  return command;
-}
-
-function parentDirectories(file: string): string[] {
-  const result: string[] = [];
-  for (let current = path.dirname(path.resolve(file)); current !== path.parse(current).root; current = path.dirname(current)) result.unshift(current);
-  return result;
-}
-
-export function buildMigrationAgentSandboxCommand(input: {
-  command: string;
-  workspacePath: string;
-  extensionPath: string;
-  configPaths: string[];
-  environment: Record<string, string | undefined>;
-  executable?: string;
-}): string {
-  const args = [
-    '--die-with-parent', '--new-session', '--unshare-user', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup',
-    '--clearenv'
-  ];
-  const directories = new Set<string>();
-  const mounts = [
-    { source: input.workspacePath, readOnly: false },
-    { source: input.extensionPath, readOnly: true },
-    ...input.configPaths.filter(candidate => fs.existsSync(candidate)).map(source => ({ source, readOnly: true }))
-  ];
-  mounts.push(...['/etc/resolv.conf', '/etc/nsswitch.conf', '/etc/hosts', '/etc/host.conf', '/etc/gai.conf', '/etc/ssl/certs', '/etc/ssl/openssl.cnf']
-    .filter(candidate => fs.existsSync(candidate)).map(source => ({ source, readOnly: true })));
-  for (const mount of mounts) for (const directory of parentDirectories(mount.source)) directories.add(directory);
-  for (const directory of directories) args.push('--dir', directory);
-  for (const systemPath of ['/usr', '/bin', '/lib', '/lib64']) if (fs.existsSync(systemPath)) args.push('--ro-bind', systemPath, systemPath);
-  for (const mount of mounts) args.push(mount.readOnly ? '--ro-bind' : '--bind', mount.source, mount.source);
-  args.push('--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--chdir', input.workspacePath);
-  for (const [name, value] of Object.entries(input.environment)) if (value !== undefined && value !== '') args.push('--setenv', name, value);
-  args.push('--', '/bin/bash', '-lc', input.command);
-  return [input.executable || '/usr/bin/bwrap', ...args].map(shellQuote).join(' ');
-}
 
 export function buildMigrationMaintenancePrompt(kind: MigrationMaintenanceKind, planId = ''): string {
   const common = [
@@ -93,17 +9,16 @@ export function buildMigrationMaintenancePrompt(kind: MigrationMaintenanceKind, 
     '调用 solomap_migration_start 发现当前仍存在的旧数据源并幂等加入后台迁移队列。',
     '调用 solomap_migration_status；对 failed、interrupted 或 completed_with_conflicts 的任务，逐个调用 solomap_migration_retry。',
     '调用 solomap_recycling_preview 生成精确回收清单；不要调用 solomap_recycling_apply，回收必须回到插件界面由用户确认。',
-    '再次调用 solomap_migration_status，然后调用 solomap_maintenance_finish。'
+    '再次调用 solomap_migration_status，确认迁移结果。'
   ] : kind === 'migration_review' ? [
     '对 failed、interrupted 或 completed_with_conflicts 的任务，逐个调用 solomap_migration_retry。',
     '调用 solomap_recycling_preview 生成精确回收清单；不要调用 solomap_recycling_apply，回收必须回到插件界面由用户确认。',
-    '再次调用 solomap_migration_status，然后调用 solomap_maintenance_finish。'
+    '再次调用 solomap_migration_status，确认迁移结果。'
   ] : [
     `本任务只允许执行插件已确认的回收清单 ${planId}。调用 solomap_recycling_apply，planId 必须逐字等于该值。`,
-    '完成后再次调用 solomap_migration_status，然后调用 solomap_maintenance_finish。'
+    '完成后再次调用 solomap_migration_status，确认回收结果。'
   ];
   return [...common, ...steps,
-    '维护结果和续接状态以数据库任务为准，不创建结果文件。',
-    '工具失败时不要绕过权限或自行处理文件；调用 solomap_maintenance_finish 写入 error。'
+    '工具失败时不要绕过权限或自行处理文件；保留原始错误并停止。'
   ].join('\n');
 }

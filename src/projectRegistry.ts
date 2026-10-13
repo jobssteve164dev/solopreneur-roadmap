@@ -107,13 +107,14 @@ export function projectName(projectPath: string): string {
 export function normalizeGlobalDataPathForExtension(rawPath: string, workspaceRoot = ''): string {
   const trimmed = String(rawPath || '').trim();
   if (trimmed) {
-    return trimmed.endsWith('.solomap-global') ? trimmed : path.join(trimmed, '.solomap-global');
+    const absolute = path.resolve(trimmed);
+    return absolute.endsWith('.solomap-global') ? absolute : path.join(absolute, '.solomap-global');
   }
   return path.join(getDefaultSolomapGlobalParent(workspaceRoot), '.solomap-global');
 }
 
 export function getDefaultSolomapGlobalParent(workspaceRoot = ''): string {
-  const candidateRoot = String(workspaceRoot || '').trim() || process.cwd();
+  const candidateRoot = path.resolve(String(workspaceRoot || '').trim() || process.cwd());
   const parent = path.dirname(candidateRoot);
   if (parent && parent !== path.parse(parent).root) {
     return parent;

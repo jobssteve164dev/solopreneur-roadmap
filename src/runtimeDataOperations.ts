@@ -1,4 +1,4 @@
-import { MaintenanceRuntimeEndpoint, RuntimeDataRequest, sendRuntimeDataRequest, sendRuntimeMaintenanceRequest } from './autonomousRuntimeControl';
+import { RuntimeDataRequest, sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { DataWrite, UnifiedDataStore } from './db/unifiedDataStore';
 import type { UnifiedMcpSource } from './unifiedMcp';
 import * as crypto from 'crypto';
@@ -9,7 +9,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { RunInputMaterialization } from './runInputMaterialization';
 import { configureAgentDatabase, databaseAgentProviders, DatabaseAgentProvider, isAgentDatabaseConfigPath } from './agentDatabaseConfig';
-import { readIntelligenceConversation, listIntelligenceConversations } from './intelligenceConversationData';
 import { MigrationRecycling } from './migrationRecycling';
 import { isRetirableRunArtifact, initializeProjectJournalAllocation } from './projectDataMigration';
 import { enqueueAvailableDataMigrations } from './runtimeDatabaseBootstrap';
@@ -20,6 +19,7 @@ import { snapshotWorkspace, captureRunGitEvidence, readWorkspaceGitHead } from '
 import { RunStop } from './runStop';
 import { registerTelegramEditorEndpoint } from './telegramExtensionBridge';
 import { persistTelegramRuntimeSecret } from './telegramRuntimeConfig';
+import { migrationRunKinds } from './runLifecycleTypes';
 
 export interface RuntimeDataOperations {
   (request: RuntimeDataRequest): Promise<unknown>;
@@ -31,6 +31,7 @@ export interface RuntimeDataOperations {
 }
 
 export interface McpRunIdentity { executionLogId: number; generation: number; proof: string }
+type MigrationRunKind = typeof migrationRunKinds[number];
 
 function normalizeObjectReference(value: unknown): string {
   const raw = String(value || '');
@@ -44,18 +45,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
   const runStops = new RunStop(store);
   const runs = new RunRecovery(store, runStops);
   const runInputs = new RunInputMaterialization(store);
-  type ProjectSession = { kind: 'project'; actorId: string; scope: string; runIdentity?: McpRunIdentity; reviewBatchId?: string };
-  type MaintenanceSession = { kind: 'maintenance'; taskId: string; taskKind: 'migration_review' | 'migration_apply' | 'recycling_apply'; targetId: string | null };
-  const sessions = new Map<string, ProjectSession | MaintenanceSession>();
-  const maintenanceLaunchClaims = new Map<string, { token: string; expiresAt: number }>();
-  const claimMaintenanceLaunch = (taskId: string) => {
-    const now = Date.now();
-    for (const [id, claim] of maintenanceLaunchClaims) if (claim.expiresAt <= now) maintenanceLaunchClaims.delete(id);
-    if ([...sessions.values()].some(session => session.kind === 'maintenance' && session.taskId === taskId) || (maintenanceLaunchClaims.get(taskId)?.expiresAt || 0) > now) throw new Error('maintenance_task_in_use');
-    const claim = { token: crypto.randomBytes(32).toString('hex'), expiresAt: now + 30 * 60_000 };
-    maintenanceLaunchClaims.set(taskId, claim);
-    return claim.token;
-  };
+  type ProjectSession = { kind: 'project'; actorId: string; scope: string; runIdentity?: McpRunIdentity; reviewBatchId?: string; migrationKind?: MigrationRunKind; migrationTargetId?: string | null };
+  const sessions = new Map<string, ProjectSession>();
   const allowedRead = (object: DataObject, session: ProjectSession): boolean => canAgentRead(object, session.scope, session.reviewBatchId, store.learningReviewScopeCurrent(object));
   const runProject = async (input: Record<string, unknown>): Promise<{ projectId: string }> => {
     if (input.projectId) {
@@ -85,23 +76,14 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       case 'open_mcp_session': {
         const scope = String(input.projectId || '');
         const runIdentity = input.runIdentity as McpRunIdentity | undefined;
+        const authorizedRun = runIdentity ? store.authorizedRunState(scope, runIdentity) : undefined;
+        const runKind = String(authorizedRun?.status.runKind || '');
+        const migrationKind = migrationRunKinds.includes(runKind as MigrationRunKind) ? runKind as MigrationRunKind : undefined;
         const reviewBatchId = runIdentity ? store.authorizedLearningReviewBatch(scope, runIdentity) : undefined;
         const identity = store.establishMcpActor(scope, input.resume as { actorId: string; proof: string } | undefined);
         const sessionToken = crypto.randomBytes(32).toString('hex');
-        sessions.set(sessionToken, { kind: 'project', actorId: identity.actorId, scope, runIdentity, reviewBatchId });
-        return { ...identity, sessionToken };
-      }
-      case 'open_maintenance_mcp_session': {
-        const taskId = String(input.taskId || '');
-        if ([...sessions.values()].some(session => session.kind === 'maintenance' && session.taskId === taskId)) throw new Error('maintenance_task_in_use');
-        const claim = maintenanceLaunchClaims.get(taskId);
-        const launchToken = String(input.launchToken || '');
-        if (!claim || claim.expiresAt <= Date.now() || !launchToken || launchToken.length !== claim.token.length || !crypto.timingSafeEqual(Buffer.from(launchToken), Buffer.from(claim.token))) throw new Error('maintenance_launch_denied');
-        const task = store.establishMaintenanceTask(taskId, String(input.proof || ''));
-        maintenanceLaunchClaims.delete(taskId);
-        const sessionToken = crypto.randomBytes(32).toString('hex');
-        sessions.set(sessionToken, { kind: 'maintenance', taskId: task.taskId, taskKind: task.kind, targetId: task.targetId });
-        return { taskId: task.taskId, kind: task.kind, targetId: task.targetId, sessionToken };
+        sessions.set(sessionToken, { kind: 'project', actorId: identity.actorId, scope, runIdentity, reviewBatchId, migrationKind, migrationTargetId: migrationKind ? String(authorizedRun?.status.migrationTargetId || '') || null : undefined });
+        return { ...identity, sessionToken, migrationKind: migrationKind || null };
       }
       case 'close_mcp_session': {
         const token = String(input.sessionToken || '');
@@ -109,21 +91,6 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         if (session?.kind === 'project') store.closeMcpActor(session.actorId, session.scope);
         sessions.delete(token);
         return { closed: true };
-      }
-      case 'create_maintenance_task': {
-        const task = store.createMaintenanceTask(String(input.kind || '') as 'migration_review' | 'migration_apply' | 'recycling_apply', input.targetId ? String(input.targetId) : undefined);
-        return { ...task, launchToken: claimMaintenanceLaunch(task.taskId) };
-      }
-      case 'claim_maintenance_task': {
-        const task = store.resumeMaintenanceTask(String(input.taskId || ''));
-        return { ...task, launchToken: claimMaintenanceLaunch(task.taskId) };
-      }
-      case 'resume_maintenance_task': return store.resumeMaintenanceTask(String(input.taskId || ''));
-      case 'maintenance_task_status': return store.readMaintenanceTask(String(input.taskId || ''));
-      case 'fail_maintenance_task': {
-        const taskId = String(input.taskId || '');
-        maintenanceLaunchClaims.delete(taskId);
-        return store.completeMaintenanceTask(taskId, String(input.error || 'agent_cli_stopped'));
       }
       case 'register_project': return store.registerProject(input as unknown as Parameters<UnifiedDataStore['registerProject']>[0]);
       case 'read_capability_registry': return store.readCapabilityRegistry(input as unknown as Parameters<UnifiedDataStore['readCapabilityRegistry']>[0]);
@@ -238,6 +205,17 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const project = await store.registerProject({ root: String(input.root || '') });
         const prepared = store.readRunIntent(project.projectId, String(input.launchIntentId || '')) ? input : await withRoadmapBackup(input);
         return store.prepareRunIntent(project.projectId, project.locationId, prepared as unknown as Parameters<UnifiedDataStore['prepareRunIntent']>[2]);
+      }
+      case 'read_run_slot': {
+        const project = await runProject(input);
+        return store.readRunSlot(project.projectId, String(input.launchSlotId || ''), input.launchSlotScope === 'global' ? 'global' : 'project');
+      }
+      case 'prepare_run_slot': {
+        await initializeProjectJournalAllocation(store, String(input.root || ''));
+        const project = await store.registerProject({ root: String(input.root || '') });
+        const scope = input.launchSlotScope === 'global' ? 'global' : 'project';
+        const prepared = store.readRunSlot(project.projectId, String(input.launchSlotId || ''), scope) ? input : await withRoadmapBackup(input);
+        return store.prepareRunSlot(project.projectId, project.locationId, prepared as unknown as Parameters<UnifiedDataStore['prepareRunSlot']>[2]);
       }
       case 'prepare_run': {
         const project = await store.registerProject({ root: String(input.root || '') });
@@ -653,17 +631,33 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       case 'import_memory': return migrations.enqueue(input);
       case 'import_intelligence': return migrations.enqueue({ ...input, collection: 'intelligence' });
       case 'import_project_data': return migrations.enqueue(input);
-      case 'read_intelligence_conversation': return readIntelligenceConversation(store, String(input.id || ''));
-      case 'list_intelligence_conversations': return listIntelligenceConversations(store);
+      case 'read_intelligence_conversation': return store.readIntelligenceConversation(String(input.id || ''));
+      case 'list_intelligence_conversations': return store.listIntelligenceConversations();
       case 'write_intelligence_conversation': return store.writeIntelligenceConversation(input as unknown as Parameters<UnifiedDataStore['writeIntelligenceConversation']>[0]);
       case 'migration_status': return input.metadataOnly === true ? store.readMigrationJobStatus(String(input.jobId || '')) : store.readMigrationJob(String(input.jobId || ''));
       case 'discover_migrations': return enqueueAvailableDataMigrations(store, operations, () => true, true);
-      case 'migration_overview': return {
-        ...(await recycling.overview()),
-        maintenanceTasks: store.maintenanceTasks(),
-        activeMaintenanceTaskIds: [...sessions.values()].filter((session): session is MaintenanceSession => session.kind === 'maintenance').map(session => session.taskId),
-        launchingMaintenanceTaskIds: [...maintenanceLaunchClaims.entries()].filter(([, claim]) => claim.expiresAt > Date.now()).map(([taskId]) => taskId)
-      };
+      case 'migration_overview': {
+        const formalRuns = store.migrationAgentRuns();
+        const projectedRuns = formalRuns.map(run => {
+          const active = !run.status.finishedAt;
+          return {
+            taskId: run.taskId,
+            kind: String(run.status.runKind),
+            targetId: String(run.status.migrationTargetId || '') || null,
+            status: active ? (String(run.status.status) === 'Preparing' ? 'ready' : 'running') : String(run.status.status) === 'Failed' ? 'failed' : 'completed',
+            error: run.status.failureReason ? String(run.status.failureReason) : null,
+            createdAt: Date.parse(String(run.status.startedAt || '')) || 0,
+            updatedAt: Date.parse(String(run.status.finishedAt || run.status.startedAt || '')) || 0,
+            validUntil: active ? Number.MAX_SAFE_INTEGER : Date.parse(String(run.status.finishedAt || '')) || 0
+          };
+        });
+        return {
+          ...(await recycling.overview()),
+          maintenanceTasks: projectedRuns,
+          activeMaintenanceTaskIds: projectedRuns.filter(task => ['ready', 'running'].includes(task.status)).map(task => task.taskId),
+          launchingMaintenanceTaskIds: []
+        };
+      }
       case 'prepare_recycling': return recycling.prepare();
       case 'read_recycling_plan': return recycling.readPlan(String(input.planId || ''));
       case 'retry_migration': return migrations.retry(String(input.jobId || ''));
@@ -685,14 +679,6 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         }
         if (failures.length) throw new Error(`recycling_items_retained:${failures.join(',')}`);
         return recycling.overview();
-      }
-      case 'complete_maintenance_task': {
-        const session = request.sessionToken ? sessions.get(request.sessionToken) : undefined;
-        if (!session || session.kind !== 'maintenance') throw new Error('action_denied');
-        const completed = store.completeMaintenanceTask(session.taskId, input.error ? String(input.error) : null);
-        maintenanceLaunchClaims.delete(session.taskId);
-        sessions.delete(String(request.sessionToken));
-        return completed;
       }
       case 'write': return store.write(input as unknown as DataWrite);
       case 'read': {
@@ -732,37 +718,19 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
     }
   };
   const operations = async (request: RuntimeDataRequest) => {
-    if (request.maintenanceTransport) {
-      if (!request.maintenanceTaskId || !request.maintenanceProof) throw new Error('maintenance_transport_denied');
-      const proof = String(request.maintenanceProof || '');
-      const task = request.operation === 'close_mcp_session'
-        ? store.verifyMaintenanceTaskIdentity(request.maintenanceTaskId, proof)
-        : store.verifyMaintenanceTaskProof(request.maintenanceTaskId, proof);
-      if (request.operation === 'open_maintenance_mcp_session') {
-        if (String(request.input.taskId || '') !== task.taskId || String(request.input.proof || '') !== String(request.maintenanceProof || '')) throw new Error('action_denied');
-      } else {
-        const transportSession = request.sessionToken ? sessions.get(request.sessionToken) : undefined;
-        if (!transportSession || transportSession.kind !== 'maintenance' || transportSession.taskId !== task.taskId) throw new Error('action_denied');
-      }
-    }
     if (!request.sessionToken) return dispatch(request);
     const session = sessions.get(request.sessionToken);
     if (!session) throw new Error('mcp_session_expired');
     const input = request.input;
-    if (session.kind === 'maintenance') {
-      store.authorizeMaintenanceTask(session.taskId, session.taskKind, session.targetId);
-      const reviewActions = ['migration_overview', 'migration_status', 'retry_migration', 'prepare_recycling', 'read_recycling_plan', 'complete_maintenance_task'];
+    if (session.migrationKind) {
+      if (!session.runIdentity) throw new Error('action_denied');
+      store.authorizedRunState(session.scope, session.runIdentity);
+      const reviewActions = ['migration_overview', 'migration_status', 'retry_migration', 'prepare_recycling', 'read_recycling_plan'];
       const migrationActions = ['discover_migrations', ...reviewActions];
-      const recyclingActions = ['migration_overview', 'read_recycling_plan', 'execute_recycling_plan', 'complete_maintenance_task'];
-      if (!(session.taskKind === 'migration_apply' ? migrationActions : session.taskKind === 'migration_review' ? reviewActions : recyclingActions).includes(request.operation)) throw new Error('action_denied');
-      if (session.taskKind === 'recycling_apply' && ['read_recycling_plan', 'execute_recycling_plan'].includes(request.operation) && String(input.planId || '') !== session.targetId) throw new Error('maintenance_target_denied');
-      try { return await dispatch(request); }
-      catch (error) {
-        if (request.operation !== 'complete_maintenance_task') {
-          try { store.completeMaintenanceTask(session.taskId, error instanceof Error ? error.message : String(error)); } catch {}
-        }
-        throw error;
-      }
+      const recyclingActions = ['migration_overview', 'read_recycling_plan', 'execute_recycling_plan'];
+      if (!(session.migrationKind === 'migration_apply' ? migrationActions : session.migrationKind === 'migration_review' ? reviewActions : recyclingActions).includes(request.operation)) throw new Error('action_denied');
+      if (session.migrationKind === 'recycling_apply' && ['read_recycling_plan', 'execute_recycling_plan'].includes(request.operation) && String(input.planId || '') !== session.migrationTargetId) throw new Error('maintenance_target_denied');
+      return dispatch(request);
     }
     if (!['write', 'read', 'search', 'link', 'context', 'export'].includes(request.operation)) throw new Error('action_denied');
     store.authorizeMcpAction(session.actorId, session.scope, request.operation);
@@ -824,55 +792,6 @@ export function runtimeMcpSource(globalDataPath: string, scope: string | null, g
       return sendRuntimeDataRequest(globalDataPath, { operation, input, sessionToken: session!.sessionToken });
     }
   } };
-}
-
-export function runtimeMaintenanceMcpSource(globalDataPath: string, taskId: string, proof: string, launchToken: string): UnifiedMcpSource {
-  let sessionToken = '';
-  const establish = async (): Promise<void> => {
-    const session = await sendRuntimeDataRequest<{ sessionToken: string }>(globalDataPath, { operation: 'open_maintenance_mcp_session', input: { taskId, proof, launchToken } });
-    sessionToken = session.sessionToken;
-  };
-  return {
-    scope: null,
-    async close() {
-      if (sessionToken) await sendRuntimeDataRequest(globalDataPath, { operation: 'close_mcp_session', input: { sessionToken } });
-      sessionToken = '';
-    },
-    async call(operation, input) {
-      if (!sessionToken) await establish();
-      try { return await sendRuntimeDataRequest(globalDataPath, { operation, input, sessionToken }); }
-      catch (error) {
-        if (!(error instanceof Error) || error.message !== 'mcp_session_expired') throw error;
-        await establish();
-        return sendRuntimeDataRequest(globalDataPath, { operation, input, sessionToken });
-      }
-    }
-  };
-}
-
-export function runtimeMaintenanceEndpointMcpSource(endpoint: MaintenanceRuntimeEndpoint, taskId: string, proof: string, launchToken: string): UnifiedMcpSource {
-  let sessionToken = '';
-  const send = <T>(request: RuntimeDataRequest) => sendRuntimeMaintenanceRequest<T>(endpoint, taskId, proof, request);
-  const establish = async (): Promise<void> => {
-    const session = await send<{ sessionToken: string }>({ operation: 'open_maintenance_mcp_session', input: { taskId, proof, launchToken } });
-    sessionToken = session.sessionToken;
-  };
-  return {
-    scope: null,
-    async close() {
-      if (sessionToken) await send({ operation: 'close_mcp_session', input: {}, sessionToken });
-      sessionToken = '';
-    },
-    async call(operation, input) {
-      if (!sessionToken) await establish();
-      try { return await send({ operation, input, sessionToken }); }
-      catch (error) {
-        if (!(error instanceof Error) || error.message !== 'mcp_session_expired') throw error;
-        await establish();
-        return send({ operation, input, sessionToken });
-      }
-    }
-  };
 }
 
 export async function runtimeProjectMcpSource(globalDataPath: string, projectRoot: string): Promise<UnifiedMcpSource | undefined> {
