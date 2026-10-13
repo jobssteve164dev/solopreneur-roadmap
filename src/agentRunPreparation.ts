@@ -15,6 +15,7 @@ import type { RunState } from './runLifecycleTypes';
 import type { FlowTrace } from './flowStore';
 import { runStatusReference, runDataReference } from './runLifecycleClient';
 import { readWindowsProcessBirthMarkerAsync } from './processIdentity.js';
+import { soloConversationRunKinds } from './runLifecycleTypes';
 
 export interface AgentRunPreparationInput {
   agentCli: string;
@@ -178,7 +179,7 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
       if (policy.objectId !== policyRef.objectId || policy.revision !== policyRef.revision || policy.kind !== 'policy' || policy.projectId !== null || policy.data.kind !== 'global_prompt' || typeof policy.data.content !== 'string') throw new Error('run_global_prompt_policy_mismatch');
       policyInstructions = [`用户全局要求（本轮固定版本 ${JSON.stringify(policyRef)}）：`, policy.data.content, '与本轮用户最新要求冲突时，以本轮用户要求为准。', ...(input.readOnlyReview ? [] : ['后续每轮 start 返回 globalPromptPolicyRef；有引用时，通过 solomap_read 读取该 objectId 和 revision 的全文，保留固定版本，不用最新版本代替。'])].join('\n');
     }
-    const prompt = [input.prompt, ...(policyInstructions ? [policyInstructions] : []), ...(input.readOnlyReview ? [] : [...(input.prompt.includes('SoloMap 数据库工具：') ? [] : [buildAgentDatabaseInstructions()]), `SoloMap 检查点命令：${path.join(__dirname, 'taskCheckpointProcess.js')}。通过 node "$SOLOMAP_TASK_COMMAND" 调用当前任务的 start、complete 和 session-close。初轮 complete 使用 --turn-id ${state.turnId}；后续 start 的 --turn-id 先使用上一轮 turnId，保留返回的新 turnId，并在对应 complete 的 --turn-id 中使用它。每轮结算绑定自己的 turnId，重试沿用原 turnId。`, reportInstructions(String(state.status.learningTaskId))])].join('\n\n');
+    const prompt = [input.prompt, ...(policyInstructions ? [policyInstructions] : []), ...(input.readOnlyReview ? [] : [...(input.prompt.includes('SoloMap 数据库工具：') ? [] : [buildAgentDatabaseInstructions({ migrationTools: soloConversationRunKinds.includes(input.runKind as typeof soloConversationRunKinds[number]) })]), `SoloMap 检查点命令：${path.join(__dirname, 'taskCheckpointProcess.js')}。通过 node "$SOLOMAP_TASK_COMMAND" 调用当前任务的 start、complete 和 session-close。初轮 complete 使用 --turn-id ${state.turnId}；后续 start 的 --turn-id 先使用上一轮 turnId，保留返回的新 turnId，并在对应 complete 的 --turn-id 中使用它。每轮结算绑定自己的 turnId，重试沿用原 turnId。`, reportInstructions(String(state.status.learningTaskId))])].join('\n\n');
     state = await call('patch_run_inputs', { ...identity, expectedRevision: state.revision, prompt, command, status: input.metadata?.startWaiting === true ? 'Waiting' : 'Running', idempotencyKey: `${prepareKey}:ready:${state.revision}` }) as RunState;
   }
   } catch (error) {

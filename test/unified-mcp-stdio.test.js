@@ -2,16 +2,27 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const net = require('node:net');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const test = require('node:test');
 const { sendRuntimeControlCommand, sendRuntimeDataRequest } = require('../out/autonomousRuntimeControl.js');
+
+function cleanupExact(root) {
+  let stat;
+  try { stat = fs.lstatSync(root); }
+  catch (error) { if (error.code === 'ENOENT') return; throw error; }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) { fs.unlinkSync(root); return; }
+  for (const name of fs.readdirSync(root)) cleanupExact(path.join(root, name));
+  fs.rmdirSync(root);
+}
 
 test('a maintenance CLI reads its formal task from an isolated cwd using the verified run identity', async t => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-maintenance-mcp-'));
   fs.mkdirSync(path.join(base, '.git'));
   const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
   const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  t.after(() => cleanupExact(base));
   const projectId = owner.projectIds.get(project);
   const registered = await owner.store.registerProject({ root: project });
   const prepared = owner.store.prepareRun(projectId, registered.locationId, {
@@ -26,7 +37,7 @@ test('a maintenance CLI reads its formal task from an isolated cwd using the ver
     const client = new Client({ name: 'maintenance-fixture', version: '1' });
     const transport = new StdioClientTransport({ command: process.execPath,
       args: [path.resolve(__dirname, '../out/databaseMcpProcess.js'), '--global-data-path', root], cwd,
-      env: { ...process.env, CLAUDE_PROJECT_DIR: cwd, SOLOMAP_PROJECT_ID: projectId, SOLOMAP_EXECUTION_LOG_ID: '1', SOLOMAP_RUN_GENERATION: String(prepared.generation), SOLOMAP_RUN_PROOF: proof }, stderr: 'pipe' });
+      env: { ...process.env, CLAUDE_PROJECT_DIR: cwd, SOLOMAP_PROJECT_ID: projectId, SOLOMAP_EXECUTION_LOG_ID: '1', SOLOMAP_RUN_GENERATION: String(prepared.generation), SOLOMAP_RUN_PROOF: proof, SOLOMAP_RUN_KIND: 'solo' }, stderr: 'pipe' });
     let errors = ''; transport.stderr?.on('data', chunk => { errors += chunk; });
     try {
       if (proof !== head.proof) {
@@ -34,6 +45,8 @@ test('a maintenance CLI reads its formal task from an isolated cwd using the ver
         assert.match(errors, proof ? /run_proof_denied/ : /project_identity_not_found/);
       } else {
         await client.connect(transport).catch(error => { throw new Error(`${error.message}: ${errors}`); });
+        const tools = (await client.listTools()).tools.map(tool => tool.name);
+        for (const name of ['solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply']) assert.ok(!tools.includes(name), `${name} must stay outside skill maintenance tasks`);
         const response = await client.callTool({ name: 'solomap_read', arguments: { ref: prepared.runId, view: 'full' } });
         assert.ok(!response.isError, JSON.stringify(response));
         assert.ok(response.content[0].text.includes('完整任务🌿'.repeat(10000)));
@@ -43,8 +56,70 @@ test('a maintenance CLI reads its formal task from an isolated cwd using the ver
   assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
 });
 
+test('an ordinary Solo CLI receives project-scoped migration and preview tools without recycling apply', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-solo-mcp-'));
+  fs.mkdirSync(path.join(base, '.git'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  t.after(() => cleanupExact(base));
+  const projectId = owner.projectIds.get(project);
+  const registered = await owner.store.registerProject({ root: project });
+  const prepared = owner.store.prepareRun(projectId, registered.locationId, {
+    root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '迁移当前项目',
+    command: 'codex', userMessage: '迁移当前项目', idempotencyKey: 'ordinary-solo-migration-tools'
+  });
+  const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
+  const client = new Client({ name: 'ordinary-solo-migration', version: '1' });
+  const transport = new StdioClientTransport({ command: process.execPath,
+    args: [path.resolve(__dirname, '../out/databaseMcpProcess.js'), '--global-data-path', root], cwd: project,
+    env: { ...process.env, SOLOMAP_PROJECT_ID: projectId, SOLOMAP_EXECUTION_LOG_ID: '1', SOLOMAP_RUN_GENERATION: String(prepared.generation), SOLOMAP_RUN_PROOF: prepared.proof, SOLOMAP_RUN_KIND: 'solo' }, stderr: 'pipe' });
+  try {
+    await client.connect(transport);
+    const tools = (await client.listTools()).tools.map(tool => tool.name);
+    for (const name of ['solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview']) assert.ok(tools.includes(name), `missing ${name}`);
+    assert.ok(!tools.includes('solomap_recycling_apply'));
+    const migration = await client.callTool({ name: 'solomap_migration_status', arguments: { projectRoot: project } });
+    assert.equal(migration.isError, undefined, JSON.stringify(migration.content));
+  } finally { await client.close(); await transport.close(); }
+});
+
+test('the MCP bridge retries one interrupted Runtime handshake before exposing verified Solo tools', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-mcp-handshake-'));
+  t.after(() => cleanupExact(base));
+  const root = path.join(base, '.solomap-global'), runtimeRoot = path.join(root, 'runtime'), project = path.join(base, 'project');
+  fs.mkdirSync(runtimeRoot, { recursive: true }); fs.mkdirSync(project);
+  let requests = 0;
+  const server = net.createServer(socket => {
+    socket.once('data', () => {
+      requests += 1;
+      if (requests === 1) { socket.end(); return; }
+      socket.end(JSON.stringify({ ok: true, runtimeId: 'fixture-runtime', result: { actorId: 'fixture-actor', proof: 'fixture-proof', sessionToken: 'fixture-session', runKind: 'solo', migrationKind: null } }));
+    });
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const address = server.address();
+  fs.writeFileSync(path.join(runtimeRoot, 'control.json'), JSON.stringify({ schemaVersion: 1, runtimeId: 'fixture-runtime', host: '127.0.0.1', port: address.port, token: 'fixture-token' }));
+  const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
+  const client = new Client({ name: 'retry-runtime-handshake', version: '1' });
+  const transport = new StdioClientTransport({ command: process.execPath,
+    args: [path.resolve(__dirname, '../out/databaseMcpProcess.js'), '--global-data-path', root], cwd: project,
+    env: { ...process.env, SOLOMAP_PROJECT_ID: '11111111-1111-4111-8111-111111111111', SOLOMAP_EXECUTION_LOG_ID: '1', SOLOMAP_RUN_GENERATION: '1', SOLOMAP_RUN_PROOF: 'fixture-run-proof', SOLOMAP_RUN_KIND: 'step' }, stderr: 'pipe' });
+  try {
+    await client.connect(transport);
+    const tools = (await client.listTools()).tools.map(tool => tool.name);
+    assert.ok(tools.includes('solomap_migration_status'));
+    assert.ok(!tools.includes('solomap_recycling_apply'));
+    assert.equal(requests, 2);
+  } finally { await client.close(); await transport.close(); }
+});
+
 for (const separateProjects of [false, true]) test(`external stdio clients concurrently use one Runtime owner (${separateProjects ? 'separate projects' : 'shared project'})`, async t => {
-  const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-stdio-')), '.solomap-global');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-stdio-'));
+  t.after(() => cleanupExact(base));
+  const root = path.join(base, '.solomap-global');
   fs.mkdirSync(root);
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   new UnifiedDataStore(root).close();

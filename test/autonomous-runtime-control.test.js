@@ -152,6 +152,39 @@ test('runtime control frames split TCP requests and closes idle clients', async 
   }
 });
 
+test('runtime data reports an interrupted response without leaking a JSON parser error', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-data-response-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const runtimeRoot = path.join(globalRoot, 'runtime');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  const server = net.createServer(socket => {
+    socket.setEncoding('utf8');
+    socket.once('data', () => socket.end());
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    fs.writeFileSync(path.join(runtimeRoot, 'control.json'), JSON.stringify({
+      schemaVersion: 1, runtimeId: 'interrupted-runtime', host: '127.0.0.1', port: address.port, token: 'fixture-token'
+    }));
+    await assert.rejects(
+      control.sendRuntimeDataRequest(globalRoot, { operation: 'migration_overview', input: {} }),
+      /runtime_data_response_incomplete/
+    );
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    const endpoint = path.join(runtimeRoot, 'control.json');
+    if (fs.existsSync(endpoint)) fs.unlinkSync(endpoint);
+    fs.rmdirSync(runtimeRoot);
+    fs.rmdirSync(globalRoot);
+    fs.rmdirSync(root);
+  }
+});
+
 test('standalone runtime stays paused and resumes through its authenticated control endpoint', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-process-control-'));
   const globalRoot = path.join(root, '.solomap-global');

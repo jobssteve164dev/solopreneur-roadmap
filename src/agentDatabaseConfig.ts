@@ -116,7 +116,7 @@ export function configureAgentDatabase(options: { provider: DatabaseAgentProvide
   }
 }
 
-export function buildAgentDatabaseInstructions(): string {
+export function buildAgentDatabaseInstructions(options: { migrationTools?: boolean } = {}): string {
   return [
     'SoloMap 数据库工具：',
     '- MCP 服务器 solomap_data 已接入当前 CLI；项目范围由当前工作目录绑定，不自行更换范围或直接操作数据库文件。',
@@ -126,6 +126,7 @@ export function buildAgentDatabaseInstructions(): string {
     '- 创建用 action="create"；修改先读取当前记录，传 objectId、expectedRevision 和 action="patch"，只提交本次变更字段。每次意图使用唯一 idempotencyKey，重试同一意图沿用该键；遇 revision_conflict 重新读取并协调差异，不能覆盖较新修改。',
     '- 以返回的 revision 和 committedSequence 确认提交，再用 solomap_read 即时回读；超时后先用同一 idempotencyKey 重试确认，不重复创建。证据关联使用 solomap_link；只有用户需要导出时使用 solomap_export。',
     '- 项目私有事实留在本项目。跨项目稳定规则和经验由现有授权复盘流程审核；召回不等于采用，未验证观察和临时交接不得冒充稳定经验。',
+    options.migrationTools ? '- 用户要求迁移当前项目旧数据时，先用 solomap_migration_status 读取摘要，再用 solomap_migration_start 发现并加入迁移；每个 jobId 都要读取详情，queued 或 running 时持续查询到终态，failed、interrupted 或 completed_with_conflicts 时按详情调用 solomap_migration_retry 并重新等待。单次工具失败后必须先重读状态；只有状态读取连续 3 次失败才报告连接阻塞，同时说明任务仍可能在后台运行，不得宣称迁移失败。完成对账后用 solomap_recycling_preview 生成精确回收清单。必须传当前项目绝对路径；普通对话只生成清单，回收仍由界面逐项确认。' : '',
     '- 历史文件在后台迁移，不等待迁移完成才开展任务，不删除旧文件，不向旧记忆目录追加新记录。工具不可用时明确报告具体错误，不另建一套存储。'
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }

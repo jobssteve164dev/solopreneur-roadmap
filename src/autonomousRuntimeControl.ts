@@ -231,7 +231,14 @@ export async function sendRuntimeDataRequest<T>(globalDataPath: string, request:
     socket.once('error', reject);
     socket.once('end', () => {
       try {
-        const parsed = JSON.parse(response) as { ok: boolean; runtimeId: string; result: T; error?: string };
+        let parsed: { ok: boolean; runtimeId: string; result: T; error?: string };
+        try {
+          if (!response.trim()) throw new Error('runtime_data_response_incomplete');
+          parsed = JSON.parse(response) as typeof parsed;
+        } catch (error) {
+          if (error instanceof Error && error.message === 'runtime_data_response_incomplete') throw error;
+          throw new Error('runtime_data_response_incomplete');
+        }
         if (!parsed.ok || parsed.runtimeId !== endpoint.runtimeId) throw new Error(parsed.error || 'different_runtime');
         resolve(parsed.result);
       } catch (error) { reject(error); }

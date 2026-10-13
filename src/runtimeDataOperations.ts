@@ -19,7 +19,7 @@ import { snapshotWorkspace, captureRunGitEvidence, readWorkspaceGitHead } from '
 import { RunStop } from './runStop';
 import { registerTelegramEditorEndpoint } from './telegramExtensionBridge';
 import { persistTelegramRuntimeSecret } from './telegramRuntimeConfig';
-import { migrationRunKinds } from './runLifecycleTypes';
+import { migrationRunKinds, soloConversationRunKinds } from './runLifecycleTypes';
 
 export interface RuntimeDataOperations {
   (request: RuntimeDataRequest): Promise<unknown>;
@@ -93,7 +93,12 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const runKind = String(authorizedRun?.status.runKind || '');
         const migrationKind = migrationRunKinds.includes(runKind as MigrationRunKind) ? runKind as MigrationRunKind : undefined;
         const migrationProjectRoot = migrationKind ? String(authorizedRun?.status.migrationProjectRoot || '') || null : null;
-        const migrationProject = migrationProjectRoot ? await migrationScope({ projectRoot: migrationProjectRoot }) : undefined;
+        const soloProjectRoot = soloConversationRunKinds.includes(runKind as typeof soloConversationRunKinds[number])
+          ? String(authorizedRun?.status.workspaceRoot || '') || null
+          : null;
+        const migrationProject = migrationProjectRoot || soloProjectRoot
+          ? await migrationScope({ projectRoot: migrationProjectRoot || soloProjectRoot })
+          : undefined;
         if (migrationProject && migrationProject.projectId !== scope) throw new Error('maintenance_scope_denied');
         const reviewBatchId = runIdentity ? store.authorizedLearningReviewBatch(scope, runIdentity) : undefined;
         const identity = store.establishMcpActor(scope, input.resume as { actorId: string; proof: string } | undefined);
@@ -103,7 +108,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
           migrationProjectRoot: migrationProject?.root || null,
           migrationProjectId: migrationProject?.projectId || null,
           migrationPhysicalRoot: migrationProject?.physicalRoot || null });
-        return { ...identity, sessionToken, migrationKind: migrationKind || null };
+        return { ...identity, sessionToken, runKind, migrationKind: migrationKind || null };
       }
       case 'close_mcp_session': {
         const token = String(input.sessionToken || '');
@@ -679,8 +684,16 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
             validUntil: active ? Number.MAX_SAFE_INTEGER : Date.parse(String(run.status.finishedAt || '')) || 0
           };
         });
+        const overview = await recycling.overview(scope);
+        const projectedOverview = input.summaryOnly === true ? {
+          ...overview,
+          jobs: overview.jobs.map(job => {
+            const { conflicts: _conflicts, ...progress } = job.progress;
+            return { ...job, progress };
+          })
+        } : overview;
         return {
-          ...(await recycling.overview(scope)),
+          ...projectedOverview,
           maintenanceTasks: projectedRuns,
           activeMaintenanceTaskIds: projectedRuns.filter(task => ['ready', 'running'].includes(task.status)).map(task => task.taskId),
           launchingMaintenanceTaskIds: []
@@ -769,6 +782,16 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       if (session.migrationKind === 'recycling_apply' && ['read_recycling_plan', 'execute_recycling_plan'].includes(request.operation) && String(input.planId || '') !== session.migrationTargetId) throw new Error('maintenance_target_denied');
       return dispatch(request);
     }
+    const ordinaryMigrationActions = ['discover_migrations', 'migration_overview', 'migration_status', 'retry_migration', 'prepare_recycling'];
+    if (ordinaryMigrationActions.includes(request.operation)) {
+      if (!session.runIdentity) throw new Error('action_denied');
+      const run = store.authorizedRunState(session.scope, session.runIdentity);
+      if (!soloConversationRunKinds.includes(String(run.status.runKind) as typeof soloConversationRunKinds[number])) throw new Error('action_denied');
+      const scope = await migrationScope(input);
+      if (!scope) throw new Error('project_scope_required');
+      if (scope.projectId !== session.scope || scope.physicalRoot !== session.migrationPhysicalRoot) throw new Error('maintenance_scope_denied');
+      return dispatch(request);
+    }
     if (!['write', 'read', 'search', 'link', 'context', 'export'].includes(request.operation)) throw new Error('action_denied');
     store.authorizeMcpAction(session.actorId, session.scope, request.operation);
     if (session.runIdentity) store.authorizedLearningReviewBatch(session.scope, session.runIdentity);
@@ -810,13 +833,16 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
 }
 
 export function runtimeMcpSource(globalDataPath: string, scope: string | null, globalReads = false, runIdentity?: McpRunIdentity): UnifiedMcpSource {
-  let session: { actorId: string; proof: string; sessionToken: string } | undefined;
+  let session: { actorId: string; proof: string; sessionToken: string; runKind: string; migrationKind: string | null } | undefined;
   let opening: Promise<void> | undefined;
   const establish = async (): Promise<void> => {
     if (!opening) opening = sendRuntimeDataRequest<typeof session>(globalDataPath, { operation: 'open_mcp_session', input: { projectId: scope, ...(runIdentity ? { runIdentity } : {}), ...(session ? { resume: { actorId: session.actorId, proof: session.proof } } : {}) } }).then(value => { session = value; }).finally(() => { opening = undefined; });
     await opening;
   };
-  return { scope, globalReads, async close() {
+  return { scope, globalReads, async sessionInfo() {
+    if (!session) await establish();
+    return { runKind: String(session!.runKind || ''), migrationKind: session!.migrationKind || null };
+  }, async close() {
     if (opening) await opening;
     if (session) await sendRuntimeDataRequest(globalDataPath, { operation: 'close_mcp_session', input: { sessionToken: session.sessionToken } });
     session = undefined;

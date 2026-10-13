@@ -135,6 +135,28 @@ test('a project-scoped migration session rejects a symlink retargeted after auth
   } finally { await f.operations.close(); f.store.close(); }
 });
 
+test('an ordinary Solo migration session rejects its registered project path after physical replacement', async t => {
+  const f = fixture(t);
+  try {
+    const projectA = path.join(f.base, 'project-a');
+    const originalA = path.join(f.base, 'project-a-original');
+    const projectB = path.join(f.base, 'project-b');
+    fs.mkdirSync(projectA);
+    fs.mkdirSync(projectB);
+    const run = await f.call('prepare_run', {
+      root: projectA, executionLogId: 1, nodeId: '__solo__', runKind: 'solo',
+      prompt: 'task', command: 'codex', userMessage: 'task', status: 'Running', idempotencyKey: 'ordinary-physical-scope'
+    });
+    const session = await f.call('open_mcp_session', {
+      projectId: run.projectId,
+      runIdentity: { executionLogId: 1, generation: run.generation, proof: run.proof }
+    });
+    fs.renameSync(projectA, originalA);
+    fs.symlinkSync(projectB, projectA, 'dir');
+    await assert.rejects(f.operations({ operation: 'migration_overview', input: { projectRoot: projectA }, sessionToken: session.sessionToken }), /maintenance_scope_denied/);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
 test('scoped maintenance history uses immutable project identity after metadata paths change', async t => {
   const f = fixture(t);
   try {
@@ -166,7 +188,7 @@ test('scoped maintenance history uses immutable project identity after metadata 
   } finally { await f.operations.close(); f.store.close(); }
 });
 
-test('a formal migration run receives migration tools through the ordinary run identity', async t => {
+test('an ordinary Solo run can migrate and prepare an exact recycling preview but cannot apply it', async t => {
   const f = fixture(t);
   try {
     const migration = await formalMigrationSession(f, 'migration_apply');
@@ -180,7 +202,32 @@ test('a formal migration run receives migration tools through the ordinary run i
       projectId: ordinary.projectId,
       runIdentity: { executionLogId: 2, generation: ordinary.generation, proof: ordinary.proof }
     });
-    await assert.rejects(f.operations({ operation: 'migration_overview', input: {}, sessionToken: ordinarySession.sessionToken }), /action_denied/);
+    assert.ok(Array.isArray((await f.operations({ operation: 'migration_overview', input: { projectRoot: migration.project }, sessionToken: ordinarySession.sessionToken })).jobs));
+    const legacy = path.join(migration.project, '.solopreneur', 'project_growth.db');
+    const bytes = Buffer.from('registered legacy project growth');
+    fs.writeFileSync(legacy, bytes);
+    const identity = `project-growth:${migration.project}`;
+    f.store.captureMigrationSource({ identity, key: 'project_growth.db', hash: crypto.createHash('sha256').update(bytes).digest('hex') }, bytes);
+    f.store.markMigrationSourceImported(identity, 'project_growth.db');
+    const preview = await f.operations({ operation: 'prepare_recycling', input: { projectRoot: migration.project }, sessionToken: ordinarySession.sessionToken });
+    assert.deepEqual(preview.files.map(file => file.path), [legacy]);
+    assert.equal(preview.files[0].bytes, bytes.length);
+    await assert.rejects(f.operations({ operation: 'migration_overview', input: {}, sessionToken: ordinarySession.sessionToken }), /project_scope_required/);
+    await assert.rejects(f.operations({ operation: 'execute_recycling_plan', input: { planId: preview.planId, projectRoot: migration.project }, sessionToken: ordinarySession.sessionToken }), /action_denied/);
+    await f.call('claim_run', { projectId: ordinary.projectId, executionLogId: 2, expectedRevision: ordinary.revision, idempotencyKey: 'replacement-ordinary-owner' });
+    await assert.rejects(f.operations({ operation: 'migration_overview', input: { projectRoot: migration.project }, sessionToken: ordinarySession.sessionToken }), /run_owner_conflict/);
+
+    for (const [executionLogId, runKind] of [[3, 'step'], [4, 'skill_install'], [5, 'agent_review']]) {
+      const run = await f.call('prepare_run', {
+        root: migration.project, executionLogId, nodeId: runKind === 'step' ? 'step-one' : '__solo__', runKind,
+        prompt: runKind, command: 'codex', userMessage: runKind, status: 'Running', idempotencyKey: `non-solo-run:${runKind}`
+      });
+      const session = await f.call('open_mcp_session', {
+        projectId: run.projectId,
+        runIdentity: { executionLogId, generation: run.generation, proof: run.proof }
+      });
+      await assert.rejects(f.operations({ operation: 'migration_overview', input: { projectRoot: migration.project }, sessionToken: session.sessionToken }), /action_denied/);
+    }
   } finally { await f.operations.close(); f.store.close(); }
 });
 
@@ -234,7 +281,7 @@ test('two project windows on one data root atomically reuse one active shared mi
   } finally { await f.operations.close(); f.store.close(); }
 });
 
-test('formal migration runs read complete retained source details while ordinary runs remain denied', async t => {
+test('formal migration runs read complete retained source details while sessions without a run identity remain denied', async t => {
   const f = fixture(t);
   try {
     const progress = { retainedFiles: ['first.md', 'last.md'], conflicts: [{ source: 'last.md', error: 'project_scope_mapping_required' }] };
@@ -280,6 +327,14 @@ test('migration prompt supplies tools without defining a private runtime or resu
   const scoped = buildMigrationMaintenancePrompt('migration_apply', '', '/workspace/packer');
   assert.match(scoped, /projectRoot="\/workspace\/packer"/);
   assert.match(scoped, /不得读取或处理其他项目/);
+  assert.match(apply, /单次工具失败不代表迁移失败/);
+  assert.match(apply, /重新调用 solomap_migration_status/);
+  assert.match(apply, /状态读取连续 3 次无法建立/);
+  assert.match(apply, /连续 3 次/);
+  assert.match(apply, /不得宣称迁移失败/);
+  assert.match(apply, /queued 或 running/);
+  assert.match(apply, /继续等待并查询/);
+  assert.doesNotMatch(apply, /工具失败时[^。]*停止/);
 });
 
 test('external Agent CLI receives migration tools from the ordinary managed MCP bridge', async t => {
@@ -291,8 +346,9 @@ test('external Agent CLI receives migration tools from the ordinary managed MCP 
   const seed = new UnifiedDataStore(root);
   const identity = await seed.registerProject({ root: project });
   const retainedFiles = Array.from({ length: 500 }, (_, index) => `history/${index}.log`);
+  const conflicts = Array.from({ length: 500 }, (_, index) => ({ source: `history/${index}.log`, error: 'migration_source_changed' }));
   const job = seed.enqueueMemoryMigration({ collection: 'documentation', sourceRoot: path.join(project, '.solopreneur', 'documentation.json'), projectRoot: project }, 'stdio-detail');
-  seed.updateMigrationJob(job.jobId, 'completed', { retainedFiles, conflicts: [], imported: 500 });
+  seed.updateMigrationJob(job.jobId, 'completed_with_conflicts', { retainedFiles, conflicts, imported: 500 });
   const prepared = seed.prepareRun(identity.projectId, identity.locationId, {
     root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'migration_apply', prompt: 'migrate', command: 'codex',
     userMessage: 'migrate', metadata: { migrationProjectRoot: project }, idempotencyKey: 'stdio-migration-run'
@@ -328,9 +384,17 @@ test('external Agent CLI receives migration tools from the ordinary managed MCP 
     assert.deepEqual(names, ['solomap_migration_retry', 'solomap_migration_start', 'solomap_migration_status', 'solomap_recycling_apply', 'solomap_recycling_preview']);
     assert.ok(listedTools.every(tool => tool.inputSchema.properties.projectRoot), 'every migration tool must carry the explicit project boundary');
     assert.ok(!names.includes('solomap_write'));
+    const overview = await client.callTool({ name: 'solomap_migration_status', arguments: { projectRoot: project } });
+    assert.equal(overview.isError, undefined, JSON.stringify(overview.content));
+    const summary = JSON.parse(overview.content[0].text);
+    assert.equal(summary.jobs[0].progress.conflictCount, conflicts.length);
+    assert.equal(summary.jobs[0].progress.retainedFileCount, retainedFiles.length);
+    assert.equal(summary.jobs[0].progress.conflicts, undefined, 'the Agent overview must stay compact and use jobId for complete conflict details');
+    assert.ok(Buffer.byteLength(overview.content[0].text) < 50000);
     const status = await client.callTool({ name: 'solomap_migration_status', arguments: { jobId: job.jobId, projectRoot: project } });
     assert.equal(status.isError, undefined, JSON.stringify(status.content));
     assert.deepEqual(JSON.parse(status.content[0].text).progress.retainedFiles, retainedFiles);
+    assert.deepEqual(JSON.parse(status.content[0].text).progress.conflicts, conflicts);
     const preview = await client.callTool({ name: 'solomap_recycling_preview', arguments: { projectRoot: project } });
     assert.equal(preview.isError, undefined, JSON.stringify(preview.content));
     assert.deepEqual(JSON.parse(preview.content[0].text), { planId: null, files: [] });

@@ -70,9 +70,10 @@ test('task instructions teach revision-safe database writes and complete content
   let module;
   try { module = require('../out/agentDatabaseConfig.js'); } catch {}
   assert.ok(module, 'database task instructions are missing');
-  const instructions = module.buildAgentDatabaseInstructions();
-  for (const keyword of ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'expectedRevision', 'idempotencyKey', 'solomap://schema', 'cursor']) assert.ok(instructions.includes(keyword), keyword);
+  const instructions = module.buildAgentDatabaseInstructions({ migrationTools: true });
+  for (const keyword of ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_migration_start', 'solomap_recycling_preview', 'jobId', 'queued', 'running', '终态', '连续 3 次', '不得宣称迁移失败', 'expectedRevision', 'idempotencyKey', 'solomap://schema', 'cursor', '普通对话只生成清单']) assert.ok(instructions.includes(keyword), keyword);
   assert.ok(!instructions.includes('solomap-memory.cjs'));
+  assert.ok(!module.buildAgentDatabaseInstructions().includes('solomap_migration_start'));
 });
 
 test('all built-in Agent families receive their native MCP format without changing user settings', () => {

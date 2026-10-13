@@ -655,7 +655,7 @@ export async function buildSolomapStartupPackInstructions(input: {
     '- 在做任何实现、判断、规划、验证或最终回答前，必须先完成本启动包。',
     '- 先读取下列存在的文件；文件不存在时记录为 skipped，不得因此中断主任务：',
     ...requiredReadFiles.map((filePath) => `  - ${relativeOrAbsolute(workspaceRoot, filePath)}`),
-    buildAgentDatabaseInstructions(),
+    buildAgentDatabaseInstructions({ migrationTools: ['solo', 'solo_continue'].includes(String(input.runKind || '')) }),
     '- 读取后用一句话形成本轮约束：用户目标、必须保留的边界、适用经验、最窄验证。',
     skillBlocks.length
       ? ['- 命中的技能必须逐一判定 used / skipped-not-applicable；判定为 used 的技能必须先读取入口 SKILL.md：', ...skillBlocks].join('\n')

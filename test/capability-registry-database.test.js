@@ -171,9 +171,11 @@ test('startup instructions consume formal context and awaited promotion results'
     await store.registerProject({ root: project });
     const prompt = await global.buildSolomapStartupPackInstructions({ workspaceRoot: project, globalDataPath: root, runKind: 'step', contextText: 'Build UI', learningSummaryContext: '完整学习总结🌿', learningRetrievalContext: '固定经验来源🌿', executionExperienceContext: '真实执行经验🌿' });
     assert.match(prompt, /solomap_context/);
+    assert.doesNotMatch(prompt, /solomap_migration_start/);
     assert.match(prompt, /完整学习总结🌿/); assert.match(prompt, /固定经验来源🌿/); assert.match(prompt, /真实执行经验🌿/);
     assert.doesNotMatch(prompt, /\[object Promise\]|memory\/profile\.md|memory\/projects\/|memory\/active\/current-session\.md/);
     assert.match(prompt, /solomap_read/);
+    await assert.doesNotReject(global.buildSolomapStartupPackInstructions({ workspaceRoot: project, globalDataPath: root, contextText: 'Legacy caller' }));
   } finally { transport.sendRuntimeDataRequest = original; await operations.close(); store.close(); }
 });
 

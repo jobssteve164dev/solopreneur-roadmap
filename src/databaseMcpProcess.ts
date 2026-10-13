@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { runtimeMcpSource } from './runtimeDataOperations';
 import { registerMigrationMcpTools, registerUnifiedMcpTools } from './unifiedMcp';
-import { migrationRunKinds } from './runLifecycleTypes';
+import { migrationRunKinds, soloConversationRunKinds } from './runLifecycleTypes';
 
 function argument(name: string): string {
   const index = process.argv.indexOf(name);
@@ -11,8 +11,6 @@ function argument(name: string): string {
 
 async function main(): Promise<void> {
   const globalDataPath = argument('--global-data-path');
-  const runKind = String(process.env.SOLOMAP_RUN_KIND || '');
-  const migrationRun = migrationRunKinds.includes(runKind as typeof migrationRunKinds[number]);
   let projectId = argument('--project-id') || (process.env.SOLOMAP_RUN_PROOF ? String(process.env.SOLOMAP_PROJECT_ID || '') : '');
   if (!globalDataPath) throw new Error('SoloMap MCP requires a Runtime endpoint.');
   if (!projectId) {
@@ -37,13 +35,23 @@ async function main(): Promise<void> {
       executionLogId: Number(process.env.SOLOMAP_EXECUTION_LOG_ID), generation: Number(process.env.SOLOMAP_RUN_GENERATION), proof: process.env.SOLOMAP_RUN_PROOF,
     } : undefined);
   // The bridge owns no SQLite connection and starts no second persistence daemon.
-  if (!migrationRun) {
-    const project = await source.call('read', { ref: projectId }) as { kind: string };
-    if (project.kind !== 'project') throw new Error('Unknown SoloMap project identity.');
+  let sessionInfo: { runKind: string; migrationKind: string | null } | undefined;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try { sessionInfo = await source.sessionInfo?.(); break; }
+    catch (error) {
+      if (attempt === 3) throw error;
+      await new Promise(resolve => setTimeout(resolve, attempt * 50));
+    }
   }
+  const runKind = String(sessionInfo?.runKind || '');
+  const migrationRun = migrationRunKinds.includes(runKind as typeof migrationRunKinds[number]);
+  const soloConversationRun = soloConversationRunKinds.includes(runKind as typeof soloConversationRunKinds[number]);
   const server = new McpServer({ name: 'solomap-data', version: '1.0.0' });
   if (migrationRun) registerMigrationMcpTools(server, source);
-  else registerUnifiedMcpTools(server, source);
+  else {
+    registerUnifiedMcpTools(server, source);
+    if (soloConversationRun) registerMigrationMcpTools(server, source, false);
+  }
   const transport = new StdioServerTransport();
   await server.connect(transport);
   let closing: Promise<void> | undefined;

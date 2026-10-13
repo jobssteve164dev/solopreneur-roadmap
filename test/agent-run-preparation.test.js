@@ -40,6 +40,8 @@ test('host preparation persists all task input and native identity without produ
     assert.equal(binding.revisions[1].sessionId, state.status.plannedNativeSessionId);
     assert.match(binding.revisions[1].sessionId, /^[0-9a-f-]{36}$/);
     assert.match(plan.prompt, /完整用户任务\n禁止改变范围/);
+    assert.match(plan.prompt, /solomap_migration_start/);
+    assert.match(plan.prompt, /普通对话只生成清单/);
     assert.match(plan.prompt, new RegExp(`SoloMap-Task: task-${state.taskId}`));
     assert.match(plan.prompt, /--report-json/);
     assert.match(plan.prompt, /taskCheckpointProcess\.js/);
@@ -77,6 +79,7 @@ test('the production preparer reuses one formal Flow role across concurrent wind
     assert.equal((await call('read_project_journal', { root: project })).logs.length, 1);
     const plan = await call('read_run_execution_plan', { root: project, executionLogId: first.status.rootExecutionLogId });
     assert.ok(plan.prompt.includes('完整计划🌿')); assert.ok(plan.command.includes('chosen-model'));
+    assert.doesNotMatch(plan.prompt, /solomap_migration_start/);
     assert.equal((await resumePreparedAgentRun(plan, call)).runId, first.runId);
     assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
   } finally { await operations.close(); store.close(); }
