@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.520 - 2026-10-13
+
+### Fixed
+- restore smart kernel after cold start (07a04dc)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.519 - 2026-10-13
 
 ### Fixed
