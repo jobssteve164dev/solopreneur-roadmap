@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.522 - 2026-10-13
+
+### Changed
+- Optimize database storage and exclude run byproducts (0db7fb9)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.521 - 2026-10-13
 
 ### Fixed
