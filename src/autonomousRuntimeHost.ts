@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-import { claimRuntimeLease, readRuntimeState, runtimeDatabaseAuthorityRegistered, runtimeRootRequiresExistingDatabase } from './autonomousRuntime';
+import { claimRuntimeLease, readRuntimeState, RuntimeState, runtimeDatabaseAuthorityRegistered, runtimeRootRequiresExistingDatabase } from './autonomousRuntime';
 import { RuntimeControlCommand, RuntimeControlResponse, sendRuntimeControlCommand } from './autonomousRuntimeControl';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import { PiMainPathRequest, PiMainPathResult } from './piMainPathDelivery';
@@ -70,6 +70,32 @@ function verifiedRuntimeProcess(pid: number, runtimeId: string, globalDataPath: 
   } catch {
     return false;
   }
+}
+
+function registeredRuntimeEntryPath(globalDataPath: string, runtimeId: string): string {
+  try {
+    const endpoint = JSON.parse(fs.readFileSync(path.join(globalDataPath, 'runtime', 'control.json'), 'utf8')) as { runtimeId?: string; entryPath?: string };
+    const entryPath = path.resolve(String(endpoint.entryPath || ''));
+    return endpoint.runtimeId === runtimeId
+      && path.basename(entryPath) === 'autonomousRuntimeProcess.js'
+      && path.basename(path.dirname(entryPath)) === 'out'
+      ? entryPath : '';
+  } catch { return ''; }
+}
+
+function verifiedDrainedRuntimeProcess(current: RuntimeState, globalDataPath: string, entryPath: string): boolean {
+  if (!entryPath || current.pid === process.pid || !processOwnerAlive(current.pid, current.processBirth || '')) return false;
+  if (process.platform !== 'linux') return true;
+  try {
+    const command = fs.readFileSync(`/proc/${current.pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
+    const dataIndex = command.indexOf('--global-data-path');
+    const runtimeIndex = command.indexOf('--runtime-id');
+    return command.some(value => path.resolve(value) === entryPath)
+      && dataIndex >= 0
+      && path.resolve(command[dataIndex + 1] || '') === path.resolve(globalDataPath)
+      && runtimeIndex >= 0
+      && command[runtimeIndex + 1] === current.runtimeId;
+  } catch { return false; }
 }
 
 function runtimeHasActiveDataLease(globalDataPath: string, runtimeId: string, entryPath: string, buildId: string, releaseVersion: string): boolean {
@@ -231,6 +257,7 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
       if (isProcessAlive(current.pid)) throw new Error('runtime_termination_failed');
     } else {
       if (health.reason !== 'different_runtime_build') throw new Error(health.reason);
+      const drainingEntryPath = registeredRuntimeEntryPath(globalDataPath, current.runtimeId);
       try {
         await (options.sendControl || ((command, expectedRuntimeId, replacementBuildId, replacementVersion) => sendRuntimeControlCommand(globalDataPath, command, { expectedRuntimeId, replacementBuildId, replacementVersion })))('drain', current.runtimeId, buildId, releaseVersion);
       } catch (error) {
@@ -244,8 +271,10 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
         await new Promise(resolve => setTimeout(resolve, 50));
       }
       if (isProcessAlive(current.pid)) {
-        const verify = options.verifyRuntimeProcess || verifiedRuntimeProcess;
-        if (!verify(current.pid, current.runtimeId, globalDataPath)) throw new Error('runtime_drain_timeout');
+        const verified = options.verifyRuntimeProcess
+          ? options.verifyRuntimeProcess(current.pid, current.runtimeId, globalDataPath)
+          : verifiedDrainedRuntimeProcess(current, globalDataPath, drainingEntryPath);
+        if (!verified) throw new Error('runtime_drain_timeout');
         await (options.terminateProcess || terminateVerifiedRuntimeProcess)(current.pid);
         if (isProcessAlive(current.pid)) throw new Error('runtime_termination_failed');
       }

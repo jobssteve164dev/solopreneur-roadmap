@@ -323,6 +323,50 @@ test('a verified older Runtime is terminated when acknowledged drain cannot fini
   assert.equal(drained, 1); assert.equal(terminated, process.pid); assert.equal(result.started, true);
 });
 
+test('a drained packaged Runtime remains verifiable after its control endpoint closes', async t => {
+  const childProcess = require('node:child_process');
+  const host = require('../out/autonomousRuntimeHost.js');
+  const runtime = require('../out/autonomousRuntime.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-drain-closed-control-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const runtimeRoot = path.join(globalRoot, 'runtime');
+  const oldExtension = path.join(root, 'old-extension');
+  const oldOut = path.join(oldExtension, 'out');
+  const oldEntry = path.join(oldOut, 'autonomousRuntimeProcess.js');
+  const statePath = path.join(runtimeRoot, 'control.json');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  fs.mkdirSync(oldOut, { recursive: true });
+  fs.writeFileSync(oldEntry, 'setInterval(() => {}, 1000);');
+  const oldChild = childProcess.spawn(process.execPath, [oldEntry, '--global-data-path', globalRoot, '--runtime-id', 'old'], { stdio: 'ignore' });
+  let replacement;
+  t.after(() => {
+    if (replacement) replacement.kill('SIGKILL');
+    oldChild.kill('SIGKILL');
+    if (fs.existsSync(statePath)) fs.unlinkSync(statePath);
+    fs.unlinkSync(oldEntry);
+    fs.rmdirSync(oldOut); fs.rmdirSync(oldExtension);
+    fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root);
+  });
+  fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'old', pid: oldChild.pid, status: 'running', heartbeatAt: new Date().toISOString(), entryPath: oldEntry }));
+  const result = await host.ensureHealthyAutonomousRuntime({
+    extensionPath: '/opt/solomap-new', globalDataPath: globalRoot, buildId: 'new', drainTimeoutMs: 5,
+    sendHealth: async () => {
+      const state = runtime.readRuntimeState(globalRoot);
+      return { ok: true, runtimeId: state.runtimeId, status: state.status, entryPath: state.runtimeId === 'old' ? oldEntry : '/opt/solomap-new/out/autonomousRuntimeProcess.js', buildId: state.runtimeId === 'old' ? 'old' : 'new' };
+    },
+    async sendControl(command, runtimeId) {
+      assert.equal(command, 'drain'); assert.equal(runtimeId, 'old');
+      fs.unlinkSync(statePath);
+    },
+    spawnProcess() {
+      replacement = childProcess.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      return { pid: replacement.pid, unref() {} };
+    }
+  });
+  assert.equal(result.started, true);
+  assert.equal(runtime.readRuntimeState(globalRoot).pid, replacement.pid);
+});
+
 test('a known different runtime build is rejected without a startup wait', async t => {
   const host = require('../out/autonomousRuntimeHost.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-wrong-build-'));
