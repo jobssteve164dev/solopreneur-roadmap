@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.0.512 - 2026-10-13
+
+### Added
+- complete unified local database migration (ee376e2)
+
+### Changed
+- SoloMap pre-session auto-backup [2026-10-12T18:06:15.304Z] (ca71c6b)
+- SoloMap pre-session auto-backup [2026-10-11T05:04:11.838Z] (6399bee)
+- SoloMap pre-session auto-backup [2026-10-11T05:02:45.862Z] (5e4e21f)
+- SoloMap pre-session auto-backup [2026-10-11T04:45:17.592Z] (a2edff3)
+
+### Fixed
+- reduce migration status overhead and preserve project ownership (69f1aea)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.511 - 2026-10-08
 
 ### Changed
