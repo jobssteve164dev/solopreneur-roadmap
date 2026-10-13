@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.527 - 2026-10-13
+
+### Fixed
+- complete upgrades while storage work drains (8ee4075)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.526 - 2026-10-13
 
 ### Fixed
