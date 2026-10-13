@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.523 - 2026-10-13
+
+### Changed
+- Retire stale SoloMap test registrations safely (22ef011)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.522 - 2026-10-13
 
 ### Changed
