@@ -131,8 +131,14 @@ async function main(): Promise<void> {
   await refreshCognitiveRuntimeConfig(databaseRoot, dataOperations);
   await refreshShadowRuntimeState(databaseRoot, dataOperations);
   let outboxRecovery: Promise<unknown> | undefined;
+  let storageMaintenance: Promise<unknown> | undefined;
   let startupMigration: Promise<void> | undefined;
   let historicalOwnerStamp = '';
+  let resolveStorageMaintenanceBarrier!: () => void;
+  let rejectStorageMaintenanceBarrier!: (error: unknown) => void;
+  const storageMaintenanceBarrier = new Promise<void>((resolve, reject) => { resolveStorageMaintenanceBarrier = resolve; rejectStorageMaintenanceBarrier = reject; });
+  void storageMaintenanceBarrier.catch(() => undefined);
+  dataOperations.setStorageMaintenanceBarrier(storageMaintenanceBarrier);
 
   let stopping = false;
   let paused = await readRuntimePauseState(dataOperations, isAutonomousRuntimeDisabled(globalDataPath));
@@ -154,6 +160,7 @@ async function main(): Promise<void> {
       await controlServer?.close();
       await telegramClosed;
       await startupMigration;
+      await storageMaintenance;
       await heartbeatRuntime('stopped');
       await dataOperations.close();
       await outboxRecovery;
@@ -204,6 +211,7 @@ async function main(): Promise<void> {
       return { status: paused ? 'paused' : 'running' };
     }
   }); } catch (error) {
+    rejectStorageMaintenanceBarrier(error);
     telegram?.close();
     await heartbeatRuntime('failed').catch(() => undefined);
     dataStore?.close();
@@ -213,11 +221,18 @@ async function main(): Promise<void> {
   dataOperations?.recoverMigrations();
   dataOperations.recoverRuns();
   outboxRecovery = dataStore?.recoverOutbox().catch(error => process.stderr.write(`SoloMap Runtime outbox recovery: ${String(error)}\n`));
-  startupMigration = (async () => {
+  const startupMigrationReady = (async () => {
     await outboxRecovery;
     if (!stopping) historicalOwnerStamp = await historicalRunOwnerStateStamp(dataStore, () => !stopping);
     if (!stopping) await enqueueStartupDataMigrations(dataStore, dataOperations, () => !stopping);
-  })().catch(error => { process.stderr.write(`SoloMap Runtime memory migration: ${String(error)}\n`); });
+    if (!stopping) await dataOperations.waitForMigrations();
+  })();
+  void startupMigrationReady.then(resolveStorageMaintenanceBarrier, rejectStorageMaintenanceBarrier);
+  startupMigration = startupMigrationReady.catch(error => { process.stderr.write(`SoloMap Runtime memory migration: ${String(error)}\n`); });
+  storageMaintenance = (async () => {
+    await startupMigrationReady;
+    if (!stopping) await dataOperations({ operation: 'maintain_database_storage', input: { compact: false, automatic: true } });
+  })().catch(error => { process.stderr.write(`SoloMap Runtime storage maintenance: ${String(error)}\n`); });
   function runCycleObserved(): void {
     void runCycle().catch(error => {
       recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.cycle.fatal', classifyDiagnosticFailure(error));

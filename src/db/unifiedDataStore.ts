@@ -36,6 +36,7 @@ import type { ReviewManifest, ReviewSource } from '../learningReview.js';
 import { ClaudeNativeEvent, validateClaudeNativeEvent, claudeNativeEventPurpose } from '../claudeNativeEvent';
 import { parseExternalMemoryEntry } from '../externalMemory';
 import { parseRoadmapCsv, serializeRoadmapNodes } from './csvStore';
+import { runArtifactKind, runArtifactStorageKind, type RunArtifactKind } from '../runArtifactPolicy.js';
 
 export interface FlowSnapshot {
   projectId: string;
@@ -287,6 +288,8 @@ export class UnifiedDataStore {
   private readonly projectRegistrations = new Map<string, Promise<{ projectId: string; locationId: string; identityPath: string }>>();
   private readonly backupFlights = new Map<string, { inputHash: string; promise: Promise<{ destination: string; databaseId: string; sha256: string; bytes: number }> }>();
   private readonly backupDestinationTails = new Map<string, Promise<void>>();
+  private contentReferenceColumnsCache?: Array<{ table: string; column: string }>;
+  private storageCleanupProtectedContents?: Set<string>;
   public get databaseId(): string {
     return String(this.rows("SELECT value FROM database_meta WHERE key='database_id'")[0].value);
   }
@@ -682,6 +685,7 @@ export class UnifiedDataStore {
     const existing = this.rows('SELECT id FROM contents WHERE sha256=? AND mime_type=? AND encoding IN (?,?,?)', [hash, mimeType, encoding, `gzip:${encoding}`, `chunked:${encoding}`])[0];
     if (existing) {
       this.content(String(existing.id));
+      this.db.run('DELETE FROM database_storage_cleanup_candidates WHERE content_id=?', [existing.id]);
       return String(existing.id);
     }
     let stored: Buffer;
@@ -1208,12 +1212,14 @@ export class UnifiedDataStore {
       } });
     });
   }
-  public captureMigrationSource(source: ImportedSource, bytes: Uint8Array, options: { mimeType?: string; encoding?: string; error?: string; pending?: boolean } = {}): { unchanged: boolean; requestId: string; committedSequence: number; stage: string } {
+  public captureMigrationSource(source: ImportedSource, bytes: Uint8Array, options: { mimeType?: string; encoding?: string; error?: string; pending?: boolean; sourceKind?: RunArtifactKind } = {}): { unchanged: boolean; requestId: string; committedSequence: number; stage: string } {
     if (!source.identity || !source.key || source.hash !== digest(bytes)) throw new Error('migration_source_invalid');
     return this.transaction(() => {
       const previous = this.rows('SELECT migration_items.*,contents.sha256 AS captured_hash FROM migration_items LEFT JOIN contents ON contents.id=migration_items.source_content_id WHERE source_identity=? AND source_key=?', [source.identity, source.key])[0];
       const revision = Number(previous?.source_capture_revision || 0);
+      const sourceKind = source.identity.startsWith('agent-runs:') ? options.sourceKind || runArtifactStorageKind(source.key) : 'source';
       const classificationChanged = options.error ? previous?.stage !== 'unmapped' || previous.error !== options.error : previous?.stage === 'unmapped' && !options.pending;
+      if (previous && previous.source_kind !== sourceKind) this.db.run('UPDATE migration_items SET source_kind=? WHERE source_identity=? AND source_key=?', [sourceKind, source.identity, source.key]);
       if (previous?.captured_hash === source.hash && !classificationChanged) {
         const request = this.rows('SELECT id,committed_sequence FROM requests WHERE id=?', [previous.source_capture_request_id])[0];
         if (!request) throw new Error('migration_capture_receipt_missing');
@@ -1226,7 +1232,7 @@ export class UnifiedDataStore {
       const requestId = crypto.randomUUID();
       const nextKey = `migration-capture:${canonical([source.identity, source.key])}:${revision + 1}`;
       this.db.run('INSERT INTO requests(actor_id,idempotency_key,id,input_hash,status) VALUES(?,?,?,?,?)', [this.actorId, nextKey, requestId, digest(descriptor), 'pending']);
-      this.db.run('INSERT INTO migration_items(source_identity,source_key,source_hash,stage,error,source_content_id,source_capture_revision,source_capture_request_id) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(source_identity,source_key) DO UPDATE SET source_content_id=excluded.source_content_id,source_capture_revision=excluded.source_capture_revision,source_capture_request_id=excluded.source_capture_request_id,stage=excluded.stage,error=excluded.error', [source.identity, source.key, source.hash, stage, error, contentId, revision + 1, requestId]);
+      this.db.run('INSERT INTO migration_items(source_identity,source_key,source_hash,stage,error,source_content_id,source_capture_revision,source_capture_request_id,source_kind) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(source_identity,source_key) DO UPDATE SET source_content_id=excluded.source_content_id,source_capture_revision=excluded.source_capture_revision,source_capture_request_id=excluded.source_capture_request_id,source_kind=excluded.source_kind,stage=excluded.stage,error=excluded.error', [source.identity, source.key, source.hash, stage, error, contentId, revision + 1, requestId, sourceKind]);
       const sequence = Number(this.rows('SELECT COALESCE(MAX(sequence),0)+1 AS next FROM events')[0].next);
       const eventContent = this.putContent(descriptor, 'application/json');
       this.db.run('INSERT INTO events VALUES(?,?,NULL,?,?,?,?,?)', [crypto.randomUUID(), sequence, this.actorId, 'migration.source_captured', eventContent, Date.now(), requestId]);
@@ -6500,16 +6506,227 @@ export class UnifiedDataStore {
         data: { namespace: 'strategy', key: projectId === null ? 'cache' : 'preferences', owner_scope: projectId || 'global', content: JSON.stringify(value) } }, source);
     });
   }
-  public writeRunArtifact(projectId: string, input: { executionLogId: number; relativePath: string; bytes: string; hash: string; mimeType?: string }): void {
+  private storeRunArtifact(projectId: string, input: { executionLogId: number; relativePath: string; bytes: string; hash: string; mimeType?: string }, artifactKind: RunArtifactKind): void {
     if (!Number.isFinite(input.executionLogId) || !input.relativePath || path.isAbsolute(input.relativePath) || input.relativePath.split(/[\\/]/).includes('..')) throw new Error('invalid_run_artifact');
     const bytes = Buffer.from(input.bytes, 'base64');
     if (bytes.toString('base64') !== input.bytes || digest(bytes) !== input.hash) throw new Error('run_artifact_hash_mismatch');
-    const contentId = this.putContent(bytes, input.mimeType || 'application/octet-stream', 'binary');
-    this.db.run('INSERT INTO project_run_artifacts VALUES(?,?,?,?,?,?,?) ON CONFLICT(project_id,execution_log_id,relative_path) DO UPDATE SET content_id=excluded.content_id,sha256=excluded.sha256,mime_type=excluded.mime_type,updated_at=excluded.updated_at', [projectId, input.executionLogId, input.relativePath, contentId, input.hash, input.mimeType || 'application/octet-stream', Date.now()]);
+    const mimeType = input.mimeType || 'application/octet-stream';
+    const existing = this.rows('SELECT sha256,mime_type,artifact_kind FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?', [projectId, input.executionLogId, input.relativePath])[0];
+    if (existing?.sha256 === input.hash && existing.mime_type === mimeType && existing.artifact_kind === artifactKind) return;
+    const contentId = this.putContent(bytes, mimeType, 'binary');
+    this.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at,artifact_kind) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(project_id,execution_log_id,relative_path) DO UPDATE SET content_id=excluded.content_id,sha256=excluded.sha256,mime_type=excluded.mime_type,updated_at=excluded.updated_at,artifact_kind=excluded.artifact_kind', [projectId, input.executionLogId, input.relativePath, contentId, input.hash, mimeType, Date.now(), artifactKind]);
+  }
+  public writeRunArtifact(projectId: string, input: { executionLogId: number; relativePath: string; bytes: string; hash: string; mimeType?: string }): void {
+    const artifactKind = runArtifactKind(input.relativePath);
+    if (!artifactKind) throw new Error('run_artifact_not_persistable');
+    this.storeRunArtifact(projectId, input, artifactKind);
+  }
+  public writeHistoricalRunArtifact(projectId: string, input: { executionLogId: number; relativePath: string; bytes: string; hash: string; mimeType?: string }, artifactKind: RunArtifactKind): void {
+    this.storeRunArtifact(projectId, input, artifactKind);
+  }
+  public protectIndexedRunArtifactOutputsBatch(cursor = 0, limit = 250): { nextCursor: number | null } {
+    if (!Number.isInteger(cursor) || cursor < 0 || !Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error('database_maintenance_limit_invalid');
+    const rows = this.rows("SELECT DISTINCT i.rowid AS cursor,i.project_id,i.execution_log_id,i.record_json FROM project_run_indexes i JOIN project_run_artifacts a ON a.project_id=i.project_id AND a.execution_log_id=i.execution_log_id WHERE i.rowid>? AND a.artifact_kind IN ('unclassified','byproduct') ORDER BY i.rowid LIMIT ?", [cursor, limit]);
+    this.transaction(() => {
+      for (const row of rows) {
+        const record = JSON.parse(String(row.record_json)) as RunIndexRecord;
+        const normalized = String(record.outputPath || '').replace(/\\/g, '/');
+        const marker = '.solopreneur/agent-runs/';
+        const markerAt = normalized.indexOf(marker);
+        const relativePath = markerAt >= 0 ? normalized.slice(markerAt + marker.length) : !path.isAbsolute(String(record.outputPath || '')) ? normalized : '';
+        if (!relativePath || relativePath.split('/').some(part => !part || part === '.' || part === '..')) continue;
+        this.db.run('UPDATE project_run_artifacts SET artifact_kind=\'output\' WHERE project_id=? AND execution_log_id=? AND relative_path=?', [row.project_id, row.execution_log_id, relativePath]);
+        this.db.run("UPDATE migration_items SET source_kind='output' WHERE source_identity LIKE 'agent-runs:%' AND source_key=? AND source_content_id IN (SELECT content_id FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?)", [relativePath, row.project_id, row.execution_log_id, relativePath]);
+      }
+    });
+    return { nextCursor: rows.length === limit ? Number(rows.at(-1)!.cursor) : null };
   }
   public readRunArtifact(projectId: string, executionLogId: number, relativePath: string): { bytes: string; hash: string; mimeType: string } | null {
     const row = this.rows('SELECT content_id,sha256,mime_type FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?', [projectId, executionLogId, relativePath])[0];
     return row ? { bytes: this.content(String(row.content_id)).toString('base64'), hash: String(row.sha256), mimeType: String(row.mime_type) } : null;
+  }
+  private contentReferenceColumns(): Array<{ table: string; column: string }> {
+    if (this.contentReferenceColumnsCache) return this.contentReferenceColumnsCache;
+    const references: Array<{ table: string; column: string }> = [];
+    for (const row of this.rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")) {
+      const table = String(row.name);
+      if (!/^[a-z_][a-z0-9_]*$/.test(table)) throw new Error('database_schema_invalid');
+      for (const foreignKey of this.rows(`PRAGMA foreign_key_list(${table})`)) {
+        const column = String(foreignKey.from);
+        if (foreignKey.table === 'contents' && table !== 'content_chunks') {
+          if (!/^[a-z_][a-z0-9_]*$/.test(column)) throw new Error('database_schema_invalid');
+          references.push({ table, column });
+        }
+      }
+    }
+    this.contentReferenceColumnsCache = references;
+    return references;
+  }
+  private queueStorageCleanupContents(contentIds: string[]): void {
+    for (const contentId of new Set(contentIds)) this.db.run('INSERT OR IGNORE INTO database_storage_cleanup_candidates SELECT id,stored_byte_length FROM contents WHERE id=?', [contentId]);
+  }
+  public prepareDatabaseStorageCleanup(): void {
+    this.storageCleanupProtectedContents = new Set<string>();
+    this.transaction(() => {
+      for (const reference of this.contentReferenceColumns()) {
+        this.db.run(`DELETE FROM database_storage_cleanup_candidates WHERE content_id IN (SELECT ${reference.column} FROM ${reference.table} WHERE ${reference.column} IS NOT NULL)`);
+      }
+    });
+    if (!this.hasDatabaseStorageCleanupCandidates()) this.storageCleanupProtectedContents = undefined;
+  }
+  public hasDatabaseStorageCleanupCandidates(): boolean {
+    return Boolean(this.rows('SELECT 1 FROM database_storage_cleanup_candidates LIMIT 1')[0]);
+  }
+  public protectDatabaseStorageCleanupReferencesBatch(table: 'object_revisions' | 'learning_review_controls' | 'legacy_learning_review_controls' | 'legacy_learning_review_cursor_inputs', cursor = 0, limit = 250): { nextCursor: number | null } {
+    if (!Number.isInteger(cursor) || cursor < 0 || !Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error('database_maintenance_limit_invalid');
+    const column = table === 'object_revisions' ? 'content_id' : 'input_content_id';
+    const rows = this.rows(`SELECT rowid AS cursor,${column} AS content_id FROM ${table} WHERE rowid>? ORDER BY rowid LIMIT ?`, [cursor, limit]);
+    this.transaction(() => {
+      for (const row of rows) {
+        const pending: Array<{ contentId: string; jsonRequired: boolean }> = [{ contentId: String(row.content_id), jsonRequired: true }];
+        while (pending.length) {
+          const current = pending.pop()!;
+          const visited = this.storageCleanupProtectedContents ||= new Set<string>();
+          if (visited.has(current.contentId)) continue;
+          visited.add(current.contentId);
+          const bytes = this.content(current.contentId);
+          let value: unknown;
+          try { value = JSON.parse(bytes.toString('utf8')); }
+          catch (error) { if (current.jsonRequired) throw error; continue; }
+          for (const contentId of new Set(portableContentReferences(value))) {
+            this.db.run('DELETE FROM database_storage_cleanup_candidates WHERE content_id=?', [contentId]);
+            pending.push({ contentId, jsonRequired: false });
+          }
+        }
+      }
+    });
+    return { nextCursor: rows.length === limit ? Number(rows.at(-1)!.cursor) : null };
+  }
+  public finalizeDatabaseStorageCleanupBatch(limit = 250, maintenanceId?: string): { deletedContents: number; reclaimedStoredBytes: number; pending: boolean } {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error('database_maintenance_limit_invalid');
+    return this.transaction(() => {
+      this.db.run('CREATE TEMP TABLE IF NOT EXISTS storage_cleanup_batch(content_id TEXT PRIMARY KEY) WITHOUT ROWID');
+      this.db.run('DELETE FROM storage_cleanup_batch');
+      this.db.run('INSERT INTO storage_cleanup_batch SELECT content_id FROM database_storage_cleanup_candidates ORDER BY content_id LIMIT ?', [limit]);
+      const totals = this.rows('SELECT COUNT(*) AS records,COALESCE(SUM(stored_byte_length),0) AS bytes FROM database_storage_cleanup_candidates WHERE content_id IN (SELECT content_id FROM storage_cleanup_batch)')[0];
+      this.db.run('DELETE FROM content_chunks WHERE content_id IN (SELECT content_id FROM storage_cleanup_batch)');
+      this.db.run('DELETE FROM contents WHERE id IN (SELECT content_id FROM storage_cleanup_batch)');
+      this.db.run('DELETE FROM database_storage_cleanup_candidates WHERE content_id IN (SELECT content_id FROM storage_cleanup_batch)');
+      const deletedContents = Number(totals.records), reclaimedStoredBytes = Number(totals.bytes);
+      if (maintenanceId) this.db.run('UPDATE database_storage_maintenance SET deleted_contents=deleted_contents+?,reclaimed_stored_bytes=reclaimed_stored_bytes+? WHERE id=?', [deletedContents, reclaimedStoredBytes, maintenanceId]);
+      const pending = this.hasDatabaseStorageCleanupCandidates();
+      if (!pending) this.storageCleanupProtectedContents = undefined;
+      return { deletedContents, reclaimedStoredBytes, pending };
+    });
+  }
+  public cleanupDatabaseStorageBatch(limit = 1000, maintenanceId?: string): { scanned: number; deletedArtifacts: number; deletedSources: number; deletedContents: number; reclaimedStoredBytes: number; pending: boolean } {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 5000) throw new Error('database_maintenance_limit_invalid');
+    return this.transaction(() => {
+      const artifacts = this.rows("SELECT project_id,execution_log_id,relative_path,content_id,artifact_kind FROM project_run_artifacts WHERE artifact_kind IN ('unclassified','byproduct') ORDER BY project_id,execution_log_id,relative_path LIMIT ?", [limit]);
+      const sources = this.rows("SELECT source_identity,source_key,source_content_id,source_kind,object_id FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind IN ('unclassified','byproduct') ORDER BY source_identity,source_key LIMIT ?", [limit]);
+      const contentIds: string[] = [];
+      let deletedArtifacts = 0; let deletedSources = 0;
+      for (const artifact of artifacts) {
+        const kind = runArtifactStorageKind(String(artifact.relative_path));
+        if (kind !== 'byproduct') this.db.run('UPDATE project_run_artifacts SET artifact_kind=? WHERE project_id=? AND execution_log_id=? AND relative_path=?', [kind, artifact.project_id, artifact.execution_log_id, artifact.relative_path]);
+        else {
+          this.db.run('DELETE FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?', [artifact.project_id, artifact.execution_log_id, artifact.relative_path]);
+          deletedArtifacts += this.db.getRowsModified(); contentIds.push(String(artifact.content_id));
+        }
+      }
+      for (const source of sources) {
+        const kind = runArtifactStorageKind(String(source.source_key));
+        if (kind !== 'byproduct') this.db.run('UPDATE migration_items SET source_kind=? WHERE source_identity=? AND source_key=?', [kind, source.source_identity, source.source_key]);
+        else if (source.object_id !== null) this.db.run("UPDATE migration_items SET source_kind='linked' WHERE source_identity=? AND source_key=?", [source.source_identity, source.source_key]);
+        else {
+          this.db.run('DELETE FROM migration_items WHERE source_identity=? AND source_key=?', [source.source_identity, source.source_key]);
+          deletedSources += this.db.getRowsModified(); if (source.source_content_id !== null) contentIds.push(String(source.source_content_id));
+        }
+      }
+      this.queueStorageCleanupContents(contentIds);
+      if (maintenanceId) this.db.run('UPDATE database_storage_maintenance SET deleted_artifacts=deleted_artifacts+?,deleted_sources=deleted_sources+? WHERE id=?', [deletedArtifacts, deletedSources, maintenanceId]);
+      const pending = Boolean(this.rows("SELECT 1 FROM project_run_artifacts WHERE artifact_kind IN ('unclassified','byproduct') LIMIT 1")[0]
+        || this.rows("SELECT 1 FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind IN ('unclassified','byproduct') LIMIT 1")[0]);
+      return { scanned: artifacts.length + sources.length, deletedArtifacts, deletedSources, deletedContents: 0, reclaimedStoredBytes: 0, pending };
+    });
+  }
+  public hasPendingDatabaseStorageCleanup(): boolean {
+    return Boolean(this.rows("SELECT 1 FROM project_run_artifacts WHERE artifact_kind IN ('unclassified','byproduct') LIMIT 1")[0]
+      || this.rows("SELECT 1 FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind IN ('unclassified','byproduct') LIMIT 1")[0]
+      || this.rows('SELECT 1 FROM database_storage_cleanup_candidates LIMIT 1')[0]);
+  }
+  public databaseStorageFileSizes(): { databaseBytes: number; dataBytes: number; walBytes: number } {
+    const size = (file: string) => { try { return fs.statSync(file).size; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0; throw error; } };
+    const dataBytes = size(this.filePath), walBytes = size(`${this.filePath}-wal`);
+    return { databaseBytes: dataBytes + walBytes, dataBytes, walBytes };
+  }
+  public readDatabaseStorage(): {
+    databaseBytes: number; dataBytes: number; walBytes: number; freePageBytes: number;
+    contents: { records: number; logicalBytes: number; storedBytes: number };
+    runArtifacts: { records: number; storedBytes: number; pendingByproductRecords: number; pendingByproductStoredBytes: number; byKind: Record<string, { records: number; storedBytes: number }> };
+    migrationSources: { records: number; storedBytes: number; pendingByproductRecords: number; pendingByproductStoredBytes: number; byKind: Record<string, { records: number; storedBytes: number }> };
+    lastMaintenance: { startedAt: number; finishedAt: number | null; status: string; error: string; deletedArtifacts: number; deletedSources: number; deletedContents: number; reclaimedStoredBytes: number; compacted: boolean; beforeBytes: number; afterBytes: number; integrity: string } | null;
+  } {
+    const { dataBytes, walBytes } = this.databaseStorageFileSizes();
+    const pageSize = Number(this.rows('PRAGMA page_size')[0]?.page_size || 0), freePages = Number(this.rows('PRAGMA freelist_count')[0]?.freelist_count || 0);
+    const content = this.rows('SELECT COUNT(*) AS records,COALESCE(SUM(byte_length),0) AS logical_bytes,COALESCE(SUM(stored_byte_length),0) AS stored_bytes FROM contents')[0];
+    const byKind: Record<string, { records: number; storedBytes: number }> = {};
+    let records = 0; let storedBytes = 0; let pendingByproductRecords = 0; let pendingByproductStoredBytes = 0;
+    for (const row of this.rows("SELECT a.artifact_kind,COUNT(*) AS records,COALESCE(SUM(c.stored_byte_length),0) AS stored_bytes FROM project_run_artifacts a JOIN contents c ON c.id=a.content_id WHERE a.artifact_kind<>'unclassified' GROUP BY a.artifact_kind")) {
+      const kind = String(row.artifact_kind), count = Number(row.records), bytes = Number(row.stored_bytes); records += count; storedBytes += bytes;
+      byKind[kind] = { records: count, storedBytes: bytes };
+      if (kind === 'byproduct') { pendingByproductRecords += count; pendingByproductStoredBytes += bytes; }
+    }
+    for (const row of this.rows("SELECT a.relative_path,c.stored_byte_length FROM project_run_artifacts a JOIN contents c ON c.id=a.content_id WHERE a.artifact_kind='unclassified'")) {
+      const kind = runArtifactStorageKind(String(row.relative_path)), bytes = Number(row.stored_byte_length); records++; storedBytes += bytes;
+      const bucket = byKind[kind] ||= { records: 0, storedBytes: 0 }; bucket.records++; bucket.storedBytes += bytes;
+      if (kind === 'byproduct') { pendingByproductRecords++; pendingByproductStoredBytes += bytes; }
+    }
+    const sourceByKind: Record<string, { records: number; storedBytes: number }> = {};
+    let sourceRecords = 0; let sourceStoredBytes = 0; let pendingSourceRecords = 0; let pendingSourceStoredBytes = 0;
+    for (const row of this.rows("SELECT m.source_kind,COUNT(*) AS records,COALESCE(SUM(COALESCE(c.stored_byte_length,0)),0) AS stored_bytes FROM migration_items m LEFT JOIN contents c ON c.id=m.source_content_id WHERE m.source_identity LIKE 'agent-runs:%' AND m.source_kind<>'unclassified' GROUP BY m.source_kind")) {
+      const kind = String(row.source_kind), count = Number(row.records), bytes = Number(row.stored_bytes); sourceRecords += count; sourceStoredBytes += bytes;
+      sourceByKind[kind] = { records: count, storedBytes: bytes };
+      if (kind === 'byproduct') { pendingSourceRecords += count; pendingSourceStoredBytes += bytes; }
+    }
+    for (const row of this.rows("SELECT m.source_key,COALESCE(c.stored_byte_length,0) AS stored_byte_length FROM migration_items m LEFT JOIN contents c ON c.id=m.source_content_id WHERE m.source_identity LIKE 'agent-runs:%' AND m.source_kind='unclassified'")) {
+      const kind = runArtifactStorageKind(String(row.source_key)), bytes = Number(row.stored_byte_length); sourceRecords++; sourceStoredBytes += bytes;
+      const bucket = sourceByKind[kind] ||= { records: 0, storedBytes: 0 }; bucket.records++; bucket.storedBytes += bytes;
+      if (kind === 'byproduct') { pendingSourceRecords++; pendingSourceStoredBytes += bytes; }
+    }
+    const maintenance = this.rows('SELECT * FROM database_storage_maintenance ORDER BY finished_at DESC,id DESC LIMIT 1')[0];
+    return { databaseBytes: dataBytes + walBytes, dataBytes, walBytes, freePageBytes: pageSize * freePages,
+      contents: { records: Number(content.records), logicalBytes: Number(content.logical_bytes), storedBytes: Number(content.stored_bytes) },
+      runArtifacts: { records, storedBytes, pendingByproductRecords, pendingByproductStoredBytes, byKind },
+      migrationSources: { records: sourceRecords, storedBytes: sourceStoredBytes, pendingByproductRecords: pendingSourceRecords, pendingByproductStoredBytes: pendingSourceStoredBytes, byKind: sourceByKind },
+      lastMaintenance: maintenance ? { startedAt: Number(maintenance.started_at), finishedAt: maintenance.finished_at === null ? null : Number(maintenance.finished_at), status: String(maintenance.status), error: String(maintenance.error), deletedArtifacts: Number(maintenance.deleted_artifacts), deletedSources: Number(maintenance.deleted_sources), deletedContents: Number(maintenance.deleted_contents), reclaimedStoredBytes: Number(maintenance.reclaimed_stored_bytes), compacted: Boolean(maintenance.compacted), beforeBytes: Number(maintenance.before_bytes), afterBytes: Number(maintenance.after_bytes), integrity: String(maintenance.integrity) } : null };
+  }
+  public compactDatabaseStorage(): { integrity: string } {
+    if (this.transactionDepth) throw new Error('database_maintenance_transaction_active');
+    this.db.run('PRAGMA wal_checkpoint(TRUNCATE)');
+    const pageSize = Number(this.rows('PRAGMA page_size')[0]?.page_size || 0);
+    const usedPages = Number(this.rows('PRAGMA page_count')[0]?.page_count || 0) - Number(this.rows('PRAGMA freelist_count')[0]?.freelist_count || 0);
+    const stat = (fs as typeof fs & { statfsSync(target: string): { bavail: number | bigint; bsize: number | bigint } }).statfsSync(this.root);
+    const available = Number(stat.bavail) * Number(stat.bsize);
+    if (available < usedPages * pageSize * 1.2 + 64 * 1024 * 1024) throw new Error('database_compaction_space_insufficient');
+    this.db.run('VACUUM');
+    this.db.run('PRAGMA optimize');
+    this.db.run('PRAGMA wal_checkpoint(TRUNCATE)');
+    const integrity = String(this.rows('PRAGMA integrity_check')[0]?.integrity_check || '');
+    if (integrity !== 'ok') throw new Error('database_integrity_error');
+    return { integrity };
+  }
+  public beginDatabaseStorageMaintenance(startedAt: number, beforeBytes: number): string {
+    const id = crypto.randomUUID();
+    this.db.run("INSERT INTO database_storage_maintenance VALUES(?,?,NULL,'running','',0,0,0,0,0,?,?,?)", [id, startedAt, beforeBytes, beforeBytes, 'not_checked']);
+    return id;
+  }
+  public recoverInterruptedDatabaseStorageMaintenance(finishedAt: number, afterBytes: number): number {
+    this.db.run("UPDATE database_storage_maintenance SET finished_at=?,status='failed',error='maintenance_interrupted',after_bytes=? WHERE status='running'", [finishedAt, afterBytes]);
+    return this.db.getRowsModified();
+  }
+  public settleDatabaseStorageMaintenance(id: string, input: { status: 'completed' | 'failed'; finishedAt: number; error?: string; deletedArtifacts: number; deletedSources: number; deletedContents: number; reclaimedStoredBytes: number; compacted: boolean; afterBytes: number; integrity: string }): void {
+    this.db.run('UPDATE database_storage_maintenance SET finished_at=?,status=?,error=?,deleted_artifacts=?,deleted_sources=?,deleted_contents=?,reclaimed_stored_bytes=?,compacted=?,after_bytes=?,integrity=? WHERE id=?', [input.finishedAt, input.status, input.error || '', input.deletedArtifacts, input.deletedSources, input.deletedContents, input.reclaimedStoredBytes, input.compacted ? 1 : 0, input.afterBytes, input.integrity, id]);
   }
   public async backup(input: { destination: string; idempotencyKey: string }): Promise<{ destination: string; databaseId: string; sha256: string; bytes: number }> {
     if (!input.idempotencyKey?.trim()) throw new Error('idempotency_key_required');

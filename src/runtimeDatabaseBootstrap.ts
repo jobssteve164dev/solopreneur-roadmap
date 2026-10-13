@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { UnifiedDataStore } from './db/unifiedDataStore';
 import { RuntimeDataOperations } from './runtimeDataOperations';
+import { runArtifactKind, shouldDescendRunArtifactDirectory } from './runArtifactPolicy.js';
 
 type MigrationOperations = (request: Parameters<RuntimeDataOperations>[0]) => Promise<unknown>;
 type MigrationAcknowledgement = { scheduled?: boolean };
@@ -10,12 +11,16 @@ type MigrationAcknowledgement = { scheduled?: boolean };
 async function historicalRunSourceStamp(store: UnifiedDataStore, roots: string[], shouldContinue: () => boolean): Promise<string> {
   const hash = crypto.createHash('sha256'), pending = [...roots].sort();
   const statusRoot = roots.find(root => path.basename(root) === 'agent-status')!;
+  const runRoot = roots.find(root => path.basename(root) === 'agent-runs')!;
   while (pending.length) {
     if (!shouldContinue()) return '';
     const file = pending.pop()!;
     let info: fs.Stats;
     try { info = await fs.promises.lstat(file); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; hash.update(JSON.stringify([file, 'missing'])); continue; }
+    const runRelative = path.relative(runRoot, file);
+    const withinRuns = !runRelative.startsWith('..') && !path.isAbsolute(runRelative);
+    if (withinRuns && runRelative && (info.isDirectory() ? !shouldDescendRunArtifactDirectory(runRelative) : !runArtifactKind(runRelative))) continue;
     hash.update(JSON.stringify([file, info.mode, info.dev, info.ino, info.size, info.mtimeMs, info.ctimeMs]));
     const statusRelative = path.relative(statusRoot, file);
     if (info.isDirectory() && !info.isSymbolicLink()) pending.push(...(await fs.promises.readdir(file)).sort().map(name => path.join(file, name)));
@@ -57,7 +62,10 @@ export async function historicalRunOwnerStateStamp(store: UnifiedDataStore, shou
         for (const entry of (await fs.promises.readdir(directory, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name))) {
           if (entry.isSymbolicLink()) continue;
           const file = path.join(directory, entry.name);
-          if (entry.isDirectory()) { pending.push(file); continue; }
+          if (entry.isDirectory()) {
+            if (source.allFiles || shouldDescendRunArtifactDirectory(path.relative(source.root, file))) pending.push(file);
+            continue;
+          }
           if (!entry.isFile() || (!source.allFiles && entry.name !== '.agent_status.json')) continue;
           await capture(file, await fs.promises.lstat(file));
         }
@@ -276,7 +284,7 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
         if (info.isSymbolicLink() || !info[['agent-runs', 'step-memory', 'run-digests'].includes(source.collection) ? 'isDirectory' : 'isFile']()) continue;
       }
       catch { continue; }
-      const version = source.collection === 'agent-runs' ? 6 : source.collection === 'project-journal' ? 2 : 1;
+      const version = source.collection === 'agent-runs' ? 7 : source.collection === 'project-journal' ? 3 : 1;
       const stamp = source.collection === 'agent-runs'
         ? await historicalRunSourceStamp(store, [source.sourceRoot, path.join(projectRoot, '.solopreneur', 'agent-status'), path.join(projectRoot, '.agent_status.json')], shouldContinue)
         : source.collection === 'documentation'

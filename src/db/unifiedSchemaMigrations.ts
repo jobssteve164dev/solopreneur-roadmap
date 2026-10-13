@@ -495,4 +495,18 @@ CREATE TABLE roadmap_file_states(
 CREATE TABLE roadmap_node_fields(
  node_id TEXT PRIMARY KEY REFERENCES roadmap_nodes(id),dependencies_text TEXT NOT NULL DEFAULT '',
  created_at_text TEXT NOT NULL DEFAULT '',completed_at_text TEXT NOT NULL DEFAULT '');
+` }, { version: 40, sql: `
+ALTER TABLE project_run_artifacts ADD COLUMN artifact_kind TEXT NOT NULL DEFAULT 'unclassified';
+ALTER TABLE migration_items ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'unclassified';
+CREATE INDEX project_run_artifacts_kind ON project_run_artifacts(artifact_kind,project_id,execution_log_id);
+CREATE INDEX project_run_artifacts_content ON project_run_artifacts(content_id);
+CREATE INDEX migration_items_source_kind ON migration_items(source_kind,source_identity,source_key);
+CREATE INDEX migration_items_content ON migration_items(source_content_id);
+CREATE TABLE database_storage_maintenance(
+ id TEXT PRIMARY KEY,started_at INTEGER NOT NULL,finished_at INTEGER,status TEXT NOT NULL CHECK(status IN ('running','completed','failed')),error TEXT NOT NULL,
+ deleted_artifacts INTEGER NOT NULL,deleted_sources INTEGER NOT NULL,deleted_contents INTEGER NOT NULL,
+ reclaimed_stored_bytes INTEGER NOT NULL,compacted INTEGER NOT NULL CHECK(compacted IN (0,1)),
+ before_bytes INTEGER NOT NULL,after_bytes INTEGER NOT NULL,integrity TEXT NOT NULL);
+CREATE TABLE database_storage_cleanup_candidates(
+ content_id TEXT PRIMARY KEY,stored_byte_length INTEGER NOT NULL);
 ` }];

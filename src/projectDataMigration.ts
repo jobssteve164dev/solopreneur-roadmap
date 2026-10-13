@@ -10,6 +10,7 @@ import { extractTokenUsageFromOutput, normalizeTokenUsage, extractCodexTranscrip
 import { findCodexTranscriptFile, getContinuationAgentProvider } from './continuation';
 import { containedRegularPath, readRegisteredTaskSources } from './growthReports.js';
 import { assertVersion2Binding, NativeSessionBinding } from './sessionIdentity.js';
+import { runArtifactKind, shouldDescendRunArtifactDirectory } from './runArtifactPolicy.js';
 
 const digest = (bytes: Uint8Array) => crypto.createHash('sha256').update(bytes).digest('hex');
 
@@ -145,7 +146,7 @@ export async function importProjectJournal(store: UnifiedDataStore, source: stri
   } finally { await captured.cleanup(); }
 }
 
-async function captureHistoricalOutput(store: UnifiedDataStore, projectId: string, projectRoot: string, file: string, executionLogId: number): Promise<string> {
+async function captureHistoricalOutput(store: UnifiedDataStore, projectId: string, projectRoot: string, file: string, executionLogId: number, artifactKind: 'output' | 'session'): Promise<string> {
   const runRoot = path.join(await fs.promises.realpath(projectRoot), '.solopreneur', 'agent-runs');
   const declared = path.resolve(projectRoot, file);
   let declaredRelative = path.relative(path.join(path.resolve(projectRoot), '.solopreneur', 'agent-runs'), declared);
@@ -159,15 +160,17 @@ async function captureHistoricalOutput(store: UnifiedDataStore, projectId: strin
     if (!archived) throw error;
     const bytes = Buffer.from(archived.bytes, 'base64');
     if (digest(bytes) !== archived.hash) throw new Error('historical_run_output_hash_mismatch');
+    store.captureMigrationSource({ identity: `agent-runs:${projectRoot}`, key: declaredRelative, hash: archived.hash }, bytes, { mimeType: archived.mimeType, encoding: 'binary', sourceKind: artifactKind });
+    store.writeHistoricalRunArtifact(projectId, { executionLogId, relativePath: declaredRelative, bytes: archived.bytes, hash: archived.hash, mimeType: archived.mimeType }, artifactKind);
     return bytes.toString('utf8');
   }
   const relative = path.relative(runRoot, resolved);
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('historical_run_output_scope_mismatch');
   const captured = await stableFile(resolved);
-  store.captureMigrationSource({ identity: `agent-runs:${projectRoot}`, key: relative, hash: captured.hash }, captured.bytes, { mimeType: 'text/plain', encoding: 'utf8' });
+  store.captureMigrationSource({ identity: `agent-runs:${projectRoot}`, key: relative, hash: captured.hash }, captured.bytes, { mimeType: 'text/plain', encoding: 'utf8', sourceKind: artifactKind });
   const previous = store.readRunArtifact(projectId, executionLogId, relative);
   if (previous && previous.hash !== captured.hash) throw new Error('migration_target_changed');
-  if (!previous) store.writeRunArtifact(projectId, { executionLogId, relativePath: relative, bytes: captured.bytes.toString('base64'), hash: captured.hash });
+  store.writeHistoricalRunArtifact(projectId, { executionLogId, relativePath: relative, bytes: captured.bytes.toString('base64'), hash: captured.hash }, artifactKind);
   return captured.bytes.toString('utf8');
 }
 
@@ -176,19 +179,19 @@ async function enrichHistoricalIndex(store: UnifiedDataStore, projectId: string,
   if (!record.outputPath) return record;
   try {
     let output = '';
-    try { output = await captureHistoricalOutput(store, projectId, projectRoot, record.outputPath, record.executionLogId); }
+    try { output = await captureHistoricalOutput(store, projectId, projectRoot, record.outputPath, record.executionLogId, 'output'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; onGap('historical_run_output_missing'); }
     if (normalizeTokenUsage(record).totalTokens > 0) return record;
     const usage = extractTokenUsageFromOutput(output, record.agentCli);
     if (usage.totalTokens > 0) return { ...record, ...usage };
     const runDirectory = path.dirname(path.isAbsolute(record.outputPath) ? record.outputPath : path.join(projectRoot, record.outputPath));
-    const sessionText = await captureHistoricalOutput(store, projectId, projectRoot, path.join(runDirectory, 'session.json'), record.executionLogId);
+    const sessionText = await captureHistoricalOutput(store, projectId, projectRoot, path.join(runDirectory, 'session.json'), record.executionLogId, 'session');
     const sessionId = String(JSON.parse(sessionText).sessionId || '').trim();
     if (!sessionId) return record;
     const family = path.basename(record.agentCli).toLowerCase(); let transcript = '';
     if (/^codex(?:-cli)?$/.test(family)) {
       let home = path.join(process.env.HOME || '', '.codex');
-      try { home = (await captureHistoricalOutput(store, projectId, projectRoot, path.join(runDirectory, 'codex-home.txt'), record.executionLogId)).trim() || home; }
+      try { home = (await captureHistoricalOutput(store, projectId, projectRoot, path.join(runDirectory, 'codex-home.txt'), record.executionLogId, 'session')).trim() || home; }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       transcript = findCodexTranscriptFile(home, sessionId);
     } else if (/^claude(?:-code|-code-cli)?$/.test(family)) transcript = findClaudeTranscript(projectRoot, record.startedAt, sessionId);
@@ -229,6 +232,26 @@ async function filesUnder(root: string, onConflict: (source: string, error: unkn
   return files.sort();
 }
 
+async function durableRunFilesUnder(root: string, onConflict: (source: string, error: unknown) => void): Promise<string[]> {
+  const files: string[] = []; const pending = [root];
+  while (pending.length) {
+    const directory = pending.pop()!;
+    let entries: fs.Dirent[];
+    try { entries = await fs.promises.readdir(directory, { withFileTypes: true }); }
+    catch (error) { onConflict(directory, error); continue; }
+    for (const entry of entries) {
+      const file = path.join(directory, entry.name); const relative = path.relative(root, file); const parts = relative.split(path.sep);
+      if (entry.isSymbolicLink()) { if (runArtifactKind(relative)) onConflict(file, new Error('migration_source_invalid')); continue; }
+      if (entry.isFile()) { if (runArtifactKind(relative)) files.push(file); continue; }
+      if (!entry.isDirectory()) continue;
+      // Durable files only exist directly under a node, a numeric run, or learning-tasks.
+      // Do not walk evidence/build/download directories that can contain entire toolchains.
+      if (shouldDescendRunArtifactDirectory(relative)) pending.push(file);
+    }
+  }
+  return files.sort();
+}
+
 /** Files whose live consumers have already moved to the global database. */
 export function isRetirableRunArtifact(_relativePath: string): boolean {
   // Run files still participate in settlement, rollback, statistics, reports, and
@@ -244,7 +267,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
   const resolvedRoot = await fs.promises.realpath(projectRoot);
   const sourceInfo = await fs.promises.lstat(sourceRoot);
   if (sourceInfo.isSymbolicLink() || await fs.promises.realpath(sourceRoot) !== path.join(resolvedRoot, '.solopreneur', 'agent-runs')) throw new Error('migration_source_scope_mismatch');
-  const files = await filesUnder(sourceRoot, (source, error) => result.conflicts.push({ source, error: String(error) }));
+  const files = await durableRunFilesUnder(sourceRoot, (source, error) => result.conflicts.push({ source, error: String(error) }));
   const statusRoot = path.join(projectRoot, '.solopreneur', 'agent-status');
   const projectStatus = path.join(projectRoot, '.agent_status.json');
   const statusFiles = files.filter(file => path.basename(file) === '.agent_status.json');
@@ -382,9 +405,29 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         const file = declared ? path.resolve(declared) : path.join(runDir, name);
         if (path.dirname(file) !== runDir) throw new Error('historical_run_source_conflict');
         const sourceKey = path.relative(sourceRoot, file);
-        const artifact = store.readRunArtifact(project.projectId, id, sourceKey) || (relative === status.nodeId ? store.readRunArtifact(project.projectId, 0, sourceKey) : null);
+        let artifact = store.readRunArtifact(project.projectId, id, sourceKey) || (relative === status.nodeId ? store.readRunArtifact(project.projectId, 0, sourceKey) : null);
+        const declaredKind = declared ? runArtifactKind(path.join(status.nodeId, String(id), name)) : null;
+        if (declared && !declaredKind) throw new Error('historical_run_input_invalid');
+        let declaredCurrent: Awaited<ReturnType<typeof stableFile>> | undefined;
+        if (declared) {
+          try { declaredCurrent = await stableFile(file); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        }
+        if (declaredCurrent) {
+          if (artifact && declaredCurrent.hash !== artifact.hash) throw new Error('historical_run_source_changed');
+          store.captureMigrationSource({ identity, key: sourceKey, hash: declaredCurrent.hash }, declaredCurrent.bytes, { mimeType: 'application/octet-stream', encoding: 'binary', sourceKind: declaredKind! });
+          store.writeHistoricalRunArtifact(project.projectId, { executionLogId: id, relativePath: sourceKey, bytes: declaredCurrent.bytes.toString('base64'), hash: declaredCurrent.hash }, declaredKind!);
+          if (!artifact) { result.originalBytes += declaredCurrent.bytes.length; result.retainedFiles.push(file); result.imported++; }
+          artifact = store.readRunArtifact(project.projectId, id, sourceKey);
+        }
         if (!artifact) { if (required) throw new Error('historical_run_input_missing'); return null; }
-        const current = await stableFile(file);
+        if (declared && !declaredCurrent) {
+          const archived = Buffer.from(artifact.bytes, 'base64');
+          store.captureMigrationSource({ identity, key: sourceKey, hash: artifact.hash }, archived, { mimeType: artifact.mimeType, encoding: 'binary', sourceKind: declaredKind! });
+          store.writeHistoricalRunArtifact(project.projectId, { executionLogId: id, relativePath: sourceKey, bytes: artifact.bytes, hash: artifact.hash, mimeType: artifact.mimeType }, declaredKind!);
+          return archived;
+        }
+        const current = declaredCurrent || await stableFile(file);
         if (current.hash !== artifact.hash) throw new Error('historical_run_source_changed');
         return Buffer.from(artifact.bytes, 'base64');
       };
@@ -443,7 +486,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       for (const [field, statusKey, fallback] of [['workspaceBefore', 'workspaceSnapshotPath', 'workspace-before.json'], ['changes', 'changesFilePath', 'changes.txt'], ['roadmapBackup', 'roadmapBackupFilePath', 'roadmap-before.csv']] as const) {
         const declared = String(status[statusKey] || ''), name = declared ? path.basename(declared) : fallback;
         if (declared && path.resolve(declared) !== path.join(runDir, name)) throw new Error('historical_run_document_scope_mismatch');
-        const bytes = await read(name, Boolean(declared));
+        const bytes = await read(fallback, Boolean(declared), statusKey);
         if (bytes) documents[field] = bytes;
       }
       const reports: Array<{ source: { identity: string; key: string; hash: string }; bytes: Buffer; observation: { executionLogId: number; sequence: number; availability: string; envelope: any } }> = [];

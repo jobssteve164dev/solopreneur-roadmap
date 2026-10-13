@@ -614,7 +614,7 @@ test('project journal migration uses a read-only history path without lifecycle 
   assert.doesNotMatch(body, /getAllExecutionLogs\(\)/);
 });
 
-test('agent-run migration records changing files and unreadable directories without stopping the queue', async () => {
+test('agent-run migration skips unrelated changing files and records unreadable durable directories without stopping the queue', async () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-agent-run-conflicts-'));
   const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project'); const runs = path.join(project, '.solopreneur', 'agent-runs');
   const changing = path.join(runs, 'changing.log'); const denied = path.join(runs, 'denied');
@@ -632,7 +632,7 @@ test('agent-run migration records changing files and unreadable directories with
   try {
     const result = await importAgentRuns(store, runs, { projectRoot: project });
     assert.equal(result.imported, 0);
-    assert.deepEqual(result.conflicts.map(item => path.basename(item.source)).sort(), ['changing.log', 'denied']);
+    assert.deepEqual(result.conflicts.map(item => path.basename(item.source)).sort(), ['denied']);
   } finally { fs.promises.lstat = lstat; fs.promises.readdir = readdir; store.close(); }
 });
 

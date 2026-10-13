@@ -414,8 +414,10 @@ test('on-demand migration discovery queues every registered legacy source idempo
   fs.mkdirSync(path.join(databaseOnlyWorkspace, '.solopreneur', 'agent-runs'), { recursive: true });
   fs.writeFileSync(path.join(root, 'projects.json'), JSON.stringify({ projects: [{ path: workspace }] }));
   fs.writeFileSync(path.join(root, 'memory', 'profile.md'), 'profile');
-  fs.writeFileSync(path.join(workspace, '.solopreneur', 'agent-runs', 'prompt.txt'), 'prompt');
-  fs.writeFileSync(path.join(databaseOnlyWorkspace, '.solopreneur', 'agent-runs', 'prompt.txt'), 'prompt');
+  fs.mkdirSync(path.join(workspace, '.solopreneur', 'agent-runs', '__solo__', '1'), { recursive: true });
+  fs.mkdirSync(path.join(databaseOnlyWorkspace, '.solopreneur', 'agent-runs', '__solo__', '1'), { recursive: true });
+  fs.writeFileSync(path.join(workspace, '.solopreneur', 'agent-runs', '__solo__', '1', 'prompt.txt'), 'prompt');
+  fs.writeFileSync(path.join(databaseOnlyWorkspace, '.solopreneur', 'agent-runs', '__solo__', '1', 'prompt.txt'), 'prompt');
   const store = new UnifiedDataStore(root);
   const operations = createRuntimeDataOperations(store);
   try {
@@ -427,11 +429,12 @@ test('on-demand migration discovery queues every registered legacy source idempo
     assert.equal(store.migrationJobs().length, first.queued);
     assert.ok(store.migrationJobs().some(job => job.args.projectRoot === databaseOnlyWorkspace && job.args.collection === 'agent-runs'));
     await operations.waitForMigrations();
-    fs.writeFileSync(path.join(databaseOnlyWorkspace, '.solopreneur', 'agent-runs', 'second.txt'), 'second');
+    fs.mkdirSync(path.join(databaseOnlyWorkspace, '.solopreneur', 'agent-runs', '__solo__', '2'), { recursive: true });
+    fs.writeFileSync(path.join(databaseOnlyWorkspace, '.solopreneur', 'agent-runs', '__solo__', '2', 'prompt.txt'), 'second');
     const refreshed = await operations({ operation: 'discover_migrations', input: {} });
     await operations.waitForMigrations();
     assert.ok(refreshed.queued > 0);
-    assert.equal(store.readMigrationSource(`agent-runs:${databaseOnlyWorkspace}`, 'second.txt').bytes.toString(), 'second');
+    assert.equal(store.readMigrationSource(`agent-runs:${databaseOnlyWorkspace}`, '__solo__/2/prompt.txt').bytes.toString(), 'second');
   } finally { await operations.close(); store.close(); }
 });
 

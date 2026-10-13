@@ -23,6 +23,7 @@ import { migrationRunKinds, soloConversationRunKinds } from './runLifecycleTypes
 
 export interface RuntimeDataOperations {
   (request: RuntimeDataRequest): Promise<unknown>;
+  setStorageMaintenanceBarrier(barrier: Promise<unknown>): void;
   recoverMigrations(): void;
   recoverRuns(): void;
   interruptRuns(): void;
@@ -45,6 +46,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
   const runStops = new RunStop(store);
   const runs = new RunRecovery(store, runStops);
   const runInputs = new RunInputMaterialization(store);
+  let storageMaintenanceTail: Promise<void> = Promise.resolve();
+  let storageMaintenanceBarrier: Promise<unknown> = Promise.resolve();
   type ProjectSession = { kind: 'project'; actorId: string; scope: string; runIdentity?: McpRunIdentity; reviewBatchId?: string; migrationKind?: MigrationRunKind; migrationTargetId?: string | null; migrationProjectRoot?: string | null; migrationProjectId?: string | null; migrationPhysicalRoot?: string | null };
   const sessions = new Map<string, ProjectSession>();
   const samePhysicalRoot = (left: string, right: string): boolean => {
@@ -75,6 +78,62 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       const bytes = await fs.promises.readFile(path.join(String(input.root), '.solopreneur', 'roadmap.csv'));
       return { ...input, roadmapBackup: bytes.toString('base64') };
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return input; throw error; }
+  };
+  const maintainDatabaseStorage = (compact: boolean, automatic: boolean) => {
+    const operation = storageMaintenanceTail.catch(() => undefined).then(async () => {
+      await storageMaintenanceBarrier;
+      const currentSize = store.databaseStorageFileSizes();
+      store.recoverInterruptedDatabaseStorageMaintenance(Date.now(), currentSize.databaseBytes);
+      if (automatic && !store.hasPendingDatabaseStorageCleanup()) return { skipped: true, reason: 'storage_current' };
+      const startedAt = Date.now(), before = currentSize;
+      const totals = { deletedArtifacts: 0, deletedSources: 0, deletedContents: 0, reclaimedStoredBytes: 0 };
+      const maintenanceId = store.beginDatabaseStorageMaintenance(startedAt, before.databaseBytes);
+      try {
+        let indexCursor = 0;
+        for (;;) {
+          const batch = store.protectIndexedRunArtifactOutputsBatch(indexCursor, 250);
+          if (batch.nextCursor === null) break;
+          indexCursor = batch.nextCursor;
+          await new Promise<void>(resolve => setImmediate(resolve));
+        }
+        for (;;) {
+          const batch = store.cleanupDatabaseStorageBatch(5000, maintenanceId);
+          totals.deletedArtifacts += batch.deletedArtifacts; totals.deletedSources += batch.deletedSources;
+          if (!batch.pending) break;
+          await new Promise<void>(resolve => setImmediate(resolve));
+        }
+        if (store.hasDatabaseStorageCleanupCandidates()) {
+          store.prepareDatabaseStorageCleanup();
+          if (store.hasDatabaseStorageCleanupCandidates()) {
+            for (const table of ['object_revisions', 'learning_review_controls', 'legacy_learning_review_controls', 'legacy_learning_review_cursor_inputs'] as const) {
+              let cursor = 0;
+              for (;;) {
+                const batch = store.protectDatabaseStorageCleanupReferencesBatch(table, cursor, 250);
+                if (batch.nextCursor === null) break;
+                cursor = batch.nextCursor;
+                await new Promise<void>(resolve => setImmediate(resolve));
+              }
+            }
+            for (;;) {
+              const batch = store.finalizeDatabaseStorageCleanupBatch(250, maintenanceId);
+              totals.deletedContents += batch.deletedContents; totals.reclaimedStoredBytes += batch.reclaimedStoredBytes;
+              if (!batch.pending) break;
+              await new Promise<void>(resolve => setImmediate(resolve));
+            }
+          }
+        }
+        const integrity = compact ? store.compactDatabaseStorage().integrity : 'not_checked';
+        const after = store.databaseStorageFileSizes(); const finishedAt = Date.now();
+        store.settleDatabaseStorageMaintenance(maintenanceId, { status: 'completed', finishedAt, ...totals, compacted: compact, afterBytes: after.databaseBytes, integrity });
+        return { ...totals, compacted: compact, integrity, beforeBytes: before.databaseBytes, afterBytes: after.databaseBytes, pendingByproductRecords: 0 };
+      } catch (error) {
+        const after = store.databaseStorageFileSizes();
+        store.settleDatabaseStorageMaintenance(maintenanceId, { status: 'failed', finishedAt: Date.now(), error: String(error), ...totals, compacted: false, afterBytes: after.databaseBytes, integrity: 'not_checked' });
+        throw error;
+      }
+    });
+    storageMaintenanceTail = operation.then(() => undefined, () => undefined);
+    return operation;
   };
   const dispatch = async (request: RuntimeDataRequest): Promise<unknown> => {
     if (!request || typeof request.operation !== 'string' || !request.input || typeof request.input !== 'object') throw new Error('invalid_data_request');
@@ -757,6 +816,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         } : undefined);
       }
       case 'backup': return store.backup({ destination: String(input.destination || ''), idempotencyKey: String(input.idempotencyKey || '') });
+      case 'read_database_storage': return store.readDatabaseStorage();
+      case 'maintain_database_storage': return maintainDatabaseStorage(input.compact === true, input.automatic === true);
       case 'restore_backup': return store.restoreBackup({ source: String(input.source || ''), destinationRoot: String(input.destinationRoot || ''), idempotencyKey: String(input.idempotencyKey || '') });
       case 'export_project': return store.exportProject(input as unknown as Parameters<UnifiedDataStore['exportProject']>[0]);
       case 'import_project': return store.importProject(input as unknown as Parameters<UnifiedDataStore['importProject']>[0]);
@@ -829,7 +890,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       return result;
     });
   };
-  return Object.assign(operations, { recoverMigrations: () => migrations.recover(), recoverRuns: () => runs.start(), interruptRuns: () => runStops.interrupt(), waitForMigrations: () => migrations.wait(), close: async () => { await runs.close(); await migrations.close(); } });
+  return Object.assign(operations, { setStorageMaintenanceBarrier: (barrier: Promise<unknown>) => { storageMaintenanceBarrier = barrier; }, recoverMigrations: () => migrations.recover(), recoverRuns: () => runs.start(), interruptRuns: () => runStops.interrupt(), waitForMigrations: () => migrations.wait(), close: async () => { await storageMaintenanceTail; await runs.close(); await migrations.close(); } });
 }
 
 export function runtimeMcpSource(globalDataPath: string, scope: string | null, globalReads = false, runIdentity?: McpRunIdentity): UnifiedMcpSource {

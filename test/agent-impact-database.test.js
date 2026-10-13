@@ -110,10 +110,166 @@ test('explicit raw history import restores old-only contribution and full token 
   const anonymous = native.find(row => row.nodeId === 'step-two');
   assert.equal(Buffer.from(store.readRunArtifact(project, anonymous.executionLogId, 'step-two/command.txt').bytes, 'base64').toString(), 'claude -p');
   const raw = store.readRunArtifact(project, 12, '__solo__/12/output.log');
-  assert.equal(Buffer.from(store.readRunArtifact(project, 12, '__solo__/12/assets/2024/report.txt').bytes, 'base64').toString(), '完整内部证据🌿');
+  assert.equal(store.readRunArtifact(project, 12, '__solo__/12/assets/2024/report.txt'), null, 'task workspace byproducts are not database records');
+  assert.ok(!store.capturedMigrationSources().some(item => item.identity === `agent-runs:${workspace}` && item.key === '__solo__/12/assets/2024/report.txt'));
   assert.equal(Buffer.from(raw.bytes, 'base64').toString(), fs.readFileSync(path.join(source, '__solo__/12/output.log'), 'utf8'));
   await importOnce('raw-impact-again'); assert.deepEqual(await read(), first);
   fs.renameSync(source, `${source}-retained`); assert.deepEqual(await read(), first);
+}));
+
+test('storage maintenance classifies retained run data and removes previously imported byproducts without touching source files', () => fixture(async ({ workspace, project, store, ops }) => {
+  const crypto = require('node:crypto');
+  const sourceRoot = path.join(workspace, '.solopreneur', 'agent-runs');
+  const run = path.join(sourceRoot, '__solo__', '44'); fs.mkdirSync(path.join(run, 'evidence'), { recursive: true });
+  const prompt = Buffer.from('必须保留的完整用户请求🌿');
+  const byproduct = crypto.randomBytes(2 * 1024 * 1024);
+  const promptPath = '__solo__/44/prompt.txt'; const byproductPath = '__solo__/44/evidence/release.vsix'; const sharedByproductPath = '__solo__/44/evidence/request-copy.txt';
+  fs.writeFileSync(path.join(run, 'prompt.txt'), prompt); fs.writeFileSync(path.join(run, 'evidence', 'release.vsix'), byproduct); fs.writeFileSync(path.join(run, 'evidence', 'request-copy.txt'), prompt);
+  const put = bytes => store.putContent(bytes, 'application/octet-stream', 'binary');
+  const promptContentId = put(prompt); const byproductContentId = put(byproduct);
+  const now = Date.now();
+  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 44, promptPath, promptContentId, crypto.createHash('sha256').update(prompt).digest('hex'), 'application/octet-stream', now]);
+  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 44, byproductPath, byproductContentId, crypto.createHash('sha256').update(byproduct).digest('hex'), 'application/octet-stream', now]);
+  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 44, sharedByproductPath, promptContentId, crypto.createHash('sha256').update(prompt).digest('hex'), 'application/octet-stream', now]);
+  for (const [key, bytes] of [[promptPath, prompt], [byproductPath, byproduct], [sharedByproductPath, prompt]]) store.captureMigrationSource({ identity: `agent-runs:${workspace}`, key, hash: crypto.createHash('sha256').update(bytes).digest('hex') }, bytes, { mimeType: 'application/octet-stream', encoding: 'binary' });
+  assert.match(String(store.rows("EXPLAIN QUERY PLAN SELECT 1 FROM project_run_artifacts WHERE artifact_kind IN ('unclassified','byproduct') LIMIT 1")[0].detail), /project_run_artifacts_kind/);
+  assert.match(String(store.rows("EXPLAIN QUERY PLAN SELECT 1 FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind IN ('unclassified','byproduct') LIMIT 1")[0].detail), /migration_items_source_kind/);
+  const before = await ops({ operation: 'read_database_storage', input: {} });
+  assert.equal(before.runArtifacts.pendingByproductRecords, 2); assert.ok(before.runArtifacts.pendingByproductStoredBytes >= byproduct.length);
+  assert.equal(before.migrationSources.pendingByproductRecords, 2); assert.ok(before.migrationSources.pendingByproductStoredBytes >= byproduct.length);
+  const cleaned = await ops({ operation: 'maintain_database_storage', input: { compact: true } });
+  assert.equal(cleaned.deletedArtifacts, 2); assert.equal(cleaned.deletedSources, 2); assert.equal(cleaned.deletedContents, 1);
+  assert.ok(cleaned.reclaimedStoredBytes >= byproduct.length); assert.equal(cleaned.pendingByproductRecords, 0);
+  assert.equal(Buffer.from(store.readRunArtifact(project, 44, promptPath).bytes, 'base64').toString(), prompt.toString());
+  assert.equal(store.readRunArtifact(project, 44, byproductPath), null);
+  assert.equal(store.rows('SELECT id FROM contents WHERE id=?', [byproductContentId]).length, 0);
+  assert.deepEqual(fs.readFileSync(path.join(run, 'evidence', 'release.vsix')), byproduct, 'database cleanup never deletes legacy source files');
+  const after = await ops({ operation: 'read_database_storage', input: {} });
+  assert.equal(after.runArtifacts.byKind.prompt.records, 1); assert.equal(after.runArtifacts.pendingByproductRecords, 0);
+  assert.equal(after.migrationSources.byKind.prompt.records, 1); assert.equal(after.migrationSources.pendingByproductRecords, 0);
+  assert.equal(after.lastMaintenance.deletedArtifacts, 2); assert.equal(after.lastMaintenance.deletedSources, 2);
+  assert.equal(after.lastMaintenance.status, 'completed'); assert.equal(after.lastMaintenance.error, '');
+  assert.ok(after.databaseBytes < before.databaseBytes);
+  const repeated = await ops({ operation: 'maintain_database_storage', input: { compact: false } });
+  assert.equal(repeated.deletedArtifacts, 0); assert.equal(repeated.deletedSources, 0); assert.equal(repeated.deletedContents, 0);
+}));
+
+test('storage maintenance checks shared content references once after multiple cleanup batches', () => fixture(async ({ project, store, ops }) => {
+  const crypto = require('node:crypto'), bytes = Buffer.from('repeated task byproduct');
+  const contentId = store.putContent(bytes, 'application/octet-stream', 'binary'), hash = crypto.createHash('sha256').update(bytes).digest('hex');
+  store.db.run('BEGIN');
+  try {
+    for (let index = 0; index < 5001; index++) store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 44, `__solo__/44/evidence/${index}.tmp`, contentId, hash, 'application/octet-stream', Date.now()]);
+    store.db.run('COMMIT');
+  } catch (error) { store.db.run('ROLLBACK'); throw error; }
+  const referenceTables = store.rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+    .flatMap(row => store.rows(`PRAGMA foreign_key_list(${row.name})`).filter(foreignKey => foreignKey.table === 'contents' && row.name !== 'content_chunks')).length;
+  const originalRun = store.db.run.bind(store.db); let referenceSweeps = 0;
+  store.db.run = (sql, values) => { if (String(sql).startsWith('DELETE FROM database_storage_cleanup_candidates WHERE content_id IN') && !String(sql).includes('storage_cleanup_batch')) referenceSweeps++; return originalRun(sql, values); };
+  let cleaned;
+  try { cleaned = await ops({ operation: 'maintain_database_storage', input: { compact: false } }); }
+  finally { store.db.run = originalRun; }
+  assert.equal(cleaned.deletedArtifacts, 5001); assert.equal(cleaned.deletedContents, 1);
+  assert.equal(referenceSweeps, referenceTables, 'reference tables are swept once for the complete cleanup, not once per batch');
+}));
+
+test('direct references empty the cleanup queue before any historical JSON scan', () => fixture(async ({ project, store, ops }) => {
+  const crypto = require('node:crypto'), bytes = Buffer.from('由耐久记录直接共享的正文');
+  const contentId = store.putContent(bytes, 'application/octet-stream', 'binary'), hash = crypto.createHash('sha256').update(bytes).digest('hex');
+  const values = pathName => [project, 44, pathName, contentId, hash, 'application/octet-stream', Date.now()];
+  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', values('__solo__/44/prompt.txt'));
+  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', values('__solo__/44/evidence/copy.bin'));
+  const protect = store.protectDatabaseStorageCleanupReferencesBatch;
+  store.protectDatabaseStorageCleanupReferencesBatch = () => { throw new Error('unnecessary_history_scan'); };
+  try { assert.equal((await ops({ operation: 'maintain_database_storage', input: { compact: false } })).deletedArtifacts, 1); }
+  finally { store.protectDatabaseStorageCleanupReferencesBatch = protect; }
+  assert.deepEqual(store.content(contentId), bytes);
+}));
+
+test('automatic storage maintenance skips current data without running a full inventory', () => fixture(async ({ store, ops }) => {
+  const read = store.readDatabaseStorage; store.readDatabaseStorage = () => { throw new Error('full_inventory_called'); };
+  try { assert.deepEqual(await ops({ operation: 'maintain_database_storage', input: { compact: false, automatic: true } }), { skipped: true, reason: 'storage_current' }); }
+  finally { store.readDatabaseStorage = read; }
+  assert.equal(store.rows('SELECT COUNT(*) AS count FROM database_storage_maintenance')[0].count, 0);
+}));
+
+test('manual storage maintenance waits for startup migration readiness', () => fixture(async ({ store, ops }) => {
+  let release;
+  ops.setStorageMaintenanceBarrier(new Promise(resolve => { release = resolve; }));
+  const maintenance = ops({ operation: 'maintain_database_storage', input: { compact: false } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(store.rows('SELECT COUNT(*) AS count FROM database_storage_maintenance')[0].count, 0);
+  release();
+  assert.equal((await maintenance).pendingByproductRecords, 0);
+}));
+
+test('storage cleanup preserves content referenced from immutable object history', () => fixture(async ({ project, store, ops }) => {
+  const crypto = require('node:crypto'), bytes = Buffer.from('仍由旧修订消费的完整正文🌿');
+  const contentId = store.putContent(bytes, 'application/octet-stream', 'binary'), hash = crypto.createHash('sha256').update(bytes).digest('hex');
+  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 44, '__solo__/44/evidence/historical-copy.bin', contentId, hash, 'application/octet-stream', Date.now()]);
+  const evidence = store.write({ kind: 'evidence', action: 'create', scope: project, idempotencyKey: 'embedded-history-reference', data: { type: 'host_observation', source_actor_id: 'local-runtime', content: 'reference holder', observed_at: Date.now() } });
+  const snapshot = store.putContent(JSON.stringify({ sourceContents: { original: contentId } }), 'application/json', 'utf8');
+  store.db.run('UPDATE object_revisions SET content_id=? WHERE object_id=? AND revision=?', [snapshot, evidence.objectId, evidence.revision]);
+  const cleaned = await ops({ operation: 'maintain_database_storage', input: { compact: false } });
+  assert.equal(cleaned.deletedArtifacts, 1); assert.equal(cleaned.deletedContents, 0);
+  assert.equal(store.rows('SELECT id FROM contents WHERE id=?', [contentId]).length, 1);
+  assert.deepEqual(store.content(contentId), bytes);
+}));
+
+test('storage cleanup preserves source content referenced by a legacy review manifest', () => fixture(async ({ project, store, ops }) => {
+  const crypto = require('node:crypto'), bytes = Buffer.from('旧复盘仍需读取的原始正文🌿');
+  const contentId = store.putContent(bytes, 'application/octet-stream', 'binary'), hash = crypto.createHash('sha256').update(bytes).digest('hex');
+  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 44, '__solo__/44/evidence/review-source.bin', contentId, hash, 'application/octet-stream', Date.now()]);
+  const batch = store.write({ kind: 'review_batch', action: 'create', scope: null, idempotencyKey: 'legacy-review-reference', data: { input_cursor: 0, input_hash: hash, proposal_content: null, review_content: JSON.stringify({ sourceContents: { original: contentId } }), status: 'interrupted' } });
+  const inputContentId = store.readMetadata(batch.objectId).data.review_content_id;
+  store.db.run('INSERT INTO legacy_learning_review_controls VALUES(?,?,?,?)', [batch.objectId, inputContentId, 'legacy-review:test', 'run-1']);
+  const cleaned = await ops({ operation: 'maintain_database_storage', input: { compact: false } });
+  assert.equal(cleaned.deletedArtifacts, 1); assert.equal(cleaned.deletedContents, 0);
+  assert.deepEqual(store.content(contentId), bytes);
+}));
+
+test('storage cleanup follows an old object revision through its review envelope to source content', () => fixture(async ({ project, store, ops }) => {
+  const crypto = require('node:crypto'), bytes = Buffer.from('旧版本复盘信封间接引用的正文🌿');
+  const contentId = store.putContent(bytes, 'application/octet-stream', 'binary'), hash = crypto.createHash('sha256').update(bytes).digest('hex');
+  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 44, '__solo__/44/evidence/old-envelope-source.bin', contentId, hash, 'application/octet-stream', Date.now()]);
+  const envelope = store.putContent(JSON.stringify({ sourceContents: { original: contentId } }), 'application/json', 'utf8');
+  const evidence = store.write({ kind: 'evidence', action: 'create', scope: project, idempotencyKey: 'indirect-history-reference', data: { type: 'host_observation', source_actor_id: 'local-runtime', content: 'reference holder', observed_at: Date.now() } });
+  const snapshot = store.putContent(JSON.stringify({ data: { review_content_id: envelope } }), 'application/json', 'utf8');
+  store.db.run('UPDATE object_revisions SET content_id=? WHERE object_id=? AND revision=?', [snapshot, evidence.objectId, evidence.revision]);
+  const cleaned = await ops({ operation: 'maintain_database_storage', input: { compact: false } });
+  assert.equal(cleaned.deletedArtifacts, 1); assert.equal(cleaned.deletedContents, 0);
+  assert.deepEqual(store.content(contentId), bytes);
+}));
+
+test('reusing queued content after the reference scan cancels its physical deletion', () => fixture(async ({ project, store }) => {
+  const crypto = require('node:crypto'), bytes = Buffer.from('保护扫描后重新成为正式数据的正文🌿');
+  const contentId = store.putContent(bytes, 'application/octet-stream', 'binary'), hash = crypto.createHash('sha256').update(bytes).digest('hex');
+  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 44, '__solo__/44/evidence/reused.bin', contentId, hash, 'application/octet-stream', Date.now()]);
+  assert.equal(store.cleanupDatabaseStorageBatch().deletedArtifacts, 1);
+  store.prepareDatabaseStorageCleanup();
+  for (const table of ['object_revisions', 'learning_review_controls', 'legacy_learning_review_controls', 'legacy_learning_review_cursor_inputs']) {
+    let cursor = 0;
+    for (;;) { const batch = store.protectDatabaseStorageCleanupReferencesBatch(table, cursor); if (batch.nextCursor === null) break; cursor = batch.nextCursor; }
+  }
+  assert.equal(store.putContent(bytes, 'application/octet-stream', 'binary'), contentId);
+  assert.deepEqual(store.finalizeDatabaseStorageCleanupBatch(), { deletedContents: 0, reclaimedStoredBytes: 0, pending: false });
+  assert.deepEqual(store.content(contentId), bytes);
+}));
+
+test('interrupted storage cleanup records failure and resumes its persistent content queue', () => fixture(async ({ project, store, ops }) => {
+  const crypto = require('node:crypto'), bytes = crypto.randomBytes(128 * 1024), hash = crypto.createHash('sha256').update(bytes).digest('hex');
+  const contentId = store.putContent(bytes, 'application/octet-stream', 'binary');
+  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 44, '__solo__/44/evidence/interrupted.bin', contentId, hash, 'application/octet-stream', Date.now()]);
+  const interruptedId = store.beginDatabaseStorageMaintenance(Date.now(), store.databaseStorageFileSizes().databaseBytes);
+  assert.equal(store.cleanupDatabaseStorageBatch(5000, interruptedId).deletedArtifacts, 1);
+  const running = store.rows('SELECT status,deleted_artifacts FROM database_storage_maintenance WHERE id=?', [interruptedId])[0];
+  assert.equal(running.status, 'running'); assert.equal(running.deleted_artifacts, 1);
+  assert.equal(store.rows('SELECT COUNT(*) AS count FROM database_storage_cleanup_candidates')[0].count, 1);
+  const resumed = await ops({ operation: 'maintain_database_storage', input: { compact: false } });
+  assert.equal(resumed.deletedContents, 1); assert.equal(store.rows('SELECT id FROM contents WHERE id=?', [contentId]).length, 0);
+  const failed = store.rows('SELECT status,error,deleted_artifacts FROM database_storage_maintenance WHERE id=?', [interruptedId])[0];
+  assert.equal(failed.status, 'failed'); assert.equal(failed.error, 'maintenance_interrupted'); assert.equal(failed.deleted_artifacts, 1);
+  assert.equal(store.rows("SELECT COUNT(*) AS count FROM database_storage_maintenance WHERE status='completed'")[0].count, 1);
 }));
 
 test('journal import enriches missing legacy token fields without changing a native index', () => fixture(async ({ workspace, project, store, ops, record, read }) => {
@@ -129,6 +285,56 @@ test('journal import enriches missing legacy token fields without changing a nat
   await ops.waitForMigrations(); assert.equal(store.readMigrationJob(job.jobId).status, 'completed');
   const result = await read(); assert.equal(result.totalRuns, 2); assert.equal(result.totalTokens, 12433);
   assert.equal(store.readProjectRunIndexes(project).find(row => row.executionLogId === 13).totalTokens, 88);
+}));
+
+test('journal enrichment preserves a custom run-local output as indexed output instead of a byproduct', () => fixture(async ({ workspace, project, store, ops, record, read }) => {
+  const { SqliteStore } = require('../out/db/sqliteStore.js');
+  const source = path.join(workspace, '.solopreneur', 'project_journal.db');
+  const run = path.join(workspace, '.solopreneur', 'agent-runs', '__solo__', '12'); fs.mkdirSync(run, { recursive: true });
+  const output = path.join(run, 'declared-output.data'), relative = path.relative(path.join(workspace, '.solopreneur', 'agent-runs'), output);
+  fs.writeFileSync(output, '完整旧计量\ntokens used\n12,345');
+  const legacy = new SqliteStore(source, path.resolve(__dirname, '..')); await legacy.init();
+  try { legacy.upsertRunIndex({ ...record(12), totalTokens: 0, outputPath: output }); } finally { legacy.close(); }
+  const job = await ops({ operation: 'import_project_data', input: { collection: 'project-journal', projectRoot: workspace, sourceRoot: source, idempotencyKey: 'impact-custom-output' } });
+  await ops.waitForMigrations(); assert.equal(store.readMigrationJob(job.jobId).status, 'completed'); assert.equal((await read()).totalTokens, 12345);
+  assert.equal(store.rows('SELECT artifact_kind FROM project_run_artifacts WHERE project_id=? AND execution_log_id=12 AND relative_path=?', [project, relative])[0].artifact_kind, 'output');
+  assert.equal(store.rows('SELECT source_kind FROM migration_items WHERE source_identity=? AND source_key=?', [`agent-runs:${workspace}`, relative])[0].source_kind, 'output');
+  await ops({ operation: 'maintain_database_storage', input: { compact: false } });
+  assert.equal(Buffer.from(store.readRunArtifact(project, 12, relative).bytes, 'base64').toString(), fs.readFileSync(output, 'utf8'));
+}));
+
+test('journal enrichment reclassifies a custom archived output after its physical source is gone', () => fixture(async ({ workspace, project, store, ops, record, read }) => {
+  const crypto = require('node:crypto'), { SqliteStore } = require('../out/db/sqliteStore.js');
+  const source = path.join(workspace, '.solopreneur', 'project_journal.db');
+  const run = path.join(workspace, '.solopreneur', 'agent-runs', '__solo__', '12'); fs.mkdirSync(run, { recursive: true });
+  const output = path.join(run, 'archived-output.data'), relative = path.relative(path.join(workspace, '.solopreneur', 'agent-runs'), output);
+  const bytes = Buffer.from('已归档的完整旧计量\ntokens used\n12,345'), hash = crypto.createHash('sha256').update(bytes).digest('hex'); fs.writeFileSync(output, bytes);
+  const legacy = new SqliteStore(source, path.resolve(__dirname, '..')); await legacy.init();
+  try { legacy.upsertRunIndex({ ...record(12), totalTokens: 0, outputPath: output }); } finally { legacy.close(); }
+  const contentId = store.putContent(bytes, 'application/octet-stream', 'binary');
+  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 12, relative, contentId, hash, 'application/octet-stream', Date.now()]);
+  store.captureMigrationSource({ identity: `agent-runs:${workspace}`, key: relative, hash }, bytes, { mimeType: 'application/octet-stream', encoding: 'binary' });
+  fs.unlinkSync(output);
+  const job = await ops({ operation: 'import_project_data', input: { collection: 'project-journal', projectRoot: workspace, sourceRoot: source, idempotencyKey: 'impact-archived-custom-output' } });
+  await ops.waitForMigrations(); assert.equal(store.readMigrationJob(job.jobId).status, 'completed'); assert.equal((await read()).totalTokens, 12345);
+  assert.equal(store.rows('SELECT artifact_kind FROM project_run_artifacts WHERE project_id=? AND execution_log_id=12 AND relative_path=?', [project, relative])[0].artifact_kind, 'output');
+  assert.equal(store.rows('SELECT source_kind FROM migration_items WHERE source_identity=? AND source_key=?', [`agent-runs:${workspace}`, relative])[0].source_kind, 'output');
+  await ops({ operation: 'maintain_database_storage', input: { compact: false } });
+  assert.equal(Buffer.from(store.readRunArtifact(project, 12, relative).bytes, 'base64').toString(), bytes.toString());
+}));
+
+test('storage cleanup preserves a nested archived output declared by the retained run index', () => fixture(async ({ workspace, project, store, ops, record }) => {
+  const crypto = require('node:crypto'), relative = '__solo__/12/archive/native-output.data';
+  const bytes = Buffer.from('只剩数据库副本的嵌套历史输出🌿'), hash = crypto.createHash('sha256').update(bytes).digest('hex');
+  store.upsertProjectRunIndex(project, { ...record(12), outputPath: relative });
+  const contentId = store.putContent(bytes, 'application/octet-stream', 'binary');
+  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 12, relative, contentId, hash, 'application/octet-stream', Date.now()]);
+  store.captureMigrationSource({ identity: `agent-runs:${workspace}`, key: relative, hash }, bytes, { mimeType: 'application/octet-stream', encoding: 'binary' });
+  assert.equal(store.rows('SELECT source_kind FROM migration_items WHERE source_identity=? AND source_key=?', [`agent-runs:${workspace}`, relative])[0].source_kind, 'byproduct');
+  await ops({ operation: 'maintain_database_storage', input: { compact: false } });
+  assert.equal(store.rows('SELECT artifact_kind FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?', [project, 12, relative])[0].artifact_kind, 'output');
+  assert.equal(store.rows('SELECT source_kind FROM migration_items WHERE source_identity=? AND source_key=?', [`agent-runs:${workspace}`, relative])[0].source_kind, 'output');
+  assert.equal(Buffer.from(store.readRunArtifact(project, 12, relative).bytes, 'base64').toString(), bytes.toString());
 }));
 
 for (const hasOutput of [true, false]) test(`journal history captures the exact full native transcript and imports only run-local usage: hasOutput=${hasOutput}`, () => fixture(async ({ workspace, project, store, ops, record, read }) => {
@@ -263,7 +469,22 @@ for (const family of ['codex', 'claude']) for (const finished of ['valid', 'miss
   }
 });
 
-const {enqueueStartupDataMigrations}=require('../out/runtimeDatabaseBootstrap.js');
+const {enqueueStartupDataMigrations,historicalRunOwnerStateStamp}=require('../out/runtimeDatabaseBootstrap.js');
+test('automatic migration discovery never enters task byproduct directories',async()=>{
+ const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-impact-discovery-'));
+ const workspace=path.join(base,'project');fs.mkdirSync(workspace);
+ const store=new UnifiedDataStore(path.join(base,'global'));const ops=createRuntimeDataOperations(store);
+ const run=path.join(workspace,'.solopreneur','agent-runs','__solo__','12'),evidence=path.join(run,'evidence');fs.mkdirSync(evidence,{recursive:true});
+ fs.writeFileSync(path.join(run,'prompt.txt'),'耐久提示词');fs.writeFileSync(path.join(evidence,'toolchain.bin'),'副产物');
+ await store.registerProject({root:workspace});
+ const original=fs.promises.readdir;let byproductReads=0;
+ fs.promises.readdir=async function(directory,...args){if(path.resolve(String(directory))===path.resolve(evidence))byproductReads++;return original.call(this,directory,...args);};
+ try{
+  await historicalRunOwnerStateStamp(store,()=>true);
+  await enqueueStartupDataMigrations(store,ops,()=>true);await ops.waitForMigrations();
+  assert.equal(byproductReads,0);
+ }finally{fs.promises.readdir=original;await ops.close();store.close();cleanupExact(base);}
+});
 test('normal upgrade catches up previously completed raw archives once without manual discovery',async()=>{
  const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-impact-startup-upgrade-'));
  const workspace=path.join(base,'project');fs.mkdirSync(workspace);

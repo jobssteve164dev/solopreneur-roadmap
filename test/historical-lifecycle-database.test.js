@@ -635,6 +635,55 @@ for (const registered of [false, true]) for (const [field, name] of [['sessionFi
   else assert.equal(await f.client.readField(reread.reference, field === 'promptFilePath' ? 'prompt' : 'command', reread.status), expected);
 });
 
+test('storage cleanup preserves an old unclassified artifact when historical status declares its exact role', async t => {
+  const f = await history(t), relative = '__solo__/71/original-prompt.data', file = path.join(f.sourceRoot, relative);
+  const bytes = Buffer.from('旧版本已经同步的完整提示词🌿'.repeat(1000)), hash = crypto.createHash('sha256').update(bytes).digest('hex');
+  fs.writeFileSync(file, bytes); f.status.promptFilePath = file; writeLearningJson(f.statusFile, f.status);
+  const contentId = f.store.putContent(bytes, 'application/octet-stream', 'binary');
+  f.store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [f.projectId, 71, relative, contentId, hash, 'application/octet-stream', Date.now()]);
+  f.store.captureMigrationSource({ identity: `agent-runs:${f.project}`, key: relative, hash }, bytes, { mimeType: 'application/octet-stream', encoding: 'binary' });
+  assert.equal(f.store.rows('SELECT artifact_kind FROM project_run_artifacts WHERE relative_path=?', [relative])[0].artifact_kind, 'unclassified');
+  assert.equal(f.store.rows('SELECT source_kind FROM migration_items WHERE source_identity=? AND source_key=?', [`agent-runs:${f.project}`, relative])[0].source_kind, 'retained');
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  assert.equal(f.store.rows('SELECT artifact_kind FROM project_run_artifacts WHERE relative_path=? AND execution_log_id=71', [relative])[0].artifact_kind, 'prompt');
+  assert.equal(f.store.rows('SELECT source_kind FROM migration_items WHERE source_identity=? AND source_key=?', [`agent-runs:${f.project}`, relative])[0].source_kind, 'prompt');
+  await f.ops({ operation: 'maintain_database_storage', input: { compact: false } });
+  assert.equal(Buffer.from(f.store.readRunArtifact(f.projectId, 71, relative).bytes, 'base64').toString(), bytes.toString());
+  assert.deepEqual(fs.readFileSync(file), bytes);
+});
+
+test('historical status reclassifies an archived custom prompt after its physical source is gone', async t => {
+  const f = await history(t), relative = '__solo__/71/archived-prompt.data', file = path.join(f.sourceRoot, relative);
+  const bytes = Buffer.from('只保存在统一数据库里的完整旧提示词🌿'.repeat(1000)), hash = crypto.createHash('sha256').update(bytes).digest('hex');
+  fs.writeFileSync(file, bytes); f.status.promptFilePath = file; writeLearningJson(f.statusFile, f.status);
+  const contentId = f.store.putContent(bytes, 'application/octet-stream', 'binary');
+  f.store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [f.projectId, 71, relative, contentId, hash, 'application/octet-stream', Date.now()]);
+  f.store.captureMigrationSource({ identity: `agent-runs:${f.project}`, key: relative, hash }, bytes, { mimeType: 'application/octet-stream', encoding: 'binary' });
+  fs.unlinkSync(file);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  assert.equal(f.store.rows('SELECT artifact_kind FROM project_run_artifacts WHERE relative_path=?', [relative])[0].artifact_kind, 'prompt');
+  assert.equal(f.store.rows('SELECT source_kind FROM migration_items WHERE source_identity=? AND source_key=?', [`agent-runs:${f.project}`, relative])[0].source_kind, 'prompt');
+  await f.ops({ operation: 'maintain_database_storage', input: { compact: false } });
+  assert.equal(Buffer.from(f.store.readRunArtifact(f.projectId, 71, relative).bytes, 'base64').toString(), bytes.toString());
+});
+
+test('cleanup retains a custom status input when its live source conflicts with the archived database copy', async t => {
+  const f = await history(t), relative = '__solo__/71/conflicting-prompt.data', file = path.join(f.sourceRoot, relative);
+  const archived = Buffer.from('数据库中的旧提示词🌿'), current = Buffer.from('运行目录中发生变化的新提示词');
+  const hash = crypto.createHash('sha256').update(archived).digest('hex');
+  fs.writeFileSync(file, current); f.status.promptFilePath = file; writeLearningJson(f.statusFile, f.status);
+  const contentId = f.store.putContent(archived, 'application/octet-stream', 'binary');
+  f.store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [f.projectId, 71, relative, contentId, hash, 'application/octet-stream', Date.now()]);
+  f.store.captureMigrationSource({ identity: `agent-runs:${f.project}`, key: relative, hash }, archived, { mimeType: 'application/octet-stream', encoding: 'binary' });
+  const imported = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+  assert.ok(imported.conflicts.some(item => item.error.includes('historical_run_source_changed')));
+  await f.ops({ operation: 'maintain_database_storage', input: { compact: false } });
+  assert.equal(f.store.rows('SELECT artifact_kind FROM project_run_artifacts WHERE relative_path=?', [relative])[0].artifact_kind, 'retained');
+  assert.equal(f.store.rows('SELECT source_kind FROM migration_items WHERE source_identity=? AND source_key=?', [`agent-runs:${f.project}`, relative])[0].source_kind, 'retained');
+  assert.equal(Buffer.from(f.store.readRunArtifact(f.projectId, 71, relative).bytes, 'base64').toString(), archived.toString());
+  assert.deepEqual(fs.readFileSync(file), current);
+});
+
 for (const field of ['sessionFilePath', 'promptFilePath', 'commandFilePath', 'outputFilePath']) for (const outside of [false, true]) test(`historical adoption rejects ${outside ? 'outside' : 'missing'} declared ${field} despite a valid same-named decoy`, async t => {
   const f = await unregisteredHistory(t), declaration = outside ? path.join(f.base, 'another-project', path.basename(f.status[field])) : path.join(f.runDir, `missing-${path.basename(f.status[field])}`);
   if (outside) { fs.mkdirSync(path.dirname(declaration)); fs.writeFileSync(declaration, fs.readFileSync(f.status[field])); }
