@@ -156,6 +156,19 @@ test('storage maintenance classifies retained run data and removes previously im
   assert.equal(repeated.deletedArtifacts, 0); assert.equal(repeated.deletedSources, 0); assert.equal(repeated.deletedContents, 0);
 }));
 
+test('every direct content reference has a leading index for bounded cleanup', () => fixture(async ({ store }) => {
+  const missing = [];
+  for (const tableRow of store.rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")) {
+    const table = String(tableRow.name);
+    const indexes = store.rows(`PRAGMA index_list("${table}")`).map(index =>
+      store.rows(`PRAGMA index_info("${String(index.name)}")`).sort((left, right) => Number(left.seqno) - Number(right.seqno)).map(column => String(column.name)));
+    for (const foreignKey of store.rows(`PRAGMA foreign_key_list("${table}")`)) {
+      if (foreignKey.table === 'contents' && !indexes.some(columns => columns[0] === String(foreignKey.from))) missing.push(`${table}.${foreignKey.from}`);
+    }
+  }
+  assert.deepEqual(missing, []);
+}));
+
 test('storage maintenance retires empty vanished SoloMap test projects before future startup discovery', () => fixture(async ({ workspace, store, ops }) => {
   const staleRoot = path.join(path.dirname(workspace), 'solomap-old-init-Ab12cd');
   fs.mkdirSync(staleRoot);
