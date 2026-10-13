@@ -36,6 +36,17 @@ interface RuntimeControlEndpoint {
   startedAt?: string;
   heartbeatAt?: string;
   databaseId?: string;
+  buildId?: string;
+  releaseVersion?: string;
+}
+
+interface RuntimeBusyLease {
+  schemaVersion: 1;
+  runtimeId: string;
+  entryPath: string;
+  buildId: string;
+  releaseVersion: string;
+  busySince: string;
 }
 
 interface RuntimeControlServerOptions {
@@ -101,11 +112,34 @@ function writeEndpoint(filePath: string, endpoint: RuntimeControlEndpoint): void
   }
 }
 
+function writeBusyLease(filePath: string, lease: RuntimeBusyLease): void {
+  const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(temporaryPath, JSON.stringify(lease), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  try {
+    fs.renameSync(temporaryPath, filePath);
+    fs.chmodSync(filePath, 0o600);
+  } catch (error) {
+    if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath);
+    throw error;
+  }
+}
+
+function clearOwnedBusyLease(filePath: string, runtimeId: string): void {
+  try {
+    const lease = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Partial<RuntimeBusyLease>;
+    if (lease.runtimeId === runtimeId) fs.unlinkSync(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
 export async function startRuntimeControlServer(options: RuntimeControlServerOptions): Promise<{ close(): Promise<void> }> {
   const token = crypto.randomBytes(32).toString('hex');
   const filePath = endpointPath(options.globalDataPath);
+  const busyFilePath = path.join(path.dirname(filePath), 'control.busy.json');
   const connections = new Set<net.Socket>();
   const busy = new Set<net.Socket>();
+  let endpoint: RuntimeControlEndpoint;
   const server = net.createServer((socket) => {
     connections.add(socket);
     socket.once('close', () => { connections.delete(socket); });
@@ -163,10 +197,26 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
           if (!options.onData || !parsed.request) throw new Error('Runtime data service is unavailable.');
           // Accepted work must finish even when a backup or export outlives a control timeout.
           socket.setTimeout(0);
+          if (busy.size === 0) writeBusyLease(busyFilePath, {
+            schemaVersion: 1,
+            runtimeId: options.runtimeId,
+            entryPath: String(options.entryPath || ''),
+            buildId: String(options.buildId || ''),
+            releaseVersion: String(options.releaseVersion || ''),
+            busySince: new Date().toISOString()
+          });
           busy.add(socket);
           let result: unknown;
           try { result = await options.onData(parsed.request); }
-          finally { busy.delete(socket); }
+          finally {
+            busy.delete(socket);
+            if (busy.size === 0) {
+              // Clearing a completed-work marker must not replace the operation's
+              // result or root error. A failed unlink remains bounded by the
+              // host-side lease age and cannot impersonate another Runtime.
+              try { clearOwnedBusyLease(busyFilePath, options.runtimeId); } catch { /* bounded stale marker */ }
+            }
+          }
           socket.end(JSON.stringify({ ok: true, runtimeId: options.runtimeId, result }) + '\n');
           return;
         }
@@ -191,14 +241,17 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('Runtime control server did not bind a local TCP port.');
-  try { writeEndpoint(filePath, {
+  endpoint = {
     schemaVersion: 1,
     runtimeId: options.runtimeId,
     host: '127.0.0.1',
     port: address.port,
     token,
-    entryPath: options.entryPath
-  }); } catch (error) {
+    entryPath: options.entryPath,
+    buildId: options.buildId,
+    releaseVersion: options.releaseVersion
+  };
+  try { writeEndpoint(filePath, endpoint); } catch (error) {
     connections.forEach(socket => socket.destroy());
     await new Promise<void>(resolve => server.close(() => resolve()));
     throw error;

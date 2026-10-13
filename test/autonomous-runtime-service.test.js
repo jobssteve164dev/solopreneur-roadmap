@@ -151,6 +151,59 @@ test('a verified SoloMap runtime without control is terminated before fallback r
   assert.equal(runtime.readRuntimeState(globalRoot).pid, spawnedChild.pid);
 });
 
+test('a fresh packaged Runtime stays owned while a long database request blocks health replies', async t => {
+  const host = require('../out/autonomousRuntimeHost.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-busy-database-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const runtimeRoot = path.join(globalRoot, 'runtime');
+  const statePath = path.join(runtimeRoot, 'control.json');
+  const busyPath = path.join(runtimeRoot, 'control.busy.json');
+  const entryPath = '/opt/solomap/out/autonomousRuntimeProcess.js';
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  const endpoint = { schemaVersion: 1, runtimeId: 'busy', pid: process.pid, status: 'paused', heartbeatAt: new Date().toISOString(),
+    entryPath, host: '127.0.0.1', port: 43210, token: 'a'.repeat(64), buildId: 'packaged-build', releaseVersion: '0.0.526' };
+  const busyLease = { schemaVersion: 1, runtimeId: 'busy', entryPath, buildId: 'packaged-build', releaseVersion: '0.0.526', busySince: new Date().toISOString() };
+  fs.writeFileSync(statePath, JSON.stringify(endpoint));
+  fs.writeFileSync(busyPath, JSON.stringify(busyLease));
+  t.after(() => { fs.unlinkSync(busyPath); fs.unlinkSync(statePath); fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root); });
+  let terminated = false;
+  let spawned = false;
+  const result = await host.ensureHealthyAutonomousRuntime({
+    extensionPath: '/opt/solomap', globalDataPath: globalRoot, buildId: 'packaged-build', releaseVersion: '0.0.526',
+    sendHealth: async () => { throw new Error('control endpoint busy'); },
+    verifyRuntimeProcess: () => true,
+    terminateProcess: async () => { terminated = true; },
+    spawnProcess: () => { spawned = true; throw new Error('must not spawn'); }
+  });
+  assert.deepEqual(result, { started: false, pid: process.pid, runtimeId: 'busy' });
+  assert.equal(terminated, false);
+  assert.equal(spawned, false);
+  fs.writeFileSync(busyPath, JSON.stringify({ ...busyLease, busySince: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString() }));
+  await assert.rejects(host.ensureHealthyAutonomousRuntime({
+    extensionPath: '/opt/solomap', globalDataPath: globalRoot, buildId: 'packaged-build', releaseVersion: '0.0.526',
+    isProcessAlive: () => true,
+    sendHealth: async () => { throw new Error('control endpoint busy'); },
+    verifyRuntimeProcess: () => true,
+    terminateProcess: async () => { terminated = true; },
+    spawnProcess: () => { spawned = true; throw new Error('must not spawn'); }
+  }), /runtime_termination_failed/);
+  assert.equal(terminated, true);
+  assert.equal(spawned, false);
+  terminated = false;
+  fs.writeFileSync(busyPath, JSON.stringify(busyLease));
+  fs.writeFileSync(statePath, JSON.stringify({ ...endpoint, buildId: 'previous-build' }));
+  await assert.rejects(host.ensureHealthyAutonomousRuntime({
+    extensionPath: '/opt/solomap', globalDataPath: globalRoot, buildId: 'packaged-build', releaseVersion: '0.0.526',
+    isProcessAlive: () => true,
+    sendHealth: async () => { throw new Error('control endpoint busy'); },
+    verifyRuntimeProcess: () => true,
+    terminateProcess: async () => { terminated = true; },
+    spawnProcess: () => { spawned = true; throw new Error('must not spawn'); }
+  }), /runtime_termination_failed/);
+  assert.equal(terminated, true);
+  assert.equal(spawned, false);
+});
+
 test('a verified SoloMap runtime with a stale heartbeat is terminated before fallback recovery', async t => {
   const host = require('../out/autonomousRuntimeHost.js');
   const runtime = require('../out/autonomousRuntime.js');

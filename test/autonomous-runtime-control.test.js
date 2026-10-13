@@ -109,6 +109,91 @@ test('runtime control rejects requests without its private token', async () => {
   }
 });
 
+test('runtime control publishes an exact busy lease around accepted data work', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-control-busy-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  fs.mkdirSync(globalRoot);
+  let server;
+  let release;
+  try {
+    const gate = new Promise(resolve => { release = resolve; });
+    server = await control.startRuntimeControlServer({
+      globalDataPath: globalRoot,
+      runtimeId: 'runtime-control-busy',
+      entryPath: '/opt/solomap/out/autonomousRuntimeProcess.js',
+      buildId: 'build-busy',
+      releaseVersion: '0.0.526',
+      onCommand() { return { status: 'paused' }; },
+      async onData() { await gate; return { done: true }; }
+    });
+    const endpointPath = path.join(globalRoot, 'runtime', 'control.json');
+    const busyPath = path.join(globalRoot, 'runtime', 'control.busy.json');
+    const pending = control.sendRuntimeDataRequest(globalRoot, { operation: 'slow_database_read', input: {} });
+    await waitFor(() => fs.existsSync(busyPath));
+    const endpoint = JSON.parse(fs.readFileSync(endpointPath, 'utf8'));
+    const busy = JSON.parse(fs.readFileSync(busyPath, 'utf8'));
+    assert.equal(endpoint.host, '127.0.0.1');
+    assert.ok(Number.isInteger(endpoint.port) && endpoint.port > 0);
+    assert.ok(typeof endpoint.token === 'string' && endpoint.token.length >= 32);
+    assert.equal(busy.entryPath, '/opt/solomap/out/autonomousRuntimeProcess.js');
+    assert.equal(busy.buildId, 'build-busy');
+    assert.equal(busy.releaseVersion, '0.0.526');
+    release();
+    assert.deepEqual(await pending, { done: true });
+    await waitFor(() => !fs.existsSync(busyPath));
+  } finally {
+    release?.();
+    if (server) await server.close();
+    const endpointPath = path.join(globalRoot, 'runtime', 'control.json');
+    if (fs.existsSync(endpointPath)) fs.unlinkSync(endpointPath);
+    const runtimeRoot = path.join(globalRoot, 'runtime');
+    if (fs.existsSync(runtimeRoot)) fs.rmdirSync(runtimeRoot);
+    if (fs.existsSync(globalRoot)) fs.rmdirSync(globalRoot);
+    fs.rmdirSync(root);
+  }
+});
+
+test('busy marker cleanup never replaces the accepted database error', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-control-busy-error-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  fs.mkdirSync(globalRoot);
+  let server;
+  let release;
+  const originalUnlink = fs.unlinkSync;
+  try {
+    const gate = new Promise(resolve => { release = resolve; });
+    server = await control.startRuntimeControlServer({
+      globalDataPath: globalRoot, runtimeId: 'runtime-control-busy-error',
+      entryPath: '/opt/solomap/out/autonomousRuntimeProcess.js', buildId: 'build-error', releaseVersion: '0.0.526',
+      onCommand() { return { status: 'paused' }; },
+      async onData() { await gate; throw new Error('SQLITE_FULL'); }
+    });
+    const busyPath = path.join(globalRoot, 'runtime', 'control.busy.json');
+    const pending = control.sendRuntimeDataRequest(globalRoot, { operation: 'failing_database_write', input: {} });
+    await waitFor(() => fs.existsSync(busyPath));
+    fs.unlinkSync = target => {
+      if (path.resolve(String(target)) === path.resolve(busyPath)) throw Object.assign(new Error('cleanup ENOSPC'), { code: 'ENOSPC' });
+      return originalUnlink(target);
+    };
+    release();
+    await assert.rejects(pending, /SQLITE_FULL/);
+    fs.unlinkSync = originalUnlink;
+    assert.equal(fs.existsSync(busyPath), true);
+  } finally {
+    fs.unlinkSync = originalUnlink;
+    release?.();
+    if (server) await server.close();
+    for (const file of ['control.busy.json', 'control.json']) {
+      const target = path.join(globalRoot, 'runtime', file);
+      if (fs.existsSync(target)) fs.unlinkSync(target);
+    }
+    const runtimeRoot = path.join(globalRoot, 'runtime');
+    if (fs.existsSync(runtimeRoot)) fs.rmdirSync(runtimeRoot);
+    if (fs.existsSync(globalRoot)) fs.rmdirSync(globalRoot);
+    fs.rmdirSync(root);
+  }
+});
+
 test('runtime control frames split TCP requests and closes idle clients', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-control-frame-'));
   const globalRoot = path.join(root, '.solomap-global');
