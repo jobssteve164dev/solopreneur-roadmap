@@ -11394,18 +11394,43 @@ test('step conversations can start independently while dependencies or other run
   assert.equal(fs.existsSync(path.join(project, '.solopreneur', 'project_journal.db')), false);
 });
 
-async function openSoloSettlementFixture(t, prefix, summary) {
+async function openSoloSettlementFixture(t, prefix, summary, metadata = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
   const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
   const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
   await engine.initAndSync(); t.after(() => engine.close());
-  const run = await native.ops({ operation: 'prepare_run', input: { root: project, executionLogId: 61, nodeId: '__solo__', runKind: 'solo', prompt: '完成任务', command: 'fixture-command', userMessage: '完成任务', metadata: { interactiveSession: true, agentCli: 'claude', collaborationReviewMode: 'off' }, idempotencyKey: 'sidebar-run' } });
+  const run = await native.ops({ operation: 'prepare_run', input: { root: project, executionLogId: 61, nodeId: '__solo__', runKind: 'solo', prompt: '完成任务', command: 'fixture-command', userMessage: '完成任务', metadata: { interactiveSession: true, agentCli: 'claude', collaborationReviewMode: 'off', ...metadata }, idempotencyKey: 'sidebar-run' } });
   await native.ops({ operation: 'append_run_log', input: { projectId: run.projectId, executionLogId: 61, generation: run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from('Solo task finished.\n').toString('base64'), idempotencyKey: 'sidebar-output' } });
   await native.ops({ operation: 'checkpoint_run', input: { projectId: run.projectId, executionLogId: 61, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial', summary, idempotencyKey: 'sidebar-complete' } });
   const reference = require('../out/runLifecycleClient.js').runStatusReference(project, 61);
   return { ...native, engine, root, project, reference, run };
 }
+
+test('historically adopted completions are indexed without replaying live completion side effects', async t => {
+  const fixture = await openSoloSettlementFixture(t, 'solomap-historical-side-effects-', '历史完成结果', { historicalAdopted: true });
+  const actualTransport = require('../out/autonomousRuntimeControl.js');
+  let effectKinds = [];
+  const transport = { ...actualTransport, async sendRuntimeDataRequest(root, request) {
+    if (request.operation === 'commit_run_settlement') effectKinds = request.input.effects.map(effect => effect.kind);
+    return actualTransport.sendRuntimeDataRequest(root, request);
+  } };
+  const extension = loadSoloSettlementHost(fixture, null, transport, true);
+  await extension.settle(fixture.reference, undefined, fixture.root);
+  assert.equal(Array.from(effectKinds).join(','), 'refresh');
+  const history = await fixture.ops({ operation: 'read_run_settlements', input: { projectId: fixture.run.projectId, executionLogId: 61 } });
+  assert.equal(history.items.length, 1);
+  assert.ok(history.items[0].learningEventId, 'historical facts must still be indexed for later retrieval');
+});
+
+test('queued historical live side effects become inert when an upgrade resumes settlement delivery', async () => {
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.applyEffect = applyRunSettlementEffect;');
+  await extension.applyEffect({
+    effectId: 'historical-automation', projectId: 'historical-project', runId: 'historical-run', turnId: 'historical-turn',
+    executionLogId: 71, sourceRevision: 1, checkpointSequence: 1, kind: 'automation',
+    payload: { statusData: { historicalAdopted: true } }
+  }, '/unreadable-historical-root');
+});
 
 function loadSoloSettlementHost(fixture, sidebar, transport, withContext = false) {
   const extension = loadCompiledModule('out/extension.js', `

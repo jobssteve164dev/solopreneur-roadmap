@@ -9455,6 +9455,7 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
     const isReviewRun = runKind === 'agent_review';
     const isContinuationRun = statusData.checkpointPreserveRoadmapState === true || (isContinuationRunKind(String(runKind || '')) && (statusData.interactiveSession !== true || statusData.stopRequested === true));
     const isSoloConversation = runKind === 'solo' || nodeId === soloConversationId;
+    const isHistoricalAdoption = statusData.historicalAdopted === true;
     let nextStatus = String(status || '');
     let completionReason = '';
     const stoppedWithoutResult = statusData.stopRequested === true && statusData.stopRequestIntent?.outcome !== 'partial'
@@ -9909,8 +9910,8 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
       ...(shouldWriteNodeStatus ? [{ kind: 'roadmap' as const, payload: effectPayload }] : []),
       ...(shouldStartReview ? [{ kind: 'review' as const, payload: effectPayload }] : []),
       ...(isReviewRun && reviewResult?.status === 'revise' && Number(reviewAttempt || 1) < 2 ? [{ kind: 'revision' as const, payload: effectPayload }] : []),
-      ...(extensionContextRef && !isContinuationRun ? [{ kind: 'telegram' as const, payload: effectPayload }] : []),
-      ...(extensionContextRef && !isReviewRun && !isContinuationRun ? [{ kind: 'automation' as const, payload: effectPayload }] : []),
+      ...(!isHistoricalAdoption && extensionContextRef && !isContinuationRun ? [{ kind: 'telegram' as const, payload: effectPayload }] : []),
+      ...(!isHistoricalAdoption && extensionContextRef && !isReviewRun && !isContinuationRun ? [{ kind: 'automation' as const, payload: effectPayload }] : []),
       { kind: 'refresh', payload: effectPayload }
     ];
     await recordAcceptedReviewVerification(consumerClient, workspaceRoot, Number(reviewOfExecutionLogId || 0), consumerLease.expectedTurnId, reviewResult);
@@ -9966,6 +9967,7 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
 }
 
 async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').RunEffect, dataRoot?: string): Promise<void> {
+  if (effect.payload.statusData?.historicalAdopted === true && (effect.kind === 'telegram' || effect.kind === 'automation')) return;
   const {
     workspaceRoot, nodeId, executionLogId, originalExecutionLogId, nextStatus, failureCode, failureReason,
     runKind, agentCli, commandPreview, command, userMessage, statusData, currentNode,

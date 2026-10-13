@@ -59,7 +59,8 @@ test('fallback runtime health requires a matching live control response', async 
   assert.equal((await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), live)).reason, 'missing_state');
   fs.mkdirSync(runtimeRoot, { recursive: true });
   fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'test', pid: process.pid, status: 'running', heartbeatAt: '2020-01-01T00:00:00.000Z' }));
-  assert.equal((await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), live)).reason, 'stale_heartbeat');
+  assert.deepEqual(await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), live), { healthy: true, reason: 'running' });
+  assert.deepEqual(await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), async () => { throw new Error('connection refused'); }), { healthy: false, reason: 'stale_heartbeat' });
   fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'test', pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
   assert.deepEqual(await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), async () => { throw new Error('connection refused'); }), { healthy: false, reason: 'control_unavailable' });
   assert.deepEqual(await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), async () => ({ ok: true, runtimeId: 'other', status: 'running' })), { healthy: false, reason: 'different_runtime' });
@@ -204,7 +205,7 @@ test('a fresh packaged Runtime stays owned while a long database request blocks 
   assert.equal(spawned, false);
 });
 
-test('a verified SoloMap runtime with a stale heartbeat is terminated before fallback recovery', async t => {
+test('a responsive current-build Runtime remains owned while a long intelligence cycle leaves its file heartbeat stale', async t => {
   const host = require('../out/autonomousRuntimeHost.js');
   const runtime = require('../out/autonomousRuntime.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-recover-stale-'));
@@ -213,30 +214,25 @@ test('a verified SoloMap runtime with a stale heartbeat is terminated before fal
   const statePath = path.join(runtimeRoot, 'control.json');
   fs.mkdirSync(runtimeRoot, { recursive: true });
   fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'stale', pid: process.pid, status: 'running', heartbeatAt: new Date(0).toISOString() }));
-  let spawnedChild;
   t.after(() => {
-    if (spawnedChild) spawnedChild.kill('SIGKILL');
     fs.unlinkSync(statePath); fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root);
   });
-  let oldAlive = true;
   let terminated = 0;
+  let spawned = false;
   const result = await host.ensureHealthyAutonomousRuntime({
     extensionPath: '/opt/solomap-new', globalDataPath: globalRoot, buildId: 'new',
-    isProcessAlive: pid => pid === process.pid ? oldAlive : true,
+    isProcessAlive: () => true,
     sendHealth: async () => {
       const state = runtime.readRuntimeState(globalRoot);
       return { ok: true, runtimeId: state.runtimeId, status: state.status, entryPath: '/opt/solomap-new/out/autonomousRuntimeProcess.js', buildId: 'new' };
     },
     verifyRuntimeProcess: (pid, runtimeId) => pid === process.pid && runtimeId === 'stale',
-    async terminateProcess(pid) { terminated = pid; oldAlive = false; },
-    spawnProcess(command, args) {
-      spawnedChild = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
-      return { pid: spawnedChild.pid, unref() {} };
-    }
+    async terminateProcess(pid) { terminated = pid; },
+    spawnProcess() { spawned = true; throw new Error('must not replace a responsive Runtime'); }
   });
-  assert.equal(terminated, process.pid);
-  assert.equal(result.started, true);
-  assert.equal(runtime.readRuntimeState(globalRoot).pid, spawnedChild.pid);
+  assert.equal(terminated, 0);
+  assert.equal(spawned, false);
+  assert.deepEqual(result, { started: false, pid: process.pid, runtimeId: 'stale' });
 });
 
 test('a healthy runtime is reused only after its control identity matches the lease', async t => {

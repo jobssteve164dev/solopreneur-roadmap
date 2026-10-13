@@ -274,14 +274,20 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
 }
 
 export async function sendRuntimeDataRequest<T>(globalDataPath: string, request: RuntimeDataRequest): Promise<T> {
-  const endpoint = await readReadyEndpoint(globalDataPath);
-  return new Promise((resolve, reject) => {
+  const send = (endpoint: RuntimeControlEndpoint): Promise<T> => new Promise((resolve, reject) => {
     const socket = net.createConnection({ host: '127.0.0.1', port: endpoint.port });
     let response = '';
+    let connected = false;
     socket.setEncoding('utf8');
-    socket.once('connect', () => socket.write(JSON.stringify({ token: endpoint.token, command: 'data', expectedRuntimeId: endpoint.runtimeId, request }) + '\n'));
+    socket.once('connect', () => {
+      connected = true;
+      socket.write(JSON.stringify({ token: endpoint.token, command: 'data', expectedRuntimeId: endpoint.runtimeId, request }) + '\n');
+    });
     socket.on('data', chunk => { response += chunk; });
-    socket.once('error', reject);
+    socket.once('error', error => {
+      if (!connected) Object.assign(error, { runtimeDataPreconnect: true });
+      reject(error);
+    });
     socket.once('end', () => {
       try {
         let parsed: { ok: boolean; runtimeId: string; result: T; error?: string };
@@ -297,6 +303,15 @@ export async function sendRuntimeDataRequest<T>(globalDataPath: string, request:
       } catch (error) { reject(error); }
     });
   });
+  const endpoint = await readReadyEndpoint(globalDataPath);
+  try {
+    return await send(endpoint);
+  } catch (error) {
+    if (!(error instanceof Error) || !(error as Error & { runtimeDataPreconnect?: boolean }).runtimeDataPreconnect) throw error;
+    const replacement = await readReadyEndpoint(globalDataPath);
+    if (replacement.runtimeId === endpoint.runtimeId && replacement.port === endpoint.port && replacement.token === endpoint.token) throw error;
+    return send(replacement);
+  }
 }
 
 export async function sendRuntimeControlCommand(

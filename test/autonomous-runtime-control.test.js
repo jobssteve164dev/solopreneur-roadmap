@@ -270,6 +270,53 @@ test('runtime data reports an interrupted response without leaking a JSON parser
   }
 });
 
+test('runtime data reconnects once when the endpoint is replaced before the request connects', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-data-replaced-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const runtimeRoot = path.join(globalRoot, 'runtime');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  const live = await control.startRuntimeControlServer({
+    globalDataPath: globalRoot,
+    runtimeId: 'replacement-runtime',
+    onCommand() { return { status: 'running' }; },
+    async onData(request) { return { operation: request.operation, recovered: true }; }
+  });
+  const endpointPath = path.join(runtimeRoot, 'control.json');
+  const replacement = fs.readFileSync(endpointPath);
+  const unavailable = net.createServer();
+  await new Promise((resolve, reject) => {
+    unavailable.once('error', reject);
+    unavailable.listen(0, '127.0.0.1', resolve);
+  });
+  const address = unavailable.address();
+  assert.ok(address && typeof address !== 'string');
+  const stalePort = address.port;
+  await new Promise(resolve => unavailable.close(resolve));
+  fs.writeFileSync(endpointPath, JSON.stringify({
+    schemaVersion: 1, runtimeId: 'stale-runtime', host: '127.0.0.1', port: stalePort, token: 'stale-token'
+  }));
+  const originalReadFile = fs.promises.readFile;
+  let swapped = false;
+  fs.promises.readFile = async function(file, ...args) {
+    const bytes = await originalReadFile.call(this, file, ...args);
+    if (!swapped && path.resolve(String(file)) === path.resolve(endpointPath)) {
+      swapped = true;
+      fs.writeFileSync(endpointPath, replacement);
+    }
+    return bytes;
+  };
+  try {
+    const pending = control.sendRuntimeDataRequest(globalRoot, { operation: 'resume_conversation', input: { id: 1 } });
+    assert.deepEqual(await pending, { operation: 'resume_conversation', recovered: true });
+    assert.equal(swapped, true);
+  } finally {
+    fs.promises.readFile = originalReadFile;
+    await live.close();
+    if (fs.existsSync(endpointPath)) fs.unlinkSync(endpointPath);
+    fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root);
+  }
+});
+
 test('standalone runtime stays paused and resumes through its authenticated control endpoint', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-process-control-'));
   const globalRoot = path.join(root, '.solomap-global');
