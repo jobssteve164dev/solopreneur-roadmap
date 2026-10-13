@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.0.513 - 2026-10-13
+
+### Fixed
+- restore local-first cold startup (137e0c6)
+
+### Docs
+- hand off project-wide data migration (85dc4b1)
+- record unified database production release (2626c35)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.512 - 2026-10-13
 
 ### Added
