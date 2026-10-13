@@ -5,7 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const { LocalAgentCliEngine, buildCognitiveCliInvocation } = require('../out/localAgentCliEngine.js');
-const { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig, writeCognitiveRuntimeConfig } = require('../out/cognitiveRuntimeConfig.js');
+const { cognitiveRuntimeConfigRevision, persistCognitiveRuntimeConfig, readCognitiveRuntimeConfig, refreshCognitiveRuntimeConfig, writeCognitiveRuntimeConfig } = require('../out/cognitiveRuntimeConfig.js');
 
 test('Codex cognitive invocation is headless, read-only, and shell-free', () => {
   const invocation = buildCognitiveCliInvocation('/usr/local/bin/codex', 'gpt-5', '{"goal":"choose"}');
@@ -105,4 +105,103 @@ test('cognitive config epochs do not return to an earlier value after an A-B-A s
     if (fs.existsSync(root)) fs.rmdirSync(root);
     fs.rmdirSync(parent);
   }
+});
+
+test('a late cognitive refresh cannot replace a newer configuration snapshot', async () => {
+  const root = path.join(os.tmpdir(), `solomap-cognitive-refresh-race-${process.pid}-${Date.now()}`);
+  let releaseOlder;
+  const older = refreshCognitiveRuntimeConfig(root, async () => {
+    await new Promise(resolve => { releaseOlder = resolve; });
+    return { items: [
+      { key: 'mode', revision: 1, value: 'agent_cli' },
+      { key: 'agentCli', revision: 1, value: 'codex' },
+      { key: 'model', revision: 1, value: 'old' }
+    ] };
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const newer = refreshCognitiveRuntimeConfig(root, async () => ({ items: [
+    { key: 'mode', revision: 2, value: 'agent_cli' },
+    { key: 'agentCli', revision: 2, value: 'codex' },
+    { key: 'model', revision: 2, value: 'new' }
+  ] }));
+
+  await newer;
+  releaseOlder();
+  await older;
+
+  assert.equal(readCognitiveRuntimeConfig(root).model, 'new');
+});
+
+test('a valid cold refresh remains usable while another refresh is still pending', async () => {
+  const root = path.join(os.tmpdir(), `solomap-cognitive-refresh-pending-${process.pid}-${Date.now()}`);
+  let releaseEarlier;
+  let releaseLater;
+  const earlier = refreshCognitiveRuntimeConfig(root, async () => {
+    await new Promise(resolve => { releaseEarlier = resolve; });
+    return { items: [
+      { key: 'mode', revision: 1, value: 'agent_cli' },
+      { key: 'agentCli', revision: 1, value: 'codex' },
+      { key: 'model', revision: 1, value: 'ready' }
+    ] };
+  });
+  const later = refreshCognitiveRuntimeConfig(root, async () => {
+    await new Promise(resolve => { releaseLater = resolve; });
+    return { items: [
+      { key: 'mode', revision: 2, value: 'agent_cli' },
+      { key: 'agentCli', revision: 2, value: 'codex' },
+      { key: 'model', revision: 2, value: 'newer' }
+    ] };
+  });
+
+  releaseEarlier();
+  assert.equal((await earlier).model, 'ready');
+  assert.equal(readCognitiveRuntimeConfig(root).model, 'ready');
+  releaseLater();
+  await later;
+  assert.equal(readCognitiveRuntimeConfig(root).model, 'newer');
+});
+
+test('a concurrent failed refresh cannot suppress a requested cognitive persistence', async () => {
+  const root = path.join(os.tmpdir(), `solomap-cognitive-persist-race-${process.pid}-${Date.now()}`);
+  const setting = (revision, model) => [
+    { key: 'mode', revision, value: 'agent_cli' },
+    { key: 'agentCli', revision, value: 'codex' },
+    { key: 'model', revision, value: model }
+  ];
+  await refreshCognitiveRuntimeConfig(root, async () => ({ items: setting(1, 'old') }));
+  let databaseItems = setting(2, 'new');
+  let releasePersistRead;
+  let releaseCompetingRead;
+  let persistReadCount = 0;
+  const patches = [];
+  const operation = async request => {
+    if (request.operation === 'read_host_settings') {
+      persistReadCount += 1;
+      if (persistReadCount === 1) await new Promise(resolve => { releasePersistRead = resolve; });
+      return { items: databaseItems };
+    }
+    if (request.operation === 'patch_host_settings') {
+      patches.push(...request.input.patches);
+      const values = new Map(databaseItems.map(item => [item.key, item.value]));
+      for (const patch of request.input.patches) values.set(patch.key, patch.value);
+      databaseItems = ['mode', 'agentCli', 'model'].map(key => ({ key, revision: key === 'model' ? 3 : 2, value: values.get(key) }));
+      return { items: databaseItems };
+    }
+    throw new Error(`unexpected operation: ${request.operation}`);
+  };
+  const persistence = persistCognitiveRuntimeConfig(root, { mode: 'agent_cli', agentCli: 'codex', model: 'old' }, operation, 'persist-old');
+  await new Promise(resolve => setImmediate(resolve));
+  const competing = refreshCognitiveRuntimeConfig(root, async () => {
+    await new Promise(resolve => { releaseCompetingRead = resolve; });
+    throw new Error('competing refresh failed');
+  });
+
+  releasePersistRead();
+  const result = await persistence;
+  releaseCompetingRead();
+  await assert.rejects(competing, /competing refresh failed/);
+
+  assert.deepEqual(patches, [{ key: 'model', expectedRevision: 2, value: 'old' }]);
+  assert.equal(result.model, 'old');
+  assert.equal(readCognitiveRuntimeConfig(root).model, 'old');
 });

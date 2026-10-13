@@ -61,8 +61,13 @@ function cognitiveOperation(globalDataPath: string, operation?: CognitiveOperati
 export async function refreshCognitiveRuntimeConfig(globalDataPath: string, operation?: CognitiveOperation): Promise<CognitiveRuntimeConfig> {
   const root = normalizeGlobalDataPathForExtension(globalDataPath);
   const result = await cognitiveOperation(root, operation)('read_host_settings', { namespace: 'cognitive', ownerScope: 'global' }) as { items: SettingItem[] };
+  const nextRevisions = new Map(result.items.map(item => [item.key, item.revision]));
+  const currentRevisions = revisions.get(root);
+  if (currentRevisions && [...currentRevisions].some(([key, revision]) => (nextRevisions.get(key) ?? -1) < revision)) {
+    return readCognitiveRuntimeConfig(root);
+  }
   const fields = new Map(result.items.map(item => [item.key, item]));
-  revisions.set(root, new Map(result.items.map(item => [item.key, item.revision])));
+  revisions.set(root, nextRevisions);
   const value = normalizeConfig({ mode: fields.get('mode')?.value as CognitiveRuntimeConfig['mode'], agentCli: String(fields.get('agentCli')?.value || ''), model: String(fields.get('model')?.value || '') });
   value.revision = crypto.createHash('sha256').update(JSON.stringify(result.items.map(item => [item.key, item.revision, item.value]))).digest('hex');
   configs.set(root, value);

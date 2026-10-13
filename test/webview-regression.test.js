@@ -14686,6 +14686,68 @@ test('cognitive Runtime config uses the same normalized data root as the detache
   assert.doesNotMatch(body, /sendRuntimeDataRequest\(settings\.globalDataPath,/);
 });
 
+test('cold-start cognitive config is immediately readable after projecting the selected Agent CLI', async t => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cognitive-cold-start-'));
+  const root = path.join(tempRoot, '.solomap-global');
+  const cognitive = require('../out/cognitiveRuntimeConfig.js');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const store = new UnifiedDataStore(root);
+  const operations = createRuntimeDataOperations(store);
+  t.after(async () => {
+    await operations.close(); store.close();
+    const unlinkOwned = file => { try { fs.unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; } };
+    unlinkOwned(path.join(root, 'solomap.db-wal')); unlinkOwned(path.join(root, 'solomap.db-shm')); unlinkOwned(path.join(root, 'solomap.db'));
+    const diagnosticsRoot = path.join(root, 'diagnostics');
+    if (fs.existsSync(diagnosticsRoot)) {
+      const dayNames = fs.readdirSync(diagnosticsRoot); assert.ok(dayNames.length <= 1);
+      if (dayNames[0]) {
+        const dayRoot = path.join(diagnosticsRoot, dayNames[0]);
+        for (const file of fs.readdirSync(dayRoot)) {
+          assert.match(file, /^recent-(?:errors|operations)\.[^.]+\.json$/);
+          unlinkOwned(path.join(dayRoot, file));
+        }
+        fs.rmdirSync(dayRoot);
+      }
+      fs.rmdirSync(diagnosticsRoot);
+    }
+    fs.rmdirSync(root); fs.rmdirSync(tempRoot);
+  });
+  await operations({ operation: 'patch_host_settings', input: {
+    namespace: 'extension', ownerScope: 'global',
+    patches: [
+      { key: 'cliPath', expectedRevision: 0, value: 'codex' },
+      { key: 'agentModelPreferences', expectedRevision: 0, value: {} },
+      { key: 'cognitiveEngineAgent', expectedRevision: 0, value: 'follow_main' }
+    ],
+    idempotencyKey: 'cold-start-extension-settings'
+  } });
+  assert.equal(cognitive.readCognitiveRuntimeConfig(root).mode, 'local_only');
+  const extensionModule = loadCompiledModule('out/extension.js', `
+    module.exports.__syncCognitiveRuntimeConfig = syncCognitiveRuntimeConfig;
+    module.exports.__connectColdStartCognitiveConfig = call => {
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
+    };
+  `);
+  extensionModule.__connectColdStartCognitiveConfig(operations);
+  const context = { globalState: { get: () => ({ globalDataPath: root }) } };
+
+  await extensionModule.__syncCognitiveRuntimeConfig(context, { globalDataPath: root });
+
+  assert.deepEqual(cognitive.readCognitiveRuntimeConfig(root), {
+    schemaVersion: 1,
+    revision: cognitive.readCognitiveRuntimeConfig(root).revision,
+    mode: 'agent_cli',
+    agentCli: 'codex',
+    model: 'auto'
+  });
+  assert.ok(cognitive.readCognitiveRuntimeConfig(root).revision);
+  const persisted = await operations({ operation: 'read_host_settings', input: { namespace: 'cognitive', ownerScope: 'global' } });
+  assert.deepEqual(Object.fromEntries(persisted.items.map(item => [item.key, item.value])), {
+    agentCli: 'codex', mode: 'agent_cli', model: 'auto'
+  });
+});
+
 test('manual experience review is routed from the existing settings action', async () => {
   const extensionModule = loadCompiledModule('out/extension.js', 'module.exports.__review = handleReviewGlobalPrompt;');
   assert.equal(typeof extensionModule.__review, 'function');

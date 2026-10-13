@@ -200,7 +200,7 @@ import { sendRuntimeControlCommand, sendRuntimeDataRequest } from './autonomousR
 import { disableAutonomousRuntimeService, enableAutonomousRuntime, ensureAutonomousRuntimeService, isAutonomousRuntimeDisabled, isRuntimeServiceManagerAvailable, registeredAutonomousRuntimeDataRoot } from './autonomousRuntimeService';
 import { IntelligenceConversationStore } from './intelligenceChat';
 import { readTodayReview } from './dailyReview';
-import { persistCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
+import { persistCognitiveRuntimeConfig, refreshCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import {
   buildCollaborationInviteCode,
   createCollaborationLobbySession,
@@ -3275,6 +3275,7 @@ async function syncCognitiveRuntimeConfig(context: vscode.ExtensionContext, sett
         values: { mode: 'agent_cli', agentCli, model },
         idempotencyKey: `cognitive-projection:${crypto.randomUUID()}`
       } });
+      await refreshCognitiveRuntimeConfig(globalDataPath, request => sendRuntimeDataRequest(globalDataPath, request));
       return;
     } catch (error) {
       if ((error as Error).message !== 'source_revision_conflict' || attempt === 4) throw error;
