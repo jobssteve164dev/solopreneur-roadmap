@@ -217,21 +217,27 @@ test('a healthy older build drains before the new fallback runtime takes its lea
   let drained = false;
   const newPath = '/opt/new/out/autonomousRuntimeProcess.js';
   const result = await host.ensureHealthyAutonomousRuntime({
-    extensionPath: '/opt/new', globalDataPath: globalRoot, buildId: 'new',
+    extensionPath: '/opt/new', globalDataPath: globalRoot, buildId: 'new', releaseVersion: '0.0.514',
     isProcessAlive: () => !drained,
     sendHealth: async () => {
       const state = runtime.readRuntimeState(globalRoot);
       return { ok: true, runtimeId: state.runtimeId, status: state.status, buildId: state.runtimeId === 'old' ? 'old' : 'new',
         entryPath: state.runtimeId === 'old' ? '/opt/old/out/autonomousRuntimeProcess.js' : newPath };
     },
-    async sendControl(command) {
+    async sendControl(command, runtimeId, replacementBuildId, replacementVersion) {
       assert.equal(command, 'drain');
+      assert.equal(runtimeId, 'old');
+      assert.equal(replacementBuildId, 'new');
+      assert.equal(replacementVersion, '0.0.514');
       runtime.updateRuntimeState(globalRoot, 'old', { status: 'stopped' });
       drained = true;
     },
     spawnProcess(command, args) {
       assert.equal(drained, true);
       assert.equal(args[0], newPath);
+      const versionIndex = args.indexOf('--runtime-version');
+      assert.ok(versionIndex > 0);
+      assert.equal(args[versionIndex + 1], '0.0.514');
       return { pid: process.pid, unref() {} };
     }
   });
@@ -368,6 +374,15 @@ test('linux runtime service starts at login and restarts after crashes', () => {
   assert.match(plan.definition, /"--database-required"/, 'a persisted service must never recreate a missing authority');
   assert.deepEqual(plan.installCommand, ['systemctl', ['--user', 'enable', '--now', 'solomap-runtime.service']]);
   assert.deepEqual(plan.statusCommand, ['systemctl', ['--user', 'is-active', '--quiet', 'solomap-runtime.service']]);
+});
+
+test('published runtime service records the extension release version', () => {
+  const extensionPath = path.resolve(__dirname, '..');
+  const plan = service.buildRuntimeServicePlan({
+    platform: 'linux', homeDir: '/tmp/solomap-home', extensionPath, globalDataPath: '/tmp/solomap-global'
+  });
+  const version = require('../package.json').version;
+  assert.match(plan.definition, new RegExp(`--runtime-version\\" \\"${version.replace(/\./g, '\\.')}`));
 });
 
 test('a healthy unchanged Linux runtime does not reload or reinstall during extension startup', async t => {

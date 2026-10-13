@@ -10,7 +10,7 @@ import { claimRuntimeLease, readRuntimeState, registerRuntimeDatabaseAuthority, 
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import { cognitiveCliEnvironment } from './localAgentCliEngine';
 import { sanitizeDiagnosticText } from './localDiagnostics';
-import { runtimeBuildId } from './runtimeBuildIdentity';
+import { runtimeBuildId, runtimeReleaseVersion } from './runtimeBuildIdentity';
 import { UnifiedDataStore } from './db/unifiedDataStore';
 import { createRuntimeDataOperations } from './runtimeDataOperations';
 import { writeRuntimePauseState } from './runtimePauseState';
@@ -38,7 +38,9 @@ interface RuntimeServiceOptions {
   execPath?: string;
   environment?: NodeJS.ProcessEnv;
   runCommand?: (command: string, args: string[]) => void | Promise<void>;
-  sendControl?: (command: RuntimeControlCommand, expectedRuntimeId?: string) => Promise<unknown>;
+  sendControl?: (command: RuntimeControlCommand, expectedRuntimeId?: string, replacementBuildId?: string, replacementVersion?: string) => Promise<unknown>;
+  buildId?: string;
+  releaseVersion?: string;
   waitForDrain?: (pid: number, runtimeId: string) => Promise<void>;
   waitForHealth?: () => Promise<void>;
   waitForRollbackHealth?: (excludedRuntimeId?: string) => Promise<void>;
@@ -104,11 +106,12 @@ function powerShellLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
-function runtimeArguments(extensionPath: string, globalDataPath: string): string[] {
+function runtimeArguments(extensionPath: string, globalDataPath: string, releaseVersion = ''): string[] {
   return [
     path.join(extensionPath, 'out', 'autonomousRuntimeProcess.js'),
     '--global-data-path', globalDataPath,
     '--runtime-owner', 'service',
+    ...(releaseVersion ? ['--runtime-version', releaseVersion] : []),
     '--database-required'
   ];
 }
@@ -124,7 +127,8 @@ export function buildRuntimeServicePlan(options: RuntimeServiceOptions): Runtime
   const environment = options.environment || cognitiveCliEnvironment();
   const runtimeEnvironment = Object.entries({ ...environment, ELECTRON_RUN_AS_NODE: '1' })
     .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && Boolean(entry[1]));
-  const args = runtimeArguments(options.extensionPath, globalDataPath);
+  const releaseVersion = options.releaseVersion || (fs.existsSync(path.join(options.extensionPath, 'package.json')) ? runtimeReleaseVersion(options.extensionPath) : '');
+  const args = runtimeArguments(options.extensionPath, globalDataPath, releaseVersion);
   if (platform === 'linux') {
     const quoted = [execPath, ...args].map(value => JSON.stringify(value)).join(' ');
     return {
@@ -284,7 +288,9 @@ export async function ensureAutonomousRuntimeService(options: RuntimeServiceOpti
   const previous = fs.existsSync(plan.definitionPath) ? fs.readFileSync(plan.definitionPath, 'utf8') : null;
   const changed = previous !== plan.definition;
   const runCommand = options.runCommand || runRuntimeServiceCommand;
-  const sendControl = options.sendControl || ((command: RuntimeControlCommand, expectedRuntimeId?: string) => sendRuntimeControlCommand(options.globalDataPath, command, { expectedRuntimeId }));
+  const replacementBuildId = options.buildId || (fs.existsSync(path.join(options.extensionPath, 'out')) ? runtimeBuildId(options.extensionPath) : crypto.createHash('sha256').update(plan.definition).digest('hex'));
+  const replacementVersion = options.releaseVersion || (fs.existsSync(path.join(options.extensionPath, 'package.json')) ? runtimeReleaseVersion(options.extensionPath) : '');
+  const sendControl = options.sendControl || ((command: RuntimeControlCommand, expectedRuntimeId?: string, nextBuildId?: string, nextVersion?: string) => sendRuntimeControlCommand(options.globalDataPath, command, { expectedRuntimeId, replacementBuildId: nextBuildId, replacementVersion: nextVersion }));
   const waitForDrain = options.waitForDrain || ((pid: number, runtimeId: string) => waitUntil(
     () => {
       const state = readRuntimeState(options.globalDataPath);
@@ -304,7 +310,7 @@ export async function ensureAutonomousRuntimeService(options: RuntimeServiceOpti
     if (!latest || latest.runtimeId !== current.runtimeId || latest.pid !== current.pid) throw new Error('different_runtime');
     if (latest.status === 'stopped' || !isProcessAlive(latest.pid)) return;
     try {
-      await sendControl('drain', current.runtimeId);
+      await sendControl('drain', current.runtimeId, replacementBuildId, replacementVersion);
     } catch (error) {
       if (error instanceof Error && error.message === 'different_runtime') throw error;
       throw new Error('control_unavailable');

@@ -16,7 +16,7 @@ import {
 import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig, refreshCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import { EmbeddedPiAgentEngine } from './piAgentEngine';
 import { sendRuntimeControlCommand, startRuntimeControlServer } from './autonomousRuntimeControl';
-import { runtimeBuildId } from './runtimeBuildIdentity';
+import { runtimeBuildId, runtimeReleaseVersion } from './runtimeBuildIdentity';
 import { classifyDiagnosticFailure, configureLocalDiagnosticPersistence, importLegacyLocalDiagnostics, recordLocalDiagnosticError } from './localDiagnostics';
 import { runPiMainPathRequestFile } from './piMainPathRuntime';
 import { startTelegramBackgroundRuntime } from './telegramRuntime';
@@ -122,6 +122,7 @@ async function main(): Promise<void> {
       ? dataStore.markMigrationSourceImported(source.identity, source.key)
       : dataStore.markMigrationSourceConflict(source.identity, source.key, error || 'legacy_diagnostic_invalid'));
   const runtimeBuild = runtimeBuildId(path.dirname(path.dirname(path.resolve(process.argv[1]))));
+  const releaseVersion = argumentValue('--runtime-version') || runtimeReleaseVersion(path.dirname(path.dirname(path.resolve(process.argv[1]))));
   const registeredRuntime = await dataOperations({ operation: 'register_runtime_instance', input: { runtimeId, pid: process.pid, processStartedAt: Date.parse(lease.owner.startedAt), processBirth: lease.owner.processBirth || '', status: 'running', buildId: runtimeBuild, idempotencyKey: `runtime-register:${runtimeId}` } }) as { generation: number };
   const heartbeatRuntime = (status: 'running' | 'paused' | 'stopped' | 'failed') => {
     const heartbeatAt = Date.now();
@@ -166,6 +167,7 @@ async function main(): Promise<void> {
     runtimeId,
     entryPath: path.resolve(process.argv[1]),
     buildId: runtimeBuild,
+    releaseVersion,
     owner: argumentValue('--runtime-owner') === 'service' ? 'service' : 'fallback',
     onData: dataOperations,
     async onCommand(command) {

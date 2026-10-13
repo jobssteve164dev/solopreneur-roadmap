@@ -51,6 +51,9 @@ test('reviewing an exact file list pauses polling and stale responses cannot hid
   assert.equal(card.hidden, true, 'the temporary card stays hidden when there is no work');
   observe();
   const first = messages.at(-1);
+  assert.equal(card.hidden, false, 'opening settings immediately shows the loading card');
+  observe();
+  assert.equal(messages.length, 1, 'a pending status read remains single-flight');
   const deliver = data => listeners.get('window-message')({ data: { command: 'dataMigrationLoaded', ...data } });
   deliver({ requestId: first.requestId, dataRoot: '/isolated', overview: { jobs: [{ jobId: 'job', status: 'running', args: {}, progress: {} }], capturedFiles: 1, migratedFiles: 1, recyclableFiles: 1, recyclableBytes: 42, recycling: [] } });
   assert.equal(card.hidden, false);
@@ -143,4 +146,29 @@ test('restored files retain visible review details for an unowned recovery direc
   assert.equal(element('[data-migration-details]').hidden, false);
   assert.match(element('[data-migration-jobs]').innerHTML, /&lt;user-folder&gt;/);
   assert.doesNotMatch(element('[data-migration-jobs]').innerHTML, /<user-folder>|ownership_unknown|inode|intent|stage/);
+});
+
+test('a failed migration status read keeps the card and its error visible', () => {
+  const elements = new Map();
+  const listeners = new Map();
+  const messages = [];
+  let observe;
+  const element = selector => {
+    if (!elements.has(selector)) elements.set(selector, { hidden: false, disabled: false, style: {}, attributes: {}, textContent: '', innerHTML: '', setAttribute(key, value) { this.attributes[key] = value; }, removeAttribute(key) { delete this.attributes[key]; } });
+    return elements.get(selector);
+  };
+  const card = { hidden: true, querySelector: element, querySelectorAll: () => [], setAttribute() {}, addEventListener: (name, listener) => listeners.set(name, listener) };
+  vm.runInNewContext(getMigrationSettingsScript(), {
+    currentLanguage: 'zh', vscode: { postMessage: message => messages.push(message) },
+    document: { getElementById: id => id === 'settings-panel' ? { style: { display: 'block' } } : card },
+    window: { addEventListener: (name, listener) => listeners.set('window-' + name, listener) },
+    MutationObserver: class { constructor(callback) { observe = callback; } observe() {} disconnect() {} },
+    setTimeout, clearTimeout
+  });
+  observe();
+  const request = messages.at(-1);
+  listeners.get('window-message')({ data: { command: 'dataMigrationLoaded', requestId: request.requestId, error: '运行时暂时不可用' } });
+  assert.equal(card.hidden, false);
+  assert.equal(element('[data-migration-error]').hidden, false);
+  assert.equal(element('[data-migration-error]').textContent, '运行时暂时不可用');
 });

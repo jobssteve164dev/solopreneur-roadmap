@@ -13,6 +13,7 @@ export interface RuntimeControlResponse {
   status: string;
   entryPath?: string;
   buildId?: string;
+  releaseVersion?: string;
   owner?: string;
   error?: string;
 }
@@ -42,9 +43,20 @@ interface RuntimeControlServerOptions {
   runtimeId: string;
   entryPath?: string;
   buildId?: string;
+  releaseVersion?: string;
   owner?: string;
   onCommand(command: RuntimeControlCommand): RuntimeControlResponse | Pick<RuntimeControlResponse, 'status'> | Promise<RuntimeControlResponse | Pick<RuntimeControlResponse, 'status'>>;
   onData?(request: RuntimeDataRequest): unknown | Promise<unknown>;
+}
+
+function compareReleaseVersions(left: string, right: string): number {
+  if (!/^\d+\.\d+\.\d+$/.test(left) || !/^\d+\.\d+\.\d+$/.test(right)) throw new Error('runtime_replacement_unverified');
+  const a = left.split('.').map(Number);
+  const b = right.split('.').map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
+  }
+  return 0;
 }
 
 function endpointPath(globalDataPath: string): string {
@@ -118,7 +130,7 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
       if (frameEnd < 0) return;
       handled = true;
       try {
-        const parsed = JSON.parse(request.slice(0, frameEnd)) as { token?: string; command?: RuntimeControlCommand | 'data'; expectedRuntimeId?: string; request?: RuntimeDataRequest };
+        const parsed = JSON.parse(request.slice(0, frameEnd)) as { token?: string; command?: RuntimeControlCommand | 'data'; expectedRuntimeId?: string; replacementBuildId?: string; replacementVersion?: string; request?: RuntimeDataRequest };
         const providedToken = Buffer.from(String(parsed.token || ''));
         const expectedToken = Buffer.from(token);
         if (providedToken.length !== expectedToken.length || !crypto.timingSafeEqual(providedToken, expectedToken)) {
@@ -134,6 +146,19 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
           socket.end(JSON.stringify({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'different_runtime' }) + '\n');
           return;
         }
+        if (command === 'drain' && options.buildId) {
+          let replacementError = '';
+          if (!parsed.replacementBuildId || options.releaseVersion && !parsed.replacementVersion) replacementError = 'runtime_replacement_unverified';
+          else if (options.releaseVersion && parsed.replacementVersion) {
+            const comparison = compareReleaseVersions(parsed.replacementVersion, options.releaseVersion);
+            if (comparison < 0) replacementError = 'runtime_downgrade_rejected';
+            else if (comparison === 0 && parsed.replacementBuildId !== options.buildId) replacementError = 'runtime_same_version_build_conflict';
+          }
+          if (replacementError) {
+            socket.end(JSON.stringify({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: replacementError }) + '\n');
+            return;
+          }
+        }
         if (command === 'data') {
           if (!options.onData || !parsed.request) throw new Error('Runtime data service is unavailable.');
           // Accepted work must finish even when a backup or export outlives a control timeout.
@@ -146,7 +171,7 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
           return;
         }
         const result = await options.onCommand(command);
-        socket.end(JSON.stringify({ ok: true, runtimeId: options.runtimeId, ...result, entryPath: options.entryPath, buildId: options.buildId, owner: options.owner }) + '\n');
+        socket.end(JSON.stringify({ ok: true, runtimeId: options.runtimeId, ...result, entryPath: options.entryPath, buildId: options.buildId, releaseVersion: options.releaseVersion, owner: options.owner }) + '\n');
       } catch (error) {
         socket.end(JSON.stringify({
           ok: false,
@@ -217,7 +242,7 @@ export async function sendRuntimeDataRequest<T>(globalDataPath: string, request:
 export async function sendRuntimeControlCommand(
   globalDataPath: string,
   command: RuntimeControlCommand,
-  overrides: { token?: string; timeoutMs?: number; expectedRuntimeId?: string } = {}
+  overrides: { token?: string; timeoutMs?: number; expectedRuntimeId?: string; replacementBuildId?: string; replacementVersion?: string } = {}
 ): Promise<RuntimeControlResponse> {
   const endpoint = await readReadyEndpoint(globalDataPath, overrides.timeoutMs || 3_000, overrides.expectedRuntimeId);
   return new Promise((resolve, reject) => {
@@ -225,7 +250,7 @@ export async function sendRuntimeControlCommand(
     let response = '';
     socket.setEncoding('utf8');
     socket.setTimeout(overrides.timeoutMs || 3_000, () => socket.destroy(new Error('Runtime control request timed out.')));
-    socket.once('connect', () => socket.write(JSON.stringify({ token: overrides.token || endpoint.token, command, expectedRuntimeId: overrides.expectedRuntimeId }) + '\n'));
+    socket.once('connect', () => socket.write(JSON.stringify({ token: overrides.token || endpoint.token, command, expectedRuntimeId: overrides.expectedRuntimeId, replacementBuildId: overrides.replacementBuildId, replacementVersion: overrides.replacementVersion }) + '\n'));
     socket.on('data', chunk => { response += chunk; });
     socket.once('error', reject);
     socket.once('end', () => {

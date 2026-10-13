@@ -30,6 +30,7 @@ test('runtime control authenticates local health, pause and resume commands', as
       runtimeId: 'runtime-control-test',
       entryPath: '/opt/solomap/out/autonomousRuntimeProcess.js',
       buildId: 'build-a',
+      releaseVersion: '0.0.513',
       onCommand(command) {
         calls.push(command);
         return { status: command === 'pause' ? 'paused' : 'running' };
@@ -39,15 +40,36 @@ test('runtime control authenticates local health, pause and resume commands', as
     const health = await control.sendRuntimeControlCommand(globalRoot, 'health');
     const paused = await control.sendRuntimeControlCommand(globalRoot, 'pause');
     const resumed = await control.sendRuntimeControlCommand(globalRoot, 'resume');
+    await assert.rejects(
+      control.sendRuntimeControlCommand(globalRoot, 'drain', { expectedRuntimeId: 'runtime-control-test' }),
+      /runtime_replacement_unverified/
+    );
+    await assert.rejects(
+      control.sendRuntimeControlCommand(globalRoot, 'drain', {
+        expectedRuntimeId: 'runtime-control-test', replacementBuildId: 'build-old', replacementVersion: '0.0.512'
+      }),
+      /runtime_downgrade_rejected/
+    );
+    await assert.rejects(
+      control.sendRuntimeControlCommand(globalRoot, 'drain', {
+        expectedRuntimeId: 'runtime-control-test', replacementBuildId: 'build-b', replacementVersion: '0.0.513'
+      }),
+      /runtime_same_version_build_conflict/
+    );
+    const drained = await control.sendRuntimeControlCommand(globalRoot, 'drain', {
+      expectedRuntimeId: 'runtime-control-test', replacementBuildId: 'build-b', replacementVersion: '0.0.514'
+    });
     await assert.rejects(control.sendRuntimeControlCommand(globalRoot, 'drain', { expectedRuntimeId: 'replaced-runtime' }), /different_runtime/);
 
     assert.equal(health.ok, true);
     assert.equal(health.runtimeId, 'runtime-control-test');
     assert.equal(health.entryPath, '/opt/solomap/out/autonomousRuntimeProcess.js');
     assert.equal(health.buildId, 'build-a');
+    assert.equal(health.releaseVersion, '0.0.513');
     assert.equal(paused.status, 'paused');
     assert.equal(resumed.status, 'running');
-    assert.deepEqual(calls, ['health', 'pause', 'resume']);
+    assert.equal(drained.status, 'running');
+    assert.deepEqual(calls, ['health', 'pause', 'resume', 'drain']);
     const endpointPath = path.join(globalRoot, 'runtime', 'control.json');
     assert.equal(fs.statSync(endpointPath).mode & 0o777, 0o600);
   } finally {
@@ -141,15 +163,22 @@ test('standalone runtime stays paused and resumes through its authenticated cont
     path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'),
     '--global-data-path', globalRoot,
     '--runtime-id', 'runtime-process-control',
+    '--runtime-version', '0.0.514',
     '--interval-ms', '5000'
   ], { stdio: 'ignore' });
   try {
     await waitFor(() => fs.existsSync(path.join(runtimeRoot, 'control.json')));
-    assert.equal((await control.sendRuntimeControlCommand(globalRoot, 'health')).owner, 'fallback');
+    const health = await control.sendRuntimeControlCommand(globalRoot, 'health');
+    assert.equal(health.owner, 'fallback');
+    assert.equal(health.releaseVersion, '0.0.514');
     await control.sendRuntimeControlCommand(globalRoot, 'pause');
     assert.equal(JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'control.json'), 'utf8')).status, 'paused');
     await control.sendRuntimeControlCommand(globalRoot, 'resume');
     assert.equal(JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'control.json'), 'utf8')).status, 'running');
+    await assert.rejects(control.sendRuntimeControlCommand(globalRoot, 'drain', {
+      expectedRuntimeId: 'runtime-process-control', replacementBuildId: 'older-build', replacementVersion: '0.0.513'
+    }), /runtime_downgrade_rejected/);
+    assert.equal((await control.sendRuntimeControlCommand(globalRoot, 'health')).status, 'running');
     await control.sendRuntimeControlCommand(globalRoot, 'stop');
     await events.once(child, 'exit');
     assert.equal(fs.existsSync(path.join(runtimeRoot, 'control.json')), false);

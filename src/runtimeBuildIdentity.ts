@@ -23,3 +23,10 @@ export function runtimeBuildId(extensionPath: string): string {
   }
   return hash.digest('hex');
 }
+
+export function runtimeReleaseVersion(extensionPath: string): string {
+  const value = JSON.parse(fs.readFileSync(path.join(extensionPath, 'package.json'), 'utf8')) as { version?: unknown };
+  const version = String(value.version || '');
+  if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('SoloMap Runtime release version is invalid.');
+  return version;
+}

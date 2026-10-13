@@ -8,7 +8,7 @@ import { claimRuntimeLease, readRuntimeState, runtimeDatabaseAuthorityRegistered
 import { RuntimeControlCommand, RuntimeControlResponse, sendRuntimeControlCommand } from './autonomousRuntimeControl';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import { PiMainPathRequest, PiMainPathResult } from './piMainPathDelivery';
-import { runtimeBuildId } from './runtimeBuildIdentity';
+import { runtimeBuildId, runtimeReleaseVersion } from './runtimeBuildIdentity';
 import { isProcessOwnerAlive as processOwnerAlive } from './processIdentity.js';
 
 interface RuntimeChild {
@@ -26,8 +26,9 @@ interface RuntimeHostOptions {
   isProcessOwnerAlive?: (pid: number, birth: string) => boolean;
   spawnProcess?: (command: string, args: string[], options: childProcess.SpawnOptions) => RuntimeChild;
   sendHealth?: (dataPath: string) => Promise<RuntimeControlResponse>;
-  sendControl?: (command: RuntimeControlCommand, expectedRuntimeId?: string) => Promise<unknown>;
+  sendControl?: (command: RuntimeControlCommand, expectedRuntimeId?: string, replacementBuildId?: string, replacementVersion?: string) => Promise<unknown>;
   buildId?: string;
+  releaseVersion?: string;
   verifyRuntimeProcess?: (pid: number, runtimeId: string, globalDataPath: string) => boolean;
   terminateProcess?: (pid: number) => Promise<void>;
   drainTimeoutMs?: number;
@@ -156,13 +157,14 @@ const runtimeHealthRequests = new Map<string, Promise<{ started: boolean; pid: n
 export function ensureHealthyAutonomousRuntime(options: RuntimeHostOptions): Promise<{ started: boolean; pid: number; runtimeId: string }> {
   const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath);
   const buildId = options.buildId || runtimeBuildId(options.extensionPath);
+  const releaseVersion = options.releaseVersion || (!options.buildId ? runtimeReleaseVersion(options.extensionPath) : '');
   const key = JSON.stringify([globalDataPath, path.resolve(options.extensionPath), buildId]);
   let pending = runtimeHealthRequests.get(key);
   if (pending) return pending;
   if (runtimeDatabaseAuthorityRegistered(globalDataPath) && !fs.existsSync(path.join(globalDataPath, 'solomap.db'))) {
     return Promise.reject(new Error('database_restore_required'));
   }
-  pending = ensureHealthyAutonomousRuntimeOnce({ ...options, globalDataPath, buildId })
+  pending = ensureHealthyAutonomousRuntimeOnce({ ...options, globalDataPath, buildId, releaseVersion })
     .finally(() => { runtimeHealthRequests.delete(key); });
   runtimeHealthRequests.set(key, pending);
   return pending;
@@ -172,6 +174,7 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
   const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath);
   const entryPath = path.join(options.extensionPath, 'out', 'autonomousRuntimeProcess.js');
   const buildId = options.buildId || runtimeBuildId(options.extensionPath);
+  const releaseVersion = options.releaseVersion || (!options.buildId ? runtimeReleaseVersion(options.extensionPath) : '');
   const current = readRuntimeState(globalDataPath);
   const isProcessAlive = options.isProcessAlive || defaultIsProcessAlive;
   const isOwnerAlive = options.isProcessOwnerAlive || (options.isProcessAlive ? ((pid: number) => options.isProcessAlive!(pid)) : processOwnerAlive);
@@ -189,7 +192,7 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
     } else {
       if (health.reason !== 'different_runtime_build') throw new Error(health.reason);
       try {
-        await (options.sendControl || ((command, expectedRuntimeId) => sendRuntimeControlCommand(globalDataPath, command, { expectedRuntimeId })))('drain', current.runtimeId);
+        await (options.sendControl || ((command, expectedRuntimeId, replacementBuildId, replacementVersion) => sendRuntimeControlCommand(globalDataPath, command, { expectedRuntimeId, replacementBuildId, replacementVersion })))('drain', current.runtimeId, buildId, releaseVersion);
       } catch (error) {
         if (error instanceof Error && error.message === 'different_runtime') throw error;
         throw new Error('control_unavailable');
@@ -235,6 +238,7 @@ export function ensureAutonomousRuntime(options: RuntimeHostOptions): { started:
     entryPath,
     '--global-data-path', globalDataPath,
     '--runtime-id', runtimeId,
+    ...(options.releaseVersion ? ['--runtime-version', options.releaseVersion] : []),
     ...(databaseRequired ? ['--database-required'] : [])
   ];
   const child = spawnProcess(options.execPath || process.execPath, args, {

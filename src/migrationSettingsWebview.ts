@@ -92,16 +92,19 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
   const visible = () => panel.style.display === 'block' || panel.style.display === 'flex';
   const button = (selector: string) => element(selector) as HTMLButtonElement;
   const error = element('[data-migration-error]');
+  error.hidden = true;
   function request(command: string, input: Record<string, unknown> = {}): void {
     if (busy) return;
     if (timer) clearTimeout(timer);
     latest = 'migration-' + (++sequence);
     notice = '';
-    busy = command !== 'dataMigration.get';
+    busy = true;
     error.hidden = true;
+    card!.hidden = false;
     card!.setAttribute('aria-busy', 'true');
     card!.querySelectorAll('button').forEach(control => { control.disabled = true; });
-    element('[data-migration-status]').textContent = text(busy ? '正在处理…' : '正在读取进度…', busy ? 'Working…' : 'Loading progress…');
+    const working = command !== 'dataMigration.get';
+    element('[data-migration-status]').textContent = text(working ? '正在处理…' : '正在读取进度…', working ? 'Working…' : 'Loading progress…');
     vscode.postMessage({ command, requestId: latest, dataRoot, ...input });
   }
   function render(): void {
@@ -140,7 +143,7 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     const history = overview?.recycling || [];
     const recoveryConflicts = overview?.recoveryConflicts || [];
     const unfinishedCleanup = history.filter((item: any) => ['approved', 'moving', 'held'].includes(item.status));
-    card!.hidden = !notice && !plan && !active && !failedMaintenance && !needsAttention.length && !recoveryConflicts.length && !Number(overview?.reviewableFiles || overview?.recyclableFiles || 0) && !history.length;
+    card!.hidden = error.hidden && !busy && !notice && !plan && !active && !failedMaintenance && !needsAttention.length && !recoveryConflicts.length && !Number(overview?.reviewableFiles || overview?.recyclableFiles || 0) && !history.length;
     const migrated = Number(overview?.migratedFiles || 0);
     const count = Number(overview?.capturedFiles || 0);
     element('[data-migration-status]').textContent = notice || (!overview ? text('尚未读取当前状态。', 'Current status has not been loaded yet.')
@@ -244,8 +247,9 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     if (message.overview) overview = message.overview;
     notice = String(message.successMessage || '');
     plan = message.plan;
+    error.textContent = String(message.error || '');
+    error.hidden = !message.error;
     render();
-    if (message.error) { error.textContent = message.error; error.hidden = false; }
   });
   const observer = typeof MutationObserver === 'function' ? new MutationObserver(() => { if (visible()) { render(); request('dataMigration.get'); } else if (timer) clearTimeout(timer); }) : undefined;
   observer?.observe(panel, { attributes: true, attributeFilter: ['style'] });
