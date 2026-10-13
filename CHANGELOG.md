@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.525 - 2026-10-13
+
+### Changed
+- Reserve WAL space before database compaction (b7f1b99)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.524 - 2026-10-13
 
 ### Changed
