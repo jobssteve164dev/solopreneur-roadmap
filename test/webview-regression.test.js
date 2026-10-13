@@ -4773,11 +4773,11 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   };
   provider.resolveWebviewView(webviewView, {}, {});
   const html = webviewView.webview.html;
-  assert.match(html, /function rememberProjectConversationInput\(input, rememberMode = true\)/);
-  assert.match(html, /function captureProjectConversationInputState\(\)[\s\S]*?rememberProjectConversationInput\(input, false\)[\s\S]*?document\.activeElement === input/);
+  assert.match(html, /function rememberProjectConversationInput\(input, rememberMode = true, persist = true\)/);
+  assert.match(html, /function captureProjectConversationInputState\(\)[\s\S]*?rememberProjectConversationInput\(input, false, false\)[\s\S]*?document\.activeElement === input/);
   assert.match(html, /function restoreProjectConversationInputState\(state\)[\s\S]*?input\.focus\(\)[\s\S]*?input\.setSelectionRange/);
   assert.match(html, /function sameConversations\(left,\s*right\)/);
-  assert.match(html, /function renderPortfolioFromAsyncUpdate\(portfolio, selectedProjectPath, updatedProjectPath = ''\)/);
+  assert.match(html, /function renderPortfolioFromAsyncUpdate\(portfolio, selectedProjectPath, updatedProjectPath = '', preserveComposerInput = true\)/);
   assert.match(html, /isConversationCardInteractionActive\(\)[\s\S]*?pendingAsyncPortfolioRender/);
   assert.match(html, /portfolioList\.addEventListener\('pointerover'[\s\S]*?hoveredConversationCard/);
   assert.match(html, /portfolioList\.addEventListener\('focusin'[\s\S]*?focusedConversationCard/);
@@ -4798,7 +4798,7 @@ test('sidebar portfolio refresh preserves active project composer input state', 
   assert.match(html, /function renderSidebarStepHistoryContent[\s\S]*?sidebarFlowConversations\[key\]/);
   assert.match(html, /getProjectContinueDraftKey\(projectPath\)/);
   assert.match(html, /state\.mode === 'continue'[\s\S]*?data-project-conversation-input/);
-  assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath, preserveComposerInput = true, updatedProjectPath = ''\) \{[\s\S]*?const preservedComposerState = captureProjectConversationInputState\(\)[\s\S]*?restoreProjectConversationInputState\(preservedComposerState\)/);
+  assert.match(html, /function renderPortfolio\(portfolio, selectedProjectPath, preserveComposerInput = true, updatedProjectPath = ''\) \{[\s\S]*?const preservedComposerState = preserveComposerInput \? captureProjectConversationInputState\(\) : null[\s\S]*?restoreProjectConversationInputState\(preservedComposerState\)/);
   assert.match(html, /case 'sidebarProjectConversationLoaded':[\s\S]*?sameConversations\(sidebarProjectConversations\[message\.projectPath\], message\.conversations \|\| \[\]\)/);
   assert.match(html, /function pruneSidebarConversationExpansionState\(conversations\)/);
   assert.match(html, /class="delivery-toggle-btn" data-conversation-expand-id/);
@@ -6354,6 +6354,95 @@ test('local-first loading paints and launches before optional or durable work', 
   assert.doesNotMatch(revealBody, /makeAgentTerminalName\(workspaceRoot, 'preparing'\)/);
   assert.match(dispatchBody, /'conversation\.runSolo': async[\s\S]*?revealAgentStartupTerminal\([\s\S]*?'solo'[\s\S]*?\);/);
   assert.match(dispatchBody, /'conversation\.runStep': async[\s\S]*?`step-\$\{String\(request\.nodeId \|\| 'conversation'\)\}`/);
+});
+
+test('sidebar paints the selected local project before snapshot reservation completes', async () => {
+  let resolveReservation;
+  const reservation = new Promise(resolve => { resolveReservation = resolve; });
+  const snapshotCache = makeSidebarSnapshotCacheStub();
+  snapshotCache.reserveSidebarPortfolioSnapshot = () => reservation;
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
+  );
+  const posted = [];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '/fixture/global' }),
+      updateSettings: async () => {},
+      getProjects: () => ({
+        projects: [{ name: 'App', path: '/fixture/app' }],
+        selectedProjectPath: '/fixture/app'
+      })
+    }
+  );
+  provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
+  provider._projectLoader.scheduleAll = () => {};
+  provider.sendDailyReview = () => {};
+
+  await provider.sendProjects();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(posted.some(message => message.command === 'projectsLoaded' && message.projects.portfolio[0]?.path === '/fixture/app'), true);
+
+  resolveReservation({ requestId: 'fixture', generation: 0 });
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(snapshotCache.__getCore()?.portfolio[0]?.path, '/fixture/app');
+});
+
+test('sidebar does not commit a superseded core snapshot when its reservation arrives late', async () => {
+  let resolveFirstReservation;
+  const firstReservation = new Promise(resolve => { resolveFirstReservation = resolve; });
+  const snapshotCache = makeSidebarSnapshotCacheStub();
+  let reservationCount = 0;
+  const commits = [];
+  snapshotCache.reserveSidebarPortfolioSnapshot = () => {
+    reservationCount += 1;
+    return reservationCount === 1
+      ? firstReservation
+      : Promise.resolve({ requestId: 'second', generation: 2 });
+  };
+  snapshotCache.commitSidebarPortfolioSnapshot = async (_globalDataPath, _reservation, projectSignature, portfolio) => {
+    commits.push({ projectSignature, portfolio: structuredClone(portfolio) });
+    return true;
+  };
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
+  );
+  let projectState = {
+    projects: [{ name: 'Project A', path: '/fixture/a' }],
+    selectedProjectPath: '/fixture/a'
+  };
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '/fixture/global' }),
+      updateSettings: async () => {},
+      getProjects: () => projectState
+    }
+  );
+  provider._view = { webview: { postMessage() { return Promise.resolve(true); } } };
+  provider._projectLoader.scheduleAll = () => {};
+  provider.sendDailyReview = () => {};
+
+  await provider.sendProjects();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  projectState = {
+    projects: [{ name: 'Project B', path: '/fixture/b' }],
+    selectedProjectPath: '/fixture/b'
+  };
+  await provider.sendProjects();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(commits.map(commit => commit.portfolio[0]?.path), ['/fixture/b']);
+
+  resolveFirstReservation({ requestId: 'first', generation: 1 });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(commits.map(commit => commit.portfolio[0]?.path), ['/fixture/b']);
 });
 
 test('project card action launches release the next project after execution registration', async () => {

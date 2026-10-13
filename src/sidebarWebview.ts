@@ -5064,7 +5064,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     for (const eventName of ['input', 'change', 'click']) document.addEventListener(eventName, event => {
       if (event && event.target && event.target.closest && event.target.closest('#feedback-panel')) return;
-      setTimeout(saveSidebarInteractionState, 0);
+      if (eventName === 'click') setTimeout(saveSidebarInteractionState, 0);
+      else saveSidebarInteractionState();
     });
 
     function conversationsSignature(conversations) {
@@ -5632,18 +5633,19 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return Boolean(active && active.closest && active.closest('[data-project-continue-composer], [data-roadmap-revision-input]'));
     }
 
-    function renderPortfolioFromAsyncUpdate(portfolio, selectedProjectPath, updatedProjectPath = '') {
+    function renderPortfolioFromAsyncUpdate(portfolio, selectedProjectPath, updatedProjectPath = '', preserveComposerInput = true) {
       if (isConversationCardInteractionActive() || isProjectComposerInteractionActive()) {
         const previousPath = pendingAsyncPortfolioRender && pendingAsyncPortfolioRender.updatedProjectPath;
         pendingAsyncPortfolioRender = {
           portfolio,
           selectedProjectPath,
-          updatedProjectPath: pendingAsyncPortfolioRender && previousPath !== updatedProjectPath ? '' : updatedProjectPath
+          updatedProjectPath: pendingAsyncPortfolioRender && previousPath !== updatedProjectPath ? '' : updatedProjectPath,
+          preserveComposerInput: (pendingAsyncPortfolioRender?.preserveComposerInput ?? true) && preserveComposerInput
         };
         return;
       }
       pendingAsyncPortfolioRender = null;
-      renderPortfolio(portfolio, selectedProjectPath, true, updatedProjectPath);
+      renderPortfolio(portfolio, selectedProjectPath, preserveComposerInput, updatedProjectPath);
     }
 
     function renderPortfolioAfterAttachmentUpdate(portfolio, selectedProjectPath) {
@@ -5655,7 +5657,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (isConversationCardInteractionActive() || isProjectComposerInteractionActive() || !pendingAsyncPortfolioRender) return;
       const pending = pendingAsyncPortfolioRender;
       pendingAsyncPortfolioRender = null;
-      renderPortfolio(pending.portfolio, pending.selectedProjectPath, true, pending.updatedProjectPath);
+      renderPortfolio(pending.portfolio, pending.selectedProjectPath, pending.preserveComposerInput, pending.updatedProjectPath);
     }
 
     if (portfolioList) {
@@ -5687,6 +5689,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       });
       portfolioList.addEventListener('compositionend', () => {
         projectComposerComposing = false;
+        setTimeout(flushPendingAsyncPortfolioRender, 0);
       });
     }
 
@@ -5694,7 +5697,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return 'continue:' + String(projectPath || '');
     }
 
-    function rememberProjectConversationInput(input, rememberMode = true) {
+    function rememberProjectConversationInput(input, rememberMode = true, persist = true) {
       if (!input) return;
       const mode = input.getAttribute('data-conversation-mode') || 'continue';
       const projectPath = input.getAttribute('data-project-path') || currentProjects.selectedProjectPath || '';
@@ -5704,15 +5707,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       }
       if (mode === 'solo') {
         projectSoloDrafts[projectPath] = input.value || '';
-        saveSidebarUiState('soloDraft', projectSoloDrafts[projectPath], projectPath || 'global');
+        if (persist) saveSidebarUiState('soloDraft', projectSoloDrafts[projectPath], projectPath || 'global');
       } else if (mode === 'flow') {
         projectContinueDrafts['flow:' + projectPath] = input.value || '';
-        saveSidebarUiState('flowDraft', projectContinueDrafts['flow:' + projectPath], projectPath || 'global');
+        if (persist) saveSidebarUiState('flowDraft', projectContinueDrafts['flow:' + projectPath], projectPath || 'global');
       } else if (targetId) {
         projectContinueDrafts[targetId] = input.value || '';
         if (projectPath) {
           projectContinueDrafts[getProjectContinueDraftKey(projectPath)] = input.value || '';
-          saveSidebarUiState('continueDraft', input.value || '', projectPath);
+          if (persist) saveSidebarUiState('continueDraft', input.value || '', projectPath);
         }
       }
     }
@@ -5720,7 +5723,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     function captureProjectConversationInputState() {
       const input = portfolioList && portfolioList.querySelector ? portfolioList.querySelector('[data-project-conversation-input]') : null;
       if (!input) return null;
-      rememberProjectConversationInput(input, false);
+      rememberProjectConversationInput(input, false, false);
       return {
         projectPath: input.getAttribute('data-project-path') || currentProjects.selectedProjectPath || '',
         mode: input.getAttribute('data-conversation-mode') || 'continue',
@@ -8551,10 +8554,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (message.scopeKey === 'global') {
             if (typeof state.portfolioFilter === 'string') activePortfolioFilter = state.portfolioFilter;
             renderPortfolioFilters();
-            renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+            renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
             break;
           }
           if (message.scopeKey !== currentProjects.selectedProjectPath) break;
+          const composerStateKeys = ['soloDraft', 'flowDraft', 'continueDraft', 'conversationMode'];
+          const hasNewerLocalComposerState = composerStateKeys.some(key => (uiStateLeafEditRevisions.get(message.scopeKey + '\\n' + key) || 0) > observedRevision);
+          const localComposerInput = hasNewerLocalComposerState && portfolioList && portfolioList.querySelectorAll
+            ? Array.from(portfolioList.querySelectorAll('[data-project-conversation-input]')).find(input => input.getAttribute('data-project-path') === String(message.scopeKey || '')) || null
+            : null;
           const storedInteraction = sidebarInteractionFromState(state);
           const remoteInteraction = Object.keys(storedInteraction).length ? storedInteraction : (state.interactionState && typeof state.interactionState === 'object' ? state.interactionState : {});
           const mergedFlat = flattenSidebarInteraction(remoteInteraction);
@@ -8601,7 +8609,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             if (typeof state.continueDraft === 'string') projectContinueDrafts[getProjectContinueDraftKey(projectPath)] = state.continueDraft;
             if (typeof state.conversationMode === 'string') projectConversationModes[projectPath] = state.conversationMode;
           }
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath, false);
+          if (localComposerInput) {
+            projectConversationModes[projectPath] = localComposerInput.getAttribute('data-conversation-mode') || 'continue';
+            rememberProjectConversationInput(localComposerInput, false, false);
+            if (pendingAsyncPortfolioRender) pendingAsyncPortfolioRender.preserveComposerInput = true;
+          }
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath, '', Boolean(localComposerInput));
           break;
         }
         case 'intelligenceConversationsLoaded':
@@ -11538,7 +11551,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     function renderPortfolio(portfolio, selectedProjectPath, preserveComposerInput = true, updatedProjectPath = '') {
-      const preservedComposerState = captureProjectConversationInputState();
+      const preservedComposerState = preserveComposerInput ? captureProjectConversationInputState() : null;
       const unchangedCards = new Map();
       const previouslyFocused = document.activeElement;
       if (updatedProjectPath) {
@@ -12089,6 +12102,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function activateProjectInSidebar(projectPath, preservePortfolioFilter = false) {
       if (!projectPath) return;
+      pendingAsyncPortfolioRender = null;
+      projectComposerComposing = false;
       if (projectPath !== activeProjectPath) {
         currentNodes = [];
       }

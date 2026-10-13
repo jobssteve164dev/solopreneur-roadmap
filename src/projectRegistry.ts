@@ -204,7 +204,7 @@ export function getProjects(input: {
   const workspaceRoot = String(input.workspaceRoot || '').trim();
   const projects = normalizeProjectsForStorage(savedProjects);
 
-  if (workspaceRoot && !hiddenProjects.has(workspaceRoot) && !projects.some((project) => project.path === workspaceRoot)) {
+  if (registry && workspaceRoot && !hiddenProjects.has(workspaceRoot) && !projects.some((project) => project.path === workspaceRoot)) {
     projects.unshift({
       name: projectName(workspaceRoot),
       path: workspaceRoot
@@ -227,7 +227,7 @@ export function getProjectsSnapshot(input: {
   const hiddenProjects = new Set(registry ? registry.hiddenProjects : []);
   const workspaceRoot = String(input.workspaceRoot || '').trim();
   const projects = normalizeProjectsForStorage(savedProjects);
-  if (workspaceRoot && !hiddenProjects.has(workspaceRoot) && !projects.some(project => project.path === workspaceRoot)) {
+  if (registry && workspaceRoot && !hiddenProjects.has(workspaceRoot) && !projects.some(project => project.path === workspaceRoot)) {
     projects.unshift({ name: projectName(workspaceRoot), path: workspaceRoot });
   }
   return sortProjectsForDisplay(normalizeProjectsForStorage(projects));
@@ -256,7 +256,7 @@ export function getProjectsReadOnly(input: {
   const projects = normalizeProjectsForStorage(savedProjects)
     .filter(project => !hiddenProjects.has(project.path) && readableProjectDirectory(project.path));
 
-  if (workspaceRoot && readableProjectDirectory(workspaceRoot) && !hiddenProjects.has(workspaceRoot) && !projects.some((project) => project.path === workspaceRoot)) {
+  if (registry && workspaceRoot && readableProjectDirectory(workspaceRoot) && !hiddenProjects.has(workspaceRoot) && !projects.some((project) => project.path === workspaceRoot)) {
     projects.unshift({
       name: projectName(workspaceRoot),
       path: workspaceRoot

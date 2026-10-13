@@ -37,7 +37,6 @@ import {
   readSidebarCoreSnapshot,
   reserveSidebarPortfolioSnapshot,
   commitSidebarPortfolioSnapshot,
-  SidebarCoreSnapshotReservation,
   SidebarConversationSnapshot,
   writeCachedConversationSnapshot
 } from './sidebarSnapshotCache';
@@ -563,7 +562,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   ): void {
     const requestId = ++this._corePortfolioRequest;
     const rootState = this.captureDataRoot(globalDataPath, selectedProjectPath);
-    let reservation: SidebarCoreSnapshotReservation | null = null;
+    const reservation = reserveSidebarPortfolioSnapshot(globalDataPath)
+      .catch(error => {
+        console.error('SoloMap sidebar failed to reserve core snapshot:', error);
+        return null;
+      });
     const sourceProjectSignature = buildSidebarProjectSignature(projects);
     const requestedPaths = new Set((options.projectPaths || []).filter(Boolean));
     const needsCompletePortfolio = stalePortfolio.length < projects.length;
@@ -593,9 +596,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         if (projects.length === 0) {
           this.postCorePortfolio(projects, selectedProjectPath, portfolio, globalDataPath);
         }
-        if (portfolio.length === projects.length && reservation && this.isCurrentDataRoot(rootState.root, rootState.generation, selectedProjectPath)) {
-          void commitSidebarPortfolioSnapshot(globalDataPath, reservation, sourceProjectSignature, portfolio)
-            .catch(error => console.error('SoloMap sidebar failed to persist core snapshot:', error));
+        if (portfolio.length === projects.length && this.isCurrentDataRoot(rootState.root, rootState.generation, selectedProjectPath)) {
+          void reservation.then(value => value
+            && requestId === this._corePortfolioRequest
+            && this.isCurrentDataRoot(rootState.root, rootState.generation, selectedProjectPath)
+            && buildSidebarProjectSignature(this._getProjects().projects) === sourceProjectSignature
+            ? commitSidebarPortfolioSnapshot(globalDataPath, value, sourceProjectSignature, portfolio)
+            : false).catch(error => console.error('SoloMap sidebar failed to persist core snapshot:', error));
         }
         if (options.includeExternal) {
           this._projectLoader.scheduleAll(projects, selectedProjectPath, portfolio);
@@ -642,10 +649,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       });
       setTimeout(() => loadNext(index + 1), 0);
     };
-    void reserveSidebarPortfolioSnapshot(globalDataPath)
-      .then(value => { reservation = value; })
-      .catch(error => console.error('SoloMap sidebar failed to reserve core snapshot:', error))
-      .finally(() => setTimeout(() => loadNext(0), 0));
+    setTimeout(() => loadNext(0), 0);
   }
 
   public async sendSoloConversationHistory(projectPath: string) {

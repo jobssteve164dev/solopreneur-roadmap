@@ -29,7 +29,10 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
       await page.setContent(html);
       await page.addStyleTag({ content: require('node:fs').readFileSync(path.join(root, 'node_modules/@vscode/codicons/dist/codicon.css'), 'utf8') });
       const send = message => page.evaluate(message => window.dispatchEvent(new MessageEvent('message', { data: message })), message);
-      const projects = selected => send({ command: 'projectsLoaded', projects: { projects: [project, { ...project, path: '/fixture/b', name: 'Project B' }], selectedProjectPath: selected, portfolio: [] } });
+      const projects = selected => {
+        const listed = [project, { ...project, path: '/fixture/b', name: 'Project B' }];
+        return send({ command: 'projectsLoaded', projects: { projects: listed, selectedProjectPath: selected, portfolio: listed } });
+      };
       await send({ command: 'settingsLoaded', settings });
       await projects(project.path);
       await page.locator('#btn-toggle-settings').click();
@@ -53,6 +56,88 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
         await page.locator('#project-autonomy-enabled').uncheck();
         await page.locator('#project-tool-network-disabled').uncheck();
       } else {
+        const projectComposer = page.locator('[data-project-conversation-input]');
+        await projectComposer.fill('冷启动后继续输入');
+        await projectComposer.evaluate(el => {
+          window.originalSidebarProjectComposer = el;
+          el.focus();
+          el.setSelectionRange(3, 6);
+          el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+        });
+        await send({ command: 'uiStateLoaded', view: 'sidebar', scopeKey: 'global', state: { portfolioFilter: 'all' } });
+        await send({ command: 'uiStateLoaded', view: 'sidebar', scopeKey: project.path, state: {} });
+        await projects(project.path);
+        check(await projectComposer.evaluate(el => el === window.originalSidebarProjectComposer), 'sidebar late startup data preserves the active composer DOM');
+        check(await projectComposer.inputValue() === '冷启动后继续输入', 'sidebar late startup data preserves composing text');
+        check(await projectComposer.evaluate(el => document.activeElement === el && el.selectionStart === 3 && el.selectionEnd === 6), 'sidebar late startup data preserves focus and selection');
+        await projectComposer.evaluate(el => el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })));
+        await page.waitForTimeout(20);
+
+        const activeComposer = page.locator('[data-project-conversation-input][data-project-path="/fixture/a"]');
+        await activeComposer.focus();
+        await page.evaluate(() => {
+          window.dispatchEvent(new MessageEvent('message', { data: { command: 'uiStateLoaded', view: 'sidebar', scopeKey: 'global', state: { portfolioFilter: 'all' } } }));
+          document.querySelector('[data-project-conversation-input][data-project-path="/fixture/a"]').blur();
+          document.querySelector('[data-select-project-path="/fixture/b"]').click();
+        });
+        await page.waitForTimeout(20);
+        check(await page.locator('.portfolio-card.is-selected').getAttribute('data-select-project-path') === '/fixture/b', 'sidebar user project switch wins over queued startup refresh');
+        check(await page.locator('[data-project-conversation-input]').getAttribute('data-project-path') === '/fixture/b', 'sidebar queued startup refresh cannot restore the previous project composer');
+        check(await page.evaluate(() => window.messages.some(message => message.command === 'project.select' && message.projectPath === '/fixture/b')), 'sidebar project switch reaches the extension');
+        await projects('/fixture/b');
+
+        await page.evaluate(() => { window.messages = []; });
+        const projectBComposer = page.locator('[data-project-conversation-input][data-project-path="/fixture/b"]');
+        await projectBComposer.evaluate(el => {
+          el.value = '';
+          el.focus();
+          el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+        });
+        await send({ command: 'uiStateLoaded', view: 'sidebar', scopeKey: '/fixture/b', state: { soloDraft: '数据库里的草稿', conversationMode: 'solo' } });
+        await projectBComposer.evaluate(el => el.blur());
+        await projectBComposer.evaluate(el => el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })));
+        await page.waitForTimeout(20);
+        const restoredProjectBComposer = page.locator('[data-project-conversation-input][data-project-path="/fixture/b"]');
+        check(await restoredProjectBComposer.getAttribute('data-conversation-mode') === 'solo', 'sidebar applies the loaded conversation mode after composition ends');
+        check(await restoredProjectBComposer.inputValue() === '数据库里的草稿', 'sidebar applies the loaded database draft after composition ends');
+        check(!await page.evaluate(() => window.messages.some(message => message.command === 'uiState.patch' && message.scopeKey === '/fixture/b' && message.key === 'soloDraft' && message.value === '')), 'sidebar never overwrites a loaded database draft with stale DOM input');
+
+        const localDraftDuringLateState = await restoredProjectBComposer.evaluate(el => {
+          el.value = '用户刚输入';
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          window.dispatchEvent(new MessageEvent('message', { data: { command: 'uiStateLoaded', view: 'sidebar', scopeKey: '/fixture/b', state: { soloDraft: '数据库旧草稿', conversationMode: 'solo' } } }));
+          const value = el.value;
+          el.blur();
+          return value;
+        });
+        check(localDraftDuringLateState === '用户刚输入', 'sidebar keeps newer local input while an older database state is queued');
+        await page.waitForTimeout(150);
+        check(await page.locator('[data-project-conversation-input][data-project-path="/fixture/b"]').inputValue() === '用户刚输入', 'sidebar keeps newer local input after the queued database state is rendered');
+
+        await page.locator('[data-adjust-roadmap-project-path="/fixture/b"]').evaluate(button => button.click());
+        await page.waitForTimeout(150);
+        await projects('/fixture/b');
+        const roadmapRevisionInput = page.locator('[data-roadmap-revision-input="/fixture/b"]');
+        const roadmapDraftDuringLateState = await roadmapRevisionInput.evaluate(el => {
+          el.value = '用户刚输入的路线修订';
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          window.dispatchEvent(new MessageEvent('message', { data: {
+            command: 'uiStateLoaded',
+            view: 'sidebar',
+            scopeKey: '/fixture/b',
+            state: {
+              'interaction.expandedRoadmapRevisionProjectPath': '/fixture/b',
+              'interaction.roadmapRevisionDrafts.%2Ffixture%2Fb': '数据库旧路线修订'
+            }
+          } }));
+          const value = el.value;
+          el.blur();
+          return value;
+        });
+        check(roadmapDraftDuringLateState === '用户刚输入的路线修订', 'sidebar keeps newer roadmap revision input while an older database state is queued');
+        await page.waitForTimeout(150);
+        check(await page.locator('[data-roadmap-revision-input="/fixture/b"]').inputValue() === '用户刚输入的路线修订', 'sidebar keeps newer roadmap revision input after the queued database state is rendered');
+
         await page.locator('#setting-language [data-solo-trigger]').click();
         await page.locator('#setting-language [data-solo-option-value="en"]').click();
         await send({ command: 'settingsLoaded', settings });

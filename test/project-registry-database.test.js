@@ -149,6 +149,28 @@ test('the standalone runtime reads the database registry after its legacy source
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-registry-runtime-'));
   const root = path.join(base, '.solomap-global'); fs.mkdirSync(root);
   const alpha = path.join(base, 'alpha'), beta = path.join(base, 'beta');
+  t.after(() => {
+    for (const file of [
+      path.join(base, 'source-isolation', 'projects.json'),
+      path.join(root, 'runtime', 'control.json'),
+      path.join(root, 'runtime', 'owner.json'),
+      path.join(root, 'solomap.db-wal'),
+      path.join(root, 'solomap.db-shm'),
+      path.join(root, 'solomap.db'),
+      path.join(alpha, '.solopreneur', 'roadmap.csv'),
+      path.join(beta, '.solopreneur', 'roadmap.csv')
+    ]) if (fs.existsSync(file)) fs.unlinkSync(file);
+    for (const directory of [
+      path.join(base, 'source-isolation'),
+      path.join(root, 'runtime'),
+      root,
+      path.join(alpha, '.solopreneur'),
+      alpha,
+      path.join(beta, '.solopreneur'),
+      beta,
+      base
+    ]) if (fs.existsSync(directory)) fs.rmdirSync(directory);
+  });
   for (const [project, status] of [[alpha, 'Pending'], [beta, 'Failed']]) {
     fs.mkdirSync(path.join(project, '.solopreneur'), { recursive: true });
     fs.writeFileSync(path.join(project, '.solopreneur', 'roadmap.csv'), `id,title,stage,status,dependencies\n1,用户任务,实施,${status},\n`);
