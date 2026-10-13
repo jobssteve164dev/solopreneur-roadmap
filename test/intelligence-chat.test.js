@@ -69,7 +69,7 @@ test('smart kernel read tools are discovered and called through standard MCP', a
   const session = await createIntelligenceMcpSession({
     getProjects: () => [{ name: 'Alpha', path: '/private/alpha' }],
     getSelectedProjectPath: () => '/private/alpha',
-    getCurrentSteps: () => [{ title: '完成登录', status: 'Pending' }],
+    getCurrentSteps: async () => [{ title: '完成登录', status: 'Pending' }],
     getSettings: () => ({ language: 'zh', cognitiveAgent: 'codex', cognitiveModel: 'gpt-test', telegramBotToken: 'secret' }),
     getTodayReview: () => ({ summary: '今天先验证付费', items: ['检查支付流程'] })
   });
@@ -98,6 +98,55 @@ test('smart kernel read tools are discovered and called through standard MCP', a
   }
 });
 
+test('smart kernel gives Pi the current project context before tool selection', async () => {
+  const { buildIntelligenceProjectContext } = require('../out/intelligenceReadTools.js');
+  const context = await buildIntelligenceProjectContext({
+    getProjects: async () => [
+      { name: 'Alpha', path: '/private/alpha', priority: 'P1' },
+      { name: 'Beta', path: '/private/beta', description: '验证付费路径' }
+    ],
+    getSelectedProjectPath: () => '/private/beta',
+    getCurrentSteps: async () => [{ title: '完成结账回归', status: 'Running' }],
+    getSettings: () => ({ language: 'zh' }),
+    getTodayReview: async () => ({ summary: '今天先完成付费闭环', items: ['核对结账结果'] })
+  });
+  assert.deepEqual(context, {
+    selectedProject: 'Beta',
+    projects: [
+      { name: 'Alpha', priority: 'P1' },
+      { name: 'Beta', description: '验证付费路径' }
+    ],
+    today: { summary: '今天先完成付费闭环', items: ['核对结账结果'] },
+    currentSteps: [{ title: '完成结账回归', status: 'Running' }]
+  });
+
+  const extension = fs.readFileSync(path.join(__dirname, '../out/extension.js'), 'utf8');
+  const start = extension.indexOf('const getIntelligenceConversationStore');
+  const end = extension.indexOf('// Register Sidebar Webview View Provider', start);
+  const smartKernel = extension.slice(start, end);
+  assert.match(smartKernel, /buildIntelligenceProjectContext/);
+  assert.match(smartKernel, /readIntelligenceCurrentSteps/);
+  assert.doesNotMatch(smartKernel, /syncEngine\.getNodes\(\)/);
+  assert.doesNotMatch(smartKernel, /engine\.chat\(messages, \{ selectedProject: '', projects: \[\] \}/);
+});
+
+test('smart kernel treats a new project without a roadmap file as an empty authoritative roadmap', async () => {
+  const { readIntelligenceCurrentSteps } = require('../out/intelligenceReadTools.js');
+  const calls = [];
+  const steps = await readIntelligenceCurrentSteps('/workspace/new-project', async (operation, input) => {
+    calls.push({ operation, input });
+    if (operation === 'read_roadmap') throw new Error('roadmap_import_required');
+    const error = new Error('ENOENT: no such file or directory');
+    error.code = 'ENOENT';
+    throw error;
+  });
+  assert.deepEqual(steps, []);
+  assert.deepEqual(calls, [
+    { operation: 'read_roadmap', input: { root: '/workspace/new-project' } },
+    { operation: 'accept_roadmap_csv', input: { root: '/workspace/new-project' } }
+  ]);
+});
+
 test('smart kernel chat uses the selected read-only model pipe with conversation context', async () => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
   const invocations = [];
@@ -118,6 +167,8 @@ test('smart kernel chat uses the selected read-only model pipe with conversation
   assert.match(invocations[0].stdin, /先修登录还是做导出/);
   assert.match(invocations[0].stdin, /怎么确认/);
   assert.match(invocations[0].stdin, /我的应用/);
+  assert.match(invocations[0].stdin, /projectContext 是请求开始时从当前权威数据读取的快照/);
+  assert.match(invocations[0].stdin, /所需事实不在 projectContext 中时/);
   assert.match(invocations[0].args.join(' '), /--sandbox read-only/);
 });
 

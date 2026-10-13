@@ -154,7 +154,7 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
     const systemPrompt = [
       '你是 SoloMap 的智能内核，帮助独立开发者思考下一步、权衡方案并厘清阻碍。',
       '直接回答最后一条用户消息。结合对话历史和已提供的项目名称；不知道的事实就明确说不知道，不编造项目进展。',
-      '项目选择和进展可能已变化。历史回答里出现的项目名称不代表当前项目；泛问候、能力介绍和无关话题不要主动带入项目。需要当前项目事实时查询工具。',
+      '本轮输入中的 projectContext 是请求开始时从当前权威数据读取的快照，可以直接用于判断；所需事实不在 projectContext 中时再查询工具。历史回答里出现的项目名称不代表当前项目；泛问候、能力介绍和无关话题不要主动带入项目。',
       '使用与用户最后一条消息相同的语言回答。',
       readTools
         ? `你可以使用 SoloMap 的${database ? '查询与数据库读写' : '只读'} MCP 工具：${JSON.stringify(availableTools.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema })))}。调用工具时先只输出一行 JSON：{"toolCall":{"name":"工具名","arguments":{}}}。收到工具结果后再回答。不得请求其他工具、读取文件或执行任务；${database ? '用户授权的数据写入通过数据库工具完成；设置修改和任务执行仍回到对应项目的既有操作。' : '用户要求更改设置或执行任务时，说明当前只能查询。'}`

@@ -2,9 +2,9 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { buildProjectPortfolioSummaries, ProjectPortfolioSummary } from './projectPortfolio';
+import { buildProjectPortfolioSummaries, ProjectPortfolioSummary, readProjectRoadmapNodesFromDatabase, RoadmapNodeLike } from './projectPortfolio';
 import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
-import { getProjectsReadOnly, normalizeGlobalDataPathForExtension, SolopreneurProject } from './projectRegistry';
+import { getProjectsReadOnly, normalizeGlobalDataPathForExtension, refreshProjectRegistry, SolopreneurProject } from './projectRegistry';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import type { RuntimeDataOperations } from './runtimeDataOperations';
 import { isProcessOwnerAlive, readProcessBirthMarker } from './processIdentity.js';
@@ -47,6 +47,7 @@ export interface ShadowDecision {
   engineId?: string;
   engineConfigRevision?: string;
   engineStatus?: 'completed' | 'failed' | 'unavailable';
+  sourceAuthority?: 'database';
 }
 
 export interface CognitiveShadowInput {
@@ -101,6 +102,8 @@ interface ShadowCycleOptions {
   now?: Date;
   beforeCommit?: () => boolean;
   engineConfigRevision?: string;
+  operation?: RuntimeDataOperations;
+  currentDecision?: ShadowDecision | null;
 }
 
 export interface RuntimeState {
@@ -166,6 +169,18 @@ export function buildProjectSourceRevision(projects: SolopreneurProject[]): stri
     priority: String(project.priority || ''),
     pinnedAt: String(project.pinnedAt || ''),
     roadmap: roadmapContent(project.path)
+  }));
+  return stableHash(JSON.stringify(facts));
+}
+
+function buildDatabaseProjectSourceRevision(projects: SolopreneurProject[], roadmaps: Map<string, RoadmapNodeLike[]>): string {
+  const facts = (projects || []).map(project => ({
+    name: String(project.name || ''),
+    path: String(project.path || ''),
+    type: String(project.type || ''),
+    priority: String(project.priority || ''),
+    pinnedAt: String(project.pinnedAt || ''),
+    roadmap: roadmaps.get(project.path) || []
   }));
   return stableHash(JSON.stringify(facts));
 }
@@ -456,47 +471,98 @@ export function runShadowDecisionCycle(options: ShadowCycleOptions): ShadowDecis
   return decision;
 }
 
+async function buildDatabaseShadowDecision(options: ShadowCycleOptions): Promise<ShadowDecision> {
+  const globalRoot = normalizeGlobalDataPathForExtension(options.globalDataPath);
+  const operation = options.operation
+    ? (name: string, input: Record<string, unknown>) => options.operation!({ operation: name, input })
+    : undefined;
+  if (!options.projects && operation) await refreshProjectRegistry(globalRoot, undefined, operation);
+  const projects = options.projects || getProjectsReadOnly({
+    globalDataPath: globalRoot,
+    projectRegistryFileName: options.projectRegistryFileName || 'projects.json',
+    legacyProjects: [],
+    legacyHiddenProjects: []
+  });
+  const roadmaps = new Map<string, RoadmapNodeLike[]>();
+  await Promise.all(projects.map(async project => {
+    const nodes = await readProjectRoadmapNodesFromDatabase(project.path, globalRoot,
+      options.operation ? (name, input) => options.operation!({ operation: name, input }) : undefined);
+    roadmaps.set(project.path, nodes);
+  }));
+  const sourceRevision = buildDatabaseProjectSourceRevision(projects, roadmaps);
+  const portfolio = buildProjectPortfolioSummaries(projects, { coreOnly: true, roadmapNodesByProjectPath: roadmaps });
+  return { ...buildShadowDecision(projects, portfolio, sourceRevision, options.now || new Date()), sourceAuthority: 'database' };
+}
+
+export async function runShadowDecisionCycleFromDatabase(options: ShadowCycleOptions): Promise<ShadowDecision> {
+  const decision = await buildDatabaseShadowDecision(options);
+  appendDecisionEvent(options.globalDataPath, decision);
+  return decision;
+}
+
 export async function runCognitiveShadowDecisionCycle(
   options: ShadowCycleOptions & { engine: CognitiveShadowEngine }
 ): Promise<ShadowDecision> {
-  const baseline = runShadowDecisionCycle(options);
-  if (!baseline.recommendations.length) return baseline;
-  const input: CognitiveShadowInput = {
-    decisionId: baseline.decisionId,
-    candidates: baseline.recommendations.map((item) => ({
-      id: item.id,
-      name: item.projectName,
-      title: item.title,
-      reason: item.reason,
-      evidence: [...item.evidence],
-      baselineRank: item.rank
-    }))
-  };
-  const proposal = await options.engine.plan(input);
-  const selected = baseline.recommendations.find((item) => item.id === String(proposal?.candidateId || ''));
-  if (!selected) throw new Error('Cognitive engine selected an unknown Today arrangement candidate.');
-  const reason = String(proposal.reason || '').trim();
-  if (!reason) throw new Error('Cognitive engine did not explain its Today arrangement choice.');
-  const recommendations = [
-    { ...selected, reason },
-    ...baseline.recommendations.filter((item) => item.id !== selected.id)
-  ].map((item, index) => ({ ...item, rank: index + 1 }));
-  const decision: ShadowDecision = {
-    ...baseline,
-    decisionId: stableHash(`${baseline.decisionId}:${options.engine.id}:${selected.id}:${reason}`),
-    algorithmVersion: `${SHADOW_ALGORITHM_VERSION}+cognitive`,
-    recommendedProjectPath: selected.projectPath,
-    summary: `今天先推进 ${selected.projectName}：${selected.title}`,
-    recommendations,
-    engineId: options.engine.id,
-    ...(options.engineConfigRevision ? { engineConfigRevision: options.engineConfigRevision } : {}),
-    engineStatus: 'completed'
-  };
-  if (options.beforeCommit && !options.beforeCommit()) {
-    throw new Error('Cognitive decision lease is no longer current.');
+  let baseline = options.operation ? await buildDatabaseShadowDecision(options) : runShadowDecisionCycle(options);
+  const current = options.currentDecision;
+  if (current?.sourceAuthority === 'database'
+    && current.sourceRevision === baseline.sourceRevision
+    && current.engineStatus === 'completed'
+    && current.engineId === options.engine.id
+    && (!options.engineConfigRevision || current.engineConfigRevision === options.engineConfigRevision)) {
+    appendDecisionEvent(options.globalDataPath, current);
+    return current;
   }
-  appendDecisionEvent(options.globalDataPath, decision);
-  return decision;
+  while (true) {
+    if (!baseline.recommendations.length) {
+      if (baseline.sourceAuthority === 'database') appendDecisionEvent(options.globalDataPath, baseline);
+      return baseline;
+    }
+    const input: CognitiveShadowInput = {
+      decisionId: baseline.decisionId,
+      candidates: baseline.recommendations.map((item) => ({
+        id: item.id,
+        name: item.projectName,
+        title: item.title,
+        reason: item.reason,
+        evidence: [...item.evidence],
+        baselineRank: item.rank
+      }))
+    };
+    const proposal = await options.engine.plan(input);
+    if (options.operation) {
+      const latest = await buildDatabaseShadowDecision(options);
+      if (latest.sourceRevision !== baseline.sourceRevision) {
+        baseline = latest;
+        continue;
+      }
+    }
+    const selected = baseline.recommendations.find((item) => item.id === String(proposal?.candidateId || ''));
+    if (!selected) throw new Error('Cognitive engine selected an unknown Today arrangement candidate.');
+    const reason = String(proposal.reason || '').trim();
+    if (!reason) throw new Error('Cognitive engine did not explain its Today arrangement choice.');
+    const recommendations = [
+      { ...selected, reason },
+      ...baseline.recommendations.filter((item) => item.id !== selected.id)
+    ].map((item, index) => ({ ...item, rank: index + 1 }));
+    const decision: ShadowDecision = {
+      ...baseline,
+      decisionId: stableHash(`${baseline.decisionId}:${options.engine.id}:${selected.id}:${reason}`),
+      algorithmVersion: `${SHADOW_ALGORITHM_VERSION}+cognitive`,
+      recommendedProjectPath: selected.projectPath,
+      summary: `今天先推进 ${selected.projectName}：${selected.title}`,
+      recommendations,
+      engineId: options.engine.id,
+      ...(options.engineConfigRevision ? { engineConfigRevision: options.engineConfigRevision } : {}),
+      engineStatus: 'completed',
+      ...(baseline.sourceAuthority ? { sourceAuthority: baseline.sourceAuthority } : {})
+    };
+    if (options.beforeCommit && !options.beforeCommit()) {
+      throw new Error('Cognitive decision lease is no longer current.');
+    }
+    appendDecisionEvent(options.globalDataPath, decision);
+    return decision;
+  }
 }
 
 export function readCurrentShadowDecision(globalDataPath: string, projects: SolopreneurProject[]): ShadowDecision | null {
@@ -505,7 +571,11 @@ export function readCurrentShadowDecision(globalDataPath: string, projects: Solo
   try {
     if (parsed.schemaVersion !== 1 || parsed.source !== 'runtime_shadow' || parsed.status !== 'completed') return null;
     if (parsed.generatedAt.slice(0, 10) !== new Date().toISOString().slice(0, 10)) return null;
-    if (parsed.sourceRevision !== buildProjectSourceRevision(projects)) return null;
+    if (parsed.sourceAuthority !== 'database' && parsed.sourceRevision !== buildProjectSourceRevision(projects)) return null;
+    if (parsed.sourceAuthority === 'database') {
+      const visible = new Map(projects.map(project => [project.path, project.name]));
+      if (parsed.projectCount !== projects.length || parsed.recommendations.some(item => visible.get(item.projectPath) !== item.projectName)) return null;
+    }
     if (
       parsed.engineStatus === 'completed'
       && parsed.engineConfigRevision

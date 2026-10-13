@@ -158,7 +158,9 @@ test('the standalone runtime reads the database registry after its legacy source
       path.join(root, 'solomap.db-shm'),
       path.join(root, 'solomap.db'),
       path.join(alpha, '.solopreneur', 'roadmap.csv'),
-      path.join(beta, '.solopreneur', 'roadmap.csv')
+      path.join(alpha, '.solopreneur', 'project.json'),
+      path.join(beta, '.solopreneur', 'roadmap.csv'),
+      path.join(beta, '.solopreneur', 'project.json')
     ]) if (fs.existsSync(file)) fs.unlinkSync(file);
     for (const directory of [
       path.join(base, 'source-isolation'),
@@ -173,7 +175,10 @@ test('the standalone runtime reads the database registry after its legacy source
   });
   for (const [project, status] of [[alpha, 'Pending'], [beta, 'Failed']]) {
     fs.mkdirSync(path.join(project, '.solopreneur'), { recursive: true });
-    fs.writeFileSync(path.join(project, '.solopreneur', 'roadmap.csv'), `id,title,stage,status,dependencies\n1,用户任务,实施,${status},\n`);
+    fs.writeFileSync(
+      path.join(project, '.solopreneur', 'roadmap.csv'),
+      `id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n1,用户任务,,实施,,,,${status},,\n`
+    );
   }
   const file = path.join(root, 'projects.json');
   const bytes = Buffer.from(JSON.stringify({ schemaVersion: 1, projects: [{ name: 'Alpha', path: alpha, priority: 'P1' }, { name: 'Beta', path: beta, priority: 'P2' }], hiddenProjects: [] })); fs.writeFileSync(file, bytes);

@@ -36,7 +36,7 @@ function removeFixtureTree(root) {
 async function fixture(action) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-learning-analysis-'));
   const workspace = path.join(base, 'project'); fs.mkdirSync(path.join(workspace, '.solopreneur'), { recursive: true });
-  fs.writeFileSync(path.join(workspace, '.solopreneur', 'roadmap.csv'), 'id,title,stage,status\n1,Verify demand,Learn,Pending\n');
+  fs.writeFileSync(path.join(workspace, '.solopreneur', 'roadmap.csv'), 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n1,Verify demand,,Learn,,,,Pending,,\n');
   const root = path.join(base, '.solomap-global');
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
   const runtimeEntry = path.resolve(__dirname, '../out/autonomousRuntimeProcess.js');
@@ -45,7 +45,7 @@ async function fixture(action) {
     if (command === 'refresh') {
       const runtime = require('../out/autonomousRuntime.js');
       await require('../out/projectRegistry.js').refreshProjectRegistry(root, undefined, (operation, input) => ops({ operation, input }));
-      runtime.runShadowDecisionCycle({ globalDataPath: root });
+      await runtime.runShadowDecisionCycleFromDatabase({ globalDataPath: root, operation: ops });
       await runtime.persistShadowRuntimeState(root, ops);
     }
     return { status: 'running' };

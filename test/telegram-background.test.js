@@ -69,10 +69,11 @@ async function backgroundFixture(t, overrides = {}, intervalMs = 5000) {
   const projectRoot = path.join(root, 'alpha');
   fs.mkdirSync(runtimeRoot, { recursive: true });
   fs.mkdirSync(path.join(projectRoot, '.solopreneur'), { recursive: true });
-  fs.writeFileSync(path.join(projectRoot, '.solopreneur', 'roadmap.csv'), 'id,title,stage,status,dependencies\n1,Ship Alpha,Build,Pending,\n');
+  fs.writeFileSync(path.join(projectRoot, '.solopreneur', 'roadmap.csv'), 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n1,Ship Alpha,,Build,,,,Pending,,\n');
   fs.writeFileSync(path.join(globalRoot, 'projects.json'), JSON.stringify({ schemaVersion: 1, projects: [{ name: 'Alpha', path: projectRoot }], hiddenProjects: [] }));
   const cli = path.join(root, 'codex');
-  fs.writeFileSync(cli, '#!/usr/bin/env node\nlet input="";process.stdin.on("data",c=>input+=c);process.stdin.on("end",()=>console.log(input.includes(\'"name":"Alpha"\') ? "Alpha 的下一步是 Ship Alpha。" : "{\\"toolCall\\":{\\"name\\":\\"get_current_project\\"}}"));\n', { mode: 0o700 });
+  const modelInput = path.join(root, 'model-input');
+  fs.writeFileSync(cli, '#!/usr/bin/env node\nconst fs=require("fs");let input="";process.stdin.on("data",c=>input+=c);process.stdin.on("end",()=>{fs.appendFileSync('+JSON.stringify(modelInput)+',input+"\\n<<<END>>>\\n");console.log("Alpha 的下一步是 Ship Alpha。")});\n', { mode: 0o700 });
   fs.writeFileSync(path.join(runtimeRoot, 'cognitive-config.json'), JSON.stringify({ schemaVersion: 1, revision: 'fixture', mode: 'agent_cli', agentCli: cli, model: 'auto' }));
   const configPath = path.join(runtimeRoot, 'telegram-config.json');
   const config = { schemaVersion: 1, enabled: true, botToken: 'fixture-token', chatId: '123456', selectedProjectPath: projectRoot, language: 'zh', bindingGeneration: 0, conversationIds: {}, ...overrides };
@@ -173,6 +174,7 @@ const request=https.request;https.request=function(options,callback){if(options.
     unlinkFixtureFile(path.join(root, 'model-started'));
     unlinkFixtureFile(path.join(root, 'slow-model-started'));
     unlinkFixtureFile(path.join(root, 'release-model'));
+    unlinkFixtureFile(modelInput);
     unlinkFixtureFile(cli);
     unlinkFixtureFile(preload);
     const emptyRuntimeDirectories = ['autonomous-executions', 'cognitive-work', 'isolated-workspaces'];
@@ -194,7 +196,7 @@ const request=https.request;https.request=function(options,callback){if(options.
     fs.rmdirSync(root);
   });
   const update = (id, text) => ({ update_id: id, message: { message_id: id, from: { id: 123456, is_bot: false, first_name: 'Fixture' }, chat: { id: 123456, type: 'private' }, date: Math.floor(Date.now() / 1000), text } });
-  return { root, globalRoot, runtimeRoot, projectRoot, cli, configPath, config, updates, sent, polls, deliveryAttempts,
+  return { root, globalRoot, runtimeRoot, projectRoot, cli, modelInput, configPath, config, updates, sent, polls, deliveryAttempts,
     rejectText(text) { rejectedTexts.add(text); }, failDeliveries(count) { deliveryFailures = count; },
     holdDelivery(text) { heldDeliveryText = text; }, releaseHeldDelivery() { heldDeliveryRelease?.(); },
     crashAfterNextDelivery() { crashOnNextDelivery = true; },
@@ -203,10 +205,14 @@ const request=https.request;https.request=function(options,callback){if(options.
 
 // Break caught: the real daemon never receives TG messages without a VS Code host.
 test('standalone runtime receives, queries projects and replies without an editor, including after restart', async t => {
-  const { globalRoot, runtimeRoot, configPath, updates, sent, polls, start, stop, update } = await backgroundFixture(t);
+  const { globalRoot, runtimeRoot, configPath, modelInput, updates, sent, polls, childStderr, start, stop, update } = await backgroundFixture(t);
   await start();
   updates.push(update(100, '当前项目下一步是什么？'));
-  await waitFor(() => sent.some(m => m.text === 'Alpha 的下一步是 Ship Alpha。'), 'Background TG must deliver an answer with no editor process');
+  try { await waitFor(() => sent.some(m => m.text === 'Alpha 的下一步是 Ship Alpha。'), 'Background TG must deliver an answer with no editor process'); }
+  catch (error) { error.message += `; stderr=${childStderr()}`; throw error; }
+  const firstPrompt = fs.readFileSync(modelInput, 'utf8');
+  assert.match(firstPrompt, /"projectContext":\{"selectedProject":"Alpha"/);
+  assert.match(firstPrompt, /"currentSteps":\[\{"title":"Ship Alpha","status":"Pending"\}\]/);
   assert.ok(polls.length > 0);
   const conversations = await control.sendRuntimeDataRequest(globalRoot, { operation: 'list_intelligence_conversations', input: {} });
   assert.equal(conversations.length, 1);
@@ -224,6 +230,18 @@ test('standalone runtime receives, queries projects and replies without an edito
   assert.equal(conversation.messages.length, 4, 'Acknowledged messages must not be replayed after restart');
   assert.equal(fs.statSync(configPath).mode & 0o777, 0o600);
   await stop();
+});
+
+test('standalone smart kernel still calls Pi for a new project without roadmap.csv', async t => {
+  const fixture = await backgroundFixture(t);
+  unlinkFixtureFile(path.join(fixture.projectRoot, '.solopreneur', 'roadmap.csv'));
+  await fixture.start();
+  fixture.updates.push(fixture.update(103, '你好'));
+  await waitFor(() => fixture.sent.some(message => message.text === 'Alpha 的下一步是 Ship Alpha。'), 'A project without roadmap.csv must still reach Pi');
+  const prompt = fs.readFileSync(fixture.modelInput, 'utf8');
+  assert.match(prompt, /"projectContext":\{"selectedProject":"Alpha"/);
+  assert.match(prompt, /"currentSteps":\[\]/);
+  await fixture.stop();
 });
 
 test('a new data root takes over a live Telegram daemon when the old root has no editor host', async t => {

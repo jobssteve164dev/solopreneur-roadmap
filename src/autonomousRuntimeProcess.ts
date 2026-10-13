@@ -8,7 +8,7 @@ import {
   readCurrentRegisteredShadowDecision,
   refreshShadowRuntimeState,
   runCognitiveShadowDecisionCycle,
-  runShadowDecisionCycle,
+  runShadowDecisionCycleFromDatabase,
   runtimeRootRequiresExistingDatabase,
   persistShadowRuntimeState,
   updateRuntimeState
@@ -88,7 +88,7 @@ async function main(): Promise<void> {
     const operations = createRuntimeDataOperations(store);
     try {
       await refreshProjectRegistry(root, undefined, (operation, input) => operations({ operation, input }));
-      const decision = runShadowDecisionCycle({ globalDataPath });
+      const decision = await runShadowDecisionCycleFromDatabase({ globalDataPath, operation: operations });
       if (!hasRuntimeLease(globalDataPath, onceRuntimeId, process.pid)) return;
       await persistShadowRuntimeState(globalDataPath, operations);
     } finally {
@@ -250,15 +250,17 @@ async function main(): Promise<void> {
       }) : null;
       activeEngine = engine || undefined;
       const decision = engine
-        ? (current?.engineStatus === 'completed' && current.engineId === engine.id ? current : await runCognitiveShadowDecisionCycle({
+        ? await runCognitiveShadowDecisionCycle({
           globalDataPath,
           engine,
+          operation: dataOperations,
+          currentDecision: current,
           engineConfigRevision: cognitiveConfigRevision,
           beforeCommit: () => !paused
             && hasRuntimeLease(globalDataPath, runtimeId, process.pid)
             && cognitiveRuntimeConfigRevision(readCognitiveRuntimeConfig(globalDataPath)) === cognitiveConfigRevision
-        }))
-        : runShadowDecisionCycle({ globalDataPath });
+        })
+        : await runShadowDecisionCycleFromDatabase({ globalDataPath, operation: dataOperations });
       if (!hasRuntimeLease(globalDataPath, runtimeId, process.pid)) {
         stop();
         return;
@@ -278,7 +280,7 @@ async function main(): Promise<void> {
         stop();
         return;
       }
-      const fallback = runShadowDecisionCycle({ globalDataPath });
+      const fallback = await runShadowDecisionCycleFromDatabase({ globalDataPath, operation: dataOperations });
       if (!hasRuntimeLease(globalDataPath, runtimeId, process.pid)) {
         stop();
         return;

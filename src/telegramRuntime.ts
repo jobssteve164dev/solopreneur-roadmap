@@ -4,6 +4,7 @@ import { CsvStore } from './db/csvStore';
 import { readTodayReview } from './dailyReview';
 import { IntelligenceConversationStore } from './intelligenceChat';
 import { createIntelligenceMcpSession } from './intelligenceMcp';
+import { buildIntelligenceProjectContext, IntelligenceReadToolSource, readIntelligenceCurrentSteps } from './intelligenceReadTools';
 import { runtimeProjectMcpSource, RuntimeDataOperations } from './runtimeDataOperations';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { readCognitiveRuntimeConfig, refreshCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
@@ -116,13 +117,14 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
     if (config.mode !== 'agent_cli') throw new Error('请在 SoloMap 设置中选择用于聊天的 Agent。');
     const engine = new EmbeddedPiAgentEngine({ agentCli: config.agentCli, model: config.model,
       configRevision: config.revision, workingDirectory: globalDataPath });
-    engines.add(engine);
     const projectForChat = selectedProject();
-    const dataSource = await runtimeProjectMcpSource(globalDataPath, projectForChat?.path || '');
-    const mcp = await observeLocalDiagnosticStage('mcp.connect', () => createIntelligenceMcpSession({
+    const intelligenceSource: IntelligenceReadToolSource = {
       getProjects: async () => { await refreshProjectRegistry(globalDataPath, undefined, call); return projects(); },
       getSelectedProjectPath: () => projectForChat?.path || '',
-      getCurrentSteps: () => projectForChat ? new CsvStore(path.join(projectForChat.path, '.solopreneur', 'roadmap.csv')).readNodes().map(node => ({ title: node.title, status: node.status })) : null,
+      getCurrentSteps: async () => {
+        if (!projectForChat) return null;
+        return readIntelligenceCurrentSteps(projectForChat.path, call);
+      },
       getSettings: () => {
         const cognitive = readCognitiveRuntimeConfig(globalDataPath);
         return { language: readTelegramRuntimeConfig(globalDataPath).language, cognitiveAgent: cognitive.agentCli, cognitiveModel: cognitive.model };
@@ -132,8 +134,12 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
         const review = readTodayReview(globalDataPath, projects());
         return review ? { summary: review.summary, items: review.todos.map(todo => todo.title) } : null;
       }
-    }, dataSource));
-    try { return await observeLocalDiagnosticStage('pi.chat', () => engine.chat(messages, { selectedProject: '', projects: [] }, mcp.client)); }
+    };
+    const projectContext = await buildIntelligenceProjectContext(intelligenceSource);
+    const dataSource = await runtimeProjectMcpSource(globalDataPath, projectForChat?.path || '');
+    const mcp = await observeLocalDiagnosticStage('mcp.connect', () => createIntelligenceMcpSession(intelligenceSource, dataSource));
+    engines.add(engine);
+    try { return await observeLocalDiagnosticStage('pi.chat', () => engine.chat(messages, projectContext, mcp.client)); }
     finally { engines.delete(engine); await observeLocalDiagnosticStage('mcp.close', () => mcp.close()); }
   });
   const reply = createTelegramIntelligenceReply(() => store, () => {

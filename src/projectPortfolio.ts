@@ -101,6 +101,7 @@ export interface ProjectPortfolioBuildOptions {
   documentationManifestsByProjectPath?: Map<string, DocumentationManifest>;
   recentActivityAtByProjectPath?: Map<string, string>;
   externalSignalsByProjectPath?: Map<string, Pick<ProjectPortfolioSummary, 'issues' | 'pullRequests' | 'delivery' | 'security'>>;
+  roadmapNodesByProjectPath?: Map<string, RoadmapNodeLike[]>;
   coreOnly?: boolean;
 }
 
@@ -398,7 +399,7 @@ function getInvestmentOverride(projectPath: string, options: ProjectPortfolioBui
 }
 
 export function buildProjectPortfolioSummary(project: SolopreneurProject, options: ProjectPortfolioBuildOptions = {}): ProjectPortfolioSummary {
-  const nodes = readProjectRoadmapNodes(project.path);
+  const nodes = options.roadmapNodesByProjectPath?.get(project.path) || readProjectRoadmapNodes(project.path);
   const stageSummary = summarizeMethodologyStages(nodes);
   const totalNodes = nodes.length;
   const completedNodes = nodes.filter((node) => node.status === 'Completed').length;
@@ -499,10 +500,12 @@ export async function buildProjectPortfolioSummariesFromDatabase(
   const investmentStatsByProjectPath = new Map<string, ProjectInvestmentStats>();
   const reusableSourceCountsByProjectPath = new Map<string, number>();
   const documentationManifestsByProjectPath = new Map<string, DocumentationManifest>();
+  const roadmapNodesByProjectPath = new Map<string, RoadmapNodeLike[]>();
   const learningOverview = options.includeReusableSignals
     ? options.learningOverview || await readLearningOverview(projects[0]?.path || process.cwd(), options.globalDataPath || '')
     : undefined;
   await Promise.all(projects.map(async (project) => {
+    roadmapNodesByProjectPath.set(project.path, await readProjectRoadmapNodesFromDatabase(project.path, options.globalDataPath || ''));
     investmentStatsByProjectPath.set(
       project.path,
       await readProjectInvestmentStatsFromDatabase(project.path, extensionPath, new Date(), options.globalDataPath || '')
@@ -515,6 +518,36 @@ export async function buildProjectPortfolioSummariesFromDatabase(
     investmentStatsByProjectPath,
     learningOverview,
     reusableSourceCountsByProjectPath,
-    documentationManifestsByProjectPath
+    documentationManifestsByProjectPath,
+    roadmapNodesByProjectPath
   });
+}
+
+export async function readProjectRoadmapNodesFromDatabase(
+  projectPath: string,
+  globalDataPath: string,
+  operation?: (name: 'read_roadmap' | 'accept_roadmap_csv', input: { root: string }) => Promise<unknown>
+): Promise<RoadmapNodeLike[]> {
+  const call = operation || ((name, input) => sendRuntimeDataRequest(normalizeGlobalDataPathForExtension(globalDataPath, projectPath), { operation: name, input }));
+  const read = async (name: 'read_roadmap' | 'accept_roadmap_csv') => {
+    const snapshot = await call(name, { root: projectPath }) as { nodes: RoadmapNodeLike[] };
+    return snapshot.nodes.map(node => ({
+      id: String(node.id || '').trim(),
+      title: String(node.title || '').trim(),
+      stage: String(node.stage || '').trim(),
+      status: String(node.status || 'Pending').trim() || 'Pending',
+      agentCli: String(node.agentCli || '').trim(),
+      dependencies: String(node.dependencies || '').trim()
+    })).filter(node => node.id);
+  };
+  try { return await read('read_roadmap'); }
+  catch (error) {
+    if (!(error instanceof Error) || error.message !== 'roadmap_import_required') throw error;
+    try { return await read('accept_roadmap_csv'); }
+    catch (acceptError) {
+      const code = (acceptError as NodeJS.ErrnoException)?.code;
+      if (code === 'ENOENT' || (acceptError instanceof Error && /\bENOENT\b/.test(acceptError.message))) return [];
+      throw acceptError;
+    }
+  }
 }

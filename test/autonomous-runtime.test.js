@@ -20,7 +20,10 @@ function createProject(root, name, rows) {
   fs.mkdirSync(dataPath, { recursive: true });
   fs.writeFileSync(
     path.join(dataPath, 'roadmap.csv'),
-    ['id,title,stage,status,dependencies', ...rows].join('\n') + '\n',
+    ['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt', ...rows.map(row => {
+      const [id, title, stage, status, dependencies] = row.split(',');
+      return [id, title, '', stage, dependencies, '', '', status, '', ''].join(',');
+    })].join('\n') + '\n',
     'utf8'
   );
   return projectPath;
@@ -88,6 +91,163 @@ test('shadow cycle observes only registered visible projects and recommends the 
     assert.equal(decision.recommendations.some(item => item.projectPath === fixture.hidden), false);
     assert.equal(decision.readOnly, true);
     assert.equal(fs.readFileSync(path.join(fixture.beta, '.solopreneur', 'roadmap.csv'), 'utf8').includes('Failed'), true);
+  } finally {
+    await removeFixture(fixture);
+  }
+});
+
+test('database shadow cycle keeps authoritative roadmap candidates after legacy source isolation', async () => {
+  const fixture = await createFixture();
+  const retained = [fixture.alpha, fixture.beta].map(projectPath => ({
+    source: path.join(projectPath, '.solopreneur', 'roadmap.csv'),
+    destination: path.join(projectPath, '.solopreneur', 'roadmap.retained.csv')
+  }));
+  try {
+    const first = await runtime.runShadowDecisionCycleFromDatabase({
+      globalDataPath: fixture.globalRoot,
+      projectRegistryFileName: 'projects.json',
+      now: new Date('2026-09-22T08:00:00.000Z'),
+      operation: fixture.operations
+    });
+    assert.equal(first.recommendations[0].projectPath, fixture.beta);
+    retained.forEach(file => fs.renameSync(file.source, file.destination));
+
+    const afterIsolation = await runtime.runShadowDecisionCycleFromDatabase({
+      globalDataPath: fixture.globalRoot,
+      projectRegistryFileName: 'projects.json',
+      now: new Date('2026-09-22T08:05:00.000Z'),
+      operation: fixture.operations
+    });
+    assert.equal(afterIsolation.recommendations[0].projectPath, fixture.beta);
+    assert.equal(afterIsolation.recommendations[0].title, 'Recover Beta');
+    assert.equal(afterIsolation.sourceAuthority, 'database');
+  } finally {
+    retained.forEach(file => { if (fs.existsSync(file.destination)) fs.renameSync(file.destination, file.source); });
+    await removeFixture(fixture);
+  }
+});
+
+test('cognitive Today arrangement reuses unchanged database facts and reruns Pi after a committed roadmap change', async () => {
+  const fixture = await createFixture();
+  try {
+    let plans = 0;
+    const engine = {
+      id: 'pi-database-engine',
+      async plan(input) {
+        plans++;
+        return { candidateId: input.candidates[0].id, reason: `数据库候选第 ${plans} 次判断。` };
+      }
+    };
+    const first = await runtime.runCognitiveShadowDecisionCycle({
+      globalDataPath: fixture.globalRoot,
+      now: new Date('2026-09-22T08:00:00.000Z'),
+      operation: fixture.operations,
+      engine
+    });
+    const unchanged = await runtime.runCognitiveShadowDecisionCycle({
+      globalDataPath: fixture.globalRoot,
+      now: new Date('2026-09-22T08:05:00.000Z'),
+      operation: fixture.operations,
+      currentDecision: first,
+      engine
+    });
+    assert.equal(plans, 1);
+    assert.equal(unchanged.decisionId, first.decisionId);
+
+    const alpha = await fixture.call('read_roadmap', { root: fixture.alpha });
+    await fixture.call('update_roadmap', {
+      root: fixture.alpha,
+      expectedRevision: alpha.revision,
+      nodes: alpha.nodes.map(node => ({ ...node, status: 'Failed' })),
+      idempotencyKey: 'today-alpha-failed'
+    });
+    const changed = await runtime.runCognitiveShadowDecisionCycle({
+      globalDataPath: fixture.globalRoot,
+      now: new Date('2026-09-22T08:10:00.000Z'),
+      operation: fixture.operations,
+      currentDecision: unchanged,
+      engine
+    });
+    assert.equal(plans, 2);
+    assert.equal(changed.recommendations[0].projectPath, fixture.alpha);
+    assert.equal(changed.recommendations[0].title, 'Ship Alpha');
+  } finally {
+    await removeFixture(fixture);
+  }
+});
+
+test('cognitive Today arrangement discards a Pi proposal when database facts change during planning', async () => {
+  const fixture = await createFixture();
+  try {
+    let plans = 0;
+    const seenProjects = [];
+    const engine = {
+      id: 'pi-concurrent-database-engine',
+      async plan(input) {
+        plans++;
+        seenProjects.push(input.candidates[0].name);
+        if (plans === 1) {
+          const alpha = await fixture.call('read_roadmap', { root: fixture.alpha });
+          await fixture.call('update_roadmap', {
+            root: fixture.alpha,
+            expectedRevision: alpha.revision,
+            nodes: alpha.nodes.map(node => ({ ...node, status: 'Failed' })),
+            idempotencyKey: 'today-alpha-failed-during-plan'
+          });
+        }
+        return { candidateId: input.candidates[0].id, reason: `数据库候选第 ${plans} 次判断。` };
+      }
+    };
+
+    const decision = await runtime.runCognitiveShadowDecisionCycle({
+      globalDataPath: fixture.globalRoot,
+      now: new Date('2026-09-22T08:00:00.000Z'),
+      operation: fixture.operations,
+      engine
+    });
+
+    assert.equal(plans, 2);
+    assert.deepEqual(seenProjects, ['Beta', 'Alpha']);
+    assert.equal(decision.recommendations[0].projectPath, fixture.alpha);
+    assert.equal(decision.recommendations[0].title, 'Ship Alpha');
+  } finally {
+    await removeFixture(fixture);
+  }
+});
+
+test('cognitive Today arrangement refreshes project metadata changed in the database during planning', async () => {
+  const fixture = await createFixture();
+  try {
+    let plans = 0;
+    const seenProjects = [];
+    const engine = {
+      id: 'pi-concurrent-registry-engine',
+      async plan(input) {
+        plans++;
+        seenProjects.push(input.candidates[0].name);
+        if (plans === 1) {
+          const registry = await fixture.call('read_project_registry', {});
+          await fixture.call('patch_project_registry', {
+            expectedRevision: registry.revision,
+            projectPatches: [{ path: fixture.alpha, fields: { priority: 'P0' } }],
+            idempotencyKey: 'today-alpha-priority-during-plan'
+          });
+        }
+        return { candidateId: input.candidates[0].id, reason: `数据库项目第 ${plans} 次判断。` };
+      }
+    };
+
+    const decision = await runtime.runCognitiveShadowDecisionCycle({
+      globalDataPath: fixture.globalRoot,
+      now: new Date('2026-09-22T08:00:00.000Z'),
+      operation: fixture.operations,
+      engine
+    });
+
+    assert.equal(plans, 2);
+    assert.deepEqual(seenProjects, ['Beta', 'Alpha']);
+    assert.equal(decision.recommendations[0].projectPath, fixture.alpha);
+    assert.equal(decision.recommendations[0].title, 'Ship Alpha');
   } finally {
     await removeFixture(fixture);
   }

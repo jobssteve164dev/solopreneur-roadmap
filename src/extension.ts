@@ -199,6 +199,7 @@ import { readRuntimeState, refreshShadowRuntimeState, registerRuntimeDatabaseAut
 import { sendRuntimeControlCommand, sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { disableAutonomousRuntimeService, enableAutonomousRuntime, ensureAutonomousRuntimeService, isAutonomousRuntimeDisabled, isRuntimeServiceManagerAvailable, registeredAutonomousRuntimeDataRoot } from './autonomousRuntimeService';
 import { IntelligenceConversationStore } from './intelligenceChat';
+import { buildIntelligenceProjectContext, IntelligenceReadToolSource, readIntelligenceCurrentSteps } from './intelligenceReadTools';
 import { readTodayReview } from './dailyReview';
 import { persistCognitiveRuntimeConfig, refreshCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import {
@@ -1015,13 +1016,13 @@ export async function activate(context: vscode.ExtensionContext) {
           workingDirectory: globalDataPath
         });
         const selectedProjectPathForChat = await getIntelligenceSelectedProjectPath();
-        const dataSource = await runtimeProjectMcpSource(globalDataPath, selectedProjectPathForChat);
-        const mcp = await observeLocalDiagnosticStage('mcp.connect', () => createIntelligenceMcpSession({
+        const intelligenceSource: IntelligenceReadToolSource = {
           getProjects: getIntelligenceProjects,
           getSelectedProjectPath: () => selectedProjectPathForChat,
-          getCurrentSteps: () => syncEngine && activeProjectRoot === selectedProjectPathForChat
-            ? syncEngine.getNodes().map(node => ({ title: node.title, status: node.status }))
-            : null,
+          getCurrentSteps: async () => {
+            if (!selectedProjectPathForChat) return null;
+            return readIntelligenceCurrentSteps(selectedProjectPathForChat, (operation, input) => sendRuntimeDataRequest(globalDataPath, { operation, input }));
+          },
           getSettings: () => {
             const currentConfig = readCognitiveRuntimeConfig(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath));
             return {
@@ -1035,9 +1036,12 @@ export async function activate(context: vscode.ExtensionContext) {
             const review = readTodayReview(globalDataPath, await getIntelligenceProjects());
             return review ? { summary: review.summary, items: review.todos.map(item => item.title) } : null;
           }
-        }, dataSource));
+        };
+        const projectContext = await buildIntelligenceProjectContext(intelligenceSource);
+        const dataSource = await runtimeProjectMcpSource(globalDataPath, selectedProjectPathForChat);
+        const mcp = await observeLocalDiagnosticStage('mcp.connect', () => createIntelligenceMcpSession(intelligenceSource, dataSource));
         try {
-          return await observeLocalDiagnosticStage('pi.chat', () => engine.chat(messages, { selectedProject: '', projects: [] }, mcp.client));
+          return await observeLocalDiagnosticStage('pi.chat', () => engine.chat(messages, projectContext, mcp.client));
         } finally {
           await observeLocalDiagnosticStage('mcp.close', () => mcp.close());
         }
