@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.528 - 2026-10-13
+
+### Fixed
+- preserve live intelligence sessions (f796f8e)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.527 - 2026-10-13
 
 ### Fixed
