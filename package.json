@@ -237,7 +237,7 @@
     "compile": "tsc -p ./ && node scripts/bundle-pi-runtime.cjs",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile",
-    "test": "node --test test/*.test.js",
+    "test": "node scripts/run-node-tests.cjs test/*.test.js",
     "solomap:experience": "node resources/tools/solomap-experience.cjs",
     "validate:scheduled-tasks": "node resources/tools/validate-scheduled-tasks.cjs",
     "openvsx:rank": "node scripts/open-vsx-rank.cjs",

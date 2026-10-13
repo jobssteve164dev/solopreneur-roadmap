@@ -331,6 +331,40 @@ test('runtime lease reclaims a dead claim file, preserves a live claim and fence
   } finally { await removeFixture(fixture); }
 });
 
+test('runtime lease recovers after an interrupted disk-full claim left two empty owner files', async () => {
+  const fixture = await createFixture();
+  const runtimeRoot = path.join(fixture.globalRoot, 'runtime');
+  const claimPath = path.join(runtimeRoot, 'control.claim');
+  const reclaimedPath = `${claimPath}.reclaimed`;
+  try {
+    for (const directory of [claimPath, reclaimedPath]) {
+      fs.mkdirSync(directory, { recursive: true });
+      fs.writeFileSync(path.join(directory, 'owner.json'), '');
+      const stale = new Date(Date.now() - 10_000);
+      fs.utimesSync(directory, stale, stale);
+    }
+
+    const recovered = runtime.claimRuntimeLease(fixture.globalRoot, {
+      runtimeId: 'recovered-after-disk-full',
+      pid: process.pid,
+      processBirth: 'proc:current',
+      isProcessOwnerAlive: () => false
+    });
+
+    assert.equal(recovered.acquired, true);
+    assert.equal(recovered.owner.runtimeId, 'recovered-after-disk-full');
+    assert.equal(fs.existsSync(claimPath), false);
+    assert.equal(fs.existsSync(reclaimedPath), false);
+  } finally {
+    for (const directory of [claimPath, reclaimedPath]) {
+      const ownerPath = path.join(directory, 'owner.json');
+      if (fs.existsSync(ownerPath)) fs.unlinkSync(ownerPath);
+      if (fs.existsSync(directory)) fs.rmdirSync(directory);
+    }
+    await removeFixture(fixture);
+  }
+});
+
 test('two simultaneous runtime contenders serialize through the database and elect one owner', async () => {
   const fixture = await createFixture();
   const source = `const runtime=require(${JSON.stringify(path.resolve(__dirname, '../out/autonomousRuntime.js'))});const root=process.argv[1],id=process.argv[2];const result=runtime.claimRuntimeLease(root,{runtimeId:id,pid:process.pid});process.stdout.write(JSON.stringify({id,acquired:result.acquired,owner:result.owner.runtimeId})+'\\n');setTimeout(()=>{},800);`;

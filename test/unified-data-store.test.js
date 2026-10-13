@@ -35,6 +35,27 @@ test('all project and global objects share typed, revisioned, immediately readab
   } finally { store.close(); }
 });
 
+test('a failed commit preserves the original storage error when SQLite already ended the transaction', () => {
+  const { store } = open();
+  const originalRun = store.db.run.bind(store.db);
+  try {
+    store.db.run = (sql, values) => {
+      if (sql === 'COMMIT') {
+        originalRun('ROLLBACK');
+        throw new Error('database or disk is full');
+      }
+      return originalRun(sql, values);
+    };
+    assert.throws(
+      () => store.write({ kind: 'project', action: 'create', scope: null, idempotencyKey: 'disk-full', data: { name: 'must preserve the storage failure' } }),
+      error => error?.message === 'database or disk is full'
+    );
+  } finally {
+    store.db.run = originalRun;
+    store.close();
+  }
+});
+
 test('rollback, scope isolation, content integrity, backup and reopen preserve full bodies', async () => {
   const { root, store } = open();
   try {

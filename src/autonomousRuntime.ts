@@ -362,8 +362,14 @@ export function claimRuntimeLease(globalDataPath: string, options: RuntimeLeaseO
       }
       if (fs.existsSync(reclaimedPath)) {
         try {
-          const current = JSON.parse(fs.readFileSync(claimOwnerPath, 'utf8')) as { pid?: number; processBirth?: string };
-          if (ownerAlive(Number(current.pid || 0), String(current.processBirth || ''))) continue;
+          let currentLive = true;
+          try {
+            const current = JSON.parse(fs.readFileSync(claimOwnerPath, 'utf8')) as { pid?: number; processBirth?: string };
+            currentLive = ownerAlive(Number(current.pid || 0), String(current.processBirth || ''));
+          } catch {
+            currentLive = Date.now() - fs.statSync(claimPath).mtimeMs < 500;
+          }
+          if (currentLive) continue;
           const reclaimedOwner = path.join(reclaimedPath, 'owner.json');
           if (fs.existsSync(reclaimedOwner)) fs.unlinkSync(reclaimedOwner);
           fs.rmdirSync(reclaimedPath);

@@ -666,8 +666,13 @@ export class UnifiedDataStore {
       this.db.run(depth ? `RELEASE ${savepoint}` : 'COMMIT');
       return result;
     } catch (error) {
-      this.db.run(depth ? `ROLLBACK TO ${savepoint}` : 'ROLLBACK');
-      if (depth) this.db.run(`RELEASE ${savepoint}`);
+      try {
+        this.db.run(depth ? `ROLLBACK TO ${savepoint}` : 'ROLLBACK');
+        if (depth) this.db.run(`RELEASE ${savepoint}`);
+      } catch {
+        // SQLite may already have ended the transaction after a commit-time I/O failure.
+        // Preserve that original storage error because it is the actionable root cause.
+      }
       throw error;
     } finally { this.transactionDepth--; }
   }

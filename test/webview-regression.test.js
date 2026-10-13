@@ -1041,8 +1041,8 @@ test('settings migration delegates to the same shared Agent CLI runner as Agent 
   assert.doesNotMatch(extension, /`enhance-/);
   assert.match(migrationLauncher, /resolveAgentCli\(requestedAgentCli, settings\.cliPath\)/);
   assert.match(migrationLauncher, /launchMaintenanceAgentRun\(context, workspaceRoot, settings, agentCli, maintenanceRoot, kind/);
-  assert.match(migrationLauncher, /launchSlotId: `settings:\$\{kind\}:\$\{targetId \|\| 'all'\}`/);
-  assert.match(migrationLauncher, /launchSlotScope: 'global'/);
+  assert.match(migrationLauncher, /launchSlotId: `settings:\$\{kind\}:\$\{targetId \|\| 'current'\}`/);
+  assert.match(migrationLauncher, /launchSlotScope: selectedProjectRoot \? 'project' : 'global'/);
   assert.doesNotMatch(migrationLauncher, /maintenance_task_in_use|migration_overview/);
   for (const fork of ['createAgentTerminal', 'LinuxBubblewrapSandbox', 'buildMigrationAgentSandboxCommand', 'SOLOMAP_MAINTENANCE_', 'maintenanceAgentTerminals']) assert.doesNotMatch(migrationLauncher, new RegExp(fork));
   assert.match(sidebarProvider, /cwd: maintenanceRoot/);

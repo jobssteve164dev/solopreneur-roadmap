@@ -159,6 +159,7 @@ function growthSettingsScope(context, initialSettings, changed) {
     nativeConfigurationProjectionValues: new Map(),
     syncEngine: null, syncEngineInitPromise: null,
     getPersistedSettings: () => scope.pendingPersistedSettings || scope.currentSettings,
+    getMigrationProjectRoot: () => '',
     normalizeGlobalDataPathForExtension: value => value, getProjects: () => [], isSoloMapLanguageZh: () => true,
     getProjectGrowthPanelCopy: () => ({}), getProjectGrowthWebviewHtml: (_w, _c, value) => value.marker,
     postLocalDataLoad: require('../out/localDataLoader.js').postLocalDataLoad,

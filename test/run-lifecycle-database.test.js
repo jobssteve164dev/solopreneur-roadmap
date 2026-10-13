@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
-const { RunLifecycleClient, readConversationLogSnapshot } = require('../out/runLifecycleClient.js');
+const { RunLifecycleClient, readConversationLogSnapshot, runStatusReference } = require('../out/runLifecycleClient.js');
 
 function fixture() {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-run-lifecycle-'));
@@ -542,6 +542,31 @@ test('native binding revisions persist confirmation and reject concurrent or mis
     assert.deepEqual(fs.readFileSync(walPath), walBefore, 'an unchanged confirmation retry must not write the database again');
     await assert.rejects(f.call('write_run_binding', { root: f.project, executionLogId: 1, generation: run.generation, expectedHeadRevision: 2, confirmSessionId: 'session-A', idempotencyKey: 'concurrent' }), /identity_index_conflict/);
     assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'agent-runs')), false);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('finishing a parallel Agent CLI upgrade leaves an interrupted Solo conversation independently resumable', async () => {
+  const f = fixture();
+  try {
+    const solo = await f.call('prepare_run', { ...request(f.project, 1), metadata: { interactiveSession: true } });
+    const scope = { root: f.project, executionLogId: 1, generation: solo.generation };
+    await f.call('write_run_binding', { ...scope, expectedHeadRevision: 0, seed: { runId: '1', provider: 'codex', workspaceRoot: f.project, cliPath: 'codex', bindingNonce: 'solo-binding', method: 'provider_callback', contract: 'official_stable' }, idempotencyKey: 'parallel-solo-seed' });
+    await f.call('write_run_binding', { ...scope, expectedHeadRevision: 1, revision: { sessionId: 'solo-native-session', method: 'provider_callback', contract: 'official_stable', state: 'planned' }, idempotencyKey: 'parallel-solo-plan' });
+    await f.call('write_run_binding', { ...scope, expectedHeadRevision: 2, confirmSessionId: 'solo-native-session', evidence: { source: 'native_callback' }, idempotencyKey: 'parallel-solo-confirm' });
+    const beforeUpgrade = await f.call('read_run_state', { root: f.project, executionLogId: 1 });
+
+    const upgrade = await f.call('prepare_run', { ...request(f.project, 2), runKind: 'agent_cli_upgrade', prompt: '升级 Agent CLI', userMessage: '升级 Agent CLI' });
+    await f.call('checkpoint_run', { projectId: upgrade.projectId, executionLogId: 2, generation: upgrade.generation, proof: upgrade.proof, expectedRevision: upgrade.revision, expectedTurnId: upgrade.turnId, action: 'complete', outcome: 'candidate_complete', summary: '升级完成', exitCode: 0, idempotencyKey: 'parallel-upgrade-complete' });
+
+    const afterUpgrade = await f.call('read_run_state', { root: f.project, executionLogId: 1 });
+    const client = new RunLifecycleClient((operation, input) => f.operations({ operation, input }), f.root);
+    assert.equal(afterUpgrade.revision, beforeUpgrade.revision);
+    assert.equal(afterUpgrade.status.status, beforeUpgrade.status.status);
+    assert.equal((await client.getResumableSession(runStatusReference(f.project, 1))).sessionId, 'solo-native-session');
+
+    const closed = await f.call('checkpoint_run', { projectId: solo.projectId, executionLogId: 1, generation: solo.generation, proof: solo.proof, expectedRevision: afterUpgrade.revision, expectedTurnId: solo.turnId, action: 'session-close', exitCode: 1, idempotencyKey: 'parallel-solo-interrupted' });
+    assert.equal(closed.status.interactiveSessionClosed, true);
+    assert.equal((await client.getResumableSession(runStatusReference(f.project, 1))).sessionId, 'solo-native-session');
   } finally { await f.operations.close(); f.store.close(); }
 });
 
