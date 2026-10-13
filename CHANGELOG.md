@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.521 - 2026-10-13
+
+### Fixed
+- restore database context for smart decisions (614745e)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.520 - 2026-10-13
 
 ### Fixed
