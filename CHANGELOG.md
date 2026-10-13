@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.518 - 2026-10-13
+
+### Fixed
+- streamline agent startup and settlement polling (5f74531)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.517 - 2026-10-13
 
 ### Fixed
