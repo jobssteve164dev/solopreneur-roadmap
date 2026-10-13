@@ -131,14 +131,16 @@ test('storage maintenance classifies retained run data and removes previously im
   store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 44, promptPath, promptContentId, crypto.createHash('sha256').update(prompt).digest('hex'), 'application/octet-stream', now]);
   store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 44, byproductPath, byproductContentId, crypto.createHash('sha256').update(byproduct).digest('hex'), 'application/octet-stream', now]);
   store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 44, sharedByproductPath, promptContentId, crypto.createHash('sha256').update(prompt).digest('hex'), 'application/octet-stream', now]);
+  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,CAST(? AS INTEGER),?,?,?,?,?)', [project, '10000000000000004', '__solo__/unsafe/evidence/release.vsix', byproductContentId, crypto.createHash('sha256').update(byproduct).digest('hex'), 'application/octet-stream', now]);
+  store.db.run("INSERT INTO project_run_indexes VALUES(?,CAST(? AS INTEGER),?,'[]','[]',?)", [project, '10000000000000004', JSON.stringify({ executionLogId: '10000000000000004', outputPath: '' }), now]);
   for (const [key, bytes] of [[promptPath, prompt], [byproductPath, byproduct], [sharedByproductPath, prompt]]) store.captureMigrationSource({ identity: `agent-runs:${workspace}`, key, hash: crypto.createHash('sha256').update(bytes).digest('hex') }, bytes, { mimeType: 'application/octet-stream', encoding: 'binary' });
   assert.match(String(store.rows("EXPLAIN QUERY PLAN SELECT 1 FROM project_run_artifacts WHERE artifact_kind IN ('unclassified','byproduct') LIMIT 1")[0].detail), /project_run_artifacts_kind/);
   assert.match(String(store.rows("EXPLAIN QUERY PLAN SELECT 1 FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind IN ('unclassified','byproduct') LIMIT 1")[0].detail), /migration_items_source_kind/);
   const before = await ops({ operation: 'read_database_storage', input: {} });
-  assert.equal(before.runArtifacts.pendingByproductRecords, 2); assert.ok(before.runArtifacts.pendingByproductStoredBytes >= byproduct.length);
+  assert.equal(before.runArtifacts.pendingByproductRecords, 3); assert.ok(before.runArtifacts.pendingByproductStoredBytes >= byproduct.length);
   assert.equal(before.migrationSources.pendingByproductRecords, 2); assert.ok(before.migrationSources.pendingByproductStoredBytes >= byproduct.length);
   const cleaned = await ops({ operation: 'maintain_database_storage', input: { compact: true } });
-  assert.equal(cleaned.deletedArtifacts, 2); assert.equal(cleaned.deletedSources, 2); assert.equal(cleaned.deletedContents, 1);
+  assert.equal(cleaned.deletedArtifacts, 3); assert.equal(cleaned.deletedSources, 2); assert.equal(cleaned.deletedContents, 1);
   assert.ok(cleaned.reclaimedStoredBytes >= byproduct.length); assert.equal(cleaned.pendingByproductRecords, 0);
   assert.equal(Buffer.from(store.readRunArtifact(project, 44, promptPath).bytes, 'base64').toString(), prompt.toString());
   assert.equal(store.readRunArtifact(project, 44, byproductPath), null);
@@ -147,11 +149,75 @@ test('storage maintenance classifies retained run data and removes previously im
   const after = await ops({ operation: 'read_database_storage', input: {} });
   assert.equal(after.runArtifacts.byKind.prompt.records, 1); assert.equal(after.runArtifacts.pendingByproductRecords, 0);
   assert.equal(after.migrationSources.byKind.prompt.records, 1); assert.equal(after.migrationSources.pendingByproductRecords, 0);
-  assert.equal(after.lastMaintenance.deletedArtifacts, 2); assert.equal(after.lastMaintenance.deletedSources, 2);
+  assert.equal(after.lastMaintenance.deletedArtifacts, 3); assert.equal(after.lastMaintenance.deletedSources, 2);
   assert.equal(after.lastMaintenance.status, 'completed'); assert.equal(after.lastMaintenance.error, '');
   assert.ok(after.databaseBytes < before.databaseBytes);
   const repeated = await ops({ operation: 'maintain_database_storage', input: { compact: false } });
   assert.equal(repeated.deletedArtifacts, 0); assert.equal(repeated.deletedSources, 0); assert.equal(repeated.deletedContents, 0);
+}));
+
+test('storage maintenance retires empty vanished SoloMap test projects before future startup discovery', () => fixture(async ({ workspace, store, ops }) => {
+  const staleRoot = path.join(path.dirname(workspace), 'solomap-old-init-Ab12cd');
+  fs.mkdirSync(staleRoot);
+  const stale = await store.registerProject({ root: staleRoot });
+  cleanupExact(staleRoot);
+
+  assert.equal(store.registeredProjectRoots().includes(staleRoot), false, 'startup discovery excludes vanished test fixtures immediately');
+  assert.equal(store.rows("SELECT status FROM project_locations WHERE project_id=?", [stale.projectId])[0].status, 'active');
+  const cleaned = await ops({ operation: 'maintain_database_storage', input: { compact: false } });
+
+  assert.equal(cleaned.retiredTestProjects, 1);
+  assert.equal(store.registeredProjectRoots().includes(staleRoot), false);
+  assert.equal(store.rows("SELECT status FROM project_locations WHERE project_id=?", [stale.projectId])[0].status, 'removed_test_fixture');
+  assert.equal(store.rows('SELECT hidden FROM projects WHERE id=?', [stale.projectId])[0].hidden, 1);
+  const retired = store.rows('SELECT revision,archived_at FROM objects WHERE id=?', [stale.projectId])[0];
+  assert.equal(retired.revision, 3); assert.ok(retired.archived_at);
+  const original = store.read(stale.projectId, 1);
+  assert.equal(original.revision, 1); assert.equal(original.archivedAt, null); assert.equal(original.data.hidden, 0);
+}));
+
+test('storage maintenance preserves a vanished temporary project when database records still depend on it', () => fixture(async ({ workspace, store, ops, record }) => {
+  const retainedRoot = path.join(path.dirname(workspace), 'solomap-old-init-Retain1');
+  fs.mkdirSync(retainedRoot);
+  const retained = await store.registerProject({ root: retainedRoot });
+  store.upsertProjectRunIndex(retained.projectId, record(91));
+  cleanupExact(retainedRoot);
+
+  assert.ok(store.registeredProjectRoots().includes(retainedRoot));
+  assert.equal((await ops({ operation: 'maintain_database_storage', input: { compact: false } })).retiredTestProjects, 0);
+  assert.equal(store.rows("SELECT status FROM project_locations WHERE project_id=?", [retained.projectId])[0].status, 'active');
+  assert.equal(store.rows('SELECT hidden FROM projects WHERE id=?', [retained.projectId])[0].hidden, 0);
+  assert.equal(store.rows('SELECT archived_at FROM objects WHERE id=?', [retained.projectId])[0].archived_at, null);
+}));
+
+test('storage maintenance preserves vanished temporary projects with metadata, object references, or active migration work', () => fixture(async ({ workspace, store, ops }) => {
+  const makeProject = async suffix => {
+    const root = path.join(path.dirname(workspace), `solomap-old-init-${suffix}`);
+    fs.mkdirSync(root);
+    const project = await store.registerProject({ root });
+    return { root, project };
+  };
+  const metadata = await makeProject('Metadata1');
+  store.write({ kind: 'project', action: 'patch', scope: null, objectId: metadata.project.projectId, expectedRevision: 1,
+    idempotencyKey: 'retain-test-project-metadata', data: { name: 'User project', notes_content: 'Keep this project' } });
+  const referenced = await makeProject('Reference1');
+  store.write({ kind: 'learning_event', action: 'create', scope: null, idempotencyKey: 'retain-test-project-reference',
+    data: { source_object_id: referenced.project.projectId, source_revision: 1, event_type: 'completed', summary: 'Project is referenced', occurred_at: Date.now() } });
+  const migrating = await makeProject('Migration1');
+  store.enqueueMemoryMigration({ collection: 'documentation', projectRoot: migrating.root, sourceRoot: path.join(migrating.root, '.solopreneur', 'documentation.json') }, 'retain-active-project-migration');
+  const scopedMigration = await makeProject('MigrationScope1');
+  store.enqueueMemoryMigration({ sourceRoot: path.join(workspace, '.codex-memory'), projectScopes: { [scopedMigration.root]: scopedMigration.project.projectId } }, 'retain-active-project-scope-migration');
+  const registered = await makeProject('Registry1');
+  await store.initializeProjectRegistry({ legacyProjects: [{ name: path.basename(registered.root), path: registered.root }] });
+  for (const item of [metadata, referenced, migrating, scopedMigration, registered]) cleanupExact(item.root);
+
+  assert.equal((await ops({ operation: 'maintain_database_storage', input: { compact: false } })).retiredTestProjects, 0);
+  for (const item of [metadata, referenced, migrating, scopedMigration, registered]) {
+    assert.ok(store.registeredProjectRoots().includes(item.root));
+    assert.equal(store.rows("SELECT status FROM project_locations WHERE project_id=?", [item.project.projectId])[0].status, 'active');
+    assert.equal(store.rows('SELECT hidden FROM projects WHERE id=?', [item.project.projectId])[0].hidden, 0);
+    assert.equal(store.rows('SELECT archived_at FROM objects WHERE id=?', [item.project.projectId])[0].archived_at, null);
+  }
 }));
 
 test('storage maintenance checks shared content references once after multiple cleanup batches', () => fixture(async ({ project, store, ops }) => {

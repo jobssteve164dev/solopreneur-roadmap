@@ -289,6 +289,8 @@ export class UnifiedDataStore {
   private readonly backupFlights = new Map<string, { inputHash: string; promise: Promise<{ destination: string; databaseId: string; sha256: string; bytes: number }> }>();
   private readonly backupDestinationTails = new Map<string, Promise<void>>();
   private contentReferenceColumnsCache?: Array<{ table: string; column: string }>;
+  private projectReferenceColumnsCache?: Array<{ table: string; column: string }>;
+  private projectObjectReferenceColumnsCache?: Array<{ table: string; column: string }>;
   private storageCleanupProtectedContents?: Set<string>;
   public get databaseId(): string {
     return String(this.rows("SELECT value FROM database_meta WHERE key='database_id'")[0].value);
@@ -2772,12 +2774,94 @@ export class UnifiedDataStore {
     return { projectId, locationId: String(saved.id), identityPath };
   }
   public registeredProjectRoots(): string[] {
-    return this.rows("SELECT root_path FROM project_locations WHERE device_id=? AND status='active' ORDER BY root_path", [this.deviceId])
+    const stale = new Set(this.staleSolomapTestProjectRegistrations().map(project => project.projectId));
+    return this.rows("SELECT root_path,project_id FROM project_locations WHERE device_id=? AND status='active' ORDER BY root_path", [this.deviceId])
+      .filter(row => !stale.has(String(row.project_id)))
       .map(row => String(row.root_path));
   }
   public registeredProjectScopes(): Array<{ root: string; projectId: string }> {
+    const stale = new Set(this.staleSolomapTestProjectRegistrations().map(project => project.projectId));
     return this.rows("SELECT root_path,project_id FROM project_locations WHERE device_id=? AND status='active' ORDER BY root_path", [this.deviceId])
-      .map(row => ({ root: String(row.root_path), projectId: String(row.project_id) }));
+      .map(row => ({ root: String(row.root_path), projectId: String(row.project_id) }))
+      .filter(project => !stale.has(project.projectId));
+  }
+  private isVanishedSolomapTestProjectRoot(root: string): boolean {
+    const resolved = path.resolve(root), relative = path.relative(path.resolve(os.tmpdir()), resolved);
+    return relative !== ''
+      && !relative.startsWith(`..${path.sep}`)
+      && !path.isAbsolute(relative)
+      && /^solomap-old-init-[A-Za-z0-9_-]+$/.test(path.basename(resolved))
+      && !fs.existsSync(resolved);
+  }
+  private staleSolomapTestProjectRegistrations(): Array<{ projectId: string; root: string }> {
+    const projectReferences = this.projectReferenceColumnsCache ||= this.rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+      .flatMap(row => this.rows(`PRAGMA foreign_key_list(${quoteSqlIdentifier(String(row.name))})`)
+        .filter(foreignKey => foreignKey.table === 'projects' && !['projects', 'project_locations'].includes(String(row.name)))
+        .map(foreignKey => ({ table: String(row.name), column: String(foreignKey.from) })));
+    const objectReferences = this.projectObjectReferenceColumnsCache ||= this.rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+      .flatMap(row => this.rows(`PRAGMA foreign_key_list(${quoteSqlIdentifier(String(row.name))})`)
+        .filter(foreignKey => foreignKey.table === 'objects' && !['projects', 'object_revisions', 'events'].includes(String(row.name)))
+        .map(foreignKey => ({ table: String(row.name), column: String(foreignKey.from) })));
+    const registry = this.readProjectRegistry();
+    const registeredRoots = new Set(registry && 'registry' in registry
+      ? [...registry.registry.projects.map(project => path.resolve(project.path)), ...registry.registry.hiddenProjects.map(root => path.resolve(root))]
+      : []);
+    const activeMigrationRoots = new Set<string>(), activeMigrationProjectIds = new Set<string>();
+    for (const row of this.rows("SELECT args_json FROM migration_jobs WHERE status IN ('queued','running','failed','interrupted','completed_with_conflicts')")) {
+      try {
+        const args = JSON.parse(String(row.args_json));
+        if (typeof args.projectRoot === 'string') activeMigrationRoots.add(path.resolve(args.projectRoot));
+        if (args.projectScopes && typeof args.projectScopes === 'object' && !Array.isArray(args.projectScopes)) {
+          for (const [root, projectId] of Object.entries(args.projectScopes)) {
+            if (path.isAbsolute(root)) activeMigrationRoots.add(path.resolve(root));
+            if (typeof projectId === 'string') activeMigrationProjectIds.add(projectId);
+          }
+        }
+      } catch { /* Invalid migration input is preserved by its failed job, not interpreted here. */ }
+    }
+    const candidates = this.rows(`SELECT l.project_id,l.root_path,p.name
+      FROM project_locations l
+      JOIN (SELECT project_id FROM project_locations GROUP BY project_id HAVING COUNT(*)=1) unique_location ON unique_location.project_id=l.project_id
+      JOIN projects p ON p.id=l.project_id
+      JOIN objects o ON o.id=p.id
+      WHERE l.device_id=? AND l.status='active' AND p.hidden=0 AND o.archived_at IS NULL
+        AND o.revision=1
+        AND p.type IS NULL AND p.priority IS NULL AND p.description IS NULL AND p.pinned_at IS NULL AND p.notes_content_id IS NULL
+        AND NOT EXISTS(SELECT 1 FROM objects scoped WHERE scoped.project_id=l.project_id)
+      ORDER BY l.root_path`, [this.deviceId])
+      .map(row => ({ projectId: String(row.project_id), root: String(row.root_path), name: String(row.name) }))
+      .filter(project => this.isVanishedSolomapTestProjectRoot(project.root)
+        && project.name === projectName(project.root)
+        && !registeredRoots.has(path.resolve(project.root))
+        && !activeMigrationRoots.has(path.resolve(project.root))
+        && !activeMigrationProjectIds.has(project.projectId));
+    if (!candidates.length) return [];
+    const candidateIds = candidates.map(project => project.projectId), referenced = new Set<string>();
+    for (let offset = 0; offset < candidateIds.length; offset += 250) {
+      const batch = candidateIds.slice(offset, offset + 250), placeholders = batch.map(() => '?').join(',');
+      for (const reference of [...projectReferences, ...objectReferences]) {
+        for (const row of this.rows(`SELECT DISTINCT ${quoteSqlIdentifier(reference.column)} AS project_id FROM ${quoteSqlIdentifier(reference.table)} WHERE ${quoteSqlIdentifier(reference.column)} IN (${placeholders})`, batch)) {
+          referenced.add(String(row.project_id));
+        }
+      }
+    }
+    return candidates.filter(project => !referenced.has(project.projectId));
+  }
+  public hasStaleSolomapTestProjectRegistrations(): boolean {
+    return this.staleSolomapTestProjectRegistrations().length > 0;
+  }
+  public cleanupStaleSolomapTestProjectRegistrations(): number {
+    return this.transaction(() => {
+      const stale = this.staleSolomapTestProjectRegistrations();
+      for (const project of stale) {
+        const hidden = this.write({ kind: 'project', action: 'patch', scope: null, objectId: project.projectId, expectedRevision: 1,
+          idempotencyKey: `storage-maintenance-retire-test-project:${project.projectId}:hide`, data: { hidden: 1 } });
+        this.write({ kind: 'project', action: 'archive', scope: null, objectId: project.projectId, expectedRevision: hidden.revision,
+          idempotencyKey: `storage-maintenance-retire-test-project:${project.projectId}:archive`, data: {} });
+        this.db.run("UPDATE project_locations SET status='removed_test_fixture' WHERE project_id=? AND device_id=? AND status='active'", [project.projectId, this.deviceId]);
+      }
+      return stale.length;
+    });
   }
   private learningReviewManifest(saved: any): ReviewManifest {
     const restore = (source: ReviewSource): ReviewSource => ({ ...source, content: this.content(String(saved.sourceContents[`${source.id}:${source.hash}:${source.contentHash}`] || saved.sourceContents[`${source.id}:${source.hash}`])).toString('utf8'), ...(source.previousVersions ? { previousVersions: source.previousVersions.map(restore) } : {}) });
@@ -6526,7 +6610,7 @@ export class UnifiedDataStore {
   }
   public protectIndexedRunArtifactOutputsBatch(cursor = 0, limit = 250): { nextCursor: number | null } {
     if (!Number.isInteger(cursor) || cursor < 0 || !Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error('database_maintenance_limit_invalid');
-    const rows = this.rows("SELECT DISTINCT i.rowid AS cursor,i.project_id,i.execution_log_id,i.record_json FROM project_run_indexes i JOIN project_run_artifacts a ON a.project_id=i.project_id AND a.execution_log_id=i.execution_log_id WHERE i.rowid>? AND a.artifact_kind IN ('unclassified','byproduct') ORDER BY i.rowid LIMIT ?", [cursor, limit]);
+    const rows = this.rows("SELECT DISTINCT i.rowid AS cursor,i.project_id,CAST(i.execution_log_id AS TEXT) AS execution_log_id,i.record_json FROM project_run_indexes i JOIN project_run_artifacts a ON a.project_id=i.project_id AND a.execution_log_id=i.execution_log_id WHERE i.rowid>? AND a.artifact_kind IN ('unclassified','byproduct') ORDER BY i.rowid LIMIT ?", [cursor, limit]);
     this.transaction(() => {
       for (const row of rows) {
         const record = JSON.parse(String(row.record_json)) as RunIndexRecord;
@@ -6622,7 +6706,7 @@ export class UnifiedDataStore {
   public cleanupDatabaseStorageBatch(limit = 1000, maintenanceId?: string): { scanned: number; deletedArtifacts: number; deletedSources: number; deletedContents: number; reclaimedStoredBytes: number; pending: boolean } {
     if (!Number.isInteger(limit) || limit < 1 || limit > 5000) throw new Error('database_maintenance_limit_invalid');
     return this.transaction(() => {
-      const artifacts = this.rows("SELECT project_id,execution_log_id,relative_path,content_id,artifact_kind FROM project_run_artifacts WHERE artifact_kind IN ('unclassified','byproduct') ORDER BY project_id,execution_log_id,relative_path LIMIT ?", [limit]);
+      const artifacts = this.rows("SELECT project_id,CAST(execution_log_id AS TEXT) AS execution_log_id,relative_path,content_id,artifact_kind FROM project_run_artifacts WHERE artifact_kind IN ('unclassified','byproduct') ORDER BY project_id,execution_log_id,relative_path LIMIT ?", [limit]);
       const sources = this.rows("SELECT source_identity,source_key,source_content_id,source_kind,object_id FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind IN ('unclassified','byproduct') ORDER BY source_identity,source_key LIMIT ?", [limit]);
       const contentIds: string[] = [];
       let deletedArtifacts = 0; let deletedSources = 0;

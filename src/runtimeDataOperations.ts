@@ -84,11 +84,12 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       await storageMaintenanceBarrier;
       const currentSize = store.databaseStorageFileSizes();
       store.recoverInterruptedDatabaseStorageMaintenance(Date.now(), currentSize.databaseBytes);
-      if (automatic && !store.hasPendingDatabaseStorageCleanup()) return { skipped: true, reason: 'storage_current' };
+      if (automatic && !store.hasPendingDatabaseStorageCleanup() && !store.hasStaleSolomapTestProjectRegistrations()) return { skipped: true, reason: 'storage_current' };
       const startedAt = Date.now(), before = currentSize;
       const totals = { deletedArtifacts: 0, deletedSources: 0, deletedContents: 0, reclaimedStoredBytes: 0 };
       const maintenanceId = store.beginDatabaseStorageMaintenance(startedAt, before.databaseBytes);
       try {
+        const retiredTestProjects = store.cleanupStaleSolomapTestProjectRegistrations();
         let indexCursor = 0;
         for (;;) {
           const batch = store.protectIndexedRunArtifactOutputsBatch(indexCursor, 250);
@@ -125,7 +126,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const integrity = compact ? store.compactDatabaseStorage().integrity : 'not_checked';
         const after = store.databaseStorageFileSizes(); const finishedAt = Date.now();
         store.settleDatabaseStorageMaintenance(maintenanceId, { status: 'completed', finishedAt, ...totals, compacted: compact, afterBytes: after.databaseBytes, integrity });
-        return { ...totals, compacted: compact, integrity, beforeBytes: before.databaseBytes, afterBytes: after.databaseBytes, pendingByproductRecords: 0 };
+        return { ...totals, retiredTestProjects, compacted: compact, integrity, beforeBytes: before.databaseBytes, afterBytes: after.databaseBytes, pendingByproductRecords: 0 };
       } catch (error) {
         const after = store.databaseStorageFileSizes();
         store.settleDatabaseStorageMaintenance(maintenanceId, { status: 'failed', finishedAt: Date.now(), error: String(error), ...totals, compacted: false, afterBytes: after.databaseBytes, integrity: 'not_checked' });
