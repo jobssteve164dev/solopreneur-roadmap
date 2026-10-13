@@ -54,7 +54,17 @@ async function main(): Promise<void> {
     return;
   }
   const identity = { projectId: plan.projectId, executionLogId };
-  let state = await request<RunState>('claim_run', { ...identity, expectedRevision: plan.revision, agentPid: process.pid, processBirth: processBirth(process.pid), ...(process.env.SOLOMAP_TERMINAL_DELIVERY_ID ? { terminalDeliveryId: process.env.SOLOMAP_TERMINAL_DELIVERY_ID } : {}), idempotencyKey: `run:${plan.runId}:claim:${crypto.randomUUID()}` });
+  const claimKey = `run:${plan.runId}:${plan.generation}:claim:${crypto.randomUUID()}`;
+  let state: RunState;
+  for (;;) {
+    const latest = await request<RunState>('read_run_state', identity);
+    if (latest.generation !== plan.generation) throw new Error('run_owner_conflict');
+    if (latest.turnId !== plan.turnId) throw new Error('checkpoint_turn_conflict');
+    try {
+      state = await request<RunState>('claim_run', { ...identity, expectedRevision: latest.revision, agentPid: process.pid, processBirth: processBirth(process.pid), ...(process.env.SOLOMAP_TERMINAL_DELIVERY_ID ? { terminalDeliveryId: process.env.SOLOMAP_TERMINAL_DELIVERY_ID } : {}), idempotencyKey: claimKey });
+      break;
+    } catch (error) { if ((error as Error).message !== 'revision_conflict') throw error; }
+  }
   const generation = state.generation;
   const proof = state.proof!;
   const checkpoint = async (fields: Record<string, unknown>): Promise<RunState> => {

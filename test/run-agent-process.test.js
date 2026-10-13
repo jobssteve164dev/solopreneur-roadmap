@@ -52,6 +52,39 @@ test('the shared packaged runner commits complete output and host completion wit
   }
 });
 
+test('the shared runner retries its initial claim after the terminal host advances the run revision', async () => {
+  const f = await executionFixture(`env -u NO_COLOR ${shellQuote(process.execPath)} -e ${shellQuote("process.stdout.write('claimed after terminal delivery')")}`);
+  const hook = path.join(path.dirname(f.root), 'advance-before-claim.cjs');
+  const deliveryId = 'terminal-delivery-race';
+  try {
+    let state = await f.call('read_run_state');
+    state = await f.call('patch_run_state', {
+      generation: state.generation,
+      expectedRevision: state.revision,
+      patch: { terminalDeliveryId: deliveryId },
+      idempotencyKey: 'terminal-delivery-identity'
+    });
+    fs.writeFileSync(hook, `const api=require(${JSON.stringify(path.resolve(__dirname, '../out/autonomousRuntimeControl.js'))});
+const original=api.sendRuntimeDataRequest;let advanced=false;
+api.sendRuntimeDataRequest=async function(root,request){
+ if(!advanced&&request.operation==='claim_run'){
+  advanced=true;
+  const current=await original(root,{operation:'read_run_state',input:{projectId:request.input.projectId,executionLogId:request.input.executionLogId}});
+  await original(root,{operation:'patch_run_state',input:{projectId:current.projectId,executionLogId:request.input.executionLogId,generation:current.generation,expectedRevision:current.revision,patch:{terminalCommandSubmittedAt:'2026-10-13T00:00:00.000Z'},idempotencyKey:'host-submitted-command-before-claim'}});
+ }
+ return original(root,request);
+};`);
+    const agent = f.startAgent({ ...process.env, NODE_OPTIONS: `--require=${hook}`, SOLOMAP_TERMINAL_DELIVERY_ID: deliveryId });
+    const [code] = await once(agent, 'exit');
+    assert.equal(code, 0, f.stderr().toString());
+    assert.equal(f.stdout().toString(), 'claimed after terminal delivery');
+    const claimed = await f.call('read_run_state');
+    assert.equal(claimed.generation, state.generation + 1);
+    assert.ok(claimed.status.agentPid > 0);
+    assert.equal(claimed.status.terminalClaimDeliveryId, deliveryId);
+  } finally { await f.close(); }
+});
+
 for (const exitCode of [0, 7]) test(`maintenance execution captures its full result and logs before exit ${exitCode}`, async () => {
   const resultBytes = Buffer.from(JSON.stringify({ success: exitCode === 0, detail: '完整安装回执🌿'.repeat(10000) }) + '\n');
   const output = '完整安装输出🌿\n'.repeat(10000);
