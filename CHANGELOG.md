@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.533 - 2026-10-14
+
+### Fixed
+- reconcile retained journal gaps (3f81ea9)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.532 - 2026-10-14
 
 ### Fixed
