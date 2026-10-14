@@ -9,6 +9,7 @@ const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const { SyncEngine } = require('../out/db/syncEngine.js');
 const { importAgentRuns, importProjectGrowth } = require('../out/projectDataMigration.js');
+const { enqueueAvailableDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
 
 test('formal conversation pages remain usable with an unreadable retired journal', async t => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-formal-journal-'));
@@ -565,6 +566,158 @@ test('legacy growth migration yields between snapshots so Runtime control remain
     await importProjectGrowth(store, source, { projectRoot: project });
     assert.deepEqual(observations, [true]);
   } finally { store.close(); }
+});
+
+test('legacy growth migration exposes every report projection through the formal reader', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-growth-projection-import-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
+  const source = path.join(project, '.solopreneur', 'project_growth.db');
+  fs.mkdirSync(path.dirname(source), { recursive: true }); fs.mkdirSync(root);
+  const { SqliteStore } = require('../out/db/sqliteStore.js'); const legacy = new SqliteStore(source, path.resolve(__dirname, '..'));
+  await legacy.init();
+  legacy.putGrowthReportProjection([
+    { key: 'legacy:coverage', value: { scanned: 73, complete: true } },
+    { key: 'legacy:relationship', value: { source: 'alpha', target: 'omega', evidence: '完整关系' } }
+  ]);
+  legacy.close();
+  const store = new UnifiedDataStore(root);
+  try {
+    const result = await importProjectGrowth(store, source, { projectRoot: project });
+    const registered = await store.registerProject({ root: project });
+    assert.deepEqual(store.readGrowthReportProjection(registered.projectId), [
+      { key: 'legacy:coverage', value: { complete: true, scanned: 73 }, revision: 1 },
+      { key: 'legacy:relationship', value: { evidence: '完整关系', source: 'alpha', target: 'omega' }, revision: 1 }
+    ]);
+    assert.equal(result.conflicts.length, 0);
+    assert.equal(store.readMigrationSource(`project-growth:${project}`, 'project_growth.db').stage, 'imported');
+  } finally { store.close(); }
+});
+
+test('legacy growth migration preserves a newer native report projection and reports the exact conflict', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-growth-projection-conflict-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
+  const source = path.join(project, '.solopreneur', 'project_growth.db');
+  fs.mkdirSync(path.dirname(source), { recursive: true }); fs.mkdirSync(root);
+  const { SqliteStore } = require('../out/db/sqliteStore.js'); const legacy = new SqliteStore(source, path.resolve(__dirname, '..'));
+  await legacy.init();
+  legacy.putGrowthReportProjection([{ key: 'shared:key', value: { generation: 'legacy', rows: 12 } }]);
+  legacy.close();
+  const store = new UnifiedDataStore(root);
+  try {
+    const registered = await store.registerProject({ root: project });
+    store.writeGrowthReportProjection(registered.projectId, [{ key: 'shared:key', value: { generation: 'native', rows: 19 } }]);
+    const result = await importProjectGrowth(store, source, { projectRoot: project });
+    assert.deepEqual(result.conflicts, [{ source: 'project_growth.db#growth_report_projection:shared:key', error: 'growth_report_projection_conflict' }]);
+    assert.deepEqual(store.readGrowthReportProjection(registered.projectId), [
+      { key: 'shared:key', value: { generation: 'native', rows: 19 }, revision: 1 }
+    ]);
+    assert.equal(store.readMigrationSource(`project-growth:${project}`, 'project_growth.db').stage, 'conflict');
+  } finally { store.close(); }
+});
+
+test('growth projection conflicts block every alias of the same physical source from recycling', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-growth-projection-alias-conflict-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'z-project'); const alias = path.join(fixture, 'a-project-alias');
+  const source = path.join(project, '.solopreneur', 'project_growth.db');
+  fs.mkdirSync(path.dirname(source), { recursive: true }); fs.mkdirSync(root); fs.symlinkSync(project, alias, 'dir');
+  const { SqliteStore } = require('../out/db/sqliteStore.js'); const legacy = new SqliteStore(source, path.resolve(__dirname, '..'));
+  await legacy.init(); legacy.putGrowthReportProjection([{ key: 'shared:key', value: { generation: 'legacy' } }]); legacy.close();
+  const store = new UnifiedDataStore(root); const { MigrationRecycling } = require('../out/migrationRecycling.js');
+  try {
+    const registered = await store.registerProject({ root: project });
+    store.writeGrowthReportProjection(registered.projectId, [{ key: 'shared:key', value: { generation: 'native' } }]);
+    const bytes = fs.readFileSync(source), hash = crypto.createHash('sha256').update(bytes).digest('hex'), key = path.basename(source);
+    for (const location of [alias, project]) store.captureMigrationSource({ identity: `project-growth:${location}`, key, hash }, bytes, { mimeType: 'application/x-sqlite3', encoding: 'binary' });
+    store.markMigrationSourceImported(`project-growth:${project}`, key);
+    const recycling = new MigrationRecycling(store); const plan = await recycling.prepare();
+    assert.equal(plan.files.length, 1);
+    const result = await importProjectGrowth(store, source, { projectRoot: project });
+    assert.equal(result.conflicts.length, 1);
+    assert.deepEqual([alias, project].map(location => store.readMigrationSource(`project-growth:${location}`, key).stage), ['conflict', 'conflict']);
+    assert.equal((await new MigrationRecycling(store).prepare()).files.length, 0);
+    assert.throws(() => recycling.confirm(plan.planId), /recycling_source_not_reconciled/);
+    store.markMigrationSourceImported(`project-growth:${project}`, key);
+    assert.equal(recycling.confirm(plan.planId).confirmed, true);
+    await importProjectGrowth(store, source, { projectRoot: project });
+    await assert.rejects(() => recycling.hold(plan.files[0].itemId), /recycling_source_not_reconciled/);
+    assert.equal(fs.existsSync(source), true);
+  } finally { store.close(); }
+});
+
+test('growth projection conflict retries never replay snapshots already adopted by v1', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-growth-projection-retry-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
+  const source = path.join(project, '.solopreneur', 'project_growth.db');
+  fs.mkdirSync(path.dirname(source), { recursive: true }); fs.mkdirSync(root);
+  const { SqliteStore } = require('../out/db/sqliteStore.js'); const legacy = new SqliteStore(source, path.resolve(__dirname, '..'));
+  await legacy.init();
+  legacy.writeGrowthSnapshot({ snapshot: { id: 'already-adopted', createdAt: new Date().toISOString(), projectPath: project, gitHead: '', scanReason: 'test', status: 'completed', durationMs: 1, error: '' }, nodes: [], edges: [], signals: [], labels: [] });
+  legacy.putGrowthReportProjection([{ key: 'shared:key', value: { generation: 'legacy' } }]); legacy.close();
+  const store = new UnifiedDataStore(root);
+  try {
+    const registered = await store.registerProject({ root: project });
+    store.writeGrowthReportProjection(registered.projectId, [{ key: 'shared:key', value: { generation: 'native' } }]);
+    const bytes = fs.readFileSync(source), identity = `project-growth:${project}`;
+    store.captureMigrationSource({ identity, key: path.basename(source), hash: crypto.createHash('sha256').update(bytes).digest('hex') }, bytes, { mimeType: 'application/x-sqlite3', encoding: 'binary' });
+    store.markMigrationSourceImported(identity, path.basename(source));
+    const writeGrowth = store.writeProjectGrowth.bind(store); let snapshotWrites = 0;
+    store.writeProjectGrowth = (...args) => { snapshotWrites++; return writeGrowth(...args); };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await importProjectGrowth(store, source, { projectRoot: project });
+      assert.equal(result.conflicts.length, 1);
+    }
+    assert.equal(snapshotWrites, 0, 'projection reconciliation must retain independent evidence that snapshots were already adopted');
+  } finally { store.close(); }
+});
+
+test('legacy growth migration treats a pre-projection database as having no report rows', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-growth-without-projection-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
+  const source = path.join(project, '.solopreneur', 'project_growth.db');
+  fs.mkdirSync(path.dirname(source), { recursive: true }); fs.mkdirSync(root);
+  const { SqliteStore } = require('../out/db/sqliteStore.js'); const legacy = new SqliteStore(source, path.resolve(__dirname, '..'));
+  await legacy.init(); legacy.close();
+  const { DatabaseSync } = require('node:sqlite'); const database = new DatabaseSync(source);
+  database.exec('DROP TABLE growth_report_projection'); database.close();
+  const store = new UnifiedDataStore(root);
+  try {
+    const result = await importProjectGrowth(store, source, { projectRoot: project });
+    assert.deepEqual(result.conflicts, []);
+    assert.equal(store.readMigrationSource(`project-growth:${project}`, 'project_growth.db').stage, 'imported');
+  } finally { store.close(); }
+});
+
+test('startup migration upgrades a previously completed growth import to include report projections', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-growth-projection-upgrade-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
+  const source = path.join(project, '.solopreneur', 'project_growth.db');
+  fs.mkdirSync(path.dirname(source), { recursive: true }); fs.mkdirSync(root);
+  const { SqliteStore } = require('../out/db/sqliteStore.js'); const legacy = new SqliteStore(source, path.resolve(__dirname, '..'));
+  await legacy.init();
+  legacy.writeGrowthSnapshot({ snapshot: { id: 'v1-already-adopted', createdAt: new Date().toISOString(), projectPath: project, gitHead: '', scanReason: 'test', status: 'completed', durationMs: 1, error: '' }, nodes: [], edges: [], signals: [], labels: [] });
+  legacy.putGrowthReportProjection([{ key: 'legacy:upgrade', value: { complete: true, records: 2 } }]); legacy.close();
+  const seed = new UnifiedDataStore(root);
+  const seededProject = await seed.registerProject({ root: project });
+  const bytes = fs.readFileSync(source), identity = `project-growth:${project}`;
+  seed.captureMigrationSource({ identity, key: 'project_growth.db', hash: crypto.createHash('sha256').update(bytes).digest('hex') }, bytes, { mimeType: 'application/x-sqlite3', encoding: 'binary' });
+  seed.markMigrationSourceImported(identity, 'project_growth.db');
+  const previous = seed.enqueueMemoryMigration({ collection: 'project-growth', sourceRoot: source, projectRoot: project }, `startup-project-growth-v1:${project}`);
+  seed.updateMigrationJob(previous.jobId, 'completed', { imported: 1, unchanged: 0, originalBytes: bytes.length, conflicts: [], retainedFiles: [source], interrupted: false });
+  seed.close();
+  const store = UnifiedDataStore.open(root); const operations = createRuntimeDataOperations(store);
+  try {
+    const registered = await store.registerProject({ root: project });
+    assert.equal(registered.projectId, seededProject.projectId);
+    const writeGrowth = store.writeProjectGrowth.bind(store); let snapshotWrites = 0;
+    store.writeProjectGrowth = (...args) => { snapshotWrites++; return writeGrowth(...args); };
+    const scheduled = await enqueueAvailableDataMigrations(store, operations, () => true, false, project);
+    await operations.waitForMigrations();
+    assert.equal(scheduled.queued, 1);
+    assert.equal(snapshotWrites, 0, 'the projection upgrade must not replay already imported growth snapshots');
+    assert.deepEqual(store.readGrowthReportProjection(registered.projectId), [
+      { key: 'legacy:upgrade', value: { complete: true, records: 2 }, revision: 1 }
+    ]);
+  } finally { await operations.close(); store.close(); }
 });
 
 test('captured growth source resumes after restart until it is fully imported', async (t) => {

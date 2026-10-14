@@ -2,6 +2,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { isDeepStrictEqual } from 'util';
 import { UnifiedDataStore } from './db/unifiedDataStore';
 import { SqliteStore } from './db/sqliteStore';
 import type { MemoryImportResult } from './memoryDatabaseMigration';
@@ -638,11 +639,13 @@ export async function importProjectGrowth(store: UnifiedDataStore, source: strin
   const captured = await captureSqliteSnapshot(physicalSource, legacy => legacy.initReadOnly()); result.originalBytes = captured.bytes.length;
   try {
   const sourceState = store.captureMigrationSource({ identity, key: path.basename(source), hash: captured.hash }, captured.bytes, { mimeType: 'application/x-sqlite3', encoding: 'binary' });
-  if (sourceState.unchanged && sourceState.stage === 'imported') { result.unchanged = 1; return result; }
+  const sourceAlreadyImported = sourceState.unchanged && sourceState.stage === 'imported';
+  if (sourceAlreadyImported) result.unchanged = 1;
   const project = await store.registerProject({ root: physicalProjectRoot }); const legacy = new SqliteStore(captured.snapshot, path.resolve(__dirname, '..'));
   try {
+    const snapshotsAlreadyImported = sourceAlreadyImported || store.growthSnapshotsImported(project.projectId, captured.hash);
     await legacy.initReadOnly();
-    for (const row of legacy.getAllGrowthSnapshotHistory().reverse()) {
+    for (const row of snapshotsAlreadyImported ? [] : legacy.getAllGrowthSnapshotHistory().reverse()) {
       if (options.shouldContinue && !options.shouldContinue()) return { ...result, interrupted: true };
       const snapshot = legacy.getGrowthSnapshotById(row.id);
       if (snapshot) { store.writeProjectGrowth(project.projectId, snapshot, `legacy-growth:${project.projectId}:${row.id}`); result.imported++; }
@@ -650,8 +653,25 @@ export async function importProjectGrowth(store: UnifiedDataStore, source: strin
       // task-start, and live database requests run between every snapshot.
       await new Promise<void>(resolve => setImmediate(resolve));
     }
+    store.markGrowthSnapshotsImported(project.projectId, captured.hash);
+    for (const row of legacy.getGrowthReportProjection('')) {
+      const current = store.readGrowthReportProjection(project.projectId, row.key).find(item => item.key === row.key);
+      if (current) {
+        if (isDeepStrictEqual(current.value, row.value)) result.unchanged++;
+        else result.conflicts.push({ source: `${path.basename(source)}#growth_report_projection:${row.key}`, error: 'growth_report_projection_conflict' });
+        continue;
+      }
+      try {
+        store.writeGrowthReportProjection(project.projectId, [{ ...row, expectedRevision: 0 }]);
+        result.imported++;
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== 'revision_conflict') throw error;
+        result.conflicts.push({ source: `${path.basename(source)}#growth_report_projection:${row.key}`, error: 'growth_report_projection_conflict' });
+      }
+    }
   } finally { legacy.close(); }
-  store.markMigrationSourceImported(identity, path.basename(source));
+  if (result.conflicts.length) store.markMigrationSourceConflict(identity, path.basename(source), 'growth_report_projection_conflict');
+  else store.markMigrationSourceImported(identity, path.basename(source));
   return result;
   } finally { await captured.cleanup(); }
 }

@@ -450,7 +450,16 @@ export class UnifiedDataStore {
     return { hash: String(row.hash), stage: String(row.stage), reconciled };
   }
   public markMigrationSourceRechecking(identity: string, key: string): void {
-    for (const source of this.equivalentMigrationSources(identity, key)) {
+    const sources = this.equivalentMigrationSources(identity, key);
+    if (identity.startsWith('project-growth:')) {
+      let physicalRoot = '';
+      try { physicalRoot = fs.realpathSync(identity.slice('project-growth:'.length)); } catch { /* The source stays ineligible when its project cannot be resolved. */ }
+      const projectId = physicalRoot ? String(this.rows("SELECT project_id FROM project_locations WHERE root_path=? AND status='active'", [physicalRoot])[0]?.project_id || '') : '';
+      for (const sourceHash of new Set(sources.filter(source => source.stage === 'imported').map(source => source.hash))) {
+        if (projectId) this.markGrowthSnapshotsImported(projectId, sourceHash);
+      }
+    }
+    for (const source of sources) {
       this.db.run("UPDATE migration_items SET stage='captured',error='migration_reconciliation_pending' WHERE source_identity=? AND source_key=? AND stage='imported'", [source.identity, key]);
     }
   }
@@ -461,12 +470,12 @@ export class UnifiedDataStore {
     if (!a || !b || a[1] !== b[1]) return false;
     try { return fs.realpathSync(a[2]) === fs.realpathSync(b[2]); } catch { return false; }
   }
-  private equivalentMigrationSources(identity: string, key: string): Array<{ identity: string; hash: string }> {
+  private equivalentMigrationSources(identity: string, key: string): Array<{ identity: string; hash: string; stage: string }> {
     const collection = /^(project-journal|project-growth):/.exec(identity)?.[1];
     const rows = collection
-      ? this.rows('SELECT source_identity,contents.sha256 AS hash FROM migration_items JOIN contents ON contents.id=source_content_id WHERE source_key=? AND source_identity>=? AND source_identity<?', [key, `${collection}:`, `${collection};`])
-      : this.rows('SELECT source_identity,contents.sha256 AS hash FROM migration_items JOIN contents ON contents.id=source_content_id WHERE source_identity=? AND source_key=?', [identity, key]);
-    return rows.filter(row => this.samePhysicalMigrationSource(identity, String(row.source_identity))).map(row => ({ identity: String(row.source_identity), hash: String(row.hash) }));
+      ? this.rows('SELECT source_identity,contents.sha256 AS hash,stage FROM migration_items JOIN contents ON contents.id=source_content_id WHERE source_key=? AND source_identity>=? AND source_identity<?', [key, `${collection}:`, `${collection};`])
+      : this.rows('SELECT source_identity,contents.sha256 AS hash,stage FROM migration_items JOIN contents ON contents.id=source_content_id WHERE source_identity=? AND source_key=?', [identity, key]);
+    return rows.filter(row => this.samePhysicalMigrationSource(identity, String(row.source_identity))).map(row => ({ identity: String(row.source_identity), hash: String(row.hash), stage: String(row.stage) }));
   }
   private beginMigrationReconciliation(jobId: string, args: Record<string, unknown>): void {
     if (args.mode === 'unified' || typeof args.projectRoot !== 'string') return;
@@ -514,8 +523,22 @@ export class UnifiedDataStore {
       this.db.run("UPDATE migration_items SET stage='imported',error=NULL WHERE source_identity=? AND source_key=?", [source.identity, key]);
     }
   }
+  public growthSnapshotsImported(projectId: string, sourceHash: string): boolean {
+    if (!projectId || !/^[a-f0-9]{64}$/.test(sourceHash)) throw new Error('migration_source_invalid');
+    return Boolean(this.rows('SELECT 1 FROM database_meta WHERE key=?', [`migration_growth_snapshots_imported:${projectId}:${sourceHash}`]).length);
+  }
+  public markGrowthSnapshotsImported(projectId: string, sourceHash: string): void {
+    if (!projectId || !/^[a-f0-9]{64}$/.test(sourceHash)) throw new Error('migration_source_invalid');
+    this.db.run('INSERT OR IGNORE INTO database_meta(key,value) VALUES(?,?)', [`migration_growth_snapshots_imported:${projectId}:${sourceHash}`, '1']);
+  }
   public markMigrationSourceConflict(identity: string, key: string, error: string): void {
     this.db.run("UPDATE migration_items SET stage='conflict',error=? WHERE source_identity=? AND source_key=?", [error, identity, key]);
+    if (!/^(project-journal|project-growth):/.test(identity)) return;
+    const sources = this.equivalentMigrationSources(identity, key);
+    const current = sources.find(source => source.identity === identity);
+    for (const source of sources) if (source.identity !== identity && current && source.hash === current.hash) {
+      this.db.run("UPDATE migration_items SET stage='conflict',error=? WHERE source_identity=? AND source_key=?", [error, source.identity, key]);
+    }
   }
   public recyclingItems(): RecyclingItem[] {
     return this.rows('SELECT * FROM migration_recycling ORDER BY created_at,id').map(row => ({ itemId: String(row.id), planId: String(row.plan_id), identity: String(row.source_identity), key: String(row.source_key), hash: String(row.source_hash), path: String(row.authorized_path ?? row.original_path), restorePath: row.restore_path === null ? null : String(row.restore_path), bytes: Number(row.byte_count), status: row.status as RecyclingItem['status'], error: row.error === null ? null : String(row.error) }));

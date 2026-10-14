@@ -1455,6 +1455,7 @@ export class SqliteStore {
 
   public getGrowthReportProjection(prefix: string): { key: string; value: any }[] {
     if (!this.db) throw new Error('Database not initialized');
+    if (!this.sqliteObjectExists('table', 'growth_report_projection')) return [];
     const statement = this.db.prepare('SELECT key, value FROM growth_report_projection WHERE substr(key, 1, ?) = ?');
     const rows: { key: string; value: any }[] = [];
     try {
