@@ -485,9 +485,14 @@ async function buildDatabaseShadowDecision(options: ShadowCycleOptions): Promise
   });
   const roadmaps = new Map<string, RoadmapNodeLike[]>();
   await Promise.all(projects.map(async project => {
-    const nodes = await readProjectRoadmapNodesFromDatabase(project.path, globalRoot,
-      options.operation ? (name, input) => options.operation!({ operation: name, input }) : undefined);
-    roadmaps.set(project.path, nodes);
+    try {
+      const nodes = await readProjectRoadmapNodesFromDatabase(project.path, globalRoot,
+        options.operation ? (name, input) => options.operation!({ operation: name, input }) : undefined);
+      roadmaps.set(project.path, nodes);
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.startsWith('roadmap_csv_invalid:')) throw error;
+      roadmaps.set(project.path, []);
+    }
   }));
   const sourceRevision = buildDatabaseProjectSourceRevision(projects, roadmaps);
   const portfolio = buildProjectPortfolioSummaries(projects, { coreOnly: true, roadmapNodesByProjectPath: roadmaps });

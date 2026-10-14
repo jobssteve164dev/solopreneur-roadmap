@@ -127,6 +127,33 @@ test('database shadow cycle keeps authoritative roadmap candidates after legacy 
   }
 });
 
+test('database Today planning isolates one project with an invalid roadmap', async () => {
+  const fixture = await createFixture();
+  try {
+    const decision = await runtime.runShadowDecisionCycleFromDatabase({
+      globalDataPath: fixture.globalRoot,
+      projects: [
+        { name: 'Alpha', path: fixture.alpha, priority: 'P1' },
+        { name: 'Beta', path: fixture.beta, priority: 'P2' }
+      ],
+      now: new Date('2026-09-22T08:00:00.000Z'),
+      operation: request => {
+        if (request.operation === 'read_roadmap' && request.input.root === fixture.alpha) {
+          return Promise.reject(new Error('roadmap_csv_invalid:dependency'));
+        }
+        return fixture.operations(request);
+      }
+    });
+
+    assert.equal(decision.status, 'completed');
+    assert.equal(decision.projectCount, 2);
+    assert.equal(decision.recommendations[0].projectPath, fixture.beta);
+    assert.equal(decision.recommendations[0].title, 'Recover Beta');
+  } finally {
+    await removeFixture(fixture);
+  }
+});
+
 test('cognitive Today arrangement reuses unchanged database facts and reruns Pi after a committed roadmap change', async () => {
   const fixture = await createFixture();
   try {
