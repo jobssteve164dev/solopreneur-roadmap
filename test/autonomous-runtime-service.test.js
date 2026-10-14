@@ -363,6 +363,106 @@ test('a drained packaged Runtime remains verifiable after its control endpoint c
   assert.equal(runtime.readRuntimeState(globalRoot).pid, replacement.pid);
 });
 
+test('a drained Runtime that has exited but is not reaped does not block replacement startup', async t => {
+  const host = require('../out/autonomousRuntimeHost.js');
+  const runtime = require('../out/autonomousRuntime.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-drain-zombie-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const runtimeRoot = path.join(globalRoot, 'runtime');
+  const statePath = path.join(runtimeRoot, 'control.json');
+  const oldPid = process.pid;
+  const replacementPid = process.pid;
+  let oldOwnerAlive = true;
+  let spawned = false;
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({
+    schemaVersion: 1,
+    runtimeId: 'old',
+    pid: oldPid,
+    processBirth: 'proc:old',
+    status: 'running',
+    heartbeatAt: new Date().toISOString()
+  }));
+  t.after(() => {
+    if (fs.existsSync(statePath)) fs.unlinkSync(statePath);
+    fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root);
+  });
+  const result = await host.ensureHealthyAutonomousRuntime({
+    extensionPath: '/opt/solomap-new',
+    globalDataPath: globalRoot,
+    buildId: 'new',
+    drainTimeoutMs: 5,
+    isProcessAlive: () => true,
+    isProcessOwnerAlive: (pid, birth) => birth === 'proc:old' ? oldOwnerAlive : pid === replacementPid,
+    sendHealth: async () => {
+      const state = runtime.readRuntimeState(globalRoot);
+      return {
+        ok: true,
+        runtimeId: state.runtimeId,
+        status: state.status,
+        entryPath: state.runtimeId === 'old'
+          ? '/opt/solomap-old/out/autonomousRuntimeProcess.js'
+          : '/opt/solomap-new/out/autonomousRuntimeProcess.js',
+        buildId: state.runtimeId === 'old' ? 'old' : 'new'
+      };
+    },
+    async sendControl(command, runtimeId) {
+      assert.equal(command, 'drain');
+      assert.equal(runtimeId, 'old');
+      oldOwnerAlive = false;
+    },
+    spawnProcess() {
+      spawned = true;
+      return { pid: replacementPid, unref() {} };
+    }
+  });
+  assert.equal(spawned, true);
+  assert.equal(result.started, true);
+  assert.equal(result.pid, replacementPid);
+  assert.equal(runtime.readRuntimeState(globalRoot).pid, replacementPid);
+});
+
+test('Linux process identity treats an exited unreaped child as dead', async t => {
+  if (process.platform !== 'linux') return t.skip('Linux /proc contract');
+  const childProcess = require('node:child_process');
+  const { isProcessOwnerAlive, isProcessZombie, readProcessBirthMarker } = require('../out/processIdentity.js');
+  const parent = childProcess.spawn('python3', ['-u', '-c', [
+    'import os, time',
+    'child = os.fork()',
+    'if child == 0:',
+    '    time.sleep(0.5)',
+    '    os._exit(0)',
+    'print(child, flush=True)',
+    'time.sleep(60)'
+  ].join('\n')], { stdio: ['ignore', 'pipe', 'pipe'] });
+  t.after(async () => {
+    if (parent.exitCode === null && parent.signalCode === null) parent.kill('SIGTERM');
+    if (parent.exitCode === null && parent.signalCode === null) {
+      await Promise.race([
+        new Promise(resolve => parent.once('exit', resolve)),
+        new Promise(resolve => setTimeout(resolve, 2_000))
+      ]);
+    }
+  });
+  const childPid = await new Promise((resolve, reject) => {
+    let output = '';
+    parent.once('error', reject);
+    parent.stdout.on('data', data => {
+      output += data.toString('utf8');
+      const line = output.split('\n')[0].trim();
+      if (/^[1-9]\d*$/.test(line)) resolve(Number(line));
+    });
+  });
+  const birth = readProcessBirthMarker(childPid);
+  assert.match(birth, /^proc:/);
+  const deadline = Date.now() + 3_000;
+  while (!isProcessZombie(childPid) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(isProcessZombie(childPid), true);
+  assert.equal(isProcessOwnerAlive(childPid, birth), false);
+});
+
 test('a known different runtime build is rejected without a startup wait', async t => {
   const host = require('../out/autonomousRuntimeHost.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-wrong-build-'));

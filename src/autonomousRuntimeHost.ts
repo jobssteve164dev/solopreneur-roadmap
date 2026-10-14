@@ -9,7 +9,7 @@ import { RuntimeControlCommand, RuntimeControlResponse, sendRuntimeControlComman
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import { PiMainPathRequest, PiMainPathResult } from './piMainPathDelivery';
 import { runtimeBuildId, runtimeReleaseVersion } from './runtimeBuildIdentity';
-import { isProcessOwnerAlive as processOwnerAlive } from './processIdentity.js';
+import { isProcessOwnerAlive as processOwnerAlive, isProcessZombie } from './processIdentity.js';
 
 interface RuntimeChild {
   pid?: number;
@@ -40,7 +40,7 @@ function defaultIsProcessAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
-    return true;
+    return !isProcessZombie(pid);
   } catch {
     return false;
   }
@@ -255,7 +255,7 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
         return { started: false, pid: current.pid, runtimeId: current.runtimeId };
       }
       await (options.terminateProcess || terminateVerifiedRuntimeProcess)(current.pid);
-      if (isProcessAlive(current.pid)) throw new Error('runtime_termination_failed');
+      if (isOwnerAlive(current.pid, current.processBirth || '')) throw new Error('runtime_termination_failed');
     } else {
       if (health.reason !== 'different_runtime_build') throw new Error(health.reason);
       const drainingEntryPath = registeredRuntimeEntryPath(globalDataPath, current.runtimeId);
@@ -267,17 +267,16 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
       }
       const deadline = Date.now() + (options.drainTimeoutMs ?? 30_000);
       while (Date.now() < deadline) {
-        const state = readRuntimeState(globalDataPath);
-        if ((!state || state.runtimeId !== current.runtimeId || state.status === 'stopped') && !isProcessAlive(current.pid)) break;
+        if (!isOwnerAlive(current.pid, current.processBirth || '')) break;
         await new Promise(resolve => setTimeout(resolve, 50));
       }
-      if (isProcessAlive(current.pid)) {
+      if (isOwnerAlive(current.pid, current.processBirth || '')) {
         const verified = options.verifyRuntimeProcess
           ? options.verifyRuntimeProcess(current.pid, current.runtimeId, globalDataPath)
           : verifiedDrainedRuntimeProcess(current, globalDataPath, drainingEntryPath);
         if (!verified) throw new Error('runtime_drain_timeout');
         await (options.terminateProcess || terminateVerifiedRuntimeProcess)(current.pid);
-        if (isProcessAlive(current.pid)) throw new Error('runtime_termination_failed');
+        if (isOwnerAlive(current.pid, current.processBirth || '')) throw new Error('runtime_termination_failed');
       }
     }
   }
