@@ -619,8 +619,18 @@ export class UnifiedDataStore {
     return this.rows("SELECT item_id AS itemId,directory AS path FROM recycling_restore_intents WHERE status='ownership_unknown' ORDER BY created_at,id") as Array<{ itemId: string; path: string }>;
   }
   public setRecyclingStatus(itemId: string, status: RecyclingItem['status'], error: string | null = null): void {
-    if (!this.rows('SELECT id FROM migration_recycling WHERE id=?', [itemId]).length) throw new Error('recycling_item_missing');
-    this.db.run('UPDATE migration_recycling SET status=?,error=?,updated_at=? WHERE id=?', [status, error, Date.now(), itemId]);
+    this.setRecyclingStatuses([{ itemId, status, error }]);
+  }
+  public setRecyclingStatuses(updates: Array<{ itemId: string; status: RecyclingItem['status']; error?: string | null }>): void {
+    if (!updates.length) return;
+    if (new Set(updates.map(update => update.itemId)).size !== updates.length) throw new Error('recycling_item_duplicate');
+    this.transaction(() => {
+      const updatedAt = Date.now();
+      for (const update of updates) {
+        this.db.run('UPDATE migration_recycling SET status=?,error=?,updated_at=? WHERE id=?', [update.status, update.error ?? null, updatedAt, update.itemId]);
+        if (this.db.getRowsModified() !== 1) throw new Error('recycling_item_missing');
+      }
+    });
   }
   public updateMigrationJob(jobId: string, status: MigrationJob['status'], progress: Record<string, unknown>, error: string | null = null): void {
     this.transaction(() => {

@@ -322,6 +322,117 @@ export class MigrationRecycling {
     this.busy.add(itemId);
     try { return await work(); } finally { this.busy.delete(itemId); }
   }
+  private async exclusiveMany<T>(itemIds: string[], work: () => Promise<T>): Promise<T> {
+    const ids = [...new Set(itemIds)];
+    if (ids.some(itemId => this.busy.has(itemId))) throw new Error('recycling_operation_in_progress');
+    for (const itemId of ids) this.busy.add(itemId);
+    try { return await work(); } finally { for (const itemId of ids) this.busy.delete(itemId); }
+  }
+  public async recycleBatch(itemIds: string[]): Promise<{ failures: string[] }> {
+    const ids = [...new Set(itemIds)];
+    return this.exclusiveMany(ids, async () => {
+      const failures = new Set<string>();
+      const moving: RecyclingItem[] = [];
+      const held = new Map<string, RecyclingItem>();
+      const changed: Array<{ itemId: string; status: 'changed'; error: string }> = [];
+      for (const itemId of ids) {
+        let item: RecyclingItem;
+        try {
+          item = this.item(itemId);
+          if (['trashed', 'restored'].includes(item.status)) continue;
+          if (item.status === 'changed') { failures.add(itemId); continue; }
+          if (item.status === 'prepared') throw new Error('recycling_confirmation_required');
+          if (!['approved', 'moving', 'held'].includes(item.status)) throw new Error('recycling_state_invalid');
+          this.assertReconciled(item);
+          const target = this.heldPath(item);
+          if (['moving', 'held'].includes(item.status)) {
+            try {
+              await this.verifiedFile(target, item.hash);
+              held.set(item.itemId, item);
+              continue;
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+              if (item.status === 'held') {
+                try { await fs.promises.lstat(item.path); }
+                catch (sourceError) {
+                  if ((sourceError as NodeJS.ErrnoException).code !== 'ENOENT') throw sourceError;
+                  try { fs.lstatSync(target); held.set(item.itemId, item); }
+                  catch (targetNow) {
+                    if ((targetNow as NodeJS.ErrnoException).code !== 'ENOENT') throw targetNow;
+                    try { fs.lstatSync(item.path); moving.push(item); }
+                    catch (sourceNow) {
+                      if ((sourceNow as NodeJS.ErrnoException).code !== 'ENOENT') throw sourceNow;
+                      this.store.setRecyclingStatus(item.itemId, 'trashed');
+                    }
+                  }
+                  continue;
+                }
+              }
+            }
+          }
+        } catch {
+          failures.add(itemId);
+          continue;
+        }
+        moving.push(item);
+      }
+      this.store.setRecyclingStatuses([
+        ...moving.map(item => ({ itemId: item.itemId, status: 'moving' as const })),
+        ...changed
+      ]);
+
+      const moved: RecyclingItem[] = [];
+      const moveFailures: Array<{ itemId: string; status: 'changed'; error: string }> = [];
+      for (const item of moving) {
+        try {
+          const target = this.heldPath(item);
+          const bytes = await this.verifiedFile(item.path, item.hash, item);
+          if (item.identity.startsWith('intelligence:') && !this.matchesConversation(item.key, bytes)) throw new Error('recycling_database_mismatch');
+          await this.safeDirectory(path.dirname(target), true);
+          try { await fs.promises.lstat(target); throw new Error('recycling_target_exists'); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          this.assertReconciled(item);
+          const sourceStat = await fs.promises.lstat(item.path);
+          if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.nlink !== 1 || this.physicalSourcePath(item) !== item.path) throw new Error('recycling_path_invalid');
+          await fs.promises.rename(item.path, target);
+          const targetStat = await fs.promises.lstat(target);
+          if (!targetStat.isFile() || targetStat.isSymbolicLink() || targetStat.nlink !== 1 || targetStat.dev !== sourceStat.dev || targetStat.ino !== sourceStat.ino) throw new Error('recycling_source_changed');
+          await this.verifiedFile(target, item.hash);
+          this.assertReconciled(item);
+          moved.push(item);
+          held.set(item.itemId, item);
+        } catch (error) {
+          failures.add(item.itemId);
+          moveFailures.push({ itemId: item.itemId, status: 'changed', error: String(error) });
+        }
+      }
+      this.store.setRecyclingStatuses([
+        ...moved.map(item => ({ itemId: item.itemId, status: 'held' as const })),
+        ...[...held.values()].filter(item => !moved.some(movedItem => movedItem.itemId === item.itemId) && item.status === 'moving')
+          .map(item => ({ itemId: item.itemId, status: 'held' as const })),
+        ...moveFailures
+      ]);
+
+      const retired: RecyclingItem[] = [];
+      for (const item of held.values()) {
+        try {
+          this.assertReconciled(item);
+          if (!(await fs.promises.lstat(this.store.filePath)).isFile()) throw new Error('database_restore_required');
+          if (this.store.recyclingSnapshot(item.itemId).hash !== item.hash) throw new Error('recycling_snapshot_changed');
+          try {
+            await this.verifiedFile(this.heldPath(item), item.hash);
+            this.assertReconciled(item);
+            await fs.promises.unlink(this.heldPath(item));
+          } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          retired.push(item);
+        } catch {
+          failures.add(item.itemId);
+        }
+      }
+      this.store.setRecyclingStatuses(retired.map(item => ({ itemId: item.itemId, status: 'trashed' as const })));
+      return { failures: [...failures] };
+    });
+  }
   public async hold(itemId: string) {
     return this.exclusive(itemId, async () => {
       const item = this.item(itemId);
@@ -336,8 +447,12 @@ export class MigrationRecycling {
           return { path: target, hash: item.hash };
         } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
         if (item.status === 'held') {
-          this.store.setRecyclingStatus(itemId, 'trashed');
-          return { recycled: true };
+          try { await fs.promises.lstat(item.path); }
+          catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            this.store.setRecyclingStatus(itemId, 'trashed');
+            return { recycled: true };
+          }
         }
       }
       try {

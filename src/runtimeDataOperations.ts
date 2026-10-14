@@ -776,13 +776,10 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const scope = await migrationScope(input);
         const plan = recycling.readPlan(String(input.planId || ''), scope);
         const failures: string[] = [];
-        for (const file of plan.files) {
-          if (['trashed', 'restored'].includes(file.status)) continue;
-          if (file.status === 'changed') { failures.push(file.itemId); continue; }
-          try {
-            const held = await recycling.hold(file.itemId);
-            if (!held.recycled) await recycling.retire(file.itemId);
-          } catch { failures.push(file.itemId); }
+        const pending = plan.files.filter(file => !['trashed', 'restored'].includes(file.status));
+        for (let offset = 0; offset < pending.length; offset += 128) {
+          const result = await recycling.recycleBatch(pending.slice(offset, offset + 128).map(file => file.itemId));
+          failures.push(...result.failures);
         }
         if (failures.length) throw new Error(`recycling_items_retained:${failures.join(',')}`);
         return recycling.overview(scope);

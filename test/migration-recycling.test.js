@@ -30,6 +30,8 @@ test('only fully migrated unchanged files enter an exact approved recycling plan
     const plan = await f.call('prepare_recycling');
     assert.deepEqual(plan.files.map(file => file.path), [f.file]);
     await assert.rejects(f.call('hold_recycling_file', { itemId: plan.files[0].itemId }), /recycling_confirmation_required/);
+    await assert.rejects(f.call('execute_recycling_plan', { planId: plan.planId }), /recycling_items_retained/);
+    assert.equal(f.store.recyclingItems()[0].status, 'prepared');
     await f.call('confirm_recycling', { planId: plan.planId });
     const held = await f.call('hold_recycling_file', { itemId: plan.files[0].itemId });
     assert.equal(fs.existsSync(f.file), false);
@@ -250,6 +252,102 @@ test('the approved recoverable database recycling path works when system trash i
     await f.call('restore_recycling_file', { itemId: plan.files[0].itemId });
     assert.equal(fs.readFileSync(f.file, 'utf8'), f.original);
   } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('plan execution batches durable status changes while preserving per-file verification and restoration', async () => {
+  const f = fixture();
+  try {
+    const files = [f.file];
+    for (const suffix of ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222']) {
+      const file = path.join(path.dirname(f.file), suffix + '.json');
+      fs.writeFileSync(file, JSON.stringify({ id: suffix, title: 'Old chat', createdAt: '2026-09-22T08:00:00.000Z', updatedAt: '2026-09-22T08:01:00.000Z', messages: [{ role: 'user', content: suffix }] }));
+      files.push(file);
+    }
+    for (const file of files) await importLegacyIntelligenceConversation(f.store, file);
+    const plan = await f.call('prepare_recycling');
+    assert.equal(plan.files.length, 3);
+    await f.call('confirm_recycling', { planId: plan.planId });
+    const individual = f.store.setRecyclingStatus.bind(f.store);
+    f.store.setRecyclingStatus = () => { throw new Error('individual_status_write_used'); };
+    await f.call('execute_recycling_plan', { planId: plan.planId });
+    f.store.setRecyclingStatus = individual;
+    assert.equal(files.every(file => !fs.existsSync(file)), true);
+    assert.deepEqual(f.store.recyclingItems().map(item => item.status), ['trashed', 'trashed', 'trashed']);
+    await f.call('restore_recycling_file', { itemId: plan.files[1].itemId });
+    assert.equal(fs.existsSync(plan.files[1].path), true);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('batch execution rejects a source replaced after moving is durable and never retires the foreign file', async () => {
+  const f = fixture();
+  const foreign = path.join(f.root, 'foreign.json');
+  const retained = f.file + '.retained';
+  try {
+    await importLegacyIntelligenceConversation(f.store, f.file);
+    const plan = await f.call('prepare_recycling');
+    await f.call('confirm_recycling', { planId: plan.planId });
+    fs.writeFileSync(foreign, f.original);
+    const batch = f.store.setRecyclingStatuses.bind(f.store);
+    let replaced = false;
+    f.store.setRecyclingStatuses = updates => {
+      batch(updates);
+      if (!replaced && updates.some(update => update.status === 'moving')) {
+        replaced = true;
+        fs.renameSync(f.file, retained);
+        fs.symlinkSync(foreign, f.file);
+      }
+    };
+    await assert.rejects(f.call('execute_recycling_plan', { planId: plan.planId }), /recycling_items_retained/);
+    assert.equal(fs.readFileSync(retained, 'utf8'), f.original);
+    assert.equal(fs.readFileSync(foreign, 'utf8'), f.original);
+    assert.equal(fs.lstatSync(f.file).isSymbolicLink(), true);
+    assert.equal(f.store.recyclingItems()[0].status, 'changed');
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('batch execution revalidates a held file moved back to its original path before reporting physical reclamation', async () => {
+  const f = fixture();
+  try {
+    await importLegacyIntelligenceConversation(f.store, f.file);
+    const plan = await f.call('prepare_recycling');
+    await f.call('confirm_recycling', { planId: plan.planId });
+    const held = await f.call('hold_recycling_file', { itemId: plan.files[0].itemId });
+    fs.renameSync(held.path, f.file);
+    await f.call('execute_recycling_plan', { planId: plan.planId });
+    assert.equal(fs.existsSync(f.file), false);
+    assert.equal(f.store.recyclingItems()[0].status, 'trashed');
+    await f.call('restore_recycling_file', { itemId: plan.files[0].itemId });
+    assert.equal(fs.readFileSync(f.file, 'utf8'), f.original);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('batch execution does not use an obsolete missing observation when a held source reappears', async () => {
+  const f = fixture();
+  const lstat = fs.promises.lstat;
+  try {
+    await importLegacyIntelligenceConversation(f.store, f.file);
+    const plan = await f.call('prepare_recycling');
+    await f.call('confirm_recycling', { planId: plan.planId });
+    const held = await f.call('hold_recycling_file', { itemId: plan.files[0].itemId });
+    const retained = held.path + '.fixture';
+    fs.renameSync(held.path, retained);
+    let reappeared = false;
+    fs.promises.lstat = async file => {
+      try { return await lstat(file); }
+      catch (error) {
+        if (!reappeared && file === f.file && error.code === 'ENOENT') {
+          reappeared = true;
+          fs.renameSync(retained, f.file);
+        }
+        throw error;
+      }
+    };
+    await f.call('execute_recycling_plan', { planId: plan.planId });
+    fs.promises.lstat = lstat;
+    assert.equal(reappeared, true);
+    assert.equal(fs.existsSync(f.file), false);
+    assert.equal(f.store.recyclingItems()[0].status, 'trashed');
+  } finally { fs.promises.lstat = lstat; await f.operations.close(); f.store.close(); }
 });
 
 test('restore recreates an absent original directory after recycling and owner restart', async () => {
