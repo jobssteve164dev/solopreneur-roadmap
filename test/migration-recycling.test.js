@@ -268,9 +268,18 @@ test('plan execution batches durable status changes while preserving per-file ve
     assert.equal(plan.files.length, 3);
     await f.call('confirm_recycling', { planId: plan.planId });
     const individual = f.store.setRecyclingStatus.bind(f.store);
+    const allItems = f.store.recyclingItems.bind(f.store);
+    let fullScans = 0;
+    f.store.recyclingItems = () => {
+      fullScans++;
+      if (fullScans > 2) throw new Error('recycling_full_table_rescan');
+      return allItems();
+    };
     f.store.setRecyclingStatus = () => { throw new Error('individual_status_write_used'); };
     await f.call('execute_recycling_plan', { planId: plan.planId });
     f.store.setRecyclingStatus = individual;
+    f.store.recyclingItems = allItems;
+    assert.equal(fullScans, 2, 'execution scans the plan once and the final overview once');
     assert.equal(files.every(file => !fs.existsSync(file)), true);
     assert.deepEqual(f.store.recyclingItems().map(item => item.status), ['trashed', 'trashed', 'trashed']);
     await f.call('restore_recycling_file', { itemId: plan.files[1].itemId });

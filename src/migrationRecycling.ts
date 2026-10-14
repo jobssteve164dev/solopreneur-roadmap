@@ -283,7 +283,7 @@ export class MigrationRecycling {
     return { confirmed: true };
   }
   private item(itemId: string): RecyclingItem {
-    const item = this.store.recyclingItems().find(value => value.itemId === itemId);
+    const item = this.store.recyclingItem(itemId);
     if (!item) throw new Error('recycling_item_missing');
     return item.restorePath ? { ...item, path: item.restorePath } : this.bindItemPath(item);
   }
@@ -506,7 +506,7 @@ export class MigrationRecycling {
     });
   }
   public async restore(itemId: string, destination?: string, scope?: MigrationProjectScope) {
-    const scopedItem = this.store.recyclingItems().find(item => item.itemId === itemId);
+    const scopedItem = this.store.recyclingItem(itemId);
     if (!scopedItem) throw new Error('recycling_item_missing');
     if (scope && !this.belongsToProject(scopedItem.identity, scope)) throw new Error('maintenance_scope_denied');
     return this.exclusive(itemId, async () => {
@@ -514,7 +514,7 @@ export class MigrationRecycling {
         if (!path.isAbsolute(destination) || path.resolve(destination) !== destination || this.physicalPath(destination) !== destination) throw new Error('recycling_path_invalid');
         const dataRoot = fs.realpathSync(this.store.root);
         if (destination === this.store.filePath || destination.startsWith(dataRoot + path.sep)) throw new Error('recycling_path_invalid');
-        const previous = this.store.recyclingItems().find(item => item.itemId === itemId);
+        const previous = this.store.recyclingItem(itemId);
         if (!previous) throw new Error('recycling_item_missing');
         if (previous.status === 'restoring' && destination !== (previous.restorePath || previous.path)) {
           const stage = this.store.recyclingRestoreStage(itemId);

@@ -541,7 +541,14 @@ export class UnifiedDataStore {
     }
   }
   public recyclingItems(): RecyclingItem[] {
-    return this.rows('SELECT * FROM migration_recycling ORDER BY created_at,id').map(row => ({ itemId: String(row.id), planId: String(row.plan_id), identity: String(row.source_identity), key: String(row.source_key), hash: String(row.source_hash), path: String(row.authorized_path ?? row.original_path), restorePath: row.restore_path === null ? null : String(row.restore_path), bytes: Number(row.byte_count), status: row.status as RecyclingItem['status'], error: row.error === null ? null : String(row.error) }));
+    return this.rows('SELECT * FROM migration_recycling ORDER BY created_at,id').map(row => this.projectRecyclingItem(row));
+  }
+  public recyclingItem(itemId: string): RecyclingItem | null {
+    const row = this.rows('SELECT * FROM migration_recycling WHERE id=?', [itemId])[0];
+    return row ? this.projectRecyclingItem(row) : null;
+  }
+  private projectRecyclingItem(row: Record<string, SqlValue>): RecyclingItem {
+    return { itemId: String(row.id), planId: String(row.plan_id), identity: String(row.source_identity), key: String(row.source_key), hash: String(row.source_hash), path: String(row.authorized_path ?? row.original_path), restorePath: row.restore_path === null ? null : String(row.restore_path), bytes: Number(row.byte_count), status: row.status as RecyclingItem['status'], error: row.error === null ? null : String(row.error) };
   }
   public createRecyclingPlan(files: Array<Omit<RecyclingItem, 'itemId' | 'planId' | 'status' | 'error'>>): { planId: string | null; files: RecyclingItem[] } {
     return this.transaction(() => {
