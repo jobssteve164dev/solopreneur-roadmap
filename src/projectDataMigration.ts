@@ -390,6 +390,17 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       const unregistered = candidates.length === 0 && !registered.tasks.some(task => task.executions.some((run: { id: number }) => run.id === id));
       if (unregistered) {
         const directories = new Set<string>(['sessionFilePath', 'promptFilePath', 'commandFilePath', 'outputFilePath'].map(field => String(status[field] || '')).filter(Boolean).map(declared => path.dirname(path.resolve(declared))));
+        if (directories.size === 0) {
+          const numbered = path.join(sourceRoot, String(status.nodeId || ''), String(id));
+          const relative = path.relative(sourceRoot, numbered);
+          if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('historical_run_source_conflict');
+          let info: fs.Stats;
+          try { info = await fs.promises.lstat(numbered); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('historical_run_source_conflict'); throw error; }
+          const physicalNumbered = path.join(resolvedRoot, '.solopreneur', 'agent-runs', String(status.nodeId || ''), String(id));
+          if (!info.isDirectory() || info.isSymbolicLink() || await fs.promises.realpath(numbered) !== path.resolve(physicalNumbered)) throw new Error('historical_run_source_conflict');
+          directories.add(numbered);
+        }
         if (directories.size !== 1) throw new Error('historical_run_source_conflict');
         const runDir = [...directories][0], relative = path.relative(sourceRoot, runDir), parts = relative.split(path.sep);
         if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || parts[0] !== status.nodeId || !(parts.length === 1 || parts.length === 2 && Number(parts[1]) === id)) throw new Error('historical_run_source_conflict');
@@ -505,11 +516,16 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
           result.retainedGaps.push({ source: declared, error: 'historical_optional_artifact_missing' });
         }
       }
+      const historicalExecutionLogIds = unregistered ? [...new Set([id, Number(status.executionLogId)])] : matchingTasks[0].executions.filter((run: { id: number; runDir: string }) => path.resolve(run.runDir) === runDir).map((run: { id: number }) => run.id);
+      const reportExecutionLogIds = new Set(historicalExecutionLogIds);
       const reports: Array<{ source: { identity: string; key: string; hash: string }; bytes: Buffer; observation: { executionLogId: number; sequence: number; availability: string; envelope: any } }> = [];
       const reportAliases = new Set<string>(status.learningTaskId ? [String(status.learningTaskId)] : []);
       if (unregistered) for (const name of (await fs.promises.readdir(runDir)).filter(name => /^task-report-(?:status-)?\d+\.json$/.test(name)).sort()) {
         const bytes = (await read(name))!, envelope = JSON.parse(bytes.toString('utf8')), sequence = Number(name.match(/\d+/)![0]);
-        if (envelope.schemaVersion !== 1 || envelope.projectPath !== projectRoot || envelope.executionLogId !== id || envelope.turnId !== `${sequence}:complete` || !Number.isSafeInteger(sequence) || sequence < 1) throw new Error('historical_run_report_mismatch');
+        let reportProjectRoot: string;
+        try { reportProjectRoot = typeof envelope.projectPath === 'string' ? await fs.promises.realpath(envelope.projectPath) : ''; }
+        catch { throw new Error('historical_run_report_mismatch'); }
+        if (envelope.schemaVersion !== 1 || reportProjectRoot !== resolvedRoot || !Number.isSafeInteger(envelope.executionLogId) || !reportExecutionLogIds.has(envelope.executionLogId) || envelope.turnId !== `${sequence}:complete` || !Number.isSafeInteger(sequence) || sequence < 1) throw new Error('historical_run_report_mismatch');
         if (envelope.taskId) {
           if (typeof envelope.taskId !== 'string' || !/^task-[a-zA-Z0-9-]+$/.test(envelope.taskId)) throw new Error('historical_run_report_mismatch');
           reportAliases.add(envelope.taskId);
@@ -517,13 +533,12 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         if (reportAliases.size > 1) throw new Error('historical_run_report_mismatch');
         const receipt = name.startsWith('task-report-status-');
         if (receipt && !['missing', 'invalid', 'save_failed'].includes(envelope.availability)) throw new Error('historical_run_report_mismatch');
-        if (receipt && reports.some(report => report.observation.sequence === sequence)) continue;
+        if (receipt && reports.some(report => report.observation.executionLogId === envelope.executionLogId && report.observation.sequence === sequence)) continue;
         const availability = receipt ? envelope.availability : envelope.report && typeof envelope.report === 'object' && typeof envelope.report.summary === 'string' ? 'recorded' : 'invalid';
-        reports.push({ source: { identity, key: path.join(relative, name), hash: digest(bytes) }, bytes, observation: { executionLogId: id, sequence, availability, envelope: availability === 'recorded' ? envelope : { ...envelope, report: null } } });
+        reports.push({ source: { identity, key: path.join(relative, name), hash: digest(bytes) }, bytes, observation: { executionLogId: envelope.executionLogId, sequence, availability, envelope: availability === 'recorded' ? envelope : { ...envelope, report: null } } });
       }
       if ((await stableFile(file)).hash !== captured.hash) throw new Error('historical_run_source_changed');
-      const historicalExecutionLogIds = unregistered ? [id] : matchingTasks[0].executions.filter((run: { id: number; runDir: string }) => path.resolve(run.runDir) === runDir).map((run: { id: number }) => run.id);
-      const adopted = store.adoptHistoricalRun(project.projectId, project.locationId, { identity: statusIdentity, key, hash: captured.hash }, { historicalExecutionLogIds, status, binding, prompt, command, output, outputSource, nativeTranscript, legacyCompletion, ...documents, ...(unregistered ? { unregisteredReports: reports, unregisteredTaskAlias: [...reportAliases][0] } : { registeredTaskAlias: matchingTasks[0].taskId }) });
+      const adopted = store.adoptHistoricalRun(project.projectId, project.locationId, { identity: statusIdentity, key, hash: captured.hash }, { historicalExecutionLogIds, status, binding, prompt, command, output, outputSource, nativeTranscript, legacyCompletion, ...documents, ...(unregistered ? { unregisteredReports: reports, unregisteredTaskAlias: [...reportAliases][0], unregisteredRequest: prompt } : { registeredTaskAlias: matchingTasks[0].taskId }) });
       if (relative === status.nodeId) {
         for (const original of filesByNode.get(relative) || []) {
           if (path.dirname(original) !== runDir) continue;

@@ -5721,27 +5721,36 @@ export class UnifiedDataStore {
   }
 
   /** Only the bounded, captured legacy importer calls this; it is not an Agent operation. */
-  public adoptHistoricalRun(projectId: string, locationId: string, source: ImportedSource, input: { historicalExecutionLogIds?: number[]; status: Record<string, unknown>; binding: NativeSessionBinding | null; prompt: string; command: string; output: Buffer; outputSource?: ImportedSource; nativeTranscript?: { source: ImportedSource; bytes: Buffer }; legacyCompletion?: { source: ImportedSource; bytes: Buffer }; workspaceBefore?: Buffer; changes?: Buffer; roadmapBackup?: Buffer; registeredTaskAlias?: string; unregisteredTaskAlias?: string; unregisteredReports?: Array<{ source: ImportedSource; bytes: Buffer; observation: { executionLogId: number; sequence: number; availability: string; envelope: any } }> }): { unchanged: boolean; state: RunState } {
+  public adoptHistoricalRun(projectId: string, locationId: string, source: ImportedSource, input: { historicalExecutionLogIds?: number[]; status: Record<string, unknown>; binding: NativeSessionBinding | null; prompt: string; command: string; output: Buffer; outputSource?: ImportedSource; nativeTranscript?: { source: ImportedSource; bytes: Buffer }; legacyCompletion?: { source: ImportedSource; bytes: Buffer }; workspaceBefore?: Buffer; changes?: Buffer; roadmapBackup?: Buffer; registeredTaskAlias?: string; unregisteredTaskAlias?: string; unregisteredRequest?: string; unregisteredReports?: Array<{ source: ImportedSource; bytes: Buffer; observation: { executionLogId: number; sequence: number; availability: string; envelope: any } }> }): { unchanged: boolean; state: RunState } {
     return this.transaction(() => {
       const status = input.status, executionLogId = Number(status.rootExecutionLogId || status.executionLogId), nodeId = String(status.nodeId || '');
+      const currentExecutionLogId = Number(status.executionLogId);
+      const historicalExecutionLogIds = [...new Set(input.historicalExecutionLogIds || [executionLogId, currentExecutionLogId])].sort((a, b) => a - b);
       const captured = this.readMigrationSource(source.identity, source.key);
       if (captured.hash !== source.hash || canonical(JSON.parse(captured.bytes.toString('utf8'))) !== canonical(status)) throw new Error('historical_run_source_changed');
       let registration = this.rows('SELECT * FROM legacy_report_tasks WHERE project_id=? AND legacy_task_id=?', [projectId, String(status.learningTaskId || input.unregisteredTaskAlias || input.registeredTaskAlias || '')])[0];
       if (input.unregisteredReports !== undefined) {
-        if (typeof status.userMessage !== 'string' || !status.userMessage.trim()) throw new Error('historical_run_task_source_missing');
+        const request = typeof status.userMessage === 'string' && status.userMessage.trim()
+          ? status.userMessage
+          : typeof input.unregisteredRequest === 'string' ? input.unregisteredRequest : '';
+        if (!request.trim()) throw new Error('historical_run_task_source_missing');
         if (!registration && !status.learningTaskId) registration = this.rows('SELECT * FROM legacy_report_tasks WHERE project_id=? AND source_identity=? AND source_key=?', [projectId, source.identity, source.key])[0];
         if (!registration) {
-          const conversationId = this.write({ kind: 'conversation', action: 'create', scope: projectId, idempotencyKey: `historical-status-conversation:${canonical([projectId, source])}`, data: { mode: 'legacy', status: 'historical', title: status.userMessage } }).objectId;
-          const taskId = this.write({ kind: 'task', action: 'create', scope: projectId, idempotencyKey: `historical-status-task:${canonical([projectId, source])}`, data: { conversation_id: conversationId, original_request_content: status.userMessage, status: 'historical' } }).objectId;
+          const conversationId = this.write({ kind: 'conversation', action: 'create', scope: projectId, idempotencyKey: `historical-status-conversation:${canonical([projectId, source])}`, data: { mode: 'legacy', status: 'historical', title: request } }).objectId;
+          const taskId = this.write({ kind: 'task', action: 'create', scope: projectId, idempotencyKey: `historical-status-task:${canonical([projectId, source])}`, data: { conversation_id: conversationId, original_request_content: request, status: 'historical' } }).objectId;
           const alias = String(status.learningTaskId || input.unregisteredTaskAlias || `task-${taskId}`);
           if (!/^task-[a-zA-Z0-9-]+$/.test(alias)) throw new Error('historical_run_task_mismatch');
-          this.db.run('INSERT INTO legacy_report_tasks VALUES(?,?,?,?,?,?,?,?)', [projectId, alias, taskId, source.identity, source.key, String(status.startedAt || ''), status.userMessage.slice(0, 120), canonical([{ id: executionLogId, nodeId }])]);
+          this.db.run('INSERT INTO legacy_report_tasks VALUES(?,?,?,?,?,?,?,?)', [projectId, alias, taskId, source.identity, source.key, String(status.startedAt || ''), request.slice(0, 120), canonical(historicalExecutionLogIds.map(id => ({ id, nodeId })))]);
           this.bumpReportSourceRevision(projectId);
           registration = this.rows('SELECT * FROM legacy_report_tasks WHERE project_id=? AND legacy_task_id=?', [projectId, alias])[0];
         } else {
           const executions = JSON.parse(String(registration.executions_json)) as Array<{ id: number; nodeId: string }>;
-          if (!executions.some(run => run.id === executionLogId)) {
-            executions.push({ id: executionLogId, nodeId }); executions.sort((a, b) => a.id - b.id);
+          let changed = false;
+          for (const id of historicalExecutionLogIds) if (!executions.some(run => run.id === id)) {
+            executions.push({ id, nodeId }); changed = true;
+          }
+          if (changed) {
+            executions.sort((a, b) => a.id - b.id);
             this.db.run('UPDATE legacy_report_tasks SET executions_json=? WHERE project_id=? AND legacy_task_id=?', [canonical(executions), projectId, registration.legacy_task_id]);
             this.bumpReportSourceRevision(projectId);
             registration = { ...registration, executions_json: canonical(executions) };
@@ -5750,8 +5759,6 @@ export class UnifiedDataStore {
         for (const report of input.unregisteredReports) this.importRegisteredReport(projectId, String(registration.task_id), report.observation, report.source, report.bytes);
       }
       if (!registration || !JSON.parse(String(registration.executions_json)).some((run: any) => run.id === executionLogId && run.nodeId === nodeId)) throw new Error('historical_run_task_mismatch');
-      const currentExecutionLogId = Number(status.executionLogId);
-      const historicalExecutionLogIds = [...new Set(input.historicalExecutionLogIds || [executionLogId, currentExecutionLogId])].sort((a, b) => a - b);
       if (!Number.isSafeInteger(executionLogId) || executionLogId < 1 || !Number.isSafeInteger(currentExecutionLogId) || currentExecutionLogId < executionLogId || !nodeId || !status.runKind) throw new Error('historical_run_identity_invalid');
       if (!historicalExecutionLogIds.includes(executionLogId) || !historicalExecutionLogIds.includes(currentExecutionLogId)) throw new Error('historical_run_identity_invalid');
       for (const id of historicalExecutionLogIds) {

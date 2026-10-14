@@ -705,6 +705,68 @@ test('a historical run from before task registration gets one durable formal tas
   assert.equal(fs.existsSync(f.registrationFile), false);
 });
 
+test('an unregistered historical continuation uses its captured prompt when the old status omitted userMessage', async t => {
+  const f = await unregisteredHistory(t, false);
+  delete f.status.userMessage;
+  writeLearningJson(f.statusFile, f.status);
+  const prompt = fs.readFileSync(path.join(f.runDir, 'prompt.txt'), 'utf8');
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  const run = f.store.readRunState(f.projectId, 71);
+  assert.equal(f.store.read(run.taskId).data.original_request_content, prompt);
+  assert.equal(Object.hasOwn(JSON.parse(f.store.readMigrationSource(`agent-status:${f.project}`, '71.json').bytes), 'userMessage'), false);
+});
+
+test('an unregistered multi-turn status retains both verified journals and their reports', async t => {
+  const f = await unregisteredHistory(t);
+  f.status.executionLogId = 72;
+  f.status.runKind = 'solo_continue';
+  f.status.checkpointSequence = 2;
+  writeLearningJson(path.join(f.runDir, 'task-report-2.json'), { schemaVersion: 1, projectPath: f.project, taskId: f.taskId, executionLogId: 72, turnId: '2:complete', createdAt: f.status.finishedAt, report: { summary: '未登记续轮真实报告' } });
+  writeLearningJson(f.statusFile, f.status);
+  f.store.importProjectJournal(f.projectId, { id: 72, nodeId: '__solo__', timestamp: f.status.finishedAt, agentCli: 'claude', command: 'claude original arguments', output: '继续轮次日志', status: 'Waiting' });
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  const run = f.store.readRunState(f.projectId, 71);
+  const task = f.store.readRegisteredReportSources(f.projectId, { taskId: run.status.learningTaskId }).tasks[0];
+  assert.deepEqual(task.executions.map(execution => execution.id), [71, 72]);
+  for (const [id, summary] of [[71, '历史首轮结果'], [72, '未登记续轮真实报告']]) {
+    const turn = await f.client.findConversationTurn(f.project, id);
+    assert.equal((await f.client.readReport(turn.reference, turn.status)).report.summary, summary);
+    assert.equal((await f.client.readJournal(turn.reference, turn.status)).executionLogId, id);
+  }
+});
+
+for (const invalid of ['undeclared report execution', 'foreign current journal node']) test(`an unregistered multi-turn status rejects ${invalid}`, async t => {
+  const f = await unregisteredHistory(t);
+  f.status.executionLogId = 72;
+  f.status.runKind = 'solo_continue';
+  f.status.checkpointSequence = 2;
+  writeLearningJson(path.join(f.runDir, 'task-report-2.json'), { schemaVersion: 1, projectPath: f.project, taskId: f.taskId, executionLogId: invalid === 'undeclared report execution' ? 73 : 72, turnId: '2:complete', createdAt: f.status.finishedAt, report: { summary: '不得错误归属的报告' } });
+  writeLearningJson(f.statusFile, f.status);
+  f.store.importProjectJournal(f.projectId, { id: 72, nodeId: invalid === 'foreign current journal node' ? 'another-node' : '__solo__', timestamp: f.status.finishedAt, agentCli: 'claude', command: 'claude original arguments', output: '继续轮次日志', status: 'Waiting' });
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+  assert.ok(result.conflicts.some(item => /historical_run_(?:report_mismatch|identity_invalid)/.test(item.error)));
+  assert.equal(await f.client.findConversation(f.project, 71), null);
+});
+
+test('an unregistered numbered run remains discoverable when its old status omitted artifact paths', async t => {
+  const f = await unregisteredHistory(t, false);
+  for (const field of ['sessionFilePath', 'promptFilePath', 'commandFilePath', 'outputFilePath']) delete f.status[field];
+  writeLearningJson(f.statusFile, f.status);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  assert.ok(await f.client.findConversation(f.project, 71));
+});
+
+test('an unregistered numbered run remains discoverable through a verified project alias', async t => {
+  const f = await unregisteredHistory(t);
+  for (const field of ['sessionFilePath', 'promptFilePath', 'commandFilePath', 'outputFilePath']) delete f.status[field];
+  writeLearningJson(f.statusFile, f.status);
+  const alias = path.join(f.base, 'project-alias');
+  fs.symlinkSync(f.project, alias, 'dir');
+  assert.deepEqual((await importAgentRuns(f.store, path.join(alias, '.solopreneur', 'agent-runs'), { projectRoot: alias })).conflicts, []);
+  const found = await f.client.findConversation(f.project, 71);
+  assert.equal((await f.client.readReport(found.reference, found.status)).report.summary, '历史首轮结果');
+});
+
 test('an unregistered status without a workspace field retains its project through the verified native binding', async t => {
   const f = await unregisteredHistory(t); delete f.status.workspaceRoot; writeLearningJson(f.statusFile, f.status);
   assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
@@ -789,7 +851,7 @@ test('runtime migration probe automatically adopts a deferred legacy run after i
 
 for (const invalid of ['report', 'request', 'source-path', 'workspace', 'nonce', 'session', 'revisions']) test(`unregistered historical adoption rejects ${invalid} without leaving an invented task or conversation`, async t => {
   const f = await unregisteredHistory(t);
-  if (invalid === 'request') delete f.status.userMessage;
+  if (invalid === 'request') { delete f.status.userMessage; fs.writeFileSync(path.join(f.runDir, 'prompt.txt'), ''); }
   if (invalid === 'source-path') f.status.outputFilePath = path.join(f.base, 'another-project', 'output.log');
   if (invalid === 'report') {
     const file = path.join(f.runDir, 'task-report-1.json'), value = JSON.parse(fs.readFileSync(file)); value.taskId = 'task-' + crypto.randomUUID(); writeLearningJson(file, value);
