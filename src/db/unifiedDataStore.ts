@@ -399,7 +399,7 @@ export class UnifiedDataStore {
     return { jobId: String(row.id), status: row.status as MigrationJob['status'], error: row.error === null ? null : String(row.error) };
   }
   public pendingMigrationJobs(): MigrationJob[] {
-    return this.rows("SELECT id FROM migration_jobs WHERE status IN ('queued','running','interrupted') ORDER BY created_at,id").map(row => this.readMigrationJob(String(row.id)));
+    return this.rows("SELECT id FROM migration_jobs WHERE status IN ('queued','running','interrupted') ORDER BY created_at,rowid").map(row => this.readMigrationJob(String(row.id)));
   }
   public migrationJobs(): MigrationJob[] {
     return this.rows('SELECT id FROM migration_jobs ORDER BY created_at,id').map(row => this.readMigrationJob(String(row.id)));
@@ -690,10 +690,16 @@ export class UnifiedDataStore {
     const bytes = typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data);
     const hash = digest(bytes);
     const existing = this.rows('SELECT id FROM contents WHERE sha256=? AND mime_type=? AND encoding IN (?,?,?)', [hash, mimeType, encoding, `gzip:${encoding}`, `chunked:${encoding}`])[0];
+    let repairId: string | undefined;
     if (existing) {
-      this.content(String(existing.id));
-      this.db.run('DELETE FROM database_storage_cleanup_candidates WHERE content_id=?', [existing.id]);
-      return String(existing.id);
+      try {
+        this.content(String(existing.id));
+        this.db.run('DELETE FROM database_storage_cleanup_candidates WHERE content_id=?', [existing.id]);
+        return String(existing.id);
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== 'content_integrity_error') throw error;
+        repairId = String(existing.id);
+      }
     }
     let stored: Buffer;
     let storedEncoding: string;
@@ -723,7 +729,17 @@ export class UnifiedDataStore {
       storedEncoding = stored === bytes ? encoding : `gzip:${encoding}`;
       storedLength = stored.length;
     }
-    const id = crypto.randomUUID();
+    const id = repairId || crypto.randomUUID();
+    if (repairId) {
+      this.transaction(() => {
+        this.db.run('DELETE FROM content_chunks WHERE content_id=?', [id]);
+        this.db.run('UPDATE contents SET encoding=?,byte_length=?,stored_byte_length=?,data=?,chunk_index_json=? WHERE id=?', [storedEncoding, bytes.length, storedLength, stored, chunkIndex, id]);
+        chunkParts?.forEach((part, ordinal) => this.db.run('INSERT INTO content_chunks VALUES(?,?,?)', [id, ordinal, part]));
+        this.content(id);
+        this.db.run('DELETE FROM database_storage_cleanup_candidates WHERE content_id=?', [id]);
+      });
+      return id;
+    }
     this.db.run('INSERT INTO contents VALUES(?,?,?,?,?,?,?,?)', [id, hash, mimeType, storedEncoding, bytes.length, storedLength, stored, chunkIndex]);
     chunkParts?.forEach((part, ordinal) => this.db.run('INSERT INTO content_chunks VALUES(?,?,?)', [id, ordinal, part]));
     return id;

@@ -7,6 +7,21 @@ const crypto = require('node:crypto');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
 
+function cleanupExact(root) {
+  if (!fs.existsSync(root)) return;
+  const directories = [root], files = [];
+  const inventory = directory => {
+    for (const name of fs.readdirSync(directory)) {
+      const target = path.join(directory, name);
+      if (fs.lstatSync(target).isDirectory()) { directories.push(target); inventory(target); }
+      else files.push(target);
+    }
+  };
+  inventory(root);
+  files.forEach(file => fs.unlinkSync(file));
+  directories.sort((left, right) => right.length - left.length).forEach(directory => fs.rmdirSync(directory));
+}
+
 test('paged reads reconstruct every original byte and keep the same revision while newer writes commit', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-content-pages-'));
   const store = new UnifiedDataStore(root);
@@ -61,4 +76,21 @@ test('a page reads and validates only the relevant independently verifiable cont
     assert.throws(() => store.read(object.objectId), /content_integrity_error/);
     assert.throws(() => store.readPage({ ref: object.objectId, limit: 100000 }), /content_integrity_error/);
   } finally { db.close(); store.close(); }
+});
+
+test('an authoritative identical write repairs corrupted deduplicated content', () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-content-repair-'));
+  const store = new UnifiedDataStore(root); const db = new DatabaseSync(store.filePath);
+  try {
+    const bytes = crypto.randomBytes(192 * 1024);
+    const project = store.write({ kind: 'project', action: 'create', scope: null, idempotencyKey: 'content-repair-project', data: { name: 'content repair' } }).objectId;
+    store.writeHistoricalRunArtifact(project, { executionLogId: 1, relativePath: '__solo__/1/output.log', bytes: bytes.toString('base64'), hash: crypto.createHash('sha256').update(bytes).digest('hex') }, 'output');
+    const contentId = db.prepare('SELECT content_id FROM project_run_artifacts WHERE execution_log_id=1').get().content_id;
+    db.prepare('DELETE FROM content_chunks WHERE content_id=? AND ordinal=1').run(contentId);
+    assert.throws(() => store.readRunArtifact(project, 1, '__solo__/1/output.log'), /content_integrity_error/);
+    store.writeHistoricalRunArtifact(project, { executionLogId: 2, relativePath: '__solo__/2/output.log', bytes: bytes.toString('base64'), hash: crypto.createHash('sha256').update(bytes).digest('hex') }, 'output');
+    assert.deepEqual(Buffer.from(store.readRunArtifact(project, 1, '__solo__/1/output.log').bytes, 'base64'), bytes);
+    assert.deepEqual(Buffer.from(store.readRunArtifact(project, 2, '__solo__/2/output.log').bytes, 'base64'), bytes);
+  } finally { db.close(); store.close(); cleanupExact(root); }
 });

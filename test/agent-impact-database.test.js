@@ -597,11 +597,11 @@ test('normal upgrade catches up previously completed raw archives once without m
  }finally{await ops.close();store.close();cleanupExact(base);}
 });
 
-test('normal upgrade rechecks journal conflicts with the order-insensitive reconciliation version', () => fixture(async ({ workspace, store, ops, record }) => {
+test('normal upgrade rechecks journal conflicts with the dependency-ordered reconciliation version', () => fixture(async ({ workspace, store, ops, record }) => {
   const source = path.join(workspace, '.solopreneur', 'project_journal.db'); const legacy = new SqliteStore(source, path.resolve(__dirname, '..')); await legacy.init();
   try { legacy.upsertRunIndex({ ...record(12), totalTokens: 0, outputPath: path.join(workspace, '.solopreneur', 'agent-runs', '__solo__', '12', 'output.log') }); } finally { legacy.close(); }
   const args = { collection: 'project-journal', sourceRoot: source, projectRoot: workspace };
-  const old = store.enqueueMemoryMigration(args, `startup-project-journal-v4:${workspace}`);
+  const old = store.enqueueMemoryMigration(args, `startup-project-journal-v5:${workspace}`);
   store.updateMigrationJob(old.jobId, 'completed_with_conflicts', { conflicts: [{ source, error: 'historical_run_output_missing' }] });
   const before = store.migrationJobCount(); await enqueueStartupDataMigrations(store, ops, () => true); await ops.waitForMigrations();
   assert.equal(store.migrationJobCount(), before + 1);
@@ -609,7 +609,38 @@ test('normal upgrade rechecks journal conflicts with the order-insensitive recon
   assert.equal(latest.status, 'completed');
   assert.deepEqual(latest.progress.conflicts, []);
   assert.ok(store.migrationJobs().some(job => job.progress.retainedGaps?.some(item => item.error === 'historical_run_output_missing')));
+  const afterUpgrade = store.migrationJobCount();
+  await enqueueStartupDataMigrations(store, ops, () => true); await ops.waitForMigrations();
+  assert.equal(store.migrationJobCount(), afterUpgrade);
+  assert.equal(store.readMigrationJob(latest.jobId).status, 'completed');
 }));
+
+test('startup queues historical run evidence before the journal that reconciles it', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-impact-migration-order-'));
+  const workspace = path.join(base, 'project'); fs.mkdirSync(path.join(workspace, '.solopreneur', 'agent-runs'), { recursive: true });
+  const source = path.join(workspace, '.solopreneur', 'project_journal.db'); const legacy = new SqliteStore(source, path.resolve(__dirname, '..')); await legacy.init(); legacy.close();
+  const store = new UnifiedDataStore(path.join(base, 'global')); const requests = [];
+  let ops;
+  try {
+    await store.registerProject({ root: workspace });
+    await enqueueStartupDataMigrations(store, async request => {
+      requests.push(request);
+      const { idempotencyKey, refreshCompleted: _refreshCompleted, ...args } = request.input;
+      return store.enqueueMemoryMigration(args, idempotencyKey);
+    }, () => true);
+    const physical = requests.filter(request => request.operation === 'import_project_data' && ['agent-runs', 'project-journal'].includes(request.input.collection));
+    assert.deepEqual(physical.map(request => request.input.collection), ['agent-runs', 'project-journal']);
+    const jobs = store.rows("SELECT id,json_extract(args_json,'$.collection') AS collection FROM migration_jobs WHERE json_extract(args_json,'$.sourceRoot') IN (?,?) ORDER BY rowid", [path.join(workspace, '.solopreneur', 'agent-runs'), source]);
+    assert.deepEqual(jobs.map(job => job.collection), ['agent-runs', 'project-journal']);
+    store.db.run('UPDATE migration_jobs SET id=?,created_at=? WHERE id=?', ['run-z', 42, jobs[0].id]);
+    store.db.run('UPDATE migration_jobs SET id=?,created_at=? WHERE id=?', ['journal-a', 42, jobs[1].id]);
+    assert.deepEqual(store.pendingMigrationJobs().filter(job => ['run-z', 'journal-a'].includes(job.jobId)).map(job => job.args.collection), ['agent-runs', 'project-journal']);
+    const started = [], update = store.updateMigrationJob.bind(store);
+    store.updateMigrationJob = (jobId, status, progress, error) => { if (status === 'running' && ['run-z', 'journal-a'].includes(jobId)) started.push(store.readMigrationJob(jobId).args.collection); return update(jobId, status, progress, error); };
+    ops = createRuntimeDataOperations(store); ops.recoverMigrations(); await ops.waitForMigrations();
+    assert.deepEqual(started, ['agent-runs', 'project-journal']);
+  } finally { if (ops) await ops.close(); store.close(); cleanupExact(base); }
+});
 
 
 test('published unmarked index is reconciled by equal source content without claiming its ownership', async () => {

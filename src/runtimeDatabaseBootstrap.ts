@@ -273,8 +273,8 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
     const sources = [
       { collection: 'documentation', sourceRoot: path.join(projectRoot, '.solopreneur', 'documentation.json') },
       { collection: 'project-growth', sourceRoot: path.join(projectRoot, '.solopreneur', 'project_growth.db') },
-      { collection: 'project-journal', sourceRoot: path.join(projectRoot, '.solopreneur', 'project_journal.db') },
       { collection: 'agent-runs', sourceRoot: path.join(projectRoot, '.solopreneur', 'agent-runs') },
+      { collection: 'project-journal', sourceRoot: path.join(projectRoot, '.solopreneur', 'project_journal.db') },
       { collection: 'step-memory', sourceRoot: path.join(projectRoot, '.solopreneur', 'step-memory') },
       { collection: 'run-digests', sourceRoot: path.join(projectRoot, '.solopreneur', 'run-digests') }
     ];
@@ -284,7 +284,7 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
         if (info.isSymbolicLink() || !info[['agent-runs', 'step-memory', 'run-digests'].includes(source.collection) ? 'isDirectory' : 'isFile']()) continue;
       }
       catch { continue; }
-      const version = source.collection === 'agent-runs' ? 7 : source.collection === 'project-journal' ? 5 : 1;
+      const version = source.collection === 'agent-runs' ? 7 : source.collection === 'project-journal' ? 6 : 1;
       const stamp = source.collection === 'agent-runs'
         ? await historicalRunSourceStamp(store, [source.sourceRoot, path.join(projectRoot, '.solopreneur', 'agent-status'), path.join(projectRoot, '.agent_status.json')], shouldContinue)
         : source.collection === 'documentation'
