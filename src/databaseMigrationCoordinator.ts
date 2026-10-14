@@ -76,5 +76,6 @@ export class DatabaseMigrationCoordinator {
     return this.store.readMigrationJob(jobId);
   }
   async wait(): Promise<void> { await this.work; }
-  async close(): Promise<void> { this.stopping = true; await this.work; }
+  interrupt(): void { this.stopping = true; }
+  async close(): Promise<void> { this.interrupt(); await this.work; }
 }

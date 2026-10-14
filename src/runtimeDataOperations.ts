@@ -26,6 +26,7 @@ export interface RuntimeDataOperations {
   setStorageMaintenanceBarrier(barrier: Promise<unknown>): void;
   recoverMigrations(): void;
   recoverRuns(): void;
+  interruptMigrations(): void;
   interruptRuns(): void;
   waitForMigrations(): Promise<void>;
   close(): Promise<void>;
@@ -891,7 +892,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       return result;
     });
   };
-  return Object.assign(operations, { setStorageMaintenanceBarrier: (barrier: Promise<unknown>) => { storageMaintenanceBarrier = barrier; }, recoverMigrations: () => migrations.recover(), recoverRuns: () => runs.start(), interruptRuns: () => runStops.interrupt(), waitForMigrations: () => migrations.wait(), close: async () => { await storageMaintenanceTail; await runs.close(); await migrations.close(); } });
+  return Object.assign(operations, { setStorageMaintenanceBarrier: (barrier: Promise<unknown>) => { storageMaintenanceBarrier = barrier; }, recoverMigrations: () => migrations.recover(), recoverRuns: () => runs.start(), interruptMigrations: () => migrations.interrupt(), interruptRuns: () => runStops.interrupt(), waitForMigrations: () => migrations.wait(), close: async () => { await storageMaintenanceTail; await runs.close(); await migrations.close(); } });
 }
 
 export function runtimeMcpSource(globalDataPath: string, scope: string | null, globalReads = false, runIdentity?: McpRunIdentity): UnifiedMcpSource {

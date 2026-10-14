@@ -148,15 +148,18 @@ async function main(): Promise<void> {
   let activeEngine: EmbeddedPiAgentEngine | undefined;
   let controlServer: { beginBusy(): () => void; close(): Promise<void> } | undefined;
   let telegram = startTelegramBackgroundRuntime(globalDataPath, dataOperations);
+  let shutdownPromise: Promise<void> | undefined;
   if (paused) { updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' }); await heartbeatRuntime('paused'); }
-  const stop = () => {
-    if (stopping) return;
+  const stop = (exitCode = 0): Promise<void> => {
+    if (exitCode !== 0) process.exitCode = exitCode;
+    if (shutdownPromise) return shutdownPromise;
     stopping = true;
-    if (timer) clearInterval(timer);
-    const telegramClosed = telegram?.close();
-    activeEngine?.cancel();
-    dataOperations.interruptRuns();
-    void (async () => {
+    shutdownPromise = (async () => {
+      if (timer) clearInterval(timer);
+      const telegramClosed = telegram?.close();
+      activeEngine?.cancel();
+      dataOperations.interruptMigrations();
+      dataOperations.interruptRuns();
       await controlServer?.close();
       await telegramClosed;
       await startupMigration;
@@ -166,8 +169,10 @@ async function main(): Promise<void> {
       await outboxRecovery;
       dataStore?.close();
       updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
-    })().catch(error => { process.stderr.write(`SoloMap Runtime shutdown: ${String(error)}\n`); process.exitCode = 1; });
-    process.exitCode = 0;
+    })();
+    void shutdownPromise.catch(error => { process.stderr.write(`SoloMap Runtime shutdown: ${String(error)}\n`); process.exitCode = 1; });
+    process.exitCode ??= exitCode;
+    return shutdownPromise;
   };
   try { controlServer = await startRuntimeControlServer({
     globalDataPath,
@@ -218,17 +223,30 @@ async function main(): Promise<void> {
     updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
     throw error;
   }
-  dataOperations?.recoverMigrations();
+  let releaseStartupMigrationBusy = () => {};
+  try {
+    releaseStartupMigrationBusy = controlServer.beginBusy();
+    dataOperations.recoverMigrations();
+  }
+  catch (error) {
+    releaseStartupMigrationBusy();
+    rejectStorageMaintenanceBarrier(error);
+    await stop();
+    throw error;
+  }
   dataOperations.recoverRuns();
   outboxRecovery = dataStore?.recoverOutbox().catch(error => process.stderr.write(`SoloMap Runtime outbox recovery: ${String(error)}\n`));
   const startupMigrationReady = (async () => {
-    await outboxRecovery;
-    if (!stopping) historicalOwnerStamp = await historicalRunOwnerStateStamp(dataStore, () => !stopping);
-    if (!stopping) await enqueueStartupDataMigrations(dataStore, dataOperations, () => !stopping);
-    if (!stopping) await dataOperations.waitForMigrations();
+    try {
+      await outboxRecovery;
+      if (!stopping) historicalOwnerStamp = await historicalRunOwnerStateStamp(dataStore, () => !stopping);
+      if (!stopping) await enqueueStartupDataMigrations(dataStore, dataOperations, () => !stopping);
+      if (!stopping) await dataOperations.waitForMigrations();
+    } finally { releaseStartupMigrationBusy(); }
   })();
   void startupMigrationReady.then(resolveStorageMaintenanceBarrier, rejectStorageMaintenanceBarrier);
   startupMigration = startupMigrationReady.catch(error => { process.stderr.write(`SoloMap Runtime memory migration: ${String(error)}\n`); });
+  void startupMigrationReady.catch(() => { void stop(1); });
   storageMaintenance = (async () => {
     await startupMigrationReady;
     if (!stopping) await dataOperations({ operation: 'maintain_database_storage', input: { compact: false, automatic: true } });

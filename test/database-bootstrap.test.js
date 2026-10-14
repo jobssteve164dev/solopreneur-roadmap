@@ -83,19 +83,22 @@ test('Today intelligence becomes readable while a recovered legacy migration is 
   fs.writeFileSync(preload, `
     const Module = require('node:module');
     const originalLoad = Module._load;
+    let releaseMigration;
+    const migration = new Promise(resolve => { releaseMigration = resolve; });
     Module._load = function(request, parent, isMain) {
       if (request === './databaseMigrationCoordinator') {
         return { DatabaseMigrationCoordinator: class {
           enqueue() { return { jobId: 'blocked', status: 'running', progress: {}, error: null, scheduled: true }; }
           recover() {}
           retry() { throw new Error('not used'); }
-          wait() { return new Promise(() => {}); }
-          close() { return Promise.resolve(); }
+          wait() { return migration; }
+          interrupt() { releaseMigration(); }
+          close() { this.interrupt(); return migration; }
         } };
       }
       if (request === './runtimeDatabaseBootstrap') {
         const actual = originalLoad.call(this, request, parent, isMain);
-        return { ...actual, refreshHistoricalRunMigrations() { return new Promise(() => {}); } };
+        return { ...actual, async refreshHistoricalRunMigrations() { return 'caught-up'; } };
       }
       return originalLoad.call(this, request, parent, isMain);
     };
@@ -119,6 +122,109 @@ test('Today intelligence becomes readable while a recovered legacy migration is 
     await new Promise(resolve => setTimeout(resolve, 25));
     assert.equal(fs.existsSync(path.join(root, 'runtime', 'control.busy.json')), true,
       'the Runtime must retain its owner lease while the internal history scan is still running');
+    const exited = once(child, 'exit');
+    await sendRuntimeControlCommand(root, 'stop');
+    const outcome = await Promise.race([
+      exited.then(() => 'exited'),
+      new Promise(resolve => setTimeout(() => resolve('timeout'), 1000))
+    ]);
+    assert.equal(outcome, 'exited', stderr || 'stop must interrupt the startup migration and exit');
+    assert.equal(fs.existsSync(path.join(root, 'runtime', 'control.busy.json')), false,
+      'stop must release the internal migration lease');
+  } finally {
+    if (child.exitCode === null) {
+      child.kill('SIGKILL');
+      await once(child, 'exit');
+    }
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('Runtime closes its control endpoint when startup migration recovery fails', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-bootstrap-migration-failure-'));
+  const root = path.join(fixture, '.solomap-global');
+  const preload = path.join(fixture, 'fail-migrations.cjs');
+  fs.writeFileSync(preload, `
+    const Module = require('node:module');
+    const originalLoad = Module._load;
+    Module._load = function(request, parent, isMain) {
+      if (request === './databaseMigrationCoordinator') {
+        return { DatabaseMigrationCoordinator: class {
+          enqueue() { throw new Error('not used'); }
+          recover() { throw new Error('startup migration failed'); }
+          retry() { throw new Error('not used'); }
+          wait() { return Promise.resolve(); }
+          interrupt() {}
+          close() { return Promise.resolve(); }
+        } };
+      }
+      return originalLoad.call(this, request, parent, isMain);
+    };
+  `);
+  const child = spawn(process.execPath, ['--require', preload, path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root], { stdio: 'pipe' });
+  let stderr = '';
+  child.stderr.on('data', bytes => { stderr += bytes; });
+  child.stdout.resume();
+  try {
+    const outcome = await Promise.race([
+      once(child, 'exit').then(([code]) => ({ code })),
+      new Promise(resolve => setTimeout(() => resolve({ code: 'timeout' }), 2000))
+    ]);
+    assert.equal(outcome.code, 1, stderr || 'startup failure must terminate the Runtime');
+    assert.match(stderr, /startup migration failed/);
+    assert.equal(fs.existsSync(path.join(root, 'runtime', 'control.busy.json')), false);
+    await assert.rejects(sendRuntimeControlCommand(root, 'refresh'));
+  } finally {
+    if (child.exitCode === null) {
+      child.kill('SIGKILL');
+      await once(child, 'exit');
+    }
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('Runtime exits unsuccessfully when an asynchronous startup migration fails', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-bootstrap-async-migration-failure-'));
+  const root = path.join(fixture, '.solomap-global');
+  const preload = path.join(fixture, 'fail-async-migrations.cjs');
+  fs.writeFileSync(preload, `
+    const Module = require('node:module');
+    const originalLoad = Module._load;
+    Module._load = function(request, parent, isMain) {
+      if (request === './databaseMigrationCoordinator') {
+        return { DatabaseMigrationCoordinator: class {
+          enqueue() { return { jobId: 'failed', status: 'running', progress: {}, error: null, scheduled: true }; }
+          recover() {}
+          retry() { throw new Error('not used'); }
+          wait() { return Promise.reject(new Error('asynchronous startup migration failed')); }
+          interrupt() {}
+          close() { return Promise.resolve(); }
+        } };
+      }
+      if (request === './runtimeDatabaseBootstrap') {
+        const actual = originalLoad.call(this, request, parent, isMain);
+        return {
+          ...actual,
+          async historicalRunOwnerStateStamp() { return 'stable'; },
+          async enqueueStartupDataMigrations() {}
+        };
+      }
+      return originalLoad.call(this, request, parent, isMain);
+    };
+  `);
+  const child = spawn(process.execPath, ['--require', preload, path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root], { stdio: 'pipe' });
+  let stderr = '';
+  child.stderr.on('data', bytes => { stderr += bytes; });
+  child.stdout.resume();
+  try {
+    const outcome = await Promise.race([
+      once(child, 'exit').then(([code]) => ({ code })),
+      new Promise(resolve => setTimeout(() => resolve({ code: 'timeout' }), 2000))
+    ]);
+    assert.equal(outcome.code, 1, stderr || 'asynchronous startup failure must terminate unsuccessfully');
+    assert.match(stderr, /asynchronous startup migration failed/);
+    assert.equal(fs.existsSync(path.join(root, 'runtime', 'control.busy.json')), false);
+    await assert.rejects(sendRuntimeControlCommand(root, 'refresh'));
   } finally {
     if (child.exitCode === null) {
       child.kill('SIGKILL');
