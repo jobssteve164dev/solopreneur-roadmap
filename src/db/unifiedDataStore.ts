@@ -188,6 +188,11 @@ function canonical(value: unknown): string {
   if (encoded === undefined) throw new Error('invalid_data: undefined is not a persisted value');
   return encoded;
 }
+function sameUnorderedRecords(left: unknown[], right: unknown[]): boolean {
+  if (left.length !== right.length) return false;
+  const normalize = (items: unknown[]) => items.map(item => canonical(item)).sort();
+  return canonical(normalize(left)) === canonical(normalize(right));
+}
 function digest(data: Uint8Array | string): string { return crypto.createHash('sha256').update(data).digest('hex'); }
 function digestFile(file: string): { sha256: string; bytes: number } {
   const hash = crypto.createHash('sha256'), buffer = Buffer.allocUnsafe(8 * 1024 * 1024);
@@ -6351,10 +6356,13 @@ export class UnifiedDataStore {
       const previous = this.rows('SELECT * FROM run_index_import_sources WHERE project_id=? AND execution_log_id=?', [projectId, id])[0];
       const digestSource = this.rows('SELECT object_id FROM run_digest_index_sources WHERE project_id=? AND execution_log_id=?', [projectId, id])[0];
       if (current) {
-        const currentHash = digest(canonical([JSON.parse(String(current.record_json)), JSON.parse(String(current.files_json)), JSON.parse(String(current.signals_json))]));
+        const currentRecord = JSON.parse(String(current.record_json));
+        const currentFiles = JSON.parse(String(current.files_json));
+        const currentSignals = JSON.parse(String(current.signals_json));
+        const currentHash = digest(canonical([currentRecord, currentFiles, currentSignals]));
         if (previous && Number(previous.priority) === 0) return false;
         if (previous && currentHash !== previous.index_hash) throw new Error('migration_target_changed');
-        if (JSON.parse(String(current.record_json)).nodeId !== record.nodeId) throw new Error('historical_run_identity_ambiguous');
+        if (currentRecord.nodeId !== record.nodeId) throw new Error('historical_run_identity_ambiguous');
         if (digestSource && priority === 10) {
           const derived: RunIndexRecord = JSON.parse(String(current.record_json));
           if (derived.nodeId !== record.nodeId) throw new Error('historical_run_identity_ambiguous');
@@ -6366,7 +6374,8 @@ export class UnifiedDataStore {
         }
         if (previous && Number(previous.priority) > priority) return false;
         if (previous && Number(previous.priority) === priority && (!this.samePhysicalMigrationSource(String(previous.source_identity), source.identity) || previous.source_key !== source.key)) throw new Error('historical_run_identity_ambiguous');
-        if (!previous && currentHash === digest(canonical([sourceRecord, files, signals]))) return false;
+        if (!previous && canonical(currentRecord) === canonical(sourceRecord)
+          && sameUnorderedRecords(currentFiles, files) && sameUnorderedRecords(currentSignals, signals)) return false;
         if (!previous && (!digestSource || priority === 10)) {
           throw new Error('historical_run_index_owner_unknown');
         }

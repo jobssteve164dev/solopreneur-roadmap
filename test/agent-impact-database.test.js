@@ -597,11 +597,11 @@ test('normal upgrade catches up previously completed raw archives once without m
  }finally{await ops.close();store.close();cleanupExact(base);}
 });
 
-test('normal upgrade rechecks journal conflicts with the retained-gap reconciliation version', () => fixture(async ({ workspace, store, ops, record }) => {
+test('normal upgrade rechecks journal conflicts with the order-insensitive reconciliation version', () => fixture(async ({ workspace, store, ops, record }) => {
   const source = path.join(workspace, '.solopreneur', 'project_journal.db'); const legacy = new SqliteStore(source, path.resolve(__dirname, '..')); await legacy.init();
   try { legacy.upsertRunIndex({ ...record(12), totalTokens: 0, outputPath: path.join(workspace, '.solopreneur', 'agent-runs', '__solo__', '12', 'output.log') }); } finally { legacy.close(); }
   const args = { collection: 'project-journal', sourceRoot: source, projectRoot: workspace };
-  const old = store.enqueueMemoryMigration(args, `startup-project-journal-v3:${workspace}`);
+  const old = store.enqueueMemoryMigration(args, `startup-project-journal-v4:${workspace}`);
   store.updateMigrationJob(old.jobId, 'completed_with_conflicts', { conflicts: [{ source, error: 'historical_run_output_missing' }] });
   const before = store.migrationJobCount(); await enqueueStartupDataMigrations(store, ops, () => true); await ops.waitForMigrations();
   assert.equal(store.migrationJobCount(), before + 1);
@@ -668,6 +668,23 @@ test('published unmarked index with different content remains an ownership confl
     identity: `project-journal:${workspace}`, key: 'project_journal.db', hash: 'source-hash'
   }, 20, sourceRecord), /historical_run_index_owner_unknown/);
   assert.equal(store.readProjectRunIndexes(project)[0].status, 'Failed');
+  assert.equal(store.rows('SELECT * FROM run_index_import_sources WHERE project_id=? AND execution_log_id=?', [project, 12]).length, 0);
+}));
+
+test('published unmarked index reconciles equal files and signals stored in a different order', () => fixture(async ({ workspace, project, store, record }) => {
+  const sourceRecord = record(12);
+  const files = [{ filePath: 'src/a.ts', role: 'changed' }, { filePath: 'docs/a.md', role: 'touched' }];
+  const signals = [
+    { executionLogId: 12, type: 'failure', value: 'first failure' },
+    { executionLogId: 12, type: 'reusable', value: 'reusable result' },
+    { executionLogId: 12, type: 'failure', value: 'second failure' }
+  ];
+  store.importProjectRunIndex(project, sourceRecord, [...files].reverse(), [...signals].reverse());
+  assert.equal(store.importHistoricalRunIndex(project, sourceRecord, files, signals, {
+    identity: `project-journal:${workspace}`, key: 'project_journal.db', hash: 'source-hash'
+  }, 20, sourceRecord), false);
+  assert.deepEqual(store.readProjectRunIndexes(project)[0].files, [...files].reverse());
+  assert.deepEqual(store.readProjectRunIndexes(project)[0].signals, [...signals].reverse());
   assert.equal(store.rows('SELECT * FROM run_index_import_sources WHERE project_id=? AND execution_log_id=?', [project, 12]).length, 0);
 }));
 
