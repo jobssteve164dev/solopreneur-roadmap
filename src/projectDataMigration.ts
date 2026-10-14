@@ -93,7 +93,7 @@ export async function initializeProjectJournalAllocation(store: UnifiedDataStore
 
 export async function importProjectJournal(store: UnifiedDataStore, source: string, options: any = {}): Promise<MemoryImportResult> {
   const projectRoot = String(options.projectRoot || ''); const identity = `project-journal:${projectRoot}`;
-  const result: MemoryImportResult = { imported: 0, unchanged: 0, originalBytes: 0, conflicts: [], retainedFiles: [source], interrupted: false };
+  const result: MemoryImportResult = { imported: 0, unchanged: 0, originalBytes: 0, conflicts: [], retainedGaps: [], retainedFiles: [source], interrupted: false };
   if (options.mode === 'unified') {
     const project = await store.registerProject({ root: projectRoot });
     if (source !== `solomap://${store.databaseId}/${project.projectId}/project-journal`) throw new Error('migration_source_scope_mismatch');
@@ -132,8 +132,9 @@ export async function importProjectJournal(store: UnifiedDataStore, source: stri
       for (const entry of indexes) {
         if (options.shouldContinue && !options.shouldContinue()) return { ...result, interrupted: true };
         try {
-          const enriched = await enrichHistoricalIndex(store, project.projectId, projectRoot, entry, error => result.conflicts.push({ source: `${source}#run:${entry.executionLogId}`, error }));
-          store.importHistoricalRunIndex(project.projectId, enriched, entry.files, entry.signals, { identity, key: path.basename(source), hash: captured.hash }, 20);
+          const enriched = await enrichHistoricalIndex(store, project.projectId, projectRoot, entry, error => result.retainedGaps!.push({ source: `${source}#run:${entry.executionLogId}`, error }));
+          const { files: _files, signals: _signals, ...sourceRecord } = entry;
+          store.importHistoricalRunIndex(project.projectId, enriched, entry.files, entry.signals, { identity, key: path.basename(source), hash: captured.hash }, 20, sourceRecord);
         } catch (error) { result.conflicts.push({ source: `${source}#run:${entry.executionLogId}`, error: String(error) }); }
         await new Promise<void>(resolve => setImmediate(resolve));
       }

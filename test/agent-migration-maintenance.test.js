@@ -334,6 +334,8 @@ test('migration prompt supplies tools without defining a private runtime or resu
   assert.match(apply, /不得宣称迁移失败/);
   assert.match(apply, /queued 或 running/);
   assert.match(apply, /继续等待并查询/);
+  assert.match(apply, /completed_with_conflicts 不得原样重试/);
+  assert.match(apply, /继续处理其他任务并生成当前安全回收清单/);
   assert.doesNotMatch(apply, /工具失败时[^。]*停止/);
 });
 

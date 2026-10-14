@@ -119,7 +119,7 @@ export class RunLifecycleClient {
       collection: 'agent-runs', sourceRoot: path.join(projectRoot, '.solopreneur', 'agent-runs'), projectRoot,
       idempotencyKey: `conversation-history-adoption-v1:${projectRoot}`, refreshCompleted: true
     }) as { jobId: string; status: string };
-    if (['failed', 'interrupted'].includes(job.status)) {
+    if (['failed', 'interrupted', 'completed_with_conflicts'].includes(job.status)) {
       try { await this.operation('retry_migration', { jobId: job.jobId }); }
       catch (error) { if ((error as Error).message !== 'migration_not_retryable') throw error; }
     }

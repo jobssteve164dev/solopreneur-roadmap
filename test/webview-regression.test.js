@@ -11289,8 +11289,8 @@ test('agent impact summary reads explicitly imported journal indexes without dig
   const globalRoot = path.join(tempRoot, '.solomap-global');
   const native = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, [{ name: 'DB Project', path: tempRoot }]);
   const job = await native.ops({ operation: 'import_project_data', input: { collection: 'project-journal', sourceRoot: path.join(solopreneurDir, 'project_journal.db'), projectRoot: tempRoot, idempotencyKey: 'impact-explicit-journal' } });
-  await native.ops.waitForMigrations(); assert.equal(native.store.readMigrationJob(job.jobId).status, 'completed_with_conflicts');
-  assert.ok(native.store.readMigrationJob(job.jobId).progress.conflicts.some(item => item.error.includes('historical_run_output_missing')));
+  await native.ops.waitForMigrations(); assert.equal(native.store.readMigrationJob(job.jobId).status, 'completed');
+  assert.ok(native.store.readMigrationJob(job.jobId).progress.retainedGaps.some(item => item.error === 'historical_run_output_missing'));
   const summary = await buildAgentImpactSummaryFromDatabase(
     [{ name: 'DB Project', path: tempRoot }],
     projectRoot,

@@ -8,6 +8,8 @@ export interface MemoryImportResult {
   unchanged: number;
   originalBytes: number;
   conflicts: Array<{ source: string; error: string }>;
+  /** Historical evidence that was already absent and cannot be recovered by retrying. */
+  retainedGaps?: Array<{ source: string; error: string }>;
   retainedFiles: string[];
   interrupted?: boolean;
 }

@@ -9,13 +9,15 @@ export function buildMigrationMaintenancePrompt(kind: MigrationMaintenanceKind, 
   ];
   const steps = kind === 'migration_apply' ? [
     '调用 solomap_migration_start 发现当前仍存在的旧数据源并幂等加入后台迁移队列。',
-    '调用 solomap_migration_status；对 failed、interrupted 或 completed_with_conflicts 的任务，先按 jobId 读取完整详情，再逐个调用 solomap_migration_retry。',
+    '调用 solomap_migration_status；对 failed 或 interrupted 的任务，先按 jobId 读取完整详情，再逐个调用 solomap_migration_retry。completed_with_conflicts 不得原样重试；只有来源或目标已经变化，或当前版本已明确修复该冲突且本轮尚未重试时，才重试一次。相同冲突再次出现时保留详情，不再循环。',
     '每次启动或重试后按 jobId 查询状态；状态为 queued 或 running 时继续等待并查询，直到进入终态，再处理下一项。只要状态读取成功，无可见进度不等于失败，不得提前停止。',
+    '单个来源仍有冲突时，继续处理其他任务并生成当前安全回收清单；不得把冲突来源列入清单，也不得因为一个来源未闭合而停止整个审计。',
     '调用 solomap_recycling_preview 生成精确回收清单；不要调用 solomap_recycling_apply，回收必须回到插件界面由用户确认。',
     '再次调用 solomap_migration_status，确认迁移结果。'
   ] : kind === 'migration_review' ? [
-    '对 failed、interrupted 或 completed_with_conflicts 的任务，先按 jobId 读取完整详情，再逐个调用 solomap_migration_retry。',
+    '对 failed 或 interrupted 的任务，先按 jobId 读取完整详情，再逐个调用 solomap_migration_retry。completed_with_conflicts 不得原样重试；只有来源或目标已经变化，或当前版本已明确修复该冲突且本轮尚未重试时，才重试一次。相同冲突再次出现时保留详情，不再循环。',
     '每次重试后按 jobId 查询状态；状态为 queued 或 running 时继续等待并查询，直到进入终态，再处理下一项。只要状态读取成功，无可见进度不等于失败，不得提前停止。',
+    '单个来源仍有冲突时，继续处理其他任务并生成当前安全回收清单；不得把冲突来源列入清单，也不得因为一个来源未闭合而停止整个审计。',
     '调用 solomap_recycling_preview 生成精确回收清单；不要调用 solomap_recycling_apply，回收必须回到插件界面由用户确认。',
     '再次调用 solomap_migration_status，确认迁移结果。'
   ] : [

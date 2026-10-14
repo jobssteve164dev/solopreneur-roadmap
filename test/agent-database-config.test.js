@@ -72,6 +72,8 @@ test('task instructions teach revision-safe database writes and complete content
   assert.ok(module, 'database task instructions are missing');
   const instructions = module.buildAgentDatabaseInstructions({ migrationTools: true });
   for (const keyword of ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_migration_start', 'solomap_recycling_preview', 'jobId', 'queued', 'running', '终态', '连续 3 次', '不得宣称迁移失败', 'expectedRevision', 'idempotencyKey', 'solomap://schema', 'cursor', '普通对话只生成清单']) assert.ok(instructions.includes(keyword), keyword);
+  assert.match(instructions, /completed_with_conflicts 不得原样重试/);
+  assert.match(instructions, /继续处理其他任务并生成当前安全回收清单/);
   assert.ok(!instructions.includes('solomap-memory.cjs'));
   assert.ok(!module.buildAgentDatabaseInstructions().includes('solomap_migration_start'));
 });

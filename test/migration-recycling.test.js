@@ -121,6 +121,23 @@ test('enqueueing a new migration does not decode unrelated completed history', a
   } finally { await f.operations.close(); f.store.close(); }
 });
 
+test('refresh discovery preserves a completed conflict until an explicit retry or a new migration identity', async () => {
+  const f = fixture();
+  try {
+    const sourceRoot = path.join(f.root, 'memory');
+    fs.mkdirSync(sourceRoot, { recursive: true });
+    const job = f.store.enqueueMemoryMigration({ sourceRoot }, 'conflict-needs-a-decision');
+    const progress = { imported: 2, conflicts: [{ source: 'profile.md', error: 'deterministic_conflict' }] };
+    f.store.updateMigrationJob(job.jobId, 'completed_with_conflicts', progress);
+
+    const discovered = await f.call('import_memory', { sourceRoot, idempotencyKey: 'conflict-needs-a-decision', refreshCompleted: true });
+
+    assert.equal(discovered.scheduled, false);
+    assert.equal(f.store.readMigrationJob(job.jobId).status, 'completed_with_conflicts');
+    assert.deepEqual(f.store.readMigrationJob(job.jobId).progress, progress);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
 test('legacy empty collection values share the default memory source status', async () => {
   const f = fixture();
   try {

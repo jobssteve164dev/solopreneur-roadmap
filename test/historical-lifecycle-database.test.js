@@ -97,6 +97,19 @@ test('a failed history import can resume in the same job after its retained sour
   assert.equal(f.store.migrationJobCount(),1);assert.equal(f.store.readMigrationJob(job.jobId).status,'completed');
 });
 
+test('history adoption explicitly retries its own conflicted job when the requested conversation is still missing', async t => {
+  const f = await history(t);
+  const job = f.store.enqueueMemoryMigration({ collection: 'agent-runs', sourceRoot: f.sourceRoot, projectRoot: f.project }, `conversation-history-adoption-v1:${f.project}`);
+  const progress = { conflicts: [{ source: 'older-unrelated-run.json', error: 'historical_run_identity_ambiguous' }] };
+  f.store.updateMigrationJob(job.jobId, 'completed_with_conflicts', progress);
+
+  const adopted = await f.client.adoptConversationHistory(f.project, 71);
+
+  assert.ok(adopted);
+  assert.equal(adopted.status.executionLogId, 71);
+  assert.equal(f.store.readMigrationJob(job.jobId).status, 'completed');
+});
+
 test('completed history adoption also discovers a later retained conversation without creating a second import job', async t => {
   const f=await history(t);const original=await f.client.adoptConversationHistory(f.project,71);
   const dir=path.join(f.sourceRoot,'__solo__','72');fs.mkdirSync(dir);

@@ -603,7 +603,7 @@ export class UnifiedDataStore {
   }
   public requeueCompletedMigration(jobId: string): boolean {
     return this.transaction(() => {
-      this.db.run("UPDATE migration_jobs SET status='queued',progress_json='{}',error=NULL,updated_at=? WHERE id=? AND status IN ('completed','completed_with_conflicts')", [Date.now(), jobId]);
+      this.db.run("UPDATE migration_jobs SET status='queued',progress_json='{}',error=NULL,updated_at=? WHERE id=? AND status='completed'", [Date.now(), jobId]);
       const requeued = this.db.getRowsModified() === 1;
       if (requeued) {
         const args = JSON.parse(String(this.rows('SELECT args_json FROM migration_jobs WHERE id=?', [jobId])[0].args_json));
@@ -6343,7 +6343,7 @@ export class UnifiedDataStore {
   public importProjectRunIndex(projectId: string, record: RunIndexRecord, files: RunIndexFile[] = [], signals: RunIndexSignal[] = []): void {
     this.db.run('INSERT INTO project_run_indexes VALUES(?,?,?,?,?,?) ON CONFLICT(project_id,execution_log_id) DO NOTHING', [projectId, Number(record.executionLogId), canonical(record), canonical(files), canonical(signals), Date.now()]);
   }
-  public importHistoricalRunIndex(projectId: string, record: RunIndexRecord, files: RunIndexFile[], signals: RunIndexSignal[], source: ImportedSource, priority: 10 | 20): boolean {
+  public importHistoricalRunIndex(projectId: string, record: RunIndexRecord, files: RunIndexFile[], signals: RunIndexSignal[], source: ImportedSource, priority: 10 | 20, sourceRecord: RunIndexRecord = record): boolean {
     if (!source.identity || !source.key || !source.hash || !Number.isSafeInteger(record.executionLogId) || record.executionLogId < 1) throw new Error('historical_run_index_source_invalid');
     return this.transaction(() => {
       const id = record.executionLogId;
@@ -6366,6 +6366,7 @@ export class UnifiedDataStore {
         }
         if (previous && Number(previous.priority) > priority) return false;
         if (previous && Number(previous.priority) === priority && (!this.samePhysicalMigrationSource(String(previous.source_identity), source.identity) || previous.source_key !== source.key)) throw new Error('historical_run_identity_ambiguous');
+        if (!previous && currentHash === digest(canonical([sourceRecord, files, signals]))) return false;
         if (!previous && (!digestSource || priority === 10)) {
           throw new Error('historical_run_index_owner_unknown');
         }

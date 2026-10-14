@@ -442,8 +442,8 @@ for (const hasOutput of [true, false]) test(`journal history captures the exact 
   const legacy = new SqliteStore(source, path.resolve(__dirname, '..')); await legacy.init();
   try { legacy.upsertRunIndex({ ...record(12), totalTokens: 0, outputPath: output }); } finally { legacy.close(); }
   const job = await ops({ operation: 'import_project_data', input: { collection: 'project-journal', projectRoot: workspace, sourceRoot: source, idempotencyKey: 'impact-native-transcript' } });
-  await ops.waitForMigrations(); assert.equal(store.readMigrationJob(job.jobId).status, hasOutput ? 'completed' : 'completed_with_conflicts'); assert.equal((await read()).totalTokens, 300);
-  if (!hasOutput) assert.ok(store.readMigrationJob(job.jobId).progress.conflicts.some(item => item.error.includes('historical_run_output_missing')));
+  await ops.waitForMigrations(); assert.equal(store.readMigrationJob(job.jobId).status, 'completed'); assert.equal((await read()).totalTokens, 300);
+  if (!hasOutput) assert.ok(store.readMigrationJob(job.jobId).progress.retainedGaps.some(item => item.error === 'historical_run_output_missing'));
   const evidence = store.rows("SELECT c.id FROM migration_items m JOIN contents c ON c.id=m.source_content_id WHERE m.source_identity=?", [`native-token-evidence:${project}`]);
   assert.equal(evidence.length, 1); assert.equal(store.content(evidence[0].id).toString('utf8'), full);
   fs.renameSync(transcript, `${transcript}-retained`); assert.equal((await read()).totalTokens, 300);
@@ -548,9 +548,9 @@ for (const family of ['codex', 'claude']) for (const finished of ['valid', 'miss
     }
     legacy.close();
     const job=await ops({operation:'import_project_data',input:{collection:'project-journal',projectRoot:workspace,sourceRoot:source,idempotencyKey:'bounded-session-history'}});
-    await ops.waitForMigrations();assert.equal(store.readMigrationJob(job.jobId).status,finished==='valid'?'completed':'completed_with_conflicts');
+    await ops.waitForMigrations();assert.equal(store.readMigrationJob(job.jobId).status,'completed');
     assert.deepEqual(store.readProjectRunIndexes(project).sort((a,b)=>a.executionLogId-b.executionLogId).map(x=>x.totalTokens),finished==='valid'?[300,400]:[0,0]);
-    if(finished!=='valid') assert.equal(store.readMigrationJob(job.jobId).progress.conflicts.filter(x=>x.error.includes('historical_token_window_missing')).length,2);
+    if(finished!=='valid') assert.equal(store.readMigrationJob(job.jobId).progress.retainedGaps.filter(x=>x.error==='historical_token_window_missing').length,2);
     const captured=store.rows('SELECT source_content_id FROM migration_items WHERE source_identity=?',[`native-token-evidence:${project}`]);
     assert.equal(captured.length,1);assert.equal(store.content(captured[0].source_content_id).toString(),full);
   } finally {
@@ -597,8 +597,22 @@ test('normal upgrade catches up previously completed raw archives once without m
  }finally{await ops.close();store.close();cleanupExact(base);}
 });
 
+test('normal upgrade rechecks journal conflicts with the retained-gap reconciliation version', () => fixture(async ({ workspace, store, ops, record }) => {
+  const source = path.join(workspace, '.solopreneur', 'project_journal.db'); const legacy = new SqliteStore(source, path.resolve(__dirname, '..')); await legacy.init();
+  try { legacy.upsertRunIndex({ ...record(12), totalTokens: 0, outputPath: path.join(workspace, '.solopreneur', 'agent-runs', '__solo__', '12', 'output.log') }); } finally { legacy.close(); }
+  const args = { collection: 'project-journal', sourceRoot: source, projectRoot: workspace };
+  const old = store.enqueueMemoryMigration(args, `startup-project-journal-v3:${workspace}`);
+  store.updateMigrationJob(old.jobId, 'completed_with_conflicts', { conflicts: [{ source, error: 'historical_run_output_missing' }] });
+  const before = store.migrationJobCount(); await enqueueStartupDataMigrations(store, ops, () => true); await ops.waitForMigrations();
+  assert.equal(store.migrationJobCount(), before + 1);
+  const latest = store.migrationJobSummaries().find(job => job.args.collection === 'project-journal' && job.args.sourceRoot === source);
+  assert.equal(latest.status, 'completed');
+  assert.deepEqual(latest.progress.conflicts, []);
+  assert.ok(store.migrationJobs().some(job => job.progress.retainedGaps?.some(item => item.error === 'historical_run_output_missing')));
+}));
 
-test('published unmarked native index survives reconciliation even when it equals the retained legacy source', async () => {
+
+test('published unmarked index is reconciled by equal source content without claiming its ownership', async () => {
   const crypto = require('node:crypto');
   const { DiskDatabase } = require('../out/db/diskDatabase.js');
   const { unifiedSchemaSql } = require('../out/db/unifiedSchema.js');
@@ -634,16 +648,41 @@ test('published unmarked native index survives reconciliation even when it equal
     const job=await ops({operation:'import_project_data',input:{collection:'project-journal',projectRoot:workspace,sourceRoot:source,idempotencyKey:'published-native-reconcile'}});
     await ops.waitForMigrations();
     assert.equal(store.readProjectRunIndexes(project)[0].totalTokens,0,'an imported source is not ownership proof of an equal native index');
-    assert.ok(store.readMigrationJob(job.jobId).progress.conflicts.some(x=>x.error.includes('historical_run_index_owner_unknown')));
+    assert.equal(store.readMigrationJob(job.jobId).status,'completed');
+    assert.deepEqual(store.readMigrationJob(job.jobId).progress.conflicts,[]);
+    assert.equal(store.rows('SELECT * FROM run_index_import_sources WHERE project_id=? AND execution_log_id=?',[project,12]).length,0,'content reconciliation must not invent historical ownership');
     assert.equal(Buffer.from(store.readRunArtifact(project,12,'__solo__/12/output.log').bytes,'base64').toString(),outputBody);
     assert.equal(store.readMigrationSource(identity,path.basename(source)).bytes.compare(bytes),0);
-    assert.equal(store.readMigrationSource(identity,path.basename(source)).stage,'conflict','a source with unresolved index ownership must stay outside recycling');
+    assert.equal(store.readMigrationSource(identity,path.basename(source)).stage,'imported');
     const {MigrationRecycling}=require('../out/migrationRecycling.js');
-    assert.equal((await new MigrationRecycling(store).prepare()).files.length,0);
+    assert.deepEqual((await new MigrationRecycling(store).prepare()).files.map(item=>item.path),[source]);
     await ops.close();store.close();store=new UnifiedDataStore(root);ops=createRuntimeDataOperations(store);
     assert.equal(store.readProjectRunIndexes(project)[0].totalTokens,0);
   }finally{await ops.close();store.close();cleanupExact(base);}
 });
+
+test('published unmarked index with different content remains an ownership conflict', () => fixture(async ({ workspace, project, store, record }) => {
+  const sourceRecord = record(12); const currentRecord = { ...sourceRecord, status: 'Failed' };
+  store.importProjectRunIndex(project, currentRecord, [], []);
+  assert.throws(() => store.importHistoricalRunIndex(project, sourceRecord, [], [], {
+    identity: `project-journal:${workspace}`, key: 'project_journal.db', hash: 'source-hash'
+  }, 20, sourceRecord), /historical_run_index_owner_unknown/);
+  assert.equal(store.readProjectRunIndexes(project)[0].status, 'Failed');
+  assert.equal(store.rows('SELECT * FROM run_index_import_sources WHERE project_id=? AND execution_log_id=?', [project, 12]).length, 0);
+}));
+
+test('agent run replay reconciles an equal unmarked index but keeps every run file outside recycling', () => fixture(async ({ workspace, project, store, ops }) => {
+  const source = path.join(workspace, '.solopreneur', 'agent-runs'); const run = path.join(source, '__solo__', '12'); fs.mkdirSync(run, { recursive: true });
+  fs.writeFileSync(path.join(run, 'command.txt'), 'codex'); fs.writeFileSync(path.join(run, 'started_at'), '2026-10-09T09:00:00Z'); fs.writeFileSync(path.join(run, 'output.log'), 'tokens used\n17');
+  const first = await ops({ operation: 'import_project_data', input: { collection: 'agent-runs', projectRoot: workspace, sourceRoot: source, idempotencyKey: 'unmarked-agent-run-first' } });
+  await ops.waitForMigrations(); assert.equal(store.readMigrationJob(first.jobId).status, 'completed');
+  store.db.run('DELETE FROM run_index_import_sources WHERE project_id=? AND execution_log_id=?', [project, 12]);
+  const replay = await ops({ operation: 'import_project_data', input: { collection: 'agent-runs', projectRoot: workspace, sourceRoot: source, idempotencyKey: 'unmarked-agent-run-replay' } });
+  await ops.waitForMigrations(); assert.equal(store.readMigrationJob(replay.jobId).status, 'completed');
+  assert.deepEqual(store.readMigrationJob(replay.jobId).progress.conflicts, []);
+  const { MigrationRecycling } = require('../out/migrationRecycling.js');
+  assert.deepEqual((await new MigrationRecycling(store).prepare()).files, []);
+}));
 
 
 for(const journalPath of ['declared','absent']) test(`journal conversion restores precise archived output with ${journalPath} path when raw physical evidence is unavailable and keeps tokens across restart`, () => fixture(async ({workspace,root,project,store,ops,record,closeOwner}) => {
@@ -661,16 +700,27 @@ for(const journalPath of ['declared','absent']) test(`journal conversion restore
   await closeOwner();const reopened=new UnifiedDataStore(root);try{assert.equal(reopened.readProjectRunIndexes(project)[0].totalTokens,12345);assert.equal(Buffer.from(reopened.readRunArtifact(project,12,'__solo__/12/output.log').bytes,'base64').toString(),body);}finally{reopened.close();}
 }));
 
-for(const knownTokens of [0,88]) test(`missing declared historical output is a retained gap even with known tokens=${knownTokens}`,()=>fixture(async({workspace,project,store,ops,record})=>{
+for(const knownTokens of [0,88]) test(`missing declared historical output is recorded as a non-retryable gap with known tokens=${knownTokens}`,()=>fixture(async({workspace,project,store,ops,record})=>{
   const journal=path.join(workspace,'.solopreneur','project_journal.db');const outputPath=path.join(workspace,'.solopreneur','agent-runs','__solo__','12','output.log');
   const legacy=new SqliteStore(journal,path.resolve(__dirname,'..'));await legacy.init();try{legacy.upsertRunIndex({...record(12),totalTokens:knownTokens,outputPath});}finally{legacy.close();}
   const bytes=fs.readFileSync(journal);const job=await ops({operation:'import_project_data',input:{collection:'project-journal',sourceRoot:journal,projectRoot:workspace,idempotencyKey:'missing-historical-body'}});await ops.waitForMigrations();
-  assert.equal(store.readMigrationJob(job.jobId).status,'completed_with_conflicts');
-  assert.ok(store.readMigrationJob(job.jobId).progress.conflicts.some(x=>x.error.includes('historical_run_output_missing')));
+  assert.equal(store.readMigrationJob(job.jobId).status,'completed');
+  assert.deepEqual(store.readMigrationJob(job.jobId).progress.conflicts,[]);
+  assert.ok(store.readMigrationJob(job.jobId).progress.retainedGaps.some(x=>x.error==='historical_run_output_missing'));
   assert.equal(store.readProjectRunIndexes(project)[0].totalTokens,knownTokens);
   assert.equal(store.readMigrationSource(`project-journal:${workspace}`,path.basename(journal)).bytes.compare(bytes),0);
-  assert.equal(store.readMigrationSource(`project-journal:${workspace}`,path.basename(journal)).stage,'conflict');
-  const {MigrationRecycling}=require('../out/migrationRecycling.js');assert.equal((await new MigrationRecycling(store).prepare()).files.length,0);
+  assert.equal(store.readMigrationSource(`project-journal:${workspace}`,path.basename(journal)).stage,'imported');
+  const {MigrationRecycling}=require('../out/migrationRecycling.js');assert.deepEqual((await new MigrationRecycling(store).prepare()).files.map(item=>item.path),[journal]);
+}));
+
+test('retained migration gaps remain auditable after the database owner restarts', () => fixture(async ({ root, workspace, store, ops, record, closeOwner }) => {
+  const journal = path.join(workspace, '.solopreneur', 'project_journal.db'); const legacy = new SqliteStore(journal, path.resolve(__dirname, '..')); await legacy.init();
+  try { legacy.upsertRunIndex({ ...record(12), totalTokens: 0, outputPath: path.join(workspace, '.solopreneur', 'agent-runs', '__solo__', '12', 'output.log') }); } finally { legacy.close(); }
+  const job = await ops({ operation: 'import_project_data', input: { collection: 'project-journal', sourceRoot: journal, projectRoot: workspace, idempotencyKey: 'retained-gap-restart' } });
+  await ops.waitForMigrations(); await closeOwner();
+  const reopened = UnifiedDataStore.open(root);
+  try { assert.deepEqual(reopened.readMigrationJob(job.jobId).progress.retainedGaps.map(item => item.error), ['historical_run_output_missing']); }
+  finally { reopened.close(); }
 }));
 
 
@@ -1248,15 +1298,16 @@ test('a successful recheck of the older alias restores the verified physical sou
 }));
 
 
-for(const approvedBeforeImport of [false,true]) test(`an earlier journal recycling plan cannot outlive a newly detected body gap: approved=${approvedBeforeImport}`,()=>fixture(async({workspace,project,store,ops,record})=>{
+for(const approvedBeforeImport of [false,true]) test(`an earlier journal recycling plan remains valid after a recorded external body gap: approved=${approvedBeforeImport}`,()=>fixture(async({workspace,project,store,ops,record})=>{
  const crypto=require('node:crypto');const {MigrationRecycling}=require('../out/migrationRecycling.js');const recycling=new MigrationRecycling(store);
  const journal=path.join(workspace,'.solopreneur','project_journal.db');const legacy=new SqliteStore(journal,path.resolve(__dirname,'..'));await legacy.init();try{legacy.upsertRunIndex({...record(12),totalTokens:0,outputPath:path.join(workspace,'.solopreneur','agent-runs','__solo__','12','output.log')});}finally{legacy.close();}
  const bytes=fs.readFileSync(journal);const identity=`project-journal:${workspace}`;store.captureMigrationSource({identity,key:path.basename(journal),hash:crypto.createHash('sha256').update(bytes).digest('hex')},bytes);store.markMigrationSourceImported(identity,path.basename(journal));
  const plan=await recycling.prepare();assert.equal(plan.files.length,1);if(approvedBeforeImport)recycling.confirm(plan.planId);
- const job=await ops({operation:'import_project_data',input:{collection:'project-journal',sourceRoot:journal,projectRoot:workspace,idempotencyKey:'journal-gap-after-old-plan'}});await ops.waitForMigrations();assert.equal(store.readMigrationJob(job.jobId).status,'completed_with_conflicts');
- if(approvedBeforeImport)await assert.rejects(()=>recycling.hold(plan.files[0].itemId),/recycling_source_not_reconciled/);
- else assert.throws(()=>recycling.confirm(plan.planId),/recycling_source_not_reconciled/);
- assert.equal(fs.readFileSync(journal).compare(bytes),0);assert.equal(store.readProjectRunIndexes(project)[0].totalTokens,0);
+ const job=await ops({operation:'import_project_data',input:{collection:'project-journal',sourceRoot:journal,projectRoot:workspace,idempotencyKey:'journal-gap-after-old-plan'}});await ops.waitForMigrations();assert.equal(store.readMigrationJob(job.jobId).status,'completed');
+ assert.ok(store.readMigrationJob(job.jobId).progress.retainedGaps.some(item=>item.error==='historical_run_output_missing'));
+ if(approvedBeforeImport){const held=await recycling.hold(plan.files[0].itemId);assert.equal(fs.readFileSync(held.path).compare(bytes),0);}
+ else assert.equal(recycling.confirm(plan.planId).confirmed,true);
+ if(!approvedBeforeImport)assert.equal(fs.readFileSync(journal).compare(bytes),0);assert.equal(store.readProjectRunIndexes(project)[0].totalTokens,0);
 }));
 
 for (const operation of ['hold', 'finish', 'retire']) test(`a held journal remains recoverable when reconciliation changes before ${operation}`, () => fixture(async ({ workspace, store }) => {
@@ -1268,7 +1319,7 @@ for (const operation of ['hold', 'finish', 'retire']) test(`a held journal remai
   const plan = await recycling.prepare(); recycling.confirm(plan.planId); const itemId = plan.files[0].itemId; const held = await recycling.hold(itemId);
   let retained = held.path;
   if (operation === 'finish') { retained += '.test-retained'; fs.renameSync(held.path, retained); }
-  store.markMigrationSourceConflict(identity, key, 'historical_run_output_missing');
+  store.markMigrationSourceConflict(identity, key, 'migration_target_changed');
   await assert.rejects(() => recycling[operation](itemId), /recycling_source_not_reconciled/);
   assert.equal(fs.readFileSync(retained).compare(bytes), 0);
   assert.equal(store.recyclingItems().find(item => item.itemId === itemId).status, 'held');
@@ -1313,7 +1364,7 @@ test('an interrupted journal recheck after detecting a gap cannot restore old im
   store.captureMigrationSource({ identity, key, hash: crypto.createHash('sha256').update(bytes).digest('hex') }, bytes); store.markMigrationSourceImported(identity, key);
   const recycling = new MigrationRecycling(store); const plan = await recycling.prepare(); let checks = 0;
   const result = await importProjectJournal(store, journal, { projectRoot: workspace, shouldContinue: () => ++checks < 2 });
-  assert.equal(result.interrupted, true); assert.ok(result.conflicts.some(item => item.error.includes('historical_run_output_missing')));
+  assert.equal(result.interrupted, true); assert.ok(result.retainedGaps.some(item => item.error === 'historical_run_output_missing'));
   assert.throws(() => recycling.confirm(plan.planId), /recycling_source_not_reconciled/);
   assert.equal(fs.readFileSync(journal).compare(bytes), 0);
   await closeOwner(); const reopened = UnifiedDataStore.open(store.root);
