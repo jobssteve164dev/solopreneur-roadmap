@@ -90,8 +90,12 @@ export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSou
     await read(input.target);
     return source.call('link', input);
   });
-  register('solomap_context', '获取与当前目标有关的项目经验和记忆；metadata 返回固定版本引用，按 cursor 继续读取。', { project: z.string().optional(), query: z.string().optional(), terms: z.array(z.string().min(1)).nonempty().optional(), categories: z.array(z.string()).optional(), kinds: z.array(z.enum(['memory', 'lesson', 'policy'])).nonempty().optional(), budget: z.number().int().positive().optional(), view: z.enum(['full', 'metadata']).optional(), limit: z.number().int().min(1).max(500).optional(), cursor: z.string().optional() }, true, async input => {
-    if (!source.scope || (input.project && input.project !== source.scope)) throw new Error('scope_denied');
+  register('solomap_context', '获取与当前目标有关的项目经验和记忆；metadata 返回固定版本引用，按 cursor 继续读取。', { project: z.string().optional().describe('当前项目名称或内部项目 ID；省略时使用当前项目。'), query: z.string().optional(), terms: z.array(z.string().min(1)).nonempty().optional(), categories: z.array(z.string()).optional(), kinds: z.array(z.enum(['memory', 'lesson', 'policy'])).nonempty().optional(), budget: z.number().int().positive().optional(), view: z.enum(['full', 'metadata']).optional(), limit: z.number().int().min(1).max(500).optional(), cursor: z.string().optional() }, true, async input => {
+    if (!source.scope) throw new Error('scope_denied');
+    if (input.project !== undefined && input.project !== source.scope) {
+      const project = await read(source.scope);
+      if (project.kind !== 'project' || input.project !== project.data.name) throw new Error('scope_denied');
+    }
     const result = await source.call('context', { ...input, project: source.scope }) as { items: DataObject[] };
     return { ...result, items: result.items.filter(authorized) };
   });

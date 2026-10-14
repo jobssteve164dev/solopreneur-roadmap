@@ -69,6 +69,7 @@ test('MCP exposes the six shared operations and retains the four existing read t
     await call('solomap_link', { source: created.objectId, relation: 'source', target: second.objectId, expectedRevision: 1, idempotencyKey: 'link' });
     assert.equal((await call('solomap_read', { ref: created.objectId })).relations[0].target, second.objectId);
     assert.ok((await call('solomap_context', { project: project.objectId, query: 'MCP目标', budget: 1000 })).items.some(item => item.objectId === created.objectId));
+    assert.ok((await call('solomap_context', { project: '项目', query: 'MCP目标', budget: 1000 })).items.some(item => item.objectId === created.objectId), 'the bound project name must be accepted as an alias for its internal id');
     const contextPages = []; let contextCursor;
     do {
       const page = await call('solomap_context', { view: 'metadata', kinds: ['memory'], terms: ['MCP目标', 'source'], budget: 1, limit: 1, ...(contextCursor ? { cursor: contextCursor } : {}) });
@@ -82,5 +83,9 @@ test('MCP exposes the six shared operations and retains the four existing read t
     const privateProject = store.write({ kind: 'project', action: 'create', scope: null, idempotencyKey: 'private', data: { name: 'private' } });
     const denied = await session.client.callTool({ name: 'solomap_search', arguments: { scope: privateProject.objectId } });
     assert.equal(denied.isError, true);
+    const deniedContext = await session.client.callTool({ name: 'solomap_context', arguments: { project: 'private' } });
+    assert.equal(deniedContext.isError, true);
+    const deniedEmptyContext = await session.client.callTool({ name: 'solomap_context', arguments: { project: '' } });
+    assert.equal(deniedEmptyContext.isError, true);
   } finally { await session.close(); store.close(); }
 });
