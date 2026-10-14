@@ -87,6 +87,28 @@ test('refreshing one portfolio card restores a real global store', async () => {
   assert.deepEqual(posted.at(-1).projects.globalStore.paths, ['/alpha', '/beta']);
 });
 
+test('one project enrichment failure does not stop projects after it from refreshing', async () => {
+  const projects = Array.from({ length: 28 }, (_, index) => ({
+    name: `Project ${index + 1}`,
+    path: `/project-${index + 1}`
+  }));
+  const Loader = loadLoader({
+    investment: async projectPath => {
+      if (projectPath === '/project-26') throw new Error('runtime connection replaced');
+      return {};
+    }
+  });
+  const posted = [];
+  const loader = createLoader(Loader, posted);
+  loader.schedulePortfolioEnrichment(projects, projects[0].path, projects);
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  const refreshedPaths = posted.flatMap(message => message.projects?.updatedProjectPaths || []);
+  assert.equal(refreshedPaths.includes('/project-26'), false);
+  assert.equal(refreshedPaths.includes('/project-27'), true);
+  assert.equal(refreshedPaths.includes('/project-28'), true);
+  assert.equal(posted.at(-1).projects.globalStore.ready, true);
+});
+
 test('invalidating one project issue load rejects its old response but keeps another project', async () => {
   const alpha = deferred();
   const beta = deferred();

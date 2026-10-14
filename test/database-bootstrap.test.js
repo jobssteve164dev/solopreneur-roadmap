@@ -116,6 +116,9 @@ test('Today intelligence becomes readable while a recovered legacy migration is 
       await new Promise(resolve => setTimeout(resolve, 20));
     } while (true);
     assert.equal(decision.status, 'completed');
+    await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal(fs.existsSync(path.join(root, 'runtime', 'control.busy.json')), true,
+      'the Runtime must retain its owner lease while the internal history scan is still running');
   } finally {
     if (child.exitCode === null) {
       child.kill('SIGKILL');

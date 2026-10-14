@@ -87,37 +87,41 @@ export class SidebarProjectLoader {
             if (projectRequests.get(project.path) !== this.portfolioProjectRequests.get(project.path)) {
               continue;
             }
-            const [investment, sourceCount, documentationManifest, analysisSource] = await Promise.all([
-              readProjectInvestmentStatsFromDatabase(project.path, this.options.getExtensionPath(), new Date(), globalDataPath),
-              sendRuntimeDataRequest<number>(normalizeGlobalDataPathForExtension(globalDataPath, project.path), { operation: 'read_project_reusable_source_count', input: { root: project.path } }),
-              sendRuntimeDataRequest<DocumentationManifest>(normalizeGlobalDataPathForExtension(globalDataPath, project.path), { operation: 'read_documentation_manifest', input: { root: project.path } }),
-              sendRuntimeDataRequest<{ recentActivityAt: string }>(normalizeGlobalDataPathForExtension(globalDataPath, project.path), { operation: 'read_project_analysis_source', input: { root: project.path } })
-            ]);
-            if (!this.options.isAvailable() || requestId !== this.portfolioRequest) return;
-            if (projectRequests.get(project.path) !== this.portfolioProjectRequests.get(project.path)) {
-              continue;
-            }
-            summaries.set(project.path, buildProjectPortfolioSummary(project, {
-              includeReusableSignals: true,
-              globalDataPath,
-              learningOverview,
-              documentationManifestsByProjectPath: new Map([[project.path, documentationManifest]]),
-              reusableSourceCountsByProjectPath: new Map([[project.path, sourceCount]]),
-              investmentStatsByProjectPath: { [project.path]: investment },
-              recentActivityAtByProjectPath: new Map([[project.path, analysisSource.recentActivityAt]]),
-              externalSignalsByProjectPath: summaries.get(project.path) ? new Map([[project.path, summaries.get(project.path)!]]) : undefined
-            }));
-            this.latestEnrichedPortfolio.set(project.path, summaries.get(project.path)!);
-            const portfolio = projects.map((item) => summaries.get(item.path)).filter(Boolean) as ProjectPortfolioSummary[];
-            this.options.postMessage({
-              command: 'projectsLoaded',
-              projects: {
-                projects,
-                selectedProjectPath,
-                portfolio,
-                updatedProjectPaths: [project.path]
+            try {
+              const [investment, sourceCount, documentationManifest, analysisSource] = await Promise.all([
+                readProjectInvestmentStatsFromDatabase(project.path, this.options.getExtensionPath(), new Date(), globalDataPath),
+                sendRuntimeDataRequest<number>(normalizeGlobalDataPathForExtension(globalDataPath, project.path), { operation: 'read_project_reusable_source_count', input: { root: project.path } }),
+                sendRuntimeDataRequest<DocumentationManifest>(normalizeGlobalDataPathForExtension(globalDataPath, project.path), { operation: 'read_documentation_manifest', input: { root: project.path } }),
+                sendRuntimeDataRequest<{ recentActivityAt: string }>(normalizeGlobalDataPathForExtension(globalDataPath, project.path), { operation: 'read_project_analysis_source', input: { root: project.path } })
+              ]);
+              if (!this.options.isAvailable() || requestId !== this.portfolioRequest) return;
+              if (projectRequests.get(project.path) !== this.portfolioProjectRequests.get(project.path)) {
+                continue;
               }
-            });
+              summaries.set(project.path, buildProjectPortfolioSummary(project, {
+                includeReusableSignals: true,
+                globalDataPath,
+                learningOverview,
+                documentationManifestsByProjectPath: new Map([[project.path, documentationManifest]]),
+                reusableSourceCountsByProjectPath: new Map([[project.path, sourceCount]]),
+                investmentStatsByProjectPath: { [project.path]: investment },
+                recentActivityAtByProjectPath: new Map([[project.path, analysisSource.recentActivityAt]]),
+                externalSignalsByProjectPath: summaries.get(project.path) ? new Map([[project.path, summaries.get(project.path)!]]) : undefined
+              }));
+              this.latestEnrichedPortfolio.set(project.path, summaries.get(project.path)!);
+              const portfolio = projects.map((item) => summaries.get(item.path)).filter(Boolean) as ProjectPortfolioSummary[];
+              this.options.postMessage({
+                command: 'projectsLoaded',
+                projects: {
+                  projects,
+                  selectedProjectPath,
+                  portfolio,
+                  updatedProjectPaths: [project.path]
+                }
+              });
+            } catch (error) {
+              console.error(`SoloMap sidebar failed to enrich project ${project.path}:`, error);
+            }
             await new Promise<void>((resolve) => setTimeout(resolve, 0));
           }
           if (!this.options.isAvailable() || requestId !== this.portfolioRequest) return;

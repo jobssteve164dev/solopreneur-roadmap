@@ -133,13 +133,29 @@ function clearOwnedBusyLease(filePath: string, runtimeId: string): void {
   }
 }
 
-export async function startRuntimeControlServer(options: RuntimeControlServerOptions): Promise<{ close(): Promise<void> }> {
+export async function startRuntimeControlServer(options: RuntimeControlServerOptions): Promise<{ beginBusy(): () => void; close(): Promise<void> }> {
   const token = crypto.randomBytes(32).toString('hex');
   const filePath = endpointPath(options.globalDataPath);
   const busyFilePath = path.join(path.dirname(filePath), 'control.busy.json');
   const connections = new Set<net.Socket>();
   const busy = new Set<net.Socket>();
+  let internalBusy = 0;
   let endpoint: RuntimeControlEndpoint;
+  const acquireBusyLease = () => {
+    if (busy.size === 0 && internalBusy === 0) writeBusyLease(busyFilePath, {
+      schemaVersion: 1,
+      runtimeId: options.runtimeId,
+      entryPath: String(options.entryPath || ''),
+      buildId: String(options.buildId || ''),
+      releaseVersion: String(options.releaseVersion || ''),
+      busySince: new Date().toISOString()
+    });
+  };
+  const clearIdleBusyLease = () => {
+    if (busy.size === 0 && internalBusy === 0) {
+      try { clearOwnedBusyLease(busyFilePath, options.runtimeId); } catch { /* bounded stale marker */ }
+    }
+  };
   const server = net.createServer((socket) => {
     connections.add(socket);
     socket.once('close', () => { connections.delete(socket); });
@@ -197,25 +213,16 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
           if (!options.onData || !parsed.request) throw new Error('Runtime data service is unavailable.');
           // Accepted work must finish even when a backup or export outlives a control timeout.
           socket.setTimeout(0);
-          if (busy.size === 0) writeBusyLease(busyFilePath, {
-            schemaVersion: 1,
-            runtimeId: options.runtimeId,
-            entryPath: String(options.entryPath || ''),
-            buildId: String(options.buildId || ''),
-            releaseVersion: String(options.releaseVersion || ''),
-            busySince: new Date().toISOString()
-          });
+          acquireBusyLease();
           busy.add(socket);
           let result: unknown;
           try { result = await options.onData(parsed.request); }
           finally {
             busy.delete(socket);
-            if (busy.size === 0) {
-              // Clearing a completed-work marker must not replace the operation's
-              // result or root error. A failed unlink remains bounded by the
-              // host-side lease age and cannot impersonate another Runtime.
-              try { clearOwnedBusyLease(busyFilePath, options.runtimeId); } catch { /* bounded stale marker */ }
-            }
+            // Clearing a completed-work marker must not replace the operation's
+            // result or root error. A failed unlink remains bounded by the
+            // host-side lease age and cannot impersonate another Runtime.
+            clearIdleBusyLease();
           }
           socket.end(JSON.stringify({ ok: true, runtimeId: options.runtimeId, result }) + '\n');
           return;
@@ -257,6 +264,17 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
     throw error;
   }
   return {
+    beginBusy: () => {
+      acquireBusyLease();
+      internalBusy++;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        internalBusy--;
+        clearIdleBusyLease();
+      };
+    },
     close: async () => {
       const closePromise = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
       const forceCloseTimer = setTimeout(() => connections.forEach(socket => { if (!busy.has(socket)) socket.destroy(); }), 100);

@@ -115,6 +115,7 @@ test('runtime control publishes an exact busy lease around accepted data work', 
   fs.mkdirSync(globalRoot);
   let server;
   let release;
+  let releaseInternal;
   try {
     const gate = new Promise(resolve => { release = resolve; });
     server = await control.startRuntimeControlServer({
@@ -138,10 +139,15 @@ test('runtime control publishes an exact busy lease around accepted data work', 
     assert.equal(busy.entryPath, '/opt/solomap/out/autonomousRuntimeProcess.js');
     assert.equal(busy.buildId, 'build-busy');
     assert.equal(busy.releaseVersion, '0.0.526');
+    releaseInternal = server.beginBusy();
     release();
     assert.deepEqual(await pending, { done: true });
+    assert.equal(fs.existsSync(busyPath), true, 'external completion must preserve an active internal lease');
+    releaseInternal();
+    releaseInternal = undefined;
     await waitFor(() => !fs.existsSync(busyPath));
   } finally {
+    releaseInternal?.();
     release?.();
     if (server) await server.close();
     const endpointPath = path.join(globalRoot, 'runtime', 'control.json');

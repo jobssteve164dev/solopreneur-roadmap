@@ -146,7 +146,7 @@ async function main(): Promise<void> {
   let rerunRequested = false;
   let timer: NodeJS.Timeout | undefined;
   let activeEngine: EmbeddedPiAgentEngine | undefined;
-  let controlServer: { close(): Promise<void> } | undefined;
+  let controlServer: { beginBusy(): () => void; close(): Promise<void> } | undefined;
   let telegram = startTelegramBackgroundRuntime(globalDataPath, dataOperations);
   if (paused) { updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' }); await heartbeatRuntime('paused'); }
   const stop = () => {
@@ -245,7 +245,9 @@ async function main(): Promise<void> {
       return;
     }
     running = true;
+    let releaseBusy: (() => void) | undefined;
     try {
+      releaseBusy = controlServer?.beginBusy();
       if (!hasRuntimeLease(globalDataPath, runtimeId, process.pid)) {
         stop();
         return;
@@ -306,6 +308,7 @@ async function main(): Promise<void> {
       updateRuntimeState(globalDataPath, runtimeId, { status: 'running' });
       await heartbeatRuntime('running');
     } finally {
+      releaseBusy?.();
       activeEngine = undefined;
       running = false;
       if (rerunRequested && !paused && !stopping) {
