@@ -6757,17 +6757,27 @@ async function launchAgentConversationTerminal(input: {
     const terminal = recordedTerminal || createAgentTerminal(input.workspaceRoot, input.label, input.conversationId, input.context ? await getOpenCodeTerminalEnvironment(input.context, input.agentCli, input.model) : undefined);
     agentTerminalRunTargets.set(terminal, target);
     terminal.show(true);
-    const persist = async (patch: Record<string, unknown>) => {
+    const persist = async (patch: Record<string, unknown>, commandSubmitted = false) => {
       for (;;) {
-        const status = await client.readStatus(reference);
+        const current = await operation('read_run_state', identity) as import('./runLifecycleTypes').RunState;
+        if (current.runId !== state.runId || (commandSubmitted
+          ? !isAgentTerminalRunTargetCurrent(target, current)
+          : current.generation !== generation)) throw new Error('run_owner_conflict');
+        if (current.turnId !== state.turnId) throw new Error('checkpoint_turn_conflict');
+        const status = await client.readStatus(reference, current.revision);
         if (!status) throw new Error('run_missing');
         try { await client.writeStatus(reference, { ...status, ...patch }); return; }
-        catch (error) { if ((error as Error).message !== 'revision_conflict') throw error; }
+        catch (error) {
+          // The submitted runner claims this delivery by advancing generation.
+          // Re-read and verify the delivery before recording its acknowledgement.
+          if ((error as Error).message !== 'revision_conflict'
+            && !(commandSubmitted && (error as Error).message === 'run_owner_conflict')) throw error;
+        }
       }
     };
     await persist({ terminalName: terminal.name, terminalDeliveryId: target.deliveryId });
     if (!await sendTextWhenTerminalReady(terminal, `SOLOMAP_TERMINAL_DELIVERY_ID=${shellQuote(target.deliveryId!)} ${input.command}`)) throw new Error('terminal_delivery_failed');
-    await persist({ terminalCommandSubmittedAt: new Date().toISOString() });
+    await persist({ terminalCommandSubmittedAt: new Date().toISOString() }, true);
     if (extensionContextRef) ensureActiveConversationPoller(extensionContextRef);
     if (input.refreshNodeId) postNodeConversations(input.refreshNodeId);
     return terminal;

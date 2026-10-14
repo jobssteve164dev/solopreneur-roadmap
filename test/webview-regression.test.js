@@ -7,6 +7,61 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
+
+test('terminal delivery survives its own runner claim while recording submission', async t => {
+  for (const mode of ['same-delivery', 'different-delivery', 'different-turn']) await t.test(mode, async t => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-delivery-claim-race-'));
+    const project = path.join(base, 'project'), root = path.join(base, '.solomap-global');
+    fs.mkdirSync(project);
+    const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+    const call = (operation, input) => native.ops({ operation, input });
+    const identity = { root: project, executionLogId: 1 };
+    const parent = await call('prepare_run', { ...identity, nodeId: '__solo__', runKind: 'solo', prompt: '原任务', command: 'not executed', userMessage: '原任务', metadata: { interactiveSession: true }, idempotencyKey: 'race-parent' });
+    const run = await call('prepare_run', { ...identity, executionLogId: 2, nodeId: '__solo__', runKind: 'solo_continue', prompt: '继续原任务', command: 'not executed', userMessage: '继续', parentExecutionLogId: 1, expectedParentTurnId: parent.turnId, deliveryOwner: { id: 'closed-window', pid: 99999999, birth: '' }, metadata: { interactiveSession: true }, idempotencyKey: 'race-continuation' });
+    identity.executionLogId = 2;
+    const parentBefore = await call('read_run_state', { ...identity, executionLogId: 1 });
+    let raced = false, sent = 0, created = 0;
+    const transport = { sendRuntimeDataRequest: async (dataRoot, request) => {
+      assert.equal(dataRoot, root, 'every write must use the isolated owner');
+      if (!raced && request.operation === 'patch_run_state' && request.input.patch.terminalCommandSubmittedAt) {
+        raced = true;
+        let current = await call('read_run_state', identity);
+        if (mode === 'different-delivery') current = await call('patch_run_state', { ...identity, generation: current.generation, expectedRevision: current.revision, patch: { terminalDeliveryId: 'another-terminal' }, idempotencyKey: 'race-replaced-delivery' });
+        await call('claim_run', { ...identity, expectedRevision: current.revision, terminalDeliveryId: current.status.terminalDeliveryId, idempotencyKey: 'race-runner-claim' });
+        if (mode === 'different-turn') {
+          current = await call('read_run_checkpoint_state', identity);
+          await call('checkpoint_run', { ...identity, generation: current.generation, proof: current.proof, expectedRevision: current.revision, expectedTurnId: current.turnId, action: 'complete', outcome: 'partial', summary: '原轮已完成', idempotencyKey: 'race-finish-turn' });
+          current = await call('read_run_checkpoint_state', identity);
+          await call('checkpoint_run', { ...identity, generation: current.generation, proof: current.proof, expectedRevision: current.revision, expectedTurnId: current.turnId, action: 'start', message: '另一轮', idempotencyKey: 'race-next-turn' });
+        }
+      }
+      return call(request.operation, request.input);
+    } };
+    const extension = loadCompiledModule('out/extension.js', `
+      module.exports.launch = launchAgentConversationTerminal;
+      module.exports.connect = (root, create) => {
+        extensionContextRef = null; getPersistedSettings = () => ({ globalDataPath: root });
+        vscode.window.createTerminal = create;
+      };
+    `, { './autonomousRuntimeControl': transport, './terminalCompatibility': require('../out/terminalCompatibility.js') });
+    extension.connect(root, options => {
+      created++;
+      return { name: options.name, processId: Promise.resolve(process.pid), show() {}, sendText() { sent++; } };
+    });
+    const launch = extension.launch({ workspaceRoot: project, label: 'continue', conversationId: 2, nodeId: '__solo__', runKind: 'solo_continue', globalDataPath: root, command: 'fixture command never executed', agentCli: 'codex' });
+    if (mode === 'same-delivery') await launch;
+    else await assert.rejects(launch, /run_owner_conflict|checkpoint_turn_conflict/);
+    assert.equal(raced, true); assert.equal(created, 1); assert.equal(sent, 1, 'claim retry must never resend the command');
+    const delivered = await call('read_run_state', identity);
+    assert.equal(delivered.generation, run.generation + 1);
+    assert.equal(Boolean(delivered.status.terminalCommandSubmittedAt), mode === 'same-delivery');
+    assert.equal(delivered.taskId, parent.taskId); assert.equal(delivered.conversationId, parent.conversationId);
+    assert.deepEqual(await call('read_run_state', { ...identity, executionLogId: 1 }), parentBefore);
+    const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)(call, root);
+    const reference = require('../out/runLifecycleClient.js').runStatusReference(project, 2);
+    await client.stop(reference, await client.readStatus(reference), '结束隔离验证', 'race-cleanup');
+  });
+});
 const sharedHostDefaultRoot = path.join(os.tmpdir(), `solomap-host-default-${process.pid}`);
 test.after(() => {
   if (!fs.existsSync(sharedHostDefaultRoot)) return;
