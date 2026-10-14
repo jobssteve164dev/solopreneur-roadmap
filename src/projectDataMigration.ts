@@ -538,7 +538,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         reports.push({ source: { identity, key: path.join(relative, name), hash: digest(bytes) }, bytes, observation: { executionLogId: envelope.executionLogId, sequence, availability, envelope: availability === 'recorded' ? envelope : { ...envelope, report: null } } });
       }
       if ((await stableFile(file)).hash !== captured.hash) throw new Error('historical_run_source_changed');
-      const adopted = store.adoptHistoricalRun(project.projectId, project.locationId, { identity: statusIdentity, key, hash: captured.hash }, { historicalExecutionLogIds, status, binding, prompt, command, output, outputSource, nativeTranscript, legacyCompletion, ...documents, ...(unregistered ? { unregisteredReports: reports, unregisteredTaskAlias: [...reportAliases][0], unregisteredRequest: prompt } : { registeredTaskAlias: matchingTasks[0].taskId }) });
+      const adopted = store.adoptHistoricalRun(project.projectId, project.locationId, { identity: statusIdentity, key, hash: captured.hash }, { historicalExecutionLogIds, status, binding, prompt, command, output, outputSource, nativeTranscript, legacyCompletion, ...documents, ...(unregistered ? { unregisteredReports: reports, unregisteredTaskAlias: [...reportAliases][0], unregisteredRequest: prompt, unregisteredWorkspaceRoot: resolvedRoot } : { registeredTaskAlias: matchingTasks[0].taskId }) });
       if (relative === status.nodeId) {
         for (const original of filesByNode.get(relative) || []) {
           if (path.dirname(original) !== runDir) continue;

@@ -776,6 +776,20 @@ test('an unregistered status without a workspace field retains its project throu
   assert.equal(Object.hasOwn(JSON.parse(f.store.readMigrationSource(`agent-status:${f.project}`, '71.json').bytes), 'workspaceRoot'), false, 'original source must retain its genuinely absent field');
 });
 
+test('an unregistered status without workspace or native binding retains the physically verified migration project', async t => {
+  const f = await unregisteredHistory(t, false);
+  delete f.status.workspaceRoot;
+  f.status.nativeSessionIdIsCurrent = false;
+  f.status.nativeSessionId = '';
+  fs.renameSync(path.join(f.runDir, 'session.json'), path.join(f.base, 'retained-unbound-session.json'));
+  writeLearningJson(f.statusFile, f.status);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  const found = await f.client.findConversation(f.project, 71);
+  assert.equal(found.status.workspaceRoot, f.project);
+  assert.equal(await f.client.readBinding(found.reference, found.status), null);
+  assert.equal(Object.hasOwn(JSON.parse(f.store.readMigrationSource(`agent-status:${f.project}`, '71.json').bytes), 'workspaceRoot'), false);
+});
+
 test('a registered historical status without the optional task alias retains the uniquely registered task', async t => {
   const f = await history(t); delete f.status.learningTaskId; writeLearningJson(f.statusFile, f.status);
   assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);

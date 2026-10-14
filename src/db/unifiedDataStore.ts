@@ -5721,7 +5721,7 @@ export class UnifiedDataStore {
   }
 
   /** Only the bounded, captured legacy importer calls this; it is not an Agent operation. */
-  public adoptHistoricalRun(projectId: string, locationId: string, source: ImportedSource, input: { historicalExecutionLogIds?: number[]; status: Record<string, unknown>; binding: NativeSessionBinding | null; prompt: string; command: string; output: Buffer; outputSource?: ImportedSource; nativeTranscript?: { source: ImportedSource; bytes: Buffer }; legacyCompletion?: { source: ImportedSource; bytes: Buffer }; workspaceBefore?: Buffer; changes?: Buffer; roadmapBackup?: Buffer; registeredTaskAlias?: string; unregisteredTaskAlias?: string; unregisteredRequest?: string; unregisteredReports?: Array<{ source: ImportedSource; bytes: Buffer; observation: { executionLogId: number; sequence: number; availability: string; envelope: any } }> }): { unchanged: boolean; state: RunState } {
+  public adoptHistoricalRun(projectId: string, locationId: string, source: ImportedSource, input: { historicalExecutionLogIds?: number[]; status: Record<string, unknown>; binding: NativeSessionBinding | null; prompt: string; command: string; output: Buffer; outputSource?: ImportedSource; nativeTranscript?: { source: ImportedSource; bytes: Buffer }; legacyCompletion?: { source: ImportedSource; bytes: Buffer }; workspaceBefore?: Buffer; changes?: Buffer; roadmapBackup?: Buffer; registeredTaskAlias?: string; unregisteredTaskAlias?: string; unregisteredRequest?: string; unregisteredWorkspaceRoot?: string; unregisteredReports?: Array<{ source: ImportedSource; bytes: Buffer; observation: { executionLogId: number; sequence: number; availability: string; envelope: any } }> }): { unchanged: boolean; state: RunState } {
     return this.transaction(() => {
       const status = input.status, executionLogId = Number(status.rootExecutionLogId || status.executionLogId), nodeId = String(status.nodeId || '');
       const currentExecutionLogId = Number(status.executionLogId);
@@ -5776,7 +5776,7 @@ export class UnifiedDataStore {
       const taskId = String(registration.task_id), conversationId = String(this.readMetadata(taskId).data.conversation_id);
       const location = this.rows('SELECT root_path FROM project_locations WHERE id=? AND project_id=?', [locationId, projectId])[0];
       const binding = input.binding && assertVersion2Binding(input.binding, source.key);
-      const declaredWorkspace = status.workspaceRoot || binding?.workspaceRoot;
+      const declaredWorkspace = status.workspaceRoot || binding?.workspaceRoot || (input.unregisteredReports !== undefined ? input.unregisteredWorkspaceRoot : undefined);
       if (!location || !declaredWorkspace || path.resolve(String(declaredWorkspace)) !== path.resolve(String(location.root_path))) throw new Error('historical_run_workspace_mismatch');
       if (binding) {
         if (binding.runId !== String(executionLogId) || path.resolve(binding.workspaceRoot) !== path.resolve(String(location.root_path)) || status.bindingNonce && binding.bindingNonce !== status.bindingNonce || status.sessionProvider && binding.provider !== status.sessionProvider) throw new Error('historical_run_binding_mismatch');
