@@ -93,6 +93,10 @@ test('Today intelligence becomes readable while a recovered legacy migration is 
           close() { return Promise.resolve(); }
         } };
       }
+      if (request === './runtimeDatabaseBootstrap') {
+        const actual = originalLoad.call(this, request, parent, isMain);
+        return { ...actual, refreshHistoricalRunMigrations() { return new Promise(() => {}); } };
+      }
       return originalLoad.call(this, request, parent, isMain);
     };
   `);

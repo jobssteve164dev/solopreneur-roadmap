@@ -252,7 +252,6 @@ async function main(): Promise<void> {
       }
       await refreshProjectRegistry(globalDataPath, undefined, (operation, input) => dataOperations({ operation, input }));
       await refreshCognitiveRuntimeConfig(globalDataPath, dataOperations);
-      if (!stopping) historicalOwnerStamp = await refreshHistoricalRunMigrations(dataStore, dataOperations, () => !stopping, historicalOwnerStamp);
       const current = readCurrentRegisteredShadowDecision(globalDataPath);
       const cognitiveConfig = readCognitiveRuntimeConfig(globalDataPath);
       const cognitiveConfigRevision = cognitiveRuntimeConfigRevision(cognitiveConfig);
@@ -282,6 +281,10 @@ async function main(): Promise<void> {
       await persistShadowRuntimeState(globalDataPath, dataOperations);
       updateRuntimeState(globalDataPath, runtimeId, { status: 'running' });
       await heartbeatRuntime('running');
+      if (!stopping) {
+        try { historicalOwnerStamp = await refreshHistoricalRunMigrations(dataStore, dataOperations, () => !stopping, historicalOwnerStamp); }
+        catch (error) { recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.migration-refresh', classifyDiagnosticFailure(error)); }
+      }
     } catch (error) {
       recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.cycle', classifyDiagnosticFailure(error));
       if (stopping) return;
