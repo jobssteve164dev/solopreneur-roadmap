@@ -287,6 +287,40 @@ test('plan execution batches durable status changes while preserving per-file ve
   } finally { await f.operations.close(); f.store.close(); }
 });
 
+test('a dependency recycled by the same approved plan cannot invalidate a remaining migrated source', async () => {
+  const f = fixture();
+  try {
+    const identity = `agent-runs:${f.root}`;
+    const retiredPath = path.join(f.root, '.solopreneur', 'agent-runs', 'old', 'prompt.txt');
+    const remainingPath = path.join(f.root, '.solopreneur', 'agent-status', '1.json');
+    const sources = [
+      { identity, key: 'old/prompt.txt', path: retiredPath, bytes: Buffer.from('old prompt') },
+      { identity: `agent-status:${f.root}`, key: '1.json', path: remainingPath, bytes: Buffer.from('{"executionLogId":1}') }
+    ].map(source => ({ ...source, hash: require('node:crypto').createHash('sha256').update(source.bytes).digest('hex') }));
+    for (const source of sources) {
+      fs.mkdirSync(path.dirname(source.path), { recursive: true });
+      fs.writeFileSync(source.path, source.bytes);
+      f.store.captureMigrationSource(source, source.bytes, { mimeType: 'application/octet-stream', encoding: 'binary' });
+      f.store.markMigrationSourceImported(source.identity, source.key);
+    }
+    const plan = f.store.createRecyclingPlan(sources.map(source => ({ identity: source.identity, key: source.key, hash: source.hash, path: source.path, bytes: source.bytes.length })));
+    f.store.approveRecyclingFiles(plan.files.map(file => ({ itemId: file.itemId, expectedPath: file.path, path: file.path })));
+    f.store.setRecyclingStatus(plan.files.find(file => file.path === retiredPath).itemId, 'trashed');
+    fs.unlinkSync(retiredPath);
+
+    f.store.markMigrationSourceConflict(sources[1].identity, sources[1].key, `ENOENT: no such file or directory, lstat '${retiredPath}'`);
+    assert.equal(f.store.migrationSourceState(sources[1].identity, sources[1].key).stage, 'imported');
+
+    f.store.db.run("UPDATE migration_items SET stage='conflict',error=? WHERE source_identity=? AND source_key=?", [`ENOENT: no such file or directory, lstat '${retiredPath}'`, sources[1].identity, sources[1].key]);
+    await f.call('execute_recycling_plan', { planId: plan.planId });
+    assert.equal(fs.existsSync(remainingPath), false);
+    assert.deepEqual(f.store.recyclingItems().map(file => file.status), ['trashed', 'trashed']);
+
+    f.store.markMigrationSourceConflict(sources[1].identity, sources[1].key, `ENOENT: no such file or directory, lstat '${retiredPath}.unplanned'`);
+    assert.equal(f.store.migrationSourceState(sources[1].identity, sources[1].key).stage, 'conflict');
+  } finally { f.store.close(); }
+});
+
 test('batch execution rejects a source replaced after moving is durable and never retires the foreign file', async () => {
   const f = fixture();
   const foreign = path.join(f.root, 'foreign.json');

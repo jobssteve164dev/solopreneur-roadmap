@@ -300,7 +300,7 @@ export class MigrationRecycling {
   }
   private heldPath(item: RecyclingItem): string { return path.join(this.store.root, '.migration-recycle', item.itemId + '.json'); }
   private assertReconciled(item: RecyclingItem): void {
-    const source = this.store.migrationSourceState(item.identity, item.key);
+    const source = this.store.recyclingSourceState(item);
     if (!source || source.hash !== item.hash || !source.reconciled || source.stage === 'conflict') throw new Error('recycling_source_not_reconciled');
     if (item.identity.startsWith('intelligence:')) {
       if (!conversationKey.test(item.key) || !this.capturedConversationMatches(item)) throw new Error('recycling_database_mismatch');

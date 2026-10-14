@@ -449,6 +449,16 @@ export class UnifiedDataStore {
     }
     return { hash: String(row.hash), stage: String(row.stage), reconciled };
   }
+  public recyclingSourceState(item: Pick<RecyclingItem, 'identity' | 'key' | 'planId'>): { hash: string; stage: string; reconciled: boolean } | null {
+    let state = this.migrationSourceState(item.identity, item.key);
+    if (state?.stage !== 'conflict') return state;
+    const error = this.rows('SELECT error FROM migration_items WHERE source_identity=? AND source_key=?', [item.identity, item.key])[0]?.error;
+    if (typeof error === 'string' && this.recycledDependencyMissing(item.identity, item.key, error, item.planId)) {
+      this.db.run("UPDATE migration_items SET stage='imported',error=NULL WHERE source_identity=? AND source_key=? AND stage='conflict' AND error=?", [item.identity, item.key, error]);
+      state = this.migrationSourceState(item.identity, item.key);
+    }
+    return state;
+  }
   public markMigrationSourceRechecking(identity: string, key: string): void {
     const sources = this.equivalentMigrationSources(identity, key);
     if (identity.startsWith('project-growth:')) {
@@ -532,6 +542,10 @@ export class UnifiedDataStore {
     this.db.run('INSERT OR IGNORE INTO database_meta(key,value) VALUES(?,?)', [`migration_growth_snapshots_imported:${projectId}:${sourceHash}`, '1']);
   }
   public markMigrationSourceConflict(identity: string, key: string, error: string): void {
+    if (this.recycledDependencyMissing(identity, key, error)) {
+      this.db.run("UPDATE migration_items SET stage='imported',error=NULL WHERE source_identity=? AND source_key=?", [identity, key]);
+      return;
+    }
     this.db.run("UPDATE migration_items SET stage='conflict',error=? WHERE source_identity=? AND source_key=?", [error, identity, key]);
     if (!/^(project-journal|project-growth):/.test(identity)) return;
     const sources = this.equivalentMigrationSources(identity, key);
@@ -539,6 +553,23 @@ export class UnifiedDataStore {
     for (const source of sources) if (source.identity !== identity && current && source.hash === current.hash) {
       this.db.run("UPDATE migration_items SET stage='conflict',error=? WHERE source_identity=? AND source_key=?", [error, source.identity, key]);
     }
+  }
+  private recycledDependencyMissing(identity: string, key: string, error: string, planId?: string): boolean {
+    const missing = /^ENOENT:.*\blstat '(.+)'$/s.exec(error)?.[1];
+    if (missing && path.isAbsolute(missing)) {
+      let absent = false;
+      try { fs.lstatSync(missing); }
+      catch (sourceError) { if ((sourceError as NodeJS.ErrnoException).code === 'ENOENT') absent = true; else throw sourceError; }
+      if (!absent) return false;
+      return this.rows(`SELECT 1 FROM migration_recycling target
+        JOIN migration_recycling dependency ON dependency.plan_id=target.plan_id
+        WHERE target.source_identity=? AND target.source_key=?
+          AND target.status IN ('approved','moving','held','trashed')
+          AND dependency.status='trashed'
+          AND COALESCE(dependency.authorized_path,dependency.original_path)=?
+          ${planId ? 'AND target.plan_id=?' : ''} LIMIT 1`, [identity, key, path.resolve(missing), ...(planId ? [planId] : [])]).length > 0;
+    }
+    return false;
   }
   public recyclingItems(): RecyclingItem[] {
     return this.rows('SELECT * FROM migration_recycling ORDER BY created_at,id').map(row => this.projectRecyclingItem(row));
