@@ -76,6 +76,51 @@ test('normal Runtime startup creates the database and automatically imports lega
   } finally { await stop(run, root); }
 });
 
+test('Today intelligence becomes readable while a recovered legacy migration is still running', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-bootstrap-intelligence-first-'));
+  const root = path.join(fixture, '.solomap-global');
+  const preload = path.join(fixture, 'block-migrations.cjs');
+  fs.writeFileSync(preload, `
+    const Module = require('node:module');
+    const originalLoad = Module._load;
+    Module._load = function(request, parent, isMain) {
+      if (request === './databaseMigrationCoordinator') {
+        return { DatabaseMigrationCoordinator: class {
+          enqueue() { return { jobId: 'blocked', status: 'running', progress: {}, error: null, scheduled: true }; }
+          recover() {}
+          retry() { throw new Error('not used'); }
+          wait() { return new Promise(() => {}); }
+          close() { return Promise.resolve(); }
+        } };
+      }
+      return originalLoad.call(this, request, parent, isMain);
+    };
+  `);
+  const child = spawn(process.execPath, ['--require', preload, path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root], { stdio: 'pipe' });
+  let stderr = '';
+  child.stderr.on('data', bytes => { stderr += bytes; });
+  child.stdout.resume();
+  try {
+    await ready({ child, errors: () => stderr }, root);
+    const deadline = Date.now() + 4000;
+    let decision;
+    do {
+      const settings = await sendRuntimeDataRequest(root, { operation: 'read_host_settings', input: { namespace: 'runtime_shadow', ownerScope: 'global' } });
+      decision = settings.items.find(item => item.key === 'decision')?.value;
+      if (decision) break;
+      assert.ok(Date.now() < deadline, stderr || 'Today intelligence waited for legacy migration completion');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    } while (true);
+    assert.equal(decision.status, 'completed');
+  } finally {
+    if (child.exitCode === null) {
+      child.kill('SIGKILL');
+      await once(child, 'exit');
+    }
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test('first database creation is durably indexed before later runtime activation can fail', async () => {
   const { ensurePersistentRuntimeDatabaseAuthority } = require('../out/databaseAuthorityBootstrap.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-authority-index-'));

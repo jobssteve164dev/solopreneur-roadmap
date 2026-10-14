@@ -252,7 +252,6 @@ async function main(): Promise<void> {
       }
       await refreshProjectRegistry(globalDataPath, undefined, (operation, input) => dataOperations({ operation, input }));
       await refreshCognitiveRuntimeConfig(globalDataPath, dataOperations);
-      await startupMigration;
       if (!stopping) historicalOwnerStamp = await refreshHistoricalRunMigrations(dataStore, dataOperations, () => !stopping, historicalOwnerStamp);
       const current = readCurrentRegisteredShadowDecision(globalDataPath);
       const cognitiveConfig = readCognitiveRuntimeConfig(globalDataPath);
