@@ -42,6 +42,182 @@ async function history(t) {
     restart: async () => { for (const close of closeCallbacks.splice(0).reverse()) await close(); owner = await openAnalysisOwner({ after: close => closeCallbacks.push(close) }, root, [{ path: project }]); } };
 }
 
+test('historical noncurrent binding observation preserves its actual revision while importing the complete later binding', async t => {
+  const f = await history(t);
+  f.status.sessionBindingHeadRevision = 1;
+  f.status.nativeSessionIdIsCurrent = false;
+  f.status.nativeSessionId = '';
+  writeLearningJson(f.statusFile, f.status);
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+  assert.deepEqual(result.conflicts, []);
+  const state = f.store.readRunState(f.projectId, 71);
+  assert.equal(state.status.sessionBindingHeadRevision, 1);
+  assert.equal(state.status.nativeSessionIdIsCurrent, false);
+  const found = await f.client.findConversation(f.project, 71);
+  assert.deepEqual(await f.client.readBinding(found.reference, found.status), f.binding);
+});
+
+test('historical noncurrent binding observation cannot name a nonexistent revision', async t => {
+  const f = await history(t);
+  f.status.sessionBindingHeadRevision = 9;
+  f.status.nativeSessionIdIsCurrent = false;
+  writeLearningJson(f.statusFile, f.status);
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+  assert.ok(result.conflicts.some(item => item.error.includes('historical_run_session_mismatch')));
+  assert.equal(await f.client.findConversation(f.project, 71), null);
+});
+
+test('settled historical run inputs and status enter the exact recycling plan after full lifecycle adoption', async t => {
+  const f = await history(t);
+  const launcher = '#!/bin/bash\n# 原历史完整 userMessage 和启动状态\nclaude original arguments\n';
+  fs.writeFileSync(path.join(f.runDir, 'run-agent.sh'), launcher);
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+  assert.deepEqual(result.conflicts, []);
+  const { MigrationRecycling } = require('../out/migrationRecycling.js');
+  const files = (await new MigrationRecycling(f.store).prepare()).files.map(item => item.path);
+  for (const name of ['prompt.txt', 'command.txt', 'output.log', 'session.json', 'started_at', 'task-report-1.json', 'run-agent.sh']) assert.ok(files.includes(path.join(f.runDir, name)), `${name} must be available for exact approval`);
+  const artifact = await f.ops({ operation: 'read_run_artifact', input: { root: f.project, executionLogId: 71, relativePath: '__solo__/71/run-agent.sh' } });
+  assert.equal(Buffer.from(artifact.bytes, 'base64').toString(), launcher);
+  assert.ok(files.includes(f.statusFile));
+  assert.equal((await f.client.findConversation(f.project, 71)).status.learningTaskId, f.taskId);
+});
+
+test('a registered task definition remains outside recycling while one of its original runs has a live legacy owner', async t => {
+  const f = await history(t);
+  f.status.agentPid = process.pid;
+  writeLearningJson(f.statusFile, f.status);
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+  assert.deepEqual(result.conflicts, []);
+  assert.equal(await f.client.findConversation(f.project, 71), null);
+  const { MigrationRecycling } = require('../out/migrationRecycling.js');
+  assert.deepEqual((await new MigrationRecycling(f.store).prepare()).files, []);
+});
+
+test('a legacy owner becoming live after adoption excludes the same run files and task definition from recycling', async t => {
+  const f = await history(t);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  f.status.agentPid = process.pid;
+  writeLearningJson(f.statusFile, f.status);
+  const { MigrationRecycling } = require('../out/migrationRecycling.js');
+  assert.deepEqual((await new MigrationRecycling(f.store).prepare()).files, []);
+});
+
+test('the exact status-declared historical input remains readable and recyclable under its original custom filename', async t => {
+  const f = await history(t);
+  const input = path.join(f.runDir, 'original-user-input.txt');
+  const body = '原声明文件的完整输入🌿'.repeat(1000);
+  fs.writeFileSync(input, body); f.status.promptFilePath = input;
+  writeLearningJson(f.statusFile, f.status);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  const found = await f.client.findConversation(f.project, 71);
+  assert.equal(await f.client.readField(found.reference, 'prompt', found.status), body);
+  const { MigrationRecycling } = require('../out/migrationRecycling.js');
+  assert.ok((await new MigrationRecycling(f.store).prepare()).files.some(item => item.path === input));
+});
+
+test('a missing optional changes artifact is recorded as a historical gap without blocking the remaining original run', async t => {
+  const f = await history(t);
+  f.status.changesFilePath = path.join(f.runDir, 'changes.txt');
+  writeLearningJson(f.statusFile, f.status);
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+  assert.deepEqual(result.conflicts, []);
+  assert.ok(result.retainedGaps.some(item => item.source === f.status.changesFilePath && item.error === 'historical_optional_artifact_missing'));
+  const found = await f.client.findConversation(f.project, 71);
+  assert.ok(found);
+  assert.equal(fs.existsSync(f.status.changesFilePath), false);
+  assert.equal(JSON.parse(f.store.readMigrationSource(`agent-status:${f.project}`, '71.json').bytes.toString()).changesFilePath, f.status.changesFilePath);
+});
+
+test('an unverifiable legacy native session remains historical evidence without gaining a resumable identity', async t => {
+  const f = await history(t);
+  const home = path.join(f.base, 'empty-native-home'); fs.mkdirSync(home);
+  fs.writeFileSync(path.join(f.runDir, 'codex-home.txt'), home);
+  fs.writeFileSync(path.join(f.runDir, 'session.json'), JSON.stringify({ version: 1, sessionId: f.binding.revisions.at(-1).sessionId, source: 'legacy_provider_observation', updatedAt: f.status.startedAt }));
+  f.status.agentCli = 'codex'; f.status.sessionProvider = 'codex'; f.status.nativeSessionIdIsCurrent = false;
+  f.status.sessionBindingHeadRevision = 1; f.status.codexHomeFilePath = path.join(f.runDir, 'codex-home.txt');
+  writeLearningJson(f.statusFile, f.status);
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+  assert.deepEqual(result.conflicts, []);
+  const found = await f.client.findConversation(f.project, 71);
+  const binding = await f.client.readBinding(found.reference, found.status);
+  assert.equal(binding.revisions.at(-1).state, 'unavailable');
+  assert.equal(binding.revisions.at(-1).sessionId, f.binding.revisions.at(-1).sessionId);
+  assert.equal(await f.client.getResumableSession(found.reference), null);
+  assert.equal(found.status.nativeSessionIdIsCurrent, false);
+});
+
+test('a missing noncurrent session file keeps its exact absence and does not block other complete history', async t => {
+  const f = await history(t);
+  fs.renameSync(path.join(f.runDir, 'session.json'), path.join(f.base, 'test-owned-session-original.json'));
+  f.status.nativeSessionIdIsCurrent = false; f.status.nativeSessionId = '';
+  writeLearningJson(f.statusFile, f.status);
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+  assert.deepEqual(result.conflicts, []);
+  assert.ok(result.retainedGaps.some(item => item.source === f.status.sessionFilePath && item.error === 'historical_optional_artifact_missing'));
+  const found = await f.client.findConversation(f.project, 71);
+  assert.equal(await f.client.readBinding(found.reference, found.status), null);
+  assert.equal(fs.existsSync(f.status.sessionFilePath), false);
+});
+
+test('historical interactive continuation keeps the root run and the current journal turn in the same task', async t => {
+  const f = await history(t);
+  registerLearningTask(f.project, { executionLogId: 72, runDir: f.runDir, parentExecutionLogId: 71, userMessage: '继续原任务', startedAt: f.status.startedAt });
+  f.store.importProjectJournal(f.projectId, { id: 72, nodeId: '__solo__', timestamp: f.status.startedAt, agentCli: 'claude', command: 'claude original arguments', output: '当前续轮完整日志', status: 'Waiting' });
+  f.status.executionLogId = 72;
+  f.status.runKind = 'solo_continue';
+  f.status.checkpointSequence = 2;
+  writeLearningJson(path.join(f.runDir, 'task-report-2.json'), { schemaVersion: 1, projectPath: f.project, taskId: f.taskId, executionLogId: 72, turnId: '2:complete', createdAt: f.status.finishedAt, report: { summary: '真实续轮结果' } });
+  writeLearningJson(f.statusFile, f.status);
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+  assert.deepEqual(result.conflicts, []);
+  const root = f.store.readRunState(f.projectId, 71);
+  const current = await f.client.findConversation(f.project, 72);
+  assert.equal(current.runId, root.runId);
+  assert.equal(current.status.learningTaskId, f.taskId);
+  assert.equal(f.store.resolveRunConversation(f.projectId, 72).state.taskId, root.taskId);
+  assert.equal(root.status.rootExecutionLogId, 71);
+  const captured = f.store.readMigrationSource(`agent-status:${f.project}`, '71.json');
+  assert.equal(JSON.parse(captured.bytes.toString()).executionLogId, 72);
+  assert.equal(f.store.readRunTurnJournal(f.projectId, 71).executionLogId, 72);
+  assert.equal(f.store.readProjectJournal(f.projectId, { executionLogId: 71 }).logs[0].output, '原项目日志完整内容');
+  assert.equal((await f.client.readReport(current.reference, current.status)).report.summary, '真实续轮结果');
+  const earlier = await f.client.findConversationTurn(f.project, 71);
+  assert.equal((await f.client.readReport(earlier.reference, earlier.status)).report.summary, '历史首轮结果');
+  const snapshot = await require('../out/runLifecycleClient.js').readConversationLogSnapshot(f.client, f.project, 71);
+  assert.equal(snapshot.stdout.toString(), '原项目日志完整内容');
+  const before = fs.readFileSync(path.join(f.root, 'solomap.db-wal'));
+  await assert.rejects(f.client.checkpoint(earlier.reference, earlier.status, { action: 'complete', outcome: 'partial', summary: 'cannot mutate history', idempotencyKey: 'history-read-only' }), /historical_turn_read_only/);
+  await assert.rejects(f.client.writeStatus(earlier.reference, earlier.status), /historical_turn_read_only/);
+  earlier.status.checkpointSummary = 'cannot overwrite the real current turn';
+  await assert.rejects(f.client.writeStatus(earlier.reference, earlier.status), /historical_turn_read_only/);
+  assert.deepEqual(f.store.readRunState(f.projectId, 71), root);
+  assert.deepEqual(fs.readFileSync(path.join(f.root, 'solomap.db-wal')), before);
+});
+
+test('three historical interactive turns retain every verified journal and report without inventing old control versions', async t => {
+  const f = await history(t);
+  for (const id of [72, 73]) {
+    registerLearningTask(f.project, { executionLogId: id, runDir: f.runDir, parentExecutionLogId: 71, userMessage: `真实续轮${id}`, startedAt: f.status.startedAt });
+    f.store.importProjectJournal(f.projectId, { id, nodeId: '__solo__', timestamp: f.status.startedAt, agentCli: 'claude', command: 'actual command', output: `真实轮次正文${id}`, status: 'Waiting' });
+    writeLearningJson(path.join(f.runDir, `task-report-${id - 70}.json`), { schemaVersion: 1, projectPath: f.project, taskId: f.taskId, executionLogId: id, turnId: `${id - 70}:complete`, createdAt: f.status.finishedAt, report: { summary: `真实报告${id}` } });
+  }
+  f.status.executionLogId = 73; f.status.checkpointSequence = 3; f.status.runKind = 'solo_continue';
+  writeLearningJson(f.statusFile, f.status);
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+  assert.deepEqual(result.conflicts, []);
+  const latest = await f.client.findConversation(f.project, 73);
+  for (const id of [71, 72, 73]) {
+    const found = await f.client.findConversationTurn(f.project, id);
+    assert.equal(found.runId, latest.runId);
+    const report = await f.client.readReport(found.reference, found.status);
+    assert.equal(report.report.summary, id === 71 ? '历史首轮结果' : `真实报告${id}`);
+    const journal = await f.client.readJournal(found.reference, found.status);
+    assert.equal(journal.executionLogId, id);
+    if (id === 72) assert.equal(await f.client.readField(found.reference, 'command', found.status), 'actual command');
+  }
+  assert.equal(f.store.rows('SELECT count(*) AS n FROM run_control_revisions').reduce((n, row) => n + row.n, 0), 1);
+});
+
 test('continuing an unadopted historical conversation first joins the same formal task and preserves its complete original source', async t => {
   const f = await history(t);
   const originals = new Map([f.statusFile, ...fs.readdirSync(f.runDir).map(name => path.join(f.runDir, name))].map(file => [file, fs.readFileSync(file)]));
@@ -816,6 +992,7 @@ for (const invalid of ['native-project', 'native-missing', 'bad-flat-id', 'provi
   fs.writeFileSync(path.join(f.runDir, 'session.json'), JSON.stringify({ sessionId: invalid === 'bad-flat-id' ? '' : sessionId, source: 'codex-output' }));
   Object.assign(f.status, { agentCli: 'codex', sessionProvider: invalid === 'provider' ? 'antigravity' : 'codex', codexHomeFilePath: path.join(f.runDir, 'codex-home.txt') });
   for (const key of ['bindingNonce', 'sessionBindingHeadRevision', 'nativeSessionIdIsCurrent', 'nativeSessionId']) delete f.status[key];
+  if (invalid === 'native-missing') Object.assign(f.status, { nativeSessionIdIsCurrent: true, nativeSessionId: sessionId });
   writeLearningJson(f.statusFile, f.status);
   const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
   const code = { 'native-project': 'historical_run_native_source_mismatch', 'native-missing': 'historical_run_native_source_missing', 'bad-flat-id': 'historical_run_legacy_identity_invalid', provider: 'historical_run_binding_mismatch' }[invalid];

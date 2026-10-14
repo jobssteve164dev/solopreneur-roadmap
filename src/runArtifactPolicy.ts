@@ -13,6 +13,7 @@ const namedKinds = new Map<string, RunArtifactKind>([
   ['prompt.txt', 'prompt'],
   ['output.log', 'output'],
   ['command.txt', 'control'],
+  ['run-agent.sh', 'control'],
   ['completion.json', 'control'],
   ['started_at', 'control'],
   ['.agent_status.json', 'control'],

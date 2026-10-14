@@ -28,6 +28,21 @@ export class MigrationRecycling {
 
   private sourcePath(identity: string, key: string): string | null {
     if (identity.startsWith('intelligence:')) return path.join(identity.slice('intelligence:'.length), key);
+    if (identity.startsWith('documentation:')) return key === '.solopreneur/documentation.json'
+      ? path.join(identity.slice('documentation:'.length), key) : null;
+    if (identity.startsWith('agent-status:')) return /^\d+\.json$/.test(key)
+      ? path.join(identity.slice('agent-status:'.length), '.solopreneur', 'agent-status', key) : null;
+    if (identity.startsWith('project-agent-status:')) return key === '.agent_status.json'
+      ? path.join(identity.slice('project-agent-status:'.length), key) : null;
+    for (const collection of ['step-memory', 'run-digests']) if (identity.startsWith(collection + ':')) {
+      const projectId = identity.slice(collection.length + 1);
+      const roots = [...new Set(this.store.registeredProjectScopes().filter(project => project.projectId === projectId)
+        .map(project => { try { return fs.realpathSync(project.root); } catch { return ''; } }).filter(Boolean))];
+      if (roots.length !== 1) return null;
+      const root = path.join(roots[0], '.solopreneur', collection);
+      const file = path.resolve(root, key), relative = path.relative(root, file);
+      return relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? file : null;
+    }
     for (const collection of ['project-journal', 'project-growth']) if (identity.startsWith(collection + ':')) {
       const root = identity.slice(collection.length + 1); const expected = collection === 'project-journal' ? 'project_journal.db' : 'project_growth.db';
       return key === expected ? path.join(root, '.solopreneur', key) : null;
@@ -39,13 +54,44 @@ export class MigrationRecycling {
     }
     return null;
   }
+  public verifyJobSource(job: { args: Record<string, unknown> }, key: string, scope?: MigrationProjectScope) {
+    const collection = String(job.args.collection || '');
+    const root = String(job.args.projectRoot || '');
+    if (!root || !['project-growth', 'project-journal', 'agent-runs', 'documentation', 'step-memory', 'run-digests'].includes(collection)) throw new Error('migration_source_scope_mismatch');
+    const project = scope || this.store.registeredProjectScopes().map(candidate => {
+      try { return { ...candidate, physicalRoot: fs.realpathSync(candidate.root) }; } catch { return null; }
+    }).find(candidate => candidate && candidate.physicalRoot === fs.realpathSync(root));
+    if (!project || !this.jobBelongsToProject(job, project)) throw new Error('maintenance_scope_denied');
+    const identity = ['step-memory', 'run-digests'].includes(collection) ? `${collection}:${project.projectId}` : `${collection}:${root}`;
+    if (!this.sourcePath(identity, key)) throw new Error('migration_source_scope_mismatch');
+    const captured = this.store.readMigrationSource(identity, key);
+    if (hash(captured.bytes) !== captured.hash) throw new Error('migration_source_hash_mismatch');
+    return { identity, key, hash: captured.hash, bytes: captured.bytes.length, verified: true, stage: captured.stage };
+  }
   private allowedPath(file: string, source?: Pick<RecyclingItem, 'identity' | 'key'>): boolean {
     const resolved = path.resolve(file); const recycleRoot = path.join(path.resolve(this.store.root), '.migration-recycle');
     if (resolved.startsWith(recycleRoot + path.sep)) return true;
     if (!source) return false;
     const declared = this.sourcePath(source.identity, source.key);
     if (!declared) return false;
-    try { return this.physicalPath(declared) === resolved; } catch { return false; }
+    try { return this.physicalSourcePath(source) === resolved; } catch { return false; }
+  }
+
+  private physicalSourcePath(source: Pick<RecyclingItem, 'identity' | 'key'>): string {
+    const declared = this.sourcePath(source.identity, source.key);
+    if (!declared) throw new Error('recycling_path_invalid');
+    const physical = this.physicalPath(declared);
+    const projectIdentity = /^(documentation|project-journal|project-growth|agent-runs|agent-status|project-agent-status):(.+)$/.exec(source.identity);
+    let projectRoot = projectIdentity?.[2];
+    const sharedIdentity = /^(step-memory|run-digests):(.+)$/.exec(source.identity);
+    if (sharedIdentity) {
+      const roots = [...new Set(this.store.registeredProjectScopes().filter(project => project.projectId === sharedIdentity[2])
+        .map(project => { try { return fs.realpathSync(project.root); } catch { return ''; } }).filter(Boolean))];
+      if (roots.length !== 1) throw new Error('recycling_path_invalid');
+      projectRoot = roots[0];
+    }
+    if (projectRoot && physical !== path.resolve(fs.realpathSync(projectRoot), path.relative(path.resolve(projectRoot), declared))) throw new Error('recycling_path_invalid');
+    return physical;
   }
 
   private physicalPath(file: string): string {
@@ -110,6 +156,46 @@ export class MigrationRecycling {
     this.matches.set(cacheKey, { hash: source.hash, revision, matches });
     return matches;
   }
+  private legacyOwnerAlive(root: string, nodeId: string, executionLogId?: number): boolean {
+    const nodeRoot = path.join(root, '.solopreneur', 'agent-runs', nodeId);
+    const files = [path.join(root, '.agent_status.json'), path.join(nodeRoot, '.agent_status.json')];
+    if (executionLogId !== undefined) files.push(path.join(root, '.solopreneur', 'agent-status', `${executionLogId}.json`), path.join(nodeRoot, String(executionLogId), '.agent_status.json'));
+    for (const file of files) {
+      try {
+        const info = fs.lstatSync(file);
+        if (!info.isFile() || info.isSymbolicLink()) return true;
+        if (fs.realpathSync(file) !== path.resolve(fs.realpathSync(root), path.relative(root, file))) return true;
+        const status = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (status.nodeId !== nodeId) continue;
+        if (executionLogId !== undefined && Number(status.rootExecutionLogId || status.executionLogId) !== executionLogId) continue;
+        if (executionLogId === undefined && file !== path.join(nodeRoot, '.agent_status.json') && !['promptFilePath', 'outputFilePath'].some(field => status[field] && path.dirname(path.resolve(String(status[field]))) === nodeRoot)) continue;
+        if (this.store.historicalRunOwnerAlive(status)) return true;
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return true; }
+    }
+    return false;
+  }
+  private runSourceRetirable(source: Pick<RecyclingItem, 'identity' | 'key'>): boolean {
+    if (!isRetirableRunArtifact(source.key) && !['prompt', 'output', 'control', 'session', 'change_evidence', 'report'].includes(this.store.migrationSourceKind(source.identity, source.key))) return false;
+    const root = source.identity.slice('agent-runs:'.length);
+    if (!source.key.startsWith('learning-tasks/')) {
+      const parts = source.key.split(/[\\/]/);
+      return !this.legacyOwnerAlive(root, parts[0], parts.length === 3 && /^\d+$/.test(parts[1]) ? Number(parts[1]) : undefined);
+    }
+    try {
+      const project = this.store.registeredProjectScopes().find(project => {
+        try { return fs.realpathSync(project.root) === fs.realpathSync(root); } catch { return false; }
+      });
+      if (!project) return false;
+      const original = JSON.parse(this.store.readMigrationSource(source.identity, source.key).bytes.toString('utf8'));
+      if (original.schemaVersion !== 1 || typeof original.taskId !== 'string' || source.key !== `learning-tasks/${original.taskId}.json`) return false;
+      const task = this.store.readRegisteredReportSources(project.projectId, { taskId: original.taskId, metadataOnly: true }).tasks[0];
+      if (!task || !Array.isArray(original.executions)) return false;
+      return original.executions.every((execution: { id: number }) => {
+        const source = this.store.resolveRunConversation(project.projectId, Number(execution.id));
+        return Boolean(source && source.state.taskId === task.sourceRef.objectId && !this.legacyOwnerAlive(root, String(source.state.status.nodeId), Number(source.state.status.rootExecutionLogId)));
+      });
+    } catch { return false; }
+  }
   private async candidates(scope?: MigrationProjectScope): Promise<Array<Omit<RecyclingItem, 'itemId' | 'planId' | 'status' | 'error'>>> {
     const identities = scope ? new Set(this.sourceIdentities(scope)) : undefined;
     const belongs = (identity: string) => !identities || identities.has(identity);
@@ -126,13 +212,13 @@ export class MigrationRecycling {
       if (!file || active.some(item => item.path === file)) continue;
       if (source.identity.startsWith('intelligence:')) {
         if (!conversationKey.test(source.key) || !this.capturedConversationMatches(source)) continue;
-      } else if (source.stage !== 'imported' || (source.identity.startsWith('agent-runs:') && !isRetirableRunArtifact(source.key))) continue;
+      } else if (source.stage !== 'imported' || (source.identity.startsWith('agent-runs:') && !this.runSourceRetirable(source))) continue;
       if (!this.store.migrationSourceState(source.identity, source.key)?.reconciled) continue;
       try {
-        const physical = this.physicalPath(file);
+        const physical = this.physicalSourcePath(source);
         if (occupied.has(physical)) continue;
         const bytes = await this.candidateSize(physical, source.hash, source);
-        if (this.physicalPath(file) !== physical) throw new Error('recycling_path_invalid');
+        if (this.physicalSourcePath(source) !== physical) throw new Error('recycling_path_invalid');
         files.push({ identity: source.identity, key: source.key, hash: source.hash, path: physical, bytes });
         occupied.add(physical);
       } catch { /* Changed, missing, or unsafe sources stay outside the recyclable list. */ }
@@ -204,9 +290,9 @@ export class MigrationRecycling {
   private bindItemPath(item: RecyclingItem): RecyclingItem {
     const declared = this.sourcePath(item.identity, item.key);
     if (!declared) throw new Error('recycling_path_invalid');
-    const physical = this.physicalPath(declared);
+    const physical = this.physicalSourcePath(item);
     if (physical !== item.path) {
-      if (item.path !== declared || this.physicalPath(declared) !== physical) throw new Error('recycling_path_invalid');
+      if (item.path !== declared || this.physicalSourcePath(item) !== physical) throw new Error('recycling_path_invalid');
       // A later import cannot reconstruct the location approved in an old receipt.
       throw new Error('recycling_path_identity_unavailable');
     }
@@ -218,13 +304,13 @@ export class MigrationRecycling {
     if (!source || source.hash !== item.hash || !source.reconciled || source.stage === 'conflict') throw new Error('recycling_source_not_reconciled');
     if (item.identity.startsWith('intelligence:')) {
       if (!conversationKey.test(item.key) || !this.capturedConversationMatches(item)) throw new Error('recycling_database_mismatch');
-    } else if (source.stage !== 'imported' || (item.identity.startsWith('agent-runs:') && !isRetirableRunArtifact(item.key))) {
+    } else if (source.stage !== 'imported' || (item.identity.startsWith('agent-runs:') && !this.runSourceRetirable(item))) {
       throw new Error('recycling_source_not_reconciled');
     }
   }
   private async safeRestoreDirectory(item: RecyclingItem): Promise<void> {
     const declared = this.sourcePath(item.identity, item.key);
-    if (!item.restorePath && (!declared || this.physicalPath(declared) !== item.path)) throw new Error('recycling_path_invalid');
+    if (!item.restorePath && (!declared || this.physicalSourcePath(item) !== item.path)) throw new Error('recycling_path_invalid');
     if (this.physicalPath(item.path) !== item.path) throw new Error('recycling_path_invalid');
     const directory = path.dirname(item.path);
     await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });

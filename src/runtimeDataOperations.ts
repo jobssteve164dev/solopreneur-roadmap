@@ -10,7 +10,7 @@ import * as path from 'path';
 import { RunInputMaterialization } from './runInputMaterialization';
 import { configureAgentDatabase, databaseAgentProviders, DatabaseAgentProvider, isAgentDatabaseConfigPath } from './agentDatabaseConfig';
 import { MigrationProjectScope, MigrationRecycling } from './migrationRecycling';
-import { isRetirableRunArtifact, initializeProjectJournalAllocation } from './projectDataMigration';
+import { initializeProjectJournalAllocation } from './projectDataMigration';
 import { enqueueAvailableDataMigrations } from './runtimeDatabaseBootstrap';
 import { validateTaskReport } from './taskReport';
 import { RunRecovery } from './runRecovery';
@@ -597,7 +597,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       }
       case 'read_project_growth': {
         const project = await store.registerProject({ root: String(input.root || '') });
-        return store.readProjectGrowth(project.projectId, Number(input.historyLimit || 12));
+        return store.readProjectGrowth(project.projectId, Number(input.historyLimit || 12), input.snapshotId === undefined ? undefined : String(input.snapshotId));
       }
       case 'initialize_project_journal': return { minimumExecutionLogId: await initializeProjectJournalAllocation(store, String(input.root || '')) };
       case 'append_project_journal': {
@@ -669,7 +669,6 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         if (typeof input.sourceKey === 'string') {
           const bytes = Buffer.from(String(input.bytes || ''), 'base64'); const identity = `agent-runs:${root}`;
           store.captureMigrationSource({ identity, key: input.sourceKey, hash: String(input.hash || '') }, bytes, { mimeType: String(input.mimeType || 'application/octet-stream'), encoding: 'binary' });
-          if (isRetirableRunArtifact(input.sourceKey)) store.markMigrationSourceImported(identity, input.sourceKey);
         }
         return { written: true };
       }
@@ -723,6 +722,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       case 'migration_status': {
         const scope = await migrationScope(input); const job = store.readMigrationJob(String(input.jobId || ''));
         if (scope && !recycling.jobBelongsToProject(job, scope)) throw new Error('maintenance_scope_denied');
+        if (input.verifySourceKey !== undefined) return { ...job, sourceVerification: recycling.verifyJobSource(job, String(input.verifySourceKey), scope) };
         return input.metadataOnly === true ? store.readMigrationJobStatus(job.jobId) : job;
       }
       case 'discover_migrations': {

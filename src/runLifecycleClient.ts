@@ -233,18 +233,21 @@ export class RunLifecycleClient {
 
   public async recoverNativeIdentity(reference: string, status: StatusSnapshot): Promise<void> {
     const state = await this.selectedState(reference, status);
+    if (state.status.historicalTurnProjection) throw new Error('historical_turn_read_only');
     await this.operation('recover_run_executions', { ...parseRunStatusReference(reference), generation: state.generation, identityOnly: true });
   }
 
   public async writeBinding(reference: string, status: StatusSnapshot, input: Omit<Parameters<UnifiedDataStore['writeRunBinding']>[1], 'executionLogId' | 'generation'>): Promise<NativeSessionBinding> {
     const snapshot = status[runSnapshot];
     if (!snapshot || snapshot.reference !== reference) throw new Error('run_status_snapshot_required');
+    if (snapshot.state.status.historicalTurnProjection) throw new Error('historical_turn_read_only');
     return this.operation('write_run_binding', { ...input, projectId: snapshot.state.projectId, executionLogId: parseRunStatusReference(reference).executionLogId, generation: snapshot.state.generation }) as Promise<NativeSessionBinding>;
   }
 
   public async checkpoint(reference: string, status: StatusSnapshot, input: Omit<RunCheckpointInput, 'executionLogId' | 'generation' | 'proof' | 'expectedRevision' | 'expectedTurnId'>): Promise<StatusSnapshot> {
     const snapshot = status[runSnapshot];
     if (!snapshot || snapshot.reference !== reference) throw new Error('run_status_snapshot_required');
+    if (snapshot.state.status.historicalTurnProjection) throw new Error('historical_turn_read_only');
     const identity = { projectId: snapshot.state.projectId, executionLogId: parseRunStatusReference(reference).executionLogId };
     const current = await this.operation('read_run_checkpoint_state', identity) as RunState;
     if (current.generation !== snapshot.state.generation) throw new Error('run_owner_conflict');
@@ -258,6 +261,7 @@ export class RunLifecycleClient {
   public async stop(reference: string, status: StatusSnapshot, reason: string, idempotencyKey: string, requireVerifiedIdentity = false, outcome?: 'partial'): Promise<StatusSnapshot> {
     const snapshot = status[runSnapshot];
     if (!snapshot || snapshot.reference !== reference) throw new Error('run_status_snapshot_required');
+    if (snapshot.state.status.historicalTurnProjection) throw new Error('historical_turn_read_only');
     const state = await this.operation('stop_run', {
       projectId: snapshot.state.projectId, executionLogId: parseRunStatusReference(reference).executionLogId,
       generation: snapshot.state.generation, expectedRevision: snapshot.state.revision, expectedTurnId: snapshot.state.turnId,
@@ -288,6 +292,7 @@ export class RunLifecycleClient {
 
   public async claimConsumer(reference: string, status: StatusSnapshot, owner: { id: string; pid: number; birth: string }): Promise<RunConsumerLease | null> {
     const state = await this.selectedState(reference, status);
+    if (state.status.historicalTurnProjection) throw new Error('historical_turn_read_only');
     return this.operation('claim_run_consumer', { projectId: state.projectId, executionLogId: parseRunStatusReference(reference).executionLogId, generation: state.generation, expectedRevision: state.revision, expectedTurnId: state.turnId, owner }) as Promise<RunConsumerLease | null>;
   }
 
@@ -321,6 +326,7 @@ export class RunLifecycleClient {
   public async writeStatus(reference: string, proposed: StatusSnapshot): Promise<StatusSnapshot> {
     const snapshot = proposed[runSnapshot];
     if (!snapshot || snapshot.reference !== reference) throw new Error('run_status_snapshot_required');
+    if (snapshot.state.status.historicalTurnProjection) throw new Error('historical_turn_read_only');
     const patch: Record<string, unknown> = {};
     const immutable = new Set(['turnId', 'executionLogId', 'journalExecutionLogId', 'rootExecutionLogId', 'workspaceRoot', 'learningTaskId', 'nodeId', 'checkpointSequence', 'checkpointToken']);
     const derived = new Set(['outputFilePath', 'changesFilePath', 'touchedFilesPath', 'commandFilePath', 'promptFilePath', 'sessionFilePath', 'completionDecisionFilePath', 'workspaceSnapshotPath', 'codexHomeFilePath', 'agentProcessPidFilePath']);
@@ -358,6 +364,12 @@ export class RunLifecycleClient {
   public async readLog(reference: string, stream: string, status?: StatusSnapshot): Promise<Buffer> {
     const identity = parseRunStatusReference(reference);
     const state = await this.selectedState(reference, status);
+    if (state.status.historicalTurnProjection) {
+      if (stream === 'stderr') return Buffer.alloc(0);
+      if (stream !== 'output' && stream !== 'stdout') throw new Error('unsupported_run_field');
+      const journal = await this.readJournal(reference, status!);
+      return Buffer.from(journal.entry.output);
+    }
     if (stream === 'output' && status && state.status.nativeReplyObjectId) {
       const reply = await this.operation('read_run_document', { projectId: state.projectId, executionLogId: identity.executionLogId, purpose: `native_reply_${state.turnId.replace(/-/g, '')}`, revision: Number(state.status.nativeReplyRevision) }) as { objectId: string; bytes: string } | null;
       if (!reply || reply.objectId !== state.status.nativeReplyObjectId) throw new Error('run_native_reply_mismatch');
@@ -382,6 +394,10 @@ export class RunLifecycleClient {
     if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 1048576) throw new Error('run_log_tail_limit_invalid');
     const identity = parseRunStatusReference(reference);
     const state = await this.selectedState(reference, status);
+    if (state.status.historicalTurnProjection) {
+      const bytes = await this.readLog(reference, stream, status);
+      return { bytes: bytes.subarray(Math.max(0, bytes.length - maxBytes)), totalBytes: bytes.length };
+    }
     if (stream === 'output' && status && state.status.nativeReplyObjectId) {
       const reply = await this.operation('read_run_document', { projectId: state.projectId, executionLogId: identity.executionLogId, purpose: `native_reply_${state.turnId.replace(/-/g, '')}`, revision: Number(state.status.nativeReplyRevision), tailBytes: maxBytes }) as { objectId: string; bytes: string; totalBytes: number } | null;
       if (!reply || reply.objectId !== state.status.nativeReplyObjectId) throw new Error('run_native_reply_mismatch');
@@ -412,6 +428,7 @@ export class RunLifecycleClient {
   public async readField(reference: string, field: 'prompt' | 'command' | 'changes' | 'workspace', status?: StatusSnapshot): Promise<string> {
     const identity = parseRunStatusReference(reference);
     const state = await this.selectedState(reference, status);
+    if (state.status.historicalTurnProjection && field === 'command') return (await this.readJournal(reference, status!)).entry.command;
     if (field === 'changes' || field === 'workspace') {
       if (field === 'changes' && state.status.workspaceEvidenceBoundary === 'unavailable') return '变更待核验。';
       const revision = Number(state.status[field === 'changes' ? 'workspaceChangesRevision' : 'workspaceSnapshotRevision'] || 0);

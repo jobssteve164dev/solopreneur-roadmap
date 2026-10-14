@@ -435,6 +435,9 @@ export class UnifiedDataStore {
     return this.rows('SELECT source_identity,source_key,contents.sha256 AS hash,stage FROM migration_items JOIN contents ON contents.id=source_content_id ORDER BY source_identity,source_key')
       .map(row => ({ identity: String(row.source_identity), key: String(row.source_key), hash: String(row.hash), stage: String(row.stage) }));
   }
+  public migrationSourceKind(identity: string, key: string): string {
+    return String(this.rows('SELECT source_kind FROM migration_items WHERE source_identity=? AND source_key=?', [identity, key])[0]?.source_kind || 'unclassified');
+  }
   public migrationSourceState(identity: string, key: string): { hash: string; stage: string; reconciled: boolean } | null {
     const row = this.rows('SELECT contents.sha256 AS hash,stage FROM migration_items JOIN contents ON contents.id=source_content_id WHERE source_identity=? AND source_key=?', [identity, key])[0];
     if (!row) return null;
@@ -3697,7 +3700,23 @@ export class UnifiedDataStore {
     const turnId = String(row.turn_id);
     if (turnId === String(row.current_turn_id)) return { state: this.readRunState(projectId, Number(row.execution_log_id)), turnId };
     const snapshot = this.rows('SELECT MAX(revision) AS revision FROM run_control_revisions WHERE run_id=? AND current_turn_id=?', [row.run_id, turnId])[0];
-    if (snapshot?.revision === null || snapshot?.revision === undefined || !Number.isInteger(Number(snapshot.revision))) throw new Error('run_turn_revision_missing');
+    if (snapshot?.revision === null || snapshot?.revision === undefined || !Number.isInteger(Number(snapshot.revision))) {
+      const current = this.readRunState(projectId, Number(row.execution_log_id));
+      if (current.status.historicalAdopted !== true) throw new Error('run_turn_revision_missing');
+      const journal = this.readRunTurnJournal(projectId, Number(row.execution_log_id), turnId);
+      const report = this.rows('SELECT reports.id,objects.revision,reports.availability FROM reports JOIN objects ON objects.id=reports.id WHERE reports.project_id=? AND reports.run_id=? AND reports.turn_id=? AND objects.archived_at IS NULL ORDER BY objects.rowid DESC LIMIT 1', [projectId, current.runId, turnId])[0];
+      // A legacy journal is a real historical observation, not a recovered
+      // control revision. Keep it readable without manufacturing old state.
+      const status: Record<string, unknown> = {
+        workspaceRoot: current.status.workspaceRoot, nodeId: journal.entry.nodeId,
+        executionLogId: Number(row.execution_log_id), rootExecutionLogId: Number(row.execution_log_id),
+        journalExecutionLogId: journal.executionLogId, learningTaskId: current.status.learningTaskId,
+        agentCli: journal.entry.agentCli, status: journal.entry.status, startedAt: journal.entry.timestamp,
+        historicalAdopted: true, historicalTurnProjection: true, nativeSessionIdIsCurrent: false,
+        ...(report ? { taskReportObjectId: String(report.id), taskReportRevision: Number(report.revision), taskReportStatus: String(report.availability) } : {})
+      };
+      return { state: { ...current, turnId, status }, turnId };
+    }
     return { state: this.readRunState(projectId, Number(row.execution_log_id), Number(snapshot.revision)), turnId };
   }
   public readRunIntent(projectId: string, launchIntentId: string): RunState | null {
@@ -5613,8 +5632,11 @@ export class UnifiedDataStore {
       return { accepted: true, latest: this.readProjectGrowth(projectId, 1).latest };
     });
   }
-  public readProjectGrowth(projectId: string, historyLimit = 12): { latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] } {
-    const ids = this.rows('SELECT g.id FROM growth_snapshots g JOIN objects o ON o.id=g.id WHERE g.project_id=? ORDER BY o.rowid DESC LIMIT ?', [projectId, Math.max(1, Math.min(50, historyLimit))]).map(row => String(row.id));
+  public readProjectGrowth(projectId: string, historyLimit = 12, snapshotId?: string): { latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] } {
+    const ids = snapshotId === undefined
+      ? this.rows('SELECT g.id FROM growth_snapshots g JOIN objects o ON o.id=g.id WHERE g.project_id=? ORDER BY o.rowid DESC LIMIT ?', [projectId, Math.max(1, Math.min(50, historyLimit))]).map(row => String(row.id))
+      : this.rows('SELECT id FROM growth_snapshots WHERE project_id=? AND id=?', [projectId, snapshotId]).map(row => String(row.id));
+    if (snapshotId !== undefined && !ids.length) throw new Error('growth_snapshot_missing');
     const read = (id: string): GrowthSnapshotData => {
       const row = this.rows('SELECT * FROM growth_snapshots WHERE id=? AND project_id=?', [id, projectId])[0];
       if (!row) throw new Error('growth_snapshot_missing');
@@ -5676,7 +5698,7 @@ export class UnifiedDataStore {
   }
 
   /** Only the bounded, captured legacy importer calls this; it is not an Agent operation. */
-  public adoptHistoricalRun(projectId: string, locationId: string, source: ImportedSource, input: { status: Record<string, unknown>; binding: NativeSessionBinding | null; prompt: string; command: string; output: Buffer; outputSource?: ImportedSource; nativeTranscript?: { source: ImportedSource; bytes: Buffer }; legacyCompletion?: { source: ImportedSource; bytes: Buffer }; workspaceBefore?: Buffer; changes?: Buffer; roadmapBackup?: Buffer; registeredTaskAlias?: string; unregisteredTaskAlias?: string; unregisteredReports?: Array<{ source: ImportedSource; bytes: Buffer; observation: { executionLogId: number; sequence: number; availability: string; envelope: any } }> }): { unchanged: boolean; state: RunState } {
+  public adoptHistoricalRun(projectId: string, locationId: string, source: ImportedSource, input: { historicalExecutionLogIds?: number[]; status: Record<string, unknown>; binding: NativeSessionBinding | null; prompt: string; command: string; output: Buffer; outputSource?: ImportedSource; nativeTranscript?: { source: ImportedSource; bytes: Buffer }; legacyCompletion?: { source: ImportedSource; bytes: Buffer }; workspaceBefore?: Buffer; changes?: Buffer; roadmapBackup?: Buffer; registeredTaskAlias?: string; unregisteredTaskAlias?: string; unregisteredReports?: Array<{ source: ImportedSource; bytes: Buffer; observation: { executionLogId: number; sequence: number; availability: string; envelope: any } }> }): { unchanged: boolean; state: RunState } {
     return this.transaction(() => {
       const status = input.status, executionLogId = Number(status.rootExecutionLogId || status.executionLogId), nodeId = String(status.nodeId || '');
       const captured = this.readMigrationSource(source.identity, source.key);
@@ -5705,7 +5727,22 @@ export class UnifiedDataStore {
         for (const report of input.unregisteredReports) this.importRegisteredReport(projectId, String(registration.task_id), report.observation, report.source, report.bytes);
       }
       if (!registration || !JSON.parse(String(registration.executions_json)).some((run: any) => run.id === executionLogId && run.nodeId === nodeId)) throw new Error('historical_run_task_mismatch');
-      if (!Number.isSafeInteger(executionLogId) || executionLogId < 1 || Number(status.executionLogId) !== executionLogId || !nodeId || !status.runKind) throw new Error('historical_run_identity_invalid');
+      const currentExecutionLogId = Number(status.executionLogId);
+      const historicalExecutionLogIds = [...new Set(input.historicalExecutionLogIds || [executionLogId, currentExecutionLogId])].sort((a, b) => a - b);
+      if (!Number.isSafeInteger(executionLogId) || executionLogId < 1 || !Number.isSafeInteger(currentExecutionLogId) || currentExecutionLogId < executionLogId || !nodeId || !status.runKind) throw new Error('historical_run_identity_invalid');
+      if (!historicalExecutionLogIds.includes(executionLogId) || !historicalExecutionLogIds.includes(currentExecutionLogId)) throw new Error('historical_run_identity_invalid');
+      for (const id of historicalExecutionLogIds) {
+        if (!Number.isSafeInteger(id) || id < executionLogId || id > currentExecutionLogId || !JSON.parse(String(registration.executions_json)).some((run: any) => run.id === id && run.nodeId === nodeId)) throw new Error('historical_run_identity_invalid');
+        if (id !== executionLogId) {
+          const journal = this.rows('SELECT node_id FROM project_journal_entries WHERE project_id=? AND execution_log_id=?', [projectId, id])[0];
+          if (!journal || journal.node_id !== nodeId) throw new Error('historical_run_identity_invalid');
+        }
+      }
+      if (currentExecutionLogId !== executionLogId) {
+        const registeredCurrent = JSON.parse(String(registration.executions_json)).some((run: any) => run.id === currentExecutionLogId && run.nodeId === nodeId);
+        const journal = this.rows('SELECT node_id FROM project_journal_entries WHERE project_id=? AND execution_log_id=?', [projectId, currentExecutionLogId])[0];
+        if (!registeredCurrent || !journal || journal.node_id !== nodeId || status.interactiveSession !== true) throw new Error('historical_run_identity_invalid');
+      }
       const taskId = String(registration.task_id), conversationId = String(this.readMetadata(taskId).data.conversation_id);
       const location = this.rows('SELECT root_path FROM project_locations WHERE id=? AND project_id=?', [locationId, projectId])[0];
       const binding = input.binding && assertVersion2Binding(input.binding, source.key);
@@ -5714,11 +5751,13 @@ export class UnifiedDataStore {
       if (binding) {
         if (binding.runId !== String(executionLogId) || path.resolve(binding.workspaceRoot) !== path.resolve(String(location.root_path)) || status.bindingNonce && binding.bindingNonce !== status.bindingNonce || status.sessionProvider && binding.provider !== status.sessionProvider) throw new Error('historical_run_binding_mismatch');
         const head = binding.revisions[binding.headRevision - 1];
-        if (status.sessionBindingHeadRevision && Number(status.sessionBindingHeadRevision) !== binding.headRevision || status.nativeSessionIdIsCurrent === true && (head.state !== 'confirmed' || head.sessionId !== status.nativeSessionId || binding.resumableRevision !== binding.headRevision)) throw new Error('historical_run_session_mismatch');
+        const observedRevision = Number(status.sessionBindingHeadRevision || binding.headRevision);
+        const observed = binding.revisions[observedRevision - 1];
+        if (!Number.isSafeInteger(observedRevision) || !observed || status.nativeSessionIdIsCurrent === true && (observedRevision !== binding.headRevision || head.state !== 'confirmed' || head.sessionId !== status.nativeSessionId || binding.resumableRevision !== binding.headRevision)) throw new Error('historical_run_session_mismatch');
       } else if (status.nativeSessionIdIsCurrent === true) throw new Error('historical_run_binding_missing');
       if (input.outputSource) {
         const outputCapture = this.readMigrationSource(input.outputSource.identity, input.outputSource.key), journal = JSON.parse(outputCapture.bytes.toString('utf8'));
-        if (outputCapture.hash !== input.outputSource.hash || journal.id !== executionLogId || journal.nodeId !== nodeId || !Buffer.from(String(journal.output || '')).equals(input.output)) throw new Error('historical_run_output_source_mismatch');
+        if (outputCapture.hash !== input.outputSource.hash || journal.id !== currentExecutionLogId || journal.nodeId !== nodeId || !Buffer.from(String(journal.output || '')).equals(input.output)) throw new Error('historical_run_output_source_mismatch');
       }
       if (input.nativeTranscript) {
         const nativeCapture = this.readMigrationSource(input.nativeTranscript.source.identity, input.nativeTranscript.source.key);
@@ -5792,12 +5831,12 @@ export class UnifiedDataStore {
       if (!Number.isFinite(startedAt) || !Number.isSafeInteger(checkpointSequence) || checkpointSequence < 0 || !status.status) throw new Error('historical_run_state_incomplete');
       const idempotencyKey = `adopt-historical-run:${canonical([projectId, source, sourceHash])}`;
       const receipt = this.recordMutation({ projectId, locationId, source, sourceHash }, idempotencyKey, 'historical_adoption', () => {
-        const previousTurns = this.rows('SELECT legacy_sequence,turn_id FROM legacy_report_turns WHERE project_id=? AND task_id=? AND execution_log_id=? ORDER BY legacy_sequence', [projectId, taskId, executionLogId]);
-        let turnId = previousTurns.find(turn => Number(turn.legacy_sequence) === checkpointSequence)?.turn_id;
+        const previousTurns = this.rows('SELECT execution_log_id,legacy_sequence,turn_id FROM legacy_report_turns WHERE project_id=? AND task_id=? AND execution_log_id IN (SELECT value FROM json_each(?)) ORDER BY legacy_sequence', [projectId, taskId, canonical(historicalExecutionLogIds)]);
+        let turnId = previousTurns.find(turn => Number(turn.execution_log_id) === currentExecutionLogId && Number(turn.legacy_sequence) === checkpointSequence)?.turn_id;
         if (!turnId) {
           const sequence = Number(this.rows('SELECT COALESCE(MAX(sequence),0)+1 AS next FROM turns WHERE task_id=?', [taskId])[0].next);
           turnId = this.write({ kind: 'turn', action: 'create', scope: projectId, idempotencyKey: `${idempotencyKey}:turn`, data: { task_id: taskId, sequence, request_content: typeof status.checkpointMessage === 'string' ? status.checkpointMessage : null, started_at: Number.isFinite(Date.parse(String(status.turnStartedAt))) ? Date.parse(String(status.turnStartedAt)) : null } }).objectId;
-          this.db.run('INSERT INTO legacy_report_turns VALUES(?,?,?,?,?)', [projectId, taskId, executionLogId, checkpointSequence, turnId]);
+          this.db.run('INSERT INTO legacy_report_turns VALUES(?,?,?,?,?)', [projectId, taskId, currentExecutionLogId, checkpointSequence, turnId]);
         }
         restoreCurrentTurnTimes(String(turnId));
         const runId = crypto.randomUUID(), now = Date.now();
@@ -5806,13 +5845,25 @@ export class UnifiedDataStore {
         const metadata: Record<string, unknown> = { ...status, ...legacyDecision, workspaceRoot: String(location.root_path), historicalSourceHash: sourceHash, historicalStatusSource: source, historicalAdopted: true };
         if (input.legacyCompletion) metadata.historicalCompletionSource = input.legacyCompletion.source;
         if (input.outputSource) metadata.historicalOutputSource = input.outputSource;
-        if (binding?.revisions[binding.headRevision - 1]?.evidence?.source === 'legacy_session_file') Object.assign(metadata, { bindingNonce: binding.bindingNonce, sessionProvider: binding.provider, sessionBindingHeadRevision: binding.headRevision, nativeSessionId: binding.revisions[binding.headRevision - 1].sessionId, nativeSessionIdIsCurrent: true });
+        if (binding?.revisions[binding.headRevision - 1]?.evidence?.source === 'legacy_session_file' && binding.revisions[binding.headRevision - 1].state === 'confirmed') Object.assign(metadata, { bindingNonce: binding.bindingNonce, sessionProvider: binding.provider, sessionBindingHeadRevision: binding.headRevision, nativeSessionId: binding.revisions[binding.headRevision - 1].sessionId, nativeSessionIdIsCurrent: true });
         if (input.nativeTranscript) Object.assign(metadata, { codexNativeCursor: input.nativeTranscript.bytes.lastIndexOf(10) + 1, historicalNativeSource: input.nativeTranscript.source });
         delete metadata.checkpointToken;
         this.db.run('INSERT INTO run_control(run_id,project_id,execution_log_id,node_key,checkpoint_sequence,current_turn_id,metadata_content_id,binding_content_id,recovery_needed) VALUES(?,?,?,?,?,?,?,?,?)', [runId, projectId, executionLogId, nodeId, checkpointSequence, turnId, this.putContent(canonical(metadata), 'application/json'), binding ? this.putContent(canonical(binding), 'application/json') : null, ['Running', 'Preparing', 'Turn Started'].includes(String(status.status)) ? 1 : 0]);
         const turnIds = new Set([...previousTurns.map(turn => String(turn.turn_id)), String(turnId)]);
         for (const oldTurn of turnIds) this.db.run('INSERT INTO relations VALUES(?,?,?)', [runId, 'source', oldTurn]);
-        this.bindRunTurnJournal(projectId, runId, String(turnId), nodeId, metadata, executionLogId);
+        this.bindRunTurnJournal(projectId, runId, String(turnId), nodeId, metadata, currentExecutionLogId);
+        for (const id of historicalExecutionLogIds.filter(id => id !== currentExecutionLogId)) {
+          const priorTurns = previousTurns.filter(turn => Number(turn.execution_log_id) === id);
+          let priorTurnId = priorTurns[priorTurns.length - 1]?.turn_id;
+          if (!priorTurnId) {
+            const journal = this.readProjectJournal(projectId, { executionLogId: id, limit: 1 }).logs[0];
+            if (!journal || journal.nodeId !== nodeId) throw new Error('historical_run_identity_invalid');
+            const sequence = Number(this.rows('SELECT COALESCE(MAX(sequence),0)+1 AS next FROM turns WHERE task_id=?', [taskId])[0].next);
+            priorTurnId = this.write({ kind: 'turn', action: 'create', scope: projectId, idempotencyKey: `${idempotencyKey}:journal-turn:${id}`, data: { task_id: taskId, sequence, request_content: null, started_at: Number.isFinite(Date.parse(journal.timestamp)) ? Date.parse(journal.timestamp) : null } }).objectId;
+            this.db.run('INSERT INTO relations VALUES(?,?,?)', [runId, 'source', priorTurnId]);
+          }
+          this.bindRunTurnJournal(projectId, runId, String(priorTurnId), nodeId, metadata, id);
+        }
         if (input.output.length) this.db.run('INSERT INTO log_chunks VALUES(?,?,?,?,?,?)', [runId, 'output', 0, this.putContent(input.output, 'application/octet-stream', 'binary'), now, 0]);
         if (input.nativeTranscript?.bytes.length) this.db.run('INSERT INTO log_chunks VALUES(?,?,?,?,?,?)', [runId, 'native:codex', 0, this.putContent(input.nativeTranscript.bytes, 'application/x-ndjson', 'binary'), now, 0]);
         if (binding) for (const revision of binding.revisions) {
@@ -5832,7 +5883,7 @@ export class UnifiedDataStore {
           const saved = this.writeRunDocument(projectId, { executionLogId, generation: 1, turnId: String(turnId), purpose, bytes: bytes.toString('base64'), mimeType, expectedRevision: 0, idempotencyKey: `${idempotencyKey}:document:${purpose}` });
           Object.assign(metadata, { [objectKey]: saved.objectId, [revisionKey]: saved.revision });
         }
-        for (const report of this.rows('SELECT id,turn_id FROM reports WHERE project_id=? AND turn_id IN (SELECT turn_id FROM legacy_report_turns WHERE project_id=? AND task_id=? AND execution_log_id=?)', [projectId, projectId, taskId, executionLogId])) {
+        for (const report of this.rows('SELECT id,turn_id FROM reports WHERE project_id=? AND turn_id IN (SELECT turn_id FROM legacy_report_turns WHERE project_id=? AND task_id=? AND execution_log_id IN (SELECT value FROM json_each(?)))', [projectId, projectId, taskId, canonical(historicalExecutionLogIds)])) {
           const old = this.readMetadata(String(report.id));
           if (old.data.run_id && old.data.run_id !== runId) throw new Error('historical_run_report_mismatch');
           const associated = this.write({ kind: 'report', action: 'patch', scope: projectId, objectId: old.objectId, expectedRevision: old.revision, idempotencyKey: `${idempotencyKey}:report:${old.objectId}`, data: { run_id: runId } });
@@ -6422,8 +6473,16 @@ export class UnifiedDataStore {
         }
         if (previous && Number(previous.priority) > priority) return false;
         if (previous && Number(previous.priority) === priority && (!this.samePhysicalMigrationSource(String(previous.source_identity), source.identity) || previous.source_key !== source.key)) throw new Error('historical_run_identity_ambiguous');
-        if (!previous && canonical(currentRecord) === canonical(sourceRecord)
+        // Published journals sometimes persisted the whole entry in record_json.
+        // Its relations are projected from their dedicated columns by every reader.
+        const { files: _embeddedFiles, signals: _embeddedSignals, ...currentProjection } = currentRecord;
+        const embeddedRelationsMatch = (_embeddedFiles === undefined || Array.isArray(_embeddedFiles) && sameUnorderedRecords(_embeddedFiles, currentFiles))
+          && (_embeddedSignals === undefined || Array.isArray(_embeddedSignals) && sameUnorderedRecords(_embeddedSignals, currentSignals));
+        if (!previous && embeddedRelationsMatch && canonical(currentProjection) === canonical(sourceRecord)
           && sameUnorderedRecords(currentFiles, files) && sameUnorderedRecords(currentSignals, signals)) return false;
+        // A filesystem summary is derived evidence, not an authority for a
+        // pre-existing journal/native index whose ownership is unmarked.
+        if (!previous && priority === 10) return false;
         if (!previous && (!digestSource || priority === 10)) {
           throw new Error('historical_run_index_owner_unknown');
         }

@@ -23,7 +23,7 @@ function registerMigrationTools(server: McpServer, source: UnifiedMcpSource, inc
     });
   };
   register('solomap_migration_start', '发现指定已登记项目中的旧数据并幂等加入后台迁移队列。', { projectRoot }, false, input => source.call('discover_migrations', input));
-  register('solomap_migration_status', '读取指定项目的迁移进度和回收状态；提供 jobId 可读取该任务的完整来源和处理记录。', { jobId: z.string().min(1).optional(), projectRoot }, true, input => input.jobId
+  register('solomap_migration_status', '读取指定项目的迁移进度和回收状态；提供 jobId 可读取该任务的完整来源和处理记录，verifySourceKey 完整校验该来源正文而不返回其内容。', { jobId: z.string().min(1).optional(), verifySourceKey: z.string().min(1).optional(), projectRoot }, true, input => input.jobId
     ? source.call('migration_status', input) : source.call('migration_overview', { ...input, summaryOnly: true }));
   register('solomap_migration_retry', '重试指定项目中一个明确失败或中断的迁移任务。', { jobId: z.string().min(1), projectRoot }, false, input => source.call('retry_migration', input));
   register('solomap_recycling_preview', '生成指定项目可回收文件的精确清单；本工具不会回收文件。', { projectRoot }, false, input => source.call('prepare_recycling', input));

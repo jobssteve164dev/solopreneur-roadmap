@@ -254,11 +254,8 @@ async function durableRunFilesUnder(root: string, onConflict: (source: string, e
 }
 
 /** Files whose live consumers have already moved to the global database. */
-export function isRetirableRunArtifact(_relativePath: string): boolean {
-  // Run files still participate in settlement, rollback, statistics, reports, and
-  // native-session recovery. They are archived in the database but stay local
-  // until every live reader has moved to the database.
-  return false;
+export function isRetirableRunArtifact(relativePath: string): boolean {
+  return runArtifactKind(relativePath) !== null;
 }
 
 export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: string, options: any = {}): Promise<MemoryImportResult> {
@@ -326,7 +323,6 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       else if (artifact) { result.conflicts.push({ source: file, error: 'migration_target_changed' }); conflictingRuns.add(runDirectory(relativePath)); }
       else {
         store.writeRunArtifact(project.projectId, { executionLogId, relativePath, bytes: captured.bytes, hash: captured.hash });
-        if (isRetirableRunArtifact(relativePath)) store.markMigrationSourceImported(identity, relativePath);
         result.imported++;
       }
       if (!artifact || artifact.hash === captured.hash) {
@@ -434,7 +430,11 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         if (current.hash !== artifact.hash) throw new Error('historical_run_source_changed');
         return current.bytes;
       };
-      const session = await read('session.json', status.nativeSessionIdIsCurrent === true || Boolean(status.sessionFilePath), 'sessionFilePath');
+      const session = await read('session.json', status.nativeSessionIdIsCurrent === true, 'sessionFilePath');
+      if (!session && status.sessionFilePath) {
+        result.retainedGaps ||= [];
+        result.retainedGaps.push({ source: String(status.sessionFilePath), error: 'historical_optional_artifact_missing' });
+      }
       let binding: NativeSessionBinding | null = null;
       let nativeTranscript: { source: { identity: string; key: string; hash: string }; bytes: Buffer } | undefined;
       if (session) {
@@ -446,13 +446,20 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
           if (!status.agentCli || status.sessionProvider && status.sessionProvider !== provider) throw new Error('historical_run_binding_mismatch');
           const sessionSource = { identity, key: path.relative(sourceRoot, String(status.sessionFilePath || path.join(runDir, 'session.json'))), hash: digest(session) };
           let providerContext: Record<string, unknown> | undefined;
+          let nativeSessionVerified = true;
           const evidence: Record<string, unknown> = { source: 'legacy_session_file', sessionSource, legacySource: value.source, timestampSource: value.updatedAt ? 'legacy_session_updated_at' : 'historical_status_started_at', nonceSource: status.bindingNonce ? 'historical_status' : 'migration_source_hash' };
           if (provider === 'codex') {
             const homeBytes = await read('codex-home.txt', Boolean(status.codexHomeFilePath), 'codexHomeFilePath');
             const home = homeBytes?.toString('utf8').trim() || process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
             if (!path.isAbsolute(home)) throw new Error('historical_run_provider_context_invalid');
             const transcript = findCodexTranscriptFile(home, value.sessionId);
-            if (!transcript) throw new Error('historical_run_native_source_missing');
+            if (!transcript) {
+              if (status.nativeSessionIdIsCurrent === true) throw new Error('historical_run_native_source_missing');
+              nativeSessionVerified = false;
+              result.retainedGaps ||= [];
+              result.retainedGaps.push({ source: path.join(runDir, 'session.json'), error: 'historical_native_identity_unverified' });
+              Object.assign(evidence, { nativeIdentityVerified: false, reason: 'historical_native_source_missing' });
+            } else {
             const realHome = await fs.promises.realpath(home), realTranscript = await fs.promises.realpath(transcript);
             if (!['sessions', 'archived_sessions'].some(directory => containedRegularPath(path.join(realHome, directory), realTranscript))) throw new Error('historical_run_native_source_scope_mismatch');
             const native = await stableFile(transcript);
@@ -464,10 +471,11 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
             result.originalBytes += native.bytes.length; result.retainedFiles.push(transcript);
             providerContext = { codex: { codexHome: path.resolve(home) } };
             Object.assign(evidence, { transcriptPath: transcript, transcriptSource: nativeTranscript.source, providerContextSource: homeBytes ? 'recorded_codex_home' : 'existing_default_with_verified_transcript' });
+            }
           }
           const createdAt = String(value.updatedAt || status.startedAt || '');
-          binding = { version: 2, runId: String(id), provider, workspaceRoot: projectRoot, cliPath: String(status.agentCli), bindingNonce: String(status.bindingNonce || `legacy-session:${sessionSource.hash}`), createdAt, headRevision: 1, resumableRevision: 1,
-            revisions: [{ revision: 1, sessionId: value.sessionId, method: 'transcript_correlated_compat', contract: 'compatibility', state: 'confirmed', createdAt, evidence, ...(providerContext ? { providerContext } : {}) }] };
+          binding = { version: 2, runId: String(id), provider, workspaceRoot: projectRoot, cliPath: String(status.agentCli), bindingNonce: String(status.bindingNonce || `legacy-session:${sessionSource.hash}`), createdAt, headRevision: 1, ...(nativeSessionVerified ? { resumableRevision: 1 } : {}),
+            revisions: [{ revision: 1, sessionId: value.sessionId, method: 'transcript_correlated_compat', contract: 'compatibility', state: nativeSessionVerified ? 'confirmed' : 'unavailable', createdAt, evidence, ...(providerContext ? { providerContext } : {}) }] };
         }
       }
       const prompt = (await read('prompt.txt', true, 'promptFilePath'))!.toString('utf8'), command = (await read('command.txt', true, 'commandFilePath'))!.toString('utf8');
@@ -475,11 +483,11 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       let outputSource: { identity: string; key: string; hash: string } | undefined;
       if (!output) {
         if (status.outputFilePath && path.basename(status.outputFilePath) !== 'output.log') throw new Error('historical_run_input_missing');
-        const journal = store.readProjectJournal(project.projectId, { executionLogId: id, nodeId: String(status.nodeId), limit: 1 }).logs[0];
+        const journal = store.readProjectJournal(project.projectId, { executionLogId: Number(status.executionLogId), nodeId: String(status.nodeId), limit: 1 }).logs[0];
         if (!journal || !journal.output) throw new Error('historical_run_input_missing');
         const { dataState: _dataState, ...sourceJournal } = journal;
         const bytes = Buffer.from(JSON.stringify(sourceJournal));
-        outputSource = { identity: `historical-journal-output:${projectRoot}`, key: String(id), hash: digest(bytes) };
+        outputSource = { identity: `historical-journal-output:${projectRoot}`, key: String(status.executionLogId), hash: digest(bytes) };
         store.captureMigrationSource(outputSource, bytes, { mimeType: 'application/json', encoding: 'utf8' });
         output = Buffer.from(journal.output);
       }
@@ -489,8 +497,12 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       for (const [field, statusKey, fallback] of [['workspaceBefore', 'workspaceSnapshotPath', 'workspace-before.json'], ['changes', 'changesFilePath', 'changes.txt'], ['roadmapBackup', 'roadmapBackupFilePath', 'roadmap-before.csv']] as const) {
         const declared = String(status[statusKey] || ''), name = declared ? path.basename(declared) : fallback;
         if (declared && path.resolve(declared) !== path.join(runDir, name)) throw new Error('historical_run_document_scope_mismatch');
-        const bytes = await read(fallback, Boolean(declared), statusKey);
+        const bytes = await read(fallback, false, statusKey);
         if (bytes) documents[field] = bytes;
+        else if (declared) {
+          result.retainedGaps ||= [];
+          result.retainedGaps.push({ source: declared, error: 'historical_optional_artifact_missing' });
+        }
       }
       const reports: Array<{ source: { identity: string; key: string; hash: string }; bytes: Buffer; observation: { executionLogId: number; sequence: number; availability: string; envelope: any } }> = [];
       const reportAliases = new Set<string>(status.learningTaskId ? [String(status.learningTaskId)] : []);
@@ -509,7 +521,8 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         reports.push({ source: { identity, key: path.join(relative, name), hash: digest(bytes) }, bytes, observation: { executionLogId: id, sequence, availability, envelope: availability === 'recorded' ? envelope : { ...envelope, report: null } } });
       }
       if ((await stableFile(file)).hash !== captured.hash) throw new Error('historical_run_source_changed');
-      const adopted = store.adoptHistoricalRun(project.projectId, project.locationId, { identity: statusIdentity, key, hash: captured.hash }, { status, binding, prompt, command, output, outputSource, nativeTranscript, legacyCompletion, ...documents, ...(unregistered ? { unregisteredReports: reports, unregisteredTaskAlias: [...reportAliases][0] } : { registeredTaskAlias: matchingTasks[0].taskId }) });
+      const historicalExecutionLogIds = unregistered ? [id] : matchingTasks[0].executions.filter((run: { id: number; runDir: string }) => path.resolve(run.runDir) === runDir).map((run: { id: number }) => run.id);
+      const adopted = store.adoptHistoricalRun(project.projectId, project.locationId, { identity: statusIdentity, key, hash: captured.hash }, { historicalExecutionLogIds, status, binding, prompt, command, output, outputSource, nativeTranscript, legacyCompletion, ...documents, ...(unregistered ? { unregisteredReports: reports, unregisteredTaskAlias: [...reportAliases][0] } : { registeredTaskAlias: matchingTasks[0].taskId }) });
       if (relative === status.nodeId) {
         for (const original of filesByNode.get(relative) || []) {
           if (path.dirname(original) !== runDir) continue;
@@ -523,6 +536,24 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         for (const artifact of runs.get(relative)?.values() || []) artifact.executionLogId = id;
       }
       if (adopted.unchanged) result.unchanged++; else result.imported++;
+      // Eligibility follows successful identity and lifecycle adoption, rather
+      // than merely having copied a file into the artifact archive.
+      const declaredFiles = ['sessionFilePath', 'promptFilePath', 'commandFilePath', 'outputFilePath', 'codexHomeFilePath', 'completionDecisionFilePath', 'workspaceSnapshotPath', 'changesFilePath', 'roadmapBackupFilePath']
+        .map(field => String(status[field] || '')).filter(Boolean);
+      for (const original of new Set([...files, ...declaredFiles])) {
+        if (path.dirname(original) !== runDir) continue;
+        const artifactPath = path.relative(sourceRoot, original);
+        const artifact = store.readRunArtifactMetadata(project.projectId, id, artifactPath);
+        if (!artifact || !isRetirableRunArtifact(artifactPath) && !['prompt', 'output', 'control', 'session', 'change_evidence', 'report'].includes(store.migrationSourceKind(identity, artifactPath))) continue;
+        let current: Awaited<ReturnType<typeof stableFile>>;
+        try { current = await stableFile(original); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          throw error;
+        }
+        if (current.hash !== artifact.hash) throw new Error('historical_run_source_changed');
+        store.markMigrationSourceImported(identity, artifactPath);
+      }
     } catch (error) {
       const coded = error as Error & { code?: string };
       const message = coded.code ? `${coded.code}: ${coded.message}` : String(error);
