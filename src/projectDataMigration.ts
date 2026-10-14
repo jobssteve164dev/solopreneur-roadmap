@@ -388,8 +388,31 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       const matchingTasks = registered.tasks.filter(task => (!status.learningTaskId || task.taskId === status.learningTaskId) && task.executions.some((run: { id: number }) => run.id === id));
       const candidates = matchingTasks.flatMap(task => task.executions.filter((run: { id: number; runDir: string }) => run.id === id));
       const unregistered = candidates.length === 0 && !registered.tasks.some(task => task.executions.some((run: { id: number }) => run.id === id));
+      let retiredWorkspaceRoot: string | undefined;
+      if (unregistered && typeof status.workspaceRoot === 'string' && path.isAbsolute(status.workspaceRoot)) {
+        const retiredRoot = path.resolve(status.workspaceRoot);
+        if (retiredRoot !== resolvedRoot) {
+          let retired = false;
+          try { await fs.promises.realpath(retiredRoot); }
+          catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') retired = true; else throw error; }
+          if (retired) {
+            const pathFields = ['sessionFilePath', 'promptFilePath', 'commandFilePath', 'outputFilePath', 'codexHomeFilePath', 'completionDecisionFilePath', 'workspaceSnapshotPath', 'changesFilePath', 'roadmapBackupFilePath'];
+            const declared = pathFields.filter(field => typeof status[field] === 'string' && status[field]);
+            for (const field of declared) {
+              const relative = path.relative(retiredRoot, path.resolve(status[field]));
+              if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('historical_run_workspace_mismatch');
+            }
+            retiredWorkspaceRoot = retiredRoot;
+          }
+        }
+      }
+      const declaredPath = (field: string): string => {
+        const declared = path.resolve(String(status[field] || ''));
+        if (!retiredWorkspaceRoot || !status[field]) return declared;
+        return path.join(projectRoot, path.relative(retiredWorkspaceRoot, declared));
+      };
       if (unregistered) {
-        const directories = new Set<string>(['sessionFilePath', 'promptFilePath', 'commandFilePath', 'outputFilePath'].map(field => String(status[field] || '')).filter(Boolean).map(declared => path.dirname(path.resolve(declared))));
+        const directories = new Set<string>(['sessionFilePath', 'promptFilePath', 'commandFilePath', 'outputFilePath'].filter(field => status[field]).map(field => path.dirname(declaredPath(field))));
         if (directories.size === 0) {
           const numbered = path.join(sourceRoot, String(status.nodeId || ''), String(id));
           const relative = path.relative(sourceRoot, numbered);
@@ -411,7 +434,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || relative.split(path.sep)[0] !== status.nodeId || conflictingRuns.has(relative)) throw new Error('historical_run_source_conflict');
       const read = async (name: string, required = true, declaredField?: string): Promise<Buffer | null> => {
         const declared = declaredField ? String(status[declaredField] || '') : '';
-        const file = declared ? path.resolve(declared) : path.join(runDir, name);
+        const file = declared ? declaredPath(declaredField!) : path.join(runDir, name);
         if (path.dirname(file) !== runDir) throw new Error('historical_run_source_conflict');
         const sourceKey = path.relative(sourceRoot, file);
         const artifact = store.readRunArtifactMetadata(project.projectId, id, sourceKey) || (relative === status.nodeId ? store.readRunArtifactMetadata(project.projectId, 0, sourceKey) : null);
@@ -456,7 +479,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
           if (value.version !== undefined && value.version !== 1 || typeof value.sessionId !== 'string' || !value.sessionId.trim() || /\s/.test(value.sessionId) || typeof value.source !== 'string' || !value.source) throw new Error('historical_run_legacy_identity_invalid');
           const provider = getContinuationAgentProvider(String(status.agentCli || ''));
           if (!status.agentCli || status.sessionProvider && status.sessionProvider !== provider) throw new Error('historical_run_binding_mismatch');
-          const sessionSource = { identity, key: path.relative(sourceRoot, String(status.sessionFilePath || path.join(runDir, 'session.json'))), hash: digest(session) };
+          const sessionSource = { identity, key: path.relative(sourceRoot, status.sessionFilePath ? declaredPath('sessionFilePath') : path.join(runDir, 'session.json')), hash: digest(session) };
           let providerContext: Record<string, unknown> | undefined;
           let nativeSessionVerified = true;
           const evidence: Record<string, unknown> = { source: 'legacy_session_file', sessionSource, legacySource: value.source, timestampSource: value.updatedAt ? 'legacy_session_updated_at' : 'historical_status_started_at', nonceSource: status.bindingNonce ? 'historical_status' : 'migration_source_hash' };
@@ -486,7 +509,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
             }
           }
           const createdAt = String(value.updatedAt || status.startedAt || '');
-          binding = { version: 2, runId: String(id), provider, workspaceRoot: projectRoot, cliPath: String(status.agentCli), bindingNonce: String(status.bindingNonce || `legacy-session:${sessionSource.hash}`), createdAt, headRevision: 1, ...(nativeSessionVerified ? { resumableRevision: 1 } : {}),
+          binding = { version: 2, runId: String(id), provider, workspaceRoot: resolvedRoot, cliPath: String(status.agentCli), bindingNonce: String(status.bindingNonce || `legacy-session:${sessionSource.hash}`), createdAt, headRevision: 1, ...(nativeSessionVerified ? { resumableRevision: 1 } : {}),
             revisions: [{ revision: 1, sessionId: value.sessionId, method: 'transcript_correlated_compat', contract: 'compatibility', state: nativeSessionVerified ? 'confirmed' : 'unavailable', createdAt, evidence, ...(providerContext ? { providerContext } : {}) }] };
         }
       }
@@ -508,7 +531,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       const legacyCompletion = completionBytes ? { source: { identity, key: path.join(relative, status.completionDecisionFilePath ? path.basename(status.completionDecisionFilePath) : 'completion.json'), hash: digest(completionBytes) }, bytes: completionBytes } : undefined;
       for (const [field, statusKey, fallback] of [['workspaceBefore', 'workspaceSnapshotPath', 'workspace-before.json'], ['changes', 'changesFilePath', 'changes.txt'], ['roadmapBackup', 'roadmapBackupFilePath', 'roadmap-before.csv']] as const) {
         const declared = String(status[statusKey] || ''), name = declared ? path.basename(declared) : fallback;
-        if (declared && path.resolve(declared) !== path.join(runDir, name)) throw new Error('historical_run_document_scope_mismatch');
+        if (declared && declaredPath(statusKey) !== path.join(runDir, name)) throw new Error('historical_run_document_scope_mismatch');
         const bytes = await read(fallback, false, statusKey);
         if (bytes) documents[field] = bytes;
         else if (declared) {
@@ -524,7 +547,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         const bytes = (await read(name))!, envelope = JSON.parse(bytes.toString('utf8')), sequence = Number(name.match(/\d+/)![0]);
         let reportProjectRoot: string;
         try { reportProjectRoot = typeof envelope.projectPath === 'string' ? await fs.promises.realpath(envelope.projectPath) : ''; }
-        catch { throw new Error('historical_run_report_mismatch'); }
+        catch { if (retiredWorkspaceRoot && path.resolve(String(envelope.projectPath || '')) === retiredWorkspaceRoot) reportProjectRoot = resolvedRoot; else throw new Error('historical_run_report_mismatch'); }
         if (envelope.schemaVersion !== 1 || reportProjectRoot !== resolvedRoot || !Number.isSafeInteger(envelope.executionLogId) || !reportExecutionLogIds.has(envelope.executionLogId) || envelope.turnId !== `${sequence}:complete` || !Number.isSafeInteger(sequence) || sequence < 1) throw new Error('historical_run_report_mismatch');
         if (envelope.taskId) {
           if (typeof envelope.taskId !== 'string' || !/^task-[a-zA-Z0-9-]+$/.test(envelope.taskId)) throw new Error('historical_run_report_mismatch');
@@ -538,7 +561,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         reports.push({ source: { identity, key: path.join(relative, name), hash: digest(bytes) }, bytes, observation: { executionLogId: envelope.executionLogId, sequence, availability, envelope: availability === 'recorded' ? envelope : { ...envelope, report: null } } });
       }
       if ((await stableFile(file)).hash !== captured.hash) throw new Error('historical_run_source_changed');
-      const adopted = store.adoptHistoricalRun(project.projectId, project.locationId, { identity: statusIdentity, key, hash: captured.hash }, { historicalExecutionLogIds, status, binding, prompt, command, output, outputSource, nativeTranscript, legacyCompletion, ...documents, ...(unregistered ? { unregisteredReports: reports, unregisteredTaskAlias: [...reportAliases][0], unregisteredRequest: prompt, unregisteredWorkspaceRoot: resolvedRoot } : { registeredTaskAlias: matchingTasks[0].taskId }) });
+      const adopted = store.adoptHistoricalRun(project.projectId, project.locationId, { identity: statusIdentity, key, hash: captured.hash }, { historicalExecutionLogIds, status, binding, prompt, command, output, outputSource, nativeTranscript, legacyCompletion, ...documents, ...(unregistered ? { unregisteredReports: reports, unregisteredTaskAlias: [...reportAliases][0], unregisteredRequest: prompt, unregisteredWorkspaceRoot: resolvedRoot, unregisteredWorkspaceRelocated: Boolean(retiredWorkspaceRoot) } : { registeredTaskAlias: matchingTasks[0].taskId }) });
       if (relative === status.nodeId) {
         for (const original of filesByNode.get(relative) || []) {
           if (path.dirname(original) !== runDir) continue;
@@ -555,7 +578,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       // Eligibility follows successful identity and lifecycle adoption, rather
       // than merely having copied a file into the artifact archive.
       const declaredFiles = ['sessionFilePath', 'promptFilePath', 'commandFilePath', 'outputFilePath', 'codexHomeFilePath', 'completionDecisionFilePath', 'workspaceSnapshotPath', 'changesFilePath', 'roadmapBackupFilePath']
-        .map(field => String(status[field] || '')).filter(Boolean);
+        .filter(field => status[field]).map(field => declaredPath(field));
       for (const original of new Set([...files, ...declaredFiles])) {
         if (path.dirname(original) !== runDir) continue;
         const artifactPath = path.relative(sourceRoot, original);

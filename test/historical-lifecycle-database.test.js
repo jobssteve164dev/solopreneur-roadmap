@@ -790,6 +790,37 @@ test('an unregistered status without workspace or native binding retains the phy
   assert.equal(Object.hasOwn(JSON.parse(f.store.readMigrationSource(`agent-status:${f.project}`, '71.json').bytes), 'workspaceRoot'), false);
 });
 
+test('an unregistered status from a retired project path rebases its declared artifacts to the verified current project', async t => {
+  const f = await unregisteredHistory(t, false);
+  const retiredRoot = path.join(f.base, 'retired-project-location');
+  f.status.workspaceRoot = retiredRoot;
+  for (const field of ['promptFilePath', 'commandFilePath', 'outputFilePath', 'sessionFilePath']) {
+    f.status[field] = path.join(retiredRoot, path.relative(f.project, f.status[field]));
+  }
+  writeLearningJson(f.statusFile, f.status);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  const found = await f.client.findConversation(f.project, 71);
+  assert.equal(found.status.workspaceRoot, f.project);
+  assert.equal(JSON.parse(f.store.readMigrationSource(`agent-status:${f.project}`, '71.json').bytes).workspaceRoot, retiredRoot);
+});
+
+test('a retired project path rebases through a verified current alias with its original report', async t => {
+  const f = await unregisteredHistory(t);
+  const retiredRoot = path.join(f.base, 'retired-project-location');
+  f.status.workspaceRoot = retiredRoot;
+  for (const field of ['promptFilePath', 'commandFilePath', 'outputFilePath', 'sessionFilePath']) {
+    f.status[field] = path.join(retiredRoot, path.relative(f.project, f.status[field]));
+  }
+  const reportFile = path.join(f.runDir, 'task-report-1.json');
+  const report = JSON.parse(fs.readFileSync(reportFile)); report.projectPath = retiredRoot; writeLearningJson(reportFile, report);
+  writeLearningJson(f.statusFile, f.status);
+  const alias = path.join(f.base, 'project-alias'); fs.symlinkSync(f.project, alias, 'dir');
+  assert.deepEqual((await importAgentRuns(f.store, path.join(alias, '.solopreneur', 'agent-runs'), { projectRoot: alias })).conflicts, []);
+  const found = await f.client.findConversation(f.project, 71);
+  assert.equal(found.status.workspaceRoot, f.project);
+  assert.equal((await f.client.readReport(found.reference, found.status)).report.summary, '历史首轮结果');
+});
+
 test('a registered historical status without the optional task alias retains the uniquely registered task', async t => {
   const f = await history(t); delete f.status.learningTaskId; writeLearningJson(f.statusFile, f.status);
   assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
