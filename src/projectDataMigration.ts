@@ -157,9 +157,9 @@ async function captureHistoricalOutput(store: UnifiedDataStore, projectId: strin
   try { resolved = await fs.promises.realpath(declared); }
   catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    const archived = store.readRunArtifact(projectId, executionLogId, declaredRelative);
+    const archived = store.readRunArtifactBytes(projectId, executionLogId, declaredRelative);
     if (!archived) throw error;
-    const bytes = Buffer.from(archived.bytes, 'base64');
+    const bytes = archived.bytes;
     if (digest(bytes) !== archived.hash) throw new Error('historical_run_output_hash_mismatch');
     store.captureMigrationSource({ identity: `agent-runs:${projectRoot}`, key: declaredRelative, hash: archived.hash }, bytes, { mimeType: archived.mimeType, encoding: 'binary', sourceKind: artifactKind });
     store.writeHistoricalRunArtifact(projectId, { executionLogId, relativePath: declaredRelative, bytes: archived.bytes, hash: archived.hash, mimeType: archived.mimeType }, artifactKind);
@@ -169,9 +169,9 @@ async function captureHistoricalOutput(store: UnifiedDataStore, projectId: strin
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('historical_run_output_scope_mismatch');
   const captured = await stableFile(resolved);
   store.captureMigrationSource({ identity: `agent-runs:${projectRoot}`, key: relative, hash: captured.hash }, captured.bytes, { mimeType: 'text/plain', encoding: 'utf8', sourceKind: artifactKind });
-  const previous = store.readRunArtifact(projectId, executionLogId, relative);
+  const previous = store.readRunArtifactMetadata(projectId, executionLogId, relative);
   if (previous && previous.hash !== captured.hash) throw new Error('migration_target_changed');
-  store.writeHistoricalRunArtifact(projectId, { executionLogId, relativePath: relative, bytes: captured.bytes.toString('base64'), hash: captured.hash }, artifactKind);
+  store.writeHistoricalRunArtifact(projectId, { executionLogId, relativePath: relative, bytes: captured.bytes, hash: captured.hash }, artifactKind);
   return captured.bytes.toString('utf8');
 }
 
@@ -319,13 +319,13 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       const relativePath = path.relative(sourceRoot, file); const captured = await stableFile(file); result.originalBytes += captured.bytes.length; result.retainedFiles.push(file);
       store.captureMigrationSource({ identity, key: relativePath, hash: captured.hash }, captured.bytes, { mimeType: 'application/octet-stream', encoding: 'binary' });
       const parts = relativePath.split(path.sep);
-      const legacyArtifactId = /^\d+$/.test(parts[0]) && store.readRunArtifact(project.projectId, Number(parts[0]), relativePath) ? Number(parts[0]) : 0;
+      const legacyArtifactId = /^\d+$/.test(parts[0]) && store.readRunArtifactMetadata(project.projectId, Number(parts[0]), relativePath) ? Number(parts[0]) : 0;
       const executionLogId = parts.length >= 3 && /^\d+$/.test(parts[1]) ? Number(parts[1]) : legacyArtifactId;
-      const artifact = store.readRunArtifact(project.projectId, executionLogId, relativePath);
+      const artifact = store.readRunArtifactMetadata(project.projectId, executionLogId, relativePath);
       if (artifact?.hash === captured.hash) result.unchanged++;
       else if (artifact) { result.conflicts.push({ source: file, error: 'migration_target_changed' }); conflictingRuns.add(runDirectory(relativePath)); }
       else {
-        store.writeRunArtifact(project.projectId, { executionLogId, relativePath, bytes: captured.bytes.toString('base64'), hash: captured.hash });
+        store.writeRunArtifact(project.projectId, { executionLogId, relativePath, bytes: captured.bytes, hash: captured.hash });
         if (isRetirableRunArtifact(relativePath)) store.markMigrationSourceImported(identity, relativePath);
         result.imported++;
       }
@@ -406,7 +406,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         const file = declared ? path.resolve(declared) : path.join(runDir, name);
         if (path.dirname(file) !== runDir) throw new Error('historical_run_source_conflict');
         const sourceKey = path.relative(sourceRoot, file);
-        let artifact = store.readRunArtifact(project.projectId, id, sourceKey) || (relative === status.nodeId ? store.readRunArtifact(project.projectId, 0, sourceKey) : null);
+        const artifact = store.readRunArtifactMetadata(project.projectId, id, sourceKey) || (relative === status.nodeId ? store.readRunArtifactMetadata(project.projectId, 0, sourceKey) : null);
         const declaredKind = declared ? runArtifactKind(path.join(status.nodeId, String(id), name)) : null;
         if (declared && !declaredKind) throw new Error('historical_run_input_invalid');
         let declaredCurrent: Awaited<ReturnType<typeof stableFile>> | undefined;
@@ -417,20 +417,22 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         if (declaredCurrent) {
           if (artifact && declaredCurrent.hash !== artifact.hash) throw new Error('historical_run_source_changed');
           store.captureMigrationSource({ identity, key: sourceKey, hash: declaredCurrent.hash }, declaredCurrent.bytes, { mimeType: 'application/octet-stream', encoding: 'binary', sourceKind: declaredKind! });
-          store.writeHistoricalRunArtifact(project.projectId, { executionLogId: id, relativePath: sourceKey, bytes: declaredCurrent.bytes.toString('base64'), hash: declaredCurrent.hash }, declaredKind!);
+          store.writeHistoricalRunArtifact(project.projectId, { executionLogId: id, relativePath: sourceKey, bytes: declaredCurrent.bytes, hash: declaredCurrent.hash }, declaredKind!);
           if (!artifact) { result.originalBytes += declaredCurrent.bytes.length; result.retainedFiles.push(file); result.imported++; }
-          artifact = store.readRunArtifact(project.projectId, id, sourceKey);
+          return declaredCurrent.bytes;
         }
         if (!artifact) { if (required) throw new Error('historical_run_input_missing'); return null; }
         if (declared && !declaredCurrent) {
-          const archived = Buffer.from(artifact.bytes, 'base64');
+          const archivedArtifact = store.readRunArtifactBytes(project.projectId, id, sourceKey);
+          if (!archivedArtifact) throw new Error('historical_run_input_missing');
+          const archived = archivedArtifact.bytes;
           store.captureMigrationSource({ identity, key: sourceKey, hash: artifact.hash }, archived, { mimeType: artifact.mimeType, encoding: 'binary', sourceKind: declaredKind! });
-          store.writeHistoricalRunArtifact(project.projectId, { executionLogId: id, relativePath: sourceKey, bytes: artifact.bytes, hash: artifact.hash, mimeType: artifact.mimeType }, declaredKind!);
+          store.writeHistoricalRunArtifact(project.projectId, { executionLogId: id, relativePath: sourceKey, bytes: archived, hash: artifact.hash, mimeType: artifact.mimeType }, declaredKind!);
           return archived;
         }
         const current = declaredCurrent || await stableFile(file);
         if (current.hash !== artifact.hash) throw new Error('historical_run_source_changed');
-        return Buffer.from(artifact.bytes, 'base64');
+        return current.bytes;
       };
       const session = await read('session.json', status.nativeSessionIdIsCurrent === true || Boolean(status.sessionFilePath), 'sessionFilePath');
       let binding: NativeSessionBinding | null = null;
@@ -511,8 +513,12 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       if (relative === status.nodeId) {
         for (const original of filesByNode.get(relative) || []) {
           if (path.dirname(original) !== runDir) continue;
-          const artifactPath = path.relative(sourceRoot, original), originalArtifact = store.readRunArtifact(project.projectId, 0, artifactPath);
-          if (originalArtifact && !store.readRunArtifact(project.projectId, id, artifactPath)) store.writeRunArtifact(project.projectId, { executionLogId: id, relativePath: artifactPath, ...originalArtifact });
+          const artifactPath = path.relative(sourceRoot, original), originalArtifact = store.readRunArtifactMetadata(project.projectId, 0, artifactPath);
+          if (originalArtifact && !store.readRunArtifactMetadata(project.projectId, id, artifactPath)) {
+            const current = await stableFile(original);
+            if (current.hash !== originalArtifact.hash) throw new Error('historical_run_source_changed');
+            store.writeRunArtifact(project.projectId, { executionLogId: id, relativePath: artifactPath, bytes: current.bytes, ...originalArtifact });
+          }
         }
         for (const artifact of runs.get(relative)?.values() || []) artifact.executionLogId = id;
       }
@@ -545,7 +551,13 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         if (nestedArtifact) continue;
       }
       if (directory === '.' || parts.length > 2 || (parts.length === 2 && !/^\d+$/.test(parts[1]))) throw new Error('historical_run_identity_ambiguous');
-      const text = (name: string) => { const source = artifacts.get(name); return source ? Buffer.from(store.readRunArtifact(project.projectId, source.executionLogId, source.file)!.bytes, 'base64').toString('utf8') : ''; };
+      const text = (name: string) => {
+        const source = artifacts.get(name);
+        if (!source) return '';
+        const bytes = fs.readFileSync(path.join(sourceRoot, source.file));
+        if (digest(bytes) !== source.hash) throw new Error('historical_run_source_changed');
+        return bytes.toString('utf8');
+      };
       const output = text('output.log'); const command = text('command.txt');
       if (!['command.txt', 'output.log', 'completion.json', 'touched-files.txt', 'changes.txt', 'prompt.txt'].some(name => artifacts.has(name))) continue;
       const nodeId = parts[0];
@@ -569,9 +581,13 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       if (parts.length === 1) for (const file of filesByNode.get(directory) || []) {
         const relativePath = path.relative(sourceRoot, file);
         const components = relativePath.split(path.sep);
-        const originalId = components.length >= 3 && /^\d+$/.test(components[1]) ? Number(components[1]) : store.readRunArtifact(project.projectId, executionLogId, relativePath) ? executionLogId : 0;
-        const artifact = store.readRunArtifact(project.projectId, originalId, relativePath);
-        if (artifact && !store.readRunArtifact(project.projectId, executionLogId, relativePath)) store.writeRunArtifact(project.projectId, { executionLogId, relativePath, ...artifact });
+        const originalId = components.length >= 3 && /^\d+$/.test(components[1]) ? Number(components[1]) : store.readRunArtifactMetadata(project.projectId, executionLogId, relativePath) ? executionLogId : 0;
+        const artifact = store.readRunArtifactMetadata(project.projectId, originalId, relativePath);
+        if (artifact && !store.readRunArtifactMetadata(project.projectId, executionLogId, relativePath)) {
+          const current = await stableFile(file);
+          if (current.hash !== artifact.hash) throw new Error('historical_run_source_changed');
+          store.writeRunArtifact(project.projectId, { executionLogId, relativePath, bytes: current.bytes, ...artifact });
+        }
       }
       const changed = text('touched-files.txt').trim() || text('changes.txt');
       const changedFiles = changed.split(/\r?\n/).map(line => line.trim().replace(/^(?:[AMDRCU?!]{1,2}|\?\?)\s+/, '')).filter(file => file && !file.startsWith('.solopreneur/agent-runs/')).map(filePath => ({ filePath, role: 'changed' }));

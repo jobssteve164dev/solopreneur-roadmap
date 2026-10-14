@@ -49,12 +49,13 @@ test('paged reads reconstruct every original byte and keep the same revision whi
     const metadata = await call({ operation: 'read', input: { ref: memory.objectId, view: 'metadata' } });
     assert.equal(metadata.data.content, undefined);
     assert.equal(metadata.revision, 2);
-  } finally { store.close(); }
+  } finally { store.close(); cleanupExact(root); }
 });
 
 test('a page reads and validates only the relevant independently verifiable content chunks', () => {
   const { DatabaseSync } = require('node:sqlite');
-  const store = new UnifiedDataStore(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-page-work-')));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-page-work-'));
+  const store = new UnifiedDataStore(root);
   const db = new DatabaseSync(store.filePath);
   try {
     const bytes = crypto.randomBytes(2 * 1024 * 1024);
@@ -75,7 +76,7 @@ test('a page reads and validates only the relevant independently verifiable cont
     assert.deepEqual(Buffer.from(first.data, 'base64'), bytes.subarray(0, 1000));
     assert.throws(() => store.read(object.objectId), /content_integrity_error/);
     assert.throws(() => store.readPage({ ref: object.objectId, limit: 100000 }), /content_integrity_error/);
-  } finally { db.close(); store.close(); }
+  } finally { db.close(); store.close(); cleanupExact(root); }
 });
 
 test('an authoritative identical write repairs corrupted deduplicated content', () => {
@@ -89,8 +90,27 @@ test('an authoritative identical write repairs corrupted deduplicated content', 
     const contentId = db.prepare('SELECT content_id FROM project_run_artifacts WHERE execution_log_id=1').get().content_id;
     db.prepare('DELETE FROM content_chunks WHERE content_id=? AND ordinal=1').run(contentId);
     assert.throws(() => store.readRunArtifact(project, 1, '__solo__/1/output.log'), /content_integrity_error/);
-    store.writeHistoricalRunArtifact(project, { executionLogId: 2, relativePath: '__solo__/2/output.log', bytes: bytes.toString('base64'), hash: crypto.createHash('sha256').update(bytes).digest('hex') }, 'output');
+    const materialize = store.content;
+    store.content = () => { throw new Error('full_content_materialization'); };
+    assert.doesNotThrow(() => store.writeHistoricalRunArtifact(project, { executionLogId: 1, relativePath: '__solo__/1/output.log', bytes, hash: crypto.createHash('sha256').update(bytes).digest('hex') }, 'output'));
+    store.content = materialize;
     assert.deepEqual(Buffer.from(store.readRunArtifact(project, 1, '__solo__/1/output.log').bytes, 'base64'), bytes);
-    assert.deepEqual(Buffer.from(store.readRunArtifact(project, 2, '__solo__/2/output.log').bytes, 'base64'), bytes);
+  } finally { db.close(); store.close(); cleanupExact(root); }
+});
+
+test('an unchanged migration source repairs its corrupted captured content', () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-source-repair-'));
+  const store = new UnifiedDataStore(root);
+  const db = new DatabaseSync(store.filePath);
+  try {
+    const bytes = crypto.randomBytes(2 * 1024 * 1024);
+    const source = { identity: 'agent-runs:/workspace/project', key: '__solo__/1/output.log', hash: crypto.createHash('sha256').update(bytes).digest('hex') };
+    store.captureMigrationSource(source, bytes, { mimeType: 'application/octet-stream', encoding: 'binary', sourceKind: 'output' });
+    const contentId = db.prepare('SELECT source_content_id FROM migration_items WHERE source_identity=? AND source_key=?').get(source.identity, source.key).source_content_id;
+    db.prepare('DELETE FROM content_chunks WHERE content_id=? AND ordinal=1').run(contentId);
+    assert.throws(() => store.readMigrationSource(source.identity, source.key), /content_integrity_error/);
+    assert.equal(store.captureMigrationSource(source, bytes, { mimeType: 'application/octet-stream', encoding: 'binary', sourceKind: 'output' }).unchanged, true);
+    assert.deepEqual(store.readMigrationSource(source.identity, source.key).bytes, bytes);
   } finally { db.close(); store.close(); cleanupExact(root); }
 });

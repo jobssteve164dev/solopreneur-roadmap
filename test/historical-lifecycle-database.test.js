@@ -320,6 +320,22 @@ test('a registered historical run in the original node directory keeps its actua
   assert.deepEqual(f.store.readProjectRunIndexes(f.projectId).map(row => row.executionLogId), [71]);
 });
 
+test('replaying an unchanged historical run repairs damaged content without the base64 artifact reader', async t => {
+  const f = await history(t);
+  const outputFile = path.join(f.runDir, 'output.log');
+  const output = Buffer.from('大体积历史输出🌿'.repeat(200000));
+  fs.writeFileSync(outputFile, output);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  const contentId = f.store.rows('SELECT content_id FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?', [f.projectId, 71, '__solo__/71/output.log'])[0].content_id;
+  f.store.db.run('DELETE FROM content_chunks WHERE content_id=? AND ordinal=1', [contentId]);
+  const readRunArtifact = f.store.readRunArtifact;
+  f.store.readRunArtifact = () => { throw new Error('base64_artifact_reader_used'); };
+  try {
+    assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  } finally { f.store.readRunArtifact = readRunArtifact; }
+  assert.deepEqual(f.store.readRunArtifactBytes(f.projectId, 71, '__solo__/71/output.log').bytes, output);
+});
+
 test('late historical byte changes are retained as source versions without overwriting the formally adopted run', async t => {
   const f = await history(t); assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
   const before = f.store.readRunState(f.projectId, 71), oldOutput = await f.client.readLog(runStatusReference(f.project, 71), 'output');

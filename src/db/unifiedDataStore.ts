@@ -687,13 +687,15 @@ export class UnifiedDataStore {
     } finally { this.transactionDepth--; }
   }
   private putContent(data: Uint8Array | string, mimeType = 'text/plain', encoding = 'utf8'): string {
-    const bytes = typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data);
+    const bytes = typeof data === 'string'
+      ? Buffer.from(data, 'utf8')
+      : Buffer.isBuffer(data) ? data : Buffer.from(data.buffer as ArrayBuffer, data.byteOffset, data.byteLength);
     const hash = digest(bytes);
     const existing = this.rows('SELECT id FROM contents WHERE sha256=? AND mime_type=? AND encoding IN (?,?,?)', [hash, mimeType, encoding, `gzip:${encoding}`, `chunked:${encoding}`])[0];
     let repairId: string | undefined;
     if (existing) {
       try {
-        this.content(String(existing.id));
+        this.assertContentIntegrity(String(existing.id));
         this.db.run('DELETE FROM database_storage_cleanup_candidates WHERE content_id=?', [existing.id]);
         return String(existing.id);
       } catch (error) {
@@ -701,48 +703,77 @@ export class UnifiedDataStore {
         repairId = String(existing.id);
       }
     }
-    let stored: Buffer;
-    let storedEncoding: string;
-    let chunkIndex: string | null = null;
-    let chunkParts: Buffer[] | undefined;
-    let storedLength: number;
     if (bytes.length > 65536) {
-      const chunks: ContentChunk[] = [];
-      const parts: Buffer[] = [];
-      let storedOffset = 0;
-      for (let offset = 0; offset < bytes.length; offset += 65536) {
-        const part = bytes.subarray(offset, offset + 65536);
-        const compressed = gzipSync(part, { level: 1 });
-        const encoded = compressed.length < part.length * 0.9 ? compressed : part;
-        chunks.push({ offset, byteLength: part.length, storedOffset, storedByteLength: encoded.length, sha256: digest(part), compressed: encoded === compressed });
-        parts.push(encoded);
-        storedOffset += encoded.length;
-      }
-      chunkParts = parts;
-      stored = Buffer.alloc(0);
-      storedLength = storedOffset;
-      storedEncoding = `chunked:${encoding}`;
-      chunkIndex = canonical(chunks);
-    } else {
-      const compressed = bytes.length >= 16384 ? gzipSync(bytes, { level: 1 }) : bytes;
-      stored = compressed.length < bytes.length * 0.9 ? compressed : bytes;
-      storedEncoding = stored === bytes ? encoding : `gzip:${encoding}`;
-      storedLength = stored.length;
-    }
-    const id = repairId || crypto.randomUUID();
-    if (repairId) {
+      const id = repairId || crypto.randomUUID(), storedEncoding = `chunked:${encoding}`;
       this.transaction(() => {
-        this.db.run('DELETE FROM content_chunks WHERE content_id=?', [id]);
-        this.db.run('UPDATE contents SET encoding=?,byte_length=?,stored_byte_length=?,data=?,chunk_index_json=? WHERE id=?', [storedEncoding, bytes.length, storedLength, stored, chunkIndex, id]);
-        chunkParts?.forEach((part, ordinal) => this.db.run('INSERT INTO content_chunks VALUES(?,?,?)', [id, ordinal, part]));
-        this.content(id);
+        if (repairId) this.db.run('DELETE FROM content_chunks WHERE content_id=?', [id]);
+        else this.db.run('INSERT INTO contents VALUES(?,?,?,?,?,?,?,?)', [id, hash, mimeType, storedEncoding, bytes.length, 0, Buffer.alloc(0), '[]']);
+        const chunks: ContentChunk[] = [];
+        let storedOffset = 0, ordinal = 0;
+        for (let offset = 0; offset < bytes.length; offset += 65536, ordinal++) {
+          const part = bytes.subarray(offset, offset + 65536);
+          const compressed = gzipSync(part, { level: 1 });
+          const encoded = compressed.length < part.length * 0.9 ? compressed : part;
+          chunks.push({ offset, byteLength: part.length, storedOffset, storedByteLength: encoded.length, sha256: digest(part), compressed: encoded === compressed });
+          this.db.run('INSERT INTO content_chunks VALUES(?,?,?)', [id, ordinal, encoded]);
+          storedOffset += encoded.length;
+        }
+        this.db.run('UPDATE contents SET encoding=?,byte_length=?,stored_byte_length=?,data=?,chunk_index_json=? WHERE id=?', [storedEncoding, bytes.length, storedOffset, Buffer.alloc(0), canonical(chunks), id]);
+        this.assertContentIntegrity(id);
         this.db.run('DELETE FROM database_storage_cleanup_candidates WHERE content_id=?', [id]);
       });
       return id;
     }
-    this.db.run('INSERT INTO contents VALUES(?,?,?,?,?,?,?,?)', [id, hash, mimeType, storedEncoding, bytes.length, storedLength, stored, chunkIndex]);
-    chunkParts?.forEach((part, ordinal) => this.db.run('INSERT INTO content_chunks VALUES(?,?,?)', [id, ordinal, part]));
+    const compressed = bytes.length >= 16384 ? gzipSync(bytes, { level: 1 }) : bytes;
+    const stored = compressed.length < bytes.length * 0.9 ? compressed : bytes;
+    const storedEncoding = stored === bytes ? encoding : `gzip:${encoding}`;
+    const storedLength = stored.length;
+    const id = repairId || crypto.randomUUID();
+    if (repairId) {
+      this.transaction(() => {
+        this.db.run('DELETE FROM content_chunks WHERE content_id=?', [id]);
+        this.db.run('UPDATE contents SET encoding=?,byte_length=?,stored_byte_length=?,data=?,chunk_index_json=NULL WHERE id=?', [storedEncoding, bytes.length, storedLength, stored, id]);
+        this.assertContentIntegrity(id);
+        this.db.run('DELETE FROM database_storage_cleanup_candidates WHERE content_id=?', [id]);
+      });
+      return id;
+    }
+    this.db.run('INSERT INTO contents VALUES(?,?,?,?,?,?,?,NULL)', [id, hash, mimeType, storedEncoding, bytes.length, storedLength, stored]);
     return id;
+  }
+  private assertContentIntegrity(id: string): void {
+    const metadata = this.rows('SELECT sha256,byte_length,stored_byte_length,encoding,chunk_index_json FROM contents WHERE id=?', [id])[0];
+    if (!metadata) throw new Error('content_missing');
+    if (!String(metadata.encoding).startsWith('chunked:')) {
+      const row = this.rows('SELECT data FROM contents WHERE id=?', [id])[0];
+      const stored = Buffer.from(row.data as Uint8Array);
+      if (stored.length !== Number(metadata.stored_byte_length)) throw new Error('content_integrity_error');
+      let bytes: Buffer;
+      try { bytes = String(metadata.encoding).startsWith('gzip:') ? gunzipSync(stored, { maxOutputLength: Number(metadata.byte_length) }) : stored; }
+      catch { throw new Error('content_integrity_error'); }
+      if (bytes.length !== Number(metadata.byte_length) || digest(bytes) !== String(metadata.sha256)) throw new Error('content_integrity_error');
+      return;
+    }
+    let chunks: ContentChunk[];
+    try { chunks = JSON.parse(String(metadata.chunk_index_json)); } catch { throw new Error('content_integrity_error'); }
+    if (!Array.isArray(chunks) || !chunks.length) throw new Error('content_integrity_error');
+    const fullHash = crypto.createHash('sha256');
+    let rawOffset = 0, storedOffset = 0;
+    for (const [ordinal, chunk] of chunks.entries()) {
+      if (chunk.offset !== rawOffset || chunk.storedOffset !== storedOffset || !Number.isInteger(chunk.byteLength) || chunk.byteLength < 1 || chunk.byteLength > 65536 || !Number.isInteger(chunk.storedByteLength) || chunk.storedByteLength < 1 || chunk.storedByteLength > 65536 || !/^[a-f0-9]{64}$/.test(chunk.sha256) || typeof chunk.compressed !== 'boolean') throw new Error('content_integrity_error');
+      const row = this.rows('SELECT data FROM content_chunks WHERE content_id=? AND ordinal=?', [id, ordinal])[0];
+      if (!row) throw new Error('content_integrity_error');
+      const stored = Buffer.from(row.data as Uint8Array);
+      if (stored.length !== chunk.storedByteLength) throw new Error('content_integrity_error');
+      let bytes: Buffer;
+      try { bytes = chunk.compressed ? gunzipSync(stored, { maxOutputLength: chunk.byteLength }) : stored; }
+      catch { throw new Error('content_integrity_error'); }
+      if (bytes.length !== chunk.byteLength || digest(bytes) !== chunk.sha256) throw new Error('content_integrity_error');
+      fullHash.update(bytes);
+      rawOffset += chunk.byteLength;
+      storedOffset += chunk.storedByteLength;
+    }
+    if (rawOffset !== Number(metadata.byte_length) || storedOffset !== Number(metadata.stored_byte_length) || fullHash.digest('hex') !== String(metadata.sha256)) throw new Error('content_integrity_error');
   }
   private content(id: string): Buffer {
     const row = this.rows('SELECT sha256,byte_length,stored_byte_length,encoding,chunk_index_json FROM contents WHERE id=?', [id])[0];
@@ -1243,12 +1274,13 @@ export class UnifiedDataStore {
       const sourceKind = source.identity.startsWith('agent-runs:') ? options.sourceKind || runArtifactStorageKind(source.key) : 'source';
       const classificationChanged = options.error ? previous?.stage !== 'unmapped' || previous.error !== options.error : previous?.stage === 'unmapped' && !options.pending;
       if (previous && previous.source_kind !== sourceKind) this.db.run('UPDATE migration_items SET source_kind=? WHERE source_identity=? AND source_key=?', [sourceKind, source.identity, source.key]);
+      const contentId = this.putContent(bytes, options.mimeType || 'application/octet-stream', options.encoding || 'binary');
       if (previous?.captured_hash === source.hash && !classificationChanged) {
+        if (previous.source_content_id !== contentId) this.db.run('UPDATE migration_items SET source_content_id=? WHERE source_identity=? AND source_key=?', [contentId, source.identity, source.key]);
         const request = this.rows('SELECT id,committed_sequence FROM requests WHERE id=?', [previous.source_capture_request_id])[0];
         if (!request) throw new Error('migration_capture_receipt_missing');
         return { unchanged: true, requestId: String(request.id), committedSequence: Number(request.committed_sequence), stage: String(previous.stage) };
       }
-      const contentId = this.putContent(bytes, options.mimeType || 'application/octet-stream', options.encoding || 'binary');
       const error = options.error || (options.pending && previous?.stage === 'unmapped' ? String(previous.error || '') : null);
       const stage = error ? 'unmapped' : 'captured';
       const descriptor = canonical({ source, contentId, revision: revision + 1, stage, error });
@@ -6616,22 +6648,28 @@ export class UnifiedDataStore {
         data: { namespace: 'strategy', key: projectId === null ? 'cache' : 'preferences', owner_scope: projectId || 'global', content: JSON.stringify(value) } }, source);
     });
   }
-  private storeRunArtifact(projectId: string, input: { executionLogId: number; relativePath: string; bytes: string; hash: string; mimeType?: string }, artifactKind: RunArtifactKind): void {
+  private storeRunArtifact(projectId: string, input: { executionLogId: number; relativePath: string; bytes: string | Uint8Array; hash: string; mimeType?: string }, artifactKind: RunArtifactKind): void {
     if (!Number.isFinite(input.executionLogId) || !input.relativePath || path.isAbsolute(input.relativePath) || input.relativePath.split(/[\\/]/).includes('..')) throw new Error('invalid_run_artifact');
-    const bytes = Buffer.from(input.bytes, 'base64');
-    if (bytes.toString('base64') !== input.bytes || digest(bytes) !== input.hash) throw new Error('run_artifact_hash_mismatch');
+    if (typeof input.bytes !== 'string' && !(input.bytes instanceof Uint8Array)) throw new Error('invalid_run_artifact');
+    const bytes = typeof input.bytes === 'string'
+      ? Buffer.from(input.bytes, 'base64')
+      : Buffer.isBuffer(input.bytes) ? input.bytes : Buffer.from(input.bytes.buffer as ArrayBuffer, input.bytes.byteOffset, input.bytes.byteLength);
+    if ((typeof input.bytes === 'string' && bytes.toString('base64') !== input.bytes) || digest(bytes) !== input.hash) throw new Error('run_artifact_hash_mismatch');
     const mimeType = input.mimeType || 'application/octet-stream';
-    const existing = this.rows('SELECT sha256,mime_type,artifact_kind FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?', [projectId, input.executionLogId, input.relativePath])[0];
-    if (existing?.sha256 === input.hash && existing.mime_type === mimeType && existing.artifact_kind === artifactKind) return;
     const contentId = this.putContent(bytes, mimeType, 'binary');
+    const existing = this.rows('SELECT content_id,sha256,mime_type,artifact_kind FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?', [projectId, input.executionLogId, input.relativePath])[0];
+    if (existing?.sha256 === input.hash && existing.mime_type === mimeType && existing.artifact_kind === artifactKind) {
+      if (existing.content_id !== contentId) this.db.run('UPDATE project_run_artifacts SET content_id=?,updated_at=? WHERE project_id=? AND execution_log_id=? AND relative_path=?', [contentId, Date.now(), projectId, input.executionLogId, input.relativePath]);
+      return;
+    }
     this.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at,artifact_kind) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(project_id,execution_log_id,relative_path) DO UPDATE SET content_id=excluded.content_id,sha256=excluded.sha256,mime_type=excluded.mime_type,updated_at=excluded.updated_at,artifact_kind=excluded.artifact_kind', [projectId, input.executionLogId, input.relativePath, contentId, input.hash, mimeType, Date.now(), artifactKind]);
   }
-  public writeRunArtifact(projectId: string, input: { executionLogId: number; relativePath: string; bytes: string; hash: string; mimeType?: string }): void {
+  public writeRunArtifact(projectId: string, input: { executionLogId: number; relativePath: string; bytes: string | Uint8Array; hash: string; mimeType?: string }): void {
     const artifactKind = runArtifactKind(input.relativePath);
     if (!artifactKind) throw new Error('run_artifact_not_persistable');
     this.storeRunArtifact(projectId, input, artifactKind);
   }
-  public writeHistoricalRunArtifact(projectId: string, input: { executionLogId: number; relativePath: string; bytes: string; hash: string; mimeType?: string }, artifactKind: RunArtifactKind): void {
+  public writeHistoricalRunArtifact(projectId: string, input: { executionLogId: number; relativePath: string; bytes: string | Uint8Array; hash: string; mimeType?: string }, artifactKind: RunArtifactKind): void {
     this.storeRunArtifact(projectId, input, artifactKind);
   }
   public protectIndexedRunArtifactOutputsBatch(cursor = 0, limit = 250): { nextCursor: number | null } {
@@ -6654,6 +6692,14 @@ export class UnifiedDataStore {
   public readRunArtifact(projectId: string, executionLogId: number, relativePath: string): { bytes: string; hash: string; mimeType: string } | null {
     const row = this.rows('SELECT content_id,sha256,mime_type FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?', [projectId, executionLogId, relativePath])[0];
     return row ? { bytes: this.content(String(row.content_id)).toString('base64'), hash: String(row.sha256), mimeType: String(row.mime_type) } : null;
+  }
+  public readRunArtifactBytes(projectId: string, executionLogId: number, relativePath: string): { bytes: Buffer; hash: string; mimeType: string } | null {
+    const row = this.rows('SELECT content_id,sha256,mime_type FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?', [projectId, executionLogId, relativePath])[0];
+    return row ? { bytes: this.content(String(row.content_id)), hash: String(row.sha256), mimeType: String(row.mime_type) } : null;
+  }
+  public readRunArtifactMetadata(projectId: string, executionLogId: number, relativePath: string): { hash: string; mimeType: string } | null {
+    const row = this.rows('SELECT sha256,mime_type FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?', [projectId, executionLogId, relativePath])[0];
+    return row ? { hash: String(row.sha256), mimeType: String(row.mime_type) } : null;
   }
   private contentReferenceColumns(): Array<{ table: string; column: string }> {
     if (this.contentReferenceColumnsCache) return this.contentReferenceColumnsCache;
