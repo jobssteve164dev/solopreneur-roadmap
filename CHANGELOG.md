@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.536 - 2026-10-14
+
+### Fixed
+- bound large artifact repair memory (73135f0)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.535 - 2026-10-14
 
 ### Fixed
