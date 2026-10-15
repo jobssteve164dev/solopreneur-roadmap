@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.558 - 2026-10-15
+
+### Fixed
+- close legacy migration conflict recovery (2f2d540)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.557 - 2026-10-15
 
 ### Fixed
