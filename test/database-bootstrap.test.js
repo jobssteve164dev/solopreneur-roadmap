@@ -602,6 +602,59 @@ test('on-demand migration discovery queues every registered legacy source idempo
   } finally { await operations.close(); store.close(); }
 });
 
+test('global migration discovery skips a registered project whose temporary root has disappeared', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { enqueueAvailableDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-discover-stale-project-'));
+  const root = path.join(base, '.solomap-global');
+  const workspace = path.join(base, 'temporary-project');
+  const retired = path.join(base, 'retired-project');
+  fs.mkdirSync(workspace, { recursive: true });
+  fs.mkdirSync(path.join(root, 'maintenance'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'usage'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'usage', 'solomap-usage.json'), '{}');
+  const store = new UnifiedDataStore(root);
+  try {
+    await store.registerProject({ root: workspace });
+    fs.renameSync(workspace, retired);
+    const requests = [];
+    await enqueueAvailableDataMigrations(store, async request => { requests.push(request); return { scheduled: true }; }, () => true);
+    for (const collection of ['learning-review', 'analysis-caches']) {
+      const request = requests.find(item => item.input.collection === collection);
+      assert.ok(request, `${collection} must still be discovered`);
+      assert.equal(request.input.archiveUnresolved, true);
+      assert.equal(Object.hasOwn(request.input.projectScopes, workspace), false);
+    }
+  } finally {
+    store.close();
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('a journal projection enqueue failure does not skip the remaining migrations for a valid project', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { enqueueAvailableDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-discover-projection-failure-'));
+  const root = path.join(base, '.solomap-global');
+  const workspace = path.join(base, 'project');
+  fs.mkdirSync(workspace, { recursive: true });
+  const store = new UnifiedDataStore(root);
+  try {
+    await store.registerProject({ root: workspace });
+    store.missingProjectJournalSources = () => ['missing'];
+    const requests = [];
+    await enqueueAvailableDataMigrations(store, async request => {
+      requests.push(request);
+      if (request.input.collection === 'project-journal' && request.input.mode === 'unified') throw new Error('projection_queue_failed');
+      return { scheduled: true };
+    }, () => true);
+    assert.ok(requests.some(request => request.input.collection === 'agent-runs' && request.input.projectRoot === workspace));
+  } finally {
+    store.close();
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('project investment consumer reads run indexes from the global Runtime database without a legacy project database', async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-global-investment-'));
   const root = path.join(base, '.solomap-global');

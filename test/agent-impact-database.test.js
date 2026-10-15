@@ -634,8 +634,8 @@ test('normal upgrade supersedes the last agent-run migration version and enables
    if(request.operation==='import_project_data'&&request.input.collection==='agent-runs')currentKey=request.input.idempotencyKey;
    return {jobId:'key-probe',status:'completed'};
   },()=>true);
-  assert.match(currentKey,/^startup-agent-runs-v9:/);
-  const prior=store.enqueueMemoryMigration(args,currentKey.replace(/^startup-agent-runs-v9:/,'startup-agent-runs-v8:'));
+  assert.match(currentKey,/^startup-agent-runs-v10:/);
+  const prior=store.enqueueMemoryMigration(args,currentKey.replace(/^startup-agent-runs-v10:/,'startup-agent-runs-v9:'));
   store.updateMigrationJob(prior.jobId,'completed_with_conflicts',{imported:0,unchanged:0,originalBytes:fs.statSync(path.join(run,'output.log')).size,conflicts:[{source:run,error:'Error: historical_run_identity_ambiguous'}],retainedFiles:[run],interrupted:false});
   assert.equal(store.readProjectImpactRuns(project).length,0);
   await enqueueStartupDataMigrations(store,ops,()=>true);await ops.waitForMigrations();
@@ -648,14 +648,31 @@ test('normal upgrade supersedes the last agent-run migration version and enables
  }finally{await ops.close();store.close();cleanupExact(base);}
 });
 
+test('normal upgrade supersedes an old agent-run conflict after its entire legacy source root was retired',async()=>{
+ const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-impact-retired-upgrade-'));
+ const workspace=path.join(base,'project');fs.mkdirSync(workspace);
+ const store=new UnifiedDataStore(path.join(base,'global'));const ops=createRuntimeDataOperations(store);
+ try{
+  await store.registerProject({root:workspace});
+  const sourceRoot=path.join(workspace,'.solopreneur','agent-runs');
+  const prior=store.enqueueMemoryMigration({collection:'agent-runs',sourceRoot,projectRoot:workspace},`startup-agent-runs-v9:${workspace}:retired`);
+  store.updateMigrationJob(prior.jobId,'completed_with_conflicts',{conflicts:[{source:path.join(workspace,'.solopreneur','agent-status','1.json'),error:'historical_run_input_missing'}]});
+  await enqueueStartupDataMigrations(store,ops,()=>true);await ops.waitForMigrations();
+  const latest=store.migrationJobSummaries().find(job=>job.args.collection==='agent-runs'&&job.args.sourceRoot===sourceRoot);
+  assert.notEqual(latest.jobId,prior.jobId);
+  assert.equal(latest.args.archiveUnresolved,true);
+  assert.equal(latest.status,'completed');
+ }finally{await ops.close();store.close();cleanupExact(base);}
+});
+
 test('normal upgrade rechecks journal conflicts with the dependency-ordered reconciliation version', () => fixture(async ({ workspace, store, ops, record }) => {
   const source = path.join(workspace, '.solopreneur', 'project_journal.db'); const legacy = new SqliteStore(source, path.resolve(__dirname, '..')); await legacy.init();
   try { legacy.upsertRunIndex({ ...record(12), totalTokens: 0, outputPath: path.join(workspace, '.solopreneur', 'agent-runs', '__solo__', '12', 'output.log') }); } finally { legacy.close(); }
   const args = { collection: 'project-journal', sourceRoot: source, projectRoot: workspace };
   const old = store.enqueueMemoryMigration(args, `startup-project-journal-v5:${workspace}`);
   store.updateMigrationJob(old.jobId, 'completed_with_conflicts', { conflicts: [{ source, error: 'historical_run_output_missing' }] });
-  const before = store.migrationJobCount(); await enqueueStartupDataMigrations(store, ops, () => true); await ops.waitForMigrations();
-  assert.equal(store.migrationJobCount(), before + 1);
+  const before = store.migrationJobs().filter(job => job.args.collection === 'project-journal').length; await enqueueStartupDataMigrations(store, ops, () => true); await ops.waitForMigrations();
+  assert.equal(store.migrationJobs().filter(job => job.args.collection === 'project-journal').length, before + 1);
   const latest = store.migrationJobSummaries().find(job => job.args.collection === 'project-journal' && job.args.sourceRoot === source);
   assert.equal(latest.status, 'completed');
   assert.deepEqual(latest.progress.conflicts, []);

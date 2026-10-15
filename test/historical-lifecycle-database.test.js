@@ -364,6 +364,18 @@ test('a missing retired history root completes cleanly and the same job discover
   assert.equal(f.store.migrationJobCount(),1);assert.equal(f.store.readMigrationJob(job.jobId).status,'completed');
 });
 
+test('a retained status can finish from archived artifacts after its physical run directory was retired', async t => {
+  const f=await history(t);
+  assert.deepEqual((await importAgentRuns(f.store,f.sourceRoot,{projectRoot:f.project})).conflicts,[]);
+  const retired=path.join(f.base,'retired-run-71');fs.renameSync(f.runDir,retired);
+
+  const replay=await importAgentRuns(f.store,f.sourceRoot,{projectRoot:f.project,archiveUnresolved:true});
+
+  assert.deepEqual(replay.conflicts,[]);
+  assert.equal(f.store.readMigrationSource(`agent-status:${f.project}`,'71.json').stage,'imported');
+  assert.ok(await f.client.findConversation(f.project,71));
+});
+
 test('history adoption explicitly retries its own conflicted job when the requested conversation is still missing', async t => {
   const f = await history(t);
   const job = f.store.enqueueMemoryMigration({ collection: 'agent-runs', sourceRoot: f.sourceRoot, projectRoot: f.project, archiveUnresolved: true }, `conversation-history-adoption-v3:${f.project}`);

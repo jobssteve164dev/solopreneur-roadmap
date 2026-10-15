@@ -797,7 +797,8 @@ test('startup migration upgrades a previously completed growth import to include
     store.writeProjectGrowth = (...args) => { snapshotWrites++; return writeGrowth(...args); };
     const scheduled = await enqueueAvailableDataMigrations(store, operations, () => true, false, project);
     await operations.waitForMigrations();
-    assert.equal(scheduled.queued, 1);
+    assert.ok(scheduled.queued >= 1);
+    assert.equal(store.migrationJobs().filter(job => job.args.collection === 'project-growth' && job.args.projectRoot === project && job.jobId !== previous.jobId).length, 1);
     assert.equal(snapshotWrites, 0, 'the projection upgrade must not replay already imported growth snapshots');
     assert.deepEqual(store.readGrowthReportProjection(registered.projectId), [
       { key: 'legacy:upgrade', value: { complete: true, records: 2 }, revision: 1 }

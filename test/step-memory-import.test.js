@@ -41,7 +41,9 @@ test('Runtime startup discovers legacy step memory from the registered project a
     fs.writeFileSync(path.join(f.sourceRoot, 'step.json'), JSON.stringify({ completionCriteria: ['启动后保留原标准'], entries: [{ unknown: '启动后正式可读' }] }));
     const discovery = await enqueueAvailableDataMigrations(f.store(), request => f.call(request.operation, request.input), () => true);
     await f.wait();
-    assert.equal(discovery.queued, 1); assert.deepEqual((await f.call('read_step_memory', scope(f))).data.completionCriteria, ['启动后保留原标准']);
+    assert.ok(discovery.queued >= 1);
+    assert.equal(f.store().migrationJobs().filter(job => job.args.collection === 'step-memory' && job.args.projectRoot === f.project).length, 1);
+    assert.deepEqual((await f.call('read_step_memory', scope(f))).data.completionCriteria, ['启动后保留原标准']);
     assert.equal(fs.existsSync(path.join(f.root, 'projects.json')), false);
   } finally { await f.close(); }
 });

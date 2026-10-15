@@ -660,7 +660,10 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       const reportExecutionLogIds = new Set(historicalExecutionLogIds);
       const reports: Array<{ source: { identity: string; key: string; hash: string }; bytes: Buffer; observation: { executionLogId: number; sequence: number; availability: string; envelope: any } }> = [];
       const reportAliases = new Set<string>(status.learningTaskId ? [String(status.learningTaskId)] : []);
-      if (unregistered) for (const name of (await fs.promises.readdir(runDir)).filter(name => /^task-report-(?:status-)?\d+\.json$/.test(name)).sort()) {
+      let reportNames: string[] = [];
+      if (unregistered) try { reportNames = await fs.promises.readdir(runDir); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      for (const name of reportNames.filter(name => /^task-report-(?:status-)?\d+\.json$/.test(name)).sort()) {
         const bytes = (await read(name))!, sequence = Number(name.match(/\d+/)![0]); let envelope: any;
         try { envelope = JSON.parse(bytes.toString('utf8')); }
         catch { throw new Error('historical_run_report_mismatch'); }

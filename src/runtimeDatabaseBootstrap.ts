@@ -174,7 +174,12 @@ async function enqueueStartupAnalysisMigration(store: UnifiedDataStore, operatio
   const files = [path.join(store.root, 'usage', 'solomap-usage.json'), path.join(store.root, 'sidebar-core-snapshot-v1.json')];
   for (const projectRoot of store.registeredProjectRoots()) {
     if (!shouldContinue()) return;
-    const project = await store.registerProject({ root: projectRoot });
+    let project;
+    try { project = await store.registerProject({ root: projectRoot }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
     projectScopes[path.resolve(projectRoot)] = project.projectId;
     const projectKey = crypto.createHash('sha1').update(projectRoot).digest('hex');
     files.push(path.join(store.root, 'conversations', `sidebar-conversation-${projectKey}-v1.json`));
@@ -199,7 +204,12 @@ async function enqueueStartupLearningReviewMigration(store: UnifiedDataStore, op
   const projectScopes: Record<string, string> = {};
   for (const root of store.registeredProjectRoots()) {
     if (!shouldContinue()) return;
-    const project = await store.registerProject({ root });
+    let project;
+    try { project = await store.registerProject({ root }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
     projectScopes[path.resolve(root)] = project.projectId;
   }
   const sourceHash = crypto.createHash('sha256'), pending = [sourceRoot];
@@ -276,12 +286,20 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
     if (!shouldContinue()) return;
     const projectRoot = String(project?.path || '');
     if (!path.isAbsolute(projectRoot)) continue;
+    let registered: Awaited<ReturnType<UnifiedDataStore['registerProject']>>;
     try {
-      const registered = await store.registerProject({ root: projectRoot });
-      if (store.missingProjectJournalSources(registered.projectId, 1).length) {
+      registered = await store.registerProject({ root: projectRoot });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`SoloMap project registration startup: ${projectRoot}: ${String(error)}\n`);
+      continue;
+    }
+    if (store.missingProjectJournalSources(registered.projectId, 1).length) {
+      try {
         await operations({ operation: 'import_project_data', input: { collection: 'project-journal', mode: 'unified', sourceRoot: `solomap://${store.databaseId}/${registered.projectId}/project-journal`, projectRoot, idempotencyKey: `startup-journal-projection-v12:${registered.projectId}`, refreshCompleted: true } });
+      } catch (error) {
+        process.stderr.write(`SoloMap journal projection startup: ${projectRoot}: ${String(error)}\n`);
       }
-    } catch (error) { process.stderr.write(`SoloMap journal projection startup: ${projectRoot}: ${String(error)}\n`); }
+    }
     const sources = [
       { collection: 'documentation', sourceRoot: path.join(projectRoot, '.solopreneur', 'documentation.json') },
       { collection: 'project-growth', sourceRoot: path.join(projectRoot, '.solopreneur', 'project_growth.db') },
@@ -291,12 +309,14 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
       { collection: 'run-digests', sourceRoot: path.join(projectRoot, '.solopreneur', 'run-digests') }
     ];
     for (const source of sources) {
-      try {
-        const info = await fs.promises.lstat(source.sourceRoot);
-        if (info.isSymbolicLink() || !info[['agent-runs', 'step-memory', 'run-digests'].includes(source.collection) ? 'isDirectory' : 'isFile']()) continue;
+      if (source.collection !== 'agent-runs') {
+        try {
+          const info = await fs.promises.lstat(source.sourceRoot);
+          if (info.isSymbolicLink() || !info[['step-memory', 'run-digests'].includes(source.collection) ? 'isDirectory' : 'isFile']()) continue;
+        }
+        catch { continue; }
       }
-      catch { continue; }
-      const version = source.collection === 'agent-runs' ? 9 : source.collection === 'project-journal' ? 8 : source.collection === 'project-growth' ? 3 : source.collection === 'documentation' ? 3 : 2;
+      const version = source.collection === 'agent-runs' ? 10 : source.collection === 'project-journal' ? 8 : source.collection === 'project-growth' ? 3 : source.collection === 'documentation' ? 3 : 2;
       const stamp = source.collection === 'agent-runs'
         ? await historicalRunSourceStamp(store, [source.sourceRoot, path.join(projectRoot, '.solopreneur', 'agent-status'), path.join(projectRoot, '.agent_status.json')], shouldContinue, discoveredOwners)
         : source.collection === 'documentation'
