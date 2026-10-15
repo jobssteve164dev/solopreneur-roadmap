@@ -85,6 +85,17 @@ export class MigrationRecycling {
     }
     return null;
   }
+  private isGlobalMemoryPath(file: string): boolean {
+    const memoryRoot = path.resolve(this.store.root, 'memory');
+    const contains = (root: string, candidate: string): boolean => {
+      const relative = path.relative(root, candidate);
+      return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+    };
+    const resolved = path.resolve(file);
+    if (contains(memoryRoot, resolved)) return true;
+    try { return contains(fs.realpathSync(memoryRoot), this.physicalPath(resolved)); }
+    catch { return false; }
+  }
   public verifyJobSource(job: { args: Record<string, unknown> }, key: string, scope?: MigrationProjectScope) {
     const collection = String(job.args.collection || '');
     const root = String(job.args.projectRoot || '');
@@ -102,6 +113,7 @@ export class MigrationRecycling {
   private allowedPath(file: string, source?: Pick<RecyclingItem, 'identity' | 'key'> & Partial<Pick<RecyclingItem, 'itemId' | 'restorePath'>>, projects?: RegisteredProjectScope[]): boolean {
     const resolved = path.resolve(file); const recycleRoot = path.join(path.resolve(this.store.root), '.migration-recycle');
     if (resolved.startsWith(recycleRoot + path.sep)) return true;
+    if (this.isGlobalMemoryPath(resolved)) return false;
     if (!source) return false;
     if (source.itemId && source.restorePath && path.resolve(source.restorePath) === resolved) {
       const bound = this.store.recyclingItem(source.itemId);
@@ -357,7 +369,7 @@ export class MigrationRecycling {
     for (const source of this.store.recyclingCandidateSources(scope ? [...identities!] : undefined).filter(source => belongs(source.identity))) {
       const projects = /^(analysis-caches|step-memory|run-digests|agent-runs):/.test(source.identity) ? projectSnapshot() : undefined;
       const file = this.sourcePath(source.identity, source.key, projects);
-      if (!file || active.some(item => item.path === file)) continue;
+      if (!file || this.isGlobalMemoryPath(file) || active.some(item => item.path === file)) continue;
       if (source.identity.startsWith('intelligence:')) {
         if (!conversationKey.test(source.key) || !this.capturedConversationMatches(source)) continue;
       } else if (source.stage !== 'imported' || (source.identity.startsWith('agent-runs:') && !this.runSourceRetirable(source, projects))) continue;

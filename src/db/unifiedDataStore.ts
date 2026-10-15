@@ -800,7 +800,7 @@ export class UnifiedDataStore {
   public closeMcpActor(actorId: string, projectId: string): void {
     this.db.run("UPDATE actors SET identity_ref=NULL WHERE id=? AND kind='mcp' AND authority_id IN (SELECT actor_id FROM grants WHERE target_id=?)", [actorId, projectId]);
   }
-  public establishMcpActor(projectId: string, resume?: { actorId: string; proof: string }): { actorId: string; proof: string; authorityActorId: string } {
+  public establishMcpActor(projectId: string, resume?: { actorId: string; proof: string }, openRequestId?: string): { actorId: string; proof: string; authorityActorId: string } {
     if (this.current(projectId).kind !== 'project') throw new Error('project_identity_invalid');
     const authorityActorId = `solomap-stdio:${projectId}`;
     if (resume) {
@@ -821,8 +821,13 @@ export class UnifiedDataStore {
       });
     }
     if (!this.rows("SELECT grants.id FROM grants JOIN objects ON objects.id=grants.id WHERE actor_id=? AND target_id=? AND status='active' AND objects.archived_at IS NULL AND (valid_until IS NULL OR valid_until>?)", [authorityActorId, projectId, Date.now()]).length) throw new Error('action_denied');
-    const actorId = crypto.randomUUID();
-    const proof = crypto.randomBytes(32).toString('hex');
+    const actorId = openRequestId ? `solomap-mcp:${digest(`${projectId}\n${openRequestId}`)}` : crypto.randomUUID();
+    const proof = openRequestId ? digest(`solomap-mcp-proof:${projectId}\n${openRequestId}`) : crypto.randomBytes(32).toString('hex');
+    const existing = this.rows('SELECT kind,identity_ref,authority_id FROM actors WHERE id=?', [actorId])[0];
+    if (existing) {
+      if (existing.kind !== 'mcp' || existing.authority_id !== authorityActorId || existing.identity_ref !== digest(proof)) throw new Error('mcp_open_request_conflict');
+      return { actorId, proof, authorityActorId };
+    }
     this.db.run('INSERT INTO actors(id,kind,provider,identity_ref,authority_id) VALUES(?,?,?,?,?)', [actorId, 'mcp', 'solomap-stdio', digest(proof), authorityActorId]);
     return { actorId, proof, authorityActorId };
   }

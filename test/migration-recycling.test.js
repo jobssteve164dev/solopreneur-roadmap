@@ -185,6 +185,57 @@ test('discarding an unconfirmed recycling plan removes only prepared receipts an
   } finally { await f.operations.close(); f.store.close(); }
 });
 
+test('the active global memory tree never enters a physical recycling plan', async () => {
+  const f = fixture();
+  try {
+    const crypto = require('node:crypto');
+    const memoryRoot = path.join(f.root, 'memory');
+    const profile = path.join(memoryRoot, 'active', 'current-session.md');
+    const nestedProject = path.join(memoryRoot, 'inbox');
+    const retiredProjectFile = path.join(nestedProject, '.solopreneur', 'README.md');
+    fs.mkdirSync(path.dirname(profile), { recursive: true });
+    fs.mkdirSync(path.dirname(retiredProjectFile), { recursive: true });
+    fs.writeFileSync(profile, 'current handoff must remain available');
+    fs.writeFileSync(retiredProjectFile, 'nested memory fixture must remain available');
+    const capture = (identity, key, file) => {
+      const bytes = fs.readFileSync(file), hash = crypto.createHash('sha256').update(bytes).digest('hex');
+      f.store.captureMigrationSource({ identity, key, hash }, bytes);
+      f.store.markMigrationSourceImported(identity, key);
+      return { identity, key, hash, path: file, bytes: bytes.length };
+    };
+    const profileSource = capture(`memory:${memoryRoot}`, 'active/current-session.md', profile);
+    capture(`project-legacy-files:${nestedProject}`, 'README.md', retiredProjectFile);
+    assert.deepEqual(await f.call('prepare_recycling'), { planId: null, files: [] });
+    const oldPlan = f.store.createRecyclingPlan([profileSource]);
+    f.store.approveRecyclingFiles(oldPlan.files.map(file => ({ itemId: file.itemId, expectedPath: file.path, path: file.path })));
+    await assert.rejects(f.call('execute_recycling_plan', { planId: oldPlan.planId }), /recycling_items_retained/);
+    assert.equal(fs.readFileSync(profile, 'utf8'), 'current handoff must remain available');
+    assert.equal(fs.readFileSync(retiredProjectFile, 'utf8'), 'nested memory fixture must remain available');
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('the physical target of a symlinked global memory tree never enters a recycling plan through a project alias', async () => {
+  const f = fixture();
+  try {
+    const crypto = require('node:crypto');
+    const physicalMemory = path.join(path.dirname(f.root), 'physical-memory');
+    const nestedProject = path.join(physicalMemory, 'inbox');
+    const retiredProjectFile = path.join(nestedProject, '.solopreneur', 'README.md');
+    fs.mkdirSync(path.dirname(retiredProjectFile), { recursive: true });
+    fs.writeFileSync(retiredProjectFile, 'physical memory target must remain available');
+    fs.symlinkSync(physicalMemory, path.join(f.root, 'memory'), 'dir');
+    const bytes = fs.readFileSync(retiredProjectFile), hash = crypto.createHash('sha256').update(bytes).digest('hex');
+    const identity = `project-legacy-files:${nestedProject}`;
+    f.store.captureMigrationSource({ identity, key: 'README.md', hash }, bytes);
+    f.store.markMigrationSourceImported(identity, 'README.md');
+    assert.deepEqual(await f.call('prepare_recycling'), { planId: null, files: [] });
+    const oldPlan = f.store.createRecyclingPlan([{ identity, key: 'README.md', hash, path: retiredProjectFile, bytes: bytes.length }]);
+    f.store.approveRecyclingFiles(oldPlan.files.map(file => ({ itemId: file.itemId, expectedPath: file.path, path: file.path })));
+    await assert.rejects(f.call('execute_recycling_plan', { planId: oldPlan.planId }), /recycling_items_retained/);
+    assert.equal(fs.readFileSync(retiredProjectFile, 'utf8'), 'physical memory target must remain available');
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
 test('discarding a confirmed recycling plan is rejected atomically', async () => {
   const f = fixture();
   try {

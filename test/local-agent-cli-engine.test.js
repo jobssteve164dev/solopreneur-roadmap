@@ -8,12 +8,17 @@ const { LocalAgentCliEngine, buildCognitiveCliInvocation } = require('../out/loc
 const { cognitiveRuntimeConfigRevision, persistCognitiveRuntimeConfig, readCognitiveRuntimeConfig, refreshCognitiveRuntimeConfig, writeCognitiveRuntimeConfig } = require('../out/cognitiveRuntimeConfig.js');
 
 test('Codex cognitive invocation is headless, read-only, and shell-free', () => {
+  const previousBus = process.env.DBUS_SESSION_BUS_ADDRESS;
+  process.env.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/tmp/solomap-fixture-bus';
   const invocation = buildCognitiveCliInvocation('/usr/local/bin/codex', 'gpt-5', '{"goal":"choose"}');
+  if (previousBus === undefined) delete process.env.DBUS_SESSION_BUS_ADDRESS;
+  else process.env.DBUS_SESSION_BUS_ADDRESS = previousBus;
   assert.equal(invocation.command, '/usr/local/bin/codex');
   assert.deepEqual(invocation.args, ['exec', '--color', 'never', '--skip-git-repo-check', '--sandbox', 'read-only', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--model', 'gpt-5', '-']);
   assert.equal(invocation.stdin, '{"goal":"choose"}');
   assert.equal(invocation.shell, false);
   assert.equal(invocation.env.CODEX_HOME, process.env.CODEX_HOME);
+  assert.equal(invocation.env.DBUS_SESSION_BUS_ADDRESS, 'unix:path=/tmp/solomap-fixture-bus');
   assert.equal(Object.hasOwn(invocation.env, 'OPENAI_API_KEY'), false);
   assert.equal(invocation.args.some(value => /dangerously|allow-all/i.test(value)), false);
 });

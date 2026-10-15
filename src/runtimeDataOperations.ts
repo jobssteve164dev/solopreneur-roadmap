@@ -50,7 +50,9 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
   let storageMaintenanceTail: Promise<void> = Promise.resolve();
   let storageMaintenanceBarrier: Promise<unknown> = Promise.resolve();
   type ProjectSession = { kind: 'project'; actorId: string; scope: string; runIdentity?: McpRunIdentity; reviewBatchId?: string; migrationKind?: MigrationRunKind; migrationTargetId?: string | null; migrationProjectRoot?: string | null; migrationProjectId?: string | null; migrationPhysicalRoot?: string | null };
+  type McpSessionResponse = { actorId: string; proof: string; authorityActorId: string; sessionToken: string; runKind: string; migrationKind: MigrationRunKind | null };
   const sessions = new Map<string, ProjectSession>();
+  const openSessions = new Map<string, { intent: string; response: McpSessionResponse }>();
   const samePhysicalRoot = (left: string, right: string): boolean => {
     try { return fs.realpathSync(left) === fs.realpathSync(right); } catch { return path.resolve(left) === path.resolve(right); }
   };
@@ -149,6 +151,14 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       case 'resolve_roadmap_conflict': return store.resolveRoadmapConflict(input as unknown as Parameters<UnifiedDataStore['resolveRoadmapConflict']>[0]);
       case 'open_mcp_session': {
         const scope = String(input.projectId || '');
+        const openRequestId = String(input.openRequestId || '');
+        if (openRequestId && (openRequestId.length < 16 || openRequestId.length > 128)) throw new Error('invalid_mcp_open_request');
+        const openIntent = JSON.stringify({ scope, runIdentity: input.runIdentity || null, resume: input.resume || null });
+        const previous = openRequestId ? openSessions.get(openRequestId) : undefined;
+        if (previous) {
+          if (previous.intent !== openIntent) throw new Error('idempotency_conflict');
+          return previous.response;
+        }
         const runIdentity = input.runIdentity as McpRunIdentity | undefined;
         const authorizedRun = runIdentity ? store.authorizedRunState(scope, runIdentity) : undefined;
         const runKind = String(authorizedRun?.status.runKind || '');
@@ -162,20 +172,23 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
           : undefined;
         if (migrationProject && migrationProject.projectId !== scope) throw new Error('maintenance_scope_denied');
         const reviewBatchId = runIdentity ? store.authorizedLearningReviewBatch(scope, runIdentity) : undefined;
-        const identity = store.establishMcpActor(scope, input.resume as { actorId: string; proof: string } | undefined);
+        const identity = store.establishMcpActor(scope, input.resume as { actorId: string; proof: string } | undefined, openRequestId || undefined);
         const sessionToken = crypto.randomBytes(32).toString('hex');
         sessions.set(sessionToken, { kind: 'project', actorId: identity.actorId, scope, runIdentity, reviewBatchId, migrationKind,
           migrationTargetId: migrationKind ? String(authorizedRun?.status.migrationTargetId || '') || null : undefined,
           migrationProjectRoot: migrationProject?.root || null,
           migrationProjectId: migrationProject?.projectId || null,
           migrationPhysicalRoot: migrationProject?.physicalRoot || null });
-        return { ...identity, sessionToken, runKind, migrationKind: migrationKind || null };
+        const response = { ...identity, sessionToken, runKind, migrationKind: migrationKind || null };
+        if (openRequestId) openSessions.set(openRequestId, { intent: openIntent, response });
+        return response;
       }
       case 'close_mcp_session': {
         const token = String(input.sessionToken || '');
         const session = sessions.get(token);
         if (session?.kind === 'project') store.closeMcpActor(session.actorId, session.scope);
         sessions.delete(token);
+        for (const [requestId, opened] of openSessions) if (opened.response.sessionToken === token) openSessions.delete(requestId);
         return { closed: true };
       }
       case 'register_project': return store.registerProject(input as unknown as Parameters<UnifiedDataStore['registerProject']>[0]);
@@ -924,26 +937,66 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
 }
 
 export function runtimeMcpSource(globalDataPath: string, scope: string | null, globalReads = false, runIdentity?: McpRunIdentity): UnifiedMcpSource {
-  let session: { actorId: string; proof: string; sessionToken: string; runKind: string; migrationKind: string | null } | undefined;
+  type McpSession = { actorId: string; proof: string; sessionToken: string; runKind: string; migrationKind: string | null };
+  let session: McpSession | undefined;
+  let resume: { actorId: string; proof: string } | undefined;
+  let openRequestId = crypto.randomUUID();
   let opening: Promise<void> | undefined;
   const establish = async (): Promise<void> => {
-    if (!opening) opening = sendRuntimeDataRequest<typeof session>(globalDataPath, { operation: 'open_mcp_session', input: { projectId: scope, ...(runIdentity ? { runIdentity } : {}), ...(session ? { resume: { actorId: session.actorId, proof: session.proof } } : {}) } }).then(value => { session = value; }).finally(() => { opening = undefined; });
+    if (session) return;
+    if (!opening) opening = sendRuntimeDataRequest<McpSession>(globalDataPath, { operation: 'open_mcp_session', input: { projectId: scope, openRequestId, ...(runIdentity ? { runIdentity } : {}), ...(resume ? { resume } : {}) } }).then(value => {
+      session = value;
+      resume = value ? { actorId: value.actorId, proof: value.proof } : resume;
+    }).finally(() => { opening = undefined; });
     await opening;
   };
+  const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
+  const retryableHandshake = (error: unknown): boolean => /(?:ECONNREFUSED|ECONNRESET|EPIPE|socket hang up|runtime_data_response_incomplete|Invalid Runtime endpoint|ENOENT|different_runtime)/.test(errorMessage(error));
+  const safeReplay = (operation: string, input: Record<string, unknown>): boolean =>
+    ['read', 'search', 'context', 'migration_overview', 'migration_status', 'read_recycling_plan'].includes(operation) ||
+    (['write', 'link', 'export'].includes(operation) && typeof input.idempotencyKey === 'string' && input.idempotencyKey.length > 0);
+  const retryOperation = (error: unknown, operation: string, input: Record<string, unknown>): { retry: boolean; resetSession: boolean } => {
+    const message = errorMessage(error);
+    if (/(?:mcp_session_expired|different_runtime)/.test(message)) return { retry: true, resetSession: true };
+    const preconnect = Boolean((error as NodeJS.ErrnoException & { runtimeDataPreconnect?: boolean })?.runtimeDataPreconnect) || /(?:ECONNREFUSED|Invalid Runtime endpoint|ENOENT)/.test(message);
+    if (preconnect) return { retry: true, resetSession: false };
+    const ambiguous = /(?:ECONNRESET|EPIPE|socket hang up|runtime_data_response_incomplete)/.test(message);
+    return { retry: ambiguous && safeReplay(operation, input), resetSession: false };
+  };
   return { scope, globalReads, async sessionInfo() {
-    if (!session) await establish();
+    const deadline = Date.now() + 10_000;
+    for (let attempt = 1; !session; attempt += 1) {
+      try { await establish(); }
+      catch (error) {
+        if (!retryableHandshake(error) || Date.now() >= deadline) throw error;
+        await new Promise(resolve => setTimeout(resolve, Math.min(250, attempt * 50)));
+      }
+    }
     return { runKind: String(session!.runKind || ''), migrationKind: session!.migrationKind || null };
   }, async close() {
     if (opening) await opening;
-    if (session) await sendRuntimeDataRequest(globalDataPath, { operation: 'close_mcp_session', input: { sessionToken: session.sessionToken } });
-    session = undefined;
+    try { if (session) await sendRuntimeDataRequest(globalDataPath, { operation: 'close_mcp_session', input: { sessionToken: session.sessionToken } }); }
+    finally { session = undefined; resume = undefined; openRequestId = crypto.randomUUID(); }
   }, async call(operation, input) {
-    if (!session) await establish();
-    try { return await sendRuntimeDataRequest(globalDataPath, { operation, input, sessionToken: session!.sessionToken }); }
-    catch (error) {
-      if (!(error instanceof Error) || error.message !== 'mcp_session_expired') throw error;
-      await establish();
-      return sendRuntimeDataRequest(globalDataPath, { operation, input, sessionToken: session!.sessionToken });
+    const deadline = Date.now() + 10_000;
+    for (let attempt = 1; ; attempt += 1) {
+      if (!session) {
+        try { await establish(); }
+        catch (error) {
+          if (!retryableHandshake(error) || Date.now() >= deadline) throw error;
+          await new Promise(resolve => setTimeout(resolve, Math.min(250, attempt * 50)));
+          continue;
+        }
+      }
+      const attempted = session!;
+      try {
+        return await sendRuntimeDataRequest(globalDataPath, { operation, input, sessionToken: attempted.sessionToken });
+      } catch (error) {
+        const decision = retryOperation(error, operation, input);
+        if (!decision.retry || Date.now() >= deadline) throw error;
+        if (decision.resetSession && session === attempted) session = undefined;
+        await new Promise(resolve => setTimeout(resolve, Math.min(250, attempt * 50)));
+      }
     }
   } };
 }

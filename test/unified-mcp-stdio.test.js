@@ -7,6 +7,7 @@ const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const test = require('node:test');
 const { sendRuntimeControlCommand, sendRuntimeDataRequest } = require('../out/autonomousRuntimeControl.js');
+const { runtimeMcpSource } = require('../out/runtimeDataOperations.js');
 
 function cleanupExact(root) {
   let stat;
@@ -185,6 +186,135 @@ test('an established MCP process resumes its database session after the Runtime 
     await client.close(); await transport.close();
     if (owner.child.exitCode === null) { await sendRuntimeControlCommand(root, 'stop'); await once(owner.child, 'close'); }
   }
+});
+
+test('opening an MCP session is idempotent for one client request across a lost response', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-mcp-open-idempotency-'));
+  const root = path.join(base, '.solomap-global'), projectRoot = path.join(base, 'project');
+  fs.mkdirSync(projectRoot, { recursive: true });
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  let store = new UnifiedDataStore(root);
+  let operations = createRuntimeDataOperations(store);
+  try {
+    const project = await store.registerProject({ root: projectRoot });
+    const request = { operation: 'open_mcp_session', input: { projectId: project.projectId, openRequestId: 'fixture-open-request' } };
+    const first = await operations(request);
+    const replay = await operations(request);
+    assert.deepEqual(replay, first);
+    await operations.close(); store.close();
+    store = new UnifiedDataStore(root);
+    operations = createRuntimeDataOperations(store);
+    const afterRestart = await operations(request);
+    assert.equal(afterRestart.actorId, first.actorId);
+    assert.equal(afterRestart.proof, first.proof);
+    assert.notEqual(afterRestart.sessionToken, first.sessionToken);
+  } finally { await operations.close(); store.close(); cleanupExact(base); }
+});
+
+test('an established MCP source retries the request that races a Runtime handover', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-mcp-runtime-race-'));
+  const root = path.join(base, '.solomap-global'), runtimeRoot = path.join(root, 'runtime');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  let opens = 0, searches = 0;
+  const openInputs = [], initialSearches = [], closedSessions = [];
+  const server = net.createServer(socket => {
+    let body = '';
+    socket.setEncoding('utf8');
+    socket.on('data', chunk => {
+      body += chunk;
+      const newline = body.indexOf('\n');
+      if (newline < 0) return;
+      const request = JSON.parse(body.slice(0, newline)).request;
+      if (request.operation === 'open_mcp_session') {
+        opens += 1;
+        openInputs.push(request.input);
+        socket.end(JSON.stringify({ ok: true, runtimeId: 'fixture-runtime', result: {
+          actorId: 'fixture-actor', proof: 'fixture-proof', sessionToken: `fixture-session-${opens}`, runKind: 'solo', migrationKind: null
+        } }));
+      } else if (request.operation === 'search') {
+        searches += 1;
+        if (searches <= 2) {
+          initialSearches.push(socket);
+          if (initialSearches.length === 2) for (const pending of initialSearches) pending.end(JSON.stringify({ ok: false, runtimeId: 'fixture-runtime', error: 'different_runtime' }));
+        } else socket.end(JSON.stringify({ ok: true, runtimeId: 'fixture-runtime', result: { items: [], cursor: null } }));
+      } else {
+        closedSessions.push(request.input.sessionToken);
+        socket.end(JSON.stringify({ ok: true, runtimeId: 'fixture-runtime', result: { closed: true } }));
+      }
+    });
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  const address = server.address();
+  fs.writeFileSync(path.join(runtimeRoot, 'control.json'), JSON.stringify({
+    schemaVersion: 1, runtimeId: 'fixture-runtime', status: 'running', heartbeatAt: new Date().toISOString(),
+    host: '127.0.0.1', port: address.port, token: 'fixture-token'
+  }));
+  const source = runtimeMcpSource(root, '11111111-1111-4111-8111-111111111111', true);
+  t.after(async () => { await source.close(); await new Promise(resolve => server.close(resolve)); cleanupExact(base); });
+  assert.equal((await source.sessionInfo()).runKind, 'solo');
+  assert.deepEqual(await Promise.all([
+    source.call('search', { query: 'handover-a' }),
+    source.call('search', { query: 'handover-b' })
+  ]), [{ items: [], cursor: null }, { items: [], cursor: null }]);
+  assert.equal(opens, 2);
+  assert.equal(searches, 4);
+  assert.equal(openInputs[0].resume, undefined);
+  assert.deepEqual(openInputs[1].resume, { actorId: 'fixture-actor', proof: 'fixture-proof' });
+  await source.close();
+  assert.deepEqual(closedSessions, ['fixture-session-2']);
+});
+
+test('an MCP source only replays an ambiguous Runtime response when the operation has an idempotency contract', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-mcp-runtime-replay-'));
+  const root = path.join(base, '.solomap-global'), runtimeRoot = path.join(root, 'runtime');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  let opens = 0, retries = 0;
+  const openInputs = [];
+  const writes = [];
+  const server = net.createServer(socket => {
+    let body = '';
+    socket.setEncoding('utf8');
+    socket.on('data', chunk => {
+      body += chunk;
+      const newline = body.indexOf('\n');
+      if (newline < 0) return;
+      const request = JSON.parse(body.slice(0, newline)).request;
+      if (request.operation === 'open_mcp_session') {
+        opens += 1;
+        openInputs.push(request.input);
+        if (opens === 1) socket.end();
+        else socket.end(JSON.stringify({ ok: true, runtimeId: 'fixture-runtime', result: {
+          actorId: 'fixture-actor', proof: 'fixture-proof', sessionToken: 'fixture-session', runKind: 'solo', migrationKind: null
+        } }));
+      } else if (request.operation === 'retry_migration') {
+        retries += 1;
+        if (retries === 1) socket.end();
+        else socket.end(JSON.stringify({ ok: true, runtimeId: 'fixture-runtime', result: { status: 'queued' } }));
+      } else if (request.operation === 'write') {
+        writes.push(request.input);
+        if (writes.length === 1) socket.end();
+        else socket.end(JSON.stringify({ ok: true, runtimeId: 'fixture-runtime', result: { objectId: 'fixture-object', revision: 1 } }));
+      } else socket.end(JSON.stringify({ ok: true, runtimeId: 'fixture-runtime', result: { closed: true } }));
+    });
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  const address = server.address();
+  fs.writeFileSync(path.join(runtimeRoot, 'control.json'), JSON.stringify({
+    schemaVersion: 1, runtimeId: 'fixture-runtime', status: 'running', heartbeatAt: new Date().toISOString(),
+    host: '127.0.0.1', port: address.port, token: 'fixture-token'
+  }));
+  const source = runtimeMcpSource(root, '11111111-1111-4111-8111-111111111111', true);
+  t.after(async () => { await source.close(); await new Promise(resolve => server.close(resolve)); cleanupExact(base); });
+  await source.sessionInfo();
+  assert.equal(typeof openInputs[0].openRequestId, 'string');
+  assert.equal(openInputs[0].openRequestId, openInputs[1].openRequestId);
+  await assert.rejects(source.call('retry_migration', { jobId: 'fixture-job' }), /runtime_data_response_incomplete/);
+  assert.equal(retries, 1);
+  const input = { kind: 'memory', action: 'create', scope: '11111111-1111-4111-8111-111111111111', idempotencyKey: 'fixture-write', data: { title: 'fixture' } };
+  assert.deepEqual(await source.call('write', input), { objectId: 'fixture-object', revision: 1 });
+  assert.deepEqual(writes, [input, input]);
+  assert.equal(opens, 2);
 });
 
 test('the MCP bridge exits promptly when its owning client session closes', async t => {
