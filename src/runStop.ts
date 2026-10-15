@@ -90,12 +90,13 @@ export class RunStop {
     if (state.status.interactiveSessionClosed) { new RunNativeObserver(this.store).forget(state); return state; }
     await new RunNativeObserver(this.store).observe(state, false, 143);
     state = current();
+    const finishedBeforeStop = Boolean(state.status.finishedAt);
     const workspaceSnapshot = state.status.finishedAt && !state.status.hostOutputPending && !state.status.nativeOutputPending ? undefined : await snapshotWorkspace(String(state.status.workspaceRoot));
     const gitEvidence = workspaceSnapshot ? await captureRunGitEvidence(String(state.status.workspaceRoot), String(state.status.baseGitHash || ''), workspaceSnapshot) : undefined;
     state = current();
     if (state.status.hostOutputPending) state = this.store.finalizeRunOutput(projectId, { executionLogId: input.executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, exitCode: 143, source: 'recovery', workspaceSnapshot, gitEvidence, idempotencyKey: `${input.idempotencyKey}:finalize-output` });
     if (!state.status.finishedAt) state = this.store.checkpointRun(projectId, { executionLogId: input.executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'complete', outcome: input.outcome === 'partial' ? 'partial' : 'failed', summary: input.reason, exitCode: 143, workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery', idempotencyKey: `${input.idempotencyKey}:complete` });
-    if (state.status.interactiveSession && !state.status.interactiveSessionClosed) {
+    if ((state.status.interactiveSession || finishedBeforeStop) && !state.status.interactiveSessionClosed) {
       state = current();
       state = this.store.checkpointRun(projectId, { executionLogId: input.executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'session-close', exitCode: 143, ...(state.status.nativeOutputPending ? { workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery' as const } : {}), idempotencyKey: `${input.idempotencyKey}:close` });
     }

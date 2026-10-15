@@ -43,7 +43,7 @@ async function historicalRunSourceStamp(store: UnifiedDataStore, roots: string[]
 export async function historicalRunOwnerStateStamp(store: UnifiedDataStore, shouldContinue: () => boolean): Promise<string> {
   const hash = crypto.createHash('sha256');
   const discoveredOwners = discoverLegacyRunProcesses(undefined, true);
-  for (const projectRoot of store.registeredProjectRoots().sort()) {
+  for (const projectRoot of store.existingRegisteredProjectRoots().sort()) {
     const liveOwners = discoveredOwners.filter(owner => path.resolve(owner.projectRoot) === path.resolve(projectRoot))
       .map(owner => [owner.pid, owner.birth, owner.runDirectory, owner.executionLogId || null]).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
     hash.update(JSON.stringify([projectRoot, 'live-wrappers', liveOwners]));
@@ -173,7 +173,7 @@ async function enqueueStartupProjectAutonomyMigration(store: UnifiedDataStore, o
 async function enqueueStartupAnalysisMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
   const projectScopes: Record<string, string> = {};
   const files = [path.join(store.root, 'usage', 'solomap-usage.json'), path.join(store.root, 'sidebar-core-snapshot-v1.json')];
-  for (const projectRoot of store.registeredProjectRoots()) {
+  for (const projectRoot of store.existingRegisteredProjectRoots()) {
     if (!shouldContinue()) return;
     let project;
     try { project = await store.registerProject({ root: projectRoot }); }
@@ -203,7 +203,7 @@ async function enqueueStartupLearningReviewMigration(store: UnifiedDataStore, op
   try { if (!(await fs.promises.lstat(sourceRoot)).isDirectory()) return; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
   const projectScopes: Record<string, string> = {};
-  for (const root of store.registeredProjectRoots()) {
+  for (const root of store.existingRegisteredProjectRoots()) {
     if (!shouldContinue()) return;
     let project;
     try { project = await store.registerProject({ root }); }
@@ -235,7 +235,7 @@ async function enqueueStartupStrategyMigration(store: UnifiedDataStore, operatio
   try { if (!(await fs.promises.stat(sourceRoot)).isDirectory()) return; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
   const mappings: Array<[string, string]> = [];
-  for (const projectRoot of store.registeredProjectRoots()) {
+  for (const projectRoot of store.existingRegisteredProjectRoots()) {
     if (!shouldContinue()) return;
     try {
       const registered = await store.registerProject({ root: projectRoot });
@@ -252,7 +252,7 @@ async function enqueueStartupLearningMigration(store: UnifiedDataStore, operatio
   try { if (!(await fs.promises.stat(sourceRoot)).isDirectory()) return; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
   const mappings: Array<[string, string]> = [];
-  for (const projectRoot of store.registeredProjectRoots()) {
+  for (const projectRoot of store.existingRegisteredProjectRoots()) {
     if (!shouldContinue()) return;
     try {
       const project = await store.registerProject({ root: projectRoot });
@@ -265,7 +265,7 @@ async function enqueueStartupLearningMigration(store: UnifiedDataStore, operatio
 }
 
 async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, selectedProjectRoot?: string): Promise<void> {
-  let projects: Array<{ path: string }> = store.registeredProjectRoots().map(projectPath => ({ path: projectPath }));
+  let projects: Array<{ path: string }> = store.existingRegisteredProjectRoots().map(projectPath => ({ path: projectPath }));
   try {
     const registry = (await store.initializeProjectRegistry()).registry;
     const known = new Set(projects.map(project => path.resolve(project.path)));
@@ -343,7 +343,7 @@ export async function enqueueStartupMemoryMigration(store: UnifiedDataStore, ope
     process.stderr.write(`SoloMap memory source inspection: ${String(error)}\n`);
   }
   const mappings = new Map<string, string | null>();
-  const projects: Array<{ path: string; name?: string }> = store.registeredProjectRoots().map(projectPath => ({ path: projectPath }));
+  const projects: Array<{ path: string; name?: string }> = store.existingRegisteredProjectRoots().map(projectPath => ({ path: projectPath }));
   try {
     const registry = (await store.initializeProjectRegistry()).registry;
     const known = new Set(projects.map(project => path.resolve(project.path)));

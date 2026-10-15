@@ -2988,6 +2988,17 @@ export class UnifiedDataStore {
       .filter(row => !stale.has(String(row.project_id)))
       .map(row => String(row.root_path));
   }
+  public existingRegisteredProjectRoots(): string[] {
+    return this.existingRegisteredProjectScopes().map(project => project.root);
+  }
+  public existingRegisteredProjectScopes(): Array<{ root: string; projectId: string }> {
+    return this.rows("SELECT root_path,project_id FROM project_locations WHERE device_id=? AND status='active' ORDER BY root_path", [this.deviceId])
+      .map(row => ({ root: String(row.root_path), projectId: String(row.project_id) }))
+      .filter(project => {
+        try { return fs.statSync(project.root).isDirectory(); }
+        catch { return false; }
+      });
+  }
   public registeredProjectScopes(): Array<{ root: string; projectId: string }> {
     const stale = new Set(this.staleSolomapTestProjectRegistrations().map(project => project.projectId));
     return this.rows("SELECT root_path,project_id FROM project_locations WHERE device_id=? AND status='active' ORDER BY root_path", [this.deviceId])
@@ -3005,11 +3016,11 @@ export class UnifiedDataStore {
   private staleSolomapTestProjectRegistrations(): Array<{ projectId: string; root: string }> {
     const projectReferences = this.projectReferenceColumnsCache ||= this.rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
       .flatMap(row => this.rows(`PRAGMA foreign_key_list(${quoteSqlIdentifier(String(row.name))})`)
-        .filter(foreignKey => foreignKey.table === 'projects' && !['projects', 'project_locations'].includes(String(row.name)))
+        .filter(foreignKey => foreignKey.table === 'projects' && foreignKey.to === 'id' && !['projects', 'project_locations'].includes(String(row.name)))
         .map(foreignKey => ({ table: String(row.name), column: String(foreignKey.from) })));
     const objectReferences = this.projectObjectReferenceColumnsCache ||= this.rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
       .flatMap(row => this.rows(`PRAGMA foreign_key_list(${quoteSqlIdentifier(String(row.name))})`)
-        .filter(foreignKey => foreignKey.table === 'objects' && !['projects', 'object_revisions', 'events'].includes(String(row.name)))
+        .filter(foreignKey => foreignKey.table === 'objects' && foreignKey.to === 'id' && !['projects', 'object_revisions', 'events'].includes(String(row.name)))
         .map(foreignKey => ({ table: String(row.name), column: String(foreignKey.from) })));
     const registry = this.readProjectRegistry();
     const registeredRoots = new Set(registry && 'registry' in registry
@@ -4133,7 +4144,8 @@ export class UnifiedDataStore {
         Object.assign(metadata, { taskReportObjectId: reportReceipt.objectId, taskReportRevision: reportReceipt.revision, taskReportStatus: reportInput.availability === 'available' ? 'recorded' : reportInput.availability, taskReportError: reportInput.validationError });
         }
       } else if (input.action === 'session-close') {
-        status = ['In Progress', 'Failed', 'Completed', 'Stopped'].includes(String(row.status)) ? String(row.status) : 'Session Closed';
+        const preserveInProgress = row.status === 'In Progress' && metadata.interactiveSession === true;
+        status = preserveInProgress || ['Failed', 'Completed', 'Stopped'].includes(String(row.status)) ? String(row.status) : 'Session Closed';
         finishedAt = now;
         const turn = this.current(turnId, false);
         if (turn.data.finished_at === null) {
@@ -5290,6 +5302,26 @@ export class UnifiedDataStore {
       if (!this.runFlowLaunchAllowed(projectId, String(row.run_id))) throw new Error('flow_not_running');
       if (JSON.parse(this.content(String(row.metadata_content_id)).toString('utf8')).stopRequested) throw new Error('run_stop_requested');
       if (!row.delivery_pending || row.finished_at !== null || this.hasLiveRunProcess(row)) throw new Error('run_already_delivered');
+      if (row.delivery_owner_id !== input.owner.id && this.runDeliveryOwnerAlive(projectId, input.executionLogId)) throw new Error('run_delivery_owner_alive');
+      this.db.run('UPDATE run_control SET delivery_owner_id=?,delivery_pid=?,delivery_birth=? WHERE run_id=?', [input.owner.id, input.owner.pid, input.owner.birth, row.run_id]);
+      this.db.run('UPDATE objects SET revision=revision+1,updated_at=? WHERE id=?', [Date.now(), row.run_id]);
+      this.saveRunControlRevision(String(row.run_id));
+      return this.current(String(row.run_id), false);
+    }, undefined, false);
+    return { ...this.readRunState(projectId, input.executionLogId, receipt.revision), receipt };
+  }
+  public claimRunTerminalOwner(projectId: string, input: { executionLogId: number; generation: number; expectedRevision: number; terminalName: string; terminalDeliveryId: string; owner: { id: string; pid: number; birth: string }; idempotencyKey: string }): RunState {
+    if (!input.owner?.id || !Number.isInteger(input.owner.pid) || input.owner.pid < 1 || typeof input.owner.birth !== 'string') throw new Error('invalid_run_delivery_owner');
+    if (!input.terminalName || !input.terminalDeliveryId) throw new Error('run_terminal_identity_required');
+    const initial = this.runControl(projectId, input.executionLogId);
+    if (initial.generation !== input.generation) throw new Error('run_owner_conflict');
+    const receipt = this.recordMutation({ operation: 'claim_run_terminal_owner', projectId, input }, input.idempotencyKey, 'terminal_owner', () => {
+      const row = this.runControl(projectId, input.executionLogId);
+      if (row.revision !== input.expectedRevision) throw new Error('revision_conflict');
+      const metadata = JSON.parse(this.content(String(row.metadata_content_id)).toString('utf8')) as Record<string, unknown>;
+      if (metadata.interactiveSession !== true || metadata.interactiveSessionClosed === true || metadata.stopRequested === true || row.delivery_pending) throw new Error('run_terminal_not_recoverable');
+      if (String(metadata.terminalName || '') !== input.terminalName || String(metadata.terminalDeliveryId || '') !== input.terminalDeliveryId) throw new Error('run_delivery_identity_changed');
+      if (!this.hasLiveRunProcess(row)) throw new Error('run_owner_missing');
       if (row.delivery_owner_id !== input.owner.id && this.runDeliveryOwnerAlive(projectId, input.executionLogId)) throw new Error('run_delivery_owner_alive');
       this.db.run('UPDATE run_control SET delivery_owner_id=?,delivery_pid=?,delivery_birth=? WHERE run_id=?', [input.owner.id, input.owner.pid, input.owner.birth, row.run_id]);
       this.db.run('UPDATE objects SET revision=revision+1,updated_at=? WHERE id=?', [Date.now(), row.run_id]);
@@ -7280,16 +7312,30 @@ export class UnifiedDataStore {
     const temporary = `${destination}.solomap-backup-${digest(requestKey).slice(0, 24)}`;
     const delivery = `${temporary}.delivery`;
     type StoredBackupReceipt = { destination: string; databaseId: string; sha256: string; bytes: number; previousSha256: string | null };
+    type InspectedSnapshot = { sha256: string; bytes: number; identity: string };
     const publicReceipt = (stored: StoredBackupReceipt) => ({ destination: stored.destination, databaseId: stored.databaseId, sha256: stored.sha256, bytes: stored.bytes });
-    const inspectSnapshot = (file: string): { sha256: string; bytes: number } | null => {
+    const regularFileIdentity = (file: string): string | null => {
       if (!fs.existsSync(file)) return null;
       const stat = fs.lstatSync(file);
       if (!stat.isFile() || stat.isSymbolicLink()) return null;
+      return [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(':');
+    };
+    const inspectSnapshot = (file: string): InspectedSnapshot | null => {
+      const identity = regularFileIdentity(file);
+      if (!identity) return null;
       try {
-        const valid = inspectImmutableDatabase(file, database => database.exec('PRAGMA integrity_check')[0]?.values?.[0]?.[0] === 'ok'
-          && database.exec("SELECT value FROM database_meta WHERE key='database_id'")[0]?.values?.[0]?.[0] === this.databaseId);
+        const valid = inspectImmutableDatabase(file, database =>
+          database.exec("SELECT value FROM database_meta WHERE key='database_id'")[0]?.values?.[0]?.[0] === this.databaseId);
         if (!valid) return null;
       } catch { return null; }
+      const inspected = digestFile(file);
+      if (regularFileIdentity(file) !== identity || inspected.bytes !== fs.lstatSync(file).size) return null;
+      return { ...inspected, identity };
+    };
+    const inspectVerifiedDigest = (file: string): { sha256: string; bytes: number } | null => {
+      if (!fs.existsSync(file)) return null;
+      const stat = fs.lstatSync(file);
+      if (!stat.isFile() || stat.isSymbolicLink()) return null;
       return digestFile(file);
     };
     const previous = this.rows('SELECT input_hash,result_content_id,status FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, requestKey])[0];
@@ -7318,9 +7364,11 @@ export class UnifiedDataStore {
     const stableDelivery = path.join(stableParent.directory, path.basename(delivery));
     let stored = previous?.result_content_id ? JSON.parse(this.content(String(previous.result_content_id)).toString('utf8')) as StoredBackupReceipt : null;
     let prepared = Boolean(stored);
+    let verifiedTemporary: InspectedSnapshot | null = null;
     try {
       if (!stored) {
         let snapshot = inspectSnapshot(stableTemporary);
+        verifiedTemporary = snapshot;
         if (!snapshot && fs.existsSync(stableTemporary)) fs.unlinkSync(stableTemporary);
         if (fs.existsSync(stableDestination)) assertDestinationInactive();
         const prior = fs.existsSync(stableDestination) ? inspectSnapshot(stableDestination) : null;
@@ -7333,6 +7381,7 @@ export class UnifiedDataStore {
           this.assertSafeDestinationParent(destination, destinationParent, 'backup_destination_invalid');
           snapshot = inspectSnapshot(stableTemporary);
           if (!snapshot) throw new Error('backup_verification_failed');
+          verifiedTemporary = snapshot;
         }
         stored = { destination, databaseId: this.databaseId, sha256: snapshot.sha256, bytes: snapshot.bytes, previousSha256: prior?.sha256 || null };
         this.db.run("UPDATE requests SET status='prepared',result_content_id=? WHERE actor_id=? AND idempotency_key=?", [this.putContent(canonical(stored), 'application/json'), this.actorId, requestKey]);
@@ -7347,7 +7396,9 @@ export class UnifiedDataStore {
         return publicReceipt(stored);
       }
       if (stored.previousSha256 === null ? fs.existsSync(stableDestination) : !published || published.sha256 !== stored.previousSha256) throw new Error('backup_destination_changed');
-      const stage = inspectSnapshot(stableTemporary);
+      const stage = verifiedTemporary && regularFileIdentity(stableTemporary) === verifiedTemporary.identity
+        ? verifiedTemporary
+        : inspectVerifiedDigest(stableTemporary);
       if (!stage || stage.sha256 !== stored.sha256 || stage.bytes !== stored.bytes) throw new Error('backup_staging_missing');
       this.assertSafeDestinationParent(destination, destinationParent, 'backup_destination_invalid');
       if (fs.existsSync(stableDelivery)) fs.unlinkSync(stableDelivery);

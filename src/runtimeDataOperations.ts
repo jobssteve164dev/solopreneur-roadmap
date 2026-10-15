@@ -58,7 +58,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
     if (input.projectRoot === undefined) return undefined;
     const requested = String(input.projectRoot || '');
     if (!path.isAbsolute(requested)) throw new Error('project_scope_required');
-    const registered = store.registeredProjectScopes().find(candidate => samePhysicalRoot(candidate.root, requested));
+    const registered = store.existingRegisteredProjectScopes().find(candidate => samePhysicalRoot(candidate.root, requested));
     if (!registered) throw new Error('project_scope_denied');
     let physicalRoot: string;
     try { physicalRoot = fs.realpathSync(registered.root); } catch { throw new Error('project_scope_denied'); }
@@ -343,6 +343,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const project = input.projectId || input.root ? await runProject(input) : undefined;
         return store.listRunStates({ ...(project ? { projectId: project.projectId } : {}), ...(input.pendingConsumer === true ? { pendingConsumer: true } : {}), ...(input.cursor !== undefined ? { cursor: Number(input.cursor) } : {}), ...(input.limit !== undefined ? { limit: Number(input.limit) } : {}) });
       }
+      case 'list_recoverable_run_states': return store.recoverableRunStates(Number(input.cursor || 0));
       case 'list_run_deliveries': {
         const project = input.projectId || input.root ? await runProject(input) : undefined;
         return store.listRunDeliveries({ ...input, ...(project ? { projectId: project.projectId } : {}) });
@@ -350,6 +351,10 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       case 'release_run_delivery': {
         const project = await runProject(input);
         return store.releaseRunDelivery(project.projectId, input as unknown as Parameters<UnifiedDataStore['releaseRunDelivery']>[1]);
+      }
+      case 'claim_run_terminal_owner': {
+        const project = await runProject(input);
+        return store.claimRunTerminalOwner(project.projectId, input as unknown as Parameters<UnifiedDataStore['claimRunTerminalOwner']>[1]);
       }
       case 'patch_run_state': {
         const project = await runProject(input);

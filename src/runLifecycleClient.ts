@@ -361,6 +361,32 @@ export class RunLifecycleClient {
     return result;
   }
 
+  public async listRecoverableStatuses(): Promise<Array<{ reference: string; status: StatusSnapshot }>> {
+    const result: Array<{ reference: string; status: StatusSnapshot }> = [];
+    let cursor: number | null = 0;
+    do {
+      const page = await this.operation('list_recoverable_run_states', { cursor }) as { items: RunState[]; nextCursor: number | null };
+      for (const state of page.items) {
+        const reference = runStatusReference(String(state.status.workspaceRoot), Number(state.status.rootExecutionLogId));
+        result.push({ reference, status: this.status(reference, state) });
+      }
+      cursor = page.nextCursor;
+    } while (cursor !== null);
+    return result;
+  }
+
+  public async claimTerminalOwner(reference: string, status: StatusSnapshot, owner: { id: string; pid: number; birth: string }): Promise<StatusSnapshot> {
+    const snapshot = status[runSnapshot];
+    if (!snapshot || snapshot.reference !== reference) throw new Error('run_status_snapshot_required');
+    const state = await this.operation('claim_run_terminal_owner', {
+      ...parseRunStatusReference(reference), projectId: snapshot.state.projectId,
+      generation: snapshot.state.generation, expectedRevision: snapshot.state.revision,
+      terminalName: String(status.terminalName || ''), terminalDeliveryId: String(status.terminalDeliveryId || ''), owner,
+      idempotencyKey: `run:${snapshot.state.runId}:${snapshot.state.generation}:terminal-owner:${owner.id}`
+    }) as RunState;
+    return this.status(reference, state);
+  }
+
   public async readLog(reference: string, stream: string, status?: StatusSnapshot): Promise<Buffer> {
     const identity = parseRunStatusReference(reference);
     const state = await this.selectedState(reference, status);

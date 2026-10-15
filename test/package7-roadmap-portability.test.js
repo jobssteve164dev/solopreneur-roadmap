@@ -343,6 +343,29 @@ test('concurrent backup replays coalesce and distinct requests serialize on one 
   assert.equal(fs.readdirSync(path.dirname(destination)).some(name => name.includes('.solomap-backup-') || name.endsWith('.delivery')), false);
 });
 
+test('backup validates one snapshot identity without blocking on a full database scan', async t => {
+  const f = fixture(t), destination = path.join(f.dataRoot, 'exports', 'single-validation.db');
+  const exec = DiskDatabase.prototype.exec; let integrityChecks = 0; let quickChecks = 0; let identityChecks = 0;
+  const openSync = fs.openSync; let stagingDigestReads = 0;
+  DiskDatabase.prototype.exec = function(sql) {
+    if (this.filePath.includes('.solomap-backup-') && sql === 'PRAGMA integrity_check') integrityChecks++;
+    if (this.filePath.includes('.solomap-backup-') && sql === 'PRAGMA quick_check') quickChecks++;
+    if (this.filePath.includes('.solomap-backup-') && sql.includes("FROM database_meta WHERE key='database_id'")) identityChecks++;
+    return exec.apply(this, arguments);
+  };
+  fs.openSync = function(file, flags) {
+    if (String(file).includes('.solomap-backup-') && flags === 'r') stagingDigestReads++;
+    return openSync.apply(this, arguments);
+  };
+  try { await f.store.backup({ destination, idempotencyKey: 'single-validation' }); }
+  finally { DiskDatabase.prototype.exec = exec; fs.openSync = openSync; }
+  assert.equal(identityChecks, 1);
+  assert.equal(quickChecks, 0);
+  assert.equal(integrityChecks, 0);
+  assert.equal(stagingDigestReads, 1);
+  assert.equal(fs.existsSync(destination), true);
+});
+
 test('a failed backup leaves no destination or temporary file and the same request can retry', async t => {
   const f = fixture(t), destination = path.join(f.dataRoot, 'exports', 'retry.db');
   const backup = f.store.db.backup.bind(f.store.db);

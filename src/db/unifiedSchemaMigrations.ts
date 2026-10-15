@@ -575,4 +575,6 @@ CREATE INDEX content_ref_scheduled_occurrences_payload_content_id ON scheduled_o
 CREATE INDEX content_ref_notification_delivery_attempts_response_content_id ON notification_delivery_attempts(response_content_id);
 CREATE INDEX content_ref_roadmap_file_states_pending_content_id ON roadmap_file_states(pending_content_id);
 CREATE INDEX content_ref_roadmap_file_states_accepted_content_id ON roadmap_file_states(accepted_content_id);
+` }, { version: 42, sql: `
+CREATE INDEX events_request ON events(request_id);
 ` }];

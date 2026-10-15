@@ -10306,6 +10306,7 @@ async function pollActiveConversations(context: vscode.ExtensionContext): Promis
       }
       deliveryCursor = deliveries.nextCursor;
     } while (deliveryCursor !== null);
+    await reconcileRestoredAgentTerminalOwners(client, await client.listRecoverableStatuses());
     const pending = await client.listStatuses(undefined, true);
     for (const record of pending) {
       await processRegisteredStatusFile(context, record.reference, false, record.status, client.dataRoot);
@@ -10318,6 +10319,36 @@ async function pollActiveConversations(context: vscode.ExtensionContext): Promis
   try { await flight; }
   finally {
     if (activeRunConsumerPolls.get(key) === flight) activeRunConsumerPolls.delete(key);
+  }
+}
+
+async function reconcileRestoredAgentTerminalOwners(
+  client: RunLifecycleClient,
+  records: Array<{ reference: string; status: Record<string, any> }>
+): Promise<void> {
+  const terminalsByName = new Map(vscode.window.terminals.map(terminal => [terminal.name, terminal]));
+  let owner: Awaited<ReturnType<typeof getAgentRunDeliveryOwner>> | undefined;
+  for (const record of records) {
+    const status = record.status;
+    const terminalName = String(status.terminalName || '');
+    const terminalDeliveryId = String(status.terminalDeliveryId || '');
+    const terminal = terminalsByName.get(terminalName);
+    const terminalCwd = terminal && typeof terminal.creationOptions === 'object' && 'cwd' in terminal.creationOptions
+      ? typeof terminal.creationOptions.cwd === 'string' ? terminal.creationOptions.cwd : terminal.creationOptions.cwd?.fsPath
+      : '';
+    const workspaceRoot = String(status.workspaceRoot || '');
+    const terminalBelongsToRun = Boolean(terminal && workspaceRoot && (terminalCwd
+      ? path.resolve(terminalCwd) === path.resolve(workspaceRoot)
+      : activeProjectRoot && path.resolve(activeProjectRoot) === path.resolve(workspaceRoot)));
+    if (status.interactiveSession !== true || status.interactiveSessionClosed === true || status.deliveryPending === true
+      || !terminalName || !terminalDeliveryId || !terminalBelongsToRun) continue;
+    owner ||= await getAgentRunDeliveryOwner();
+    if (status.deliveryOwnerId === owner.id && Number(status.deliveryOwnerPid) === owner.pid && String(status.deliveryOwnerBirth || '') === owner.birth) continue;
+    try {
+      await client.claimTerminalOwner(record.reference, status, owner);
+    } catch (error) {
+      if (!['revision_conflict', 'run_owner_conflict', 'run_delivery_owner_alive', 'run_delivery_identity_changed', 'run_owner_missing', 'run_terminal_not_recoverable'].includes((error as Error).message)) throw error;
+    }
   }
 }
 

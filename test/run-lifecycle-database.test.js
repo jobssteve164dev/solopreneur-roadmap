@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
+const { once } = require('node:events');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
 const { RunLifecycleClient, readConversationLogSnapshot, runStatusReference } = require('../out/runLifecycleClient.js');
@@ -531,6 +533,35 @@ test('run state patches retain omitted fields and historical state while a new o
     await assert.rejects(f.call('patch_run_state', { root: f.project, executionLogId: 1, generation: initial.generation, expectedRevision: claimed.revision, patch: { status: 'Failed' }, idempotencyKey: 'old-owner' }), /run_owner_conflict/);
     await assert.rejects(f.call('append_run_log', { root: f.project, executionLogId: 1, generation: initial.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from('late').toString('base64'), idempotencyKey: 'late-log' }), /run_owner_conflict/);
   } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('a restored terminal reclaims its live run before orphan recovery', async () => {
+  const f = fixture();
+  const wrapper = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>process.exit(0));process.stdout.write('ready');setInterval(()=>{},1000)"], { cwd: f.project, stdio: 'pipe' });
+  await once(wrapper.stdout, 'data'); wrapper.stderr.resume();
+  const processBirth = pid => { const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8'); return `proc:${stat.slice(stat.lastIndexOf(') ') + 2).trim().split(/\s+/)[19]}`; };
+  try {
+    let run = await f.call('prepare_run', { ...request(f.project), metadata: { interactiveSession: true, terminalName: 'restored terminal', terminalDeliveryId: 'delivery-1' }, deliveryOwner: { id: 'old-window', pid: 1073741824, birth: 'proc:gone' } });
+    run = await f.call('claim_run', { root: f.project, executionLogId: 1, expectedRevision: run.revision, agentPid: wrapper.pid, processBirth: processBirth(wrapper.pid), terminalDeliveryId: 'delivery-1', idempotencyKey: 'restored-runner-claim' });
+    run = await f.call('checkpoint_run', { root: f.project, executionLogId: 1, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial', summary: '本轮已经保存', idempotencyKey: 'restored-turn-complete' });
+    assert.equal(run.status.status, 'In Progress');
+    assert.ok(run.status.finishedAt);
+    const client = new RunLifecycleClient((operation, input) => f.operations({ operation, input }), f.root);
+    const [recoverable] = await client.listRecoverableStatuses();
+    assert.equal(recoverable.status.terminalName, 'restored terminal');
+    await assert.rejects(f.call('claim_run_terminal_owner', { root: f.project, executionLogId: 1, generation: run.generation, expectedRevision: run.revision, terminalName: 'another terminal', terminalDeliveryId: 'delivery-1', owner: { id: 'new-window', pid: process.pid, birth: processBirth(process.pid) }, idempotencyKey: 'wrong-restored-terminal' }), /run_delivery_identity_changed/);
+    const claimed = await client.claimTerminalOwner(recoverable.reference, recoverable.status, { id: 'new-window', pid: process.pid, birth: processBirth(process.pid) });
+    assert.equal(claimed.deliveryOwnerId, 'new-window');
+    assert.equal(claimed.deliveryOwnerPid, process.pid);
+    let now = 1000;
+    const recovery = new (require('../out/runRecovery.js').RunRecovery)(f.store, undefined, () => now, 1000);
+    try { await recovery.recover(); now += 1001; await recovery.recover(); }
+    finally { await recovery.close(); }
+    assert.equal(wrapper.exitCode, null, 'a restored terminal owner must keep its Agent process alive');
+  } finally {
+    if (wrapper.exitCode === null && wrapper.signalCode === null) { const ended = once(wrapper, 'exit'); wrapper.kill('SIGKILL'); await ended; }
+    await f.operations.close(); f.store.close();
+  }
 });
 
 test('native binding revisions persist confirmation and reject concurrent or mismatched confirmation', async () => {

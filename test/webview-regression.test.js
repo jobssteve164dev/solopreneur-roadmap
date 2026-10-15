@@ -62,6 +62,26 @@ test('terminal delivery survives its own runner claim while recording submission
     await client.stop(reference, await client.readStatus(reference), '结束隔离验证', 'race-cleanup');
   });
 });
+
+test('only a restored visible terminal reclaims its interactive run owner', async () => {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.reconcile = reconcileRestoredAgentTerminalOwners;
+    module.exports.setTerminals = terminals => { vscode.window.terminals.push(...terminals); };
+  `);
+  extension.setTerminals([{ name: 'restored terminal', creationOptions: { cwd: '/project-a' } }]);
+  const claims = [];
+  const client = { claimTerminalOwner: async (reference, status, owner) => { claims.push({ reference, status, owner }); } };
+  await extension.reconcile(client, [
+    { reference: 'visible', status: { workspaceRoot: '/project-a', interactiveSession: true, terminalName: 'restored terminal', terminalDeliveryId: 'delivery-visible', deliveryOwnerId: 'old' } },
+    { reference: 'other-project', status: { workspaceRoot: '/project-b', interactiveSession: true, terminalName: 'restored terminal', terminalDeliveryId: 'delivery-other', deliveryOwnerId: 'old' } },
+    { reference: 'missing', status: { workspaceRoot: '/project-a', interactiveSession: true, terminalName: 'missing terminal', terminalDeliveryId: 'delivery-missing', deliveryOwnerId: 'old' } },
+    { reference: 'closed', status: { workspaceRoot: '/project-a', interactiveSession: true, interactiveSessionClosed: true, terminalName: 'restored terminal', terminalDeliveryId: 'delivery-closed', deliveryOwnerId: 'old' } }
+  ]);
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0].reference, 'visible');
+  assert.equal(claims[0].owner.pid, process.pid);
+  assert.match(claims[0].owner.birth, /^(proc|ps):/);
+});
 const sharedHostDefaultRoot = path.join(os.tmpdir(), `solomap-host-default-${process.pid}`);
 test.after(() => {
   if (!fs.existsSync(sharedHostDefaultRoot)) return;

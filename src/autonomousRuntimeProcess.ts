@@ -331,8 +331,8 @@ async function main(): Promise<void> {
       }
     }
   }
-  process.once('SIGTERM', stop);
-  process.once('SIGINT', stop);
+  process.once('SIGTERM', () => { void stop(); });
+  process.once('SIGINT', () => { void stop(); });
   runCycleObserved();
   timer = setInterval(runCycleObserved, intervalValue());
 }

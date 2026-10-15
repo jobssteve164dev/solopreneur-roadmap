@@ -9,7 +9,13 @@ export class RunRecovery {
   private recovery: Promise<void> | undefined;
   private timer: NodeJS.Timeout | undefined;
   private stopped = false;
-  constructor(private readonly store: UnifiedDataStore, private readonly stops = new RunStop(store)) {}
+  private readonly terminalOwnerMissingSince = new Map<string, number>();
+  constructor(
+    private readonly store: UnifiedDataStore,
+    private readonly stops = new RunStop(store),
+    private readonly now = () => Date.now(),
+    private readonly terminalOwnerGraceMs = 30_000
+  ) {}
 
   public recover(): Promise<void> {
     if (!this.recovery) this.recovery = this.recoverPending().finally(() => { this.recovery = undefined; });
@@ -39,7 +45,35 @@ export class RunRecovery {
             if (['run_owner_conflict', 'revision_conflict', 'checkpoint_turn_conflict', 'identity_index_conflict'].includes((error as Error).message)) continue;
             errors.push(error);
           }
-          if (this.store.runProcessAlive(observed.projectId, executionLogId)) continue;
+          if (this.store.runProcessAlive(observed.projectId, executionLogId)) {
+            const live = this.store.readRunCheckpointState(observed.projectId, executionLogId);
+            const terminalKey = `${live.runId}:${live.generation}:${String(live.status.terminalDeliveryId || live.status.terminalName || '')}`;
+            const terminalOwned = live.status.interactiveSession === true
+              && live.status.interactiveSessionClosed !== true
+              && !live.status.deliveryPending
+              && Boolean(live.status.terminalName);
+            if (!terminalOwned || this.store.runDeliveryOwnerAlive(live.projectId, executionLogId)) {
+              this.terminalOwnerMissingSince.delete(terminalKey);
+              continue;
+            }
+            const missingSince = this.terminalOwnerMissingSince.get(terminalKey);
+            if (missingSince === undefined) {
+              this.terminalOwnerMissingSince.set(terminalKey, this.now());
+              continue;
+            }
+            if (this.now() - missingSince < this.terminalOwnerGraceMs) continue;
+            await this.stops.stop(live.projectId, {
+              executionLogId,
+              generation: live.generation,
+              expectedRevision: live.revision,
+              expectedTurnId: live.turnId,
+              reason: '承载当前对话的终端窗口已关闭。',
+              requireVerifiedIdentity: true,
+              idempotencyKey: `run:${live.runId}:${live.generation}:orphaned-terminal:${live.turnId}`
+            });
+            this.terminalOwnerMissingSince.delete(terminalKey);
+            continue;
+          }
           const before = this.store.readRunCheckpointState(observed.projectId, executionLogId);
           if (before.generation !== observed.generation) continue;
           let maintenanceCaptureError = '';

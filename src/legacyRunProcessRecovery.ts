@@ -144,7 +144,7 @@ function terminal(state: ReturnType<UnifiedDataStore['readRunCheckpointState']>,
 export async function reapFinishedLegacyRunProcesses(store: UnifiedDataStore): Promise<{ stopped: number; conflicts: string[] }> {
   let stopped = 0;
   const conflicts: string[] = [];
-  const registered = new Map(store.registeredProjectScopes().map(project => [path.resolve(project.root), project.projectId]));
+  const registered = new Map(store.existingRegisteredProjectScopes().map(project => [path.resolve(project.root), project.projectId]));
   for (const candidate of discoverLegacyRunProcesses(undefined, true)) {
     const projectId = registered.get(path.resolve(candidate.projectRoot));
     if (!candidate.executionLogId || !projectId) continue;

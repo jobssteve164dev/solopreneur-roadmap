@@ -30,6 +30,35 @@ async function stop(run, root) {
   await exited;
 }
 
+test('Runtime handles SIGTERM without treating the signal name as an exit code', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-bootstrap-sigterm-'));
+  const root = path.join(fixture, '.solomap-global');
+  const run = launch(root);
+  try {
+    await ready(run, root);
+    const signalDeadline = Date.now() + 10000;
+    while (true) {
+      const caught = BigInt(`0x${fs.readFileSync(`/proc/${run.child.pid}/status`, 'utf8').match(/^SigCgt:\s+([0-9a-f]+)$/mi)?.[1] || '0'}`);
+      if ((caught & (1n << 14n)) !== 0n) break;
+      assert.ok(Date.now() < signalDeadline, run.errors() || 'Runtime did not install its SIGTERM handler');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const exited = once(run.child, 'exit');
+    run.child.kill('SIGTERM');
+    const [code, signal] = await exited;
+    assert.equal(code, 0, run.errors());
+    assert.equal(signal, null, run.errors());
+    assert.doesNotMatch(run.errors(), /ERR_INVALID_ARG_TYPE|process\.exitCode/);
+  } finally {
+    if (run.child.exitCode === null && run.child.signalCode === null) {
+      run.child.kill('SIGKILL');
+      await once(run.child, 'exit');
+    }
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test('normal Runtime startup creates the database and automatically imports legacy memory with stable project ownership', async () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-bootstrap-'));
   const root = path.join(fixture, '.solomap-global');

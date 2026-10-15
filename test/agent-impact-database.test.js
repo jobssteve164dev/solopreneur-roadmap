@@ -169,6 +169,15 @@ test('every direct content reference has a leading index for bounded cleanup', (
   assert.deepEqual(missing, []);
 }));
 
+test('project registration replay has an indexed event request lookup', () => fixture(async ({ store }) => {
+  const indexed = store.rows('PRAGMA index_list(events)').some(index => {
+    const columns = store.rows(`PRAGMA index_info("${String(index.name)}")`)
+      .sort((left, right) => Number(left.seqno) - Number(right.seqno));
+    return String(columns[0]?.name || '') === 'request_id';
+  });
+  assert.equal(indexed, true, 'registering existing projects must not scan the complete event history');
+}));
+
 test('database compaction reserves space for both the vacuum image and WAL commit', () => fixture(async ({ store }) => {
   const pageSize = Number(store.rows('PRAGMA page_size')[0].page_size);
   const usedPages = Number(store.rows('PRAGMA page_count')[0].page_count) - Number(store.rows('PRAGMA freelist_count')[0].freelist_count);
@@ -200,6 +209,40 @@ test('storage maintenance retires empty vanished SoloMap test projects before fu
   assert.equal(retired.revision, 3); assert.ok(retired.archived_at);
   const original = store.read(stale.projectId, 1);
   assert.equal(original.revision, 1); assert.equal(original.archivedAt, null); assert.equal(original.data.hidden, 0);
+}));
+
+test('registered project discovery checks object identities without scanning object kind discriminators', () => fixture(async ({ workspace, store }) => {
+  const staleRoot = path.join(path.dirname(workspace), 'solomap-old-init-Scan1');
+  fs.mkdirSync(staleRoot);
+  await store.registerProject({ root: staleRoot });
+  cleanupExact(staleRoot);
+  const originalRows = store.rows.bind(store); const referenceQueries = [];
+  store.rows = (sql, values) => {
+    if (String(sql).startsWith('SELECT DISTINCT')) referenceQueries.push(String(sql));
+    return originalRows(sql, values);
+  };
+  try { store.registeredProjectRoots(); }
+  finally { store.rows = originalRows; }
+  assert.ok(referenceQueries.length > 0, 'the vanished fixture still requires a reference audit');
+  assert.equal(referenceQueries.some(sql => /\bobject_kind\b/.test(sql)), false,
+    'an object kind discriminator is not an object identity and must never trigger a full table scan');
+}));
+
+test('startup source discovery excludes vanished roots without running the retirement reference audit', () => fixture(async ({ workspace, store }) => {
+  const staleRoot = path.join(path.dirname(workspace), 'solomap-old-init-Scan2');
+  fs.mkdirSync(staleRoot);
+  await store.registerProject({ root: staleRoot });
+  cleanupExact(staleRoot);
+  const originalRows = store.rows.bind(store); let referenceAudits = 0;
+  store.rows = (sql, values) => {
+    if (String(sql).startsWith('SELECT DISTINCT')) referenceAudits++;
+    return originalRows(sql, values);
+  };
+  let roots;
+  try { roots = store.existingRegisteredProjectRoots(); }
+  finally { store.rows = originalRows; }
+  assert.deepEqual(roots, [workspace]);
+  assert.equal(referenceAudits, 0, 'startup source discovery must not run the retirement safety audit');
 }));
 
 test('storage maintenance preserves a vanished temporary project when database records still depend on it', () => fixture(async ({ workspace, store, ops, record }) => {
