@@ -85,7 +85,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       await storageMaintenanceBarrier;
       const currentSize = store.databaseStorageFileSizes();
       store.recoverInterruptedDatabaseStorageMaintenance(Date.now(), currentSize.databaseBytes);
-      if (automatic && !store.hasPendingDatabaseStorageCleanup() && !store.hasStaleSolomapTestProjectRegistrations()) return { skipped: true, reason: 'storage_current' };
+      if (automatic && !store.hasPendingAutomaticDatabaseStorageCleanup() && !store.hasStaleSolomapTestProjectRegistrations()) return { skipped: true, reason: 'storage_current' };
       const startedAt = Date.now(), before = currentSize;
       const totals = { deletedArtifacts: 0, deletedSources: 0, deletedContents: 0, reclaimedStoredBytes: 0 };
       const maintenanceId = store.beginDatabaseStorageMaintenance(startedAt, before.databaseBytes);
@@ -93,13 +93,13 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const retiredTestProjects = store.cleanupStaleSolomapTestProjectRegistrations();
         let indexCursor = 0;
         for (;;) {
-          const batch = store.protectIndexedRunArtifactOutputsBatch(indexCursor, 250);
+          const batch = store.protectIndexedRunArtifactOutputsBatch(indexCursor, 250, !automatic);
           if (batch.nextCursor === null) break;
           indexCursor = batch.nextCursor;
           await new Promise<void>(resolve => setImmediate(resolve));
         }
         for (;;) {
-          const batch = store.cleanupDatabaseStorageBatch(automatic ? 250 : 5000, maintenanceId);
+          const batch = store.cleanupDatabaseStorageBatch(automatic ? 250 : 5000, maintenanceId, !automatic);
           totals.deletedArtifacts += batch.deletedArtifacts; totals.deletedSources += batch.deletedSources;
           if (!batch.pending) break;
           await new Promise<void>(resolve => setImmediate(resolve));
@@ -127,7 +127,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const integrity = compact ? store.compactDatabaseStorage().integrity : 'not_checked';
         const after = store.databaseStorageFileSizes(); const finishedAt = Date.now();
         store.settleDatabaseStorageMaintenance(maintenanceId, { status: 'completed', finishedAt, ...totals, compacted: compact, afterBytes: after.databaseBytes, integrity });
-        return { ...totals, retiredTestProjects, compacted: compact, integrity, beforeBytes: before.databaseBytes, afterBytes: after.databaseBytes, pendingByproductRecords: 0 };
+        return { ...totals, retiredTestProjects, compacted: compact, integrity, beforeBytes: before.databaseBytes, afterBytes: after.databaseBytes, pendingByproductRecords: store.pendingDatabaseStorageCleanupRecords() };
       } catch (error) {
         const after = store.databaseStorageFileSizes();
         store.settleDatabaseStorageMaintenance(maintenanceId, { status: 'failed', finishedAt: Date.now(), error: String(error), ...totals, compacted: false, afterBytes: after.databaseBytes, integrity: 'not_checked' });
@@ -136,14 +136,6 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
     });
     storageMaintenanceTail = operation.then(() => undefined, () => undefined);
     return operation;
-  };
-  const readDatabaseStorage = async () => {
-    for (;;) {
-      const batch = store.classifyDatabaseStorageBatch(250);
-      if (!batch.pending) break;
-      await new Promise<void>(resolve => setImmediate(resolve));
-    }
-    return store.readDatabaseStorage();
   };
   const dispatch = async (request: RuntimeDataRequest): Promise<unknown> => {
     if (!request || typeof request.operation !== 'string' || !request.input || typeof request.input !== 'object') throw new Error('invalid_data_request');
@@ -834,7 +826,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       }
       case 'backup': return store.backup({ destination: String(input.destination || ''), idempotencyKey: String(input.idempotencyKey || '') });
       case 'read_database_overview': return store.readDatabaseOverview();
-      case 'read_database_storage': return readDatabaseStorage();
+      case 'read_database_storage': return store.readDatabaseStorage();
       case 'maintain_database_storage': return maintainDatabaseStorage(input.compact === true, input.automatic === true);
       case 'restore_backup': return store.restoreBackup({ source: String(input.source || ''), destinationRoot: String(input.destinationRoot || ''), idempotencyKey: String(input.idempotencyKey || '') });
       case 'export_project': return store.exportProject(input as unknown as Parameters<UnifiedDataStore['exportProject']>[0]);

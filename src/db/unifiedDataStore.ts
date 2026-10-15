@@ -7049,9 +7049,10 @@ export class UnifiedDataStore {
   public writeHistoricalRunArtifact(projectId: string, input: { executionLogId: number; relativePath: string; bytes: string | Uint8Array; hash: string; mimeType?: string }, artifactKind: RunArtifactKind): void {
     this.storeRunArtifact(projectId, input, artifactKind);
   }
-  public protectIndexedRunArtifactOutputsBatch(cursor = 0, limit = 250): { nextCursor: number | null } {
+  public protectIndexedRunArtifactOutputsBatch(cursor = 0, limit = 250, includeUnclassified = true): { nextCursor: number | null } {
     if (!Number.isInteger(cursor) || cursor < 0 || !Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error('database_maintenance_limit_invalid');
-    const rows = this.rows("SELECT DISTINCT i.rowid AS cursor,i.project_id,CAST(i.execution_log_id AS TEXT) AS execution_log_id,i.record_json FROM project_run_indexes i JOIN project_run_artifacts a ON a.project_id=i.project_id AND a.execution_log_id=i.execution_log_id WHERE i.rowid>? AND a.artifact_kind IN ('unclassified','byproduct') ORDER BY i.rowid LIMIT ?", [cursor, limit]);
+    const kinds = includeUnclassified ? "IN ('unclassified','byproduct')" : "='byproduct'";
+    const rows = this.rows(`SELECT DISTINCT i.rowid AS cursor,i.project_id,CAST(i.execution_log_id AS TEXT) AS execution_log_id,i.record_json FROM project_run_indexes i JOIN project_run_artifacts a ON a.project_id=i.project_id AND a.execution_log_id=i.execution_log_id WHERE i.rowid>? AND a.artifact_kind ${kinds} ORDER BY i.rowid LIMIT ?`, [cursor, limit]);
     this.transaction(() => {
       for (const row of rows) {
         const record = JSON.parse(String(row.record_json)) as RunIndexRecord;
@@ -7060,8 +7061,8 @@ export class UnifiedDataStore {
         const markerAt = normalized.indexOf(marker);
         const relativePath = markerAt >= 0 ? normalized.slice(markerAt + marker.length) : !path.isAbsolute(String(record.outputPath || '')) ? normalized : '';
         if (!relativePath || relativePath.split('/').some(part => !part || part === '.' || part === '..')) continue;
-        this.db.run('UPDATE project_run_artifacts SET artifact_kind=\'output\' WHERE project_id=? AND execution_log_id=? AND relative_path=?', [row.project_id, row.execution_log_id, relativePath]);
-        this.db.run("UPDATE migration_items SET source_kind='output' WHERE source_identity LIKE 'agent-runs:%' AND source_key=? AND source_content_id IN (SELECT content_id FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?)", [relativePath, row.project_id, row.execution_log_id, relativePath]);
+        this.db.run(`UPDATE project_run_artifacts SET artifact_kind='output' WHERE project_id=? AND execution_log_id=? AND relative_path=? AND artifact_kind ${kinds}`, [row.project_id, row.execution_log_id, relativePath]);
+        this.db.run(`UPDATE migration_items SET source_kind='output' WHERE source_identity LIKE 'agent-runs:%' AND source_key=? AND source_kind ${kinds} AND source_content_id IN (SELECT content_id FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?)`, [relativePath, row.project_id, row.execution_log_id, relativePath]);
       }
     });
     return { nextCursor: rows.length === limit ? Number(rows.at(-1)!.cursor) : null };
@@ -7162,11 +7163,12 @@ export class UnifiedDataStore {
       return { deletedContents, reclaimedStoredBytes, pending };
     });
   }
-  public cleanupDatabaseStorageBatch(limit = 1000, maintenanceId?: string): { scanned: number; deletedArtifacts: number; deletedSources: number; deletedContents: number; reclaimedStoredBytes: number; pending: boolean } {
+  public cleanupDatabaseStorageBatch(limit = 1000, maintenanceId?: string, includeUnclassified = true): { scanned: number; deletedArtifacts: number; deletedSources: number; deletedContents: number; reclaimedStoredBytes: number; pending: boolean } {
     if (!Number.isInteger(limit) || limit < 1 || limit > 5000) throw new Error('database_maintenance_limit_invalid');
     return this.transaction(() => {
-      const artifacts = this.rows("SELECT project_id,CAST(execution_log_id AS TEXT) AS execution_log_id,relative_path,content_id,artifact_kind FROM project_run_artifacts WHERE artifact_kind IN ('unclassified','byproduct') ORDER BY project_id,execution_log_id,relative_path LIMIT ?", [limit]);
-      const sources = this.rows("SELECT source_identity,source_key,source_content_id,source_kind,object_id FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind IN ('unclassified','byproduct') ORDER BY source_identity,source_key LIMIT ?", [limit]);
+      const kinds = includeUnclassified ? "IN ('unclassified','byproduct')" : "='byproduct'";
+      const artifacts = this.rows(`SELECT project_id,CAST(execution_log_id AS TEXT) AS execution_log_id,relative_path,content_id,artifact_kind FROM project_run_artifacts WHERE artifact_kind ${kinds} ORDER BY project_id,execution_log_id,relative_path LIMIT ?`, [limit]);
+      const sources = this.rows(`SELECT source_identity,source_key,source_content_id,source_kind,object_id FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind ${kinds} ORDER BY source_identity,source_key LIMIT ?`, [limit]);
       const contentIds: string[] = [];
       let deletedArtifacts = 0; let deletedSources = 0;
       for (const artifact of artifacts) {
@@ -7188,27 +7190,24 @@ export class UnifiedDataStore {
       }
       this.queueStorageCleanupContents(contentIds);
       if (maintenanceId) this.db.run('UPDATE database_storage_maintenance SET deleted_artifacts=deleted_artifacts+?,deleted_sources=deleted_sources+? WHERE id=?', [deletedArtifacts, deletedSources, maintenanceId]);
-      const pending = Boolean(this.rows("SELECT 1 FROM project_run_artifacts WHERE artifact_kind IN ('unclassified','byproduct') LIMIT 1")[0]
-        || this.rows("SELECT 1 FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind IN ('unclassified','byproduct') LIMIT 1")[0]);
+      const pending = Boolean(this.rows(`SELECT 1 FROM project_run_artifacts WHERE artifact_kind ${kinds} LIMIT 1`)[0]
+        || this.rows(`SELECT 1 FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind ${kinds} LIMIT 1`)[0]);
       return { scanned: artifacts.length + sources.length, deletedArtifacts, deletedSources, deletedContents: 0, reclaimedStoredBytes: 0, pending };
-    });
-  }
-  public classifyDatabaseStorageBatch(limit = 250): { scanned: number; pending: boolean } {
-    if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error('database_maintenance_limit_invalid');
-    return this.transaction(() => {
-      const artifacts = this.rows("SELECT rowid,relative_path FROM project_run_artifacts WHERE artifact_kind='unclassified' ORDER BY rowid LIMIT ?", [limit]);
-      const sources = this.rows("SELECT rowid,source_key FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind='unclassified' ORDER BY rowid LIMIT ?", [limit]);
-      for (const artifact of artifacts) this.db.run('UPDATE project_run_artifacts SET artifact_kind=? WHERE rowid=?', [runArtifactStorageKind(String(artifact.relative_path)), artifact.rowid]);
-      for (const source of sources) this.db.run('UPDATE migration_items SET source_kind=? WHERE rowid=?', [runArtifactStorageKind(String(source.source_key)), source.rowid]);
-      const pending = artifacts.length === limit || sources.length === limit
-        || Boolean(this.rows("SELECT 1 FROM project_run_artifacts WHERE artifact_kind='unclassified' LIMIT 1")[0]
-          || this.rows("SELECT 1 FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind='unclassified' LIMIT 1")[0]);
-      return { scanned: artifacts.length + sources.length, pending };
     });
   }
   public hasPendingDatabaseStorageCleanup(): boolean {
     return Boolean(this.rows("SELECT 1 FROM project_run_artifacts WHERE artifact_kind IN ('unclassified','byproduct') LIMIT 1")[0]
       || this.rows("SELECT 1 FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind IN ('unclassified','byproduct') LIMIT 1")[0]
+      || this.rows('SELECT 1 FROM database_storage_cleanup_candidates LIMIT 1')[0]);
+  }
+  public pendingDatabaseStorageCleanupRecords(): number {
+    const artifacts = this.rows("SELECT COUNT(*) AS count FROM project_run_artifacts WHERE artifact_kind IN ('unclassified','byproduct')")[0];
+    const sources = this.rows("SELECT COUNT(*) AS count FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind IN ('unclassified','byproduct')")[0];
+    return Number(artifacts.count) + Number(sources.count);
+  }
+  public hasPendingAutomaticDatabaseStorageCleanup(): boolean {
+    return Boolean(this.rows("SELECT 1 FROM project_run_artifacts WHERE artifact_kind='byproduct' LIMIT 1")[0]
+      || this.rows("SELECT 1 FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind='byproduct' LIMIT 1")[0]
       || this.rows('SELECT 1 FROM database_storage_cleanup_candidates LIMIT 1')[0]);
   }
   public databaseStorageFileSizes(): { databaseBytes: number; dataBytes: number; walBytes: number } {
@@ -7228,27 +7227,17 @@ export class UnifiedDataStore {
     const content = this.rows('SELECT COUNT(*) AS records,COALESCE(SUM(byte_length),0) AS logical_bytes,COALESCE(SUM(stored_byte_length),0) AS stored_bytes FROM contents')[0];
     const byKind: Record<string, { records: number; storedBytes: number }> = {};
     let records = 0; let storedBytes = 0; let pendingByproductRecords = 0; let pendingByproductStoredBytes = 0;
-    for (const row of this.rows("SELECT a.artifact_kind,COUNT(*) AS records,COALESCE(SUM(c.stored_byte_length),0) AS stored_bytes FROM project_run_artifacts a JOIN contents c ON c.id=a.content_id WHERE a.artifact_kind<>'unclassified' GROUP BY a.artifact_kind")) {
+    for (const row of this.rows('SELECT a.artifact_kind,COUNT(*) AS records,COALESCE(SUM(c.stored_byte_length),0) AS stored_bytes FROM project_run_artifacts a JOIN contents c ON c.id=a.content_id GROUP BY a.artifact_kind')) {
       const kind = String(row.artifact_kind), count = Number(row.records), bytes = Number(row.stored_bytes); records += count; storedBytes += bytes;
       byKind[kind] = { records: count, storedBytes: bytes };
-      if (kind === 'byproduct') { pendingByproductRecords += count; pendingByproductStoredBytes += bytes; }
-    }
-    for (const row of this.rows("SELECT a.relative_path,COUNT(*) AS records,COALESCE(SUM(c.stored_byte_length),0) AS stored_bytes FROM project_run_artifacts a JOIN contents c ON c.id=a.content_id WHERE a.artifact_kind='unclassified' GROUP BY a.relative_path")) {
-      const kind = runArtifactStorageKind(String(row.relative_path)), count = Number(row.records), bytes = Number(row.stored_bytes); records += count; storedBytes += bytes;
-      const bucket = byKind[kind] ||= { records: 0, storedBytes: 0 }; bucket.records += count; bucket.storedBytes += bytes;
-      if (kind === 'byproduct') { pendingByproductRecords += count; pendingByproductStoredBytes += bytes; }
+      if (kind === 'byproduct' || kind === 'unclassified') { pendingByproductRecords += count; pendingByproductStoredBytes += bytes; }
     }
     const sourceByKind: Record<string, { records: number; storedBytes: number }> = {};
     let sourceRecords = 0; let sourceStoredBytes = 0; let pendingSourceRecords = 0; let pendingSourceStoredBytes = 0;
-    for (const row of this.rows("SELECT m.source_kind,COUNT(*) AS records,COALESCE(SUM(COALESCE(c.stored_byte_length,0)),0) AS stored_bytes FROM migration_items m LEFT JOIN contents c ON c.id=m.source_content_id WHERE m.source_identity LIKE 'agent-runs:%' AND m.source_kind<>'unclassified' GROUP BY m.source_kind")) {
+    for (const row of this.rows("SELECT m.source_kind,COUNT(*) AS records,COALESCE(SUM(COALESCE(c.stored_byte_length,0)),0) AS stored_bytes FROM migration_items m LEFT JOIN contents c ON c.id=m.source_content_id WHERE m.source_identity LIKE 'agent-runs:%' GROUP BY m.source_kind")) {
       const kind = String(row.source_kind), count = Number(row.records), bytes = Number(row.stored_bytes); sourceRecords += count; sourceStoredBytes += bytes;
       sourceByKind[kind] = { records: count, storedBytes: bytes };
-      if (kind === 'byproduct') { pendingSourceRecords += count; pendingSourceStoredBytes += bytes; }
-    }
-    for (const row of this.rows("SELECT m.source_key,COUNT(*) AS records,COALESCE(SUM(COALESCE(c.stored_byte_length,0)),0) AS stored_bytes FROM migration_items m LEFT JOIN contents c ON c.id=m.source_content_id WHERE m.source_identity LIKE 'agent-runs:%' AND m.source_kind='unclassified' GROUP BY m.source_key")) {
-      const kind = runArtifactStorageKind(String(row.source_key)), count = Number(row.records), bytes = Number(row.stored_bytes); sourceRecords += count; sourceStoredBytes += bytes;
-      const bucket = sourceByKind[kind] ||= { records: 0, storedBytes: 0 }; bucket.records += count; bucket.storedBytes += bytes;
-      if (kind === 'byproduct') { pendingSourceRecords += count; pendingSourceStoredBytes += bytes; }
+      if (kind === 'byproduct' || kind === 'unclassified') { pendingSourceRecords += count; pendingSourceStoredBytes += bytes; }
     }
     const maintenance = this.rows('SELECT * FROM database_storage_maintenance ORDER BY finished_at DESC,id DESC LIMIT 1')[0];
     return { databaseBytes: dataBytes + walBytes, dataBytes, walBytes, freePageBytes: pageSize * freePages,

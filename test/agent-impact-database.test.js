@@ -141,17 +141,13 @@ test('storage maintenance classifies retained run data and removes previously im
   }
   assert.match(String(store.rows("EXPLAIN QUERY PLAN SELECT 1 FROM project_run_artifacts WHERE artifact_kind IN ('unclassified','byproduct') LIMIT 1")[0].detail), /project_run_artifacts_kind/);
   assert.match(String(store.rows("EXPLAIN QUERY PLAN SELECT 1 FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind IN ('unclassified','byproduct') LIMIT 1")[0].detail), /migration_items_source_kind/);
-  const originalRows = store.rows.bind(store); let largestUnclassifiedResult = 0;
-  store.rows = (sql, parameters) => {
-    const result = originalRows(sql, parameters);
-    if (sql.includes("='unclassified'") && (sql.includes('project_run_artifacts') || sql.includes('migration_items'))) largestUnclassifiedResult = Math.max(largestUnclassifiedResult, result.length);
-    return result;
-  };
+  const artifactUnclassified = Number(store.rows("SELECT COUNT(*) AS count FROM project_run_artifacts WHERE artifact_kind='unclassified'")[0].count);
+  const sourceUnclassified = Number(store.rows("SELECT COUNT(*) AS count FROM migration_items WHERE source_kind='unclassified'")[0].count);
   const before = await ops({ operation: 'read_database_storage', input: {} });
-  store.rows = originalRows;
-  assert.ok(largestUnclassifiedResult <= 250, `storage summary materialized ${largestUnclassifiedResult} unclassified rows in one event-loop turn`);
-  assert.equal(before.runArtifacts.pendingByproductRecords, 603); assert.ok(before.runArtifacts.pendingByproductStoredBytes >= byproduct.length);
-  assert.equal(before.migrationSources.pendingByproductRecords, 602); assert.ok(before.migrationSources.pendingByproductStoredBytes >= byproduct.length);
+  assert.equal(Number(store.rows("SELECT COUNT(*) AS count FROM project_run_artifacts WHERE artifact_kind='unclassified'")[0].count), artifactUnclassified, 'a storage read must not classify or rewrite artifacts');
+  assert.equal(Number(store.rows("SELECT COUNT(*) AS count FROM migration_items WHERE source_kind='unclassified'")[0].count), sourceUnclassified, 'a storage read must not classify or rewrite migration sources');
+  assert.equal(before.runArtifacts.byKind.unclassified.records, 604); assert.equal(before.runArtifacts.pendingByproductRecords, 604);
+  assert.equal(before.migrationSources.byKind.byproduct.records, 602); assert.equal(before.migrationSources.pendingByproductRecords, 602);
   const cleaned = await ops({ operation: 'maintain_database_storage', input: { compact: true } });
   assert.equal(cleaned.deletedArtifacts, 603); assert.equal(cleaned.deletedSources, 602); assert.equal(cleaned.deletedContents, 1);
   assert.ok(cleaned.reclaimedStoredBytes >= byproduct.length); assert.equal(cleaned.pendingByproductRecords, 0);
@@ -369,19 +365,42 @@ test('automatic storage maintenance uses foreground-sized cleanup batches', () =
   const crypto = require('node:crypto');
   const bytes = Buffer.from('automatic cleanup must keep foreground requests responsive');
   const contentId = store.putContent(bytes, 'application/octet-stream', 'binary');
-  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [
-    project, 44, '__solo__/44/evidence/automatic.tmp', contentId, crypto.createHash('sha256').update(bytes).digest('hex'), 'application/octet-stream', Date.now()
+  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at,artifact_kind) VALUES(?,?,?,?,?,?,?,?)', [
+    project, 44, '__solo__/44/evidence/automatic.tmp', contentId, crypto.createHash('sha256').update(bytes).digest('hex'), 'application/octet-stream', Date.now(), 'byproduct'
   ]);
   const originalCleanup = store.cleanupDatabaseStorageBatch.bind(store);
   const limits = [];
-  store.cleanupDatabaseStorageBatch = (limit, maintenanceId) => {
+  store.cleanupDatabaseStorageBatch = (limit, maintenanceId, includeUnclassified) => {
     limits.push(limit);
-    return originalCleanup(limit, maintenanceId);
+    return originalCleanup(limit, maintenanceId, includeUnclassified);
   };
   try { await ops({ operation: 'maintain_database_storage', input: { compact: false, automatic: true } }); }
   finally { store.cleanupDatabaseStorageBatch = originalCleanup; }
   assert.ok(limits.length > 0);
   assert.ok(limits.every(limit => limit <= 250), `automatic cleanup batch was too large: ${limits.join(',')}`);
+}));
+
+test('automatic storage maintenance cleans known byproducts without classifying historical records', () => fixture(async ({ workspace, project, store, ops, record }) => {
+  const crypto = require('node:crypto');
+  const insertArtifact = (relativePath, value) => {
+    const bytes = Buffer.from(value), contentId = store.putContent(bytes, 'application/octet-stream', 'binary');
+    store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at,artifact_kind) VALUES(?,?,?,?,?,?,?,?)', [
+      project, 44, relativePath, contentId, crypto.createHash('sha256').update(bytes).digest('hex'), 'application/octet-stream', Date.now(), relativePath.endsWith('.tmp') ? 'byproduct' : 'unclassified'
+    ]);
+  };
+  store.upsertProjectRunIndex(project, {
+    ...record(44),
+    outputPath: path.join(workspace, '.solopreneur', 'agent-runs', '__solo__', '44', 'prompt.txt')
+  });
+  insertArtifact('__solo__/44/prompt.txt', 'historical record requiring explicit classification');
+  insertArtifact('__solo__/44/evidence/automatic.tmp', 'known startup-safe byproduct');
+  const result = await ops({ operation: 'maintain_database_storage', input: { compact: false, automatic: true } });
+  assert.equal(result.deletedArtifacts, 1);
+  assert.equal(result.pendingByproductRecords, 1);
+  const remaining = store.rows('SELECT relative_path,artifact_kind FROM project_run_artifacts ORDER BY relative_path');
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].relative_path, '__solo__/44/prompt.txt');
+  assert.equal(remaining[0].artifact_kind, 'unclassified');
 }));
 
 test('manual storage maintenance waits for startup migration readiness', () => fixture(async ({ store, ops }) => {
