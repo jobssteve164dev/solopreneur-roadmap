@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.553 - 2026-10-15
+
+### Fixed
+- stream recycling candidate validation (8c023e2)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.552 - 2026-10-15
 
 ### Fixed
