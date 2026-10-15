@@ -506,6 +506,25 @@ test('completed run artifacts are content-addressed in the global database', asy
   } finally { await operations.close(); store.close(); }
 });
 
+test('completed run artifacts can be read in bounded pages', async () => {
+  const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-run-artifact-pages-')), '.solomap-global');
+  const project = path.join(path.dirname(root), 'project');
+  fs.mkdirSync(project); fs.mkdirSync(root);
+  const store = new UnifiedDataStore(root);
+  const operations = createRuntimeDataOperations(store);
+  try {
+    const content = Buffer.from('paged artifact content\n'.repeat(10000));
+    const hash = crypto.createHash('sha256').update(content).digest('hex');
+    await operations({ operation: 'write_run_artifact', input: { root: project, executionLogId: 42, relativePath: 'task-report.json', mimeType: 'application/json', bytes: content.toString('base64'), hash } });
+    const first = await operations({ operation: 'read_run_artifact', input: { root: project, executionLogId: 42, relativePath: 'task-report.json', offset: 0, limit: 65536 } });
+    const second = await operations({ operation: 'read_run_artifact', input: { root: project, executionLogId: 42, relativePath: 'task-report.json', offset: first.nextOffset, limit: 1048576 } });
+    assert.equal(first.offset, 0); assert.equal(first.totalBytes, content.length); assert.equal(first.nextOffset, 65536);
+    assert.equal(second.offset, 65536); assert.equal(second.totalBytes, content.length); assert.equal(second.nextOffset, null);
+    assert.equal(first.hash, hash); assert.equal(second.hash, hash);
+    assert.deepEqual(Buffer.concat([Buffer.from(first.bytes, 'base64'), Buffer.from(second.bytes, 'base64')]), content);
+  } finally { await operations.close(); store.close(); }
+});
+
 test('legacy project data migrates in the background while live-consumer run files stay local', async () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-project-data-migration-'));
   const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');

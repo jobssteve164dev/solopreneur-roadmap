@@ -673,7 +673,10 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return { written: true };
       }
       case 'read_run_artifact': {
-        const project = await store.registerProject({ root: String(input.root || '') }); return store.readRunArtifact(project.projectId, Number(input.executionLogId || 0), String(input.relativePath || ''));
+        const project = await store.registerProject({ root: String(input.root || '') });
+        return input.offset !== undefined || input.limit !== undefined
+          ? store.readRunArtifactPage(project.projectId, Number(input.executionLogId || 0), String(input.relativePath || ''), input.offset === undefined ? 0 : Number(input.offset), input.limit === undefined ? 65536 : Number(input.limit))
+          : store.readRunArtifact(project.projectId, Number(input.executionLogId || 0), String(input.relativePath || ''));
       }
       case 'read_growth_report_projection': {
         const project = await store.registerProject({ root: String(input.root || '') });

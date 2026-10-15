@@ -6902,6 +6902,16 @@ export class UnifiedDataStore {
     const row = this.rows('SELECT content_id,sha256,mime_type FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?', [projectId, executionLogId, relativePath])[0];
     return row ? { bytes: this.content(String(row.content_id)).toString('base64'), hash: String(row.sha256), mimeType: String(row.mime_type) } : null;
   }
+  public readRunArtifactPage(projectId: string, executionLogId: number, relativePath: string, offset = 0, limit = 65536): { bytes: string; hash: string; mimeType: string; offset: number; totalBytes: number; nextOffset: number | null } | null {
+    if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 1048576) throw new Error('invalid_artifact_page');
+    const row = this.rows('SELECT a.content_id,a.sha256,a.mime_type,c.byte_length,c.stored_byte_length,c.encoding,c.chunk_index_json FROM project_run_artifacts a JOIN contents c ON c.id=a.content_id WHERE a.project_id=? AND a.execution_log_id=? AND a.relative_path=?', [projectId, executionLogId, relativePath])[0];
+    if (!row) return null;
+    const totalBytes = Number(row.byte_length);
+    if (offset > totalBytes) throw new Error('invalid_artifact_page');
+    const end = Math.min(totalBytes, offset + limit);
+    const bytes = this.contentRange(String(row.content_id), row, offset, end);
+    return { bytes: bytes.toString('base64'), hash: String(row.sha256), mimeType: String(row.mime_type), offset, totalBytes, nextOffset: end < totalBytes ? end : null };
+  }
   public readRunArtifactBytes(projectId: string, executionLogId: number, relativePath: string): { bytes: Buffer; hash: string; mimeType: string } | null {
     const row = this.rows('SELECT content_id,sha256,mime_type FROM project_run_artifacts WHERE project_id=? AND execution_log_id=? AND relative_path=?', [projectId, executionLogId, relativePath])[0];
     return row ? { bytes: this.content(String(row.content_id)), hash: String(row.sha256), mimeType: String(row.mime_type) } : null;
