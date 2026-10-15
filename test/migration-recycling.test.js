@@ -214,6 +214,28 @@ test('the active global memory tree never enters a physical recycling plan', asy
   } finally { await f.operations.close(); f.store.close(); }
 });
 
+test('every roadmap.csv remains protected from new and previously prepared recycling plans', async () => {
+  const f = fixture();
+  try {
+    const projectRoot = path.join(path.dirname(f.root), 'project-with-roadmap');
+    const roadmap = path.join(projectRoot, '.solopreneur', 'path-recovery-20260728T074000Z', 'ROADMAP.CSV');
+    fs.mkdirSync(path.dirname(roadmap), { recursive: true });
+    const bytes = Buffer.from('id,title\n1,Keep every roadmap\n');
+    fs.writeFileSync(roadmap, bytes);
+    await f.store.registerProject({ root: projectRoot });
+    const identity = `project-legacy-files:${projectRoot}`;
+    const key = 'path-recovery-20260728T074000Z/ROADMAP.CSV';
+    const hash = require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+    f.store.captureMigrationSource({ identity, key, hash }, bytes);
+    f.store.markMigrationSourceImported(identity, key);
+    assert.deepEqual(await f.call('prepare_recycling', { projectRoot }), { planId: null, files: [] });
+    const oldPlan = f.store.createRecyclingPlan([{ identity, key, hash, path: roadmap, bytes: bytes.length }]);
+    f.store.approveRecyclingFiles(oldPlan.files.map(file => ({ itemId: file.itemId, expectedPath: file.path, path: file.path })));
+    await assert.rejects(f.call('execute_recycling_plan', { projectRoot, planId: oldPlan.planId }), /recycling_items_retained/);
+    assert.deepEqual(fs.readFileSync(roadmap), bytes);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
 test('the physical target of a symlinked global memory tree never enters a recycling plan through a project alias', async () => {
   const f = fixture();
   try {

@@ -135,6 +135,7 @@ test('retired project scaffolding is archived for exact consumer readback while 
   const retained = new Map([
     ['project.json', Buffer.from(JSON.stringify({ schemaVersion: 1, projectId: f.registered.projectId }))],
     ['roadmap.csv', Buffer.from('id,title\n1,Keep the roadmap\n')],
+    ['path-recovery-20260728T074000Z/roadmap.csv', Buffer.from('id,title\n2,Keep the recovered roadmap too\n')],
     ['time-plan.json', Buffer.from('{"version":1,"status":"draft"}')],
     ['audits/user-review.md', Buffer.from('formal user-owned audit')],
     ['runtime/business-migration/manifest.json', Buffer.from('{"businessAsset":true}')],
@@ -186,9 +187,10 @@ test('retired project scaffolding is archived for exact consumer readback while 
   const recycled = await f.call('execute_recycling_plan', { projectRoot: f.project, planId: plan.planId });
   assert.equal(recycled.recycledFiles, retired.size);
   for (const relative of retired.keys()) assert.equal(fs.existsSync(path.join(solo, relative)), false);
-  for (const directory of ['attachments', 'step-sessions', 'path-recovery-20260728T074000Z']) {
+  for (const directory of ['attachments', 'step-sessions']) {
     assert.equal(fs.existsSync(path.join(solo, directory)), false, `${directory} must not remain as an empty legacy folder`);
   }
+  assert.equal(fs.existsSync(path.join(solo, 'path-recovery-20260728T074000Z')), true, 'a legacy folder containing roadmap.csv must remain');
   assert.equal(fs.existsSync(path.join(solo, 'runtime')), true, 'runtime remains because it contains retained business data');
   for (const [relative, bytes] of retained) assert.deepEqual(fs.readFileSync(path.join(solo, relative)), bytes);
   const attachment = plan.files.find(file => file.path.endsWith('context.png'));

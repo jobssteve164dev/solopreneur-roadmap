@@ -33,6 +33,7 @@ export function isRetiredProjectFile(relativePath: string): boolean {
   const normalized = relativePath.split(path.sep).join('/');
   if (!normalized || normalized.startsWith('/') || normalized.split('/').includes('..')) return false;
   const parts = normalized.split('/');
+  if (parts[parts.length - 1].toLowerCase() === 'roadmap.csv') return false;
   if (parts.length === 1) return retiredFiles.has(parts[0]);
   if (normalized === 'runtime/task-checkpoint.cjs') return true;
   return retiredDirectories.includes(parts[0]) || retiredDirectoryPatterns.some(pattern => pattern.test(parts[0]));
@@ -113,7 +114,7 @@ async function projectFiles(sourceRoot: string): Promise<Array<{ file: string; k
     for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
       const file = path.join(directory, entry.name);
       const key = path.relative(sourceRoot, file).split(path.sep).join('/');
-      const retired = current.retired || isRetiredProjectFile(key);
+      const retired = entry.name.toLowerCase() !== 'roadmap.csv' && (current.retired || isRetiredProjectFile(key));
       if (entry.isSymbolicLink()) { files.push({ file, key, retired, unsafe: true }); continue; }
       if (entry.isDirectory()) {
         if (current.retired || directory === sourceRoot && isRetiredProjectDirectory(entry.name)) pending.push({ directory: file, retired: true });

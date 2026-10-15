@@ -8,6 +8,7 @@ import { isRetiredProjectFile } from './legacyProjectFileMigration.js';
 
 const hash = (bytes: Buffer) => crypto.createHash('sha256').update(bytes).digest('hex');
 const conversationKey = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.json$/i;
+const isRoadmapCsv = (file: string) => path.basename(path.resolve(file)).toLowerCase() === 'roadmap.csv';
 export interface MigrationProjectScope { root: string; projectId: string; physicalRoot: string }
 type RegisteredProjectScope = { root: string; projectId: string };
 type CandidateSource = Pick<RecyclingItem, 'identity' | 'key'> & { kind?: string };
@@ -113,7 +114,7 @@ export class MigrationRecycling {
   private allowedPath(file: string, source?: Pick<RecyclingItem, 'identity' | 'key'> & Partial<Pick<RecyclingItem, 'itemId' | 'restorePath'>>, projects?: RegisteredProjectScope[]): boolean {
     const resolved = path.resolve(file); const recycleRoot = path.join(path.resolve(this.store.root), '.migration-recycle');
     if (resolved.startsWith(recycleRoot + path.sep)) return true;
-    if (this.isGlobalMemoryPath(resolved)) return false;
+    if (this.isGlobalMemoryPath(resolved) || isRoadmapCsv(resolved)) return false;
     if (!source) return false;
     if (source.itemId && source.restorePath && path.resolve(source.restorePath) === resolved) {
       const bound = this.store.recyclingItem(source.itemId);
@@ -369,13 +370,14 @@ export class MigrationRecycling {
     for (const source of this.store.recyclingCandidateSources(scope ? [...identities!] : undefined).filter(source => belongs(source.identity))) {
       const projects = /^(analysis-caches|step-memory|run-digests|agent-runs):/.test(source.identity) ? projectSnapshot() : undefined;
       const file = this.sourcePath(source.identity, source.key, projects);
-      if (!file || this.isGlobalMemoryPath(file) || active.some(item => item.path === file)) continue;
+      if (!file || this.isGlobalMemoryPath(file) || isRoadmapCsv(file) || active.some(item => item.path === file)) continue;
       if (source.identity.startsWith('intelligence:')) {
         if (!conversationKey.test(source.key) || !this.capturedConversationMatches(source)) continue;
       } else if (source.stage !== 'imported' || (source.identity.startsWith('agent-runs:') && !this.runSourceRetirable(source, projects))) continue;
       if (/^(project-journal|project-growth):/.test(source.identity) && !this.store.migrationSourceState(source.identity, source.key)?.reconciled) continue;
       try {
         const physical = this.physicalSourcePath(source, projects);
+        if (isRoadmapCsv(physical)) continue;
         if (occupied.has(physical)) continue;
         const bytes = await this.candidateSize(physical, source.hash, source, projects);
         if (this.physicalSourcePath(source, projects) !== physical) throw new Error('recycling_path_invalid');
