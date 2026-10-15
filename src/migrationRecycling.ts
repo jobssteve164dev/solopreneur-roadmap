@@ -166,7 +166,8 @@ export class MigrationRecycling {
     return bytes;
   }
   private async candidateSize(file: string, expectedHash: string, source: CandidateSource, projects?: RegisteredProjectScope[]): Promise<number> {
-    if (!this.allowedPath(file, source, projects)) throw new Error('recycling_path_invalid');
+    // candidates() resolves this path immediately before and after the read;
+    // the file identity checks below bind every byte between those boundaries.
     const stat = await fs.promises.lstat(file);
     if (this.symbolicLinkSource(source)) {
       if (!stat.isSymbolicLink()) throw new Error('recycling_path_invalid');

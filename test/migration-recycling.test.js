@@ -79,6 +79,25 @@ test('recycling preview validates source files without loading each candidate in
   } finally { fs.promises.readFile = readFile; await f.operations.close(); f.store.close(); }
 });
 
+test('recycling preview resolves each physical candidate only before and after its identity-bound read', async () => {
+  const f = fixture();
+  const realpathSync = fs.realpathSync;
+  let physicalResolutions = 0;
+  try {
+    await importLegacyIntelligenceConversation(f.store, f.file);
+    fs.realpathSync = file => {
+      if (path.resolve(String(file)) === path.resolve(path.dirname(f.file))) physicalResolutions++;
+      return realpathSync(file);
+    };
+    const plan = await f.call('prepare_recycling');
+    assert.equal(plan.files.length, 1);
+    assert.equal(physicalResolutions, 2, 'the preview keeps the two trust-boundary checks without a redundant middle traversal');
+  } finally {
+    fs.realpathSync = realpathSync;
+    await f.operations.close(); f.store.close();
+  }
+});
+
 test('recycling preview filters unfinished and already trashed history before resolving physical paths', async () => {
   const f = fixture();
   const registeredProjectScopes = f.store.registeredProjectScopes.bind(f.store);
