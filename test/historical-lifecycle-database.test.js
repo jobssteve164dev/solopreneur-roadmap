@@ -496,6 +496,38 @@ test('a registered historical run in the original node directory keeps its actua
   assert.deepEqual(f.store.readProjectRunIndexes(f.projectId).map(row => row.executionLogId), [71]);
 });
 
+test('a node-directory output archived before adoption converges after status repair and append', async t => {
+  const f = await history(t), original = path.join(f.base, 'isolated-original-run'), nodeDir = path.dirname(f.runDir);
+  fs.renameSync(f.runDir, original); fs.renameSync(nodeDir, path.join(f.base, 'retained-empty-original-parent')); fs.renameSync(original, nodeDir);
+  for (const key of ['sessionFilePath', 'promptFilePath', 'commandFilePath', 'outputFilePath']) f.status[key] = path.join(nodeDir, path.basename(f.status[key]));
+  registerLearningTask(f.project, { executionLogId: 71, runDir: nodeDir, userMessage: '不改原目标', startedAt: f.status.startedAt, taskId: f.taskId });
+  f.status.learningTaskId = `task-${crypto.randomUUID()}`; writeLearningJson(f.statusFile, f.status);
+  assert.ok((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts.length);
+  assert.equal(await f.client.findConversation(f.project, 71), null);
+  f.status.learningTaskId = f.taskId; writeLearningJson(f.statusFile, f.status);
+  const outputFile = path.join(nodeDir, 'output.log'); fs.appendFileSync(outputFile, '节点根目录追加输出🌿');
+  const current = fs.readFileSync(outputFile);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  assert.ok(f.store.readRunArtifactBytes(f.projectId, 71, '__solo__/output.log').bytes.equals(current));
+  assert.ok((await f.client.readLog(runStatusReference(f.project, 71), 'output')).equals(current));
+});
+
+test('a node-directory output with omitted artifact paths converges after status repair and append', async t => {
+  const f = await history(t), original = path.join(f.base, 'isolated-original-run'), nodeDir = path.dirname(f.runDir);
+  fs.renameSync(f.runDir, original); fs.renameSync(nodeDir, path.join(f.base, 'retained-empty-original-parent')); fs.renameSync(original, nodeDir);
+  for (const key of ['sessionFilePath', 'promptFilePath', 'commandFilePath', 'outputFilePath']) delete f.status[key];
+  registerLearningTask(f.project, { executionLogId: 71, runDir: nodeDir, userMessage: '不改原目标', startedAt: f.status.startedAt, taskId: f.taskId });
+  f.status.learningTaskId = `task-${crypto.randomUUID()}`; writeLearningJson(f.statusFile, f.status);
+  assert.ok((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts.length);
+  assert.equal(await f.client.findConversation(f.project, 71), null);
+  f.status.learningTaskId = f.taskId; writeLearningJson(f.statusFile, f.status);
+  const outputFile = path.join(nodeDir, 'output.log'); fs.appendFileSync(outputFile, '省略路径的节点根目录追加输出🌿');
+  const current = fs.readFileSync(outputFile);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  assert.ok(f.store.readRunArtifactBytes(f.projectId, 71, '__solo__/output.log').bytes.equals(current));
+  assert.ok((await f.client.readLog(runStatusReference(f.project, 71), 'output')).equals(current));
+});
+
 test('replaying an unchanged historical run repairs damaged content without the base64 artifact reader', async t => {
   const f = await history(t);
   const outputFile = path.join(f.runDir, 'output.log');
@@ -521,6 +553,49 @@ test('late historical byte changes are retained as source versions without overw
   assert.deepEqual(await f.client.readLog(runStatusReference(f.project, 71), 'output'), oldOutput);
   const captured = f.store.readMigrationSource(`agent-runs:${f.project}`, '__solo__/71/output.log');
   assert.equal(captured.sourceRevision, 2); assert.deepEqual(captured.bytes, changed);
+});
+
+test('an append-only historical output refreshes the formal archive and remains recyclable', async t => {
+  const f = await history(t), outputFile = path.join(f.runDir, 'output.log');
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  for (const suffix of ['后续运行输出🌿'.repeat(1000), '再次追加的运行输出🌿'.repeat(1000)]) {
+    fs.appendFileSync(outputFile, suffix);
+    const current = fs.readFileSync(outputFile);
+    const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+    assert.deepEqual(result.conflicts, []);
+    assert.ok(f.store.readRunArtifactBytes(f.projectId, 71, '__solo__/71/output.log').bytes.equals(current));
+    assert.ok((await f.client.readLog(runStatusReference(f.project, 71), 'output')).equals(current));
+  }
+  const beforeReplay = f.store.readRunState(f.projectId, 71);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  assert.deepEqual(f.store.readRunState(f.projectId, 71), beforeReplay);
+  assert.equal(f.store.migrationSourceState(`agent-runs:${f.project}`, '__solo__/71/output.log').stage, 'imported');
+  const { MigrationRecycling } = require('../out/migrationRecycling.js');
+  assert.ok((await new MigrationRecycling(f.store).prepare()).files.some(item => item.path === outputFile));
+});
+
+test('an empty adopted historical output accepts its first exact append', async t => {
+  const f = await history(t), outputFile = path.join(f.runDir, 'output.log');
+  fs.writeFileSync(outputFile, '');
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  fs.appendFileSync(outputFile, '空归档后的第一段输出🌿');
+  const current = fs.readFileSync(outputFile);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  assert.ok(f.store.readRunArtifactBytes(f.projectId, 71, '__solo__/71/output.log').bytes.equals(current));
+  assert.ok((await f.client.readLog(runStatusReference(f.project, 71), 'output')).equals(current));
+});
+
+test('an output archived before lifecycle adoption converges after its status is repaired and bytes append', async t => {
+  const f = await history(t), outputFile = path.join(f.runDir, 'output.log');
+  f.status.learningTaskId = `task-${crypto.randomUUID()}`; writeLearningJson(f.statusFile, f.status);
+  assert.ok((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts.length);
+  assert.equal(await f.client.findConversation(f.project, 71), null);
+  f.status.learningTaskId = f.taskId; writeLearningJson(f.statusFile, f.status);
+  fs.appendFileSync(outputFile, '状态修复前已经追加的完整输出🌿');
+  const current = fs.readFileSync(outputFile);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  assert.ok(f.store.readRunArtifactBytes(f.projectId, 71, '__solo__/71/output.log').bytes.equals(current));
+  assert.ok((await f.client.readLog(runStatusReference(f.project, 71), 'output')).equals(current));
 });
 
 test('the original project-root status is adopted and survives source isolation with its complete provenance', async t => {
@@ -763,8 +838,11 @@ test('an unregistered numbered run remains discoverable through a verified proje
   const alias = path.join(f.base, 'project-alias');
   fs.symlinkSync(f.project, alias, 'dir');
   assert.deepEqual((await importAgentRuns(f.store, path.join(alias, '.solopreneur', 'agent-runs'), { projectRoot: alias })).conflicts, []);
+  fs.appendFileSync(path.join(f.runDir, 'output.log'), '通过项目别名追加的输出🌿');
+  assert.deepEqual((await importAgentRuns(f.store, path.join(alias, '.solopreneur', 'agent-runs'), { projectRoot: alias })).conflicts, []);
   const found = await f.client.findConversation(f.project, 71);
   assert.equal((await f.client.readReport(found.reference, found.status)).report.summary, '历史首轮结果');
+  assert.ok((await f.client.readLog(runStatusReference(f.project, 71), 'output')).equals(fs.readFileSync(path.join(f.runDir, 'output.log'))));
 });
 
 test('an unregistered status without a workspace field retains its project through the verified native binding', async t => {

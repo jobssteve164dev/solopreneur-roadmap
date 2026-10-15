@@ -5769,7 +5769,7 @@ export class UnifiedDataStore {
   }
 
   /** Only the bounded, captured legacy importer calls this; it is not an Agent operation. */
-  public adoptHistoricalRun(projectId: string, locationId: string, source: ImportedSource, input: { historicalExecutionLogIds?: number[]; status: Record<string, unknown>; binding: NativeSessionBinding | null; prompt: string; command: string; output: Buffer; outputSource?: ImportedSource; nativeTranscript?: { source: ImportedSource; bytes: Buffer }; legacyCompletion?: { source: ImportedSource; bytes: Buffer }; workspaceBefore?: Buffer; changes?: Buffer; roadmapBackup?: Buffer; registeredTaskAlias?: string; unregisteredTaskAlias?: string; unregisteredRequest?: string; unregisteredWorkspaceRoot?: string; unregisteredWorkspaceRelocated?: boolean; unregisteredReports?: Array<{ source: ImportedSource; bytes: Buffer; observation: { executionLogId: number; sequence: number; availability: string; envelope: any } }> }): { unchanged: boolean; state: RunState } {
+  public adoptHistoricalRun(projectId: string, locationId: string, source: ImportedSource, input: { historicalExecutionLogIds?: number[]; status: Record<string, unknown>; binding: NativeSessionBinding | null; prompt: string; command: string; output: Buffer; outputSource?: ImportedSource; nativeTranscript?: { source: ImportedSource; bytes: Buffer }; legacyCompletion?: { source: ImportedSource; bytes: Buffer }; appendedOutputSource?: ImportedSource; appendedOutputArtifactExecutionLogId?: number; workspaceBefore?: Buffer; changes?: Buffer; roadmapBackup?: Buffer; registeredTaskAlias?: string; unregisteredTaskAlias?: string; unregisteredRequest?: string; unregisteredWorkspaceRoot?: string; unregisteredWorkspaceRelocated?: boolean; unregisteredReports?: Array<{ source: ImportedSource; bytes: Buffer; observation: { executionLogId: number; sequence: number; availability: string; envelope: any } }> }): { unchanged: boolean; state: RunState } {
     return this.transaction(() => {
       const status = input.status, executionLogId = Number(status.rootExecutionLogId || status.executionLogId), nodeId = String(status.nodeId || '');
       const currentExecutionLogId = Number(status.executionLogId);
@@ -5857,6 +5857,17 @@ export class UnifiedDataStore {
       }
       const sourceIdentity = { source, status, binding, prompt: digest(input.prompt), command: digest(input.command), output: digest(input.output), ...(input.outputSource ? { outputSource: input.outputSource } : {}), ...(input.nativeTranscript ? { nativeSource: input.nativeTranscript.source } : {}), workspaceBefore: input.workspaceBefore ? digest(input.workspaceBefore) : null, changes: input.changes ? digest(input.changes) : null, roadmapBackup: input.roadmapBackup ? digest(input.roadmapBackup) : null };
       const sourceHash = digest(canonical({ ...sourceIdentity, ...(input.legacyCompletion ? { completionSource: input.legacyCompletion.source } : {}) }));
+      let appendedOutput: { source: ImportedSource; archived: { bytes: Buffer; hash: string; mimeType: string }; captured: { bytes: Buffer; hash: string } } | undefined;
+      if (input.appendedOutputSource) {
+        if (runArtifactKind(input.appendedOutputSource.key) !== 'output') throw new Error('historical_run_output_source_mismatch');
+        const archivedExecutionLogId = input.appendedOutputArtifactExecutionLogId ?? executionLogId;
+        if (!Number.isSafeInteger(archivedExecutionLogId) || archivedExecutionLogId < 0) throw new Error('historical_run_output_source_mismatch');
+        const archived = this.readRunArtifactBytes(projectId, archivedExecutionLogId, input.appendedOutputSource.key);
+        const capturedOutput = this.readMigrationSource(input.appendedOutputSource.identity, input.appendedOutputSource.key);
+        if (!archived || capturedOutput.hash !== input.appendedOutputSource.hash || capturedOutput.hash !== digest(input.output) || !capturedOutput.bytes.equals(input.output)
+          || input.output.length <= archived.bytes.length || !input.output.subarray(0, archived.bytes.length).equals(archived.bytes)) throw new Error('historical_run_output_source_mismatch');
+        appendedOutput = { source: input.appendedOutputSource, archived, captured: capturedOutput };
+      }
       const consumerStatus = String(legacyDecision.status || status.status);
       const needsConsumer = ['In Progress', 'Failed'].includes(consumerStatus);
       const restoreCurrentTurnTimes = (turnId: string) => {
@@ -5875,6 +5886,36 @@ export class UnifiedDataStore {
         const state = this.readRunState(projectId, executionLogId);
         if (state.taskId !== taskId) throw new Error('historical_run_target_conflict');
         if (state.status.historicalSourceHash !== sourceHash) {
+          if (appendedOutput) {
+            const { source: outputSource, archived, captured: capturedOutput } = appendedOutput;
+            const previousSourceIdentity = { ...sourceIdentity, output: archived.hash };
+            const previousSourceHash = digest(canonical({ ...previousSourceIdentity, ...(input.legacyCompletion ? { completionSource: input.legacyCompletion.source } : {}) }));
+            const outputChunks = this.rows('SELECT sequence,byte_offset,content_id,byte_length FROM log_chunks JOIN contents ON contents.id=log_chunks.content_id WHERE run_id=? AND stream=\'output\' ORDER BY sequence', [state.runId]);
+            let archivedOffset = 0;
+            const exactFormalOutput = outputChunks.every((chunk, index) => {
+              const bytes = this.content(String(chunk.content_id));
+              const exact = Number(chunk.sequence) === index && Number(chunk.byte_offset) === archivedOffset && Number(chunk.byte_length) === bytes.length
+                && bytes.equals(archived.bytes.subarray(archivedOffset, archivedOffset + bytes.length));
+              archivedOffset += bytes.length;
+              return exact;
+            }) && archivedOffset === archived.bytes.length;
+            if (exactFormalOutput && state.status.historicalSourceHash === previousSourceHash) {
+              this.recordMutation({ projectId, source, previousOutputHash: archived.hash }, `adopt-appended-historical-output:${canonical([projectId, sourceHash])}`, 'historical_adoption', () => {
+                this.writeHistoricalRunArtifact(projectId, { executionLogId, relativePath: outputSource.key, bytes: input.output, hash: capturedOutput.hash, mimeType: archived.mimeType }, 'output');
+                const control = this.runControl(projectId, executionLogId);
+                const metadata = { ...JSON.parse(this.content(String(control.metadata_content_id)).toString('utf8')), historicalSourceHash: sourceHash };
+                const appended = input.output.subarray(archived.bytes.length);
+                this.db.run('INSERT INTO log_chunks VALUES(?,?,?,?,?,?)', [state.runId, 'output', outputChunks.length, this.putContent(appended, 'application/octet-stream', 'binary'), Date.now(), archived.bytes.length]);
+                this.db.run('UPDATE run_control SET metadata_content_id=? WHERE run_id=?', [this.putContent(canonical(metadata), 'application/json'), state.runId]);
+                this.db.run('UPDATE objects SET revision=revision+1,updated_at=? WHERE id=?', [Date.now(), state.runId]);
+                this.saveRunControlRevision(state.runId);
+                return this.current(state.runId);
+              });
+              this.markMigrationSourceImported(outputSource.identity, outputSource.key);
+              this.markMigrationSourceImported(source.identity, source.key);
+              return { unchanged: false, state: this.readRunState(projectId, executionLogId) };
+            }
+          }
           if (!input.legacyCompletion || state.status.historicalCompletionSource || state.status.historicalSourceHash !== digest(canonical(sourceIdentity))) throw new Error('historical_run_target_conflict');
           const completion = input.legacyCompletion;
           const mayNormalize = state.revision === 1 && state.status.status === status.status;
@@ -5969,6 +6010,7 @@ export class UnifiedDataStore {
           if (report.turn_id === turnId) Object.assign(metadata, { taskReportObjectId: associated.objectId, taskReportRevision: associated.revision, taskReportStatus: String(old.data.availability) });
         }
         this.db.run('UPDATE run_control SET metadata_content_id=? WHERE run_id=?', [this.putContent(canonical(metadata), 'application/json'), runId]);
+        if (appendedOutput) this.writeHistoricalRunArtifact(projectId, { executionLogId, relativePath: appendedOutput.source.key, bytes: input.output, hash: appendedOutput.captured.hash, mimeType: appendedOutput.archived.mimeType }, 'output');
         this.saveRunControlRevision(runId);
         if (needsConsumer) this.db.run("INSERT INTO run_consumer_sources VALUES(?,?,?,?,?,'queued')", [runId, projectId, String(turnId), checkpointSequence, 1]);
         return this.current(runId);
