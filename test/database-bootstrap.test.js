@@ -593,6 +593,87 @@ test('an unreadable memory source does not prevent queuing independent chat migr
   } finally { fs.promises.stat = stat; await ops.close(); store.close(); }
 });
 
+test('normal Runtime startup defers the full legacy project-file scan until explicit migration discovery', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { enqueueStartupDataMigrations, enqueueAvailableDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-deferred-legacy-scan-'));
+  const root = path.join(base, '.solomap-global');
+  const workspace = path.join(base, 'project');
+  fs.mkdirSync(path.join(workspace, '.solopreneur'), { recursive: true });
+  fs.writeFileSync(path.join(workspace, '.solopreneur', 'README.md'), 'retired generated instructions');
+  const store = new UnifiedDataStore(root);
+  const requests = [];
+  const operations = async request => { requests.push(request); return { scheduled: true }; };
+  try {
+    await store.registerProject({ root: workspace });
+    await enqueueStartupDataMigrations(store, operations, () => true);
+    assert.ok(!requests.some(request => request.input.collection === 'project-legacy-files'),
+      'ordinary startup must not scan every project legacy file');
+    await enqueueAvailableDataMigrations(store, operations, () => true, true, workspace);
+    assert.ok(requests.some(request => request.input.collection === 'project-legacy-files'),
+      'explicit migration discovery must include retired project files');
+  } finally {
+    store.close();
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('explicit migration discovery preserves the established step-memory and run-digests task versions', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { enqueueAvailableDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-established-project-migration-versions-'));
+  const root = path.join(base, '.solomap-global');
+  const workspace = path.join(base, 'project');
+  fs.mkdirSync(path.join(workspace, '.solopreneur', 'step-memory'), { recursive: true });
+  fs.mkdirSync(path.join(workspace, '.solopreneur', 'run-digests'), { recursive: true });
+  fs.writeFileSync(path.join(workspace, '.solopreneur', 'step-memory', 'step.json'), '{}');
+  fs.writeFileSync(path.join(workspace, '.solopreneur', 'run-digests', 'digest.json'), '{}');
+  const store = new UnifiedDataStore(root);
+  const requests = [];
+  try {
+    await store.registerProject({ root: workspace });
+    await enqueueAvailableDataMigrations(store, async request => { requests.push(request); return { scheduled: true }; }, () => true, true, workspace);
+    for (const collection of ['step-memory', 'run-digests']) {
+      const request = requests.find(candidate => candidate.input.collection === collection);
+      assert.ok(request, `${collection} migration must be discovered`);
+      assert.match(request.input.idempotencyKey, new RegExp(`^startup-${collection}-v2:`));
+    }
+  } finally {
+    store.close();
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('one project-source enqueue failure does not block retired-file discovery for any registered project', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { enqueueAvailableDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-independent-project-source-discovery-'));
+  const root = path.join(base, '.solomap-global');
+  const projects = [path.join(base, 'project-a'), path.join(base, 'project-b')];
+  const store = new UnifiedDataStore(root);
+  const requests = [];
+  try {
+    for (const project of projects) {
+      fs.mkdirSync(path.join(project, '.solopreneur', 'step-memory'), { recursive: true });
+      fs.writeFileSync(path.join(project, '.solopreneur', 'step-memory', 'step.json'), '{}');
+      fs.writeFileSync(path.join(project, '.solopreneur', 'README.md'), 'retired instructions');
+      await store.registerProject({ root: project });
+    }
+    await enqueueAvailableDataMigrations(store, async request => {
+      requests.push(request);
+      if (request.input.collection === 'step-memory') throw new Error('fixture_step_memory_conflict');
+      return { scheduled: true };
+    }, () => true);
+    assert.deepEqual(
+      requests.filter(request => request.input.collection === 'project-legacy-files').map(request => request.input.projectRoot).sort(),
+      projects.sort()
+    );
+  } finally {
+    store.close();
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test('on-demand migration discovery queues every registered legacy source idempotently', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');

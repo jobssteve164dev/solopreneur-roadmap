@@ -137,6 +137,14 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
     storageMaintenanceTail = operation.then(() => undefined, () => undefined);
     return operation;
   };
+  const readDatabaseStorage = async () => {
+    for (;;) {
+      const batch = store.classifyDatabaseStorageBatch(250);
+      if (!batch.pending) break;
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+    return store.readDatabaseStorage();
+  };
   const dispatch = async (request: RuntimeDataRequest): Promise<unknown> => {
     if (!request || typeof request.operation !== 'string' || !request.input || typeof request.input !== 'object') throw new Error('invalid_data_request');
     const input = request.input;
@@ -786,7 +794,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const scope = await migrationScope(input);
         const plan = recycling.readPlan(String(input.planId || ''), scope);
         const failures: string[] = [];
-        const pending = plan.files.filter(file => !['trashed', 'restored'].includes(file.status));
+        const pending = plan.files.filter(file => file.status !== 'restored');
         for (let offset = 0; offset < pending.length; offset += 128) {
           const result = await recycling.recycleBatch(pending.slice(offset, offset + 128).map(file => file.itemId));
           failures.push(...result.failures);
@@ -826,7 +834,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       }
       case 'backup': return store.backup({ destination: String(input.destination || ''), idempotencyKey: String(input.idempotencyKey || '') });
       case 'read_database_overview': return store.readDatabaseOverview();
-      case 'read_database_storage': return store.readDatabaseStorage();
+      case 'read_database_storage': return readDatabaseStorage();
       case 'maintain_database_storage': return maintainDatabaseStorage(input.compact === true, input.automatic === true);
       case 'restore_backup': return store.restoreBackup({ source: String(input.source || ''), destinationRoot: String(input.destinationRoot || ''), idempotencyKey: String(input.idempotencyKey || '') });
       case 'export_project': return store.exportProject(input as unknown as Parameters<UnifiedDataStore['exportProject']>[0]);

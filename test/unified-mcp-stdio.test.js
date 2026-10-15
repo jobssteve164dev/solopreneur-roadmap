@@ -187,6 +187,36 @@ test('an established MCP process resumes its database session after the Runtime 
   }
 });
 
+test('the MCP bridge exits promptly when its owning client session closes', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-mcp-owner-stop-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project');
+  fs.mkdirSync(project, { recursive: true }); fs.mkdirSync(path.join(project, '.git'));
+  const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  t.after(() => cleanupExact(base));
+  const projectId = owner.projectIds.get(project);
+  const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
+  const client = new Client({ name: 'mcp-owner-stop', version: '1' });
+  const transport = new StdioClientTransport({ command: process.execPath,
+    args: [path.resolve(__dirname, '../out/databaseMcpProcess.js'), '--global-data-path', root, '--project-id', projectId], cwd: project, stderr: 'pipe' });
+  let errors = ''; transport.stderr?.on('data', chunk => { errors += chunk; });
+  try {
+    await client.connect(transport);
+    const pid = transport.pid;
+    assert.ok(pid, 'MCP bridge must expose its child pid after connecting');
+    await client.close();
+    const deadline = Date.now() + 1000;
+    while (Date.now() < deadline) {
+      try { process.kill(pid, 0); await new Promise(resolve => setTimeout(resolve, 20)); }
+      catch (error) { if (error.code === 'ESRCH') break; throw error; }
+    }
+    assert.throws(() => process.kill(pid, 0), error => error.code === 'ESRCH', errors || `MCP bridge ${pid} stayed alive after its client session closed`);
+  } finally {
+    await client.close().catch(() => undefined);
+    await transport.close().catch(() => undefined);
+  }
+});
+
 for (const separateProjects of [false, true]) test(`external stdio clients concurrently use one Runtime owner (${separateProjects ? 'separate projects' : 'shared project'})`, async t => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-stdio-'));
   t.after(() => cleanupExact(base));

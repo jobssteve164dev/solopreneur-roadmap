@@ -5,6 +5,7 @@ import { UnifiedDataStore } from './db/unifiedDataStore';
 import { RuntimeDataOperations } from './runtimeDataOperations';
 import { runArtifactKind, shouldDescendRunArtifactDirectory } from './runArtifactPolicy.js';
 import { discoverLegacyRunProcesses, reapFinishedLegacyRunProcesses, type LegacyRunProcess } from './legacyRunProcessRecovery.js';
+import { legacyProjectFilesStamp } from './legacyProjectFileMigration.js';
 
 type MigrationOperations = (request: Parameters<RuntimeDataOperations>[0]) => Promise<unknown>;
 type MigrationAcknowledgement = { scheduled?: boolean };
@@ -87,7 +88,7 @@ export async function historicalRunOwnerStateStamp(store: UnifiedDataStore, shou
 export async function refreshHistoricalRunMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, previousStamp: string): Promise<string> {
   const currentStamp = await historicalRunOwnerStateStamp(store, shouldContinue);
   if (previousStamp && currentStamp && currentStamp !== previousStamp && shouldContinue()) {
-    await enqueueAvailableDataMigrations(store, operations, shouldContinue);
+    await enqueueAvailableDataMigrations(store, operations, shouldContinue, false, undefined, false);
   }
   return currentStamp;
 }
@@ -95,11 +96,11 @@ export async function refreshHistoricalRunMigrations(store: UnifiedDataStore, op
 export async function enqueueStartupDataMigrations(store: UnifiedDataStore, operations: RuntimeDataOperations, shouldContinue: () => boolean): Promise<void> {
   const recovered = await reapFinishedLegacyRunProcesses(store);
   for (const conflict of recovered.conflicts) process.stderr.write(`SoloMap legacy run recovery: ${conflict}\n`);
-  await enqueueAvailableDataMigrations(store, operations, shouldContinue);
+  await enqueueAvailableDataMigrations(store, operations, shouldContinue, false, undefined, false);
 }
 
 /** Discovers current legacy sources without blocking the caller on their import. */
-export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, refreshCompleted = false, projectRoot?: string): Promise<{ queued: number }> {
+export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, refreshCompleted = false, projectRoot?: string, includeLegacyProjectFiles = true): Promise<{ queued: number }> {
   let queued = 0;
   const enqueue = async (request: Parameters<RuntimeDataOperations>[0]): Promise<unknown> => {
     const result = await operations(refreshCompleted ? { ...request, input: { ...request.input, refreshCompleted: true } } : request) as MigrationAcknowledgement;
@@ -107,7 +108,7 @@ export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, op
     return result;
   };
   if (projectRoot) {
-    try { await enqueueStartupProjectMigrations(store, enqueue, shouldContinue, projectRoot); }
+    try { await enqueueStartupProjectMigrations(store, enqueue, shouldContinue, projectRoot, includeLegacyProjectFiles); }
     catch (error) { process.stderr.write(`SoloMap project data migration startup: ${String(error)}\n`); }
     return { queued };
   }
@@ -125,7 +126,7 @@ export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, op
   catch (error) { process.stderr.write(`SoloMap project autonomy migration startup: ${String(error)}\n`); }
   try { await enqueueStartupMemoryMigration(store, enqueue, shouldContinue); }
   catch (error) { process.stderr.write(`SoloMap memory migration startup: ${String(error)}\n`); }
-  try { await enqueueStartupProjectMigrations(store, enqueue, shouldContinue); }
+  try { await enqueueStartupProjectMigrations(store, enqueue, shouldContinue, undefined, includeLegacyProjectFiles); }
   catch (error) { process.stderr.write(`SoloMap project data migration startup: ${String(error)}\n`); }
   try { await enqueueStartupLearningMigration(store, enqueue, shouldContinue); }
   catch (error) { process.stderr.write(`SoloMap learning migration startup: ${String(error)}\n`); }
@@ -264,7 +265,7 @@ async function enqueueStartupLearningMigration(store: UnifiedDataStore, operatio
   if (shouldContinue()) await operations({ operation: 'import_project_data', input: { collection: 'learning', sourceRoot, projectScopes, archiveUnresolved: true, idempotencyKey: `startup-learning-v3:${signature}` } });
 }
 
-async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, selectedProjectRoot?: string): Promise<void> {
+async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, selectedProjectRoot?: string, includeLegacyProjectFiles = true): Promise<void> {
   let projects: Array<{ path: string }> = store.existingRegisteredProjectRoots().map(projectPath => ({ path: projectPath }));
   try {
     const registry = (await store.initializeProjectRegistry()).registry;
@@ -307,27 +308,40 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
       { collection: 'agent-runs', sourceRoot: path.join(projectRoot, '.solopreneur', 'agent-runs') },
       { collection: 'project-journal', sourceRoot: path.join(projectRoot, '.solopreneur', 'project_journal.db') },
       { collection: 'step-memory', sourceRoot: path.join(projectRoot, '.solopreneur', 'step-memory') },
-      { collection: 'run-digests', sourceRoot: path.join(projectRoot, '.solopreneur', 'run-digests') }
+      { collection: 'run-digests', sourceRoot: path.join(projectRoot, '.solopreneur', 'run-digests') },
+      ...(includeLegacyProjectFiles ? [{ collection: 'project-legacy-files', sourceRoot: path.join(projectRoot, '.solopreneur') }] : [])
     ];
     for (const source of sources) {
-      if (source.collection !== 'agent-runs') {
+      if (source.collection !== 'agent-runs' && source.collection !== 'project-legacy-files') {
         try {
           const info = await fs.promises.lstat(source.sourceRoot);
           if (info.isSymbolicLink() || !info[['step-memory', 'run-digests'].includes(source.collection) ? 'isDirectory' : 'isFile']()) continue;
         }
         catch { continue; }
       }
-      const version = source.collection === 'agent-runs' ? 10 : source.collection === 'project-journal' ? 8 : source.collection === 'project-growth' ? 3 : source.collection === 'documentation' ? 3 : 2;
+      let legacyStamp = '';
+      if (source.collection === 'project-legacy-files') {
+        try {
+          const current = await legacyProjectFilesStamp(projectRoot);
+          if (!current.count) continue;
+          legacyStamp = current.stamp;
+        } catch { continue; }
+      }
+      const version = source.collection === 'agent-runs' ? 10 : source.collection === 'project-journal' ? 8 : source.collection === 'project-growth' ? 3 : source.collection === 'documentation' ? 3 : ['step-memory', 'run-digests'].includes(source.collection) ? 2 : 1;
       const stamp = source.collection === 'agent-runs'
         ? await historicalRunSourceStamp(store, [source.sourceRoot, path.join(projectRoot, '.solopreneur', 'agent-status'), path.join(projectRoot, '.agent_status.json')], shouldContinue, discoveredOwners)
         : source.collection === 'documentation'
           ? crypto.createHash('sha256').update(await fs.promises.readFile(source.sourceRoot)).digest('hex')
-          : '';
+          : legacyStamp;
       if (!shouldContinue()) return;
       const input = { ...source, projectRoot, archiveUnresolved: true, idempotencyKey: `startup-${source.collection}-v${version}:${projectRoot}${stamp ? `:${stamp}` : ''}` };
-      const current = await operations({ operation: 'import_project_data', input }) as { status?: string };
-      if (source.collection === 'agent-runs' && current?.status === 'completed_with_conflicts') {
-        await operations({ operation: 'import_project_data', input: { ...input, idempotencyKey: `startup-agent-runs-v11:${projectRoot}${stamp ? `:${stamp}` : ''}` } });
+      try {
+        const current = await operations({ operation: 'import_project_data', input }) as { status?: string };
+        if (source.collection === 'agent-runs' && current?.status === 'completed_with_conflicts') {
+          await operations({ operation: 'import_project_data', input: { ...input, idempotencyKey: `startup-agent-runs-v11:${projectRoot}${stamp ? `:${stamp}` : ''}` } });
+        }
+      } catch (error) {
+        process.stderr.write(`SoloMap ${source.collection} migration startup: ${projectRoot}: ${String(error)}\n`);
       }
     }
   }

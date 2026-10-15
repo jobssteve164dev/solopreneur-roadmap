@@ -134,13 +134,26 @@ test('storage maintenance classifies retained run data and removes previously im
   store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,CAST(? AS INTEGER),?,?,?,?,?)', [project, '10000000000000004', '__solo__/unsafe/evidence/release.vsix', byproductContentId, crypto.createHash('sha256').update(byproduct).digest('hex'), 'application/octet-stream', now]);
   store.db.run("INSERT INTO project_run_indexes VALUES(?,CAST(? AS INTEGER),?,'[]','[]',?)", [project, '10000000000000004', JSON.stringify({ executionLogId: '10000000000000004', outputPath: '' }), now]);
   for (const [key, bytes] of [[promptPath, prompt], [byproductPath, byproduct], [sharedByproductPath, prompt]]) store.captureMigrationSource({ identity: `agent-runs:${workspace}`, key, hash: crypto.createHash('sha256').update(bytes).digest('hex') }, bytes, { mimeType: 'application/octet-stream', encoding: 'binary' });
+  for (let index = 0; index < 600; index++) {
+    const repeatedPath = `__solo__/${1000 + index}/evidence/repeated-${index}.tmp`;
+    store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 1000 + index, repeatedPath, promptContentId, crypto.createHash('sha256').update(prompt).digest('hex'), 'application/octet-stream', now]);
+    store.captureMigrationSource({ identity: `agent-runs:${workspace}-${index}`, key: repeatedPath, hash: crypto.createHash('sha256').update(prompt).digest('hex') }, prompt, { mimeType: 'application/octet-stream', encoding: 'binary' });
+  }
   assert.match(String(store.rows("EXPLAIN QUERY PLAN SELECT 1 FROM project_run_artifacts WHERE artifact_kind IN ('unclassified','byproduct') LIMIT 1")[0].detail), /project_run_artifacts_kind/);
   assert.match(String(store.rows("EXPLAIN QUERY PLAN SELECT 1 FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind IN ('unclassified','byproduct') LIMIT 1")[0].detail), /migration_items_source_kind/);
+  const originalRows = store.rows.bind(store); let largestUnclassifiedResult = 0;
+  store.rows = (sql, parameters) => {
+    const result = originalRows(sql, parameters);
+    if (sql.includes("='unclassified'") && (sql.includes('project_run_artifacts') || sql.includes('migration_items'))) largestUnclassifiedResult = Math.max(largestUnclassifiedResult, result.length);
+    return result;
+  };
   const before = await ops({ operation: 'read_database_storage', input: {} });
-  assert.equal(before.runArtifacts.pendingByproductRecords, 3); assert.ok(before.runArtifacts.pendingByproductStoredBytes >= byproduct.length);
-  assert.equal(before.migrationSources.pendingByproductRecords, 2); assert.ok(before.migrationSources.pendingByproductStoredBytes >= byproduct.length);
+  store.rows = originalRows;
+  assert.ok(largestUnclassifiedResult <= 250, `storage summary materialized ${largestUnclassifiedResult} unclassified rows in one event-loop turn`);
+  assert.equal(before.runArtifacts.pendingByproductRecords, 603); assert.ok(before.runArtifacts.pendingByproductStoredBytes >= byproduct.length);
+  assert.equal(before.migrationSources.pendingByproductRecords, 602); assert.ok(before.migrationSources.pendingByproductStoredBytes >= byproduct.length);
   const cleaned = await ops({ operation: 'maintain_database_storage', input: { compact: true } });
-  assert.equal(cleaned.deletedArtifacts, 3); assert.equal(cleaned.deletedSources, 2); assert.equal(cleaned.deletedContents, 1);
+  assert.equal(cleaned.deletedArtifacts, 603); assert.equal(cleaned.deletedSources, 602); assert.equal(cleaned.deletedContents, 1);
   assert.ok(cleaned.reclaimedStoredBytes >= byproduct.length); assert.equal(cleaned.pendingByproductRecords, 0);
   assert.equal(Buffer.from(store.readRunArtifact(project, 44, promptPath).bytes, 'base64').toString(), prompt.toString());
   assert.equal(store.readRunArtifact(project, 44, byproductPath), null);
@@ -149,7 +162,7 @@ test('storage maintenance classifies retained run data and removes previously im
   const after = await ops({ operation: 'read_database_storage', input: {} });
   assert.equal(after.runArtifacts.byKind.prompt.records, 1); assert.equal(after.runArtifacts.pendingByproductRecords, 0);
   assert.equal(after.migrationSources.byKind.prompt.records, 1); assert.equal(after.migrationSources.pendingByproductRecords, 0);
-  assert.equal(after.lastMaintenance.deletedArtifacts, 3); assert.equal(after.lastMaintenance.deletedSources, 2);
+  assert.equal(after.lastMaintenance.deletedArtifacts, 603); assert.equal(after.lastMaintenance.deletedSources, 602);
   assert.equal(after.lastMaintenance.status, 'completed'); assert.equal(after.lastMaintenance.error, '');
   assert.ok(after.databaseBytes < before.databaseBytes);
   const repeated = await ops({ operation: 'maintain_database_storage', input: { compact: false } });
