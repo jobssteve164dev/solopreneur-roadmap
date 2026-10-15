@@ -8,7 +8,7 @@ import { DatabaseMigrationCoordinator } from './databaseMigrationCoordinator';
 import * as fs from 'fs';
 import * as path from 'path';
 import { RunInputMaterialization } from './runInputMaterialization';
-import { configureAgentDatabase, databaseAgentProviders, DatabaseAgentProvider, isAgentDatabaseConfigPath } from './agentDatabaseConfig';
+import { configureAgentDatabase, databaseAgentProviders, DatabaseAgentProvider, isAgentDatabaseConfigPath, retireManagedCodexBaseConfig } from './agentDatabaseConfig';
 import { MigrationProjectScope, MigrationRecycling } from './migrationRecycling';
 import { initializeProjectJournalAllocation } from './projectDataMigration';
 import { enqueueAvailableDataMigrations } from './runtimeDatabaseBootstrap';
@@ -714,6 +714,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         if (configuration !== undefined && !isAgentDatabaseConfigPath(provider as DatabaseAgentProvider, configuration)) throw new Error('invalid_agent_database_configuration');
         const project = await store.registerProject({ root: String(input.root || '') });
         const configPath = configureAgentDatabase({ provider: provider as DatabaseAgentProvider, configPath: configuration as string | undefined, command: input.command, globalDataPath: store.root });
+        if (provider === 'codex' && path.basename(configPath) === 'solomap.config.toml') retireManagedCodexBaseConfig(path.dirname(configPath));
         return { ...project, configPath };
       }
       case 'import_memory': return migrations.enqueue(input);

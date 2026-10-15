@@ -620,7 +620,7 @@ test('automatic migration discovery never enters task byproduct directories',asy
   assert.equal(byproductReads,0);
  }finally{fs.promises.readdir=original;await ops.close();store.close();cleanupExact(base);}
 });
-test('normal upgrade supersedes the last agent-run migration version and enables unresolved source archiving',async()=>{
+test('agent-run migration upgrade replays only a source whose prior migration conflicted',async()=>{
  const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-impact-startup-upgrade-'));
  const workspace=path.join(base,'project');fs.mkdirSync(workspace);
  const store=new UnifiedDataStore(path.join(base,'global'));const ops=createRuntimeDataOperations(store);
@@ -628,20 +628,23 @@ test('normal upgrade supersedes the last agent-run migration version and enables
   const project=(await store.registerProject({root:workspace})).projectId;
   const sourceRoot=path.join(workspace,'.solopreneur','agent-runs');const run=path.join(sourceRoot,'__solo__','12');fs.mkdirSync(run,{recursive:true});
   fs.writeFileSync(path.join(run,'command.txt'),'codex');fs.writeFileSync(path.join(run,'output.log'),'完整历史日志\ntokens used\n12,345');
-  const args={collection:'agent-runs',sourceRoot,projectRoot:workspace};
-  let currentKey='';
+  const args={collection:'agent-runs',sourceRoot,projectRoot:workspace,archiveUnresolved:true};
+  let currentKeys=[];
   await enqueueStartupDataMigrations(store,async request=>{
-   if(request.operation==='import_project_data'&&request.input.collection==='agent-runs')currentKey=request.input.idempotencyKey;
+   if(request.operation==='import_project_data'&&request.input.collection==='agent-runs')currentKeys.push(request.input.idempotencyKey);
    return {jobId:'key-probe',status:'completed'};
   },()=>true);
-  assert.match(currentKey,/^startup-agent-runs-v11:/);
-  const prior=store.enqueueMemoryMigration(args,currentKey.replace(/^startup-agent-runs-v11:/,'startup-agent-runs-v10:'));
+  assert.equal(currentKeys.length,1);assert.match(currentKeys[0],/^startup-agent-runs-v10:/);
+  const prior=store.enqueueMemoryMigration(args,currentKeys[0]);
   store.updateMigrationJob(prior.jobId,'completed_with_conflicts',{imported:0,unchanged:0,originalBytes:fs.statSync(path.join(run,'output.log')).size,conflicts:[{source:run,error:'Error: historical_run_identity_ambiguous'}],retainedFiles:[run],interrupted:false});
   assert.equal(store.readProjectImpactRuns(project).length,0);
   await enqueueStartupDataMigrations(store,ops,()=>true);await ops.waitForMigrations();
-  assert.deepEqual(store.readProjectRunIndexes(project).map(x=>[x.executionLogId,x.totalTokens]),[[12,12345]]);
   const upgraded=store.migrationJobs().find(job=>job.args.collection==='agent-runs'&&job.jobId!==prior.jobId);
+  assert.ok(upgraded,JSON.stringify(store.migrationJobs()));
+  assert.match(store.rows('SELECT idempotency_key FROM migration_jobs WHERE id=?',[upgraded.jobId])[0].idempotency_key,/^startup-agent-runs-v11:/);
   assert.equal(upgraded.args.archiveUnresolved,true);
+  assert.equal(upgraded.status,'completed');
+  assert.deepEqual(store.readProjectRunIndexes(project).map(x=>[x.executionLogId,x.totalTokens]),[[12,12345]]);
   const jobs=store.migrationJobCount();const sourceState=store.rows('SELECT source_identity,source_key,source_hash,source_capture_revision FROM migration_items ORDER BY source_key');
   await enqueueStartupDataMigrations(store,ops,()=>true);await ops.waitForMigrations();
   assert.equal(store.migrationJobCount(),jobs);assert.deepEqual(store.rows('SELECT source_identity,source_key,source_hash,source_capture_revision FROM migration_items ORDER BY source_key'),sourceState);
@@ -663,6 +666,35 @@ test('normal upgrade supersedes an old agent-run conflict after its entire legac
   assert.equal(latest.args.archiveUnresolved,true);
   assert.equal(latest.status,'completed');
  }finally{await ops.close();store.close();cleanupExact(base);}
+});
+
+test('agent-run migration upgrade does not replay a source that already completed',async()=>{
+ const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-impact-targeted-upgrade-'));
+ const workspace=path.join(base,'project');fs.mkdirSync(workspace);
+ const store=new UnifiedDataStore(path.join(base,'global'));const ops=createRuntimeDataOperations(store);
+ try{
+  await store.registerProject({root:workspace});
+  const sourceRoot=path.join(workspace,'.solopreneur','agent-runs');
+  await enqueueStartupDataMigrations(store,ops,()=>true);await ops.waitForMigrations();
+  const jobs=store.migrationJobs().filter(job=>job.args.collection==='agent-runs');assert.equal(jobs.length,1);assert.equal(jobs[0].status,'completed');
+  await enqueueStartupDataMigrations(store,ops,()=>true);await ops.waitForMigrations();
+  assert.equal(store.migrationJobs().filter(job=>job.args.collection==='agent-runs').length,1);
+ }finally{await ops.close();store.close();cleanupExact(base);}
+});
+
+test('startup settles already queued broad agent-run upgrades from an earlier release when v10 succeeded',()=>{
+ const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-impact-redundant-upgrade-'));
+ const store=new UnifiedDataStore(path.join(base,'global'));
+ try{
+  const root=path.join(base,'project'),sourceRoot=path.join(root,'.solopreneur','agent-runs'),args={collection:'agent-runs',sourceRoot,projectRoot:root};fs.mkdirSync(root);
+  const v10=store.enqueueMemoryMigration(args,`startup-agent-runs-v10:${root}:same`);
+  const progress={imported:0,unchanged:7,originalBytes:123,conflicts:[],retainedFiles:['kept'],interrupted:false};
+  store.updateMigrationJob(v10.jobId,'completed',progress);
+  const v11=store.enqueueMemoryMigration({...args,archiveUnresolved:true},`startup-agent-runs-v11:${root}:same`);
+  store.updateMigrationJob(v11.jobId,'running',{interrupted:true});
+  assert.equal(store.settleRedundantAgentRunUpgradeMigrations(),1);
+  assert.deepEqual(store.readMigrationJob(v11.jobId),{jobId:v11.jobId,status:'completed',args:{...args,archiveUnresolved:true},progress,error:null});
+ }finally{store.close();cleanupExact(base);}
 });
 
 test('normal upgrade rechecks journal conflicts with the dependency-ordered reconciliation version', () => fixture(async ({ workspace, store, ops, record }) => {

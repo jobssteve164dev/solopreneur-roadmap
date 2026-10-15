@@ -402,6 +402,20 @@ export class UnifiedDataStore {
   public pendingMigrationJobs(): MigrationJob[] {
     return this.rows("SELECT id FROM migration_jobs WHERE status IN ('queued','running','interrupted') ORDER BY created_at,rowid").map(row => this.readMigrationJob(String(row.id)));
   }
+  public settleRedundantAgentRunUpgradeMigrations(): number {
+    return this.transaction(() => {
+      let settled = 0;
+      const pending = this.rows("SELECT id,idempotency_key FROM migration_jobs WHERE status IN ('queued','running','interrupted') AND idempotency_key LIKE 'startup-agent-runs-v11:%'");
+      for (const row of pending) {
+        const priorKey = String(row.idempotency_key).replace(/^startup-agent-runs-v11:/, 'startup-agent-runs-v10:');
+        const prior = this.rows("SELECT progress_json FROM migration_jobs WHERE actor_id=? AND idempotency_key=? AND status='completed'", [this.ownerActorId, priorKey])[0];
+        if (!prior) continue;
+        this.db.run("UPDATE migration_jobs SET status='completed',progress_json=?,error=NULL,updated_at=? WHERE id=? AND status IN ('queued','running','interrupted')", [String(prior.progress_json), Date.now(), row.id]);
+        settled += this.db.getRowsModified();
+      }
+      return settled;
+    });
+  }
   public migrationJobs(): MigrationJob[] {
     return this.rows('SELECT id FROM migration_jobs ORDER BY created_at,id').map(row => this.readMigrationJob(String(row.id)));
   }

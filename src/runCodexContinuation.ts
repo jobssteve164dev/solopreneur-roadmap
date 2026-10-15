@@ -25,7 +25,7 @@ async function main(): Promise<void> {
   const sessionId = String(state.status.plannedNativeSessionId || '');
   if (!launch.continuation || !sessionId) throw new Error('native_resume_target_required');
   const head = await operation<{ nextSequence: number; totalBytes: number }>('read_run_log_head', { ...identity, stream: 'native:codex' });
-  const child = childProcess.spawn(launch.agentCli, ['app-server'], { cwd: String(state.status.workspaceRoot), stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = childProcess.spawn(launch.agentCli, ['--profile', 'solomap', 'app-server'], { cwd: String(state.status.workspaceRoot), stdio: ['pipe', 'pipe', 'pipe'] });
   const closed = once(child, 'close') as Promise<[number | null, NodeJS.Signals | null]>;
   void closed.catch(() => undefined);
   let completed = false; let nativeTurnId = ''; let assistant = ''; let failure = '';

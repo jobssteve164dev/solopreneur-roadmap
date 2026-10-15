@@ -9082,7 +9082,7 @@ test('agent command builder keeps background one-shot commands and uses native i
 
   assert.equal(
     extensionModule.__buildAgentCommand('codex', 'Ship the MVP', '/workspace/app'),
-    "'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'Ship the MVP'"
+    "'codex' --profile solomap exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'Ship the MVP'"
   );
   assert.equal(
     extensionModule.__extractNativeSessionIdFromConversation({
@@ -9099,11 +9099,11 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.equal(extensionModule.__hasProEntitlement({ proEntitlements: {} }, 'strategy_pyramid'), false);
   assert.equal(
     extensionModule.__buildAgentCommand('codex-cli', "Don't skip tests", '/workspace/app'),
-    "'codex-cli' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'Don'\\''t skip tests'"
+    "'codex-cli' --profile solomap exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'Don'\\''t skip tests'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('codex', 'Continue the MVP', '/workspace/app', '019dc472-6a80-7c70-99a4-b2593a641d11'),
-    "'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'Continue the MVP'"
+    "'codex' --profile solomap exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox 'Continue the MVP'"
   );
   assert.equal(
     extensionModule.__buildAgentCommand('cursor-agent', 'Build landing page', '/workspace/app'),
@@ -9139,11 +9139,11 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('codex', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app'),
-    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -"
+    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'codex' --profile solomap exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -"
   );
   assert.equal(
     extensionModule.__buildReadOnlyAgentCommandForPromptFile('codex', '/workspace/app/review.txt', '/workspace/app'),
-    "cat '/workspace/app/review.txt' | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --sandbox read-only --ask-for-approval never -"
+    "cat '/workspace/app/review.txt' | 'codex' --profile solomap exec --color always -C '/workspace/app' --skip-git-repo-check --sandbox read-only --ask-for-approval never -"
   );
   assert.match(extensionModule.__buildReadOnlyAgentCommandForPromptFile('agy', '/workspace/app/review.txt', '/workspace/app'), /--mode plan --sandbox/);
   assert.doesNotMatch(extensionModule.__buildReadOnlyAgentCommandForPromptFile('agy', '/workspace/app/review.txt', '/workspace/app'), /dangerously-skip-permissions/);
@@ -9166,7 +9166,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('codex', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'auto', 'gpt-5.5'),
-    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m 'gpt-5.5' -"
+    "cat '/workspace/app/.solopreneur/agent-runs/2/prompt.txt' | 'codex' --profile solomap exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -m 'gpt-5.5' -"
   );
   assert.equal(
     extensionModule.__buildAgentCommandForPromptFile('cursor-agent', '/workspace/app/.solopreneur/agent-runs/2/prompt.txt', '/workspace/app', 'auto', 'gpt-5.3-codex'),
@@ -9178,7 +9178,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('codex', 'agent_prompt', '/workspace/app'),
-    "printf %s \"$agent_prompt\" | 'codex' exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -"
+    "printf %s \"$agent_prompt\" | 'codex' --profile solomap exec --color always -C '/workspace/app' --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox -"
   );
   assert.equal(
     extensionModule.__buildAgentCommandFromShellVar('agy', 'agent_prompt', '/workspace/app'),
@@ -9190,7 +9190,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     extensionModule.__buildNativeContinueCommand('codex', '019dc472-6a80-7c70-99a4-b2593a641d11', '/workspace/app'),
-    "'codex' resume --include-non-interactive --all -C '/workspace/app' '019dc472-6a80-7c70-99a4-b2593a641d11'"
+    "'codex' --profile solomap resume --include-non-interactive --all -C '/workspace/app' '019dc472-6a80-7c70-99a4-b2593a641d11'"
   );
   assert.equal(
     extensionModule.__buildNativeContinueCommand('cursor-agent', '3350a3b7-7761-4ed5-9661-2e9c9de8f924', '/workspace/app'),
@@ -9590,7 +9590,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.ok(fs.existsSync(shellScript.runScriptPath));
   assert.ok(fs.existsSync(shellScript.promptFilePath));
   assert.ok(fs.existsSync(shellScript.commandFilePath));
-  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /codex' --no-alt-screen -C .*--dangerously-bypass-approvals-and-sandbox/);
+  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /codex' --profile solomap --no-alt-screen -C .*--dangerously-bypass-approvals-and-sandbox/);
   assert.match(fs.readFileSync(shellScript.promptFilePath, 'utf8'), /Ship the MVP/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /ls-files/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /check-ignore/);
@@ -13144,8 +13144,8 @@ for (const permission of ['auto', 'never']) test(`first revise decision automati
   const correctionOutput = '已修正并验证完整结果🌿\n'.repeat(10000);
   fs.writeFileSync(mainCli, `#!${process.execPath}
 const fs=require('node:fs'),assert=require('node:assert/strict');
-assert.equal(process.argv[2],'app-server');assert.equal(process.env.CODEX_HOME,${JSON.stringify(home)});
-assert.match(fs.readFileSync(${JSON.stringify(path.join(home, 'config.toml'))},'utf8'),/SoloMap managed database MCP begin/);
+assert.deepEqual(process.argv.slice(2,5),['--profile','solomap','app-server']);assert.equal(process.env.CODEX_HOME,${JSON.stringify(home)});
+assert.match(fs.readFileSync(${JSON.stringify(path.join(home, 'solomap.config.toml'))},'utf8'),/SoloMap managed database MCP begin/);
 const send=m=>process.stdout.write(JSON.stringify(m)+'\\n');let resume;
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
  const m=JSON.parse(line);

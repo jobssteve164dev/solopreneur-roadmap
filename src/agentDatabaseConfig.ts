@@ -13,9 +13,32 @@ export type DatabaseAgentProvider = typeof databaseAgentProviders[number];
 const databaseToolNames = ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply'];
 const start = '# SoloMap managed database MCP begin';
 const end = '# SoloMap managed database MCP end';
+export const codexDatabaseProfile = 'solomap';
+
+export function codexDatabaseProfilePath(codexHome = path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'))): string {
+  return path.join(codexHome, `${codexDatabaseProfile}.config.toml`);
+}
+
+export function retireManagedCodexBaseConfig(codexHome = path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'))): boolean {
+  const file = path.join(codexHome, 'config.toml');
+  if (!fs.existsSync(file)) return false;
+  const original = fs.readFileSync(file, 'utf8');
+  const begin = original.indexOf(start), finish = original.indexOf(end);
+  if (begin < 0 && finish < 0) return false;
+  if (begin < 0 || finish < begin || original.indexOf(start, begin + start.length) >= 0 || original.indexOf(end, finish + end.length) >= 0) throw new Error('solomap_mcp_config_marker_invalid');
+  const next = original.slice(0, begin) + original.slice(finish + end.length);
+  if (next !== original) {
+    const temporary = file + '.' + crypto.randomUUID() + '.tmp';
+    try {
+      fs.writeFileSync(temporary, next, { flag: 'wx', mode: fs.statSync(file).mode & 0o777 });
+      replaceRegularFileIfUnchanged(file, temporary, original);
+    } finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
+  }
+  return true;
+}
 
 export function agentDatabaseConfigPath(provider: DatabaseAgentProvider): string {
-  if (provider === 'codex') return path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'config.toml');
+  if (provider === 'codex') return codexDatabaseProfilePath();
   if (provider === 'claude') {
     const home = path.resolve(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')).normalize('NFC');
     const legacy = path.join(home, '.config.json');
@@ -37,7 +60,8 @@ export function isAgentDatabaseConfigPath(provider: DatabaseAgentProvider, file:
   if (typeof file !== 'string' || !path.isAbsolute(file)) return false;
   if (provider === 'opencode') return /\.jsonc?$/.test(file);
   if (provider === 'claude' && path.basename(file) === '.config.json') return true;
-  const basename = provider === 'codex' || provider === 'grok' ? 'config.toml' : provider === 'claude' ? '.claude.json' : provider === 'copilot' ? 'mcp-config.json' : provider === 'antigravity' ? 'mcp_config.json' : 'mcp.json';
+  if (provider === 'codex') return ['config.toml', `${codexDatabaseProfile}.config.toml`].includes(path.basename(file));
+  const basename = provider === 'grok' ? 'config.toml' : provider === 'claude' ? '.claude.json' : provider === 'copilot' ? 'mcp-config.json' : provider === 'antigravity' ? 'mcp_config.json' : 'mcp.json';
   return path.basename(file) === basename;
 }
 

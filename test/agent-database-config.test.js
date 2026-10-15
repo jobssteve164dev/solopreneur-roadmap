@@ -22,6 +22,21 @@ test('Codex forwards the ordinary run identity and kind without storing their va
   module.configureAgentDatabase({ provider: 'codex', configPath: file, command: process.execPath, globalDataPath: '/global/.solomap-global' });
   assert.equal(fs.readFileSync(file, 'utf8'), once);
 });
+
+test('Codex uses a SoloMap-only profile and retires the managed bridge from the base config', () => {
+  const root = fixtureRoot('solomap-codex-profile-'), home = path.join(root, 'codex-home');
+  fs.mkdirSync(home);
+  const module = require('../out/agentDatabaseConfig.js');
+  const base = path.join(home, 'config.toml');
+  module.configureAgentDatabase({ provider: 'codex', configPath: base, command: '/old/node', globalDataPath: '/global' });
+  fs.appendFileSync(base, '\nmodel = "preserved"\n');
+  const profile = module.codexDatabaseProfilePath(home);
+  module.configureAgentDatabase({ provider: 'codex', configPath: profile, command: '/new/node', globalDataPath: '/global' });
+  assert.equal(module.retireManagedCodexBaseConfig(home), true);
+  assert.doesNotMatch(fs.readFileSync(base, 'utf8'), /mcp_servers\.solomap_data/);
+  assert.match(fs.readFileSync(base, 'utf8'), /model = "preserved"/);
+  assert.match(fs.readFileSync(profile, 'utf8'), /mcp_servers\.solomap_data/);
+});
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');

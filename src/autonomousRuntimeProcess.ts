@@ -226,6 +226,7 @@ async function main(): Promise<void> {
   let releaseStartupMigrationBusy = () => {};
   try {
     releaseStartupMigrationBusy = controlServer.beginBusy();
+    dataStore.settleRedundantAgentRunUpgradeMigrations();
     dataOperations.recoverMigrations();
   }
   catch (error) {

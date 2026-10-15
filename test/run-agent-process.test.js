@@ -243,7 +243,7 @@ test('the packaged review runner preserves native read-only flags, seals full JS
     const cliRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-review-cli-'));
     const cli = path.join(cliRoot, 'codex');
     const source = `const fs=require('fs');const args=process.argv.slice(1);if(!args.includes('read-only')||!args.includes('never'))process.exit(9);const prompt=fs.readFileSync(0,'utf8');if(prompt!=='任务原文')process.exit(8);${mode === 'writes' ? "fs.writeFileSync('forbidden-change.txt','changed');" : ''}process.stdout.write(${JSON.stringify(mode === 'invalid' ? 'no decision' : 'SOLOMAP_REVIEW_JSON_START\n{"status":"pass","summary":"完整复核🌿","findings":[],"nextAction":"","criteria":[],"goalSatisfied":true,"evidenceSufficient":true}\nSOLOMAP_REVIEW_JSON_END')});`;
-    fs.writeFileSync(cli, `#!/bin/bash\nexec ${shellQuote(process.execPath)} -e ${shellQuote(source)} "$@"\n`, { mode: 0o755 });
+    fs.writeFileSync(cli, `#!/bin/bash\nexec ${shellQuote(process.execPath)} -e ${shellQuote(source)} -- "$@"\n`, { mode: 0o755 });
     const metadata = { agentLaunch: { schemaVersion: 1, agentCli: cli, selectedModel: '', taskPermissionMode: 'auto', continuation: false, direct: false, readOnly: true } };
     const f = await executionFixture('placeholder', metadata, '', 'agent_review');
     try {
@@ -267,9 +267,9 @@ for (const mode of ['auto', 'never']) for (const preconfirmed of [false, true]) 
   const home = path.join(cliRoot, 'source-codex-home'); fs.mkdirSync(home);
   fs.writeFileSync(path.join(home, 'config.toml'), 'model = "original-provider-model"\n');
   const text = '完整修正输出🌿'.repeat(20000);
-  const source = `if(process.argv[1]!=='app-server')process.exit(9);const rl=require('readline').createInterface({input:process.stdin});const send=m=>process.stdout.write(JSON.stringify(m)+'\\n');rl.on('line',line=>{const m=JSON.parse(line);if(m.method==='initialize'){if(m.params.capabilities!==null)process.exit(6);send({id:0,result:{}});}if(m.method==='thread/resume'){if(m.params.threadId!==${JSON.stringify(sessionId)}||${mode === 'auto' ? "m.params.sandbox!=='danger-full-access'||m.params.approvalPolicy!=='never'" : "m.params.sandbox!==undefined||m.params.approvalPolicy!==undefined"})process.exit(8);send({id:1,result:{thread:{id:m.params.threadId}}});}if(m.method==='turn/start'){if(m.params.input[0].text!=='任务原文'||!Array.isArray(m.params.input[0].text_elements))process.exit(7);require('fs').writeFileSync('correction.txt','交付');send({id:2,result:{turn:{id:'native-turn-one'}}});send({method:'item/agentMessage/delta',params:{threadId:${JSON.stringify(sessionId)},turnId:'native-turn-one',delta:'完整修正输出🌿'.repeat(20000)}});send({method:'turn/completed',params:{threadId:${JSON.stringify(sessionId)},turn:{id:'native-turn-one',status:'completed'}}});}});`;
-  const sourceContextCheck = `if(process.env.CODEX_HOME!==${JSON.stringify(home)}){process.stderr.write('source_codex_home_lost');process.exit(5);}if(!require('fs').readFileSync(require('path').join(process.env.CODEX_HOME,'config.toml'),'utf8').includes('SoloMap managed database MCP begin')){process.stderr.write('source_codex_mcp_missing');process.exit(4);}`;
-  fs.writeFileSync(cli, `#!/bin/bash\nexec ${shellQuote(process.execPath)} -e ${shellQuote(sourceContextCheck + source)} "$@"\n`, { mode: 0o755 });
+  const source = `if(JSON.stringify(process.argv.slice(1,4))!==JSON.stringify(['--profile','solomap','app-server']))process.exit(9);const rl=require('readline').createInterface({input:process.stdin});const send=m=>process.stdout.write(JSON.stringify(m)+'\\n');rl.on('line',line=>{const m=JSON.parse(line);if(m.method==='initialize'){if(m.params.capabilities!==null)process.exit(6);send({id:0,result:{}});}if(m.method==='thread/resume'){if(m.params.threadId!==${JSON.stringify(sessionId)}||${mode === 'auto' ? "m.params.sandbox!=='danger-full-access'||m.params.approvalPolicy!=='never'" : "m.params.sandbox!==undefined||m.params.approvalPolicy!==undefined"})process.exit(8);send({id:1,result:{thread:{id:m.params.threadId}}});}if(m.method==='turn/start'){if(m.params.input[0].text!=='任务原文'||!Array.isArray(m.params.input[0].text_elements))process.exit(7);require('fs').writeFileSync('correction.txt','交付');send({id:2,result:{turn:{id:'native-turn-one'}}});send({method:'item/agentMessage/delta',params:{threadId:${JSON.stringify(sessionId)},turnId:'native-turn-one',delta:'完整修正输出🌿'.repeat(20000)}});send({method:'turn/completed',params:{threadId:${JSON.stringify(sessionId)},turn:{id:'native-turn-one',status:'completed'}}});}});`;
+  const sourceContextCheck = `if(process.env.CODEX_HOME!==${JSON.stringify(home)}){process.stderr.write('source_codex_home_lost');process.exit(5);}if(!require('fs').readFileSync(require('path').join(process.env.CODEX_HOME,'solomap.config.toml'),'utf8').includes('SoloMap managed database MCP begin')){process.stderr.write('source_codex_mcp_missing');process.exit(4);}`;
+  fs.writeFileSync(cli, `#!/bin/bash\nexec ${shellQuote(process.execPath)} -e ${shellQuote(sourceContextCheck + source)} -- "$@"\n`, { mode: 0o755 });
   const launch = { schemaVersion: 1, agentCli: cli, selectedModel: 'original-model', taskPermissionMode: mode, continuation: true, direct: false };
   const f = await executionFixture('placeholder', { agentLaunch: launch, agentCli: cli, plannedNativeSessionId: sessionId, agentDatabaseConfigPath: path.join(cliRoot, 'config.toml'), bindingNonce: '1'.repeat(64) }, '', 'agent_review_revision');
   try {
@@ -554,7 +554,8 @@ test('a Codex startup failure retries without the daemon while preserving the ex
     const agent = f.startAgent(); agent.stdin.end(); assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
     const attempts = f.stdout().toString().split(/\r?\n/).filter(line => line.startsWith('attempt:')).map(line => JSON.parse(line.slice(8)));
     assert.equal(attempts.length, 2);
-    assert.equal(attempts[0][0], 'resume'); assert.equal(attempts[1][0], 'resume'); assert.equal(attempts[1][1], '--no-daemon');
+    assert.deepEqual(attempts[0].slice(0, 3), ['--profile', 'solomap', 'resume']);
+    assert.deepEqual(attempts[1].slice(0, 4), ['--no-daemon', '--profile', 'solomap', 'resume']);
     assert.ok(attempts.every(args => args.includes('confirmed-native-session-123')));
     assert.ok(attempts.every(args => args.at(-1).includes('original-binding-nonce')));
     const log = await f.call('read_run_log', { stream: 'stdout' }); const text = Buffer.from(log.bytes, 'base64').toString();
@@ -770,7 +771,7 @@ test('Codex resume latency cannot start a correction after the parent entered a 
   const codexHome = path.join(cliRoot, 'native-home');
   const cli = path.join(cliRoot, 'codex'); const sessionId = 'cc70ea64-51ec-41ef-842b-72f62bb8b7b3';
   const source = `const fs=require('fs');const rl=require('readline').createInterface({input:process.stdin});const send=m=>process.stdout.write(JSON.stringify(m)+'\\n');rl.on('line',line=>{const m=JSON.parse(line);if(m.method==='initialize')send({id:0,result:{}});if(m.method==='thread/resume'){fs.writeFileSync('resume-waiting','');const timer=setInterval(()=>{if(fs.existsSync('release-resume')){clearInterval(timer);send({id:1,result:{thread:{id:m.params.threadId}}});}},10);}if(m.method==='turn/start'){fs.writeFileSync('obsolete-correction.txt','started');send({id:2,result:{turn:{id:'native-late'}}});send({method:'turn/completed',params:{threadId:${JSON.stringify(sessionId)},turn:{id:'native-late',status:'completed'}}});}});`;
-  fs.writeFileSync(cli, `#!/bin/bash\nexec ${shellQuote(process.execPath)} -e ${shellQuote(source)} "$@"\n`, { mode: 0o755 });
+  fs.writeFileSync(cli, `#!/bin/bash\nexec ${shellQuote(process.execPath)} -e ${shellQuote(source)} -- "$@"\n`, { mode: 0o755 });
   const f = await executionFixture('unused main command', { interactiveSession: true });
   try {
     const parent = await f.call('read_run_checkpoint_state');

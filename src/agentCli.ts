@@ -7,6 +7,8 @@ export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
+const codexProfileArgs = '--profile solomap';
+
 export function normalizeTaskPermissionMode(value: unknown): string {
   return ['auto', 'always', 'never'].includes(String(value || '')) ? String(value) : 'auto';
 }
@@ -425,7 +427,7 @@ export function buildAgentCommand(agentCli: string, agentPrompt: string, workspa
   void nativeSessionId;
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} ${quotedPrompt}`;
+    return `${quotedCli} ${codexProfileArgs} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} ${quotedPrompt}`;
   }
   if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `${quotedCli} -p${permissionSegment}${modelSegment} --output-format text ${quotedPrompt}`;
@@ -462,8 +464,8 @@ export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath:
   const quotedPromptFileInstruction = shellQuote(promptFileInstruction);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    if (promptInstruction) return `${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} ${quotedPromptFileInstruction}`;
-    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} -`;
+    if (promptInstruction) return `${quotedCli} ${codexProfileArgs} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} ${quotedPromptFileInstruction}`;
+    return `cat ${quotedPromptFile} | ${quotedCli} ${codexProfileArgs} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} -`;
   }
   if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `${quotedCli} -p${permissionSegment}${modelSegment} --output-format text ${quotedPromptFileInstruction}`;
@@ -501,7 +503,7 @@ export function buildInteractiveAgentCommandForPromptFile(agentCli: string, prom
   const quotedInstruction = shellQuote(promptFileInstruction);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} --no-alt-screen -C ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} ${quotedInstruction}`;
+    return `${quotedCli} ${codexProfileArgs} --no-alt-screen -C ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} ${quotedInstruction}`;
   }
   if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli}${permissionSegment}${modelSegment} ${quotedInstruction})`;
@@ -558,7 +560,7 @@ export function buildInteractiveAgentContinuationCommandForPromptFile(agentCli: 
   const quotedInstruction = shellQuote(promptFileInstruction);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} resume --no-alt-screen -C ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} ${quotedSessionId} ${quotedInstruction}`;
+    return `${quotedCli} ${codexProfileArgs} resume --no-alt-screen -C ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} ${quotedSessionId} ${quotedInstruction}`;
   }
   if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --resume ${quotedSessionId}${permissionSegment}${modelSegment} ${quotedInstruction})`;
@@ -590,7 +592,7 @@ export function buildReadOnlyAgentCommandForPromptFile(agentCli: string, promptF
   const quotedInstruction = shellQuote(promptFileInstruction);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `cat ${quotedPromptFile} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --sandbox read-only --ask-for-approval never${modelSegment} -`;
+    return `cat ${quotedPromptFile} | ${quotedCli} ${codexProfileArgs} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --sandbox read-only --ask-for-approval never${modelSegment} -`;
   }
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
     return `cat ${quotedPromptFile} | ${quotedCli} --mode plan --sandbox --print-timeout 5m${modelSegment} --add-dir=${shellQuote(workspaceRoot)} --print`;
@@ -648,7 +650,7 @@ export function buildAgentCommandFromShellVar(agentCli: string, promptVarName: s
   const modelSegment = getAgentModelFlag(agentCli, selectedModel);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `printf %s ${promptExpression} | ${quotedCli} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} -`;
+    return `printf %s ${promptExpression} | ${quotedCli} ${codexProfileArgs} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} -`;
   }
   if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `${quotedCli} -p${permissionSegment}${modelSegment} --output-format text ${promptExpression}`;
@@ -681,7 +683,7 @@ export function buildNativeContinueCommand(agentCli: string, sessionId: string, 
   const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} resume --include-non-interactive --all -C ${shellQuote(workspaceRoot)} ${quotedSessionId}`;
+    return `${quotedCli} ${codexProfileArgs} resume --include-non-interactive --all -C ${shellQuote(workspaceRoot)} ${quotedSessionId}`;
   }
   if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --resume ${quotedSessionId})`;

@@ -1,7 +1,7 @@
 import * as crypto from 'crypto';
 import * as path from 'path';
 import { getAgentProvider, shellQuote } from './agentCli';
-import { agentDatabaseConfigPath, databaseAgentProviders, DatabaseAgentProvider } from './agentDatabaseConfig';
+import { agentDatabaseConfigPath, codexDatabaseProfilePath, databaseAgentProviders, DatabaseAgentProvider } from './agentDatabaseConfig';
 import type { NativeSessionBinding } from './sessionIdentity';
 import { getCodexSessionHome } from './sessionIdentity';
 import type { RunState } from './runLifecycleTypes';
@@ -35,7 +35,9 @@ export async function prepareNativeAgentLaunch(input: {
     const binding = ['codex', 'claude'].includes(provider) ? await input.operation('read_run_binding', scope) as NativeSessionBinding | null : null;
     const codexHome = provider === 'codex' ? getCodexSessionHome(binding) : '';
     const claude = provider === 'claude' ? [...(binding?.revisions || [])].reverse().find(value => value.providerContext?.claude)?.providerContext?.claude as Record<string, unknown> | undefined : undefined;
-    const configPath = codexHome ? path.join(codexHome, 'config.toml') : String(claude?.configPath || state.status.agentDatabaseConfigPath || agentDatabaseConfigPath(provider as DatabaseAgentProvider));
+    const configPath = provider === 'codex'
+      ? codexDatabaseProfilePath(codexHome || undefined)
+      : String(claude?.configPath || state.status.agentDatabaseConfigPath || agentDatabaseConfigPath(provider as DatabaseAgentProvider));
     await input.operation('prepare_agent_database', { root: input.workspaceRoot, provider, command: process.execPath, configPath });
   }
   if (state.status.interactiveSession !== true) return state;

@@ -101,9 +101,10 @@ export async function enqueueStartupDataMigrations(store: UnifiedDataStore, oper
 /** Discovers current legacy sources without blocking the caller on their import. */
 export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, refreshCompleted = false, projectRoot?: string): Promise<{ queued: number }> {
   let queued = 0;
-  const enqueue = async (request: Parameters<RuntimeDataOperations>[0]): Promise<void> => {
+  const enqueue = async (request: Parameters<RuntimeDataOperations>[0]): Promise<unknown> => {
     const result = await operations(refreshCompleted ? { ...request, input: { ...request.input, refreshCompleted: true } } : request) as MigrationAcknowledgement;
     if (result.scheduled) queued++;
+    return result;
   };
   if (projectRoot) {
     try { await enqueueStartupProjectMigrations(store, enqueue, shouldContinue, projectRoot); }
@@ -316,14 +317,18 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
         }
         catch { continue; }
       }
-      const version = source.collection === 'agent-runs' ? 11 : source.collection === 'project-journal' ? 8 : source.collection === 'project-growth' ? 3 : source.collection === 'documentation' ? 3 : 2;
+      const version = source.collection === 'agent-runs' ? 10 : source.collection === 'project-journal' ? 8 : source.collection === 'project-growth' ? 3 : source.collection === 'documentation' ? 3 : 2;
       const stamp = source.collection === 'agent-runs'
         ? await historicalRunSourceStamp(store, [source.sourceRoot, path.join(projectRoot, '.solopreneur', 'agent-status'), path.join(projectRoot, '.agent_status.json')], shouldContinue, discoveredOwners)
         : source.collection === 'documentation'
           ? crypto.createHash('sha256').update(await fs.promises.readFile(source.sourceRoot)).digest('hex')
           : '';
       if (!shouldContinue()) return;
-      await operations({ operation: 'import_project_data', input: { ...source, projectRoot, archiveUnresolved: true, idempotencyKey: `startup-${source.collection}-v${version}:${projectRoot}${stamp ? `:${stamp}` : ''}` } });
+      const input = { ...source, projectRoot, archiveUnresolved: true, idempotencyKey: `startup-${source.collection}-v${version}:${projectRoot}${stamp ? `:${stamp}` : ''}` };
+      const current = await operations({ operation: 'import_project_data', input }) as { status?: string };
+      if (source.collection === 'agent-runs' && current?.status === 'completed_with_conflicts') {
+        await operations({ operation: 'import_project_data', input: { ...input, idempotencyKey: `startup-agent-runs-v11:${projectRoot}${stamp ? `:${stamp}` : ''}` } });
+      }
     }
   }
 }
