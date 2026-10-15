@@ -1003,7 +1003,7 @@ test('explicit recycling review reads source metadata once and reuses unchanged 
   for (let index = 0; index < 503; index++) store.captureMigrationSource({ identity: `agent-runs:${workspace}`, key: `__solo__/${index}/output.log`, hash }, bytes);
   let sourceMetadataReads = 0; let wholeFileReads = 0;
   const rows = store.rows.bind(store); const readFile = fs.promises.readFile;
-  store.rows = (sql, args) => { if (sql.startsWith('SELECT source_identity,source_key,contents.sha256')) sourceMetadataReads++; return rows(sql, args); };
+  store.rows = (sql, args) => { if (sql.includes('FROM migration_items items JOIN contents')) sourceMetadataReads++; return rows(sql, args); };
   fs.promises.readFile = async (...args) => { if (String(args[0]) === journal) wholeFileReads++; return readFile(...args); };
   try {
     const before = store.rows('SELECT COUNT(*) AS count FROM migration_items')[0].count;

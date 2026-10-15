@@ -271,7 +271,7 @@ export class MigrationRecycling {
       try { occupied.add(this.physicalPath(item.path)); } catch { occupied.add(item.path); }
     }
     const files = [];
-    for (const source of this.store.capturedMigrationSources().filter(source => belongs(source.identity))) {
+    for (const source of this.store.recyclingCandidateSources(scope ? [...identities!] : undefined).filter(source => belongs(source.identity))) {
       const file = this.sourcePath(source.identity, source.key);
       if (!file || active.some(item => item.path === file)) continue;
       if (source.identity.startsWith('intelligence:')) {

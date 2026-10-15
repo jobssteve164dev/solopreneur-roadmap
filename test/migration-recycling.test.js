@@ -79,6 +79,31 @@ test('recycling preview validates source files without loading each candidate in
   } finally { fs.promises.readFile = readFile; await f.operations.close(); f.store.close(); }
 });
 
+test('recycling preview filters unfinished and already trashed history before resolving physical paths', async () => {
+  const f = fixture();
+  const registeredProjectScopes = f.store.registeredProjectScopes.bind(f.store);
+  try {
+    await importLegacyIntelligenceConversation(f.store, f.file);
+    const bytes = Buffer.from('captured but not imported');
+    const hash = require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+    for (let index = 0; index < 250; index++) {
+      f.store.captureMigrationSource({ identity: 'step-memory:unfinished-project', key: `history/${index}.md`, hash }, bytes);
+    }
+    f.store.registeredProjectScopes = () => { throw new Error('unfinished_source_path_resolved'); };
+    const first = await f.call('prepare_recycling');
+    assert.deepEqual(first.files.map(file => file.path), [f.file]);
+    f.store.registeredProjectScopes = registeredProjectScopes;
+    await f.call('confirm_recycling', { planId: first.planId });
+    await f.call('execute_recycling_plan', { planId: first.planId });
+    assert.deepEqual(f.store.recyclingCandidateSources(), []);
+    const repeated = await f.call('prepare_recycling');
+    assert.deepEqual(repeated, { planId: null, files: [] });
+  } finally {
+    f.store.registeredProjectScopes = registeredProjectScopes;
+    await f.operations.close(); f.store.close();
+  }
+});
+
 test('migration overview stays small with populated history while job detail retains every source and conflict after restart', async () => {
   const f = fixture();
   const retainedFiles = Array.from({ length: 25000 }, (_, index) => `project/.solopreneur/agent-runs/step/${index}/output.log`);

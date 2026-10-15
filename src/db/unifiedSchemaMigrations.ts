@@ -577,4 +577,7 @@ CREATE INDEX content_ref_roadmap_file_states_pending_content_id ON roadmap_file_
 CREATE INDEX content_ref_roadmap_file_states_accepted_content_id ON roadmap_file_states(accepted_content_id);
 ` }, { version: 42, sql: `
 CREATE INDEX events_request ON events(request_id);
+` }, { version: 43, sql: `
+CREATE INDEX migration_items_stage_source ON migration_items(stage,source_identity,source_key);
+CREATE INDEX migration_recycling_source_receipt ON migration_recycling(source_identity,source_key,source_hash,status);
 ` }];
