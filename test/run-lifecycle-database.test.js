@@ -66,6 +66,26 @@ test('historical output-only conversations expose their complete output as stdou
   } finally { await f.operations.close(); f.store.close(); }
 });
 
+test('paged historical logs read only the requested range of a large stored chunk', async () => {
+  const f = fixture();
+  try {
+    const run = await f.call('prepare_run', request(f.project));
+    const output = Buffer.from('large historical output\n'.repeat(120000));
+    const contentId = f.store.putContent(output, 'application/octet-stream', 'binary');
+    f.store.db.run('INSERT INTO log_chunks VALUES(?,?,?,?,?,?)', [run.runId, 'output', 0, contentId, Date.now(), 0]);
+    const readContent = f.store.content.bind(f.store);
+    f.store.content = id => {
+      if (id === contentId) throw new Error('whole_log_chunk_read');
+      return readContent(id);
+    };
+    const offset = 1048576;
+    const page = await f.call('read_run_log', { root: f.project, executionLogId: 1, stream: 'output', offset, limit: 65536 });
+    assert.deepEqual(Buffer.from(page.bytes, 'base64'), output.subarray(offset, offset + 65536));
+    assert.equal(page.totalBytes, output.length);
+    assert.equal(page.nextOffset, offset + 65536);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
 test('conversation log snapshots keep each historical turn inside its recorded byte range', async () => {
   const f = fixture();
   try {

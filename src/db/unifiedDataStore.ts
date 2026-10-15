@@ -5421,8 +5421,11 @@ export class UnifiedDataStore {
     const totalBytes = last ? Number(last.byte_offset) + Number(last.byte_length) : 0;
     if (offset > totalBytes) throw new Error('invalid_log_offset');
     const end = Math.min(totalBytes, offset + limit);
-    const parts = this.rows('SELECT content_id,byte_offset FROM log_chunks JOIN contents ON contents.id=log_chunks.content_id WHERE run_id=? AND stream=? AND byte_offset<? AND byte_offset+byte_length>? ORDER BY sequence', [run.run_id, input.stream, end, offset])
-      .map(row => { const bytes = this.content(String(row.content_id)); return bytes.subarray(Math.max(0, offset - Number(row.byte_offset)), Math.min(bytes.length, end - Number(row.byte_offset))); });
+    const parts = this.rows('SELECT content_id,byte_offset,sha256,mime_type,byte_length,stored_byte_length,encoding,chunk_index_json FROM log_chunks JOIN contents ON contents.id=log_chunks.content_id WHERE run_id=? AND stream=? AND byte_offset<? AND byte_offset+byte_length>? ORDER BY sequence', [run.run_id, input.stream, end, offset])
+      .map(row => {
+        const chunkOffset = Number(row.byte_offset), chunkLength = Number(row.byte_length);
+        return this.contentRange(String(row.content_id), row, Math.max(0, offset - chunkOffset), Math.min(chunkLength, end - chunkOffset));
+      });
     return { bytes: Buffer.concat(parts).toString('base64'), offset, totalBytes, nextOffset: end < totalBytes ? end : null };
   }
   public readRunLogHead(projectId: string, executionLogId: number, stream: string): { nextSequence: number; totalBytes: number } {
