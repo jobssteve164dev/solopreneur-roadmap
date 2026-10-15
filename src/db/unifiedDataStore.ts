@@ -450,10 +450,11 @@ export class UnifiedDataStore {
     return this.rows('SELECT source_identity,source_key,contents.sha256 AS hash,stage FROM migration_items JOIN contents ON contents.id=source_content_id ORDER BY source_identity,source_key')
       .map(row => ({ identity: String(row.source_identity), key: String(row.source_key), hash: String(row.hash), stage: String(row.stage) }));
   }
-  public recyclingCandidateSources(sourceIdentities?: string[]): Array<{ identity: string; key: string; hash: string; stage: string }> {
+  public recyclingCandidateSources(sourceIdentities?: string[]): Array<{ identity: string; key: string; hash: string; stage: string; kind: string }> {
     if (sourceIdentities?.length === 0) return [];
     const identityFilter = sourceIdentities ? ` AND items.source_identity IN (${sourceIdentities.map(() => '?').join(',')})` : '';
-    return this.rows(`SELECT items.source_identity,items.source_key,contents.sha256 AS hash,items.stage
+    return this.rows(`SELECT items.source_identity,items.source_key,contents.sha256 AS hash,items.stage,
+        COALESCE(items.source_kind,'unclassified') AS kind
       FROM migration_items items JOIN contents ON contents.id=items.source_content_id
       WHERE (items.stage='imported' OR (
         items.stage<>'imported' AND items.source_identity LIKE 'intelligence:%' AND substr(items.source_key,-5)='.json'
@@ -462,7 +463,7 @@ export class UnifiedDataStore {
         WHERE recycled.source_identity=items.source_identity AND recycled.source_key=items.source_key
           AND recycled.source_hash=contents.sha256 AND recycled.status='trashed'
       ) ORDER BY items.source_identity,items.source_key`, sourceIdentities || [])
-      .map(row => ({ identity: String(row.source_identity), key: String(row.source_key), hash: String(row.hash), stage: String(row.stage) }));
+      .map(row => ({ identity: String(row.source_identity), key: String(row.source_key), hash: String(row.hash), stage: String(row.stage), kind: String(row.kind) }));
   }
   public migrationSourceKind(identity: string, key: string): string {
     return String(this.rows('SELECT source_kind FROM migration_items WHERE source_identity=? AND source_key=?', [identity, key])[0]?.source_kind || 'unclassified');

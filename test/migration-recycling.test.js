@@ -136,6 +136,23 @@ test('recycling preview reuses one registered project snapshot for every eligibl
   }
 });
 
+test('recycling preview carries ordinary source state and kind in the candidate query', async () => {
+  const f = fixture();
+  const migrationSourceState = f.store.migrationSourceState.bind(f.store);
+  const migrationSourceKind = f.store.migrationSourceKind.bind(f.store);
+  try {
+    await importLegacyIntelligenceConversation(f.store, f.file);
+    f.store.migrationSourceState = () => { throw new Error('candidate_state_requeried'); };
+    f.store.migrationSourceKind = () => { throw new Error('candidate_kind_requeried'); };
+    const plan = await f.call('prepare_recycling');
+    assert.deepEqual(plan.files.map(file => file.path), [f.file]);
+  } finally {
+    f.store.migrationSourceState = migrationSourceState;
+    f.store.migrationSourceKind = migrationSourceKind;
+    await f.operations.close(); f.store.close();
+  }
+});
+
 test('discarding an unconfirmed recycling plan removes only prepared receipts and leaves sources untouched', async () => {
   const f = fixture();
   try {

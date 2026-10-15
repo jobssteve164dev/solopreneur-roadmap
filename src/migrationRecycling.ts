@@ -9,6 +9,7 @@ const hash = (bytes: Buffer) => crypto.createHash('sha256').update(bytes).digest
 const conversationKey = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.json$/i;
 export interface MigrationProjectScope { root: string; projectId: string; physicalRoot: string }
 type RegisteredProjectScope = { root: string; projectId: string };
+type CandidateSource = Pick<RecyclingItem, 'identity' | 'key'> & { kind?: string };
 
 /** Only collections whose writers and readers use the database may be retired. */
 export class MigrationRecycling {
@@ -150,10 +151,10 @@ export class MigrationRecycling {
     if (!after.isFile() || after.isSymbolicLink() || before.ino !== after.ino || before.mtimeMs !== after.mtimeMs || before.size !== after.size || hash(bytes) !== expectedHash) throw new Error('recycling_source_changed');
     return bytes;
   }
-  private symbolicLinkSource(source: Pick<RecyclingItem, 'identity' | 'key'>): boolean {
-    return this.store.migrationSourceKind(source.identity, source.key) === 'symlink';
+  private symbolicLinkSource(source: CandidateSource): boolean {
+    return (source.kind ?? this.store.migrationSourceKind(source.identity, source.key)) === 'symlink';
   }
-  private async verifiedSource(file: string, expectedHash: string, source: Pick<RecyclingItem, 'identity' | 'key'>, projects?: RegisteredProjectScope[]): Promise<Buffer> {
+  private async verifiedSource(file: string, expectedHash: string, source: CandidateSource, projects?: RegisteredProjectScope[]): Promise<Buffer> {
     if (!this.symbolicLinkSource(source)) return this.verifiedFile(file, expectedHash, source, projects);
     if (!this.allowedPath(file, source, projects)) throw new Error('recycling_path_invalid');
     const before = await fs.promises.lstat(file);
@@ -164,7 +165,7 @@ export class MigrationRecycling {
       || await fs.promises.readlink(file) !== target || hash(bytes) !== expectedHash) throw new Error('recycling_source_changed');
     return bytes;
   }
-  private async candidateSize(file: string, expectedHash: string, source: Pick<RecyclingItem, 'identity' | 'key'>, projects?: RegisteredProjectScope[]): Promise<number> {
+  private async candidateSize(file: string, expectedHash: string, source: CandidateSource, projects?: RegisteredProjectScope[]): Promise<number> {
     if (!this.allowedPath(file, source, projects)) throw new Error('recycling_path_invalid');
     const stat = await fs.promises.lstat(file);
     if (this.symbolicLinkSource(source)) {
@@ -237,8 +238,8 @@ export class MigrationRecycling {
     return discoverLegacyRunProcesses(root).some(owner => owner.runDirectory === nodeRoot
       || executionLogId !== undefined && owner.executionLogId === executionLogId && path.dirname(owner.runDirectory) === nodeRoot);
   }
-  private runSourceRetirable(source: Pick<RecyclingItem, 'identity' | 'key'>, projects?: RegisteredProjectScope[]): boolean {
-    if (!isRetirableRunArtifact(source.key) && !['prompt', 'output', 'control', 'session', 'change_evidence', 'report'].includes(this.store.migrationSourceKind(source.identity, source.key))) return false;
+  private runSourceRetirable(source: CandidateSource, projects?: RegisteredProjectScope[]): boolean {
+    if (!isRetirableRunArtifact(source.key) && !['prompt', 'output', 'control', 'session', 'change_evidence', 'report'].includes(source.kind ?? this.store.migrationSourceKind(source.identity, source.key))) return false;
     const root = source.identity.slice('agent-runs:'.length);
     const project = (projects ?? this.store.registeredProjectScopes()).find(project => {
       try { return fs.realpathSync(project.root) === fs.realpathSync(root); } catch { return false; }
@@ -281,7 +282,7 @@ export class MigrationRecycling {
       if (source.identity.startsWith('intelligence:')) {
         if (!conversationKey.test(source.key) || !this.capturedConversationMatches(source)) continue;
       } else if (source.stage !== 'imported' || (source.identity.startsWith('agent-runs:') && !this.runSourceRetirable(source, projects))) continue;
-      if (!this.store.migrationSourceState(source.identity, source.key)?.reconciled) continue;
+      if (/^(project-journal|project-growth):/.test(source.identity) && !this.store.migrationSourceState(source.identity, source.key)?.reconciled) continue;
       try {
         const physical = this.physicalSourcePath(source, projects);
         if (occupied.has(physical)) continue;
