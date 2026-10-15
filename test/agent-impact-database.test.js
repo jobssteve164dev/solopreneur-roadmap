@@ -844,18 +844,18 @@ test('explicit recycling review reads source metadata once and reuses unchanged 
   await importProjectJournal(store, journal, { projectRoot: workspace });
   const bytes = Buffer.from('完整保留的历史运行内容'); const hash = crypto.createHash('sha256').update(bytes).digest('hex');
   for (let index = 0; index < 503; index++) store.captureMigrationSource({ identity: `agent-runs:${workspace}`, key: `__solo__/${index}/output.log`, hash }, bytes);
-  let sourceMetadataReads = 0; let fileReads = 0;
+  let sourceMetadataReads = 0; let wholeFileReads = 0;
   const rows = store.rows.bind(store); const readFile = fs.promises.readFile;
   store.rows = (sql, args) => { if (sql.startsWith('SELECT source_identity,source_key,contents.sha256')) sourceMetadataReads++; return rows(sql, args); };
-  fs.promises.readFile = async (...args) => { if (String(args[0]) === journal) fileReads++; return readFile(...args); };
+  fs.promises.readFile = async (...args) => { if (String(args[0]) === journal) wholeFileReads++; return readFile(...args); };
   try {
     const before = store.rows('SELECT COUNT(*) AS count FROM migration_items')[0].count;
     const plan = await ops({ operation: 'prepare_recycling', input: {} }); assert.equal(plan.files.length, 1);
     assert.equal(sourceMetadataReads, 1, 'byte authorization must not rescan every captured source');
-    assert.equal(fileReads, 1);
+    assert.equal(wholeFileReads, 0, 'explicit review must not load the whole legacy database into one buffer');
     sourceMetadataReads = 0;
     assert.equal((await ops({ operation: 'prepare_recycling', input: {} })).planId, plan.planId);
-    assert.equal(sourceMetadataReads, 1); assert.equal(fileReads, 1, 'unchanged explicit review does not reread the legacy database');
+    assert.equal(sourceMetadataReads, 1); assert.equal(wholeFileReads, 0, 'unchanged explicit review does not reread the whole legacy database');
     assert.equal(store.rows('SELECT COUNT(*) AS count FROM migration_items')[0].count, before);
   } finally { store.rows = rows; fs.promises.readFile = readFile; }
 }));

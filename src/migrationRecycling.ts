@@ -12,7 +12,7 @@ export interface MigrationProjectScope { root: string; projectId: string; physic
 export class MigrationRecycling {
   private busy = new Set<string>();
   private matches = new Map<string, { hash: string; revision: number; matches: boolean }>();
-  private fileChecks = new Map<string, { hash: string; inode: number; size: number; mtime: number; ctime: number }>();
+  private fileChecks = new Map<string, { hash: string; device: number; inode: number; size: number; mtime: number; ctime: number }>();
   constructor(private readonly store: UnifiedDataStore) {}
 
   private sourceIdentities(scope: MigrationProjectScope): string[] {
@@ -129,12 +129,27 @@ export class MigrationRecycling {
     const stat = await fs.promises.lstat(file);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new Error('recycling_path_invalid');
     const previous = this.fileChecks.get(file);
-    if (previous?.hash === expectedHash && previous.inode === stat.ino && previous.size === stat.size && previous.mtime === stat.mtimeMs && previous.ctime === stat.ctimeMs) return stat.size;
-    const bytes = await this.verifiedFile(file, expectedHash, source);
+    if (previous?.hash === expectedHash && previous.device === stat.dev && previous.inode === stat.ino && previous.size === stat.size && previous.mtime === stat.mtimeMs && previous.ctime === stat.ctimeMs) return stat.size;
+    const digest = crypto.createHash('sha256');
+    const buffer = Buffer.allocUnsafe(1024 * 1024);
+    const handle = await fs.promises.open(file, 'r');
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino || opened.size !== stat.size || opened.mtimeMs !== stat.mtimeMs || opened.ctimeMs !== stat.ctimeMs) throw new Error('recycling_source_changed');
+      let position = 0;
+      while (position < opened.size) {
+        const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, opened.size - position), position);
+        if (!bytesRead) throw new Error('recycling_source_changed');
+        digest.update(buffer.subarray(0, bytesRead));
+        position += bytesRead;
+      }
+      const closedOver = await handle.stat();
+      if (closedOver.dev !== opened.dev || closedOver.ino !== opened.ino || closedOver.size !== opened.size || closedOver.mtimeMs !== opened.mtimeMs || closedOver.ctimeMs !== opened.ctimeMs || digest.digest('hex') !== expectedHash) throw new Error('recycling_source_changed');
+    } finally { await handle.close(); }
     const after = await fs.promises.lstat(file);
-    if (stat.ino !== after.ino || stat.mtimeMs !== after.mtimeMs || stat.ctimeMs !== after.ctimeMs || stat.size !== after.size) throw new Error('recycling_source_changed');
-    this.fileChecks.set(file, { hash: expectedHash, inode: after.ino, size: after.size, mtime: after.mtimeMs, ctime: after.ctimeMs });
-    return bytes.length;
+    if (!after.isFile() || after.isSymbolicLink() || after.nlink !== 1 || stat.dev !== after.dev || stat.ino !== after.ino || stat.mtimeMs !== after.mtimeMs || stat.ctimeMs !== after.ctimeMs || stat.size !== after.size) throw new Error('recycling_source_changed');
+    this.fileChecks.set(file, { hash: expectedHash, device: after.dev, inode: after.ino, size: after.size, mtime: after.mtimeMs, ctime: after.ctimeMs });
+    return after.size;
   }
   private matchesConversation(key: string, bytes: Buffer): boolean {
     try {

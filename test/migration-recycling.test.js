@@ -63,6 +63,22 @@ test('migration overview is immediate and leaves byte validation to explicit rev
   } finally { fs.promises.readFile = readFile; await f.operations.close(); f.store.close(); }
 });
 
+test('recycling preview validates source files without loading each candidate into one buffer', async () => {
+  const f = fixture();
+  const readFile = fs.promises.readFile;
+  try {
+    await importLegacyIntelligenceConversation(f.store, f.file);
+    fs.promises.readFile = async (file, ...args) => {
+      if (path.resolve(String(file)) === path.resolve(f.file)) throw new Error('whole_candidate_read');
+      return readFile(file, ...args);
+    };
+    const plan = await f.call('prepare_recycling');
+    assert.equal(plan.files.length, 1);
+    assert.equal(plan.files[0].path, f.file);
+    assert.equal(plan.files[0].bytes, Buffer.byteLength(f.original));
+  } finally { fs.promises.readFile = readFile; await f.operations.close(); f.store.close(); }
+});
+
 test('migration overview stays small with populated history while job detail retains every source and conflict after restart', async () => {
   const f = fixture();
   const retainedFiles = Array.from({ length: 25000 }, (_, index) => `project/.solopreneur/agent-runs/step/${index}/output.log`);
