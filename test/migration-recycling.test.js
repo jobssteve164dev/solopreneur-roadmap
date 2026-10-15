@@ -104,6 +104,64 @@ test('recycling preview filters unfinished and already trashed history before re
   }
 });
 
+test('recycling preview reuses one registered project snapshot for every eligible source path', async () => {
+  const f = fixture();
+  const registeredProjectScopes = f.store.registeredProjectScopes.bind(f.store);
+  try {
+    await importLegacyIntelligenceConversation(f.store, f.file);
+    const projectRoot = path.join(path.dirname(f.root), 'project');
+    fs.mkdirSync(path.join(projectRoot, '.solopreneur'), { recursive: true });
+    await f.store.registerProject({ root: projectRoot });
+    const identity = `analysis-caches:${f.root}`;
+    for (const name of ['issues-cache.json', 'pull-requests-cache.json', 'delivery-cache.json']) {
+      const file = path.join(projectRoot, '.solopreneur', name);
+      const bytes = Buffer.from(JSON.stringify({ name }));
+      const hash = require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+      fs.writeFileSync(file, bytes);
+      const key = path.relative(f.root, file).split(path.sep).join('/');
+      f.store.captureMigrationSource({ identity, key, hash }, bytes);
+      f.store.markMigrationSourceImported(identity, key);
+    }
+    let registryReads = 0;
+    f.store.registeredProjectScopes = () => {
+      registryReads++;
+      return registeredProjectScopes();
+    };
+    const plan = await f.call('prepare_recycling');
+    assert.equal(plan.files.length, 4);
+    assert.equal(registryReads, 1, 'one preview must resolve all candidates against one registry snapshot');
+  } finally {
+    f.store.registeredProjectScopes = registeredProjectScopes;
+    await f.operations.close(); f.store.close();
+  }
+});
+
+test('discarding an unconfirmed recycling plan removes only prepared receipts and leaves sources untouched', async () => {
+  const f = fixture();
+  try {
+    await importLegacyIntelligenceConversation(f.store, f.file);
+    const plan = await f.call('prepare_recycling');
+    const result = await f.call('discard_recycling_plan', { planId: plan.planId });
+    assert.deepEqual(result, { discarded: true, planId: plan.planId, files: 1, bytes: Buffer.byteLength(f.original) });
+    assert.equal(fs.readFileSync(f.file, 'utf8'), f.original);
+    assert.deepEqual(f.store.recyclingItems(), []);
+    await assert.rejects(f.call('read_recycling_plan', { planId: plan.planId }), /recycling_plan_missing/);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('discarding a confirmed recycling plan is rejected atomically', async () => {
+  const f = fixture();
+  try {
+    await importLegacyIntelligenceConversation(f.store, f.file);
+    const plan = await f.call('prepare_recycling');
+    await f.call('confirm_recycling', { planId: plan.planId });
+    await assert.rejects(f.call('discard_recycling_plan', { planId: plan.planId }), /recycling_plan_not_discardable/);
+    assert.equal(f.store.recyclingItems().length, 1);
+    assert.equal(f.store.recyclingItems()[0].status, 'approved');
+    assert.equal(fs.readFileSync(f.file, 'utf8'), f.original);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
 test('migration overview stays small with populated history while job detail retains every source and conflict after restart', async () => {
   const f = fixture();
   const retainedFiles = Array.from({ length: 25000 }, (_, index) => `project/.solopreneur/agent-runs/step/${index}/output.log`);

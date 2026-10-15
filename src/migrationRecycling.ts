@@ -8,6 +8,7 @@ import { discoverLegacyRunProcesses } from './legacyRunProcessRecovery.js';
 const hash = (bytes: Buffer) => crypto.createHash('sha256').update(bytes).digest('hex');
 const conversationKey = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.json$/i;
 export interface MigrationProjectScope { root: string; projectId: string; physicalRoot: string }
+type RegisteredProjectScope = { root: string; projectId: string };
 
 /** Only collections whose writers and readers use the database may be retired. */
 export class MigrationRecycling {
@@ -27,7 +28,7 @@ export class MigrationRecycling {
     return !scope || this.sourceIdentities(scope).includes(identity);
   }
 
-  private sourcePath(identity: string, key: string): string | null {
+  private sourcePath(identity: string, key: string, projects?: RegisteredProjectScope[]): string | null {
     const containedFile = (root: string): string | null => {
       const file = path.resolve(root, key), relative = path.relative(path.resolve(root), file);
       return relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? file : null;
@@ -40,7 +41,7 @@ export class MigrationRecycling {
       const cacheNames = new Set(['issues-cache.json', 'pull-requests-cache.json', 'delivery-cache.json', 'security-cache.json']);
       if (!cacheNames.has(path.basename(file)) || path.basename(path.dirname(file)) !== '.solopreneur') return null;
       const projectRoot = path.dirname(path.dirname(file));
-      const registered = this.store.registeredProjectScopes().some(project => {
+      const registered = (projects ?? this.store.registeredProjectScopes()).some(project => {
         try { return fs.realpathSync(project.root) === fs.realpathSync(projectRoot); } catch { return path.resolve(project.root) === projectRoot; }
       });
       return registered ? file : null;
@@ -56,7 +57,7 @@ export class MigrationRecycling {
       ? path.join(identity.slice('project-agent-status:'.length), key) : null;
     for (const collection of ['step-memory', 'run-digests']) if (identity.startsWith(collection + ':')) {
       const projectId = identity.slice(collection.length + 1);
-      const roots = [...new Set(this.store.registeredProjectScopes().filter(project => project.projectId === projectId)
+      const roots = [...new Set((projects ?? this.store.registeredProjectScopes()).filter(project => project.projectId === projectId)
         .map(project => { try { return fs.realpathSync(project.root); } catch { return ''; } }).filter(Boolean))];
       if (roots.length !== 1) return null;
       const root = path.join(roots[0], '.solopreneur', collection);
@@ -88,7 +89,7 @@ export class MigrationRecycling {
     if (hash(captured.bytes) !== captured.hash) throw new Error('migration_source_hash_mismatch');
     return { identity, key, hash: captured.hash, bytes: captured.bytes.length, verified: true, stage: captured.stage };
   }
-  private allowedPath(file: string, source?: Pick<RecyclingItem, 'identity' | 'key'> & Partial<Pick<RecyclingItem, 'itemId' | 'restorePath'>>): boolean {
+  private allowedPath(file: string, source?: Pick<RecyclingItem, 'identity' | 'key'> & Partial<Pick<RecyclingItem, 'itemId' | 'restorePath'>>, projects?: RegisteredProjectScope[]): boolean {
     const resolved = path.resolve(file); const recycleRoot = path.join(path.resolve(this.store.root), '.migration-recycle');
     if (resolved.startsWith(recycleRoot + path.sep)) return true;
     if (!source) return false;
@@ -97,20 +98,20 @@ export class MigrationRecycling {
       if (!bound || bound.identity !== source.identity || bound.key !== source.key || bound.restorePath !== resolved) return false;
       try { return this.physicalPath(resolved) === resolved; } catch { return false; }
     }
-    const declared = this.sourcePath(source.identity, source.key);
+    const declared = this.sourcePath(source.identity, source.key, projects);
     if (!declared) return false;
-    try { return this.physicalSourcePath(source) === resolved; } catch { return false; }
+    try { return this.physicalSourcePath(source, projects) === resolved; } catch { return false; }
   }
 
-  private physicalSourcePath(source: Pick<RecyclingItem, 'identity' | 'key'>): string {
-    const declared = this.sourcePath(source.identity, source.key);
+  private physicalSourcePath(source: Pick<RecyclingItem, 'identity' | 'key'>, projects?: RegisteredProjectScope[]): string {
+    const declared = this.sourcePath(source.identity, source.key, projects);
     if (!declared) throw new Error('recycling_path_invalid');
     const physical = this.physicalPath(declared);
     const projectIdentity = /^(documentation|project-journal|project-growth|agent-runs|agent-status|project-agent-status):(.+)$/.exec(source.identity);
     let projectRoot = projectIdentity?.[2];
     const sharedIdentity = /^(step-memory|run-digests):(.+)$/.exec(source.identity);
     if (sharedIdentity) {
-      const roots = [...new Set(this.store.registeredProjectScopes().filter(project => project.projectId === sharedIdentity[2])
+      const roots = [...new Set((projects ?? this.store.registeredProjectScopes()).filter(project => project.projectId === sharedIdentity[2])
         .map(project => { try { return fs.realpathSync(project.root); } catch { return ''; } }).filter(Boolean))];
       if (roots.length !== 1) throw new Error('recycling_path_invalid');
       projectRoot = roots[0];
@@ -140,8 +141,8 @@ export class MigrationRecycling {
     const expected = path.join(root, path.basename(directory));
     if ((await fs.promises.lstat(directory)).isSymbolicLink() || await fs.promises.realpath(directory) !== expected) throw new Error('recycling_path_invalid');
   }
-  private async verifiedFile(file: string, expectedHash: string, source?: Pick<RecyclingItem, 'identity' | 'key'>): Promise<Buffer> {
-    if (!this.allowedPath(file, source)) throw new Error('recycling_path_invalid');
+  private async verifiedFile(file: string, expectedHash: string, source?: Pick<RecyclingItem, 'identity' | 'key'>, projects?: RegisteredProjectScope[]): Promise<Buffer> {
+    if (!this.allowedPath(file, source, projects)) throw new Error('recycling_path_invalid');
     const before = await fs.promises.lstat(file);
     if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) throw new Error('recycling_path_invalid');
     const bytes = await fs.promises.readFile(file);
@@ -152,9 +153,9 @@ export class MigrationRecycling {
   private symbolicLinkSource(source: Pick<RecyclingItem, 'identity' | 'key'>): boolean {
     return this.store.migrationSourceKind(source.identity, source.key) === 'symlink';
   }
-  private async verifiedSource(file: string, expectedHash: string, source: Pick<RecyclingItem, 'identity' | 'key'>): Promise<Buffer> {
-    if (!this.symbolicLinkSource(source)) return this.verifiedFile(file, expectedHash, source);
-    if (!this.allowedPath(file, source)) throw new Error('recycling_path_invalid');
+  private async verifiedSource(file: string, expectedHash: string, source: Pick<RecyclingItem, 'identity' | 'key'>, projects?: RegisteredProjectScope[]): Promise<Buffer> {
+    if (!this.symbolicLinkSource(source)) return this.verifiedFile(file, expectedHash, source, projects);
+    if (!this.allowedPath(file, source, projects)) throw new Error('recycling_path_invalid');
     const before = await fs.promises.lstat(file);
     if (!before.isSymbolicLink()) throw new Error('recycling_path_invalid');
     const target = await fs.promises.readlink(file), bytes = Buffer.from(target, 'utf8');
@@ -163,12 +164,12 @@ export class MigrationRecycling {
       || await fs.promises.readlink(file) !== target || hash(bytes) !== expectedHash) throw new Error('recycling_source_changed');
     return bytes;
   }
-  private async candidateSize(file: string, expectedHash: string, source: Pick<RecyclingItem, 'identity' | 'key'>): Promise<number> {
-    if (!this.allowedPath(file, source)) throw new Error('recycling_path_invalid');
+  private async candidateSize(file: string, expectedHash: string, source: Pick<RecyclingItem, 'identity' | 'key'>, projects?: RegisteredProjectScope[]): Promise<number> {
+    if (!this.allowedPath(file, source, projects)) throw new Error('recycling_path_invalid');
     const stat = await fs.promises.lstat(file);
     if (this.symbolicLinkSource(source)) {
       if (!stat.isSymbolicLink()) throw new Error('recycling_path_invalid');
-      return (await this.verifiedSource(file, expectedHash, source)).length;
+      return (await this.verifiedSource(file, expectedHash, source, projects)).length;
     }
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new Error('recycling_path_invalid');
     const previous = this.fileChecks.get(file);
@@ -236,10 +237,10 @@ export class MigrationRecycling {
     return discoverLegacyRunProcesses(root).some(owner => owner.runDirectory === nodeRoot
       || executionLogId !== undefined && owner.executionLogId === executionLogId && path.dirname(owner.runDirectory) === nodeRoot);
   }
-  private runSourceRetirable(source: Pick<RecyclingItem, 'identity' | 'key'>): boolean {
+  private runSourceRetirable(source: Pick<RecyclingItem, 'identity' | 'key'>, projects?: RegisteredProjectScope[]): boolean {
     if (!isRetirableRunArtifact(source.key) && !['prompt', 'output', 'control', 'session', 'change_evidence', 'report'].includes(this.store.migrationSourceKind(source.identity, source.key))) return false;
     const root = source.identity.slice('agent-runs:'.length);
-    const project = this.store.registeredProjectScopes().find(project => {
+    const project = (projects ?? this.store.registeredProjectScopes()).find(project => {
       try { return fs.realpathSync(project.root) === fs.realpathSync(root); } catch { return false; }
     });
     if (!source.key.startsWith('learning-tasks/')) {
@@ -271,18 +272,21 @@ export class MigrationRecycling {
       try { occupied.add(this.physicalPath(item.path)); } catch { occupied.add(item.path); }
     }
     const files = [];
+    let registeredProjects: RegisteredProjectScope[] | undefined;
+    const projectSnapshot = () => registeredProjects ||= this.store.registeredProjectScopes();
     for (const source of this.store.recyclingCandidateSources(scope ? [...identities!] : undefined).filter(source => belongs(source.identity))) {
-      const file = this.sourcePath(source.identity, source.key);
+      const projects = /^(analysis-caches|step-memory|run-digests|agent-runs):/.test(source.identity) ? projectSnapshot() : undefined;
+      const file = this.sourcePath(source.identity, source.key, projects);
       if (!file || active.some(item => item.path === file)) continue;
       if (source.identity.startsWith('intelligence:')) {
         if (!conversationKey.test(source.key) || !this.capturedConversationMatches(source)) continue;
-      } else if (source.stage !== 'imported' || (source.identity.startsWith('agent-runs:') && !this.runSourceRetirable(source))) continue;
+      } else if (source.stage !== 'imported' || (source.identity.startsWith('agent-runs:') && !this.runSourceRetirable(source, projects))) continue;
       if (!this.store.migrationSourceState(source.identity, source.key)?.reconciled) continue;
       try {
-        const physical = this.physicalSourcePath(source);
+        const physical = this.physicalSourcePath(source, projects);
         if (occupied.has(physical)) continue;
-        const bytes = await this.candidateSize(physical, source.hash, source);
-        if (this.physicalSourcePath(source) !== physical) throw new Error('recycling_path_invalid');
+        const bytes = await this.candidateSize(physical, source.hash, source, projects);
+        if (this.physicalSourcePath(source, projects) !== physical) throw new Error('recycling_path_invalid');
         files.push({ identity: source.identity, key: source.key, hash: source.hash, path: physical, bytes });
         occupied.add(physical);
       } catch { /* Changed, missing, or unsafe sources stay outside the recyclable list. */ }
@@ -317,6 +321,7 @@ export class MigrationRecycling {
     try { return fs.realpathSync(root) === scope.physicalRoot; } catch { return path.resolve(root) === path.resolve(scope.root); }
   }
   public async prepare(scope?: MigrationProjectScope) { return this.store.createRecyclingPlan(await this.candidates(scope)); }
+  public discardPlan(planId: string) { return { discarded: true, ...this.store.discardPreparedRecyclingPlan(planId) }; }
   public readPlan(planId: string, scope?: MigrationProjectScope) {
     let requiresConfirmation = false;
     const files = this.store.recyclingItems().filter(item => item.planId === planId).map(item => {

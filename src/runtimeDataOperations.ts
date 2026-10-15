@@ -771,6 +771,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       }
       case 'prepare_recycling': return recycling.prepare(await migrationScope(input));
       case 'read_recycling_plan': return recycling.readPlan(String(input.planId || ''), await migrationScope(input));
+      case 'discard_recycling_plan': return recycling.discardPlan(String(input.planId || ''));
       case 'retry_migration': {
         const scope = await migrationScope(input); const job = store.readMigrationJob(String(input.jobId || ''));
         if (scope && !recycling.jobBelongsToProject(job, scope)) throw new Error('maintenance_scope_denied');

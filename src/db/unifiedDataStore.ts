@@ -682,6 +682,17 @@ export class UnifiedDataStore {
       return { planId, files: this.recyclingItems().filter(item => item.planId === planId) };
     });
   }
+  public discardPreparedRecyclingPlan(planId: string): { planId: string; files: number; bytes: number } {
+    return this.transaction(() => {
+      const rows = this.rows('SELECT status,byte_count FROM migration_recycling WHERE plan_id=? ORDER BY id', [planId]);
+      if (!rows.length) throw new Error('recycling_plan_missing');
+      if (rows.some(row => row.status !== 'prepared')) throw new Error('recycling_plan_not_discardable');
+      const bytes = rows.reduce((total, row) => total + Number(row.byte_count), 0);
+      this.db.run("DELETE FROM migration_recycling WHERE plan_id=? AND status='prepared'", [planId]);
+      if (this.db.getRowsModified() !== rows.length) throw new Error('recycling_plan_not_discardable');
+      return { planId, files: rows.length, bytes };
+    });
+  }
   public recyclingSnapshot(itemId: string): { bytes: Buffer; hash: string } {
     const item = this.rows('SELECT source_content_id,source_hash FROM migration_recycling WHERE id=?', [itemId])[0];
     if (!item) throw new Error('recycling_item_missing');

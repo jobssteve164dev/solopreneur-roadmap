@@ -215,6 +215,7 @@ test('an ordinary Solo run can migrate and prepare an exact recycling preview bu
     assert.deepEqual(preview.files.map(file => file.path), [legacy]);
     assert.equal(preview.files[0].bytes, bytes.length);
     await assert.rejects(f.operations({ operation: 'migration_overview', input: {}, sessionToken: ordinarySession.sessionToken }), /project_scope_required/);
+    await assert.rejects(f.operations({ operation: 'discard_recycling_plan', input: { planId: preview.planId }, sessionToken: ordinarySession.sessionToken }), /action_denied/);
     await assert.rejects(f.operations({ operation: 'execute_recycling_plan', input: { planId: preview.planId, projectRoot: migration.project }, sessionToken: ordinarySession.sessionToken }), /action_denied/);
     await f.call('claim_run', { projectId: ordinary.projectId, executionLogId: 2, expectedRevision: ordinary.revision, idempotencyKey: 'replacement-ordinary-owner' });
     await assert.rejects(f.operations({ operation: 'migration_overview', input: { projectRoot: migration.project }, sessionToken: ordinarySession.sessionToken }), /run_owner_conflict/);
