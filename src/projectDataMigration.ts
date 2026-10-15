@@ -79,7 +79,8 @@ async function stableFile(file: string): Promise<{ bytes: Buffer; hash: string }
 function isAppendedHistoricalOutput(store: UnifiedDataStore, projectId: string, executionLogId: number, relativePath: string, current: { bytes: Buffer; hash: string }): boolean {
   if (runArtifactKind(relativePath) !== 'output') return false;
   const archived = store.readRunArtifactBytes(projectId, executionLogId, relativePath);
-  return Boolean(archived && current.bytes.length > archived.bytes.length && current.bytes.subarray(0, archived.bytes.length).equals(archived.bytes));
+  return Boolean(archived && current.bytes.length > archived.bytes.length && digest(archived.bytes) === archived.hash
+    && digest(current.bytes.subarray(0, archived.bytes.length)) === archived.hash);
 }
 
 export async function initializeProjectJournalAllocation(store: UnifiedDataStore, projectRoot: string): Promise<number> {
@@ -313,6 +314,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
   const runs = new Map<string, Map<string, { file: string; hash: string; executionLogId: number; modifiedAt: number }>>();
   const conflictingRuns = new Set<string>();
   const appendedOutputs = new Set<string>();
+  const lateChangeEvidence = new Map<string, { file: string; executionLogId: number }>();
   const runDirectory = (relative: string) => { const parts = relative.split(path.sep); return parts.length >= 3 && /^\d+$/.test(parts[1]) ? parts.slice(0, 2).join(path.sep) : parts[0]; };
   for (const file of files) {
     if (options.shouldContinue && !options.shouldContinue()) return { ...result, interrupted: true };
@@ -329,6 +331,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       let artifact = store.readRunArtifactMetadata(project.projectId, executionLogId, relativePath);
       if (artifact?.hash === captured.hash) result.unchanged++;
       else if (artifact && isAppendedHistoricalOutput(store, project.projectId, executionLogId, relativePath, captured)) appendedOutputs.add(relativePath);
+      else if (artifact && ['changes.txt', 'touched-files.txt'].includes(path.basename(relativePath))) lateChangeEvidence.set(relativePath, { file, executionLogId });
       else if (artifact) { result.conflicts.push({ source: file, error: 'migration_target_changed' }); conflictingRuns.add(runDirectory(relativePath)); }
       else {
         store.writeRunArtifact(project.projectId, { executionLogId, relativePath, bytes: captured.bytes, hash: captured.hash });
@@ -344,6 +347,12 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       }
     } catch (error) { result.conflicts.push({ source: file, error: String(error) }); conflictingRuns.add(runDirectory(path.relative(sourceRoot, file))); }
     await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  const appendedRunDirectories = new Set([...appendedOutputs].map(runDirectory));
+  for (const [relativePath, changed] of lateChangeEvidence) {
+    if (appendedRunDirectories.has(runDirectory(relativePath))) continue;
+    result.conflicts.push({ source: changed.file, error: 'migration_target_changed' });
+    conflictingRuns.add(runDirectory(relativePath));
   }
   // Registered envelopes bind reports to tasks and execution identities; directory names
   // alone are never sufficient to manufacture those relationships.
@@ -441,6 +450,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       const runDir = path.resolve(candidates[0].runDir), relative = path.relative(sourceRoot, runDir);
       if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || relative.split(path.sep)[0] !== status.nodeId || conflictingRuns.has(relative)) throw new Error('historical_run_source_conflict');
       let appendedOutputArtifactExecutionLogId: number | undefined;
+      let changesSourceKey: string | undefined;
       const read = async (name: string, required = true, declaredField?: string): Promise<Buffer | null> => {
         const declared = declaredField ? String(status[declaredField] || '') : '';
         const file = declared ? declaredPath(declaredField!) : path.join(runDir, name);
@@ -459,10 +469,11 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         }
         if (declaredCurrent) {
           const appended = Boolean(artifact && declaredCurrent.hash !== artifact.hash && declaredKind === 'output' && appendedOutputs.has(sourceKey));
-          if (artifact && declaredCurrent.hash !== artifact.hash && !appended) throw new Error('historical_run_source_changed');
+          const refreshed = Boolean(artifact && declaredCurrent.hash !== artifact.hash && lateChangeEvidence.has(sourceKey));
+          if (artifact && declaredCurrent.hash !== artifact.hash && !appended && !refreshed) throw new Error('historical_run_source_changed');
           if (appended) appendedOutputArtifactExecutionLogId = artifactExecutionLogId;
           store.captureMigrationSource({ identity, key: sourceKey, hash: declaredCurrent.hash }, declaredCurrent.bytes, { mimeType: 'application/octet-stream', encoding: 'binary', sourceKind: declaredKind! });
-          if (!appended) store.writeHistoricalRunArtifact(project.projectId, { executionLogId: id, relativePath: sourceKey, bytes: declaredCurrent.bytes, hash: declaredCurrent.hash }, declaredKind!);
+          if (!appended && !refreshed) store.writeHistoricalRunArtifact(project.projectId, { executionLogId: id, relativePath: sourceKey, bytes: declaredCurrent.bytes, hash: declaredCurrent.hash }, declaredKind!);
           if (!artifact) { result.originalBytes += declaredCurrent.bytes.length; result.retainedFiles.push(file); result.imported++; }
           return declaredCurrent.bytes;
         }
@@ -477,8 +488,8 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         }
         const current = declaredCurrent || await stableFile(file);
         if (current.hash !== artifact.hash) {
-          if (!appendedOutputs.has(sourceKey)) throw new Error('historical_run_source_changed');
-          appendedOutputArtifactExecutionLogId = artifactExecutionLogId;
+          if (appendedOutputs.has(sourceKey)) appendedOutputArtifactExecutionLogId = artifactExecutionLogId;
+          else if (!lateChangeEvidence.has(sourceKey)) throw new Error('historical_run_source_changed');
         }
         return current.bytes;
       };
@@ -534,7 +545,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       let output = await read('output.log', false, 'outputFilePath');
       const physicalOutput = status.outputFilePath ? declaredPath('outputFilePath') : path.join(runDir, 'output.log');
       const outputArtifactPath = path.relative(sourceRoot, physicalOutput);
-      const appendedOutputSource = output && appendedOutputs.has(outputArtifactPath)
+      const appendedOutputSource = output && appendedOutputArtifactExecutionLogId !== undefined
         ? { identity, key: outputArtifactPath, hash: digest(output) }
         : undefined;
       let outputSource: { identity: string; key: string; hash: string } | undefined;
@@ -555,7 +566,10 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         const declared = String(status[statusKey] || ''), name = declared ? path.basename(declared) : fallback;
         if (declared && declaredPath(statusKey) !== path.join(runDir, name)) throw new Error('historical_run_document_scope_mismatch');
         const bytes = await read(fallback, false, statusKey);
-        if (bytes) documents[field] = bytes;
+        if (bytes) {
+          documents[field] = bytes;
+          if (field === 'changes') changesSourceKey = path.relative(sourceRoot, declared ? declaredPath(statusKey) : path.join(runDir, fallback));
+        }
         else if (declared) {
           result.retainedGaps ||= [];
           result.retainedGaps.push({ source: declared, error: 'historical_optional_artifact_missing' });
@@ -583,7 +597,15 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         reports.push({ source: { identity, key: path.join(relative, name), hash: digest(bytes) }, bytes, observation: { executionLogId: envelope.executionLogId, sequence, availability, envelope: availability === 'recorded' ? envelope : { ...envelope, report: null } } });
       }
       if ((await stableFile(file)).hash !== captured.hash) throw new Error('historical_run_source_changed');
-      const adopted = store.adoptHistoricalRun(project.projectId, project.locationId, { identity: statusIdentity, key, hash: captured.hash }, { historicalExecutionLogIds, status, binding, prompt, command, output, outputSource, nativeTranscript, legacyCompletion, appendedOutputSource, appendedOutputArtifactExecutionLogId, ...documents, ...(unregistered ? { unregisteredReports: reports, unregisteredTaskAlias: [...reportAliases][0], unregisteredRequest: prompt, unregisteredWorkspaceRoot: resolvedRoot, unregisteredWorkspaceRelocated: Boolean(retiredWorkspaceRoot) } : { registeredTaskAlias: matchingTasks[0].taskId }) });
+      const refreshedArtifacts = [];
+      for (const [sourceKey, changed] of lateChangeEvidence) {
+        if (runDirectory(sourceKey) !== relative) continue;
+        const current = await stableFile(changed.file);
+        const adoptedArtifact = store.readRunArtifactMetadata(project.projectId, id, sourceKey);
+        if (adoptedArtifact?.hash === current.hash) continue;
+        refreshedArtifacts.push({ source: { identity, key: sourceKey, hash: current.hash }, artifactExecutionLogId: adoptedArtifact ? id : changed.executionLogId, kind: 'change_evidence' as const, ...(sourceKey === changesSourceKey ? { documentPurpose: 'changes' as const } : {}) });
+      }
+      const adopted = store.adoptHistoricalRun(project.projectId, project.locationId, { identity: statusIdentity, key, hash: captured.hash }, { historicalExecutionLogIds, status, binding, prompt, command, output, outputSource, nativeTranscript, legacyCompletion, appendedOutputSource, appendedOutputArtifactExecutionLogId, refreshedArtifacts, ...documents, ...(unregistered ? { unregisteredReports: reports, unregisteredTaskAlias: [...reportAliases][0], unregisteredRequest: prompt, unregisteredWorkspaceRoot: resolvedRoot, unregisteredWorkspaceRelocated: Boolean(retiredWorkspaceRoot) } : { registeredTaskAlias: matchingTasks[0].taskId }) });
       if (relative === status.nodeId) {
         for (const original of filesByNode.get(relative) || []) {
           if (path.dirname(original) !== runDir) continue;

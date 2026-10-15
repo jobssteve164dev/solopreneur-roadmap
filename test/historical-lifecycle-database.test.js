@@ -499,17 +499,37 @@ test('a registered historical run in the original node directory keeps its actua
 test('a node-directory output archived before adoption converges after status repair and append', async t => {
   const f = await history(t), original = path.join(f.base, 'isolated-original-run'), nodeDir = path.dirname(f.runDir);
   fs.renameSync(f.runDir, original); fs.renameSync(nodeDir, path.join(f.base, 'retained-empty-original-parent')); fs.renameSync(original, nodeDir);
+  fs.writeFileSync(path.join(nodeDir, 'changes.txt'), 'M src/node-initial.ts\n');
+  fs.writeFileSync(path.join(nodeDir, 'touched-files.txt'), 'M src/node-initial.ts\n');
   for (const key of ['sessionFilePath', 'promptFilePath', 'commandFilePath', 'outputFilePath']) f.status[key] = path.join(nodeDir, path.basename(f.status[key]));
   registerLearningTask(f.project, { executionLogId: 71, runDir: nodeDir, userMessage: '不改原目标', startedAt: f.status.startedAt, taskId: f.taskId });
+  f.status.turnLogEndOffsets = { output: fs.statSync(path.join(nodeDir, 'output.log')).size };
+  f.status.workspaceChangeCount = 77;
   f.status.learningTaskId = `task-${crypto.randomUUID()}`; writeLearningJson(f.statusFile, f.status);
   assert.ok((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts.length);
   assert.equal(await f.client.findConversation(f.project, 71), null);
   f.status.learningTaskId = f.taskId; writeLearningJson(f.statusFile, f.status);
   const outputFile = path.join(nodeDir, 'output.log'); fs.appendFileSync(outputFile, '节点根目录追加输出🌿');
+  fs.writeFileSync(path.join(nodeDir, 'changes.txt'), 'M src/node-first.ts\n');
+  fs.writeFileSync(path.join(nodeDir, 'touched-files.txt'), 'M src/node-first.ts\n');
   const current = fs.readFileSync(outputFile);
   assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
   assert.ok(f.store.readRunArtifactBytes(f.projectId, 71, '__solo__/output.log').bytes.equals(current));
   assert.ok((await f.client.readLog(runStatusReference(f.project, 71), 'output')).equals(current));
+  let found = await f.client.findConversation(f.project, 71);
+  assert.ok((await f.client.readLog(found.reference, 'output', found.status)).equals(current));
+  assert.equal(found.status.workspaceChangeCount, 1);
+  fs.appendFileSync(outputFile, '节点根目录第二次追加输出🌿');
+  fs.writeFileSync(path.join(nodeDir, 'changes.txt'), 'M src/node-second.ts\n');
+  fs.writeFileSync(path.join(nodeDir, 'touched-files.txt'), 'M src/node-second.ts\n');
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  assert.ok(f.store.readRunArtifactBytes(f.projectId, 71, '__solo__/changes.txt').bytes.equals(fs.readFileSync(path.join(nodeDir, 'changes.txt'))));
+  assert.ok((await f.client.readLog(runStatusReference(f.project, 71), 'output')).equals(fs.readFileSync(outputFile)));
+  found = await f.client.findConversation(f.project, 71);
+  assert.ok((await f.client.readLog(found.reference, 'output', found.status)).equals(fs.readFileSync(outputFile)));
+  const settled = f.store.readRunState(f.projectId, 71);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  assert.deepEqual(f.store.readRunState(f.projectId, 71), settled);
 });
 
 test('a node-directory output with omitted artifact paths converges after status repair and append', async t => {
@@ -572,6 +592,54 @@ test('an append-only historical output refreshes the formal archive and remains 
   assert.equal(f.store.migrationSourceState(`agent-runs:${f.project}`, '__solo__/71/output.log').stage, 'imported');
   const { MigrationRecycling } = require('../out/migrationRecycling.js');
   assert.ok((await new MigrationRecycling(f.store).prepare()).files.some(item => item.path === outputFile));
+});
+
+test('a finalized historical run adopts appended output with its replaced change evidence', async t => {
+  const f = await history(t), outputFile = path.join(f.runDir, 'output.log');
+  fs.writeFileSync(outputFile, Buffer.alloc(128 * 1024, 'a'));
+  fs.writeFileSync(path.join(f.runDir, 'changes.txt'), 'M src/initial-result.ts\n');
+  fs.writeFileSync(path.join(f.runDir, 'touched-files.txt'), 'M src/initial-result.ts\n');
+  f.status.turnLogEndOffsets = { output: fs.statSync(outputFile).size };
+  f.status.workspaceChangeCount = 99;
+  writeLearningJson(f.statusFile, f.status);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  fs.appendFileSync(outputFile, Buffer.alloc(256 * 1024, 'b'));
+  fs.writeFileSync(path.join(f.runDir, 'changes.txt'), 'M src/final-result.ts\n');
+  fs.writeFileSync(path.join(f.runDir, 'touched-files.txt'), 'M src/final-result.ts\n');
+  for (const name of ['output.log', 'changes.txt', 'touched-files.txt']) {
+    const bytes = fs.readFileSync(path.join(f.runDir, name));
+    f.store.captureMigrationSource({ identity: `agent-runs:${f.project}`, key: `__solo__/71/${name}`, hash: crypto.createHash('sha256').update(bytes).digest('hex') }, bytes);
+  }
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+  assert.deepEqual(result.conflicts, []);
+  assert.ok(f.store.readRunArtifactBytes(f.projectId, 71, '__solo__/71/output.log').bytes.equals(fs.readFileSync(outputFile)));
+  assert.ok(f.store.readRunArtifactBytes(f.projectId, 71, '__solo__/71/changes.txt').bytes.equals(fs.readFileSync(path.join(f.runDir, 'changes.txt'))));
+  assert.ok(f.store.readRunArtifactBytes(f.projectId, 71, '__solo__/71/touched-files.txt').bytes.equals(fs.readFileSync(path.join(f.runDir, 'touched-files.txt'))));
+  assert.ok((await f.client.readLog(runStatusReference(f.project, 71), 'output')).equals(fs.readFileSync(outputFile)));
+  assert.equal(f.store.readRunState(f.projectId, 71).status.workspaceChangeCount, 1);
+  let found = await f.client.findConversation(f.project, 71);
+  assert.ok((await f.client.readLog(found.reference, 'output', found.status)).equals(fs.readFileSync(outputFile)));
+  fs.appendFileSync(outputFile, '最终一段输出');
+  fs.writeFileSync(path.join(f.runDir, 'changes.txt'), '');
+  fs.writeFileSync(path.join(f.runDir, 'touched-files.txt'), '');
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  assert.equal(f.store.readRunArtifactBytes(f.projectId, 71, '__solo__/71/changes.txt').bytes.length, 0);
+  assert.equal(f.store.readRunArtifactBytes(f.projectId, 71, '__solo__/71/touched-files.txt').bytes.length, 0);
+  assert.ok((await f.client.readLog(runStatusReference(f.project, 71), 'output')).equals(fs.readFileSync(outputFile)));
+  assert.equal(f.store.readRunState(f.projectId, 71).status.workspaceChangeCount, 0);
+  found = await f.client.findConversation(f.project, 71);
+  assert.ok((await f.client.readLog(found.reference, 'output', found.status)).equals(fs.readFileSync(outputFile)));
+});
+
+test('historical change evidence cannot be replaced without an appended output', async t => {
+  const f = await history(t), changes = path.join(f.runDir, 'changes.txt'), touched = path.join(f.runDir, 'touched-files.txt');
+  fs.writeFileSync(changes, 'M src/original.ts\n'); fs.writeFileSync(touched, 'M src/original.ts\n');
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  fs.writeFileSync(changes, 'M src/replaced.ts\n'); fs.writeFileSync(touched, 'M src/replaced.ts\n');
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+  assert.ok(result.conflicts.some(item => item.source === changes && item.error === 'migration_target_changed'));
+  assert.ok(result.conflicts.some(item => item.source === touched && item.error === 'migration_target_changed'));
+  assert.equal(f.store.readRunArtifactBytes(f.projectId, 71, '__solo__/71/changes.txt').bytes.toString(), 'M src/original.ts\n');
 });
 
 test('an empty adopted historical output accepts its first exact append', async t => {
