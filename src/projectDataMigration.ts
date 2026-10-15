@@ -405,6 +405,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       const matchingTasks = registered.tasks.filter(task => (!status.learningTaskId || task.taskId === status.learningTaskId) && task.executions.some((run: { id: number }) => run.id === id));
       const candidates = matchingTasks.flatMap(task => task.executions.filter((run: { id: number; runDir: string }) => run.id === id));
       const unregistered = candidates.length === 0 && !registered.tasks.some(task => task.executions.some((run: { id: number }) => run.id === id));
+      const pathFields = ['sessionFilePath', 'promptFilePath', 'commandFilePath', 'outputFilePath', 'codexHomeFilePath', 'completionDecisionFilePath', 'workspaceSnapshotPath', 'changesFilePath', 'roadmapBackupFilePath'];
       let retiredWorkspaceRoot: string | undefined;
       if (unregistered && typeof status.workspaceRoot === 'string' && path.isAbsolute(status.workspaceRoot)) {
         const retiredRoot = path.resolve(status.workspaceRoot);
@@ -413,7 +414,6 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
           try { await fs.promises.realpath(retiredRoot); }
           catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') retired = true; else throw error; }
           if (retired) {
-            const pathFields = ['sessionFilePath', 'promptFilePath', 'commandFilePath', 'outputFilePath', 'codexHomeFilePath', 'completionDecisionFilePath', 'workspaceSnapshotPath', 'changesFilePath', 'roadmapBackupFilePath'];
             const declared = pathFields.filter(field => typeof status[field] === 'string' && status[field]);
             for (const field of declared) {
               const relative = path.relative(retiredRoot, path.resolve(status[field]));
@@ -423,10 +423,58 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
           }
         }
       }
+      let retiredAgentRunsRoot: string | undefined;
+      if (unregistered && !retiredWorkspaceRoot) {
+        const declared = pathFields.filter(field => typeof status[field] === 'string' && status[field]);
+        const roots = new Set<string>();
+        let eligible = declared.length > 0;
+        for (const field of declared) {
+          const declaredFile = String(status[field]);
+          if (!path.isAbsolute(declaredFile)) { eligible = false; break; }
+          let directory = path.dirname(path.resolve(declaredFile));
+          for (;;) {
+            if (path.basename(directory) === 'agent-runs' && path.basename(path.dirname(directory)) === '.solopreneur') { roots.add(directory); break; }
+            const parent = path.dirname(directory);
+            if (parent === directory) { eligible = false; break; }
+            directory = parent;
+          }
+          if (!eligible) break;
+        }
+        const retiredRoot = roots.size === 1 ? [...roots][0] : '';
+        if (!retiredRoot || retiredRoot === path.join(resolvedRoot, '.solopreneur', 'agent-runs')) eligible = false;
+        let retiredComponent = retiredRoot;
+        while (eligible) {
+          try {
+            if ((await fs.promises.lstat(retiredComponent)).isSymbolicLink()) { eligible = false; break; }
+          } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          const parent = path.dirname(retiredComponent);
+          if (parent === retiredComponent) break;
+          retiredComponent = parent;
+        }
+        for (const field of eligible ? declared : []) {
+          const declaredFile = path.resolve(status[field]);
+          try { await fs.promises.lstat(declaredFile); eligible = false; break; }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          const relative = path.relative(retiredRoot, declaredFile);
+          const currentFile = path.join(sourceRoot, relative);
+          if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) { eligible = false; break; }
+          try {
+            const info = await fs.promises.lstat(currentFile);
+            const physical = path.join(resolvedRoot, '.solopreneur', 'agent-runs', relative);
+            if (!info.isFile() || info.isSymbolicLink() || await fs.promises.realpath(currentFile) !== physical) { eligible = false; break; }
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            eligible = false; break;
+          }
+        }
+        if (eligible) retiredAgentRunsRoot = retiredRoot;
+      }
       const declaredPath = (field: string): string => {
         const declared = path.resolve(String(status[field] || ''));
-        if (!retiredWorkspaceRoot || !status[field]) return declared;
-        return path.join(projectRoot, path.relative(retiredWorkspaceRoot, declared));
+        if (!status[field]) return declared;
+        if (retiredWorkspaceRoot) return path.join(projectRoot, path.relative(retiredWorkspaceRoot, declared));
+        if (retiredAgentRunsRoot) return path.join(sourceRoot, path.relative(retiredAgentRunsRoot, declared));
+        return declared;
       };
       if (unregistered) {
         const directories = new Set<string>(['sessionFilePath', 'promptFilePath', 'commandFilePath', 'outputFilePath'].filter(field => status[field]).map(field => path.dirname(declaredPath(field))));
@@ -605,7 +653,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         if (adoptedArtifact?.hash === current.hash) continue;
         refreshedArtifacts.push({ source: { identity, key: sourceKey, hash: current.hash }, artifactExecutionLogId: adoptedArtifact ? id : changed.executionLogId, kind: 'change_evidence' as const, ...(sourceKey === changesSourceKey ? { documentPurpose: 'changes' as const } : {}) });
       }
-      const adopted = store.adoptHistoricalRun(project.projectId, project.locationId, { identity: statusIdentity, key, hash: captured.hash }, { historicalExecutionLogIds, status, binding, prompt, command, output, outputSource, nativeTranscript, legacyCompletion, appendedOutputSource, appendedOutputArtifactExecutionLogId, refreshedArtifacts, ...documents, ...(unregistered ? { unregisteredReports: reports, unregisteredTaskAlias: [...reportAliases][0], unregisteredRequest: prompt, unregisteredWorkspaceRoot: resolvedRoot, unregisteredWorkspaceRelocated: Boolean(retiredWorkspaceRoot) } : { registeredTaskAlias: matchingTasks[0].taskId }) });
+      const adopted = store.adoptHistoricalRun(project.projectId, project.locationId, { identity: statusIdentity, key, hash: captured.hash }, { historicalExecutionLogIds, status, binding, prompt, command, output, outputSource, nativeTranscript, legacyCompletion, appendedOutputSource, appendedOutputArtifactExecutionLogId, refreshedArtifacts, ...documents, ...(unregistered ? { unregisteredReports: reports, unregisteredTaskAlias: [...reportAliases][0], unregisteredRequest: prompt, unregisteredWorkspaceRoot: resolvedRoot, unregisteredWorkspaceRelocated: Boolean(retiredWorkspaceRoot || retiredAgentRunsRoot) } : { registeredTaskAlias: matchingTasks[0].taskId }) });
       if (relative === status.nodeId) {
         for (const original of filesByNode.get(relative) || []) {
           if (path.dirname(original) !== runDir) continue;

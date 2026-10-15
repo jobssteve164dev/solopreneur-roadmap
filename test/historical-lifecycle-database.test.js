@@ -922,6 +922,47 @@ test('an unregistered status without a workspace field retains its project throu
   assert.equal(Object.hasOwn(JSON.parse(f.store.readMigrationSource(`agent-status:${f.project}`, '71.json').bytes), 'workspaceRoot'), false, 'original source must retain its genuinely absent field');
 });
 
+test('an unregistered status rebases missing artifacts from an existing retired project to the verified current run', async t => {
+  const f = await unregisteredHistory(t, false);
+  const retiredProject = path.join(f.base, 'retired-project-still-present');
+  fs.mkdirSync(retiredProject);
+  delete f.status.workspaceRoot;
+  for (const field of ['promptFilePath', 'commandFilePath', 'outputFilePath', 'sessionFilePath']) {
+    f.status[field] = path.join(retiredProject, path.relative(f.project, f.status[field]));
+  }
+  writeLearningJson(f.statusFile, f.status);
+
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+
+  assert.deepEqual(result.conflicts, []);
+  const found = await f.client.findConversation(f.project, 71);
+  assert.ok(found);
+  assert.equal(await f.client.readField(found.reference, 'prompt', found.status), fs.readFileSync(path.join(f.runDir, 'prompt.txt'), 'utf8'));
+  assert.deepEqual(await f.client.readLog(found.reference, 'output', found.status), fs.readFileSync(path.join(f.runDir, 'output.log')));
+  const original = JSON.parse(f.store.readMigrationSource(`agent-status:${f.project}`, '71.json').bytes);
+  assert.equal(original.outputFilePath, path.join(retiredProject, '.solopreneur', 'agent-runs', '__solo__', '71', 'output.log'));
+  assert.equal(Object.hasOwn(original, 'workspaceRoot'), false);
+});
+
+test('an unregistered status does not rebase through a symlinked retired agent-runs root', async t => {
+  const f = await unregisteredHistory(t, false);
+  const retiredProject = path.join(f.base, 'retired-project-with-symlink');
+  const emptyTarget = path.join(f.base, 'empty-retired-agent-runs');
+  fs.mkdirSync(path.join(retiredProject, '.solopreneur'), { recursive: true });
+  fs.mkdirSync(emptyTarget);
+  fs.symlinkSync(emptyTarget, path.join(retiredProject, '.solopreneur', 'agent-runs'), 'dir');
+  delete f.status.workspaceRoot;
+  for (const field of ['promptFilePath', 'commandFilePath', 'outputFilePath', 'sessionFilePath']) {
+    f.status[field] = path.join(retiredProject, path.relative(f.project, f.status[field]));
+  }
+  writeLearningJson(f.statusFile, f.status);
+
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+
+  assert.ok(result.conflicts.some(item => item.error.includes('historical_run_source_conflict')));
+  assert.equal(await f.client.findConversation(f.project, 71), null);
+});
+
 test('an unregistered status without workspace or native binding retains the physically verified migration project', async t => {
   const f = await unregisteredHistory(t, false);
   delete f.status.workspaceRoot;
