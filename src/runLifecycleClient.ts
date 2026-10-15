@@ -117,7 +117,7 @@ export class RunLifecycleClient {
     const projectRoot = path.resolve(root);
     const job = await this.operation('import_project_data', {
       collection: 'agent-runs', sourceRoot: path.join(projectRoot, '.solopreneur', 'agent-runs'), projectRoot,
-      idempotencyKey: `conversation-history-adoption-v2:${projectRoot}`, refreshCompleted: true, archiveUnresolved: true
+      idempotencyKey: `conversation-history-adoption-v3:${projectRoot}`, refreshCompleted: true, archiveUnresolved: true
     }) as { jobId: string; status: string };
     if (['failed', 'interrupted', 'completed_with_conflicts'].includes(job.status)) {
       try { await this.operation('retry_migration', { jobId: job.jobId }); }

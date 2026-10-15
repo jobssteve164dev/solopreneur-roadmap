@@ -620,7 +620,7 @@ test('automatic migration discovery never enters task byproduct directories',asy
   assert.equal(byproductReads,0);
  }finally{fs.promises.readdir=original;await ops.close();store.close();cleanupExact(base);}
 });
-test('normal upgrade catches up previously completed raw archives once without manual discovery',async()=>{
+test('normal upgrade supersedes the last agent-run migration version and enables unresolved source archiving',async()=>{
  const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-impact-startup-upgrade-'));
  const workspace=path.join(base,'project');fs.mkdirSync(workspace);
  const store=new UnifiedDataStore(path.join(base,'global'));const ops=createRuntimeDataOperations(store);
@@ -629,11 +629,19 @@ test('normal upgrade catches up previously completed raw archives once without m
   const sourceRoot=path.join(workspace,'.solopreneur','agent-runs');const run=path.join(sourceRoot,'__solo__','12');fs.mkdirSync(run,{recursive:true});
   fs.writeFileSync(path.join(run,'command.txt'),'codex');fs.writeFileSync(path.join(run,'output.log'),'完整历史日志\ntokens used\n12,345');
   const args={collection:'agent-runs',sourceRoot,projectRoot:workspace};
-  const prior=store.enqueueMemoryMigration(args,`startup-agent-runs-v1:${workspace}`);
-  store.updateMigrationJob(prior.jobId,'completed',{imported:2,unchanged:0,originalBytes:fs.statSync(path.join(run,'output.log')).size,conflicts:[],retainedFiles:[],interrupted:false});
+  let currentKey='';
+  await enqueueStartupDataMigrations(store,async request=>{
+   if(request.operation==='import_project_data'&&request.input.collection==='agent-runs')currentKey=request.input.idempotencyKey;
+   return {jobId:'key-probe',status:'completed'};
+  },()=>true);
+  assert.match(currentKey,/^startup-agent-runs-v9:/);
+  const prior=store.enqueueMemoryMigration(args,currentKey.replace(/^startup-agent-runs-v9:/,'startup-agent-runs-v8:'));
+  store.updateMigrationJob(prior.jobId,'completed_with_conflicts',{imported:0,unchanged:0,originalBytes:fs.statSync(path.join(run,'output.log')).size,conflicts:[{source:run,error:'Error: historical_run_identity_ambiguous'}],retainedFiles:[run],interrupted:false});
   assert.equal(store.readProjectImpactRuns(project).length,0);
   await enqueueStartupDataMigrations(store,ops,()=>true);await ops.waitForMigrations();
   assert.deepEqual(store.readProjectRunIndexes(project).map(x=>[x.executionLogId,x.totalTokens]),[[12,12345]]);
+  const upgraded=store.migrationJobs().find(job=>job.args.collection==='agent-runs'&&job.jobId!==prior.jobId);
+  assert.equal(upgraded.args.archiveUnresolved,true);
   const jobs=store.migrationJobCount();const sourceState=store.rows('SELECT source_identity,source_key,source_hash,source_capture_revision FROM migration_items ORDER BY source_key');
   await enqueueStartupDataMigrations(store,ops,()=>true);await ops.waitForMigrations();
   assert.equal(store.migrationJobCount(),jobs);assert.deepEqual(store.rows('SELECT source_identity,source_key,source_hash,source_capture_revision FROM migration_items ORDER BY source_key'),sourceState);

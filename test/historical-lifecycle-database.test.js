@@ -366,7 +366,7 @@ test('a missing retired history root completes cleanly and the same job discover
 
 test('history adoption explicitly retries its own conflicted job when the requested conversation is still missing', async t => {
   const f = await history(t);
-  const job = f.store.enqueueMemoryMigration({ collection: 'agent-runs', sourceRoot: f.sourceRoot, projectRoot: f.project, archiveUnresolved: true }, `conversation-history-adoption-v2:${f.project}`);
+  const job = f.store.enqueueMemoryMigration({ collection: 'agent-runs', sourceRoot: f.sourceRoot, projectRoot: f.project, archiveUnresolved: true }, `conversation-history-adoption-v3:${f.project}`);
   const progress = { conflicts: [{ source: 'older-unrelated-run.json', error: 'historical_run_identity_ambiguous' }] };
   f.store.updateMigrationJob(job.jobId, 'completed_with_conflicts', progress);
 
