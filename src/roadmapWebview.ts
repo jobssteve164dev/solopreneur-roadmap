@@ -1,7 +1,7 @@
 import * as path from 'path';
 import type * as vscode from 'vscode';
 import { getSharedWebviewRuntimeScript } from './webviewSharedRuntime';
-import { getMigrationSettingsCardHtml, getMigrationSettingsScript } from './migrationSettingsWebview';
+import { getDatabaseOverviewCardHtml, getDatabaseOverviewScript } from './databaseOverviewSettings';
 
 const roadmapHtmlCache = new Map<string, string>();
 
@@ -2158,7 +2158,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       </div>
     </div>
 
-    ${getMigrationSettingsCardHtml()}
+    ${getDatabaseOverviewCardHtml()}
 
     <div class="settings-actions">
       <button class="settings-action-btn save-btn" id="btn-save-settings"><span class="codicon codicon-save"></span><span id="text-save-settings">Save</span></button>
@@ -2246,7 +2246,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     const projectAutonomyEnabled = document.getElementById('project-autonomy-enabled');
     const projectToolNetworkDisabled = document.getElementById('project-tool-network-disabled');
     let currentLanguage = 'zh';
-    ${getMigrationSettingsScript()}
+    ${getDatabaseOverviewScript()}
     let currentNodes = [];
     let expandedNodeId = '';
     let pendingFocusedNodeId = '';
@@ -3177,7 +3177,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         settingsPanel.style.display = 'flex';
         renderProjectSettings();
         settingsDirtyKeys.clear();
-        requestSettings();
+        requestSettings('full');
       }
     });
 
@@ -3409,11 +3409,12 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       }
     });
 
-    function requestSettings() {
+    function requestSettings(mode = 'full') {
       latestSettingsRequestId = 'roadmap-settings-' + (++settingsRequestSeq);
       vscode.postMessage({
         command: 'settings.get',
-        requestId: latestSettingsRequestId
+        requestId: latestSettingsRequestId,
+        mode
       });
     }
 
@@ -3450,7 +3451,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
 
     // Request nodes and settings on load
     vscode.postMessage({ command: 'getNodes' });
-    requestSettings();
+    requestSettings('snapshot');
     vscode.postMessage({ command: 'project.getAll' });
     vscode.postMessage({ command: 'getFlowState' });
     if (typeof setInterval === 'function') {

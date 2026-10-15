@@ -153,6 +153,7 @@ import {
 import { buildConversationPresentations, selectLatestConversationRoots } from './conversationPresentation';
 import { dispatchPluginAction, PluginActionRequest, PluginSurface } from './pluginActions';
 import { handleMigrationSettingsAction } from './migrationSettingsActions';
+import { DatabaseOverview, readDatabaseOverview } from './databaseOverviewSettings';
 import { buildMigrationMaintenancePrompt, MigrationMaintenanceKind } from './migrationAgentMaintenance';
 import {
   buildAgentModelsLoadedMessage,
@@ -1300,6 +1301,28 @@ async function handleSharedWebviewAction(
 ): Promise<boolean> {
   if (handleAutomationSoundMessage(target, message)) return true;
   const respond = (payload: Record<string, unknown>) => postWebviewMessage(target, payload);
+  if (message.command === 'databaseOverview.get') {
+    const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+    try {
+      const overview = await readDatabaseOverview(root, {
+        ensureReady: async expectedRoot => {
+          await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: expectedRoot });
+        },
+        readStorage: expectedRoot => sendRuntimeDataRequest<DatabaseOverview>(expectedRoot, { operation: 'read_database_overview', input: {} })
+      });
+      if (root !== normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) throw new Error('data_location_changed');
+      await respond({ command: 'databaseOverviewLoaded', requestId: String(message.requestId || ''), overview });
+    } catch (error) {
+      const language = getPersistedSettings(context).language;
+      recordLocalDiagnosticError(root, 'database.overview.settings', error);
+      await respond({
+        command: 'databaseOverviewLoaded',
+        requestId: String(message.requestId || ''),
+        error: language === 'en' ? 'Database details are temporarily unavailable. Try again.' : '暂时无法读取数据库概览，请重试。'
+      });
+    }
+    return true;
+  }
   if (String(message.command || '').startsWith('dataMigration.')) {
     const language = getPersistedSettings(context).language;
     try {
@@ -1922,13 +1945,25 @@ async function handleSharedWebviewAction(
       }
     },
     'settings.get': async (request) => {
+      if (request.mode === 'snapshot') {
+        await respond({
+          command: 'settingsLoaded',
+          settings: getSettingsWithRuntimeState(context),
+          projectRoot: getMigrationProjectRoot(context) || '',
+          requestId: String(request.requestId || ''),
+          editRevision: Number(request.editRevision || 0),
+          hydrated: false
+        });
+        return;
+      }
       invalidatePersistedSettingsCache();
       await respond({
         command: 'settingsLoaded',
         settings: await getSettingsWithOpenCodeSecretState(context),
         projectRoot: getMigrationProjectRoot(context) || '',
         requestId: String(request.requestId || ''),
-        editRevision: Number(request.editRevision || 0)
+        editRevision: Number(request.editRevision || 0),
+        hydrated: true
       });
       void refreshProAccountStatus(context).catch((error) => {
         console.warn('SoloMap Pro status refresh failed after settings loaded:', error);

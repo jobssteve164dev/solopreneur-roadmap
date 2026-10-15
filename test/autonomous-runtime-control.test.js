@@ -18,6 +18,15 @@ async function waitFor(check, timeoutMs = 3000) {
   throw new Error('Timed out waiting for Runtime state.');
 }
 
+async function waitForAsync(check, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  throw new Error('Timed out waiting for Runtime state.');
+}
+
 test('runtime control authenticates local health, pause and resume commands', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-control-'));
   const globalRoot = path.join(root, '.solomap-global');
@@ -323,7 +332,7 @@ test('runtime data reconnects once when the endpoint is replaced before the requ
   }
 });
 
-test('standalone runtime stays paused and resumes through its authenticated control endpoint', async () => {
+test('standalone runtime keeps Today suggestions fresh while autonomous execution is paused', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-process-control-'));
   const globalRoot = path.join(root, '.solomap-global');
   const runtimeRoot = path.join(globalRoot, 'runtime');
@@ -342,8 +351,28 @@ test('standalone runtime stays paused and resumes through its authenticated cont
     const health = await control.sendRuntimeControlCommand(globalRoot, 'health');
     assert.equal(health.owner, 'fallback');
     assert.equal(health.releaseVersion, '0.0.514');
+    const readDecision = async () => {
+      const state = await control.sendRuntimeDataRequest(globalRoot, {
+        operation: 'read_host_settings',
+        input: { namespace: 'runtime_shadow', ownerScope: 'global' }
+      });
+      return state.items.find(item => item.key === 'decision')?.value;
+    };
+    let decisionBeforeRefresh;
+    await waitForAsync(async () => Boolean(decisionBeforeRefresh = await readDecision()));
     await control.sendRuntimeControlCommand(globalRoot, 'pause');
     assert.equal(JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'control.json'), 'utf8')).status, 'paused');
+    const generatedBeforeRefresh = decisionBeforeRefresh.generatedAt;
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const refreshed = await control.sendRuntimeControlCommand(globalRoot, 'refresh');
+    assert.equal(refreshed.status, 'paused');
+    await waitForAsync(async () => (await readDecision())?.generatedAt !== generatedBeforeRefresh);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'control.json'), 'utf8')).status, 'paused');
+    const pauseState = await control.sendRuntimeDataRequest(globalRoot, {
+      operation: 'read_host_settings',
+      input: { namespace: 'runtime', ownerScope: 'global' }
+    });
+    assert.equal(pauseState.items.find(item => item.key === 'autonomyPaused').value, true);
     await control.sendRuntimeControlCommand(globalRoot, 'resume');
     assert.equal(JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'control.json'), 'utf8')).status, 'running');
     await assert.rejects(control.sendRuntimeControlCommand(globalRoot, 'drain', {

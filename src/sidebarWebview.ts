@@ -2,7 +2,7 @@ import * as path from 'path';
 import type * as vscode from 'vscode';
 import { getDefaultOpenCodeProviderOptions } from './openCodeAdapter';
 import { getSharedWebviewRuntimeScript } from './webviewSharedRuntime';
-import { getMigrationSettingsCardHtml, getMigrationSettingsScript } from './migrationSettingsWebview';
+import { getDatabaseOverviewCardHtml, getDatabaseOverviewScript } from './databaseOverviewSettings';
 
 function joinExtensionUri(extensionUri: vscode.Uri, ...segments: string[]): vscode.Uri {
   const base = extensionUri as any;
@@ -4728,7 +4728,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       </div>
     </div>
 
-    ${getMigrationSettingsCardHtml()}
+    ${getDatabaseOverviewCardHtml()}
 
     <div class="settings-actions">
       <button class="settings-action-btn test-btn" id="btn-test-cli"><span class="codicon codicon-debug-start"></span><span id="text-test-cli">Test CLI</span></button>
@@ -4893,7 +4893,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const collaborationCreatedQuickNoteIds = new Set();
     const collaborationExpandedMessageIds = new Set();
     let currentLanguage = 'zh';
-    ${getMigrationSettingsScript()}
+    ${getDatabaseOverviewScript()}
     let currentNodes = [];
     let activeProjectPath = '';
     let activePortfolioFilter = 'all';
@@ -4961,6 +4961,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let settingsEditRevision = 0;
     let pendingSettingsSave = null;
     let latestSettingsRequestId = '';
+    let latestSettingsRequestMode = 'full';
     let globalPromptReviewDraft = null;
     let settingsRequestSeq = 0;
     let lastDependencyStatus = null;
@@ -7035,7 +7036,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
       renderProAccount(currentSettings);
       renderAbilitiesAndEnhancements(currentSettings);
-      renderAutomationSettings(currentSettings);
+      if (!settingsDirtyKeys.has('automationTasks')) renderAutomationSettings(currentSettings);
       renderCollaborationPanel();
       renderIntelligenceRecent();
       renderIntelligenceThread();
@@ -7345,9 +7346,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         if (collaborationPanel) collaborationPanel.style.display = 'none';
         if (btnToggleCollaboration) btnToggleCollaboration.classList.remove('is-active');
         settingsPanel.style.display = 'block';
-        requestSettings();
-        requestDependencyCheck();
-        requestAgentImpact();
+        requestSettings('full');
       }
     });
 
@@ -7554,7 +7553,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (!isOpenCode) return;
       const storedModel = String(agentModelPreferenceMap.opencode || '');
       const modelProvider = storedModel.includes('/') ? storedModel.split('/')[0] : '';
-      const selectedProvider = String((currentSettings && currentSettings.openCodeProvider) || getSoloSelectValue(settingOpenCodeProvider) || modelProvider || '');
+      const selectedProvider = String(
+        (settingsDirtyKeys.has('openCodeProvider') ? getSoloSelectValue(settingOpenCodeProvider) : '')
+        || (currentSettings && currentSettings.openCodeProvider)
+        || getSoloSelectValue(settingOpenCodeProvider)
+        || modelProvider
+        || ''
+      );
       const providerOptions = getOpenCodeProviderOptions();
       setSoloSelectOptions(settingOpenCodeProvider, providerOptions, selectedProvider);
       const effectiveProvider = getSoloSelectValue(settingOpenCodeProvider);
@@ -8476,11 +8481,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
 
-    function requestSettings() {
+    function requestSettings(mode = 'full') {
       latestSettingsRequestId = 'sidebar-settings-' + (++settingsRequestSeq);
+      latestSettingsRequestMode = mode;
       vscode.postMessage({
         command: 'settings.get',
-        requestId: latestSettingsRequestId
+        requestId: latestSettingsRequestId,
+        mode
       });
     }
 
@@ -8536,7 +8543,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     // Request configurations and nodes on load
     vscode.postMessage({ command: 'getNodes' });
-    requestSettings();
+    requestSettings('snapshot');
     vscode.postMessage({ command: 'project.getAll' });
     vscode.postMessage({ command: 'collaboration.getRooms' });
     vscode.postMessage({ command: 'getDailyReview' });
@@ -8682,41 +8689,58 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'settingsLoaded':
-          settingsDataLoaded = true;
           if (message.requestId && message.requestId !== latestSettingsRequestId) break;
-          syncAgentImpactSettings(message.settings || {});
-          if (settingsSavePending || settingsFormDirty) {
-            currentSettings = { ...currentSettings, ...(message.settings || {}) };
-            renderTelegramSettingsStatus();
-            renderProAccount(currentSettings);
-            renderAbilitiesAndEnhancements(currentSettings);
-            break;
+          settingsDataLoaded = true;
+          const loadedSettings = message.settings || {};
+          const authoritativeHydration = message.hydrated === true
+            || (message.hydrated === undefined && latestSettingsRequestMode === 'full');
+          currentSettings = loadedSettings;
+          if (!settingsFormDirty && !settingsSavePending) {
+            settingsDirtyKeys.clear();
+            automationDirtyKeys.clear();
+            agentModelDirtyKeys.clear();
           }
-          currentSettings = message.settings || {};
-          settingsDirtyKeys.clear();
-          automationDirtyKeys.clear();
-          agentModelDirtyKeys.clear();
-          if (settingTelegramEnabled) setSoloSelectValue(settingTelegramEnabled, currentSettings.telegramEnabled ? 'on' : 'off');
-          if (settingTelegramToken) settingTelegramToken.value = '';
-          Object.keys(agentModelPreferenceMap).forEach(key => delete agentModelPreferenceMap[key]);
-          Object.assign(agentModelPreferenceMap, (message.settings && message.settings.agentModelPreferences) || {});
-          applySettingCliPath(message.settings.cliPath || 'agy');
-          if (settingCognitiveEngineAgent) setSoloSelectValue(settingCognitiveEngineAgent, message.settings.cognitiveEngineAgent && message.settings.cognitiveEngineAgent !== 'local_only' ? message.settings.cognitiveEngineAgent : 'follow_main');
-          settingGlobalPrompt.value = message.settings.globalPrompt || '';
-          if (settingGlobalDataPath) settingGlobalDataPath.value = message.settings.globalDataPath || '';
-          applyReviewerCliPath(message.settings.reviewerCliPath || '');
-          if (settingCollaborationReviewMode) setSoloSelectValue(settingCollaborationReviewMode, message.settings.collaborationReviewMode || 'high_risk');
+          if (settingTelegramEnabled && !settingsDirtyKeys.has('telegramEnabled')) {
+            setSoloSelectValue(settingTelegramEnabled, currentSettings.telegramEnabled ? 'on' : 'off');
+          }
+          if (settingTelegramToken && !settingsDirtyKeys.has('telegramBotToken')) settingTelegramToken.value = '';
+          const loadedPreferences = loadedSettings.agentModelPreferences || {};
+          if (!settingsDirtyKeys.has('agentModelPreferences')) {
+            Object.keys(agentModelPreferenceMap).forEach(key => delete agentModelPreferenceMap[key]);
+            Object.assign(agentModelPreferenceMap, loadedPreferences);
+          } else {
+            new Set([...Object.keys(agentModelPreferenceMap), ...Object.keys(loadedPreferences)]).forEach(key => {
+              if (agentModelDirtyKeys.has(key)) return;
+              if (Object.prototype.hasOwnProperty.call(loadedPreferences, key)) agentModelPreferenceMap[key] = loadedPreferences[key];
+              else delete agentModelPreferenceMap[key];
+            });
+          }
+          if (!settingsDirtyKeys.has('cliPath')) applySettingCliPath(loadedSettings.cliPath || 'agy');
+          if (settingCognitiveEngineAgent && !settingsDirtyKeys.has('cognitiveEngineAgent')) {
+            setSoloSelectValue(settingCognitiveEngineAgent, loadedSettings.cognitiveEngineAgent && loadedSettings.cognitiveEngineAgent !== 'local_only' ? loadedSettings.cognitiveEngineAgent : 'follow_main');
+          }
+          if (!settingsDirtyKeys.has('globalPrompt')) settingGlobalPrompt.value = loadedSettings.globalPrompt || '';
+          if (settingGlobalDataPath && !settingsDirtyKeys.has('globalDataPath')) settingGlobalDataPath.value = loadedSettings.globalDataPath || '';
+          if (!settingsDirtyKeys.has('reviewerCliPath')) applyReviewerCliPath(loadedSettings.reviewerCliPath || '');
+          if (settingCollaborationReviewMode && !settingsDirtyKeys.has('collaborationReviewMode')) {
+            setSoloSelectValue(settingCollaborationReviewMode, loadedSettings.collaborationReviewMode || 'high_risk');
+          }
           syncOpenCodeSettings();
           syncSettingAgentModelSelect();
           ensureAgentModelsLoaded(getEffectiveSettingCliPath(), 'settings');
           renderProAccount(currentSettings);
-          renderAbilitiesAndEnhancements(message.settings);
-          renderAutomationSettings(message.settings);
-          setSoloSelectValue(settingLanguage, message.settings.language || 'zh');
+          renderAbilitiesAndEnhancements(loadedSettings);
+          if (!settingsDirtyKeys.has('automationTasks')) renderAutomationSettings(loadedSettings);
+          if (!settingsDirtyKeys.has('language')) setSoloSelectValue(settingLanguage, loadedSettings.language || 'zh');
           currentLanguage = getSoloSelectValue(settingLanguage);
           applyLanguage();
           restartFocusTimerTick();
           renderCollaborationPanel();
+          syncAgentImpactSettings(loadedSettings, !authoritativeHydration);
+          if (authoritativeHydration && settingsPanel && settingsPanel.style.display === 'block') {
+            requestDependencyCheck();
+            requestAgentImpact();
+          }
           break;
 
         case 'settingsSaved':
@@ -9435,12 +9459,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       });
     }
 
-    function syncAgentImpactSettings(settings) {
+    function syncAgentImpactSettings(settings, refreshWhenVisible = true) {
       const dataPath = String(settings.globalDataPath || '');
-      if (dataPath === agentImpactDataPath) return;
+      if (dataPath === agentImpactDataPath) return false;
       agentImpactDataPath = dataPath;
       latestAgentImpactRequestId = '';
-      if (settingsPanel && settingsPanel.style.display === 'block') requestAgentImpact();
+      if (refreshWhenVisible && settingsPanel && settingsPanel.style.display === 'block') requestAgentImpact();
+      return true;
     }
 
     function renderAgentImpactFailure(message) {

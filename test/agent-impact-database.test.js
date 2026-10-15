@@ -285,6 +285,30 @@ test('automatic storage maintenance skips current data without running a full in
   assert.equal(store.rows('SELECT COUNT(*) AS count FROM database_storage_maintenance')[0].count, 0);
 }));
 
+test('database overview reads display metrics without running the full storage inventory', () => fixture(async ({ store, ops }) => {
+  const original = store.readDatabaseStorage;
+  store.readDatabaseStorage = () => { throw new Error('full_inventory_called'); };
+  try {
+    const overview = await ops({ operation: 'read_database_overview', input: {} });
+    assert.equal(overview.contents.records, Number(store.rows('SELECT COUNT(*) AS records FROM contents INDEXED BY sqlite_autoindex_contents_1')[0].records));
+    assert.ok(overview.databaseBytes > 0);
+    assert.ok(overview.freePageBytes >= 0);
+  } finally {
+    store.readDatabaseStorage = original;
+  }
+}));
+
+test('database overview reports a newer running maintenance instead of an older completion', () => fixture(async ({ store, ops }) => {
+  store.db.run("INSERT INTO database_storage_maintenance VALUES(?,?,?,'completed','',0,0,0,0,0,?,?,?)", [
+    'older-completed', 100, 200, 10, 9, 'ok'
+  ]);
+  store.db.run("INSERT INTO database_storage_maintenance VALUES(?,?,NULL,'running','',0,0,0,0,0,?,?,?)", [
+    'newer-running', 300, 9, 9, 'not_checked'
+  ]);
+  const overview = await ops({ operation: 'read_database_overview', input: {} });
+  assert.deepEqual(overview.lastMaintenance, { finishedAt: null, status: 'running' });
+}));
+
 test('automatic storage maintenance uses foreground-sized cleanup batches', () => fixture(async ({ project, store, ops }) => {
   const crypto = require('node:crypto');
   const bytes = Buffer.from('automatic cleanup must keep foreground requests responsive');

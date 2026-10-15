@@ -187,7 +187,7 @@ async function main(): Promise<void> {
       if (command === 'pause' || command === 'drain') {
         paused = true;
         if (command === 'pause') await writeRuntimePauseState(dataOperations, true);
-        activeEngine?.cancel();
+        if (command === 'drain') activeEngine?.cancel();
         updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' });
         await heartbeatRuntime('paused');
         if (command === 'drain') setTimeout(stop, 25).unref();
@@ -204,10 +204,8 @@ async function main(): Promise<void> {
         return { status: 'running' };
       }
       if (command === 'refresh') {
-        if (!paused) {
-          if (running) rerunRequested = true;
-          else runCycleObserved();
-        }
+        if (running) rerunRequested = true;
+        else runCycleObserved();
         return { status: paused ? 'paused' : 'running' };
       }
       if (command === 'stop') {
@@ -260,10 +258,6 @@ async function main(): Promise<void> {
   }
   async function runCycle(): Promise<void> {
     if (stopping || running) return;
-    if (paused) {
-      updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' });
-      return;
-    }
     running = true;
     let releaseBusy: (() => void) | undefined;
     try {
@@ -291,8 +285,7 @@ async function main(): Promise<void> {
           operation: dataOperations,
           currentDecision: current,
           engineConfigRevision: cognitiveConfigRevision,
-          beforeCommit: () => !paused
-            && hasRuntimeLease(globalDataPath, runtimeId, process.pid)
+          beforeCommit: () => hasRuntimeLease(globalDataPath, runtimeId, process.pid)
             && cognitiveRuntimeConfigRevision(readCognitiveRuntimeConfig(globalDataPath)) === cognitiveConfigRevision
         })
         : await runShadowDecisionCycleFromDatabase({ globalDataPath, operation: dataOperations });
@@ -301,8 +294,8 @@ async function main(): Promise<void> {
         return;
       }
       await persistShadowRuntimeState(globalDataPath, dataOperations);
-      updateRuntimeState(globalDataPath, runtimeId, { status: 'running' });
-      await heartbeatRuntime('running');
+      updateRuntimeState(globalDataPath, runtimeId, { status: paused ? 'paused' : 'running' });
+      await heartbeatRuntime(paused ? 'paused' : 'running');
       if (!stopping && startupMigrationsReady) {
         try { historicalOwnerStamp = await refreshHistoricalRunMigrations(dataStore, dataOperations, () => !stopping, historicalOwnerStamp); }
         catch (error) { recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.migration-refresh', classifyDiagnosticFailure(error)); }
@@ -310,11 +303,6 @@ async function main(): Promise<void> {
     } catch (error) {
       recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.cycle', classifyDiagnosticFailure(error));
       if (stopping) return;
-      if (paused) {
-        updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' });
-        await heartbeatRuntime('paused');
-        return;
-      }
       if (!hasRuntimeLease(globalDataPath, runtimeId, process.pid)) {
         stop();
         return;
@@ -325,13 +313,13 @@ async function main(): Promise<void> {
         return;
       }
       await persistShadowRuntimeState(globalDataPath, dataOperations);
-      updateRuntimeState(globalDataPath, runtimeId, { status: 'running' });
-      await heartbeatRuntime('running');
+      updateRuntimeState(globalDataPath, runtimeId, { status: paused ? 'paused' : 'running' });
+      await heartbeatRuntime(paused ? 'paused' : 'running');
     } finally {
       releaseBusy?.();
       activeEngine = undefined;
       running = false;
-      if (rerunRequested && !paused && !stopping) {
+      if (rerunRequested && !stopping) {
         rerunRequested = false;
         runCycleObserved();
       }

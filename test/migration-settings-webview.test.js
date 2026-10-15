@@ -6,20 +6,19 @@ const vm = require('node:vm');
 const { getSidebarWebviewHtml } = require('../out/sidebarWebview.js');
 const { getWebviewHtml } = require('../out/roadmapWebview.js');
 const { getMigrationSettingsCardHtml, getMigrationSettingsScript } = require('../out/migrationSettingsWebview.js');
+const { getDatabaseOverviewCardHtml, getDatabaseOverviewScript } = require('../out/databaseOverviewSettings.js');
 
-test('both generated settings surfaces include the same accessible migration and recycling card with valid final scripts', () => {
+test('both generated settings surfaces replace the temporary migration card with the database overview', () => {
   const uri = { path: '/isolated/extension', fsPath: '/isolated/extension', toString: () => '/isolated/extension' };
   const webview = { asWebviewUri: value => value.toString(), cspSource: 'fixture' };
   for (const html of [getSidebarWebviewHtml(webview, uri), getWebviewHtml(webview, { extensionUri: uri, extensionPath: uri.fsPath })]) {
-    assert.equal((html.match(/id="migration-settings-card"/g) || []).length, 1);
-    assert.match(html, /data-migration-preview/);
-    assert.match(html, /data-migration-confirm/);
-    assert.match(html, /data-migration-status[^>]*role="status"/);
-    assert.ok(html.indexOf('id="migration-settings-card"') > html.lastIndexOf('<div class="settings-card"'), 'the temporary migration card must be the final settings card');
+    assert.equal((html.match(/id="database-overview-card"/g) || []).length, 1);
+    assert.doesNotMatch(html, /id="migration-settings-card"|data-migration-preview|data-migration-confirm/);
+    assert.match(html, /data-database-overview-status[^>]*role="status"/);
     for (const match of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)) new vm.Script(match[1]);
   }
-  assert.match(getMigrationSettingsCardHtml(), /overflow-wrap:\s*anywhere/);
-  new vm.Script(getMigrationSettingsScript());
+  assert.match(getDatabaseOverviewCardHtml(), /overflow-wrap:\s*anywhere/);
+  new vm.Script(getDatabaseOverviewScript());
 });
 
 test('the temporary data cleanup card speaks in user actions and keeps advanced detail secondary', () => {

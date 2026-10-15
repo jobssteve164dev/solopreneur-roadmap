@@ -1112,20 +1112,17 @@ test('settings migration delegates to the same shared Agent CLI runner as Agent 
   assert.match(sidebarProvider, /cwd: maintenanceRoot/);
 });
 
-test('the final temporary migration card delegates maintenance to Agent and preserves exact confirmation', () => {
-  const webview = fs.readFileSync(path.join(projectRoot, 'src/migrationSettingsWebview.ts'), 'utf8');
+test('the final settings card shows a read-only database overview instead of migration controls', () => {
+  const webview = fs.readFileSync(path.join(projectRoot, 'src/databaseOverviewSettings.ts'), 'utf8');
   const sidebar = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
-  assert.match(webview, /data-migration-agent/);
-  assert.match(webview, /dataMigration\.agent/);
-  assert.match(webview, /dataMigration\.recycle/);
-  assert.match(webview, /reviewAgentActive/);
-  assert.match(webview, /activeRecyclingPlans\.has\(item\.planId\)/);
-  assert.match(webview, /旧数据整理/);
-  assert.match(webview, /data-migration-delegate/);
-  assert.match(webview, /dataMigration\.delegate/);
-  assert.match(webview, /交给 Agent 迁移/);
-  assert.doesNotMatch(fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8'), /自动整理需要使用 Claude Code/);
-  assert.ok(sidebar.indexOf('${getMigrationSettingsCardHtml()}') > sidebar.indexOf('feedback-rating-card'));
+  assert.match(webview, /数据库概览/);
+  assert.match(webview, /数据库占用/);
+  assert.match(webview, /内容条目/);
+  assert.match(webview, /可复用空间/);
+  assert.match(webview, /databaseOverview\.get/);
+  assert.doesNotMatch(webview, /dataMigration\.|maintain_database_storage|移到回收站|交给 Agent/);
+  assert.doesNotMatch(sidebar, /getMigrationSettingsCardHtml|getMigrationSettingsScript/);
+  assert.ok(sidebar.indexOf('${getDatabaseOverviewCardHtml()}') > sidebar.indexOf('feedback-rating-card'));
 });
 
 test('extension activation refreshes bundled global memory tools', () => {
@@ -1987,6 +1984,13 @@ function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
   if (elements['migration-settings-card']) {
     const children = new Map();
     elements['migration-settings-card'].querySelector = selector => {
+      if (!children.has(selector)) children.set(selector, createElement(selector));
+      return children.get(selector);
+    };
+  }
+  if (elements['database-overview-card']) {
+    const children = new Map();
+    elements['database-overview-card'].querySelector = selector => {
       if (!children.has(selector)) children.set(selector, createElement(selector));
       return children.get(selector);
     };
@@ -3814,6 +3818,8 @@ test('sidebar defers agent account checks until settings opens', () => {
   const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
   const { elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(script, ids);
 
+  const initialSettingsRequest = postedMessages.find(message => message.command === 'settings.get');
+  assert.equal(initialSettingsRequest?.mode, 'snapshot');
   postedMessages.length = 0;
   dispatchMessage({
     command: 'settingsLoaded',
@@ -3827,7 +3833,60 @@ test('sidebar defers agent account checks until settings opens', () => {
 
   elements['btn-toggle-settings'].listeners.click();
   assert.equal(elements['settings-panel'].style.display, 'block');
+  assert.equal(postedMessages.filter(message => message.command === 'checkDependencies').length, 0);
+  const fullSettingsRequest = postedMessages.find(message => message.command === 'settings.get');
+  assert.equal(fullSettingsRequest?.mode, 'full');
+  dispatchMessage({
+    command: 'settingsLoaded',
+    requestId: fullSettingsRequest.requestId,
+    hydrated: true,
+    settings: { cliPath: 'claude', language: 'zh', globalPrompt: '' }
+  });
   assert.equal(postedMessages.filter(message => message.command === 'checkDependencies').length, 1);
+  assert.equal(postedMessages.find(message => message.command === 'checkDependencies')?.cliPath, 'claude');
+});
+
+test('sidebar hydrates untouched settings without overwriting a field edited during the full read', () => {
+  const { getSidebarWebviewHtml } = require(path.join(projectRoot, 'out/sidebarWebview.js'));
+  const html = getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const script = extractLastScript(html);
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(script, ids);
+  const snapshotRequest = postedMessages.find(message => message.command === 'settings.get');
+  dispatchMessage({
+    command: 'settingsLoaded',
+    requestId: snapshotRequest.requestId,
+    hydrated: false,
+    settings: { cliPath: 'codex', language: 'zh', globalPrompt: '旧提示', globalDataPath: '/old-data' }
+  });
+
+  postedMessages.length = 0;
+  elements['btn-toggle-settings'].listeners.click();
+  const fullRequest = postedMessages.find(message => message.command === 'settings.get');
+  elements['setting-global-prompt'].value = '正在编辑的新提示';
+  elements['settings-panel'].listeners.input({ target: elements['setting-global-prompt'] });
+  elements['automation-focus-minutes'].value = '45';
+  elements['settings-panel'].listeners.input({ target: elements['automation-focus-minutes'] });
+  dispatchMessage({
+    command: 'settingsLoaded',
+    requestId: fullRequest.requestId,
+    hydrated: true,
+    settings: {
+      cliPath: 'claude',
+      language: 'en',
+      globalPrompt: '数据库提示',
+      globalDataPath: '/real-data',
+      automationTasks: { focusMinutes: 25 }
+    }
+  });
+
+  assert.equal(elements['setting-global-prompt'].value, '正在编辑的新提示');
+  assert.equal(elements['automation-focus-minutes'].value, '45');
+  assert.equal(elements['setting-cli-select'].getAttribute('data-value'), 'claude');
+  assert.equal(elements['setting-language'].getAttribute('data-value'), 'en');
+  assert.equal(elements['setting-global-data-path'].value, '/real-data');
+  assert.ok(postedMessages.some(message => message.command === 'checkDependencies' && message.cliPath === 'claude'));
+  assert.ok(postedMessages.some(message => message.command === 'agentImpact.get' && message.cliPath === 'claude'));
 });
 
 test('sidebar starts background service reconciliation once after its ready signal', async () => {

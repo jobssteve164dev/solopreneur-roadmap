@@ -7079,6 +7079,25 @@ export class UnifiedDataStore {
       migrationSources: { records: sourceRecords, storedBytes: sourceStoredBytes, pendingByproductRecords: pendingSourceRecords, pendingByproductStoredBytes: pendingSourceStoredBytes, byKind: sourceByKind },
       lastMaintenance: maintenance ? { startedAt: Number(maintenance.started_at), finishedAt: maintenance.finished_at === null ? null : Number(maintenance.finished_at), status: String(maintenance.status), error: String(maintenance.error), deletedArtifacts: Number(maintenance.deleted_artifacts), deletedSources: Number(maintenance.deleted_sources), deletedContents: Number(maintenance.deleted_contents), reclaimedStoredBytes: Number(maintenance.reclaimed_stored_bytes), compacted: Boolean(maintenance.compacted), beforeBytes: Number(maintenance.before_bytes), afterBytes: Number(maintenance.after_bytes), integrity: String(maintenance.integrity) } : null };
   }
+  public readDatabaseOverview(): {
+    databaseBytes: number; freePageBytes: number; contents: { records: number };
+    lastMaintenance: { finishedAt: number | null; status: string } | null;
+  } {
+    const { databaseBytes } = this.databaseStorageFileSizes();
+    const pageSize = Number(this.rows('PRAGMA page_size')[0]?.page_size || 0);
+    const freePages = Number(this.rows('PRAGMA freelist_count')[0]?.freelist_count || 0);
+    const records = Number(this.rows('SELECT COUNT(*) AS records FROM contents INDEXED BY sqlite_autoindex_contents_1')[0]?.records || 0);
+    const maintenance = this.rows('SELECT finished_at,status FROM database_storage_maintenance ORDER BY started_at DESC,id DESC LIMIT 1')[0];
+    return {
+      databaseBytes,
+      freePageBytes: pageSize * freePages,
+      contents: { records },
+      lastMaintenance: maintenance ? {
+        finishedAt: maintenance.finished_at === null ? null : Number(maintenance.finished_at),
+        status: String(maintenance.status)
+      } : null
+    };
+  }
   public compactDatabaseStorage(): { integrity: string } {
     if (this.transactionDepth) throw new Error('database_maintenance_transaction_active');
     this.db.run('PRAGMA wal_checkpoint(TRUNCATE)');

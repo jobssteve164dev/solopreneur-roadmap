@@ -818,6 +818,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         } : undefined);
       }
       case 'backup': return store.backup({ destination: String(input.destination || ''), idempotencyKey: String(input.idempotencyKey || '') });
+      case 'read_database_overview': return store.readDatabaseOverview();
       case 'read_database_storage': return store.readDatabaseStorage();
       case 'maintain_database_storage': return maintainDatabaseStorage(input.compact === true, input.automatic === true);
       case 'restore_backup': return store.restoreBackup({ source: String(input.source || ''), destinationRoot: String(input.destinationRoot || ''), idempotencyKey: String(input.idempotencyKey || '') });
