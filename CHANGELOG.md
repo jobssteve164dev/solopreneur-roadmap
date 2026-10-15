@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.551 - 2026-10-15
+
+### Fixed
+- page large run artifacts (f8eea93)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.550 - 2026-10-15
 
 ### Fixed
