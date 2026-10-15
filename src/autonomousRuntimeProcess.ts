@@ -27,6 +27,7 @@ import { enqueueStartupDataMigrations, historicalRunOwnerStateStamp, refreshHist
 import { isAutonomousRuntimeDisabled } from './autonomousRuntimeService';
 import { importLegacyRuntimeState } from './runtimeStateMigration';
 import { readRuntimePauseState, writeRuntimePauseState } from './runtimePauseState';
+import { reapFinishedLegacyRunProcesses } from './legacyRunProcessRecovery';
 
 function argumentValue(name: string): string {
   const index = process.argv.indexOf(name);
@@ -241,6 +242,10 @@ async function main(): Promise<void> {
       if (!stopping) historicalOwnerStamp = await historicalRunOwnerStateStamp(dataStore, () => !stopping);
       if (!stopping) await enqueueStartupDataMigrations(dataStore, dataOperations, () => !stopping);
       if (!stopping) await dataOperations.waitForMigrations();
+      if (!stopping) {
+        const recovered = await reapFinishedLegacyRunProcesses(dataStore);
+        for (const conflict of recovered.conflicts) process.stderr.write(`SoloMap legacy run recovery: ${conflict}\n`);
+      }
       if (!stopping) startupMigrationsReady = true;
     } finally { releaseStartupMigrationBusy(); }
   })();

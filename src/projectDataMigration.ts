@@ -12,6 +12,7 @@ import { findCodexTranscriptFile, getContinuationAgentProvider } from './continu
 import { containedRegularPath, readRegisteredTaskSources } from './growthReports.js';
 import { assertVersion2Binding, NativeSessionBinding } from './sessionIdentity.js';
 import { runArtifactKind, shouldDescendRunArtifactDirectory } from './runArtifactPolicy.js';
+import { discoverLegacyRunProcesses } from './legacyRunProcessRecovery.js';
 
 const digest = (bytes: Uint8Array) => crypto.createHash('sha256').update(bytes).digest('hex');
 
@@ -287,6 +288,10 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
   const uniqueStatusFiles = [...new Set(statusFiles)];
   const liveStatusFiles = new Set<string>();
   const liveRunDirectories = new Set<string>();
+  for (const owner of discoverLegacyRunProcesses(projectRoot)) {
+    const relative = path.relative(sourceRoot, owner.runDirectory);
+    if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) liveRunDirectories.add(owner.runDirectory);
+  }
   for (const statusFile of uniqueStatusFiles) {
     try {
       const status = JSON.parse((await stableFile(statusFile)).bytes.toString('utf8'));

@@ -1125,6 +1125,35 @@ test('the final settings card shows a read-only database overview instead of mig
   assert.ok(sidebar.indexOf('${getDatabaseOverviewCardHtml()}') > sidebar.indexOf('feedback-rating-card'));
 });
 
+test('database overview reads the bounded overview query instead of the full storage inventory', async () => {
+  const requests = [], messages = [], errors = [];
+  const transport = { ...require('../out/autonomousRuntimeControl.js'), sendRuntimeDataRequest: async (_root, request) => {
+    requests.push(request);
+    return { databaseBytes: 1024, freePageBytes: 0, contents: { records: 1 }, lastMaintenance: null };
+  } };
+  const runtimeHost = { ...require('../out/autonomousRuntimeHost.js'), ensureHealthyAutonomousRuntime: async () => ({ started: false }) };
+  const diagnostics = { ...require('../out/localDiagnostics.js'), recordLocalDiagnosticError: (_root, _kind, error) => errors.push(String(error)) };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.handle = handleSharedWebviewAction;
+    module.exports.connect = () => {
+      getPersistedSettings = () => ({ globalDataPath: '/fixture/.solomap-global', language: 'zh' });
+    };
+  `, {
+    './autonomousRuntimeControl': transport,
+    './autonomousRuntimeHost': runtimeHost,
+    './databaseOverviewSettings': require('../out/databaseOverviewSettings.js'),
+    './localDiagnostics': diagnostics
+  });
+  extension.connect();
+
+  assert.equal(await extension.handle({ extensionPath: projectRoot }, { command: 'databaseOverview.get', requestId: 'overview-1' }, 'sidebar', { postMessage: async message => { messages.push(message); return true; } }), true);
+
+  assert.equal(JSON.stringify(requests), JSON.stringify([{ operation: 'read_database_overview', input: {} }]), JSON.stringify({ messages, errors }));
+  assert.equal(messages[0].command, 'databaseOverviewLoaded');
+  assert.equal(messages[0].requestId, 'overview-1');
+  assert.equal(messages[0].overview.contents.records, 1);
+});
+
 test('extension activation refreshes bundled global memory tools', () => {
   const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
   const activationStart = extension.indexOf('export async function activate(context: vscode.ExtensionContext)');

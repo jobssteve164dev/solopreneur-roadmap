@@ -4,6 +4,7 @@ import * as path from 'path';
 import { UnifiedDataStore } from './db/unifiedDataStore';
 import { RuntimeDataOperations } from './runtimeDataOperations';
 import { runArtifactKind, shouldDescendRunArtifactDirectory } from './runArtifactPolicy.js';
+import { reapFinishedLegacyRunProcesses } from './legacyRunProcessRecovery.js';
 
 type MigrationOperations = (request: Parameters<RuntimeDataOperations>[0]) => Promise<unknown>;
 type MigrationAcknowledgement = { scheduled?: boolean };
@@ -84,6 +85,8 @@ export async function refreshHistoricalRunMigrations(store: UnifiedDataStore, op
 }
 
 export async function enqueueStartupDataMigrations(store: UnifiedDataStore, operations: RuntimeDataOperations, shouldContinue: () => boolean): Promise<void> {
+  const recovered = await reapFinishedLegacyRunProcesses(store);
+  for (const conflict of recovered.conflicts) process.stderr.write(`SoloMap legacy run recovery: ${conflict}\n`);
   await enqueueAvailableDataMigrations(store, operations, shouldContinue);
 }
 

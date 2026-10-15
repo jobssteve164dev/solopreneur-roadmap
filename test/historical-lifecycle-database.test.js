@@ -10,6 +10,24 @@ const { registerLearningTask, writeLearningJson } = require('./fixtures/legacy-t
 const { createSessionBindingValue, appendSessionBindingValue } = require('../out/sessionIdentity.js');
 const { RunLifecycleClient, runStatusReference } = require('../out/runLifecycleClient.js');
 const { prepareAgentRun } = require('../out/agentRunPreparation.js');
+const { isProcessOwnerAlive, readProcessBirthMarker } = require('../out/processIdentity.js');
+
+async function startLegacyRunScript(t, scriptPath) {
+  const readyPath = `${scriptPath}.ready`;
+  fs.writeFileSync(scriptPath, '#!/bin/sh\nwhile :; do sleep 60 & child=$!; printf %s "$child" > "$SOLOMAP_TEST_READY"; wait "$child"; done\n');
+  const child = require('node:child_process').spawn('/bin/sh', [scriptPath], { detached: true, stdio: 'ignore', env: { ...process.env, SOLOMAP_TEST_READY: readyPath } });
+  const birth = readProcessBirthMarker(child.pid);
+  t.after(() => {
+    try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+  });
+  for (let attempt = 0; attempt < 100 && (!isProcessOwnerAlive(child.pid, birth) || !fs.existsSync(readyPath)); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(isProcessOwnerAlive(child.pid, birth), 'legacy wrapper must be running before the lifecycle assertion');
+  assert.ok(fs.existsSync(readyPath), 'legacy wrapper must open its script before the lifecycle assertion');
+  const descendantPid = Number(fs.readFileSync(readyPath, 'utf8'));
+  const descendantBirth = readProcessBirthMarker(descendantPid);
+  assert.ok(isProcessOwnerAlive(descendantPid, descendantBirth), 'legacy wrapper child must be running before the lifecycle assertion');
+  return { child, birth, descendantPid, descendantBirth };
+}
 
 async function history(t) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-historical-lifecycle-'));
@@ -91,6 +109,48 @@ test('a registered task definition remains outside recycling while one of its or
   assert.equal(await f.client.findConversation(f.project, 71), null);
   const { MigrationRecycling } = require('../out/migrationRecycling.js');
   assert.deepEqual((await new MigrationRecycling(f.store).prepare()).files, []);
+});
+
+test('a live legacy wrapper protects its run directory when the old status receipt is malformed', async t => {
+  const f = await history(t);
+  const wrapper = await startLegacyRunScript(t, path.join(f.runDir, 'run-agent.sh'));
+  fs.writeFileSync(f.statusFile, '');
+
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+
+  assert.ok(result.conflicts.some(item => item.source === f.statusFile));
+  assert.throws(() => f.store.readMigrationSource(`agent-runs:${f.project}`, '__solo__/71/prompt.txt'), /migration_source_missing/);
+  assert.ok(isProcessOwnerAlive(wrapper.child.pid, wrapper.birth));
+});
+
+test('startup recovery stops a terminal legacy wrapper even after its script file is gone', async t => {
+  const f = await history(t);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  const script = path.join(f.runDir, 'run-agent.sh');
+  const wrapper = await startLegacyRunScript(t, script);
+  fs.unlinkSync(script);
+  assert.ok(isProcessOwnerAlive(wrapper.child.pid, wrapper.birth), 'removing the historical script path does not stop its running wrapper');
+
+  const bootstrap = require('../out/runtimeDatabaseBootstrap.js');
+  await bootstrap.enqueueStartupDataMigrations(f.store, f.ops, () => true);
+  await f.ops.waitForMigrations();
+
+  for (let attempt = 0; attempt < 200 && isProcessOwnerAlive(wrapper.child.pid, wrapper.birth); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(isProcessOwnerAlive(wrapper.child.pid, wrapper.birth), false, 'a formally finished historical conversation cannot keep its old process tree alive');
+  assert.equal(isProcessOwnerAlive(wrapper.descendantPid, wrapper.descendantBirth), false, 'the old wrapper child cannot survive after the conversation has finished');
+});
+
+test('startup recovery preserves a waiting historical session while its legacy launcher still exists', async t => {
+  const f = await history(t);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  const wrapper = await startLegacyRunScript(t, path.join(f.runDir, 'run-agent.sh'));
+
+  const bootstrap = require('../out/runtimeDatabaseBootstrap.js');
+  await bootstrap.enqueueStartupDataMigrations(f.store, f.ops, () => true);
+  await f.ops.waitForMigrations();
+
+  assert.ok(isProcessOwnerAlive(wrapper.child.pid, wrapper.birth), 'a resumable waiting session with its launcher must remain available');
+  assert.ok(isProcessOwnerAlive(wrapper.descendantPid, wrapper.descendantBirth));
 });
 
 test('a legacy owner becoming live after adoption excludes the same run files and task definition from recycling', async t => {

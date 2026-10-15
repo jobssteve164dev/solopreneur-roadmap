@@ -7347,6 +7347,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         if (btnToggleCollaboration) btnToggleCollaboration.classList.remove('is-active');
         settingsPanel.style.display = 'block';
         requestSettings('full');
+        requestAgentImpact();
       }
     });
 
