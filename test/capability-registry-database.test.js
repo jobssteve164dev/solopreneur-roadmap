@@ -18,6 +18,42 @@ function prepareCodegraphFixture(base, version) {
     : file === 'npm' && args?.join(' ') === 'prefix -g' ? prefix + '\n' : execute(file, args, options);
 }
 
+test('legacy capability registry keeps a valid external skill registration without treating its entry path as managed package bytes', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-capability-external-'));
+  const root = path.join(base, 'global'), external = path.join(base, 'external', 'SKILL.md');
+  fs.mkdirSync(path.join(root, 'skills'), { recursive: true }); fs.mkdirSync(path.dirname(external));
+  fs.writeFileSync(external, '# External skill\n完整技能正文');
+  fs.writeFileSync(path.join(root, 'skills', 'registry.json'), JSON.stringify({ skills: [{
+    id: 'external-skill', title: 'External skill', status: 'installed', entry: '../../external/SKILL.md', packagePath: '../../external'
+  }] }));
+  const store = new UnifiedDataStore(root);
+  try {
+    const result = await require('../out/capabilityDatabaseMigration.js').importCapabilityDirectory(store, root, { archiveUnresolved: true });
+    assert.deepEqual(result.conflicts, []);
+    const registered = store.readCapabilityRegistry({ kind: 'skill' }).entries[0];
+    assert.equal(registered.entry.id, 'external-skill');
+    assert.equal(store.read(registered.objectId).relations.some(relation => store.read(relation.target).data.type === 'installation:entry_document'), false);
+    assert.equal(store.readMigrationSource(`capabilities:${root}`, 'skills/registry.json').stage, 'imported');
+  } finally { store.close(); }
+});
+
+test('a terminal capability registry conflict is retained as exact evidence and becomes recyclable', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-capability-archive-'));
+  const root = path.join(base, 'global'), file = path.join(root, 'skills', 'registry.json');
+  const bytes = Buffer.from(JSON.stringify({ skills: [{ id: '../invalid', title: 'retired' }] }));
+  fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, bytes);
+  const store = new UnifiedDataStore(root);
+  try {
+    const result = await require('../out/capabilityDatabaseMigration.js').importCapabilityDirectory(store, root, { archiveUnresolved: true });
+    assert.deepEqual(result.conflicts, []);
+    assert.equal(result.archivedSources.length, 1);
+    const evidence = store.read(result.archivedSources[0].evidenceRef.split('/').at(-1));
+    assert.deepEqual(Buffer.from(evidence.data.content.data, 'base64'), bytes);
+    const plan = await new (require('../out/migrationRecycling.js').MigrationRecycling)(store).prepare();
+    assert.ok(plan.files.some(item => item.path === file));
+  } finally { store.close(); }
+});
+
 // Original host regression 166: capability registration must survive the move
 // from file registries without losing activation, permissions or install history.
 test('capability registration survives concurrent windows, exact replay and owner restart', async () => {
@@ -331,7 +367,9 @@ test('startup migration preserves historical capability choices, full metadata a
     assert.equal(store.readCapabilityRegistry({ kind: 'mcp' }).entries[0].entry.status, 'disabled');
     assert.ok(store.pendingMigrationJobs().length === 0);
     const overview = await operations({ operation: 'migration_overview', input: {} });
-    assert.ok(overview.jobs.some(job => job.status === 'completed_with_conflicts'), 'source/database conflict must remain visible');
+    assert.equal(overview.jobs.at(-1).status, 'completed', 'a terminal source/database difference is retained as evidence instead of blocking migration');
+    assert.equal(store.readMigrationSource(`capabilities:${root}`, 'mcp/registry.json').stage, 'imported');
+    assert.ok((await new (require('../out/migrationRecycling.js').MigrationRecycling)(store).prepare()).files.some(item => item.path === registryFile));
     await operations.close(); store.close(); store = new UnifiedDataStore(root); operations = createRuntimeDataOperations(store);
     assert.equal(store.readCapabilityRegistry({ kind: 'mcp' }).entries[0].entry.status, 'disabled');
     assert.equal(store.readCapabilityRegistry({ kind: 'enhancement' }).entries[0].entry.status, 'uninstalled');

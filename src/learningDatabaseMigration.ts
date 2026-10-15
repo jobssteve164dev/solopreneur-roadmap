@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { UnifiedDataStore } from './db/unifiedDataStore';
 import type { LegacyReviewTarget } from './db/unifiedDataStore';
-import type { MemoryImportOptions, MemoryImportResult } from './memoryDatabaseMigration';
+import { archiveUnresolvedMigrationSource, isArchivableMigrationConflict, resolveLegacyProjectScope, type MemoryImportOptions, type MemoryImportResult } from './memoryDatabaseMigration';
 import { isUsefulVerificationSignal } from './learningQuality.js';
 import { reviewHash, legacyReviewSourceBody, ReviewManifest, ReviewSource } from './learningReview.js';
 import { validateLearningReview } from './learningReviewApply.js';
@@ -16,7 +16,9 @@ export async function importLearningReviewDirectory(store: UnifiedDataStore, sou
   const result: MemoryImportResult = { imported: 0, unchanged: 0, originalBytes: 0, conflicts: [], retainedFiles: [] };
   try {
     const file = path.join(root, 'review.lock'), captured = await stableSource(file, root);
-    const owner = JSON.parse(captured.bytes.toString('utf8'));
+    let owner: any;
+    try { owner = JSON.parse(captured.bytes.toString('utf8')); }
+    catch { throw new Error('legacy_review_lock_invalid'); }
     if (!Number.isInteger(owner.pid) || owner.pid < 1 || typeof owner.runId !== 'string') throw new Error('legacy_review_lock_invalid');
     result.retainedFiles.push('review.lock');
     if (store.historicalRunOwnerAlive({ agentPid: owner.pid, processBirth: owner.processStart ? `proc:${owner.processStart}` : '' })) {
@@ -32,10 +34,22 @@ export async function importLearningReviewDirectory(store: UnifiedDataStore, sou
     store.captureMigrationSource({ identity, key, hash: captured.hash }, captured.bytes, { mimeType: 'application/octet-stream', encoding: 'binary', pending: true });
     return { key, ...captured };
   };
+  const captureSymlink = async (file: string): Promise<{ key: string; hash: string; bytes: Buffer }> => {
+    const before = await fs.promises.lstat(file);
+    if (!before.isSymbolicLink()) throw new Error('migration_source_invalid');
+    const target = await fs.promises.readlink(file), bytes = Buffer.from(target, 'utf8');
+    const after = await fs.promises.lstat(file);
+    if (!after.isSymbolicLink() || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || await fs.promises.readlink(file) !== target) throw new Error('migration_source_changed');
+    const key = path.relative(root, file).split(path.sep).join('/'), source = { identity, key, hash: crypto.createHash('sha256').update(bytes).digest('hex') };
+    result.originalBytes += bytes.length;
+    store.captureMigrationSource(source, bytes, { mimeType: 'application/vnd.solomap.symlink', encoding: 'utf8', pending: true, physicalKind: 'symlink' });
+    return { key, hash: source.hash, bytes };
+  };
   const json = (file: { bytes: Buffer }): any => {
     const text = file.bytes.toString('utf8');
     if (!Buffer.from(text).equals(file.bytes)) throw new Error('legacy_review_encoding_invalid');
-    return JSON.parse(text.replace(/^\uFEFF/, ''));
+    try { return JSON.parse(text.replace(/^\uFEFF/, '')); }
+    catch { throw new Error('legacy_review_encoding_invalid'); }
   };
   const validateSource = (source: ReviewSource, projects: string[]): void => {
     legacyReviewSourceBody(source);
@@ -51,7 +65,7 @@ export async function importLearningReviewDirectory(store: UnifiedDataStore, sou
         || (state.deferredSources !== undefined && !Array.isArray(state.deferredSources)) || (state.unresolved !== undefined && !Array.isArray(state.unresolved))) throw new Error('legacy_review_cursor_invalid');
       for (const [id, value] of Object.entries(state.sources || {})) {
         const source = { ...(value as any), id };
-        if (!/^[a-f0-9]{64}$/.test(source.hash || '') || (source.projectPath && !projects.includes(source.projectPath))) throw new Error('legacy_review_cursor_invalid');
+        if (!/^[a-f0-9]{64}$/.test(source.hash || '') || (source.projectPath && !resolveLegacyProjectScope(options, source.projectPath))) throw new Error('legacy_review_cursor_invalid');
         if (source.content !== undefined || source.value !== undefined) validateSource(source, projects);
       }
       if ((await stableSource(path.join(root, cursor.key), root)).hash !== cursor.hash) throw new Error('source_changed_during_import');
@@ -60,8 +74,11 @@ export async function importLearningReviewDirectory(store: UnifiedDataStore, sou
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         const message = error instanceof Error ? error.message : String(error);
-        result.conflicts.push({ source: 'review-state.json', error: message });
-        if (cursor) store.captureMigrationSource({ identity, key: cursor.key, hash: cursor.hash }, cursor.bytes, { mimeType: 'application/json', encoding: 'utf8', error: message });
+        if (cursor) {
+          const descriptor = { identity, key: cursor.key, hash: cursor.hash };
+          store.captureMigrationSource(descriptor, cursor.bytes, { mimeType: 'application/json', encoding: 'utf8', error: message });
+          if (!archiveUnresolvedMigrationSource(store, result, descriptor, cursor.bytes, message, options, { displaySource: 'review-state.json', mimeType: 'application/json' })) result.conflicts.push({ source: 'review-state.json', error: message });
+        } else result.conflicts.push({ source: 'review-state.json', error: message });
       }
     }
   };
@@ -86,9 +103,10 @@ export async function importLearningReviewDirectory(store: UnifiedDataStore, sou
         const entries = await fs.promises.readdir(directory, { withFileTypes: true });
         for (const item of entries.sort((a, b) => a.name.localeCompare(b.name))) {
           const file = path.join(directory, item.name);
-          if (item.isSymbolicLink()) throw new Error('migration_source_invalid');
+          if (item.isSymbolicLink()) { const captured = await captureSymlink(file); files.push({ key: captured.key, hash: captured.hash }); }
           if (item.isDirectory()) directories.push(file);
           else if (item.isFile()) { const captured = await capture(file); files.push({ key: captured.key, hash: captured.hash }); }
+          else if (item.isSymbolicLink()) { /* Captured as exact link metadata above. */ }
           else throw new Error('migration_source_invalid');
           await new Promise<void>(resolve => setImmediate(resolve));
         }
@@ -102,7 +120,7 @@ export async function importLearningReviewDirectory(store: UnifiedDataStore, sou
       if (!manifest) throw new Error('legacy_review_manifest_missing');
       if (manifest.schemaVersion !== 1 || manifest.runId !== entry.name || typeof manifest.globalRoot !== 'string' || typeof manifest.globalPrompt !== 'string'
         || manifest.promptHash !== reviewHash(manifest.globalPrompt) || !Array.isArray(manifest.projects) || !Array.isArray(manifest.sources) || !Array.isArray(manifest.memory) || !Array.isArray(manifest.gaps)
-        || manifest.projects.some(project => typeof project !== 'string' || !options.projectScopes?.[project])) throw new Error('legacy_review_manifest_invalid');
+        || manifest.projects.some(project => typeof project !== 'string' || !resolveLegacyProjectScope(options, project))) throw new Error('legacy_review_manifest_invalid');
       for (const source of manifest.sources) validateSource(source, manifest.projects);
       const references = read('result.json');
       const referencedFile = (value: unknown): string => {
@@ -122,17 +140,29 @@ export async function importLearningReviewDirectory(store: UnifiedDataStore, sou
         if (application[key] !== undefined && !Array.isArray(application[key])) throw new Error('legacy_review_application_sources_invalid');
         for (const source of application[key] || []) validateSource(source, manifest.projects);
       }
-      for (const file of files) if ((await stableSource(path.join(root, file.key), root)).hash !== file.hash) throw new Error('source_changed_during_import');
+      for (const file of files) {
+        const source = path.join(root, file.key);
+        const current = (await fs.promises.lstat(source)).isSymbolicLink()
+          ? crypto.createHash('sha256').update(Buffer.from(await fs.promises.readlink(source), 'utf8')).digest('hex')
+          : (await stableSource(source, root)).hash;
+        if (current !== file.hash) throw new Error('source_changed_during_import');
+      }
       const imported = store.importLegacyLearningReview({ identity, runKey, manifest, proposal: proposal ? JSON.stringify(proposal) : null, application, ...(targets ? { targets } : {}), files });
       if (imported.unchanged) result.unchanged++; else result.imported++;
       for (const target of targets || []) if (target.afterError) result.conflicts.push({ source: `${runKey}#${target.key}`, error: target.afterError });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      result.conflicts.push({ source: runKey, error: message });
       for (const file of files) {
         const captured = store.readMigrationSource(identity, file.key);
-        store.captureMigrationSource({ identity, key: file.key, hash: captured.hash }, captured.bytes, { mimeType: 'application/octet-stream', encoding: 'binary', error: message });
+        const symlink = store.migrationSourceKind(identity, file.key) === 'symlink';
+        store.captureMigrationSource({ identity, key: file.key, hash: captured.hash }, captured.bytes, { mimeType: symlink ? 'application/vnd.solomap.symlink' : 'application/octet-stream', encoding: symlink ? 'utf8' : 'binary', error: message, ...(symlink ? { physicalKind: 'symlink' as const } : {}) });
       }
+      if (options.archiveUnresolved && files.length && isArchivableMigrationConflict(message)) {
+        const archived = store.archiveMigrationSourceGroup(identity, runKey, files.map(file => file.key), { reason: message });
+        result.archivedSources ||= [];
+        result.archivedSources.push({ source: runKey, error: message, evidenceRef: `solomap://evidence/${archived.objectId}` });
+        if (archived.unchanged) result.unchanged++; else result.imported++;
+      } else if (!(options.archiveUnresolved && message === 'legacy_review_manifest_missing')) result.conflicts.push({ source: runKey, error: message });
     }
     options.onProgress?.(result); await new Promise<void>(resolve => setImmediate(resolve));
   }
@@ -165,7 +195,7 @@ async function legacySemanticReviewTargets(store: UnifiedDataStore, manifest: Re
     let scope: string | null = null;
     if (change.path.startsWith('projects/')) {
       const project = manifest.projects.find(project => `projects/${sanitizeAttachmentScope(path.basename(project).toLowerCase()) || 'project'}.md` === change.path);
-      scope = project ? options.projectScopes?.[project] || null : null;
+      scope = project ? resolveLegacyProjectScope(options, project) : null;
       if (!scope) throw new Error('project_scope_mapping_required');
     }
     const category = change.path === 'profile.md' ? 'profile' : change.path === 'operating-rules.md' ? 'rules' : ({ projects: 'project', decisions: 'decision', patterns: 'pattern', domains: 'domain', active: 'active', inbox: 'inbox' } as Record<string, string>)[change.path.split('/')[0]] || 'inbox';
@@ -173,7 +203,7 @@ async function legacySemanticReviewTargets(store: UnifiedDataStore, manifest: Re
   }
   for (const [index, lesson] of proposal.lessons.entries()) {
     const key = `lesson:${index}`, id = lesson.id || `lesson-${reviewHash(`${manifest.runId}:${index}`).slice(0, 24)}`;
-    const scope = options.projectScopes?.[lesson.projectPath];
+    const scope = resolveLegacyProjectScope(options, lesson.projectPath);
     if (!scope) throw new Error('project_scope_mapping_required');
     if (application.pending[key] !== undefined && !/^[a-f0-9]{64}$/.test(application.pending[key])) throw new Error('legacy_review_application_target_invalid');
     const data = { status: 'historical', summary: lesson.summary, applies_when: lesson.appliesWhen, does_not_apply_when: lesson.doesNotApplyWhen, do_this: lesson.doThis, avoid_this: lesson.avoidThis, verification: lesson.verification,
@@ -184,7 +214,10 @@ async function legacySemanticReviewTargets(store: UnifiedDataStore, manifest: Re
       const flavor = manifest.globalRoot.includes('\\') || /^[A-Za-z]:/.test(manifest.globalRoot) ? path.win32 : path;
       const files = [flavor.join(manifest.globalRoot, 'learning', 'candidates', `${id}.json`), path.join(path.dirname(sourceRoot), 'learning', 'candidates', `${id}.json`)];
       const source = manifest.sources.find(source => source.projectPath === lesson.projectPath && !!source.file && files.includes(source.file));
-      if (beforeData.id !== id || beforeData.scope !== scope || !source || JSON.stringify(JSON.parse(legacyReviewSourceBody(source))) !== JSON.stringify(previous)) throw new Error('legacy_review_lesson_before_invalid');
+      let sourceBody: unknown;
+      try { sourceBody = source ? JSON.parse(legacyReviewSourceBody(source)) : null; }
+      catch { throw new Error('legacy_review_lesson_before_invalid'); }
+      if (beforeData.id !== id || beforeData.scope !== scope || !source || JSON.stringify(sourceBody) !== JSON.stringify(previous)) throw new Error('legacy_review_lesson_before_invalid');
     }
     const binding = { identity: `learning:${path.join(path.dirname(sourceRoot), 'learning')}`, key: `candidates/${id}.json` }, targetStatus = status(key, application.pending[key], id);
     let after: string = JSON.stringify(lesson), afterSource: LegacyReviewTarget['afterSource'], afterError: string | undefined;
@@ -241,9 +274,11 @@ async function stableSource(file: string, boundary?: string): Promise<{ bytes: B
 }
 
 function lessonSource(bytes: Buffer, options: MemoryImportOptions): { id: string; scope: string; updatedAt: number; data: Record<string, unknown> } {
-  const entry = JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, ''));
+  let entry: any;
+  try { entry = JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, '')); }
+  catch { throw new Error('legacy_lesson_invalid'); }
   if (!entry || entry.schemaVersion !== 1 || typeof entry.id !== 'string' || !entry.id || typeof entry.projectPath !== 'string' || !path.isAbsolute(entry.projectPath) || !['candidate', 'approved', 'promoted', 'rejected'].includes(entry.status) || ['summary', 'appliesWhen', 'doThis', 'avoidThis'].some(key => typeof entry[key] !== 'string') || !Array.isArray(entry.evidenceRefs) || entry.evidenceRefs.some((ref: any) => !ref || typeof ref.type !== 'string' || typeof ref.ref !== 'string')) throw new Error('legacy_lesson_invalid');
-  const scope = options.projectScopes?.[path.resolve(entry.projectPath)];
+  const scope = resolveLegacyProjectScope(options, path.resolve(entry.projectPath));
   if (!scope) throw new Error('project_scope_mapping_required');
   const timestamp = (value: unknown): number | null => {
     if (value === undefined || value === null) return null;
@@ -269,9 +304,11 @@ function lessonSource(bytes: Buffer, options: MemoryImportOptions): { id: string
 function learningEventSource(bytes: Buffer, options: MemoryImportOptions): { id: string; scope: string; data: Record<string, unknown> } {
   const text = bytes.toString('utf8');
   if (!Buffer.from(text).equals(bytes)) throw new Error('legacy_learning_event_encoding_invalid');
-  const event = JSON.parse(text.replace(/^\uFEFF/, ''));
+  let event: any;
+  try { event = JSON.parse(text.replace(/^\uFEFF/, '')); }
+  catch { throw new Error('legacy_learning_event_invalid'); }
   if (!event || event.schemaVersion !== 1 || typeof event.id !== 'string' || !event.id || typeof event.projectPath !== 'string' || !path.isAbsolute(event.projectPath) || typeof event.summary !== 'string' || typeof event.sourceType !== 'string' || typeof event.sourceRef !== 'string' || !['completed', 'failed', 'verified', 'deviated', 'corrected', 'blocked', 'reused', 'partial', 'needs_confirmation'].includes(event.eventType) || !Array.isArray(event.evidenceRefs) || !Array.isArray(event.tags)) throw new Error('legacy_learning_event_invalid');
-  const scope = options.projectScopes?.[path.resolve(event.projectPath)];
+  const scope = resolveLegacyProjectScope(options, path.resolve(event.projectPath));
   if (!scope) throw new Error('project_scope_mapping_required');
   const occurredAt = typeof event.createdAt === 'string' ? Date.parse(event.createdAt) : Number.NaN;
   if (!Number.isFinite(occurredAt)) throw new Error('legacy_learning_event_timestamp_invalid');
@@ -282,9 +319,11 @@ function learningEventSource(bytes: Buffer, options: MemoryImportOptions): { id:
 function learningDecisionSource(bytes: Buffer, options: MemoryImportOptions): { id: string; scope: string; eventId: string; candidateIds: string[]; updatedAt: number; data: Record<string, unknown> } {
   const text = bytes.toString('utf8');
   if (!Buffer.from(text).equals(bytes)) throw new Error('legacy_learning_decision_encoding_invalid');
-  const entry = JSON.parse(text.replace(/^\uFEFF/, ''));
+  let entry: any;
+  try { entry = JSON.parse(text.replace(/^\uFEFF/, '')); }
+  catch { throw new Error('legacy_learning_decision_invalid'); }
   if (!entry || entry.schemaVersion !== 1 || typeof entry.id !== 'string' || !entry.id || typeof entry.eventId !== 'string' || !entry.eventId || typeof entry.projectPath !== 'string' || !path.isAbsolute(entry.projectPath) || !['created', 'skipped'].includes(entry.decision) || typeof entry.reason !== 'string' || !Array.isArray(entry.candidateIds) || entry.candidateIds.some((id: unknown) => typeof id !== 'string' || !id) || !Array.isArray(entry.checkedSignals) || !Array.isArray(entry.evidenceRefs)) throw new Error('legacy_learning_decision_invalid');
-  const scope = options.projectScopes?.[path.resolve(entry.projectPath)];
+  const scope = resolveLegacyProjectScope(options, path.resolve(entry.projectPath));
   if (!scope) throw new Error('project_scope_mapping_required');
   const createdAt = typeof entry.createdAt === 'string' ? Date.parse(entry.createdAt) : Number.NaN;
   const updatedAt = typeof entry.updatedAt === 'string' ? Date.parse(entry.updatedAt) : Number.NaN;
@@ -332,12 +371,16 @@ async function importLearningLedger(store: UnifiedDataStore, file: string, ident
     if (result.conflicts.length === conflictStart) {
       store.captureMigrationSource({ identity, key, hash: captured.hash }, captured.bytes, { mimeType: 'application/x-ndjson', encoding: 'utf8' });
       store.markMigrationSourceImported(identity, key);
+    } else {
+      store.captureMigrationSource({ identity, key, hash: captured.hash }, captured.bytes, { mimeType: 'application/x-ndjson', encoding: 'utf8', error: 'learning_ledger_mapping_incomplete' });
+      if (archiveUnresolvedMigrationSource(store, result, { identity, key, hash: captured.hash }, captured.bytes, 'learning_ledger_mapping_incomplete', options, { displaySource: key, mimeType: 'application/x-ndjson' })) {
+        result.conflicts.splice(conflictStart);
+      }
     }
-    else store.captureMigrationSource({ identity, key, hash: captured.hash }, captured.bytes, { mimeType: 'application/x-ndjson', encoding: 'utf8', error: 'learning_ledger_mapping_incomplete' });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (captured) store.captureMigrationSource({ identity, key, hash: captured.hash }, captured.bytes, { mimeType: 'application/x-ndjson', encoding: 'utf8', error: message });
-    result.conflicts.push({ source: key, error: message });
+    if (!captured || !archiveUnresolvedMigrationSource(store, result, { identity, key, hash: captured.hash }, captured.bytes, message, options, { displaySource: key, mimeType: 'application/x-ndjson' })) result.conflicts.push({ source: key, error: message });
   }
 }
 
@@ -370,8 +413,11 @@ export async function importLearningDirectory(store: UnifiedDataStore, sourceRoo
         (decision ? decisions : sources).push({ file, key, hash: captured.hash, updatedAt: mapped.updatedAt, scope: mapped.scope, id: mapped.id });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (captured) store.captureMigrationSource({ identity, key, hash: captured.hash }, captured.bytes, { mimeType: 'application/json', encoding: 'utf8', error: message });
-        result.conflicts.push({ source: key, error: message });
+        if (captured) {
+          const descriptor = { identity, key, hash: captured.hash };
+          store.captureMigrationSource(descriptor, captured.bytes, { mimeType: 'application/json', encoding: 'utf8', error: message });
+          if (!archiveUnresolvedMigrationSource(store, result, descriptor, captured.bytes, message, options, { displaySource: key, mimeType: 'application/json' })) result.conflicts.push({ source: key, error: message });
+        } else result.conflicts.push({ source: key, error: message });
       }
       result.originalBytes += captured?.bytes.length ?? 0;
       options.onProgress?.(result); await new Promise<void>(resolve => setImmediate(resolve));
@@ -390,8 +436,11 @@ export async function importLearningDirectory(store: UnifiedDataStore, sourceRoo
       if (imported.unchanged) result.unchanged++; else result.imported++;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (captured) store.captureMigrationSource({ identity, key: source.key, hash: captured.hash }, captured.bytes, { mimeType: 'application/json', encoding: 'utf8', error: message });
-      result.conflicts.push({ source: source.key, error: message });
+      if (captured) {
+        const descriptor = { identity, key: source.key, hash: captured.hash };
+        store.captureMigrationSource(descriptor, captured.bytes, { mimeType: 'application/json', encoding: 'utf8', error: message });
+        if (!archiveUnresolvedMigrationSource(store, result, descriptor, captured.bytes, message, options, { displaySource: source.key, mimeType: 'application/json', projectId: source.scope })) result.conflicts.push({ source: source.key, error: message });
+      } else result.conflicts.push({ source: source.key, error: message });
     }
     options.onProgress?.(result); await new Promise<void>(resolve => setImmediate(resolve));
   }
@@ -409,8 +458,11 @@ export async function importLearningDirectory(store: UnifiedDataStore, sourceRoo
       if (imported.unchanged) result.unchanged++; else result.imported++;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (captured) store.captureMigrationSource({ identity, key: source.key, hash: captured.hash }, captured.bytes, { mimeType: 'application/json', encoding: 'utf8', error: message });
-      result.conflicts.push({ source: source.key, error: message });
+      if (captured) {
+        const descriptor = { identity, key: source.key, hash: captured.hash };
+        store.captureMigrationSource(descriptor, captured.bytes, { mimeType: 'application/json', encoding: 'utf8', error: message });
+        if (!archiveUnresolvedMigrationSource(store, result, descriptor, captured.bytes, message, options, { displaySource: source.key, mimeType: 'application/json', projectId: source.scope })) result.conflicts.push({ source: source.key, error: message });
+      } else result.conflicts.push({ source: source.key, error: message });
     }
     options.onProgress?.(result); await new Promise<void>(resolve => setImmediate(resolve));
   }

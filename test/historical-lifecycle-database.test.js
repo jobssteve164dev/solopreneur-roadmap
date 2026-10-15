@@ -11,6 +11,7 @@ const { createSessionBindingValue, appendSessionBindingValue } = require('../out
 const { RunLifecycleClient, runStatusReference } = require('../out/runLifecycleClient.js');
 const { prepareAgentRun } = require('../out/agentRunPreparation.js');
 const { isProcessOwnerAlive, readProcessBirthMarker } = require('../out/processIdentity.js');
+const { historicalRunOwnerStateStamp, refreshHistoricalRunMigrations } = require('../out/runtimeDatabaseBootstrap.js');
 
 async function startLegacyRunScript(t, scriptPath) {
   const readyPath = `${scriptPath}.ready`;
@@ -118,9 +119,39 @@ test('a live legacy wrapper protects its run directory when the old status recei
 
   const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
 
-  assert.ok(result.conflicts.some(item => item.source === f.statusFile));
+  assert.deepEqual(result.conflicts, []);
   assert.throws(() => f.store.readMigrationSource(`agent-runs:${f.project}`, '__solo__/71/prompt.txt'), /migration_source_missing/);
+  assert.throws(() => f.store.readMigrationSource(`agent-status:${f.project}`, '71.json'), /migration_source_missing/);
   assert.ok(isProcessOwnerAlive(wrapper.child.pid, wrapper.birth));
+});
+
+test('a malformed status is rediscovered without file changes when its live wrapper exits', async t => {
+  const f = await history(t);
+  const wrapper = await startLegacyRunScript(t, path.join(f.runDir, 'run-agent.sh'));
+  fs.writeFileSync(f.statusFile, '');
+  const liveStamp = await historicalRunOwnerStateStamp(f.store, () => true);
+  const exited = new Promise(resolve => wrapper.child.once('exit', resolve));
+  process.kill(-wrapper.child.pid, 'SIGKILL'); await exited;
+  assert.equal(isProcessOwnerAlive(wrapper.child.pid, wrapper.birth), false);
+  const calls = [];
+  const stoppedStamp = await refreshHistoricalRunMigrations(f.store, async request => { calls.push(request); return { scheduled: true }; }, () => true, liveStamp);
+  assert.notEqual(stoppedStamp, liveStamp);
+  assert.ok(calls.some(request => request.input.collection === 'agent-runs' && request.input.projectRoot === f.project));
+});
+
+test('a stopped legacy run with a malformed status keeps exact evidence and no longer blocks retirement', async t => {
+  const f = await history(t);
+  fs.writeFileSync(f.statusFile, '');
+
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project, archiveUnresolved: true });
+
+  assert.deepEqual(result.conflicts, []);
+  assert.ok(result.archivedSources.some(item => item.source === f.statusFile && item.error.endsWith('historical_run_status_invalid')));
+  assert.equal(f.store.readMigrationSource(`agent-status:${f.project}`, '71.json').stage, 'imported');
+  const { MigrationRecycling } = require('../out/migrationRecycling.js');
+  const files = (await new MigrationRecycling(f.store).prepare()).files.map(item => item.path);
+  assert.ok(files.includes(f.statusFile));
+  for (const name of ['prompt.txt', 'command.txt', 'output.log', 'session.json']) assert.ok(files.includes(path.join(f.runDir, name)), `${name} must be retired after its anonymous run index is durable`);
 });
 
 test('startup recovery stops a terminal legacy wrapper even after its script file is gone', async t => {
@@ -322,11 +353,11 @@ test('concurrent history adoption shares one background import and repeated adop
   t.diagnostic(`concurrentRequests=8 migrationJobs=1 repeatedRequests=20 retainedBytesRead=${retainedBytes} projectMetadataBytesRead=${projectMetadataBytes} unchangedWal=true`);
 });
 
-test('a failed history import can resume in the same job after its retained source is restored', async t => {
+test('a missing retired history root completes cleanly and the same job discovers it when restored', async t => {
   const f=await history(t),retained=path.join(f.base,'retained-history-source');
   fs.renameSync(f.sourceRoot,retained);
-  await assert.rejects(f.client.adoptConversationHistory(f.project,71),/ENOENT/);
-  const job=f.store.migrationJobs()[0];assert.equal(job.status,'failed');
+  assert.equal(await f.client.adoptConversationHistory(f.project,71),null);
+  const job=f.store.migrationJobs()[0];assert.equal(job.status,'completed');
   fs.renameSync(retained,f.sourceRoot);
   const values=await Promise.all(Array.from({length:8},()=>f.client.adoptConversationHistory(f.project,71)));
   assert.ok(values.every(value=>value&&value.runId===values[0].runId));
@@ -335,7 +366,7 @@ test('a failed history import can resume in the same job after its retained sour
 
 test('history adoption explicitly retries its own conflicted job when the requested conversation is still missing', async t => {
   const f = await history(t);
-  const job = f.store.enqueueMemoryMigration({ collection: 'agent-runs', sourceRoot: f.sourceRoot, projectRoot: f.project }, `conversation-history-adoption-v1:${f.project}`);
+  const job = f.store.enqueueMemoryMigration({ collection: 'agent-runs', sourceRoot: f.sourceRoot, projectRoot: f.project, archiveUnresolved: true }, `conversation-history-adoption-v2:${f.project}`);
   const progress = { conflicts: [{ source: 'older-unrelated-run.json', error: 'historical_run_identity_ambiguous' }] };
   f.store.updateMigrationJob(job.jobId, 'completed_with_conflicts', progress);
 
@@ -492,6 +523,17 @@ test('historical workspace evidence and roadmap backup remain readable through f
   assert.equal(await f.client.readField(found.reference, 'changes', found.status), changes);
   const document = f.store.readRunDocument(f.projectId, 71, 'roadmap_backup', Number(found.status.roadmapBackupRevision));
   assert.equal(document.objectId, found.status.roadmapBackupObjectId); assert.equal(Buffer.from(document.bytes, 'base64').toString(), roadmapBackup);
+});
+
+test('replay uses an archived optional workspace document after its retired physical copy is gone', async t => {
+  const f = await history(t), workspace = path.join(f.runDir, 'workspace-before.json');
+  const snapshot = JSON.stringify({ 'retired.txt': { size: 8, mtimeMs: 1790000000000 } });
+  fs.writeFileSync(workspace, snapshot); f.status.workspaceSnapshotPath = workspace; writeLearningJson(f.statusFile, f.status);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  fs.unlinkSync(workspace);
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project, archiveUnresolved: true })).conflicts, []);
+  const found = await f.client.findConversation(f.project, 71);
+  assert.equal(await f.client.readField(found.reference, 'workspace', found.status), snapshot);
 });
 
 test('startup discovers a historical owner that has finished without replaying unchanged sources or creating another task', async t => {

@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { DocumentationManifest } from './documentationManifest';
 import { UnifiedDataStore } from './db/unifiedDataStore';
-import type { MemoryImportOptions, MemoryImportResult } from './memoryDatabaseMigration';
+import { archiveUnresolvedMigrationSource, type MemoryImportOptions, type MemoryImportResult } from './memoryDatabaseMigration';
 
 const digest = (bytes: Uint8Array) => crypto.createHash('sha256').update(bytes).digest('hex');
 interface DocumentationImportOptions extends MemoryImportOptions { projectRoot?: string }
@@ -37,15 +37,20 @@ export async function importDocumentationManifest(store: UnifiedDataStore, sourc
   result.retainedFiles.push(key);
   store.captureMigrationSource(source, bytes, { mimeType: 'application/json', encoding: 'utf8', pending: true });
   try {
-    const manifest = JSON.parse(bytes.toString('utf8')) as DocumentationManifest;
+    let manifest: DocumentationManifest;
+    try { manifest = JSON.parse(bytes.toString('utf8')) as DocumentationManifest; }
+    catch { throw new Error('invalid_documentation_manifest'); }
     if (!manifest || !Array.isArray(manifest.documents) || !Array.isArray(manifest.pendingReview)) throw new Error('invalid_documentation_manifest');
     const project = await store.registerProject({ root: projectRoot });
     const imported = store.importDocumentationManifest(project.projectId, { manifest, source });
     if (imported.unchanged) result.unchanged++; else result.imported++;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (store.migrationSourceState(identity, key)?.stage !== 'conflict') store.markMigrationSourceConflict(identity, key, message);
-    result.conflicts.push({ source: key, error: message });
+    const projectId = (await store.registerProject({ root: projectRoot })).projectId;
+    if (!archiveUnresolvedMigrationSource(store, result, source, bytes, message, options, { displaySource: key, mimeType: 'application/json', projectId })) {
+      if (store.migrationSourceState(identity, key)?.stage !== 'conflict') store.markMigrationSourceConflict(identity, key, message);
+      result.conflicts.push({ source: key, error: message });
+    }
   }
   options.onProgress?.(result);
   return result;

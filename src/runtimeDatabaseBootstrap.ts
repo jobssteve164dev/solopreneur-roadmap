@@ -4,15 +4,19 @@ import * as path from 'path';
 import { UnifiedDataStore } from './db/unifiedDataStore';
 import { RuntimeDataOperations } from './runtimeDataOperations';
 import { runArtifactKind, shouldDescendRunArtifactDirectory } from './runArtifactPolicy.js';
-import { reapFinishedLegacyRunProcesses } from './legacyRunProcessRecovery.js';
+import { discoverLegacyRunProcesses, reapFinishedLegacyRunProcesses, type LegacyRunProcess } from './legacyRunProcessRecovery.js';
 
 type MigrationOperations = (request: Parameters<RuntimeDataOperations>[0]) => Promise<unknown>;
 type MigrationAcknowledgement = { scheduled?: boolean };
 
-async function historicalRunSourceStamp(store: UnifiedDataStore, roots: string[], shouldContinue: () => boolean): Promise<string> {
+async function historicalRunSourceStamp(store: UnifiedDataStore, roots: string[], shouldContinue: () => boolean, discoveredOwners: LegacyRunProcess[]): Promise<string> {
   const hash = crypto.createHash('sha256'), pending = [...roots].sort();
   const statusRoot = roots.find(root => path.basename(root) === 'agent-status')!;
   const runRoot = roots.find(root => path.basename(root) === 'agent-runs')!;
+  const projectRoot = path.dirname(path.dirname(runRoot));
+  const liveOwners = discoveredOwners.filter(owner => path.resolve(owner.projectRoot) === path.resolve(projectRoot))
+    .map(owner => [owner.pid, owner.birth, owner.runDirectory, owner.executionLogId || null]).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  hash.update(JSON.stringify(['live-wrappers', liveOwners]));
   while (pending.length) {
     if (!shouldContinue()) return '';
     const file = pending.pop()!;
@@ -38,7 +42,11 @@ async function historicalRunSourceStamp(store: UnifiedDataStore, roots: string[]
 /** Cheap owner-state probe used after startup; retained run payloads are scanned only when this stamp changes. */
 export async function historicalRunOwnerStateStamp(store: UnifiedDataStore, shouldContinue: () => boolean): Promise<string> {
   const hash = crypto.createHash('sha256');
+  const discoveredOwners = discoverLegacyRunProcesses(undefined, true);
   for (const projectRoot of store.registeredProjectRoots().sort()) {
+    const liveOwners = discoveredOwners.filter(owner => path.resolve(owner.projectRoot) === path.resolve(projectRoot))
+      .map(owner => [owner.pid, owner.birth, owner.runDirectory, owner.executionLogId || null]).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+    hash.update(JSON.stringify([projectRoot, 'live-wrappers', liveOwners]));
     const roots = [
       { root: path.join(projectRoot, '.agent_status.json'), allFiles: true },
       { root: path.join(projectRoot, '.solopreneur', 'agent-status'), allFiles: true },
@@ -110,7 +118,7 @@ export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, op
       try { const bytes = await fs.promises.readFile(file); existing.push({ file, hash: crypto.createHash('sha256').update(bytes).digest('hex') }); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     }
-    if (existing.length) await enqueue({ operation: 'import_project_data', input: { collection: 'capabilities', sourceRoot: store.root, idempotencyKey: `startup-capabilities-v1:${crypto.createHash('sha256').update(JSON.stringify(existing)).digest('hex')}` } });
+    if (existing.length) await enqueue({ operation: 'import_project_data', input: { collection: 'capabilities', sourceRoot: store.root, archiveUnresolved: true, idempotencyKey: `startup-capabilities-v2:${crypto.createHash('sha256').update(JSON.stringify(existing)).digest('hex')}` } });
   } catch (error) { process.stderr.write(`SoloMap capability migration startup: ${String(error)}\n`); }
   try { await enqueueStartupProjectAutonomyMigration(store, enqueue, shouldContinue); }
   catch (error) { process.stderr.write(`SoloMap project autonomy migration startup: ${String(error)}\n`); }
@@ -181,7 +189,7 @@ async function enqueueStartupAnalysisMigration(store: UnifiedDataStore, operatio
   }
   if (!existing.length || !shouldContinue()) return;
   const signature = crypto.createHash('sha256').update(JSON.stringify({ projectScopes, existing })).digest('hex');
-  await operations({ operation: 'import_project_data', input: { collection: 'analysis-caches', sourceRoot: store.root, projectScopes, idempotencyKey: `startup-analysis-caches-v1:${signature}` } });
+  await operations({ operation: 'import_project_data', input: { collection: 'analysis-caches', sourceRoot: store.root, projectScopes, archiveUnresolved: true, idempotencyKey: `startup-analysis-caches-v2:${signature}` } });
 }
 
 async function enqueueStartupLearningReviewMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
@@ -208,7 +216,7 @@ async function enqueueStartupLearningReviewMigration(store: UnifiedDataStore, op
     }
   }
   const signature = crypto.createHash('sha256').update(JSON.stringify({ sourceRoot, projectScopes, stamp: sourceHash.digest('hex') })).digest('hex');
-  if (shouldContinue()) await operations({ operation: 'import_project_data', input: { collection: 'learning-review', sourceRoot, projectScopes, idempotencyKey: `startup-learning-review-v1:${signature}` } });
+  if (shouldContinue()) await operations({ operation: 'import_project_data', input: { collection: 'learning-review', sourceRoot, projectScopes, archiveUnresolved: true, idempotencyKey: `startup-learning-review-v2:${signature}` } });
 }
 
 async function enqueueStartupStrategyMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
@@ -242,7 +250,7 @@ async function enqueueStartupLearningMigration(store: UnifiedDataStore, operatio
   }
   const projectScopes = Object.fromEntries(mappings.sort(([a], [b]) => a.localeCompare(b)));
   const signature = crypto.createHash('sha256').update(JSON.stringify({ sourceRoot, projectScopes })).digest('hex');
-  if (shouldContinue()) await operations({ operation: 'import_project_data', input: { collection: 'learning', sourceRoot, projectScopes, idempotencyKey: `startup-learning-v1:${signature}` } });
+  if (shouldContinue()) await operations({ operation: 'import_project_data', input: { collection: 'learning', sourceRoot, projectScopes, archiveUnresolved: true, idempotencyKey: `startup-learning-v2:${signature}` } });
 }
 
 async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, selectedProjectRoot?: string): Promise<void> {
@@ -263,6 +271,7 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
       try { return fs.realpathSync(project.path) === selectedPhysical; } catch { return false; }
     });
   }
+  const discoveredOwners = discoverLegacyRunProcesses(undefined, true);
   for (const project of projects) {
     if (!shouldContinue()) return;
     const projectRoot = String(project?.path || '');
@@ -287,14 +296,14 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
         if (info.isSymbolicLink() || !info[['agent-runs', 'step-memory', 'run-digests'].includes(source.collection) ? 'isDirectory' : 'isFile']()) continue;
       }
       catch { continue; }
-      const version = source.collection === 'agent-runs' ? 7 : source.collection === 'project-journal' ? 6 : source.collection === 'project-growth' ? 2 : 1;
+      const version = source.collection === 'agent-runs' ? 8 : source.collection === 'project-journal' ? 7 : source.collection === 'project-growth' ? 2 : source.collection === 'documentation' ? 2 : 1;
       const stamp = source.collection === 'agent-runs'
-        ? await historicalRunSourceStamp(store, [source.sourceRoot, path.join(projectRoot, '.solopreneur', 'agent-status'), path.join(projectRoot, '.agent_status.json')], shouldContinue)
+        ? await historicalRunSourceStamp(store, [source.sourceRoot, path.join(projectRoot, '.solopreneur', 'agent-status'), path.join(projectRoot, '.agent_status.json')], shouldContinue, discoveredOwners)
         : source.collection === 'documentation'
           ? crypto.createHash('sha256').update(await fs.promises.readFile(source.sourceRoot)).digest('hex')
           : '';
       if (!shouldContinue()) return;
-      await operations({ operation: 'import_project_data', input: { ...source, projectRoot, idempotencyKey: `startup-${source.collection}-v${version}:${projectRoot}${stamp ? `:${stamp}` : ''}` } });
+      await operations({ operation: 'import_project_data', input: { ...source, projectRoot, archiveUnresolved: true, idempotencyKey: `startup-${source.collection}-v${version}:${projectRoot}${stamp ? `:${stamp}` : ''}` } });
     }
   }
 }
@@ -353,5 +362,5 @@ export async function enqueueStartupMemoryMigration(store: UnifiedDataStore, ope
   if (!shouldContinue()) return;
   const projectScopes = Object.fromEntries([...mappings].filter((entry): entry is [string, string] => entry[1] !== null).sort(([a], [b]) => a.localeCompare(b)));
   const signature = crypto.createHash('sha256').update(JSON.stringify({ sourceRoot, projectScopes })).digest('hex');
-  await operations({ operation: 'import_memory', input: { sourceRoot, projectScopes, idempotencyKey: `startup-memory-v1:${signature}` } });
+  await operations({ operation: 'import_memory', input: { sourceRoot, projectScopes, archiveUnresolved: true, idempotencyKey: `startup-memory-v2:${signature}` } });
 }

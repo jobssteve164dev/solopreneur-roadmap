@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { UnifiedDataStore } from './db/unifiedDataStore';
-import type { MemoryImportOptions, MemoryImportResult } from './memoryDatabaseMigration';
+import { archiveUnresolvedMigrationSource, isArchivableMigrationConflict, type MemoryImportOptions, type MemoryImportResult } from './memoryDatabaseMigration';
 
 const hash = (bytes: Buffer) => crypto.createHash('sha256').update(bytes).digest('hex');
 const collections = [
@@ -42,35 +42,56 @@ export async function importCapabilityDirectory(store: UnifiedDataStore, sourceR
     const conflictStart = result.conflicts.length;
     try {
       registry = await capture(file);
-      const parsed = JSON.parse(registry.bytes.toString('utf8'));
+      let parsed: any;
+      try { parsed = JSON.parse(registry.bytes.toString('utf8')); }
+      catch { throw new Error('capability_registry_invalid'); }
       if (!Array.isArray(parsed[collection.field])) throw new Error('capability_registry_invalid');
       const ids = new Set<string>();
       for (const entry of parsed[collection.field]) {
         if (options.shouldContinue && !options.shouldContinue()) return { ...result, interrupted: true };
         let entrySource: { identity: string; key: string; hash: string } | undefined;
+        const capturedFiles: Array<Awaited<ReturnType<typeof capture>>> = [];
+        let entryBytes: Buffer | undefined;
         try {
           if (!entry || typeof entry.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(entry.id) || ids.has(entry.id)) throw new Error('capability_identity_invalid');
           ids.add(entry.id);
           const packageRoot = path.join(sourceRoot, collection.directory, collection.installed, entry.id);
           const files: Record<string, string> = { manifest: path.join(packageRoot, `solomap.${collection.kind}.json`), source_lock: path.join(packageRoot, 'source.lock.json') };
-          if (collection.kind === 'skill') files.entry_document = path.resolve(sourceRoot, collection.directory, entry.entry || path.join(collection.installed, entry.id, 'package', 'SKILL.md'));
+          if (collection.kind === 'skill') {
+            const entryDocument = path.resolve(sourceRoot, collection.directory, entry.entry || path.join(collection.installed, entry.id, 'package', 'SKILL.md'));
+            const relativeEntry = path.relative(root, entryDocument);
+            // Some retired registries referenced an independently installed user skill.
+            // Preserve the registration, but never adopt bytes outside the managed data root.
+            if (relativeEntry && relativeEntry !== '..' && !relativeEntry.startsWith(`..${path.sep}`) && !path.isAbsolute(relativeEntry)) files.entry_document = entryDocument;
+          }
           if (collection.kind === 'enhancement') files.health = path.join(packageRoot, 'health.json');
           const attachments: Array<{ purpose: string; bytes: string }> = [], sources: Array<{ identity: string; key: string; hash: string }> = [];
           for (const [purpose, filename] of Object.entries(files)) {
-            try { const captured = await capture(filename); sources.push(captured.source); attachments.push({ purpose, bytes: captured.bytes.toString('base64') }); }
+            try { const captured = await capture(filename); capturedFiles.push(captured); sources.push(captured.source); attachments.push({ purpose, bytes: captured.bytes.toString('base64') }); }
             catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
             await new Promise<void>(resolve => setImmediate(resolve));
           }
-          const bytes = Buffer.from(JSON.stringify({ entry, attachments }));
-          entrySource = { identity, key: `${registry.source.key}#entry:${entry.id}`, hash: hash(bytes) };
-          store.captureMigrationSource(entrySource, bytes, { pending: true });
+          entryBytes = Buffer.from(JSON.stringify({ entry, attachments }));
+          entrySource = { identity, key: `${registry.source.key}#entry:${entry.id}`, hash: hash(entryBytes) };
+          store.captureMigrationSource(entrySource, entryBytes, { pending: true });
           const imported = store.importCapabilityEntry(collection.kind, entry, entrySource, attachments);
           if (imported.unchanged) result.unchanged++; else result.imported++;
           for (const source of sources) store.markMigrationSourceImported(source.identity, source.key);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          result.conflicts.push({ source: `${registry.source.key}#entry:${String(entry?.id || '')}`, error: message });
-          if (entrySource) store.markMigrationSourceConflict(identity, entrySource.key, message);
+          const displaySource = `${registry.source.key}#entry:${String(entry?.id || '')}`;
+          let archived = false;
+          if (options.archiveUnresolved && isArchivableMigrationConflict(message)) {
+            const sources = [registry, ...capturedFiles, ...(entrySource && entryBytes ? [{ source: entrySource, bytes: entryBytes }] : [])];
+            archived = true;
+            for (const captured of sources) if (!archiveUnresolvedMigrationSource(store, result, captured.source, captured.bytes, message, options, {
+              displaySource, mimeType: captured === registry ? 'application/json' : 'application/octet-stream'
+            })) archived = false;
+          }
+          if (!archived) {
+            result.conflicts.push({ source: displaySource, error: message });
+            if (entrySource) store.markMigrationSourceConflict(identity, entrySource.key, message);
+          }
         }
         options.onProgress?.(result);
         await new Promise<void>(resolve => setImmediate(resolve));
@@ -81,8 +102,11 @@ export async function importCapabilityDirectory(store: UnifiedDataStore, sourceR
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         const message = error instanceof Error ? error.message : String(error);
-        result.conflicts.push({ source: path.relative(sourceRoot, file).split(path.sep).join('/'), error: message });
-        if (registry) store.markMigrationSourceConflict(identity, registry.source.key, message);
+        const displaySource = path.relative(sourceRoot, file).split(path.sep).join('/');
+        if (!registry || !archiveUnresolvedMigrationSource(store, result, registry.source, registry.bytes, message, options, { displaySource, mimeType: 'application/json' })) {
+          result.conflicts.push({ source: displaySource, error: message });
+          if (registry) store.markMigrationSourceConflict(identity, registry.source.key, message);
+        }
       }
     }
   }

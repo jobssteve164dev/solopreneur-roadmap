@@ -2,17 +2,18 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { UnifiedDataStore } from './db/unifiedDataStore';
-import type { MemoryImportResult } from './memoryDatabaseMigration';
+import { archiveUnresolvedMigrationSource, type MemoryImportResult } from './memoryDatabaseMigration';
 
 function hash(bytes: Uint8Array): string { return crypto.createHash('sha256').update(bytes).digest('hex'); }
 
-async function stableJson(file: string): Promise<{ bytes: Buffer; value: any; hash: string }> {
+async function stableJson(file: string): Promise<{ bytes: Buffer; value: any; hash: string; parseError?: string }> {
   const before = await fs.promises.lstat(file);
   if (!before.isFile() || before.isSymbolicLink()) throw new Error('migration_source_invalid');
   const bytes = await fs.promises.readFile(file);
   const after = await fs.promises.lstat(file);
   if (before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) throw new Error('migration_source_changed');
-  return { bytes, value: JSON.parse(bytes.toString('utf8')), hash: hash(bytes) };
+  try { return { bytes, value: JSON.parse(bytes.toString('utf8')), hash: hash(bytes) }; }
+  catch { return { bytes, value: null, hash: hash(bytes), parseError: 'analysis_cache_source_invalid' }; }
 }
 
 export async function importAnalysisCaches(store: UnifiedDataStore, sourceRoot: string, options: any = {}): Promise<MemoryImportResult> {
@@ -29,12 +30,16 @@ export async function importAnalysisCaches(store: UnifiedDataStore, sourceRoot: 
     store.markMigrationSourceRechecking(identity, source.key);
     store.captureMigrationSource(source, captured.bytes, { mimeType: 'application/json', encoding: 'utf8' });
     try {
+      if (captured.parseError) throw new Error(captured.parseError);
       const imported = store.importAnalysisState(projectId, namespace, key, transform(captured.value), source);
       imported.unchanged ? result.unchanged++ : result.imported++;
       store.markMigrationSourceImported(identity, source.key);
     } catch (error) {
-      result.conflicts.push({ source: file, error: String(error) });
-      store.markMigrationSourceConflict(identity, source.key, String(error));
+      const message = String(error);
+      if (!archiveUnresolvedMigrationSource(store, result, source, captured.bytes, message, options, { displaySource: file, mimeType: 'application/json', projectId })) {
+        result.conflicts.push({ source: file, error: message });
+        store.markMigrationSourceConflict(identity, source.key, message);
+      }
     }
     options.onProgress?.(result);
   };

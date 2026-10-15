@@ -359,6 +359,28 @@ test('journal migration yields during both logs and indexes so new data can comm
   } finally { store.close(); }
 });
 
+test('an unassignable historical index preserves the exact journal as evidence and no longer blocks physical retirement', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-journal-archive-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
+  const source = path.join(project, '.solopreneur/project_journal.db');
+  const { SqliteStore } = require('../out/db/sqliteStore.js');
+  const legacy = new SqliteStore(source, path.resolve(__dirname, '..')); await legacy.init();
+  const executionLogId = legacy.logExecution('step', 'codex', 'run', 'complete historical output', 'Completed');
+  legacy.upsertRunIndex({ executionLogId, nodeId: 'step', runKind: 'step', agentCli: 'codex', status: 'Completed', startedAt: '', finishedAt: '', durationMs: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0, outputPath: '', outputBytes: 0, outputTail: '', commandPath: '', promptPath: '', changesPath: '', touchedFilesPath: '', updatedAt: '' });
+  legacy.close();
+  const original = fs.readFileSync(source), store = new UnifiedDataStore(root);
+  store.importHistoricalRunIndex = () => { throw new Error('historical_run_index_owner_unknown'); };
+  try {
+    const result = await require('../out/projectDataMigration.js').importProjectJournal(store, source, { projectRoot: project, archiveUnresolved: true });
+    assert.deepEqual(result.conflicts, []);
+    assert.equal(result.archivedSources.length, 1);
+    const evidence = store.read(result.archivedSources[0].evidenceRef.split('/').at(-1));
+    assert.deepEqual(Buffer.from(evidence.data.content.data, 'base64'), original);
+    const plan = await new (require('../out/migrationRecycling.js').MigrationRecycling)(store).prepare();
+    assert.ok(plan.files.some(file => file.path === source));
+  } finally { store.close(); }
+});
+
 test('project journal writes are immediate and concurrent through the single Runtime owner', async () => {
   const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-journal-db-')), '.solomap-global');
   const project = path.join(path.dirname(root), 'project');
@@ -547,7 +569,7 @@ test('completed run artifacts can be read in bounded pages', async () => {
   } finally { await operations.close(); store.close(); }
 });
 
-test('legacy project data migrates in the background while live-consumer run files stay local', async () => {
+test('legacy project data migrates in the background and terminal run files become recyclable after database readback', async () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-project-data-migration-'));
   const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
   const journalPath = path.join(project, '.solopreneur', 'project_journal.db'); const runsRoot = path.join(project, '.solopreneur', 'agent-runs');
@@ -571,8 +593,10 @@ test('legacy project data migrates in the background while live-consumer run fil
     assert.equal(overview.recyclableFiles, 0);
     assert.equal(fs.existsSync(journalPath), true); assert.equal(fs.existsSync(artifact), true);
     const plan = await operations({ operation: 'prepare_recycling', input: {} });
-    assert.deepEqual(plan.files.map(file => path.basename(file.path)), ['project_journal.db'], 'the exact captured physical journal becomes reviewable after its consistent snapshot is imported');
-    assert.equal(plan.files.some(file => file.path === artifact), false, 'task reports remain available to live consumers');
+    assert.deepEqual(new Set(plan.files.map(file => path.basename(file.path))), new Set(['project_journal.db', 'task-report.json', 'output.log']), 'the exact terminal sources become reviewable after database readback and lifecycle adoption');
+    assert.equal(plan.files.some(file => file.path === artifact), true);
+    const archivedOutput = await operations({ operation: 'read_run_artifact', input: { root: project, executionLogId, relativePath: path.join('1', String(executionLogId), 'output.log') } });
+    assert.equal(Buffer.from(archivedOutput.bytes, 'base64').toString(), 'archived output');
     assert.equal(fs.existsSync(journalPath), true);
   } finally { await operations.close(); store.close(); }
 });
@@ -653,6 +677,26 @@ test('legacy growth migration preserves a newer native report projection and rep
       { key: 'shared:key', value: { generation: 'native', rows: 19 }, revision: 1 }
     ]);
     assert.equal(store.readMigrationSource(`project-growth:${project}`, 'project_growth.db').stage, 'conflict');
+  } finally { store.close(); }
+});
+
+test('legacy growth projection conflicts archive the exact database while preserving the native choice', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-growth-projection-archive-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
+  const source = path.join(project, '.solopreneur', 'project_growth.db');
+  fs.mkdirSync(path.dirname(source), { recursive: true }); fs.mkdirSync(root);
+  const { SqliteStore } = require('../out/db/sqliteStore.js'); const legacy = new SqliteStore(source, path.resolve(__dirname, '..'));
+  await legacy.init(); legacy.putGrowthReportProjection([{ key: 'shared:key', value: { generation: 'legacy' } }]); legacy.close();
+  const expected = fs.readFileSync(source), store = new UnifiedDataStore(root);
+  try {
+    const registered = await store.registerProject({ root: project });
+    store.writeGrowthReportProjection(registered.projectId, [{ key: 'shared:key', value: { generation: 'native' } }]);
+    const result = await importProjectGrowth(store, source, { projectRoot: project, archiveUnresolved: true });
+    assert.deepEqual(result.conflicts, []); assert.equal(result.archivedSources.length, 1);
+    assert.deepEqual(store.readGrowthReportProjection(registered.projectId)[0].value, { generation: 'native' });
+    const evidence = store.read(result.archivedSources[0].evidenceRef.split('/').at(-1));
+    assert.deepEqual(Buffer.from(evidence.data.content.data, 'base64'), expected);
+    assert.ok((await new (require('../out/migrationRecycling.js').MigrationRecycling)(store).prepare()).files.some(item => item.path === source));
   } finally { store.close(); }
 });
 

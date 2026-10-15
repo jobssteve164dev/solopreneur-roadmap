@@ -768,11 +768,25 @@ test('agent run replay reconciles an equal unmarked index but keeps every run fi
   const first = await ops({ operation: 'import_project_data', input: { collection: 'agent-runs', projectRoot: workspace, sourceRoot: source, idempotencyKey: 'unmarked-agent-run-first' } });
   await ops.waitForMigrations(); assert.equal(store.readMigrationJob(first.jobId).status, 'completed');
   store.db.run('DELETE FROM run_index_import_sources WHERE project_id=? AND execution_log_id=?', [project, 12]);
+  const { MigrationRecycling } = require('../out/migrationRecycling.js');
+  assert.deepEqual((await new MigrationRecycling(store).prepare()).files, []);
   const replay = await ops({ operation: 'import_project_data', input: { collection: 'agent-runs', projectRoot: workspace, sourceRoot: source, idempotencyKey: 'unmarked-agent-run-replay' } });
   await ops.waitForMigrations(); assert.equal(store.readMigrationJob(replay.jobId).status, 'completed');
   assert.deepEqual(store.readMigrationJob(replay.jobId).progress.conflicts, []);
-  const { MigrationRecycling } = require('../out/migrationRecycling.js');
   assert.deepEqual((await new MigrationRecycling(store).prepare()).files, []);
+}));
+
+test('an approved run recycling plan stops when its run index loses source ownership', () => fixture(async ({ workspace, project, store, ops }) => {
+  const source = path.join(workspace, '.solopreneur', 'agent-runs'); const run = path.join(source, '__solo__', '12'); fs.mkdirSync(run, { recursive: true });
+  fs.writeFileSync(path.join(run, 'command.txt'), 'codex'); fs.writeFileSync(path.join(run, 'started_at'), '2026-10-09T09:00:00Z'); fs.writeFileSync(path.join(run, 'output.log'), 'tokens used\n17');
+  const job = await ops({ operation: 'import_project_data', input: { collection: 'agent-runs', projectRoot: workspace, sourceRoot: source, idempotencyKey: 'owned-agent-run' } });
+  await ops.waitForMigrations(); assert.equal(store.readMigrationJob(job.jobId).status, 'completed');
+  const { MigrationRecycling } = require('../out/migrationRecycling.js'); const recycling = new MigrationRecycling(store);
+  const plan = await recycling.prepare(); assert.ok(plan.files.length >= 3); recycling.confirm(plan.planId);
+  store.db.run('DELETE FROM run_index_import_sources WHERE project_id=? AND execution_log_id=?', [project, 12]);
+  const result = await recycling.recycleBatch(plan.files.map(item => item.itemId));
+  assert.deepEqual(new Set(result.failures), new Set(plan.files.map(item => item.itemId)));
+  for (const item of plan.files) assert.equal(fs.existsSync(item.path), true);
 }));
 
 

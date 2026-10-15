@@ -313,8 +313,10 @@ test('database and legacy projects with the same memory slug stay ambiguous inst
     await operations.waitForMigrations();
     const other = await store.registerProject({ root: second });
     for (const project of [registered, other]) assert.equal(store.search({ scope: project.projectId, kinds: ['memory'] }).items.length, 0);
-    assert.deepEqual(store.migrationJobs()[0].progress.conflicts, [{ source: 'projects/alpha.md', error: 'project_scope_mapping_required' }]);
-    assert.equal(store.readMigrationSource(`memory:${path.join(root, 'memory')}`, 'projects/alpha.md').bytes.toString(), 'Unresolved private project history');
+    assert.deepEqual(store.migrationJobs()[0].progress.conflicts, []);
+    assert.ok(store.migrationJobs()[0].progress.archivedSources.some(item => item.source === 'projects/alpha.md' && item.error === 'project_scope_mapping_required'));
+    const retained = store.readMigrationSource(`memory:${path.join(root, 'memory')}`, 'projects/alpha.md');
+    assert.equal(retained.bytes.toString(), 'Unresolved private project history'); assert.equal(retained.stage, 'imported');
   } finally { await operations.close(); store.close(); }
 });
 
@@ -499,7 +501,7 @@ test('a damaged project registry cannot block global memory import or assign unp
     assert.equal(store.read(items[0].objectId).data.content, 'global preferences survive');
     const { DatabaseSync } = require('node:sqlite');
     const db = new DatabaseSync(store.filePath, { readOnly: true });
-    assert.equal(db.prepare('SELECT count(*) AS total FROM migration_items').get().total, 3);
+    assert.equal(db.prepare('SELECT count(*) AS total FROM migration_items').get().total, 4);
     const captured = store.readMigrationSource(`project-registry:${root}`, 'projects.json');
     assert.equal(captured.bytes.toString(), '{damaged'); assert.equal(captured.stage, 'unmapped');
     db.close();
@@ -542,7 +544,7 @@ test('a disconnected project with the same legacy slug prevents assigning ambigu
     assert.equal(store.search({ scope: project.projectId, kinds: ['memory'] }).items.length, 0);
     const source = store.readMigrationSource('memory:' + path.join(root, 'memory'), 'projects/alpha.md');
     assert.equal(source.bytes.toString(), 'Unproven project identity');
-    assert.equal(source.stage, 'unmapped');
+    assert.equal(source.stage, 'imported');
   } finally { await operations.close(); store.close(); }
 });
 

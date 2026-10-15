@@ -534,6 +534,61 @@ export class UnifiedDataStore {
       this.db.run("UPDATE migration_items SET stage='imported',error=NULL WHERE source_identity=? AND source_key=?", [source.identity, key]);
     }
   }
+  /** Preserve a source that cannot be normalized as first-class history before retiring its physical copy. */
+  public archiveMigrationSource(source: ImportedSource, bytes: Uint8Array, input: { reason: string; mimeType?: string; projectId?: string | null; observedAt?: number }): WriteReceipt & { unchanged: boolean } {
+    if (!input.reason.trim() || source.hash !== digest(bytes)) throw new Error('migration_archive_invalid');
+    return this.transaction(() => {
+      const captured = this.rows(`SELECT migration_items.source_content_id,migration_items.source_capture_revision,contents.sha256
+        FROM migration_items JOIN contents ON contents.id=migration_items.source_content_id
+        WHERE source_identity=? AND source_key=?`, [source.identity, source.key])[0];
+      if (!captured || String(captured.sha256) !== source.hash) throw new Error('migration_archive_source_mismatch');
+      this.assertContentIntegrity(String(captured.source_content_id));
+      const reasonHash = digest(input.reason);
+      const archiveSource = { identity: `migration-archive:${source.identity}`, key: `${source.key}#${reasonHash}`, hash: source.hash };
+      const imported = this.importObjectInternal({ kind: 'evidence', action: 'create', scope: input.projectId || null,
+        idempotencyKey: `archive-migration-source:${canonical(archiveSource)}`, data: {
+          type: `legacy_migration_source:${source.identity}/${source.key}#${input.reason}`,
+          source_actor_id: this.actorId,
+          observed_at: Number.isFinite(input.observedAt) ? Number(input.observedAt) : Date.now(),
+          source_revision: Number(captured.source_capture_revision)
+        } }, archiveSource, { content: String(captured.source_content_id) });
+      const binding = this.rows('SELECT object_id,imported_revision FROM migration_items WHERE source_identity=? AND source_key=?', [archiveSource.identity, archiveSource.key])[0];
+      if (!binding) throw new Error('migration_archive_receipt_missing');
+      this.markMigrationSourceImported(source.identity, source.key);
+      const receipt = imported.receipt || { requestId: '', objectId: String(binding.object_id), revision: Number(binding.imported_revision), committedSequence: 0, status: 'committed' as const, pendingEffects: [] };
+      return { ...receipt, unchanged: imported.unchanged };
+    });
+  }
+  /** Bind a set of already captured files to one readable historical inventory. */
+  public archiveMigrationSourceGroup(identity: string, groupKey: string, keys: string[], input: { reason: string; projectId?: string | null; observedAt?: number }): WriteReceipt & { unchanged: boolean } {
+    if (!identity || !groupKey || !input.reason.trim() || !keys.length) throw new Error('migration_archive_invalid');
+    return this.transaction(() => {
+      const sources = [...new Set(keys)].sort().map(key => {
+        const captured = this.readMigrationSource(identity, key);
+        const archived = this.archiveMigrationSource({ identity, key, hash: captured.hash }, captured.bytes, {
+          reason: input.reason,
+          mimeType: this.migrationSourceKind(identity, key) === 'symlink' ? 'application/vnd.solomap.symlink' : 'application/octet-stream',
+          projectId: input.projectId,
+          observedAt: input.observedAt
+        });
+        return { key, hash: captured.hash, bytes: captured.bytes.length, sourceRevision: captured.sourceRevision, evidenceRef: `solomap://evidence/${archived.objectId}` };
+      });
+      const content = canonical({ schemaVersion: 1, sourceIdentity: identity, groupKey, reason: input.reason, sources });
+      const archiveSource = { identity: `migration-archive-group:${identity}`, key: groupKey, hash: digest(content) };
+      const imported = this.importObject({ kind: 'evidence', action: 'create', scope: input.projectId || null,
+        idempotencyKey: `archive-migration-source-group:${canonical(archiveSource)}`, data: {
+          type: `legacy_migration_group:${identity}/${groupKey}`,
+          source_actor_id: this.actorId,
+          content,
+          observed_at: Number.isFinite(input.observedAt) ? Number(input.observedAt) : Date.now()
+        } }, archiveSource);
+      const binding = this.rows('SELECT object_id,imported_revision FROM migration_items WHERE source_identity=? AND source_key=?', [archiveSource.identity, archiveSource.key])[0];
+      if (!binding) throw new Error('migration_archive_receipt_missing');
+      for (const source of sources) this.markMigrationSourceImported(identity, source.key);
+      const receipt = imported.receipt || { requestId: '', objectId: String(binding.object_id), revision: Number(binding.imported_revision), committedSequence: 0, status: 'committed' as const, pendingEffects: [] };
+      return { ...receipt, unchanged: imported.unchanged };
+    });
+  }
   public growthSnapshotsImported(projectId: string, sourceHash: string): boolean {
     if (!projectId || !/^[a-f0-9]{64}$/.test(sourceHash)) throw new Error('migration_source_invalid');
     return Boolean(this.rows('SELECT 1 FROM database_meta WHERE key=?', [`migration_growth_snapshots_imported:${projectId}:${sourceHash}`]).length);
@@ -1341,12 +1396,12 @@ export class UnifiedDataStore {
       } });
     });
   }
-  public captureMigrationSource(source: ImportedSource, bytes: Uint8Array, options: { mimeType?: string; encoding?: string; error?: string; pending?: boolean; sourceKind?: RunArtifactKind } = {}): { unchanged: boolean; requestId: string; committedSequence: number; stage: string } {
+  public captureMigrationSource(source: ImportedSource, bytes: Uint8Array, options: { mimeType?: string; encoding?: string; error?: string; pending?: boolean; sourceKind?: RunArtifactKind; physicalKind?: 'symlink' } = {}): { unchanged: boolean; requestId: string; committedSequence: number; stage: string } {
     if (!source.identity || !source.key || source.hash !== digest(bytes)) throw new Error('migration_source_invalid');
     return this.transaction(() => {
       const previous = this.rows('SELECT migration_items.*,contents.sha256 AS captured_hash FROM migration_items LEFT JOIN contents ON contents.id=migration_items.source_content_id WHERE source_identity=? AND source_key=?', [source.identity, source.key])[0];
       const revision = Number(previous?.source_capture_revision || 0);
-      const sourceKind = source.identity.startsWith('agent-runs:') ? options.sourceKind || runArtifactStorageKind(source.key) : 'source';
+      const sourceKind = options.physicalKind || (source.identity.startsWith('agent-runs:') ? options.sourceKind || runArtifactStorageKind(source.key) : 'source');
       const classificationChanged = options.error ? previous?.stage !== 'unmapped' || previous.error !== options.error : previous?.stage === 'unmapped' && !options.pending;
       if (previous && previous.source_kind !== sourceKind) this.db.run('UPDATE migration_items SET source_kind=? WHERE source_identity=? AND source_key=?', [sourceKind, source.identity, source.key]);
       const contentId = this.putContent(bytes, options.mimeType || 'application/octet-stream', options.encoding || 'binary');
@@ -1419,6 +1474,9 @@ export class UnifiedDataStore {
     });
   }
   public importObject(input: DataWrite, source: ImportedSource): { receipt?: WriteReceipt; unchanged: boolean } {
+    return this.importObjectInternal(input, source);
+  }
+  private importObjectInternal(input: DataWrite, source: ImportedSource, contentBindings: Record<string, string> = {}): { receipt?: WriteReceipt; unchanged: boolean } {
     if (!source.identity || !source.key || !/^[a-f0-9]{64}$/.test(source.hash)) throw new Error('migration_source_invalid');
     const previous = this.rows('SELECT * FROM migration_items WHERE source_identity=? AND source_key=?', [source.identity, source.key])[0];
     const bound = previous?.object_id ? this.current(String(previous.object_id), false) : undefined;
@@ -1438,7 +1496,7 @@ export class UnifiedDataStore {
       }
       input = { ...input, action: 'patch', objectId: current.objectId, expectedRevision: current.revision, idempotencyKey: `${input.idempotencyKey}:after:${current.revision}` };
     }
-    return { receipt: this.writeMutation(input, source), unchanged: false };
+    return { receipt: this.writeMutation(input, source, source, true, contentBindings), unchanged: false };
   }
   public importLessonSource(projectId: string, legacyId: string, data: Record<string, unknown>, source: ImportedSource, updatedAt: number, bytes: Uint8Array): { receipt?: WriteReceipt; unchanged: boolean } {
     return this.transaction(() => {
@@ -1521,14 +1579,15 @@ export class UnifiedDataStore {
       return imported;
     });
   }
-  private writeMutation(input: DataWrite, source?: ImportedSource, importedSource = source, updateSearch = true): WriteReceipt {
+  private writeMutation(input: DataWrite, source?: ImportedSource, importedSource = source, updateSearch = true, contentBindings: Record<string, string> = {}): WriteReceipt {
     const definition = this.definition(input.kind);
     if (!['create', 'patch', 'archive'].includes(input.action)) throw new Error('unknown_action');
     if (typeof input.idempotencyKey !== 'string' || !input.idempotencyKey.trim()) throw new Error('idempotency_key_required');
     if (input.scope !== null && typeof input.scope !== 'string') throw new Error('scope_required');
     if (definition.project && !input.scope) throw new Error('project_scope_required');
     if (input.kind === 'project' && input.scope !== null) throw new Error('project_is_global');
-    return this.recordMutation(source ? { input, source } : input, input.idempotencyKey, input.action, () => {
+    const mutationInput = Object.keys(contentBindings).length ? { input, source, contentBindings } : source ? { input, source } : input;
+    return this.recordMutation(mutationInput, input.idempotencyKey, input.action, () => {
       const id = input.action === 'create' ? crypto.randomUUID() : input.objectId;
       if (!id) throw new Error('object_id_required');
       const time = Date.now();
@@ -1545,6 +1604,14 @@ export class UnifiedDataStore {
         if (!Object.prototype.hasOwnProperty.call(fields, 'lesson_revision')) fields.lesson_revision = fields.candidate_refs[0]?.revision ?? null;
       }
       const data = this.normalizeData(input.kind, fields);
+      const allowed = this.columns.get(definition.table)!;
+      for (const [field, contentId] of Object.entries(contentBindings)) {
+        const key = field === 'content' ? 'content_id' : field.endsWith('_content') ? `${field}_id` : field;
+        if (!allowed.has(key) || Object.prototype.hasOwnProperty.call(fields, field) || Object.prototype.hasOwnProperty.call(fields, key)) throw new Error(`invalid_content_binding: ${input.kind}.${field}`);
+        if (!this.rows('SELECT id FROM contents WHERE id=?', [contentId]).length) throw new Error('content_missing');
+        this.assertContentIntegrity(contentId);
+        data[key] = contentId;
+      }
       if (input.kind === 'lesson_decision' && data.lesson_id && data.lesson_revision === undefined) {
         const previous = input.action === 'create' ? null : this.current(id);
         data.lesson_revision = previous?.data.lesson_id === data.lesson_id && previous.data.lesson_revision != null ? Number(previous.data.lesson_revision) : this.current(String(data.lesson_id), false).revision;
@@ -1567,7 +1634,7 @@ export class UnifiedDataStore {
         if (keys.length) this.db.run(`UPDATE ${definition.table} SET ${keys.map(key => key + '=?').join(',')} WHERE id=?`, [...keys.map(key => data[key]), id]);
         this.db.run('UPDATE objects SET revision=revision+1,updated_at=?,archived_at=? WHERE id=? AND revision=?', [time, input.action === 'archive' ? time : object.archivedAt, id, input.expectedRevision!]);
       }
-      const object = this.current(id);
+      const object = this.current(id, !Object.keys(contentBindings).length);
       if (input.kind === 'lesson_decision' && Object.prototype.hasOwnProperty.call(input.data, 'candidate_refs')) object.data.candidate_refs = input.data.candidate_refs;
       if (input.kind === 'lesson' && Object.prototype.hasOwnProperty.call(input.data, 'event_refs')) object.data.event_refs = input.data.event_refs;
       return object;
@@ -6651,6 +6718,16 @@ export class UnifiedDataStore {
       this.db.run('INSERT INTO run_index_import_sources VALUES(?,?,?,?,?,?,?)', [projectId, id, source.identity, source.key, source.hash, indexHash, priority]);
       return true;
     });
+  }
+  public historicalRunIndexOwnedBySource(projectId: string, executionLogId: number, source: ImportedSource): boolean {
+    const owner = this.rows('SELECT source_identity,source_key,source_hash,priority FROM run_index_import_sources WHERE project_id=? AND execution_log_id=?', [projectId, executionLogId])[0];
+    return Boolean(owner && Number(owner.priority) === 10
+      && this.samePhysicalMigrationSource(String(owner.source_identity), source.identity)
+      && String(owner.source_key) === source.key
+      && String(owner.source_hash) === source.hash);
+  }
+  public historicalRunIndexHasOwner(projectId: string, executionLogId: number): boolean {
+    return Boolean(this.rows('SELECT 1 FROM run_index_import_sources WHERE project_id=? AND execution_log_id=?', [projectId, executionLogId]).length);
   }
   private enrichRunIndexFromArchivedOutput(projectId: string, record: RunIndexRecord): { key: string; hash: string } | null {
     if (normalizeTokenUsage(record).totalTokens > 0) return null;

@@ -77,12 +77,14 @@ test('a project-scoped migration discovers, reports, retries, and previews only 
       f.store.markMigrationSourceImported(identity, 'project_growth.db');
     }
     const mixedPlan = await f.call('prepare_recycling');
-    assert.equal(mixedPlan.files.length, 2);
+    assert.equal(mixedPlan.files.length, 3);
     const ready = await f.operations({ operation: 'migration_overview', input: { projectRoot: projectA }, sessionToken: migration.session.sessionToken });
     assert.equal(ready.reviewableFiles, 1, 'an unconfirmed cross-project plan cannot hide this project from its own review');
     const plan = await f.operations({ operation: 'prepare_recycling', input: { projectRoot: projectA }, sessionToken: migration.session.sessionToken });
-    assert.equal(plan.files.length, 1);
-    assert.equal(plan.files[0].path, path.join(projectA, '.solopreneur', 'project_growth.db'));
+    assert.deepEqual(plan.files.map(file => file.path).sort(), [
+      path.join(projectA, '.solopreneur', 'documentation.json'),
+      path.join(projectA, '.solopreneur', 'project_growth.db')
+    ].sort());
     assert.notEqual(plan.planId, mixedPlan.planId);
     assert.equal((await f.operations({ operation: 'prepare_recycling', input: { projectRoot: projectA }, sessionToken: migration.session.sessionToken })).planId, plan.planId, 'the host must retrieve the exact project plan prepared by the Agent');
     await assert.rejects(f.operations({ operation: 'read_recycling_plan', input: { planId: plan.planId, projectRoot: projectB }, sessionToken: migration.session.sessionToken }), /maintenance_scope_denied/);

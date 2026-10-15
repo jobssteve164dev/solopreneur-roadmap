@@ -56,6 +56,7 @@ export class DatabaseMigrationCoordinator {
             projectRoot: job.args.projectRoot,
             sourceIdentity: job.args.sourceIdentity as string | undefined,
             projectScopes: job.args.projectScopes as Record<string, string> | undefined,
+            archiveUnresolved: job.args.archiveUnresolved === true,
             shouldContinue: () => !this.stopping,
             onProgress: (progress: MemoryImportResult) => {
               if (++processed % 32 === 0) this.store.updateMigrationJob(job.jobId, 'running', { ...progress });

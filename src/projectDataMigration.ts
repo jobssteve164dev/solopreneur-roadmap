@@ -5,7 +5,7 @@ import * as os from 'os';
 import { isDeepStrictEqual } from 'util';
 import { UnifiedDataStore } from './db/unifiedDataStore';
 import { SqliteStore } from './db/sqliteStore';
-import type { MemoryImportResult } from './memoryDatabaseMigration';
+import { archiveUnresolvedMigrationSource, type MemoryImportResult } from './memoryDatabaseMigration';
 import type { RunIndexEntry, RunIndexRecord } from './db/types';
 import { extractTokenUsageFromOutput, normalizeTokenUsage, extractCodexTranscriptUsage, extractClaudeTranscriptUsage, findClaudeTranscript } from './tokenUsage';
 import { findCodexTranscriptFile, getContinuationAgentProvider } from './continuation';
@@ -150,6 +150,11 @@ export async function importProjectJournal(store: UnifiedDataStore, source: stri
       if (indexes.length < 200) break;
     }
   } finally { legacy.close(); }
+  if (result.conflicts.length && options.archiveUnresolved) {
+    const conflicts = [...result.conflicts];
+    const descriptor = { identity, key: path.basename(source), hash: captured.hash };
+    if (archiveUnresolvedMigrationSource(store, result, descriptor, captured.bytes, JSON.stringify(conflicts), options, { displaySource: source, mimeType: 'application/x-sqlite3', projectId: project.projectId })) result.conflicts = [];
+  }
   if (result.conflicts.length) store.markMigrationSourceConflict(identity, path.basename(source), JSON.stringify(result.conflicts));
   else store.markMigrationSourceImported(identity, path.basename(source));
   return result;
@@ -196,7 +201,10 @@ async function enrichHistoricalIndex(store: UnifiedDataStore, projectId: string,
     if (usage.totalTokens > 0) return { ...record, ...usage };
     const runDirectory = path.dirname(path.isAbsolute(record.outputPath) ? record.outputPath : path.join(projectRoot, record.outputPath));
     const sessionText = await captureHistoricalOutput(store, projectId, projectRoot, path.join(runDirectory, 'session.json'), record.executionLogId, 'session');
-    const sessionId = String(JSON.parse(sessionText).sessionId || '').trim();
+    let sessionValue: any;
+    try { sessionValue = JSON.parse(sessionText); }
+    catch { throw new Error('historical_run_input_invalid'); }
+    const sessionId = String(sessionValue.sessionId || '').trim();
     if (!sessionId) return record;
     const family = path.basename(record.agentCli).toLowerCase(); let transcript = '';
     if (/^codex(?:-cli)?$/.test(family)) {
@@ -270,10 +278,13 @@ export function isRetirableRunArtifact(relativePath: string): boolean {
 export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: string, options: any = {}): Promise<MemoryImportResult> {
   const projectRoot = String(options.projectRoot || ''); const identity = `agent-runs:${projectRoot}`;
   const result: MemoryImportResult = { imported: 0, unchanged: 0, originalBytes: 0, conflicts: [], retainedFiles: [], interrupted: false };
+  if (path.resolve(sourceRoot) !== path.join(path.resolve(projectRoot), '.solopreneur', 'agent-runs')) throw new Error('migration_source_scope_mismatch');
+  let sourceInfo: fs.Stats;
+  try { sourceInfo = await fs.promises.lstat(sourceRoot); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return result; throw error; }
   const project = await store.registerProject({ root: projectRoot });
   const resolvedRoot = await fs.promises.realpath(projectRoot);
-  const sourceInfo = await fs.promises.lstat(sourceRoot);
-  if (sourceInfo.isSymbolicLink() || await fs.promises.realpath(sourceRoot) !== path.join(resolvedRoot, '.solopreneur', 'agent-runs')) throw new Error('migration_source_scope_mismatch');
+  if (!sourceInfo.isDirectory() || sourceInfo.isSymbolicLink() || await fs.promises.realpath(sourceRoot) !== path.join(resolvedRoot, '.solopreneur', 'agent-runs')) throw new Error('migration_source_scope_mismatch');
   const files = await durableRunFilesUnder(sourceRoot, (source, error) => result.conflicts.push({ source, error: String(error) }));
   const statusRoot = path.join(projectRoot, '.solopreneur', 'agent-status');
   const projectStatus = path.join(projectRoot, '.agent_status.json');
@@ -291,6 +302,7 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
   for (const owner of discoverLegacyRunProcesses(projectRoot)) {
     const relative = path.relative(sourceRoot, owner.runDirectory);
     if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) liveRunDirectories.add(owner.runDirectory);
+    if (owner.executionLogId) liveStatusFiles.add(path.join(statusRoot, `${owner.executionLogId}.json`));
   }
   for (const statusFile of uniqueStatusFiles) {
     try {
@@ -405,7 +417,9 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       captured = await stableFile(file);
       if (external) { result.originalBytes += captured.bytes.length; result.retainedFiles.push(file); }
       store.captureMigrationSource({ identity: statusIdentity, key, hash: captured.hash }, captured.bytes, { mimeType: 'application/json', encoding: 'utf8' });
-      const status = JSON.parse(captured.bytes.toString('utf8'));
+      let status: any;
+      try { status = JSON.parse(captured.bytes.toString('utf8')); }
+      catch { throw new Error('historical_run_status_invalid'); }
       const id = Number(status.rootExecutionLogId || status.executionLogId);
       const matchingTasks = registered.tasks.filter(task => (!status.learningTaskId || task.taskId === status.learningTaskId) && task.executions.some((run: { id: number }) => run.id === id));
       const candidates = matchingTasks.flatMap(task => task.executions.filter((run: { id: number; runDir: string }) => run.id === id));
@@ -542,7 +556,14 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
           store.writeHistoricalRunArtifact(project.projectId, { executionLogId: id, relativePath: sourceKey, bytes: archived, hash: artifact.hash, mimeType: artifact.mimeType }, declaredKind!);
           return archived;
         }
-        const current = declaredCurrent || await stableFile(file);
+        let current: Awaited<ReturnType<typeof stableFile>>;
+        try { current = declaredCurrent || await stableFile(file); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          const archivedArtifact = store.readRunArtifactBytes(project.projectId, artifactExecutionLogId, sourceKey);
+          if (!archivedArtifact) { if (required) throw new Error('historical_run_input_missing'); return null; }
+          return archivedArtifact.bytes;
+        }
         if (current.hash !== artifact.hash) {
           if (appendedOutputs.has(sourceKey)) appendedOutputArtifactExecutionLogId = artifactExecutionLogId;
           else if (!lateChangeEvidence.has(sourceKey)) throw new Error('historical_run_source_changed');
@@ -557,7 +578,9 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       let binding: NativeSessionBinding | null = null;
       let nativeTranscript: { source: { identity: string; key: string; hash: string }; bytes: Buffer } | undefined;
       if (session) {
-        const value = JSON.parse(session.toString('utf8'));
+        let value: any;
+        try { value = JSON.parse(session.toString('utf8')); }
+        catch { throw new Error('historical_run_input_invalid'); }
         if (value.version === 2) binding = assertVersion2Binding(value, file);
         else {
           if (value.version !== undefined && value.version !== 1 || typeof value.sessionId !== 'string' || !value.sessionId.trim() || /\s/.test(value.sessionId) || typeof value.source !== 'string' || !value.source) throw new Error('historical_run_legacy_identity_invalid');
@@ -582,7 +605,9 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
             const realHome = await fs.promises.realpath(home), realTranscript = await fs.promises.realpath(transcript);
             if (!['sessions', 'archived_sessions'].some(directory => containedRegularPath(path.join(realHome, directory), realTranscript))) throw new Error('historical_run_native_source_scope_mismatch');
             const native = await stableFile(transcript);
-            const newline = native.bytes.indexOf(10), first = JSON.parse(native.bytes.subarray(0, newline < 0 ? native.bytes.length : newline).toString('utf8'));
+            const newline = native.bytes.indexOf(10); let first: any;
+            try { first = JSON.parse(native.bytes.subarray(0, newline < 0 ? native.bytes.length : newline).toString('utf8')); }
+            catch { throw new Error('historical_run_native_source_mismatch'); }
             const meta = first.type === 'session_meta' ? first.payload : null;
             if (!meta || (meta.id || meta.session_id) !== value.sessionId || meta.id && meta.session_id && meta.id !== meta.session_id || !meta.cwd || path.resolve(meta.cwd) !== path.resolve(projectRoot)) throw new Error('historical_run_native_source_mismatch');
             nativeTranscript = { source: { identity: `native-session-history:${projectRoot}`, key: `${id}/codex/${path.basename(transcript)}`, hash: native.hash }, bytes: native.bytes };
@@ -636,7 +661,9 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       const reports: Array<{ source: { identity: string; key: string; hash: string }; bytes: Buffer; observation: { executionLogId: number; sequence: number; availability: string; envelope: any } }> = [];
       const reportAliases = new Set<string>(status.learningTaskId ? [String(status.learningTaskId)] : []);
       if (unregistered) for (const name of (await fs.promises.readdir(runDir)).filter(name => /^task-report-(?:status-)?\d+\.json$/.test(name)).sort()) {
-        const bytes = (await read(name))!, envelope = JSON.parse(bytes.toString('utf8')), sequence = Number(name.match(/\d+/)![0]);
+        const bytes = (await read(name))!, sequence = Number(name.match(/\d+/)![0]); let envelope: any;
+        try { envelope = JSON.parse(bytes.toString('utf8')); }
+        catch { throw new Error('historical_run_report_mismatch'); }
         let reportProjectRoot: string;
         try { reportProjectRoot = typeof envelope.projectPath === 'string' ? await fs.promises.realpath(envelope.projectPath) : ''; }
         catch { if (retiredWorkspaceRoot && path.resolve(String(envelope.projectPath || '')) === retiredWorkspaceRoot) reportProjectRoot = resolvedRoot; else throw new Error('historical_run_report_mismatch'); }
@@ -696,8 +723,10 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
     } catch (error) {
       const coded = error as Error & { code?: string };
       const message = coded.code ? `${coded.code}: ${coded.message}` : String(error);
-      result.conflicts.push({ source: file, error: message });
-      if (captured) store.markMigrationSourceConflict(statusIdentity, key, message);
+      if (!captured || !archiveUnresolvedMigrationSource(store, result, { identity: statusIdentity, key, hash: captured.hash }, captured.bytes, message, options, { displaySource: file, mimeType: 'application/json', projectId: project.projectId })) {
+        result.conflicts.push({ source: file, error: message });
+        if (captured) store.markMigrationSourceConflict(statusIdentity, key, message);
+      }
     }
     options.onProgress?.(result);
     await new Promise<void>(resolve => setImmediate(resolve));
@@ -744,7 +773,9 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
         catch { outcome = { failureCode: 'completion_state_invalid', failureReason: 'Agent completion decision file could not be parsed.' }; }
       }
       const status = outcome.markCompleted === true ? 'Completed' : outcome.markCompleted === false || outcome.failureReason || outcome.failureCode || /Failure category:|Failure reason:|Agent CLI exited before completing/i.test(output) ? 'Failed' : 'unknown';
-      const metadata = text('.agent_status.json'); const state = metadata ? JSON.parse(metadata) : {};
+      const metadata = text('.agent_status.json'); let state: any = {};
+      if (metadata) try { state = JSON.parse(metadata); }
+      catch { throw new Error('historical_run_identity_invalid'); }
       const runKind = String(state.runKind || (nodeId === '__solo__' ? 'solo' : nodeId === '__roadmap_revision__' ? 'roadmap_revision' : 'step'));
       const declaredArtifactIds = new Set([...artifacts.values()].map(item => item.executionLogId).filter(id => id > 0));
       const executionLogId = parts.length === 2 ? Number(parts[1]) : declaredArtifactIds.size === 1 ? [...declaredArtifactIds][0] : store.reserveHistoricalRunId(project.projectId, directory, { nodeId, timestamp: startedAt, agentCli: command, command, output, status }, minimumAnonymousId);
@@ -762,10 +793,51 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
       const changed = text('touched-files.txt').trim() || text('changes.txt');
       const changedFiles = changed.split(/\r?\n/).map(line => line.trim().replace(/^(?:[AMDRCU?!]{1,2}|\?\?)\s+/, '')).filter(file => file && !file.startsWith('.solopreneur/agent-runs/')).map(filePath => ({ filePath, role: 'changed' }));
       const record: RunIndexRecord = { executionLogId, nodeId, runKind, agentCli: command, status, startedAt, finishedAt: new Date(Date.parse(startedAt) + durationMs).toISOString(), durationMs, ...extractTokenUsageFromOutput(output, command), outputTail: '', outputPath: '', outputBytes: Buffer.byteLength(output), commandPath: '', promptPath: '', changesPath: '', touchedFilesPath: '', updatedAt: new Date(Math.max(...[...artifacts.values()].map(item => item.modifiedAt))).toISOString() };
-      store.importHistoricalRunIndex(project.projectId, record, changedFiles, [], { identity, key: directory, hash: digest(Buffer.from(JSON.stringify([...artifacts].map(([name, item]) => [name, item.hash])))) }, 10);
+      const indexSource = { identity, key: directory, hash: digest(Buffer.from(JSON.stringify([...artifacts].map(([name, item]) => [name, item.hash])))) };
+      store.importHistoricalRunIndex(project.projectId, record, changedFiles, [], indexSource, 10);
+      if (store.historicalRunIndexOwnedBySource(project.projectId, executionLogId, indexSource)) for (const file of files) {
+        const sourceKey = path.relative(sourceRoot, file);
+        if (runDirectory(sourceKey) === directory) store.markMigrationSourceImported(identity, sourceKey);
+      } else if (!store.historicalRunIndexHasOwner(project.projectId, executionLogId)) for (const file of files) {
+        const sourceKey = path.relative(sourceRoot, file);
+        if (runDirectory(sourceKey) === directory) store.markMigrationSourceRechecking(identity, sourceKey);
+      }
     } catch (error) { result.conflicts.push({ source: path.join(sourceRoot, directory), error: String(error) }); }
     options.onProgress?.(result);
     await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  if (options.archiveUnresolved && result.conflicts.length) {
+    const remaining: typeof result.conflicts = [];
+    for (const conflict of result.conflicts) {
+      const absolute = path.resolve(conflict.source);
+      const sourceKeys: Array<{ identity: string; key: string }> = [];
+      const runRelative = path.relative(sourceRoot, absolute);
+      if (runRelative && !runRelative.startsWith('..') && !path.isAbsolute(runRelative)) {
+        const normalized = runRelative.split(path.sep).join('/');
+        const exact = files.find(file => path.resolve(file) === absolute);
+        if (exact) sourceKeys.push({ identity, key: path.relative(sourceRoot, exact) });
+        else for (const file of files) {
+          const key = path.relative(sourceRoot, file);
+          if (key === runRelative || key.startsWith(`${runRelative}${path.sep}`) || key.split(path.sep).join('/').startsWith(`${normalized}/`)) sourceKeys.push({ identity, key });
+        }
+      }
+      const statusRelative = path.relative(statusRoot, absolute);
+      if (statusRelative && !statusRelative.startsWith('..') && !path.isAbsolute(statusRelative)) sourceKeys.push({ identity: `agent-status:${projectRoot}`, key: statusRelative });
+      if (absolute === path.resolve(projectStatus)) sourceKeys.push({ identity: `project-agent-status:${projectRoot}`, key: '.agent_status.json' });
+      let archived = sourceKeys.length > 0;
+      for (const source of sourceKeys) {
+        try {
+          const captured = store.readMigrationSource(source.identity, source.key);
+          archived = archiveUnresolvedMigrationSource(store, result, { ...source, hash: captured.hash }, captured.bytes, conflict.error, options, {
+            displaySource: conflict.source,
+            mimeType: source.key.endsWith('.json') ? 'application/json' : 'application/octet-stream',
+            projectId: project.projectId
+          }) && archived;
+        } catch { archived = false; }
+      }
+      if (!archived) remaining.push(conflict);
+    }
+    result.conflicts = remaining;
   }
   return result;
 }
@@ -808,6 +880,12 @@ export async function importProjectGrowth(store: UnifiedDataStore, source: strin
       }
     }
   } finally { legacy.close(); }
+  if (result.conflicts.length && options.archiveUnresolved) {
+    const conflicts = [...result.conflicts];
+    if (archiveUnresolvedMigrationSource(store, result, { identity, key: path.basename(source), hash: captured.hash }, captured.bytes, JSON.stringify(conflicts), options, {
+      displaySource: source, mimeType: 'application/x-sqlite3', projectId: project.projectId
+    })) result.conflicts = [];
+  }
   if (result.conflicts.length) store.markMigrationSourceConflict(identity, path.basename(source), 'growth_report_projection_conflict');
   else store.markMigrationSourceImported(identity, path.basename(source));
   return result;
@@ -835,8 +913,9 @@ export async function importStepMemoryDirectory(store: UnifiedDataStore, sourceR
       const imported = store.importStepMemorySource(project.projectId, { nodeId: key.slice(0, -format.length - 1), source: { identity, key, hash: captured.hash }, bytes: captured.bytes, format });
       if (imported.unchanged) result.unchanged++; else result.imported++;
     } catch (error) {
-      result.conflicts.push({ source: file, error: String(error) });
-      if (captured) store.captureMigrationSource({ identity, key, hash: captured.hash }, captured.bytes, { mimeType: 'application/octet-stream', encoding: 'binary', error: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      if (captured) store.captureMigrationSource({ identity, key, hash: captured.hash }, captured.bytes, { mimeType: 'application/octet-stream', encoding: 'binary', error: message });
+      if (!captured || !archiveUnresolvedMigrationSource(store, result, { identity, key, hash: captured.hash }, captured.bytes, message, options, { displaySource: file, mimeType: 'application/octet-stream', projectId: project.projectId })) result.conflicts.push({ source: file, error: message });
     }
     options.onProgress?.(result);
     await new Promise<void>(resolve => setImmediate(resolve));
@@ -863,8 +942,9 @@ export async function importRunDigestDirectory(store: UnifiedDataStore, sourceRo
       const imported = store.importRunDigestSource(project.projectId, { source: { identity, key, hash: captured.hash }, bytes: captured.bytes });
       if (imported.unchanged) result.unchanged++; else result.imported++;
     } catch (error) {
-      result.conflicts.push({ source: file, error: String(error) });
-      if (captured) store.captureMigrationSource({ identity, key, hash: captured.hash }, captured.bytes, { mimeType: 'application/octet-stream', encoding: 'binary', error: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      if (captured) store.captureMigrationSource({ identity, key, hash: captured.hash }, captured.bytes, { mimeType: 'application/octet-stream', encoding: 'binary', error: message });
+      if (!captured || !archiveUnresolvedMigrationSource(store, result, { identity, key, hash: captured.hash }, captured.bytes, message, options, { displaySource: file, mimeType: 'application/octet-stream', projectId: project.projectId })) result.conflicts.push({ source: file, error: message });
     }
     options.onProgress?.(result); await new Promise<void>(resolve => setImmediate(resolve));
   }

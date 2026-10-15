@@ -238,8 +238,11 @@ test('startup migration captures the legacy documentation index without rewritin
   await operations.waitForMigrations();
   const conflict = store.readMigrationSource(`documentation:${fs.realpathSync(project)}`, '.solopreneur/documentation.json');
   assert.ok(conflict.bytes.equals(changed));
-  assert.equal(conflict.stage, 'conflict', 'a changed retired source must be captured without replacing the database authority');
+  assert.equal(conflict.stage, 'imported', 'a changed retired source must be archived without replacing the database authority');
   assert.equal((await operations({ operation: 'read_documentation_manifest', input: { root: project } })).updatedAt, '2026-01-02T03:04:05.000Z');
+  const jobs = (await operations({ operation: 'migration_overview', input: {} })).jobs.filter(job => job.args.collection === 'documentation');
+  assert.equal(jobs.at(-1).status, 'completed');
+  assert.equal(jobs.at(-1).progress.archivedSources.length, 1);
 });
 
 test('a terminal maintenance run without its promised result can be settled as failed', async t => {
