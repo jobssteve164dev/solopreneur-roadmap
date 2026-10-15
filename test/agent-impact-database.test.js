@@ -285,6 +285,25 @@ test('automatic storage maintenance skips current data without running a full in
   assert.equal(store.rows('SELECT COUNT(*) AS count FROM database_storage_maintenance')[0].count, 0);
 }));
 
+test('automatic storage maintenance uses foreground-sized cleanup batches', () => fixture(async ({ project, store, ops }) => {
+  const crypto = require('node:crypto');
+  const bytes = Buffer.from('automatic cleanup must keep foreground requests responsive');
+  const contentId = store.putContent(bytes, 'application/octet-stream', 'binary');
+  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [
+    project, 44, '__solo__/44/evidence/automatic.tmp', contentId, crypto.createHash('sha256').update(bytes).digest('hex'), 'application/octet-stream', Date.now()
+  ]);
+  const originalCleanup = store.cleanupDatabaseStorageBatch.bind(store);
+  const limits = [];
+  store.cleanupDatabaseStorageBatch = (limit, maintenanceId) => {
+    limits.push(limit);
+    return originalCleanup(limit, maintenanceId);
+  };
+  try { await ops({ operation: 'maintain_database_storage', input: { compact: false, automatic: true } }); }
+  finally { store.cleanupDatabaseStorageBatch = originalCleanup; }
+  assert.ok(limits.length > 0);
+  assert.ok(limits.every(limit => limit <= 250), `automatic cleanup batch was too large: ${limits.join(',')}`);
+}));
+
 test('manual storage maintenance waits for startup migration readiness', () => fixture(async ({ store, ops }) => {
   let release;
   ops.setStorageMaintenanceBarrier(new Promise(resolve => { release = resolve; }));

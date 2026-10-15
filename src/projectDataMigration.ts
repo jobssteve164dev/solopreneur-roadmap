@@ -464,7 +464,10 @@ export async function importAgentRuns(store: UnifiedDataStore, sourceRoot: strin
             if (!info.isFile() || info.isSymbolicLink() || await fs.promises.realpath(currentFile) !== physical) { eligible = false; break; }
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-            eligible = false; break;
+            const journalOutput = field === 'outputFilePath' && path.basename(declaredFile) === 'output.log'
+              ? store.readProjectJournal(project.projectId, { executionLogId: Number(status.executionLogId), nodeId: String(status.nodeId), limit: 1 }).logs[0]?.output
+              : '';
+            if (!journalOutput) { eligible = false; break; }
           }
         }
         if (eligible) retiredAgentRunsRoot = retiredRoot;

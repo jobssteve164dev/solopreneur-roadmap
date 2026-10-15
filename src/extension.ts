@@ -9403,17 +9403,19 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
     if (status === 'Running' || status === 'Preparing' || status === 'Turn Started') return;
     consumerLease = await consumerClient.claimConsumer(normalizedStatusFilePath, statusData, await getAgentRunDeliveryOwner());
     if (!consumerLease) return;
-    let statusSyncEngine = isActiveProject ? syncEngine : null;
-    if (!statusSyncEngine && workspaceRoot && extensionContextRef) {
+    const skipHistoricalSoloRoadmap = statusData.historicalAdopted === true && String(statusData.nodeId || '') === soloConversationId;
+    let statusSyncEngine = isActiveProject && !skipHistoricalSoloRoadmap ? syncEngine : null;
+    if (!statusSyncEngine && workspaceRoot && (extensionContextRef || skipHistoricalSoloRoadmap)) {
       const solopreneurDir = path.join(workspaceRoot, '.solopreneur');
       transientStatusSyncEngine = new SyncEngine(
         path.join(solopreneurDir, 'roadmap.csv'),
         path.join(solopreneurDir, 'project_journal.db'),
-        extensionContextRef.extensionPath,
-        sourceDataRoot
+        extensionContextRef?.extensionPath || '',
+        sourceDataRoot,
+        skipHistoricalSoloRoadmap ? { roadmap: 'skip' } : undefined
       );
       statusSyncEngine = transientStatusSyncEngine;
-      await statusSyncEngine.initAndSync();
+      await statusSyncEngine.initAndSync(skipHistoricalSoloRoadmap ? { history: 'skip' } : undefined);
     }
 
     if (!statusSyncEngine) {
@@ -9428,7 +9430,7 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
         if (row?.nodeId) settlementNodes.add(row.nodeId);
       }
     }
-    if (typeof statusSyncEngine.readAgentExecutions === 'function') {
+    if (!skipHistoricalSoloRoadmap && typeof statusSyncEngine.readAgentExecutions === 'function') {
       for (const scope of settlementNodes) await statusSyncEngine.readAgentExecutions(scope);
     }
     isActiveProject = Boolean(workspaceRoot && workspaceRoot === activeProjectRoot && statusSyncEngine === syncEngine);
@@ -9579,7 +9581,7 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
         failureReason = failureReason || 'Agent CLI 在完成 Solo 对话前退出。';
         completionReason = failureReason;
       }
-      if (roadmapCsvChanged && await restoreRoadmapBackup(normalizedStatusFilePath, workspaceRoot, consumerClient, statusData)) {
+      if (!isHistoricalAdoption && roadmapCsvChanged && await restoreRoadmapBackup(normalizedStatusFilePath, workspaceRoot, consumerClient, statusData)) {
         const protectedRoadmapReason = 'Solo 对话不会直接调整路线图，已保留对话前路线图。';
         completionReason = completionReason ? `${completionReason} ${protectedRoadmapReason}` : protectedRoadmapReason;
       }
@@ -9655,6 +9657,9 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
       completionReason = '续聊已记录；不参与任务完成、失败或进行中判断。';
       failureCode = '';
       failureReason = '';
+    }
+    if (isHistoricalAdoption && isSoloConversation) {
+      shouldRefreshRoadmap = false;
     }
     if (shouldStartReview && shouldWriteNodeStatus && nextStatus === 'Completed') {
       reviewDeferredCompletion = true;
@@ -9989,15 +9994,17 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
   } = effect.payload;
   const globalDataPath = dataRoot || String(effect.payload.globalDataPath || '');
   let completionReason = String(effect.payload.completionReason || '');
-  const isActiveProject = Boolean(workspaceRoot && workspaceRoot === activeProjectRoot && syncEngine && normalizeGlobalDataPathForExtension(syncEngine.dataRoot) === normalizeSolomapGlobalPath(workspaceRoot, String(globalDataPath || '')));
+  const skipHistoricalSoloRoadmap = statusData?.historicalAdopted === true && String(nodeId || '') === soloConversationId;
+  const isActiveProject = Boolean(!skipHistoricalSoloRoadmap && workspaceRoot && workspaceRoot === activeProjectRoot && syncEngine && normalizeGlobalDataPathForExtension(syncEngine.dataRoot) === normalizeSolomapGlobalPath(workspaceRoot, String(globalDataPath || '')));
   const statusSyncEngine = isActiveProject ? syncEngine! : new SyncEngine(
     path.join(workspaceRoot, '.solopreneur', 'roadmap.csv'), path.join(workspaceRoot, '.solopreneur', 'project_journal.db'),
-    extensionContextRef?.extensionPath || '', String(globalDataPath || '')
+    extensionContextRef?.extensionPath || '', String(globalDataPath || ''),
+    skipHistoricalSoloRoadmap ? { roadmap: 'skip' } : undefined
   );
   try {
-    if (!isActiveProject) await statusSyncEngine.initAndSync();
+    if (!isActiveProject) await statusSyncEngine.initAndSync(skipHistoricalSoloRoadmap ? { history: 'skip' } : undefined);
     await statusSyncEngine.readAgentExecutionById(Number(executionLogId));
-    await statusSyncEngine.readAgentExecutions(String(nodeId));
+    if (!skipHistoricalSoloRoadmap) await statusSyncEngine.readAgentExecutions(String(nodeId));
     const committedStatus = await runLifecycleClient(workspaceRoot, globalDataPath).readStatus(runStatusReference(workspaceRoot, Number(originalExecutionLogId)));
     if (!committedStatus) throw new Error('run_effect_source_missing');
     if ((effect.kind === 'roadmap' || effect.kind === 'revision') && isReviewRun) {

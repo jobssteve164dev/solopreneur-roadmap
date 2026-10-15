@@ -944,6 +944,43 @@ test('an unregistered status rebases missing artifacts from an existing retired 
   assert.equal(Object.hasOwn(original, 'workspaceRoot'), false);
 });
 
+test('an unregistered status rebases a missing default output only when its formal journal retains the output', async t => {
+  const f = await unregisteredHistory(t, false);
+  const retiredProject = path.join(f.base, 'retired-project-with-journal-output');
+  fs.mkdirSync(retiredProject);
+  delete f.status.workspaceRoot;
+  for (const field of ['promptFilePath', 'commandFilePath', 'outputFilePath', 'sessionFilePath']) {
+    f.status[field] = path.join(retiredProject, path.relative(f.project, f.status[field]));
+  }
+  fs.unlinkSync(path.join(f.runDir, 'output.log'));
+  writeLearningJson(f.statusFile, f.status);
+
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+
+  assert.deepEqual(result.conflicts, []);
+  const found = await f.client.findConversation(f.project, 71);
+  assert.ok(found);
+  assert.equal((await f.client.readLog(found.reference, 'output', found.status)).toString(), '原项目日志完整内容');
+});
+
+test('an unregistered status keeps a missing retired output conflicted when its formal journal has no output', async t => {
+  const f = await unregisteredHistory(t, false);
+  const retiredProject = path.join(f.base, 'retired-project-without-journal-output');
+  fs.mkdirSync(retiredProject);
+  delete f.status.workspaceRoot;
+  for (const field of ['promptFilePath', 'commandFilePath', 'outputFilePath', 'sessionFilePath']) {
+    f.status[field] = path.join(retiredProject, path.relative(f.project, f.status[field]));
+  }
+  fs.unlinkSync(path.join(f.runDir, 'output.log'));
+  f.store.updateProjectJournal(f.projectId, 71, { agentCli: 'claude', command: 'claude original arguments', output: '', status: 'Waiting' });
+  writeLearningJson(f.statusFile, f.status);
+
+  const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+
+  assert.ok(result.conflicts.some(item => item.error.includes('historical_run_source_conflict')));
+  assert.equal(await f.client.findConversation(f.project, 71), null);
+});
+
 test('an unregistered status does not rebase through a symlinked retired agent-runs root', async t => {
   const f = await unregisteredHistory(t, false);
   const retiredProject = path.join(f.base, 'retired-project-with-symlink');

@@ -11449,13 +11449,21 @@ test('step conversations can start independently while dependencies or other run
   assert.equal(fs.existsSync(path.join(project, '.solopreneur', 'project_journal.db')), false);
 });
 
-async function openSoloSettlementFixture(t, prefix, summary, metadata = {}) {
+async function openSoloSettlementFixture(t, prefix, summary, metadata = {}, workspaceChanges = '') {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
   const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
   const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
   await engine.initAndSync(); t.after(() => engine.close());
   const run = await native.ops({ operation: 'prepare_run', input: { root: project, executionLogId: 61, nodeId: '__solo__', runKind: 'solo', prompt: '完成任务', command: 'fixture-command', userMessage: '完成任务', metadata: { interactiveSession: true, agentCli: 'claude', collaborationReviewMode: 'off', ...metadata }, idempotencyKey: 'sidebar-run' } });
+  if (workspaceChanges) {
+    await native.ops({ operation: 'write_run_document', input: {
+      projectId: run.projectId, executionLogId: 61, generation: run.generation, turnId: run.turnId,
+      purpose: require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId, 'changes'),
+      bytes: Buffer.from(workspaceChanges).toString('base64'), mimeType: 'text/plain', expectedRevision: 0,
+      idempotencyKey: 'sidebar-workspace-changes'
+    } });
+  }
   await native.ops({ operation: 'append_run_log', input: { projectId: run.projectId, executionLogId: 61, generation: run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from('Solo task finished.\n').toString('base64'), idempotencyKey: 'sidebar-output' } });
   await native.ops({ operation: 'checkpoint_run', input: { projectId: run.projectId, executionLogId: 61, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial', summary, idempotencyKey: 'sidebar-complete' } });
   const reference = require('../out/runLifecycleClient.js').runStatusReference(project, 61);
@@ -11476,6 +11484,24 @@ test('historically adopted completions are indexed without replaying live comple
   const history = await fixture.ops({ operation: 'read_run_settlements', input: { projectId: fixture.run.projectId, executionLogId: 61 } });
   assert.equal(history.items.length, 1);
   assert.ok(history.items[0].learningEventId, 'historical facts must still be indexed for later retrieval');
+});
+
+test('a historical Solo settlement does not parse or refresh the active project roadmap', async t => {
+  const fixture = await openSoloSettlementFixture(t, 'solomap-historical-invalid-roadmap-', '历史 Solo 结果', {
+    historicalAdopted: true, checkpointPreserveRoadmapState: true
+  }, 'M .solopreneur/roadmap.csv');
+  const invalidRoadmap = [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,保留权威路线图,历史 Solo 不应改写本文件,实施,missing,codex,保持原样,Pending,2026-01-01T00:00:00.000Z,'
+  ].join('\n');
+  fs.writeFileSync(path.join(fixture.project, '.solopreneur', 'roadmap.csv'), invalidRoadmap);
+  const actualTransport = require('../out/autonomousRuntimeControl.js');
+  const extension = loadSoloSettlementHost(fixture, null, actualTransport, true);
+  await extension.settle(fixture.reference, undefined, fixture.root);
+  const history = await fixture.ops({ operation: 'read_run_settlements', input: { projectId: fixture.run.projectId, executionLogId: 61 } });
+  assert.equal(history.items.length, 1);
+  assert.equal((await fixture.ops({ operation: 'list_run_states', input: { projectId: fixture.run.projectId, pendingConsumer: true } })).items.length, 0);
+  assert.equal(fs.readFileSync(path.join(fixture.project, '.solopreneur', 'roadmap.csv'), 'utf8'), invalidRoadmap);
 });
 
 test('queued historical live side effects become inert when an upgrade resumes settlement delivery', async () => {
@@ -12103,12 +12129,15 @@ test('a resumed Codex run accepts its own first native completion without replay
   f.append([{ timestamp: f.timestamp, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'prior-native-turn', started_at: f.timestamp, last_agent_message: '上一轮完整结果' } }]);
   await f.ops({ operation: 'recover_run_executions', input: {} });
   const prior = await f.ops({ operation: 'read_run_state', input: f.scope });
+  const sourceOffset = fs.statSync(f.transcriptPath).size;
   const resumed = await require('../out/agentRunPreparation.js').prepareAgentRun({ agentCli: 'codex', selectedModel: '', prompt: '继续原完整任务', workspaceRoot: f.project, nodeId: '__solo__', executionLogId: 0, userMessage: '恢复后的当前用户目标', runKind: 'solo_continue', globalDataPath: f.root, taskPermissionMode: 'auto', collaborationReviewMode: 'off', nativeSessionId: f.sessionId, continuation: true, parentExecutionLogId: 91, expectedParentTurnId: prior.turnId, launchIntentId: 'resume-native-without-start', metadata: { codexResumeTranscriptPath: f.transcriptPath, nativeResumeProviderContext: { codex: { codexHome: f.codexHome } } } }, (operation, input) => f.ops({ operation, input }));
+  assert.equal(resumed.status.codexNativeSourceOffset, sourceOffset, 'continuation must fence off the existing native history before launch');
   const scope = { projectId: resumed.projectId, root: f.project, executionLogId: Number(resumed.status.rootExecutionLogId) };
   await f.ops({ operation: 'claim_run', input: { ...scope, expectedRevision: resumed.revision, agentPid: process.pid, idempotencyKey: 'resumed-native-owner' } });
   await f.ops({ operation: 'recover_run_executions', input: {} });
   const untouched = await f.ops({ operation: 'read_run_state', input: scope });
   assert.equal(untouched.turnId, resumed.turnId); assert.equal(untouched.status.status, 'Running'); assert.equal(untouched.status.checkpointSummary, undefined, 'an old completion cannot settle the resumed turn');
+  assert.equal((await f.ops({ operation: 'read_run_log_head', input: { ...scope, stream: 'native:codex' } })).totalBytes, 0, 'continuation must not duplicate the prior transcript into its run log');
   const timestamp = new Date(Date.parse(resumed.status.startedAt) + 10).toISOString();
   f.append([{ timestamp, type: 'event_msg', payload: { type: 'task_complete', turn_id: 'resumed-native-first', started_at: timestamp, last_agent_message: '恢复后这一轮完整结果' } }]);
   await f.ops({ operation: 'recover_run_executions', input: {} });
@@ -12116,6 +12145,7 @@ test('a resumed Codex run accepts its own first native completion without replay
   assert.equal(final.status.checkpointSummary, '恢复后这一轮完整结果'); assert.equal(final.turnId, resumed.turnId);
   assert.equal(final.taskId, prior.taskId); assert.notEqual(final.turnId, prior.turnId);
   assert.equal(final.status.codexNativeTurnId, 'resumed-native-first');
+  assert.equal((await f.ops({ operation: 'read_run_log_head', input: { ...scope, stream: 'native:codex' } })).totalBytes, fs.statSync(f.transcriptPath).size - sourceOffset);
   assert.equal((await f.ops({ operation: 'read_run_state', input: f.scope })).status.checkpointSummary, '上一轮完整结果');
 });
 

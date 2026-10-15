@@ -27,18 +27,19 @@ export class SyncEngine {
     private csvPath: string,
     private dbPath: string,
     private extensionPath: string,
-    private globalDataPath = ''
+    private globalDataPath = '',
+    private options: { roadmap?: 'load' | 'skip' } = {}
   ) {
     this.csvStore = new CsvStore(csvPath);
     this.projectRoot = path.dirname(path.dirname(dbPath));
     if (!globalDataPath) this.sqliteStore = new SqliteStore(dbPath, extensionPath);
-    this.nodeCache = this.csvStore.readNodes();
+    if (this.options.roadmap !== 'skip') this.nodeCache = this.csvStore.readNodes();
   }
 
   /**
    * Initializes both engines and synchronizes their data on startup.
    */
-  public async initAndSync(options: { history?: 'all' | 'background' } = {}): Promise<void> {
+  public async initAndSync(options: { history?: 'all' | 'background' | 'skip' } = {}): Promise<void> {
     // 1. Init SQLite database
     if (this.globalDataPath) {
       this.minimumExecutionLogId = (await sendRuntimeDataRequest<{ minimumExecutionLogId: number }>(this.globalDataPath,
@@ -51,11 +52,13 @@ export class SyncEngine {
         setImmediate(() => {
           if (!this.closed) void this.loadHistory().catch(error => console.warn('SoloMap background conversation hydration failed:', error));
         });
-      } else await this.loadHistory();
+      } else if (options.history !== 'skip') await this.loadHistory();
     } else await this.sqliteStore!.init();
 
-    if (this.globalDataPath) await this.refreshNodes();
-    else this.refreshNodes();
+    if (this.options.roadmap !== 'skip') {
+      if (this.globalDataPath) await this.refreshNodes();
+      else this.refreshNodes();
+    }
   }
 
   private async readOrAcceptRoadmap(): Promise<{ nodes: RoadmapNode[]; revision: number }> {

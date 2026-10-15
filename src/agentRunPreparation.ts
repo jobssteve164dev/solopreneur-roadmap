@@ -117,8 +117,13 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
   const provider = getAgentProvider(input.agentCli);
   const interactive = isInteractiveConversationRunKind(input.runKind);
   const continuation = (interactive || input.runKind === 'agent_review_revision') && Boolean(input.nativeSessionId?.trim()) && (input.continuation ?? Boolean(input.directExecutionCommand));
+  let codexNativeSourceOffset: number | undefined;
   if (provider === 'codex' && continuation && input.metadata?.codexResumeTranscriptPath) {
-    await assertCodexResumeTranscript(String(input.metadata.codexResumeTranscriptPath), input.workspaceRoot, String(input.nativeSessionId).trim());
+    const transcriptPath = String(input.metadata.codexResumeTranscriptPath);
+    await assertCodexResumeTranscript(transcriptPath, input.workspaceRoot, String(input.nativeSessionId).trim());
+    const stat = await fs.promises.stat(transcriptPath);
+    if (!stat.isFile()) throw new Error('identity_transcript_unavailable');
+    codexNativeSourceOffset = stat.size;
   }
   let state: RunState | undefined;
   try { if (input.launchSlotId) state = await call('read_run_slot', { root: input.workspaceRoot, launchSlotId: input.launchSlotId, launchSlotScope: input.launchSlotScope || 'project' }) as RunState | undefined;
@@ -132,6 +137,7 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
       interactiveSession: interactive, sessionProvider: provider, sessionMode: continuation ? 'resume' : input.nativeSessionId ? 'fresh-with-reference' : 'fresh',
       bindingNonce: interactive ? crypto.randomBytes(32).toString('hex') : '', plannedNativeSessionId,
       previousNativeSessionId: input.nativeSessionId || '', nativeSessionId: '', nativeSessionIdIsCurrent: false,
+      ...(codexNativeSourceOffset === undefined ? {} : { codexNativeSourceOffset }),
       taskCheckpointCommandPath: path.join(__dirname, 'taskCheckpointProcess.js'),
       agentLaunch: { schemaVersion: 1, agentCli: input.agentCli, selectedModel: input.selectedModel, taskPermissionMode: input.taskPermissionMode, continuation, direct: Boolean(input.directExecutionCommand), ...(input.readOnlyReview ? { readOnly: true } : {}) }
     };

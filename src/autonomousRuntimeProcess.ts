@@ -134,6 +134,7 @@ async function main(): Promise<void> {
   let storageMaintenance: Promise<unknown> | undefined;
   let startupMigration: Promise<void> | undefined;
   let historicalOwnerStamp = '';
+  let startupMigrationsReady = false;
   let resolveStorageMaintenanceBarrier!: () => void;
   let rejectStorageMaintenanceBarrier!: (error: unknown) => void;
   const storageMaintenanceBarrier = new Promise<void>((resolve, reject) => { resolveStorageMaintenanceBarrier = resolve; rejectStorageMaintenanceBarrier = reject; });
@@ -242,6 +243,7 @@ async function main(): Promise<void> {
       if (!stopping) historicalOwnerStamp = await historicalRunOwnerStateStamp(dataStore, () => !stopping);
       if (!stopping) await enqueueStartupDataMigrations(dataStore, dataOperations, () => !stopping);
       if (!stopping) await dataOperations.waitForMigrations();
+      if (!stopping) startupMigrationsReady = true;
     } finally { releaseStartupMigrationBusy(); }
   })();
   void startupMigrationReady.then(resolveStorageMaintenanceBarrier, rejectStorageMaintenanceBarrier);
@@ -301,7 +303,7 @@ async function main(): Promise<void> {
       await persistShadowRuntimeState(globalDataPath, dataOperations);
       updateRuntimeState(globalDataPath, runtimeId, { status: 'running' });
       await heartbeatRuntime('running');
-      if (!stopping) {
+      if (!stopping && startupMigrationsReady) {
         try { historicalOwnerStamp = await refreshHistoricalRunMigrations(dataStore, dataOperations, () => !stopping, historicalOwnerStamp); }
         catch (error) { recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.migration-refresh', classifyDiagnosticFailure(error)); }
       }

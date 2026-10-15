@@ -36,6 +36,22 @@ interface RuntimeHostOptions {
 
 const activeDataLeaseMaxAgeMs = 6 * 60 * 60 * 1000;
 
+function isStrictlyNewerRuntimeRelease(current: string | undefined, requested: string): boolean {
+  const parse = (value: string | undefined): [number, number, number] | undefined => {
+    const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(value || ''));
+    if (!match) return undefined;
+    const parts = match.slice(1).map(Number);
+    return parts.every(Number.isSafeInteger) ? parts as [number, number, number] : undefined;
+  };
+  const currentParts = parse(current);
+  const requestedParts = parse(requested);
+  if (!currentParts || !requestedParts) return false;
+  for (let index = 0; index < currentParts.length; index++) {
+    if (currentParts[index] !== requestedParts[index]) return currentParts[index] > requestedParts[index];
+  }
+  return false;
+}
+
 function defaultIsProcessAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -98,7 +114,7 @@ function verifiedDrainedRuntimeProcess(current: RuntimeState, globalDataPath: st
   } catch { return false; }
 }
 
-function runtimeHasActiveDataLease(globalDataPath: string, runtimeId: string, entryPath: string, buildId: string, releaseVersion: string): boolean {
+function runtimeHasActiveDataLease(globalDataPath: string, runtimeId: string, entryPath: string, buildId: string, releaseVersion: string, preserveNewerRelease = false): boolean {
   try {
     const endpoint = JSON.parse(fs.readFileSync(path.join(globalDataPath, 'runtime', 'control.json'), 'utf8')) as {
       schemaVersion?: number; runtimeId?: string; host?: string; port?: number; token?: string; entryPath?: string; buildId?: string; releaseVersion?: string;
@@ -108,19 +124,28 @@ function runtimeHasActiveDataLease(globalDataPath: string, runtimeId: string, en
     };
     const busySince = typeof lease.busySince === 'string' ? Date.parse(lease.busySince) : NaN;
     const busyAge = Date.now() - busySince;
+    const endpointEntryPath = path.resolve(String(endpoint.entryPath || ''));
+    const leaseEntryPath = path.resolve(String(lease.entryPath || ''));
+    const exactRequestedBuild = endpointEntryPath === path.resolve(entryPath)
+      && endpoint.buildId === buildId
+      && endpoint.releaseVersion === releaseVersion;
+    const validNewerBuild = preserveNewerRelease
+      && path.basename(endpointEntryPath) === 'autonomousRuntimeProcess.js'
+      && path.basename(path.dirname(endpointEntryPath)) === 'out'
+      && typeof endpoint.buildId === 'string'
+      && endpoint.buildId.length > 0
+      && isStrictlyNewerRuntimeRelease(endpoint.releaseVersion, releaseVersion);
     return endpoint.schemaVersion === 1
       && endpoint.runtimeId === runtimeId
       && endpoint.host === '127.0.0.1'
       && Number.isInteger(endpoint.port) && Number(endpoint.port) > 0
       && typeof endpoint.token === 'string' && endpoint.token.length >= 32
-      && path.resolve(String(endpoint.entryPath || '')) === path.resolve(entryPath)
-      && endpoint.buildId === buildId
-      && endpoint.releaseVersion === releaseVersion
+      && (exactRequestedBuild || validNewerBuild)
       && lease.schemaVersion === 1
       && lease.runtimeId === runtimeId
-      && path.resolve(String(lease.entryPath || '')) === path.resolve(entryPath)
-      && lease.buildId === buildId
-      && lease.releaseVersion === releaseVersion
+      && leaseEntryPath === endpointEntryPath
+      && lease.buildId === endpoint.buildId
+      && lease.releaseVersion === endpoint.releaseVersion
       && Number.isFinite(busyAge)
       && busyAge >= -5_000
       && busyAge <= activeDataLeaseMaxAgeMs;
@@ -149,7 +174,7 @@ export async function inspectAutonomousRuntimeHealth(
   expectedBuildId?: string,
   expectedOwner?: string,
   allowMissingOwner = false
-): Promise<{ healthy: boolean; reason: string }> {
+): Promise<{ healthy: boolean; reason: string; releaseVersion?: string }> {
   const state = readRuntimeState(globalDataPath);
   if (!state) return { healthy: false, reason: 'missing_state' };
   if (state.pid !== pid) return { healthy: false, reason: 'different_process' };
@@ -161,9 +186,11 @@ export async function inspectAutonomousRuntimeHealth(
     if (response.runtimeId !== state.runtimeId) return { healthy: false, reason: 'different_runtime' };
     if (!response.ok || response.status !== state.status) return { healthy: false, reason: 'control_not_running' };
     if (expectedEntryPath && path.resolve(response.entryPath || '') !== path.resolve(expectedEntryPath)) {
-      return { healthy: false, reason: 'different_runtime_build' };
+      return { healthy: false, reason: 'different_runtime_build', ...(response.releaseVersion ? { releaseVersion: response.releaseVersion } : {}) };
     }
-    if (expectedBuildId && response.buildId !== expectedBuildId) return { healthy: false, reason: 'different_runtime_build' };
+    if (expectedBuildId && response.buildId !== expectedBuildId) {
+      return { healthy: false, reason: 'different_runtime_build', ...(response.releaseVersion ? { releaseVersion: response.releaseVersion } : {}) };
+    }
     if (expectedOwner && response.owner !== expectedOwner && !(allowMissingOwner && !response.owner)) {
       return { healthy: false, reason: 'different_runtime_owner' };
     }
@@ -248,16 +275,19 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
       const verify = options.verifyRuntimeProcess || verifiedRuntimeProcess;
       if (!['control_unavailable', 'stale_heartbeat'].includes(health.reason) || !verify(current.pid, current.runtimeId, globalDataPath)) throw new Error(health.reason);
       // A packaged Runtime can be temporarily unable to answer health while a
-      // synchronous SQLite request owns its event loop. Preserve only the
-      // exact current build's bounded accepted-work lease; an expired lease
-      // still follows the verified stale-owner recovery path below.
-      if (releaseVersion && runtimeHasActiveDataLease(globalDataPath, current.runtimeId, entryPath, buildId, releaseVersion)) {
+      // synchronous SQLite request owns its event loop. Preserve the exact
+      // build or a strictly newer build while its accepted-work lease is
+      // bounded; an expired lease still follows stale-owner recovery below.
+      if (releaseVersion && runtimeHasActiveDataLease(globalDataPath, current.runtimeId, entryPath, buildId, releaseVersion, true)) {
         return { started: false, pid: current.pid, runtimeId: current.runtimeId };
       }
       await (options.terminateProcess || terminateVerifiedRuntimeProcess)(current.pid);
       if (isOwnerAlive(current.pid, current.processBirth || '')) throw new Error('runtime_termination_failed');
     } else {
       if (health.reason !== 'different_runtime_build') throw new Error(health.reason);
+      if (isStrictlyNewerRuntimeRelease(health.releaseVersion, releaseVersion)) {
+        return { started: false, pid: current.pid, runtimeId: current.runtimeId };
+      }
       const drainingEntryPath = registeredRuntimeEntryPath(globalDataPath, current.runtimeId);
       try {
         await (options.sendControl || ((command, expectedRuntimeId, replacementBuildId, replacementVersion) => sendRuntimeControlCommand(globalDataPath, command, { expectedRuntimeId, replacementBuildId, replacementVersion })))('drain', current.runtimeId, buildId, releaseVersion);

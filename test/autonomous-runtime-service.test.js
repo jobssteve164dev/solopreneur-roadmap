@@ -205,6 +205,38 @@ test('a fresh packaged Runtime stays owned while a long database request blocks 
   assert.equal(spawned, false);
 });
 
+test('an older extension host preserves a busy newer Runtime lease', async t => {
+  const host = require('../out/autonomousRuntimeHost.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-busy-newer-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const runtimeRoot = path.join(globalRoot, 'runtime');
+  const statePath = path.join(runtimeRoot, 'control.json');
+  const busyPath = path.join(runtimeRoot, 'control.busy.json');
+  const entryPath = '/opt/solomap-new/out/autonomousRuntimeProcess.js';
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({
+    schemaVersion: 1, runtimeId: 'busy-newer', pid: process.pid, status: 'paused', heartbeatAt: new Date().toISOString(),
+    entryPath, host: '127.0.0.1', port: 43210, token: 'a'.repeat(64), buildId: 'new-build', releaseVersion: '0.0.554'
+  }));
+  fs.writeFileSync(busyPath, JSON.stringify({
+    schemaVersion: 1, runtimeId: 'busy-newer', entryPath, buildId: 'new-build', releaseVersion: '0.0.554', busySince: new Date().toISOString()
+  }));
+  t.after(() => { fs.unlinkSync(busyPath); fs.unlinkSync(statePath); fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root); });
+  let terminated = false;
+  let spawned = false;
+  const result = await host.ensureHealthyAutonomousRuntime({
+    extensionPath: '/opt/solomap-old', globalDataPath: globalRoot, buildId: 'old-build', releaseVersion: '0.0.550',
+    isProcessAlive: () => true,
+    sendHealth: async () => { throw new Error('control endpoint busy'); },
+    verifyRuntimeProcess: () => true,
+    terminateProcess: async () => { terminated = true; },
+    spawnProcess: () => { spawned = true; throw new Error('must not spawn'); }
+  });
+  assert.deepEqual(result, { started: false, pid: process.pid, runtimeId: 'busy-newer' });
+  assert.equal(terminated, false);
+  assert.equal(spawned, false);
+});
+
 test('a responsive current-build Runtime remains owned while a long intelligence cycle leaves its file heartbeat stale', async t => {
   const host = require('../out/autonomousRuntimeHost.js');
   const runtime = require('../out/autonomousRuntime.js');
@@ -251,6 +283,36 @@ test('a healthy runtime is reused only after its control identity matches the le
   assert.deepEqual(await host.ensureHealthyAutonomousRuntime({ ...options,
     sendHealth: async () => ({ ok: true, runtimeId: 'owner', status: 'running', entryPath: '/opt/solomap/out/autonomousRuntimeProcess.js', buildId: 'new' })
   }), { started: false, pid: process.pid, runtimeId: 'owner' });
+});
+
+test('an older extension host never downgrades a healthy newer Runtime', async t => {
+  const host = require('../out/autonomousRuntimeHost.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-no-downgrade-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const runtimeRoot = path.join(globalRoot, 'runtime');
+  const statePath = path.join(runtimeRoot, 'control.json');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'newer', pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
+  t.after(() => { fs.unlinkSync(statePath); fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root); });
+  let drained = false;
+  let spawned = false;
+  const result = await host.ensureHealthyAutonomousRuntime({
+    extensionPath: '/opt/old', globalDataPath: globalRoot, buildId: 'old-build', releaseVersion: '0.0.550',
+    isProcessAlive: () => true,
+    sendHealth: async () => ({
+      ok: true,
+      runtimeId: 'newer',
+      status: 'running',
+      entryPath: '/opt/new/out/autonomousRuntimeProcess.js',
+      buildId: 'new-build',
+      releaseVersion: '0.0.554'
+    }),
+    async sendControl() { drained = true; throw new Error('must not drain a newer Runtime'); },
+    spawnProcess() { spawned = true; throw new Error('must not start an older Runtime'); }
+  });
+  assert.deepEqual(result, { started: false, pid: process.pid, runtimeId: 'newer' });
+  assert.equal(drained, false);
+  assert.equal(spawned, false);
 });
 
 test('a healthy older build drains before the new fallback runtime takes its lease', async t => {

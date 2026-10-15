@@ -99,7 +99,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
           await new Promise<void>(resolve => setImmediate(resolve));
         }
         for (;;) {
-          const batch = store.cleanupDatabaseStorageBatch(5000, maintenanceId);
+          const batch = store.cleanupDatabaseStorageBatch(automatic ? 250 : 5000, maintenanceId);
           totals.deletedArtifacts += batch.deletedArtifacts; totals.deletedSources += batch.deletedSources;
           if (!batch.pending) break;
           await new Promise<void>(resolve => setImmediate(resolve));

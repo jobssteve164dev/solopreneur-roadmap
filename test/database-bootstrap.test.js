@@ -80,8 +80,10 @@ test('Today intelligence becomes readable while a recovered legacy migration is 
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-bootstrap-intelligence-first-'));
   const root = path.join(fixture, '.solomap-global');
   const preload = path.join(fixture, 'block-migrations.cjs');
+  const refreshMarker = path.join(fixture, 'historical-refresh-started');
   fs.writeFileSync(preload, `
     const Module = require('node:module');
+    const fs = require('node:fs');
     const originalLoad = Module._load;
     let releaseMigration;
     const migration = new Promise(resolve => { releaseMigration = resolve; });
@@ -98,7 +100,7 @@ test('Today intelligence becomes readable while a recovered legacy migration is 
       }
       if (request === './runtimeDatabaseBootstrap') {
         const actual = originalLoad.call(this, request, parent, isMain);
-        return { ...actual, async refreshHistoricalRunMigrations() { return 'caught-up'; } };
+        return { ...actual, async refreshHistoricalRunMigrations() { fs.writeFileSync(${JSON.stringify(refreshMarker)}, 'called'); return 'caught-up'; } };
       }
       return originalLoad.call(this, request, parent, isMain);
     };
@@ -122,6 +124,8 @@ test('Today intelligence becomes readable while a recovered legacy migration is 
     await new Promise(resolve => setTimeout(resolve, 25));
     assert.equal(fs.existsSync(path.join(root, 'runtime', 'control.busy.json')), true,
       'the Runtime must retain its owner lease while the internal history scan is still running');
+    assert.equal(fs.existsSync(refreshMarker), false,
+      'the autonomous cycle must not start a second historical scan while startup migration is still running');
     const exited = once(child, 'exit');
     await sendRuntimeControlCommand(root, 'stop');
     const outcome = await Promise.race([

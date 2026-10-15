@@ -166,6 +166,28 @@ test('recent startup and new writes do not wait for historical journal or index 
   } finally { release(); engine.close(); await server.close(); await operations.close(); store.close(); }
 });
 
+test('history-skip startup avoids full journal and run-index hydration', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-history-skip-'));
+  const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');
+  fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
+  const registered = await store.registerProject({ root: project });
+  store.appendProjectJournal(registered.projectId, 'history-skip:1', { nodeId: '__solo__', timestamp: '2026-01-01T00:00:00.000Z', output: 'retained output', status: 'Completed' }, 1);
+  let fullJournalReads = 0; let runIndexReads = 0;
+  const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'history-skip-owner', onCommand: () => ({ status: 'running' }), onData: async request => {
+    if (request.operation === 'read_project_journal' && !request.input.nodeId && !request.input.executionLogId) fullJournalReads++;
+    if (request.operation === 'read_project_run_indexes') runIndexReads++;
+    return operations(request);
+  } });
+  const engine = new SyncEngine(path.join(project, '.solopreneur/roadmap.csv'), path.join(project, '.solopreneur/project_journal.db'), path.resolve(__dirname, '..'), root);
+  try {
+    await engine.initAndSync({ history: 'skip' });
+    assert.equal(fullJournalReads, 0);
+    assert.equal(runIndexReads, 0);
+    assert.equal((await engine.readAgentExecutionById(1)).output, 'retained output');
+  } finally { engine.close(); await server.close(); await operations.close(); store.close(); }
+});
+
 test('background startup reserves unmigrated IDs without reading old outputs', async () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-legacy-id-reservation-'));
   const root = path.join(fixture, '.solomap-global'); const project = path.join(fixture, 'project');

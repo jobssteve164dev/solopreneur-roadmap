@@ -99,9 +99,12 @@ export class RunNativeObserver {
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
     await assertCodexResumeTranscript(transcriptPath, String(observed.status.workspaceRoot), head.sessionId);
     current();
-    if (stat.size < logHead.totalBytes) throw new Error('native_transcript_truncated');
-    if (stat.size > logHead.totalBytes) {
-      const source = fs.createReadStream(transcriptPath, { start: logHead.totalBytes, end: stat.size - 1 });
+    const sourceOffset = Number(observed.status.codexNativeSourceOffset || 0);
+    if (!Number.isSafeInteger(sourceOffset) || sourceOffset < 0) throw new Error('native_transcript_offset_invalid');
+    const capturedSourceBytes = sourceOffset + logHead.totalBytes;
+    if (stat.size < capturedSourceBytes) throw new Error('native_transcript_truncated');
+    if (stat.size > capturedSourceBytes) {
+      const source = fs.createReadStream(transcriptPath, { start: capturedSourceBytes, end: stat.size - 1 });
       for await (const value of source) {
         const state = current();
         const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
