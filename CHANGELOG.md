@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.563 - 2026-10-15
+
+### Fixed
+- bound runtime startup and session recovery (c3c3bd4)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.562 - 2026-10-15
 
 ### Fixed
