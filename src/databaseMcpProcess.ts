@@ -9,6 +9,11 @@ function argument(name: string): string {
   return index < 0 ? '' : String(process.argv[index + 1] || '');
 }
 
+function retryableRuntimeHandshake(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:ECONNREFUSED|ECONNRESET|EPIPE|socket hang up|runtime_data_response_incomplete|Invalid Runtime endpoint|different_runtime)/.test(message);
+}
+
 async function main(): Promise<void> {
   const globalDataPath = argument('--global-data-path');
   let projectId = argument('--project-id') || (process.env.SOLOMAP_RUN_PROOF ? String(process.env.SOLOMAP_PROJECT_ID || '') : '');
@@ -36,20 +41,21 @@ async function main(): Promise<void> {
     } : undefined);
   // The bridge owns no SQLite connection and starts no second persistence daemon.
   let sessionInfo: { runKind: string; migrationKind: string | null } | undefined;
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  const handshakeDeadline = Date.now() + 10_000;
+  for (let attempt = 1; ; attempt += 1) {
     try { sessionInfo = await source.sessionInfo?.(); break; }
     catch (error) {
-      if (attempt === 3) throw error;
-      await new Promise(resolve => setTimeout(resolve, attempt * 50));
+      if (!retryableRuntimeHandshake(error) || Date.now() >= handshakeDeadline) throw error;
+      await new Promise(resolve => setTimeout(resolve, Math.min(250, attempt * 50)));
     }
   }
   const runKind = String(sessionInfo?.runKind || '');
   const migrationRun = migrationRunKinds.includes(runKind as typeof migrationRunKinds[number]);
   const soloConversationRun = soloConversationRunKinds.includes(runKind as typeof soloConversationRunKinds[number]);
   const server = new McpServer({ name: 'solomap-data', version: '1.0.0' });
+  registerUnifiedMcpTools(server, source, { readOnly: migrationRun || runKind === 'agent_review' });
   if (migrationRun) registerMigrationMcpTools(server, source);
   else {
-    registerUnifiedMcpTools(server, source);
     if (soloConversationRun) registerMigrationMcpTools(server, source, false);
   }
   const transport = new StdioServerTransport();

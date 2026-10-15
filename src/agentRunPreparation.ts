@@ -15,7 +15,7 @@ import type { RunState } from './runLifecycleTypes';
 import type { FlowTrace } from './flowStore';
 import { runStatusReference, runDataReference } from './runLifecycleClient';
 import { readWindowsProcessBirthMarkerAsync } from './processIdentity.js';
-import { soloConversationRunKinds } from './runLifecycleTypes';
+import { migrationRunKinds, soloConversationRunKinds } from './runLifecycleTypes';
 
 export interface AgentRunPreparationInput {
   agentCli: string;
@@ -81,6 +81,32 @@ function sharedRunnerCommand(workspaceRoot: string, globalDataPath: string, exec
 function preparedRunResult(state: RunState, workspaceRoot: string, executionLogId: number, dataRoot: string): RunState & { dataRoot: string; finalCommand: string; outputFilePath: string; changesFilePath: string; commandFilePath: string; promptFilePath: string; runScriptPath: string } {
   const reference = runStatusReference(workspaceRoot, executionLogId);
   return { ...state, dataRoot, finalCommand: sharedRunnerCommand(workspaceRoot, dataRoot, executionLogId), outputFilePath: runDataReference(reference, 'output'), changesFilePath: runDataReference(reference, 'changes'), commandFilePath: runDataReference(reference, 'command'), promptFilePath: runDataReference(reference, 'prompt'), runScriptPath: path.join(__dirname, 'runAgentProcess.js') };
+}
+
+function renderPreloadedMemoryContext(result: unknown, projectId: string): string {
+  const items = Array.isArray((result as { items?: unknown[] } | undefined)?.items)
+    ? (result as { items: Array<{ objectId?: string; projectId?: string | null; kind?: string; revision?: number; data?: Record<string, unknown> }> }).items
+      .filter(item => item?.projectId === projectId || item?.projectId === null && ['verified', 'approved', 'active'].includes(String(item?.data?.status || '')))
+      .map(item => ({ objectId: item.objectId, revision: item.revision, kind: item.kind, data: item.data }))
+    : [];
+  return [
+    'SoloMap 数据库记忆上下文（宿主按本轮目标加载的固定版本）：',
+    items.length ? JSON.stringify(items) : '本轮没有命中相关的可用记忆；继续以当前用户要求和项目证据为准。'
+  ].join('\n');
+}
+
+function memoryContextTerms(...values: string[]): string[] {
+  const terms = new Set<string>();
+  const add = (value: string): void => { if (value.length >= 2) terms.add(value.slice(0, 80)); };
+  for (const value of values) for (const segment of value.match(/[\p{Script=Han}]+|[\p{L}\p{N}_-]+/gu) || []) {
+    if (/^[\p{Script=Han}]+$/u.test(segment) && segment.length > 4) {
+      for (let width = 4; width >= 2 && terms.size < 40; width -= 1) {
+        for (let index = 0; index <= segment.length - width && terms.size < 40; index += 1) add(segment.slice(index, index + width));
+      }
+    } else add(segment);
+    if (terms.size >= 40) break;
+  }
+  return [...terms];
 }
 
 export async function resumePreparedAgentRun(state: RunState, operation: Operation, dataRoot?: string): Promise<Awaited<ReturnType<typeof prepareAgentRun>>> {
@@ -185,7 +211,25 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
       if (policy.objectId !== policyRef.objectId || policy.revision !== policyRef.revision || policy.kind !== 'policy' || policy.projectId !== null || policy.data.kind !== 'global_prompt' || typeof policy.data.content !== 'string') throw new Error('run_global_prompt_policy_mismatch');
       policyInstructions = [`用户全局要求（本轮固定版本 ${JSON.stringify(policyRef)}）：`, policy.data.content, '与本轮用户最新要求冲突时，以本轮用户要求为准。', ...(input.readOnlyReview ? [] : ['后续每轮 start 返回 globalPromptPolicyRef；有引用时，通过 solomap_read 读取该 objectId 和 revision 的全文，保留固定版本，不用最新版本代替。'])].join('\n');
     }
-    const prompt = [input.prompt, ...(policyInstructions ? [policyInstructions] : []), ...(input.readOnlyReview ? [] : [...(input.prompt.includes('SoloMap 数据库工具：') ? [] : [buildAgentDatabaseInstructions({ migrationTools: soloConversationRunKinds.includes(input.runKind as typeof soloConversationRunKinds[number]) })]), `SoloMap 检查点命令：${path.join(__dirname, 'taskCheckpointProcess.js')}。通过 node "$SOLOMAP_TASK_COMMAND" 调用当前任务的 start、complete 和 session-close。初轮 complete 使用 --turn-id ${state.turnId}；后续 start 的 --turn-id 先使用上一轮 turnId，保留返回的新 turnId，并在对应 complete 的 --turn-id 中使用它。每轮结算绑定自己的 turnId，重试沿用原 turnId。`, reportInstructions(String(state.status.learningTaskId))])].join('\n\n');
+    const hasDatabaseInstructions = input.prompt.includes('SoloMap 数据库记忆系统（每个任务必须执行）：') || input.prompt.includes('SoloMap 数据库工具：');
+    const migrationRun = migrationRunKinds.includes(input.runKind as typeof migrationRunKinds[number]);
+    const hostLoadsReviewMemory = input.readOnlyReview === true && provider === 'grok';
+    let preloadedMemoryContext = '';
+    if (hostLoadsReviewMemory) {
+      try {
+        const terms = memoryContextTerms(input.userMessage, input.prompt.slice(0, 1200));
+        const recalled = await call('context', { project: state.projectId, ...(terms.length ? { terms } : {}), budget: 6000 });
+        preloadedMemoryContext = renderPreloadedMemoryContext(recalled, state.projectId);
+      } catch (error) {
+        preloadedMemoryContext = `SoloMap 数据库记忆上下文暂时不可用：${error instanceof Error ? error.message : String(error)}。不要改读旧记忆文件或建立平行存储；继续以当前用户要求和项目证据完成只读复核。`;
+      }
+    }
+    const databaseInstructions = hostLoadsReviewMemory
+      ? buildAgentDatabaseInstructions({ readOnly: true, contextProvided: true })
+      : input.readOnlyReview || migrationRun
+        ? hasDatabaseInstructions ? '' : buildAgentDatabaseInstructions({ readOnly: true })
+        : hasDatabaseInstructions ? '' : buildAgentDatabaseInstructions({ migrationTools: soloConversationRunKinds.includes(input.runKind as typeof soloConversationRunKinds[number]) });
+    const prompt = [input.prompt, ...(policyInstructions ? [policyInstructions] : []), ...(databaseInstructions ? [databaseInstructions] : []), ...(preloadedMemoryContext ? [preloadedMemoryContext] : []), ...(input.readOnlyReview ? [] : [`SoloMap 检查点命令：${path.join(__dirname, 'taskCheckpointProcess.js')}。通过 node "$SOLOMAP_TASK_COMMAND" 调用当前任务的 start、complete 和 session-close。初轮 complete 使用 --turn-id ${state.turnId}；后续 start 的 --turn-id 先使用上一轮 turnId，保留返回的新 turnId，并在对应 complete 的 --turn-id 中使用它。每轮结算绑定自己的 turnId，重试沿用原 turnId。`, reportInstructions(String(state.status.learningTaskId))])].join('\n\n');
     state = await call('patch_run_inputs', { ...identity, expectedRevision: state.revision, prompt, command, status: input.metadata?.startWaiting === true ? 'Waiting' : 'Running', idempotencyKey: `${prepareKey}:ready:${state.revision}` }) as RunState;
   }
   } catch (error) {

@@ -7,12 +7,21 @@ const { spawnSync } = require('node:child_process');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
 const { shellQuote } = require('../out/agentCli.js');
+const fixtureRoots = [];
+function fixtureRoot(prefix) { const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); fixtureRoots.push(root); return root; }
+function cleanupExact(root) {
+  if (!fs.existsSync(root)) return;
+  const directories = [root], files = [];
+  const inventory = directory => fs.readdirSync(directory).forEach(name => { const target = path.join(directory, name); if (fs.lstatSync(target).isDirectory()) { directories.push(target); inventory(target); } else files.push(target); });
+  inventory(root); files.forEach(file => fs.unlinkSync(file)); directories.sort((a, b) => b.length - a.length).forEach(directory => fs.rmdirSync(directory));
+}
+test.after(() => fixtureRoots.forEach(cleanupExact));
 
 test('host preparation persists all task input and native identity without producing permanent per-run files', async () => {
   const modulePath = path.resolve(__dirname, '../out/agentRunPreparation.js');
   assert.ok(fs.existsSync(modulePath), 'host preparation must use the same domain operations as the shared runner');
   const { prepareAgentRun } = require(modulePath);
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "solomap-run-preparation-'unicode-🌿-"));
+  const base = fixtureRoot("solomap-run-preparation-'unicode-🌿-");
   const root = path.join(base, '.solomap-global'); const projectRoot = path.join(base, 'project'); fs.mkdirSync(projectRoot);
   const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
   try {
@@ -42,6 +51,9 @@ test('host preparation persists all task input and native identity without produ
     assert.match(plan.prompt, /完整用户任务\n禁止改变范围/);
     assert.match(plan.prompt, /solomap_migration_start/);
     assert.match(plan.prompt, /普通对话只生成清单/);
+    assert.match(plan.prompt, /SoloMap 数据库记忆系统（每个任务必须执行）/);
+    assert.match(plan.prompt, /实现或判断前.*solomap_context/);
+    assert.match(plan.prompt, /任务收尾.*未来任务仍会复用/);
     assert.match(plan.prompt, new RegExp(`SoloMap-Task: task-${state.taskId}`));
     assert.match(plan.prompt, /--report-json/);
     assert.match(plan.prompt, /taskCheckpointProcess\.js/);
@@ -64,7 +76,7 @@ test('host preparation persists all task input and native identity without produ
 test('the production preparer reuses one formal Flow role across concurrent windows and delivery recovery', async () => {
   const { prepareAgentRun, resumePreparedAgentRun } = require('../out/agentRunPreparation.js');
   const { createFlowTrace, createFlowLoop } = require('../out/flowStore.js');
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-flow-preparer-'));
+  const base = fixtureRoot('solomap-flow-preparer-');
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
   const call = (operation, input) => operations({ operation, input });
@@ -87,7 +99,7 @@ test('the production preparer reuses one formal Flow role across concurrent wind
 
 test('stable launch intents reuse one task and complete launch parameters across retry and restart', async () => {
   const { prepareAgentRun } = require('../out/agentRunPreparation.js');
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-run-intent-'));
+  const base = fixtureRoot('solomap-run-intent-');
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   let store = new UnifiedDataStore(root); let ops = createRuntimeDataOperations(store);
   const call = (operation, input) => ops({ operation, input });
@@ -109,7 +121,7 @@ test('stable launch intents reuse one task and complete launch parameters across
 
 test('read-only review preparation retains full evidence without asking the reviewer to write checkpoints', async () => {
   const { prepareAgentRun } = require('../out/agentRunPreparation.js');
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-review-preparer-'));
+  const base = fixtureRoot('solomap-review-preparer-');
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
   try {
@@ -117,7 +129,13 @@ test('read-only review preparation retains full evidence without asking the revi
     const input = { agentCli: 'codex', selectedModel: 'chosen-model', prompt, workspaceRoot: project, nodeId: 'step', executionLogId: 0, userMessage: '原始目标', runKind: 'agent_review', globalDataPath: root, taskPermissionMode: 'auto', readOnlyReview: true, launchIntentId: 'review-effect-one' };
     const prepared = await prepareAgentRun(input, (operation, input) => ops({ operation, input }));
     const plan = await ops({ operation: 'read_run_execution_plan', input: { root: project, executionLogId: prepared.status.rootExecutionLogId } });
-    assert.equal(plan.prompt, prompt);
+    assert.ok(plan.prompt.startsWith(prompt));
+    assert.match(plan.prompt, /SoloMap 数据库记忆系统（每个任务必须执行）/);
+    assert.match(plan.prompt, /solomap_context/);
+    assert.match(plan.prompt, /solomap_search/);
+    assert.match(plan.prompt, /solomap_read/);
+    assert.match(plan.prompt, /本轮对数据库记忆仅可检索和读取/);
+    assert.doesNotMatch(plan.prompt, /solomap_write|solomap_link|solomap_export|solomap_migration_start|solomap_recycling_preview|taskCheckpointProcess|--report-json/);
     assert.equal(plan.status.agentLaunch.readOnly, true);
     assert.equal(plan.status.interactiveSession, false);
     assert.doesNotMatch(plan.command, /solomap_read|--dangerously|--full-auto/);
@@ -125,9 +143,47 @@ test('read-only review preparation retains full evidence without asking the revi
   } finally { await ops.close(); store.close(); }
 });
 
+test('Grok read-only review receives bounded host-loaded database memory while MCP remains denied', async () => {
+  const { prepareAgentRun } = require('../out/agentRunPreparation.js');
+  const base = fixtureRoot('solomap-grok-review-memory-'); const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store); const call = (operation, input) => ops({ operation, input });
+  try {
+    const registered = await call('register_project', { root: project });
+    await call('write', { kind: 'memory', action: 'create', scope: registered.projectId, idempotencyKey: 'grok-review-memory', data: { category: 'project', title: '审查边界', status: 'captured', content: '必须核对真实测试证据。' } });
+    const prepared = await prepareAgentRun({ agentCli: 'grok', selectedModel: '', prompt: '复核当前交付', workspaceRoot: project, nodeId: 'step', executionLogId: 0, userMessage: '检查测试证据', runKind: 'agent_review', globalDataPath: root, taskPermissionMode: 'auto', readOnlyReview: true, launchIntentId: 'grok-review-memory' }, call);
+    const plan = await call('read_run_execution_plan', { root: project, executionLogId: prepared.status.rootExecutionLogId });
+    assert.match(plan.prompt, /宿主按本轮目标加载的固定版本/);
+    assert.match(plan.prompt, /必须核对真实测试证据/);
+    assert.match(plan.prompt, /不需要为了启动再次调用 MCP/);
+    assert.match(plan.command, /--deny 'MCPTool'/);
+    assert.doesNotMatch(plan.prompt, /solomap_write|solomap_link|solomap_export/);
+  } finally { await ops.close(); store.close(); }
+});
+
+test('the final prompt assembly gives representative executable task families the same database memory contract', async () => {
+  const { prepareAgentRun } = require('../out/agentRunPreparation.js');
+  const base = fixtureRoot('solomap-memory-contract-matrix-');
+  const runKinds = ['step', 'solo', 'flow_planner', 'agent_review_revision', 'migration_review', 'skill_install', 'agent_cli_upgrade'];
+  for (const [index, runKind] of runKinds.entries()) {
+    const caseRoot = path.join(base, String(index)); const root = path.join(caseRoot, 'global'); const project = path.join(caseRoot, 'project'); fs.mkdirSync(caseRoot); fs.mkdirSync(project);
+    const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+    const call = (operation, input) => ops({ operation, input });
+    try {
+      const prepared = await prepareAgentRun({ agentCli: 'claude', selectedModel: '', prompt: `任务：${runKind}`, workspaceRoot: project, nodeId: `node-${index}`, executionLogId: 100 + index, userMessage: runKind, runKind, globalDataPath: root, taskPermissionMode: 'auto' }, call);
+      const plan = await call('read_run_execution_plan', { root: project, executionLogId: prepared.status.rootExecutionLogId });
+      assert.equal((plan.prompt.match(/SoloMap 数据库记忆系统（每个任务必须执行）：/g) || []).length, 1, runKind);
+      assert.match(plan.prompt, /实现或判断前.*solomap_context/, runKind);
+      if (runKind.startsWith('migration_')) {
+        assert.match(plan.prompt, /本轮对数据库记忆仅可检索和读取/, runKind);
+        assert.doesNotMatch(plan.prompt, /solomap_write|solomap_link|solomap_export/, runKind);
+      } else assert.match(plan.prompt, /任务收尾.*未来任务仍会复用/, runKind);
+    } finally { await ops.close(); store.close(); }
+  }
+});
+
 test('unattended review corrections continue the selected native session while keeping durable task identity', async () => {
   const { prepareAgentRun } = require('../out/agentRunPreparation.js');
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-review-native-revision-'));
+  const base = fixtureRoot('solomap-review-native-revision-');
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
   const call = (operation, input) => ops({ operation, input });

@@ -258,7 +258,7 @@ test('production Solo context uses the database before its first file exists', a
   try {
     assert.equal(fs.existsSync(path.join(root, 'solomap.db')), false);
     const prompt = await extension.__soloPolicyPrompt('执行用户动作', project, '', [], root);
-    assert.match(prompt, /SoloMap 数据库工具：/);
+    assert.match(prompt, /SoloMap 数据库记忆系统（每个任务必须执行）：/);
     assert.doesNotMatch(prompt, /solomap-memory\.cjs.*(?:route|retrieve)|documentation\.json|global-default-prompt\.md/);
   } finally { await runtime.close(); }
 });
@@ -1018,7 +1018,7 @@ test('new Solo launch opens its terminal while a full history refresh is pending
     assert.equal(id, 1); assert.equal(historyRequests, 0);
     assert.deepEqual(calls, ['committed', 'terminal']);
     const plan = await sendRuntimeDataRequest(root, { operation: 'read_run_execution_plan', input: { root: projectPath, executionLogId: id } });
-    assert.ok(plan.prompt.includes('prompt')); assert.ok(plan.prompt.includes('SoloMap 数据库工具：'));
+    assert.ok(plan.prompt.includes('prompt')); assert.ok(plan.prompt.includes('SoloMap 数据库记忆系统（每个任务必须执行）：'));
     assert.equal(plan.status.userMessage, 'Start now');
     assert.equal(commands.length, 1); assert.ok(commands[0].includes('runAgentProcess.js'));
     const state = await sendRuntimeDataRequest(root, { operation: 'read_run_state', input: { root: projectPath, executionLogId: id } });

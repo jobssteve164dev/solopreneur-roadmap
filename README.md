@@ -45,7 +45,7 @@ SoloMap is a **local-first, Git-friendly, highly-polished** execution control pa
 *   **Multi-Agent Collaboration**: Toggle a secondary Agent (e.g., use `agy` for building and `claude` for read-only review) to get automatic code quality gates.
 
 ### 🧠 Cross-Project Learning & Memory
-*   **Never Make the Same Mistake Twice**: Lessons learned, architectural decisions, and repeated blockers are captured in `.solomap-global/memory/` and automatically injected into subsequent task prompts.
+*   **Never Make the Same Mistake Twice**: Lessons learned, architectural decisions, and repeated blockers are stored in SoloMap's unified local database and retrieved through the Runtime for each relevant task.
 *   **Privacy by Default**: All task logs, agent histories, and learnings live entirely on your machine.
 
 ---

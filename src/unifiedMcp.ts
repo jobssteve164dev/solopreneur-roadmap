@@ -32,7 +32,7 @@ function registerMigrationTools(server: McpServer, source: UnifiedMcpSource, inc
 
 export function registerMigrationMcpTools(server: McpServer, source: UnifiedMcpSource, includeRecyclingApply = true): void { registerMigrationTools(server, source, includeRecyclingApply); }
 
-export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSource): void {
+export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSource, options: { readOnly?: boolean } = {}): void {
   const z = require('zod') as typeof import('zod');
   const scope = z.string().nullable().optional();
   const schema = dataSchema();
@@ -75,7 +75,7 @@ export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSou
     return source.call('search', { ...input, scope: source.scope });
   });
   register('solomap_read', '读取全文、元数据或固定版本的内容分页；按 cursor 继续读取。ref="solomap://schema" 返回可写字段合同。', { ref: z.string(), revision: z.number().int().positive().optional(), view: z.enum(['full', 'metadata', 'content']).optional(), field: z.string().optional(), cursor: z.string().optional(), limit: z.number().int().min(1).max(1048576).optional() }, true, readView);
-  register('solomap_write', '创建、修改或归档记录，返回已提交版本和回执。', {
+  if (!options.readOnly) register('solomap_write', '创建、修改或归档记录，返回已提交版本和回执。', {
     kind: z.enum(kinds), action: z.enum(['create', 'patch', 'archive']), scope,
     objectId: z.string().optional(), expectedRevision: z.number().int().nonnegative().optional(), idempotencyKey: z.string().min(1), data: z.object(dataFields).passthrough().describe('按 kind 使用 solomap://schema 中的字段；创建需提供 required 字段，补丁只提供本次修改的字段。')
   }, false, async input => {
@@ -83,7 +83,7 @@ export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSou
     validateAgentWrite(input, input.objectId ? await read(input.objectId) : undefined);
     return source.call('write', { ...input, scope: source.scope });
   });
-  register('solomap_link', '关联来源、证据、父子关系或依赖。', { source: z.string(), relation: z.string(), target: z.string(), expectedRevision: z.number().int().positive(), idempotencyKey: z.string().min(1) }, false, async input => {
+  if (!options.readOnly) register('solomap_link', '关联来源、证据、父子关系或依赖。', { source: z.string(), relation: z.string(), target: z.string(), expectedRevision: z.number().int().positive(), idempotencyKey: z.string().min(1) }, false, async input => {
     const object = await read(input.source);
     if (object.projectId !== source.scope) throw new Error('scope_denied');
     validateAgentLink(object, input.relation);
@@ -99,7 +99,7 @@ export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSou
     const result = await source.call('context', { ...input, project: source.scope }) as { items: DataObject[] };
     return { ...result, items: result.items.filter(authorized) };
   });
-  register('solomap_export', '按需导出记录全文，不覆盖已有产物。', { ref: z.string(), format: z.enum(['json', 'md', 'text']), destination: z.string(), idempotencyKey: z.string().min(1) }, false, async input => {
+  if (!options.readOnly) register('solomap_export', '按需导出记录全文，不覆盖已有产物。', { ref: z.string(), format: z.enum(['json', 'md', 'text']), destination: z.string(), idempotencyKey: z.string().min(1) }, false, async input => {
     await read(input.ref);
     return source.call('export', input);
   });

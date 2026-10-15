@@ -842,10 +842,30 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
     if (session.migrationKind) {
       if (!session.runIdentity) throw new Error('action_denied');
       store.authorizedRunState(session.scope, session.runIdentity);
-      const reviewActions = ['migration_overview', 'migration_status', 'retry_migration', 'prepare_recycling', 'read_recycling_plan'];
+      const memoryReadActions = ['search', 'read', 'context'];
+      const reviewActions = [...memoryReadActions, 'migration_overview', 'migration_status', 'retry_migration', 'prepare_recycling', 'read_recycling_plan'];
       const migrationActions = ['discover_migrations', ...reviewActions];
-      const recyclingActions = ['migration_overview', 'read_recycling_plan', 'execute_recycling_plan'];
+      const recyclingActions = [...memoryReadActions, 'migration_overview', 'read_recycling_plan', 'execute_recycling_plan'];
       if (!(session.migrationKind === 'migration_apply' ? migrationActions : session.migrationKind === 'migration_review' ? reviewActions : recyclingActions).includes(request.operation)) throw new Error('action_denied');
+      if (memoryReadActions.includes(request.operation)) {
+        store.authorizeMcpAction(session.actorId, session.scope, request.operation);
+        if (request.operation === 'search' && input.scope !== session.scope) throw new Error('scope_denied');
+        if (request.operation === 'context' && input.project !== session.scope) throw new Error('scope_denied');
+        if (request.operation === 'read' && input.ref && !allowedRead(store.readMetadata(normalizeObjectReference(input.ref)), session)) throw new Error('scope_denied');
+        return store.withActor(session.actorId, async () => {
+          const result = await dispatch(request);
+          if (request.operation === 'read') {
+            const value = result as DataObject | { object: DataObject };
+            if (!allowedRead('object' in value ? value.object : value, session)) throw new Error('scope_denied');
+            return 'object' in value ? { ...value, object: agentObject(value.object) } : agentObject(value);
+          }
+          if (request.operation === 'context') {
+            const context = result as { items: DataObject[] };
+            return { ...context, items: context.items.filter(item => allowedRead(item, session)) };
+          }
+          return result;
+        });
+      }
       if (session.migrationProjectRoot) {
         const scope = await migrationScope(input);
         if (!scope || scope.projectId !== session.migrationProjectId || scope.physicalRoot !== session.migrationPhysicalRoot) throw new Error('maintenance_scope_denied');

@@ -321,14 +321,16 @@ export async function sendRuntimeDataRequest<T>(globalDataPath: string, request:
       } catch (error) { reject(error); }
     });
   });
-  const endpoint = await readReadyEndpoint(globalDataPath);
-  try {
-    return await send(endpoint);
-  } catch (error) {
-    if (!(error instanceof Error) || !(error as Error & { runtimeDataPreconnect?: boolean }).runtimeDataPreconnect) throw error;
-    const replacement = await readReadyEndpoint(globalDataPath);
-    if (replacement.runtimeId === endpoint.runtimeId && replacement.port === endpoint.port && replacement.token === endpoint.token) throw error;
-    return send(replacement);
+  let endpoint = await readReadyEndpoint(globalDataPath);
+  const reconnectDeadline = Date.now() + 3_000;
+  for (;;) {
+    try {
+      return await send(endpoint);
+    } catch (error) {
+      if (!(error instanceof Error) || !(error as Error & { runtimeDataPreconnect?: boolean }).runtimeDataPreconnect || Date.now() >= reconnectDeadline) throw error;
+      await new Promise(resolve => setTimeout(resolve, 25));
+      endpoint = await readReadyEndpoint(globalDataPath, Math.max(25, reconnectDeadline - Date.now()));
+    }
   }
 }
 

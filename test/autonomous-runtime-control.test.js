@@ -332,6 +332,34 @@ test('runtime data reconnects once when the endpoint is replaced before the requ
   }
 });
 
+test('runtime data waits for a stale endpoint to be replaced during a handover', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-data-delayed-replacement-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const runtimeRoot = path.join(globalRoot, 'runtime');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  const live = await control.startRuntimeControlServer({
+    globalDataPath: globalRoot,
+    runtimeId: 'delayed-replacement-runtime',
+    onCommand() { return { status: 'running' }; },
+    async onData(request) { return { operation: request.operation, recovered: true }; }
+  });
+  const endpointPath = path.join(runtimeRoot, 'control.json');
+  const replacement = fs.readFileSync(endpointPath);
+  const unavailable = net.createServer();
+  await new Promise((resolve, reject) => { unavailable.once('error', reject); unavailable.listen(0, '127.0.0.1', resolve); });
+  const address = unavailable.address(); assert.ok(address && typeof address !== 'string');
+  await new Promise(resolve => unavailable.close(resolve));
+  fs.writeFileSync(endpointPath, JSON.stringify({ schemaVersion: 1, runtimeId: 'stale-runtime', host: '127.0.0.1', port: address.port, token: 'stale-token' }));
+  const timer = setTimeout(() => fs.writeFileSync(endpointPath, replacement), 200);
+  try {
+    assert.deepEqual(await control.sendRuntimeDataRequest(globalRoot, { operation: 'resume_conversation', input: { id: 1 } }), { operation: 'resume_conversation', recovered: true });
+  } finally {
+    clearTimeout(timer); await live.close();
+    if (fs.existsSync(endpointPath)) fs.unlinkSync(endpointPath);
+    fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root);
+  }
+});
+
 test('standalone runtime keeps Today suggestions fresh while autonomous execution is paused', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-process-control-'));
   const globalRoot = path.join(root, '.solomap-global');

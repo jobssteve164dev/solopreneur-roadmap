@@ -84,7 +84,41 @@ test('an ordinary Solo CLI receives project-scoped migration and preview tools w
   } finally { await client.close(); await transport.close(); }
 });
 
-test('the MCP bridge retries one interrupted Runtime handshake before exposing verified Solo tools', async t => {
+test('an agent review MCP session exposes only read-only database memory tools', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-review-mcp-'));
+  fs.mkdirSync(path.join(base, '.git'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  t.after(() => cleanupExact(base));
+  const projectId = owner.projectIds.get(project);
+  const registered = await owner.store.registerProject({ root: project });
+  const memory = owner.store.write({
+    kind: 'memory', action: 'create', scope: projectId, idempotencyKey: 'review-memory',
+    data: { category: 'patterns', title: 'review context', status: 'verified', content: 'use the database memory' }
+  });
+  const prepared = owner.store.prepareRun(projectId, registered.locationId, {
+    root: project, executionLogId: 1, nodeId: '__review__', runKind: 'agent_review', prompt: 'review',
+    command: 'codex review', userMessage: 'review', idempotencyKey: 'read-only-review-tools'
+  });
+  const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
+  const client = new Client({ name: 'agent-review-memory', version: '1' });
+  const transport = new StdioClientTransport({ command: process.execPath,
+    args: [path.resolve(__dirname, '../out/databaseMcpProcess.js'), '--global-data-path', root], cwd: project,
+    env: { ...process.env, SOLOMAP_PROJECT_ID: projectId, SOLOMAP_EXECUTION_LOG_ID: '1', SOLOMAP_RUN_GENERATION: String(prepared.generation), SOLOMAP_RUN_PROOF: prepared.proof, SOLOMAP_RUN_KIND: 'agent_review' }, stderr: 'pipe' });
+  try {
+    await client.connect(transport);
+    const names = (await client.listTools()).tools.map(tool => tool.name).sort();
+    assert.deepEqual(names, ['solomap_context', 'solomap_read', 'solomap_search']);
+    const context = await client.callTool({ name: 'solomap_context', arguments: { project: projectId, query: 'review context' } });
+    assert.equal(context.isError, undefined, JSON.stringify(context.content));
+    assert.ok(JSON.parse(context.content[0].text).items.some(item => item.objectId === memory.objectId));
+    const read = await client.callTool({ name: 'solomap_read', arguments: { ref: memory.objectId, revision: memory.revision, view: 'full' } });
+    assert.equal(JSON.parse(read.content[0].text).data.content, 'use the database memory');
+  } finally { await client.close(); await transport.close(); }
+});
+
+test('the MCP bridge survives a Runtime handover longer than the old three-attempt window', async t => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-mcp-handshake-'));
   t.after(() => cleanupExact(base));
   const root = path.join(base, '.solomap-global'), runtimeRoot = path.join(root, 'runtime'), project = path.join(base, 'project');
@@ -93,7 +127,7 @@ test('the MCP bridge retries one interrupted Runtime handshake before exposing v
   const server = net.createServer(socket => {
     socket.once('data', () => {
       requests += 1;
-      if (requests === 1) { socket.end(); return; }
+      if (requests <= 5) { socket.end(); return; }
       socket.end(JSON.stringify({ ok: true, runtimeId: 'fixture-runtime', result: { actorId: 'fixture-actor', proof: 'fixture-proof', sessionToken: 'fixture-session', runKind: 'solo', migrationKind: null } }));
     });
   });
@@ -112,8 +146,45 @@ test('the MCP bridge retries one interrupted Runtime handshake before exposing v
     const tools = (await client.listTools()).tools.map(tool => tool.name);
     assert.ok(tools.includes('solomap_migration_status'));
     assert.ok(!tools.includes('solomap_recycling_apply'));
-    assert.equal(requests, 2);
+    assert.equal(requests, 6);
   } finally { await client.close(); await transport.close(); }
+});
+
+test('an established MCP process resumes its database session after the Runtime is replaced', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-mcp-runtime-replacement-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project');
+  fs.mkdirSync(project, { recursive: true }); fs.mkdirSync(path.join(project, '.git'));
+  new (require('../out/db/unifiedDataStore.js').UnifiedDataStore)(root).close();
+  t.after(() => cleanupExact(base));
+  const startRuntime = async runtimeId => {
+    const child = spawn(process.execPath, [path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root, '--runtime-id', runtimeId, '--database-required'], { stdio: 'pipe' });
+    let stderr = ''; child.stderr.on('data', value => { stderr += value; }); child.stdout.resume();
+    const deadline = Date.now() + 10000;
+    while (!fs.existsSync(path.join(root, 'runtime', 'control.json'))) {
+      assert.equal(child.exitCode, null, stderr);
+      assert.ok(Date.now() < deadline, stderr || 'runtime did not start');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    return { child, stderr: () => stderr };
+  };
+  let owner = await startRuntime('mcp-owner-one');
+  const registered = await sendRuntimeDataRequest(root, { operation: 'register_project', input: { root: project } });
+  const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
+  const client = new Client({ name: 'runtime-replacement-client', version: '1' });
+  const transport = new StdioClientTransport({ command: process.execPath,
+    args: [path.resolve(__dirname, '../out/databaseMcpProcess.js'), '--global-data-path', root, '--project-id', registered.projectId], cwd: project, stderr: 'pipe' });
+  try {
+    await client.connect(transport);
+    assert.equal((await client.callTool({ name: 'solomap_search', arguments: { query: 'before' } })).isError, undefined);
+    await sendRuntimeControlCommand(root, 'stop'); await once(owner.child, 'close');
+    owner = await startRuntime('mcp-owner-two');
+    const resumed = await client.callTool({ name: 'solomap_search', arguments: { query: 'after' } });
+    assert.equal(resumed.isError, undefined, JSON.stringify(resumed.content));
+  } finally {
+    await client.close(); await transport.close();
+    if (owner.child.exitCode === null) { await sendRuntimeControlCommand(root, 'stop'); await once(owner.child, 'close'); }
+  }
 });
 
 for (const separateProjects of [false, true]) test(`external stdio clients concurrently use one Runtime owner (${separateProjects ? 'separate projects' : 'shared project'})`, async t => {

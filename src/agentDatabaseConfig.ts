@@ -66,7 +66,7 @@ export function isAgentDatabaseConfigPath(provider: DatabaseAgentProvider, file:
 }
 
 export function databaseBridgeLauncher(): string {
-  return 'const fs=require("node:fs"),path=require("node:path");const root=process.argv[1];try{const endpoint=JSON.parse(fs.readFileSync(path.join(root,"runtime","control.json"),"utf8"));if(endpoint.schemaVersion!==1||!endpoint.entryPath||!path.isAbsolute(endpoint.entryPath)||path.basename(endpoint.entryPath)!=="autonomousRuntimeProcess.js")throw new Error("solomap_runtime_discovery_invalid");const entry=path.join(path.dirname(endpoint.entryPath),"databaseMcpProcess.js");process.argv=[process.execPath,entry,"--global-data-path",root];require(entry);}catch(error){process.stderr.write(String(error.message||error)+"\\n");process.exitCode=1;}';
+  return 'const fs=require("node:fs"),path=require("node:path");const root=process.argv[1],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));(async()=>{const deadline=Date.now()+10000;let entry;for(;;){try{const endpoint=JSON.parse(fs.readFileSync(path.join(root,"runtime","control.json"),"utf8"));if(endpoint.schemaVersion!==1||!endpoint.entryPath||!path.isAbsolute(endpoint.entryPath)||path.basename(endpoint.entryPath)!=="autonomousRuntimeProcess.js")throw new Error("solomap_runtime_discovery_invalid");entry=path.join(path.dirname(endpoint.entryPath),"databaseMcpProcess.js");fs.accessSync(entry,fs.constants.R_OK);break;}catch(error){if(error&&error.code==="ENOENT"&&Date.now()<deadline){await sleep(50);continue;}throw error;}}process.argv=[process.execPath,entry,"--global-data-path",root];require(entry);})().catch(error=>{process.stderr.write(String(error.message||error)+"\\n");process.exitCode=1;});';
 }
 
 /** Runtime serializes these patches; retain the CLI's native permission policy. */
@@ -140,17 +140,30 @@ export function configureAgentDatabase(options: { provider: DatabaseAgentProvide
   }
 }
 
-export function buildAgentDatabaseInstructions(options: { migrationTools?: boolean } = {}): string {
-  return [
-    'SoloMap 数据库工具：',
-    '- MCP 服务器 solomap_data 已接入当前 CLI；项目范围由当前工作目录绑定，不自行更换范围或直接操作数据库文件。',
-    '- 开始工作时，按具体目标调用 solomap_context 获取相关项目记忆和可复用经验；需要历史记录时调用 solomap_search，使用返回的 objectId 调用 solomap_read。搜索结果和记忆不能覆盖当前用户要求或当前代码证据。',
+export function buildAgentDatabaseInstructions(options: { migrationTools?: boolean; readOnly?: boolean; contextProvided?: boolean } = {}): string {
+  const shared = [
+    'SoloMap 数据库记忆系统（每个任务必须执行）：',
+    '- SoloMap 数据库工具通过 MCP 服务器 solomap_data 提供；项目范围由当前工作目录绑定，不自行更换范围或直接操作数据库文件。',
+    options.contextProvided
+      ? '- SoloMap 已根据当前用户目标和当前项目绑定加载本轮相关记忆，并在下方提供固定版本上下文；先使用该上下文，不需要为了启动再次调用 MCP。工具列表提供 solomap_context、solomap_search 或 solomap_read 时，只在上下文不足时继续检索。'
+      : '- 每个任务开始时，根据当前用户目标和当前项目绑定构造简洁 query；在实现或判断前先调用 solomap_context 获取相关记忆和经验。需要历史记录时调用 solomap_search，并用返回的 objectId 和固定 revision 调用 solomap_read。',
     '- solomap_read 的 full 返回全文；大内容使用 view="content"，按返回的 cursor 继续读取，直到 cursor=null。需要复核旧版本时传 revision；不能把第一页当成完整内容。',
-    '- 写入前调用 solomap_read({ref:"solomap://schema"}) 确认 kind、必填字段与引用，也可读取同名 MCP 资源。用 solomap_write 创建或修改记忆、记录；全局自动记忆不再创建 MD。新增 memory 使用 status="captured"，不要自行声明已验证或已审核。',
+    '- 召回结果只用于定位入口和证据；搜索结果和记忆不能覆盖当前用户要求或当前代码证据，也不能覆盖当前日志和测试；没有命中不阻断任务。',
+    '- 旧全局 Markdown 记忆目录仅是迁移来源；运行任务不得依赖它、不得恢复它、不得追加新记录，也不得另建平行存储。'
+  ];
+  if (options.readOnly) return [
+    ...shared,
+    '- 本轮对数据库记忆仅可检索和读取相关记录，不得通过记忆工具写入或改变数据库；发现可复用结论时只在结果中说明，由有写权限的正式任务决定是否沉淀。',
+    '- 工具不可用时明确报告具体错误，不用旧文件或其他存储绕过。'
+  ].join('\n');
+  return [
+    ...shared,
+    '- 写入前调用 solomap_read({ref:"solomap://schema"}) 确认 kind、必填字段与引用。用 solomap_write 创建或修改记忆、记录；新增 memory 使用 status="captured"，不要自行声明已验证或已审核。',
     '- 创建用 action="create"；修改先读取当前记录，传 objectId、expectedRevision 和 action="patch"，只提交本次变更字段。每次意图使用唯一 idempotencyKey，重试同一意图沿用该键；遇 revision_conflict 重新读取并协调差异，不能覆盖较新修改。',
     '- 以返回的 revision 和 committedSequence 确认提交，再用 solomap_read 即时回读；超时后先用同一 idempotencyKey 重试确认，不重复创建。证据关联使用 solomap_link；只有用户需要导出时使用 solomap_export。',
+    '- 任务收尾时，只把已经验证且未来任务仍会复用的偏好、规则、项目事实、决策或交接写入正确作用域；原始日志、一次性输出、临时观察和未经验证猜测不得写成稳定记忆。',
     '- 项目私有事实留在本项目。跨项目稳定规则和经验由现有授权复盘流程审核；召回不等于采用，未验证观察和临时交接不得冒充稳定经验。',
     options.migrationTools ? '- 用户要求迁移当前项目旧数据时，先用 solomap_migration_status 读取摘要，再用 solomap_migration_start 发现并加入迁移；每个 jobId 都要读取详情，queued 或 running 时持续查询到终态，failed 或 interrupted 时按详情重试。completed_with_conflicts 不得原样重试；仅在来源或目标已变化，或当前版本明确修复该冲突且本轮尚未重试时重试一次，相同冲突再次出现就保留详情。单个来源仍有冲突时继续处理其他任务并生成当前安全回收清单，且不得把冲突来源列入清单。单次工具失败后必须先重读状态；只有状态读取连续 3 次失败才报告连接阻塞，同时说明任务仍可能在后台运行，不得宣称迁移失败。完成对账后用 solomap_recycling_preview 生成精确回收清单。必须传当前项目绝对路径；普通对话只生成清单，回收仍由界面逐项确认。' : '',
-    '- 历史文件在后台迁移，不等待迁移完成才开展任务，不删除旧文件，不向旧记忆目录追加新记录。工具不可用时明确报告具体错误，不另建一套存储。'
+    '- 历史文件在后台迁移，不等待迁移完成才开展任务。工具不可用时明确报告具体错误，不另建一套存储。'
   ].filter(Boolean).join('\n');
 }

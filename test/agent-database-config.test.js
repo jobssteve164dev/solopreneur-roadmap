@@ -41,6 +41,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const childProcess = require('node:child_process');
 const fixtureRoots = [];
 function fixtureRoot(prefix) { const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); fixtureRoots.push(root); return root; }
 function cleanupExact(root) {
@@ -50,6 +51,32 @@ function cleanupExact(root) {
   inventory(root); files.forEach(file => fs.unlinkSync(file)); directories.sort((a, b) => b.length - a.length).forEach(directory => fs.rmdirSync(directory));
 }
 test.after(() => fixtureRoots.forEach(cleanupExact));
+
+test('the managed bridge waits for a Runtime handover instead of exiting the MCP transport', async () => {
+  const { databaseBridgeLauncher } = require('../out/agentDatabaseConfig.js');
+  const root = fixtureRoot('solomap-bridge-handover-');
+  const runtime = path.join(root, 'runtime'); const release = path.join(root, 'release');
+  fs.mkdirSync(runtime); fs.mkdirSync(release);
+  fs.writeFileSync(path.join(release, 'databaseMcpProcess.js'), "process.stdout.write('bridge-ready\\n');\n");
+  const child = childProcess.spawn(process.execPath, ['-e', databaseBridgeLauncher(), root], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '', stderr = ''; child.stdout.on('data', value => { stdout += value; }); child.stderr.on('data', value => { stderr += value; });
+  const timer = setTimeout(() => fs.writeFileSync(path.join(runtime, 'control.json'), JSON.stringify({ schemaVersion: 1, entryPath: path.join(release, 'autonomousRuntimeProcess.js') })), 200);
+  const [code] = await require('node:events').once(child, 'close');
+  clearTimeout(timer);
+  assert.equal(code, 0, stderr);
+  assert.equal(stdout, 'bridge-ready\n');
+});
+
+test('the managed bridge reports a permanent discovery error without waiting through the handover window', async () => {
+  const { databaseBridgeLauncher } = require('../out/agentDatabaseConfig.js');
+  const root = fixtureRoot('solomap-bridge-invalid-'); const runtime = path.join(root, 'runtime'); fs.mkdirSync(runtime);
+  fs.writeFileSync(path.join(runtime, 'control.json'), JSON.stringify({ schemaVersion: 9, entryPath: 'relative-entry.js' }));
+  const startedAt = Date.now();
+  const result = childProcess.spawnSync(process.execPath, ['-e', databaseBridgeLauncher(), root], { encoding: 'utf8', timeout: 3000 });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /solomap_runtime_discovery_invalid/);
+  assert.ok(Date.now() - startedAt < 2500, `permanent error was delayed for ${Date.now() - startedAt}ms`);
+});
 
 test('external CLI configuration installs a shared bridge without replacing other servers or permissions', () => {
   let module;
@@ -87,10 +114,26 @@ test('task instructions teach revision-safe database writes and complete content
   assert.ok(module, 'database task instructions are missing');
   const instructions = module.buildAgentDatabaseInstructions({ migrationTools: true });
   for (const keyword of ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_migration_start', 'solomap_recycling_preview', 'jobId', 'queued', 'running', '终态', '连续 3 次', '不得宣称迁移失败', 'expectedRevision', 'idempotencyKey', 'solomap://schema', 'cursor', '普通对话只生成清单']) assert.ok(instructions.includes(keyword), keyword);
+  assert.match(instructions, /每个任务必须执行/);
+  assert.match(instructions, /当前用户目标.*当前项目/);
+  assert.match(instructions, /实现或判断前.*solomap_context/);
+  assert.match(instructions, /任务收尾/);
+  assert.match(instructions, /未来任务仍会复用/);
+  assert.match(instructions, /旧全局 Markdown 记忆目录.*迁移来源/);
+  assert.match(instructions, /不得依赖.*不得恢复.*不得追加/);
   assert.match(instructions, /completed_with_conflicts 不得原样重试/);
   assert.match(instructions, /继续处理其他任务并生成当前安全回收清单/);
   assert.ok(!instructions.includes('solomap-memory.cjs'));
   assert.ok(!module.buildAgentDatabaseInstructions().includes('solomap_migration_start'));
+});
+
+test('read-only task instructions retrieve database memory without exposing mutation tools', () => {
+  const { buildAgentDatabaseInstructions } = require('../out/agentDatabaseConfig.js');
+  const instructions = buildAgentDatabaseInstructions({ readOnly: true, migrationTools: true });
+  for (const keyword of ['每个任务必须执行', 'solomap_context', 'solomap_search', 'solomap_read', '当前用户目标', '当前项目']) assert.ok(instructions.includes(keyword), keyword);
+  for (const forbidden of ['solomap_write', 'solomap_link', 'solomap_export', 'solomap_migration_start', 'solomap_recycling_preview', 'solomap_recycling_apply']) assert.ok(!instructions.includes(forbidden), forbidden);
+  assert.match(instructions, /本轮对数据库记忆仅可检索和读取/);
+  assert.match(instructions, /不得通过记忆工具写入或改变数据库/);
 });
 
 test('all built-in Agent families receive their native MCP format without changing user settings', () => {

@@ -386,9 +386,11 @@ test('external Agent CLI receives migration tools from the ordinary managed MCP 
     await client.connect(transport);
     const listedTools = (await client.listTools()).tools;
     const names = listedTools.map(tool => tool.name).sort();
-    assert.deepEqual(names, ['solomap_migration_retry', 'solomap_migration_start', 'solomap_migration_status', 'solomap_recycling_apply', 'solomap_recycling_preview']);
-    assert.ok(listedTools.every(tool => tool.inputSchema.properties.projectRoot), 'every migration tool must carry the explicit project boundary');
-    assert.ok(!names.includes('solomap_write'));
+    assert.deepEqual(names, ['solomap_context', 'solomap_migration_retry', 'solomap_migration_start', 'solomap_migration_status', 'solomap_read', 'solomap_recycling_apply', 'solomap_recycling_preview', 'solomap_search']);
+    assert.ok(listedTools.filter(tool => tool.name.startsWith('solomap_migration_') || tool.name.startsWith('solomap_recycling_')).every(tool => tool.inputSchema.properties.projectRoot), 'every migration tool must carry the explicit project boundary');
+    for (const name of ['solomap_write', 'solomap_link', 'solomap_export']) assert.ok(!names.includes(name));
+    const context = await client.callTool({ name: 'solomap_context', arguments: { project: identity.projectId, query: 'migration' } });
+    assert.equal(context.isError, undefined, JSON.stringify(context.content));
     const overview = await client.callTool({ name: 'solomap_migration_status', arguments: { projectRoot: project } });
     assert.equal(overview.isError, undefined, JSON.stringify(overview.content));
     const summary = JSON.parse(overview.content[0].text);
