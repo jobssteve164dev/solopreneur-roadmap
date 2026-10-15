@@ -376,6 +376,22 @@ test('a retained status can finish from archived artifacts after its physical ru
   assert.ok(await f.client.findConversation(f.project,71));
 });
 
+test('a retained status remains idempotent when its missing output fallback was later reprojected in the journal', async t => {
+  const f=await history(t),output=path.join(f.runDir,'output.log'),retainedOutput=path.join(f.base,'retained-output.log');
+  fs.renameSync(output,retainedOutput);
+  assert.deepEqual((await importAgentRuns(f.store,f.sourceRoot,{projectRoot:f.project})).conflicts,[]);
+  const before=f.store.readRunState(f.projectId,71),formalOutput=await f.client.readLog(runStatusReference(f.project,71),'output');
+  fs.renameSync(f.runDir,path.join(f.base,'retired-run-after-adoption'));
+  f.store.updateProjectJournal(f.projectId,71,{agentCli:'claude',command:'claude original arguments',output:'后来写入项目日志的正式投影',status:'Recorded'});
+
+  const replay=await importAgentRuns(f.store,f.sourceRoot,{projectRoot:f.project,archiveUnresolved:true});
+
+  assert.deepEqual(replay.conflicts,[]);
+  assert.deepEqual(f.store.readRunState(f.projectId,71),before);
+  assert.deepEqual(await f.client.readLog(runStatusReference(f.project,71),'output'),formalOutput);
+  assert.equal(f.store.readMigrationSource(`agent-status:${f.project}`,'71.json').stage,'imported');
+});
+
 test('history adoption explicitly retries its own conflicted job when the requested conversation is still missing', async t => {
   const f = await history(t);
   const job = f.store.enqueueMemoryMigration({ collection: 'agent-runs', sourceRoot: f.sourceRoot, projectRoot: f.project, archiveUnresolved: true }, `conversation-history-adoption-v3:${f.project}`);
@@ -1375,6 +1391,12 @@ for (const provider of ['codex', 'antigravity']) test(`unregistered flat ${provi
   const sequence = f.store.search({ scope: f.projectId }).sourceSequence;
   assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
   assert.equal(f.store.search({ scope: f.projectId }).sourceSequence, sequence);
+  if (provider === 'codex') {
+    fs.appendFileSync(transcript, JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '后来变化的原生来源' }] } }) + '\n');
+    assert.ok((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts.some(item => item.error.includes('historical_run_target_conflict')));
+    fs.writeFileSync(transcript, transcriptBody);
+    assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  }
   fs.renameSync(f.sourceRoot, path.join(f.base, 'retained-flat-history'));fs.renameSync(f.statuses, path.join(f.base, 'retained-flat-statuses'));await f.restart();
   const reread = await f.client.findConversation(f.project, 71);
   assert.equal((await f.client.getResumableSession(reread.reference)).sessionId, sessionId);

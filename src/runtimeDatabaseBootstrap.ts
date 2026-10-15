@@ -316,7 +316,7 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
         }
         catch { continue; }
       }
-      const version = source.collection === 'agent-runs' ? 10 : source.collection === 'project-journal' ? 8 : source.collection === 'project-growth' ? 3 : source.collection === 'documentation' ? 3 : 2;
+      const version = source.collection === 'agent-runs' ? 11 : source.collection === 'project-journal' ? 8 : source.collection === 'project-growth' ? 3 : source.collection === 'documentation' ? 3 : 2;
       const stamp = source.collection === 'agent-runs'
         ? await historicalRunSourceStamp(store, [source.sourceRoot, path.join(projectRoot, '.solopreneur', 'agent-status'), path.join(projectRoot, '.agent_status.json')], shouldContinue, discoveredOwners)
         : source.collection === 'documentation'

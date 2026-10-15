@@ -6012,22 +6012,38 @@ export class UnifiedDataStore {
               return { unchanged: false, state: this.readRunState(projectId, executionLogId) };
             }
           }
-          if (!input.legacyCompletion || state.status.historicalCompletionSource || state.status.historicalSourceHash !== digest(canonical(sourceIdentity))) throw new Error('historical_run_target_conflict');
-          const completion = input.legacyCompletion;
-          const mayNormalize = state.revision === 1 && state.status.status === status.status;
-          const receipt = this.recordMutation({ projectId, source, completionSource: completion.source }, `adopt-historical-completion:${canonical([projectId, sourceHash])}`, 'historical_adoption', () => {
-            const control = this.runControl(projectId, executionLogId);
-            const metadata = { ...JSON.parse(this.content(String(control.metadata_content_id)).toString('utf8')), ...(mayNormalize ? legacyDecision : {}), historicalCompletionSource: completion.source, historicalSourceHash: sourceHash };
-            if (mayNormalize && legacyDecision.status) this.db.run('UPDATE runs SET status=? WHERE id=?', [String(legacyDecision.status), state.runId]);
-            this.db.run('UPDATE run_control SET metadata_content_id=? WHERE run_id=?', [this.putContent(canonical(metadata), 'application/json'), state.runId]);
-            this.db.run('UPDATE objects SET revision=revision+1,updated_at=? WHERE id=?', [Date.now(), state.runId]);
-            this.saveRunControlRevision(state.runId);
-            if (mayNormalize && Object.keys(legacyDecision).length) this.db.run("INSERT INTO run_consumer_sources VALUES(?,?,?,?,?,'queued') ON CONFLICT(run_id,turn_id,checkpoint_sequence) DO UPDATE SET source_revision=excluded.source_revision WHERE run_consumer_sources.state='queued'", [state.runId, projectId, state.turnId, Number(control.checkpoint_sequence), state.revision + 1]);
-            return this.current(state.runId);
-          });
-          this.db.run("UPDATE migration_items SET object_id=?,imported_revision=?,stage='imported',error=NULL WHERE source_identity=? AND source_key=? AND source_hash=?", [receipt.objectId, receipt.revision, completion.source.identity, completion.source.key, completion.source.hash]);
-          this.markMigrationSourceImported(source.identity, source.key);
-          return { unchanged: false, state: this.readRunState(projectId, executionLogId) };
+          if (input.legacyCompletion && !state.status.historicalCompletionSource && state.status.historicalSourceHash === digest(canonical(sourceIdentity))) {
+            const completion = input.legacyCompletion;
+            const mayNormalize = state.revision === 1 && state.status.status === status.status;
+            const receipt = this.recordMutation({ projectId, source, completionSource: completion.source }, `adopt-historical-completion:${canonical([projectId, sourceHash])}`, 'historical_adoption', () => {
+              const control = this.runControl(projectId, executionLogId);
+              const metadata = { ...JSON.parse(this.content(String(control.metadata_content_id)).toString('utf8')), ...(mayNormalize ? legacyDecision : {}), historicalCompletionSource: completion.source, historicalSourceHash: sourceHash };
+              if (mayNormalize && legacyDecision.status) this.db.run('UPDATE runs SET status=? WHERE id=?', [String(legacyDecision.status), state.runId]);
+              this.db.run('UPDATE run_control SET metadata_content_id=? WHERE run_id=?', [this.putContent(canonical(metadata), 'application/json'), state.runId]);
+              this.db.run('UPDATE objects SET revision=revision+1,updated_at=? WHERE id=?', [Date.now(), state.runId]);
+              this.saveRunControlRevision(state.runId);
+              if (mayNormalize && Object.keys(legacyDecision).length) this.db.run("INSERT INTO run_consumer_sources VALUES(?,?,?,?,?,'queued') ON CONFLICT(run_id,turn_id,checkpoint_sequence) DO UPDATE SET source_revision=excluded.source_revision WHERE run_consumer_sources.state='queued'", [state.runId, projectId, state.turnId, Number(control.checkpoint_sequence), state.revision + 1]);
+              return this.current(state.runId);
+            });
+            this.db.run("UPDATE migration_items SET object_id=?,imported_revision=?,stage='imported',error=NULL WHERE source_identity=? AND source_key=? AND source_hash=?", [receipt.objectId, receipt.revision, completion.source.identity, completion.source.key, completion.source.hash]);
+            this.markMigrationSourceImported(source.identity, source.key);
+            return { unchanged: false, state: this.readRunState(projectId, executionLogId) };
+          }
+          const historicalStatusSource = state.status.historicalStatusSource, historicalOutputSource = state.status.historicalOutputSource;
+          if (state.status.historicalAdopted === true && historicalStatusSource && canonical(historicalStatusSource) === canonical(source)
+            && input.outputSource && historicalOutputSource && typeof historicalOutputSource === 'object'
+            && String((historicalOutputSource as ImportedSource).identity || '') === input.outputSource.identity
+            && String((historicalOutputSource as ImportedSource).key || '') === input.outputSource.key
+            && String((historicalOutputSource as ImportedSource).hash || '') !== input.outputSource.hash) {
+            const formalOutput = Buffer.concat(this.rows("SELECT content_id FROM log_chunks WHERE run_id=? AND stream='output' ORDER BY sequence", [state.runId]).map(chunk => this.content(String(chunk.content_id))));
+            const previousSourceIdentity = { ...sourceIdentity, output: digest(formalOutput), outputSource: historicalOutputSource };
+            const previousSourceHash = digest(canonical({ ...previousSourceIdentity, ...(state.status.historicalCompletionSource ? { completionSource: state.status.historicalCompletionSource } : {}) }));
+            if (previousSourceHash === state.status.historicalSourceHash) {
+              this.markMigrationSourceImported(source.identity, source.key);
+              return { unchanged: true, state };
+            }
+          }
+          throw new Error('historical_run_target_conflict');
         }
         const legacyTurn = this.rows('SELECT turn_id FROM legacy_report_turns WHERE project_id=? AND task_id=? AND execution_log_id=? AND legacy_sequence=?', [projectId, taskId, executionLogId, Number(status.checkpointSequence || 0)])[0];
         if (legacyTurn?.turn_id === state.turnId && Number(state.status.checkpointSequence) === Number(status.checkpointSequence || 0)) restoreCurrentTurnTimes(state.turnId);

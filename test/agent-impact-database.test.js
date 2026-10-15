@@ -634,8 +634,8 @@ test('normal upgrade supersedes the last agent-run migration version and enables
    if(request.operation==='import_project_data'&&request.input.collection==='agent-runs')currentKey=request.input.idempotencyKey;
    return {jobId:'key-probe',status:'completed'};
   },()=>true);
-  assert.match(currentKey,/^startup-agent-runs-v10:/);
-  const prior=store.enqueueMemoryMigration(args,currentKey.replace(/^startup-agent-runs-v10:/,'startup-agent-runs-v9:'));
+  assert.match(currentKey,/^startup-agent-runs-v11:/);
+  const prior=store.enqueueMemoryMigration(args,currentKey.replace(/^startup-agent-runs-v11:/,'startup-agent-runs-v10:'));
   store.updateMigrationJob(prior.jobId,'completed_with_conflicts',{imported:0,unchanged:0,originalBytes:fs.statSync(path.join(run,'output.log')).size,conflicts:[{source:run,error:'Error: historical_run_identity_ambiguous'}],retainedFiles:[run],interrupted:false});
   assert.equal(store.readProjectImpactRuns(project).length,0);
   await enqueueStartupDataMigrations(store,ops,()=>true);await ops.waitForMigrations();
@@ -655,7 +655,7 @@ test('normal upgrade supersedes an old agent-run conflict after its entire legac
  try{
   await store.registerProject({root:workspace});
   const sourceRoot=path.join(workspace,'.solopreneur','agent-runs');
-  const prior=store.enqueueMemoryMigration({collection:'agent-runs',sourceRoot,projectRoot:workspace},`startup-agent-runs-v9:${workspace}:retired`);
+  const prior=store.enqueueMemoryMigration({collection:'agent-runs',sourceRoot,projectRoot:workspace},`startup-agent-runs-v10:${workspace}:retired`);
   store.updateMigrationJob(prior.jobId,'completed_with_conflicts',{conflicts:[{source:path.join(workspace,'.solopreneur','agent-status','1.json'),error:'historical_run_input_missing'}]});
   await enqueueStartupDataMigrations(store,ops,()=>true);await ops.waitForMigrations();
   const latest=store.migrationJobSummaries().find(job=>job.args.collection==='agent-runs'&&job.args.sourceRoot===sourceRoot);
