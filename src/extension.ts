@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as childProcess from 'child_process';
 import * as crypto from 'crypto';
 import { readWindowsProcessBirthMarker } from './processIdentity.js';
+import { withDesktopSessionEnvironment } from './desktopSessionEnvironment';
 import { automationSoundReady, deliverAutomationSound, disposeAutomationSoundView, handleAutomationSoundMessage } from './automationSound.js';
 import { createVscodeTelegramHost } from './telegramRemote';
 import { queueTelegramBackgroundNotification, refreshTelegramRuntimeConfig, telegramBotTokenSecretStorageKey } from './telegramRuntimeConfig';
@@ -6656,8 +6657,9 @@ function createAgentTerminal(
   conversationId = 0,
   env?: Record<string, string>
 ): vscode.Terminal {
+  const terminalEnvironment = withDesktopSessionEnvironment(env);
   const reservedTerminals = reservedAgentTerminalsByProject.get(workspaceRoot);
-  const environmentSignature = JSON.stringify(env || {});
+  const environmentSignature = JSON.stringify(terminalEnvironment);
   const liveTerminals = new Set(vscode.window.terminals);
   if (reservedTerminals) {
     const liveReservations = reservedTerminals.filter((entry) => liveTerminals.has(entry.terminal));
@@ -6699,7 +6701,7 @@ function createAgentTerminal(
     iconPath: iconPath,
     color: new vscode.ThemeColor('terminal.ansiCyan'),
     cwd: workspaceRoot,
-    env,
+    env: terminalEnvironment,
   });
 }
 
@@ -6723,6 +6725,7 @@ async function revealAgentStartupTerminal(
     agentCli || getPersistedSettings(context).cliPath,
     model
   );
+  const resolvedTerminalEnvironment = withDesktopSessionEnvironment(terminalEnvironment);
   const terminal = vscode.window.createTerminal({
     name: makeAgentTerminalName(workspaceRoot, label),
     iconPath: extensionContextRef
@@ -6730,12 +6733,12 @@ async function revealAgentStartupTerminal(
       : new vscode.ThemeIcon('symbol-string'),
     color: new vscode.ThemeColor('terminal.ansiCyan'),
     cwd: workspaceRoot,
-    env: terminalEnvironment
+    env: resolvedTerminalEnvironment
   });
   const reservations = reservedAgentTerminalsByProject.get(workspaceRoot) || [];
   reservations.push({
     terminal,
-    environmentSignature: JSON.stringify(terminalEnvironment || {})
+    environmentSignature: JSON.stringify(resolvedTerminalEnvironment)
   });
   reservedAgentTerminalsByProject.set(workspaceRoot, reservations);
   activeAgentTerminalName = terminal.name;

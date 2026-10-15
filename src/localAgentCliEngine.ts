@@ -4,6 +4,7 @@ import * as path from 'path';
 
 import { getAgentCliFamily, resolveAgentCliWithinFamily } from './agentCli';
 import { CognitiveShadowEngine, CognitiveShadowInput, CognitiveShadowProposal } from './autonomousRuntime';
+import { desktopSessionEnvironment } from './desktopSessionEnvironment';
 
 export interface CognitiveCliInvocation {
   command: string;
@@ -44,6 +45,7 @@ export function buildCognitiveCliInvocation(agentCli: string, model: string, pro
 
 export function cognitiveCliEnvironment(): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries({
+    ...desktopSessionEnvironment(),
     PATH: process.env.PATH,
     HOME: process.env.HOME,
     USERPROFILE: process.env.USERPROFILE,
@@ -52,7 +54,6 @@ export function cognitiveCliEnvironment(): NodeJS.ProcessEnv {
     XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
     XDG_DATA_HOME: process.env.XDG_DATA_HOME,
     XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
-    DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS,
     CODEX_HOME: process.env.CODEX_HOME,
     CODEX_SHARED_CONFIG_PATH: process.env.CODEX_SHARED_CONFIG_PATH,
     CODEX_SHARED_DEVICE_IDENTITY_PATH: process.env.CODEX_SHARED_DEVICE_IDENTITY_PATH,

@@ -1690,7 +1690,8 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
               vscodeTestState.uriHandlers.push(handler);
               return { dispose() {} };
             },
-            createTerminal() {
+            createTerminal(options) {
+              vscodeTestState.createdTerminalOptions = options;
               return {
                 name: 'Agent Console · test',
                 show() {},
@@ -1891,6 +1892,9 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
         }
         if (id === './cognitiveRuntimeConfig') {
           return require(path.join(projectRoot, 'out/cognitiveRuntimeConfig.js'));
+        }
+        if (id === './desktopSessionEnvironment') {
+          return require(path.join(projectRoot, 'out/desktopSessionEnvironment.js'));
         }
         if (id === './piAgentEngine') {
           return require(path.join(projectRoot, 'out/piAgentEngine.js'));
@@ -8933,10 +8937,14 @@ test('a closed startup reservation cannot consume the next Agent launch command'
   };
   extensionModule.__reserveTerminalForTest(workspaceRoot, closedTerminal);
   extensionModule.__vscodeTestState.createdTerminal = null;
-
+  const previousKeyring = process.env.GNOME_KEYRING_CONTROL;
+  process.env.GNOME_KEYRING_CONTROL = '/run/user/fixture/keyring';
   const terminal = extensionModule.__createAgentTerminal(workspaceRoot, 'solo', 72);
+  if (previousKeyring === undefined) delete process.env.GNOME_KEYRING_CONTROL;
+  else process.env.GNOME_KEYRING_CONTROL = previousKeyring;
 
   assert.notEqual(terminal, closedTerminal);
+  assert.equal(extensionModule.__vscodeTestState.createdTerminalOptions.env.GNOME_KEYRING_CONTROL, '/run/user/fixture/keyring');
 });
 
 test('the active conversation poller does not fail a quiet long-running Agent', async t => {
@@ -13837,7 +13845,7 @@ test('continuing a stopped interactive conversation opens a new terminal and set
   assert.deepEqual(await Promise.all([click(),click()]),[true,true]);
   assert.deepEqual(errors,[]);assert.equal(staleShown,0);assert.equal(staleDisposed,1);assert.equal(created.length,1,'concurrent button actions reserve one fresh terminal');assert.equal(preparedRuns.length,1);
   const terminal = created[0].terminal, continuation = preparedRuns[0], newId = Number(continuation.status.rootExecutionLogId), nextReference = require('../out/runLifecycleClient.js').runStatusReference(project,newId);
-  assert.equal(created[0].options.cwd,project);assert.equal(Object.keys(created[0].options.env).length,0);assert.ok(terminal.shown>=1);assert.notEqual(terminal.name,stale.name);
+  assert.equal(created[0].options.cwd,project);assert.deepEqual(created[0].options.env,require('../out/desktopSessionEnvironment.js').desktopSessionEnvironment());assert.ok(terminal.shown>=1);assert.notEqual(terminal.name,stale.name);
   assert.equal(extension.reservations(project),0,'actual delivery consumes the startup reservation rather than creating another terminal');assert.deepEqual({...extension.owned(newId)},{name:terminal.name,root:project});assert.deepEqual({...extension.owned(336)},{name:undefined,root:undefined});
   assert.equal(sent.length,2);assert.equal(sent[0].terminal,terminal);assert.equal(sent[1].terminal,terminal);assert.match(sent[0].text,/正在准备本地对话/);assert.match(sent[1].text,/SOLOMAP_TERMINAL_DELIVERY_ID=/);assert.ok(sent[1].text.endsWith(continuation.finalCommand));assert.match(continuation.finalCommand,/runAgentProcess\.js/);
   const states = await native.ops({operation:'list_run_states',input:{root:project,cursor:0,limit:10}});assert.equal(states.items.length,3);
@@ -13931,7 +13939,7 @@ test('continuing an earlier turn opens a new session terminal once for concurren
   const click=()=>extension.action({}, {command:'conversation.continue',projectPath:project,nodeId:'__solo__',conversationId:earlierId},'sidebar',{postMessage(message){posted.push(message);return Promise.resolve(true);}});
   assert.deepEqual(await Promise.all([click(),click()]),[true,true]);assert.deepEqual(errors,[]);assert.equal(oldShown,0);assert.equal(oldDisposed,1);assert.equal(created.length,1);assert.equal(preparedRuns.length,1);assert.deepEqual(registrations,[],'continue from an earlier turn does not register input against the old terminal');
   const prepared = preparedRuns[0], newId = Number(prepared.status.rootExecutionLogId), terminal = created[0].terminal;
-  assert.equal(created[0].options.cwd,project);assert.equal(Object.keys(created[0].options.env).length,0);assert.notEqual(terminal.name,oldTerminal.name);assert.ok(terminal.shown>=1);assert.equal(extension.reservations(project),0);assert.deepEqual({...extension.owned(newId)},{name:terminal.name,root:project});assert.deepEqual({...extension.owned(336)},{name:undefined,root:undefined});
+  assert.equal(created[0].options.cwd,project);assert.deepEqual(created[0].options.env,require('../out/desktopSessionEnvironment.js').desktopSessionEnvironment());assert.notEqual(terminal.name,oldTerminal.name);assert.ok(terminal.shown>=1);assert.equal(extension.reservations(project),0);assert.deepEqual({...extension.owned(newId)},{name:terminal.name,root:project});assert.deepEqual({...extension.owned(336)},{name:undefined,root:undefined});
   assert.equal(sent.length,2);assert.equal(sent[0].terminal,terminal);assert.equal(sent[1].terminal,terminal);assert.match(sent[0].text,/正在准备本地对话/);assert.match(sent[1].text,/SOLOMAP_TERMINAL_DELIVERY_ID=/);assert.ok(sent[1].text.endsWith(prepared.finalCommand));assert.match(prepared.finalCommand,/runAgentProcess\.js/);
   const delivered = await read(project,newId);assert.equal(delivered.taskId,run.taskId);assert.equal(delivered.conversationId,run.conversationId);assert.notEqual(delivered.turnId,parent.turnId);assert.equal(delivered.status.sourceParentRunId,parent.runId);assert.equal(delivered.status.sourceParentTurnId,parent.turnId);assert.equal(delivered.status.lineageRootExecutionLogId,336);assert.equal(delivered.status.plannedNativeSessionId,run.status.plannedNativeSessionId);assert.equal(delivered.status.terminalName,terminal.name);assert.ok(delivered.status.terminalDeliveryId);assert.ok(delivered.status.terminalCommandSubmittedAt);
   assert.equal((await operation('list_run_states',{root:project,cursor:0,limit:10})).items.length,5);assert.equal(posted.filter(m=>m.command==='conversationActionSettled'&&m.action==='continue'&&m.projectPath===project&&Number(m.conversationId)===earlierId).length,2);

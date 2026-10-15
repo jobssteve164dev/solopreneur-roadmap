@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import { desktopSessionEnvironment } from './desktopSessionEnvironment';
 import { disposeAutomationSoundView } from './automationSound.js';
 import { SyncEngine } from './db/syncEngine';
 import { AgentConversation } from './db/types';
@@ -828,6 +829,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       name: 'Setup',
       iconPath: vscode.Uri.joinPath(this._extensionUri, 'resources', 'logo.png'),
       cwd: maintenanceRoot,
+      env: desktopSessionEnvironment(),
     });
     terminal.show(true);
     if (action === 'github-auth') {
