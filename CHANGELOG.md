@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.572 - 2026-10-15
+
+### Fixed
+- preserve roadmap files during recycling (743b765)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.571 - 2026-10-15
 
 ### Fixed
