@@ -327,6 +327,7 @@ export class UnifiedDataStore {
       if (!existed) fs.chmodSync(this.filePath, 0o600);
       const sql = unifiedSchemaSql();
       const migrationsExist = this.rows("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'").length;
+      let schemaChanged = !migrationsExist;
       const rebuildTables = !migrationsExist || !this.rows('SELECT version FROM schema_migrations WHERE version=18').length;
       // SQLite requires FK enforcement outside the transaction to replace a referenced table.
       // Every reference is checked before committing; normal writes always enforce constraints.
@@ -351,6 +352,7 @@ export class UnifiedDataStore {
           if (!applied) {
             this.db.run(migration.sql);
             this.db.run('INSERT INTO schema_migrations VALUES(?,?,?)', [migration.version, digest(migration.sql), Date.now()]);
+            schemaChanged = true;
           }
         }
         if (rebuildTables && this.rows('PRAGMA foreign_key_check').length) throw new Error('migration_foreign_key_violation');
@@ -366,6 +368,8 @@ export class UnifiedDataStore {
       const device = this.rows('SELECT id FROM devices WHERE environment=?', [environment])[0];
       this.deviceId = device ? String(device.id) : crypto.randomUUID();
       if (!device) this.db.run('INSERT INTO devices VALUES(?,?,?,NULL,?)', [this.deviceId, os.hostname(), environment, Date.now()]);
+      try { this.maintainPlannerStatistics(schemaChanged); }
+      catch (error) { console.warn('SoloMap planner statistics maintenance failed:', error); }
     } catch (error) { this.db.close(); throw error; }
   }
   public withActor<T>(actorId: string, action: () => T): T {
@@ -1768,6 +1772,7 @@ export class UnifiedDataStore {
       this.db.run('INSERT INTO object_revisions VALUES(?,?,?,?,?,?)', [id, object.revision, snapshotId, this.actorId, reason, time]);
       if (object.kind === 'report') this.indexReportRevision(object, time);
       if (object.projectId && ['task', 'turn', 'conversation', 'report', 'growth_snapshot'].includes(object.kind)) this.bumpReportSourceRevision(object.projectId);
+      if (object.projectId && ['run', 'turn'].includes(object.kind)) this.touchProjectAnalysisSource(object.projectId);
       if (object.kind === 'lesson') (object.data.event_refs as Array<{ sourceId: string; objectId: string | null; revision: number | null }>).forEach((ref, ordinal) => this.db.run('INSERT INTO lesson_event_refs VALUES(?,?,?,?,?,?,?)', [id, object.revision, ordinal, object.projectId, ref.sourceId, ref.objectId, ref.revision]));
       if (object.kind === 'lesson_decision') (object.data.candidate_refs as Array<{ objectId: string; revision: number | null }>).forEach((candidate, ordinal) => this.db.run('INSERT INTO lesson_decision_candidates VALUES(?,?,?,?,?,?)', [id, object.revision, ordinal, object.projectId, candidate.objectId, candidate.revision]));
       const sequence = Number(this.rows('SELECT COALESCE(MAX(sequence),0)+1 AS next FROM events')[0].next);
@@ -5766,6 +5771,7 @@ export class UnifiedDataStore {
         this.db.run('INSERT INTO relations VALUES(?,?,?)', [run.run_id, 'source', id]);
       }
       if (input.turnId) this.db.run('INSERT OR IGNORE INTO relations VALUES(?,?,?)', [id, 'source', input.turnId]);
+      this.touchProjectAnalysisSource(projectId);
       return this.current(id, false);
     });
     return receipt;
@@ -6237,7 +6243,10 @@ export class UnifiedDataStore {
     return missing.length;
   }
   private bumpReportSourceRevision(projectId: string): void {
-    this.db.run('INSERT INTO report_source_generations VALUES(?,1) ON CONFLICT(project_id) DO UPDATE SET revision=revision+1', [projectId]);
+    this.db.run('INSERT INTO report_source_generations(project_id,revision) VALUES(?,1) ON CONFLICT(project_id) DO UPDATE SET revision=revision+1', [projectId]);
+  }
+  private touchProjectAnalysisSource(projectId: string): void {
+    this.db.run('INSERT INTO project_analysis_sources(project_id,revision,run_count,latest_run_at,recent_activity_at) VALUES(?,1,0,0,0) ON CONFLICT(project_id) DO UPDATE SET revision=project_analysis_sources.revision+1', [projectId]);
   }
   public reportSourceRevision(projectId: string): number {
     return Number(this.rows('SELECT revision FROM report_source_generations WHERE project_id=?', [projectId])[0]?.revision || 0);
@@ -6717,7 +6726,7 @@ export class UnifiedDataStore {
       const executionClause = input.executionLogId ? ' AND j.execution_log_id=?' : '';
       const executionValues: SqlValue[] = input.executionLogId ? [input.executionLogId] : [];
       rows = this.rows(`SELECT j.*,NULL AS linked_at,0 AS linked FROM project_journal_entries j WHERE j.project_id=? AND j.node_id=?${executionClause}
-        UNION ALL SELECT j.*,l.linked_at,1 AS linked FROM project_journal_links l JOIN project_journal_entries j ON j.project_id=l.project_id AND j.execution_log_id=l.execution_log_id
+        UNION ALL SELECT j.*,l.linked_at,1 AS linked FROM project_journal_links l INDEXED BY project_journal_links_node CROSS JOIN project_journal_entries j ON j.project_id=l.project_id AND j.execution_log_id=l.execution_log_id
         WHERE l.project_id=? AND l.node_id=?${executionClause} ORDER BY execution_log_id DESC LIMIT ? OFFSET ?`,
         [projectId, input.nodeId, ...executionValues, projectId, input.nodeId, ...executionValues, limit + 1, offset]);
     } else {
@@ -6958,40 +6967,20 @@ export class UnifiedDataStore {
     });
   }
   public readProjectAnalysisSource(projectId: string): { runCount: number; latestRunAt: string; recentActivityAt: string; conversationRevision: string } {
-    const runs = this.rows("SELECT record_json,files_json,signals_json,updated_at FROM project_run_indexes WHERE project_id=? ORDER BY execution_log_id", [projectId]);
-    const journal = this.rows('SELECT execution_log_id,node_id,timestamp,agent_cli,command,output,status FROM project_journal_entries WHERE project_id=? ORDER BY execution_log_id', [projectId]);
-    const links = this.rows('SELECT execution_log_id,node_id,linked_at FROM project_journal_links WHERE project_id=? ORDER BY execution_log_id,node_id', [projectId]);
-    const conversations = this.rows(`SELECT j.execution_log_id,j.run_id,j.turn_id,
-      rc.generation,rc.checkpoint_sequence,rc.current_turn_id,rc.metadata_content_id,rc.binding_content_id,rc.delivery_pending,rc.recovery_needed,
-      r.status AS run_status,r.started_at AS run_started_at,r.finished_at AS run_finished_at,r.exit_code,run_object.revision AS run_revision,
-      turn_object.revision AS turn_revision,t.request_content_id,t.summary_content_id,t.outcome,t.started_at AS turn_started_at,t.finished_at AS turn_finished_at
-      FROM run_turn_journals j
-      JOIN run_control rc ON rc.project_id=j.project_id AND rc.run_id=j.run_id
-      JOIN runs r ON r.id=j.run_id AND r.project_id=j.project_id
-      JOIN objects run_object ON run_object.id=j.run_id
-      JOIN turns t ON t.id=j.turn_id AND t.project_id=j.project_id
-      JOIN objects turn_object ON turn_object.id=j.turn_id
-      WHERE j.project_id=? ORDER BY j.execution_log_id,j.turn_id`, [projectId]);
-    const runDocuments = this.rows(`SELECT j.execution_log_id,d.purpose,d.object_id,o.revision,e.content_id,c.sha256
-      FROM run_turn_journals j
-      JOIN run_documents d ON d.run_id=j.run_id
-      JOIN objects o ON o.id=d.object_id
-      JOIN evidence e ON e.id=d.object_id
-      JOIN contents c ON c.id=e.content_id
-      WHERE j.project_id=? ORDER BY j.execution_log_id,d.purpose`, [projectId]);
-    const runDates = runs.flatMap(row => {
-      const record = JSON.parse(String(row.record_json));
-      return [String(record.finishedAt || ''), String(record.startedAt || '')];
-    }).filter(Boolean);
-    const journalDates = journal.map(row => String(row.timestamp || '')).filter(Boolean);
-    const latest = [...runDates, ...journalDates]
-      .map(value => Date.parse(value)).filter(Number.isFinite).reduce((current, value) => Math.max(current, value), 0);
-    const latestRun = runDates.map(value => Date.parse(value)).filter(Number.isFinite).reduce((current, value) => Math.max(current, value), 0);
+    const row = this.rows('SELECT revision,run_count,latest_run_at,recent_activity_at FROM project_analysis_sources WHERE project_id=?', [projectId])[0];
+    const runCount = Number(row?.run_count || 0);
+    const timestamp = (value: unknown): string => {
+      const milliseconds = Number(value || 0);
+      return Number.isFinite(milliseconds) && milliseconds !== 0 ? new Date(milliseconds).toISOString() : '';
+    };
+    const latestRunAt = timestamp(row?.latest_run_at);
+    const recentActivityAt = timestamp(row?.recent_activity_at);
+    const revision = Number(row?.revision || 0);
     return {
-      runCount: runs.length,
-      latestRunAt: latestRun ? new Date(latestRun).toISOString() : '',
-      recentActivityAt: latest ? new Date(latest).toISOString() : '',
-      conversationRevision: digest(canonical([journal, links, runs, conversations, runDocuments]))
+      runCount,
+      latestRunAt,
+      recentActivityAt,
+      conversationRevision: digest(canonical([projectId, revision, runCount, latestRunAt, recentActivityAt]))
     };
   }
   public readStrategyState(projectId: string | null): { objectId: string | null; revision: number; value: unknown } {
@@ -7269,6 +7258,14 @@ export class UnifiedDataStore {
         status: String(maintenance.status)
       } : null
     };
+  }
+  public maintainPlannerStatistics(force = false, now = Date.now()): boolean {
+    if (this.transactionDepth) throw new Error('database_maintenance_transaction_active');
+    const last = Number(this.rows("SELECT value FROM database_meta WHERE key='planner_statistics_optimized_at'")[0]?.value || 0);
+    if (!force && Number.isFinite(last) && now - last < 24 * 60 * 60 * 1000) return false;
+    this.db.run('PRAGMA optimize=0x10002');
+    this.db.run('INSERT INTO database_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', ['planner_statistics_optimized_at', String(now)]);
+    return true;
   }
   public compactDatabaseStorage(): { integrity: string } {
     if (this.transactionDepth) throw new Error('database_maintenance_transaction_active');

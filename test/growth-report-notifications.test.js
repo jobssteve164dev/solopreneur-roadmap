@@ -26,6 +26,7 @@ test('the real growth panel observes native reports without watching retired rep
     getPersistedSettings: () => ({ globalDataPath: f.root }), normalizeGlobalDataPathForExtension: x => x,
     vscode: { workspace: { createFileSystemWatcher: () => assert.fail('ordinary native reports must not watch retired directories') }, RelativePattern: class {} },
     setTimeout, console };
+  scope.panelMessages_1 = require('../out/panelMessages.js');
   const observer = path.resolve(__dirname, '../out/growthReportObserver.js');
   if (fs.existsSync(observer)) scope.growthReportObserver_js_1 = require(observer);
   await new vm.Script(compiled.slice(start, end) + '\n}\nrefreshProjectGrowthPanel(context,projectPath)') .runInNewContext(scope);
@@ -188,6 +189,7 @@ function growthSettingsScope(context, initialSettings, changed) {
     settingsKey: 'settings', vscode: { ConfigurationTarget: { Global: 1 }, workspace: { getConfiguration: () => ({ get: () => undefined, update: async () => {} }) }, window: { showInformationMessage: () => {} } }
   };
   scope.localDataLoader_1 = { postLocalDataLoad: scope.postLocalDataLoad };
+  scope.panelMessages_1 = require('../out/panelMessages.js');
   scope.projectGrowth_1 = { getProjectGrowthView: (...args) => scope.getProjectGrowthView(...args) };
   scope.projectGrowthWebview_1 = { getProjectGrowthWebviewHtml: scope.getProjectGrowthWebviewHtml };
   scope.agentModelSelection_1 = { mergeAgentModelPreferences: scope.mergeAgentModelPreferences };

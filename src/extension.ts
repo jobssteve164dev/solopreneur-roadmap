@@ -236,7 +236,10 @@ import {
   postFlowStateLoaded,
   postProjectsLoaded,
   postSettingsLoaded,
-  postWebviewMessage
+  postWebviewContainerMessage,
+  postWebviewMessage,
+  updateWebviewContainer,
+  webviewFromContainer
 } from './panelMessages';
 import {
   extractCodexSessionIdFromOutputText,
@@ -833,7 +836,7 @@ export async function activate(context: vscode.ExtensionContext) {
           scanReason: 'manual_command',
           maxFiles: 5000
         });
-        activePanel?.webview.postMessage({ command: 'projectGrowthLoaded', projectPath, growth: growthView });
+        void postWebviewContainerMessage(activePanel, { command: 'projectGrowthLoaded', projectPath, growth: growthView });
         sidebarProvider?.postMessage({ command: 'projectGrowthLoaded', projectPath, growth: growthView });
         vscode.window.showInformationMessage(copy.refreshDone(growthView.totals.files, growthView.totals.modules));
       } catch (error) {
@@ -868,7 +871,7 @@ export async function activate(context: vscode.ExtensionContext) {
     async () => {
       await broadcastSettings(context, false, false);
       if (sidebarProvider) void sidebarProvider.sendProjects();
-      if (activePanel) postProjectsLoaded(activePanel.webview, getProjectState(context));
+      void postWebviewContainerMessage(activePanel, { command: 'projectsLoaded', projects: getProjectState(context) });
       if (activeStrategyPyramidPanel) {
         activeStrategyPyramidPanel.title = getStrategyPyramidPanelTitle(context);
         void refreshStrategyPyramidPanel(context);
@@ -1217,12 +1220,18 @@ async function ensureTaskRuntimeReady(context: vscode.ExtensionContext): Promise
   await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
 }
 
-let projectActionLaunchQueue: Promise<void> = Promise.resolve();
+const projectActionLaunchQueues = new Map<string, Promise<void>>();
 
-async function enqueueProjectActionLaunch<T>(action: (registered: () => void) => Promise<T>): Promise<T> {
-  const previous = projectActionLaunchQueue;
+async function enqueueProjectActionLaunch<T>(
+  projectKeyOrAction: string | ((registered: () => void) => Promise<T>),
+  keyedAction?: (registered: () => void) => Promise<T>
+): Promise<T> {
+  const projectKey = typeof projectKeyOrAction === 'string' ? path.resolve(projectKeyOrAction) : '__legacy__';
+  const action = typeof projectKeyOrAction === 'function' ? projectKeyOrAction : keyedAction!;
+  const previous = projectActionLaunchQueues.get(projectKey) || Promise.resolve();
   let releaseQueue: () => void = () => {};
-  projectActionLaunchQueue = new Promise<void>((resolve) => { releaseQueue = resolve; });
+  const current = new Promise<void>((resolve) => { releaseQueue = resolve; });
+  projectActionLaunchQueues.set(projectKey, current);
   await previous;
   let released = false;
   const registered = () => {
@@ -1234,6 +1243,7 @@ async function enqueueProjectActionLaunch<T>(action: (registered: () => void) =>
     return await action(registered);
   } finally {
     registered();
+    if (projectActionLaunchQueues.get(projectKey) === current) projectActionLaunchQueues.delete(projectKey);
   }
 }
 
@@ -1619,16 +1629,15 @@ async function handleSharedWebviewAction(
       await respond({ command: 'collaborationInviteCodeCopied', roomId });
     },
     'conversation.runRoadmapRevision': async (request) => {
-      let preparedProjectPath = '';
-      await enqueueProjectActionLaunch(async (registered) => {
-        const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
-        const startupTerminal = await revealAgentStartupTerminal(context, workspaceRoot, 'roadmap-revision', String(request.agentCli || ''), String(request.model || ''));
-        try {
-          const projectPath = await ensureActionProject(context, request.projectPath || '');
-          if (!projectPath && request.projectPath) {
-            throw new Error('SoloMap could not prepare this project for roadmap adjustment.');
-          }
-          preparedProjectPath = projectPath;
+      const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      if (!workspaceRoot || !getProjects(context).some((project) => project.path === workspaceRoot)) {
+        throw new Error('SoloMap could not prepare this project for roadmap adjustment.');
+      }
+      const settings = getPersistedSettings(context);
+      const globalDataPath = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
+      const launchTarget = await captureConversationLaunchTarget(context, workspaceRoot, globalDataPath, settings);
+      try {
+        await enqueueProjectActionLaunch(workspaceRoot, async (registered) => {
           await handleRoadmapRevision(
             context,
             String(request.userMessage || ''),
@@ -1637,15 +1646,18 @@ async function handleSharedWebviewAction(
             normalizeSupplementFiles(request.supplementFiles),
             () => {
               registered();
-              void respond({ command: 'roadmapRevisionLaunchRegistered', projectPath });
-            }
+              void respond({ command: 'roadmapRevisionLaunchRegistered', projectPath: workspaceRoot });
+            },
+            launchTarget
           );
-        } finally {
-          discardReservedAgentStartupTerminal(workspaceRoot, startupTerminal);
-        }
-      });
-      if (preparedProjectPath) {
-        await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(preparedProjectPath);
+        });
+      } finally {
+        launchTarget.engine?.close();
+      }
+      try {
+        await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);
+      } catch (error) {
+        recordLocalDiagnosticError(globalDataPath, 'webview.sidebar.roadmap-revision.refresh', error);
       }
     },
     'flow.run': async (request) => {
@@ -1955,7 +1967,7 @@ async function handleSharedWebviewAction(
       if (surface === 'roadmap') {
         sidebarProvider?.postMessage({ command: 'projectGrowthLoaded', projectPath, growth });
       } else {
-        activePanel?.webview.postMessage({ command: 'projectGrowthLoaded', projectPath, growth });
+        void postWebviewContainerMessage(activePanel, { command: 'projectGrowthLoaded', projectPath, growth });
       }
     },
     'settings.get': async (request) => {
@@ -2574,7 +2586,7 @@ async function broadcastSettings(context: vscode.ExtensionContext, includeFlow =
     sidebarProvider.sendSettings(settings);
   }
   if (activePanel) {
-    postSettingsLoaded(activePanel.webview, settings, getMigrationProjectRoot(context) || '');
+    void postWebviewContainerMessage(activePanel, { command: 'settingsLoaded', settings, projectRoot: getMigrationProjectRoot(context) || '' });
     if (includeFlow) await postFlowStateToWebview(context);
   }
   if (includeStrategy && activeStrategyPyramidPanel) {
@@ -2596,7 +2608,7 @@ async function postFlowStateToWebview(context: vscode.ExtensionContext): Promise
   if (panel !== activePanel || projectPath !== activeProjectRoot || generation !== projectSelectionGeneration) return;
   const state = await buildFlowStatePayload(projectPath, hasAccess, flowRuntimeRoot());
   if (panel !== activePanel || projectPath !== activeProjectRoot || generation !== projectSelectionGeneration) return;
-  await postWebviewMessage(panel.webview, {
+  await postWebviewContainerMessage(panel, {
     command: 'flowStateLoaded', projectPath,
     state
   });
@@ -3449,7 +3461,7 @@ async function persistProjectSelection(dataRoot: string, projectPath: string): P
 
 function broadcastProjectSelection(projectRoot: string, generation: number): void {
   sidebarProvider?.sendProjectSelection(projectRoot, generation);
-  postWebviewMessage(activePanel?.webview, { command: 'projectSelectionChanged', projectRoot, generation });
+  void postWebviewContainerMessage(activePanel, { command: 'projectSelectionChanged', projectRoot, generation });
 }
 
 async function selectProject(context: vscode.ExtensionContext, projectPath: string): Promise<void> {
@@ -3482,30 +3494,22 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   const syncReady = ensureSyncEngine(context);
   void sidebarProvider?.sendProjectConversationSnapshot(projectPath, true);
   if (activePanel) {
-    postWebviewMessage(activePanel.webview, { command: 'roadmapLoading', projectPath });
-    postProjectsLoaded(activePanel.webview, { projects, selectedProjectPath: projectPath });
+    void postWebviewContainerMessage(activePanel, { command: 'roadmapLoading', projectPath });
+    void postWebviewContainerMessage(activePanel, { command: 'projectsLoaded', projects: { projects, selectedProjectPath: projectPath } });
   }
   if (activeProjectGrowthPanel) {
     const copy = getProjectGrowthPanelCopy(context);
     activeProjectGrowthPath = projectPath;
     activeProjectGrowthPanel.title = copy.panelTitle;
     const cachedGrowth = getCachedProjectGrowthView(getPersistedSettings(context).globalDataPath, projectPath);
-    if (cachedGrowth) {
-      const project = projects.find((item) => item.path === projectPath);
-      activeProjectGrowthPanel.webview.html = getProjectGrowthWebviewHtml(
-        activeProjectGrowthPanel.webview,
-        context,
-        cachedGrowth,
-        project?.name || path.basename(projectPath) || 'Project',
-        isSoloMapLanguageZh(context),
-        projects
-      );
-    } else {
-      activeProjectGrowthPanel.webview.html = buildLocalDataStatusHtml(activeProjectGrowthPanel.webview, context, {
-        title: copy.openingTitle,
-        message: copy.openingMessage
-      });
-    }
+    updateWebviewContainer(activeProjectGrowthPanel, (webview) => {
+      if (cachedGrowth) {
+        const project = projects.find((item) => item.path === projectPath);
+        webview.html = getProjectGrowthWebviewHtml(webview, context, cachedGrowth, project?.name || path.basename(projectPath) || 'Project', isSoloMapLanguageZh(context), projects);
+      } else {
+        webview.html = buildLocalDataStatusHtml(webview, context, { title: copy.openingTitle, message: copy.openingMessage });
+      }
+    });
     void refreshProjectGrowthPanel(context, projectPath);
   }
   scheduleProjectRunIndexBackfill(context, projectPath);
@@ -4112,9 +4116,7 @@ async function removeProject(context: vscode.ExtensionContext, projectPath: stri
 
 function sendProjectsToWebviews(context: vscode.ExtensionContext): void {
   const projects = getProjectState(context);
-  if (activePanel) {
-    postProjectsLoaded(activePanel.webview, projects);
-  }
+  void postWebviewContainerMessage(activePanel, { command: 'projectsLoaded', projects });
   if (sidebarProvider) {
     sidebarProvider.sendProjects();
   }
@@ -4122,9 +4124,7 @@ function sendProjectsToWebviews(context: vscode.ExtensionContext): void {
 
 function sendLocalProjectsToWebviews(context: vscode.ExtensionContext, projectPath = ''): void {
   const projects = getProjectState(context);
-  if (activePanel) {
-    postProjectsLoaded(activePanel.webview, projects);
-  }
+  void postWebviewContainerMessage(activePanel, { command: 'projectsLoaded', projects });
   if (sidebarProvider) {
     sidebarProvider.sendLocalProjects(projectPath);
   }
@@ -4377,9 +4377,9 @@ async function openRoadmapPanel(
   if (activePanel) {
     activePanel.title = getRoadmapPanelTitle(context);
     activePanel.reveal(vscode.ViewColumn.One);
-    postWebviewMessage(activePanel.webview, { command: 'setMainView', view: effectiveInitialView });
+    void postWebviewContainerMessage(activePanel, { command: 'setMainView', view: effectiveInitialView });
     if (requestedNodeId) {
-      postWebviewMessage(activePanel.webview, { command: 'focusRoadmapNode', nodeId: requestedNodeId });
+      void postWebviewContainerMessage(activePanel, { command: 'focusRoadmapNode', nodeId: requestedNodeId });
     }
     setTimeout(() => void recordLocalUsageEvent(context, 'roadmapOpened').catch(error => console.error('SoloMap failed to record local usage:', error)), 0);
     return;
@@ -4413,19 +4413,19 @@ async function openRoadmapPanel(
   });
   setTimeout(() => {
     if (activePanel !== roadmapPanel) return;
-    roadmapPanel.webview.html = getWebviewHtml(roadmapPanel.webview, context);
-    postWebviewMessage(roadmapPanel.webview, { command: 'roadmapLoading', projectPath: projectRoot });
-    postWebviewMessage(roadmapPanel.webview, { command: 'setMainView', view: effectiveInitialView });
+    roadmapWebview.html = getWebviewHtml(roadmapWebview, context);
+    postWebviewMessage(roadmapWebview, { command: 'roadmapLoading', projectPath: projectRoot });
+    postWebviewMessage(roadmapWebview, { command: 'setMainView', view: effectiveInitialView });
     if (requestedNodeId) {
-      postWebviewMessage(roadmapPanel.webview, { command: 'focusRoadmapNode', nodeId: requestedNodeId });
+      postWebviewMessage(roadmapWebview, { command: 'focusRoadmapNode', nodeId: requestedNodeId });
     }
   }, 80);
   setTimeout(() => void recordLocalUsageEvent(context, 'roadmapOpened').catch(error => console.error('SoloMap failed to record local usage:', error)), 0);
 
   // Handle messages from Webview
-  activePanel.webview.onDidReceiveMessage(
+  roadmapWebview.onDidReceiveMessage(
     async (message) => {
-      if (await handleSharedWebviewAction(context, message, 'roadmap', activePanel?.webview)) {
+      if (await handleSharedWebviewAction(context, message, 'roadmap', roadmapWebview)) {
         return;
       }
       switch (message.command) {
@@ -4433,7 +4433,7 @@ async function openRoadmapPanel(
           if (syncEngine && activeProjectRoot === getSelectedProjectPath(context)) {
             sendNodesToWebview();
           } else {
-            postWebviewMessage(activePanel?.webview, { command: 'roadmapLoading', projectPath: getSelectedProjectPath(context) });
+            void postWebviewContainerMessage(activePanel, { command: 'roadmapLoading', projectPath: getSelectedProjectPath(context) });
             void ensureSyncEngine(context).then((ready) => {
               if (ready) {
                 sendNodesToWebview();
@@ -4495,19 +4495,21 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
     activeProjectGrowthPanel.reveal(vscode.ViewColumn.One);
     activeProjectGrowthPanel.title = copy.panelTitle;
     const cachedGrowth = getCachedProjectGrowthView(getPersistedSettings(context).globalDataPath, projectPath);
-    activeProjectGrowthPanel.webview.html = cachedGrowth
-      ? getProjectGrowthWebviewHtml(
-          activeProjectGrowthPanel.webview,
+    updateWebviewContainer(activeProjectGrowthPanel, (webview) => {
+      webview.html = cachedGrowth
+        ? getProjectGrowthWebviewHtml(
+          webview,
           context,
           cachedGrowth,
           getProjects(context).find((item) => item.path === projectPath)?.name || path.basename(projectPath) || 'Project',
           isSoloMapLanguageZh(context),
           getProjects(context)
         )
-      : buildLocalDataStatusHtml(activeProjectGrowthPanel.webview, context, {
+        : buildLocalDataStatusHtml(webview, context, {
           title: copy.openingTitle,
           message: copy.openingMessage
         });
+    });
     void refreshProjectGrowthPanel(context, projectPath);
     return;
   }
@@ -4523,9 +4525,10 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
     }
   );
   activeProjectGrowthPanel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'resources', 'logo.png');
-
-  activeProjectGrowthPanel.webview.html = buildLocalDataStatusHtml(
-    activeProjectGrowthPanel.webview,
+  const growthPanel = activeProjectGrowthPanel;
+  const growthWebview = growthPanel.webview;
+  growthWebview.html = buildLocalDataStatusHtml(
+    growthWebview,
     context,
     {
       title: copy.openingTitle,
@@ -4534,7 +4537,7 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
   );
   void refreshProjectGrowthPanel(context, projectPath);
 
-  activeProjectGrowthPanel.webview.onDidReceiveMessage(
+  growthWebview.onDidReceiveMessage(
     async (message) => {
       switch (message.command) {
         case 'growth.reports':
@@ -4545,7 +4548,8 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
           const pageSequence = projectGrowthLoadSequence;
           if (!panel || target !== activeProjectGrowthPath || !getProjects(context).some(item => item.path === target)) break;
           const respond = (value: any) => {
-            if (activeProjectGrowthPanel === panel && activeProjectGrowthPath === target && projectGrowthLoadSequence === pageSequence) void panel.webview.postMessage({ ...value, projectPath: target });
+            if (activeProjectGrowthPanel !== panel || activeProjectGrowthPath !== target || projectGrowthLoadSequence !== pageSequence) return;
+            void postWebviewContainerMessage(panel, { ...value, projectPath: target });
           };
           if (message.command !== 'growth.reportAction') {
             try {
@@ -4634,14 +4638,12 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
         case 'refreshGrowth':
           const refreshCopy = getProjectGrowthPanelCopy(context);
           const projectPathToRefresh = activeProjectGrowthPath || getSelectedProjectPath(context) || projectPath;
-          activeProjectGrowthPanel!.webview.html = buildLocalDataStatusHtml(
-            activeProjectGrowthPanel!.webview,
-            context,
-            {
+          updateWebviewContainer(activeProjectGrowthPanel, (webview) => {
+            webview.html = buildLocalDataStatusHtml(webview, context, {
               title: refreshCopy.refreshingTitle,
               message: refreshCopy.refreshingMessage
-            }
-          );
+            });
+          });
           try {
             await refreshProjectGrowthSnapshot(projectPathToRefresh, context.extensionPath, {
               globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath),
@@ -4653,7 +4655,7 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
           break;
         case 'runCoverageAnalysis': {
           const coverageProjectPath = activeProjectGrowthPath || getSelectedProjectPath(context) || projectPath;
-          activeProjectGrowthPanel?.webview.postMessage({ command: 'coverageAnalysisStarted' });
+          void postWebviewContainerMessage(activeProjectGrowthPanel, { command: 'coverageAnalysisStarted' });
           await runProjectCoverageAnalysis(
             coverageProjectPath,
             context.extensionPath,
@@ -4667,9 +4669,9 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
     }
   );
 
-  activeProjectGrowthPanel.onDidDispose(
+  growthPanel.onDidDispose(
     () => {
-      activeProjectGrowthPanel = null;
+      if (activeProjectGrowthPanel === growthPanel) activeProjectGrowthPanel = null;
       activeProjectGrowthPath = '';
       growthReportWatcher?.dispose(); growthReportWatcher = null; growthReportWatchPath = '';
     },
@@ -4691,7 +4693,8 @@ async function refreshProjectGrowthPanel(context: vscode.ExtensionContext, proje
     growthReportWatcher?.dispose();
     growthReportWatchPath = reportWatchKey;
     growthReportWatcher = observeGrowthReports(reportDataRoot, projectPath, () => {
-      if (growthReportWatchPath === reportWatchKey && activeProjectGrowthPanel === panel && activeProjectGrowthPath === projectPath) void panel.webview.postMessage({ command: 'growth.reportsChanged', projectPath });
+      if (growthReportWatchPath !== reportWatchKey || activeProjectGrowthPanel !== panel || activeProjectGrowthPath !== projectPath) return;
+      void postWebviewContainerMessage(panel, { command: 'growth.reportsChanged', projectPath });
     }, () => panel.visible);
     context.subscriptions.push(growthReportWatcher);
   }
@@ -4705,14 +4708,9 @@ async function refreshProjectGrowthPanel(context: vscode.ExtensionContext, proje
     () => getProjectGrowthView(projectPath, context.extensionPath, { globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath), refreshIfMissing: false }),
     (growthView) => {
       if (!activeProjectGrowthPanel || activeProjectGrowthPanel !== panel || activeProjectGrowthPath !== projectPath || loadSequence !== projectGrowthLoadSequence) return;
-      activeProjectGrowthPanel.webview.html = getProjectGrowthWebviewHtml(
-        activeProjectGrowthPanel.webview,
-        context,
-        growthView,
-        projectName,
-        isZh,
-        getProjects(context)
-      );
+      updateWebviewContainer(panel, (webview) => {
+        webview.html = getProjectGrowthWebviewHtml(webview, context, growthView, projectName, isZh, getProjects(context));
+      });
       if (!growthView.snapshotId) {
         setTimeout(() => {
           if (!activeProjectGrowthPanel || activeProjectGrowthPath !== projectPath || loadSequence !== projectGrowthLoadSequence) return;
@@ -4722,26 +4720,23 @@ async function refreshProjectGrowthPanel(context: vscode.ExtensionContext, proje
             maxFiles: 4000
           }).then((refreshedView) => {
             if (!activeProjectGrowthPanel || activeProjectGrowthPath !== projectPath || loadSequence !== projectGrowthLoadSequence) return;
-            activeProjectGrowthPanel.webview.html = getProjectGrowthWebviewHtml(
-              activeProjectGrowthPanel.webview,
-              context,
-              refreshedView,
-              projectName,
-              isZh,
-              getProjects(context)
-            );
+            updateWebviewContainer(panel, (webview) => {
+              webview.html = getProjectGrowthWebviewHtml(webview, context, refreshedView, projectName, isZh, getProjects(context));
+            });
           }).catch((error) => console.error('SoloMap project growth background refresh failed:', error));
         }, 0);
       }
     },
     (message) => {
       if (!activeProjectGrowthPanel || activeProjectGrowthPanel !== panel || activeProjectGrowthPath !== projectPath || loadSequence !== projectGrowthLoadSequence) return;
-      activeProjectGrowthPanel.webview.html = buildLocalDataStatusHtml(activeProjectGrowthPanel.webview, context, {
-        title: copy.loadFailedTitle,
-        message: copy.loadFailedMessage,
-        detail: message,
-        actionLabel: copy.retryLabel,
-        actionCommand: 'refreshGrowth'
+      updateWebviewContainer(panel, (webview) => {
+        webview.html = buildLocalDataStatusHtml(webview, context, {
+          title: copy.loadFailedTitle,
+          message: copy.loadFailedMessage,
+          detail: message,
+          actionLabel: copy.retryLabel,
+          actionCommand: 'refreshGrowth'
+        });
       });
     },
     copy.loadFailedFallback
@@ -5015,7 +5010,7 @@ async function sendNodesToWebview(): Promise<void> {
   const selection = projectSelectionGeneration; const sequence = ++completionCriteriaViewSequence;
   const sourceNodes = engine?.getNodes() || []; const source = JSON.stringify(sourceNodes);
   const nodes = nodesWithVisibleCompletionCriteria(engine, sourceNodes);
-  void postWebviewMessage(activePanel?.webview, { command: 'nodesUpdated', nodes, projectPath: workspaceRoot });
+  void postWebviewContainerMessage(activePanel, { command: 'nodesUpdated', nodes, projectPath: workspaceRoot });
   sidebarProvider?.sendNodesToWebview();
   if (extensionContextRef) void postFlowStateToWebview(extensionContextRef);
   if (!engine || !workspaceRoot) return;
@@ -5032,7 +5027,7 @@ async function sendNodesToWebview(): Promise<void> {
       completionCriteriaViews.set(engine, new Map(hydrated.map(node => [node.id, node.completionCriteria || []])));
       completionCriteriaViewRevisions.set(engine, revision);
       completionCriteriaViewRoots.set(engine, dataRoot);
-      void postWebviewMessage(activePanel?.webview, { command: 'nodesUpdated', nodes: hydrated, projectPath: workspaceRoot });
+      void postWebviewContainerMessage(activePanel, { command: 'nodesUpdated', nodes: hydrated, projectPath: workspaceRoot });
       sidebarProvider?.postMessage({ command: 'nodesUpdated', nodes: hydrated, projectPath: workspaceRoot });
       return;
     }
@@ -5085,13 +5080,7 @@ async function reconcileActiveProjectConversationLifecycle(): Promise<void> {
 
 function postRoadmapLoadFailed(projectPath: string, error: unknown): void {
   const message = formatLocalDataError(error, '路线图本地数据加载失败。');
-  if (activePanel) {
-    activePanel.webview.postMessage({
-      command: 'roadmapLoadFailed',
-      projectPath,
-      message
-    });
-  }
+  void postWebviewContainerMessage(activePanel, { command: 'roadmapLoadFailed', projectPath, message });
   if (sidebarProvider) {
     sidebarProvider.sendNodesToWebview();
   }
@@ -6526,7 +6515,7 @@ function postNodeConversations(
       : null;
     const conversations = page ? page.logs : syncEngine.getAgentExecutions(nodeId);
     const payloadConversations = conversations.length > 0 ? conversations : fallbackConversations.slice(0, pageSize);
-    activePanel.webview.postMessage({
+    void postWebviewContainerMessage(activePanel, {
       command: 'nodeConversationsLoaded',
       nodeId,
       conversations: buildConversationPresentations(activeProjectRoot || '', nodeId, payloadConversations),
@@ -7125,20 +7114,20 @@ function getSkillInstallWorkspaceRoot(context: vscode.ExtensionContext): string 
 
 function postMcpInstallResult(context: vscode.ExtensionContext, success: boolean, message: string): void {
   invalidatePersistedSettingsCache();
-  activePanel?.webview.postMessage({ command: 'mcpInstallResult', success, message });
+  void postWebviewContainerMessage(activePanel, { command: 'mcpInstallResult', success, message });
   sidebarProvider?.postMcpInstallResult(success, message);
   void broadcastSettings(context, false, false).catch(error => console.error('SoloMap capability settings refresh failed:', error));
 }
 
 function postSkillInstallResult(context: vscode.ExtensionContext, success: boolean, message: string): void {
   invalidatePersistedSettingsCache();
-  activePanel?.webview.postMessage({ command: 'skillInstallResult', success, message });
+  void postWebviewContainerMessage(activePanel, { command: 'skillInstallResult', success, message });
   sidebarProvider?.postSkillInstallResult(success, message);
   void broadcastSettings(context, false, false).catch(error => console.error('SoloMap capability settings refresh failed:', error));
 }
 
 function postAgentCliUpgradeResult(success: boolean, message: string, pending = false): void {
-  activePanel?.webview.postMessage({ command: 'agentCliUpgradeResult', success, message, pending });
+  void postWebviewContainerMessage(activePanel, { command: 'agentCliUpgradeResult', success, message, pending });
   sidebarProvider?.postAgentCliUpgradeResult(success, message, pending);
 }
 
@@ -7960,7 +7949,11 @@ async function handleRoadmapRevision(
 ): Promise<void> {
   const projectSyncEngine = target?.engine || syncEngine;
   const workspaceRoot = target?.workspaceRoot || activeProjectRoot;
-  await ensureTaskRuntimeReady(context);
+  if (target?.globalDataPath) {
+    await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: target.globalDataPath });
+  } else {
+    await ensureTaskRuntimeReady(context);
+  }
   if (!projectSyncEngine || !workspaceRoot) return;
   if (await resumeOrdinaryConversation(context, workspaceRoot, target?.launchIntentId, target?.globalDataPath) !== null) { onExecutionRegistered(); return; }
   const revisionRequest = userMessage.trim();
@@ -7968,7 +7961,7 @@ async function handleRoadmapRevision(
     vscode.window.showWarningMessage('Describe how you want to adjust the roadmap before sending.');
     return;
   }
-  const settings = getPersistedSettings(context);
+  const settings = target?.settings || getPersistedSettings(context);
   const globalDataPath = normalizeSolomapGlobalPath(workspaceRoot, target?.globalDataPath || settings.globalDataPath);
   const requestedAgentCli = (selectedAgentCli || settings.cliPath || 'agy').trim();
   const agentCli = resolveAgentCli(requestedAgentCli, selectedAgentCli ? '' : settings.cliPath);
@@ -8583,7 +8576,8 @@ async function recordAutomationTaskEvent(workspaceRoot: string, event: Record<st
 }
 
 async function playAutomationSound(id: string, token: string, posted: () => void): Promise<boolean> {
-  const view = automationSoundReady(activePanel?.webview) ? activePanel!.webview : sidebarProvider?.getWebview?.();
+  const roadmap = webviewFromContainer(activePanel);
+  const view = automationSoundReady(roadmap) ? roadmap : sidebarProvider?.getWebview?.();
   if (view) return deliverAutomationSound(view, id, token, posted);
   return false;
 }
@@ -8630,7 +8624,7 @@ async function confirmAutomationUiDelivery(key: string, confirmation: Automation
 async function consumeAutomationUiDelivery(globalDataPath: string, id: string, stillValid?: () => boolean, kind?: 'notification' | 'sound'): Promise<void> {
   if (automationUiClosing) return;
   const root = normalizeGlobalDataPathForExtension(globalDataPath); const key = `${root}:${id}`;
-  if (!automationUiConfirmations.has(key) && kind === 'sound' && !automationSoundReady(activePanel?.webview) && !automationSoundReady(sidebarProvider?.getWebview?.()) && (!stillValid || stillValid())) return;
+  if (!automationUiConfirmations.has(key) && kind === 'sound' && !automationSoundReady(webviewFromContainer(activePanel)) && !automationSoundReady(sidebarProvider?.getWebview?.()) && (!stillValid || stillValid())) return;
   const existing = automationUiFlights.get(key); if (existing) return;
   let started!: () => void; const visible = new Promise<void>(resolve => { started = resolve; });
   const flight = (async () => {
@@ -8654,7 +8648,7 @@ async function consumeAutomationUiDelivery(globalDataPath: string, id: string, s
         return;
       }
       if (claim.payload.kind === 'sound') {
-        if (!automationSoundReady(activePanel?.webview) && !automationSoundReady(sidebarProvider?.getWebview?.())) {
+        if (!automationSoundReady(webviewFromContainer(activePanel)) && !automationSoundReady(sidebarProvider?.getWebview?.())) {
           await confirmAutomationUiDelivery(key, { root, id, token, state: 'queued' });
           return;
         }
@@ -10449,7 +10443,7 @@ export async function deactivate() {
   automationUiClosing = true;
   if (roadmapWatcherTimer) { clearTimeout(roadmapWatcherTimer); roadmapWatcherTimer = null; }
   if (focusReminderTimer) { clearTimeout(focusReminderTimer); focusReminderTimer = null; }
-  if (activePanel) disposeAutomationSoundView(activePanel.webview);
+  const roadmap = webviewFromContainer(activePanel); if (roadmap) disposeAutomationSoundView(roadmap);
   const sidebar = sidebarProvider?.getWebview?.(); if (sidebar) disposeAutomationSoundView(sidebar);
   const owners = [...automationUiOwners.entries()];
   await Promise.allSettled(owners.map(async ([root, registration]) => {

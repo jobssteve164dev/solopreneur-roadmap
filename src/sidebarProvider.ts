@@ -161,16 +161,19 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     return Boolean(this._view);
   }
 
-  public getWebview(): vscode.Webview | undefined { return this._view?.webview; }
+  public getWebview(): vscode.Webview | undefined {
+    try { return this._view?.webview; }
+    catch { return undefined; }
+  }
 
   private refreshDependencyStatus(webviewView: vscode.WebviewView, cliPath: string): void {
     const dependencyStatus = getDependencyStatus(cliPath);
-    this._view?.webview.postMessage({ command: 'dependenciesChecked', status: dependencyStatus });
+    void this.postMessage({ command: 'dependenciesChecked', status: dependencyStatus });
     const accountRequest = ++this._agentAccountStatusRequest;
     const accountByFamily = new Map();
     const publish = () => {
       if (accountRequest !== this._agentAccountStatusRequest || this._view !== webviewView) return;
-      this._view?.webview.postMessage({
+      void this.postMessage({
         command: 'dependenciesChecked',
         status: {
           ...dependencyStatus,
@@ -225,7 +228,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const request = ++this._intelligenceListRequest;
       const conversations = await this._listIntelligenceConversations?.() || [];
       if (this._view !== webviewView || request !== this._intelligenceListRequest) return;
-      webviewView.webview.postMessage({ command: 'intelligenceConversationsLoaded', conversations });
+      void this.postMessage({ command: 'intelligenceConversationsLoaded', conversations });
     };
     // Listen to messages from the webview
     webviewView.webview.onDidReceiveMessage(async (data) => {
@@ -244,13 +247,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             try {
               const conversation = await this._getIntelligenceConversation?.(id) || null;
               if (this._view !== webviewView || request !== this._intelligenceGetRequest || version !== (this._intelligenceConversationVersions.get(id) || 0)) break;
-              this._view?.webview.postMessage({
+              void this.postMessage({
                 command: 'intelligenceConversationLoaded',
                 conversation,
                 conversationId: id
               });
             } catch (error) {
-              this._view?.webview.postMessage({ command: 'intelligenceLoadFailed', message: error instanceof Error ? error.message : String(error) });
+              void this.postMessage({ command: 'intelligenceLoadFailed', message: error instanceof Error ? error.message : String(error) });
             }
             break;
           }
@@ -261,11 +264,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               const conversation = await this._sendIntelligenceMessage(String(data.text || ''), String(data.conversationId || ''));
               if (this._view !== webviewView) break;
               this._intelligenceConversationVersions.set(conversation.id, (this._intelligenceConversationVersions.get(conversation.id) || 0) + 1);
-              this._view?.webview.postMessage({ command: 'intelligenceReplyLoaded', requestId, conversation });
+              void this.postMessage({ command: 'intelligenceReplyLoaded', requestId, conversation });
               await postIntelligenceList();
             } catch (error) {
               if (this._view !== webviewView) break;
-              this._view?.webview.postMessage({ command: 'intelligenceReplyFailed', requestId, message: error instanceof Error ? error.message : String(error) });
+              void this.postMessage({ command: 'intelligenceReplyFailed', requestId, message: error instanceof Error ? error.message : String(error) });
             }
             break;
           }
@@ -325,7 +328,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             break;
           case 'runDailyReview': {
             const review = await startDailyReviewAgent(this._getSettings(), this._getProjects().projects, this._extensionUri);
-            this._view?.webview.postMessage({ command: 'dailyReviewLoaded', review });
+            void this.postMessage({ command: 'dailyReviewLoaded', review });
             break;
           }
           case 'recordTodayShadowFeedback': {
@@ -350,7 +353,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       } catch (error) {
         recordLocalDiagnosticError(getDiagnosticDataPath(this._getSettings), `sidebar.action.${String(data?.command || 'unknown')}`, error);
         console.error('SoloMap sidebar message failed:', data?.command, error);
-        this._view?.webview.postMessage({
+        void this.postMessage({
           command: 'sidebarActionFailed',
           message: error instanceof Error ? error.message : String(error),
           action: String(data?.command || ''),
@@ -391,7 +394,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (!this._view) {
         return;
       }
-      this._view.webview.postMessage({
+      void this.postMessage({
         command: 'settingsLoaded',
         settings,
         projectRoot: this._getProjects().selectedProjectPath || '',
@@ -403,11 +406,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   public sendProjectSelection(projectRoot: string, generation: number) {
-    this._view?.webview.postMessage({ command: 'projectSelectionChanged', projectRoot, generation });
+    void this.postMessage({ command: 'projectSelectionChanged', projectRoot, generation });
   }
 
   public postSkillInstallResult(success: boolean, message: string) {
-    this._view?.webview.postMessage({
+    void this.postMessage({
       command: 'skillInstallResult',
       success,
       message
@@ -415,7 +418,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   public postMcpInstallResult(success: boolean, message: string) {
-    this._view?.webview.postMessage({
+    void this.postMessage({
       command: 'mcpInstallResult',
       success,
       message
@@ -423,7 +426,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   public postAgentCliUpgradeResult(success: boolean, message: string, pending = false) {
-    this._view?.webview.postMessage({ command: 'agentCliUpgradeResult', success, message, pending });
+    void this.postMessage({ command: 'agentCliUpgradeResult', success, message, pending });
   }
 
   public async sendProjects() {
@@ -475,7 +478,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       this.sendDailyReview();
     } catch (error) {
       console.error('SoloMap sidebar failed to send projects:', error);
-      this._view?.webview.postMessage({
+      void this.postMessage({
         command: 'projectsLoaded',
         projects: {
           projects: [],
@@ -545,7 +548,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const currentPortfolio = applyProjectRegistryToPortfolio(projects, portfolio);
     this._latestPortfolio = currentPortfolio;
     const globalStore = createGlobalEngineeringSnapshotPlaceholder(globalDataPath, currentPortfolio);
-    this._view?.webview.postMessage({
+    void this.postMessage({
       command: 'projectsLoaded',
       projects: { projects, selectedProjectPath, portfolio: currentPortfolio, globalStore, recentConversationSnapshot }
     });
@@ -650,7 +653,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       );
       this._latestPortfolio = portfolio;
       const globalStore = createGlobalEngineeringSnapshotPlaceholder(globalDataPath, portfolio);
-      this._view?.webview.postMessage({
+      void this.postMessage({
         command: 'projectsLoaded',
         projects: {
           projects,
@@ -679,7 +682,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (ledgerRevision !== (this._conversationLedgerRevisions.get(projectPath) || 0)
         || this._latestConversationHistoryRequest.get(requestKey) !== requestId
         || !this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) return;
-      this._view.webview.postMessage({
+      void this.postMessage({
         command: 'sidebarSoloConversationLoaded',
         projectPath,
         conversations
@@ -703,7 +706,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (ledgerRevision !== (this._conversationLedgerRevisions.get(projectPath) || 0)
         || this._latestConversationHistoryRequest.get(requestKey) !== requestId
         || !this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) return;
-      this._view.webview.postMessage({
+      void this.postMessage({
         command: 'sidebarStepConversationLoaded',
         projectPath,
         nodeId,
@@ -728,7 +731,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (ledgerRevision !== (this._conversationLedgerRevisions.get(projectPath) || 0)
         || this._latestConversationHistoryRequest.get(requestKey) !== requestId
         || !this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) return;
-      this._view.webview.postMessage({
+      void this.postMessage({
         command: 'sidebarProjectConversationLoaded',
         projectPath,
         conversations
@@ -801,7 +804,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   private postProjectConversationSnapshot(projectPath: string, snapshot: SidebarConversationSnapshot): void {
-    this._view?.webview.postMessage({
+    void this.postMessage({
       command: 'sidebarProjectConversationSnapshotLoaded',
       projectPath,
       soloConversations: snapshot.solo,
@@ -818,7 +821,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }
       const projectState = this._getProjects();
       await refreshShadowRuntimeState(this._getSettings().globalDataPath);
-      this._view.webview.postMessage({
+      void this.postMessage({
         command: 'dailyReviewLoaded',
         review: readTodayReview(this._getSettings().globalDataPath, projectState.projects)
       });

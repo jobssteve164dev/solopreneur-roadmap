@@ -85,6 +85,124 @@ test('usage and conversation revisions come only from unified database rows', as
   assert.equal(after.recentActivityAt, '2026-10-11T00:01:00.000Z');
 });
 
+test('project analysis source stays bounded as project history grows', async (t) => {
+  const first = await fixture();
+  t.after(() => { first.store.close(); cleanupFixture(first); });
+  for (let index = 1; index <= 8; index += 1) {
+    const timestamp = `2026-10-11T00:${String(index).padStart(2, '0')}:00.000Z`;
+    first.store.appendProjectJournal(first.project.projectId, `bounded-journal-${index}`, {
+      nodeId: '__solo__', timestamp, agentCli: 'codex', command: `command-${index}`, output: `output-${index}`, status: 'Processed'
+    });
+    first.store.upsertProjectRunIndex(first.project.projectId, {
+      executionLogId: index, nodeId: '__solo__', runKind: 'solo', agentCli: 'codex', status: 'Processed',
+      startedAt: timestamp, finishedAt: timestamp, durationMs: 0
+    }, [], []);
+  }
+  const originalRows = first.store.rows.bind(first.store);
+  const returnedRows = [];
+  first.store.rows = (sql, parameters) => {
+    const rows = originalRows(sql, parameters);
+    returnedRows.push({ sql, count: rows.length });
+    return rows;
+  };
+
+  const source = first.store.readProjectAnalysisSource(first.project.projectId);
+
+  assert.equal(source.runCount, 8);
+  assert.equal(source.latestRunAt, '2026-10-11T00:08:00.000Z');
+  assert.ok(returnedRows.length > 0);
+  assert.equal(Math.max(...returnedRows.map(row => row.count)), 1,
+    `analysis source materialized project history: ${returnedRows.filter(row => row.count > 1).map(row => `${row.count} rows from ${row.sql}`).join('; ')}`);
+});
+
+test('project analysis timestamps use real instants and incremental inserts', async (t) => {
+  const first = await fixture();
+  t.after(() => { first.store.close(); cleanupFixture(first); });
+  const projectId = first.project.projectId;
+  first.store.appendProjectJournal(projectId, 'offset-journal', {
+    nodeId: '__solo__', timestamp: '2026-10-11T10:00:00.000+08:00', agentCli: 'codex', command: 'offset', output: 'done', status: 'Processed'
+  });
+  first.store.upsertProjectRunIndex(projectId, {
+    executionLogId: 1, nodeId: '__solo__', runKind: 'solo', agentCli: 'codex', status: 'Processed',
+    startedAt: '2026-10-11T02:30:00.000Z', finishedAt: '2026-10-11T03:00:00.000Z', durationMs: 1800000
+  }, [], []);
+  first.store.appendProjectJournal(projectId, 'invalid-journal', {
+    nodeId: '__solo__', timestamp: 'not-a-timestamp', agentCli: 'codex', command: 'invalid', output: 'ignored', status: 'Processed'
+  });
+  const source = first.store.readProjectAnalysisSource(projectId);
+  assert.equal(source.latestRunAt, '2026-10-11T03:00:00.000Z');
+  assert.equal(source.recentActivityAt, '2026-10-11T03:00:00.000Z');
+
+  const insertTriggers = first.store.rows("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND name IN ('project_analysis_run_insert','project_analysis_journal_insert')");
+  assert.equal(insertTriggers.length, 2);
+  for (const trigger of insertTriggers) {
+    assert.doesNotMatch(String(trigger.sql), /SELECT\s+(?:COUNT|COALESCE\s*\(\s*MAX)/i,
+      `${trigger.name} must not rescan project history on append`);
+  }
+});
+
+test('project analysis rescans only when the current maximum moves backward', async (t) => {
+  const first = await fixture();
+  t.after(() => { first.store.close(); cleanupFixture(first); });
+  const projectId = first.project.projectId;
+  const record = (executionLogId, finishedAt) => ({
+    executionLogId, nodeId: '__solo__', runKind: 'solo', agentCli: 'codex', status: 'Processed',
+    startedAt: finishedAt, finishedAt, durationMs: 0
+  });
+  first.store.upsertProjectRunIndex(projectId, record(1, '2026-10-11T01:00:00.000Z'), [], []);
+  first.store.upsertProjectRunIndex(projectId, record(2, '2026-10-11T02:00:00.000Z'), [], []);
+  first.store.db.run('UPDATE project_run_indexes SET record_json=? WHERE project_id=? AND execution_log_id=?', [
+    JSON.stringify(record(2, '2026-10-11T00:30:00.000Z')), projectId, 2
+  ]);
+  assert.equal(first.store.readProjectAnalysisSource(projectId).latestRunAt, '2026-10-11T01:00:00.000Z');
+  first.store.db.run('DELETE FROM run_index_import_sources WHERE project_id=? AND execution_log_id=?', [projectId, 1]);
+  first.store.db.run('DELETE FROM project_run_indexes WHERE project_id=? AND execution_log_id=?', [projectId, 1]);
+  const source = first.store.readProjectAnalysisSource(projectId);
+  assert.equal(source.runCount, 1);
+  assert.equal(source.latestRunAt, '2026-10-11T00:30:00.000Z');
+});
+
+test('linked journal history starts from the project and node index', async (t) => {
+  const first = await fixture();
+  t.after(() => { first.store.close(); cleanupFixture(first); });
+  const journal = first.store.appendProjectJournal(first.project.projectId, 'journal-plan', {
+    nodeId: '__solo__', timestamp: '2026-10-11T00:00:00.000Z', agentCli: 'codex', command: 'one', output: 'done', status: 'Processed'
+  });
+  first.store.linkProjectJournal(first.project.projectId, journal.executionLogId, 'linked-step', '2026-10-11T00:01:00.000Z');
+  const originalRows = first.store.rows.bind(first.store);
+  let query;
+  let parameters;
+  first.store.rows = (sql, values) => {
+    if (sql.includes('UNION ALL SELECT j.*')) { query = sql; parameters = values; }
+    return originalRows(sql, values);
+  };
+
+  first.store.readProjectJournal(first.project.projectId, { nodeId: 'linked-step', limit: 20 });
+  assert.ok(query && parameters);
+  const plan = originalRows(`EXPLAIN QUERY PLAN ${query}`, parameters).map(row => String(row.detail));
+  assert.ok(plan.some(detail => detail.includes('project_journal_links_node') && detail.includes('project_id=? AND node_id=?')), plan.join('\n'));
+});
+
+test('planner statistics are initialized after schema changes and refreshed at most daily', async (t) => {
+  const first = await fixture();
+  t.after(() => { first.store.close(); cleanupFixture(first); });
+  const optimizedAt = Number(first.store.rows("SELECT value FROM database_meta WHERE key='planner_statistics_optimized_at'")[0].value);
+  assert.ok(first.store.rows("SELECT 1 FROM sqlite_master WHERE name='sqlite_stat1'").length > 0);
+  assert.ok(Number(first.store.rows('SELECT COUNT(*) AS count FROM sqlite_stat1')[0].count) > 0);
+  const settingsPlan = first.store.rows(`EXPLAIN QUERY PLAN SELECT s.id,s.key,s.content_id,s.secret_ref,o.revision
+    FROM settings s JOIN objects o ON o.id=s.id
+    WHERE s.namespace=? AND s.owner_scope=? AND o.archived_at IS NULL ORDER BY s.key`, ['host', 'global']);
+  assert.ok(settingsPlan.some(row => String(row.detail).includes('settings_namespace_owner_key (namespace=? AND owner_scope=?)')), settingsPlan.map(row => row.detail).join('\n'));
+  assert.equal(first.store.maintainPlannerStatistics(false, optimizedAt + 1), false);
+  assert.equal(first.store.maintainPlannerStatistics(false, optimizedAt + 24 * 60 * 60 * 1000), true);
+});
+
+test('autonomous runtime isolates planner statistics maintenance from the main cycle', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'autonomousRuntimeProcess.ts'), 'utf8');
+  assert.match(source, /try \{ dataStore\.maintainPlannerStatistics\(\); \}\s*catch \(error\) \{ recordLocalDiagnosticError\([^\n]+autonomous-runtime\.planner-statistics/);
+  assert.match(source, /autonomous-runtime\.planner-statistics[\s\S]*?await refreshProjectRegistry/);
+});
+
 test('simultaneous usage events with the same timestamp both commit', async (t) => {
   const first = await fixture();
   const operations = createRuntimeDataOperations(first.store);

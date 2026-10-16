@@ -64,6 +64,7 @@ test('native report identity stays canonical through the real verify action and 
       activeProjectGrowthPath: f.project, projectGrowthLoadSequence: 1, growthReportActions: new Set(),
       getProjects: () => [{ path: f.project }], getPersistedSettings: () => ({ globalDataPath: f.root }), normalizeGlobalDataPathForExtension: value => value,
       isSoloMapLanguageZh: () => true, growthReports_js_1: require('../out/growthReports.js'),
+      panelMessages_1: require('../out/panelMessages.js'),
       learningReview_js_1: { projectGithubRepository: async () => 'owner/repository', collectGithubEvidence: async input => { captured.push(input); return { gaps: [], commits: [] }; } }
     });
   assert.equal(settled[0]?.error, undefined);
@@ -112,6 +113,7 @@ async function continueReport(f, taskId, turnId, executionLogId) {
       getProjects: () => [{ path: f.project }], getPersistedSettings: () => ({ globalDataPath: f.root }),
       normalizeGlobalDataPathForExtension: root => root, isSoloMapLanguageZh: () => true,
       growthReports_js_1: require('../out/growthReports.js'), path,
+      panelMessages_1: require('../out/panelMessages.js'),
       vscode: { window: { showInputBox: async () => '继续完成日期选择' } },
       captureConversationLaunchTarget: (context, workspaceRoot, globalDataPath, settings) => capture.runInNewContext({ context, workspaceRoot, globalDataPath, settings,
         path, crypto: require('node:crypto'), syncEngine_1: require('../out/db/syncEngine.js'),

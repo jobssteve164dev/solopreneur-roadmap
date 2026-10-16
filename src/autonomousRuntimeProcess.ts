@@ -272,6 +272,8 @@ async function main(): Promise<void> {
         stop();
         return;
       }
+      try { dataStore.maintainPlannerStatistics(); }
+      catch (error) { recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.planner-statistics', classifyDiagnosticFailure(error)); }
       await refreshProjectRegistry(globalDataPath, undefined, (operation, input) => dataOperations({ operation, input }));
       await refreshCognitiveRuntimeConfig(globalDataPath, dataOperations);
       const current = readCurrentRegisteredShadowDecision(globalDataPath);

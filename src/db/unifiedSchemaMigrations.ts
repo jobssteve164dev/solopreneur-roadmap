@@ -33,6 +33,37 @@ const learningEventSourceColumns = 'source_type TEXT, verification_signal INTEGE
 const lessonDecisionSourceColumns = 'legacy_decision_id TEXT, external_source TEXT, external_created_at INTEGER, external_updated_at INTEGER, event_revision INTEGER, lesson_revision INTEGER, source_object_id TEXT REFERENCES evidence(id), source_revision INTEGER';
 export const additionalEntityColumns: Record<string, string> = { memory: structuredMemoryColumns + ', valid_from INTEGER', lesson: lessonSourceColumns, learning_event: learningEventSourceColumns, lesson_decision: lessonDecisionSourceColumns };
 
+function analysisTimestamp(value: string): string {
+  return `COALESCE(CAST(ROUND((julianday(${value})-2440587.5)*86400000) AS INTEGER),0)`;
+}
+function analysisRunTimestamp(record = 'record_json'): string {
+  return `MAX(${analysisTimestamp(`json_extract(${record},'$.finishedAt')`)},${analysisTimestamp(`json_extract(${record},'$.startedAt')`)})`;
+}
+function latestRunTimestamp(projectId: string): string {
+  return `(SELECT COALESCE(MAX(${analysisRunTimestamp()}),0) FROM project_run_indexes WHERE project_id=${projectId})`;
+}
+function latestJournalTimestamp(projectId: string): string {
+  return `(SELECT COALESCE(MAX(${analysisTimestamp('timestamp')}),0) FROM project_journal_entries WHERE project_id=${projectId})`;
+}
+function refreshRunAnalysisSource(projectId: string, oldTimestamp: string, newTimestamp: string): string {
+  const latestRun = latestRunTimestamp(projectId);
+  const recent = `MAX(${latestRun},${latestJournalTimestamp(projectId)})`;
+  return `UPDATE project_analysis_sources SET revision=revision+1,
+latest_run_at=CASE WHEN ${newTimestamp}>=latest_run_at THEN ${newTimestamp} WHEN ${oldTimestamp}=latest_run_at THEN ${latestRun} ELSE latest_run_at END,
+recent_activity_at=CASE WHEN ${newTimestamp}>=recent_activity_at THEN ${newTimestamp} WHEN ${oldTimestamp}=latest_run_at THEN ${recent} ELSE recent_activity_at END
+WHERE project_id=${projectId};`;
+}
+function refreshJournalAnalysisSource(projectId: string, oldTimestamp: string, newTimestamp: string): string {
+  const recent = `MAX(${latestRunTimestamp(projectId)},${latestJournalTimestamp(projectId)})`;
+  return `UPDATE project_analysis_sources SET revision=revision+1,
+recent_activity_at=CASE WHEN ${newTimestamp}>=recent_activity_at THEN ${newTimestamp} WHEN ${oldTimestamp}=recent_activity_at THEN ${recent} ELSE recent_activity_at END
+WHERE project_id=${projectId};`;
+}
+function touchProjectAnalysisSource(projectId: string): string {
+  return `INSERT INTO project_analysis_sources(project_id,revision,run_count,latest_run_at,recent_activity_at) VALUES(${projectId},1,0,0,0)
+ON CONFLICT(project_id) DO UPDATE SET revision=project_analysis_sources.revision+1;`;
+}
+
 export const unifiedSchemaMigrations = [{ version: 2, sql: `
 CREATE TABLE migration_jobs(
  id TEXT PRIMARY KEY,actor_id TEXT NOT NULL REFERENCES actors(id),idempotency_key TEXT NOT NULL,
@@ -580,4 +611,52 @@ CREATE INDEX events_request ON events(request_id);
 ` }, { version: 43, sql: `
 CREATE INDEX migration_items_stage_source ON migration_items(stage,source_identity,source_key);
 CREATE INDEX migration_recycling_source_receipt ON migration_recycling(source_identity,source_key,source_hash,status);
+` }, { version: 44, sql: `
+CREATE TABLE project_analysis_sources(
+ project_id TEXT PRIMARY KEY REFERENCES projects(id),revision INTEGER NOT NULL,
+ run_count INTEGER NOT NULL,latest_run_at INTEGER NOT NULL,recent_activity_at INTEGER NOT NULL);
+INSERT INTO project_analysis_sources(project_id,revision,run_count,latest_run_at,recent_activity_at)
+SELECT p.id,COALESCE(g.revision,0),
+ (SELECT COUNT(*) FROM project_run_indexes i WHERE i.project_id=p.id),
+ ${latestRunTimestamp('p.id')},
+ MAX(
+  ${latestRunTimestamp('p.id')},
+  ${latestJournalTimestamp('p.id')}
+ )
+FROM projects p LEFT JOIN report_source_generations g ON g.project_id=p.id;
+CREATE INDEX settings_namespace_owner_key ON settings(namespace,owner_scope,key,id);
+CREATE TRIGGER project_analysis_run_insert AFTER INSERT ON project_run_indexes BEGIN
+ INSERT INTO project_analysis_sources(project_id,revision,run_count,latest_run_at,recent_activity_at)
+ VALUES(NEW.project_id,1,1,${analysisRunTimestamp('NEW.record_json')},${analysisRunTimestamp('NEW.record_json')})
+ ON CONFLICT(project_id) DO UPDATE SET revision=project_analysis_sources.revision+1,run_count=project_analysis_sources.run_count+1,
+ latest_run_at=MAX(project_analysis_sources.latest_run_at,excluded.latest_run_at),recent_activity_at=MAX(project_analysis_sources.recent_activity_at,excluded.recent_activity_at);
+END;
+CREATE TRIGGER project_analysis_run_update AFTER UPDATE ON project_run_indexes BEGIN
+ ${refreshRunAnalysisSource('NEW.project_id', analysisRunTimestamp('OLD.record_json'), analysisRunTimestamp('NEW.record_json'))}
+END;
+CREATE TRIGGER project_analysis_run_delete AFTER DELETE ON project_run_indexes BEGIN
+ UPDATE project_analysis_sources SET revision=revision+1,run_count=MAX(0,run_count-1),
+ latest_run_at=CASE WHEN ${analysisRunTimestamp('OLD.record_json')}=latest_run_at THEN ${latestRunTimestamp('OLD.project_id')} ELSE latest_run_at END,
+ recent_activity_at=CASE WHEN ${analysisRunTimestamp('OLD.record_json')}=latest_run_at THEN MAX(${latestRunTimestamp('OLD.project_id')},${latestJournalTimestamp('OLD.project_id')}) ELSE recent_activity_at END
+ WHERE project_id=OLD.project_id;
+END;
+CREATE TRIGGER project_analysis_journal_insert AFTER INSERT ON project_journal_entries BEGIN
+ INSERT INTO project_analysis_sources(project_id,revision,run_count,latest_run_at,recent_activity_at)
+ VALUES(NEW.project_id,1,0,0,${analysisTimestamp('NEW.timestamp')})
+ ON CONFLICT(project_id) DO UPDATE SET revision=project_analysis_sources.revision+1,recent_activity_at=MAX(project_analysis_sources.recent_activity_at,excluded.recent_activity_at);
+END;
+CREATE TRIGGER project_analysis_journal_update AFTER UPDATE ON project_journal_entries BEGIN
+ ${refreshJournalAnalysisSource('NEW.project_id', analysisTimestamp('OLD.timestamp'), analysisTimestamp('NEW.timestamp'))}
+END;
+CREATE TRIGGER project_analysis_journal_delete AFTER DELETE ON project_journal_entries BEGIN
+ UPDATE project_analysis_sources SET revision=revision+1,
+ recent_activity_at=CASE WHEN ${analysisTimestamp('OLD.timestamp')}=recent_activity_at THEN MAX(${latestRunTimestamp('OLD.project_id')},${latestJournalTimestamp('OLD.project_id')}) ELSE recent_activity_at END
+ WHERE project_id=OLD.project_id;
+END;
+CREATE TRIGGER project_analysis_link_insert AFTER INSERT ON project_journal_links BEGIN ${touchProjectAnalysisSource('NEW.project_id')} END;
+CREATE TRIGGER project_analysis_link_update AFTER UPDATE ON project_journal_links BEGIN ${touchProjectAnalysisSource('NEW.project_id')} END;
+CREATE TRIGGER project_analysis_link_delete AFTER DELETE ON project_journal_links BEGIN ${touchProjectAnalysisSource('OLD.project_id')} END;
+CREATE TRIGGER project_analysis_control_insert AFTER INSERT ON run_control BEGIN ${touchProjectAnalysisSource('NEW.project_id')} END;
+CREATE TRIGGER project_analysis_control_update AFTER UPDATE ON run_control BEGIN ${touchProjectAnalysisSource('NEW.project_id')} END;
+CREATE TRIGGER project_analysis_control_delete AFTER DELETE ON run_control BEGIN ${touchProjectAnalysisSource('OLD.project_id')} END;
 ` }];

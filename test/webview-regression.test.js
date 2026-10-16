@@ -6450,10 +6450,10 @@ test('local-first loading paints and launches before optional or durable work', 
     extensionSource.indexOf('async function handleOpenProjectGrowth')
   );
   assert.ok(
-    roadmapOpenBody.indexOf('buildLocalDataStatusHtml') < roadmapOpenBody.indexOf('getWebviewHtml(roadmapPanel.webview, context)'),
+    roadmapOpenBody.indexOf('buildLocalDataStatusHtml') < roadmapOpenBody.indexOf('getWebviewHtml(roadmapWebview, context)'),
     'a lightweight roadmap shell must paint before the complete Webview is built'
   );
-  assert.match(roadmapOpenBody, /getWebviewHtml\(roadmapPanel\.webview, context\)[\s\S]*?\}, 80\)/);
+  assert.match(roadmapOpenBody, /getWebviewHtml\(roadmapWebview, context\)[\s\S]*?\}, 80\)/);
   const roadmapWebviewSource = fs.readFileSync(path.join(projectRoot, 'src/roadmapWebview.ts'), 'utf8');
   assert.match(roadmapWebviewSource, /const roadmapHtmlCache = new Map<string, string>\(\)/);
   assert.match(roadmapWebviewSource, /const cachedHtml = roadmapHtmlCache\.get\(cacheKey\)[\s\S]*?return cachedHtml/);
@@ -6484,7 +6484,7 @@ test('local-first loading paints and launches before optional or durable work', 
 
   assert.match(extensionSource, /let persistedSettingsCache: SolopreneurSettings \| null = null/);
   assert.match(extensionSource, /persistedSettingsCacheWorkspaceRoot === settingsWorkspaceRoot[\s\S]*?return persistedSettingsCache/);
-  assert.match(extensionSource, /'settings\.get': async[\s\S]*?invalidatePersistedSettingsCache\(\)[\s\S]*?postSettingsLoaded/);
+  assert.match(extensionSource, /'settings\.get': async[\s\S]*?invalidatePersistedSettingsCache\(\)[\s\S]*?respond\(\{[\s\S]*?command: 'settingsLoaded'/);
   assert.match(extensionSource, /getAgentExecutionPage\(nodeId, pageSize, requestedPage \* pageSize\)/);
 
   const sidebarWebviewSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
@@ -6594,6 +6594,27 @@ test('sidebar message paths absorb a disposed webview rejection', async () => {
 
   assert.equal(await provider.postMessage({ command: 'fixture' }), false);
   assert.equal(await provider.sendNodesToWebview(), false);
+  provider._view = { get webview() { throw new Error('Webview is disposed'); } };
+  assert.equal(provider.getWebview(), undefined);
+  assert.equal(await provider.postMessage({ command: 'fixture-after-dispose' }), false);
+});
+
+test('conversation delivery treats a disposed roadmap webview as a best-effort projection', () => {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.postConversation = postNodeConversations;
+    module.exports.connect = () => {
+      activeProjectRoot = '/fixture/project';
+      syncEngine = { getAgentExecutions: () => [] };
+      activePanel = { get webview() { throw new Error('Webview is disposed'); } };
+      sidebarProvider = null;
+    };
+  `);
+  extension.connect();
+
+  assert.doesNotThrow(
+    () => extension.postConversation('__roadmap_revision__'),
+    'a disposed UI projection cannot turn a submitted Agent command into a delivery failure'
+  );
 });
 
 test('sidebar does not commit a superseded core snapshot when its reservation arrives late', async () => {
@@ -6676,7 +6697,7 @@ test('project card action launches release the next project after execution regi
   assert.deepEqual(events, ['first:start', 'first:registered', 'second:start', 'first:finished']);
 });
 
-test('failed project preparation closes startup terminals instead of leaving empty shells', async () => {
+test('failed project preparation never leaves an empty shell', async () => {
   for (const command of ['conversation.runSolo', 'conversation.runRoadmapRevision']) {
     const terminal = {
       name: `Project B · ${command} · 1 (solomap)`, processId: Promise.resolve(123),
@@ -6689,6 +6710,7 @@ test('failed project preparation closes startup terminals instead of leaving emp
         extensionContextRef = { extensionPath: ${JSON.stringify(projectRoot)}, extensionUri: vscode.Uri.file(${JSON.stringify(projectRoot)}) };
         activeProjectRoot = project; sidebarProvider = null;
         getSelectedProjectPath = () => project;
+        getProjects = () => ${command === 'conversation.runRoadmapRevision' ? '[]' : '[{ path: project }]'};
         getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'codex', automationTasks: {} });
         getOpenCodeTerminalEnvironment = async () => ({});
         ensureActionProject = async () => { throw new Error('project preparation failed'); };
@@ -6700,22 +6722,28 @@ test('failed project preparation closes startup terminals instead of leaving emp
 
     await assert.rejects(
       extension.action({}, { command, projectPath: '/fixture/project-b', userMessage: '继续真实任务', agentCli: 'codex' }, 'sidebar'),
-      /project preparation failed/
+      command === 'conversation.runSolo' ? /project preparation failed/ : /could not prepare this project/
     );
 
-    assert.equal(terminal.disposed, 1, `${command} must close the unused terminal`);
+    assert.equal(terminal.disposed || 0, command === 'conversation.runSolo' ? 1 : 0,
+      `${command} must not leave an unused terminal`);
     assert.equal(extension.reservations('/fixture/project-b'), 0, `${command} must release the reservation`);
   }
 });
 
 test('roadmap revision launches bind each concurrent project without changing the selected project or pre-opening shells', async () => {
   const projects = ['/fixture/project-a', '/fixture/project-b', '/fixture/project-c'];
-  const entered = [];
-  const registered = [];
-  const completed = [];
-  const targets = [];
-  const releases = new Map();
-  const gates = new Map(projects.map(project => [project, new Promise(resolve => releases.set(project, resolve))]));
+  const enginePaths = [];
+  class ProjectSyncEngine {
+    constructor(roadmapPath, journalPath, extensionPath, globalDataPath) {
+      this.roadmapPath = roadmapPath;
+      this.journalPath = journalPath;
+      this.extensionPath = extensionPath;
+      this.globalDataPath = globalDataPath;
+      enginePaths.push({ roadmapPath, journalPath, globalDataPath });
+    }
+    close() { this.closed = true; }
+  }
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.action = handleSharedWebviewAction;
     module.exports.selected = () => selectedProjectPath;
@@ -6723,20 +6751,20 @@ test('roadmap revision launches bind each concurrent project without changing th
     let selectedProjectPath = ${JSON.stringify(projects[0])};
     let startupTerminalCount = 0;
     const projectList = ${JSON.stringify(projects)};
+    const entered = [], registered = [], completed = [], targets = [], releases = new Map(), gates = new Map();
+    for (const project of projectList) gates.set(project, new Promise(resolve => releases.set(project, resolve)));
+    module.exports.testState = { entered, registered, completed, targets, releases };
     getProjects = () => projectList.map(projectPath => ({ path: projectPath, name: projectPath.split('/').pop() }));
     getSelectedProjectPath = () => selectedProjectPath;
     getPersistedSettings = () => ({ globalDataPath: '/fixture/global', cliPath: 'codex', automationTasks: {} });
+    autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
     revealAgentStartupTerminal = async () => { startupTerminalCount += 1; return { dispose() {} }; };
     ensureActionProject = async (_context, projectPath) => { selectedProjectPath = projectPath; return projectPath; };
-    captureConversationLaunchTarget = async (_context, workspaceRoot) => {
-      entered.push(workspaceRoot);
-      await gates.get(workspaceRoot);
-      const target = { workspaceRoot, globalDataPath: '/fixture/global', engine: { close() {} }, launchIntentId: 'intent:' + workspaceRoot };
-      targets.push(target);
-      return target;
-    };
     handleRoadmapRevision = async (_context, message, _cli, _model, _files, onExecutionRegistered, target) => {
       if (!target || target.workspaceRoot !== message) throw new Error('roadmap revision was not bound to its explicit project target');
+      entered.push(target.workspaceRoot);
+      targets.push(target);
+      await gates.get(target.workspaceRoot);
       registered.push(target.workspaceRoot);
       onExecutionRegistered();
       await Promise.resolve();
@@ -6744,9 +6772,10 @@ test('roadmap revision launches bind each concurrent project without changing th
     };
     sidebarProvider = { refreshProjectConversationSnapshotAfterStatusChange: async () => {} };
   `, {
-    './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js')
+    './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js'),
+    './db/syncEngine': { SyncEngine: ProjectSyncEngine }
   });
-  extension.__test = { entered, registered, completed, targets, gates };
+  const { entered, registered, completed, targets, releases } = extension.testState;
 
   const launches = projects.map(projectPath => extension.action(
     {},
@@ -6755,15 +6784,17 @@ test('roadmap revision launches bind each concurrent project without changing th
   ));
   await new Promise(resolve => setTimeout(resolve, 0));
 
-  assert.deepEqual(entered.slice().sort(), projects.slice().sort(), 'different projects must enter preparation concurrently');
+  assert.equal(JSON.stringify(entered.slice().sort()), JSON.stringify(projects.slice().sort()), 'different projects must enter preparation concurrently');
   assert.equal(extension.selected(), projects[0], 'launching another project must not change the user selection');
   assert.equal(extension.startupTerminalCount(), 0, 'a visible shell must not exist before the durable run is registered');
 
   for (const projectPath of projects) releases.get(projectPath)();
   await Promise.all(launches);
-  assert.deepEqual(registered.slice().sort(), projects.slice().sort());
-  assert.deepEqual(completed.slice().sort(), projects.slice().sort());
+  assert.equal(JSON.stringify(registered.slice().sort()), JSON.stringify(projects.slice().sort()));
+  assert.equal(JSON.stringify(completed.slice().sort()), JSON.stringify(projects.slice().sort()));
   assert.equal(new Set(targets.map(target => target.launchIntentId)).size, 3);
+  assert.deepEqual(enginePaths.map(item => path.dirname(path.dirname(item.roadmapPath))).sort(), projects.slice().sort());
+  assert.ok(targets.every(target => target.engine.closed), 'every project-local SyncEngine must close after launch registration');
   assert.equal(extension.selected(), projects[0]);
 });
 
@@ -8676,6 +8707,14 @@ test('panel message helper posts stable command payloads', async () => {
   ]);
   assert.equal(await panelMessages.postSettingsLoaded({ postMessage() { throw new Error('Webview is disposed'); } }, {}), false);
   assert.equal(await panelMessages.postProjectsLoaded({ postMessage() { return Promise.reject(new Error('Webview is disposed')); } }, {}), false);
+  const disposedPanel = { get webview() { throw new Error('Webview is disposed'); } };
+  assert.equal(await panelMessages.postWebviewContainerMessage(disposedPanel, { command: 'ignored' }), false);
+  assert.equal(panelMessages.updateWebviewContainer(disposedPanel, () => assert.fail('disposed webview must not be updated')), false);
+  assert.throws(
+    () => panelMessages.updateWebviewContainer({ webview: target }, () => { throw new Error('render failed'); }),
+    /render failed/,
+    'real rendering failures must remain diagnosable'
+  );
 });
 
 test('conversation presentation is the shared source for roadmap and sidebar actions', () => {
@@ -9117,7 +9156,9 @@ test('agent command builder keeps background one-shot commands and uses native i
   capabilityTransport.sendRuntimeDataRequest = (root, request) => {
     let owner = capabilityStores.get(root);
     if (!owner) {
-      const dataRoot = path.resolve(root).startsWith(`${path.resolve(os.tmpdir())}${path.sep}`)
+      const resolvedRoot = path.resolve(root);
+      const sharedTemporaryDefault = path.join(path.resolve(os.tmpdir()), '.solomap-global');
+      const dataRoot = resolvedRoot.startsWith(`${path.resolve(os.tmpdir())}${path.sep}`) && resolvedRoot !== sharedTemporaryDefault
         ? root
         : path.join(transportFixtureRoot, String(capabilityStores.size), '.solomap-global');
       const store = new (require('../out/db/unifiedDataStore.js').UnifiedDataStore)(dataRoot);

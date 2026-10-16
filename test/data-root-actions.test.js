@@ -260,7 +260,9 @@ function extensionHost(t, f, options = {}) {
   };
   // Execute the registered production message body, keeping its real continuation handler.
   const begin = source.indexOf('async (message) => {', source.indexOf('async function handleOpenProjectGrowth('));
-  const end = source.indexOf('\n    });\n    activeProjectGrowthPanel.onDidDispose', begin);
+  const currentEnd = source.indexOf('\n    });\n    growthPanel.onDidDispose', begin);
+  const legacyEnd = source.indexOf('\n    });\n    activeProjectGrowthPanel.onDidDispose', begin);
+  const end = currentEnd > begin ? currentEnd : legacyEnd;
   assert.ok(begin > 0 && end > begin);
   vm.runInContext('this.dispatchGrowth = ' + source.slice(begin, end) + '\n}', host);
   const bind = scope.bindEngine; scope.bindEngine = async () => { const result = await bind(); f.engines.add(scope.hostEngine()); return result; };
