@@ -759,6 +759,102 @@ test('Today arrangement reads the current Runtime shadow decision', async () => 
   }
 });
 
+test('Today arrangement keeps a compatible same-day database snapshot visible while the Runtime catches up', async () => {
+  const fixture = await createFixture();
+  const Module = require('node:module');
+  const originalLoad = Module._load;
+  try {
+    runtime.runShadowDecisionCycle({
+      globalDataPath: fixture.globalRoot,
+      projects: [
+        { name: 'Alpha', path: fixture.alpha, priority: 'P1' },
+        { name: 'Beta', path: fixture.beta, priority: 'P2' }
+      ],
+      now: new Date()
+    });
+    Module._load = function(request, parent, isMain) {
+      if (request === 'vscode') return { Uri: { joinPath() { return {}; } } };
+      return originalLoad.call(this, request, parent, isMain);
+    };
+    delete require.cache[require.resolve('../out/dailyReview.js')];
+    const { readTodayReview } = require('../out/dailyReview.js');
+    const review = readTodayReview(fixture.globalRoot, [
+      { name: 'Alpha', path: fixture.alpha, priority: 'P1' },
+      { name: 'Beta', path: fixture.beta, priority: 'P2' },
+      { name: 'Gamma', path: path.join(fixture.root, 'gamma'), priority: 'P2' }
+    ]);
+
+    assert.equal(review.status, 'completed');
+    assert.equal(review.stale, true);
+    assert.equal(review.summary, '今日安排正在更新，先显示最近结果。');
+    assert.deepEqual(review.todos.map(item => item.projectPath), [fixture.beta, fixture.alpha]);
+  } finally {
+    Module._load = originalLoad;
+    await removeFixture(fixture);
+  }
+});
+
+test('a database Today snapshot becomes stale when current project priority changes', async () => {
+  const fixture = await createFixture();
+  try {
+    const projects = [
+      { name: 'Alpha', path: fixture.alpha, priority: 'P1' },
+      { name: 'Beta', path: fixture.beta, priority: 'P2' }
+    ];
+    await runtime.runShadowDecisionCycleFromDatabase({
+      globalDataPath: fixture.globalRoot,
+      projects,
+      operation: fixture.operations,
+      now: new Date()
+    });
+    assert.ok(runtime.readCurrentShadowDecision(fixture.globalRoot, projects));
+    assert.equal(runtime.readCurrentShadowDecision(fixture.globalRoot, [{ ...projects[0], priority: 'P0' }, projects[1]]), null);
+    assert.ok(runtime.readCompatibleShadowDecision(fixture.globalRoot, [{ ...projects[0], priority: 'P0' }, projects[1]]));
+  } finally {
+    await removeFixture(fixture);
+  }
+});
+
+test('a database Today snapshot becomes stale when only roadmap facts change', async () => {
+  const fixture = await createFixture();
+  const Module = require('node:module');
+  const originalLoad = Module._load;
+  try {
+    const projects = [
+      { name: 'Alpha', path: fixture.alpha, priority: 'P1' },
+      { name: 'Beta', path: fixture.beta, priority: 'P2' }
+    ];
+    await runtime.runShadowDecisionCycleFromDatabase({
+      globalDataPath: fixture.globalRoot,
+      projects,
+      now: new Date(),
+      operation: fixture.operations
+    });
+    const alpha = await fixture.call('read_roadmap', { root: fixture.alpha });
+    await fixture.call('update_roadmap', {
+      root: fixture.alpha,
+      expectedRevision: alpha.revision,
+      nodes: alpha.nodes.map(node => ({ ...node, status: 'Failed' })),
+      idempotencyKey: 'today-display-alpha-failed'
+    });
+
+    Module._load = function(request, parent, isMain) {
+      if (request === 'vscode') return { Uri: { joinPath() { return {}; } } };
+      return originalLoad.call(this, request, parent, isMain);
+    };
+    delete require.cache[require.resolve('../out/dailyReview.js')];
+    const { readTodayReviewFromDatabase } = require('../out/dailyReview.js');
+    const review = await readTodayReviewFromDatabase(fixture.globalRoot, projects, fixture.operations);
+
+    assert.equal(review.stale, true);
+    assert.equal(review.summary, '今日安排正在更新，先显示最近结果。');
+    assert.equal(review.todos[0].projectPath, fixture.beta);
+  } finally {
+    Module._load = originalLoad;
+    await removeFixture(fixture);
+  }
+});
+
 test('cognitive shadow engine can reorder opaque candidates without receiving local paths', async () => {
   const fixture = await createFixture();
   try {

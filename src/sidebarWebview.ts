@@ -5010,7 +5010,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       return {
         issueDraftTitle, issueDraftBody, issueDraftCategory, issueDraftPriority, quickIssueDraftTitle, expandedIssueNumber,
         issuePanelExpanded, deliveryActionPanelExpanded, issueFormOpen,
-        expandedRoadmapRevisionProjectPath, roadmapRevisionDrafts: { ...roadmapRevisionDrafts },
+        roadmapRevisionDrafts: { ...roadmapRevisionDrafts },
         projectContinueNodeSelections: { ...projectContinueNodeSelections },
         projectConversationModes: { ...projectConversationModes },
         projectConversationAgentSelections: { ...projectConversationAgentSelections },
@@ -6819,6 +6819,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       issueFormOpen = false;
       issueActionMessage = '';
       deliveryActionMessage = '';
+      expandedRoadmapRevisionProjectPath = '';
       for (const value of [roadmapRevisionDrafts, projectContinueNodeSelections, projectConversationModes,
         projectConversationAgentSelections, projectConversationModelSelections, projectContinueFiles,
         projectSoloFiles, projectSoloDrafts, projectContinueDrafts, sidebarExpandedConversations,
@@ -8587,7 +8588,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           issuePanelExpanded = interaction.issuePanelExpanded === true;
           deliveryActionPanelExpanded = interaction.deliveryActionPanelExpanded === true;
           issueFormOpen = interaction.issueFormOpen === true;
-          expandedRoadmapRevisionProjectPath = typeof interaction.expandedRoadmapRevisionProjectPath === 'string' ? interaction.expandedRoadmapRevisionProjectPath : expandedRoadmapRevisionProjectPath;
           for (const value of [roadmapRevisionDrafts, projectContinueNodeSelections, projectConversationModes,
             projectConversationAgentSelections, projectConversationModelSelections, projectContinueFiles, projectSoloFiles,
             projectSoloDrafts, projectContinueDrafts, sidebarExpandedConversations, sidebarLogsExpandedConversations]) Object.keys(value).forEach(key => delete value[key]);
@@ -10544,6 +10544,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       function buildTodayPlanItems(portfolio, selectedProjectPath) {
         const shadowOrder = new Map();
         if (currentDailyReview
+          && currentDailyReview.stale !== true
           && currentDailyReview.source === 'runtime_shadow'
           && !ignoredTodayDecisionIds.has(String(currentDailyReview.decisionId || ''))
           && Array.isArray(currentDailyReview.todos)) {
@@ -10660,7 +10661,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             \${review.summary ? \`<div class="daily-review-summary">\${escapeHtml(review.summary)}</div>\` : ''}
             \${otherTodosHtml}
             \${otherConfirmsHtml}
-            \${review.source === 'runtime_shadow' && review.decisionId ? \`<button class="global-review-btn" type="button" data-ignore-today-decision>\${escapeHtml(t('dailyReviewIgnore'))}</button>\` : ''}
+            \${review.stale !== true && review.source === 'runtime_shadow' && review.decisionId ? \`<button class="global-review-btn" type="button" data-ignore-today-decision>\${escapeHtml(t('dailyReviewIgnore'))}</button>\` : ''}
           </div>
         \`;
       }
@@ -10680,7 +10681,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         const review = currentDailyReview || {};
         const decisionId = String(review.decisionId || '');
         const selectedProjectPath = String(projectPath || '');
-        if (review.source !== 'runtime_shadow' || !decisionId || !selectedProjectPath) return;
+        if (review.stale === true || review.source !== 'runtime_shadow' || !decisionId || !selectedProjectPath) return;
         if (ignoredTodayDecisionIds.has(decisionId) || review.feedbackOutcome === 'ignored') return;
         const recommendedProjectPath = String(review.recommendedProjectPath || '');
         vscode.postMessage({
@@ -10696,7 +10697,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       function ignoreTodayDecision() {
         const review = currentDailyReview || {};
         const decisionId = String(review.decisionId || '');
-        if (review.source !== 'runtime_shadow' || !decisionId) return;
+        if (review.stale === true || review.source !== 'runtime_shadow' || !decisionId) return;
         ignoredTodayDecisionIds.add(decisionId);
         vscode.postMessage({
           command: 'recordTodayShadowFeedback',
@@ -12131,9 +12132,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       pendingAsyncPortfolioRender = null;
       projectComposerComposing = false;
       if (projectPath !== activeProjectPath) {
-        currentNodes = [];
+        resetProjectScopedState(projectPath, true);
       }
-      activeProjectPath = projectPath;
       currentProjects.selectedProjectPath = projectPath;
       sidebarSoloConversations = sidebarSoloConversationsByProject[projectPath] || [];
       setSoloSelectValue(projectSelect, projectPath);
@@ -12146,7 +12146,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       renderPortfolio(currentProjects.portfolio, projectPath);
       setTimeout(() => {
         if (currentProjects.selectedProjectPath === projectPath) {
-          requestSidebarProjectConversationSnapshot(projectPath, true);
+          requestSidebarProjectConversationSnapshot(projectPath);
         }
         const selectedCard = portfolioList && portfolioList.querySelector ? portfolioList.querySelector('.portfolio-card.is-selected') : null;
         if (selectedCard && typeof selectedCard.scrollIntoView === 'function') {

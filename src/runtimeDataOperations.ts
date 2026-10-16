@@ -147,6 +147,22 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       case 'install_runtime_secret': persistTelegramRuntimeSecret(store.root, String(input.secretRef || ''), String(input.value || '')); return { installed: true };
       case 'accept_roadmap_csv': return store.acceptRoadmapCsv(input as unknown as Parameters<UnifiedDataStore['acceptRoadmapCsv']>[0]);
       case 'read_roadmap': return store.readRoadmap(input as unknown as Parameters<UnifiedDataStore['readRoadmap']>[0]);
+      case 'read_today_roadmaps': {
+        if (!Array.isArray(input.roots) || input.roots.some(root => typeof root !== 'string' || !path.isAbsolute(root))) throw new Error('invalid_today_roadmap_query');
+        const items = await Promise.all(input.roots.map(async rawRoot => {
+          const root = String(rawRoot);
+          try {
+            const snapshot = await store.readRoadmap({ root });
+            return { root, nodes: snapshot.nodes };
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException)?.code;
+            if (error instanceof Error && error.message === 'roadmap_import_required') return { root, nodes: [], unavailable: true };
+            if (code === 'ENOENT' || (error instanceof Error && (error.message.startsWith('roadmap_csv_invalid:') || /\bENOENT\b/.test(error.message)))) return { root, nodes: [] };
+            throw error;
+          }
+        }));
+        return { items };
+      }
       case 'update_roadmap': return store.updateRoadmap(input as unknown as Parameters<UnifiedDataStore['updateRoadmap']>[0]);
       case 'resolve_roadmap_conflict': return store.resolveRoadmapConflict(input as unknown as Parameters<UnifiedDataStore['resolveRoadmapConflict']>[0]);
       case 'open_mcp_session': {

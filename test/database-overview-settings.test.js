@@ -20,14 +20,14 @@ function loadOverviewModule() {
   }
 }
 
-test('both settings surfaces show one database overview and no migration cleanup controls', () => {
+test('only sidebar settings show the database overview and neither surface shows migration cleanup controls', () => {
   const { getSidebarWebviewHtml } = require(path.join(projectRoot, 'out/sidebarWebview.js'));
   const { getWebviewHtml } = require(path.join(projectRoot, 'out/roadmapWebview.js'));
-  for (const html of [
-    getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot)),
-    getWebviewHtml(createWebviewStub(), { extensionUri: createUri(projectRoot) })
-  ]) {
-    assert.equal((html.match(/data-database-overview-card/g) || []).length, 1);
+  const sidebar = getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const roadmap = getWebviewHtml(createWebviewStub(), { extensionUri: createUri(projectRoot) });
+  assert.equal((sidebar.match(/data-database-overview-card/g) || []).length, 1);
+  assert.equal((roadmap.match(/data-database-overview-card/g) || []).length, 0);
+  for (const html of [sidebar, roadmap]) {
     assert.doesNotMatch(html, /data-migration-settings-card/);
     assert.doesNotMatch(html, /清理旧数据|Cleanup old data|dataMigration\./);
   }

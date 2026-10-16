@@ -8,15 +8,18 @@ const { getWebviewHtml } = require('../out/roadmapWebview.js');
 const { getMigrationSettingsCardHtml, getMigrationSettingsScript } = require('../out/migrationSettingsWebview.js');
 const { getDatabaseOverviewCardHtml, getDatabaseOverviewScript } = require('../out/databaseOverviewSettings.js');
 
-test('both generated settings surfaces replace the temporary migration card with the database overview', () => {
+test('only sidebar settings keep the database overview after the temporary migration card is removed', () => {
   const uri = { path: '/isolated/extension', fsPath: '/isolated/extension', toString: () => '/isolated/extension' };
   const webview = { asWebviewUri: value => value.toString(), cspSource: 'fixture' };
-  for (const html of [getSidebarWebviewHtml(webview, uri), getWebviewHtml(webview, { extensionUri: uri, extensionPath: uri.fsPath })]) {
-    assert.equal((html.match(/id="database-overview-card"/g) || []).length, 1);
+  const sidebar = getSidebarWebviewHtml(webview, uri);
+  const roadmap = getWebviewHtml(webview, { extensionUri: uri, extensionPath: uri.fsPath });
+  assert.equal((sidebar.match(/id="database-overview-card"/g) || []).length, 1);
+  assert.equal((roadmap.match(/id="database-overview-card"/g) || []).length, 0);
+  for (const html of [sidebar, roadmap]) {
     assert.doesNotMatch(html, /id="migration-settings-card"|data-migration-preview|data-migration-confirm/);
-    assert.match(html, /data-database-overview-status[^>]*role="status"/);
     for (const match of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)) new vm.Script(match[1]);
   }
+  assert.match(sidebar, /data-database-overview-status[^>]*role="status"/);
   assert.match(getDatabaseOverviewCardHtml(), /overflow-wrap:\s*anywhere/);
   new vm.Script(getDatabaseOverviewScript());
 });

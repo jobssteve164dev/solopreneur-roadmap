@@ -1,7 +1,7 @@
 import * as crypto from 'crypto';
 import * as path from 'path';
 import { CsvStore } from './db/csvStore';
-import { readTodayReview } from './dailyReview';
+import { readTodayReviewFromDatabase } from './dailyReview';
 import { IntelligenceConversationStore } from './intelligenceChat';
 import { createIntelligenceMcpSession } from './intelligenceMcp';
 import { buildIntelligenceProjectContext, IntelligenceReadToolSource, readIntelligenceCurrentSteps } from './intelligenceReadTools';
@@ -131,7 +131,7 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
       },
       getTodayReview: async () => {
         await refreshProjectRegistry(globalDataPath, undefined, call);
-        const review = readTodayReview(globalDataPath, projects());
+        const review = await readTodayReviewFromDatabase(globalDataPath, projects(), operation);
         return review ? { summary: review.summary, items: review.todos.map(todo => todo.title) } : null;
       }
     };

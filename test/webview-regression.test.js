@@ -1547,13 +1547,17 @@ function isolatedCapabilityRuntime(root) {
 function makeSidebarSnapshotCacheStub(options = {}) {
   const actual = require('../out/sidebarSnapshotCache.js');
   const conversations = new Map();
+  const coreReadRoots = [];
   let core = null;
   let generation = 0;
   const signature = options.buildConversationDatabaseSignature || (async (_globalDataPath, projectPath) => `fixture:${projectPath}`);
   return {
     buildSidebarProjectSignature: actual.buildSidebarProjectSignature,
     buildConversationDatabaseSignature: signature,
-    async readSidebarCoreSnapshot() { return core; },
+    async readSidebarCoreSnapshot(globalDataPath) {
+      coreReadRoots.push(globalDataPath);
+      return options.readSidebarCoreSnapshot ? options.readSidebarCoreSnapshot(globalDataPath) : core;
+    },
     async reserveSidebarPortfolioSnapshot() {
       generation += 1;
       return { requestId: `fixture-${generation}`, generation };
@@ -1570,6 +1574,8 @@ function makeSidebarSnapshotCacheStub(options = {}) {
       conversations.set(projectPath, structuredClone(snapshot));
     },
     __setConversation(projectPath, snapshot) { conversations.set(projectPath, structuredClone(snapshot)); },
+    __setCore(snapshot) { core = structuredClone(snapshot); },
+    __getCoreReadRoots() { return [...coreReadRoots]; },
     __getConversation(projectPath) { return conversations.has(projectPath) ? structuredClone(conversations.get(projectPath)) : null; },
     __getCore() { return core ? structuredClone(core) : null; }
   };
@@ -2739,6 +2745,13 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     globalThis.__renderProjectDeliveryPanel = renderProjectDeliveryPanel;
     globalThis.__buildSecurityActionPrompt = buildSecurityActionPrompt;
     globalThis.__renderGlobalFocus = renderGlobalFocus;
+    globalThis.__renderDailyReview = renderDailyReview;
+    globalThis.__buildTodayPlanItems = buildTodayPlanItems;
+    globalThis.__setCurrentDailyReviewForTest = value => { currentDailyReview = value; };
+    globalThis.__setCurrentProjectsForTest = value => {
+      currentProjects.portfolio = value.portfolio || [];
+      currentProjects.selectedProjectPath = value.selectedProjectPath || '';
+    };
     globalThis.__recordTodayDecisionFeedback = recordTodayDecisionFeedback;
     globalThis.__ignoreTodayDecision = ignoreTodayDecision;
     globalThis.__renderIssueDetailWithPayload = (payload) => { issueDetails = payload; return renderIssueDetail('/workspace/app'); };
@@ -2774,6 +2787,9 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     globalThis.__setExpandedRoadmapRevisionProject = (projectPath) => {
       if (typeof expandedRoadmapRevisionProjectPath !== 'undefined') expandedRoadmapRevisionProjectPath = projectPath;
     };
+    globalThis.__currentSidebarInteractionState = currentSidebarInteractionState;
+    globalThis.__resetProjectScopedState = resetProjectScopedState;
+    globalThis.__activateProjectInSidebar = activateProjectInSidebar;
     globalThis.__setStartingRoadmapRevisionProject = (projectPath) => {
       startingRoadmapRevisionPaths.clear();
       if (projectPath) startingRoadmapRevisionPaths.add(projectPath);
@@ -2786,6 +2802,27 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
 
   assert.equal(typeof context.__renderProjectNextActionCard, 'function');
   assert.equal(typeof context.__buildSidebarRoadmapRevisionRequest, 'function');
+  const currentPortfolio = [
+    { name: 'Current urgent', path: '/workspace/current', failedNodes: 1, globalPriority: 'P0' },
+    { name: 'Cached first', path: '/workspace/cached', pendingNodes: 1, globalPriority: 'P2' },
+    { name: 'Third', path: '/workspace/third', pendingNodes: 1, globalPriority: 'P2' }
+  ];
+  context.__setCurrentDailyReviewForTest({ stale: true, source: 'runtime_shadow', todos: [{ projectPath: '/workspace/cached' }] });
+  assert.equal(context.__buildTodayPlanItems(currentPortfolio, '')[0].project.path, '/workspace/current');
+  context.__setCurrentDailyReviewForTest({ source: 'runtime_shadow', todos: [{ projectPath: '/workspace/cached' }] });
+  assert.equal(context.__buildTodayPlanItems(currentPortfolio, '')[0].project.path, '/workspace/cached');
+  const equalPortfolio = currentPortfolio.map(project => ({ ...project, failedNodes: 0, pendingNodes: 1, globalPriority: 'P2' }));
+  assert.equal(context.__buildTodayPlanItems(equalPortfolio, '')[0].project.path, '/workspace/cached');
+  context.__setCurrentProjectsForTest({ portfolio: currentPortfolio, selectedProjectPath: '/workspace/current' });
+  const staleReviewHtml = context.__renderDailyReview({ status: 'completed', stale: true, source: 'runtime_shadow', decisionId: 'stale-decision', summary: 'Updating', todos: [], needsConfirmation: [] });
+  assert.doesNotMatch(staleReviewHtml, /data-ignore-today-decision/);
+  postedMessages.length = 0;
+  context.__setCurrentDailyReviewForTest({ stale: true, source: 'runtime_shadow', decisionId: 'stale-decision', recommendedProjectPath: '/workspace/cached', todos: [] });
+  context.__recordTodayDecisionFeedback('/workspace/cached');
+  context.__ignoreTodayDecision();
+  assert.equal(postedMessages.some(message => message.command === 'recordTodayShadowFeedback'), false);
+  const freshReviewHtml = context.__renderDailyReview({ status: 'completed', source: 'runtime_shadow', decisionId: 'fresh-decision', summary: 'Ready', todos: [], needsConfirmation: [] });
+  assert.match(freshReviewHtml, /data-ignore-today-decision/);
   const nextActionProject = {
     name: 'app',
     path: '/workspace/app',
@@ -2808,6 +2845,10 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   const expandedNextActionHtml = context.__renderProjectNextActionCard(nextActionProject);
   assert.match(expandedNextActionHtml, /data-roadmap-revision-input="\/workspace\/app"/);
   assert.match(expandedNextActionHtml, /class="project-next-action-btn is-confirm project-roadmap-revision-send"[^>]*data-send-roadmap-revision-project-path="\/workspace\/app"/);
+  assert.equal(Object.hasOwn(context.__currentSidebarInteractionState(), 'expandedRoadmapRevisionProjectPath'), false);
+  context.__activateProjectInSidebar('/workspace/second');
+  assert.doesNotMatch(context.__renderProjectNextActionCard(nextActionProject), /data-roadmap-revision-input/);
+  context.__resetProjectScopedState('/workspace/app', false);
 
   const coldStartRevisionRequest = context.__buildSidebarRoadmapRevisionRequest('/workspace/app', '调整优先级');
   assert.equal(coldStartRevisionRequest.agentCli, '');
@@ -4124,6 +4165,117 @@ test('sidebar sends an empty first portfolio so startup can finish without regis
   provider.sendProjects();
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.ok(posted.some(message => message.command === 'projectsLoaded' && message.projects.projects.length === 0));
+});
+
+test('sidebar resolves an empty Today data path from the registered project before refreshing', async () => {
+  const refreshedRoots = [];
+  const reviewRoots = [];
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '', {
+    './autonomousRuntime': {
+      refreshShadowRuntimeState: async root => { refreshedRoots.push(root); },
+      recordShadowDecisionFeedback: async () => {}
+    },
+    './dailyReview': {
+      readTodayReviewFromDatabase: async root => {
+        reviewRoots.push(root);
+        return null;
+      },
+      startDailyReviewAgent: async () => null
+    }
+  });
+  const posted = [];
+  const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
+    getSettings: () => ({ globalDataPath: '' }),
+    updateSettings: async () => {},
+    getProjects: () => ({ projects: [{ name: 'App', path: '/fixture/app' }], selectedProjectPath: '/fixture/app' })
+  });
+  provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
+
+  await provider.sendDailyReview();
+
+  assert.deepEqual(refreshedRoots, ['/fixture/.solomap-global']);
+  assert.deepEqual(reviewRoots, ['/fixture/.solomap-global']);
+  assert.equal(posted.some(message => message.command === 'dailyReviewLoaded'), true);
+});
+
+test('an older Today database read cannot repaint a newer project set', async () => {
+  const pendingReads = [];
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '', {
+    './autonomousRuntime': {
+      refreshShadowRuntimeState: async () => {},
+      recordShadowDecisionFeedback: async () => {}
+    },
+    './dailyReview': {
+      readTodayReviewFromDatabase: (root, projects) => new Promise(resolve => pendingReads.push({ root, projects, resolve })),
+      startDailyReviewAgent: async () => null
+    }
+  });
+  const posted = [];
+  let projectState = { projects: [{ name: 'A', path: '/fixture/a' }], selectedProjectPath: '/fixture/a' };
+  const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
+    getSettings: () => ({ globalDataPath: '' }),
+    updateSettings: async () => {},
+    getProjects: () => projectState
+  });
+  provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
+
+  const older = provider.sendDailyReview();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  projectState = { projects: [{ name: 'B', path: '/fixture/b' }], selectedProjectPath: '/fixture/b' };
+  const newer = provider.sendDailyReview();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(pendingReads.length, 2);
+  pendingReads[1].resolve({ summary: 'B' });
+  await newer;
+  pendingReads[0].resolve({ summary: 'A' });
+  await older;
+
+  const reviews = posted.filter(message => message.command === 'dailyReviewLoaded');
+  assert.deepEqual(reviews.map(message => message.review.summary), ['B']);
+  assert.equal(pendingReads[0].root, '/fixture/.solomap-global');
+  assert.equal(pendingReads[1].root, '/fixture/.solomap-global');
+});
+
+test('manual Today refresh and feedback share the current normalized project generation', async () => {
+  let resolveManual;
+  const feedbackRoots = [];
+  let currentReview = { summary: 'B', decisionId: 'decision' };
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '', {
+    './autonomousRuntime': {
+      refreshShadowRuntimeState: async () => {},
+      recordShadowDecisionFeedback: async root => { feedbackRoots.push(root); }
+    },
+    './dailyReview': {
+      readTodayReviewFromDatabase: async (_root, projects) => ({ ...currentReview, summary: projects[0].name }),
+      startDailyReviewAgent: () => new Promise(resolve => { resolveManual = resolve; })
+    }
+  });
+  const posted = [];
+  let listener;
+  let projectState = { projects: [{ name: 'A', path: '/fixture-a/app' }], selectedProjectPath: '/fixture-a/app' };
+  const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
+    getSettings: () => ({ globalDataPath: '' }),
+    updateSettings: async () => {},
+    getProjects: () => projectState
+  });
+  provider.resolveWebviewView({ webview: {
+    options: {}, html: '', asWebviewUri: uri => String(uri.fsPath || uri),
+    postMessage(message) { posted.push(message); return Promise.resolve(true); },
+    onDidReceiveMessage(callback) { listener = callback; }
+  } }, {}, {});
+
+  const manual = listener({ command: 'runDailyReview' });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  projectState = { projects: [{ name: 'B', path: '/fixture-b/app' }], selectedProjectPath: '/fixture-b/app' };
+  await provider.sendDailyReview();
+  resolveManual({ summary: 'A' });
+  await manual;
+  await listener({ command: 'recordTodayShadowFeedback', outcome: 'accepted', operationId: 'op', decisionId: 'decision', recommendedProjectPath: '/fixture-b/app', selectedProjectPath: '/fixture-b/app' });
+  currentReview = { summary: 'B', decisionId: 'decision', stale: true };
+  await listener({ command: 'recordTodayShadowFeedback', outcome: 'accepted', operationId: 'stale-op', decisionId: 'decision', recommendedProjectPath: '/fixture-b/app', selectedProjectPath: '/fixture-b/app' });
+
+  assert.deepEqual(posted.filter(message => message.command === 'dailyReviewLoaded').map(message => message.review.summary), ['B']);
+  assert.deepEqual(feedbackRoots, ['/fixture-b/.solomap-global']);
 });
 
 test('full roadmap webview runtime script parses and opens settings panel', async () => {
@@ -6572,6 +6724,78 @@ test('sidebar paints the selected local project before snapshot reservation comp
   resolveReservation({ requestId: 'fixture', generation: 0 });
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(snapshotCache.__getCore()?.portfolio[0]?.path, '/fixture/app');
+});
+
+test('sidebar paints a compatible database snapshot before refreshing a changed project signature', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
+  snapshotCache.__setCore({
+    version: 3,
+    projectSignature: 'older-signature',
+    portfolio: [{ name: 'App', path: '/fixture/app', recommendedNodeTitle: 'Cached next action' }]
+  });
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
+  );
+  const posted = [];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects: [{ name: 'App', path: '/fixture/app' }], selectedProjectPath: '/fixture/app' })
+    }
+  );
+  provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
+  provider._projectLoader.scheduleAll = () => {};
+  provider.sendDailyReview = () => {};
+
+  await provider.sendProjects();
+
+  const firstPortfolio = posted.find(message => message.command === 'projectsLoaded')?.projects?.portfolio;
+  assert.equal(firstPortfolio?.[0]?.recommendedNodeTitle, 'Cached next action');
+  assert.equal(snapshotCache.__getCoreReadRoots()[0], '/fixture/.solomap-global');
+});
+
+test('an older sidebar cache read cannot repaint the previous project after a newer cold-start request', async () => {
+  const pendingReads = [];
+  const snapshotCache = makeSidebarSnapshotCacheStub({
+    readSidebarCoreSnapshot: () => new Promise(resolve => pendingReads.push(resolve))
+  });
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
+  );
+  const posted = [];
+  let projectState = { projects: [{ name: 'A', path: '/fixture/a' }], selectedProjectPath: '/fixture/a' };
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
+      updateSettings: async () => {},
+      getProjects: () => projectState
+    }
+  );
+  provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
+  provider._projectLoader.scheduleAll = () => {};
+  provider.sendDailyReview = () => {};
+
+  const older = provider.sendProjects();
+  projectState = { projects: [{ name: 'B', path: '/fixture/b' }], selectedProjectPath: '/fixture/b' };
+  const newer = provider.sendProjects();
+  assert.equal(pendingReads.length, 2);
+  pendingReads[1]({ version: 3, projectSignature: snapshotCache.buildSidebarProjectSignature(projectState.projects), portfolio: [{ name: 'B', path: '/fixture/b' }] });
+  await newer;
+  pendingReads[0]({ version: 3, projectSignature: snapshotCache.buildSidebarProjectSignature([{ name: 'A', path: '/fixture/a' }]), portfolio: [{ name: 'A', path: '/fixture/a' }] });
+  await older;
+
+  const loads = posted.filter(message => message.command === 'projectsLoaded');
+  assert.equal(loads.at(-1)?.projects?.selectedProjectPath, '/fixture/b');
+  assert.equal(loads.some(message => message.projects?.selectedProjectPath === '/fixture/a'), false);
 });
 
 test('sidebar message paths absorb a disposed webview rejection', async () => {

@@ -34,6 +34,7 @@ export interface ShadowDecision {
   source: 'runtime_shadow';
   algorithmVersion: string;
   sourceRevision: string;
+  projectRevision?: string;
   projectCount: number;
   readOnly: true;
   baselineProjectPath: string;
@@ -173,6 +174,16 @@ export function buildProjectSourceRevision(projects: SolopreneurProject[]): stri
   return stableHash(JSON.stringify(facts));
 }
 
+function buildProjectMetadataRevision(projects: SolopreneurProject[]): string {
+  return stableHash(JSON.stringify((projects || []).map(project => ({
+    name: String(project.name || ''),
+    path: String(project.path || ''),
+    type: String(project.type || ''),
+    priority: String(project.priority || ''),
+    pinnedAt: String(project.pinnedAt || '')
+  }))));
+}
+
 function buildDatabaseProjectSourceRevision(projects: SolopreneurProject[], roadmaps: Map<string, RoadmapNodeLike[]>): string {
   const facts = (projects || []).map(project => ({
     name: String(project.name || ''),
@@ -183,6 +194,38 @@ function buildDatabaseProjectSourceRevision(projects: SolopreneurProject[], road
     roadmap: roadmaps.get(project.path) || []
   }));
   return stableHash(JSON.stringify(facts));
+}
+
+function normalizeRoadmapNodes(nodes: RoadmapNodeLike[]): RoadmapNodeLike[] {
+  return (nodes || []).map(node => ({
+    id: String(node.id || '').trim(),
+    title: String(node.title || '').trim(),
+    stage: String(node.stage || '').trim(),
+    status: String(node.status || 'Pending').trim() || 'Pending',
+    agentCli: String(node.agentCli || '').trim(),
+    dependencies: String(node.dependencies || '').trim()
+  })).filter(node => node.id);
+}
+
+export async function readDatabaseTodaySourceRevision(
+  globalDataPath: string,
+  projects: SolopreneurProject[],
+  operation?: RuntimeDataOperations
+): Promise<string | null> {
+  try {
+    const globalRoot = normalizeGlobalDataPathForExtension(globalDataPath, projects[0]?.path);
+    const result = operation
+      ? await operation({ operation: 'read_today_roadmaps', input: { roots: projects.map(project => project.path) } })
+      : await sendRuntimeDataRequest(globalRoot, { operation: 'read_today_roadmaps', input: { roots: projects.map(project => project.path) } });
+    const items = (result as { items?: Array<{ root: string; nodes: RoadmapNodeLike[]; unavailable?: boolean }> })?.items;
+    if (!Array.isArray(items)) return null;
+    if (items.some(item => item.unavailable)) return null;
+    const byPath = new Map(items.map(item => [String(item.root), normalizeRoadmapNodes(item.nodes)]));
+    if (projects.some(project => !byPath.has(project.path))) return null;
+    return buildDatabaseProjectSourceRevision(projects, byPath);
+  } catch {
+    return null;
+  }
 }
 
 function priorityRank(priority: string): number {
@@ -496,7 +539,11 @@ async function buildDatabaseShadowDecision(options: ShadowCycleOptions): Promise
   }));
   const sourceRevision = buildDatabaseProjectSourceRevision(projects, roadmaps);
   const portfolio = buildProjectPortfolioSummaries(projects, { coreOnly: true, roadmapNodesByProjectPath: roadmaps });
-  return { ...buildShadowDecision(projects, portfolio, sourceRevision, options.now || new Date()), sourceAuthority: 'database' };
+  return {
+    ...buildShadowDecision(projects, portfolio, sourceRevision, options.now || new Date()),
+    projectRevision: buildProjectMetadataRevision(projects),
+    sourceAuthority: 'database'
+  };
 }
 
 export async function runShadowDecisionCycleFromDatabase(options: ShadowCycleOptions): Promise<ShadowDecision> {
@@ -570,16 +617,17 @@ export async function runCognitiveShadowDecisionCycle(
   }
 }
 
-export function readCurrentShadowDecision(globalDataPath: string, projects: SolopreneurProject[]): ShadowDecision | null {
-  const parsed = shadowDecisions.get(normalizeGlobalDataPathForExtension(globalDataPath));
+export function readCurrentShadowDecision(globalDataPath: string, projects: SolopreneurProject[], currentDatabaseSourceRevision?: string | null): ShadowDecision | null {
+  const parsed = readStoredShadowDecision(globalDataPath);
   if (!parsed) return null;
   try {
-    if (parsed.schemaVersion !== 1 || parsed.source !== 'runtime_shadow' || parsed.status !== 'completed') return null;
-    if (parsed.generatedAt.slice(0, 10) !== new Date().toISOString().slice(0, 10)) return null;
     if (parsed.sourceAuthority !== 'database' && parsed.sourceRevision !== buildProjectSourceRevision(projects)) return null;
     if (parsed.sourceAuthority === 'database') {
       const visible = new Map(projects.map(project => [project.path, project.name]));
-      if (parsed.projectCount !== projects.length || parsed.recommendations.some(item => visible.get(item.projectPath) !== item.projectName)) return null;
+      if ((currentDatabaseSourceRevision !== undefined && parsed.sourceRevision !== currentDatabaseSourceRevision)
+        || parsed.projectRevision !== buildProjectMetadataRevision(projects)
+        || parsed.projectCount !== projects.length
+        || parsed.recommendations.some(item => visible.get(item.projectPath) !== item.projectName)) return null;
     }
     if (
       parsed.engineStatus === 'completed'
@@ -587,6 +635,38 @@ export function readCurrentShadowDecision(globalDataPath: string, projects: Solo
       && parsed.engineConfigRevision !== cognitiveRuntimeConfigRevision(readCognitiveRuntimeConfig(globalDataPath))
     ) return null;
     return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function readStoredShadowDecision(globalDataPath: string): ShadowDecision | null {
+  const parsed = shadowDecisions.get(normalizeGlobalDataPathForExtension(globalDataPath));
+  try {
+    if (!parsed || parsed.schemaVersion !== 1 || parsed.source !== 'runtime_shadow' || parsed.status !== 'completed') return null;
+    if (parsed.generatedAt.slice(0, 10) !== new Date().toISOString().slice(0, 10)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function readCompatibleShadowDecision(globalDataPath: string, projects: SolopreneurProject[]): ShadowDecision | null {
+  const parsed = readStoredShadowDecision(globalDataPath);
+  if (!parsed) return null;
+  try {
+    const visible = new Map(projects.map(project => [project.path, project.name]));
+    const recommendations = parsed.recommendations.filter(item => visible.get(item.projectPath) === item.projectName);
+    if (projects.length > 0 && recommendations.length === 0) return null;
+    const first = recommendations[0];
+    return {
+      ...parsed,
+      projectCount: projects.length,
+      recommendations,
+      baselineProjectPath: visible.has(parsed.baselineProjectPath) ? parsed.baselineProjectPath : (first?.projectPath || ''),
+      recommendedProjectPath: visible.has(parsed.recommendedProjectPath) ? parsed.recommendedProjectPath : (first?.projectPath || ''),
+      summary: first ? `今天先推进 ${first.projectName}：${first.title}` : '当前没有可以安排的项目。'
+    };
   } catch {
     return null;
   }

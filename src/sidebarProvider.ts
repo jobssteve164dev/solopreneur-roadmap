@@ -18,7 +18,7 @@ function getDiagnosticDataPath(getSettings: () => SolopreneurSettings): string {
 }
 import { SidebarProjectLoader } from './sidebarProjectLoader';
 import { createGlobalEngineeringSnapshotPlaceholder, ensureGlobalEngineeringStore } from './globalEngineeringStore';
-import { readTodayReview, startDailyReviewAgent } from './dailyReview';
+import { readTodayReviewFromDatabase, startDailyReviewAgent } from './dailyReview';
 import {
   buildAgentAutomationWrapper,
   buildAgentInstallCommand,
@@ -28,6 +28,7 @@ import {
 import {
   applyProjectRegistryToPortfolio,
   buildProjectPortfolioSummary,
+  normalizeGlobalDataPath,
   ProjectPortfolioSummary,
   SolopreneurProject
 } from './projectPortfolio';
@@ -95,6 +96,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private readonly _latestConversationSnapshotRequest = new Map<string, number>();
   private _latestPortfolio: ProjectPortfolioSummary[] = [];
   private _corePortfolioRequest = 0;
+  private _dailyReviewRequest = 0;
   private _conversationSnapshotRequest = 0;
   private _conversationHistoryRequest = 0;
   private readonly _latestConversationHistoryRequest = new Map<string, number>();
@@ -164,6 +166,25 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   public getWebview(): vscode.Webview | undefined {
     try { return this._view?.webview; }
     catch { return undefined; }
+  }
+
+  private beginDailyReviewRequest() {
+    if (!this._view) return null;
+    const view = this._view;
+    const requestId = ++this._dailyReviewRequest;
+    const projectState = this._getProjects();
+    const globalDataPath = normalizeGlobalDataPath(this._getSettings().globalDataPath, projectState.projects);
+    const projectSignature = buildSidebarProjectSignature(projectState.projects);
+    return {
+      projectState,
+      globalDataPath,
+      isCurrent: () => {
+        if (!this._view || this._view !== view || requestId !== this._dailyReviewRequest) return false;
+        const currentProjectState = this._getProjects();
+        return normalizeGlobalDataPath(this._getSettings().globalDataPath, currentProjectState.projects) === globalDataPath
+          && buildSidebarProjectSignature(currentProjectState.projects) === projectSignature;
+      }
+    };
   }
 
   private refreshDependencyStatus(webviewView: vscode.WebviewView, cliPath: string): void {
@@ -327,7 +348,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             this.sendDailyReview();
             break;
           case 'runDailyReview': {
-            const review = await startDailyReviewAgent(this._getSettings(), this._getProjects().projects, this._extensionUri);
+            const request = this.beginDailyReviewRequest();
+            if (!request) break;
+            const review = await startDailyReviewAgent(
+              { ...this._getSettings(), globalDataPath: request.globalDataPath },
+              request.projectState.projects,
+              this._extensionUri
+            );
+            if (!request.isCurrent()) break;
             void this.postMessage({ command: 'dailyReviewLoaded', review });
             break;
           }
@@ -336,7 +364,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             if (!['accepted', 'overridden', 'ignored'].includes(outcome)) {
               throw new Error('Today arrangement feedback outcome is invalid.');
             }
-            await recordShadowDecisionFeedback(this._getSettings().globalDataPath, {
+            const request = this.beginDailyReviewRequest();
+            if (!request || !request.isCurrent()) break;
+            const currentReview = await readTodayReviewFromDatabase(request.globalDataPath, request.projectState.projects);
+            if (!request.isCurrent()) break;
+            if (!currentReview || currentReview.stale || currentReview.decisionId !== String(data.decisionId || '')) {
+              this.sendDailyReview();
+              break;
+            }
+            await recordShadowDecisionFeedback(request.globalDataPath, {
               operationId: String(data.operationId || ''),
               decisionId: String(data.decisionId || ''),
               recommendedProjectPath: String(data.recommendedProjectPath || ''),
@@ -440,15 +476,21 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }
       this._refreshAllLocalProjects = false;
       this._pendingLocalProjectPaths.clear();
-      this._corePortfolioRequest += 1;
+      const requestId = ++this._corePortfolioRequest;
       this._projectLoader.cancelExternalLoads();
       const projectState = this._getProjects();
-      const globalDataPath = this._getSettings().globalDataPath;
+      const globalDataPath = normalizeGlobalDataPath(this._getSettings().globalDataPath, projectState.projects);
+      if (projectState.projects.length === 0) {
+        this.postCorePortfolio([], projectState.selectedProjectPath, [], globalDataPath);
+        this.sendDailyReview();
+        return;
+      }
       const projectSignature = buildSidebarProjectSignature(projectState.projects);
       const [cached, cachedConversation] = await Promise.all([
         readSidebarCoreSnapshot(globalDataPath),
         readCachedConversationSnapshot(globalDataPath, projectState.selectedProjectPath)
       ]);
+      if (!this._view || requestId !== this._corePortfolioRequest) return;
       const availablePaths = new Set(projectState.projects.map((project) => project.path));
       const stalePortfolio = (this._latestPortfolio.length > 0 ? this._latestPortfolio : (cached?.portfolio || []))
         .filter((summary) => availablePaths.has(summary.path));
@@ -456,7 +498,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         this.postCorePortfolio(projectState.projects, projectState.selectedProjectPath, cached.portfolio, globalDataPath, cachedConversation);
         this._projectLoader.scheduleAll(projectState.projects, projectState.selectedProjectPath, cached.portfolio);
       } else {
-        if (cachedConversation) {
+        if (stalePortfolio.length) {
+          this.postCorePortfolio(projectState.projects, projectState.selectedProjectPath, stalePortfolio, globalDataPath, cachedConversation);
+        }
+        if (cachedConversation && !stalePortfolio.length) {
           this.postProjectConversationSnapshot(projectState.selectedProjectPath, cachedConversation);
         }
         this.scheduleCorePortfolio(projectState.projects, projectState.selectedProjectPath, globalDataPath, stalePortfolio, {
@@ -511,7 +556,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       try {
         if (!this._view) return;
         const projectState = this._getProjects();
-        const globalDataPath = this._getSettings().globalDataPath;
+        const globalDataPath = normalizeGlobalDataPath(this._getSettings().globalDataPath, projectState.projects);
         const cached = await readSidebarCoreSnapshot(globalDataPath);
         const availablePaths = new Set(projectState.projects.map((project) => project.path));
         const stalePortfolio = (this._latestPortfolio.length > 0 ? this._latestPortfolio : (cached?.portfolio || []))
@@ -816,14 +861,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
   public async sendDailyReview() {
     try {
-      if (!this._view) {
-        return;
-      }
-      const projectState = this._getProjects();
-      await refreshShadowRuntimeState(this._getSettings().globalDataPath);
+      const request = this.beginDailyReviewRequest();
+      if (!request) return;
+      await refreshShadowRuntimeState(request.globalDataPath);
+      if (!request.isCurrent()) return;
+      const review = await readTodayReviewFromDatabase(request.globalDataPath, request.projectState.projects);
+      if (!request.isCurrent()) return;
       void this.postMessage({
         command: 'dailyReviewLoaded',
-        review: readTodayReview(this._getSettings().globalDataPath, projectState.projects)
+        review
       });
     } catch (error) {
       console.error('SoloMap sidebar failed to send daily review:', error);

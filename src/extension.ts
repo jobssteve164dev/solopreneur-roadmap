@@ -203,7 +203,7 @@ import { sendRuntimeControlCommand, sendRuntimeDataRequest } from './autonomousR
 import { disableAutonomousRuntimeService, enableAutonomousRuntime, ensureAutonomousRuntimeService, isAutonomousRuntimeDisabled, isRuntimeServiceManagerAvailable, registeredAutonomousRuntimeDataRoot } from './autonomousRuntimeService';
 import { IntelligenceConversationStore } from './intelligenceChat';
 import { buildIntelligenceProjectContext, IntelligenceReadToolSource, readIntelligenceCurrentSteps } from './intelligenceReadTools';
-import { readTodayReview } from './dailyReview';
+import { readTodayReviewFromDatabase } from './dailyReview';
 import { persistCognitiveRuntimeConfig, refreshCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import {
   buildCollaborationInviteCode,
@@ -1039,7 +1039,7 @@ export async function activate(context: vscode.ExtensionContext) {
           },
           getTodayReview: async () => {
             await refreshShadowRuntimeState(globalDataPath);
-            const review = readTodayReview(globalDataPath, await getIntelligenceProjects());
+            const review = await readTodayReviewFromDatabase(globalDataPath, await getIntelligenceProjects());
             return review ? { summary: review.summary, items: review.todos.map(item => item.title) } : null;
           }
         };

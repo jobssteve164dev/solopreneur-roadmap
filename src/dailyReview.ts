@@ -2,7 +2,8 @@ import * as path from 'path';
 import { SolopreneurSettings } from './pluginContracts';
 import { normalizeGlobalDataPath, SolopreneurProject } from './projectPortfolio';
 import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost';
-import { projectShadowDecisionForToday, readCurrentShadowDecision, readShadowDecisionFeedbackOutcome, refreshShadowRuntimeState } from './autonomousRuntime';
+import { projectShadowDecisionForToday, readCompatibleShadowDecision, readCurrentShadowDecision, readDatabaseTodaySourceRevision, readShadowDecisionFeedbackOutcome, refreshShadowRuntimeState } from './autonomousRuntime';
+import type { RuntimeDataOperations } from './runtimeDataOperations';
 import { sendRuntimeControlCommand } from './autonomousRuntimeControl';
 
 export interface DailyReviewTodo {
@@ -43,17 +44,29 @@ export interface DailyReviewArtifact {
   recommendedProjectPath?: string;
   sourceRevision?: string;
   readOnly?: boolean;
+  stale?: boolean;
   feedbackOutcome?: string;
 }
 
 
-export function readTodayReview(globalDataPath: string, projects: SolopreneurProject[]): DailyReviewArtifact | null {
+export function readTodayReview(globalDataPath: string, projects: SolopreneurProject[], currentDatabaseSourceRevision?: string | null): DailyReviewArtifact | null {
   const globalRoot = normalizeGlobalDataPath(globalDataPath, projects);
-  const shadowDecision = readCurrentShadowDecision(globalRoot, projects);
-  return shadowDecision ? projectShadowDecisionForToday(
-    shadowDecision,
-    readShadowDecisionFeedbackOutcome(globalRoot, shadowDecision.decisionId)
-  ) as DailyReviewArtifact : null;
+  const current = readCurrentShadowDecision(globalRoot, projects, currentDatabaseSourceRevision);
+  const shadowDecision = current || readCompatibleShadowDecision(globalRoot, projects);
+  if (!shadowDecision) return null;
+  return {
+    ...projectShadowDecisionForToday(
+      shadowDecision,
+      readShadowDecisionFeedbackOutcome(globalRoot, shadowDecision.decisionId)
+    ),
+    ...(!current ? { stale: true, summary: '今日安排正在更新，先显示最近结果。' } : {})
+  } as DailyReviewArtifact;
+}
+
+export async function readTodayReviewFromDatabase(globalDataPath: string, projects: SolopreneurProject[], operation?: RuntimeDataOperations): Promise<DailyReviewArtifact | null> {
+  const globalRoot = normalizeGlobalDataPath(globalDataPath, projects);
+  const currentDatabaseSourceRevision = await readDatabaseTodaySourceRevision(globalRoot, projects, operation);
+  return readTodayReview(globalRoot, projects, currentDatabaseSourceRevision);
 }
 
 
@@ -61,15 +74,18 @@ export async function startDailyReviewAgent(settings: SolopreneurSettings, proje
   const globalRoot = normalizeGlobalDataPath(settings.globalDataPath, projects);
   await ensureHealthyAutonomousRuntime({ extensionPath: path.resolve(__dirname, '..'), globalDataPath: globalRoot });
   await refreshShadowRuntimeState(globalRoot);
-  let review = readTodayReview(globalRoot, projects);
-  if (!review) {
+  const currentDatabaseSourceRevision = await readDatabaseTodaySourceRevision(globalRoot, projects);
+  let review = readTodayReview(globalRoot, projects, currentDatabaseSourceRevision);
+  if (!review || review.stale) {
     await sendRuntimeControlCommand(globalRoot, 'refresh', { timeoutMs: 10_000 });
     const deadline = Date.now() + 30_000;
     do {
       await new Promise(resolve => setTimeout(resolve, 100));
       await refreshShadowRuntimeState(globalRoot);
-      review = readTodayReview(globalRoot, projects);
-    } while (!review && Date.now() < deadline);
+      const refreshed = readTodayReview(globalRoot, projects, currentDatabaseSourceRevision);
+      if (refreshed) review = refreshed;
+      if (review && !review.stale) break;
+    } while (Date.now() < deadline);
   }
   if (review) return review;
   const now = new Date().toISOString();
