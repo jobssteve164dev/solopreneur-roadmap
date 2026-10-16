@@ -1403,16 +1403,21 @@ async function handleSharedWebviewAction(
       );
     },
     'conversation.runSolo': async (request) => {
-      await revealAgentStartupTerminal(context, String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'solo', String(request.agentCli || ''), String(request.model || ''));
-      const projectPath = await ensureActionProject(context, request.projectPath || '');
-      if (!projectPath && request.projectPath) return;
-      await handleRunSoloConversation(
-        context,
-        String(request.userMessage || ''),
-        String(request.agentCli || ''),
-        String(request.model || ''),
-        normalizeSupplementFiles(request.supplementFiles)
-      );
+      const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      const startupTerminal = await revealAgentStartupTerminal(context, workspaceRoot, 'solo', String(request.agentCli || ''), String(request.model || ''));
+      try {
+        const projectPath = await ensureActionProject(context, request.projectPath || '');
+        if (!projectPath && request.projectPath) return;
+        await handleRunSoloConversation(
+          context,
+          String(request.userMessage || ''),
+          String(request.agentCli || ''),
+          String(request.model || ''),
+          normalizeSupplementFiles(request.supplementFiles)
+        );
+      } finally {
+        discardReservedAgentStartupTerminal(workspaceRoot, startupTerminal);
+      }
     },
     'timePlan.generate': async (request) => {
       await revealAgentStartupTerminal(context, String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'solo-time-plan', String(request.agentCli || ''), String(request.model || ''));
@@ -1616,23 +1621,28 @@ async function handleSharedWebviewAction(
     'conversation.runRoadmapRevision': async (request) => {
       let preparedProjectPath = '';
       await enqueueProjectActionLaunch(async (registered) => {
-        await revealAgentStartupTerminal(context, String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'roadmap-revision', String(request.agentCli || ''), String(request.model || ''));
-        const projectPath = await ensureActionProject(context, request.projectPath || '');
-        if (!projectPath && request.projectPath) {
-          throw new Error('SoloMap could not prepare this project for roadmap adjustment.');
-        }
-        preparedProjectPath = projectPath;
-        await handleRoadmapRevision(
-          context,
-          String(request.userMessage || ''),
-          String(request.agentCli || ''),
-          String(request.model || ''),
-          normalizeSupplementFiles(request.supplementFiles),
-          () => {
-            registered();
-            void respond({ command: 'roadmapRevisionLaunchRegistered', projectPath });
+        const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+        const startupTerminal = await revealAgentStartupTerminal(context, workspaceRoot, 'roadmap-revision', String(request.agentCli || ''), String(request.model || ''));
+        try {
+          const projectPath = await ensureActionProject(context, request.projectPath || '');
+          if (!projectPath && request.projectPath) {
+            throw new Error('SoloMap could not prepare this project for roadmap adjustment.');
           }
-        );
+          preparedProjectPath = projectPath;
+          await handleRoadmapRevision(
+            context,
+            String(request.userMessage || ''),
+            String(request.agentCli || ''),
+            String(request.model || ''),
+            normalizeSupplementFiles(request.supplementFiles),
+            () => {
+              registered();
+              void respond({ command: 'roadmapRevisionLaunchRegistered', projectPath });
+            }
+          );
+        } finally {
+          discardReservedAgentStartupTerminal(workspaceRoot, startupTerminal);
+        }
       });
       if (preparedProjectPath) {
         await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(preparedProjectPath);
@@ -4396,7 +4406,8 @@ async function openRoadmapPanel(
   // Paint a tiny shell first. Building and parsing the complete roadmap Webview
   // is intentionally deferred so opening a large view always has immediate feedback.
   const roadmapPanel = activePanel;
-  roadmapPanel.webview.html = buildLocalDataStatusHtml(roadmapPanel.webview, context, {
+  const roadmapWebview = roadmapPanel.webview;
+  roadmapWebview.html = buildLocalDataStatusHtml(roadmapWebview, context, {
     title: isSoloMapLanguageZh(context) ? '正在打开项目路线图' : 'Opening project roadmap',
     message: isSoloMapLanguageZh(context) ? '正在读取本地路线图数据。' : 'Loading local roadmap data.'
   });
@@ -4460,8 +4471,8 @@ async function openRoadmapPanel(
   // Clean up when panel is closed
   activePanel.onDidDispose(
     () => {
-      disposeAutomationSoundView(roadmapPanel.webview);
-      activePanel = null;
+      if (activePanel === roadmapPanel) activePanel = null;
+      disposeAutomationSoundView(roadmapWebview);
     },
     null,
     context.subscriptions
@@ -5004,7 +5015,7 @@ async function sendNodesToWebview(): Promise<void> {
   const selection = projectSelectionGeneration; const sequence = ++completionCriteriaViewSequence;
   const sourceNodes = engine?.getNodes() || []; const source = JSON.stringify(sourceNodes);
   const nodes = nodesWithVisibleCompletionCriteria(engine, sourceNodes);
-  activePanel?.webview.postMessage({ command: 'nodesUpdated', nodes, projectPath: workspaceRoot });
+  void postWebviewMessage(activePanel?.webview, { command: 'nodesUpdated', nodes, projectPath: workspaceRoot });
   sidebarProvider?.sendNodesToWebview();
   if (extensionContextRef) void postFlowStateToWebview(extensionContextRef);
   if (!engine || !workspaceRoot) return;
@@ -5021,7 +5032,7 @@ async function sendNodesToWebview(): Promise<void> {
       completionCriteriaViews.set(engine, new Map(hydrated.map(node => [node.id, node.completionCriteria || []])));
       completionCriteriaViewRevisions.set(engine, revision);
       completionCriteriaViewRoots.set(engine, dataRoot);
-      activePanel?.webview.postMessage({ command: 'nodesUpdated', nodes: hydrated, projectPath: workspaceRoot });
+      void postWebviewMessage(activePanel?.webview, { command: 'nodesUpdated', nodes: hydrated, projectPath: workspaceRoot });
       sidebarProvider?.postMessage({ command: 'nodesUpdated', nodes: hydrated, projectPath: workspaceRoot });
       return;
     }
@@ -6717,15 +6728,26 @@ const reservedAgentTerminalsByProject = new Map<string, Array<{
   environmentSignature: string;
 }>>();
 
+function discardReservedAgentStartupTerminal(workspaceRoot: string, terminal?: vscode.Terminal): boolean {
+  if (!workspaceRoot || !terminal) return false;
+  const reservations = reservedAgentTerminalsByProject.get(workspaceRoot) || [];
+  if (!reservations.some((entry) => entry.terminal === terminal)) return false;
+  const remaining = reservations.filter((entry) => entry.terminal !== terminal);
+  if (remaining.length > 0) reservedAgentTerminalsByProject.set(workspaceRoot, remaining);
+  else reservedAgentTerminalsByProject.delete(workspaceRoot);
+  terminal.dispose();
+  return true;
+}
+
 async function revealAgentStartupTerminal(
   context: vscode.ExtensionContext,
   workspaceRoot: string,
   label: string,
   agentCli = '',
   model = ''
-): Promise<void> {
+): Promise<vscode.Terminal | undefined> {
   if (!workspaceRoot) {
-    return;
+    return undefined;
   }
   const terminalEnvironment = await getOpenCodeTerminalEnvironment(
     context,
@@ -6751,6 +6773,7 @@ async function revealAgentStartupTerminal(
   activeAgentTerminalName = terminal.name;
   terminal.show(true);
   void sendTextWhenTerminalReady(terminal, `printf '%s\\n' ${shellQuote('SoloMap 正在准备本地对话…')}`);
+  return terminal;
 }
 
 const agentTerminalDeliveries = new Map<string, Promise<vscode.Terminal>>();

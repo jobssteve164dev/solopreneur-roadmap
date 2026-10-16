@@ -51,6 +51,7 @@ import { sendTextWhenTerminalReady } from './terminalCompatibility';
 import { recordShadowDecisionFeedback, refreshShadowRuntimeState } from './autonomousRuntime';
 import { IntelligenceConversation, IntelligenceConversationStore } from './intelligenceChat';
 import { readAgentAccountStatuses } from './agentAccountStatus';
+import { postWebviewMessage } from './panelMessages';
 
 interface SidebarProviderDependencies {
   getSettings: () => SolopreneurSettings;
@@ -140,7 +141,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     this._readAgentAccountStatuses = dependencies.readAgentAccountStatuses || readAgentAccountStatuses;
     this._projectLoader = new SidebarProjectLoader({
       isAvailable: () => Boolean(this._view),
-      postMessage: (message) => { this._view?.webview.postMessage(message); },
+      postMessage: (message) => { void this.postMessage(message); },
       getGlobalDataPath: () => this._getSettings().globalDataPath,
       getExtensionPath: () => this._extensionUri.fsPath,
       buildGlobalStore: ensureGlobalEngineeringStore,
@@ -148,8 +149,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  public postMessage(message: Record<string, unknown>): Thenable<boolean> | undefined {
-    return this._view?.webview.postMessage(message);
+  public postMessage(message: Record<string, unknown>): Thenable<boolean> | Promise<boolean> {
+    try {
+      return postWebviewMessage(this._view?.webview, message);
+    } catch {
+      return Promise.resolve(false);
+    }
   }
 
   public hasWebview(): boolean {
@@ -193,9 +198,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     _token: vscode.CancellationToken
   ) {
     this._view = webviewView;
+    const webview = webviewView.webview;
     webviewView.onDidDispose?.(() => {
-      disposeAutomationSoundView(webviewView.webview);
       if (this._view === webviewView) this._view = undefined;
+      disposeAutomationSoundView(webview);
     });
     webviewView.onDidChangeVisibility?.(() => {
       if (!webviewView.visible) disposeAutomationSoundView(webviewView.webview);
@@ -360,19 +366,20 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   /**
    * Refreshes the sidebar view with updated node states.
    */
-  public sendNodesToWebview() {
+  public sendNodesToWebview(): Thenable<boolean> | Promise<boolean> {
     try {
       if (!this._view || !this._syncEngine) {
-        return;
+        return Promise.resolve(false);
       }
       const nodes = this._syncEngine.getNodes();
-      this._view.webview.postMessage({
+      return postWebviewMessage(this._view.webview, {
         command: 'nodesUpdated',
         nodes: nodes,
         projectPath: this._getProjects().selectedProjectPath
       });
     } catch (error) {
       console.error('SoloMap sidebar failed to send nodes:', error);
+      return Promise.resolve(false);
     }
   }
 

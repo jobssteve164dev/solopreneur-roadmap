@@ -5425,7 +5425,11 @@ test('closing the roadmap panel keeps the project sentinel alive for sidebar sta
     await extension.open(context); await finish(1); extension.start(project); await extension.poll(context);
     assert.ok(received.some(item => item.status.rootExecutionLogId === 1));
     const poller = extension.poller(); assert.ok(poller);
-    extension.__vscodeTestState.webviewPanels[0].dispose();
+    const panel = extension.__vscodeTestState.webviewPanels[0];
+    const liveWebview = panel.webview; let disposed = false;
+    Object.defineProperty(panel, 'webview', { get() { if (disposed) throw new Error('Webview is disposed'); return liveWebview; } });
+    const dispose = panel.dispose; panel.dispose = () => { disposed = true; return dispose(); };
+    assert.doesNotThrow(() => panel.dispose(), 'disposing a real VS Code panel must clear the active reference before touching its disposed webview');
     assert.equal(extension.panelOpen(), false); assert.equal(extension.poller(), poller);
     await finish(2); await extension.poll(context);
     assert.ok(received.some(item => item.status.rootExecutionLogId === 2), 'the closed panel must not block a later formal result from reaching the sidebar consumer');
@@ -6571,6 +6575,27 @@ test('sidebar paints the selected local project before snapshot reservation comp
   assert.equal(snapshotCache.__getCore()?.portfolio[0]?.path, '/fixture/app');
 });
 
+test('sidebar message paths absorb a disposed webview rejection', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [{ id: 'step-1' }] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '/fixture/global' }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects: [], selectedProjectPath: '/fixture/app' })
+    }
+  );
+  provider._view = {
+    webview: {
+      postMessage() { return Promise.reject(new Error('Webview is disposed')); }
+    }
+  };
+
+  assert.equal(await provider.postMessage({ command: 'fixture' }), false);
+  assert.equal(await provider.sendNodesToWebview(), false);
+});
+
 test('sidebar does not commit a superseded core snapshot when its reservation arrives late', async () => {
   let resolveFirstReservation;
   const firstReservation = new Promise(resolve => { resolveFirstReservation = resolve; });
@@ -6649,6 +6674,38 @@ test('project card action launches release the next project after execution regi
   finishFirst();
   await Promise.all([first, second]);
   assert.deepEqual(events, ['first:start', 'first:registered', 'second:start', 'first:finished']);
+});
+
+test('failed project preparation closes startup terminals instead of leaving empty shells', async () => {
+  for (const command of ['conversation.runSolo', 'conversation.runRoadmapRevision']) {
+    const terminal = {
+      name: `Project B · ${command} · 1 (solomap)`, processId: Promise.resolve(123),
+      show() {}, sendText() {}, dispose() { this.disposed = (this.disposed || 0) + 1; }
+    };
+    const extension = loadCompiledModule('out/extension.js', `
+      module.exports.action = handleSharedWebviewAction;
+      module.exports.reservations = project => reservedAgentTerminalsByProject.get(project)?.length || 0;
+      module.exports.connect = (root, project, terminal) => {
+        extensionContextRef = { extensionPath: ${JSON.stringify(projectRoot)}, extensionUri: vscode.Uri.file(${JSON.stringify(projectRoot)}) };
+        activeProjectRoot = project; sidebarProvider = null;
+        getSelectedProjectPath = () => project;
+        getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'codex', automationTasks: {} });
+        getOpenCodeTerminalEnvironment = async () => ({});
+        ensureActionProject = async () => { throw new Error('project preparation failed'); };
+        recordLocalDiagnosticError = () => {};
+        vscode.window.createTerminal = () => { vscode.window.terminals.push(terminal); return terminal; };
+      };
+    `);
+    extension.connect('/fixture/global', '/fixture/project-b', terminal);
+
+    await assert.rejects(
+      extension.action({}, { command, projectPath: '/fixture/project-b', userMessage: '继续真实任务', agentCli: 'codex' }, 'sidebar'),
+      /project preparation failed/
+    );
+
+    assert.equal(terminal.disposed, 1, `${command} must close the unused terminal`);
+    assert.equal(extension.reservations('/fixture/project-b'), 0, `${command} must release the reservation`);
+  }
 });
 
 test('sidebar project switcher supports searching by project name or path', () => {
@@ -8558,6 +8615,8 @@ test('panel message helper posts stable command payloads', async () => {
     'flowStateLoaded',
     'agentModelsLoaded'
   ]);
+  assert.equal(await panelMessages.postSettingsLoaded({ postMessage() { throw new Error('Webview is disposed'); } }, {}), false);
+  assert.equal(await panelMessages.postProjectsLoaded({ postMessage() { return Promise.reject(new Error('Webview is disposed')); } }, {}), false);
 });
 
 test('conversation presentation is the shared source for roadmap and sidebar actions', () => {

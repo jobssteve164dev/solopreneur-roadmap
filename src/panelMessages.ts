@@ -8,7 +8,11 @@ export function postWebviewMessage(target: WebviewMessageTarget, message: Record
   if (!target) {
     return Promise.resolve(false);
   }
-  return target.postMessage(message);
+  try {
+    return Promise.resolve(target.postMessage(message)).catch(() => false);
+  } catch {
+    return Promise.resolve(false);
+  }
 }
 
 export function postSettingsLoaded(target: WebviewMessageTarget, settings: unknown, projectRoot?: string): Thenable<boolean> | Promise<boolean> {
