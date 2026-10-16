@@ -65,6 +65,13 @@ export async function importAnalysisCaches(store: UnifiedDataStore, sourceRoot: 
         cache: value
       }));
     }
+    await importFile(
+      path.join(projectRoot, '.solopreneur', 'coverage', 'project-growth-coverage.json'),
+      projectId,
+      'coverage',
+      'project-growth'
+    );
+    await importFile(path.join(projectRoot, '.solopreneur', 'time-plan.json'), projectId, 'time-plan', 'current');
   }
   return result;
 }

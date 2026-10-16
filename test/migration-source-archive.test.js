@@ -211,6 +211,36 @@ test('a retired analysis cache cannot replace live state and is archived without
   } finally { store.close(); }
 });
 
+test('a legacy project coverage cache imports into database state and becomes recyclable', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-coverage-import-'));
+  const dataRoot = path.join(root, '.solomap-global');
+  const projectRoot = path.join(root, 'project');
+  const coverageRoot = path.join(projectRoot, '.solopreneur', 'coverage');
+  fs.mkdirSync(coverageRoot, { recursive: true });
+  const sourceFile = path.join(coverageRoot, 'project-growth-coverage.json');
+  const snapshot = {
+    version: 1,
+    provider: 'c8-istanbul',
+    status: 'ready',
+    generatedAt: '2026-10-16T00:00:00.000Z',
+    lastAttemptAt: '2026-10-16T00:00:00.000Z',
+    durationMs: 12,
+    testPassed: true,
+    files: [],
+    error: ''
+  };
+  fs.writeFileSync(sourceFile, JSON.stringify(snapshot));
+  const store = new UnifiedDataStore(dataRoot);
+  try {
+    const project = await store.registerProject({ root: projectRoot });
+    const result = await importAnalysisCaches(store, dataRoot, { projectScopes: { [projectRoot]: project.projectId }, archiveUnresolved: true });
+    assert.equal(result.imported, 1);
+    assert.deepEqual(store.readAnalysisState(project.projectId, 'coverage', 'project-growth').value, snapshot);
+    const recycling = await new (require('../out/migrationRecycling.js').MigrationRecycling)(store).prepare();
+    assert.ok(recycling.files.some(file => file.path === sourceFile));
+  } finally { store.close(); }
+});
+
 test('archived global sources and abandoned atomic status temporaries enter the exact recycling plan', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-archive-recycling-'));
   const dataRoot = path.join(root, '.solomap-global'), learningRoot = path.join(dataRoot, 'learning');

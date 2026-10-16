@@ -11,12 +11,17 @@ const retiredFiles = new Set([
   'bootstrap-roadmap-instructions.md',
   'execution-graph.json',
   'roadmap-methodology.md',
-  'validate-roadmap.cjs'
+  'validate-roadmap.cjs',
+  'validate-time-plan.cjs'
 ]);
 
 const retiredDirectories = [
   'attachments',
-  'step-sessions'
+  'step-sessions',
+  'audits',
+  'runtime',
+  'tmp',
+  'verification'
 ];
 
 const retiredDirectoryPatterns = [

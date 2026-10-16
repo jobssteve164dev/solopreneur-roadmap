@@ -188,6 +188,8 @@ async function enqueueStartupAnalysisMigration(store: UnifiedDataStore, operatio
     files.push(path.join(store.root, `sidebar-conversation-${projectKey}-v1.json`));
     files.push(...['issues-cache.json', 'pull-requests-cache.json', 'delivery-cache.json', 'security-cache.json']
       .map(name => path.join(projectRoot, '.solopreneur', name)));
+    files.push(path.join(projectRoot, '.solopreneur', 'coverage', 'project-growth-coverage.json'));
+    files.push(path.join(projectRoot, '.solopreneur', 'time-plan.json'));
   }
   const existing: Array<[string, number, number]> = [];
   for (const file of files) {

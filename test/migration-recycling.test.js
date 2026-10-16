@@ -51,6 +51,29 @@ test('only fully migrated unchanged files enter an exact approved recycling plan
   } finally { await f.operations.close(); f.store.close(); }
 });
 
+test('recycling a migrated project artifact prunes its now-empty legacy directory chain', async () => {
+  const f = fixture();
+  const projectRoot = path.join(path.dirname(f.root), 'project-with-retired-coverage');
+  const sourceRoot = path.join(projectRoot, '.solopreneur', 'coverage');
+  const sourceFile = path.join(sourceRoot, 'project-growth-coverage.json');
+  try {
+    fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
+    fs.writeFileSync(sourceFile, JSON.stringify({ version: 1, provider: 'c8-istanbul', status: 'ready', files: [] }));
+    const project = await f.store.registerProject({ root: projectRoot });
+    const bytes = fs.readFileSync(sourceFile);
+    await require('../out/analysisDatabaseMigration.js').importAnalysisCaches(f.store, f.root, {
+      projectScopes: { [projectRoot]: project.projectId },
+      archiveUnresolved: true
+    });
+    const plan = await f.call('prepare_recycling');
+    assert.deepEqual(plan.files.map(file => file.path), [sourceFile]);
+    await f.call('confirm_recycling', { planId: plan.planId });
+    assert.equal((await f.call('execute_recycling_plan', { planId: plan.planId })).recycledFiles, 1);
+    assert.equal(fs.existsSync(sourceRoot), false);
+    assert.equal(fs.existsSync(path.join(projectRoot, '.solopreneur')), true);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
 test('migration overview is immediate and leaves byte validation to explicit review', async () => {
   const f = fixture();
   const readFile = fs.promises.readFile;

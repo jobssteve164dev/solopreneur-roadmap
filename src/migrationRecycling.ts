@@ -44,9 +44,15 @@ export class MigrationRecycling {
       const root = identity.slice('analysis-caches:'.length), local = containedFile(root);
       if (local) return local;
       const file = path.resolve(root, key);
-      const cacheNames = new Set(['issues-cache.json', 'pull-requests-cache.json', 'delivery-cache.json', 'security-cache.json']);
-      if (!cacheNames.has(path.basename(file)) || path.basename(path.dirname(file)) !== '.solopreneur') return null;
-      const projectRoot = path.dirname(path.dirname(file));
+      const isExternalCache = new Set(['issues-cache.json', 'pull-requests-cache.json', 'delivery-cache.json', 'security-cache.json']).has(path.basename(file))
+        && path.basename(path.dirname(file)) === '.solopreneur';
+      const isCoverageCache = path.basename(file) === 'project-growth-coverage.json'
+        && path.basename(path.dirname(file)) === 'coverage'
+        && path.basename(path.dirname(path.dirname(file))) === '.solopreneur';
+      const isTimePlan = path.basename(file) === 'time-plan.json'
+        && path.basename(path.dirname(file)) === '.solopreneur';
+      if (!isExternalCache && !isCoverageCache && !isTimePlan) return null;
+      const projectRoot = isCoverageCache ? path.dirname(path.dirname(path.dirname(file))) : path.dirname(path.dirname(file));
       const registered = (projects ?? this.store.registeredProjectScopes()).some(project => {
         try { return fs.realpathSync(project.root) === fs.realpathSync(projectRoot); } catch { return path.resolve(project.root) === projectRoot; }
       });
@@ -547,9 +553,20 @@ export class MigrationRecycling {
     try { return await work(); } finally { for (const itemId of ids) this.busy.delete(itemId); }
   }
   private async pruneRetiredProjectDirectories(item: RecyclingItem): Promise<void> {
-    if (!item.identity.startsWith('project-legacy-files:')) return;
-    const projectRoot = fs.realpathSync(item.identity.slice('project-legacy-files:'.length));
-    const sourceRoot = path.join(projectRoot, '.solopreneur');
+    let sourceRoot = path.dirname(path.resolve(item.path));
+    while (path.basename(sourceRoot) !== '.solopreneur') {
+      const parent = path.dirname(sourceRoot);
+      if (parent === sourceRoot) return;
+      sourceRoot = parent;
+    }
+    const projectRoot = path.dirname(sourceRoot);
+    const registered = this.store.registeredProjectScopes().some(project => {
+      try { return fs.realpathSync(project.root) === projectRoot; }
+      catch { return false; }
+    });
+    if (!registered) return;
+    const sourceInfo = fs.lstatSync(sourceRoot);
+    if (!sourceInfo.isDirectory() || sourceInfo.isSymbolicLink() || fs.realpathSync(sourceRoot) !== sourceRoot) return;
     if (item.path !== sourceRoot && !item.path.startsWith(sourceRoot + path.sep)) throw new Error('recycling_path_invalid');
     let directory = path.dirname(item.path);
     while (directory !== sourceRoot && directory.startsWith(sourceRoot + path.sep)) {

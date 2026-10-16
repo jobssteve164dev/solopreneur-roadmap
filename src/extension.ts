@@ -15,7 +15,7 @@ import { SyncEngine } from './db/syncEngine';
 import { AgentConversation, RoadmapNode } from './db/types';
 import { buildFlowStatePayload, createFlowLoop, createFlowTrace, FlowLoopScoring, FlowLoopStatus, FlowRole, FlowTrace, readFlowTrace, saveFlowTrace, updateFlowTrace } from './flowStore';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
-import { confirmTimePlan, readTimePlan } from './timePlan';
+import { confirmTimePlan, extractTimePlanDraft, readTimePlan, saveTimePlan, type TimePlanDraft } from './timePlan';
 import {
   claimDueScheduledTaskDatabase,
   completeScheduledTaskDatabase,
@@ -52,6 +52,7 @@ import { buildLocalDataStatusHtml, formatLocalDataError, postLocalDataLoad } fro
 import { backfillRunIndexFromDigests } from './runIndexMaintenance';
 import { clearProjectGrowthViewCache, getCachedProjectGrowthView, getProjectGrowthView, refreshProjectGrowthSnapshot } from './projectGrowth';
 import { runProjectCoverageAnalysis } from './projectCoverage';
+import { moveUntrackedFilesToRollbackSafety } from './rollbackSafety';
 import {
   buildCognitiveStrategyPyramidSnapshotData,
   buildStrategyPyramidSnapshotData,
@@ -1248,15 +1249,16 @@ async function ensureActionProject(context: vscode.ExtensionContext, projectPath
   return ready && activeProjectRoot === requestedPath ? requestedPath : '';
 }
 
-function buildTimePlansPayload(context: vscode.ExtensionContext): {
-  plans: Array<{ projectPath: string; projectName: string; plan: NonNullable<ReturnType<typeof readTimePlan>['plan']> }>;
-} {
-  const plans = getProjects(context).flatMap((project) => {
-    const result = readTimePlan(project.path);
+async function buildTimePlansPayload(context: vscode.ExtensionContext): Promise<{
+  plans: Array<{ projectPath: string; projectName: string; plan: TimePlanDraft }>;
+}> {
+  const globalDataPath = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+  const plans = (await Promise.all(getProjects(context).map(async (project) => {
+    const result = await readTimePlan(project.path, globalDataPath);
     return result.valid && result.plan
       ? [{ projectPath: project.path, projectName: project.name || path.basename(project.path), plan: result.plan }]
       : [];
-  });
+  }))).flat();
   plans.sort((left, right) => {
     const leftStart = left.plan.items[0]?.startAt || '';
     const rightStart = right.plan.items[0]?.startAt || '';
@@ -1268,7 +1270,7 @@ function buildTimePlansPayload(context: vscode.ExtensionContext): {
 function buildScheduledTasksFromTimePlan(
   projectPath: string,
   projectName: string,
-  plan: NonNullable<ReturnType<typeof readTimePlan>['plan']>,
+  plan: TimePlanDraft,
   currentTasks: SolomapScheduledAutomationTask[]
 ): SolomapScheduledAutomationTask[] {
   const retainedTasks = currentTasks.filter((task) => task.sourceTimePlanProjectPath !== projectPath);
@@ -1427,12 +1429,13 @@ async function handleSharedWebviewAction(
       );
     },
     'timePlan.get': async () => {
-      await respond({ command: 'timePlansLoaded', ...buildTimePlansPayload(context) });
+      await respond({ command: 'timePlansLoaded', ...await buildTimePlansPayload(context) });
     },
     'timePlan.confirm': async (request) => {
       const projectPath = String(request.projectPath || '');
       if (!projectPath || !getProjects(context).some((project) => project.path === projectPath)) return;
-      const result = readTimePlan(projectPath);
+      const globalDataPath = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+      const result = await readTimePlan(projectPath, globalDataPath);
       if (!result.valid || !result.plan) return;
       const project = getProjects(context).find((candidate) => candidate.path === projectPath);
       const currentAutomation = getPersistedSettings(context).automationTasks || normalizeAutomationSettings({});
@@ -1458,9 +1461,9 @@ async function handleSharedWebviewAction(
       await updatePersistedSettings(context, {
         automationTasks: { scheduledTaskMutations }
       });
-      confirmTimePlan(projectPath);
+      await confirmTimePlan(projectPath, globalDataPath);
       await broadcastSettings(context, false, false);
-      await respond({ command: 'timePlansLoaded', ...buildTimePlansPayload(context) });
+      await respond({ command: 'timePlansLoaded', ...await buildTimePlansPayload(context) });
     },
     'collaboration.getRooms': async () => {
       await respond({ command: 'collaborationRoomsLoaded', rooms: await readCollaborationRooms(context) });
@@ -4640,7 +4643,11 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
         case 'runCoverageAnalysis': {
           const coverageProjectPath = activeProjectGrowthPath || getSelectedProjectPath(context) || projectPath;
           activeProjectGrowthPanel?.webview.postMessage({ command: 'coverageAnalysisStarted' });
-          await runProjectCoverageAnalysis(coverageProjectPath, context.extensionPath);
+          await runProjectCoverageAnalysis(
+            coverageProjectPath,
+            context.extensionPath,
+            normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)
+          );
           clearProjectGrowthViewCache(coverageProjectPath);
           void refreshProjectGrowthPanel(context, coverageProjectPath);
           break;
@@ -7992,24 +7999,24 @@ async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirem
     'Create an actionable time-plan draft from the current state of this project and the user requirements.',
     `User requirements: ${userRequirements}`,
     userTimeContext,
-    'The only deliverable is `.solopreneur/time-plan.json` in the project. Do not change the roadmap, project code, or other files, and do not start any planned task.',
+    'Do not change the roadmap, project code, or any project file, and do not start any planned task.',
     'Use exactly this JSON structure:',
     '{"version":1,"status":"draft","generatedAt":"ISO-8601","request":"user requirements","items":[{"id":"stable unique ID","title":"concise English user-facing task","startAt":"ISO-8601 with timezone","durationMinutes":25,"assignee":"user or agent","prompt":"required execution prompt only when assignee is agent"}]}',
     'Write every user-facing field in English. Times must be concrete and non-overlapping. Respect task dependencies, reasonable working hours, and stated deadlines. Do not assume the user has a full free day; when information is missing, create a conservative short plan and state the assumptions in the final response.',
-    `After writing the file, run ${shellQuote(process.execPath)} ${shellQuote(path.join(context.extensionPath, 'resources', 'tools', 'validate-time-plan.cjs'))}. If validation fails, fix the JSON from the reported errors and rerun until it prints PASS.`,
-    'The final response should only say that the draft was generated and validated and is waiting for confirmation in SoloMap.'
+    'Return the final validated JSON between the exact tags <solomap-time-plan> and </solomap-time-plan>. Do not put any other text inside those tags.',
+    'After the closing tag, only say that the draft was generated and is waiting for confirmation in SoloMap.'
   ] : [
     '请根据当前项目的真实进展和用户补充需求，生成一份可执行的时间安排草案。',
     `用户补充需求：${userRequirements}`,
     userTimeContext,
-    '唯一交付物是项目目录下的 `.solopreneur/time-plan.json`。不要修改路线图、项目代码或其他文件，也不要开始执行安排中的任务。',
+    '不要修改路线图、项目代码或任何项目文件，也不要开始执行安排中的任务。',
     'JSON 必须使用以下结构：',
     '{"version":1,"status":"draft","generatedAt":"ISO-8601","request":"用户需求","items":[{"id":"稳定且唯一的 ID","title":"用户可读的事项","startAt":"带时区的 ISO-8601","durationMinutes":25,"assignee":"user 或 agent","prompt":"仅 assignee=agent 时必填的执行提示"}]}',
     '时间应具体、互不重叠，并结合当前日期、合理工作时段、任务依赖和用户截止时间；不要凭空假设用户有完整全天可用时间。信息不足时采用保守的短计划，并在最终回复中指出采用的假设。',
-    `写入后必须运行 ${shellQuote(process.execPath)} ${shellQuote(path.join(context.extensionPath, 'resources', 'tools', 'validate-time-plan.cjs'))}。如果校验失败，按输出修正 JSON 并重新运行，直到出现 PASS 后才结束。`,
-    '最终回复只需说明草案已生成并通过校验，等待用户在 SoloMap 中确认。'
+    '最终把校验后的 JSON 放在精确标签 <solomap-time-plan> 与 </solomap-time-plan> 之间；标签内不要写其他文字。',
+    '结束标签之后只需说明草案已生成，等待用户在 SoloMap 中确认。'
   ]).join('\n\n');
-  await handleRunSoloConversation(context, prompt, selectedAgentCli, selectedModel, [], '', false);
+  await handleRunSoloConversation(context, prompt, selectedAgentCli, selectedModel, [], '', false, undefined, { timePlanDraft: true });
 }
 
 async function readStoredNativeSessionId(workspaceRoot: string, nodeId: string, agentCli: string, globalDataPath: string): Promise<string> {
@@ -8017,7 +8024,7 @@ async function readStoredNativeSessionId(workspaceRoot: string, nodeId: string, 
   return session?.sessionId || '';
 }
 
-async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = [], occurrenceId = '', interactiveConversation = true, target?: AgentLaunchTarget): Promise<number> {
+async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = [], occurrenceId = '', interactiveConversation = true, target?: AgentLaunchTarget, runMetadata: Record<string, unknown> = {}): Promise<number> {
   const workspaceRoot = target?.workspaceRoot || activeProjectRoot;
   const projectSyncEngine = target?.engine || syncEngine;
   await ensureTaskRuntimeReady(context);
@@ -8082,7 +8089,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     attachedFiles.length > 0 ? `Attached files:\n${attachedFiles.join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
   const conversationPrompt = await buildSoloConversationPrompt(request, workspaceRoot, settings.globalPrompt, attachedFiles, globalDataPath, settings.enabledEnhancements, interactiveConversation);
-  const prepared = await prepareOrdinaryConversation(context, { agentCli, selectedModel, prompt: conversationPrompt, globalPrompt: settings.globalPrompt, workspaceRoot, nodeId: soloConversationId, executionLogId: 0, userMessage: request, runKind: interactiveConversation ? 'solo' : 'solo_background', globalDataPath, taskPermissionMode: settings.taskPermissionMode || 'auto', nativeSessionId, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), metadata: { launchSummary: buildLaunchSummary(), captureRoadmapBackup: true, preSessionGitBackup: true } });
+  const prepared = await prepareOrdinaryConversation(context, { agentCli, selectedModel, prompt: conversationPrompt, globalPrompt: settings.globalPrompt, workspaceRoot, nodeId: soloConversationId, executionLogId: 0, userMessage: request, runKind: interactiveConversation ? 'solo' : 'solo_background', globalDataPath, taskPermissionMode: settings.taskPermissionMode || 'auto', nativeSessionId, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), metadata: { launchSummary: buildLaunchSummary(), captureRoadmapBackup: true, preSessionGitBackup: true, ...runMetadata } });
   postNodeConversations(soloConversationId);
   return deliverOrdinaryConversation(context, prepared);
 }
@@ -8309,38 +8316,6 @@ async function openProjectFileDiff(projectPath: string, relativePath: string, gi
   return true;
 }
 
-function moveUntrackedFilesToRollbackSafety(projectPath: string): string {
-  const listResult = childProcess.spawnSync('git', ['ls-files', '--others', '--exclude-standard', '-z'], {
-    cwd: projectPath,
-    encoding: 'buffer'
-  });
-  if (listResult.status !== 0) {
-    throw new Error(String(listResult.stderr || 'Could not list untracked files.'));
-  }
-  const untrackedFiles = Buffer.from(listResult.stdout || Buffer.alloc(0))
-    .toString('utf8')
-    .split('\0')
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .filter((item) => !item.startsWith('.solopreneur/rollback-safety/'));
-  if (untrackedFiles.length === 0) {
-    return '';
-  }
-
-  const safeStamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const safetyRoot = path.join(projectPath, '.solopreneur', 'rollback-safety', safeStamp);
-  for (const relativeFile of untrackedFiles) {
-    const sourcePath = path.resolve(projectPath, relativeFile);
-    if (!sourcePath.startsWith(path.resolve(projectPath) + path.sep) || !fs.existsSync(sourcePath)) {
-      continue;
-    }
-    const targetPath = path.join(safetyRoot, relativeFile);
-    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-    fs.renameSync(sourcePath, targetPath);
-  }
-  return path.relative(projectPath, safetyRoot);
-}
-
 async function rollbackProjectToPreSessionGitHash(context: vscode.ExtensionContext, projectPath: string, gitHash: string): Promise<void> {
   const normalizedProjectPath = String(projectPath || '').trim();
   const normalizedGitHash = String(gitHash || '').trim();
@@ -8366,7 +8341,7 @@ async function rollbackProjectToPreSessionGitHash(context: vscode.ExtensionConte
     }
 
     const confirm = await vscode.window.showWarningMessage(
-      `确认撤销本次修改并恢复到对话开始前？未跟踪的新文件会先转移到 .solopreneur/rollback-safety，不会直接删除。提交：${verifiedHash.slice(0, 8)}`,
+      `确认撤销本次修改并恢复到对话开始前？未跟踪的新文件会先转移到 SoloMap 恢复区，不会直接删除。提交：${verifiedHash.slice(0, 8)}`,
       { modal: true },
       '确认撤销'
     );
@@ -8374,7 +8349,30 @@ async function rollbackProjectToPreSessionGitHash(context: vscode.ExtensionConte
       return;
     }
 
-    const safetyDir = moveUntrackedFilesToRollbackSafety(normalizedProjectPath);
+    const rollbackDataRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+    const safetyDir = moveUntrackedFilesToRollbackSafety(normalizedProjectPath, rollbackDataRoot);
+    if (safetyDir) {
+      try {
+        const recoveryKey = `${crypto.createHash('sha256').update(path.resolve(normalizedProjectPath)).digest('hex').slice(0, 16)}:${path.basename(safetyDir)}`;
+        const current = await sendRuntimeDataRequest<{ revision: number }>(rollbackDataRoot, {
+          operation: 'read_analysis_state',
+          input: { root: normalizedProjectPath, namespace: 'rollback-recovery', key: recoveryKey }
+        });
+        await sendRuntimeDataRequest(rollbackDataRoot, {
+          operation: 'write_analysis_state',
+          input: {
+            root: normalizedProjectPath,
+            namespace: 'rollback-recovery',
+            key: recoveryKey,
+            expectedRevision: current.revision,
+            value: { path: safetyDir, projectPath: normalizedProjectPath, createdAt: new Date().toISOString() },
+            idempotencyKey: `rollback-recovery:${recoveryKey}`
+          }
+        });
+      } catch (error) {
+        console.error('SoloMap could not index the rollback recovery location:', error);
+      }
+    }
     const restoreRes = childProcess.spawnSync('git', ['restore', '--source', verifiedHash, '--staged', '--worktree', '--', '.'], {
       cwd: normalizedProjectPath,
       encoding: 'utf8'
@@ -8386,7 +8384,7 @@ async function rollbackProjectToPreSessionGitHash(context: vscode.ExtensionConte
 
     vscode.window.showInformationMessage(
       safetyDir
-        ? `项目已恢复到 ${verifiedHash.slice(0, 8)}；未跟踪新文件已移到 ${safetyDir}`
+        ? `项目已恢复到 ${verifiedHash.slice(0, 8)}；未跟踪新文件已安全保存在 SoloMap 恢复区：${safetyDir}`
         : `项目已恢复到 ${verifiedHash.slice(0, 8)}`
     );
     if (getSelectedProjectPath(context) !== normalizedProjectPath) {
@@ -9623,10 +9621,22 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
         const protectedRoadmapReason = 'Solo 对话不会直接调整路线图，已保留对话前路线图。';
         completionReason = completionReason ? `${completionReason} ${protectedRoadmapReason}` : protectedRoadmapReason;
       }
-      if (workspaceRoot === activeProjectRoot && typeof readTimePlan === 'function') {
+      if (statusData.timePlanDraft === true && status === 'In Progress') {
+        const draft = extractTimePlanDraft(outputText);
+        if (draft.valid && draft.plan) {
+          await saveTimePlan(workspaceRoot, globalDataPath, draft.plan);
+          completionReason = '时间安排草案已保存，等待用户确认。';
+        } else {
+          nextStatus = 'Failed';
+          failureCode = 'time_plan_invalid';
+          failureReason = draft.reason;
+          completionReason = draft.reason;
+        }
+      }
+      if (workspaceRoot === activeProjectRoot) {
         try {
           if (extensionContextRef) {
-            sidebarProvider?.postMessage({ command: 'timePlansLoaded', ...buildTimePlansPayload(extensionContextRef) });
+            sidebarProvider?.postMessage({ command: 'timePlansLoaded', ...await buildTimePlansPayload(extensionContextRef) });
           }
         } catch (error) {
           console.error('SoloMap failed to refresh the time plan draft:', error);

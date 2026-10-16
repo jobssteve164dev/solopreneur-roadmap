@@ -1497,19 +1497,21 @@ test('ability action labels are restored after language localization in both web
   }
 });
 
-test('time plan JSON is validated by both the plugin reader and the Agent-facing tool', () => {
+test('time plan JSON is validated by the plugin and committed through the database contract', () => {
   const source = fs.readFileSync(path.join(projectRoot, 'src', 'timePlan.ts'), 'utf8');
   assert.match(source, /validateTimePlanValue/);
   assert.match(source, /confirmTimePlan/);
+  assert.match(source, /extractTimePlanDraft/);
+  assert.match(source, /read_analysis_state/);
+  assert.match(source, /write_analysis_state/);
   assert.match(source, /assignee.*user.*agent/s);
   assert.match(source, /时间重叠/);
   const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
-  assert.match(extension, /resources.*tools.*validate-time-plan\.cjs/s);
-  assert.equal(fs.existsSync(path.join(projectRoot, 'resources', 'tools', 'validate-time-plan.cjs')), true);
-  assert.match(extension, /如果校验失败，按输出修正 JSON 并重新运行/);
+  assert.match(extension, /<solomap-time-plan>/);
+  assert.doesNotMatch(extension, /\.solopreneur\/time-plan\.json/);
   assert.match(extension, /sourceTimePlanProjectPath/);
   assert.match(extension, /scheduleKind: 'once'/);
-  assert.ok(extension.indexOf('await updatePersistedSettings(context') < extension.indexOf('confirmTimePlan(projectPath)'));
+  assert.ok(extension.indexOf('await updatePersistedSettings(context') < extension.indexOf('await confirmTimePlan(projectPath'));
 });
 
 function createUri(value) {
@@ -4733,7 +4735,8 @@ test('sidebar conversation result cards expose rollback actions for pre-session 
   const sidebarSource = fs.readFileSync(path.join(projectRoot, 'out/sidebarWebview.js'), 'utf8');
   const extensionSource = [
     fs.readFileSync(path.join(projectRoot, 'out/extension.js'), 'utf8'),
-    fs.readFileSync(path.join(projectRoot, 'out/roadmapWebview.js'), 'utf8')
+    fs.readFileSync(path.join(projectRoot, 'out/roadmapWebview.js'), 'utf8'),
+    fs.readFileSync(path.join(projectRoot, 'out/rollbackSafety.js'), 'utf8')
   ].join('\n');
 
   assert.match(sidebarSource, /function extractPreGitHash\(conversation\)/);
@@ -6382,7 +6385,7 @@ test('project growth history is full width and coverage comes from complete snap
   assert.match(extensionSource, /case 'runCoverageAnalysis':[\s\S]*?runProjectCoverageAnalysis/);
   assert.doesNotMatch(extensionSource, /scanReason: 'panel_open'[\s\S]{0,500}runProjectCoverageAnalysis/);
   assert.match(coverageSource, /const coverageRuns = new Map/);
-  assert.match(growthSource, /loadProjectCoverageSnapshot\(data\.snapshot\.projectPath\)/);
+  assert.match(growthSource, /loadProjectCoverageSnapshot\(projectPath, globalDataPath\)/);
 });
 
 test('sidebar roadmap action uses the concise roadmap label', () => {

@@ -123,13 +123,18 @@ test('retired project scaffolding is archived for exact consumer readback while 
   fs.mkdirSync(path.join(solo, 'step-sessions'), { recursive: true });
   fs.mkdirSync(path.join(solo, 'path-recovery-20260728T074000Z'), { recursive: true });
   fs.mkdirSync(path.join(solo, 'audits'), { recursive: true });
+  fs.mkdirSync(path.join(solo, 'verification'), { recursive: true });
   const retired = new Map([
     ['README.md', Buffer.from('generated project data instructions')],
     ['execution-graph.json', Buffer.from('{"nodes":["complete legacy graph"]}')],
     ['runtime/task-checkpoint.cjs', Buffer.from('module.exports = "legacy checkpoint";')],
     ['step-sessions/__solo__.json', Buffer.from('{"sessionId":"legacy-session"}')],
     ['attachments/solo/context.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3])],
-    ['path-recovery-20260728T074000Z/recovered.txt', Buffer.from('preserved recovery evidence')]
+    ['path-recovery-20260728T074000Z/recovered.txt', Buffer.from('preserved recovery evidence')],
+    ['audits/user-review.md', Buffer.from('formal historical audit')],
+    ['runtime/business-migration/manifest.json', Buffer.from('{"businessAsset":true}')],
+    ['tmp/customer-export.sql', Buffer.from('select * from customer_data;')],
+    ['verification/sidebar.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3])]
   ]);
   for (const [relative, bytes] of retired) fs.writeFileSync(path.join(solo, relative), bytes);
   const retained = new Map([
@@ -137,9 +142,6 @@ test('retired project scaffolding is archived for exact consumer readback while 
     ['roadmap.csv', Buffer.from('id,title\n1,Keep the roadmap\n')],
     ['path-recovery-20260728T074000Z/roadmap.csv', Buffer.from('id,title\n2,Keep the recovered roadmap too\n')],
     ['time-plan.json', Buffer.from('{"version":1,"status":"draft"}')],
-    ['audits/user-review.md', Buffer.from('formal user-owned audit')],
-    ['runtime/business-migration/manifest.json', Buffer.from('{"businessAsset":true}')],
-    ['tmp/customer-export.sql', Buffer.from('select * from customer_data;')],
     ['product-notes.md', Buffer.from('unknown user document stays local')]
   ]);
   for (const [relative, bytes] of retained) fs.writeFileSync(path.join(solo, relative), bytes);
@@ -187,11 +189,10 @@ test('retired project scaffolding is archived for exact consumer readback while 
   const recycled = await f.call('execute_recycling_plan', { projectRoot: f.project, planId: plan.planId });
   assert.equal(recycled.recycledFiles, retired.size);
   for (const relative of retired.keys()) assert.equal(fs.existsSync(path.join(solo, relative)), false);
-  for (const directory of ['attachments', 'step-sessions']) {
+  for (const directory of ['attachments', 'step-sessions', 'audits', 'runtime', 'tmp', 'verification']) {
     assert.equal(fs.existsSync(path.join(solo, directory)), false, `${directory} must not remain as an empty legacy folder`);
   }
   assert.equal(fs.existsSync(path.join(solo, 'path-recovery-20260728T074000Z')), true, 'a legacy folder containing roadmap.csv must remain');
-  assert.equal(fs.existsSync(path.join(solo, 'runtime')), true, 'runtime remains because it contains retained business data');
   for (const [relative, bytes] of retained) assert.deepEqual(fs.readFileSync(path.join(solo, relative)), bytes);
   const attachment = plan.files.find(file => file.path.endsWith('context.png'));
   await f.call('restore_recycling_file', { projectRoot: f.project, itemId: attachment.itemId });

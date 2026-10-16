@@ -229,7 +229,7 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
 
   const persistedView = buildProjectGrowthViewModel(latest);
   assert.equal(persistedView.totals.capabilities, 1);
-  writeFile(path.join(solopreneurDir, 'coverage', 'project-growth-coverage.json'), JSON.stringify({
+  const coverageSnapshot = {
     version: 1,
     provider: 'c8-istanbul',
     status: 'ready',
@@ -251,8 +251,8 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
       statements: { covered: 0, total: 1, percent: 0 }
     }],
     error: ''
-  }));
-  const coveredView = buildProjectGrowthViewModel(latest);
+  };
+  const coveredView = buildProjectGrowthViewModel(latest, { coverageSnapshot });
   const coveredDataModule = coveredView.modules.find((module) => module.label === 'src/db');
   assert.equal(coveredDataModule.runtimeCoveredFiles, 1);
   assert.equal(coveredDataModule.lineCoveragePercent, 72.7);

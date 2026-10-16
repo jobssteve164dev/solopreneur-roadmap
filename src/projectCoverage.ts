@@ -1,8 +1,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import * as os from 'os';
 import { execFile, execFileSync } from 'child_process';
 import { createCoverageMap } from 'istanbul-lib-coverage';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 
 export type ProjectCoverageStatus = 'ready' | 'test_failed' | 'stale_failed' | 'unavailable';
 
@@ -56,15 +59,25 @@ export function coverageVersionState(projectPath: string, snapshot: Pick<Project
   try { return captureCoverageVersion(projectPath).contentHash === snapshot.sourceVersion.contentHash ? 'current' : 'stale'; } catch { return 'unknown'; }
 }
 
-const coverageCache = new Map<string, { modifiedAt: number; snapshot: ProjectCoverageSnapshot }>();
 const coverageRuns = new Map<string, Promise<ProjectCoverageSnapshot>>();
 
-function coverageRoot(projectPath: string): string {
-  return path.join(projectPath, '.solopreneur', 'coverage');
+interface AnalysisState<T> {
+  objectId: string | null;
+  revision: number;
+  value: T | null;
 }
 
-function coverageCachePath(projectPath: string): string {
-  return path.join(coverageRoot(projectPath), 'project-growth-coverage.json');
+function coverageDataRoot(projectPath: string, globalDataPath: string): string {
+  return normalizeGlobalDataPathForExtension(globalDataPath, projectPath);
+}
+
+function removeOwnedCoverageReportDirectory(directory: string): void {
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory() && !entry.isSymbolicLink()) removeOwnedCoverageReportDirectory(target);
+    else fs.unlinkSync(target);
+  }
+  fs.rmdirSync(directory);
 }
 
 function emptyCoverageSnapshot(status: ProjectCoverageStatus, error: string): ProjectCoverageSnapshot {
@@ -89,21 +102,13 @@ function isCoverageSnapshot(value: unknown): value is ProjectCoverageSnapshot {
     && Array.isArray(candidate.files);
 }
 
-export function loadProjectCoverageSnapshot(projectPath: string): ProjectCoverageSnapshot | null {
-  const cachePath = coverageCachePath(projectPath);
-  let modifiedAt = 0;
+export async function loadProjectCoverageSnapshot(projectPath: string, globalDataPath = ''): Promise<ProjectCoverageSnapshot | null> {
   try {
-    modifiedAt = fs.statSync(cachePath).mtimeMs;
-  } catch {
-    return null;
-  }
-  const cached = coverageCache.get(projectPath);
-  if (cached?.modifiedAt === modifiedAt) return cached.snapshot;
-  try {
-    const parsed = JSON.parse(fs.readFileSync(cachePath, 'utf8')) as unknown;
-    if (!isCoverageSnapshot(parsed)) return null;
-    coverageCache.set(projectPath, { modifiedAt, snapshot: parsed });
-    return parsed;
+    const state = await sendRuntimeDataRequest<AnalysisState<ProjectCoverageSnapshot>>(coverageDataRoot(projectPath, globalDataPath), {
+      operation: 'read_analysis_state',
+      input: { root: projectPath, namespace: 'coverage', key: 'project-growth' }
+    });
+    return isCoverageSnapshot(state.value) ? state.value : null;
   } catch {
     return null;
   }
@@ -170,26 +175,46 @@ function readTestScript(projectPath: string): string {
   }
 }
 
-function writeCoverageSnapshot(projectPath: string, snapshot: ProjectCoverageSnapshot): void {
-  const cachePath = coverageCachePath(projectPath);
-  fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-  fs.writeFileSync(cachePath, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
-  const modifiedAt = fs.statSync(cachePath).mtimeMs;
-  coverageCache.set(projectPath, { modifiedAt, snapshot });
+async function writeCoverageSnapshot(projectPath: string, globalDataPath: string, snapshot: ProjectCoverageSnapshot): Promise<void> {
+  const root = coverageDataRoot(projectPath, globalDataPath);
+  const idempotencyKey = `coverage:${crypto.randomUUID()}`;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const current = await sendRuntimeDataRequest<AnalysisState<ProjectCoverageSnapshot>>(root, {
+      operation: 'read_analysis_state',
+      input: { root: projectPath, namespace: 'coverage', key: 'project-growth' }
+    });
+    try {
+      await sendRuntimeDataRequest(root, {
+        operation: 'write_analysis_state',
+        input: {
+          root: projectPath,
+          namespace: 'coverage',
+          key: 'project-growth',
+          expectedRevision: current.revision,
+          value: snapshot,
+          idempotencyKey: `${idempotencyKey}:${attempt}`
+        }
+      });
+      return;
+    } catch (error) {
+      if (!/revision_conflict/.test(String(error)) || attempt === 3) throw error;
+    }
+  }
 }
 
-function preservePreviousCoverageFailure(
+async function preservePreviousCoverageFailure(
   projectPath: string,
+  globalDataPath: string,
   previous: ProjectCoverageSnapshot | null,
   attemptedAt: string,
   startedAt: number,
   error: string
-): ProjectCoverageSnapshot {
+): Promise<ProjectCoverageSnapshot> {
   if (!previous) {
     const unavailable = emptyCoverageSnapshot('unavailable', error);
     unavailable.lastAttemptAt = attemptedAt;
     unavailable.durationMs = Date.now() - startedAt;
-    writeCoverageSnapshot(projectPath, unavailable);
+    await writeCoverageSnapshot(projectPath, globalDataPath, unavailable);
     return unavailable;
   }
   const staleSnapshot: ProjectCoverageSnapshot = {
@@ -200,31 +225,30 @@ function preservePreviousCoverageFailure(
     testPassed: false,
     error
   };
-  writeCoverageSnapshot(projectPath, staleSnapshot);
+  await writeCoverageSnapshot(projectPath, globalDataPath, staleSnapshot);
   return staleSnapshot;
 }
 
-async function executeCoverageRun(projectPath: string, extensionPath: string): Promise<ProjectCoverageSnapshot> {
+async function executeCoverageRun(projectPath: string, extensionPath: string, globalDataPath: string): Promise<ProjectCoverageSnapshot> {
   const startedAt = Date.now();
   const attemptedAt = new Date().toISOString();
-  const previous = loadProjectCoverageSnapshot(projectPath);
+  const previous = await loadProjectCoverageSnapshot(projectPath, globalDataPath);
   const sourceVersion = captureCoverageVersion(projectPath);
   const testScript = readTestScript(projectPath);
   if (!testScript) {
-    return preservePreviousCoverageFailure(projectPath, previous, attemptedAt, startedAt, '项目没有可运行的 npm test 脚本。');
+    return preservePreviousCoverageFailure(projectPath, globalDataPath, previous, attemptedAt, startedAt, '项目没有可运行的 npm test 脚本。');
   }
   const coverageNodeExecutable = await resolveCoverageNodeExecutable();
   if (!coverageNodeExecutable) {
-    return preservePreviousCoverageFailure(projectPath, previous, attemptedAt, startedAt, '运行验证分析需要 Node.js 20.19 或更高版本。');
+    return preservePreviousCoverageFailure(projectPath, globalDataPath, previous, attemptedAt, startedAt, '运行验证分析需要 Node.js 20.19 或更高版本。');
   }
 
-  const reportDir = path.join(coverageRoot(projectPath), 'runtime');
-  const reportPath = path.join(reportDir, 'coverage-final.json');
-  fs.mkdirSync(reportDir, { recursive: true });
   const c8Cli = path.join(extensionPath, 'node_modules', 'c8', 'bin', 'c8.js');
   if (!fs.existsSync(c8Cli)) {
-    return preservePreviousCoverageFailure(projectPath, previous, attemptedAt, startedAt, 'SoloMap 覆盖分析组件未安装完整。');
+    return preservePreviousCoverageFailure(projectPath, globalDataPath, previous, attemptedAt, startedAt, 'SoloMap 覆盖分析组件未安装完整。');
   }
+  const reportDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-coverage-report-'));
+  const reportPath = path.join(reportDir, 'coverage-final.json');
   const npmExecutable = process.platform === 'win32' ? 'npm.cmd' : 'npm';
   const childEnvironment: NodeJS.ProcessEnv = { ...process.env, NO_COLOR: '1' };
   delete childEnvironment.FORCE_COLOR;
@@ -248,14 +272,11 @@ async function executeCoverageRun(projectPath: string, extensionPath: string): P
     }, (error) => resolve({ error }));
   });
 
-  if (!fs.existsSync(reportPath)) {
-    const error = result.error?.message || '测试结束后没有生成覆盖报告。';
-    return preservePreviousCoverageFailure(projectPath, previous, attemptedAt, startedAt, error);
-  }
-
+  let snapshot: ProjectCoverageSnapshot | null = null;
+  let reportError = '';
   try {
-    const files = parseIstanbulCoverageReport(projectPath, reportPath);
-    const snapshot: ProjectCoverageSnapshot = {
+    if (!fs.existsSync(reportPath)) reportError = result.error?.message || '测试结束后没有生成覆盖报告。';
+    else snapshot = {
       version: 1,
       provider: 'c8-istanbul',
       status: result.error ? 'test_failed' : 'ready',
@@ -264,27 +285,25 @@ async function executeCoverageRun(projectPath: string, extensionPath: string): P
       durationMs: Date.now() - startedAt,
       testPassed: !result.error,
       sourceVersion,
-      files,
+      files: parseIstanbulCoverageReport(projectPath, reportPath),
       error: result.error?.message || ''
     };
-    writeCoverageSnapshot(projectPath, snapshot);
-    return snapshot;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return preservePreviousCoverageFailure(projectPath, previous, attemptedAt, startedAt, message);
+    reportError = error instanceof Error ? error.message : String(error);
+  } finally {
+    removeOwnedCoverageReportDirectory(reportDir);
   }
+  if (!snapshot) return preservePreviousCoverageFailure(projectPath, globalDataPath, previous, attemptedAt, startedAt, reportError);
+  await writeCoverageSnapshot(projectPath, globalDataPath, snapshot);
+  return snapshot;
 }
 
-export function runProjectCoverageAnalysis(projectPath: string, extensionPath: string): Promise<ProjectCoverageSnapshot> {
-  const activeRun = coverageRuns.get(projectPath);
+export function runProjectCoverageAnalysis(projectPath: string, extensionPath: string, globalDataPath = ''): Promise<ProjectCoverageSnapshot> {
+  const runKey = `${coverageDataRoot(projectPath, globalDataPath)}\n${path.resolve(projectPath)}`;
+  const activeRun = coverageRuns.get(runKey);
   if (activeRun) return activeRun;
-  const run = executeCoverageRun(projectPath, extensionPath)
-    .finally(() => coverageRuns.delete(projectPath));
-  coverageRuns.set(projectPath, run);
+  const run = executeCoverageRun(projectPath, extensionPath, globalDataPath)
+    .finally(() => coverageRuns.delete(runKey));
+  coverageRuns.set(runKey, run);
   return run;
-}
-
-export function clearProjectCoverageCache(projectPath = ''): void {
-  if (projectPath) coverageCache.delete(projectPath);
-  else coverageCache.clear();
 }

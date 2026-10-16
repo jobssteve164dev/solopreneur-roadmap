@@ -1,5 +1,6 @@
-import * as fs from 'fs';
-import * as path from 'path';
+import * as crypto from 'crypto';
+import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 
 export type TimePlanAssignee = 'user' | 'agent';
 
@@ -27,9 +28,8 @@ export interface TimePlanResult {
   reason: string;
 }
 
-export function getTimePlanPath(projectPath: string): string {
-  return path.join(projectPath, '.solopreneur', 'time-plan.json');
-}
+type TimePlanOperation = (operation: string, input: Record<string, unknown>) => Promise<unknown>;
+interface TimePlanState { revision: number; value: unknown }
 
 export function validateTimePlanValue(value: unknown): TimePlanResult {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -98,66 +98,66 @@ export function validateTimePlanValue(value: unknown): TimePlanResult {
   };
 }
 
-export function readTimePlan(projectPath: string): TimePlanResult {
-  const filePath = getTimePlanPath(projectPath);
-  if (!fs.existsSync(filePath)) {
-    return { valid: false, plan: null, reason: '还没有 Agent 生成的时间安排。' };
-  }
+function timePlanOperation(projectPath: string, globalDataPath: string, operation?: TimePlanOperation): TimePlanOperation {
+  if (operation) return operation;
+  const root = normalizeGlobalDataPathForExtension(globalDataPath, projectPath);
+  return (name, input) => sendRuntimeDataRequest(root, { operation: name, input });
+}
+
+export async function readTimePlan(projectPath: string, globalDataPath = '', operation?: TimePlanOperation): Promise<TimePlanResult> {
   try {
-    return validateTimePlanValue(JSON.parse(fs.readFileSync(filePath, 'utf8')));
+    const state = await timePlanOperation(projectPath, globalDataPath, operation)('read_analysis_state', {
+      root: projectPath,
+      namespace: 'time-plan',
+      key: 'current'
+    }) as TimePlanState;
+    return state.value === null
+      ? { valid: false, plan: null, reason: '还没有 Agent 生成的时间安排。' }
+      : validateTimePlanValue(state.value);
   } catch (error: any) {
-    return { valid: false, plan: null, reason: `time-plan.json 无法解析：${error?.message || error}` };
+    return { valid: false, plan: null, reason: `时间安排暂时无法读取：${error?.message || error}` };
   }
 }
 
-export function confirmTimePlan(projectPath: string): TimePlanResult {
-  const result = readTimePlan(projectPath);
+export async function saveTimePlan(projectPath: string, globalDataPath: string, value: unknown, operation?: TimePlanOperation): Promise<TimePlanResult> {
+  const result = validateTimePlanValue(value);
+  if (!result.valid || !result.plan) return result;
+  const call = timePlanOperation(projectPath, globalDataPath, operation);
+  const writeId = crypto.randomUUID();
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const current = await call('read_analysis_state', { root: projectPath, namespace: 'time-plan', key: 'current' }) as TimePlanState;
+    try {
+      await call('write_analysis_state', {
+        root: projectPath,
+        namespace: 'time-plan',
+        key: 'current',
+        expectedRevision: current.revision,
+        value: result.plan,
+        idempotencyKey: `time-plan:${writeId}:${attempt}`
+      });
+      return result;
+    } catch (error) {
+      if (!/revision_conflict/.test(String(error)) || attempt === 3) throw error;
+    }
+  }
+  return result;
+}
+
+export async function confirmTimePlan(projectPath: string, globalDataPath = '', operation?: TimePlanOperation): Promise<TimePlanResult> {
+  const result = await readTimePlan(projectPath, globalDataPath, operation);
   if (!result.valid || !result.plan) return result;
   const confirmed: TimePlanDraft = {
     ...result.plan,
     status: 'confirmed',
     confirmedAt: new Date().toISOString()
   };
-  const filePath = getTimePlanPath(projectPath);
-  const temporaryPath = `${filePath}.confirming`;
-  fs.writeFileSync(temporaryPath, `${JSON.stringify(confirmed, null, 2)}\n`, 'utf8');
-  fs.renameSync(temporaryPath, filePath);
-  return validateTimePlanValue(confirmed);
+  return saveTimePlan(projectPath, globalDataPath, confirmed, operation);
 }
 
-export function buildTimePlanValidationScript(): string {
-  return `#!/usr/bin/env node
-const fs = require('fs');
-const path = require('path');
-function fail(reason) { console.error('FAIL time plan validation: ' + reason); process.exit(1); }
-const filePath = path.join(process.cwd(), '.solopreneur', 'time-plan.json');
-if (!fs.existsSync(filePath)) fail('未找到 .solopreneur/time-plan.json。');
-let plan;
-try { plan = JSON.parse(fs.readFileSync(filePath, 'utf8')); } catch (error) { fail('JSON 无法解析：' + error.message); }
-if (!plan || Array.isArray(plan) || typeof plan !== 'object') fail('根节点必须是 JSON 对象。');
-if (plan.version !== 1 || plan.status !== 'draft') fail('Agent 生成时 version 必须为 1，status 必须为 draft。');
-if (!plan.generatedAt || !Number.isFinite(Date.parse(plan.generatedAt))) fail('generatedAt 必须是有效的 ISO 时间。');
-if (!Array.isArray(plan.items) || plan.items.length < 1 || plan.items.length > 12) fail('items 必须包含 1 到 12 项安排。');
-const ids = new Set();
-const items = plan.items.map((item, index) => {
-  if (!item || Array.isArray(item) || typeof item !== 'object') fail('第 ' + (index + 1) + ' 项必须是 JSON 对象。');
-  const id = String(item.id || '').trim();
-  const title = String(item.title || '').trim();
-  const startAt = String(item.startAt || '').trim();
-  const durationMinutes = Number(item.durationMinutes);
-  const assignee = String(item.assignee || '');
-  if (!id || ids.has(id) || !title) fail('每项必须有不重复的 id 和非空 title。');
-  if (!Number.isFinite(Date.parse(startAt))) fail(title + ' 的 startAt 不是有效的 ISO 时间。');
-  if (!Number.isInteger(durationMinutes) || durationMinutes < 5 || durationMinutes > 480) fail(title + ' 的 durationMinutes 必须是 5 到 480 的整数。');
-  if (!['user', 'agent'].includes(assignee)) fail(title + ' 的 assignee 必须是 user 或 agent。');
-  if (assignee === 'agent' && !String(item.prompt || '').trim()) fail(title + ' 交给 Agent 执行时必须提供 prompt。');
-  ids.add(id);
-  return { title, startAt, durationMinutes };
-}).sort((a, b) => Date.parse(a.startAt) - Date.parse(b.startAt));
-for (let index = 1; index < items.length; index += 1) {
-  const previousEnd = Date.parse(items[index - 1].startAt) + items[index - 1].durationMinutes * 60000;
-  if (Date.parse(items[index].startAt) < previousEnd) fail(items[index].title + ' 与上一项时间重叠。');
-}
-console.log('PASS time plan validation (' + items.length + ' items)');
-`;
+export function extractTimePlanDraft(output: string): TimePlanResult {
+  const matches = [...String(output || '').matchAll(/<solomap-time-plan>([\s\S]*?)<\/solomap-time-plan>/g)];
+  const body = String(matches.at(-1)?.[1] || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  if (!body) return { valid: false, plan: null, reason: 'Agent 没有返回可保存的时间安排。' };
+  try { return validateTimePlanValue(JSON.parse(body)); }
+  catch (error: any) { return { valid: false, plan: null, reason: `时间安排 JSON 无法解析：${error?.message || error}` }; }
 }

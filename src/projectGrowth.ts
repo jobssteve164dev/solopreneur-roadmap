@@ -7,7 +7,7 @@ import { CsvStore } from './db/csvStore';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
-import { loadProjectCoverageSnapshot, ProjectCoverageMetric, coverageVersionState } from './projectCoverage';
+import { loadProjectCoverageSnapshot, ProjectCoverageMetric, ProjectCoverageSnapshot, coverageVersionState } from './projectCoverage';
 import {
   GrowthEdgeRecord,
   GrowthModuleLabelRecord,
@@ -1962,6 +1962,7 @@ export function buildProjectGrowthViewModel(
   options: {
     previous?: GrowthSnapshotData | null;
     history?: GrowthSnapshotData[];
+    coverageSnapshot?: ProjectCoverageSnapshot | null;
   } = {}
 ): ProjectGrowthViewModel {
   if (!data) {
@@ -2056,7 +2057,7 @@ export function buildProjectGrowthViewModel(
     testFiles.add(edge.targetId);
     directTestFilesByModule.set(moduleId, testFiles);
   }
-  const coverageSnapshot = loadProjectCoverageSnapshot(data.snapshot.projectPath);
+  const coverageSnapshot = options.coverageSnapshot || null;
   const scannedFilePaths = new Set([...fileById.values()].map((file) => file.path));
   for (const coverageFile of coverageSnapshot?.files || []) {
     const sourcePath = resolveTestReferenceToSource(coverageFile.path, scannedFilePaths);
@@ -2321,7 +2322,8 @@ export async function refreshProjectGrowthSnapshot(
     await sendRuntimeDataRequest(globalDataPath, { operation: 'commit_project_growth_refresh', input: { root: projectPath, ...reservation, data: snapshot } });
     const stored = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: options.historyLimit || 12 } });
     if (!stored.latest) throw new Error('growth_snapshot_commit_missing');
-    const view = buildProjectGrowthViewModel(stored.latest, { previous, history: stored.history });
+    const coverageSnapshot = await loadProjectCoverageSnapshot(projectPath, globalDataPath);
+    const view = buildProjectGrowthViewModel(stored.latest, { previous, history: stored.history, coverageSnapshot });
     projectGrowthViewCache.set(projectGrowthCacheKey(globalDataPath, projectPath), view);
     return view;
   }
@@ -2339,7 +2341,7 @@ export async function getProjectGrowthView(
     const cacheKey = projectGrowthCacheKey(globalDataPath, projectPath);
     const cached = projectGrowthViewCache.get(cacheKey);
     if (!options.forceRefresh && cached && stored.latest?.snapshot.id === cached.snapshotId) {
-      const coverage = loadProjectCoverageSnapshot(projectPath);
+      const coverage = await loadProjectCoverageSnapshot(projectPath, globalDataPath);
       return { ...cached, coverage: { ...cached.coverage, versionState: coverage ? coverageVersionState(projectPath, coverage) : 'unknown' } };
     }
     if (options.forceRefresh || (options.refreshIfMissing !== false && !stored.latest)) {
@@ -2356,7 +2358,8 @@ export async function getProjectGrowthView(
       await sendRuntimeDataRequest(globalDataPath, { operation: 'commit_project_growth_refresh', input: { root: projectPath, ...reservation, data: snapshot } });
       const committed = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: options.historyLimit || 12 } });
       if (!committed.latest) throw new Error('growth_snapshot_commit_missing');
-      const view = buildProjectGrowthViewModel(committed.latest, { previous, history: committed.history });
+      const coverageSnapshot = await loadProjectCoverageSnapshot(projectPath, globalDataPath);
+      const view = buildProjectGrowthViewModel(committed.latest, { previous, history: committed.history, coverageSnapshot });
       projectGrowthViewCache.set(cacheKey, view);
       return view;
     }
@@ -2364,14 +2367,15 @@ export async function getProjectGrowthView(
     if (!latest) {
       const view = emptyProjectGrowthViewModel();
       view.projectPath = projectPath;
-      const coverage = loadProjectCoverageSnapshot(projectPath);
+      const coverage = await loadProjectCoverageSnapshot(projectPath, globalDataPath);
       view.coverage.versionState = coverage ? coverageVersionState(projectPath, coverage) : 'unknown';
       projectGrowthViewCache.set(cacheKey, view);
       return view;
     }
     const history = stored.history;
     const previous = history.find(item => item.snapshot.id !== latest.snapshot.id) || null;
-    const view = buildProjectGrowthViewModel(latest, { previous, history });
+    const coverageSnapshot = await loadProjectCoverageSnapshot(projectPath, globalDataPath);
+    const view = buildProjectGrowthViewModel(latest, { previous, history, coverageSnapshot });
     projectGrowthViewCache.set(cacheKey, view);
     return view;
   }

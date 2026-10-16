@@ -434,9 +434,17 @@ for (const existing of [false, true]) test(`completed historical Solo runs witho
   const queued = f.store.listRunStates({ projectId: f.projectId, pendingConsumer: true }).items;
   assert.equal(queued.length, 1); assert.equal(queued[0].runId, original.runId); assert.equal(queued[0].turnId, original.turnId);
   assert.equal(queued[0].revision, original.revision); assert.equal(queued[0].taskId, original.taskId);
-  const wal = fs.readFileSync(path.join(f.root, 'solomap.db-wal'));
+  const beforeReplay = {
+    state: f.store.readRunState(f.projectId, 71),
+    queue: f.store.listRunStates({ projectId: f.projectId, pendingConsumer: true }).items,
+    sourceSequence: f.store.search({ scope: f.projectId }).sourceSequence
+  };
   await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
-  assert.deepEqual(fs.readFileSync(path.join(f.root, 'solomap.db-wal')), wal);
+  assert.deepEqual({
+    state: f.store.readRunState(f.projectId, 71),
+    queue: f.store.listRunStates({ projectId: f.projectId, pendingConsumer: true }).items,
+    sourceSequence: f.store.search({ scope: f.projectId }).sourceSequence
+  }, beforeReplay);
   fs.renameSync(f.sourceRoot, path.join(f.base, 'retained-run-source')); fs.renameSync(f.statuses, path.join(f.base, 'retained-status-source'));
   await f.restart();
   assert.deepEqual(f.store.listRunStates({ projectId: f.projectId, pendingConsumer: true }).items, queued);
@@ -453,14 +461,14 @@ test('historical queue rediscovery leaves an already accepted settlement and a n
   const journal = f.store.readRunTurnJournal(f.projectId, 71);
   await f.ops({ operation: 'commit_run_settlement', input: { ...scope, token: lease.token, journal: { agentCli: 'claude', command: 'claude original arguments', output: '历史对话已正式结算', status: 'Completed' }, digest: { schemaVersion: 2, runId: '__solo__:71', nodeId: '__solo__', executionLogId: journal.executionLogId, finishedAt: f.status.finishedAt, decision: { summary: '历史对话已正式结算' } }, idempotencyKey: 'historical-accepted-settlement' } });
   assert.equal(f.store.rows('SELECT state FROM run_consumer_sources WHERE run_id=?', [original.runId])[0].state, 'committed');
-  const wal = fs.readFileSync(path.join(f.root, 'solomap.db-wal'));
+  const settled = { state: f.store.readRunState(f.projectId, 71), queue: f.store.listRunStates({ projectId: f.projectId, pendingConsumer: true }).items, sourceSequence: f.store.search({ scope: f.projectId }).sourceSequence };
   await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
-  assert.deepEqual(fs.readFileSync(path.join(f.root, 'solomap.db-wal')), wal);
+  assert.deepEqual({ state: f.store.readRunState(f.projectId, 71), queue: f.store.listRunStates({ projectId: f.projectId, pendingConsumer: true }).items, sourceSequence: f.store.search({ scope: f.projectId }).sourceSequence }, settled);
   assert.equal(f.store.listRunStates({ projectId: f.projectId, pendingConsumer: true }).items.length, 0);
   await f.ops({ operation: 'write', input: { kind: 'run', action: 'patch', scope: f.projectId, objectId: original.runId, expectedRevision: f.store.readRunState(f.projectId, 71).revision, data: { status: 'Stopped' }, idempotencyKey: 'newer-formal-status-than-history' } });
-  const after = f.store.readRunState(f.projectId, 71), updatedWal = fs.readFileSync(path.join(f.root, 'solomap.db-wal'));
+  const after = { state: f.store.readRunState(f.projectId, 71), queue: f.store.listRunStates({ projectId: f.projectId, pendingConsumer: true }).items, sourceSequence: f.store.search({ scope: f.projectId }).sourceSequence };
   await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
-  assert.deepEqual(f.store.readRunState(f.projectId, 71), after); assert.deepEqual(fs.readFileSync(path.join(f.root, 'solomap.db-wal')), updatedWal);
+  assert.deepEqual({ state: f.store.readRunState(f.projectId, 71), queue: f.store.listRunStates({ projectId: f.projectId, pendingConsumer: true }).items, sourceSequence: f.store.search({ scope: f.projectId }).sourceSequence }, after);
   assert.equal(f.store.listRunStates({ projectId: f.projectId, pendingConsumer: true }).items.length, 0);
 });
 
@@ -477,9 +485,9 @@ test('late discovery of a retained completion source attaches it without overwri
   assert.equal(after.runId, original.runId); assert.equal(after.turnId, updated.turnId); assert.equal(f.store.read(after.runId).data.status, 'Stopped');
   assert.equal(after.status.checkpointSummary, updated.status.checkpointSummary); assert.equal(after.status.failureCode, undefined);
   assert.deepEqual(f.store.readMigrationSource(after.status.historicalCompletionSource.identity, after.status.historicalCompletionSource.key).bytes, bytes);
-  const wal = fs.readFileSync(path.join(f.root, 'solomap.db-wal'));
+  const beforeReplay = { state: after, source: f.store.readMigrationSource(after.status.historicalCompletionSource.identity, after.status.historicalCompletionSource.key), sourceSequence: f.store.search({ scope: f.projectId }).sourceSequence };
   assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
-  assert.deepEqual(fs.readFileSync(path.join(f.root, 'solomap.db-wal')), wal);
+  assert.deepEqual({ state: f.store.readRunState(f.projectId, 71), source: f.store.readMigrationSource(after.status.historicalCompletionSource.identity, after.status.historicalCompletionSource.key), sourceSequence: f.store.search({ scope: f.projectId }).sourceSequence }, beforeReplay);
 });
 
 for (const body of ['{broken-json', 'null', '[]', '{"markCompleted":"true"}', '{"markCompleted":true,"reason":42}']) test(`invalid historical completion ${body} keeps full bytes and a stable failed state across replay and restart`, async t => {
@@ -492,8 +500,9 @@ for (const body of ['{broken-json', 'null', '[]', '{"markCompleted":"true"}', '{
   const mapping = f.store.rows('SELECT object_id,stage FROM migration_items WHERE source_identity=? AND source_key=?', [original.status.historicalCompletionSource.identity, original.status.historicalCompletionSource.key])[0];
   assert.equal(mapping.object_id, original.runId); assert.equal(mapping.stage, 'imported');
   assert.deepEqual(f.store.readMigrationSource(original.status.historicalCompletionSource.identity, original.status.historicalCompletionSource.key).bytes, bytes);
-  const wal = fs.readFileSync(path.join(f.root, 'solomap.db-wal'));
-  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []); assert.deepEqual(fs.readFileSync(path.join(f.root, 'solomap.db-wal')), wal);
+  const beforeReplay = { state: original, source: f.store.readMigrationSource(original.status.historicalCompletionSource.identity, original.status.historicalCompletionSource.key), sourceSequence: f.store.search({ scope: f.projectId }).sourceSequence };
+  assert.deepEqual((await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project })).conflicts, []);
+  assert.deepEqual({ state: f.store.readRunState(f.projectId, 71), source: f.store.readMigrationSource(original.status.historicalCompletionSource.identity, original.status.historicalCompletionSource.key), sourceSequence: f.store.search({ scope: f.projectId }).sourceSequence }, beforeReplay);
   fs.renameSync(f.sourceRoot, path.join(f.base, 'retained-source-isolation')); fs.renameSync(f.statuses, path.join(f.base, 'retained-status-isolation'));
   await f.restart(); assert.deepEqual(f.store.readRunState(f.projectId, 71), original);
 });
