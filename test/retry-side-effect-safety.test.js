@@ -288,6 +288,11 @@ test('the status consumer queues mutable auxiliary work instead of running it be
   assert.match(consumer, /timePlan:/);
   const effects = source.slice(source.indexOf('async function applyRunSettlementEffect('), source.indexOf('const activeRunEffectPolls'));
   assert.match(effects, /effect\.payload\.captureGrowth === true/);
+  assert.match(effects, /shouldCommit:/);
   assert.match(effects, /could not capture the post-run growth snapshot/);
   assert.match(effects, /effect\.kind === 'refresh' && effect\.payload\.timePlan/);
+  const growthSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'projectGrowth.ts'), 'utf8');
+  const capture = growthSource.slice(growthSource.indexOf('export async function captureProjectGrowthSnapshot('), growthSource.indexOf('export async function getProjectGrowthView('));
+  assert.match(capture, /options\.shouldCommit\?\.\(\) === false/);
+  assert.ok(capture.lastIndexOf('options.shouldCommit?.() === false') > capture.indexOf('await finalizeProjectGrowthSnapshot('));
 });

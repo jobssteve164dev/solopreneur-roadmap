@@ -29,6 +29,10 @@ export interface ProjectGrowthScanOptions {
   globalDataPath?: string;
 }
 
+export interface ProjectGrowthCaptureOptions extends ProjectGrowthScanOptions {
+  shouldCommit?: () => boolean;
+}
+
 export interface ProjectGrowthCommitResult {
   accepted: boolean;
   snapshotId: string | null;
@@ -2339,9 +2343,10 @@ export async function captureProjectGrowthSnapshot(
   projectPath: string,
   extensionPath: string,
   requestId: string,
-  options: ProjectGrowthScanOptions = {}
+  options: ProjectGrowthCaptureOptions = {}
 ): Promise<ProjectGrowthCommitResult> {
   if (!requestId.trim()) throw new Error('growth_refresh_request_required');
+  if (options.shouldCommit?.() === false) return { accepted: false, snapshotId: null, unchanged: false };
   const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath || '', projectPath);
   await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
   const reservation = await sendRuntimeDataRequest<{ requestId: string; generation: number }>(globalDataPath, {
@@ -2351,6 +2356,7 @@ export async function captureProjectGrowthSnapshot(
   const runEntries = await readProjectRunEntries(projectPath, globalDataPath);
   const snapshot = buildProjectGrowthSnapshot(projectPath, roadmapNodes, runEntries, options);
   await finalizeProjectGrowthSnapshot(snapshot, projectPath, extensionPath, roadmapNodes, runEntries);
+  if (options.shouldCommit?.() === false) return { accepted: false, snapshotId: null, unchanged: false };
   return sendRuntimeDataRequest<ProjectGrowthCommitResult>(globalDataPath, {
     operation: 'commit_project_growth_refresh', input: { root: projectPath, ...reservation, data: snapshot }
   });

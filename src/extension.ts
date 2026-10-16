@@ -10205,12 +10205,15 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
       await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);
     }
     refreshSidebarProjectCards();
-    if (effect.payload.captureGrowth === true && extensionContextRef && workspaceRoot) {
+    if (effect.payload.captureGrowth === true && extensionContextRef && workspaceRoot
+      && normalizeGlobalDataPathForExtension(getPersistedSettings(extensionContextRef).globalDataPath) === normalizeGlobalDataPathForExtension(String(globalDataPath || ''))) {
       try {
         await captureProjectGrowthSnapshot(workspaceRoot, extensionContextRef.extensionPath, `run-effect:${effect.effectId}:growth`, {
           globalDataPath,
           scanReason: String(effect.payload.growthScanReason || 'agent_run'),
-          maxFiles: 5000
+          maxFiles: 5000,
+          shouldCommit: () => Boolean(extensionContextRef
+            && normalizeGlobalDataPathForExtension(getPersistedSettings(extensionContextRef).globalDataPath) === normalizeGlobalDataPathForExtension(String(globalDataPath || '')))
         });
       } catch (error) {
         console.error('SoloMap could not capture the post-run growth snapshot:', error);
