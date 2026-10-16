@@ -67,6 +67,45 @@ test('unsupported step memory and run digests become exact evidence instead of p
   } finally { store.close(); }
 });
 
+test('retired learning auxiliary files become exact database evidence instead of permanent filesystem residue', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-learning-auxiliary-'));
+  const dataRoot = path.join(root, '.solomap-global'), learningRoot = path.join(root, 'learning');
+  const sources = new Map([
+    ['candidates/old-candidate.md', Buffer.from('# 完整旧候选\n\n保留原始内容🌿\n')],
+    ['promotion-suggestions/old-suggestion.json', Buffer.from('{"schemaVersion":1,"summary":"完整旧建议🌿"}\n')],
+    ['ledger/index.json', Buffer.from('{"schemaVersion":1,"entries":["old"]}\n')]
+  ]);
+  for (const [key, bytes] of sources) {
+    const file = path.join(learningRoot, key); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, bytes);
+  }
+  fs.writeFileSync(path.join(learningRoot, 'unknown.txt'), 'still owned by an unknown producer');
+  const store = new UnifiedDataStore(dataRoot);
+  try {
+    const result = await importLearningDirectory(store, learningRoot);
+    assert.deepEqual(result.conflicts, []);
+    assert.deepEqual(result.retainedFiles, ['unknown.txt']);
+    assert.equal(result.archivedSources.length, 1);
+    assert.equal(result.archivedSources[0].source, 'legacy-auxiliary');
+    const inventory = store.read(result.archivedSources[0].evidenceRef.split('/').at(-1));
+    const manifest = JSON.parse(inventory.data.content);
+    assert.deepEqual(manifest.sources.map(source => source.key), [...sources.keys()].sort());
+    for (const source of manifest.sources) {
+      const item = store.readMigrationSource(`learning:${learningRoot}`, source.key);
+      assert.equal(item.stage, 'imported'); assert.deepEqual(item.bytes, sources.get(source.key));
+      assert.deepEqual(evidenceBytes(store.read(source.evidenceRef.split('/').at(-1))), sources.get(source.key));
+    }
+    const recycling = await new (require('../out/migrationRecycling.js').MigrationRecycling)(store).prepare();
+    assert.deepEqual(recycling.files.map(item => item.path).sort(), [...sources.keys()].map(key => path.join(learningRoot, key)).sort());
+    for (const item of recycling.files) {
+      const bytes = sources.get(path.relative(learningRoot, item.path).split(path.sep).join('/'));
+      assert.equal(item.hash, crypto.createHash('sha256').update(bytes).digest('hex')); assert.equal(item.bytes, bytes.length);
+    }
+    assert.equal(recycling.files.some(item => item.path.endsWith('unknown.txt')), false);
+    const again = await importLearningDirectory(store, learningRoot);
+    assert.equal(again.unchanged, 1); assert.equal(again.imported, 0);
+  } finally { store.close(); }
+});
+
 test('an unexpected database failure stays conflicted and cannot be converted into recyclable evidence', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-source-operational-error-'));
   const dataRoot = path.join(root, '.solomap-global'), memoryRoot = path.join(root, 'memory');

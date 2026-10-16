@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -523,6 +524,22 @@ test('startup discovers legacy learning without a memory directory and uses exac
   const prompt = await ledger.buildLearningRetrievalContext(workspace, root, { projectPath: workspace, contextText: 'unmatched', runKind: 'solo' });
   assert.match(prompt, /Preserve the current selection/);
   assert.equal(fs.existsSync(path.join(root, 'memory')), false);
+}));
+
+test('startup upgrades a completed v3 learning migration to archive retired auxiliary files', () => fixture(async ({ root, workspace, project, ops, store }) => {
+  const sourceRoot = path.join(root, 'learning'); fs.mkdirSync(path.join(sourceRoot, 'candidates'), { recursive: true });
+  const file = path.join(sourceRoot, 'candidates', 'old-candidate.md'), bytes = Buffer.from('# 旧候选\n\n完整历史🌿\n'); fs.writeFileSync(file, bytes);
+  const projectScopes = { [workspace]: project };
+  const signature = crypto.createHash('sha256').update(JSON.stringify({ sourceRoot, projectScopes })).digest('hex');
+  const old = store.enqueueMemoryMigration({ collection: 'learning', sourceRoot, projectScopes, archiveUnresolved: true }, `startup-learning-v3:${signature}`);
+  store.updateMigrationJob(old.jobId, 'completed', { imported: 0, unchanged: 0, originalBytes: 0, conflicts: [], retainedFiles: ['candidates/old-candidate.md'] });
+  assert.throws(() => store.readMigrationSource(`learning:${sourceRoot}`, 'candidates/old-candidate.md'), /migration_source_missing/);
+  const { enqueueAvailableDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
+  await enqueueAvailableDataMigrations(store, ops, () => true); await ops.waitForMigrations();
+  const jobs = store.migrationJobs().filter(job => job.args.collection === 'learning');
+  assert.equal(jobs.length, 2, 'the upgraded importer must not replay the completed v3 startup receipt');
+  const captured = store.readMigrationSource(`learning:${sourceRoot}`, 'candidates/old-candidate.md');
+  assert.equal(captured.stage, 'imported'); assert.deepEqual(captured.bytes, bytes);
 }));
 
 test('unchanged invalid learning sources keep one captured revision on retry', () => fixture(async ({ root, workspace, project, ops, store }) => {

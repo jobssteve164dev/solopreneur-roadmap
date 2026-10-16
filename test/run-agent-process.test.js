@@ -104,6 +104,8 @@ for (const exitCode of [0, 7]) test(`maintenance execution captures its full res
     const recorded = await f.call('read_run_document', { purpose });
     assert.ok(recorded, 'the shared host must capture the exact receipt before settling the run');
     assert.deepEqual(Buffer.from(recorded.bytes, 'base64'), resultBytes);
+    assert.equal(fs.existsSync(resultPath), false, 'the exact temporary receipt must be removed after database readback');
+    assert.equal(fs.existsSync(directory), false, 'the operation directory must be removed once it is empty');
     assert.equal(f.stdout().toString(), output);
     await f.stopRuntime(); await f.startRuntime();
     assert.deepEqual(await f.call('read_run_document', { purpose }), recorded);
@@ -234,7 +236,7 @@ for (const kind of ['unchanged-old', 'new-receipt', 'invalid-directory']) test(`
       assert.match(String(state.status.summary || state.status.checkpointSummary), kind === 'unchanged-old' ? /maintenance_result_missing/ : /capability_attachment_path_invalid/);
     }
     assert.equal((await f.call('read_run_document', { purpose: oldPurpose })).objectId, old.objectId);
-    assert.equal(fs.existsSync(resultPath), true, 'old and failed physical evidence must be retained');
+    assert.equal(fs.existsSync(resultPath), kind !== 'new-receipt', 'only unchanged or invalid physical evidence remains available for diagnosis');
   } finally { await f.close(); }
 });
 

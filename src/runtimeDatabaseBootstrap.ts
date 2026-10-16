@@ -264,7 +264,7 @@ async function enqueueStartupLearningMigration(store: UnifiedDataStore, operatio
   }
   const projectScopes = Object.fromEntries(mappings.sort(([a], [b]) => a.localeCompare(b)));
   const signature = crypto.createHash('sha256').update(JSON.stringify({ sourceRoot, projectScopes })).digest('hex');
-  if (shouldContinue()) await operations({ operation: 'import_project_data', input: { collection: 'learning', sourceRoot, projectScopes, archiveUnresolved: true, idempotencyKey: `startup-learning-v3:${signature}` } });
+  if (shouldContinue()) await operations({ operation: 'import_project_data', input: { collection: 'learning', sourceRoot, projectScopes, archiveUnresolved: true, idempotencyKey: `startup-learning-v4:${signature}` } });
 }
 
 async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, selectedProjectRoot?: string, includeLegacyProjectFiles = true): Promise<void> {

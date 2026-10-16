@@ -391,6 +391,7 @@ export async function importLearningDirectory(store: UnifiedDataStore, sourceRoo
   const result: MemoryImportResult = { imported: 0, unchanged: 0, originalBytes: 0, conflicts: [], retainedFiles: [] };
   const sources: Array<{ file: string; key: string; hash: string; updatedAt: number; scope: string; id: string }> = [];
   const decisions: typeof sources = [];
+  const auxiliary: Array<{ file: string; key: string; hash: string }> = [];
   const pending = [root];
   while (pending.length) {
     if (options.shouldContinue && !options.shouldContinue()) return { ...result, interrupted: true };
@@ -402,6 +403,15 @@ export async function importLearningDirectory(store: UnifiedDataStore, sourceRoo
       if (entry.isFile() && key === 'ledger/events.jsonl') {
         await importLearningLedger(store, file, identity, options, result);
         if (result.interrupted) return result;
+        continue;
+      }
+      if (entry.isFile() && (/^candidates\/[^/]+\.md$/.test(key) || /^promotion-suggestions\/[^/]+\.json$/.test(key) || key === 'ledger/index.json')) {
+        try {
+          const captured = await stableSource(file);
+          store.captureMigrationSource({ identity, key, hash: captured.hash }, captured.bytes, { mimeType: key.endsWith('.json') ? 'application/json' : 'text/markdown', encoding: 'utf8', pending: true });
+          auxiliary.push({ file, key, hash: captured.hash }); result.originalBytes += captured.bytes.length;
+        } catch (error) { result.conflicts.push({ source: key, error: error instanceof Error ? error.message : String(error) }); }
+        options.onProgress?.(result); await new Promise<void>(resolve => setImmediate(resolve));
         continue;
       }
       if (!entry.isFile() || !/^(?:candidates|approved|rejected|candidate-decisions)\/[^/]+\.json$/.test(key)) { result.retainedFiles.push(key); continue; }
@@ -422,6 +432,18 @@ export async function importLearningDirectory(store: UnifiedDataStore, sourceRoo
       result.originalBytes += captured?.bytes.length ?? 0;
       options.onProgress?.(result); await new Promise<void>(resolve => setImmediate(resolve));
     }
+  }
+  if (auxiliary.length) {
+    auxiliary.sort((a, b) => a.key.localeCompare(b.key));
+    try {
+      for (const source of auxiliary) if ((await stableSource(source.file, root)).hash !== source.hash) throw new Error('source_changed_during_import');
+      const inventoryHash = crypto.createHash('sha256').update(JSON.stringify(auxiliary.map(source => [source.key, source.hash]))).digest('hex');
+      const archived = store.archiveMigrationSourceGroup(identity, `legacy-auxiliary-${inventoryHash}`, auxiliary.map(source => source.key), { reason: 'legacy_learning_auxiliary_retired' });
+      result.archivedSources ||= [];
+      result.archivedSources.push({ source: 'legacy-auxiliary', error: 'legacy_learning_auxiliary_retired', evidenceRef: `solomap://evidence/${archived.objectId}` });
+      if (archived.unchanged) result.unchanged++; else result.imported++;
+    } catch (error) { result.conflicts.push({ source: 'legacy-auxiliary', error: error instanceof Error ? error.message : String(error) }); }
+    options.onProgress?.(result); await new Promise<void>(resolve => setImmediate(resolve));
   }
   // Only references are sorted; one full source is retained in memory at a time.
   sources.sort((a, b) => a.scope.localeCompare(b.scope) || a.id.localeCompare(b.id) || a.updatedAt - b.updatedAt || a.key.localeCompare(b.key));

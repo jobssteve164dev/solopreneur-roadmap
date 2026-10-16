@@ -8,6 +8,7 @@ const { once } = require('node:events');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
 const { RunLifecycleClient, readConversationLogSnapshot, runStatusReference } = require('../out/runLifecycleClient.js');
+const { captureMaintenanceRunResult } = require('../out/maintenanceRunResult.js');
 
 function fixture() {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-run-lifecycle-'));
@@ -128,6 +129,8 @@ test('dead maintenance owner recovery retains its full receipt before settling a
     const receipt = await f.call('read_run_document', { root: f.project, executionLogId: 1, purpose });
     assert.ok(receipt, 'recovery must capture the completed external result before marking the interrupted process');
     assert.deepEqual(Buffer.from(receipt.bytes, 'base64'), bytes);
+    assert.equal(fs.existsSync(resultPath), false, 'recovery must remove the exact receipt after database readback');
+    assert.equal(fs.existsSync(path.dirname(resultPath)), false, 'recovery must remove the empty operation directory');
     const state = await f.call('read_run_state', { root: f.project, executionLogId: 1 });
     assert.equal(state.status.status, 'Failed', 'a missing host exit receipt cannot invent a successful process exit');
     await f.operations.close(); f.store.close(); closed = true;
@@ -135,6 +138,105 @@ test('dead maintenance owner recovery retains its full receipt before settling a
     try { assert.deepEqual(reopened.readRunDocument(run.projectId, 1, purpose), receipt); }
     finally { reopened.close(); }
   } finally { if (!closed) { await f.operations.close(); f.store.close(); } }
+});
+
+test('maintenance result cleanup refuses a same-byte physical replacement at the deletion boundary', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-maintenance-result-race-'));
+  const root = path.join(base, '.solomap-global'), directory = path.join(root, 'tmp', 'owned-operation'), file = path.join(directory, 'result.json');
+  fs.mkdirSync(directory, { recursive: true }); const bytes = Buffer.from('{"success":true,"detail":"完整回执🌿"}\n'); fs.writeFileSync(file, bytes);
+  const state = { projectId: 'project', runId: 'run', turnId: 'turn', generation: 1, revision: 1,
+    status: { runKind: 'skill_install', executionLogId: 1, maintenanceResultPath: file, maintenanceResultGeneration: 1, maintenanceResultBaseline: null } };
+  let stored = null;
+  const operation = async (name, input) => {
+    if (name === 'read_run_document') return stored;
+    stored = { bytes: input.bytes, hash: require('node:crypto').createHash('sha256').update(Buffer.from(input.bytes, 'base64')).digest('hex'), totalBytes: bytes.length };
+    return { objectId: 'receipt', revision: 1 };
+  };
+  const rename = fs.renameSync; let replacement;
+  fs.renameSync = (source, target) => {
+    if (!replacement && path.basename(source) === 'result.json') {
+      rename(file, `${file}.original`); fs.writeFileSync(file, bytes); replacement = fs.lstatSync(file);
+    }
+    return rename(source, target);
+  };
+  try {
+    await assert.rejects(captureMaintenanceRunResult(root, state, operation), /maintenance_result_source_changed/);
+    const current = fs.lstatSync(file);
+    assert.equal(current.dev, replacement.dev); assert.equal(current.ino, replacement.ino, 'the replacement must be restored, not deleted');
+    assert.deepEqual(fs.readFileSync(file), bytes);
+  } finally { fs.renameSync = rename; }
+});
+
+test('maintenance result cleanup retains mismatched evidence and non-result siblings', async () => {
+  for (const scenario of ['mismatch', 'sibling']) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), `solomap-maintenance-result-${scenario}-`));
+    const root = path.join(base, '.solomap-global'), directory = path.join(root, 'tmp', 'owned-operation'), file = path.join(directory, 'result.json');
+    fs.mkdirSync(directory, { recursive: true }); const bytes = Buffer.from('{"success":true}\n'); fs.writeFileSync(file, bytes);
+    if (scenario === 'sibling') fs.writeFileSync(path.join(directory, 'diagnostic.log'), 'retain me');
+    const state = { projectId: 'project', runId: 'run', turnId: 'turn', generation: 1, revision: 1,
+      status: { runKind: 'skill_install', executionLogId: 1, maintenanceResultPath: file, maintenanceResultGeneration: 1, maintenanceResultBaseline: null } };
+    let stored = null;
+    const operation = async (name, input) => {
+      if (name === 'read_run_document') return stored;
+      const storedBytes = scenario === 'mismatch' ? Buffer.from('different').toString('base64') : input.bytes;
+      stored = { bytes: storedBytes, hash: require('node:crypto').createHash('sha256').update(Buffer.from(storedBytes, 'base64')).digest('hex'), totalBytes: Buffer.from(storedBytes, 'base64').length };
+      return { objectId: 'receipt', revision: 1 };
+    };
+    if (scenario === 'mismatch') {
+      await assert.rejects(captureMaintenanceRunResult(root, state, operation), /maintenance_result_readback_mismatch/);
+      assert.deepEqual(fs.readFileSync(file), bytes, 'mismatched evidence remains physically available');
+    } else {
+      assert.equal(await captureMaintenanceRunResult(root, state, operation), true);
+      assert.equal(fs.existsSync(file), false); assert.equal(fs.readFileSync(path.join(directory, 'diagnostic.log'), 'utf8'), 'retain me');
+    }
+  }
+});
+
+test('maintenance result cleanup rejects a symlinked temporary parent without deleting its target', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-maintenance-result-symlink-'));
+  const root = path.join(base, '.solomap-global'), outside = path.join(base, 'outside'), directory = path.join(outside, 'owned-operation');
+  fs.mkdirSync(directory, { recursive: true }); fs.mkdirSync(root); fs.symlinkSync(outside, path.join(root, 'tmp'), 'dir');
+  const file = path.join(root, 'tmp', 'owned-operation', 'result.json'), bytes = Buffer.from('{"success":true}\n'); fs.writeFileSync(file, bytes);
+  const state = { projectId: 'project', runId: 'run', turnId: 'turn', generation: 1, revision: 1,
+    status: { runKind: 'skill_install', executionLogId: 1, maintenanceResultPath: file, maintenanceResultGeneration: 1, maintenanceResultBaseline: null } };
+  let stored = null;
+  const operation = async (name, input) => {
+    if (name === 'read_run_document') return stored;
+    stored = { bytes: input.bytes, hash: require('node:crypto').createHash('sha256').update(bytes).digest('hex'), totalBytes: bytes.length };
+    return { objectId: 'receipt', revision: 1 };
+  };
+  await assert.rejects(captureMaintenanceRunResult(root, state, operation), /maintenance_result_path_invalid/);
+  assert.deepEqual(fs.readFileSync(path.join(directory, 'result.json')), bytes);
+});
+
+test('maintenance result cleanup retains an unbound same-byte source when its database document already exists', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-maintenance-result-existing-'));
+  const root = path.join(base, '.solomap-global'), directory = path.join(root, 'tmp', 'owned-operation'), file = path.join(directory, 'result.json');
+  fs.mkdirSync(directory, { recursive: true }); const bytes = Buffer.from('{"success":true}\n'); fs.writeFileSync(file, bytes);
+  const state = { projectId: 'project', runId: 'run', turnId: 'turn', generation: 1, revision: 1,
+    status: { runKind: 'skill_install', executionLogId: 1, maintenanceResultPath: file, maintenanceResultGeneration: 1, maintenanceResultBaseline: null } };
+  const stored = { bytes: bytes.toString('base64'), hash: require('node:crypto').createHash('sha256').update(bytes).digest('hex'), totalBytes: bytes.length };
+  assert.equal(await captureMaintenanceRunResult(root, state, async name => name === 'read_run_document' ? stored : assert.fail('must not rewrite existing document')), true);
+  assert.deepEqual(fs.readFileSync(file), bytes, 'a cross-call inode without persisted identity cannot be deleted');
+});
+
+test('maintenance result cleanup stays successful on an unsupported secure-path platform and recovers empty directories', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-maintenance-result-portable-'));
+  const root = path.join(base, '.solomap-global'), directory = path.join(root, 'tmp', 'owned-operation'), file = path.join(directory, 'result.json');
+  fs.mkdirSync(directory, { recursive: true }); const bytes = Buffer.from('{"success":true}\n'); fs.writeFileSync(file, bytes);
+  const state = { projectId: 'project', runId: 'run', turnId: 'turn', generation: 1, revision: 1,
+    status: { runKind: 'skill_install', executionLogId: 1, maintenanceResultPath: file, maintenanceResultGeneration: 1, maintenanceResultBaseline: null } };
+  let stored = null;
+  const operation = async (name, input) => {
+    if (name === 'read_run_document') return stored;
+    stored = { bytes: input.bytes, hash: require('node:crypto').createHash('sha256').update(bytes).digest('hex'), totalBytes: bytes.length };
+    return { objectId: 'receipt', revision: 1 };
+  };
+  assert.equal(await captureMaintenanceRunResult(root, state, operation, 'win32'), true);
+  assert.deepEqual(fs.readFileSync(file), bytes, 'unsupported secure deletion retains the physical receipt without failing the task');
+  fs.unlinkSync(file);
+  assert.equal(await captureMaintenanceRunResult(root, state, operation), true);
+  assert.equal(fs.existsSync(directory), false, 'an empty operation directory is retired on recovery');
 });
 
 test('dead maintenance recovery seals invalid evidence with its exact error', async () => {
