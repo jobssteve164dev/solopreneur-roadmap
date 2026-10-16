@@ -110,7 +110,7 @@ test('an agent review MCP session exposes only read-only database memory tools',
   try {
     await client.connect(transport);
     const names = (await client.listTools()).tools.map(tool => tool.name).sort();
-    assert.deepEqual(names, ['solomap_context', 'solomap_read', 'solomap_search']);
+    assert.deepEqual(names, ['solomap_context', 'solomap_experience', 'solomap_memory', 'solomap_read', 'solomap_search']);
     const context = await client.callTool({ name: 'solomap_context', arguments: { project: projectId, query: 'review context' } });
     assert.equal(context.isError, undefined, JSON.stringify(context.content));
     assert.ok(JSON.parse(context.content[0].text).items.some(item => item.objectId === memory.objectId));

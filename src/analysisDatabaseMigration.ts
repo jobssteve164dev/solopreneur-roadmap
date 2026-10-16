@@ -50,15 +50,6 @@ export async function importAnalysisCaches(store: UnifiedDataStore, sourceRoot: 
   const projectScopes = Object.entries(options.projectScopes || {}) as Array<[string, string]>;
   for (const [projectRoot, projectId] of projectScopes) {
     if (result.interrupted) break;
-    const projectKey = crypto.createHash('sha1').update(projectRoot).digest('hex');
-    const conversationCandidates = [
-      path.join(sourceRoot, 'conversations', `sidebar-conversation-${projectKey}-v1.json`),
-      path.join(sourceRoot, `sidebar-conversation-${projectKey}-v1.json`)
-    ];
-    for (const file of conversationCandidates) await importFile(file, projectId, 'sidebar', 'conversation', value => ({
-      sourceRevision: store.readProjectAnalysisSource(projectId).conversationRevision,
-      snapshot: value?.snapshot || value
-    }));
     for (const [fileName, key] of [['issues-cache.json', 'issues'], ['pull-requests-cache.json', 'pullRequests'], ['delivery-cache.json', 'delivery'], ['security-cache.json', 'security']] as const) {
       await importFile(path.join(projectRoot, '.solopreneur', fileName), projectId, 'external', key, value => ({
         requestedAt: Date.parse(String(value?.syncedAt || '')) || 0,

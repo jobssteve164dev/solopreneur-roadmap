@@ -35,7 +35,7 @@ async function runExperienceCli(f, command, options = []) {
   return JSON.parse((await promisify(execFile)(process.execPath, [path.resolve(__dirname, '../resources/tools/solomap-experience.cjs'), command, '--project', f.project, '--global', f.root, '--json', ...options])).stdout);
 }
 
-test('the generated first-use handoff command runs without deploying global tool copies', async () => {
+test('the generated first-use handoff uses the formal MCP tool without deploying global tool copies', async () => {
   const { buildCrossAgentHandoffInstructions } = require('../out/runDigest.js');
   const f = await fixture(true);
   try {
@@ -46,25 +46,31 @@ test('the generated first-use handoff command runs without deploying global tool
     const expected = digest(0, { nodeId: 'step', userIntent: '首次接续必须读取当前数据库', outcome: '已保存的接续结论🌿', handoff: { nextAgentBrief: '完整接续信息🌿'.repeat(2000) } });
     await f.call('commit_run_settlement', { ...scope, token: lease.token, journal: { agentCli: 'codex', command: 'formal command', output: '完整接续日志🌿'.repeat(2000), status: 'In Progress' }, digest: expected, idempotencyKey: 'first-handoff-settle' });
     const instructions = buildCrossAgentHandoffInstructions(f.project, 'step', 'step', f.root);
-    const command = instructions.split('\n').find(line => line.trim().startsWith('node ')).trim();
-    const execute = async () => JSON.parse((await promisify(execFile)('/bin/bash', ['--noprofile', '--norc', '-c', `${command} --json`], { cwd: f.project })).stdout);
-    const result = await execute();
-    assert.equal(result.globalRoot, f.root);
-    assert.equal(result.payload.length, 1);
-    assert.equal(result.payload[0].brief, expected.handoff.nextAgentBrief);
-    const sourceRef = result.payload[0].sourceRef;
+    assert.match(instructions, /solomap_experience/);
+    assert.match(instructions, /"action":"handoff"/);
+    assert.doesNotMatch(instructions, /\.cjs|\bnode\s/);
+    const readHandoff = async () => {
+      const source = runtimeMcpSource(f.root, run.projectId);
+      try {
+        const handlers = new Map(); registerUnifiedMcpTools({ registerTool: (name, _schema, handler) => handlers.set(name, handler), registerResource() {} }, source);
+        const response = await handlers.get('solomap_experience')({ action: 'handoff', node: 'step', limit: 3 });
+        assert.equal(response.isError, undefined, JSON.stringify(response.content));
+        return JSON.parse(response.content[0].text);
+      } finally { await source.close(); }
+    };
+    const result = await readHandoff();
+    assert.equal(result.records.length, 1);
+    assert.equal(result.records[0].brief, expected.handoff.nextAgentBrief);
+    const sourceRef = result.records[0].sourceRef;
     assert.deepEqual((await f.call('read_run_digests', { root: f.project })).items[0].digest, expected);
     await f.reopen();
-    const reopenedResult = await execute();
-    assert.deepEqual(reopenedResult.payload, result.payload, 'the same generated command remains usable after owner restart');
-    assert.equal(reopenedResult.globalRoot, result.globalRoot);
-    assert.equal(reopenedResult.projectRoot, result.projectRoot);
-    assert.equal(reopenedResult.command, result.command);
+    const reopenedResult = await readHandoff();
+    assert.deepEqual(reopenedResult.records, result.records, 'the same formal MCP query remains usable after owner restart');
     assert.ok(sourceRef.objectId && Number.isInteger(sourceRef.revision));
     assert.equal(fs.existsSync(path.join(f.root, 'tools')), false);
-    const skill = instructions.match(/先读取 (.+)，再运行：/)[1];
+    const skill = instructions.match(/先读取 (.+)，再调用正式 MCP 工具：/)[1];
     assert.equal(fs.statSync(skill).isFile(), true, 'the advertised skill must exist independently of the user project');
-    if (process.env.SOLOMAP_462_HANDOFF_EVIDENCE) fs.writeFileSync(process.env.SOLOMAP_462_HANDOFF_EVIDENCE, JSON.stringify({ instructions, command, expected, result, reopenedResult, source: await f.call('read', { ref: sourceRef.objectId, revision: sourceRef.revision }), root: f.root, project: f.project, noGlobalToolCopies: !fs.existsSync(path.join(f.root, 'tools')) }, null, 2));
+    if (process.env.SOLOMAP_462_HANDOFF_EVIDENCE) fs.writeFileSync(process.env.SOLOMAP_462_HANDOFF_EVIDENCE, JSON.stringify({ instructions, expected, result, reopenedResult, source: await f.call('read', { ref: sourceRef.objectId, revision: sourceRef.revision }), root: f.root, project: f.project, noGlobalToolCopies: !fs.existsSync(path.join(f.root, 'tools')) }, null, 2));
   } finally { await f.close(); }
 });
 
@@ -241,15 +247,16 @@ test('a valid task query retains relevant semantic signals after the old 300-tok
   } finally { await f.close(); }
 });
 
-test('the actual generated handoff command uses the same non-default data root as the prepared run', async () => {
+test('the actual generated handoff instruction stays on the bound formal MCP scope', async () => {
   const f = await fixture(true); const sourceRoot = path.join(f.project, '.solopreneur', 'run-digests'); fs.mkdirSync(sourceRoot);
   fs.writeFileSync(path.join(sourceRoot, 'one.json'), JSON.stringify(digest(0, { nodeId: 'step' })));
   try {
     await f.import(); await runExperienceCli(f, 'history');
     const { buildCrossAgentHandoffInstructions } = require('../out/runDigest.js');
-    const line = buildCrossAgentHandoffInstructions(f.project, 'step', 'step', f.root).split('\n').find(line => line.trim().startsWith('node '));
-    const result = JSON.parse((await promisify(execFile)('/bin/bash', ['--noprofile', '--norc', '-c', `${line.trim()} --json`], { cwd: f.project })).stdout);
-    assert.equal(result.payload.length, 1); assert.equal(result.globalRoot, f.root);
+    const instructions = buildCrossAgentHandoffInstructions(f.project, 'step', 'step', f.root);
+    assert.match(instructions, /solomap_experience/); assert.match(instructions, /"node":"step"/);
+    assert.equal(instructions.includes(f.root), false);
+    assert.doesNotMatch(instructions, /\.cjs|\bnode\s/);
   } finally { await f.close(); }
 });
 

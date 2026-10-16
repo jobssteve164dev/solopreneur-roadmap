@@ -1278,15 +1278,14 @@ test('settings capability refresh reads skills installed after the first cached 
 
 function assertBundledHandoffInstructions(instructions, globalRoot) {
   const escape = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const { shellQuote } = require('../out/agentCli.js');
-  assert.match(instructions, /solomap-experience\.cjs' handoff/);
-  assert.match(instructions, new RegExp(escape(path.join(projectRoot, 'resources', 'tools', 'solomap-experience.cjs'))));
-  assert.match(instructions, new RegExp(escape(`--global ${shellQuote(globalRoot)}`)));
+  assert.match(instructions, /solomap_experience/);
+  assert.match(instructions, /"action":"handoff"/);
+  assert.doesNotMatch(instructions, /solomap-experience\.cjs|\bnode\s/);
   assert.doesNotMatch(instructions, new RegExp(escape(path.join(globalRoot, 'tools', 'solomap-experience.cjs'))));
   assert.match(instructions, new RegExp(escape(path.join(projectRoot, 'resources', 'skills', 'solomap-cross-agent-handoff', 'SKILL.md'))));
 }
 
-test('first step and revision prompts execute their bundled handoff commands from the current data root', async () => {
+test('first step and revision prompts use the formal handoff MCP on the current project scope', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
   const transport = require('../out/autonomousRuntimeControl.js');
@@ -1308,13 +1307,13 @@ test('first step and revision prompts execute their bundled handoff commands fro
     const snapshots = [];
     for (const prompt of prompts) {
       assertBundledHandoffInstructions(prompt, root);
-      const command = prompt.split('\n').find(line => line.trim().startsWith('node ') && line.includes(' handoff --project ')).trim();
-      const executed = await require('node:util').promisify(require('node:child_process').execFile)('/bin/bash', ['--noprofile', '--norc', '-c', `${command} --json`], { cwd: project });
-      const result = JSON.parse(executed.stdout);
-      assert.equal(result.globalRoot, root); assert.equal(result.projectRoot, project);
+      const call = prompt.match(/solomap_experience\((\{"action":"handoff"[^\n]+\})\)/);
+      assert.ok(call, 'the prompt must contain a structured formal MCP call');
+      const input = JSON.parse(call[1]);
+      assert.equal(input.action, 'handoff'); assert.equal(input.limit, 3);
       assert.equal(fs.existsSync(path.join(root, 'tools')), false);
-      assert.equal(fs.statSync(prompt.match(/先读取 (.+)，再运行：/)[1]).isFile(), true);
-      snapshots.push({ prompt, command, result });
+      assert.equal(fs.statSync(prompt.match(/先读取 (.+)，再调用正式 MCP 工具：/)[1]).isFile(), true);
+      snapshots.push({ prompt, input });
     }
     if (process.env.SOLOMAP_462_PROMPT_HANDOFF_EVIDENCE) fs.writeFileSync(process.env.SOLOMAP_462_PROMPT_HANDOFF_EVIDENCE, JSON.stringify(snapshots, null, 2));
   } finally { await server.close(); await operations.close(); store.close(); }

@@ -917,16 +917,14 @@ export function formatExecutionExperiencePrompt(selected: RunDigestReference[], 
 }
 
 export function buildCrossAgentHandoffInstructions(workspaceRoot: string, nodeId: string, runKind: string, globalDataPath = ''): string {
-  const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
   const extensionRoot = path.resolve(__dirname, '..');
-  const experienceTool = path.join(extensionRoot, 'resources', 'tools', 'solomap-experience.cjs');
   const skillPath = path.join(extensionRoot, 'resources', 'skills', 'solomap-cross-agent-handoff', 'SKILL.md');
-  const nodeFilter = nodeId ? ` --node ${shellQuote(nodeId)}` : '';
+  const handoffInput = JSON.stringify({ action: 'handoff', ...(nodeId ? { node: nodeId } : {}), limit: 3 });
   return [
     'SoloMap 跨 Agent 协作入口：',
-    `- 如果本轮是在接续、复核、修复失败运行、跨不同 Agent CLI 协作，或你不确定上一轮到底改了什么，先读取 ${skillPath}，再运行：`,
-    `  node ${shellQuote(experienceTool)} handoff --project ${shellQuote(workspaceRoot)} --global ${shellQuote(globalRoot)}${nodeFilter} --limit 3`,
-    `- 需要进一步查看历史记录时，用同一工具的 \`summary\`、\`history\`、\`failures\`、\`latest-changes\` 或 \`search\` 子命令；当前运行类型：${runKind || 'unknown'}。`,
+    `- 如果本轮是在接续、复核、修复失败运行、跨不同 Agent CLI 协作，或你不确定上一轮到底改了什么，先读取 ${skillPath}，再调用正式 MCP 工具：`,
+    `  solomap_experience(${handoffInput})`,
+    `- 需要进一步查看历史记录时，继续调用 \`solomap_experience\`，将 action 设为 \`summary\`、\`history\`、\`failures\`、\`latest-changes\` 或 \`search\`；当前运行类型：${runKind || 'unknown'}。`,
     '- 这些历史信号只能降低重复探索，不能覆盖本轮用户最新要求、当前文件、测试和命令输出。',
     '- 不要把原始 execution log 全文复制进最终回复；只提炼对用户有帮助的结论、改动、验证和风险。'
   ].join('\n');

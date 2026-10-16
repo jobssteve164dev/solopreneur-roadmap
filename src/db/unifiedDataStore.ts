@@ -6631,8 +6631,8 @@ export class UnifiedDataStore {
             metadata.projection = { ...header, ...(settlement ? { settlementRef: { objectId: String(settlement.target_id), revision: 1 } } : {}) };
           }
           if (metadata.kind === 'evidence' && metadata.data.type === 'project_journal') {
-            const journal = this.rows('SELECT j.execution_log_id,j.node_id,j.agent_cli,j.status,j.timestamp FROM project_journal_sources s JOIN project_journal_entries j ON j.project_id=s.project_id AND j.execution_log_id=s.execution_log_id WHERE s.object_id=?', [metadata.objectId])[0];
-            if (journal) metadata.projection = { sourceRef: { objectId: metadata.objectId, revision: metadata.revision }, executionLogId: Number(journal.execution_log_id), nodeId: String(journal.node_id), agentCli: String(journal.agent_cli), status: String(journal.status), finishedAt: String(journal.timestamp) };
+            const journal = this.rows("SELECT j.execution_log_id,j.node_id,j.agent_cli,j.status,j.timestamp,CASE WHEN instr(j.output,'Failure category:')>0 OR instr(j.output,'Failure reason:')>0 THEN 1 ELSE 0 END AS failure_count FROM project_journal_sources s JOIN project_journal_entries j ON j.project_id=s.project_id AND j.execution_log_id=s.execution_log_id WHERE s.object_id=?", [metadata.objectId])[0];
+            if (journal) metadata.projection = { sourceRef: { objectId: metadata.objectId, revision: metadata.revision }, executionLogId: Number(journal.execution_log_id), nodeId: String(journal.node_id), agentCli: String(journal.agent_cli), status: String(journal.status), finishedAt: String(journal.timestamp), failureCount: Number(journal.failure_count || 0) };
           }
           matches.push(projectObject ? projectObject(metadata) : metadata);
         }

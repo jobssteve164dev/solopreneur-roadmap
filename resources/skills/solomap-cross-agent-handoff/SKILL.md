@@ -9,33 +9,31 @@ Use this skill when a task is continuing, reviewing, repairing, or coordinating 
 
 ## Start Here
 
-Use the handoff command in the current task prompt. It includes the tool location and the data root for this run. Keep its `--project` and `--global` arguments when changing the subcommand or adding filters.
+Use the formal `solomap_experience` MCP call in the current task prompt. The MCP session is already bound to the current project; do not provide or infer a database path.
 
-For a project using the default data root, run from the project root:
+Start with:
 
-```bash
-node resources/tools/solomap-experience.cjs handoff --project . --limit 3
+```json
+{"action":"handoff","limit":3}
 ```
 
 If the current task belongs to a known roadmap node, filter by node:
 
-```bash
-node resources/tools/solomap-experience.cjs handoff --project . --node <node-id> --limit 3
+```json
+{"action":"handoff","node":"<node-id>","limit":3}
 ```
 
 ## Drill Down
 
-Use these commands only when the handoff pack is not enough:
+Call `solomap_experience` with these inputs only when the handoff pack is not enough:
 
-```bash
-node resources/tools/solomap-experience.cjs summary --project .
-node resources/tools/solomap-experience.cjs failures --project . --limit 5
-node resources/tools/solomap-experience.cjs latest-changes --project . --limit 20
-node resources/tools/solomap-experience.cjs search --project . --query "<file-or-topic>" --limit 5
-node resources/tools/solomap-experience.cjs history --project . --node <node-id> --limit 5
+```json
+{"action":"summary"}
+{"action":"failures","limit":5}
+{"action":"latest-changes","limit":20}
+{"action":"search","query":"<file-or-topic>","limit":5}
+{"action":"history","node":"<node-id>","limit":5}
 ```
-
-Add `--json` when you need structured output. Add `--full` only when summarized signals are insufficient; raw execution logs can be long and should not be pasted into the final user response.
 
 Each record includes a `sourceRef`. Read its complete source with `solomap_read({ref: sourceRef.objectId, revision: sourceRef.revision})`; for large content, use `view="content"` and follow every cursor until it is null. The command reads through the same SoloMap data tools as the task, and does not require opening a database or keeping old history files.
 

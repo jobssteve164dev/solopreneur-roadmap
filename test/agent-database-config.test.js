@@ -113,7 +113,7 @@ test('task instructions teach revision-safe database writes and complete content
   try { module = require('../out/agentDatabaseConfig.js'); } catch {}
   assert.ok(module, 'database task instructions are missing');
   const instructions = module.buildAgentDatabaseInstructions({ migrationTools: true });
-  for (const keyword of ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_migration_start', 'solomap_recycling_preview', 'jobId', 'queued', 'running', '终态', '连续 3 次', '不得宣称迁移失败', 'expectedRevision', 'idempotencyKey', 'solomap://schema', 'cursor', '普通对话只生成清单']) assert.ok(instructions.includes(keyword), keyword);
+  for (const keyword of ['solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_migration_start', 'solomap_recycling_preview', 'jobId', 'queued', 'running', '终态', '连续 3 次', '不得宣称迁移失败', 'expectedRevision', 'idempotencyKey', 'solomap://schema', 'cursor', '普通对话只生成清单']) assert.ok(instructions.includes(keyword), keyword);
   assert.match(instructions, /每个任务必须执行/);
   assert.match(instructions, /当前用户目标.*当前项目/);
   assert.match(instructions, /实现或判断前.*solomap_context/);
@@ -130,7 +130,7 @@ test('task instructions teach revision-safe database writes and complete content
 test('read-only task instructions retrieve database memory without exposing mutation tools', () => {
   const { buildAgentDatabaseInstructions } = require('../out/agentDatabaseConfig.js');
   const instructions = buildAgentDatabaseInstructions({ readOnly: true, migrationTools: true });
-  for (const keyword of ['每个任务必须执行', 'solomap_context', 'solomap_search', 'solomap_read', '当前用户目标', '当前项目']) assert.ok(instructions.includes(keyword), keyword);
+  for (const keyword of ['每个任务必须执行', 'solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_search', 'solomap_read', '当前用户目标', '当前项目']) assert.ok(instructions.includes(keyword), keyword);
   for (const forbidden of ['solomap_write', 'solomap_link', 'solomap_export', 'solomap_migration_start', 'solomap_recycling_preview', 'solomap_recycling_apply']) assert.ok(!instructions.includes(forbidden), forbidden);
   assert.match(instructions, /本轮对数据库记忆仅可检索和读取/);
   assert.match(instructions, /不得通过记忆工具写入或改变数据库/);
@@ -165,7 +165,7 @@ test('all built-in Agent families receive their native MCP format without changi
         assert.equal(server.command, '/native/node');
         if (provider === 'copilot') {
           assert.equal(server.type, 'local');
-          assert.deepEqual(server.tools, ['solomap_context', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply']);
+          assert.deepEqual(server.tools, ['solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply']);
         }
       }
     }

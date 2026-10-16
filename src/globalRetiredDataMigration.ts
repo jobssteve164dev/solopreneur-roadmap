@@ -11,17 +11,19 @@ const retiredFiles = new Set([
   'decision-conflicts.csv',
   'dependencies.csv',
   'portfolio.csv',
+  'context/global-default-prompt.md',
   'runtime/events.jsonl',
   'runtime/execution-runtime.json'
 ]);
 
 const normalizeKey = (value: string): string => value.split(path.sep).join('/').replace(/^\.\//, '');
+const retiredSidebarPattern = /^(?:conversations\/)?sidebar-conversation-[a-f0-9]{40}-v1\.json(?:\.legacy-\d+)?$/i;
 
 export function isGlobalRetiredDataKey(value: string): boolean {
   const key = normalizeKey(value);
   return retiredFiles.has(key)
     || /^active-conversations\/records\/[a-f0-9]{64}\.json$/i.test(key)
-    || /^conversations\/sidebar-conversation-[a-f0-9]{40}-v1\.json\.legacy-\d+$/i.test(key)
+    || retiredSidebarPattern.test(key)
     || /^daily\/\d{4}-\d{2}-\d{2}\.json$/.test(key)
     || /^metrics\/(?:priority-accuracy|execution-speed|reuse-rate)\.csv$/.test(key)
     || key === 'metrics/monthly-summary.md';
@@ -29,8 +31,15 @@ export function isGlobalRetiredDataKey(value: string): boolean {
 
 async function discoverFiles(root: string, shouldContinue: () => boolean): Promise<Array<{ file: string; key: string; info: fs.Stats }>> {
   const files: Array<{ file: string; key: string; info: fs.Stats }> = [];
+  let rootSidebarFiles: string[] = [];
+  try {
+    rootSidebarFiles = (await fs.promises.readdir(root, { withFileTypes: true }))
+      .filter(entry => entry.isFile() && !entry.isSymbolicLink() && retiredSidebarPattern.test(entry.name))
+      .map(entry => path.join(root, entry.name));
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   const candidates = retiredDirectories.map(key => path.join(root, ...key.split('/')))
     .concat([...retiredFiles].map(key => path.join(root, ...key.split('/'))));
+  candidates.push(...rootSidebarFiles);
   const pending = [...candidates].sort().reverse();
   while (pending.length) {
     if (!shouldContinue()) break;
