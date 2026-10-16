@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.580 - 2026-10-16
+
+### Added
+- promote memory and experience to MCP tools (4692e54)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.579 - 2026-10-16
 
 ### Fixed
