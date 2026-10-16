@@ -539,6 +539,47 @@ test('legacy runtime files are captured byte-for-byte and imported once', () => 
   }
 });
 
+test('the oldest top-level scheduled task ledger enters the same runtime-state migration', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-p4-top-level-schedules-'));
+  const scheduledRoot = path.join(root, 'scheduled-tasks'); fs.mkdirSync(scheduledRoot, { recursive: true });
+  const schedulePath = path.join(scheduledRoot, 'scheduled-tasks.json');
+  const dueAt = '2026-01-02T09:00:00.000Z';
+  fs.writeFileSync(schedulePath, JSON.stringify({ schemaVersion: 1, tasks: [{ occurrenceId: `old@${dueAt}`, taskId: 'old', dueAt, attempts: 1, task: { id: 'old', scheduleKind: 'daily', timeOfDay: '09:00', title: 'Old ledger' } }], failures: [] }));
+  const store = new UnifiedDataStore(root);
+  try {
+    importLegacyRuntimeState(store, root);
+    assert.equal(store.readScheduleLedger().tasks[0].task.title, 'Old ledger');
+    assert.equal(store.migrationSourceState(`runtime-state:${root}`, 'scheduled-tasks/scheduled-tasks.json').stage, 'imported');
+  } finally {
+    store.close();
+    for (const file of [schedulePath, path.join(root, 'solomap.db-shm'), path.join(root, 'solomap.db-wal'), path.join(root, 'solomap.db')]) if (fs.existsSync(file)) fs.unlinkSync(file);
+    fs.rmdirSync(scheduledRoot); fs.rmdirSync(root);
+  }
+});
+
+test('the newer runtime schedule source prevents an older top-level ledger from becoming authoritative', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-p4-schedule-precedence-'));
+  const runtimeRoot = path.join(root, 'runtime', 'scheduled-tasks');
+  const oldestRoot = path.join(root, 'scheduled-tasks');
+  fs.mkdirSync(runtimeRoot, { recursive: true }); fs.mkdirSync(oldestRoot, { recursive: true });
+  const runtimePath = path.join(runtimeRoot, 'scheduled-tasks.json');
+  const oldestPath = path.join(oldestRoot, 'scheduled-tasks.json');
+  const dueAt = '2026-01-02T09:00:00.000Z';
+  fs.writeFileSync(runtimePath, JSON.stringify({ schemaVersion: 1, tasks: [], failures: [] }));
+  fs.writeFileSync(oldestPath, JSON.stringify({ schemaVersion: 1, tasks: [{ occurrenceId: `old@${dueAt}`, taskId: 'old', dueAt, task: { id: 'old', scheduleKind: 'daily', timeOfDay: '09:00', title: 'Must not revive' } }], failures: [] }));
+  const store = new UnifiedDataStore(root);
+  try {
+    importLegacyRuntimeState(store, root);
+    assert.deepEqual(store.readScheduleLedger().tasks, []);
+    assert.equal(store.migrationSourceState(`runtime-state:${root}`, 'runtime/scheduled-tasks/scheduled-tasks.json').stage, 'imported');
+    assert.equal(store.migrationSourceState(`runtime-state:${root}`, 'scheduled-tasks/scheduled-tasks.json').stage, 'conflict');
+  } finally {
+    store.close();
+    for (const file of [runtimePath, oldestPath, path.join(root, 'solomap.db-shm'), path.join(root, 'solomap.db-wal'), path.join(root, 'solomap.db')]) if (fs.existsSync(file)) fs.unlinkSync(file);
+    fs.rmdirSync(runtimeRoot); fs.rmdirSync(path.join(root, 'runtime')); fs.rmdirSync(oldestRoot); fs.rmdirSync(root);
+  }
+});
+
 test('legacy Telegram state resumes after config import was committed before a restart', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-p4-telegram-resume-'));
   const runtime = path.join(root, 'runtime'); fs.mkdirSync(runtime);

@@ -6,6 +6,7 @@ import { RuntimeDataOperations } from './runtimeDataOperations';
 import { runArtifactKind, shouldDescendRunArtifactDirectory } from './runArtifactPolicy.js';
 import { discoverLegacyRunProcesses, reapFinishedLegacyRunProcesses, type LegacyRunProcess } from './legacyRunProcessRecovery.js';
 import { legacyProjectFilesStamp } from './legacyProjectFileMigration.js';
+import { globalRetiredDataStamp } from './globalRetiredDataMigration.js';
 
 type MigrationOperations = (request: Parameters<RuntimeDataOperations>[0]) => Promise<unknown>;
 type MigrationAcknowledgement = { scheduled?: boolean };
@@ -136,6 +137,8 @@ export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, op
   catch (error) { process.stderr.write(`SoloMap strategy migration startup: ${String(error)}\n`); }
   try { await enqueueStartupAnalysisMigration(store, enqueue, shouldContinue); }
   catch (error) { process.stderr.write(`SoloMap analysis cache migration startup: ${String(error)}\n`); }
+  try { await enqueueStartupGlobalRetiredMigration(store, enqueue, shouldContinue); }
+  catch (error) { process.stderr.write(`SoloMap retired global data migration startup: ${String(error)}\n`); }
   if (!shouldContinue()) return { queued };
   const sourceRoot = path.join(store.root, 'intelligence-conversations');
   try {
@@ -144,6 +147,14 @@ export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, op
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`SoloMap intelligence migration startup: ${String(error)}\n`);
   }
   return { queued };
+}
+
+async function enqueueStartupGlobalRetiredMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
+  const signature = await globalRetiredDataStamp(store.root, shouldContinue);
+  if (!signature || !shouldContinue()) return;
+  await operations({ operation: 'import_project_data', input: {
+    collection: 'global-retired', sourceRoot: store.root, idempotencyKey: `startup-global-retired-v1:${signature}`
+  } });
 }
 
 async function enqueueStartupProjectAutonomyMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {

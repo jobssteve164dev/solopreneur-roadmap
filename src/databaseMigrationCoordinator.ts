@@ -9,6 +9,7 @@ import { importAnalysisCaches } from './analysisDatabaseMigration';
 import { importDocumentationManifest } from './documentationDatabaseMigration';
 import { importProjectAutonomyAuthorizations } from './projectAutonomyDatabaseMigration';
 import { importLegacyProjectFiles } from './legacyProjectFileMigration';
+import { importGlobalRetiredData } from './globalRetiredDataMigration';
 
 /** One background queue belongs to the existing Runtime database owner. */
 export class DatabaseMigrationCoordinator {
@@ -37,7 +38,7 @@ export class DatabaseMigrationCoordinator {
         let processed = 0;
         try {
           const collection = job.args.collection || 'memory';
-          if (!['memory', 'learning', 'learning-review', 'strategy', 'capabilities', 'documentation', 'analysis-caches', 'intelligence', 'project-autonomy', 'project-journal', 'agent-runs', 'project-growth', 'step-memory', 'run-digests', 'project-legacy-files'].includes(String(collection))) throw new Error('migration_collection_unsupported');
+          if (!['memory', 'learning', 'learning-review', 'strategy', 'capabilities', 'documentation', 'analysis-caches', 'intelligence', 'project-autonomy', 'project-journal', 'agent-runs', 'project-growth', 'step-memory', 'run-digests', 'project-legacy-files', 'global-retired'].includes(String(collection))) throw new Error('migration_collection_unsupported');
           const importer: (store: UnifiedDataStore, source: string, options: any) => Promise<MemoryImportResult> = job.args.collection === 'intelligence' ? importIntelligenceDirectory
             : job.args.collection === 'learning' ? importLearningDirectory
             : job.args.collection === 'learning-review' ? importLearningReviewDirectory
@@ -52,6 +53,7 @@ export class DatabaseMigrationCoordinator {
             : job.args.collection === 'step-memory' ? importStepMemoryDirectory
             : job.args.collection === 'run-digests' ? importRunDigestDirectory
             : job.args.collection === 'project-legacy-files' ? importLegacyProjectFiles
+            : job.args.collection === 'global-retired' ? importGlobalRetiredData
             : importMemoryDirectory;
           const result = await importer(this.store, String(job.args.sourceRoot), {
             mode: job.args.mode,

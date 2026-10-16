@@ -98,6 +98,25 @@ test('a legacy diagnostic file created after the first scan is imported on the n
   });
 });
 
+test('legacy diagnostics import discovers every historical and root process file', async t => {
+  const diagnostics = require('../out/localDiagnostics.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-diagnostic-history-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const diagnosticsRoot = path.join(globalRoot, 'diagnostics');
+  const historicalDirectory = path.join(diagnosticsRoot, '2024-01-02');
+  fs.mkdirSync(historicalDirectory, { recursive: true });
+  const entries = [{ at: '2024-01-02T03:04:05.000Z', scope: 'old.failure', fingerprint: 'abc123', message: 'old_failure' }];
+  fs.writeFileSync(path.join(historicalDirectory, 'recent-errors.41-deadbeef.json'), JSON.stringify({ schemaVersion: 1, entries }));
+  fs.writeFileSync(path.join(diagnosticsRoot, 'recent-errors.42-feedface.json'), JSON.stringify({ schemaVersion: 1, entries }));
+  const events = [];
+
+  const imported = await diagnostics.importLegacyLocalDiagnostics(globalRoot, event => events.push(event), () => {});
+
+  assert.deepEqual(imported, { files: 2, events: 2 });
+  assert.equal(events.every(event => event.scope === 'old.failure'), true);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+});
+
 test('ordinary summary ignores legacy JSON and reads only the configured database sink cache', async t => {
   const diagnostics = require('../out/localDiagnostics.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-trace-archive-'));

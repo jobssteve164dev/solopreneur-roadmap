@@ -10,7 +10,6 @@ interface DiagnosticEntry { at: string; scope: string; fingerprint: string; mess
 interface DiagnosticStore { schemaVersion: number; entries: DiagnosticEntry[] }
 const MAX_ENTRIES = 50;
 const MAX_OPERATION_EVENTS = 200;
-const DIAGNOSTIC_WINDOW_DAYS = 14;
 const PROCESS_DIAGNOSTIC_ID = `${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
 
 type DiagnosticStageStatus = 'start' | 'ok' | 'error' | 'cancel';
@@ -100,16 +99,22 @@ function diagnosticDirectory(globalDataPath: string, date = new Date()): string 
 function diagnosticFiles(globalDataPath: string, kind: 'errors' | 'operations'): string[] {
   const root = path.join(normalizeGlobalDataPathForExtension(globalDataPath), 'diagnostics');
   const files: Array<{ path: string; modifiedAt: number }> = [];
-  const directories = Array.from({ length: DIAGNOSTIC_WINDOW_DAYS }, (_, daysAgo) =>
-    diagnosticDirectory(globalDataPath, new Date(Date.now() - daysAgo * 86_400_000)));
+  const directories = [root];
+  try {
+    directories.push(...fs.readdirSync(root, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && !entry.isSymbolicLink() && /^\d{4}-\d{2}-\d{2}$/.test(entry.name))
+      .map(entry => path.join(root, entry.name)));
+  } catch { /* No diagnostic directory has been created. */ }
   for (const directory of directories) {
     try {
-      for (const name of fs.readdirSync(directory)) {
-        if (!new RegExp(`^recent-${kind}\\.\\d+-[a-f0-9]{8}\\.json$`).test(name)) continue;
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const name = entry.name;
         const filePath = path.join(directory, name);
+        if (!entry.isFile() || entry.isSymbolicLink()) continue;
+        if (!new RegExp(`^recent-${kind}\\.\\d+-[a-f0-9]{8}\\.json$`).test(name)) continue;
         try { files.push({ path: filePath, modifiedAt: fs.statSync(filePath).mtimeMs }); } catch { /* File may have moved during a read. */ }
       }
-    } catch { /* A day with no diagnostics has no directory. */ }
+    } catch { /* A historical diagnostic directory may disappear during startup. */ }
   }
   const legacyPath = path.join(root, `recent-${kind}.json`);
   try { files.push({ path: legacyPath, modifiedAt: fs.statSync(legacyPath).mtimeMs }); } catch { /* No legacy file. */ }

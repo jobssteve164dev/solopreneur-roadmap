@@ -1878,9 +1878,42 @@ export class UnifiedDataStore {
     return { objectId: object.objectId, revision: object.revision, legacyContextImported, registry: JSON.parse(String(object.data.content)) };
   }
 
+  private async reconcileLateProjectRegistryFile(current: ProjectRegistrySnapshot): Promise<void> {
+    const file = path.join(this.root, 'projects.json');
+    let before: fs.Stats;
+    try { before = await fs.promises.lstat(file); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+    if (!before.isFile() || before.isSymbolicLink()) return;
+    const bytes = await fs.promises.readFile(file);
+    const after = await fs.promises.lstat(file);
+    if (!after.isFile() || after.isSymbolicLink() || before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs) return;
+    const source = { identity: `project-registry:${this.root}`, key: 'projects.json', hash: digest(bytes) };
+    const prior = this.migrationSourceState(source.identity, source.key);
+    if (prior?.hash === source.hash && prior.stage === 'imported') return;
+    this.captureMigrationSource(source, bytes, { mimeType: 'application/json', encoding: 'utf8', pending: true });
+    try {
+      const parsed = JSON.parse(bytes.toString('utf8')) as Partial<ProjectRegistryFile>;
+      if (!parsed || !Array.isArray(parsed.projects) || parsed.hiddenProjects !== undefined && !Array.isArray(parsed.hiddenProjects)) throw new Error('project_registry_source_invalid');
+      const comparable = (registry: Partial<ProjectRegistryFile>) => ({
+        projects: normalizeProjectsForStorage(registry.projects || []),
+        hiddenProjects: [...new Set((registry.hiddenProjects || []).map(item => String(item).trim()).filter(Boolean))].sort(),
+        selectedProjectPath: String(registry.selectedProjectPath || '')
+      });
+      const authoritative = this.readProjectRegistry() as ProjectRegistrySnapshot | null;
+      if (!authoritative || canonical(comparable(parsed)) !== canonical(comparable(authoritative.registry))) throw new Error('newer_database_revision');
+      this.markMigrationSourceImported(source.identity, source.key);
+    } catch (error) {
+      this.markMigrationSourceConflict(source.identity, source.key, error instanceof Error ? error.message : String(error));
+    }
+  }
+
   public async initializeProjectRegistry(input: { legacyProjects?: ProjectRegistryFile['projects']; legacyHiddenProjects?: string[]; legacySelectedProjectPath?: string; workspaceRoot?: string } = {}): Promise<ProjectRegistrySnapshot> {
     const existing = this.readProjectRegistry();
-    if (existing) return this.importProjectRegistryContext(input);
+    if (existing) {
+      const current = this.importProjectRegistryContext(input);
+      await this.reconcileLateProjectRegistryFile(current);
+      return current;
+    }
     const file = path.join(this.root, 'projects.json');
     let legacy: Partial<ProjectRegistryFile> = {};
     let registrySource: ImportedSource | undefined;

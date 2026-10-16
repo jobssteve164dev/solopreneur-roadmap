@@ -5,6 +5,7 @@ import { RecyclingItem, UnifiedDataStore } from './db/unifiedDataStore';
 import { isRetirableRunArtifact } from './projectDataMigration';
 import { discoverLegacyRunProcesses } from './legacyRunProcessRecovery.js';
 import { isRetiredProjectFile } from './legacyProjectFileMigration.js';
+import { isGlobalRetiredDataKey } from './globalRetiredDataMigration.js';
 
 const hash = (bytes: Buffer) => crypto.createHash('sha256').update(bytes).digest('hex');
 const conversationKey = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.json$/i;
@@ -35,11 +36,28 @@ export class MigrationRecycling {
   }
 
   private sourcePath(identity: string, key: string, projects?: RegisteredProjectScope[]): string | null {
+    const normalizedKey = key.split(path.sep).join('/');
     const containedFile = (root: string): string | null => {
       const file = path.resolve(root, key), relative = path.relative(path.resolve(root), file);
       return relative && !relative.startsWith('..') && !path.isAbsolute(relative) ? file : null;
     };
     if (identity.startsWith('intelligence:')) return path.join(identity.slice('intelligence:'.length), key);
+    if (identity.startsWith('global-retired:')) {
+      if (!isGlobalRetiredDataKey(normalizedKey)) return null;
+      return containedFile(identity.slice('global-retired:'.length));
+    }
+    if (identity.startsWith('local-diagnostics:')) {
+      if (!/^diagnostics\/(?:\d{4}-\d{2}-\d{2}\/)?recent-(?:errors|operations)(?:\.\d+-[a-f0-9]{8})?\.json$/i.test(normalizedKey)) return null;
+      return containedFile(identity.slice('local-diagnostics:'.length));
+    }
+    if (identity.startsWith('runtime-state:')) {
+      if (!new Set(['runtime/cognitive-config.json', 'runtime/state.json', 'runtime/today-shadow.json', 'runtime/shadow-evaluation.json', 'runtime/shadow-feedback.jsonl', 'runtime/scheduled-tasks/scheduled-tasks.json', 'scheduled-tasks/scheduled-tasks.json']).has(normalizedKey)) return null;
+      return containedFile(identity.slice('runtime-state:'.length));
+    }
+    if (identity.startsWith('project-registry:')) {
+      if (normalizedKey !== 'projects.json') return null;
+      return containedFile(identity.slice('project-registry:'.length));
+    }
     if (identity.startsWith('analysis-caches:')) {
       const root = identity.slice('analysis-caches:'.length), local = containedFile(root);
       if (local) return local;

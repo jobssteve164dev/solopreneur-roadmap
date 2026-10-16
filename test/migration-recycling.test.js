@@ -75,6 +75,46 @@ test('recycling a migrated project artifact prunes its now-empty legacy director
   } finally { await f.operations.close(); f.store.close(); }
 });
 
+test('the project registry migration owns projects.json through the common recycling path', async () => {
+  const f = fixture();
+  const registry = path.join(f.root, 'projects.json');
+  try {
+    fs.writeFileSync(registry, JSON.stringify({ schemaVersion: 1, projects: [], hiddenProjects: [] }));
+    await f.store.initializeProjectRegistry();
+    const plan = await f.call('prepare_recycling');
+    assert.ok(plan.files.some(file => file.path === registry));
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('an identical projects.json written after database initialization joins the existing registry recycling chain', async () => {
+  const f = fixture();
+  const registry = path.join(f.root, 'projects.json');
+  try {
+    const initialized = await f.store.initializeProjectRegistry();
+    fs.writeFileSync(registry, JSON.stringify(initialized.registry));
+    await f.store.initializeProjectRegistry();
+    const plan = await f.call('prepare_recycling');
+    assert.ok(plan.files.some(file => file.path === registry));
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('a late equivalent projects.json cannot suppress later VS Code project context import', async () => {
+  const f = fixture();
+  const registry = path.join(f.root, 'projects.json');
+  const project = path.join(path.dirname(f.root), 'late-context-project');
+  try {
+    fs.mkdirSync(project);
+    const initialized = await f.store.initializeProjectRegistry();
+    fs.writeFileSync(registry, JSON.stringify(initialized.registry));
+    const migrated = await f.store.initializeProjectRegistry({ legacyProjects: [{ name: 'Late context', path: project }], legacyHiddenProjects: [] });
+    assert.deepEqual(migrated.registry.projects.map(item => item.path), [project]);
+    assert.equal(f.store.migrationSourceState(`project-registry:${f.root}`, 'vscode-project-state').stage, 'imported');
+    assert.equal(f.store.migrationSourceState(`project-registry:${f.root}`, 'projects.json').stage, 'conflict');
+    const plan = await f.call('prepare_recycling');
+    assert.equal(plan.files.some(file => file.path === registry), false);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
 test('migration overview is immediate and leaves byte validation to explicit review', async () => {
   const f = fixture();
   const readFile = fs.promises.readFile;

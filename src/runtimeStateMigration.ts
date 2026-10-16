@@ -87,6 +87,18 @@ function importSettings(store: UnifiedDataStore, source: NonNullable<ReturnType<
   store.importLegacyHostSettings({ source, namespace, values });
 }
 
+function importLegacyScheduleFile(store: UnifiedDataStore, root: string, file: string): void {
+  const scheduled = captureAvailable(store, root, file);
+  if (!scheduled || scheduled.unchanged) return;
+  const tasks = Array.isArray(scheduled.value.tasks) ? scheduled.value.tasks as JsonRecord[] : [];
+  const failures = Array.isArray(scheduled.value.failures) ? scheduled.value.failures as JsonRecord[] : [];
+  const records = [...tasks.map(value => ({ value, state: 'pending' as const })), ...failures.map(value => ({ value, state: 'failed' as const }))]
+    .filter(item => item.value.task && typeof item.value.task === 'object' && item.value.occurrenceId && item.value.taskId && Number.isFinite(Date.parse(String(item.value.dueAt || ''))));
+  store.importLegacySchedules({ source: scheduled,
+    schedules: records.map(({ value }) => ({ id: String(value.taskId), timezone: 'UTC', trigger: { kind: (value.task as JsonRecord).scheduleKind === 'once' ? 'once' : 'daily', timeOfDay: String((value.task as JsonRecord).timeOfDay || ''), scheduledAt: String((value.task as JsonRecord).scheduledAt || '') }, enabled: (value.task as JsonRecord).enabled !== false, nextDueAt: Date.parse(String(value.dueAt)), task: value.task as JsonRecord })),
+    records: records.map(({ value, state }) => ({ scheduleId: String(value.taskId), occurrenceKey: `${String(value.taskId)}@${Date.parse(String(value.dueAt))}`, dueAt: Date.parse(String(value.retryAt || value.dueAt)), attempts: Math.max(0, Number(value.attempts || 0)), state, task: value.task as JsonRecord })) });
+}
+
 export function importLegacyRuntimeState(store: UnifiedDataStore, globalDataPath: string): void {
   const root = path.resolve(globalDataPath);
   const runtime = path.join(root, 'runtime');
@@ -127,15 +139,15 @@ export function importLegacyRuntimeState(store: UnifiedDataStore, globalDataPath
     ...(telegramState && !telegramState.unchanged ? { state: { identity: telegramState.identity, key: telegramState.key, hash: telegramState.hash, value: telegramState.value } } : {})
   });
 
-  const scheduled = captureAvailable(store, root, path.join(runtime, 'scheduled-tasks', 'scheduled-tasks.json'));
-  if (scheduled && !scheduled.unchanged) {
-    const tasks = Array.isArray(scheduled.value.tasks) ? scheduled.value.tasks as JsonRecord[] : [];
-    const failures = Array.isArray(scheduled.value.failures) ? scheduled.value.failures as JsonRecord[] : [];
-    const records = [...tasks.map(value => ({ value, state: 'pending' as const })), ...failures.map(value => ({ value, state: 'failed' as const }))]
-      .filter(item => item.value.task && typeof item.value.task === 'object' && item.value.occurrenceId && item.value.taskId && Number.isFinite(Date.parse(String(item.value.dueAt || ''))));
-    store.importLegacySchedules({ source: scheduled,
-      schedules: records.map(({ value }) => ({ id: String(value.taskId), timezone: 'UTC', trigger: { kind: (value.task as JsonRecord).scheduleKind === 'once' ? 'once' : 'daily', timeOfDay: String((value.task as JsonRecord).timeOfDay || ''), scheduledAt: String((value.task as JsonRecord).scheduledAt || '') }, enabled: (value.task as JsonRecord).enabled !== false, nextDueAt: Date.parse(String(value.dueAt)), task: value.task as JsonRecord })),
-      records: records.map(({ value, state }) => ({ scheduleId: String(value.taskId), occurrenceKey: `${String(value.taskId)}@${Date.parse(String(value.dueAt))}`, dueAt: Date.parse(String(value.retryAt || value.dueAt)), attempts: Math.max(0, Number(value.attempts || 0)), state, task: value.task as JsonRecord })) });
+  const runtimeSchedule = path.join(runtime, 'scheduled-tasks', 'scheduled-tasks.json');
+  const oldestSchedule = path.join(root, 'scheduled-tasks', 'scheduled-tasks.json');
+  let runtimeScheduleExists = false;
+  try { fs.lstatSync(runtimeSchedule); runtimeScheduleExists = true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') runtimeScheduleExists = true; }
+  importLegacyScheduleFile(store, root, runtimeScheduleExists ? runtimeSchedule : oldestSchedule);
+  if (runtimeScheduleExists) {
+    const superseded = captureAvailable(store, root, oldestSchedule);
+    if (superseded && !superseded.unchanged) store.markMigrationSourceConflict(superseded.identity, superseded.key, 'superseded_runtime_source');
   }
 
   for (const [name, key] of [['today-shadow.json', 'decision'], ['shadow-evaluation.json', 'evaluation']] as const) {
