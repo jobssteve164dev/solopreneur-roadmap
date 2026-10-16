@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.577 - 2026-10-16
+
+### Changed
+- SoloMap pre-session auto-backup [2026-10-16T04:28:38.549Z] (707e824)
+
+### Fixed
+- isolate concurrent roadmap revision launches (3933714)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.576 - 2026-10-16
 
 ### Fixed
