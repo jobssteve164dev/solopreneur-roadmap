@@ -659,4 +659,20 @@ CREATE TRIGGER project_analysis_link_delete AFTER DELETE ON project_journal_link
 CREATE TRIGGER project_analysis_control_insert AFTER INSERT ON run_control BEGIN ${touchProjectAnalysisSource('NEW.project_id')} END;
 CREATE TRIGGER project_analysis_control_update AFTER UPDATE ON run_control BEGIN ${touchProjectAnalysisSource('NEW.project_id')} END;
 CREATE TRIGGER project_analysis_control_delete AFTER DELETE ON run_control BEGIN ${touchProjectAnalysisSource('OLD.project_id')} END;
+` }, { version: 45, sql: `
+CREATE TABLE growth_snapshot_cleanup_plans(
+ plan_id TEXT PRIMARY KEY REFERENCES evidence(id),database_id TEXT NOT NULL,snapshot_upper_bound INTEGER NOT NULL,
+ snapshot_count INTEGER NOT NULL,latest_snapshot_id TEXT,manifest_hash TEXT NOT NULL,
+ manifest_content_id TEXT NOT NULL REFERENCES contents(id),
+ status TEXT NOT NULL CHECK(status IN ('prepared','applying','applied','invalidated')),
+ invalidation_reason TEXT NOT NULL DEFAULT '',created_at INTEGER NOT NULL,applied_at INTEGER);
+CREATE TABLE growth_snapshot_cleanup_batches(
+ plan_id TEXT NOT NULL REFERENCES growth_snapshot_cleanup_plans(plan_id),batch_index INTEGER NOT NULL,
+ candidate_ids_content_id TEXT NOT NULL REFERENCES contents(id),receipt_content_id TEXT REFERENCES contents(id),
+ status TEXT NOT NULL CHECK(status IN ('prepared','applied')),created_at INTEGER NOT NULL,applied_at INTEGER,
+ PRIMARY KEY(plan_id,batch_index));
+CREATE INDEX growth_snapshot_cleanup_plan_status ON growth_snapshot_cleanup_plans(status,created_at);
+CREATE INDEX content_ref_growth_cleanup_plans_manifest ON growth_snapshot_cleanup_plans(manifest_content_id);
+CREATE INDEX content_ref_growth_cleanup_batches_candidates ON growth_snapshot_cleanup_batches(candidate_ids_content_id);
+CREATE INDEX content_ref_growth_cleanup_batches_receipt ON growth_snapshot_cleanup_batches(receipt_content_id);
 ` }];

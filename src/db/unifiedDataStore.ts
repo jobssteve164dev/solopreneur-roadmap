@@ -109,6 +109,59 @@ export interface WriteReceipt {
   status: 'committed';
   pendingEffects: string[];
 }
+export interface GrowthSnapshotCleanupManifest {
+  schemaVersion: 1;
+  title: '待删除数据库记录清单';
+  policy: 'continuous_semantic_segments_keep_last';
+  createdAt: number;
+  database: { databaseId: string; schemaVersion: number; snapshotCount: number; snapshotUpperBound: number; latestSnapshotId: string | null };
+  retainedSnapshots: Array<{ snapshotId: string; projectId: string; objectRowid: number; semanticFingerprint: string; segmentOrdinal: number }>;
+  candidateSnapshots: Array<{ snapshotId: string; projectId: string; objectRowid: number; semanticFingerprint: string; segmentOrdinal: number; retainedSnapshotId: string }>;
+  records: {
+    growthSnapshots: { count: number; ids: string[]; records: Array<{ id: string; projectId: string; gitHead: string | null; reason: string; status: string; durationMs: number | null; createdAt: number; projectPath: string; error: string; payloadHash: string }> };
+    growthItems: { count: number; snapshotIds: string[] };
+    growthEdges: { count: number; snapshotIds: string[] };
+    growthSignals: { count: number; snapshotIds: string[] };
+    growthModuleLabels: { count: number; snapshotIds: string[] };
+    objects: { count: number; ids: string[]; records: Array<{ id: string; kind: string; projectId: string | null; revision: number; createdAt: number; updatedAt: number; archivedAt: number | null }> };
+    objectSearch: { count: number; rowids: number[] };
+    objectRevisions: { count: number; keys: Array<{ objectId: string; revision: number; contentKey: string; actorId: string; reason: string; createdAt: number }> };
+    events: { count: number; records: Array<{ eventId: string; subjectId: string; requestId: string; actorId: string; kind: string; contentKey: string; sequence: number; createdAt: number }> };
+    outbox: { count: number; records: Array<{ id: string; eventId: string; channel: string; destinationRef: string; contentKey: string; generation: number; state: string; attempt: number; nextAttemptAt: number | null }> };
+    requests: { count: number; records: Array<{ id: string; actorId: string; idempotencyKey: string; inputHash: string; resultContentKey: string | null; status: string; committedSequence: number | null }> };
+    contents: { candidateIds: string[]; deletableIds: string[]; retainedSharedIds: string[] };
+    contentChunks: { count: number; keys: Array<{ contentKey: string; ordinal: number }> };
+    databaseStorageCleanupCandidates: { count: number; contentIds: string[] };
+  };
+  invalidationConditions: string[];
+}
+export interface GrowthSnapshotCleanupPlan {
+  planId: string;
+  planHash: string;
+  status: 'prepared' | 'applying' | 'applied' | 'invalidated';
+  invalidationReason?: string;
+  manifest: GrowthSnapshotCleanupManifest;
+}
+interface GrowthSnapshotCleanupDeletedCounts {
+  growthSnapshots: number;
+  growthItems: number;
+  growthEdges: number;
+  growthSignals: number;
+  growthModuleLabels: number;
+  objects: number;
+  objectSearch: number;
+  objectRevisions: number;
+  events: number;
+  outbox: number;
+  requests: number;
+}
+interface GrowthSnapshotCleanupBatchPlan {
+  snapshotIds: string[];
+  objectSearchRowids: number[];
+  eventIds: string[];
+  outboxIds: string[];
+  expected: GrowthSnapshotCleanupDeletedCounts;
+}
 export interface CapabilityOperation {
   operationId: string;
   ordinal: number;
@@ -197,7 +250,8 @@ function sameUnorderedRecords(left: unknown[], right: unknown[]): boolean {
 function digest(data: Uint8Array | string): string { return crypto.createHash('sha256').update(data).digest('hex'); }
 function growthPayloadHash(data: GrowthSnapshotData): string {
   const { id: _id, createdAt: _createdAt, durationMs: _durationMs, scanReason: _scanReason, ...snapshot } = data.snapshot;
-  const ordered = (items: Record<string, unknown>[]) => items.sort((left, right) => canonical(left).localeCompare(canonical(right)));
+  const ordered = (items: Record<string, unknown>[]) => items.map(item => ({ item, key: canonical(item) }))
+    .sort((left, right) => left.key.localeCompare(right.key)).map(entry => entry.item);
   const nodes = ordered(data.nodes.map(({ snapshotId: _snapshotId, ...node }) => node));
   const edges = ordered(data.edges.map(({ snapshotId: _snapshotId, ...edge }) => edge));
   const signals = ordered(data.signals.map(({ snapshotId: _snapshotId, createdAt: _signalCreatedAt, ...signal }) => signal));
@@ -873,6 +927,18 @@ export class UnifiedDataStore {
       }
       throw error;
     } finally { this.transactionDepth--; }
+  }
+  private readTransaction<T>(operation: () => T): T {
+    if (this.transactionDepth) return operation();
+    this.db.run('BEGIN');
+    try {
+      const result = operation();
+      this.db.run('COMMIT');
+      return result;
+    } catch (error) {
+      try { this.db.run('ROLLBACK'); } catch { /* Preserve the original read failure. */ }
+      throw error;
+    }
   }
   private putContent(data: Uint8Array | string, mimeType = 'text/plain', encoding = 'utf8'): string {
     const bytes = typeof data === 'string'
@@ -5944,6 +6010,615 @@ export class UnifiedDataStore {
     };
     const history = ids.map(read);
     return { latest: history[0] || null, history };
+  }
+  private growthSnapshotCleanupFingerprint(projectId: string, snapshotId: string): string {
+    const data = this.readProjectGrowth(projectId, 1, snapshotId).latest;
+    if (!data) throw new Error('growth_snapshot_missing');
+    return growthPayloadHash(data);
+  }
+  private resetGrowthSnapshotCleanupScope(table: string, column: string, values: string[]): void {
+    const quotedTable = quoteSqlIdentifier(table), quotedColumn = quoteSqlIdentifier(column);
+    this.db.run(`CREATE TEMP TABLE IF NOT EXISTS ${quotedTable}(${quotedColumn} TEXT PRIMARY KEY) WITHOUT ROWID`);
+    this.db.run(`DELETE FROM ${quotedTable}`);
+    for (const value of values) this.db.run(`INSERT INTO ${quotedTable} VALUES(?)`, [value]);
+  }
+  private growthSnapshotCleanupForeignKeys(target: string): Array<{ table: string; column: string }> {
+    const references = new Map<string, { table: string; column: string }>();
+    for (const row of this.rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")) {
+      const table = String(row.name);
+      if (!/^[a-z_][a-z0-9_]*$/.test(table)) throw new Error('database_schema_invalid');
+      for (const foreignKey of this.rows(`PRAGMA foreign_key_list(${quoteSqlIdentifier(table)})`)) {
+        const column = String(foreignKey.from);
+        if (String(foreignKey.table) !== target) continue;
+        if (!/^[a-z_][a-z0-9_]*$/.test(column)) throw new Error('database_schema_invalid');
+        references.set(`${table}.${column}`, { table, column });
+      }
+    }
+    return [...references.values()];
+  }
+  private growthSnapshotCleanupEmbeddedSharedContentIds(candidateContentIds: string[], excluded: {
+    objectIds: string[];
+    eventIds: string[];
+    requestIds: string[];
+    outboxIds: string[];
+  }): Set<string> {
+    const candidates = new Set(candidateContentIds);
+    if (!candidates.size) return new Set();
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_embedded_object_scope', 'object_id', excluded.objectIds);
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_embedded_event_scope', 'event_id', excluded.eventIds);
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_embedded_request_scope', 'request_id', excluded.requestIds);
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_embedded_outbox_scope', 'outbox_id', excluded.outboxIds);
+    const roots = this.rows(`SELECT content_id,1 AS json_required FROM object_revisions
+      WHERE object_id NOT IN (SELECT object_id FROM growth_cleanup_embedded_object_scope)
+      UNION SELECT input_content_id,1 FROM learning_review_controls WHERE input_content_id IS NOT NULL
+      UNION SELECT input_content_id,1 FROM legacy_learning_review_controls WHERE input_content_id IS NOT NULL
+      UNION SELECT input_content_id,1 FROM legacy_learning_review_cursor_inputs WHERE input_content_id IS NOT NULL`)
+      .map(row => ({ contentId: String(row.content_id), jsonRequired: Boolean(row.json_required) }));
+    for (const reference of this.contentReferenceColumns()) {
+      const table = quoteSqlIdentifier(reference.table), column = quoteSqlIdentifier(reference.column);
+      const conditions = [`r.${column} IS NOT NULL`, "(c.mime_type='application/json' OR c.mime_type LIKE '%+json')"];
+      if (reference.table === 'object_revisions') conditions.push('r.object_id NOT IN (SELECT object_id FROM growth_cleanup_embedded_object_scope)');
+      else if (reference.table === 'events') conditions.push('r.id NOT IN (SELECT event_id FROM growth_cleanup_embedded_event_scope)');
+      else if (reference.table === 'requests') conditions.push('r.id NOT IN (SELECT request_id FROM growth_cleanup_embedded_request_scope)');
+      else if (reference.table === 'outbox') conditions.push('r.id NOT IN (SELECT outbox_id FROM growth_cleanup_embedded_outbox_scope)');
+      roots.push(...this.rows(`SELECT DISTINCT r.${column} AS content_id,1 AS json_required FROM ${table} r
+        JOIN contents c ON c.id=r.${column} WHERE ${conditions.join(' AND ')}`)
+        .map(row => ({ contentId: String(row.content_id), jsonRequired: true })));
+    }
+    const shared = new Set<string>(), visited = new Set<string>();
+    while (roots.length) {
+      const current = roots.pop()!;
+      if (candidates.has(current.contentId)) shared.add(current.contentId);
+      if (visited.has(current.contentId)) continue;
+      visited.add(current.contentId);
+      let value: unknown;
+      try { value = JSON.parse(this.content(current.contentId).toString('utf8')); }
+      catch (error) { if (current.jsonRequired) throw error; continue; }
+      for (const contentId of new Set(portableContentReferences(value))) {
+        if (candidates.has(contentId)) shared.add(contentId);
+        roots.push({ contentId, jsonRequired: false });
+      }
+    }
+    return shared;
+  }
+  private buildGrowthSnapshotCleanupManifest(createdAt: number): GrowthSnapshotCleanupManifest {
+    const rows = this.rows(`SELECT g.id,g.project_id,o.rowid AS object_rowid
+      FROM growth_snapshots g JOIN objects o ON o.id=g.id ORDER BY g.project_id,o.rowid`);
+    const retainedSnapshots: GrowthSnapshotCleanupManifest['retainedSnapshots'] = [];
+    const candidateSnapshots: GrowthSnapshotCleanupManifest['candidateSnapshots'] = [];
+    let segment: Array<{ snapshotId: string; projectId: string; objectRowid: number; semanticFingerprint: string }> = [];
+    let segmentOrdinal = 0;
+    let activeProject = '';
+    const finishSegment = () => {
+      if (!segment.length) return;
+      const retained = segment.at(-1)!;
+      retainedSnapshots.push({ ...retained, segmentOrdinal });
+      for (const candidate of segment.slice(0, -1)) candidateSnapshots.push({ ...candidate, segmentOrdinal, retainedSnapshotId: retained.snapshotId });
+      segment = [];
+    };
+    for (const row of rows) {
+      const projectId = String(row.project_id), snapshotId = String(row.id);
+      const item = { snapshotId, projectId, objectRowid: Number(row.object_rowid), semanticFingerprint: this.growthSnapshotCleanupFingerprint(projectId, snapshotId) };
+      if (projectId !== activeProject) {
+        finishSegment(); activeProject = projectId; segmentOrdinal = 1; segment = [item]; continue;
+      }
+      if (segment.at(-1)!.semanticFingerprint !== item.semanticFingerprint) {
+        finishSegment(); segmentOrdinal++; segment = [item]; continue;
+      }
+      segment.push(item);
+    }
+    finishSegment();
+    const candidateIds = candidateSnapshots.map(item => item.snapshotId);
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_scope', 'snapshot_id', candidateIds);
+    const count = (table: string, column = 'snapshot_id'): number => Number(this.rows(`SELECT COUNT(*) AS count FROM ${quoteSqlIdentifier(table)} WHERE ${quoteSqlIdentifier(column)} IN (SELECT snapshot_id FROM growth_cleanup_scope)`)[0].count);
+    const snapshotRecords = this.rows(`SELECT id,project_id,git_head,reason,status,duration_ms,created_at,project_path,error,payload_hash FROM growth_snapshots
+      WHERE id IN (SELECT snapshot_id FROM growth_cleanup_scope) ORDER BY id`).map(row => ({ id: String(row.id), projectId: String(row.project_id),
+        gitHead: row.git_head === null ? null : String(row.git_head), reason: String(row.reason), status: String(row.status), durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
+        createdAt: Number(row.created_at), projectPath: String(row.project_path), error: String(row.error), payloadHash: String(row.payload_hash) }));
+    const objectRecords = this.rows(`SELECT id,kind,project_id,revision,created_at,updated_at,archived_at FROM objects
+      WHERE id IN (SELECT snapshot_id FROM growth_cleanup_scope) ORDER BY id`).map(row => ({ id: String(row.id), kind: String(row.kind),
+        projectId: row.project_id === null ? null : String(row.project_id), revision: Number(row.revision), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at), archivedAt: row.archived_at === null ? null : Number(row.archived_at) }));
+    const objectRevisions = this.rows(`SELECT object_id,revision,content_id,actor_id,reason,created_at FROM object_revisions
+      WHERE object_id IN (SELECT snapshot_id FROM growth_cleanup_scope) ORDER BY object_id,revision`).map(row => ({ objectId: String(row.object_id), revision: Number(row.revision),
+        contentKey: String(row.content_id), actorId: String(row.actor_id), reason: String(row.reason), createdAt: Number(row.created_at) }));
+    const events = this.rows(`SELECT id,subject_id,request_id,actor_id,kind,content_id,sequence,created_at FROM events
+      WHERE subject_id IN (SELECT snapshot_id FROM growth_cleanup_scope) ORDER BY sequence,id`).map(row => ({ eventId: String(row.id), subjectId: String(row.subject_id), requestId: String(row.request_id),
+        actorId: String(row.actor_id), kind: String(row.kind), contentKey: String(row.content_id), sequence: Number(row.sequence), createdAt: Number(row.created_at) }));
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_event_scope', 'event_id', events.map(item => item.eventId));
+    const outbox = this.rows(`SELECT id,event_id,channel,destination_ref,content_id,generation,state,attempt,next_attempt_at FROM outbox
+      WHERE event_id IN (SELECT event_id FROM growth_cleanup_event_scope) ORDER BY id`).map(row => ({ id: String(row.id), eventId: String(row.event_id), channel: String(row.channel),
+        destinationRef: String(row.destination_ref), contentKey: String(row.content_id), generation: Number(row.generation), state: String(row.state), attempt: Number(row.attempt), nextAttemptAt: row.next_attempt_at === null ? null : Number(row.next_attempt_at) }));
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_outbox_scope', 'outbox_id', outbox.map(item => item.id));
+    const requestIds = [...new Set(events.map(item => item.requestId))].sort();
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_request_scope', 'request_id', requestIds);
+    const requests = this.rows(`SELECT id,actor_id,idempotency_key,input_hash,result_content_id,status,committed_sequence FROM requests
+      WHERE id IN (SELECT request_id FROM growth_cleanup_request_scope) ORDER BY id`).map(row => ({ id: String(row.id), actorId: String(row.actor_id), idempotencyKey: String(row.idempotency_key),
+        inputHash: String(row.input_hash), resultContentKey: row.result_content_id === null ? null : String(row.result_content_id), status: String(row.status), committedSequence: row.committed_sequence === null ? null : Number(row.committed_sequence) }));
+    if (requests.length !== requestIds.length || this.rows(`SELECT 1 FROM events e JOIN growth_cleanup_request_scope s ON s.request_id=e.request_id
+      WHERE e.id NOT IN (SELECT event_id FROM growth_cleanup_event_scope) LIMIT 1`).length
+      || this.rows(`SELECT 1 FROM migration_items m JOIN growth_cleanup_request_scope s ON s.request_id=m.source_capture_request_id LIMIT 1`).length
+      || this.rows(`SELECT 1 FROM migration_source_json_versions v JOIN growth_cleanup_request_scope s ON s.request_id=v.request_id LIMIT 1`).length) {
+      throw new Error('growth_cleanup_request_reference_conflict');
+    }
+    const allowedObjectReferences = new Set(['growth_snapshots.id', 'object_revisions.object_id', 'events.subject_id']);
+    for (const reference of this.growthSnapshotCleanupForeignKeys('objects')) {
+      if (allowedObjectReferences.has(`${reference.table}.${reference.column}`)) continue;
+      const table = quoteSqlIdentifier(reference.table), column = quoteSqlIdentifier(reference.column);
+      if (this.rows(`SELECT 1 FROM ${table} r JOIN growth_cleanup_scope s ON s.snapshot_id=r.${column} LIMIT 1`).length) throw new Error(`growth_cleanup_external_reference:${reference.table}.${reference.column}`);
+    }
+    const candidateContentIds = [...new Set([
+      ...objectRevisions.map(item => item.contentKey), ...events.map(item => item.contentKey),
+      ...outbox.map(item => item.contentKey), ...requests.flatMap(item => item.resultContentKey ? [item.resultContentKey] : [])
+    ])].sort();
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_content_scope', 'content_id', candidateContentIds);
+    const shared = new Set<string>();
+    for (const reference of this.contentReferenceColumns()) {
+      const table = quoteSqlIdentifier(reference.table), column = quoteSqlIdentifier(reference.column);
+      const exclusion = reference.table === 'object_revisions' ? ' WHERE r.object_id NOT IN (SELECT snapshot_id FROM growth_cleanup_scope)'
+        : reference.table === 'events' ? ' WHERE r.id NOT IN (SELECT event_id FROM growth_cleanup_event_scope)'
+        : reference.table === 'requests' ? ' WHERE r.id NOT IN (SELECT request_id FROM growth_cleanup_request_scope)'
+        : reference.table === 'outbox' ? ' WHERE r.id NOT IN (SELECT outbox_id FROM growth_cleanup_outbox_scope)' : '';
+      for (const row of this.rows(`SELECT DISTINCT r.${column} AS content_id FROM ${table} r JOIN growth_cleanup_content_scope s ON s.content_id=r.${column}${exclusion}`)) shared.add(String(row.content_id));
+    }
+    for (const contentId of this.growthSnapshotCleanupEmbeddedSharedContentIds(candidateContentIds, {
+      objectIds: candidateIds,
+      eventIds: events.map(item => item.eventId),
+      requestIds,
+      outboxIds: outbox.map(item => item.id)
+    })) shared.add(contentId);
+    const objectSearchRowids = this.rows(`SELECT rowid FROM object_search WHERE rowid IN
+      (SELECT o.rowid FROM objects o JOIN growth_cleanup_scope s ON s.snapshot_id=o.id) ORDER BY rowid`).map(row => Number(row.rowid));
+    const deletableContentIds = candidateContentIds.filter(id => !shared.has(id));
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_deletable_content_scope', 'content_id', deletableContentIds);
+    const contentChunks = this.rows(`SELECT content_id,ordinal FROM content_chunks
+      WHERE content_id IN (SELECT content_id FROM growth_cleanup_deletable_content_scope) ORDER BY content_id,ordinal`)
+      .map(row => ({ contentKey: String(row.content_id), ordinal: Number(row.ordinal) }));
+    const storageCleanupContentIds = this.rows(`SELECT content_id FROM database_storage_cleanup_candidates
+      WHERE content_id IN (SELECT content_id FROM growth_cleanup_deletable_content_scope) ORDER BY content_id`).map(row => String(row.content_id));
+    const latest = rows.reduce<Record<string, SqlValue> | undefined>((current, row) => !current || Number(row.object_rowid) > Number(current.object_rowid) ? row : current, undefined);
+    const manifest: GrowthSnapshotCleanupManifest = {
+      schemaVersion: 1,
+      title: '待删除数据库记录清单',
+      policy: 'continuous_semantic_segments_keep_last',
+      createdAt,
+      database: {
+        databaseId: this.databaseId,
+        schemaVersion: unifiedSchemaMigrations.at(-1)?.version || 1,
+        snapshotCount: rows.length,
+        snapshotUpperBound: rows.reduce((maximum, row) => Math.max(maximum, Number(row.object_rowid)), 0),
+        latestSnapshotId: latest ? String(latest.id) : null
+      },
+      retainedSnapshots,
+      candidateSnapshots,
+      records: {
+        growthSnapshots: { count: candidateIds.length, ids: candidateIds, records: snapshotRecords },
+        growthItems: { count: count('growth_items'), snapshotIds: candidateIds },
+        growthEdges: { count: count('growth_edges'), snapshotIds: candidateIds },
+        growthSignals: { count: count('growth_signals'), snapshotIds: candidateIds },
+        growthModuleLabels: { count: count('growth_module_labels'), snapshotIds: candidateIds },
+        objects: { count: count('objects', 'id'), ids: candidateIds, records: objectRecords },
+        objectSearch: { count: objectSearchRowids.length, rowids: objectSearchRowids },
+        objectRevisions: { count: objectRevisions.length, keys: objectRevisions },
+        events: { count: events.length, records: events },
+        outbox: { count: outbox.length, records: outbox },
+        requests: { count: requests.length, records: requests },
+        contents: { candidateIds: candidateContentIds, deletableIds: deletableContentIds, retainedSharedIds: candidateContentIds.filter(id => shared.has(id)) },
+        contentChunks: { count: contentChunks.length, keys: contentChunks },
+        databaseStorageCleanupCandidates: { count: storageCleanupContentIds.length, contentIds: storageCleanupContentIds }
+      },
+      invalidationConditions: [
+        'database_identity_changed', 'schema_version_changed', 'snapshot_boundary_changed',
+        'candidate_or_retained_fingerprint_changed', 'record_impact_changed', 'global_content_reference_changed'
+      ]
+    };
+    if (manifest.retainedSnapshots.length + manifest.candidateSnapshots.length !== manifest.database.snapshotCount) throw new Error('growth_cleanup_manifest_incomplete');
+    return manifest;
+  }
+  public readGrowthSnapshotCleanupPlan(planId: string): GrowthSnapshotCleanupPlan {
+    const row = this.rows('SELECT * FROM growth_snapshot_cleanup_plans WHERE plan_id=?', [planId])[0];
+    if (!row) throw new Error('growth_cleanup_plan_missing');
+    const manifest = JSON.parse(this.content(String(row.manifest_content_id)).toString('utf8')) as GrowthSnapshotCleanupManifest;
+    if (digest(canonical(manifest)) !== row.manifest_hash || manifest.database.databaseId !== row.database_id
+      || manifest.database.snapshotUpperBound !== Number(row.snapshot_upper_bound) || manifest.database.snapshotCount !== Number(row.snapshot_count)
+      || manifest.database.latestSnapshotId !== (row.latest_snapshot_id === null ? null : String(row.latest_snapshot_id))) throw new Error('growth_cleanup_plan_corrupt');
+    return {
+      planId,
+      planHash: String(row.manifest_hash),
+      status: String(row.status) as GrowthSnapshotCleanupPlan['status'],
+      ...(row.invalidation_reason ? { invalidationReason: String(row.invalidation_reason) } : {}),
+      manifest
+    };
+  }
+  public previewGrowthSnapshotCleanup(input: { idempotencyKey: string }): GrowthSnapshotCleanupPlan {
+    if (!input.idempotencyKey?.trim()) throw new Error('idempotency_key_required');
+    const previous = this.rows('SELECT result_content_id,status FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, input.idempotencyKey])[0];
+    if (previous) {
+      if (previous.status !== 'committed' || !previous.result_content_id) throw new Error('growth_cleanup_preview_pending');
+      const receipt = JSON.parse(this.content(String(previous.result_content_id)).toString('utf8')) as WriteReceipt;
+      return this.readGrowthSnapshotCleanupPlan(receipt.objectId);
+    }
+    const createdAt = Date.now();
+    const scanned = this.readTransaction(() => ({
+      dataVersion: Number(this.rows('PRAGMA data_version')[0].data_version),
+      manifest: this.buildGrowthSnapshotCleanupManifest(createdAt)
+    }));
+    return this.transaction(() => {
+      if (Number(this.rows('PRAGMA data_version')[0].data_version) !== scanned.dataVersion) throw new Error('growth_cleanup_preview_source_changed');
+      const manifest = scanned.manifest;
+      const planHash = digest(canonical(manifest));
+      const receipt = this.writeMutation({
+        kind: 'evidence', action: 'create', scope: null, idempotencyKey: input.idempotencyKey,
+        data: { type: 'growth_snapshot_cleanup_plan', source_actor_id: this.actorId, content: canonical(manifest), observed_at: createdAt }
+      }, undefined, undefined, false);
+      const evidence = this.rows('SELECT content_id FROM evidence WHERE id=?', [receipt.objectId])[0];
+      this.db.run(`INSERT INTO growth_snapshot_cleanup_plans
+        (plan_id,database_id,snapshot_upper_bound,snapshot_count,latest_snapshot_id,manifest_hash,manifest_content_id,status,created_at)
+        VALUES(?,?,?,?,?,?,?,'prepared',?)`, [receipt.objectId, manifest.database.databaseId, manifest.database.snapshotUpperBound,
+        manifest.database.snapshotCount, manifest.database.latestSnapshotId, planHash, evidence.content_id, createdAt]);
+      return { planId: receipt.objectId, planHash, status: 'prepared', manifest };
+    });
+  }
+  private growthSnapshotCleanupBatchPlan(snapshotIds: string[], manifest: GrowthSnapshotCleanupManifest): GrowthSnapshotCleanupBatchPlan {
+    const events = manifest.records.events.records.filter(item => snapshotIds.includes(item.subjectId));
+    const eventIds = events.map(item => item.eventId);
+    const eventIdSet = new Set(eventIds);
+    const outboxIds = manifest.records.outbox.records.filter(item => eventIdSet.has(item.eventId)).map(item => item.id);
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_batch_scope', 'snapshot_id', snapshotIds);
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_batch_event_scope', 'event_id', eventIds);
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_batch_outbox_scope', 'outbox_id', outboxIds);
+    const count = (table: string, column: string, scope: string, scopeColumn: string): number => Number(this.rows(
+      `SELECT COUNT(*) AS count FROM ${quoteSqlIdentifier(table)} WHERE ${quoteSqlIdentifier(column)} IN (SELECT ${quoteSqlIdentifier(scopeColumn)} FROM ${quoteSqlIdentifier(scope)})`
+    )[0].count);
+    const objectSearchRowids = this.rows(`SELECT rowid FROM object_search WHERE rowid IN
+      (SELECT o.rowid FROM objects o JOIN growth_cleanup_batch_scope s ON s.snapshot_id=o.id) ORDER BY rowid`).map(row => Number(row.rowid));
+    return {
+      snapshotIds,
+      objectSearchRowids,
+      eventIds,
+      outboxIds,
+      expected: {
+        growthSnapshots: count('growth_snapshots', 'id', 'growth_cleanup_batch_scope', 'snapshot_id'),
+        growthItems: count('growth_items', 'snapshot_id', 'growth_cleanup_batch_scope', 'snapshot_id'),
+        growthEdges: count('growth_edges', 'snapshot_id', 'growth_cleanup_batch_scope', 'snapshot_id'),
+        growthSignals: count('growth_signals', 'snapshot_id', 'growth_cleanup_batch_scope', 'snapshot_id'),
+        growthModuleLabels: count('growth_module_labels', 'snapshot_id', 'growth_cleanup_batch_scope', 'snapshot_id'),
+        objects: count('objects', 'id', 'growth_cleanup_batch_scope', 'snapshot_id'),
+        objectSearch: objectSearchRowids.length,
+        objectRevisions: count('object_revisions', 'object_id', 'growth_cleanup_batch_scope', 'snapshot_id'),
+        events: count('events', 'id', 'growth_cleanup_batch_event_scope', 'event_id'),
+        outbox: count('outbox', 'id', 'growth_cleanup_batch_outbox_scope', 'outbox_id'),
+        requests: 0
+      }
+    };
+  }
+  private validateGrowthSnapshotCleanupBatchRecords(batch: GrowthSnapshotCleanupBatchPlan, manifest: GrowthSnapshotCleanupManifest): GrowthSnapshotCleanupDeletedCounts {
+    const actual = this.growthSnapshotCleanupBatchPlan(batch.snapshotIds, manifest);
+    if (canonical(actual.expected) !== canonical(batch.expected) || canonical(actual.objectSearchRowids) !== canonical(batch.objectSearchRowids)) throw new Error('growth_cleanup_batch_record_drift');
+    const ids = new Set(batch.snapshotIds), eventIds = new Set(batch.eventIds);
+    const snapshotRecords = this.rows(`SELECT id,project_id,git_head,reason,status,duration_ms,created_at,project_path,error,payload_hash FROM growth_snapshots
+      WHERE id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope) ORDER BY id`).map(row => ({ id: String(row.id), projectId: String(row.project_id),
+        gitHead: row.git_head === null ? null : String(row.git_head), reason: String(row.reason), status: String(row.status), durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
+        createdAt: Number(row.created_at), projectPath: String(row.project_path), error: String(row.error), payloadHash: String(row.payload_hash) }));
+    if (canonical(snapshotRecords) !== canonical(manifest.records.growthSnapshots.records.filter(item => ids.has(item.id)))) throw new Error('growth_cleanup_snapshot_record_drift');
+    const objects = this.rows(`SELECT id,kind,project_id,revision,created_at,updated_at,archived_at FROM objects
+      WHERE id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope) ORDER BY id`).map(row => ({ id: String(row.id), kind: String(row.kind),
+        projectId: row.project_id === null ? null : String(row.project_id), revision: Number(row.revision), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at), archivedAt: row.archived_at === null ? null : Number(row.archived_at) }));
+    if (canonical(objects) !== canonical(manifest.records.objects.records.filter(item => ids.has(item.id)))) throw new Error('growth_cleanup_object_record_drift');
+    const revisions = this.rows(`SELECT object_id,revision,content_id,actor_id,reason,created_at FROM object_revisions
+      WHERE object_id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope) ORDER BY object_id,revision`).map(row => ({ objectId: String(row.object_id), revision: Number(row.revision),
+        contentKey: String(row.content_id), actorId: String(row.actor_id), reason: String(row.reason), createdAt: Number(row.created_at) }));
+    if (canonical(revisions) !== canonical(manifest.records.objectRevisions.keys.filter(item => ids.has(item.objectId)))) throw new Error('growth_cleanup_revision_record_drift');
+    const events = this.rows(`SELECT id,subject_id,request_id,actor_id,kind,content_id,sequence,created_at FROM events
+      WHERE subject_id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope) ORDER BY sequence,id`).map(row => ({ eventId: String(row.id), subjectId: String(row.subject_id), requestId: String(row.request_id),
+        actorId: String(row.actor_id), kind: String(row.kind), contentKey: String(row.content_id), sequence: Number(row.sequence), createdAt: Number(row.created_at) }));
+    if (canonical(events) !== canonical(manifest.records.events.records.filter(item => ids.has(item.subjectId)))) throw new Error('growth_cleanup_event_record_drift');
+    const outbox = this.rows(`SELECT id,event_id,channel,destination_ref,content_id,generation,state,attempt,next_attempt_at FROM outbox
+      WHERE event_id IN (SELECT event_id FROM growth_cleanup_batch_event_scope) ORDER BY id`).map(row => ({ id: String(row.id), eventId: String(row.event_id), channel: String(row.channel),
+        destinationRef: String(row.destination_ref), contentKey: String(row.content_id), generation: Number(row.generation), state: String(row.state), attempt: Number(row.attempt), nextAttemptAt: row.next_attempt_at === null ? null : Number(row.next_attempt_at) }));
+    if (canonical(outbox) !== canonical(manifest.records.outbox.records.filter(item => eventIds.has(item.eventId)))) throw new Error('growth_cleanup_outbox_record_drift');
+    for (const item of manifest.candidateSnapshots.filter(candidate => ids.has(candidate.snapshotId))) {
+      if (this.growthSnapshotCleanupFingerprint(item.projectId, item.snapshotId) !== item.semanticFingerprint) throw new Error('growth_cleanup_snapshot_fingerprint_drift');
+    }
+    return actual.expected;
+  }
+  private validateGrowthSnapshotCleanupResume(plan: GrowthSnapshotCleanupPlan, batches: Record<string, SqlValue>[]): void {
+    const manifest = plan.manifest;
+    const parsed = batches.map((batch, batchIndex) => {
+      if (Number(batch.batch_index) !== batchIndex) throw new Error('batch_sequence_changed');
+      const value = JSON.parse(this.content(String(batch.candidate_ids_content_id)).toString('utf8')) as GrowthSnapshotCleanupBatchPlan;
+      if (!Array.isArray(value.snapshotIds) || !Array.isArray(value.objectSearchRowids) || !Array.isArray(value.eventIds) || !Array.isArray(value.outboxIds) || !value.expected) throw new Error('batch_plan_corrupt');
+      if (batch.status === 'applied') {
+        if (!batch.receipt_content_id) throw new Error('batch_receipt_missing');
+        const receipt = JSON.parse(this.content(String(batch.receipt_content_id)).toString('utf8'));
+        if (canonical(receipt) !== canonical({ batchIndex, snapshotIds: value.snapshotIds, deleted: value.expected })) throw new Error('batch_receipt_changed');
+      } else if (batch.status !== 'prepared' || batch.receipt_content_id) throw new Error('batch_state_changed');
+      return { row: batch, value };
+    });
+    if (canonical(parsed.flatMap(item => item.value.snapshotIds)) !== canonical(manifest.records.growthSnapshots.ids)) throw new Error('batch_candidates_changed');
+    if (canonical(parsed.flatMap(item => item.value.objectSearchRowids).sort((left, right) => left - right)) !== canonical(manifest.records.objectSearch.rowids)) throw new Error('batch_object_search_changed');
+    const expectedTotals: GrowthSnapshotCleanupDeletedCounts = {
+      growthSnapshots: 0, growthItems: 0, growthEdges: 0, growthSignals: 0, growthModuleLabels: 0,
+      objects: 0, objectSearch: 0, objectRevisions: 0, events: 0, outbox: 0, requests: manifest.records.requests.count
+    };
+    for (const item of parsed) for (const [key, value] of Object.entries(item.value.expected)) expectedTotals[key as keyof GrowthSnapshotCleanupDeletedCounts] += value;
+    if (canonical(expectedTotals) !== canonical({
+      growthSnapshots: manifest.records.growthSnapshots.count,
+      growthItems: manifest.records.growthItems.count,
+      growthEdges: manifest.records.growthEdges.count,
+      growthSignals: manifest.records.growthSignals.count,
+      growthModuleLabels: manifest.records.growthModuleLabels.count,
+      objects: manifest.records.objects.count,
+      objectSearch: manifest.records.objectSearch.count,
+      objectRevisions: manifest.records.objectRevisions.count,
+      events: manifest.records.events.count,
+      outbox: manifest.records.outbox.count,
+      requests: manifest.records.requests.count
+    })) throw new Error('batch_impact_changed');
+    for (const item of parsed) {
+      const actual = this.growthSnapshotCleanupBatchPlan(item.value.snapshotIds, manifest);
+      const expected = item.row.status === 'applied'
+        ? { ...item.value.expected, growthSnapshots: 0, growthItems: 0, growthEdges: 0, growthSignals: 0, growthModuleLabels: 0, objects: 0, objectSearch: 0, objectRevisions: 0, events: 0, outbox: 0 }
+        : item.value.expected;
+      const expectedSearchRowids = item.row.status === 'applied' ? [] : item.value.objectSearchRowids;
+      if (canonical(actual.expected) !== canonical(expected) || canonical(actual.objectSearchRowids) !== canonical(expectedSearchRowids)) throw new Error('batch_record_impact_changed');
+    }
+    const remainingCandidateIds = parsed.filter(item => item.row.status === 'prepared').flatMap(item => item.value.snapshotIds);
+    const currentSnapshotIds = this.rows('SELECT id FROM growth_snapshots ORDER BY id').map(row => String(row.id));
+    const expectedSnapshotIds = [...manifest.retainedSnapshots.map(item => item.snapshotId), ...remainingCandidateIds].sort();
+    if (canonical(currentSnapshotIds) !== canonical(expectedSnapshotIds)) throw new Error('snapshot_boundary_changed');
+    const plannedSnapshots = [...manifest.retainedSnapshots, ...manifest.candidateSnapshots.filter(item => remainingCandidateIds.includes(item.snapshotId))];
+    for (const item of plannedSnapshots) if (this.growthSnapshotCleanupFingerprint(item.projectId, item.snapshotId) !== item.semanticFingerprint) throw new Error('snapshot_fingerprint_changed');
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_resume_scope', 'snapshot_id', remainingCandidateIds);
+    const currentSnapshotRecords = this.rows(`SELECT id,project_id,git_head,reason,status,duration_ms,created_at,project_path,error,payload_hash FROM growth_snapshots
+      WHERE id IN (SELECT snapshot_id FROM growth_cleanup_resume_scope) ORDER BY id`).map(row => ({ id: String(row.id), projectId: String(row.project_id),
+        gitHead: row.git_head === null ? null : String(row.git_head), reason: String(row.reason), status: String(row.status), durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
+        createdAt: Number(row.created_at), projectPath: String(row.project_path), error: String(row.error), payloadHash: String(row.payload_hash) }));
+    if (canonical(currentSnapshotRecords) !== canonical(manifest.records.growthSnapshots.records.filter(item => remainingCandidateIds.includes(item.id)))) throw new Error('snapshot_record_changed');
+    const currentObjects = this.rows(`SELECT id,kind,project_id,revision,created_at,updated_at,archived_at FROM objects
+      WHERE id IN (SELECT snapshot_id FROM growth_cleanup_resume_scope) ORDER BY id`).map(row => ({ id: String(row.id), kind: String(row.kind),
+        projectId: row.project_id === null ? null : String(row.project_id), revision: Number(row.revision), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at), archivedAt: row.archived_at === null ? null : Number(row.archived_at) }));
+    if (canonical(currentObjects) !== canonical(manifest.records.objects.records.filter(item => remainingCandidateIds.includes(item.id)))) throw new Error('object_record_changed');
+    const expectedRevisions = manifest.records.objectRevisions.keys.filter(item => remainingCandidateIds.includes(item.objectId));
+    const currentRevisions = this.rows(`SELECT object_id,revision,content_id,actor_id,reason,created_at FROM object_revisions
+      WHERE object_id IN (SELECT snapshot_id FROM growth_cleanup_resume_scope) ORDER BY object_id,revision`)
+      .map(row => ({ objectId: String(row.object_id), revision: Number(row.revision), contentKey: String(row.content_id), actorId: String(row.actor_id), reason: String(row.reason), createdAt: Number(row.created_at) }));
+    if (canonical(currentRevisions) !== canonical(expectedRevisions)) throw new Error('object_revision_changed');
+    const remainingEventIds = parsed.filter(item => item.row.status === 'prepared').flatMap(item => item.value.eventIds);
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_resume_event_scope', 'event_id', remainingEventIds);
+    const currentEvents = this.rows(`SELECT id,subject_id,request_id,actor_id,kind,content_id,sequence,created_at FROM events
+      WHERE id IN (SELECT event_id FROM growth_cleanup_resume_event_scope) ORDER BY sequence,id`)
+      .map(row => ({ eventId: String(row.id), subjectId: String(row.subject_id), requestId: String(row.request_id), actorId: String(row.actor_id), kind: String(row.kind), contentKey: String(row.content_id), sequence: Number(row.sequence), createdAt: Number(row.created_at) }));
+    const expectedEvents = manifest.records.events.records.filter(item => remainingEventIds.includes(item.eventId));
+    if (canonical(currentEvents) !== canonical(expectedEvents)
+      || this.rows(`SELECT 1 FROM events e JOIN growth_cleanup_resume_scope s ON s.snapshot_id=e.subject_id
+        WHERE e.id NOT IN (SELECT event_id FROM growth_cleanup_resume_event_scope) LIMIT 1`).length) throw new Error('event_record_changed');
+    const remainingOutboxIds = parsed.filter(item => item.row.status === 'prepared').flatMap(item => item.value.outboxIds);
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_resume_outbox_scope', 'outbox_id', remainingOutboxIds);
+    const currentOutbox = this.rows(`SELECT id,event_id,channel,destination_ref,content_id,generation,state,attempt,next_attempt_at FROM outbox
+      WHERE id IN (SELECT outbox_id FROM growth_cleanup_resume_outbox_scope) ORDER BY id`)
+      .map(row => ({ id: String(row.id), eventId: String(row.event_id), channel: String(row.channel), destinationRef: String(row.destination_ref), contentKey: String(row.content_id),
+        generation: Number(row.generation), state: String(row.state), attempt: Number(row.attempt), nextAttemptAt: row.next_attempt_at === null ? null : Number(row.next_attempt_at) }));
+    const expectedOutbox = manifest.records.outbox.records.filter(item => remainingOutboxIds.includes(item.id));
+    if (canonical(currentOutbox) !== canonical(expectedOutbox)
+      || this.rows(`SELECT 1 FROM outbox o JOIN growth_cleanup_resume_event_scope s ON s.event_id=o.event_id
+        WHERE o.id NOT IN (SELECT outbox_id FROM growth_cleanup_resume_outbox_scope) LIMIT 1`).length) throw new Error('outbox_record_changed');
+    const requestIds = manifest.records.requests.records.map(item => item.id);
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_resume_request_scope', 'request_id', requestIds);
+    const currentRequests = this.rows(`SELECT id,actor_id,idempotency_key,input_hash,result_content_id,status,committed_sequence FROM requests
+      WHERE id IN (SELECT request_id FROM growth_cleanup_resume_request_scope) ORDER BY id`)
+      .map(row => ({ id: String(row.id), actorId: String(row.actor_id), idempotencyKey: String(row.idempotency_key), inputHash: String(row.input_hash), resultContentKey: row.result_content_id === null ? null : String(row.result_content_id),
+        status: String(row.status), committedSequence: row.committed_sequence === null ? null : Number(row.committed_sequence) }));
+    if (canonical(currentRequests) !== canonical(manifest.records.requests.records)) throw new Error('request_record_changed');
+    if (this.rows(`SELECT 1 FROM events e JOIN growth_cleanup_resume_request_scope s ON s.request_id=e.request_id
+      WHERE e.id NOT IN (SELECT event_id FROM growth_cleanup_resume_event_scope) LIMIT 1`).length
+      || this.rows(`SELECT 1 FROM migration_items m JOIN growth_cleanup_resume_request_scope s ON s.request_id=m.source_capture_request_id LIMIT 1`).length
+      || this.rows(`SELECT 1 FROM migration_source_json_versions v JOIN growth_cleanup_resume_request_scope s ON s.request_id=v.request_id LIMIT 1`).length) throw new Error('request_reference_changed');
+    const allCandidateIds = manifest.records.growthSnapshots.ids;
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_all_candidate_scope', 'snapshot_id', allCandidateIds);
+    const allowedObjectReferences = new Set(['growth_snapshots.id', 'object_revisions.object_id', 'events.subject_id']);
+    for (const reference of this.growthSnapshotCleanupForeignKeys('objects')) {
+      if (allowedObjectReferences.has(`${reference.table}.${reference.column}`)) continue;
+      const table = quoteSqlIdentifier(reference.table), column = quoteSqlIdentifier(reference.column);
+      if (this.rows(`SELECT 1 FROM ${table} r JOIN growth_cleanup_all_candidate_scope s ON s.snapshot_id=r.${column} LIMIT 1`).length) throw new Error('object_reference_changed');
+    }
+    this.resetGrowthSnapshotCleanupScope('growth_cleanup_resume_content_scope', 'content_id', manifest.records.contents.deletableIds);
+    for (const reference of this.contentReferenceColumns()) {
+      const table = quoteSqlIdentifier(reference.table), column = quoteSqlIdentifier(reference.column);
+      const exclusion = reference.table === 'object_revisions' ? ' WHERE r.object_id NOT IN (SELECT snapshot_id FROM growth_cleanup_resume_scope)'
+        : reference.table === 'events' ? ' WHERE r.id NOT IN (SELECT event_id FROM growth_cleanup_resume_event_scope)'
+        : reference.table === 'requests' ? ' WHERE r.id NOT IN (SELECT request_id FROM growth_cleanup_resume_request_scope)'
+        : reference.table === 'outbox' ? ' WHERE r.id NOT IN (SELECT outbox_id FROM growth_cleanup_resume_outbox_scope)' : '';
+      if (this.rows(`SELECT 1 FROM ${table} r JOIN growth_cleanup_resume_content_scope s ON s.content_id=r.${column}${exclusion} LIMIT 1`).length) throw new Error('content_reference_changed');
+    }
+    if (this.growthSnapshotCleanupEmbeddedSharedContentIds(manifest.records.contents.deletableIds, {
+      objectIds: allCandidateIds,
+      eventIds: manifest.records.events.records.map(item => item.eventId),
+      requestIds: manifest.records.requests.records.map(item => item.id),
+      outboxIds: manifest.records.outbox.records.map(item => item.id)
+    }).size) throw new Error('embedded_content_reference_changed');
+  }
+  private invalidateGrowthSnapshotCleanupPlan(planId: string, reason: string): void {
+    this.transaction(() => this.db.run("UPDATE growth_snapshot_cleanup_plans SET status='invalidated',invalidation_reason=? WHERE plan_id=? AND status IN ('prepared','applying')", [reason, planId]));
+  }
+  public applyGrowthSnapshotCleanup(input: { planId: string; planHash: string; confirmation: string; idempotencyKey: string; batchSize?: number }): Record<string, unknown> {
+    if (input.confirmation !== '确认删除该清单记录') throw new Error('growth_cleanup_confirmation_required');
+    if (!input.idempotencyKey?.trim()) throw new Error('idempotency_key_required');
+    const batchSize = input.batchSize ?? 25;
+    if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 100) throw new Error('growth_cleanup_batch_size_invalid');
+    let plan = this.readGrowthSnapshotCleanupPlan(input.planId);
+    if (plan.planHash !== input.planHash) throw new Error('growth_cleanup_plan_hash_mismatch');
+    const intent = { operation: 'apply_growth_snapshot_cleanup', ...input, batchSize };
+    const inputHash = digest(canonical(intent));
+    let request = this.rows('SELECT * FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, input.idempotencyKey])[0];
+    let applyDataVersion: number;
+    if (request) {
+      if (String(request.input_hash) !== inputHash) throw new Error('idempotency_conflict');
+      if (request.status === 'committed' && request.result_content_id) return JSON.parse(this.content(String(request.result_content_id)).toString('utf8'));
+      if (plan.status === 'invalidated') throw new Error('growth_cleanup_plan_invalidated');
+      if (plan.status !== 'applying') throw new Error('growth_cleanup_apply_pending');
+      const resumeDataVersion = Number(this.rows('PRAGMA data_version')[0].data_version);
+      try {
+        this.validateGrowthSnapshotCleanupResume(plan, this.rows('SELECT * FROM growth_snapshot_cleanup_batches WHERE plan_id=? ORDER BY batch_index', [input.planId]));
+        if (Number(this.rows('PRAGMA data_version')[0].data_version) !== resumeDataVersion) throw new Error('growth_cleanup_resume_source_changed');
+      } catch (error) {
+        this.invalidateGrowthSnapshotCleanupPlan(input.planId, error instanceof Error ? error.message : String(error));
+        throw new Error('growth_cleanup_plan_invalidated');
+      }
+      applyDataVersion = resumeDataVersion;
+    } else {
+      if (plan.status !== 'prepared') throw new Error(plan.status === 'invalidated' ? 'growth_cleanup_plan_invalidated' : 'growth_cleanup_plan_not_prepared');
+      let scanned: { dataVersion: number; manifest: GrowthSnapshotCleanupManifest };
+      try {
+        scanned = this.readTransaction(() => ({
+          dataVersion: Number(this.rows('PRAGMA data_version')[0].data_version),
+          manifest: this.buildGrowthSnapshotCleanupManifest(plan.manifest.createdAt)
+        }));
+      }
+      catch (error) {
+        this.invalidateGrowthSnapshotCleanupPlan(input.planId, error instanceof Error ? error.message : String(error));
+        throw new Error('growth_cleanup_plan_invalidated');
+      }
+      if (digest(canonical(scanned.manifest)) !== input.planHash) {
+        this.invalidateGrowthSnapshotCleanupPlan(input.planId, 'manifest_changed');
+        throw new Error('growth_cleanup_plan_invalidated');
+      }
+      try {
+        this.transaction(() => {
+          if (Number(this.rows('PRAGMA data_version')[0].data_version) !== scanned.dataVersion) throw new Error('growth_cleanup_apply_source_changed');
+          this.db.run('INSERT INTO requests(actor_id,idempotency_key,id,input_hash,status) VALUES(?,?,?,?,?)', [this.actorId, input.idempotencyKey, crypto.randomUUID(), inputHash, 'pending']);
+          this.db.run("UPDATE growth_snapshot_cleanup_plans SET status='applying' WHERE plan_id=? AND status='prepared'", [input.planId]);
+          if (this.db.getRowsModified() !== 1) throw new Error('growth_cleanup_plan_not_prepared');
+          for (let offset = 0, batchIndex = 0; offset < plan.manifest.candidateSnapshots.length; offset += batchSize, batchIndex++) {
+            const ids = plan.manifest.candidateSnapshots.slice(offset, offset + batchSize).map(item => item.snapshotId);
+            this.db.run("INSERT INTO growth_snapshot_cleanup_batches(plan_id,batch_index,candidate_ids_content_id,status,created_at) VALUES(?,?,?,'prepared',?)",
+              [input.planId, batchIndex, this.putContent(canonical(this.growthSnapshotCleanupBatchPlan(ids, plan.manifest)), 'application/json'), Date.now()]);
+          }
+        });
+      } catch (error) {
+        this.invalidateGrowthSnapshotCleanupPlan(input.planId, error instanceof Error ? error.message : String(error));
+        throw new Error('growth_cleanup_plan_invalidated');
+      }
+      request = this.rows('SELECT * FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, input.idempotencyKey])[0];
+      plan = this.readGrowthSnapshotCleanupPlan(input.planId);
+      applyDataVersion = scanned.dataVersion;
+    }
+    const batchReceipts: Array<Record<string, unknown>> = [];
+    for (const batch of this.rows('SELECT * FROM growth_snapshot_cleanup_batches WHERE plan_id=? ORDER BY batch_index', [input.planId])) {
+      if (batch.status === 'applied' && batch.receipt_content_id) {
+        batchReceipts.push(JSON.parse(this.content(String(batch.receipt_content_id)).toString('utf8'))); continue;
+      }
+      const batchPlan = JSON.parse(this.content(String(batch.candidate_ids_content_id)).toString('utf8')) as GrowthSnapshotCleanupBatchPlan;
+      const ids = batchPlan.snapshotIds;
+      const eventIds = batchPlan.eventIds;
+      const outboxIds = batchPlan.outboxIds;
+      let receipt: Record<string, unknown>;
+      try {
+        receipt = this.transaction(() => {
+          if (Number(this.rows('PRAGMA data_version')[0].data_version) !== applyDataVersion) throw new Error('growth_cleanup_global_drift');
+          this.resetGrowthSnapshotCleanupScope('growth_cleanup_batch_scope', 'snapshot_id', ids);
+          this.resetGrowthSnapshotCleanupScope('growth_cleanup_batch_event_scope', 'event_id', eventIds);
+          this.resetGrowthSnapshotCleanupScope('growth_cleanup_batch_outbox_scope', 'outbox_id', outboxIds);
+          const deleted = this.validateGrowthSnapshotCleanupBatchRecords(batchPlan, plan.manifest);
+          this.db.run('DELETE FROM outbox WHERE id IN (SELECT outbox_id FROM growth_cleanup_batch_outbox_scope)');
+          this.db.run('DELETE FROM growth_edges WHERE snapshot_id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope)');
+          this.db.run('DELETE FROM growth_signals WHERE snapshot_id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope)');
+          this.db.run('DELETE FROM growth_module_labels WHERE snapshot_id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope)');
+          this.db.run('DELETE FROM growth_items WHERE snapshot_id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope)');
+          this.db.run('DELETE FROM events WHERE id IN (SELECT event_id FROM growth_cleanup_batch_event_scope)');
+          this.db.run('DELETE FROM growth_snapshots WHERE id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope)');
+          this.db.run('DELETE FROM object_revisions WHERE object_id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope)');
+          this.db.run('DELETE FROM object_search WHERE rowid IN (SELECT o.rowid FROM objects o JOIN growth_cleanup_batch_scope s ON s.snapshot_id=o.id)');
+          this.db.run('DELETE FROM objects WHERE id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope)');
+          const value = { batchIndex: Number(batch.batch_index), snapshotIds: ids, deleted };
+          const contentId = this.putContent(canonical(value), 'application/json');
+          this.db.run("UPDATE growth_snapshot_cleanup_batches SET status='applied',receipt_content_id=?,applied_at=? WHERE plan_id=? AND batch_index=? AND status='prepared'", [contentId, Date.now(), input.planId, batch.batch_index]);
+          if (this.db.getRowsModified() !== 1) throw new Error('growth_cleanup_batch_conflict');
+          return value;
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        if (/^growth_cleanup_.*_drift$/.test(reason)) {
+          this.invalidateGrowthSnapshotCleanupPlan(input.planId, reason);
+          throw new Error('growth_cleanup_plan_invalidated');
+        }
+        throw error;
+      }
+      batchReceipts.push(receipt);
+    }
+    const totals = { growthSnapshots: 0, growthItems: 0, growthEdges: 0, growthSignals: 0, growthModuleLabels: 0,
+      objects: 0, objectSearch: 0, objectRevisions: 0, events: 0, outbox: 0, requests: 0,
+      contentChunks: 0, databaseStorageCleanupCandidates: 0, contents: 0 };
+    for (const batch of batchReceipts) for (const [key, value] of Object.entries(batch.deleted as Record<string, number>)) totals[key as keyof typeof totals] += value;
+    let result: Record<string, unknown>;
+    try {
+      result = this.transaction(() => {
+      if (Number(this.rows('PRAGMA data_version')[0].data_version) !== applyDataVersion) throw new Error('growth_cleanup_global_drift');
+      const requestIds = plan.manifest.records.requests.records.map(item => item.id);
+      this.resetGrowthSnapshotCleanupScope('growth_cleanup_final_request_scope', 'request_id', requestIds);
+      const requests = this.rows(`SELECT id,actor_id,idempotency_key,input_hash,result_content_id,status,committed_sequence FROM requests
+        WHERE id IN (SELECT request_id FROM growth_cleanup_final_request_scope) ORDER BY id`)
+        .map(row => ({ id: String(row.id), actorId: String(row.actor_id), idempotencyKey: String(row.idempotency_key), inputHash: String(row.input_hash), resultContentKey: row.result_content_id === null ? null : String(row.result_content_id),
+          status: String(row.status), committedSequence: row.committed_sequence === null ? null : Number(row.committed_sequence) }));
+      if (canonical(requests) !== canonical(plan.manifest.records.requests.records)
+        || this.rows('SELECT 1 FROM events e JOIN growth_cleanup_final_request_scope s ON s.request_id=e.request_id LIMIT 1').length
+        || this.rows('SELECT 1 FROM migration_items m JOIN growth_cleanup_final_request_scope s ON s.request_id=m.source_capture_request_id LIMIT 1').length
+        || this.rows('SELECT 1 FROM migration_source_json_versions v JOIN growth_cleanup_final_request_scope s ON s.request_id=v.request_id LIMIT 1').length) {
+        throw new Error('growth_cleanup_request_reference_drift');
+      }
+      totals.requests = requests.length;
+      this.db.run('DELETE FROM requests WHERE id IN (SELECT request_id FROM growth_cleanup_final_request_scope)');
+      this.resetGrowthSnapshotCleanupScope('growth_cleanup_final_content_scope', 'content_id', plan.manifest.records.contents.deletableIds);
+      for (const reference of this.contentReferenceColumns()) {
+        const table = quoteSqlIdentifier(reference.table), column = quoteSqlIdentifier(reference.column);
+        if (this.rows(`SELECT 1 FROM ${table} r JOIN growth_cleanup_final_content_scope s ON s.content_id=r.${column} LIMIT 1`).length) throw new Error('growth_cleanup_content_reference_drift');
+      }
+      if (this.growthSnapshotCleanupEmbeddedSharedContentIds(plan.manifest.records.contents.deletableIds, {
+        objectIds: plan.manifest.records.growthSnapshots.ids,
+        eventIds: plan.manifest.records.events.records.map(item => item.eventId),
+        requestIds: plan.manifest.records.requests.records.map(item => item.id),
+        outboxIds: plan.manifest.records.outbox.records.map(item => item.id)
+      }).size) {
+        throw new Error('growth_cleanup_embedded_content_reference_drift');
+      }
+      const contentIds = this.rows(`SELECT id FROM contents WHERE id IN
+        (SELECT content_id FROM growth_cleanup_final_content_scope) ORDER BY id`).map(row => String(row.id));
+      const contentChunks = this.rows(`SELECT content_id,ordinal FROM content_chunks WHERE content_id IN
+        (SELECT content_id FROM growth_cleanup_final_content_scope) ORDER BY content_id,ordinal`)
+        .map(row => ({ contentKey: String(row.content_id), ordinal: Number(row.ordinal) }));
+      const storageCleanupContentIds = this.rows(`SELECT content_id FROM database_storage_cleanup_candidates WHERE content_id IN
+        (SELECT content_id FROM growth_cleanup_final_content_scope) ORDER BY content_id`).map(row => String(row.content_id));
+      if (canonical(contentIds) !== canonical(plan.manifest.records.contents.deletableIds)
+        || canonical(contentChunks) !== canonical(plan.manifest.records.contentChunks.keys)
+        || canonical(storageCleanupContentIds) !== canonical(plan.manifest.records.databaseStorageCleanupCandidates.contentIds)) {
+        throw new Error('growth_cleanup_content_record_drift');
+      }
+      totals.databaseStorageCleanupCandidates = storageCleanupContentIds.length;
+      this.db.run('DELETE FROM database_storage_cleanup_candidates WHERE content_id IN (SELECT content_id FROM growth_cleanup_final_content_scope)');
+      totals.contentChunks = contentChunks.length;
+      this.db.run('DELETE FROM content_chunks WHERE content_id IN (SELECT content_id FROM growth_cleanup_final_content_scope)');
+      totals.contents = contentIds.length;
+      this.db.run('DELETE FROM contents WHERE id IN (SELECT content_id FROM growth_cleanup_final_content_scope)');
+      for (const projectId of new Set(plan.manifest.candidateSnapshots.map(item => item.projectId))) this.bumpReportSourceRevision(projectId);
+      const violations = this.rows('PRAGMA foreign_key_check');
+      if (violations.length) throw new Error('growth_cleanup_foreign_key_violation');
+      const value = { planId: input.planId, planHash: input.planHash, status: 'applied', batches: batchReceipts, deleted: totals, foreignKeyViolations: 0 };
+      const resultContentId = this.putContent(canonical(value), 'application/json');
+      const sequence = Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS value FROM events')[0].value);
+      this.db.run("UPDATE growth_snapshot_cleanup_plans SET status='applied',applied_at=? WHERE plan_id=? AND status='applying'", [Date.now(), input.planId]);
+      if (this.db.getRowsModified() !== 1) throw new Error('growth_cleanup_plan_state_conflict');
+      this.db.run("UPDATE requests SET status='committed',result_content_id=?,committed_sequence=? WHERE actor_id=? AND idempotency_key=? AND status='pending'", [resultContentId, sequence, this.actorId, input.idempotencyKey]);
+      if (this.db.getRowsModified() !== 1) throw new Error('growth_cleanup_request_state_conflict');
+        return value;
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (/^growth_cleanup_.*_drift$/.test(reason)) {
+        this.invalidateGrowthSnapshotCleanupPlan(input.planId, reason);
+        throw new Error('growth_cleanup_plan_invalidated');
+      }
+      throw error;
+    }
+    return result;
   }
   public importRegisteredReportTask(projectId: string, source: ImportedSource, bytes: Uint8Array, task: { taskId: string; userMessage: string; startedAt: string; executions: Array<{ id: number; nodeId: string }> }): string {
     return this.transaction(() => {

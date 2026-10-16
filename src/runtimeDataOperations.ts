@@ -633,6 +633,9 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const project = await store.registerProject({ root: String(input.root || '') });
         return store.readProjectGrowth(project.projectId, Number(input.historyLimit || 12), input.snapshotId === undefined ? undefined : String(input.snapshotId));
       }
+      case 'preview_growth_snapshot_cleanup': return store.previewGrowthSnapshotCleanup(input as unknown as Parameters<UnifiedDataStore['previewGrowthSnapshotCleanup']>[0]);
+      case 'read_growth_snapshot_cleanup_plan': return store.readGrowthSnapshotCleanupPlan(String(input.planId || ''));
+      case 'apply_growth_snapshot_cleanup': return store.applyGrowthSnapshotCleanup(input as unknown as Parameters<UnifiedDataStore['applyGrowthSnapshotCleanup']>[0]);
       case 'initialize_project_journal': return { minimumExecutionLogId: await initializeProjectJournalAllocation(store, String(input.root || '')) };
       case 'append_project_journal': {
         await initializeProjectJournalAllocation(store, String(input.root || ''));
