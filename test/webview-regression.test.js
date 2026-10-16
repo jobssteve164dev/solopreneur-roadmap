@@ -6708,6 +6708,65 @@ test('failed project preparation closes startup terminals instead of leaving emp
   }
 });
 
+test('roadmap revision launches bind each concurrent project without changing the selected project or pre-opening shells', async () => {
+  const projects = ['/fixture/project-a', '/fixture/project-b', '/fixture/project-c'];
+  const entered = [];
+  const registered = [];
+  const completed = [];
+  const targets = [];
+  const releases = new Map();
+  const gates = new Map(projects.map(project => [project, new Promise(resolve => releases.set(project, resolve))]));
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.action = handleSharedWebviewAction;
+    module.exports.selected = () => selectedProjectPath;
+    module.exports.startupTerminalCount = () => startupTerminalCount;
+    let selectedProjectPath = ${JSON.stringify(projects[0])};
+    let startupTerminalCount = 0;
+    const projectList = ${JSON.stringify(projects)};
+    getProjects = () => projectList.map(projectPath => ({ path: projectPath, name: projectPath.split('/').pop() }));
+    getSelectedProjectPath = () => selectedProjectPath;
+    getPersistedSettings = () => ({ globalDataPath: '/fixture/global', cliPath: 'codex', automationTasks: {} });
+    revealAgentStartupTerminal = async () => { startupTerminalCount += 1; return { dispose() {} }; };
+    ensureActionProject = async (_context, projectPath) => { selectedProjectPath = projectPath; return projectPath; };
+    captureConversationLaunchTarget = async (_context, workspaceRoot) => {
+      entered.push(workspaceRoot);
+      await gates.get(workspaceRoot);
+      const target = { workspaceRoot, globalDataPath: '/fixture/global', engine: { close() {} }, launchIntentId: 'intent:' + workspaceRoot };
+      targets.push(target);
+      return target;
+    };
+    handleRoadmapRevision = async (_context, message, _cli, _model, _files, onExecutionRegistered, target) => {
+      if (!target || target.workspaceRoot !== message) throw new Error('roadmap revision was not bound to its explicit project target');
+      registered.push(target.workspaceRoot);
+      onExecutionRegistered();
+      await Promise.resolve();
+      completed.push(target.workspaceRoot);
+    };
+    sidebarProvider = { refreshProjectConversationSnapshotAfterStatusChange: async () => {} };
+  `, {
+    './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js')
+  });
+  extension.__test = { entered, registered, completed, targets, gates };
+
+  const launches = projects.map(projectPath => extension.action(
+    {},
+    { command: 'conversation.runRoadmapRevision', projectPath, userMessage: projectPath, agentCli: 'codex' },
+    'sidebar'
+  ));
+  await new Promise(resolve => setTimeout(resolve, 0));
+
+  assert.deepEqual(entered.slice().sort(), projects.slice().sort(), 'different projects must enter preparation concurrently');
+  assert.equal(extension.selected(), projects[0], 'launching another project must not change the user selection');
+  assert.equal(extension.startupTerminalCount(), 0, 'a visible shell must not exist before the durable run is registered');
+
+  for (const projectPath of projects) releases.get(projectPath)();
+  await Promise.all(launches);
+  assert.deepEqual(registered.slice().sort(), projects.slice().sort());
+  assert.deepEqual(completed.slice().sort(), projects.slice().sort());
+  assert.equal(new Set(targets.map(target => target.launchIntentId)).size, 3);
+  assert.equal(extension.selected(), projects[0]);
+});
+
 test('sidebar project switcher supports searching by project name or path', () => {
   const sidebarSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
   assert.match(sidebarSource, /data-project-search type="search"/);
