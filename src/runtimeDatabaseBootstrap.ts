@@ -329,7 +329,7 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
           legacyStamp = current.stamp;
         } catch { continue; }
       }
-      const version = source.collection === 'agent-runs' ? 10 : source.collection === 'project-journal' ? 8 : source.collection === 'project-growth' ? 3 : source.collection === 'documentation' ? 3 : ['step-memory', 'run-digests'].includes(source.collection) ? 2 : 1;
+      const version = source.collection === 'agent-runs' ? 10 : source.collection === 'project-journal' ? 8 : source.collection === 'project-growth' ? 3 : source.collection === 'documentation' ? 3 : ['step-memory', 'run-digests', 'project-legacy-files'].includes(source.collection) ? 2 : 1;
       const stamp = source.collection === 'agent-runs'
         ? await historicalRunSourceStamp(store, [source.sourceRoot, path.join(projectRoot, '.solopreneur', 'agent-status'), path.join(projectRoot, '.agent_status.json')], shouldContinue, discoveredOwners)
         : source.collection === 'documentation'

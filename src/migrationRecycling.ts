@@ -360,6 +360,21 @@ export class MigrationRecycling {
       });
     } catch { return false; }
   }
+  private legacyRunEvidenceInUse(source: CandidateSource): boolean {
+    if (!source.identity.startsWith('project-legacy-files:')) return false;
+    const root = source.identity.slice('project-legacy-files:'.length);
+    const normalized = source.key.split(path.sep).join('/');
+    const owners = discoverLegacyRunProcesses(root);
+    if (normalized.startsWith('agent-runs/')) {
+      const file = path.resolve(root, '.solopreneur', ...normalized.split('/'));
+      return owners.some(owner => file === owner.runDirectory || file.startsWith(owner.runDirectory + path.sep));
+    }
+    const status = /^agent-status\/(\d+)\.json$/.exec(normalized);
+    if (!status) return false;
+    if (owners.some(owner => owner.executionLogId === Number(status[1]))) return true;
+    try { return this.store.historicalRunOwnerAlive(JSON.parse(fs.readFileSync(path.join(root, '.solopreneur', ...normalized.split('/')), 'utf8'))); }
+    catch { return false; }
+  }
   private async candidates(scope?: MigrationProjectScope): Promise<Array<Omit<RecyclingItem, 'itemId' | 'planId' | 'status' | 'error'>>> {
     const identities = scope ? new Set(this.sourceIdentities(scope)) : undefined;
     const belongs = (identity: string) => !identities || identities.has(identity);
@@ -377,6 +392,7 @@ export class MigrationRecycling {
       const projects = /^(analysis-caches|step-memory|run-digests|agent-runs):/.test(source.identity) ? projectSnapshot() : undefined;
       const file = this.sourcePath(source.identity, source.key, projects);
       if (!file || this.isGlobalMemoryPath(file) || isRoadmapCsv(file) || active.some(item => item.path === file)) continue;
+      if (this.legacyRunEvidenceInUse(source)) continue;
       if (source.identity.startsWith('intelligence:')) {
         if (!conversationKey.test(source.key) || !this.capturedConversationMatches(source)) continue;
       } else if (source.stage !== 'imported' || (source.identity.startsWith('agent-runs:') && !this.runSourceRetirable(source, projects))) continue;

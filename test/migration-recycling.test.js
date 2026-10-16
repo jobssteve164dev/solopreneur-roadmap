@@ -6,6 +6,7 @@ const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { importLegacyIntelligenceConversation } = require('../out/intelligenceConversationData.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { readProcessBirthMarker } = require('../out/processIdentity.js');
 
 function fixture() {
   const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-recycling-')), '.solomap-global');
@@ -256,6 +257,26 @@ test('every roadmap.csv remains protected from new and previously prepared recyc
     f.store.approveRecyclingFiles(oldPlan.files.map(file => ({ itemId: file.itemId, expectedPath: file.path, path: file.path })));
     await assert.rejects(f.call('execute_recycling_plan', { projectRoot, planId: oldPlan.planId }), /recycling_items_retained/);
     assert.deepEqual(fs.readFileSync(roadmap), bytes);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('an archived legacy status owned by a live process cannot enter a recycling plan', async () => {
+  const f = fixture();
+  try {
+    const crypto = require('node:crypto');
+    const projectRoot = path.join(path.dirname(f.root), 'project-with-live-legacy-status');
+    const statusFile = path.join(projectRoot, '.solopreneur', 'agent-status', '8.json');
+    fs.mkdirSync(path.dirname(statusFile), { recursive: true });
+    const bytes = Buffer.from(JSON.stringify({ agentPid: process.pid, processBirth: readProcessBirthMarker(process.pid) }));
+    fs.writeFileSync(statusFile, bytes);
+    const project = await f.store.registerProject({ root: projectRoot });
+    const identity = `project-legacy-files:${projectRoot}`;
+    const key = 'agent-status/8.json';
+    const hash = crypto.createHash('sha256').update(bytes).digest('hex');
+    f.store.captureMigrationSource({ identity, key, hash }, bytes);
+    f.store.archiveMigrationSource({ identity, key, hash }, bytes, { reason: 'retired SoloMap project file', projectId: project.projectId });
+    assert.deepEqual(await f.call('prepare_recycling', { projectRoot }), { planId: null, files: [] });
+    assert.deepEqual(fs.readFileSync(statusFile), bytes);
   } finally { await f.operations.close(); f.store.close(); }
 });
 

@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { UnifiedDataStore } from './db/unifiedDataStore';
 import type { MemoryImportResult } from './memoryDatabaseMigration';
+import { discoverLegacyRunProcesses } from './legacyRunProcessRecovery.js';
 
 const retiredFiles = new Set([
   '.gitignore',
@@ -19,6 +20,8 @@ const retiredDirectories = [
   'attachments',
   'step-sessions',
   'audits',
+  'agent-runs',
+  'agent-status',
   'runtime',
   'tmp',
   'verification'
@@ -158,6 +161,7 @@ export async function importLegacyProjectFiles(store: UnifiedDataStore, sourceRo
   const project = await store.registerProject({ root: projectRoot });
   const identity = `project-legacy-files:${projectRoot}`;
   const result: MemoryImportResult = { imported: 0, unchanged: 0, originalBytes: 0, conflicts: [], retainedFiles: [], interrupted: false };
+  const liveRuns = discoverLegacyRunProcesses(projectRoot).map(owner => ({ runDirectory: path.resolve(owner.runDirectory), executionLogId: owner.executionLogId }));
   for (const source of await projectFiles(physicalSourceRoot)) {
     if (options.shouldContinue && !options.shouldContinue()) return { ...result, interrupted: true };
     if (!source.retired) { result.retainedFiles.push(source.file); continue; }
@@ -169,6 +173,19 @@ export async function importLegacyProjectFiles(store: UnifiedDataStore, sourceRo
     try {
       const captured = await stableFile(physicalSourceRoot, source.file);
       result.originalBytes += captured.bytes.length;
+      const normalizedKey = source.key.split(path.sep).join('/');
+      const runRelative = normalizedKey.startsWith('agent-runs/') ? normalizedKey.slice('agent-runs/'.length) : '';
+      const runFile = runRelative ? path.resolve(projectRoot, '.solopreneur', 'agent-runs', runRelative) : '';
+      const statusMatch = /^agent-status\/(\d+)\.json$/.exec(normalizedKey);
+      const processOwnsSource = runFile
+        ? liveRuns.some(owner => runFile === owner.runDirectory || runFile.startsWith(owner.runDirectory + path.sep))
+        : statusMatch ? liveRuns.some(owner => owner.executionLogId === Number(statusMatch[1])) : false;
+      let statusOwnsSource = false;
+      if (statusMatch) {
+        try { statusOwnsSource = store.historicalRunOwnerAlive(JSON.parse(captured.bytes.toString('utf8'))); }
+        catch { /* Invalid historical status is archived after no live process claims it. */ }
+      }
+      if (processOwnsSource || statusOwnsSource) { result.retainedFiles.push(source.file); continue; }
       store.captureMigrationSource({ identity, key: source.key, hash: captured.hash }, captured.bytes, {
         mimeType: mimeType(source.file), encoding: /^(?:text\/|application\/(?:json|javascript|x-ndjson))/.test(mimeType(source.file)) ? 'utf8' : 'binary'
       });

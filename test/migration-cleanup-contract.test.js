@@ -6,6 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { readProcessBirthMarker } = require('../out/processIdentity.js');
 
 async function fixture(action) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cleanup-contract-'));
@@ -124,6 +125,8 @@ test('retired project scaffolding is archived for exact consumer readback while 
   fs.mkdirSync(path.join(solo, 'path-recovery-20260728T074000Z'), { recursive: true });
   fs.mkdirSync(path.join(solo, 'audits'), { recursive: true });
   fs.mkdirSync(path.join(solo, 'verification'), { recursive: true });
+  fs.mkdirSync(path.join(solo, 'agent-runs', '__solo__', '7'), { recursive: true });
+  fs.mkdirSync(path.join(solo, 'agent-status'), { recursive: true });
   const retired = new Map([
     ['README.md', Buffer.from('generated project data instructions')],
     ['execution-graph.json', Buffer.from('{"nodes":["complete legacy graph"]}')],
@@ -134,13 +137,17 @@ test('retired project scaffolding is archived for exact consumer readback while 
     ['audits/user-review.md', Buffer.from('formal historical audit')],
     ['runtime/business-migration/manifest.json', Buffer.from('{"businessAsset":true}')],
     ['tmp/customer-export.sql', Buffer.from('select * from customer_data;')],
-    ['verification/sidebar.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3])]
+    ['verification/sidebar.png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3])],
+    ['agent-runs/__solo__/7/operator-note.md', Buffer.from('legacy run evidence outside the structured artifact contract')],
+    ['agent-status/7.json', Buffer.from('{"status":"historical"}')]
   ]);
   for (const [relative, bytes] of retired) fs.writeFileSync(path.join(solo, relative), bytes);
   const retained = new Map([
     ['project.json', Buffer.from(JSON.stringify({ schemaVersion: 1, projectId: f.registered.projectId }))],
     ['roadmap.csv', Buffer.from('id,title\n1,Keep the roadmap\n')],
     ['path-recovery-20260728T074000Z/roadmap.csv', Buffer.from('id,title\n2,Keep the recovered roadmap too\n')],
+    ['agent-runs/__solo__/7/roadmap.csv', Buffer.from('id,title\n3,Keep the run roadmap backup too\n')],
+    ['agent-status/8.json', Buffer.from(JSON.stringify({ agentPid: process.pid, processBirth: readProcessBirthMarker(process.pid) }))],
     ['time-plan.json', Buffer.from('{"version":1,"status":"draft"}')],
     ['product-notes.md', Buffer.from('unknown user document stays local')]
   ]);
@@ -192,6 +199,8 @@ test('retired project scaffolding is archived for exact consumer readback while 
   for (const directory of ['attachments', 'step-sessions', 'audits', 'runtime', 'tmp', 'verification']) {
     assert.equal(fs.existsSync(path.join(solo, directory)), false, `${directory} must not remain as an empty legacy folder`);
   }
+  assert.equal(fs.existsSync(path.join(solo, 'agent-runs')), true, 'an agent-runs folder containing roadmap.csv must remain');
+  assert.equal(fs.existsSync(path.join(solo, 'agent-status')), true, 'an agent-status folder owned by a live process must remain');
   assert.equal(fs.existsSync(path.join(solo, 'path-recovery-20260728T074000Z')), true, 'a legacy folder containing roadmap.csv must remain');
   for (const [relative, bytes] of retained) assert.deepEqual(fs.readFileSync(path.join(solo, relative)), bytes);
   const attachment = plan.files.find(file => file.path.endsWith('context.png'));

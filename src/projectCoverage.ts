@@ -108,10 +108,18 @@ export async function loadProjectCoverageSnapshot(projectPath: string, globalDat
       operation: 'read_analysis_state',
       input: { root: projectPath, namespace: 'coverage', key: 'project-growth' }
     });
-    return isCoverageSnapshot(state.value) ? state.value : null;
+    if (isCoverageSnapshot(state.value)) return state.value;
   } catch {
-    return null;
+    // The read-only legacy fallback below keeps an already captured result visible
+    // while startup migration is still being scheduled.
   }
+  const legacy = path.join(projectPath, '.solopreneur', 'coverage', 'project-growth-coverage.json');
+  try {
+    const info = fs.lstatSync(legacy);
+    if (!info.isFile() || info.isSymbolicLink() || fs.realpathSync(legacy) !== legacy) return null;
+    const value = JSON.parse(fs.readFileSync(legacy, 'utf8'));
+    return isCoverageSnapshot(value) ? value : null;
+  } catch { return null; }
 }
 
 function metricFromSummary(summary: { covered: number; total: number; pct: number }): ProjectCoverageMetric {
