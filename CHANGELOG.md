@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.574 - 2026-10-16
+
+### Fixed
+- retire remaining project-local runtime state (af1d313)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.573 - 2026-10-15
 
 ### Fixed
