@@ -50,7 +50,7 @@ import {
 import { getWebviewHtml } from './roadmapWebview';
 import { buildLocalDataStatusHtml, formatLocalDataError, postLocalDataLoad } from './localDataLoader';
 import { backfillRunIndexFromDigests } from './runIndexMaintenance';
-import { clearProjectGrowthViewCache, getCachedProjectGrowthView, getProjectGrowthView, refreshProjectGrowthSnapshot } from './projectGrowth';
+import { captureProjectGrowthSnapshot, clearProjectGrowthViewCache, getCachedProjectGrowthView, getProjectGrowthView, refreshProjectGrowthSnapshot } from './projectGrowth';
 import { runProjectCoverageAnalysis } from './projectCoverage';
 import { moveUntrackedFilesToRollbackSafety } from './rollbackSafety';
 import {
@@ -9527,6 +9527,7 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
       && (!statusData.checkpointOutcome || statusData.checkpointOutcome === 'failed');
     let failureCode = String(statusData.failureCode || (stoppedWithoutResult ? 'stopped_by_user' : '')).trim();
     let failureReason = String(statusData.failureReason || (stoppedWithoutResult ? statusData.stopReason || '用户已停止当前对话。' : '')).trim();
+    let pendingTimePlan: TimePlanDraft | null = null;
     const currentNode = statusSyncEngine.getNodes().find((candidate) => candidate.id === nodeId) || null;
     const hasOtherRunningConversationForNode = !isSoloConversation
       && !isReviewRun
@@ -9641,22 +9642,13 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
       if (statusData.timePlanDraft === true && status === 'In Progress') {
         const draft = extractTimePlanDraft(outputText);
         if (draft.valid && draft.plan) {
-          await saveTimePlan(workspaceRoot, globalDataPath, draft.plan);
-          completionReason = '时间安排草案已保存，等待用户确认。';
+          pendingTimePlan = draft.plan;
+          completionReason = '时间安排草案已生成，等待用户确认。';
         } else {
           nextStatus = 'Failed';
           failureCode = 'time_plan_invalid';
           failureReason = draft.reason;
           completionReason = draft.reason;
-        }
-      }
-      if (workspaceRoot === activeProjectRoot) {
-        try {
-          if (extensionContextRef) {
-            sidebarProvider?.postMessage({ command: 'timePlansLoaded', ...await buildTimePlansPayload(extensionContextRef) });
-          }
-        } catch (error) {
-          console.error('SoloMap failed to refresh the time plan draft:', error);
         }
       }
     } else if (workspaceRoot && runKind === 'roadmap_revision') {
@@ -9836,19 +9828,6 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
         runIndexSummary = `Run index not saved: ${error instanceof Error ? error.message : String(error)}`;
       }
     }
-    let projectGrowthSummary = '';
-    if (workspaceRoot && !isReviewRun && extensionContextRef) {
-      try {
-        const growthView = await refreshProjectGrowthSnapshot(workspaceRoot, extensionContextRef.extensionPath, {
-          globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(extensionContextRef).globalDataPath),
-          scanReason: isContinuationRun ? 'agent_continuation' : isSoloConversation ? 'solo' : String(runKind || 'agent_run'),
-          maxFiles: 5000
-        });
-        projectGrowthSummary = `Project growth snapshot saved: ${growthView.totals.files} files, ${growthView.totals.modules} modules, ${growthView.gaps.length} gaps.`;
-      } catch (error) {
-        projectGrowthSummary = `Project growth snapshot not saved: ${error instanceof Error ? error.message : String(error)}`;
-      }
-    }
     let settledLearning: import('./runLifecycleTypes').RunSettlementInput['learning'];
     if (workspaceRoot) {
       const verificationSignals = extractVerificationSignals(outputTail, resolvedCommand, nextStatus);
@@ -9956,7 +9935,6 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
       documentationAudit ? `Documentation harness: ${documentationAudit.summary}` : '',
       runDigestSummary,
       runIndexSummary,
-      projectGrowthSummary,
       documentationAudit && documentationAudit.pendingReview.length > 0
         ? `Documentation review needed:\n${documentationAudit.pendingReview.map((item) => `- ${item.path}: ${item.reason}`).join('\n')}`
         : '',
@@ -9975,6 +9953,8 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
       : currentNode
         ? await readCompletionCriteria(workspaceRoot, currentNode, String(globalDataPath || ''))
         : [taskGoal].filter(Boolean);
+    const hasCurrentGrowthHost = Boolean(extensionContextRef
+      && normalizeGlobalDataPathForExtension(getPersistedSettings(extensionContextRef).globalDataPath) === normalizeGlobalDataPathForExtension(String(globalDataPath || '')));
 
     const effectPayload = JSON.parse(JSON.stringify({
       workspaceRoot, nodeId, executionLogId, originalExecutionLogId: Number(statusData.rootExecutionLogId || executionLogId),
@@ -9984,7 +9964,10 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
       reviewResult, reviewAttempt, reviewMainAgentCli, reviewMainNativeSessionId, reviewOfExecutionLogId,
       reviewTaskGoal, reviewCompletionCriteria, reviewerCliPath, collaborationReviewMode, reviewDeferredCompletion,
       resolvedCommand, changedFilesSummary, touchedFilesSummary, outputTail, taskGoal, taskCompletionCriteria,
-      preGitHash, outputFilePath, capturedSessionId
+      preGitHash, outputFilePath, capturedSessionId,
+      captureGrowth: Boolean(workspaceRoot && !isReviewRun && hasCurrentGrowthHost),
+      growthScanReason: isContinuationRun ? 'agent_continuation' : isSoloConversation ? 'solo' : String(runKind || 'agent_run'),
+      ...(pendingTimePlan ? { timePlan: pendingTimePlan } : {})
     }));
     const effects: NonNullable<import('./runLifecycleTypes').RunSettlementInput['effects']> = [
       ...(shouldWriteNodeStatus ? [{ kind: 'roadmap' as const, payload: effectPayload }] : []),
@@ -10061,6 +10044,13 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
   let completionReason = String(effect.payload.completionReason || '');
   const skipHistoricalSoloRoadmap = statusData?.historicalAdopted === true && String(nodeId || '') === soloConversationId;
   const isActiveProject = Boolean(!skipHistoricalSoloRoadmap && workspaceRoot && workspaceRoot === activeProjectRoot && syncEngine && normalizeGlobalDataPathForExtension(syncEngine.dataRoot) === normalizeSolomapGlobalPath(workspaceRoot, String(globalDataPath || '')));
+  if (effect.kind === 'refresh' && effect.payload.timePlan) {
+    if (!workspaceRoot || !effect.payload.timePlan) throw new Error('time_plan_effect_invalid');
+    await saveTimePlan(workspaceRoot, globalDataPath, effect.payload.timePlan);
+    if (isActiveProject && extensionContextRef) {
+      sidebarProvider?.postMessage({ command: 'timePlansLoaded', ...await buildTimePlansPayload(extensionContextRef) });
+    }
+  }
   const statusSyncEngine = isActiveProject ? syncEngine! : new SyncEngine(
     path.join(workspaceRoot, '.solopreneur', 'roadmap.csv'), path.join(workspaceRoot, '.solopreneur', 'project_journal.db'),
     extensionContextRef?.extensionPath || '', String(globalDataPath || ''),
@@ -10215,6 +10205,17 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
       await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);
     }
     refreshSidebarProjectCards();
+    if (effect.payload.captureGrowth === true && extensionContextRef && workspaceRoot) {
+      try {
+        await captureProjectGrowthSnapshot(workspaceRoot, extensionContextRef.extensionPath, `run-effect:${effect.effectId}:growth`, {
+          globalDataPath,
+          scanReason: String(effect.payload.growthScanReason || 'agent_run'),
+          maxFiles: 5000
+        });
+      } catch (error) {
+        console.error('SoloMap could not capture the post-run growth snapshot:', error);
+      }
+    }
 
     } else if (effect.kind === 'telegram') {
     // Send Telegram Notification

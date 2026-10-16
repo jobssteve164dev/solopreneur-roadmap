@@ -195,6 +195,15 @@ function sameUnorderedRecords(left: unknown[], right: unknown[]): boolean {
   return canonical(normalize(left)) === canonical(normalize(right));
 }
 function digest(data: Uint8Array | string): string { return crypto.createHash('sha256').update(data).digest('hex'); }
+function growthPayloadHash(data: GrowthSnapshotData): string {
+  const { id: _id, createdAt: _createdAt, durationMs: _durationMs, scanReason: _scanReason, ...snapshot } = data.snapshot;
+  const ordered = (items: Record<string, unknown>[]) => items.sort((left, right) => canonical(left).localeCompare(canonical(right)));
+  const nodes = ordered(data.nodes.map(({ snapshotId: _snapshotId, ...node }) => node));
+  const edges = ordered(data.edges.map(({ snapshotId: _snapshotId, ...edge }) => edge));
+  const signals = ordered(data.signals.map(({ snapshotId: _snapshotId, createdAt: _signalCreatedAt, ...signal }) => signal));
+  const labels = ordered(data.labels.map(({ snapshotId: _snapshotId, updatedAt: _updatedAt, ...label }) => label));
+  return digest(canonical({ snapshot, nodes, edges, signals, labels }));
+}
 function digestFile(file: string): { sha256: string; bytes: number } {
   const hash = crypto.createHash('sha256'), buffer = Buffer.allocUnsafe(8 * 1024 * 1024);
   const descriptor = fs.openSync(file, 'r'); let bytes = 0;
@@ -5833,7 +5842,7 @@ export class UnifiedDataStore {
       const replay = this.rows('SELECT id FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, idempotencyKey]).length > 0;
       const receipt = this.write({
         kind: 'growth_snapshot', action: 'create', scope: projectId, idempotencyKey,
-        data: { git_head: snapshot.gitHead || null, reason: snapshot.scanReason, status: snapshot.status, duration_ms: snapshot.durationMs, created_at: Date.parse(snapshot.createdAt), project_path: snapshot.projectPath, error: snapshot.error || '', payload_hash: digest(canonical(data)) }
+        data: { git_head: snapshot.gitHead || null, reason: snapshot.scanReason, status: snapshot.status, duration_ms: snapshot.durationMs, created_at: Date.parse(snapshot.createdAt), project_path: snapshot.projectPath, error: snapshot.error || '', payload_hash: growthPayloadHash(data) }
       });
       if (replay) return receipt;
       const storedSnapshotId = receipt.objectId;
@@ -5871,6 +5880,16 @@ export class UnifiedDataStore {
   }
   public reserveProjectGrowthRefresh(projectId: string, requestId: string): { requestId: string; generation: number } {
     if (!requestId.trim()) throw new Error('invalid_growth_refresh');
+    const reservationKey = `analysis-state:${projectId}:growth-refresh:current:reserve:${requestId}`;
+    const replay = this.rows('SELECT result_content_id,status FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, reservationKey])[0];
+    if (replay) {
+      if (replay.status !== 'committed' || !replay.result_content_id) throw new Error('growth_refresh_reservation_pending');
+      const receipt = JSON.parse(this.content(String(replay.result_content_id)).toString('utf8')) as WriteReceipt;
+      const state = this.read(receipt.objectId, receipt.revision);
+      const value = JSON.parse(String(state.data.content)) as { requestId?: string };
+      if (state.projectId !== projectId || state.data.namespace !== 'analysis:growth-refresh' || state.data.key !== 'current' || value.requestId !== requestId) throw new Error('idempotency_conflict');
+      return { requestId, generation: receipt.revision };
+    }
     const current = this.readAnalysisState(projectId, 'growth-refresh', 'current');
     const written = this.writeAnalysisState(projectId, {
       namespace: 'growth-refresh', key: 'current', expectedRevision: current.revision,
@@ -5878,16 +5897,34 @@ export class UnifiedDataStore {
     });
     return { requestId, generation: written.revision };
   }
-  public commitProjectGrowthRefresh(projectId: string, input: { requestId: string; generation: number; data: GrowthSnapshotData }): { accepted: boolean; latest: GrowthSnapshotData | null } {
+  public commitProjectGrowthRefresh(projectId: string, input: { requestId: string; generation: number; data: GrowthSnapshotData }): { accepted: boolean; snapshotId: string | null; unchanged: boolean } {
     if (!String(input.requestId || '').trim() || !Number.isInteger(input.generation) || input.generation < 1 || !input.data) throw new Error('invalid_growth_refresh');
     return this.transaction(() => {
+      const requestKey = `growth-refresh-result:${projectId}:${input.requestId}`;
+      const inputHash = digest(canonical({ projectId, requestId: input.requestId, generation: input.generation }));
+      const previous = this.rows('SELECT input_hash,result_content_id,status FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, requestKey])[0];
+      if (previous) {
+        if (previous.input_hash !== inputHash) throw new Error('idempotency_conflict');
+        if (previous.status !== 'committed' || !previous.result_content_id) throw new Error('growth_refresh_commit_pending');
+        return JSON.parse(this.content(String(previous.result_content_id)).toString('utf8'));
+      }
+      this.db.run('INSERT INTO requests(actor_id,idempotency_key,id,input_hash,status) VALUES(?,?,?,?,?)', [this.actorId, requestKey, crypto.randomUUID(), inputHash, 'pending']);
+      const finish = (result: { accepted: boolean; snapshotId: string | null; unchanged: boolean }) => {
+        const sequence = Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS value FROM events')[0].value);
+        this.db.run("UPDATE requests SET status='committed',result_content_id=?,committed_sequence=? WHERE actor_id=? AND idempotency_key=?", [this.putContent(canonical(result), 'application/json'), sequence, this.actorId, requestKey]);
+        return result;
+      };
       const reservation = this.readAnalysisState(projectId, 'growth-refresh', 'current');
       const reserved = reservation.value as { requestId?: string } | null;
+      const latest = this.rows('SELECT id,payload_hash FROM growth_snapshots WHERE project_id=? ORDER BY rowid DESC LIMIT 1', [projectId])[0];
       if (reservation.revision !== input.generation || reserved?.requestId !== input.requestId) {
-        return { accepted: false, latest: this.readProjectGrowth(projectId, 1).latest };
+        return finish({ accepted: false, snapshotId: latest ? String(latest.id) : null, unchanged: false });
       }
-      this.writeProjectGrowth(projectId, input.data, `growth-refresh:${input.requestId}`);
-      return { accepted: true, latest: this.readProjectGrowth(projectId, 1).latest };
+      if (latest && String(latest.payload_hash || '') === growthPayloadHash(input.data)) {
+        return finish({ accepted: true, snapshotId: String(latest.id), unchanged: true });
+      }
+      const receipt = this.writeProjectGrowth(projectId, input.data, `growth-refresh:${input.requestId}`);
+      return finish({ accepted: true, snapshotId: receipt.objectId, unchanged: false });
     });
   }
   public readProjectGrowth(projectId: string, historyLimit = 12, snapshotId?: string): { latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] } {

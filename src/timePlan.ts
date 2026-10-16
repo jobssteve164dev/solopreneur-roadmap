@@ -126,6 +126,18 @@ export async function saveTimePlan(projectPath: string, globalDataPath: string, 
   const writeId = crypto.randomUUID();
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const current = await call('read_analysis_state', { root: projectPath, namespace: 'time-plan', key: 'current' }) as TimePlanState;
+    const currentPlan = current.value === null ? null : validateTimePlanValue(current.value);
+    if (currentPlan?.valid && currentPlan.plan) {
+      if (JSON.stringify(currentPlan.plan) === JSON.stringify(result.plan)) return currentPlan;
+      const currentGeneration = Date.parse(currentPlan.plan.generatedAt);
+      const incomingGeneration = Date.parse(result.plan.generatedAt);
+      const confirmsCurrentGeneration = currentGeneration === incomingGeneration
+        && currentPlan.plan.status === 'draft'
+        && result.plan.status === 'confirmed';
+      if (currentGeneration > incomingGeneration || (currentGeneration === incomingGeneration && !confirmsCurrentGeneration)) {
+        return currentPlan;
+      }
+    }
     try {
       await call('write_analysis_state', {
         root: projectPath,

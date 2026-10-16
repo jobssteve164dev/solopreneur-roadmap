@@ -29,6 +29,12 @@ export interface ProjectGrowthScanOptions {
   globalDataPath?: string;
 }
 
+export interface ProjectGrowthCommitResult {
+  accepted: boolean;
+  snapshotId: string | null;
+  unchanged: boolean;
+}
+
 async function readProjectRunEntries(projectPath: string, globalDataPath: string): Promise<RunIndexEntry[]> {
   return sendRuntimeDataRequest<RunIndexEntry[]>(globalDataPath, {
     operation: 'read_project_run_indexes', input: { root: projectPath }
@@ -2327,6 +2333,27 @@ export async function refreshProjectGrowthSnapshot(
     projectGrowthViewCache.set(projectGrowthCacheKey(globalDataPath, projectPath), view);
     return view;
   }
+}
+
+export async function captureProjectGrowthSnapshot(
+  projectPath: string,
+  extensionPath: string,
+  requestId: string,
+  options: ProjectGrowthScanOptions = {}
+): Promise<ProjectGrowthCommitResult> {
+  if (!requestId.trim()) throw new Error('growth_refresh_request_required');
+  const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath || '', projectPath);
+  await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
+  const reservation = await sendRuntimeDataRequest<{ requestId: string; generation: number }>(globalDataPath, {
+    operation: 'reserve_project_growth_refresh', input: { root: projectPath, requestId }
+  });
+  const roadmapNodes = new CsvStore(path.join(projectPath, '.solopreneur', 'roadmap.csv')).readNodes();
+  const runEntries = await readProjectRunEntries(projectPath, globalDataPath);
+  const snapshot = buildProjectGrowthSnapshot(projectPath, roadmapNodes, runEntries, options);
+  await finalizeProjectGrowthSnapshot(snapshot, projectPath, extensionPath, roadmapNodes, runEntries);
+  return sendRuntimeDataRequest<ProjectGrowthCommitResult>(globalDataPath, {
+    operation: 'commit_project_growth_refresh', input: { root: projectPath, ...reservation, data: snapshot }
+  });
 }
 
 export async function getProjectGrowthView(
