@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.579 - 2026-10-16
+
+### Fixed
+- unify retired global data migration (7a4b34e)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.578 - 2026-10-16
 
 ### Changed
