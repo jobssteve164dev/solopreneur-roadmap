@@ -110,7 +110,7 @@ export interface WriteReceipt {
   pendingEffects: string[];
 }
 export interface GrowthSnapshotCleanupManifest {
-  schemaVersion: 1;
+  schemaVersion: 2;
   title: '待删除数据库记录清单';
   policy: 'continuous_semantic_segments_keep_last';
   createdAt: number;
@@ -6015,11 +6015,78 @@ export class UnifiedDataStore {
     const history = ids.map(read);
     return { latest: history[0] || null, history };
   }
-  private growthSnapshotCleanupFingerprint(projectId: string, snapshotId: string): string {
-    const row = this.rows('SELECT payload_hash FROM growth_snapshots WHERE id=? AND project_id=?', [snapshotId, projectId])[0];
+  private hashGrowthSnapshotCleanupRows(hash: crypto.Hash, section: string, sql: string, values: SqlValue[],
+      project: (row: Record<string, SqlValue>) => unknown): void {
+    const statement = this.db.prepare(sql);
+    let count = 0;
+    hash.update(`${section}\0`);
+    try {
+      statement.bind(values);
+      while (statement.step()) {
+        const value = canonical(project(statement.getAsObject()));
+        hash.update(`${Buffer.byteLength(value, 'utf8')}:`);
+        hash.update(value);
+        count++;
+      }
+    } finally { statement.free(); }
+    hash.update(`\0${count};`);
+  }
+  private computeGrowthSnapshotCleanupFingerprint(projectId: string, snapshotId: string): string {
+    const row = this.rows(`SELECT project_path,git_head,status,error FROM growth_snapshots
+      WHERE id=? AND project_id=?`, [snapshotId, projectId])[0];
     if (!row) throw new Error('growth_snapshot_missing');
-    const payloadHash = String(row.payload_hash || '');
-    return /^[a-f0-9]{64}$/.test(payloadHash) ? payloadHash : `unindexed:${snapshotId}`;
+    const hash = crypto.createHash('sha256');
+    hash.update('growth-snapshot-cleanup-semantic-v1\0');
+    const header = canonical({ projectPath: String(row.project_path), gitHead: String(row.git_head || ''), status: String(row.status), error: String(row.error || '') });
+    hash.update(`snapshot\0${Buffer.byteLength(header, 'utf8')}:`);
+    hash.update(header);
+    this.hashGrowthSnapshotCleanupRows(hash, 'nodes', `SELECT metrics_json FROM growth_items
+      WHERE snapshot_id=? ORDER BY item_id`, [snapshotId], item => {
+      const value = JSON.parse(String(item.metrics_json));
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('growth_snapshot_node_invalid');
+      const { snapshotId: _snapshotId, ...node } = value as Record<string, unknown>;
+      return node;
+    });
+    this.hashGrowthSnapshotCleanupRows(hash, 'edges', `SELECT source_item_id,target_item_id,kind,weight,evidence FROM growth_edges
+      WHERE snapshot_id=? ORDER BY source_item_id,target_item_id,kind`, [snapshotId], edge => ({
+      sourceId: String(edge.source_item_id), targetId: String(edge.target_item_id), kind: String(edge.kind),
+      weight: Number(edge.weight || 0), evidence: String(edge.evidence || '')
+    }));
+    this.hashGrowthSnapshotCleanupRows(hash, 'signals', `SELECT item_id,type,level,value,source,source_ref FROM growth_signals
+      WHERE snapshot_id=? ORDER BY item_id,type,level,value,source,source_ref`, [snapshotId], signal => ({
+      nodeId: String(signal.item_id), type: String(signal.type), level: String(signal.level), value: String(signal.value || ''),
+      source: String(signal.source), sourceRef: String(signal.source_ref)
+    }));
+    this.hashGrowthSnapshotCleanupRows(hash, 'labels', `SELECT node_id,label,role,source,confidence FROM growth_module_labels
+      WHERE snapshot_id=? ORDER BY node_id`, [snapshotId], label => ({
+      nodeId: String(label.node_id), label: String(label.label), role: String(label.role), source: String(label.source), confidence: Number(label.confidence)
+    }));
+    return hash.digest('hex');
+  }
+  private indexGrowthSnapshotCleanupFingerprints(): void {
+    for (;;) {
+      const missing = this.rows(`SELECT g.id,g.project_id FROM growth_snapshots g
+        LEFT JOIN growth_snapshot_semantic_index i ON i.snapshot_id=g.id
+        WHERE i.snapshot_id IS NULL OR i.format_version<>1 ORDER BY g.project_id,g.rowid LIMIT 50`);
+      if (!missing.length) return;
+      this.transaction(() => {
+        for (const item of missing) {
+          const snapshotId = String(item.id), projectId = String(item.project_id);
+          const fingerprint = this.computeGrowthSnapshotCleanupFingerprint(projectId, snapshotId);
+          this.db.run(`INSERT INTO growth_snapshot_semantic_index(snapshot_id,semantic_fingerprint,format_version,indexed_at)
+            VALUES(?,?,1,?) ON CONFLICT(snapshot_id) DO UPDATE SET semantic_fingerprint=excluded.semantic_fingerprint,
+            format_version=excluded.format_version,indexed_at=excluded.indexed_at`, [snapshotId, fingerprint, Date.now()]);
+        }
+      });
+    }
+  }
+  private growthSnapshotCleanupFingerprint(projectId: string, snapshotId: string): string {
+    const row = this.rows(`SELECT i.semantic_fingerprint FROM growth_snapshot_semantic_index i
+      JOIN growth_snapshots g ON g.id=i.snapshot_id WHERE i.snapshot_id=? AND g.project_id=? AND i.format_version=1`, [snapshotId, projectId])[0];
+    if (!row) throw new Error('growth_snapshot_semantic_index_missing');
+    const fingerprint = String(row.semantic_fingerprint || '');
+    if (!/^[a-f0-9]{64}$/.test(fingerprint)) throw new Error('growth_snapshot_semantic_index_invalid');
+    return fingerprint;
   }
   private resetGrowthSnapshotCleanupScope(table: string, column: string, values: string[]): void {
     const quotedTable = quoteSqlIdentifier(table), quotedColumn = quoteSqlIdentifier(column);
@@ -6042,8 +6109,12 @@ export class UnifiedDataStore {
     return [...references.values()];
   }
   private buildGrowthSnapshotCleanupManifest(createdAt: number): GrowthSnapshotCleanupManifest {
-    const rows = this.rows(`SELECT g.id,g.project_id,g.payload_hash,o.rowid AS object_rowid
-      FROM growth_snapshots g JOIN objects o ON o.id=g.id ORDER BY g.project_id,o.rowid`);
+    const rows = this.rows(`SELECT g.id,g.project_id,i.semantic_fingerprint,o.rowid AS object_rowid
+      FROM growth_snapshots g JOIN objects o ON o.id=g.id
+      JOIN growth_snapshot_semantic_index i ON i.snapshot_id=g.id AND i.format_version=1
+      ORDER BY g.project_id,o.rowid`);
+    const snapshotCount = Number(this.rows('SELECT COUNT(*) AS count FROM growth_snapshots')[0].count);
+    if (rows.length !== snapshotCount) throw new Error('growth_snapshot_semantic_index_incomplete');
     const retainedSnapshots: GrowthSnapshotCleanupManifest['retainedSnapshots'] = [];
     const candidateSnapshots: GrowthSnapshotCleanupManifest['candidateSnapshots'] = [];
     let segment: Array<{ snapshotId: string; projectId: string; objectRowid: number; semanticFingerprint: string }> = [];
@@ -6058,9 +6129,8 @@ export class UnifiedDataStore {
     };
     for (const row of rows) {
       const projectId = String(row.project_id), snapshotId = String(row.id);
-      const payloadHash = String(row.payload_hash || '');
       const item = { snapshotId, projectId, objectRowid: Number(row.object_rowid),
-        semanticFingerprint: /^[a-f0-9]{64}$/.test(payloadHash) ? payloadHash : `unindexed:${snapshotId}` };
+        semanticFingerprint: String(row.semantic_fingerprint) };
       if (projectId !== activeProject) {
         finishSegment(); activeProject = projectId; segmentOrdinal = 1; segment = [item]; continue;
       }
@@ -6124,7 +6194,7 @@ export class UnifiedDataStore {
       WHERE content_id IN (SELECT content_id FROM growth_cleanup_deletable_content_scope) ORDER BY content_id`).map(row => String(row.content_id));
     const latest = rows.reduce<Record<string, SqlValue> | undefined>((current, row) => !current || Number(row.object_rowid) > Number(current.object_rowid) ? row : current, undefined);
     const manifest: GrowthSnapshotCleanupManifest = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       title: '待删除数据库记录清单',
       policy: 'continuous_semantic_segments_keep_last',
       createdAt,
@@ -6263,6 +6333,7 @@ export class UnifiedDataStore {
       return this.readGrowthSnapshotCleanupPlan(receipt.objectId);
     }
     const createdAt = Date.now();
+    this.indexGrowthSnapshotCleanupFingerprints();
     const scanned = this.readTransaction(() => ({
       dataVersion: Number(this.rows('PRAGMA data_version')[0].data_version),
       manifest: this.buildGrowthSnapshotCleanupManifest(createdAt)
@@ -6466,6 +6537,10 @@ export class UnifiedDataStore {
     if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 100) throw new Error('growth_cleanup_batch_size_invalid');
     let plan = this.readGrowthSnapshotCleanupPlan(input.planId);
     if (plan.planHash !== input.planHash) throw new Error('growth_cleanup_plan_hash_mismatch');
+    if (plan.manifest.schemaVersion !== 2) {
+      this.invalidateGrowthSnapshotCleanupPlan(input.planId, 'semantic_index_required');
+      throw new Error('growth_cleanup_plan_invalidated');
+    }
     if (plan.manifest.records.contents.deletableIds.length) {
       this.invalidateGrowthSnapshotCleanupPlan(input.planId, 'content_cleanup_requires_reference_index');
       throw new Error('growth_cleanup_plan_invalidated');
@@ -6490,6 +6565,7 @@ export class UnifiedDataStore {
       applyDataVersion = resumeDataVersion;
     } else {
       if (plan.status !== 'prepared') throw new Error(plan.status === 'invalidated' ? 'growth_cleanup_plan_invalidated' : 'growth_cleanup_plan_not_prepared');
+      this.indexGrowthSnapshotCleanupFingerprints();
       let scanned: { dataVersion: number; manifest: GrowthSnapshotCleanupManifest };
       try {
         scanned = this.readTransaction(() => ({

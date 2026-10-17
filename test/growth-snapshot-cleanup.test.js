@@ -211,28 +211,72 @@ test('snapshot cleanup does not depend on scanning arbitrary live JSON roots', a
   assert.ok(!manifest.records.contents.deletableIds.includes(revision.content_id));
 });
 
-test('cleanup uses the stored snapshot payload hash without rereading every snapshot detail', async t => {
+test('cleanup derives a semantic index when legacy payload hashes differ for equal details', async t => {
   const f = await fixture(t);
   const ids = await writeHistory(f, ['A', 'A']);
+  f.store.db.run('UPDATE growth_snapshots SET payload_hash=? WHERE id=?', ['1'.repeat(64), ids[0]]);
+  f.store.db.run('UPDATE growth_snapshots SET payload_hash=? WHERE id=?', ['2'.repeat(64), ids[1]]);
   f.store.readProjectGrowth = () => { throw new Error('snapshot detail should not be reread'); };
+  const originalRows = f.store.rows.bind(f.store);
+  f.store.rows = (sql, values) => {
+    if (/SELECT .* FROM growth_(?:items|edges|signals|module_labels)\s+WHERE snapshot_id=/s.test(String(sql))) {
+      throw new Error('snapshot details must be streamed instead of materialized');
+    }
+    return originalRows(sql, values);
+  };
 
   const preview = await f.call('preview_growth_snapshot_cleanup', { idempotencyKey: 'preview-bounded-roots' });
   const manifest = fullManifest(f, preview);
+  f.store.rows = originalRows;
 
   assert.deepEqual(manifest.candidateSnapshots.map(item => item.snapshotId), [ids[0]]);
-  assert.equal(manifest.candidateSnapshots[0].semanticFingerprint,
-    f.store.rows('SELECT payload_hash FROM growth_snapshots WHERE id=?', [ids[0]])[0].payload_hash);
+  assert.equal(manifest.candidateSnapshots[0].semanticFingerprint, manifest.retainedSnapshots[0].semanticFingerprint);
+  assert.notEqual(manifest.candidateSnapshots[0].semanticFingerprint, '1'.repeat(64));
+  assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_snapshot_semantic_index')[0].count, 2);
+
+  const stored = JSON.parse(f.store.rows('SELECT metrics_json FROM growth_items WHERE snapshot_id=? ORDER BY item_id LIMIT 1', [ids[0]])[0].metrics_json);
+  f.store.db.run('UPDATE growth_items SET metrics_json=? WHERE snapshot_id=? AND item_id=?',
+    [JSON.stringify({ ...stored, label: 'changed' }), ids[0], stored.nodeId]);
+  assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_snapshot_semantic_index WHERE snapshot_id=?', [ids[0]])[0].count, 0);
+
+  const changed = await f.call('preview_growth_snapshot_cleanup', { idempotencyKey: 'preview-reindexed-details' });
+  assert.deepEqual(fullManifest(f, changed).candidateSnapshots, []);
+  assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_snapshot_semantic_index')[0].count, 2);
+});
+
+test('cleanup invalidates manifests created before the semantic index contract', async t => {
+  const f = await fixture(t);
+  await writeHistory(f, ['A', 'A']);
+  const preview = await f.call('preview_growth_snapshot_cleanup', { idempotencyKey: 'preview-legacy-manifest' });
+  const plan = f.store.readGrowthSnapshotCleanupPlan(preview.planId);
+  const originalRead = f.store.readGrowthSnapshotCleanupPlan.bind(f.store);
+  f.store.readGrowthSnapshotCleanupPlan = () => ({ ...plan, manifest: { ...plan.manifest, schemaVersion: 1 } });
+
+  await assert.rejects(f.call('apply_growth_snapshot_cleanup', {
+    planId: preview.planId,
+    planHash: preview.planHash,
+    confirmation: '确认删除该清单记录',
+    idempotencyKey: 'apply-legacy-manifest'
+  }), /growth_cleanup_plan_invalidated/);
+  f.store.readGrowthSnapshotCleanupPlan = originalRead;
+  assert.equal(originalRead(preview.planId).status, 'invalidated');
 });
 
 test('cleanup detail lookups use snapshot-prefixed database indexes', async t => {
   const f = await fixture(t);
   const [snapshotId] = await writeHistory(f, ['A']);
 
-  for (const table of ['growth_items', 'growth_edges', 'growth_signals', 'growth_module_labels']) {
-    const details = f.store.rows(`EXPLAIN QUERY PLAN SELECT COUNT(*) FROM ${table} WHERE snapshot_id=?`, [snapshotId])
-      .map(row => String(row.detail)).join('\n');
+  const queries = [
+    'SELECT metrics_json FROM growth_items WHERE snapshot_id=? ORDER BY item_id',
+    'SELECT source_item_id,target_item_id,kind,weight,evidence FROM growth_edges WHERE snapshot_id=? ORDER BY source_item_id,target_item_id,kind',
+    'SELECT item_id,type,level,value,source,source_ref FROM growth_signals WHERE snapshot_id=? ORDER BY item_id,type,level,value,source,source_ref',
+    'SELECT node_id,label,role,source,confidence FROM growth_module_labels WHERE snapshot_id=? ORDER BY node_id'
+  ];
+  for (const query of queries) {
+    const details = f.store.rows(`EXPLAIN QUERY PLAN ${query}`, [snapshotId]).map(row => String(row.detail)).join('\n');
     assert.match(details, /USING (?:COVERING )?INDEX/);
     assert.match(details, /snapshot_id=\?/);
+    assert.doesNotMatch(details, /USE TEMP B-TREE/);
   }
 });
 

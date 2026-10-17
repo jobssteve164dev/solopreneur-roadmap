@@ -675,4 +675,25 @@ CREATE INDEX growth_snapshot_cleanup_plan_status ON growth_snapshot_cleanup_plan
 CREATE INDEX content_ref_growth_cleanup_plans_manifest ON growth_snapshot_cleanup_plans(manifest_content_id);
 CREATE INDEX content_ref_growth_cleanup_batches_candidates ON growth_snapshot_cleanup_batches(candidate_ids_content_id);
 CREATE INDEX content_ref_growth_cleanup_batches_receipt ON growth_snapshot_cleanup_batches(receipt_content_id);
+` }, { version: 46, sql: `
+CREATE TABLE growth_snapshot_semantic_index(
+ snapshot_id TEXT PRIMARY KEY REFERENCES growth_snapshots(id) ON DELETE CASCADE,
+ semantic_fingerprint TEXT NOT NULL,format_version INTEGER NOT NULL CHECK(format_version=1),indexed_at INTEGER NOT NULL);
+CREATE INDEX growth_snapshot_semantic_fingerprint ON growth_snapshot_semantic_index(semantic_fingerprint,snapshot_id);
+CREATE INDEX growth_signals_semantic_order ON growth_signals(snapshot_id,item_id,type,level,value,source,source_ref);
+CREATE TRIGGER growth_snapshot_semantic_header_update AFTER UPDATE OF project_id,git_head,status,project_path,error ON growth_snapshots BEGIN
+ DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id IN (OLD.id,NEW.id);
+END;
+CREATE TRIGGER growth_item_semantic_insert AFTER INSERT ON growth_items BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=NEW.snapshot_id; END;
+CREATE TRIGGER growth_item_semantic_update AFTER UPDATE ON growth_items BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id IN (OLD.snapshot_id,NEW.snapshot_id); END;
+CREATE TRIGGER growth_item_semantic_delete AFTER DELETE ON growth_items BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=OLD.snapshot_id; END;
+CREATE TRIGGER growth_edge_semantic_insert AFTER INSERT ON growth_edges BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=NEW.snapshot_id; END;
+CREATE TRIGGER growth_edge_semantic_update AFTER UPDATE ON growth_edges BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id IN (OLD.snapshot_id,NEW.snapshot_id); END;
+CREATE TRIGGER growth_edge_semantic_delete AFTER DELETE ON growth_edges BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=OLD.snapshot_id; END;
+CREATE TRIGGER growth_signal_semantic_insert AFTER INSERT ON growth_signals BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=NEW.snapshot_id; END;
+CREATE TRIGGER growth_signal_semantic_update AFTER UPDATE ON growth_signals BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id IN (OLD.snapshot_id,NEW.snapshot_id); END;
+CREATE TRIGGER growth_signal_semantic_delete AFTER DELETE ON growth_signals BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=OLD.snapshot_id; END;
+CREATE TRIGGER growth_label_semantic_insert AFTER INSERT ON growth_module_labels BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=NEW.snapshot_id; END;
+CREATE TRIGGER growth_label_semantic_update AFTER UPDATE ON growth_module_labels BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id IN (OLD.snapshot_id,NEW.snapshot_id); END;
+CREATE TRIGGER growth_label_semantic_delete AFTER DELETE ON growth_module_labels BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=OLD.snapshot_id; END;
 ` }];
