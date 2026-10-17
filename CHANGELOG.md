@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.587 - 2026-10-17
+
+### Added
+- add scoped database compaction operation (9916911)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.586 - 2026-10-17
 
 ### Fixed
