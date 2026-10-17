@@ -18,6 +18,7 @@ import { classifyDiagnosticFailure, observeLocalDiagnosticStage, recordLocalDiag
 import { readProcessBirthMarker } from './processIdentity.js';
 import { claimTelegramChannelLease, requestTelegramChannelTakeover, TelegramChannelLease } from './telegramChannelLease';
 import { countTelegramHostPresence, withTelegramHostPresenceLock } from './telegramHostPresence';
+import { setIntelligenceTimeScheduleInDatabase } from './intelligenceTimeSchedule';
 
 interface TelegramRuntimeState {
   offset: number;
@@ -40,6 +41,18 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
   const inboxOwner = { id: `telegram:${process.pid}`, pid: process.pid, birth: readProcessBirthMarker(process.pid) || `pid:${process.pid}` };
   let activeHost: TelegramHost | undefined;
   let sending: Promise<void> | undefined;
+  let scheduledAutomationWakePending = false;
+  let nextScheduledAutomationWakeAt = 0;
+  async function wakeScheduledAutomation(force = false): Promise<void> {
+    if (!scheduledAutomationWakePending || (!force && Date.now() < nextScheduledAutomationWakeAt)) return;
+    nextScheduledAutomationWakeAt = Date.now() + 30_000;
+    try {
+      const refreshed = await executeTelegramExtensionCommand(globalDataPath, 'solopreneur.internalRefreshTimedAutomation', []);
+      if (refreshed === true) scheduledAutomationWakePending = false;
+    } catch {
+      // The durable ledger remains pending until an editor endpoint is available.
+    }
+  }
   async function sendOutbox(duringHandoff = false): Promise<void> {
     if (sending) return sending;
     if (closed || (handoffPending && !duringHandoff) || !channelLease) return;
@@ -137,7 +150,16 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
     };
     const projectContext = await buildIntelligenceProjectContext(intelligenceSource);
     const dataSource = await runtimeProjectMcpSource(globalDataPath, projectForChat?.path || '');
-    const mcp = await observeLocalDiagnosticStage('mcp.connect', () => createIntelligenceMcpSession(intelligenceSource, dataSource));
+    const mcp = await observeLocalDiagnosticStage('mcp.connect', () => createIntelligenceMcpSession(intelligenceSource, dataSource, {
+      setTimeSchedule: input => {
+        if (!projectForChat) throw new Error('请先在 SoloMap 中选择要安排任务的项目。');
+        return setIntelligenceTimeScheduleInDatabase(globalDataPath, projectForChat, input, call).then(async result => {
+          scheduledAutomationWakePending = true;
+          await wakeScheduledAutomation(true);
+          return result;
+        });
+      }
+    }));
     engines.add(engine);
     try { return await observeLocalDiagnosticStage('pi.chat', () => engine.chat(messages, projectContext, mcp.client)); }
     finally { engines.delete(engine); await observeLocalDiagnosticStage('mcp.close', () => mcp.close()); }
@@ -360,6 +382,7 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
   const timer = setInterval(() => {
     void synchronize();
     void sendOutbox().catch(error => recordLocalDiagnosticError(globalDataPath, 'telegram.delivery', classifyDiagnosticFailure(error)));
+    void wakeScheduledAutomation();
   }, 1000);
   return { async close() {
     closed = true;

@@ -10,7 +10,7 @@ export interface UnifiedMcpSource {
   sessionInfo?(): Promise<{ runKind: string; migrationKind: string | null }>;
   call(operation: string, input: Record<string, unknown>): Promise<unknown>;
 }
-export const unifiedToolNames = ['solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_export'];
+export const unifiedToolNames = ['solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_export', 'solomap_conversation_status'];
 export const migrationToolNames = ['solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply'];
 
 function registerMigrationTools(server: McpServer, source: UnifiedMcpSource, includeRecyclingApply: boolean): void {
@@ -32,7 +32,7 @@ function registerMigrationTools(server: McpServer, source: UnifiedMcpSource, inc
 
 export function registerMigrationMcpTools(server: McpServer, source: UnifiedMcpSource, includeRecyclingApply = true): void { registerMigrationTools(server, source, includeRecyclingApply); }
 
-export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSource, options: { readOnly?: boolean } = {}): void {
+export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSource, options: { readOnly?: boolean; conversationLifecycle?: boolean } = {}): void {
   const z = require('zod') as typeof import('zod');
   const scope = z.string().nullable().optional();
   const schema = dataSchema();
@@ -336,6 +336,14 @@ export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSou
     await read(input.ref);
     return source.call('export', input);
   });
+  if (options.conversationLifecycle) register('solomap_conversation_status', '写入当前 Agent 对话的正式检查点状态。开始处理时使用 start；交付本轮结果时使用 complete。运行身份、版本和幂等性由插件绑定，不要自行读写账本。', {
+    action: z.enum(['start', 'complete']),
+    message: z.string().min(1).optional(),
+    outcome: z.enum(['partial', 'candidate_complete', 'blocked_user', 'blocked_external', 'failed']).optional(),
+    summary: z.string().min(1).optional(),
+    next: z.string().optional(),
+    report: z.unknown().optional()
+  }, false, input => source.call('checkpoint_current_run', input));
   const { ResourceTemplate } = require('@modelcontextprotocol/sdk/server/mcp.js') as typeof import('@modelcontextprotocol/sdk/server/mcp.js');
   server.registerResource('solomap-schema', 'solomap://schema', { description: '可读写记录种类、字段、必填项与引用。正式状态和审核仍使用现有授权动作。', mimeType: 'application/json' }, uri => ({ contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(schema) }] }));
   server.registerResource('solomap-object', new ResourceTemplate('solomap://objects/{id}', { list: undefined }), {

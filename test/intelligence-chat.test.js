@@ -337,6 +337,104 @@ test('smart kernel chat accepts a fenced read tool request and answers from its 
   assert.equal(calls, 2);
 });
 
+test('smart kernel and Telegram conversations can set a time schedule through the shared MCP tool', async () => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
+  const scheduled = [];
+  const session = await createIntelligenceMcpSession({
+    getProjects: () => [{ name: 'Alpha', path: '/alpha' }],
+    getSelectedProjectPath: () => '/alpha',
+    getCurrentSteps: () => null,
+    getSettings: () => ({ language: 'zh' })
+  }, undefined, {
+    setTimeSchedule: async input => {
+      scheduled.push(input);
+      return { taskId: 'intelligence-task-1', scheduledAt: input.scheduledAt };
+    }
+  });
+  let calls = 0;
+  const engine = new EmbeddedPiAgentEngine({
+    agentCli: 'codex', runner: async invocation => {
+      calls += 1;
+      if (calls === 1) {
+        assert.match(invocation.stdin, /set_time_schedule/);
+        return JSON.stringify({ toolCall: { name: 'set_time_schedule', arguments: {
+          title: '检查发布结果', scheduleKind: 'once', scheduledAt: '2099-10-18T09:00:00+08:00',
+          assignee: 'user'
+        } } });
+      }
+      assert.match(invocation.stdin, /intelligence-task-1/);
+      return '已安排在明天上午 9 点。';
+    }
+  });
+  try {
+    assert.equal(await engine.chat([{ role: 'user', content: '明天上午 9 点提醒我检查发布结果' }],
+      { selectedProject: 'Alpha', projects: ['Alpha'] }, session.client), '已安排在明天上午 9 点。');
+    assert.deepEqual(scheduled, [{
+      title: '检查发布结果', scheduleKind: 'once', scheduledAt: '2099-10-18T09:00:00+08:00',
+      assignee: 'user'
+    }]);
+  } finally {
+    await session.close();
+  }
+});
+
+test('time schedule validation returns Chinese guidance for user-correctable fields', () => {
+  const { validateIntelligenceTimeScheduleInput } = require('../out/intelligenceMcp.js');
+  assert.throws(() => validateIntelligenceTimeScheduleInput({ title: '提醒', scheduleKind: 'once', scheduledAt: 'tomorrow', assignee: 'user' }), /未来时间.*时区/);
+  assert.throws(() => validateIntelligenceTimeScheduleInput({ title: '提醒', scheduleKind: 'daily', assignee: 'user' }), /每日安排.*HH:mm/);
+  assert.throws(() => validateIntelligenceTimeScheduleInput({ title: '执行', scheduleKind: 'daily', timeOfDay: '09:00', assignee: 'agent' }), /Agent.*执行提示/);
+});
+
+test('standalone Telegram scheduling writes the authoritative settings and schedule ledger idempotently', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-intelligence-schedule-'));
+  const globalRoot = path.join(base, 'global'), projectRoot = path.join(base, 'project');
+  fs.mkdirSync(projectRoot);
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { setIntelligenceTimeScheduleInDatabase } = require('../out/intelligenceTimeSchedule.js');
+  const store = new UnifiedDataStore(globalRoot), operations = createRuntimeDataOperations(store);
+  const call = (operation, input) => operations({ operation, input });
+  const input = { title: '检查发布结果', scheduleKind: 'once', scheduledAt: '2099-10-18T09:00:00+08:00', assignee: 'user' };
+  try {
+    const first = await setIntelligenceTimeScheduleInDatabase(globalRoot, { name: 'Alpha', path: projectRoot }, input, call);
+    const second = await setIntelligenceTimeScheduleInDatabase(globalRoot, { name: 'Alpha', path: projectRoot }, input, call);
+    assert.equal(second.taskId, first.taskId);
+    const settings = await call('read_host_settings', { namespace: 'extension', ownerScope: 'global' });
+    const automation = settings.items.find(item => item.key === 'automationTasks').value;
+    assert.equal(automation.scheduledTasks.length, 1);
+    assert.equal(automation.scheduledTasks[0].id, first.taskId);
+    const ledger = await call('read_schedule_ledger', {});
+    assert.equal(ledger.tasks.length, 1);
+    assert.equal(ledger.tasks[0].taskId, first.taskId);
+  } finally {
+    await operations.close(); store.close(); cleanupExact(base);
+  }
+});
+
+test('standalone Telegram scheduling preserves the active focus reminder in the shared schedule ledger', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-intelligence-focus-schedule-'));
+  const globalRoot = path.join(base, 'global'), projectRoot = path.join(base, 'project');
+  fs.mkdirSync(projectRoot);
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { setIntelligenceTimeScheduleInDatabase } = require('../out/intelligenceTimeSchedule.js');
+  const { syncScheduledTaskDatabase } = require('../out/scheduledTaskLedger.js');
+  const store = new UnifiedDataStore(globalRoot), operations = createRuntimeDataOperations(store);
+  const call = (operation, input) => operations({ operation, input });
+  const focus = { id: '__solomap_focus_reminder__', title: '专注时间提醒', enabled: true, assignee: 'user', scheduleKind: 'once',
+    scheduledAt: '2099-10-18T08:30:00+08:00', projectPath: projectRoot, internalKind: 'focus_reminder', focusMinutes: 25, notify: true, sound: false };
+  try {
+    await syncScheduledTaskDatabase(projectRoot, globalRoot, [focus], new Date('2099-10-18T00:00:00Z'), call);
+    const scheduled = await setIntelligenceTimeScheduleInDatabase(globalRoot, { name: 'Alpha', path: projectRoot },
+      { title: '检查发布结果', scheduleKind: 'once', scheduledAt: '2099-10-18T09:00:00+08:00', assignee: 'user' }, call);
+    const ledger = await call('read_schedule_ledger', {});
+    assert.deepEqual(new Set(ledger.tasks.map(item => item.taskId)), new Set([focus.id, scheduled.taskId]));
+  } finally {
+    await operations.close(); store.close(); cleanupExact(base);
+  }
+});
+
 test('smart kernel chat does not show broken tool JSON as a reply', async () => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
   const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async () => '{"toolCall":{' });

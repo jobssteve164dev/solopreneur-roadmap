@@ -127,6 +127,23 @@ test('task instructions teach revision-safe database writes and complete content
   assert.ok(!module.buildAgentDatabaseInstructions().includes('solomap_migration_start'));
 });
 
+test('the run-bound MCP surface exposes one conversation status tool backed by the formal checkpoint operation', async () => {
+  const { registerUnifiedMcpTools } = require('../out/unifiedMcp.js');
+  const tools = new Map(), calls = [];
+  registerUnifiedMcpTools({ registerTool: (name, contract, handler) => tools.set(name, { contract, handler }), registerResource() {} }, { scope: 'project', call: async (operation, input) => { calls.push({ operation, input }); return { status: 'Running' }; } }, { conversationLifecycle: true });
+  assert.ok(tools.has('solomap_conversation_status'));
+  const result = await tools.get('solomap_conversation_status').handler({ action: 'start' });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(calls.at(-1), { operation: 'checkpoint_current_run', input: { action: 'start' } });
+  const readOnlyRun = new Map();
+  registerUnifiedMcpTools({ registerTool: (name, contract, handler) => readOnlyRun.set(name, { contract, handler }), registerResource() {} }, { scope: 'project', call: async () => ({}) }, { readOnly: true, conversationLifecycle: true });
+  assert.equal(readOnlyRun.has('solomap_conversation_status'), true, 'a bound migration/review run keeps its dedicated checkpoint tool');
+  assert.equal(readOnlyRun.has('solomap_write'), false, 'the checkpoint tool must not unlock generic database writes');
+  const ordinary = new Map();
+  registerUnifiedMcpTools({ registerTool: (name, contract, handler) => ordinary.set(name, { contract, handler }), registerResource() {} }, { scope: 'project', call: async () => ({}) });
+  assert.equal(ordinary.has('solomap_conversation_status'), false, 'an unbound MCP session cannot mutate a conversation lifecycle');
+});
+
 test('read-only task instructions retrieve database memory without exposing mutation tools', () => {
   const { buildAgentDatabaseInstructions } = require('../out/agentDatabaseConfig.js');
   const instructions = buildAgentDatabaseInstructions({ readOnly: true, migrationTools: true });
@@ -165,7 +182,7 @@ test('all built-in Agent families receive their native MCP format without changi
         assert.equal(server.command, '/native/node');
         if (provider === 'copilot') {
           assert.equal(server.type, 'local');
-          assert.deepEqual(server.tools, ['solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply']);
+          assert.deepEqual(server.tools, ['solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_conversation_status', 'solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply']);
         }
       }
     }

@@ -645,9 +645,9 @@ function buildCapabilityResultPublicationInstructions(resultFilePath: string): s
     '结果发布协议：',
     `- 全部物理操作和最终验证完成后，先把完整 JSON 写入 ${resultFilePath}.tmp，再原子重命名为 ${resultFilePath}。`,
     '- result.json 是宿主结算信号，只能在最终状态确定后发布，写入后不得再次修改。',
-    '- result.json 原子发布并完成任务报告预检后，用检查点命令的 complete 动作结算本轮，成功时必须传入 `--outcome candidate_complete`、非空 `--summary` 和完整 `--report-json`。',
+    '- result.json 原子发布并完成任务报告预检后，调用 MCP 工具 `solomap_conversation_status`，参数为 `{"action":"complete","outcome":"candidate_complete","summary":"完成摘要","report":<完整任务报告 JSON>}`。',
     '- `success` 或 `completed` 不是合法的 outcome；合法值只有 partial、candidate_complete、blocked_user、blocked_external、failed。',
-    '- 这是非交互维护运行。complete 成功后直接正常退出 CLI，不要调用 session-close。'
+    '- 这是非交互维护运行。MCP complete 成功后直接正常退出 CLI，不要调用 session-close，也不要运行任何检查点命令。'
   ];
 }
 

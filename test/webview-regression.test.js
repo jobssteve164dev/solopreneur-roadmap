@@ -277,9 +277,9 @@ for (const mode of ['solo', 'step']) test(`the final ${mode} conversation prompt
       metadata: { nativeResumeProviderContext: { claude: { claudeHome: path.join(base, 'claude-home'), configDirOverride: path.join(base, 'claude-home'), configPath: path.join(base, 'claude-home/.claude.json') } } } });
     const plan = await require('../out/autonomousRuntimeControl.js').sendRuntimeDataRequest(root, { operation: 'read_run_execution_plan', input: { root: project, executionLogId: 1 } });
     assert.doesNotMatch(plan.prompt, /\.solopreneur\/runtime\/task-checkpoint\.cjs|检查点命令已由插件生成/);
-    assert.equal(plan.prompt.split('SoloMap 检查点命令：').length - 1, 1, 'the final database prompt must contain exactly one runnable checkpoint contract');
-    assert.ok(plan.prompt.includes(path.join(projectRoot, 'out/taskCheckpointProcess.js')));
-    assert.ok(plan.prompt.includes(`--turn-id ${plan.turnId}`));
+    assert.equal(plan.prompt.split('SoloMap 对话状态由 MCP 工具管理').length - 1, 1, 'the final database prompt must contain exactly one MCP checkpoint contract');
+    assert.match(plan.prompt, /solomap_conversation_status\(\{action:"start"\}\)/);
+    assert.doesNotMatch(plan.prompt, /SOLOMAP_TASK_COMMAND|taskCheckpointProcess\.js/);
     assert.ok(plan.prompt.includes('实现用户目标'));
     assert.equal(fs.existsSync(path.join(project, '.solopreneur/runtime/task-checkpoint.cjs')), false);
   } finally { await runtime.close(); }
@@ -1909,6 +1909,9 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
         if (id === './intelligenceMcp') {
           return require(path.join(projectRoot, 'out/intelligenceMcp.js'));
         }
+        if (id === './intelligenceTimeSchedule') {
+          return require(path.join(projectRoot, 'out/intelligenceTimeSchedule.js'));
+        }
         if (id === './autonomousRuntimeHost') {
           // These UI/identity fixtures isolate process creation; database startup
           // and the generated task consumer have separate real-owner acceptance.
@@ -1969,6 +1972,34 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
   context.module.exports.__vscodeTestState = vscodeTestState;
   return context.module.exports;
 }
+
+test('intelligence time schedules use the existing settings mutation and await its ledger synchronization', async () => {
+  const project = '/workspace/alpha';
+  const state = { patch: null, options: null, directScheduleCalls: 0 };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.setTimeSchedule = setIntelligenceTimeSchedule;
+    module.exports.connectTimeSchedule = state => {
+      getProjects = () => [{ name: 'Alpha', path: ${JSON.stringify('/workspace/alpha')} }];
+      updatePersistedSettings = async (_context, patch, options) => { state.patch = patch; state.options = options; };
+      scheduleTimedAutomationTaskAsync = async () => { state.directScheduleCalls += 1; };
+    };
+  `);
+  extension.connectTimeSchedule(state);
+  const result = await extension.setTimeSchedule({}, project, {
+    title: '发布检查', scheduleKind: 'daily', timeOfDay: '09:30', assignee: 'agent',
+    prompt: '检查最新发布结果并汇报异常。'
+  });
+  const mutation = state.patch.automationTasks.scheduledTaskMutations[0];
+  assert.equal(mutation.operation, 'add');
+  assert.equal(mutation.taskId, mutation.task.id);
+  assert.deepEqual({ ...mutation.task, id: undefined }, {
+    id: undefined, title: '发布检查', enabled: true, projectPath: project, projectName: 'Alpha',
+    scheduleKind: 'daily', timeOfDay: '09:30', assignee: 'agent', prompt: '检查最新发布结果并汇报异常。'
+  });
+  assert.equal(result.taskId, mutation.taskId);
+  assert.equal(state.options.awaitAutomationSchedule, true);
+  assert.equal(state.directScheduleCalls, 0, 'the settings write owns the single ledger synchronization');
+});
 
 function extractLastScript(html) {
   const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
@@ -9796,6 +9827,12 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(continuationPrompt, /继续把登录态和订阅校验打通/);
   assert.match(continuationPrompt, /SoloMap 启动包/);
   assert.doesNotMatch(continuationPrompt, /SOLOMAP_TASK_COMMAND|completion\.json/, 'the shared preparation layer appends the single runnable checkpoint contract later');
+  const compiledExtension = fs.readFileSync(path.join(projectRoot, 'out', 'extension.js'), 'utf8');
+  assert.doesNotMatch(compiledExtension, /完成时运行 node \"\$SOLOMAP_TASK_COMMAND\" complete/);
+  assert.match(compiledExtension, /开始处理前仍调用 MCP 工具 solomap_conversation_status[\s\S]*?完成时调用同一工具的 complete 动作/);
+  assert.doesNotMatch(compiledExtension, /无需再次调用 start/);
+  const compiledTelegramBridge = fs.readFileSync(path.join(projectRoot, 'out', 'telegramExtensionBridge.js'), 'utf8');
+  assert.match(compiledTelegramBridge, /solopreneur\.internalRefreshTimedAutomation/);
   const runnerDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-codex-runner-'));
   const runnerPath = path.join(runnerDir, 'run-codex-continuation.cjs');
   extensionModule.__buildCodexContinuationRunnerScript(
@@ -16712,6 +16749,31 @@ for (const continuation of [false, true]) test(`the actual ${continuation ? 'con
     assert.equal(fs.existsSync(path.join(root, 'learning')), false, 'the complete preparation prompt must not create a parallel learning ledger');
     assert.equal(fs.existsSync(path.join(root, 'metrics')), false);
   } finally { await server.close(); await ops.close(); store.close(); }
+});
+
+test('an external time-schedule wake waits until a pending local settings write settles', async () => {
+  const events = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.refreshExternal = refreshTimedAutomationFromExternalSettings;
+    module.exports.pending = value => { pendingPersistedSettings = value; };
+    module.exports.connect = (events, pendingDuringRefresh) => {
+      getPersistedSettings = () => ({ globalDataPath: '/data' });
+      refreshExtensionSettingsFromDatabase = async () => { events.push('refresh'); if (pendingDuringRefresh) pendingPersistedSettings = { globalDataPath: '/data' }; };
+      scheduleTimedAutomationTaskAsync = async () => { events.push('schedule'); };
+    };
+  `);
+  extension.connect(events, false);
+  extension.pending({ globalDataPath: '/data' });
+  assert.equal(await extension.refreshExternal({}), false);
+  assert.deepEqual(events, []);
+  extension.pending(null);
+  extension.connect(events, true);
+  assert.equal(await extension.refreshExternal({}), false);
+  assert.deepEqual(events, ['refresh']);
+  extension.pending(null);
+  extension.connect(events, false);
+  assert.equal(await extension.refreshExternal({}), true);
+  assert.deepEqual(events, ['refresh', 'refresh', 'schedule']);
 });
 
 test('late step criteria hydration cannot replace the user latest roadmap state or newer database criteria', async () => {

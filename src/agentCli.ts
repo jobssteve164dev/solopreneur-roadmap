@@ -604,7 +604,7 @@ export function buildReadOnlyAgentCommandForPromptFile(agentCli: string, promptF
     return `${quotedCli} -p --permission-mode plan${modelSegment} ${quotedInstruction} --add-dir ${shellQuote(workspaceRoot)}`;
   }
   if (executableName === 'grok') {
-    return `${quotedCli} --no-auto-update --cwd ${shellQuote(workspaceRoot)} --sandbox read-only --tools ${shellQuote('read_file,grep,list_dir')} --deny ${shellQuote('Bash')} --deny ${shellQuote('Edit')} --deny ${shellQuote('Write')} --deny ${shellQuote('MCPTool')} --always-approve${modelSegment} --output-format plain -p ${quotedInstruction}`;
+    return `${quotedCli} --no-auto-update --cwd ${shellQuote(workspaceRoot)} --sandbox read-only --tools ${shellQuote('read_file,grep,list_dir')} --allow ${shellQuote('Read(**)')} --allow ${shellQuote('Grep(**)')} --allow ${shellQuote('MCPTool(solomap_data__solomap_conversation_status)')} --deny ${shellQuote('Bash')} --deny ${shellQuote('Edit')} --deny ${shellQuote('Write')}${modelSegment} --output-format plain -p ${quotedInstruction}`;
   }
   return '';
 }

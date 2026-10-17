@@ -30,6 +30,10 @@ test('ordinary preparation delivers the complete fixed database policy without c
   assert.ok(plan.prompt.includes(body), 'preserve every byte including leading spaces and the final newline');
   assert.ok(plan.prompt.includes(policy.objectId));
   assert.ok(plan.prompt.includes(JSON.stringify(policy)), 'the delivered instructions identify their fixed revision');
+  assert.match(plan.prompt, /solomap_conversation_status/);
+  assert.match(plan.prompt, /处理任务前先调用.*start/);
+  assert.match(plan.prompt, /后续每收到一轮新的用户消息.*message/);
+  assert.doesNotMatch(plan.prompt, /SOLOMAP_TASK_COMMAND|SoloMap 检查点命令/);
   assert.equal(f.store.rows('SELECT COUNT(*) AS n FROM policy_uses')[0].n, 0, 'injection is not actual adoption');
   assert.equal(f.store.rows('SELECT COUNT(*) AS n FROM evaluations')[0].n, 0);
   assert.equal(prepared.status.globalPromptPolicyRef.revision, policy.revision);

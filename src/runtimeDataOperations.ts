@@ -895,6 +895,33 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
     const session = sessions.get(request.sessionToken);
     if (!session) throw new Error('mcp_session_expired');
     const input = request.input;
+    if (request.operation === 'checkpoint_current_run') {
+      if (!session.runIdentity) throw new Error('action_denied');
+      const bound = store.authorizedRunState(session.scope, session.runIdentity);
+      const action = String(input.action || '');
+      if (!['start', 'complete'].includes(action)) throw new Error('invalid_checkpoint_action');
+      if (action === 'start' && ['Running', 'Turn Started'].includes(String(bound.status.status)) && String(bound.status.checkpointEventId || '').endsWith(':start')) return bound;
+      const payload = {
+        action,
+        ...(input.message === undefined ? {} : { message: String(input.message) }),
+        ...(input.outcome === undefined ? {} : { outcome: String(input.outcome) }),
+        ...(input.summary === undefined ? {} : { summary: String(input.summary) }),
+        ...(input.next === undefined ? {} : { next: String(input.next) }),
+        ...(input.report === undefined ? {} : { report: input.report })
+      };
+      const intentHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+      const sequenceKey = action === 'start' ? `:${bound.status.checkpointSequence}` : '';
+      return dispatch({ operation: 'checkpoint_run', input: {
+        projectId: session.scope,
+        executionLogId: session.runIdentity.executionLogId,
+        generation: session.runIdentity.generation,
+        proof: session.runIdentity.proof,
+        expectedRevision: bound.revision,
+        expectedTurnId: bound.turnId,
+        ...payload,
+        idempotencyKey: `mcp-conversation:${bound.runId}:${bound.turnId}${sequenceKey}:${intentHash}`
+      } });
+    }
     if (session.migrationKind) {
       if (!session.runIdentity) throw new Error('action_denied');
       store.authorizedRunState(session.scope, session.runIdentity);
@@ -997,6 +1024,7 @@ export function runtimeMcpSource(globalDataPath: string, scope: string | null, g
   const retryableHandshake = (error: unknown): boolean => /(?:ECONNREFUSED|ECONNRESET|EPIPE|socket hang up|runtime_data_response_incomplete|Invalid Runtime endpoint|ENOENT|different_runtime)/.test(errorMessage(error));
   const safeReplay = (operation: string, input: Record<string, unknown>): boolean =>
     ['read', 'search', 'context', 'migration_overview', 'migration_status', 'read_recycling_plan'].includes(operation) ||
+    operation === 'checkpoint_current_run' ||
     (['write', 'link', 'export'].includes(operation) && typeof input.idempotencyKey === 'string' && input.idempotencyKey.length > 0);
   const retryOperation = (error: unknown, operation: string, input: Record<string, unknown>): { retry: boolean; resetSession: boolean } => {
     const message = errorMessage(error);

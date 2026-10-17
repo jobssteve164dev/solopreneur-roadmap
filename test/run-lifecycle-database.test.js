@@ -23,6 +23,32 @@ function request(project, executionLogId = 1) {
   return { root: project, executionLogId, nodeId: '__solo__', runKind: 'solo', prompt: '完整任务输入\n原始证据', command: 'codex', userMessage: '完成用户目标', status: 'Running', idempotencyKey: `prepare:${project}:${executionLogId}` };
 }
 
+test('a run-bound MCP checkpoint starts the prepared conversation in the existing ledger row', async () => {
+  const f = fixture();
+  try {
+    const project = await f.call('register_project', { root: f.project });
+    f.store.appendProjectJournal(project.projectId, 'prepared-card', { nodeId: '__solo__', timestamp: new Date().toISOString(), agentCli: 'codex', command: '', output: '完成用户目标', status: 'Preparing' }, 1);
+    const prepared = await f.call('prepare_run', { ...request(f.project), status: 'Preparing' });
+    const ready = await f.call('patch_run_inputs', { projectId: prepared.projectId, executionLogId: 1, generation: prepared.generation, expectedRevision: prepared.revision, prompt: '完整任务输入', command: 'codex', status: 'Running', idempotencyKey: 'mcp-ready' });
+    assert.equal(f.store.readRunTurnJournal(prepared.projectId, 1).entry.status, 'Preparing');
+    const opened = await f.operations({ operation: 'open_mcp_session', input: { projectId: prepared.projectId, openRequestId: 'mcp-conversation-start', runIdentity: { executionLogId: 1, generation: ready.generation, proof: prepared.proof } } });
+    const started = await f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'start' } });
+    assert.equal(started.turnId, prepared.turnId, 'starting the initial conversation must not create another turn');
+    assert.equal(started.status.status, 'Running');
+    assert.equal(started.status.checkpointSequence, 1);
+    assert.equal(f.store.readRunTurnJournal(prepared.projectId, 1).entry.status, 'Running');
+    const replay = await f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'start' } });
+    assert.equal(replay.revision, started.revision);
+    const report = { schemaVersion: 1, summary: '本轮结果', unmetRequirements: [], decisions: [], corrections: [], verification: [], commits: [], experienceUsage: [], lessons: [] };
+    const completed = await f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'complete', outcome: 'partial', summary: '本轮结果', report } });
+    assert.equal(completed.status.status, 'In Progress');
+    assert.equal(f.store.readRunTurnJournal(prepared.projectId, 1).entry.status, 'In Progress');
+    const completedReplay = await f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'complete', outcome: 'partial', summary: '本轮结果', report } });
+    assert.equal(completedReplay.revision, completed.revision);
+    await f.operations({ operation: 'close_mcp_session', input: { sessionToken: opened.sessionToken } });
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
 test('expanded conversation logs read every fixed-turn stdout and stderr byte from the unified database', async () => {
   const f = fixture();
   try {

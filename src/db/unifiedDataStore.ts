@@ -4213,20 +4213,26 @@ export class UnifiedDataStore {
       let unreportedClose = false;
       const sealingNativeOnClose = input.action === 'session-close' && metadata.nativeOutputPending === true;
       const finalizingNative = input.action === 'complete' && input.workspaceEvidenceSource === 'native' && metadata.nativeOutputPending === true && this.readMetadata(turnId).data.finished_at !== null;
+      const acknowledgingInitialStart = input.action === 'start' && Number(row.checkpoint_sequence) === 0 && ['Preparing', 'Running'].includes(String(row.status)) && this.readMetadata(turnId).data.finished_at === null;
       const logOffsets = Object.fromEntries(['output', 'stdout', 'stderr'].map(stream => [stream, this.readRunLogHead(projectId, input.executionLogId, stream).totalBytes]));
       if (input.action === 'start') {
         if (metadata.hostOutputPending === true || metadata.nativeOutputPending === true) throw new Error('run_output_pending');
         if (metadata.interactiveSessionClosed === true) throw new Error('session_already_closed');
         if (metadata.stopRequested === true) throw new Error('run_stop_requested');
         if (input.exitCode !== undefined) throw new Error('invalid_checkpoint_exit_code');
-        if (['Running', 'Turn Started'].includes(String(row.status))) throw new Error('turn_already_running');
-        if (!String(input.message || '').trim()) throw new Error('checkpoint_message_required');
-        const sequence = Number(this.rows('SELECT COALESCE(MAX(sequence),0)+1 AS next FROM turns WHERE task_id=?', [row.task_id])[0].next);
-        turnId = this.write({ kind: 'turn', action: 'create', scope: projectId, idempotencyKey: `${input.idempotencyKey}:turn`, data: { task_id: String(row.task_id), sequence, request_content: input.message!, started_at: now } }).objectId;
         status = 'Running';
         this.db.run('UPDATE run_control SET recovery_needed=1 WHERE run_id=?', [row.run_id]);
         this.db.run('UPDATE runs SET exit_code=NULL WHERE id=?', [row.run_id]);
-        Object.assign(metadata, { userMessage: input.message, checkpointMessage: input.message, checkpointOutcome: '', checkpointSummary: '', checkpointNext: '', checkpointImplicitTurn: false, checkpointStartSourceTurnId: String(row.current_turn_id), turnStartedAt: new Date(now).toISOString() });
+        const message = String(input.message || metadata.userMessage || '');
+        Object.assign(metadata, { userMessage: message, checkpointMessage: message, checkpointOutcome: '', checkpointSummary: '', checkpointNext: '', checkpointImplicitTurn: false, checkpointStartSourceTurnId: String(row.current_turn_id), turnStartedAt: new Date(now).toISOString() });
+        if (!acknowledgingInitialStart) {
+          if (['Running', 'Turn Started'].includes(String(row.status))) throw new Error('turn_already_running');
+          if (!String(input.message || '').trim()) throw new Error('checkpoint_message_required');
+          const sequence = Number(this.rows('SELECT COALESCE(MAX(sequence),0)+1 AS next FROM turns WHERE task_id=?', [row.task_id])[0].next);
+          turnId = this.write({ kind: 'turn', action: 'create', scope: projectId, idempotencyKey: `${input.idempotencyKey}:turn`, data: { task_id: String(row.task_id), sequence, request_content: input.message!, started_at: now } }).objectId;
+          this.db.run('INSERT INTO relations VALUES(?,?,?)', [row.run_id, 'source', turnId]);
+          this.bindRunTurnJournal(projectId, String(row.run_id), turnId, String(row.node_key), metadata);
+        }
         // Replaying a machine event cannot prove delivery of a subsequently saved policy.
         if (input.workspaceEvidenceSource !== 'native') {
           const globalPolicy = this.globalPromptPolicyReference();
@@ -4243,8 +4249,6 @@ export class UnifiedDataStore {
         delete metadata.taskReportRevision;
         delete metadata.taskReportStatus;
         delete metadata.taskReportError;
-        this.db.run('INSERT INTO relations VALUES(?,?,?)', [row.run_id, 'source', turnId]);
-        this.bindRunTurnJournal(projectId, String(row.run_id), turnId, String(row.node_key), metadata);
       } else if (input.action === 'complete') {
         if (finalizingNative) {
           const turn = this.readMetadata(turnId);
@@ -4423,7 +4427,10 @@ export class UnifiedDataStore {
       if (metadata.hostOutputPending) this.db.run('UPDATE run_control SET recovery_needed=1 WHERE run_id=?', [row.run_id]);
       else if (input.action === 'session-close' || (exitCode !== undefined && !metadata.interactiveSession)) this.db.run('UPDATE run_control SET recovery_needed=0 WHERE run_id=?', [row.run_id]);
       else if (metadata.interactiveSession) this.db.run('UPDATE run_control SET recovery_needed=1 WHERE run_id=?', [row.run_id]);
-      if (input.action !== 'start') {
+      if (input.action === 'start' && acknowledgingInitialStart) {
+        const journal = this.readRunTurnJournal(projectId, input.executionLogId, turnId);
+        this.updateProjectJournal(projectId, journal.executionLogId, { ...journal.entry, status: 'Running' });
+      } else if (input.action !== 'start') {
         const journal = this.readRunTurnJournal(projectId, input.executionLogId, turnId);
         const evidence = input.action === 'complete' || unreportedClose ? [
           `Completion decision:\n${String(metadata.checkpointSummary || '')}`,

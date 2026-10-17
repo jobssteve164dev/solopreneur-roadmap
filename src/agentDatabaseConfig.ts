@@ -10,7 +10,7 @@ const { parseTOML } = require('toml-eslint-parser');
 
 export const databaseAgentProviders = ['codex', 'claude', 'cursor', 'copilot', 'opencode', 'grok', 'antigravity'] as const;
 export type DatabaseAgentProvider = typeof databaseAgentProviders[number];
-const databaseToolNames = ['solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply'];
+const databaseToolNames = ['solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_conversation_status', 'solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply'];
 const start = '# SoloMap managed database MCP begin';
 const end = '# SoloMap managed database MCP end';
 export const codexDatabaseProfile = 'solomap';

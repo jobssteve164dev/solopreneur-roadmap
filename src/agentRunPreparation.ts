@@ -69,7 +69,7 @@ function reportInstructions(taskId: string): string {
   return buildTaskReportInstructions(taskId, '{{SOLOMAP_REPORT_JSON}}', true).split('\n').map(line => {
     if (line.startsWith('- 在 {{SOLOMAP_REPORT_JSON}}')) return '- 本轮汇报使用严格 JSON：schemaVersion=1，summary 为本轮结果，其余字段为数组：unmetRequirements、decisions、corrections、verification、commits、experienceUsage、lessons。没有内容用 []，不制造经验或提交。';
     if (line.startsWith('- 保存报告后、结算前')) return `- 提交前，在 Node 中加载 ${JSON.stringify(path.join(__dirname, 'taskReport.js'))}，调用 validateTaskReport(报告对象, 当前项目绝对路径) 预检；校验失败先精简原稿并重检。`;
-    if (line.startsWith('- 沿原有 complete')) return '- 沿原有 complete 命令结算，并附加 --report-json 参数，传入上述 JSON 的完整文本；报告问题不阻断原任务。不要为报告额外结算，也不需要生成内部报告文件。';
+    if (line.startsWith('- 沿原有 complete')) return '- 使用 solomap_conversation_status 的 complete 动作结算，并把上述完整 JSON 作为 report 参数；报告问题不阻断原任务。不要为报告额外结算，也不需要生成内部报告文件。';
     return line;
   }).join('\n');
 }
@@ -229,7 +229,8 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
       : input.readOnlyReview || migrationRun
         ? hasDatabaseInstructions ? '' : buildAgentDatabaseInstructions({ readOnly: true })
         : hasDatabaseInstructions ? '' : buildAgentDatabaseInstructions({ migrationTools: soloConversationRunKinds.includes(input.runKind as typeof soloConversationRunKinds[number]) });
-    const prompt = [input.prompt, ...(policyInstructions ? [policyInstructions] : []), ...(databaseInstructions ? [databaseInstructions] : []), ...(preloadedMemoryContext ? [preloadedMemoryContext] : []), ...(input.readOnlyReview ? [] : [`SoloMap 检查点命令：${path.join(__dirname, 'taskCheckpointProcess.js')}。通过 node "$SOLOMAP_TASK_COMMAND" 调用当前任务的 start、complete 和 session-close。初轮 complete 使用 --turn-id ${state.turnId}；后续 start 的 --turn-id 先使用上一轮 turnId，保留返回的新 turnId，并在对应 complete 的 --turn-id 中使用它。每轮结算绑定自己的 turnId，重试沿用原 turnId。`, reportInstructions(String(state.status.learningTaskId))])].join('\n\n');
+    const lifecycleInstructions = 'SoloMap 对话状态由 MCP 工具管理：收到本提示后，在处理任务前先调用 solomap_conversation_status({action:"start"})，确认当前对话已进入 Running。后续每收到一轮新的用户消息，也先调用 start，并把该轮完整原始消息放入 message。每轮交付结果时调用同一工具的 complete 动作，并提供 outcome、summary、可选 next 和 report。运行身份、版本、轮次与幂等性由插件绑定；不要运行检查点命令，也不要用通用写入工具修改对话账本。';
+    const prompt = [input.prompt, lifecycleInstructions, ...(policyInstructions ? [policyInstructions] : []), ...(databaseInstructions ? [databaseInstructions] : []), ...(preloadedMemoryContext ? [preloadedMemoryContext] : []), ...(input.readOnlyReview ? [] : [reportInstructions(String(state.status.learningTaskId))])].join('\n\n');
     state = await call('patch_run_inputs', { ...identity, expectedRevision: state.revision, prompt, command, status: input.metadata?.startWaiting === true ? 'Waiting' : 'Running', idempotencyKey: `${prepareKey}:ready:${state.revision}` }) as RunState;
   }
   } catch (error) {

@@ -4,7 +4,7 @@ import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 
 const commands = new Set(['authorizeChat', 'bindChat', 'solopreneur.internalGetStatus', 'solopreneur.internalRunAgent', 'solopreneur.internalStopAgent',
-  'solopreneur.internalApproveNode', 'solopreneur.internalDenyNode']);
+  'solopreneur.internalApproveNode', 'solopreneur.internalDenyNode', 'solopreneur.internalRefreshTimedAutomation']);
 const unavailable = '请打开 SoloMap 项目编辑器后再执行此操作。聊天和项目查询仍可使用。';
 type EditorEndpoint = { bridgeId: string; port: number; token: string; pid: number; expiresAt: number };
 const runtimeEditorEndpoints = new Map<string, EditorEndpoint>();

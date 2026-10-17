@@ -553,7 +553,9 @@ test('all Agent-maintained capability prompts publish result.json only once afte
     assert.match(prompt, /全部物理操作和最终验证完成后/);
     assert.match(prompt, /原子重命名/);
     assert.match(prompt, /写入后不得再次修改/);
-    assert.match(prompt, /--outcome candidate_complete/);
+    assert.match(prompt, /solomap_conversation_status/);
+    assert.match(prompt, /"outcome":"candidate_complete"/);
+    assert.doesNotMatch(prompt, /用检查点命令|SOLOMAP_TASK_COMMAND|--outcome/);
     assert.match(prompt, /success.*不是合法的 outcome/);
     assert.match(prompt, /不要调用 session-close/);
   }

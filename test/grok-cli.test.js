@@ -101,12 +101,13 @@ test('Grok interactive and review commands preserve the existing SoloMap convers
   );
   assert.match(review, /^'grok' --no-auto-update /);
   assert.match(review, /--sandbox read-only/);
-  assert.match(review, /--always-approve/);
+  assert.doesNotMatch(review, /--always-approve/);
   assert.match(review, /--tools 'read_file,grep,list_dir'/);
   assert.match(review, /--deny 'Bash'/);
   assert.match(review, /--deny 'Edit'/);
   assert.match(review, /--deny 'Write'/);
-  assert.match(review, /--deny 'MCPTool'/);
+  assert.match(review, /--allow 'MCPTool\(solomap_data__solomap_conversation_status\)'/);
+  assert.doesNotMatch(review, /--deny 'MCPTool'/);
   assert.match(review, /--output-format plain/);
   assert.match(review, /-p 'Read the complete SoloMap review prompt/);
   assert.match(review, /Read the complete SoloMap review prompt/);

@@ -67,7 +67,8 @@ import { prepareAgentRun, resumePreparedAgentRun, getAgentRunDeliveryOwner, type
 import { prepareMaintenanceAgentRun } from './maintenanceAgentRun';
 import { RunLifecycleClient, parseRunStatusReference, readConversationLogSnapshot, runStatusReference, runDataReference } from './runLifecycleClient';
 import { matchesRunFileEvidence } from './runWorkspace';
-import { createIntelligenceMcpSession, getIntelligenceMcpConnector } from './intelligenceMcp';
+import { createIntelligenceMcpSession, getIntelligenceMcpConnector, IntelligenceTimeScheduleInput, validateIntelligenceTimeScheduleInput } from './intelligenceMcp';
+import { intelligenceTimeScheduleTaskId } from './intelligenceTimeSchedule';
 import { getStrategyPyramidWebviewHtml } from './strategyPyramidWebview';
 import { getProjectGrowthWebviewHtml } from './projectGrowthWebview';
 import { readCachedConversationSnapshot } from './sidebarSnapshotCache';
@@ -933,6 +934,10 @@ export async function activate(context: vscode.ExtensionContext) {
     await handleRunAgent(context, nodeId, '');
   }));
 
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalRefreshTimedAutomation', async () => {
+    return refreshTimedAutomationFromExternalSettings(context);
+  }));
+
   context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalStopAgent', () => {
     let stopped = false;
     for (const t of vscode.window.terminals) {
@@ -1045,7 +1050,9 @@ export async function activate(context: vscode.ExtensionContext) {
         };
         const projectContext = await buildIntelligenceProjectContext(intelligenceSource);
         const dataSource = await runtimeProjectMcpSource(globalDataPath, selectedProjectPathForChat);
-        const mcp = await observeLocalDiagnosticStage('mcp.connect', () => createIntelligenceMcpSession(intelligenceSource, dataSource));
+        const mcp = await observeLocalDiagnosticStage('mcp.connect', () => createIntelligenceMcpSession(intelligenceSource, dataSource, {
+          setTimeSchedule: input => setIntelligenceTimeSchedule(context, selectedProjectPathForChat, input)
+        }));
         try {
           return await observeLocalDiagnosticStage('pi.chat', () => engine.chat(messages, projectContext, mcp.client));
         } finally {
@@ -3149,7 +3156,7 @@ async function getOpenCodeTerminalEnvironment(
   return buildOpenCodeTerminalEnvironment(agentCli, model, provider, apiKey);
 }
 
-async function updatePersistedSettings(context: vscode.ExtensionContext, settings: Partial<SolopreneurSettings>, options: { globalPromptSource?: 'user' | 'review_projection' } = {}): Promise<void> {
+async function updatePersistedSettings(context: vscode.ExtensionContext, settings: Partial<SolopreneurSettings>, options: { globalPromptSource?: 'user' | 'review_projection'; awaitAutomationSchedule?: boolean } = {}): Promise<void> {
   const databaseWriteId = `extension-settings:${crypto.randomUUID()}`;
   const currentSettings = pendingPersistedSettings || getPersistedSettings(context);
   const hasSetting = (key: keyof SolopreneurSettings) => (
@@ -3307,7 +3314,8 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
       scheduleFocusReminder(context);
     }
     if (Object.prototype.hasOwnProperty.call(automationPatch, 'scheduledTasks') || automationPatch.scheduledTaskMutations?.length || Object.prototype.hasOwnProperty.call(triggerPatch, 'scheduled_time') || Object.prototype.hasOwnProperty.call(automationPatch.triggerPatches || {}, 'scheduled_time')) {
-      scheduleTimedAutomationTask(context);
+      if (options.awaitAutomationSchedule) await scheduleTimedAutomationTaskAsync(context);
+      else scheduleTimedAutomationTask(context);
     }
   }
   const previousRuntimeRoot = normalizeGlobalDataPathForExtension(currentSettings.globalDataPath);
@@ -3321,6 +3329,33 @@ async function updatePersistedSettings(context: vscode.ExtensionContext, setting
       request => sendRuntimeDataRequest(previousRuntimeRoot, request));
     await activateObservedBackgroundRuntime(context, nextRuntimeRoot);
   }
+}
+
+async function setIntelligenceTimeSchedule(context: vscode.ExtensionContext, projectPath: string, input: IntelligenceTimeScheduleInput): Promise<Record<string, unknown>> {
+  input = validateIntelligenceTimeScheduleInput(input);
+  const project = getProjects(context).find(item => item.path === projectPath);
+  if (!project || !projectPath) throw new Error('请先在 SoloMap 中选择要安排任务的项目。');
+  const taskId = intelligenceTimeScheduleTaskId(projectPath, input);
+  const task: SolomapScheduledAutomationTask = {
+    id: taskId,
+    title: input.title,
+    enabled: true,
+    projectPath,
+    projectName: project.name,
+    scheduleKind: input.scheduleKind,
+    assignee: input.assignee,
+    ...(input.scheduleKind === 'once' ? { scheduledAt: input.scheduledAt } : { timeOfDay: input.timeOfDay }),
+    ...(input.assignee === 'agent' ? { prompt: input.prompt } : {})
+  };
+  await updatePersistedSettings(context, { automationTasks: { scheduledTaskMutations: [{ operation: 'add', taskId, task }] } }, { awaitAutomationSchedule: true });
+  return {
+    taskId,
+    title: task.title,
+    scheduleKind: task.scheduleKind,
+    ...(task.scheduledAt ? { scheduledAt: task.scheduledAt } : {}),
+    ...(task.timeOfDay ? { timeOfDay: task.timeOfDay } : {}),
+    assignee: task.assignee
+  };
 }
 
 async function syncCognitiveRuntimeConfig(context: vscode.ExtensionContext, settings: SolopreneurSettings): Promise<void> {
@@ -7641,7 +7676,7 @@ async function handleContinueConversationTurn(
       const started = await registerInteractiveConversationTurn(continuationProject, reusable.conversationId, terminalMessage, preserveRoadmapState, settings.globalDataPath, continuationEngine);
       reusable.terminal.show(true);
       if (started) {
-        const delivered = await sendAgentTextWhenTerminalReady(reusable.terminal, [terminalMessage, `本轮已由 SoloMap 登记为执行中，无需再次运行 start。本轮 turnId：${started.turnId}。完成时运行 node "$SOLOMAP_TASK_COMMAND" complete --turn-id ${shellQuote(started.turnId)}，沿用原汇报要求。`].join('\n\n'), getAgentProvider(String(started.agentCli)));
+        const delivered = await sendAgentTextWhenTerminalReady(reusable.terminal, [terminalMessage, `本轮已由 SoloMap 预登记。本轮 turnId：${started.turnId}。开始处理前仍调用 MCP 工具 solomap_conversation_status 的 start 动作，插件会幂等确认同一轮；完成时调用同一工具的 complete 动作并沿用原汇报要求。不要运行检查点命令。`].join('\n\n'), getAgentProvider(String(started.agentCli)));
         if (!delivered) throw new Error('无法把本轮消息发送到当前 Agent 终端。');
         if (syncEngine === continuationEngine) postNodeConversations(nodeId);
       } else vscode.window.showInformationMessage('当前 Agent 终端仍在处理上一轮，已为你打开现有会话。');
@@ -8758,6 +8793,15 @@ async function deferOrFailScheduledOccurrence(context: vscode.ExtensionContext, 
 
 function scheduleTimedAutomationTask(context: vscode.ExtensionContext): void {
   void scheduleTimedAutomationTaskAsync(context).catch(error => console.error('SoloMap scheduled task synchronization failed:', error));
+}
+
+async function refreshTimedAutomationFromExternalSettings(context: vscode.ExtensionContext): Promise<boolean> {
+  if (pendingPersistedSettings) return false;
+  const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+  await refreshExtensionSettingsFromDatabase(context, root);
+  if (pendingPersistedSettings) return false;
+  await scheduleTimedAutomationTaskAsync(context);
+  return true;
 }
 
 async function scheduleTimedAutomationTaskAsync(context: vscode.ExtensionContext): Promise<void> {

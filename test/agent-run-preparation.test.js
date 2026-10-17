@@ -55,8 +55,9 @@ test('host preparation persists all task input and native identity without produ
     assert.match(plan.prompt, /实现或判断前.*solomap_context/);
     assert.match(plan.prompt, /任务收尾.*未来任务仍会复用/);
     assert.match(plan.prompt, new RegExp(`SoloMap-Task: task-${state.taskId}`));
-    assert.match(plan.prompt, /--report-json/);
-    assert.match(plan.prompt, /taskCheckpointProcess\.js/);
+    assert.match(plan.prompt, /solomap_conversation_status\(\{action:"start"\}\)/);
+    assert.match(plan.prompt, /complete 动作/);
+    assert.doesNotMatch(plan.prompt, /--report-json|taskCheckpointProcess\.js|SOLOMAP_TASK_COMMAND/);
     assert.doesNotMatch(plan.prompt, /agent-runs\/|\.solopreneur\/runtime/);
     assert.equal(spawnSync('bash', ['-n', '-c', prepared.finalCommand], { encoding: 'utf8' }).status, 0);
     assert.deepEqual(fs.readdirSync(path.join(projectRoot, '.solopreneur')), ['project.json']);
@@ -119,7 +120,7 @@ test('stable launch intents reuse one task and complete launch parameters across
   } finally { await ops.close(); store.close(); }
 });
 
-test('read-only review preparation retains full evidence without asking the reviewer to write checkpoints', async () => {
+test('read-only review preparation retains full evidence and uses only the dedicated MCP checkpoint writer', async () => {
   const { prepareAgentRun } = require('../out/agentRunPreparation.js');
   const base = fixtureRoot('solomap-review-preparer-');
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -135,6 +136,7 @@ test('read-only review preparation retains full evidence without asking the revi
     assert.match(plan.prompt, /solomap_search/);
     assert.match(plan.prompt, /solomap_read/);
     assert.match(plan.prompt, /本轮对数据库记忆仅可检索和读取/);
+    assert.match(plan.prompt, /solomap_conversation_status\(\{action:"start"\}\)/);
     assert.doesNotMatch(plan.prompt, /solomap_write|solomap_link|solomap_export|solomap_migration_start|solomap_recycling_preview|taskCheckpointProcess|--report-json/);
     assert.equal(plan.status.agentLaunch.readOnly, true);
     assert.equal(plan.status.interactiveSession, false);
@@ -143,7 +145,7 @@ test('read-only review preparation retains full evidence without asking the revi
   } finally { await ops.close(); store.close(); }
 });
 
-test('Grok read-only review receives bounded host-loaded database memory while MCP remains denied', async () => {
+test('Grok read-only review receives bounded memory and only the dedicated MCP checkpoint permission', async () => {
   const { prepareAgentRun } = require('../out/agentRunPreparation.js');
   const base = fixtureRoot('solomap-grok-review-memory-'); const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store); const call = (operation, input) => ops({ operation, input });
@@ -155,7 +157,9 @@ test('Grok read-only review receives bounded host-loaded database memory while M
     assert.match(plan.prompt, /宿主按本轮目标加载的固定版本/);
     assert.match(plan.prompt, /必须核对真实测试证据/);
     assert.match(plan.prompt, /不需要为了启动再次调用 MCP/);
-    assert.match(plan.command, /--deny 'MCPTool'/);
+    assert.match(plan.prompt, /solomap_conversation_status\(\{action:"start"\}\)/);
+    assert.match(plan.command, /--allow 'MCPTool\(solomap_data__solomap_conversation_status\)'/);
+    assert.doesNotMatch(plan.command, /--deny 'MCPTool'/);
     assert.doesNotMatch(plan.prompt, /solomap_write|solomap_link|solomap_export/);
   } finally { await ops.close(); store.close(); }
 });

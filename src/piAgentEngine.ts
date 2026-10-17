@@ -7,7 +7,7 @@ import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { getAgentCliFamily, resolveAgentCliWithinFamily } from './agentCli';
 import { CognitiveShadowEngine, CognitiveShadowInput, CognitiveShadowProposal } from './autonomousRuntime';
 import { IntelligenceMessage } from './intelligenceChat';
-import { getIntelligenceMcpConnector } from './intelligenceMcp';
+import { getIntelligenceMcpConnector, intelligenceActionToolNames } from './intelligenceMcp';
 import { unifiedToolNames } from './unifiedMcp';
 import { buildAgentDatabaseInstructions } from './agentDatabaseConfig';
 import {
@@ -113,6 +113,15 @@ function embeddedModel(model: string): Record<string, unknown> {
   };
 }
 
+function intelligenceLocalTimeContext(now = new Date()): string {
+  const offsetMinutes = -now.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const absolute = Math.abs(offsetMinutes);
+  const offset = `${sign}${String(Math.floor(absolute / 60)).padStart(2, '0')}:${String(absolute % 60).padStart(2, '0')}`;
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000).toISOString().replace('Z', offset);
+  return `当前时间：${local}；当前时区：${Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'}。解析今天、明天和钟点时以此为准。`;
+}
+
 export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
   public readonly framework = '@earendil-works/pi-agent-core';
   public readonly id: string;
@@ -147,7 +156,7 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
     const database = listed.some(tool => tool.name === 'solomap_write');
     const allowedNames = new Set(getIntelligenceMcpConnector(database).permissions?.tools || []);
     const availableTools = listed.filter(tool =>
-      allowedNames.has(tool.name) && (tool.annotations?.readOnlyHint === true || (database && unifiedToolNames.includes(tool.name)))
+      allowedNames.has(tool.name) && (tool.annotations?.readOnlyHint === true || intelligenceActionToolNames.includes(tool.name) || (database && unifiedToolNames.includes(tool.name)))
       && tool.annotations?.destructiveHint !== true);
     const toolNames = new Set(availableTools.map(tool => tool.name));
     const schema = database && readTools?.readResource ? await readTools.readResource({ uri: 'solomap://schema' }) : undefined;
@@ -156,8 +165,9 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
       '直接回答最后一条用户消息。结合对话历史和已提供的项目名称；不知道的事实就明确说不知道，不编造项目进展。',
       '本轮输入中的 projectContext 是请求开始时从当前权威数据读取的快照，可以直接用于判断；所需事实不在 projectContext 中时再查询工具。历史回答里出现的项目名称不代表当前项目；泛问候、能力介绍和无关话题不要主动带入项目。',
       '使用与用户最后一条消息相同的语言回答。',
+      intelligenceLocalTimeContext(),
       readTools
-        ? `你可以使用 SoloMap 的${database ? '查询与数据库读写' : '只读'} MCP 工具：${JSON.stringify(availableTools.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema })))}。调用工具时先只输出一行 JSON：{"toolCall":{"name":"工具名","arguments":{}}}。收到工具结果后再回答。不得请求其他工具、读取文件或执行任务；${database ? '用户授权的数据写入通过数据库工具完成；设置修改和任务执行仍回到对应项目的既有操作。' : '用户要求更改设置或执行任务时，说明当前只能查询。'}`
+        ? `你可以使用 SoloMap 的 MCP 工具：${JSON.stringify(availableTools.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema })))}。调用工具时先只输出一行 JSON：{"toolCall":{"name":"工具名","arguments":{}}}。收到工具结果后再回答。不得请求其他工具、读取文件或执行任务；时间安排必须使用 set_time_schedule，其他设置修改和任务执行仍回到对应项目的既有操作。`
         : '这里只进行对话，不调用工具、不读取文件、不执行任务。用户要执行时，指出需要回到对应项目操作。',
       database ? buildAgentDatabaseInstructions() : '',
       schema ? `数据库字段合同：${JSON.stringify(schema.contents)}` : '',
