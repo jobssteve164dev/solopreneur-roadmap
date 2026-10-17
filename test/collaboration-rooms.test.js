@@ -228,3 +228,87 @@ test('public lobby sessions require an account grant and never fall back to an a
   assert.equal(result.ok, true);
   assert.equal(result.ticket, 'signed-ticket');
 });
+
+test('public lobby retries one transient transport failure before joining', async () => {
+  const diagnostics = [];
+  let calls = 0;
+  const result = await createCollaborationLobbySession('Builder', 'account-grant', async () => {
+    calls += 1;
+    if (calls === 1) throw new TypeError('fetch failed');
+    return new Response(JSON.stringify({
+      ok: true,
+      ticket: 'retry-ticket',
+      memberId: 'retry-member',
+      sessionStartedAt: 1000,
+      sessionEndsAt: 2000
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }, event => diagnostics.push(event));
+  assert.equal(calls, 2);
+  assert.equal(result.ok, true);
+  assert.equal(result.ticket, 'retry-ticket');
+  assert.deepEqual(diagnostics.map(event => [event.stage, event.outcome, event.error]), [
+    ['lobby_session', 'fallback', 'collaboration_network_error']
+  ]);
+});
+
+test('public lobby returns a stable network error after both transport attempts fail', async () => {
+  const diagnostics = [];
+  let calls = 0;
+  const result = await createCollaborationLobbySession('Builder', 'account-grant', async () => {
+    calls += 1;
+    throw new TypeError('fetch failed');
+  }, event => diagnostics.push(event));
+  assert.equal(calls, 2);
+  assert.deepEqual(result, { ok: false, error: 'collaboration_network_error' });
+  assert.deepEqual(diagnostics.map(event => [event.stage, event.outcome, event.error]), [
+    ['lobby_session', 'fallback', 'collaboration_network_error'],
+    ['lobby_session', 'failure', 'collaboration_network_error']
+  ]);
+});
+
+test('public lobby deadline covers a stalled response body before retrying', async () => {
+  const diagnostics = [];
+  let calls = 0;
+  const startedAt = Date.now();
+  const result = await createCollaborationLobbySession('Builder', 'account-grant', async () => {
+    calls += 1;
+    if (calls === 1) {
+      return new Response(new ReadableStream({
+        start(controller) {
+          setTimeout(() => {
+            controller.enqueue(new TextEncoder().encode(JSON.stringify({ ok: true, ticket: 'too-late' })));
+            controller.close();
+          }, 200);
+        }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({
+      ok: true,
+      ticket: 'body-retry-ticket',
+      memberId: 'body-retry-member',
+      sessionStartedAt: 1000,
+      sessionEndsAt: 2000
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }, event => diagnostics.push(event), 80);
+  assert.equal(calls, 2);
+  assert.equal(result.ticket, 'body-retry-ticket');
+  assert.ok(Date.now() - startedAt < 180, 'the stalled response body must not outlive the request deadline');
+  assert.deepEqual(diagnostics.map(event => [event.outcome, event.error]), [
+    ['fallback', 'collaboration_request_timeout']
+  ]);
+});
+
+test('public lobby retries a transient 5xx and records the terminal 5xx failure', async () => {
+  const diagnostics = [];
+  let calls = 0;
+  const result = await createCollaborationLobbySession('Builder', 'account-grant', async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ ok: false, error: 'relay_unavailable' }), { status: 503 });
+  }, event => diagnostics.push(event));
+  assert.equal(calls, 2);
+  assert.deepEqual(result, { ok: false, error: 'relay_unavailable' });
+  assert.deepEqual(diagnostics.map(event => [event.outcome, event.status, event.error]), [
+    ['fallback', 503, 'relay_unavailable'],
+    ['failure', 503, 'relay_unavailable']
+  ]);
+});

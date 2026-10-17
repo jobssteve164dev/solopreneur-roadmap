@@ -82,14 +82,14 @@ test('recovery consumes a late stop request for an already finished non-interact
   } finally { if (recovery) await recovery.close(); store.close(); }
 });
 
-test('recovery stops an interactive process after its terminal host disappears', async () => {
+test('recovery preserves a live interactive process when only its terminal host disappears', async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-orphaned-terminal-recovery-'));
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const wrapper = spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>process.exit(0));process.stdout.write('ready');setInterval(()=>{},1000)"], { cwd: project, stdio: 'pipe' });
   await once(wrapper.stdout, 'data'); wrapper.stderr.resume();
   const stat = fs.readFileSync(`/proc/${wrapper.pid}/stat`, 'utf8');
   const birth = `proc:${stat.slice(stat.lastIndexOf(') ') + 2).trim().split(/\s+/)[19]}`;
-  const store = new UnifiedDataStore(root); let recovery; let now = 1000;
+  const store = new UnifiedDataStore(root); let recovery;
   try {
     const identity = await store.registerProject({ root: project });
     let run = store.prepareRun(identity.projectId, identity.locationId, {
@@ -98,17 +98,16 @@ test('recovery stops an interactive process after its terminal host disappears',
       deliveryOwner: { id: 'closed-window', pid: 1073741824, birth: 'proc:gone' }, idempotencyKey: 'orphaned-terminal-run'
     });
     run = store.claimRun(run.projectId, { executionLogId: 1, expectedRevision: run.revision, agentPid: wrapper.pid, processBirth: birth, terminalDeliveryId: 'delivery-1', idempotencyKey: 'orphaned-terminal-claim' });
-    recovery = new RunRecovery(store, undefined, () => now, 1000);
+    recovery = new RunRecovery(store);
     await recovery.recover();
-    assert.equal(wrapper.exitCode, null, 'the grace period must allow a restored terminal host to reclaim the run');
-    now += 1001;
-    const ended = once(wrapper, 'exit');
+    assert.equal(wrapper.exitCode, null, 'recovery must preserve a live run when its display owner is missing');
     await recovery.recover();
-    assert.equal(await Promise.race([ended.then(() => 'exited'), new Promise(resolve => { const timer = setTimeout(() => resolve('timeout'), 2000); timer.unref(); })]), 'exited');
-    const closed = store.readRunState(run.projectId, 1);
-    assert.equal(closed.status.interactiveSessionClosed, true);
-    assert.equal(closed.status.stopReason, '承载当前对话的终端窗口已关闭。');
-    assert.equal(store.recoverableRunStates().items.length, 0);
+    await recovery.recover();
+    assert.equal(wrapper.exitCode, null, 'display ownership loss must not terminate a verified live execution');
+    const preserved = store.readRunState(run.projectId, 1);
+    assert.notEqual(preserved.status.stopRequested, true);
+    assert.notEqual(preserved.status.interactiveSessionClosed, true);
+    assert.equal(store.recoverableRunStates().items.length, 1);
   } finally {
     if (recovery) await recovery.close();
     if (wrapper.exitCode === null && wrapper.signalCode === null) { const ended = once(wrapper, 'exit'); wrapper.kill('SIGKILL'); await ended; }

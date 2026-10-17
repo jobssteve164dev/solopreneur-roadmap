@@ -112,6 +112,7 @@ async function main(): Promise<void> {
   let captures: Promise<void>[] = [];
   let temporaryInput = false;
   let requestedSignal: NodeJS.Signals | undefined;
+  let terminationDecision = Promise.resolve();
   const continuationStopSummary = (exitCode: number): string | undefined => {
     const intent = state.status.stopRequestIntent as { outcome?: string } | undefined;
     if (state.status.stopRequested && intent?.outcome === 'partial' && !state.status.failureCode && !state.status.failureReason
@@ -123,7 +124,17 @@ async function main(): Promise<void> {
     try { if (process.platform === 'win32') child.kill(signal); else process.kill(-child.pid, signal); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
   };
-  const onTerminate = () => { requestedSignal = 'SIGTERM'; signalChild('SIGTERM'); };
+  const onTerminate = () => {
+    terminationDecision = (async () => {
+      try {
+        const latest = await request<RunState>('read_run_state', identity);
+        if (latest.generation !== generation || latest.turnId !== state.turnId || !latest.status.stopRequested) return;
+        state = latest;
+        requestedSignal = 'SIGTERM';
+        signalChild('SIGTERM');
+      } catch { /* A transport or stale-owner failure is not authority to stop a live Agent. */ }
+    })();
+  };
   const onInterrupt = () => { requestedSignal = 'SIGINT'; signalChild('SIGINT'); };
   process.on('SIGTERM', onTerminate);
   process.on('SIGINT', onInterrupt);
@@ -155,13 +166,14 @@ async function main(): Promise<void> {
       }
     });
   };
-  const checkStopped = () => {
+  const checkStopped = async () => {
+    await terminationDecision;
     if (requestedSignal) throw Object.assign(new Error(`执行已停止：${requestedSignal}`), { exitCode: requestedSignal === 'SIGINT' ? 130 : 143 });
   };
   const execute = async (command: string, streams: [string, string], terminal: boolean, visible: boolean, collect = false): Promise<CapturedAgentProcess> => {
     if (!command.trim()) throw new Error('run_command_required');
     const heads = await Promise.all(streams.map(stream => request<{ nextSequence: number; totalBytes: number }>('read_run_log_head', { ...identity, stream })));
-    checkStopped();
+    await checkStopped();
     const inner = terminal ? `if command -v script >/dev/null 2>&1; then exec script -q -f -e -c ${shellQuote(command)} /dev/null; else exec bash -c ${shellQuote(command)}; fi` : `exec bash -c ${shellQuote(command)}`;
     // The child cannot execute the Agent before its PID is durably registered.
     // If the wrapper dies before releasing fd 3, EOF exits this gate.
@@ -181,7 +193,7 @@ async function main(): Promise<void> {
     void exited.catch(() => undefined);
     if (!child.pid) await exited;
     await patch({ agentChildPid: child.pid!, processChildBirth: processBirth(child.pid!) });
-    checkStopped();
+    await checkStopped();
     // Attach readers before releasing the gate. Node drains unread pipes when
     // a short-lived child exits, so asynchronous discovery must happen first.
     const collected: Buffer[][] = [[], []];
@@ -193,7 +205,7 @@ async function main(): Promise<void> {
     const finished = Promise.all([...captures, exited]);
     void finished.catch(() => undefined);
     for (;;) {
-      checkStopped();
+      await checkStopped();
       const permission = await request<{ permission: 'allow' | 'wait' | 'deny'; reason: string }>('read_run_launch_permission', { ...identity, generation, proof, expectedTurnId: plan.turnId });
       if (permission.permission === 'allow') break;
       if (permission.permission === 'deny') {
@@ -209,7 +221,7 @@ async function main(): Promise<void> {
     const result = await finished;
     const [exitCode, signal] = result[2] as [number | null, NodeJS.Signals | null];
     const code = exitCode ?? (signal === 'SIGINT' ? 130 : 143);
-    checkStopped();
+    await checkStopped();
     return { code, stdout: Buffer.concat(collected[0]), stderr: Buffer.concat(collected[1]) };
   };
   const startupFailed = async (offsets: number[]): Promise<boolean> => {

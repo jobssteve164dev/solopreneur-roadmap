@@ -1531,7 +1531,11 @@ async function handleSharedWebviewAction(
         }
       }
       const sessionGrant = verified.grant || cached.grant;
-      const result = await createCollaborationLobbySession(String(request.nickname || ''), sessionGrant, fetch);
+      const result = await createCollaborationLobbySession(String(request.nickname || ''), sessionGrant, fetch, event => {
+        const detail = `${event.outcome}:${event.status || 0}:${event.durationMs}:${event.error}`;
+        recordLocalDiagnosticError(diagnosticDataPath, `collaboration.lobby.${event.stage}`, detail);
+        console.warn(`SoloMap collaboration lobby ${event.outcome} at ${event.stage}: ${detail}`);
+      });
       if (!await isCurrentPassportGrant(context, sessionGrant)) {
         await respond({ command: 'collaborationLobbyJoinFailed', error: 'account_changed' });
         return;

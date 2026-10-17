@@ -30,7 +30,8 @@ test('the shared packaged runner commits complete output and host completion wit
       assert.equal(runtime.exitCode, null, errors); assert.ok(Date.now() < deadline, errors || 'Runtime must become ready');
       await new Promise(resolve => setTimeout(resolve, 20));
     }
-    agent = spawn(process.execPath, [runner, '--global-data-path', root, '--project-path', projectRoot, '--execution-log-id', '1'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const agentEnv = { ...process.env }; delete agentEnv.SOLOMAP_TERMINAL_DELIVERY_ID;
+    agent = spawn(process.execPath, [runner, '--global-data-path', root, '--project-path', projectRoot, '--execution-log-id', '1'], { stdio: ['ignore', 'pipe', 'pipe'], env: agentEnv });
     const stdout = []; let runnerErrors = ''; agent.stdout.on('data', b => stdout.push(b)); agent.stderr.on('data', b => { runnerErrors += b; });
     const [code] = await once(agent, 'exit');
     assert.equal(code, 0, runnerErrors);
@@ -47,7 +48,7 @@ test('the shared packaged runner commits complete output and host completion wit
     assert.deepEqual(fs.readdirSync(path.join(projectRoot, '.solopreneur')), ['project.json']);
     assert.equal(fs.existsSync(path.join(root, 'tmp')), false, 'no path was required by this command');
   } finally {
-    if (agent && agent.exitCode === null) { const exited = once(agent, 'exit'); agent.kill('SIGTERM'); await exited; }
+    if (agent && agent.exitCode === null) { const exited = once(agent, 'exit'); agent.kill('SIGKILL'); await exited; }
     if (runtime.exitCode === null) { const exited = once(runtime, 'exit'); await sendRuntimeControlCommand(root, 'stop'); await exited; }
     fs.rmSync(base, { recursive: true, force: true });
   }
@@ -97,7 +98,7 @@ for (const exitCode of [0, 7]) test(`maintenance execution captures its full res
     const state = await f.call('read_run_state');
     await f.call('patch_run_state', { generation: state.generation, expectedRevision: state.revision,
       patch: { maintenanceResultPath: resultPath, maintenanceWorkspaceRoot: directory }, idempotencyKey: 'owned-install-paths' });
-    const agent = f.startAgent({ ...process.env, FIXTURE_RESULT_FILE: resultPath });
+    const agent = f.startAgent({ FIXTURE_RESULT_FILE: resultPath });
     const [code] = await once(agent, 'exit'); assert.equal(code, exitCode, f.stderr().toString());
     const final = await f.call('read_run_state');
     const purpose = `maintenance_result_${final.generation}`;
@@ -156,14 +157,16 @@ async function executionFixture(command, metadata = {}, initialOutput = '', runK
   return {
     root, projectRoot, prepared, startRuntime, stopRuntime,
     call: (operation, input = {}) => sendRuntimeDataRequest(root, { operation, input: { projectId: prepared.projectId, executionLogId: 1, ...input } }),
-    startAgent(env = process.env, selectedExecutionLogId = 1) {
-      agent = spawn(process.execPath, [path.resolve(__dirname, '../out/runAgentProcess.js'), '--global-data-path', root, '--project-path', projectRoot, '--execution-log-id', String(selectedExecutionLogId)], { stdio: 'pipe', env });
+    startAgent(env = {}, selectedExecutionLogId = 1) {
+      const agentEnv = { ...process.env, ...env };
+      if (!Object.hasOwn(env, 'SOLOMAP_TERMINAL_DELIVERY_ID')) delete agentEnv.SOLOMAP_TERMINAL_DELIVERY_ID;
+      agent = spawn(process.execPath, [path.resolve(__dirname, '../out/runAgentProcess.js'), '--global-data-path', root, '--project-path', projectRoot, '--execution-log-id', String(selectedExecutionLogId)], { stdio: 'pipe', env: agentEnv });
       agent.stdout.on('data', b => output.push(b)); agent.stderr.on('data', b => errors.push(b));
       return agent;
     },
     stdout: () => Buffer.concat(output), stderr: () => Buffer.concat(errors),
     async close() {
-      if (agent?.exitCode === null && agent.signalCode === null) { const exited = once(agent, 'exit'); agent.kill('SIGTERM'); await exited; }
+      if (agent?.exitCode === null && agent.signalCode === null) { const exited = once(agent, 'exit'); agent.kill('SIGKILL'); await exited; }
       await stopRuntime();
       fs.rmSync(base, { recursive: true, force: true });
     }
@@ -176,7 +179,7 @@ test('the shared runner preserves the captured Claude native home after the proc
   const home = path.join(f.root, 'native-home'); const other = path.join(f.root, 'other-native-home');
   try {
     await f.call('write_run_binding', { generation: f.prepared.generation, expectedHeadRevision: 0, seed: { runId: '1', provider: 'claude', workspaceRoot: f.projectRoot, cliPath: 'claude', bindingNonce: '2'.repeat(64), method: 'caller_assigned', contract: 'official_stable', providerContext: { claude: { claudeHome: home } } }, idempotencyKey: 'claude-home-seed' });
-    const agent = f.startAgent({ ...process.env, CLAUDE_CONFIG_DIR: other });
+    const agent = f.startAgent({ CLAUDE_CONFIG_DIR: other });
     assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
     assert.equal(f.stdout().toString(), home);
     assert.equal(fs.existsSync(other), false);
@@ -194,7 +197,7 @@ test('Claude preflight preserves the source native MCP configuration after the d
   });
   try {
     await f.call('write_run_binding', { generation: f.prepared.generation, expectedHeadRevision: 0, seed: { runId: '1', provider: 'claude', workspaceRoot: f.projectRoot, cliPath: 'claude', bindingNonce: '3'.repeat(64), method: 'caller_assigned', contract: 'official_stable', providerContext: { claude: { claudeHome: path.dirname(original), configPath: original } } }, idempotencyKey: 'claude-config-seed' });
-    const agent = f.startAgent({ ...process.env, CLAUDE_CONFIG_DIR: path.dirname(other) });
+    const agent = f.startAgent({ CLAUDE_CONFIG_DIR: path.dirname(other) });
     assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
     const configured = JSON.parse(fs.readFileSync(original, 'utf8'));
     assert.equal(configured.mcpServers.solomap_data?.env.SOLOMAP_MANAGED_BRIDGE, '1');
@@ -208,7 +211,7 @@ test('a default Claude native context keeps the config override unset when the r
   const f = await executionFixture(`${shellQuote(process.execPath)} -e ${shellQuote(program)}`, { agentCli: 'claude', sessionProvider: 'claude', interactiveSession: false });
   try {
     await f.call('write_run_binding', { generation: f.prepared.generation, expectedHeadRevision: 0, seed: { runId: '1', provider: 'claude', workspaceRoot: f.projectRoot, cliPath: 'claude', bindingNonce: '4'.repeat(64), method: 'caller_assigned', contract: 'official_stable', providerContext: { claude: { claudeHome: path.join(f.root, 'default-home'), configDirOverride: null } } }, idempotencyKey: 'claude-default-seed' });
-    const agent = f.startAgent({ ...process.env, CLAUDE_CONFIG_DIR: path.join(f.root, 'other-home') });
+    const agent = f.startAgent({ CLAUDE_CONFIG_DIR: path.join(f.root, 'other-home') });
     assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
     assert.equal(f.stdout().toString(), 'unset');
   } finally { await f.close(); }
@@ -225,7 +228,7 @@ for (const kind of ['unchanged-old', 'new-receipt', 'invalid-directory']) test(`
       bytes: Buffer.from('previous receipt🌿').toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: 'previous-maintenance-receipt' });
     let state = await f.call('read_run_state');
     await f.call('patch_run_state', { generation: state.generation, expectedRevision: state.revision, patch: { maintenanceResultPath: resultPath }, idempotencyKey: 'maintenance-result-target' });
-    const agent = f.startAgent({ ...process.env, FIXTURE_RESULT_FILE: resultPath }); const [code] = await once(agent, 'exit');
+    const agent = f.startAgent({ FIXTURE_RESULT_FILE: resultPath }); const [code] = await once(agent, 'exit');
     state = await f.call('read_run_state');
     assert.ok(state.generation > f.prepared.generation);
     const current = await f.call('read_run_document', { purpose: `maintenance_result_${state.generation}` });
@@ -278,7 +281,7 @@ for (const mode of ['auto', 'never']) for (const preconfirmed of [false, true]) 
     const binding = await f.call('write_run_binding', { generation: f.prepared.generation, expectedHeadRevision: 0, seed: { runId: '1', provider: 'codex', workspaceRoot: f.projectRoot, cliPath: cli, bindingNonce: '1'.repeat(64), createdAt: f.prepared.status.startedAt, providerContext: { codex: { codexHome: home } }, method: 'provider_callback', contract: 'official_stable' }, idempotencyKey: 'revision-binding-seed' });
     const planned = await f.call('write_run_binding', { generation: f.prepared.generation, expectedHeadRevision: binding.headRevision, revision: { sessionId, method: 'provider_callback', contract: 'official_stable', state: 'planned', createdAt: f.prepared.status.startedAt, evidence: { source: 'confirmed_resume_target' } }, idempotencyKey: 'revision-binding-planned' });
     if (preconfirmed) await f.call('write_run_binding', { generation: f.prepared.generation, expectedHeadRevision: planned.headRevision, confirmSessionId: sessionId, evidence: { source: 'confirmed_resume_transcript' }, idempotencyKey: 'revision-binding-preconfirmed' });
-    const agent = f.startAgent({ ...process.env, CODEX_HOME: path.join(cliRoot, 'other-codex-home') }); const [code] = await once(agent, 'exit');
+    const agent = f.startAgent({ CODEX_HOME: path.join(cliRoot, 'other-codex-home') }); const [code] = await once(agent, 'exit');
     assert.equal(code, 0, f.stderr().toString()); assert.ok(f.stdout().toString().includes(text));
     assert.match(fs.readFileSync(path.join(home, 'config.toml'), 'utf8'), /model = "original-provider-model"/);
     assert.equal(fs.existsSync(path.join(cliRoot, 'config.toml')), false, 'the fallback configuration must not replace the source session configuration');
@@ -341,7 +344,7 @@ test('a Flow paused after wrapper claim keeps its child gated and resumes the sa
     const id = run.status.rootExecutionLogId;
     const hook = path.join(path.dirname(f.root), 'pause-before-gate.cjs');
     fs.writeFileSync(hook, `const api=require(${JSON.stringify(path.resolve(__dirname, '../out/autonomousRuntimeControl.js'))});const original=api.sendRuntimeDataRequest;let paused=false;api.sendRuntimeDataRequest=async function(root,request){if(!paused&&request.operation==='read_run_log_head'&&request.input.executionLogId===${id}){paused=true;const current=await original(root,{operation:'read_flow_trace',input:{root:${JSON.stringify(f.projectRoot)},flowId:${JSON.stringify(flow.flowId)}}});await original(root,{operation:'write_flow_trace',input:{root:${JSON.stringify(f.projectRoot)},flow:{...current.flow,status:'paused'},expectedRevision:current.revision,idempotencyKey:'pause-after-claim'}});process.stderr.write('paused-before-child\\n');}return original(root,request);};`);
-    const agent = f.startAgent({ ...process.env, NODE_OPTIONS: `--require=${hook}` }, id);
+    const agent = f.startAgent({ NODE_OPTIONS: `--require=${hook}` }, id);
     const deadline = Date.now() + 10000;
     let state;
     do {
@@ -369,7 +372,7 @@ test('a newer parent turn after wrapper claim prevents an old automatic correcti
     const run = await f.call('prepare_run', { root: f.projectRoot, executionLogId: 2, parentExecutionLogId: 1, expectedParentTurnId: parent.turnId, nodeId: '__solo__', runKind: 'agent_review_revision', prompt: '修正旧轮次', command, userMessage: '原目标', idempotencyKey: 'gated-parent-revision' });
     const hook = path.join(path.dirname(f.root), 'newer-parent-before-gate.cjs');
     fs.writeFileSync(hook, `const api=require(${JSON.stringify(path.resolve(__dirname, '../out/autonomousRuntimeControl.js'))});const original=api.sendRuntimeDataRequest;let advanced=false;api.sendRuntimeDataRequest=async function(root,request){if(!advanced&&request.operation==='read_run_log_head'&&request.input.executionLogId===2){advanced=true;const identity={projectId:${JSON.stringify(run.projectId)},executionLogId:1};const current=await original(root,{operation:'read_run_checkpoint_state',input:identity});await original(root,{operation:'checkpoint_run',input:{...identity,generation:current.generation,proof:current.proof,expectedRevision:current.revision,expectedTurnId:current.turnId,action:'start',message:'新一轮用户要求',idempotencyKey:'advance-parent-after-claim'}});}return original(root,request);};`);
-    const agent = f.startAgent({ ...process.env, NODE_OPTIONS: `--require=${hook}` }, 2);
+    const agent = f.startAgent({ NODE_OPTIONS: `--require=${hook}` }, 2);
     const [code] = await once(agent, 'exit'); assert.notEqual(code, 0, 'obsolete corrections must not execute');
     assert.equal(fs.existsSync(path.join(f.projectRoot, 'obsolete-correction.txt')), false);
     const child = await f.call('read_run_state', { executionLogId: 2 }); assert.equal(child.status.status, 'Failed'); assert.equal(child.status.hostOutputPending, false);
@@ -419,12 +422,12 @@ test('the shared runner honors continuation stops without overwriting saved outc
     const command=`exec ${shellQuote(process.execPath)} -e ${shellQuote("process.stdout.write('完整已接受输出🌿\\n'.repeat(10000));setInterval(()=>{},1000)")}`;
     const f=await executionFixture(command,{interactiveSession:true});
     try{
-      let env=process.env;
+      let env={};
       if(mode==='child-first'){
         const hook=path.join(path.dirname(f.root),'defer-wrapper-signal.cjs');
         // Deliver the real child signal first; the wrapper's original handler runs later.
         fs.writeFileSync(hook,"const original=process.on;process.on=function(event,listener){return original.call(this,event,event==='SIGTERM'?(...args)=>setTimeout(()=>listener(...args),700):listener);};");
-        env={...process.env,NODE_OPTIONS:`--require=${hook}`};
+        env={NODE_OPTIONS:`--require=${hook}`};
       }
       const agent=f.startAgent(env),ended=once(agent,'exit');let state;const deadline=Date.now()+10000;
       for(;;){state=await f.call('read_run_checkpoint_state');if(state.status.agentChildPid&&f.stdout().toString().replace(/\r\n/g,'\n')===expected)break;assert.equal(agent.exitCode,null,f.stderr().toString());assert.ok(Date.now()<deadline,'shared runner must capture full output');await new Promise(resolve=>setTimeout(resolve,20));}
@@ -520,7 +523,7 @@ main().catch(error=>{process.stderr.write(String(error));process.exitCode=1});`;
     state = await f.call('patch_run_state', { generation: state.generation, expectedRevision: state.revision, patch: { agentDatabaseConfigPath: configPath, agentLaunch: { schemaVersion: 1, agentCli: cli, selectedModel: 'test-model', taskPermissionMode: 'auto', continuation: false, direct: false } }, idempotencyKey: 'cli-plan' });
     await f.call('patch_run_inputs', { generation: state.generation, expectedRevision: state.revision, prompt: expected, command: 'database prompt launch', status: 'Running', idempotencyKey: 'ready-cli' });
     await sendRuntimeDataRequest(f.root, { operation: 'prepare_agent_database', input: { root: f.projectRoot, provider: 'claude', configPath, command: process.execPath } });
-    const agent = f.startAgent({ ...process.env, SOLOMAP_TEST_MCP_CONFIG: configPath });
+    const agent = f.startAgent({ SOLOMAP_TEST_MCP_CONFIG: configPath });
     assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
     assert.equal(f.stdout().toString(), expected);
     assert.equal(fs.existsSync(path.join(f.root, 'tmp', 'run-inputs')), false);
@@ -640,7 +643,7 @@ test('a replacement packaged runner appends to the committed stream rather than 
 test('a missing shell settles the owned run as failed and preserves the launch error', async () => {
   const f = await executionFixture('printf unreachable');
   try {
-    const agent = f.startAgent({ ...process.env, PATH: '/solomap-test-missing-shell' }); const [code] = await once(agent, 'exit');
+    const agent = f.startAgent({ PATH: '/solomap-test-missing-shell' }); const [code] = await once(agent, 'exit');
     assert.equal(code, 1);
     const state = await f.call('read_run_state');
     assert.equal(state.status.status, 'Failed');
@@ -681,6 +684,24 @@ test('closing the display pipe keeps the accepted Agent running and preserves it
   } finally { await f.close(); }
 });
 
+test('an unsolicited SIGTERM cannot stop a live interactive run without a persisted stop intent', async () => {
+  const source = "process.stdout.write('ready\\n');setTimeout(()=>process.stdout.write('still running\\n'),500);setInterval(()=>{},1000)";
+  const f = await executionFixture(`env -u NO_COLOR ${shellQuote(process.execPath)} -e ${shellQuote(source)}`, { interactiveSession: true });
+  try {
+    const agent = f.startAgent(); const finished = once(agent, 'exit');
+    const deadline = Date.now() + 10000;
+    while (!f.stdout().includes(Buffer.from('ready'))) { assert.equal(agent.exitCode, null, f.stderr().toString()); assert.ok(Date.now() < deadline, 'runner must start the Agent'); await new Promise(resolve => setTimeout(resolve, 10)); }
+    agent.kill('SIGTERM');
+    await new Promise(resolve => setTimeout(resolve, 250));
+    assert.equal(agent.exitCode, null, 'a host or terminal lifecycle signal is not a user stop request');
+    while (!f.stdout().includes(Buffer.from('still running'))) { assert.equal(agent.exitCode, null, f.stderr().toString()); assert.ok(Date.now() < deadline, 'the accepted Agent must keep running after the transient signal'); await new Promise(resolve => setTimeout(resolve, 10)); }
+    const live = await f.call('read_run_state');
+    assert.notEqual(live.status.stopRequested, true); assert.notEqual(live.status.interactiveSessionClosed, true);
+    const stopping = f.call('stop_run', { generation: live.generation, expectedRevision: live.revision, expectedTurnId: live.turnId, reason: '测试结束', idempotencyKey: 'formal-stop-after-transient-signal' });
+    assert.equal((await finished)[0], 143); await stopping;
+  } finally { await f.close(); }
+});
+
 test('closing a waiting interactive session preserves its settled turn instead of inventing a failed turn', async () => {
   const source = "process.stdout.write('waiting-session-ready\\n');setInterval(()=>{},1000)";
   const f = await executionFixture(`exec env -u NO_COLOR ${shellQuote(process.execPath)} -e ${shellQuote(source)}`, { interactiveSession: true });
@@ -690,7 +711,9 @@ test('closing a waiting interactive session preserves its settled turn instead o
     const state = await f.call('read_run_checkpoint_state');
     const settled = await f.call('checkpoint_run', { generation: state.generation, proof: state.proof, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'complete', outcome: 'partial', summary: '已交付本轮结果', idempotencyKey: 'first-turn-settled' });
     await f.call('patch_run_state', { generation: settled.generation, expectedRevision: settled.revision, patch: { status: 'Waiting' }, idempotencyKey: 'waiting' });
-    agent.kill('SIGTERM'); assert.equal((await finished)[0], 143, f.stderr().toString());
+    const current = await f.call('read_run_state');
+    const stopping = f.call('stop_run', { generation: current.generation, expectedRevision: current.revision, expectedTurnId: current.turnId, reason: '关闭等待中的会话', idempotencyKey: 'formal-waiting-session-stop' });
+    assert.equal((await finished)[0], 143, f.stderr().toString()); await stopping;
     const closed = await f.call('read_run_state');
     assert.equal(closed.turnId, settled.turnId); assert.equal(closed.status.checkpointOutcome, 'partial');
     assert.equal(closed.status.checkpointSummary, '已交付本轮结果'); assert.equal(closed.status.interactiveSessionClosed, true);
@@ -713,10 +736,12 @@ test('a stop received while preparing log heads prevents the Agent command from 
   const hook = path.join(path.dirname(f.root), 'delay-materialization.cjs');
   fs.writeFileSync(hook, `const api=require(${JSON.stringify(path.resolve(__dirname, '../out/autonomousRuntimeControl.js'))});const original=api.sendRuntimeDataRequest;api.sendRuntimeDataRequest=async function(root,request){if(request.operation==='read_run_log_head'){process.stderr.write('preparing-log-heads\\n');await new Promise(resolve=>setTimeout(resolve,500));}return original(root,request);};`);
   try {
-    const agent = f.startAgent({ ...process.env, NODE_OPTIONS: `--require=${hook}` }); const finished = once(agent, 'exit');
+    const agent = f.startAgent({ NODE_OPTIONS: `--require=${hook}` }); const finished = once(agent, 'exit');
     while (!f.stderr().includes(Buffer.from('preparing-log-heads\n'))) { assert.equal(agent.exitCode, null, f.stderr().toString()); await new Promise(resolve => setTimeout(resolve, 10)); }
-    agent.kill('SIGTERM');
+    const current = await f.call('read_run_state');
+    const stopping = f.call('stop_run', { generation: current.generation, expectedRevision: current.revision, expectedTurnId: current.turnId, reason: '准备期间停止', idempotencyKey: 'formal-preparing-stop' });
     const [code] = await finished; assert.equal(code, 143, f.stderr().toString());
+    await stopping;
     assert.equal(f.stdout().length, 0);
     const state = await f.call('read_run_state'); assert.equal(state.status.status, 'Failed');
     const log = await f.call('read_run_log', { stream: 'stdout' }); assert.equal(log.totalBytes, 0);
@@ -781,7 +806,7 @@ test('Codex resume latency cannot start a correction after the parent entered a 
     const run = await f.call('prepare_run', { root: f.projectRoot, executionLogId: 2, parentExecutionLogId: 1, expectedParentTurnId: parent.turnId, nodeId: '__solo__', runKind: 'agent_review_revision', prompt: '修正原轮', command: 'placeholder', userMessage: '原目标', metadata: { agentLaunch: { schemaVersion: 1, agentCli: cli, selectedModel: '', taskPermissionMode: 'auto', continuation: true, direct: false }, plannedNativeSessionId: sessionId, agentCli: cli, bindingNonce: '2'.repeat(64) }, idempotencyKey: 'late-resume-revision' });
     const seed = await f.call('write_run_binding', { executionLogId: 2, generation: run.generation, expectedHeadRevision: 0, seed: { runId: '2', provider: 'codex', workspaceRoot: f.projectRoot, cliPath: cli, bindingNonce: '2'.repeat(64), createdAt: run.status.startedAt, method: 'provider_callback', contract: 'official_stable', providerContext: { codex: { codexHome } } }, idempotencyKey: 'late-resume-binding' });
     await f.call('write_run_binding', { executionLogId: 2, generation: run.generation, expectedHeadRevision: seed.headRevision, revision: { sessionId, method: 'provider_callback', contract: 'official_stable', state: 'planned' }, idempotencyKey: 'late-resume-planned' });
-    const agent = f.startAgent(process.env, 2); const exited = once(agent, 'exit');
+    const agent = f.startAgent({}, 2); const exited = once(agent, 'exit');
     const deadline = Date.now() + 15000;
     while (!fs.existsSync(path.join(f.projectRoot, 'resume-waiting'))) { assert.equal(agent.exitCode, null, f.stderr().toString()); assert.ok(Date.now() < deadline, 'resume must reach the real protocol boundary'); await new Promise(resolve => setTimeout(resolve, 20)); }
     const latest = await f.call('read_run_checkpoint_state');

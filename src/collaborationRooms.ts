@@ -72,7 +72,8 @@ export type CollaborationDiagnosticStage =
   | 'account_create'
   | 'device_registration'
   | 'device_create'
-  | 'device_refresh';
+  | 'device_refresh'
+  | 'lobby_session';
 
 export interface CollaborationDiagnosticEvent {
   stage: CollaborationDiagnosticStage;
@@ -96,15 +97,20 @@ async function fetchWithDeadline(
   url: string,
   init: RequestInit,
   fetcher: typeof fetch,
-  deadlineAt: number
-): Promise<{ response: Response; durationMs: number }> {
+  deadlineAt: number,
+  readBody = false
+): Promise<{ response: Response; durationMs: number; bodyText?: string }> {
   const remainingMs = Math.max(1, deadlineAt - Date.now());
   const controller = new AbortController();
   const startedAt = Date.now();
   const timeout = setTimeout(() => controller.abort(), remainingMs);
+  const aborted = new Promise<never>((_resolve, reject) => {
+    controller.signal.addEventListener('abort', () => reject(new Error('collaboration_request_timeout')), { once: true });
+  });
   try {
-    const response = await fetcher(url, { ...init, signal: controller.signal });
-    return { response, durationMs: Date.now() - startedAt };
+    const response = await Promise.race([fetcher(url, { ...init, signal: controller.signal }), aborted]);
+    const bodyText = readBody ? await Promise.race([response.text(), aborted]) : undefined;
+    return { response, durationMs: Date.now() - startedAt, ...(bodyText === undefined ? {} : { bodyText }) };
   } catch (error) {
     if (controller.signal.aborted) throw new Error('collaboration_request_timeout');
     throw error;
@@ -398,28 +404,65 @@ export async function createCollaborationRoom(
 export async function createCollaborationLobbySession(
   nickname: string,
   passportGrant: string,
-  fetcher: typeof fetch = fetch
+  fetcher: typeof fetch = fetch,
+  diagnosticSink?: CollaborationDiagnosticSink,
+  sessionDeadlineMs = collaborationCreateDeadlineMs
 ): Promise<CollaborationLobbySession> {
   const normalizedNickname = String(nickname || '').trim().replace(/\s+/g, ' ').slice(0, 40);
   if (!normalizedNickname) return { ok: false, error: 'nickname_required' };
   if (!passportGrant) return { ok: false, error: 'login_required' };
-  const response = await fetcher(`${collaborationSiteOrigin}/api/collaboration/lobby/session`, {
-    method: 'POST',
-    headers: {
-      'authorization': `Bearer ${passportGrant}`,
-      'content-type': 'application/json'
-    },
-    body: JSON.stringify({ nickname: normalizedNickname })
-  });
-  const result = await response.json().catch(() => ({ ok: false, error: `lobby_session_http_${response.status}` })) as CollaborationLobbySession;
-  if (!response.ok) return { ok: false, error: String(result.error || `lobby_session_http_${response.status}`) };
-  return {
-    ok: Boolean(result.ok),
-    ticket: String(result.ticket || ''),
-    memberId: String(result.memberId || ''),
-    sessionStartedAt: Number(result.sessionStartedAt || 0),
-    sessionEndsAt: Number(result.sessionEndsAt || 0)
-  };
+  const normalizedDeadlineMs = Math.max(1, Number(sessionDeadlineMs) || collaborationCreateDeadlineMs);
+  const deadlineAt = Date.now() + normalizedDeadlineMs;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const startedAt = Date.now();
+    try {
+      const request = await fetchWithDeadline(`${collaborationSiteOrigin}/api/collaboration/lobby/session`, {
+        method: 'POST',
+        headers: {
+          'authorization': `Bearer ${passportGrant}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ nickname: normalizedNickname })
+      }, fetcher, attempt === 0
+        ? Math.min(deadlineAt, Date.now() + Math.min(5_000, Math.max(1, Math.floor(normalizedDeadlineMs / 2))))
+        : deadlineAt, true);
+      const response = request.response;
+      let result: CollaborationLobbySession;
+      try {
+        result = JSON.parse(String(request.bodyText || '')) as CollaborationLobbySession;
+      } catch {
+        result = { ok: false, error: `lobby_session_http_${response.status}` };
+      }
+      if (!response.ok) {
+        const error = String(result.error || `lobby_session_http_${response.status}`);
+        if (attempt === 0 && [500, 502, 503, 504].includes(response.status)) {
+          emitCollaborationDiagnostic(diagnosticSink, { stage: 'lobby_session', outcome: 'fallback', durationMs: request.durationMs, status: response.status, error });
+          continue;
+        }
+        if (attempt === 1 && [500, 502, 503, 504].includes(response.status)) {
+          emitCollaborationDiagnostic(diagnosticSink, { stage: 'lobby_session', outcome: 'failure', durationMs: request.durationMs, status: response.status, error });
+        }
+        return { ok: false, error };
+      }
+      return {
+        ok: Boolean(result.ok),
+        ticket: String(result.ticket || ''),
+        memberId: String(result.memberId || ''),
+        sessionStartedAt: Number(result.sessionStartedAt || 0),
+        sessionEndsAt: Number(result.sessionEndsAt || 0)
+      };
+    } catch (error) {
+      const code = diagnosticErrorCode(error);
+      emitCollaborationDiagnostic(diagnosticSink, {
+        stage: 'lobby_session',
+        outcome: attempt === 0 ? 'fallback' : 'failure',
+        durationMs: Date.now() - startedAt,
+        error: code
+      });
+      if (attempt === 1) return { ok: false, error: code };
+    }
+  }
+  return { ok: false, error: 'collaboration_network_error' };
 }
 
 export function buildCollaborationInviteCode(room: Pick<CollaborationRoomRecord, 'roomId' | 'relayToken' | 'encryptionKey'>): string {
