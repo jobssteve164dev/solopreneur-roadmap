@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.590 - 2026-10-17
+
+### Fixed
+- preserve native Pi chat context (db91b09)
+
+### Docs
+- hand off Pi native conversation context (45719b6)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.589 - 2026-10-17
 
 ### Fixed
