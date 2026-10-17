@@ -79,10 +79,67 @@ test('an ordinary Solo CLI receives project-scoped migration and preview tools w
     await client.connect(transport);
     const tools = (await client.listTools()).tools.map(tool => tool.name);
     for (const name of ['solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview']) assert.ok(tools.includes(name), `missing ${name}`);
+    assert.ok(tools.includes('solomap_start_conversation'));
     assert.ok(!tools.includes('solomap_recycling_apply'));
     const migration = await client.callTool({ name: 'solomap_migration_status', arguments: { projectRoot: project } });
     assert.equal(migration.isError, undefined, JSON.stringify(migration.content));
   } finally { await client.close(); await transport.close(); }
+});
+
+test('an Agent CLI starts a new conversation in another registered project through the editor host', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-start-conversation-'));
+  const root = path.join(base, '.solomap-global'), sourceProject = path.join(base, 'source'), targetProject = path.join(base, 'target');
+  fs.mkdirSync(path.join(sourceProject, '.git'), { recursive: true });
+  fs.mkdirSync(path.join(targetProject, '.git'), { recursive: true });
+  t.after(() => cleanupExact(base));
+  const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [
+    { path: sourceProject, name: 'Source' }, { path: targetProject, name: 'Target' }
+  ]);
+  await owner.store.initializeProjectRegistry({ legacyProjects: [
+    { path: sourceProject, name: 'Source' }, { path: targetProject, name: 'Target' }
+  ] });
+  const launches = [];
+  const bridge = await require('../out/telegramExtensionBridge.js').startTelegramExtensionBridge(root, async (command, args) => {
+    launches.push({ command, payload: JSON.parse(args[0]) });
+    return { status: 'started', projectPath: targetProject, mode: 'step' };
+  });
+  const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
+  const client = new Client({ name: 'conversation-launch-fixture', version: '1' });
+  const transport = new StdioClientTransport({ command: process.execPath,
+    args: [path.resolve(__dirname, '../out/databaseMcpProcess.js'), '--global-data-path', root, '--project-id', owner.projectIds.get(sourceProject)], cwd: sourceProject, stderr: 'pipe' });
+  try {
+    await client.connect(transport);
+    const response = await client.callTool({ name: 'solomap_start_conversation', arguments: {
+      project: 'Target', mode: 'step', stepId: 'S01', message: '开始目标项目环节', agentCli: 'codex', model: 'auto', idempotencyKey: 'cross-project-step'
+    } });
+    assert.equal(response.isError, undefined, JSON.stringify(response.content));
+    assert.equal(launches.length, 1);
+    assert.equal(launches[0].command, 'solopreneur.internalStartConversation');
+    assert.deepEqual({ ...launches[0].payload, launchIntentId: '<stable>' }, {
+      projectPath: targetProject, mode: 'step', stepId: 'S01', message: '开始目标项目环节', agentCli: 'codex', model: 'auto', launchIntentId: '<stable>'
+    });
+    assert.match(launches[0].payload.launchIntentId, /^mcp:solomap-mcp:[a-f0-9]+:[a-f0-9]{64}$/);
+    const crossProjectConflict = await client.callTool({ name: 'solomap_start_conversation', arguments: {
+      project: 'Source', mode: 'step', stepId: 'S01', message: '开始目标项目环节', agentCli: 'codex', model: 'auto', idempotencyKey: 'cross-project-step'
+    } });
+    assert.equal(crossProjectConflict.isError, true);
+    assert.match(crossProjectConflict.content[0].text, /idempotency_conflict/);
+    const crossModeConflict = await client.callTool({ name: 'solomap_start_conversation', arguments: {
+      project: 'Target', mode: 'flow', message: '开始目标项目环节', agentCli: 'codex', model: 'auto', idempotencyKey: 'cross-project-step'
+    } });
+    assert.equal(crossModeConflict.isError, true);
+    assert.match(crossModeConflict.content[0].text, /idempotency_conflict/);
+    assert.equal(launches.length, 1, 'one idempotency key cannot launch across projects or modes');
+    const escapedMessage = '\\'.repeat(32768);
+    const escaped = await client.callTool({ name: 'solomap_start_conversation', arguments: {
+      project: 'Target', mode: 'solo', message: escapedMessage, idempotencyKey: 'maximum-escaped-message'
+    } });
+    assert.equal(escaped.isError, undefined, JSON.stringify(escaped.content));
+    assert.equal(launches[1].payload.message, escapedMessage);
+  } finally {
+    await client.close(); await transport.close(); bridge.dispose();
+  }
 });
 
 test('an agent review MCP session exposes only read-only database memory tools', async t => {

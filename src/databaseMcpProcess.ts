@@ -53,7 +53,7 @@ async function main(): Promise<void> {
   const migrationRun = migrationRunKinds.includes(runKind as typeof migrationRunKinds[number]);
   const soloConversationRun = soloConversationRunKinds.includes(runKind as typeof soloConversationRunKinds[number]);
   const server = new McpServer({ name: 'solomap-data', version: '1.0.0' });
-  registerUnifiedMcpTools(server, source, { readOnly: migrationRun || runKind === 'agent_review', conversationLifecycle: Boolean(process.env.SOLOMAP_RUN_PROOF) });
+  registerUnifiedMcpTools(server, source, { readOnly: migrationRun || runKind === 'agent_review', conversationLifecycle: Boolean(process.env.SOLOMAP_RUN_PROOF), conversationLaunch: true });
   if (migrationRun) registerMigrationMcpTools(server, source);
   else {
     if (soloConversationRun) registerMigrationMcpTools(server, source, false);

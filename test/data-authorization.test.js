@@ -20,6 +20,7 @@ for (const change of [{ status: 'revoked' }, { valid_until: 1 }, { action_set_js
     const grant = store.search({ scope: project, kinds: ['grant'] }).items.find(item => item.data.actor_id === session.authorityActorId);
     store.write({ kind: 'grant', action: 'patch', scope: project, objectId: grant.objectId, expectedRevision: grant.revision, idempotencyKey: 'revoke', data: change });
     await assert.rejects(call('write', { kind: 'memory', action: 'create', scope: project, idempotencyKey: 'denied', data: { category: 'project', title: 'claim', status: 'candidate', content: 'claim' } }), /action_denied/);
+    await assert.rejects(call('start_conversation', { project: project, mode: 'solo', message: 'must stay denied', idempotencyKey: 'denied-conversation' }), /action_denied/);
     assert.equal(store.search({ scope: project, kinds: ['memory'] }).items.length, 0);
   }));
 }

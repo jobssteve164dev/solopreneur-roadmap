@@ -156,6 +156,21 @@ export function createFlowTrace(
   };
 }
 
+export function matchesFlowLaunchIntent(
+  flow: FlowTrace,
+  goal: string,
+  input: { supplementFiles?: string[]; selectedAgentCli?: string; selectedModel?: string } = {}
+): boolean {
+  const expectedFiles = Array.isArray(input.supplementFiles) ? input.supplementFiles : [];
+  const actualFiles = Array.isArray(flow.source.supplementFiles) ? flow.source.supplementFiles : [];
+  return flow.goal === goal
+    && flow.source.userInput === goal
+    && String(flow.source.selectedAgentCli || '') === String(input.selectedAgentCli || '')
+    && String(flow.source.selectedModel || '') === String(input.selectedModel || '')
+    && actualFiles.length === expectedFiles.length
+    && actualFiles.every((file, index) => file === expectedFiles[index]);
+}
+
 export function createFlowLoop(goal: string, index: number): FlowLoopTrace {
   const now = new Date().toISOString();
   return {

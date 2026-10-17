@@ -13,7 +13,7 @@ import { createTelegramBackgroundConnection } from './telegramBackgroundConnecti
 import * as Papa from 'papaparse';
 import { SyncEngine } from './db/syncEngine';
 import { AgentConversation, RoadmapNode } from './db/types';
-import { buildFlowStatePayload, createFlowLoop, createFlowTrace, FlowLoopScoring, FlowLoopStatus, FlowRole, FlowTrace, readFlowTrace, saveFlowTrace, updateFlowTrace } from './flowStore';
+import { buildFlowStatePayload, createFlowLoop, createFlowTrace, FlowLoopScoring, FlowLoopStatus, FlowRole, FlowTrace, matchesFlowLaunchIntent, readFlowTrace, saveFlowTrace, updateFlowTrace } from './flowStore';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
 import { confirmTimePlan, extractTimePlanDraft, readTimePlan, saveTimePlan, type TimePlanDraft } from './timePlan';
 import {
@@ -932,6 +932,40 @@ export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalRunAgent', async (nodeId: string) => {
     await revealAgentStartupTerminal(context, activeProjectRoot || getSelectedProjectPath(context) || '', `step-${nodeId || 'conversation'}`);
     await handleRunAgent(context, nodeId, '');
+  }));
+
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalStartConversation', async (serialized: string) => {
+    const input = JSON.parse(String(serialized || '')) as { projectPath?: string; mode?: string; message?: string; stepId?: string; agentCli?: string; model?: string; launchIntentId?: string };
+    const projectPath = path.resolve(String(input.projectPath || ''));
+    const mode = String(input.mode || '');
+    const message = String(input.message || '').trim();
+    const settings = getPersistedSettings(context);
+    const globalDataPath = normalizeSolomapGlobalPath(projectPath, settings.globalDataPath);
+    await refreshProjectRegistryForContext(context, globalDataPath);
+    const project = getProjects(context).find(candidate => path.resolve(candidate.path) === projectPath);
+    if (!project || !['step', 'solo', 'flow'].includes(mode) || !message || !String(input.launchIntentId || '')) throw new Error('invalid_conversation_request');
+    if (mode === 'step' && !String(input.stepId || '').trim()) throw new Error('step_id_required');
+    const target = await captureConversationLaunchTarget(context, projectPath, globalDataPath, settings);
+    target.launchIntentId = String(input.launchIntentId);
+    try {
+      if (mode === 'step') {
+        let registered = false;
+        const startupTerminal = await revealAgentStartupTerminal(context, projectPath, `step-${String(input.stepId)}`, String(input.agentCli || ''), String(input.model || ''));
+        try {
+          await handleRunAgent(context, String(input.stepId), message, String(input.agentCli || ''), String(input.model || ''), [], true, () => { registered = true; }, target);
+          if (!registered) throw new Error('conversation_not_started');
+        } finally { if (!registered) discardReservedAgentStartupTerminal(projectPath, startupTerminal); }
+      } else if (mode === 'solo') {
+        const startupTerminal = await revealAgentStartupTerminal(context, projectPath, 'solo', String(input.agentCli || ''), String(input.model || ''));
+        try {
+          const executionLogId = await handleRunSoloConversation(context, message, String(input.agentCli || ''), String(input.model || ''), [], '', true, target);
+          if (!executionLogId) throw new Error('conversation_not_started');
+        } finally { discardReservedAgentStartupTerminal(projectPath, startupTerminal); }
+      } else if (!await handleRunFlow(context, message, String(input.agentCli || ''), String(input.model || ''), [], target)) {
+        throw new Error('conversation_not_started');
+      }
+      return { status: 'started', projectPath, mode };
+    } finally { target.engine?.close(); }
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalRefreshTimedAutomation', async () => {
@@ -1897,6 +1931,7 @@ async function handleSharedWebviewAction(
           command: 'pastedAttachmentsSaved',
           targetId: request.targetId || '',
           requestId: String(request.requestId || ''),
+          attachmentEpoch: Number(request.attachmentEpoch || 0),
           files
         });
       } else {
@@ -1904,6 +1939,7 @@ async function handleSharedWebviewAction(
           command: 'supplementFilesSelected',
           nodeId: request.nodeId || '',
           requestId: String(request.requestId || ''),
+          attachmentEpoch: Number(request.attachmentEpoch || 0),
           files
         });
       }
@@ -8217,7 +8253,7 @@ async function startFlowRoleRun(
   );
   const executionLogId = Number(prepared.status.rootExecutionLogId);
   const statusFilePath = runStatusReference(input.projectPath, executionLogId);
-  await postFlowStateToWebview(context);
+  if (input.projectPath === activeProjectRoot) await postFlowStateToWebview(context);
   await launchAgentConversationTerminal({
     workspaceRoot: input.projectPath,
     label: `flow-${input.flow.flowId}-${input.role}-${executionLogId}`,
@@ -8238,15 +8274,16 @@ async function handleRunFlow(
   goal: string,
   selectedAgentCli = '',
   selectedModel = '',
-  supplementFiles: string[] = []
-): Promise<void> {
-  if (!activeProjectRoot || !syncEngine) {
-    return;
-  }
+  supplementFiles: string[] = [],
+  target?: AgentLaunchTarget
+): Promise<boolean> {
+  const projectPath = target?.workspaceRoot || activeProjectRoot || '';
+  const projectSyncEngine = target?.engine || syncEngine;
+  if (!projectPath || !projectSyncEngine) return false;
   const request = String(goal || '').trim();
   if (!request) {
     vscode.window.showWarningMessage('先写下你想让 Flow 自动推进完成的目标。');
-    return;
+    return false;
   }
   if (!await hasFlowModeAccess(context)) {
     const choice = await vscode.window.showInformationMessage('Flow 是 SoloMap Pro 功能。', '升级 Pro');
@@ -8254,33 +8291,46 @@ async function handleRunFlow(
       await beginPassportAuthorizationFlow(context);
     }
     await postFlowStateToWebview(context);
-    return;
+    return false;
   }
-  syncEngine.refreshNodes?.();
-  const trace = createFlowTrace(activeProjectRoot, request, {
+  const settings = target?.settings || getPersistedSettings(context);
+  const globalDataPath = target?.globalDataPath || settings.globalDataPath;
+  const stableFlowId = target?.launchIntentId ? `flow-${crypto.createHash('sha256').update(target.launchIntentId).digest('hex').slice(0, 32)}` : '';
+  if (stableFlowId) {
+    const existing = await readFlowTrace(projectPath, stableFlowId, globalDataPath);
+    if (existing) {
+      if (!matchesFlowLaunchIntent(existing, request, { supplementFiles, selectedAgentCli, selectedModel })) throw new Error('idempotency_conflict');
+      return true;
+    }
+  }
+  projectSyncEngine.refreshNodes?.();
+  const trace = createFlowTrace(projectPath, request, {
     supplementFiles,
     selectedAgentCli,
     selectedModel
   });
+  if (stableFlowId) trace.flowId = stableFlowId;
   trace.loops = [createFlowLoop(request, 1)];
   await startFlowRoleRun(context, {
-    projectPath: activeProjectRoot,
+    projectPath,
     flow: trace,
     initialFlow: trace,
     loopIndex: 1,
     role: 'planner',
     prompt: await buildFlowPlannerPrompt({
       goal: request,
-      workspaceRoot: activeProjectRoot,
+      workspaceRoot: projectPath,
       flowId: trace.flowId,
       loopId: 'loop-1',
-      globalPrompt: getPersistedSettings(context).globalPrompt,
-      globalDataPath: getPersistedSettings(context).globalDataPath,
+      globalPrompt: settings.globalPrompt,
+      globalDataPath,
       supplementFiles
     }),
     selectedAgentCli,
-    selectedModel
+    selectedModel,
+    globalDataPath
   });
+  return true;
 }
 
 async function linkSoloConversationToNode(conversationId: number, nodeId: string): Promise<void> {

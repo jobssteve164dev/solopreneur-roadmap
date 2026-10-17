@@ -868,6 +868,19 @@ export class UnifiedDataStore {
       return value.schemaVersion === 1 && Array.isArray(value.actions) && value.actions.includes(action);
     })) throw new Error('action_denied');
   }
+  public reserveMcpConversationLaunch(actorId: string, idempotencyKey: string, intent: Record<string, unknown>): { replayed: boolean } {
+    const requestKey = `mcp-conversation-launch:${idempotencyKey}`;
+    const inputHash = digest(canonical(intent));
+    return this.transaction(() => {
+      const previous = this.rows('SELECT input_hash FROM requests WHERE actor_id=? AND idempotency_key=?', [actorId, requestKey])[0];
+      if (previous) {
+        if (String(previous.input_hash) !== inputHash) throw new Error('idempotency_conflict');
+        return { replayed: true };
+      }
+      this.db.run('INSERT INTO requests(actor_id,idempotency_key,id,input_hash,status,committed_sequence) VALUES(?,?,?,?,?,?)', [actorId, requestKey, crypto.randomUUID(), inputHash, 'committed', Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS value FROM events')[0].value)]);
+      return { replayed: false };
+    });
+  }
   public closeMcpActor(actorId: string, projectId: string): void {
     this.db.run("UPDATE actors SET identity_ref=NULL WHERE id=? AND kind='mcp' AND authority_id IN (SELECT actor_id FROM grants WHERE target_id=?)", [actorId, projectId]);
   }
@@ -887,11 +900,20 @@ export class UnifiedDataStore {
         const time = Date.now();
         this.db.run('INSERT INTO actors(id,kind,provider,identity_ref) VALUES(?,?,?,?)', [authorityActorId, 'mcp_principal', 'solomap-stdio', projectId]);
         this.db.run('INSERT INTO objects VALUES(?,?,?,?,?,?,NULL)', [grantId, 'grant', projectId, 1, time, time]);
-        this.db.run('INSERT INTO grants(id,project_id,actor_id,target_id,action_set_json,revision,status) VALUES(?,?,?,?,?,?,?)', [grantId, projectId, authorityActorId, projectId, canonical({ schemaVersion: 1, actions: ['search', 'read', 'write', 'link', 'context', 'export'] }), 1, 'active']);
+        this.db.run('INSERT INTO grants(id,project_id,actor_id,target_id,action_set_json,revision,status) VALUES(?,?,?,?,?,?,?)', [grantId, projectId, authorityActorId, projectId, canonical({ schemaVersion: 1, actions: ['search', 'read', 'write', 'link', 'context', 'export', 'start_conversation'] }), 1, 'active']);
         return this.current(grantId);
       });
     }
-    if (!this.rows("SELECT grants.id FROM grants JOIN objects ON objects.id=grants.id WHERE actor_id=? AND target_id=? AND status='active' AND objects.archived_at IS NULL AND (valid_until IS NULL OR valid_until>?)", [authorityActorId, projectId, Date.now()]).length) throw new Error('action_denied');
+    const grant = this.rows("SELECT grants.id,grants.action_set_json FROM grants JOIN objects ON objects.id=grants.id WHERE actor_id=? AND target_id=? AND status='active' AND objects.archived_at IS NULL AND (valid_until IS NULL OR valid_until>?)", [authorityActorId, projectId, Date.now()])[0];
+    if (!grant) throw new Error('action_denied');
+    const actionSet = JSON.parse(String(grant.action_set_json)) as { schemaVersion: number; actions: string[] };
+    const legacyDefaultActions = ['search', 'read', 'write', 'link', 'context', 'export'];
+    if (!actionSet.actions.includes('start_conversation') && actionSet.schemaVersion === 1
+      && actionSet.actions.length === legacyDefaultActions.length
+      && legacyDefaultActions.every(action => actionSet.actions.includes(action))) this.transaction(() => {
+      this.db.run('UPDATE grants SET action_set_json=?,revision=revision+1 WHERE id=?', [canonical({ ...actionSet, actions: [...actionSet.actions, 'start_conversation'] }), grant.id]);
+      this.db.run('UPDATE objects SET revision=revision+1,updated_at=? WHERE id=?', [Date.now(), grant.id]);
+    });
     const actorId = openRequestId ? `solomap-mcp:${digest(`${projectId}\n${openRequestId}`)}` : crypto.randomUUID();
     const proof = openRequestId ? digest(`solomap-mcp-proof:${projectId}\n${openRequestId}`) : crypto.randomBytes(32).toString('hex');
     const existing = this.rows('SELECT kind,identity_ref,authority_id FROM actors WHERE id=?', [actorId])[0];

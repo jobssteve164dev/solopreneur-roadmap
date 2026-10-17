@@ -206,7 +206,7 @@ function bootstrapSoloMapWebviewRuntime(): void {
   function bindPastedImageAttachments(
     input: Element | null,
     postMessage: (message: any) => void,
-    buildMessage: (attachments: any[]) => any,
+    buildMessage: () => any,
     onStateChange?: (state: { phase: 'started' | 'failed'; requestId: string; count: number }) => void
   ): void {
     if (!input || input.getAttribute('data-paste-image-bound') === 'true') return;
@@ -221,10 +221,11 @@ function bootstrapSoloMapWebviewRuntime(): void {
       if (!files.length) return;
       event.preventDefault();
       const requestId = 'paste-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+      const message = buildMessage();
       if (onStateChange) onStateChange({ phase: 'started', requestId, count: files.length });
       const attachments = (await Promise.all(files.map(readClipboardImage))).filter(Boolean);
       if (attachments.length) {
-        postMessage({ ...buildMessage(attachments), requestId });
+        postMessage({ ...message, attachments, requestId });
       } else if (onStateChange) {
         onStateChange({ phase: 'failed', requestId, count: files.length });
       }

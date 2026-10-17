@@ -144,6 +144,35 @@ test('the run-bound MCP surface exposes one conversation status tool backed by t
   assert.equal(ordinary.has('solomap_conversation_status'), false, 'an unbound MCP session cannot mutate a conversation lifecycle');
 });
 
+test('the Agent CLI MCP surface starts a new Step, Solo, or Flow conversation in a selected project', async () => {
+  const { registerUnifiedMcpTools } = require('../out/unifiedMcp.js');
+  const tools = new Map(), calls = [];
+  registerUnifiedMcpTools(
+    { registerTool: (name, contract, handler) => tools.set(name, { contract, handler }), registerResource() {} },
+    { scope: 'source-project', call: async (operation, input) => { calls.push({ operation, input }); return { status: 'started', conversationId: 42 }; } },
+    { conversationLaunch: true }
+  );
+  const tool = tools.get('solomap_start_conversation');
+  assert.ok(tool, 'the managed Agent CLI MCP is missing the conversation launch tool');
+  for (const mode of ['step', 'solo', 'flow']) {
+    const input = {
+      project: '/workspace/target', mode, message: `${mode} request`,
+      ...(mode === 'step' ? { stepId: 'step-1' } : {}),
+      idempotencyKey: `start-${mode}`
+    };
+    const result = await tool.handler(input);
+    assert.equal(result.isError, undefined, JSON.stringify(result));
+    assert.deepEqual(calls.at(-1), { operation: 'start_conversation', input });
+  }
+  const readOnly = new Map();
+  registerUnifiedMcpTools(
+    { registerTool: (name, contract, handler) => readOnly.set(name, { contract, handler }), registerResource() {} },
+    { scope: 'source-project', call: async () => ({}) },
+    { readOnly: true, conversationLaunch: true }
+  );
+  assert.equal(readOnly.has('solomap_start_conversation'), false, 'read-only Agent review sessions cannot launch conversations');
+});
+
 test('read-only task instructions retrieve database memory without exposing mutation tools', () => {
   const { buildAgentDatabaseInstructions } = require('../out/agentDatabaseConfig.js');
   const instructions = buildAgentDatabaseInstructions({ readOnly: true, migrationTools: true });
@@ -182,7 +211,7 @@ test('all built-in Agent families receive their native MCP format without changi
         assert.equal(server.command, '/native/node');
         if (provider === 'copilot') {
           assert.equal(server.type, 'local');
-          assert.deepEqual(server.tools, ['solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_conversation_status', 'solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply']);
+          assert.deepEqual(server.tools, ['solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_export', 'solomap_conversation_status', 'solomap_start_conversation', 'solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply']);
         }
       }
     }
@@ -200,6 +229,7 @@ test('managed Copilot configuration gains migration tools on upgrade without a p
   const tools = JSON.parse(fs.readFileSync(file, 'utf8')).mcpServers.solomap_data.tools;
   assert.ok(tools.includes('solomap_recycling_apply'));
   assert.ok(tools.includes('solomap_migration_start'));
+  assert.ok(tools.includes('solomap_start_conversation'));
   assert.ok(!tools.includes('solomap_maintenance_finish'));
 });
 

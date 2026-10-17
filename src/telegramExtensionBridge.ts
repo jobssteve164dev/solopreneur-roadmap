@@ -4,7 +4,8 @@ import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 
 const commands = new Set(['authorizeChat', 'bindChat', 'solopreneur.internalGetStatus', 'solopreneur.internalRunAgent', 'solopreneur.internalStopAgent',
-  'solopreneur.internalApproveNode', 'solopreneur.internalDenyNode', 'solopreneur.internalRefreshTimedAutomation']);
+  'solopreneur.internalApproveNode', 'solopreneur.internalDenyNode', 'solopreneur.internalRefreshTimedAutomation', 'solopreneur.internalStartConversation']);
+const maxBridgeFrameBytes = 512 * 1024;
 const unavailable = '请打开 SoloMap 项目编辑器后再执行此操作。聊天和项目查询仍可使用。';
 type EditorEndpoint = { bridgeId: string; port: number; token: string; pid: number; expiresAt: number };
 const runtimeEditorEndpoints = new Map<string, EditorEndpoint>();
@@ -40,7 +41,7 @@ export async function startTelegramExtensionBridge(globalDataPath: string,
     socket.on('data', async chunk => {
       if (handled) return;
       buffer += chunk;
-      if (buffer.length > 8192) { handled = true; socket.destroy(); return; }
+      if (Buffer.byteLength(buffer, 'utf8') > maxBridgeFrameBytes) { handled = true; socket.destroy(); return; }
       if (!buffer.includes('\n')) return;
       handled = true;
       try {
@@ -61,6 +62,7 @@ export async function startTelegramExtensionBridge(globalDataPath: string,
     server.once('error', reject);
     server.listen(0, '127.0.0.1', () => { server.off('error', reject); resolve(); });
   });
+  server.unref();
   const address = server.address();
   if (!address || typeof address === 'string') {
     server.close();
@@ -74,6 +76,7 @@ export async function startTelegramExtensionBridge(globalDataPath: string,
     throw error;
   }
   const registrationTimer = setInterval(() => { void register().catch(() => undefined); }, 1_000);
+  registrationTimer.unref?.();
   return { dispose() {
     clearInterval(registrationTimer);
     sockets.forEach(socket => socket.destroy());

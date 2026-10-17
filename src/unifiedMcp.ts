@@ -32,7 +32,7 @@ function registerMigrationTools(server: McpServer, source: UnifiedMcpSource, inc
 
 export function registerMigrationMcpTools(server: McpServer, source: UnifiedMcpSource, includeRecyclingApply = true): void { registerMigrationTools(server, source, includeRecyclingApply); }
 
-export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSource, options: { readOnly?: boolean; conversationLifecycle?: boolean } = {}): void {
+export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSource, options: { readOnly?: boolean; conversationLifecycle?: boolean; conversationLaunch?: boolean } = {}): void {
   const z = require('zod') as typeof import('zod');
   const scope = z.string().nullable().optional();
   const schema = dataSchema();
@@ -243,6 +243,15 @@ export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSou
       catch (error) { return { isError: true, content: [{ type: 'text' as const, text: error instanceof Error ? error.message : String(error) }] }; }
     });
   };
+  if (!options.readOnly && options.conversationLaunch) register('solomap_start_conversation', '在已登记项目中发起新的 Step、Solo 或 Flow 对话。Step 需要 stepId；Solo 和 Flow 不需要。', {
+    project: z.string().min(1).max(4096).describe('已登记项目的名称、ID 或绝对路径。'),
+    mode: z.enum(['step', 'solo', 'flow']),
+    message: z.string().min(1).max(32768),
+    stepId: z.string().min(1).max(1024).optional(),
+    agentCli: z.string().min(1).max(4096).optional(),
+    model: z.string().min(1).max(1024).optional(),
+    idempotencyKey: z.string().min(1).max(256)
+  }, false, input => source.call('start_conversation', input));
   register('solomap_search', '查找项目记录、记忆和执行证据。', { scope, query: z.string().optional(), terms: z.array(z.string().min(1)).nonempty().optional(), kinds: z.array(z.string()).optional(), limit: z.number().int().min(1).max(500).optional(), cursor: z.string().optional() }, true, async input => {
     if ((input.scope ?? source.scope) !== source.scope) throw new Error('scope_denied');
     return source.call('search', { ...input, scope: source.scope });

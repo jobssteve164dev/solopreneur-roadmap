@@ -5273,8 +5273,14 @@ test('sidebar keeps solo composer active and renders pasted attachments while th
       focusedInput.setAttribute('data-project-path', projectPath);
       focusedInput.setAttribute('data-conversation-target-id', 'solo:' + projectPath);
       focusedInput.closest = selector => selector === '[data-project-continue-composer]' ? {} : null;
+      window.__pendingPasteReaders = [];
+      window.__delayPasteReader = false;
       globalThis.FileReader = class {
         readAsDataURL() {
+          if (window.__delayPasteReader) {
+            window.__pendingPasteReaders.push(this);
+            return;
+          }
           this.result = 'data:image/png;base64,aGVsbG8=';
           this.onload();
         }
@@ -5283,7 +5289,7 @@ test('sidebar keeps solo composer active and renders pasted attachments while th
       portfolioList.innerHTML = 'before-paste';
       portfolioList.querySelector = selector => selector === '[data-project-conversation-input]' ? focusedInput : null;
       bindPastedImageAttachments(focusedInput, 'solo:' + projectPath, () => projectPath, 'solo:' + projectPath);
-      focusedInput.listeners.paste({
+      const pasteImage = () => focusedInput.listeners.paste({
         clipboardData: {
           items: [{
             kind: 'file',
@@ -5293,6 +5299,39 @@ test('sidebar keeps solo composer active and renders pasted attachments while th
         },
         preventDefault() {}
       });
+      pasteImage();
+      window.__pasteAnotherSoloImage = () => {
+        window.__delayPasteReader = true;
+        pasteImage();
+      };
+      window.__releasePasteReader = () => {
+        const reader = window.__pendingPasteReaders.shift();
+        reader.result = 'data:image/png;base64,bGF0ZQ==';
+        reader.onload();
+      };
+      window.__sendSoloComposer = () => {
+        const sendInput = document.createElement('send-input');
+        sendInput.value = '发送当前消息';
+        const sendButton = document.createElement('send-button');
+        sendButton.setAttribute('data-conversation-mode', 'solo');
+        sendButton.setAttribute('data-project-path', projectPath);
+        sendButton.setAttribute('data-conversation-target-id', 'solo:' + projectPath);
+        const panel = {
+          querySelector(selector) {
+            if (selector === '[data-project-conversation-input]') return sendInput;
+            return null;
+          }
+        };
+        sendButton.closest = selector => selector === '[data-project-continue-composer]' ? panel : null;
+        const container = {
+          querySelector() { return null; },
+          querySelectorAll(selector) {
+            return selector === '[data-project-continue-send]' ? [sendButton] : [];
+          }
+        };
+        bindProjectContinueComposer(container);
+        sendButton.listeners.click({ stopPropagation() {} });
+      };
       return {
         beforeWasSolo: /data-conversation-mode="solo"/.test(beforeNodes),
         rememberedMode: 'solo',
@@ -5388,6 +5427,21 @@ test('sidebar keeps solo composer active and renders pasted attachments while th
   });
   assert.match(elements['portfolio-list'].innerHTML, /screenshot\.png/);
   assert.doesNotMatch(elements['portfolio-list'].innerHTML, /正在添加截图/);
+
+  context.window.__pasteAnotherSoloImage();
+  context.window.__sendSoloComposer();
+  assert.ok(postedMessages.some(message => message.command === 'conversation.runSolo'));
+  context.window.__releasePasteReader();
+  await new Promise(resolve => setImmediate(resolve));
+  const lateSaveMessage = postedMessages.filter(message => message.command === 'attachment.save').at(-1);
+  dispatchMessage({
+    command: 'pastedAttachmentsSaved',
+    targetId: 'solo:/workspace/app',
+    requestId: lateSaveMessage.requestId,
+    attachmentEpoch: lateSaveMessage.attachmentEpoch,
+    files: ['.solopreneur/attachments/solo-workspace-app/late-screenshot.png']
+  });
+  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /late-screenshot\.png/, 'an attachment reply from before send must not repopulate the composer');
 });
 
 test('daily review delegates its user action to the durable Runtime decision', () => {

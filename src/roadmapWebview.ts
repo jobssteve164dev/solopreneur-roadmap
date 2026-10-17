@@ -2304,6 +2304,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     const nodeConversationPaging = {};
     const nodeSupplementFiles = {};
     const pendingPastedAttachments = {};
+    const pastedAttachmentEpochs = {};
     const conversationDrafts = {};
     let conversationChildrenMap = {};
     const conversationLogScrollPositions = {};
@@ -3695,6 +3696,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           break;
         }
         case 'supplementFilesSelected':
+          if (message.requestId && Number(message.attachmentEpoch || 0) !== Number(pastedAttachmentEpochs[message.nodeId] || 0)) break;
           if (message.nodeId && pendingPastedAttachments[message.nodeId]) {
             pendingPastedAttachments[message.nodeId].delete(String(message.requestId || ''));
           }
@@ -4199,7 +4201,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             triggerRun(node.id, input ? input.value : '', getSoloSelectValue(agentSelect), getSoloSelectValue(modelSelect), nodeSupplementFiles[node.id] || []);
             if (input) input.value = '';
             conversationDrafts[node.id] = '';
-            nodeSupplementFiles[node.id] = [];
+            clearSubmittedAttachments(node.id);
             saveRoadmapInteractionState();
             renderRoadmap(currentNodes);
           });
@@ -4425,7 +4427,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           input.value = '';
           soloDraft = '';
           saveRoadmapUiState('soloDraft', '');
-          nodeSupplementFiles[soloConversationId] = [];
+          clearSubmittedAttachments(soloConversationId);
           renderSoloPanel(currentNodes);
         });
       }
@@ -4606,7 +4608,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           });
           if (input) input.value = '';
           flowDraft = '';
-          nodeSupplementFiles[flowTargetId] = [];
+          clearSubmittedAttachments(flowTargetId);
           renderFlowPanel();
           saveRoadmapInteractionState();
         });
@@ -4750,7 +4752,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           });
           input.value = '';
           roadmapRevisionDraft = '';
-          nodeSupplementFiles[roadmapRevisionId] = [];
+          clearSubmittedAttachments(roadmapRevisionId);
           renderRoadmapRevisionPanel(currentNodes);
           saveRoadmapInteractionState();
         });
@@ -5221,10 +5223,10 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       SoloMapWebview.bindPastedImageAttachments(
         input,
         message => vscode.postMessage(message),
-        attachments => ({
+        () => ({
           command: 'attachment.save',
           nodeId,
-          attachments
+          attachmentEpoch: Number(pastedAttachmentEpochs[nodeId] || 0),
         }),
         state => {
           if (!pendingPastedAttachments[nodeId]) pendingPastedAttachments[nodeId] = new Set();
@@ -5236,6 +5238,12 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           if (afterPaste) afterPaste();
         }
       );
+    }
+
+    function clearSubmittedAttachments(nodeId) {
+      pastedAttachmentEpochs[nodeId] = Number(pastedAttachmentEpochs[nodeId] || 0) + 1;
+      if (pendingPastedAttachments[nodeId]) pendingPastedAttachments[nodeId].clear();
+      nodeSupplementFiles[nodeId] = [];
     }
 
     function renderSupplementFiles(nodeId, files) {

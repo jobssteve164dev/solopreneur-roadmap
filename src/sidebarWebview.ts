@@ -4978,6 +4978,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const projectSoloFiles = {};
     const projectSoloDrafts = {};
     const pendingPastedAttachments = {};
+    const pastedAttachmentEpochs = {};
     const projectRefreshPaths = new Set();
     const pendingConversationContinuations = new Set();
     const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [], globalStore: null };
@@ -9115,6 +9116,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'pastedAttachmentsSaved':
+          if (Number(message.attachmentEpoch || 0) !== Number(pastedAttachmentEpochs[message.targetId] || 0)) break;
           if (message.targetId && pendingPastedAttachments[message.targetId]) {
             pendingPastedAttachments[message.targetId].delete(String(message.requestId || ''));
           }
@@ -9493,12 +9495,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       SoloMapWebview.bindPastedImageAttachments(
         input,
         message => vscode.postMessage(message),
-        attachments => ({
+        () => ({
           command: 'attachment.save',
           projectPath: typeof getProjectPath === 'function' ? getProjectPath() : currentProjects.selectedProjectPath,
           targetId,
           scope: scope || targetId || 'conversation',
-          attachments
+          attachmentEpoch: Number(pastedAttachmentEpochs[targetId] || 0),
         }),
         state => {
           if (!pendingPastedAttachments[targetId]) pendingPastedAttachments[targetId] = new Set();
@@ -9521,6 +9523,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           seen.add(file);
           return true;
         });
+    }
+
+    function clearSubmittedAttachments(targetId) {
+      pastedAttachmentEpochs[targetId] = Number(pastedAttachmentEpochs[targetId] || 0) + 1;
+      if (pendingPastedAttachments[targetId]) pendingPastedAttachments[targetId].clear();
+      if (String(targetId).startsWith('solo:')) projectSoloFiles[targetId] = [];
+      else projectContinueFiles[targetId] = [];
     }
 
     function extractPreGitHash(conversation) {
@@ -10258,7 +10267,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             if (input) input.value = '';
             projectSoloDrafts[projectPath] = '';
             saveSidebarUiState('soloDraft', '', projectPath);
-            projectSoloFiles[targetId] = [];
+            clearSubmittedAttachments(targetId);
             renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
             return;
           }
@@ -10275,7 +10284,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             if (input) input.value = '';
             projectContinueDrafts['flow:' + projectPath] = '';
             saveSidebarUiState('flowDraft', '', projectPath);
-            projectContinueFiles['flow:' + projectPath] = [];
+            clearSubmittedAttachments('flow:' + projectPath);
             renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
             return;
           }
@@ -10285,7 +10294,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         projectContinueDrafts[nodeId] = '';
         projectContinueDrafts[getProjectContinueDraftKey(projectPath)] = '';
         saveSidebarUiState('continueDraft', '', projectPath);
-        projectContinueFiles[nodeId] = [];
+        clearSubmittedAttachments(nodeId);
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });

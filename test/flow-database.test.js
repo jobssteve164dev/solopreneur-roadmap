@@ -5,7 +5,14 @@ const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
-const { createFlowTrace, createFlowLoop } = require('../out/flowStore.js');
+const { createFlowTrace, createFlowLoop, matchesFlowLaunchIntent } = require('../out/flowStore.js');
+
+test('Flow launch replay accepts only the same normalized intent', () => {
+  const flow = createFlowTrace('/project', '完整目标', { supplementFiles: ['a.png'], selectedAgentCli: 'codex', selectedModel: 'auto' });
+  assert.equal(matchesFlowLaunchIntent(flow, '完整目标', { supplementFiles: ['a.png'], selectedAgentCli: 'codex', selectedModel: 'auto' }), true);
+  assert.equal(matchesFlowLaunchIntent(flow, '另一个目标', { supplementFiles: ['a.png'], selectedAgentCli: 'codex', selectedModel: 'auto' }), false);
+  assert.equal(matchesFlowLaunchIntent(flow, '完整目标', { supplementFiles: ['a.png'], selectedAgentCli: 'claude', selectedModel: 'auto' }), false);
+});
 
 test('Flow persists its task, role evidence and scoring in the single database with CAS and restart recovery', async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-flow-db-'));

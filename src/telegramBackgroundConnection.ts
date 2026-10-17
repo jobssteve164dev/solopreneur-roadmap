@@ -71,11 +71,6 @@ export function createTelegramBackgroundConnection(options: {
       if (stale()) { await leaveRoot(globalDataPath, false); currentRoot = ''; return { legacySettled: false }; }
       initialization = initialization.catch(() => undefined).then(async () => {
         if (stale()) return;
-        if (!settings.telegramEnabled || !settings.telegramBotToken) {
-          bridge?.dispose();
-          bridge = undefined;
-          return;
-        }
         if (bridge && currentRoot === globalDataPath) return;
         bridge?.dispose();
         const nextBridge = await startTelegramExtensionBridge(globalDataPath, async (command, args) => {
