@@ -15,6 +15,7 @@ import { getCodexSessionHome, NativeSessionBinding } from './sessionIdentity';
 import { readWindowsProcessBirthMarker } from './processIdentity.js';
 import { maintenanceRunKinds } from './runLifecycleTypes';
 import { captureMaintenanceRunResult, maintenanceResultSignature } from './maintenanceRunResult';
+import { captureRunLog } from './runLogBatching';
 
 function argument(name: string): string {
   const index = process.argv.indexOf(name);
@@ -145,13 +146,14 @@ async function main(): Promise<void> {
   const capture = async (stream: NodeJS.ReadableStream, name: string, forward: (bytes: Buffer) => Promise<void>, head: { nextSequence: number; totalBytes: number }): Promise<void> => {
     let sequence = head.nextSequence;
     let offset = head.totalBytes;
-    for await (const value of stream) {
-      const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
-      await request('append_run_log', { ...identity, generation, stream: name, sequence, offset, bytes: bytes.toString('base64'), idempotencyKey: `run:${plan.runId}:${generation}:${name}:${sequence}` });
-      await forward(bytes);
-      sequence++;
-      offset += bytes.length;
-    }
+    await captureRunLog(stream, {
+      forward,
+      append: async bytes => {
+        await request('append_run_log', { ...identity, generation, stream: name, sequence, offset, bytes: bytes.toString('base64'), idempotencyKey: `run:${plan.runId}:${generation}:${name}:${sequence}` });
+        sequence++;
+        offset += bytes.length;
+      }
+    });
   };
   const checkStopped = () => {
     if (requestedSignal) throw Object.assign(new Error(`执行已停止：${requestedSignal}`), { exitCode: requestedSignal === 'SIGINT' ? 130 : 143 });
