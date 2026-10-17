@@ -73,6 +73,22 @@ test('Antigravity cognitive mode leaves print last so stdin remains the prompt',
   ]);
 });
 
+test('every chat model pipe starts a fresh non-resumed CLI invocation', () => {
+  const invocations = new Map([
+    ['codex', buildCognitiveCliInvocation('codex', 'auto', 'turn')],
+    ['claude', buildCognitiveCliInvocation('claude', 'auto', 'turn')],
+    ['copilot', buildCognitiveCliInvocation('copilot', 'auto', 'turn')],
+    ['cursor', buildCognitiveCliInvocation('cursor-agent', 'auto', 'turn')],
+    ['antigravity', buildCognitiveCliInvocation('agy', 'auto', 'turn')]
+  ]);
+  assert.ok(invocations.get('codex').args.includes('--ephemeral'));
+  assert.ok(invocations.get('claude').args.includes('--no-session-persistence'));
+  for (const [family, invocation] of invocations) {
+    assert.equal(invocation.stdin, 'turn', family);
+    assert.equal(invocation.args.some(argument => /^(--continue|-c|--resume|-r|--conversation|--session-id)(=|$)/.test(argument)), false, family);
+  }
+});
+
 test('Runtime reloads a normalized local Agent CLI choice from its config file', () => {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cognitive-config-'));
   const root = path.join(parent, '.solomap-global');

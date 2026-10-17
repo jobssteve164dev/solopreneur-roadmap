@@ -211,8 +211,10 @@ test('standalone runtime receives, queries projects and replies without an edito
   try { await waitFor(() => sent.some(m => m.text === 'Alpha 的下一步是 Ship Alpha。'), 'Background TG must deliver an answer with no editor process'); }
   catch (error) { error.message += `; stderr=${childStderr()}`; throw error; }
   const firstPrompt = fs.readFileSync(modelInput, 'utf8');
-  assert.match(firstPrompt, /"projectContext":\{"selectedProject":"Alpha"/);
-  assert.match(firstPrompt, /"currentSteps":\[\{"title":"Ship Alpha","status":"Pending"\}\]/);
+  const firstChatPrompt = firstPrompt.split('<<<END>>>').filter(value => value.trim()).at(-1);
+  assert.match(firstChatPrompt, /SYSTEM:[\s\S]*本轮项目快照[^\n]*"selectedProject":"Alpha"/);
+  assert.match(firstChatPrompt, /SYSTEM:[\s\S]*"currentSteps":\[\{"title":"Ship Alpha","status":"Pending"\}\]/);
+  assert.doesNotMatch(firstChatPrompt, /USER:[^]*"selectedProject":"Alpha"/);
   assert.ok(polls.length > 0);
   const conversations = await control.sendRuntimeDataRequest(globalRoot, { operation: 'list_intelligence_conversations', input: {} });
   assert.equal(conversations.length, 1);
@@ -239,8 +241,10 @@ test('standalone smart kernel still calls Pi for a new project without roadmap.c
   fixture.updates.push(fixture.update(103, '你好'));
   await waitFor(() => fixture.sent.some(message => message.text === 'Alpha 的下一步是 Ship Alpha。'), 'A project without roadmap.csv must still reach Pi');
   const prompt = fs.readFileSync(fixture.modelInput, 'utf8');
-  assert.match(prompt, /"projectContext":\{"selectedProject":"Alpha"/);
-  assert.match(prompt, /"currentSteps":\[\]/);
+  const chatPrompt = prompt.split('<<<END>>>').filter(value => value.trim()).at(-1);
+  assert.match(chatPrompt, /SYSTEM:[\s\S]*本轮项目快照[^\n]*"selectedProject":"Alpha"/);
+  assert.match(chatPrompt, /SYSTEM:[\s\S]*"currentSteps":\[\]/);
+  assert.doesNotMatch(chatPrompt, /USER:[^]*"selectedProject":"Alpha"/);
   await fixture.stop();
 });
 

@@ -164,11 +164,15 @@ test('smart kernel chat uses the selected read-only model pipe with conversation
   ], { selectedProject: '我的应用', projects: ['我的应用'] });
   assert.equal(reply, '先确认登录问题影响了哪些用户。');
   assert.equal(invocations.length, 1);
-  assert.match(invocations[0].stdin, /先修登录还是做导出/);
-  assert.match(invocations[0].stdin, /怎么确认/);
+  assert.match(invocations[0].stdin, /USER:\n先修登录还是做导出/);
+  assert.match(invocations[0].stdin, /ASSISTANT:\n先确认影响范围/);
+  assert.match(invocations[0].stdin, /USER:\n怎么确认/);
+  assert.equal(invocations[0].stdin.split('怎么确认？').length - 1, 1, 'the current user message must be appended once');
   assert.match(invocations[0].stdin, /我的应用/);
   assert.match(invocations[0].stdin, /projectContext 是请求开始时从当前权威数据读取的快照/);
   assert.match(invocations[0].stdin, /所需事实不在 projectContext 中时/);
+  assert.doesNotMatch(invocations[0].stdin, /USER:[\s\S]*"projectContext"/,
+    'the project snapshot belongs to ephemeral system context, not a user envelope');
   assert.match(invocations[0].args.join(' '), /--sandbox read-only/);
 });
 
@@ -208,7 +212,9 @@ test('smart kernel chat answers a project question after reading current plugin 
   await session.close();
   assert.equal(reply, '当前项目 Beta 尚需验证付费。');
   assert.equal(prompts.length, 2);
-  assert.match(prompts[1], /TOOLRESULT:/);
+  assert.match(prompts[1], /USER:\n当前项目还要做什么/);
+  assert.match(prompts[1], /ASSISTANT:\n[^\n]*"type":"toolCall"[^\n]*"id":"read-1"[^\n]*"name":"get_current_project"[^\n]*"arguments":\{\}/);
+  assert.match(prompts[1], /TOOLRESULT:\n[^\n]*"toolCallId":"read-1"[^\n]*"toolName":"get_current_project"/);
   assert.match(prompts[1], /Beta/);
   assert.match(prompts[1], /验证付费/);
   assert.doesNotMatch(prompts[0], /Alpha/);
@@ -217,6 +223,122 @@ test('smart kernel chat answers a project question after reading current plugin 
   assert.ok(events.some(event => event.stage === 'mcp.list' && event.status === 'ok'));
   assert.ok(events.some(event => event.stage === 'mcp.get_current_project' && event.status === 'ok'));
   assert.doesNotMatch(JSON.stringify(events), /完成登录|验证付费|\/beta/);
+});
+
+test('smart kernel bounds long Pi context by complete recent turns while retaining the current user', async () => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const messages = [];
+  for (let index = 0; index < 90; index += 1) {
+    messages.push({ role: 'user', content: `question-${index}-${'u'.repeat(6_000)}` });
+    messages.push({ role: 'assistant', content: `answer-${index}-${'a'.repeat(6_000)}` });
+  }
+  messages.push({ role: 'user', content: 'current-question-must-survive' });
+  const originalMessages = structuredClone(messages);
+  let prompt = '';
+  const engine = new EmbeddedPiAgentEngine({
+    agentCli: 'codex', runner: async invocation => {
+      prompt = invocation.stdin;
+      return 'bounded answer';
+    }
+  });
+
+  assert.equal(await engine.chat(messages, { selectedProject: '', projects: [] }), 'bounded answer');
+  assert.ok(prompt.length <= 600_000, `projected prompt is unexpectedly large: ${prompt.length}`);
+  assert.doesNotMatch(prompt, /question-0-|answer-0-/);
+  assert.match(prompt, /USER:\nquestion-89-/);
+  assert.match(prompt, /ASSISTANT:\nanswer-89-/);
+  assert.match(prompt, /USER:\ncurrent-question-must-survive/);
+  assert.equal(prompt.split('current-question-must-survive').length - 1, 1);
+  assert.deepEqual(messages, originalMessages, 'context projection must not mutate durable conversation messages');
+});
+
+test('smart kernel bounds one oversized current user message without losing either edge', async () => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const messages = [{ role: 'user', content: `current-start-${'x'.repeat(700_000)}-current-end` }];
+  const originalMessages = structuredClone(messages);
+  let prompt = '';
+  const engine = new EmbeddedPiAgentEngine({
+    agentCli: 'codex', runner: async invocation => {
+      prompt = invocation.stdin;
+      return 'bounded answer';
+    }
+  });
+
+  assert.equal(await engine.chat(messages, { selectedProject: '', projects: [] }), 'bounded answer');
+  assert.ok(prompt.length <= 600_000, `projected prompt is unexpectedly large: ${prompt.length}`);
+  assert.match(prompt, /USER:\ncurrent-start-/);
+  assert.match(prompt, /…\[context truncated\]…/);
+  assert.match(prompt, /-current-end/);
+  assert.deepEqual(messages, originalMessages);
+});
+
+test('smart kernel bounds an oversized tool result while preserving its call linkage and current turn', async () => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
+  const prompts = [];
+  const session = await createIntelligenceMcpSession({
+    getProjects: () => [{ name: 'Alpha', path: '/alpha' }],
+    getSelectedProjectPath: () => '/alpha',
+    getCurrentSteps: () => [{ title: `tool-start-${'t'.repeat(700_000)}-tool-end`, status: 'Pending' }],
+    getSettings: () => ({ language: 'zh' })
+  });
+  const engine = new EmbeddedPiAgentEngine({
+    agentCli: 'codex', runner: async invocation => {
+      prompts.push(invocation.stdin);
+      return prompts.length === 1 ? '{"toolCall":{"name":"get_current_project"}}' : 'bounded tool answer';
+    }
+  });
+
+  try {
+    assert.equal(await engine.chat([{ role: 'user', content: 'keep-current-turn' }],
+      { selectedProject: '', projects: [] }, session.client), 'bounded tool answer');
+  } finally {
+    await session.close();
+  }
+  assert.equal(prompts.length, 2);
+  assert.ok(prompts[1].length <= 600_000, `projected prompt is unexpectedly large: ${prompts[1].length}`);
+  assert.match(prompts[1], /USER:\nkeep-current-turn/);
+  assert.match(prompts[1], /"type":"toolCall","id":"read-1","name":"get_current_project"/);
+  assert.match(prompts[1], /TOOLRESULT:\n[^\n]*"toolCallId":"read-1","toolName":"get_current_project"/);
+  assert.match(prompts[1], /tool-start-/);
+  assert.match(prompts[1], /…\\?\[context truncated\\?\]…/);
+  assert.match(prompts[1], /-tool-end/);
+});
+
+test('smart kernel bounds tool results containing many short content blocks', async () => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const prompts = [];
+  const readTools = {
+    async listTools() {
+      return { tools: [{
+        name: 'get_current_project', description: 'Read current project',
+        inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true }
+      }] };
+    },
+    async callTool() {
+      return {
+        content: Array.from({ length: 20_000 }, (_, index) => ({
+          type: 'text', text: `block-${index}-${'v'.repeat(32)}`
+        }))
+      };
+    }
+  };
+  const engine = new EmbeddedPiAgentEngine({
+    agentCli: 'codex', runner: async invocation => {
+      prompts.push(invocation.stdin);
+      return prompts.length === 1 ? '{"toolCall":{"name":"get_current_project"}}' : 'bounded blocks answer';
+    }
+  });
+
+  assert.equal(await engine.chat([{ role: 'user', content: 'keep-many-blocks-turn' }],
+    { selectedProject: '', projects: [] }, readTools), 'bounded blocks answer');
+  assert.equal(prompts.length, 2);
+  assert.ok(prompts[1].length <= 600_000, `projected prompt is unexpectedly large: ${prompts[1].length}`);
+  assert.match(prompts[1], /USER:\nkeep-many-blocks-turn/);
+  assert.match(prompts[1], /"type":"toolCall","id":"read-1","name":"get_current_project"/);
+  assert.match(prompts[1], /TOOLRESULT:\n[^\n]*"toolCallId":"read-1","toolName":"get_current_project"/);
+  assert.match(prompts[1], /block-0-/);
+  assert.match(prompts[1], /block-19999-/);
 });
 
 test('smart kernel does not treat a historical project as the current topic for a greeting', async () => {
@@ -268,16 +390,44 @@ test('Telegram replies continue in the sidebar Pi conversation and can use read-
       await session.close();
     }
   }, dataRequest);
-  let savedIds = {};
+  const sidebarConversation = await store.send('当前项目还要做什么？');
+  let savedIds = { '123456': sidebarConversation.id };
   const reply = createTelegramIntelligenceReply(() => store, () => savedIds, async ids => { savedIds = ids; }, () => 0);
-  assert.equal(await reply('123456', '当前项目还要做什么？'), '当前项目 Beta 尚需验证付费。');
   assert.equal(await reply('123456', '先做哪一步？'), '先验证付费流程。');
   assert.equal((await store.list()).length, 1);
   assert.equal((await store.get(savedIds['123456'])).messages.length, 4);
-  assert.match(prompts[1], /TOOLRESULT:/);
+  assert.match(prompts[1], /"toolCallId":"read-1"/);
   assert.match(prompts[1], /验证付费/);
   assert.match(prompts[2], /当前项目 Beta 尚需验证付费/);
+  assert.doesNotMatch(prompts[2], /"toolCallId":"read-1"/,
+    'internal tool messages from a completed turn must not be persisted into the next request');
   assert.doesNotMatch(prompts.join('\n'), /\/private\/beta/);
+});
+
+test('each request uses a fresh project snapshot without storing snapshots in conversation history', async t => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const { IntelligenceConversationStore } = require('../out/intelligenceChat.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-project-snapshot-'));
+  t.after(() => cleanupExact(root));
+  const prompts = [];
+  let projectContext = { selectedProject: 'snapshot-alpha', projects: ['snapshot-alpha'] };
+  const engine = new EmbeddedPiAgentEngine({
+    agentCli: 'codex', runner: async invocation => {
+      prompts.push(invocation.stdin);
+      return prompts.length === 1 ? 'first-visible-answer' : 'second-visible-answer';
+    }
+  });
+  const store = new IntelligenceConversationStore(root,
+    messages => engine.chat(messages, projectContext), createConversationDataRequest());
+
+  const first = await store.send('first-user-question');
+  projectContext = { selectedProject: 'snapshot-beta', projects: ['snapshot-beta'] };
+  const second = await store.send('second-user-question', first.id);
+
+  assert.match(prompts[0], /snapshot-alpha/);
+  assert.match(prompts[1], /snapshot-beta/);
+  assert.doesNotMatch(prompts[1], /snapshot-alpha/);
+  assert.doesNotMatch(JSON.stringify(second.messages), /snapshot-alpha|snapshot-beta/);
 });
 
 test('unlinking Telegram during a Pi answer cannot restore its old conversation', async t => {
@@ -606,6 +756,59 @@ test('smart kernel chat saves a separate durable conversation and resumes its hi
   assert.deepEqual((await reopened.get(first.id)).messages, second.messages);
 });
 
+test('a revision retry regenerates from committed history and commits one complete turn', async t => {
+  const { IntelligenceConversationStore } = require('../out/intelligenceChat.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-intelligence-revision-'));
+  t.after(() => cleanupExact(root));
+  const values = new Map();
+  let firstWrite = true;
+  const requests = async (_root, request) => {
+    if (request.operation === 'read_intelligence_conversation') {
+      const value = values.get(request.input.id);
+      return value ? structuredClone(value) : null;
+    }
+    if (request.operation === 'list_intelligence_conversations') return [];
+    if (request.operation === 'write_intelligence_conversation') {
+      if (firstWrite) {
+        firstWrite = false;
+        const requested = request.input.conversation;
+        values.set(requested.id, {
+          revision: 1,
+          conversation: {
+            ...structuredClone(requested),
+            messages: [
+              { role: 'user', content: '另一入口的问题' },
+              { role: 'assistant', content: '另一入口的回答' }
+            ]
+          }
+        });
+        throw new Error('revision_conflict');
+      }
+      const current = values.get(request.input.conversation.id);
+      assert.equal(request.input.expectedRevision, current.revision);
+      values.set(request.input.conversation.id, {
+        revision: current.revision + 1,
+        conversation: structuredClone(request.input.conversation)
+      });
+      return { revision: current.revision + 1 };
+    }
+    throw new Error(`unexpected intelligence operation: ${request.operation}`);
+  };
+  const seen = [];
+  const store = new IntelligenceConversationStore(root, async messages => {
+    seen.push(structuredClone(messages));
+    return seen.length === 1 ? '应被冲突丢弃的回答' : '基于最新历史的回答';
+  }, requests);
+
+  const conversation = await store.send('我的问题');
+  assert.equal(seen.length, 2);
+  assert.deepEqual(seen[1].map(message => message.content), ['另一入口的问题', '另一入口的回答', '我的问题']);
+  assert.deepEqual(conversation.messages.map(message => message.content),
+    ['另一入口的问题', '另一入口的回答', '我的问题', '基于最新历史的回答']);
+  assert.equal(conversation.messages.filter(message => message.content === '我的问题').length, 1);
+  assert.equal(conversation.messages.filter(message => message.role === 'assistant').length, 2);
+});
+
 test('smart kernel chat keeps the draft available when generation fails', async t => {
   const { IntelligenceConversationStore } = require('../out/intelligenceChat.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-intelligence-chat-failure-'));
@@ -614,5 +817,29 @@ test('smart kernel chat keeps the draft available when generation fails', async 
   });
   const store = new IntelligenceConversationStore(root, async () => { throw new Error('model unavailable'); }, createConversationDataRequest());
   await assert.rejects(() => store.send('继续这个问题'), /model unavailable/);
+  assert.deepEqual(await store.list(), []);
+});
+
+test('cancelling a Pi chat commits neither the current user nor a partial assistant turn', async t => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const { IntelligenceConversationStore } = require('../out/intelligenceChat.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-intelligence-cancel-'));
+  t.after(() => cleanupExact(root));
+  let release;
+  const waiting = new Promise(resolve => { release = resolve; });
+  const engine = new EmbeddedPiAgentEngine({
+    agentCli: 'codex', runner: async () => {
+      await waiting;
+      return '取消后到达的回答';
+    }
+  });
+  const store = new IntelligenceConversationStore(root,
+    messages => engine.chat(messages, { selectedProject: '', projects: [] }), createConversationDataRequest());
+  const pending = store.send('不要留下半轮消息');
+  await new Promise(resolve => setImmediate(resolve));
+  engine.cancel();
+  release();
+
+  await assert.rejects(pending, /cancelled|aborted/i);
   assert.deepEqual(await store.list(), []);
 });
