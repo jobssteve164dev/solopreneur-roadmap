@@ -139,6 +139,28 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
     storageMaintenanceTail = operation.then(() => undefined, () => undefined);
     return operation;
   };
+  const compactDatabaseStorage = () => {
+    const operation = storageMaintenanceTail.catch(() => undefined).then(async () => {
+      await storageMaintenanceBarrier;
+      const currentSize = store.databaseStorageFileSizes();
+      store.recoverInterruptedDatabaseStorageMaintenance(Date.now(), currentSize.databaseBytes);
+      const startedAt = Date.now();
+      const maintenanceId = store.beginDatabaseStorageMaintenance(startedAt, currentSize.databaseBytes);
+      const totals = { deletedArtifacts: 0, deletedSources: 0, deletedContents: 0, reclaimedStoredBytes: 0 };
+      try {
+        const integrity = store.compactDatabaseStorage().integrity;
+        const after = store.databaseStorageFileSizes();
+        store.settleDatabaseStorageMaintenance(maintenanceId, { status: 'completed', finishedAt: Date.now(), ...totals, compacted: true, afterBytes: after.databaseBytes, integrity });
+        return { ...totals, retiredTestProjects: 0, compacted: true, integrity, beforeBytes: currentSize.databaseBytes, afterBytes: after.databaseBytes, pendingByproductRecords: store.pendingDatabaseStorageCleanupRecords() };
+      } catch (error) {
+        const after = store.databaseStorageFileSizes();
+        store.settleDatabaseStorageMaintenance(maintenanceId, { status: 'failed', finishedAt: Date.now(), error: String(error), ...totals, compacted: false, afterBytes: after.databaseBytes, integrity: 'not_checked' });
+        throw error;
+      }
+    });
+    storageMaintenanceTail = operation.then(() => undefined, () => undefined);
+    return operation;
+  };
   const dispatch = async (request: RuntimeDataRequest): Promise<unknown> => {
     if (!request || typeof request.operation !== 'string' || !request.input || typeof request.input !== 'object') throw new Error('invalid_data_request');
     const input = request.input;
@@ -861,6 +883,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       case 'read_database_overview': return store.readDatabaseOverview();
       case 'read_database_storage': return store.readDatabaseStorage();
       case 'maintain_database_storage': return maintainDatabaseStorage(input.compact === true, input.automatic === true);
+      case 'compact_database_storage': return compactDatabaseStorage();
       case 'restore_backup': return store.restoreBackup({ source: String(input.source || ''), destinationRoot: String(input.destinationRoot || ''), idempotencyKey: String(input.idempotencyKey || '') });
       case 'export_project': return store.exportProject(input as unknown as Parameters<UnifiedDataStore['exportProject']>[0]);
       case 'import_project': return store.importProject(input as unknown as Parameters<UnifiedDataStore['importProject']>[0]);
