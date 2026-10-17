@@ -278,6 +278,9 @@ test('cleanup detail lookups use snapshot-prefixed database indexes', async t =>
     assert.match(details, /snapshot_id=\?/);
     assert.doesNotMatch(details, /USE TEMP B-TREE/);
   }
+  const parentLookup = f.store.rows('EXPLAIN QUERY PLAN SELECT 1 FROM growth_items WHERE snapshot_id=? AND parent_id=?', [snapshotId, 'directory:.'])
+    .map(row => String(row.detail)).join('\n');
+  assert.match(parentLookup, /growth_items_parent \(snapshot_id=\? AND parent_id=\?\)/);
 });
 
 test('cleanup invalidates old plans that attempted unindexed content deletion', async t => {

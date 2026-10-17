@@ -696,4 +696,6 @@ CREATE TRIGGER growth_signal_semantic_delete AFTER DELETE ON growth_signals BEGI
 CREATE TRIGGER growth_label_semantic_insert AFTER INSERT ON growth_module_labels BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=NEW.snapshot_id; END;
 CREATE TRIGGER growth_label_semantic_update AFTER UPDATE ON growth_module_labels BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id IN (OLD.snapshot_id,NEW.snapshot_id); END;
 CREATE TRIGGER growth_label_semantic_delete AFTER DELETE ON growth_module_labels BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=OLD.snapshot_id; END;
+` }, { version: 47, sql: `
+CREATE INDEX growth_items_parent ON growth_items(snapshot_id,parent_id);
 ` }];
