@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.584 - 2026-10-17
+
+### Changed
+- SoloMap pre-session auto-backup [2026-10-16T22:57:27.171Z] (8bf0ecf)
+
+### Fixed
+- bound growth cleanup preview memory (d327c6b)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.583 - 2026-10-16
 
 ### Added
