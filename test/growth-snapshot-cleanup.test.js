@@ -42,11 +42,16 @@ async function writeHistory(f, states) {
   return ids;
 }
 
+function fullManifest(f, preview) {
+  return f.store.readGrowthSnapshotCleanupPlan(preview.planId).manifest;
+}
+
 test('cleanup preview freezes an immutable exact A-A-B-A-A segment manifest', async t => {
   const f = await fixture(t);
   const ids = await writeHistory(f, ['A', 'A', 'B', 'A', 'A']);
 
   const preview = await f.call('preview_growth_snapshot_cleanup', { idempotencyKey: 'preview-segments' });
+  const manifest = fullManifest(f, preview);
 
   assert.equal(preview.status, 'prepared');
   assert.match(preview.planId, /^[a-f0-9-]{36}$/);
@@ -54,9 +59,12 @@ test('cleanup preview freezes an immutable exact A-A-B-A-A segment manifest', as
   assert.equal(preview.manifest.title, '待删除数据库记录清单');
   assert.equal(preview.manifest.database.databaseId, f.store.databaseId);
   assert.equal(preview.manifest.database.snapshotCount, 5);
-  assert.deepEqual(preview.manifest.retainedSnapshots.map(item => item.snapshotId), [ids[1], ids[2], ids[4]]);
-  assert.deepEqual(preview.manifest.candidateSnapshots.map(item => item.snapshotId), [ids[0], ids[3]]);
-  assert.deepEqual(preview.manifest.candidateSnapshots.map(item => item.retainedSnapshotId), [ids[1], ids[4]]);
+  assert.equal(preview.manifest.retainedSnapshots.count, 3);
+  assert.equal(preview.manifest.candidateSnapshots.count, 2);
+  assert.ok(Buffer.byteLength(JSON.stringify(preview)) < 10_000);
+  assert.deepEqual(manifest.retainedSnapshots.map(item => item.snapshotId), [ids[1], ids[2], ids[4]]);
+  assert.deepEqual(manifest.candidateSnapshots.map(item => item.snapshotId), [ids[0], ids[3]]);
+  assert.deepEqual(manifest.candidateSnapshots.map(item => item.retainedSnapshotId), [ids[1], ids[4]]);
   assert.equal(preview.manifest.records.growthSnapshots.count, 2);
   assert.equal(preview.manifest.records.growthItems.count, 4);
   assert.equal(preview.manifest.records.growthEdges.count, 2);
@@ -64,16 +72,25 @@ test('cleanup preview freezes an immutable exact A-A-B-A-A segment manifest', as
   assert.equal(preview.manifest.records.growthModuleLabels.count, 2);
   assert.equal(preview.manifest.records.objects.count, 2);
   assert.equal(preview.manifest.records.objectSearch.count, 2);
-  assert.equal(preview.manifest.records.objectSearch.rowids.length, 2);
+  assert.equal(manifest.records.objectSearch.rowids.length, 2);
   assert.equal(preview.manifest.records.objectRevisions.count, 2);
   assert.equal(preview.manifest.records.events.count, 2);
   assert.equal(preview.manifest.records.requests.count, 2);
-  assert.equal(preview.manifest.records.contents.candidateIds.length, 4);
-  assert.equal(preview.manifest.records.contents.deletableIds.length, 4);
+  assert.equal(preview.manifest.records.contents.candidateCount, 4);
+  assert.equal(preview.manifest.records.contents.deletableCount, 0);
   assert.equal(preview.manifest.records.contentChunks.count, 0);
   assert.equal(preview.manifest.records.databaseStorageCleanupCandidates.count, 0);
   assert.deepEqual(await f.call('read_growth_snapshot_cleanup_plan', { planId: preview.planId }), preview);
   assert.deepEqual(await f.call('preview_growth_snapshot_cleanup', { idempotencyKey: 'preview-segments' }), preview);
+  const firstPage = await f.call('read_growth_snapshot_cleanup_manifest_page', {
+    planId: preview.planId, section: 'candidateSnapshots', cursor: 0, limit: 1
+  });
+  const secondPage = await f.call('read_growth_snapshot_cleanup_manifest_page', {
+    planId: preview.planId, section: 'candidateSnapshots', cursor: firstPage.nextCursor, limit: 1
+  });
+  assert.deepEqual([...firstPage.items, ...secondPage.items], manifest.candidateSnapshots);
+  assert.equal(firstPage.total, 2);
+  assert.equal(secondPage.nextCursor, null);
   assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_snapshots')[0].count, 5, 'preview must not delete snapshots');
 });
 
@@ -99,6 +116,7 @@ test('confirmed cleanup applies in idempotent batches and preserves A-B-A with v
   const f = await fixture(t);
   const ids = await writeHistory(f, ['A', 'A', 'B', 'A', 'A']);
   const preview = await f.call('preview_growth_snapshot_cleanup', { idempotencyKey: 'preview-apply' });
+  const manifest = fullManifest(f, preview);
   const input = {
     planId: preview.planId,
     planHash: preview.planHash,
@@ -116,16 +134,16 @@ test('confirmed cleanup applies in idempotent batches and preserves A-B-A with v
   assert.deepEqual(applied.deleted, {
     growthSnapshots: 2, growthItems: 4, growthEdges: 2, growthSignals: 2, growthModuleLabels: 2,
     objects: 2, objectSearch: 2, objectRevisions: 2, events: 2, outbox: 0, requests: 2,
-    contentChunks: 0, databaseStorageCleanupCandidates: 0, contents: 4
+    contentChunks: 0, databaseStorageCleanupCandidates: 0, contents: 0
   });
   assert.deepEqual((await f.call('read_project_growth', { root: f.projectRoot, historyLimit: 50 })).history.map(item => item.snapshot.id), [ids[4], ids[2], ids[1]]);
   assert.deepEqual(f.store.rows('PRAGMA foreign_key_check'), []);
-  assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM object_search WHERE rowid IN (?,?)', preview.manifest.records.objectSearch.rowids)[0].count, 0);
+  assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM object_search WHERE rowid IN (?,?)', manifest.records.objectSearch.rowids)[0].count, 0);
   assert.deepEqual(await f.call('apply_growth_snapshot_cleanup', input), applied);
   assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_snapshot_cleanup_batches WHERE plan_id=?', [preview.planId])[0].count, 2);
 });
 
-test('cleanup retains candidate content that still has any reference elsewhere in the database', async t => {
+test('snapshot cleanup leaves directly referenced content to separate garbage collection', async t => {
   const f = await fixture(t);
   const ids = await writeHistory(f, ['A', 'A']);
   const revision = f.store.rows('SELECT content_id FROM object_revisions WHERE object_id=?', [ids[0]])[0];
@@ -135,23 +153,24 @@ test('cleanup retains candidate content that still has any reference elsewhere i
     VALUES(?,?,?,?,?,?,?,'retained')`, [f.projectId, 999, 'retained-growth-content.json', revision.content_id, content.sha256, content.mime_type, Date.now()]);
 
   const preview = await f.call('preview_growth_snapshot_cleanup', { idempotencyKey: 'preview-shared-content' });
+  const manifest = fullManifest(f, preview);
 
-  assert.deepEqual(preview.manifest.candidateSnapshots.map(item => item.snapshotId), [ids[0]]);
-  assert.ok(preview.manifest.records.contents.retainedSharedIds.includes(revision.content_id));
-  assert.ok(!preview.manifest.records.contents.deletableIds.includes(revision.content_id));
+  assert.deepEqual(manifest.candidateSnapshots.map(item => item.snapshotId), [ids[0]]);
+  assert.ok(manifest.records.contents.retainedSharedIds.includes(revision.content_id));
+  assert.ok(!manifest.records.contents.deletableIds.includes(revision.content_id));
   const applied = await f.call('apply_growth_snapshot_cleanup', {
     planId: preview.planId,
     planHash: preview.planHash,
     confirmation: '确认删除该清单记录',
     idempotencyKey: 'apply-shared-content'
   });
-  assert.equal(applied.deleted.contents, preview.manifest.records.contents.deletableIds.length);
+  assert.equal(applied.deleted.contents, manifest.records.contents.deletableIds.length);
   assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM contents WHERE id=?', [revision.content_id])[0].count, 1);
   assert.equal(f.store.rows("SELECT COUNT(*) AS count FROM project_run_artifacts WHERE relative_path='retained-growth-content.json'")[0].count, 1);
   assert.deepEqual(f.store.rows('PRAGMA foreign_key_check'), []);
 });
 
-test('cleanup follows retained JSON content references before classifying candidate content as deletable', async t => {
+test('snapshot cleanup leaves content referenced from retained JSON untouched', async t => {
   const f = await fixture(t);
   const ids = await writeHistory(f, ['A', 'A']);
   const revision = f.store.rows('SELECT content_id FROM object_revisions WHERE object_id=?', [ids[0]])[0];
@@ -162,9 +181,10 @@ test('cleanup follows retained JSON content references before classifying candid
   });
 
   const preview = await f.call('preview_growth_snapshot_cleanup', { idempotencyKey: 'preview-embedded-content' });
+  const manifest = fullManifest(f, preview);
 
-  assert.ok(preview.manifest.records.contents.retainedSharedIds.includes(revision.content_id));
-  assert.ok(!preview.manifest.records.contents.deletableIds.includes(revision.content_id));
+  assert.ok(manifest.records.contents.retainedSharedIds.includes(revision.content_id));
+  assert.ok(!manifest.records.contents.deletableIds.includes(revision.content_id));
   const applied = await f.call('apply_growth_snapshot_cleanup', {
     planId: preview.planId,
     planHash: preview.planHash,
@@ -172,25 +192,78 @@ test('cleanup follows retained JSON content references before classifying candid
     idempotencyKey: 'apply-embedded-content'
   });
   assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM contents WHERE id=?', [revision.content_id])[0].count, 1);
-  assert.equal(applied.deleted.contents, preview.manifest.records.contents.deletableIds.length);
+  assert.equal(applied.deleted.contents, manifest.records.contents.deletableIds.length);
 });
 
-test('cleanup follows embedded references from every live database content root', async t => {
+test('snapshot cleanup does not depend on scanning arbitrary live JSON roots', async t => {
   const f = await fixture(t);
   const ids = await writeHistory(f, ['A', 'A']);
   const revision = f.store.rows('SELECT content_id FROM object_revisions WHERE object_id=?', [ids[0]])[0];
-  const rootContentId = f.store.putContent(JSON.stringify({ sourceContents: { candidate: revision.content_id } }), 'application/json');
+  const rootContentId = f.store.putContent('{unrelated invalid json', 'application/json');
   const actor = f.store.rows('SELECT actor_id FROM requests ORDER BY rowid LIMIT 1')[0];
   f.store.db.run("INSERT INTO requests(actor_id,idempotency_key,id,input_hash,result_content_id,status) VALUES(?,?,?,?,?,'committed')",
     [actor.actor_id, 'external-embedded-root', 'external-embedded-root', 'b'.repeat(64), rootContentId]);
 
   const preview = await f.call('preview_growth_snapshot_cleanup', { idempotencyKey: 'preview-all-embedded-roots' });
+  const manifest = fullManifest(f, preview);
 
-  assert.ok(preview.manifest.records.contents.retainedSharedIds.includes(revision.content_id));
-  assert.ok(!preview.manifest.records.contents.deletableIds.includes(revision.content_id));
+  assert.ok(manifest.records.contents.retainedSharedIds.includes(revision.content_id));
+  assert.ok(!manifest.records.contents.deletableIds.includes(revision.content_id));
 });
 
-test('cleanup manifest inventories every physical FTS, chunk, and cleanup-queue record it deletes', async t => {
+test('cleanup uses the stored snapshot payload hash without rereading every snapshot detail', async t => {
+  const f = await fixture(t);
+  const ids = await writeHistory(f, ['A', 'A']);
+  f.store.readProjectGrowth = () => { throw new Error('snapshot detail should not be reread'); };
+
+  const preview = await f.call('preview_growth_snapshot_cleanup', { idempotencyKey: 'preview-bounded-roots' });
+  const manifest = fullManifest(f, preview);
+
+  assert.deepEqual(manifest.candidateSnapshots.map(item => item.snapshotId), [ids[0]]);
+  assert.equal(manifest.candidateSnapshots[0].semanticFingerprint,
+    f.store.rows('SELECT payload_hash FROM growth_snapshots WHERE id=?', [ids[0]])[0].payload_hash);
+});
+
+test('cleanup detail lookups use snapshot-prefixed database indexes', async t => {
+  const f = await fixture(t);
+  const [snapshotId] = await writeHistory(f, ['A']);
+
+  for (const table of ['growth_items', 'growth_edges', 'growth_signals', 'growth_module_labels']) {
+    const details = f.store.rows(`EXPLAIN QUERY PLAN SELECT COUNT(*) FROM ${table} WHERE snapshot_id=?`, [snapshotId])
+      .map(row => String(row.detail)).join('\n');
+    assert.match(details, /USING (?:COVERING )?INDEX/);
+    assert.match(details, /snapshot_id=\?/);
+  }
+});
+
+test('cleanup invalidates old plans that attempted unindexed content deletion', async t => {
+  const f = await fixture(t);
+  await writeHistory(f, ['A', 'A']);
+  const preview = await f.call('preview_growth_snapshot_cleanup', { idempotencyKey: 'preview-old-content-plan' });
+  const plan = f.store.readGrowthSnapshotCleanupPlan(preview.planId);
+  const originalRead = f.store.readGrowthSnapshotCleanupPlan.bind(f.store);
+  f.store.readGrowthSnapshotCleanupPlan = () => ({
+    ...plan,
+    manifest: {
+      ...plan.manifest,
+      records: {
+        ...plan.manifest.records,
+        contents: { ...plan.manifest.records.contents, deletableIds: [plan.manifest.records.contents.candidateIds[0]] }
+      }
+    }
+  });
+
+  await assert.rejects(f.call('apply_growth_snapshot_cleanup', {
+    planId: preview.planId,
+    planHash: preview.planHash,
+    confirmation: '确认删除该清单记录',
+    idempotencyKey: 'apply-old-content-plan'
+  }), /growth_cleanup_plan_invalidated/);
+  f.store.readGrowthSnapshotCleanupPlan = originalRead;
+  assert.equal(originalRead(preview.planId).status, 'invalidated');
+});
+
+test('cleanup retains content blobs for separate indexed garbage collection', async t => {
   const f = await fixture(t);
   const ids = await writeHistory(f, ['A', 'A']);
   const chunkedContentId = f.store.putContent(JSON.stringify({ payload: 'x'.repeat(70_000) }), 'application/json');
@@ -200,10 +273,13 @@ test('cleanup manifest inventories every physical FTS, chunk, and cleanup-queue 
   assert.ok(chunkCount > 0);
 
   const preview = await f.call('preview_growth_snapshot_cleanup', { idempotencyKey: 'preview-physical-records' });
+  const manifest = fullManifest(f, preview);
 
   assert.equal(preview.manifest.records.objectSearch.count, 1);
-  assert.equal(preview.manifest.records.contentChunks.count, chunkCount);
-  assert.deepEqual(preview.manifest.records.databaseStorageCleanupCandidates.contentIds, [chunkedContentId]);
+  assert.equal(preview.manifest.records.contentChunks.count, 0);
+  assert.deepEqual(manifest.records.contents.deletableIds, []);
+  assert.ok(manifest.records.contents.retainedSharedIds.includes(chunkedContentId));
+  assert.deepEqual(manifest.records.databaseStorageCleanupCandidates.contentIds, []);
   const applied = await f.call('apply_growth_snapshot_cleanup', {
     planId: preview.planId,
     planHash: preview.planHash,
@@ -212,9 +288,10 @@ test('cleanup manifest inventories every physical FTS, chunk, and cleanup-queue 
   });
 
   assert.equal(applied.deleted.objectSearch, 1);
-  assert.equal(applied.deleted.contentChunks, chunkCount);
-  assert.equal(applied.deleted.databaseStorageCleanupCandidates, 1);
-  assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM contents WHERE id=?', [chunkedContentId])[0].count, 0);
+  assert.equal(applied.deleted.contentChunks, 0);
+  assert.equal(applied.deleted.databaseStorageCleanupCandidates, 0);
+  assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM contents WHERE id=?', [chunkedContentId])[0].count, 1);
+  assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM content_chunks WHERE content_id=?', [chunkedContentId])[0].count, chunkCount);
 });
 
 test('cleanup invalidates a partially applied plan when the remaining batch drifts before resume', async t => {
