@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.589 - 2026-10-17
+
+### Fixed
+- batch agent terminal log persistence (ba6253a)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.588 - 2026-10-17
 
 ### Added
