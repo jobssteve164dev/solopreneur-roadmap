@@ -5827,7 +5827,7 @@ test('sidebar local project refresh batches core cards before scheduling enrichm
   assert.equal(postedMessages[0].projects.portfolio[1].recommendedNodeTitle, 'Keep other');
 });
 
-test('automatic all-project local refresh keeps the external signal queue alive', async () => {
+test('automatic project status refresh stays scoped while keeping the external signal queue alive', async () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
   const projects = [
     { name: 'app', path: '/workspace/app' },
@@ -5851,10 +5851,59 @@ test('automatic all-project local refresh keeps the external signal queue alive'
   provider._projectLoader.cancelExternalLoads = () => { cancellations += 1; };
   provider._projectLoader.schedulePortfolioEnrichment = () => resolveEnrichment();
 
-  provider.sendLocalProjects();
+  provider.sendLocalProjects('/workspace/other');
   await Promise.race([enrichment, new Promise(resolve => setTimeout(resolve, 200))]);
 
   assert.equal(cancellations, 0);
+});
+
+test('extension routes automatic card refreshes to the project whose local state changed', () => {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.refreshCards = refreshSidebarProjectCards;
+    module.exports.connectRefreshCards = provider => {
+      sidebarProvider = provider;
+      activeProjectRoot = '/workspace/active';
+    };
+  `);
+  const refreshed = [];
+  extension.connectRefreshCards({ sendLocalProjects(projectPath) { refreshed.push(projectPath); } });
+
+  extension.refreshCards('/workspace/background');
+  extension.refreshCards();
+
+  assert.deepEqual(refreshed, ['/workspace/background', '/workspace/active']);
+});
+
+test('sidebar completes local core cards before starting automatic external refreshes', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const events = [];
+  const projects = [
+    { name: 'app', path: '/workspace/app' },
+    { name: 'other', path: '/workspace/other' }
+  ];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects, selectedProjectPath: '/workspace/app' })
+    }
+  );
+  provider._view = { webview: { postMessage(message) {
+    if (message.command === 'projectsLoaded') events.push(`core:${message.projects.updatedProjectPaths?.[0] || 'snapshot'}`);
+    return Promise.resolve(true);
+  } } };
+  provider._projectLoader.cancelExternalLoads = () => {};
+  provider._projectLoader.scheduleExternalSignals = () => events.push('external');
+  provider._projectLoader.schedulePortfolioEnrichment = () => {};
+  provider._projectLoader.scheduleAll = () => events.push('external');
+  provider.sendDailyReview = () => {};
+
+  await provider.sendProjects();
+  await new Promise(resolve => setTimeout(resolve, 40));
+
+  assert.deepEqual(events.slice(0, 3), ['core:/workspace/app', 'core:/workspace/other', 'external']);
 });
 
 test('sidebar local portfolio updates preserve newer GitHub signals', async () => {
@@ -7167,6 +7216,21 @@ test('project panels open before project selection persistence completes', () =>
   assert.match(extensionSource, /'project\.openRoadmap': async[\s\S]*?void openRoadmapPanel\(context, 'roadmap', projectPath\);[\s\S]*?setTimeout\(\(\) => void selectProject\(context, projectPath\), 0\)/);
   assert.match(extensionSource, /'project\.openGrowth': async[\s\S]*?void openProjectGrowthPanel\(context, projectPath\);[\s\S]*?setTimeout\(\(\) => void selectProject\(context, projectPath\), 0\)/);
   assert.match(extensionSource, /selectedProjectPathInMemory = projectPath;[\s\S]*?const persistSelection = persistProjectSelection\(root, projectPath\);[\s\S]*?const persistDeviceSelection = patchUiState/);
+});
+
+test('full settings hydration delivers saved local settings before optional capability enrichment', () => {
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const start = extensionSource.indexOf("'settings.get': async");
+  const end = extensionSource.indexOf("'settings.openCodeKeyStatus': async", start);
+  const handler = extensionSource.slice(start, end);
+  const fullHandler = handler.slice(handler.indexOf('invalidatePersistedSettingsCache'));
+  const localRead = fullHandler.indexOf('refreshExtensionSettingsFromDatabase');
+  const localResponse = fullHandler.indexOf("command: 'settingsLoaded'");
+  const optionalEnrichment = fullHandler.indexOf('getSettingsWithOpenCodeSecretState');
+
+  assert.ok(localRead >= 0, 'full settings must hydrate the database-backed L1 settings');
+  assert.ok(localResponse > localRead, 'saved local settings must be returned after their database read');
+  assert.ok(optionalEnrichment > localResponse, 'capabilities and secret-state enrichment must start after the L1 response');
 });
 
 test('local-first loading paints and launches before optional or durable work', () => {

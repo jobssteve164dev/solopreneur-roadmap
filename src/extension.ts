@@ -1213,7 +1213,7 @@ async function reconcileBackgroundIntelligenceService(context: vscode.ExtensionC
     }
     await refreshSolomapCapabilityRegistries(getSettingsEnhancementWorkspaceRoot(), globalDataPath);
     await resumeCapabilityOperations(context, getSettingsEnhancementWorkspaceRoot());
-    if (globalDataPath === normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) refreshSidebarProjectCards();
+    if (globalDataPath === normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) refreshSidebarProjectCards(null);
     sidebarProvider?.sendDailyReview();
   } catch (error) {
     recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'autonomous-runtime.start', error);
@@ -2049,17 +2049,30 @@ async function handleSharedWebviewAction(
         return;
       }
       invalidatePersistedSettingsCache();
+      const settingsRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+      await refreshExtensionSettingsFromDatabase(context, settingsRoot);
       await respond({
         command: 'settingsLoaded',
-        settings: await getSettingsWithOpenCodeSecretState(context),
+        settings: getSettingsWithRuntimeState(context),
         projectRoot: getMigrationProjectRoot(context) || '',
         requestId: String(request.requestId || ''),
         editRevision: Number(request.editRevision || 0),
         hydrated: true
       });
-      void refreshProAccountStatus(context).catch((error) => {
-        console.warn('SoloMap Pro status refresh failed after settings loaded:', error);
-      });
+      void getSettingsWithOpenCodeSecretState(context).then(async settings => {
+        await respond({
+          command: 'settingsLoaded',
+          settings,
+          projectRoot: getMigrationProjectRoot(context) || '',
+          requestId: String(request.requestId || ''),
+          editRevision: Number(request.editRevision || 0),
+          hydrated: true,
+          enriched: true
+        });
+        void refreshProAccountStatus(context).catch((error) => {
+          console.warn('SoloMap Pro status refresh failed after settings loaded:', error);
+        });
+      }).catch(error => recordLocalDiagnosticError(settingsRoot, 'settings.enrichment', error));
     },
     'settings.openCodeKeyStatus': async (request) => {
       const provider = normalizeOpenCodeProvider(request.openCodeProvider);
@@ -5318,9 +5331,9 @@ function postRoadmapLoadFailed(projectPath: string, error: unknown): void {
   }
 }
 
-function refreshSidebarProjectCards(): void {
+function refreshSidebarProjectCards(projectPath?: string | null): void {
   if (sidebarProvider) {
-    sidebarProvider.sendLocalProjects();
+    sidebarProvider.sendLocalProjects(projectPath === null ? '' : (projectPath || activeProjectRoot || ''));
   }
 }
 
@@ -7924,7 +7937,7 @@ async function handleContinueConversationTurn(
     }, settings);
     if (!preserveRoadmapState && node && node.status !== 'Completed') {
       await continuationEngine.updateNode(nodeId, { status: 'Running' });
-      if (syncEngine === continuationEngine) { sendNodesToWebview(); refreshSidebarProjectCards(); }
+      if (syncEngine === continuationEngine) { sendNodesToWebview(); refreshSidebarProjectCards(continuationProject); }
     }
     await deliverOrdinaryConversation(context, prepared);
     return;
@@ -8656,7 +8669,7 @@ async function rollbackProjectToPreSessionGitHash(context: vscode.ExtensionConte
       await syncEngine.initAndSync();
     }
     sendNodesToWebview();
-    refreshSidebarProjectCards();
+    refreshSidebarProjectCards(projectPath);
   } catch (error: any) {
     vscode.window.showErrorMessage(`执行回滚操作出错：${error?.message || error}`);
   }
@@ -8735,7 +8748,7 @@ async function handleRunAgent(
   void recordLocalUsageEvent(context, 'agentRun').catch(error => console.error('SoloMap failed to record local usage:', error));
   await projectSyncEngine.updateNode(nodeId, { status: 'Running' });
   sendNodesToWebview();
-  refreshSidebarProjectCards();
+  refreshSidebarProjectCards(workspaceRoot);
 
   const nativeSessionId = await readStoredNativeSessionId(workspaceRoot, nodeId, agentCli, globalDataPath);
   const runStartedAt = new Date().toISOString();
@@ -10341,7 +10354,7 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
         status: nodeStatus as RoadmapNode['status'],
         completedAt,
       });
-      refreshSidebarProjectCards();
+      refreshSidebarProjectCards(workspaceRoot);
     }
 
     } else if (effect.kind === 'revision') {
@@ -10459,7 +10472,7 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
     if (workspaceRoot) {
       await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);
     }
-    refreshSidebarProjectCards();
+    refreshSidebarProjectCards(workspaceRoot);
     if (effect.payload.captureGrowth === true && extensionContextRef && workspaceRoot
       && normalizeGlobalDataPathForExtension(getPersistedSettings(extensionContextRef).globalDataPath) === normalizeGlobalDataPathForExtension(String(globalDataPath || ''))) {
       try {
@@ -10573,7 +10586,7 @@ async function pollActiveConversations(context: vscode.ExtensionContext): Promis
     await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: key });
     const previousRegistry = readProjectRegistryFile(key, projectRegistryFileName);
     const registry = await refreshProjectRegistryForContext(context, key);
-    if (previousRegistry?.updatedAt !== registry.registry.updatedAt && key === normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) refreshSidebarProjectCards();
+    if (previousRegistry?.updatedAt !== registry.registry.updatedAt && key === normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) refreshSidebarProjectCards(null);
     let deliveryCursor: number | null = 0;
     do {
       const deliveries = await client.listDeliveries(deliveryCursor);

@@ -640,9 +640,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (localPortfolio.length) {
         this.postCorePortfolio(projectState.projects, projectState.selectedProjectPath, localPortfolio, globalDataPath);
       }
-      this._projectLoader.scheduleExternalSignals(projectState.projects, projectState.selectedProjectPath);
       this.scheduleCorePortfolio(projectState.projects, projectState.selectedProjectPath, globalDataPath, localPortfolio, {
-        includeExternal: false
+        includeExternal: true
       });
       this.sendDailyReview();
 

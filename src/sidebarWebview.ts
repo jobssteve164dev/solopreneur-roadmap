@@ -8758,7 +8758,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           restartFocusTimerTick();
           renderCollaborationPanel();
           syncAgentImpactSettings(loadedSettings, !authoritativeHydration);
-          if (authoritativeHydration && settingsPanel && settingsPanel.style.display === 'block') {
+          if (authoritativeHydration && message.enriched !== true && settingsPanel && settingsPanel.style.display === 'block') {
             requestDependencyCheck();
             requestAgentImpact();
           }
