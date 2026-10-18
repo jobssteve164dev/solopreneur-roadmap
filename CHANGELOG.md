@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.595 - 2026-10-18
+
+### Fixed
+- share canonical data root across projects (ea04a54)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.594 - 2026-10-18
 
 ### Fixed
