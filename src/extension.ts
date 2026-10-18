@@ -191,6 +191,7 @@ import {
   configureLocalDiagnosticPersistence,
   observeLocalDiagnosticStage,
   recordLocalDiagnosticError,
+  sanitizeDiagnosticText,
   withLocalDiagnosticTrace
 } from './localDiagnostics';
 import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost';
@@ -4951,58 +4952,69 @@ async function refreshStrategyPyramidPanel(context: vscode.ExtensionContext, for
   }
   const isLatestRequest = strategyPyramidRequestGate.begin();
   const canPublishToPanel = () => activeStrategyPyramidPanel === panel && isLatestRequest();
-  if (!await hasLocalStrategyPyramidAccess(context)) {
-    if (!canPublishToPanel()) return;
-    panel.webview.html = buildLocalDataStatusHtml(panel.webview, context, {
-      title: '需要 SoloMap Pro',
-      message: '战略金字塔需要 Pro。你仍然可以先使用本地路线图和项目卡片；登录或升级后这里会读取本地项目组合数据。',
-      actionLabel: '登录 / 升级 Pro',
-      actionCommand: 'openProAuthorization'
-    });
-    return;
-  }
-  const strategyProjects = getProjects(context);
   const strategyGlobalDataPath = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
-  const cognitiveConfig = readCognitiveRuntimeConfig(strategyGlobalDataPath);
-  const engineConfigRevision = cognitiveConfig.mode === 'agent_cli' ? cognitiveRuntimeConfigRevision(cognitiveConfig) : '';
-  const projectRevision = JSON.stringify(strategyProjects.map(project => [project.path, project.name, project.type || '']));
-  const canPublishCurrentSource = () => {
-    if (!canPublishToPanel()) return false;
-    if (path.resolve(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) !== path.resolve(strategyGlobalDataPath)) return false;
-    const currentConfig = readCognitiveRuntimeConfig(strategyGlobalDataPath);
-    const currentEngineRevision = currentConfig.mode === 'agent_cli' ? cognitiveRuntimeConfigRevision(currentConfig) : '';
-    const currentProjectRevision = JSON.stringify(getProjects(context).map(project => [project.path, project.name, project.type || '']));
-    return currentEngineRevision === engineConfigRevision && currentProjectRevision === projectRevision;
-  };
-  await postLocalDataLoad(
-    async () => {
-      const cachedSnapshot = forceRefresh ? null : await readCachedStrategyPyramidSnapshot(
+  const trace = createLocalDiagnosticTrace(strategyGlobalDataPath, 'strategy.load');
+  const startedAt = Date.now();
+  let canPublishCurrentSource = () => canPublishToPanel()
+    && path.resolve(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) === path.resolve(strategyGlobalDataPath);
+  await withLocalDiagnosticTrace(trace, async () => {
+    try {
+      if (!await observeLocalDiagnosticStage('strategy.access', () => hasLocalStrategyPyramidAccess(context))) {
+        if (canPublishCurrentSource()) panel.webview.html = buildLocalDataStatusHtml(panel.webview, context, {
+          title: '需要 SoloMap Pro',
+          message: '战略金字塔需要 Pro。你仍然可以先使用本地路线图和项目卡片；登录或升级后这里会读取本地项目组合数据。',
+          actionLabel: '登录 / 升级 Pro',
+          actionCommand: 'openProAuthorization'
+        });
+        trace.record('strategy.load', 'cancel', Date.now() - startedAt);
+        return;
+      }
+      const strategyProjects = getProjects(context);
+      const cognitiveConfig = readCognitiveRuntimeConfig(strategyGlobalDataPath);
+      const engineConfigRevision = cognitiveConfig.mode === 'agent_cli' ? cognitiveRuntimeConfigRevision(cognitiveConfig) : '';
+      const projectRevision = JSON.stringify(strategyProjects.map(project => [project.path, project.name, project.type || '']));
+      canPublishCurrentSource = () => {
+        if (!canPublishToPanel()) return false;
+        if (path.resolve(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) !== path.resolve(strategyGlobalDataPath)) return false;
+        const currentConfig = readCognitiveRuntimeConfig(strategyGlobalDataPath);
+        const currentEngineRevision = currentConfig.mode === 'agent_cli' ? cognitiveRuntimeConfigRevision(currentConfig) : '';
+        const currentProjectRevision = JSON.stringify(getProjects(context).map(project => [project.path, project.name, project.type || '']));
+        return currentEngineRevision === engineConfigRevision && currentProjectRevision === projectRevision;
+      };
+      const cachedSnapshot = forceRefresh ? null : await observeLocalDiagnosticStage('strategy.cache', () => readCachedStrategyPyramidSnapshot(
         strategyProjects,
         strategyGlobalDataPath,
         engineConfigRevision
-      );
-      return cachedSnapshot || buildStrategyPyramidSnapshot(context, undefined, canPublishCurrentSource);
-    },
-    (snapshot) => {
-      if (!canPublishCurrentSource()) return;
-      panel.webview.html = getStrategyPyramidWebviewHtml(
-        panel.webview,
-        context,
-        snapshot
-      );
-    },
-    (message) => {
-      if (!canPublishCurrentSource()) return;
-      console.error('SoloMap strategy pyramid load failed:', message);
+      ));
+      trace.record(cachedSnapshot ? 'strategy.cache.hit' : 'strategy.cache.miss', 'ok');
+      const snapshot = cachedSnapshot || await observeLocalDiagnosticStage('strategy.build', () => buildStrategyPyramidSnapshot(context, undefined, canPublishCurrentSource));
+      if (!canPublishCurrentSource()) {
+        trace.record('strategy.load', 'cancel', Date.now() - startedAt);
+        return;
+      }
+      await observeLocalDiagnosticStage('strategy.render', async () => {
+        panel.webview.html = getStrategyPyramidWebviewHtml(
+          panel.webview,
+          context,
+          snapshot
+        );
+      });
+      trace.record('strategy.load', 'ok', Date.now() - startedAt);
+    } catch (error) {
+      const current = canPublishCurrentSource();
+      trace.record('strategy.load', current ? 'error' : 'cancel', Date.now() - startedAt, error);
+      const message = error instanceof Error ? error.message : String(error);
+      recordLocalDiagnosticError(strategyGlobalDataPath, 'strategy.load', `trace=${trace.id} ${message}`);
+      if (!current) return;
+      console.error('SoloMap strategy pyramid load failed:', sanitizeDiagnosticText(message));
       panel.webview.html = buildLocalDataStatusHtml(panel.webview, context, {
         title: '战略金字塔加载失败',
         message: '暂时无法读取项目组合，请稍后重试。',
         actionLabel: '重试',
         actionCommand: 'refreshStrategyPyramid'
       });
-    },
-    '战略金字塔本地数据加载失败。'
-  );
+    }
+  });
 }
 
 async function buildStrategyPyramidSnapshot(
@@ -5043,7 +5055,8 @@ async function buildStrategyPyramidSnapshot(
       if (current) return current;
       throw error;
     }
-    const fallback = await buildStrategyPyramidSnapshotData(projects, globalDataPath, workspaceRoot, true, beforeCommit);
+    recordLocalDiagnosticError(globalDataPath, 'strategy.judgment', error);
+    const fallback = await observeLocalDiagnosticStage('strategy.fallback', () => buildStrategyPyramidSnapshotData(projects, globalDataPath, workspaceRoot, true, beforeCommit));
     return {
       ...fallback,
       decisionSource: 'rules_fallback' as const,

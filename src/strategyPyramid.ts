@@ -6,6 +6,7 @@ import { readLearningOverview } from './learningLedger';
 import { readProjectInvestmentStatsFromDatabase } from './projectAnalytics';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
+import { observeLocalDiagnosticStage, recordLocalDiagnosticError, getCurrentLocalDiagnosticTrace } from './localDiagnostics';
 
 export interface StrategyPyramidProject {
   name: string;
@@ -1037,7 +1038,16 @@ async function readProjectStrategies(projects: StrategyPyramidProject[], globalD
 
 type StrategyState = { objectId: string | null; revision: number; value: unknown };
 function strategyState(globalDataPath: string, root?: string): Promise<StrategyState> {
-  return sendRuntimeDataRequest(normalizeGlobalDataPath(globalDataPath), { operation: 'read_strategy_state', input: root === undefined ? {} : { root } });
+  return strategyDataRead(globalDataPath, root, 'state', () => sendRuntimeDataRequest(normalizeGlobalDataPath(globalDataPath), { operation: 'read_strategy_state', input: root === undefined ? {} : { root } }));
+}
+
+async function strategyDataRead<T>(globalDataPath: string, root: string | undefined, stage: string, read: () => Promise<T>): Promise<T> {
+  try { return await read(); }
+  catch (error) {
+    const project = root ? crypto.createHash('sha256').update(path.resolve(root)).digest('hex').slice(0, 12) : 'portfolio';
+    recordLocalDiagnosticError(globalDataPath, `strategy.${stage}.${project}`, `trace=${getCurrentLocalDiagnosticTrace()?.id || 'none'} ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
+  }
 }
 function saveStrategyState(globalDataPath: string, previous: StrategyState, value: unknown, root?: string, source?: StrategySource): Promise<StrategyState> {
   return sendRuntimeDataRequest(normalizeGlobalDataPath(globalDataPath), { operation: 'write_strategy_state', input: { ...(root === undefined ? {} : { root }), ...(source ? { expectedSourceRevision: source.databaseRevision, sourceProjectIds: source.projectIds } : {}), expectedRevision: previous.revision, value, idempotencyKey: crypto.randomUUID() } });
@@ -1092,7 +1102,7 @@ async function writeStrategyPyramidSnapshot(
 interface StrategySource { signature: string; databaseRevision: string; projectIds: string[] }
 async function strategySourceSignature(projectEntries: StrategyPyramidProject[], globalDataPath: string): Promise<StrategySource> {
   const globalRoot = normalizeGlobalDataPath(globalDataPath);
-  const source = await sendRuntimeDataRequest<{ revision: string; projectIds: string[] }>(globalRoot, { operation: 'read_strategy_source_revision', input: { roots: projectEntries.filter(project => project?.path).map(project => project.path) } });
+  const source = await observeLocalDiagnosticStage('strategy.source', () => sendRuntimeDataRequest<{ revision: string; projectIds: string[] }>(globalRoot, { operation: 'read_strategy_source_revision', input: { roots: projectEntries.filter(project => project?.path).map(project => project.path) } }));
   const projects = [];
   for (const project of projectEntries.filter(project => project?.path)) {
     let roadmap = 'missing';
@@ -1124,8 +1134,8 @@ export async function buildStrategyPyramidSnapshotData(
   if (beforeCommit && !beforeCommit()) throw new Error('Strategy pyramid request is no longer current.');
   const previous = persist ? await strategyState(globalDataPath) : undefined;
   const signature = await strategySourceSignature(projectEntries, globalDataPath);
-  const savedStrategies = await readProjectStrategies(projectEntries, globalDataPath);
-  const investments = new Map(await Promise.all(projectEntries.filter(project => project?.path).map(async project => [project.path, await readProjectInvestmentStatsFromDatabase(project.path, path.resolve(__dirname, '..'), new Date(), globalDataPath)] as const)));
+  const savedStrategies = await observeLocalDiagnosticStage('strategy.saved', () => readProjectStrategies(projectEntries, globalDataPath));
+  const investments = new Map(await observeLocalDiagnosticStage('strategy.investment', () => Promise.all(projectEntries.filter(project => project?.path).map(async project => [project.path, await strategyDataRead(globalDataPath, project.path, 'investment', () => readProjectInvestmentStatsFromDatabase(project.path, path.resolve(__dirname, '..'), new Date(), globalDataPath))] as const))));
 
   const projects = projectEntries
     .filter((project) => project && project.path)
@@ -1213,7 +1223,7 @@ export async function buildStrategyPyramidSnapshotData(
   const sellCount = countLoop('sell');
   const learnCount = countLoop('learn');
   const improveCount = countLoop('improve');
-  const learningSummary = await readLearningOverview(projects[0]?.path || fallbackWorkspaceRoot, globalDataPath);
+  const learningSummary = await observeLocalDiagnosticStage('strategy.learning', () => readLearningOverview(projects[0]?.path || fallbackWorkspaceRoot, globalDataPath));
   const learningSignals: StrategyPyramidLearningSignal[] = learningSummary.projectSignals.map((item) => ({
     projectName: item.projectName,
     projectPath: item.projectPath,
@@ -1279,7 +1289,7 @@ export async function buildStrategyPyramidSnapshotData(
   if (persist) {
     if ((await strategySourceSignature(projectEntries, globalDataPath)).signature !== signature.signature) throw new Error('Strategy pyramid facts changed while judgment was running.');
     if (beforeCommit && !beforeCommit()) throw new Error('Strategy pyramid request is no longer current.');
-    await writeStrategyPyramidSnapshot(globalDataPath, previous!, snapshot, signature);
+    await observeLocalDiagnosticStage('strategy.persist', () => writeStrategyPyramidSnapshot(globalDataPath, previous!, snapshot, signature));
   }
   return snapshot;
 }
@@ -1299,7 +1309,7 @@ export async function buildCognitiveStrategyPyramidSnapshotData(
     }
     const sourceSignature = await strategySourceSignature(projectEntries, globalDataPath);
     const baseline = await buildStrategyPyramidSnapshotData(projectEntries, globalDataPath, fallbackWorkspaceRoot, false);
-    const judgment = await engine.judgeStrategyPyramid(buildStrategyPyramidCognitiveInput(baseline));
+    const judgment = await observeLocalDiagnosticStage('strategy.judgment', () => engine.judgeStrategyPyramid(buildStrategyPyramidCognitiveInput(baseline)));
     if ((await strategySourceSignature(projectEntries, globalDataPath)).signature !== sourceSignature.signature) {
       if (attempt === 0) continue;
       throw new Error('Strategy pyramid facts changed while intelligent judgment was running.');
@@ -1311,7 +1321,7 @@ export async function buildCognitiveStrategyPyramidSnapshotData(
       engineId: engine.id,
       engineConfigRevision
     });
-    await writeStrategyPyramidSnapshot(globalDataPath, previous, snapshot, sourceSignature, engineConfigRevision, false);
+    await observeLocalDiagnosticStage('strategy.persist', () => writeStrategyPyramidSnapshot(globalDataPath, previous, snapshot, sourceSignature, engineConfigRevision, false));
     return snapshot;
   }
   throw new Error('Strategy pyramid facts changed while intelligent judgment was running.');

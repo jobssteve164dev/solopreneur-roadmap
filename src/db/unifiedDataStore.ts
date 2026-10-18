@@ -3046,6 +3046,19 @@ export class UnifiedDataStore {
     });
   }
 
+  public async resolveProjectForRead(root: string): Promise<string | null> {
+    if (!root) throw new Error('project_root_required');
+    try {
+      fs.statSync(root);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      const locations = this.rows("SELECT DISTINCT project_locations.project_id FROM project_locations JOIN objects ON objects.id=project_locations.project_id WHERE device_id=? AND root_path=? AND status IN ('active','alias') AND objects.archived_at IS NULL", [this.deviceId, path.resolve(root)]);
+      if (locations.length > 1) throw new Error('project_registry_alias_conflict');
+      return locations.length ? String(locations[0].project_id) : null;
+    }
+    return (await this.registerProject({ root })).projectId;
+  }
+
   public async registerProject(input: { root: string; name?: string }): Promise<{ projectId: string; locationId: string; identityPath: string }> {
     if (!input.root || !fs.statSync(input.root).isDirectory()) throw new Error('project_root_required');
     const root = fs.realpathSync(input.root);

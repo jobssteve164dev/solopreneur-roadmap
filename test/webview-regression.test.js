@@ -8349,6 +8349,56 @@ for (const cached of [true, false]) test(`strategy panel switches data roots whi
   } finally { release(); owners[0].store[method] = original; }
 });
 
+test('strategy command renders an offline portfolio and persists its diagnostic chain', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-strategy-command-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project');
+  fs.mkdirSync(path.join(project, '.solopreneur'), { recursive: true });
+  fs.writeFileSync(path.join(project, '.solopreneur/roadmap.csv'), 'id,title,stage,status\n1,Deliver value,Build,Pending\n');
+  const projects = [{ name: 'Current product', path: project }, { name: 'Offline project', path: path.join(base, 'missing') }];
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, projects.slice(0, 1));
+  await require('../out/projectRegistry.js').refreshProjectRegistry(root, () => ({ legacyProjects: projects }), (operation, input) => native.ops({ operation, input }));
+  const diagnostics = require('../out/localDiagnostics.js');
+  diagnostics.configureLocalDiagnosticPersistence({ append: (_root, event) => native.store.appendDiagnosticEvent(event) });
+  t.after(() => diagnostics.configureLocalDiagnosticPersistence(undefined));
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.open = handleOpenStrategyPyramid; module.exports.refresh = refreshStrategyPyramidPanel;
+    hasLocalStrategyPyramidAccess = async () => true;
+  `, { './cognitiveRuntimeConfig': { readCognitiveRuntimeConfig: () => ({ mode: 'none' }), cognitiveRuntimeConfigRevision: () => '' } });
+  const context = { extensionPath: projectRoot, extensionUri: createUri(projectRoot), subscriptions: [], globalState: { get: key => key === 'solopreneur.settings' ? { globalDataPath: root } : undefined } };
+  await extension.open(context);
+  const panel = extension.__vscodeTestState.webviewPanels[0];
+  await new Promise((resolve, reject) => {
+    const deadline = Date.now() + 5000;
+    const check = () => panel.webview.html.includes('id="tab-pyramid"') ? resolve() : Date.now() > deadline ? reject(new Error(panel.webview.html)) : setTimeout(check, 10);
+    check();
+  });
+  assert.match(panel.webview.html, /Current product/);
+  assert.match(panel.webview.html, /Offline project/);
+  assert.equal(fs.existsSync(projects[1].path), false);
+  for (const match of panel.webview.html.matchAll(/<script>([\s\S]*?)<\/script>/g)) assert.doesNotThrow(() => new vm.Script(match[1]));
+  const artifacts = path.join(projectRoot, 'output/strategy-pyramid-verification'); fs.mkdirSync(artifacts, { recursive: true });
+  fs.writeFileSync(path.join(artifacts, 'offline.html'), panel.webview.html);
+  await extension.refresh(context);
+  const events = native.store.readDiagnosticEvents().items;
+  assert.ok(events.some(e => e.scope === 'strategy.cache.hit'));
+  assert.ok(events.some(e => e.scope === 'strategy.render' && e.payload.status === 'ok'));
+  let rendered = panel.webview.html, failRender = true;
+  Object.defineProperty(panel.webview, 'html', { get: () => rendered, set: value => {
+    if (failRender) { failRender = false; throw new Error('render failed API_KEY=private-fixture-key'); }
+    rendered = value;
+  } });
+  await extension.refresh(context);
+  assert.match(rendered, /战略金字塔加载失败/);
+  const failedRender = native.store.readDiagnosticEvents().items;
+  assert.ok(failedRender.some(e => e.scope === 'strategy.render' && e.payload.status === 'error'));
+  const error = failedRender.filter(e => e.kind === 'error' && e.scope === 'strategy.load').at(-1);
+  assert.match(error.payload.message, /render failed API_KEY=<redacted>/);
+  assert.doesNotMatch(JSON.stringify(failedRender), /private-fixture-key/);
+  await extension.refresh(context);
+  assert.match(rendered, /id="tab-pyramid"/);
+  panel.dispose();
+});
+
 test('strategy cache connection failures reach the existing failure page and retry action', async t => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
@@ -8356,6 +8406,12 @@ test('strategy cache connection failures reach the existing failure page and ret
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-strategy-disconnected-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const diagnostics = require('../out/localDiagnostics.js');
+  diagnostics.configureLocalDiagnosticPersistence({ append: (dataRoot, event) => {
+    assert.equal(dataRoot, root);
+    store.appendDiagnosticEvent(event);
+  } });
+  t.after(() => diagnostics.configureLocalDiagnosticPersistence(undefined));
   const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'disconnected-strategy-fixture', onCommand: () => ({ status: 'running' }), onData: ops });
   let restoredServer;
   t.after(async () => { if (restoredServer) await restoredServer.close(); await ops.close(); store.close(); });
@@ -8374,6 +8430,13 @@ test('strategy cache connection failures reach the existing failure page and ret
   assert.match(panel.webview.html, /refreshStrategyPyramid/);
   assert.doesNotMatch(panel.webview.html, /control\.json|\.solomap-global|ENOENT|solomap-strategy-disconnected/);
   assert.equal(store.readStrategyState(null).revision, 0);
+  const failed = store.readDiagnosticEvents().items;
+  assert.ok(failed.some(e => e.scope === 'strategy.cache' && e.payload.status === 'error'));
+  assert.ok(failed.some(e => e.scope === 'strategy.load' && e.payload.status === 'error'));
+  const failure = failed.find(e => e.kind === 'error' && e.scope === 'strategy.load');
+  assert.ok(failure, 'the concrete failure must be persisted, not only printed to the console');
+  assert.match(failure.payload.message, /Invalid Runtime endpoint|control_unavailable|ENOENT/);
+  assert.doesNotMatch(failure.payload.message, /solomap-strategy-disconnected/);
   const script = panel.webview.html.match(/<script>([\s\S]*?)<\/script>/)[1];
   assert.doesNotThrow(() => new vm.Script(script));
   const artifact = path.join(base, 'failure.html'); fs.writeFileSync(artifact, panel.webview.html);
@@ -8381,6 +8444,14 @@ test('strategy cache connection failures reach the existing failure page and ret
   await extension.refresh(context, true);
   assert.equal(store.readStrategyState(null).revision, 1);
   assert.doesNotMatch(panel.webview.html, /战略金字塔加载失败/);
+  const successful = store.readDiagnosticEvents().items;
+  const complete = successful.filter(e => e.scope === 'strategy.load' && e.payload.status === 'ok').at(-1);
+  assert.ok(complete);
+  const stages = successful.filter(e => e.payload.traceId === complete.payload.traceId);
+  for (const stage of ['strategy.access', 'strategy.build', 'strategy.source', 'strategy.investment', 'strategy.learning', 'strategy.persist', 'strategy.render']) {
+    assert.ok(stages.some(e => e.scope === stage && e.payload.status === 'ok'), stage);
+  }
+  assert.notEqual(complete.payload.traceId, failed.find(e => e.scope === 'strategy.load').payload.traceId);
   const successArtifact = path.join(base, 'restored.html'); fs.writeFileSync(successArtifact, panel.webview.html);
   for (const match of panel.webview.html.matchAll(/<script>([\s\S]*?)<\/script>/g)) assert.doesNotThrow(() => new vm.Script(match[1]));
   fs.writeFileSync(path.join(os.tmpdir(), 'solomap-462-analysis-cache-failure-render.json'), JSON.stringify({ artifact, successArtifact }));

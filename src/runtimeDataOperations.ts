@@ -685,7 +685,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const project = await store.registerProject({ root: String(input.root || '') }); return store.readProjectRunIndexes(project.projectId, input as any);
       }
       case 'read_project_investment_runs': {
-        const project = await store.registerProject({ root: String(input.root || '') }); return store.readProjectInvestmentRuns(project.projectId);
+        const projectId = await store.resolveProjectForRead(String(input.root || ''));
+        return projectId ? store.readProjectInvestmentRuns(projectId) : [];
       }
       case 'read_project_impact_runs': {
         const project = await store.registerProject({ root: String(input.root || '') }); return store.readProjectImpactRuns(project.projectId);
@@ -716,13 +717,19 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       case 'read_strategy_source_revision': {
         if (!Array.isArray(input.roots) || input.roots.some(root => typeof root !== 'string')) throw new Error('strategy_source_roots_required');
         const projectIds: string[] = [];
-        for (const root of input.roots) projectIds.push((await store.registerProject({ root })).projectId);
+        for (const root of input.roots) {
+          const projectId = await store.resolveProjectForRead(root);
+          if (projectId) projectIds.push(projectId);
+        }
         return { revision: store.readStrategySourceRevision(projectIds), projectIds };
       }
-      case 'read_strategy_state':
+      case 'read_strategy_state': {
+        const project = input.root === undefined ? null : await store.resolveProjectForRead(String(input.root));
+        return input.root !== undefined && !project ? { objectId: null, revision: 0, value: null } : store.readStrategyState(project);
+      }
       case 'write_strategy_state': {
         const project = input.root === undefined ? null : (await store.registerProject({ root: String(input.root) })).projectId;
-        return request.operation === 'read_strategy_state' ? store.readStrategyState(project) : store.writeStrategyState(project, input as unknown as Parameters<UnifiedDataStore['writeStrategyState']>[1]);
+        return store.writeStrategyState(project, input as unknown as Parameters<UnifiedDataStore['writeStrategyState']>[1]);
       }
       case 'write_run_artifact': {
         const root = String(input.root || ''); const project = await store.registerProject({ root }); store.writeRunArtifact(project.projectId, input as any);
