@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.593 - 2026-10-18
+
+### Added
+- 接入 Pi Harness 原生上下文压缩 (6d744c3)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.592 - 2026-10-17
 
 ### Added
