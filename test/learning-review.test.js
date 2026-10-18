@@ -1508,6 +1508,7 @@ test('actual legacy review application retains candidate evidence after import w
   const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
   const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
   const { promisify } = require('node:util'); const cp = require('node:child_process');
+  const { anonymousToolEnv } = require('./analysis-fixture.js');
   const f = applicationFixture(); let prompt = 'Keep intent.';
   f.proposal.lessons.push({ projectPath: f.project, status: 'candidate', summary: 'reviewfileprovenance keeps verified sources attached to the reviewed conclusion', appliesWhen: 'reviewfileprovenance migration', doesNotApplyWhen: 'An unreviewed source is only a claim', doThis: 'Read the original checked evidence', avoidThis: 'Do not guess the source', verification: 'Observe the reviewed result', evidence: ['evidence-1'], reason: 'The independently checked source supports this conclusion' });
   assert.equal((await applyLearningReview({ ...f, review: f.makeReview(), getGlobalPrompt: () => prompt, setGlobalPrompt: async value => { prompt = value; } })).status, 'applied');
@@ -1518,11 +1519,12 @@ test('actual legacy review application retains candidate evidence after import w
   const server = await startRuntimeControlServer({ globalDataPath: f.globalRoot, runtimeId: 'legacy-reviewed-evidence-owner', onCommand: () => ({ status: 'running' }), onData: ops });
   try {
     const { projectId } = await ops({ operation: 'register_project', input: { root: f.project } });
+    const env = anonymousToolEnv();
     const job = await ops({ operation: 'import_project_data', input: { collection: 'learning', sourceRoot, projectScopes: { [f.project]: projectId }, idempotencyKey: 'actual-reviewed-lesson-import' } });
     await ops.waitForMigrations(); assert.equal(store.readMigrationJob(job.jobId).status, 'completed');
     fs.renameSync(sourceRoot, sourceRoot + '-retained-evidence');
     const tool = path.resolve(__dirname, '../resources/tools/solomap-experience.cjs');
-    const invoke = async json => (await promisify(cp.execFile)(process.execPath, [tool, 'retrieve', '--project', f.project, '--global', f.globalRoot, '--query', 'reviewfileprovenance', ...(json ? ['--json'] : [])], { encoding: 'utf8' })).stdout;
+    const invoke = async json => (await promisify(cp.execFile)(process.execPath, [tool, 'retrieve', '--project', f.project, '--global', f.globalRoot, '--query', 'reviewfileprovenance', ...(json ? ['--json'] : [])], { encoding: 'utf8', env })).stdout;
     const result = JSON.parse(await invoke(true));
     assert.deepEqual(result.payload.lessons, [], 'a legacy candidate is retained as history but is not executable experience');
     assert.ok(!(await invoke(false)).includes(old.evidenceRefs[0].ref));

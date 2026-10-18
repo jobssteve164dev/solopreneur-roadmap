@@ -16,7 +16,7 @@ test('distributed data client writes large complete content and immediately read
   let client;
   try {
     const project = await ops({ operation: 'register_project', input: { root: workspace } });
-    client = await openDataClient(globalRoot, workspace);
+    client = await openDataClient(globalRoot, workspace, null);
     const content = '完整原文🌿\n'.repeat(20000);
     assert.ok(content.length > 65536);
     const created = await client.call('write', { action: 'create', kind: 'memory', scope: project.projectId, idempotencyKey: 'large-distributed-client-write', data: { category: 'inbox', status: 'captured', title: '完整正文', content } });

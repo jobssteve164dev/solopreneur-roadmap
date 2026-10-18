@@ -17,7 +17,7 @@ async function fixture(action) {
   let client;
   try {
     const project = await ops({ operation: 'register_project', input: { root: workspace } });
-    client = await openDataClient(root, workspace);
+    client = await openDataClient(root, workspace, null);
     const write = (scope, key, extra = {}) => store.write({ kind: 'memory', action: 'create', scope, idempotencyKey: key, data: { category: 'rules', title: key, status: 'active', content: '完整记忆正文🌿'.repeat(10000), ...extra } });
     await action({ store, client, project: project.projectId, write });
   } finally { if (client) await client.close(); await server.close(); await ops.close(); store.close(); }

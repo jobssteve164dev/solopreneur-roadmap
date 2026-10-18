@@ -4,11 +4,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const net = require('node:net');
 
-async function openDataClient(globalRoot, projectRoot) {
+async function openDataClient(globalRoot, projectRoot, explicitRunIdentity) {
   const identity = JSON.parse(await fs.promises.readFile(path.join(projectRoot, '.solopreneur', 'project.json'), 'utf8'));
   if (identity.schemaVersion !== 1 || typeof identity.projectId !== 'string' || !identity.projectId) throw new Error('project_identity_invalid');
   let session; let opening;
-  const runIdentity = process.env.SOLOMAP_RUN_PROOF ? { executionLogId: Number(process.env.SOLOMAP_EXECUTION_LOG_ID), generation: Number(process.env.SOLOMAP_RUN_GENERATION), proof: process.env.SOLOMAP_RUN_PROOF } : undefined;
+  const runIdentity = explicitRunIdentity === null
+    ? undefined
+    : explicitRunIdentity || (process.env.SOLOMAP_RUN_PROOF ? { executionLogId: Number(process.env.SOLOMAP_EXECUTION_LOG_ID), generation: Number(process.env.SOLOMAP_RUN_GENERATION), proof: process.env.SOLOMAP_RUN_PROOF } : undefined);
   const request = async input => {
     const endpoint = JSON.parse(await fs.promises.readFile(path.join(globalRoot, 'runtime', 'control.json'), 'utf8'));
     if (endpoint.schemaVersion !== 1 || endpoint.host !== '127.0.0.1' || !Number.isInteger(endpoint.port) || !endpoint.token) throw new Error('runtime_endpoint_invalid');

@@ -24,4 +24,10 @@ async function openAnalysisOwner(t, root, projects) {
   return { store, ops, projectIds };
 }
 
-module.exports = { openAnalysisOwner };
+function anonymousToolEnv() {
+  const env = { ...process.env };
+  for (const key of ['SOLOMAP_PROJECT_ID', 'SOLOMAP_EXECUTION_LOG_ID', 'SOLOMAP_RUN_GENERATION', 'SOLOMAP_RUN_PROOF', 'SOLOMAP_RUN_KIND', 'SOLOMAP_TERMINAL_DELIVERY_ID']) delete env[key];
+  return env;
+}
+
+module.exports = { openAnalysisOwner, anonymousToolEnv };

@@ -12,6 +12,7 @@ const { getAgentRunDeliveryOwner } = require('../out/agentRunPreparation.js');
 const { buildExecutionExperiencePrompt, readExecutionGraph } = require('../out/runDigest.js');
 const { runtimeMcpSource } = require('../out/runtimeDataOperations.js');
 const { registerUnifiedMcpTools } = require('../out/unifiedMcp.js');
+const { anonymousToolEnv } = require('./analysis-fixture.js');
 
 async function fixture(customRoot = false) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-digest-database-'));
@@ -20,7 +21,8 @@ async function fixture(customRoot = false) {
   let server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'digest-owner', onCommand: () => ({ status: 'running' }), onData: ops });
   const call = (operation, input) => sendRuntimeDataRequest(root, { operation, input });
   const identity = await call('register_project', { root: project });
-  return { base, root, project, identity, call, store: () => store,
+  const env = anonymousToolEnv();
+  return { base, root, project, identity, call, env, store: () => store,
     async wait() { await ops.waitForMigrations(); },
     async import(key = 'digest-import') {
       const job = await call('import_project_data', { collection: 'run-digests', projectRoot: project, sourceRoot: path.join(project, '.solopreneur', 'run-digests'), idempotencyKey: key });
@@ -32,7 +34,7 @@ async function fixture(customRoot = false) {
 }
 
 async function runExperienceCli(f, command, options = []) {
-  return JSON.parse((await promisify(execFile)(process.execPath, [path.resolve(__dirname, '../resources/tools/solomap-experience.cjs'), command, '--project', f.project, '--global', f.root, '--json', ...options])).stdout);
+  return JSON.parse((await promisify(execFile)(process.execPath, [path.resolve(__dirname, '../resources/tools/solomap-experience.cjs'), command, '--project', f.project, '--global', f.root, '--json', ...options], { env: f.env })).stdout);
 }
 
 test('the generated first-use handoff uses the formal MCP tool without deploying global tool copies', async () => {
@@ -309,7 +311,7 @@ test('distributed full history reads a formal journal with no digest through ord
     const history = await runExperienceCli(f, 'history', ['--full']); assert.equal(history.payload.length, 1); assert.equal(history.payload[0].executionLogId, journal.executionLogId); assert.equal(history.payload[0].log.output, output);
     assert.ok(history.payload[0].sourceRef.objectId);
     const old = history.payload[0].sourceRef;
-    const markdown = (await promisify(execFile)(process.execPath, [path.resolve(__dirname, '../resources/tools/solomap-experience.cjs'), 'history', '--project', f.project, '--global', f.root, '--full'])).stdout;
+    const markdown = (await promisify(execFile)(process.execPath, [path.resolve(__dirname, '../resources/tools/solomap-experience.cjs'), 'history', '--project', f.project, '--global', f.root, '--full'], { env: f.env })).stdout;
     assert.match(markdown, new RegExp(`solomap://objects/${old.objectId}.*revision[=: ]+${old.revision}`));
     await f.call('update_project_journal', { root: f.project, executionLogId: journal.executionLogId, agentCli: 'codex', command: 'actual command', output: '更新后的完整正文', status: 'Completed' });
     assert.equal((await runExperienceCli(f, 'history', ['--full'])).payload[0].log.output, '更新后的完整正文');
@@ -448,13 +450,13 @@ test('the distributed experience CLI reads complete formal evidence after the le
     for (const file of ['package.json', 'dist/sql-wasm.js', 'dist/sql-wasm.wasm']) fs.copyFileSync(path.resolve(__dirname, '../node_modules/sql.js', file), path.join(legacyDependency, file));
     for (const file of fs.readdirSync(path.resolve(__dirname, '../resources/tools')).filter(name => name.startsWith('solomap-') && name.endsWith('.cjs'))) fs.copyFileSync(path.resolve(__dirname, '../resources/tools', file), path.join(toolRoot, file));
     const cli = path.join(toolRoot, 'solomap-experience.cjs');
-    const history = JSON.parse((await promisify(execFile)(process.execPath, [cli, 'history', '--project', f.project, '--global', f.root, '--json', '--full'])).stdout);
+    const history = JSON.parse((await promisify(execFile)(process.execPath, [cli, 'history', '--project', f.project, '--global', f.root, '--json', '--full'], { env: f.env })).stdout);
     assert.equal(history.payload.length, 1); assert.equal(history.payload[0].userIntent, value.userIntent); assert.ok(history.payload[0].sourceRef.objectId);
-    const handoff = JSON.parse((await promisify(execFile)(process.execPath, [cli, 'handoff', '--project', f.project, '--global', f.root, '--json'])).stdout); assert.equal(handoff.payload[0].brief, value.handoff.nextAgentBrief);
-    const markdown = (await promisify(execFile)(process.execPath, [cli, 'handoff', '--project', f.project, '--global', f.root])).stdout;
+    const handoff = JSON.parse((await promisify(execFile)(process.execPath, [cli, 'handoff', '--project', f.project, '--global', f.root, '--json'], { env: f.env })).stdout); assert.equal(handoff.payload[0].brief, value.handoff.nextAgentBrief);
+    const markdown = (await promisify(execFile)(process.execPath, [cli, 'handoff', '--project', f.project, '--global', f.root], { env: f.env })).stdout;
     assert.match(markdown, /接续这条正式经验/);
     assert.match(markdown, new RegExp(`solomap://objects/${handoff.payload[0].sourceRef.objectId}.*revision[=: ]+${handoff.payload[0].sourceRef.revision}`));
-    const summary = JSON.parse((await promisify(execFile)(process.execPath, [cli, 'summary', '--project', f.project, '--global', f.root, '--json'])).stdout); assert.equal(summary.payload.totalRecords, 1); assert.equal(summary.payload.graphRunCount, 1);
+    const summary = JSON.parse((await promisify(execFile)(process.execPath, [cli, 'summary', '--project', f.project, '--global', f.root, '--json'], { env: f.env })).stdout); assert.equal(summary.payload.totalRecords, 1); assert.equal(summary.payload.graphRunCount, 1);
     assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'project_journal.db')), false);
   } finally { await f.close(); }
 });

@@ -8,6 +8,7 @@ const { promisify } = require('node:util');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations, runtimeMcpSource } = require('../out/runtimeDataOperations.js');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
+const { anonymousToolEnv } = require('./analysis-fixture.js');
 
 const projectRoot = path.resolve(__dirname, '..');
 const toolPath = path.join(projectRoot, 'resources', 'tools', 'solomap-experience.cjs');
@@ -22,6 +23,7 @@ test('experience retrieve returns structured lessons and rejects generic URL mat
   const server = await startRuntimeControlServer({ globalDataPath: globalRoot, runtimeId: 'experience-owner', onCommand: () => ({ status: 'running' }), onData: ops });
   try {
   const project = await ops({ operation: 'register_project', input: { root: workspace } });
+  const env = anonymousToolEnv();
   fs.writeFileSync(path.join(digestRoot, 'solo-1.json'), JSON.stringify({
     schemaVersion: 2,
     runId: 'solo-1',
@@ -67,7 +69,7 @@ test('experience retrieve returns structured lessons and rejects generic URL mat
     '--query', '首次提示词 经验账本索引',
     '--limit', '5',
     '--json'
-  ], { encoding: 'utf8' })).stdout);
+  ], { encoding: 'utf8', env })).stdout);
 
   assert.equal(result.command, 'retrieve');
   assert.equal(result.payload.lessons.length, 1);
@@ -81,13 +83,13 @@ test('experience retrieve returns structured lessons and rejects generic URL mat
   assert.doesNotMatch(JSON.stringify(result.payload), /重新注入全部历史运行正文/);
   assert.equal(store.read(rejected.objectId).data.status, 'rejected', 'excluded lessons remain readable as history');
   assert.equal(fs.existsSync(path.join(globalRoot, 'learning')), false);
-  const markdown = (await promisify(childProcess.execFile)(process.execPath, [toolPath, 'retrieve', '--project', workspace, '--global', globalRoot, '--query', '首次提示词 经验账本索引'], { encoding: 'utf8' })).stdout;
+  const markdown = (await promisify(childProcess.execFile)(process.execPath, [toolPath, 'retrieve', '--project', workspace, '--global', globalRoot, '--query', '首次提示词 经验账本索引'], { encoding: 'utf8', env })).stdout;
   assert.match(markdown, new RegExp(`solomap://objects/${valuable.objectId}.*revision[=: ]+1`));
   assert.match(markdown, /读取固定版本原文再验证。/);
   assert.match(markdown, new RegExp(`solomap://objects/${result.payload.evidenceLeads[0].sourceRef.objectId}.*revision[=: ]+1`));
   store.write({ kind: 'lesson', action: 'patch', scope: project.projectId, objectId: valuable.objectId, expectedRevision: 1, idempotencyKey: 'update-valuable-lesson', data: { do_this: '更新后的 retrieve 动作。' } });
   const { openDataClient } = require('../resources/tools/solomap-data-client.cjs');
-  const client = await openDataClient(globalRoot, workspace);
+  const client = await openDataClient(globalRoot, workspace, null);
   try {
     const original = await client.call('read', { ref: result.payload.lessons[0].sourceRef.objectId, revision: result.payload.lessons[0].sourceRef.revision });
     assert.equal(original.data.do_this, '使用 retrieve 查询，并优先读取结构化经验和证据入口。');
@@ -105,6 +107,7 @@ test('experience retrieve refuses generic URL-only queries', async () => {
   const server = await startRuntimeControlServer({ globalDataPath: globalRoot, runtimeId: 'generic-experience-owner', onCommand: () => ({ status: 'running' }), onData: ops });
   try {
   await ops({ operation: 'register_project', input: { root: workspace } });
+  const env = anonymousToolEnv();
   const result = JSON.parse((await promisify(childProcess.execFile)(process.execPath, [
     toolPath,
     'retrieve',
@@ -112,7 +115,7 @@ test('experience retrieve refuses generic URL-only queries', async () => {
     '--global', globalRoot,
     '--query', 'https://example.com',
     '--json'
-  ], { encoding: 'utf8' })).stdout);
+  ], { encoding: 'utf8', env })).stdout);
   assert.deepEqual(result.payload.tokens, []);
   assert.deepEqual(result.payload.lessons, []);
   assert.match(result.payload.message, /具体功能、文件、错误或目标/);
@@ -126,10 +129,11 @@ test('typed confidence keeps the stronger lesson when equivalent candidates arri
   const server = await startRuntimeControlServer({ globalDataPath: globalRoot, runtimeId: 'confidence-owner', onCommand: () => ({ status: 'running' }), onData: ops });
   try {
     const project = await ops({ operation: 'register_project', input: { root: workspace } });
+    const env = anonymousToolEnv();
     const data = { status: 'approved', summary: 'OAuth 回调验证必须绑定完整 nonce 和当前会话。', applies_when: 'OAuth 回调验证时。', do_this: '先核对 nonce 再确认身份。' };
     const strong = store.write({ kind: 'lesson', action: 'create', scope: project.projectId, idempotencyKey: 'strong', data: { ...data, confidence: 0.9 } });
     store.write({ kind: 'lesson', action: 'create', scope: project.projectId, idempotencyKey: 'weak', data: { ...data, confidence: 0.2 } });
-    const result = JSON.parse((await promisify(childProcess.execFile)(process.execPath, [toolPath, 'retrieve', '--project', workspace, '--global', globalRoot, '--query', 'OAuth 回调验证 nonce', '--json'])).stdout);
+    const result = JSON.parse((await promisify(childProcess.execFile)(process.execPath, [toolPath, 'retrieve', '--project', workspace, '--global', globalRoot, '--query', 'OAuth 回调验证 nonce', '--json'], { env })).stdout);
     assert.equal(result.payload.lessons.length, 1);
     assert.equal(result.payload.lessons[0].id, strong.objectId);
     assert.equal(result.payload.lessons[0].confidence, 0.9);
@@ -143,9 +147,10 @@ test('real experience CLI preserves typed evidence, role filters and the origina
   const server = await startRuntimeControlServer({ globalDataPath: globalRoot, runtimeId: 'typed-experience-owner', onCommand: () => ({ status: 'running' }), onData: ops });
   try {
     const project = await ops({ operation: 'register_project', input: { root: workspace } });
+    const env = anonymousToolEnv();
     const data = { status: 'approved', summary: 'Validate the final generated script through its actual runtime output', applies_when: 'Changing executable generation', do_this: 'Run the generated script', confidence: 1, external_confidence: 'high', lesson_type: 'verification_pattern', evidence_refs_json: [{ type: 'command', ref: 'node --test stablereplaynonce.test.js', summary: 'The final regression passed' }] };
     const lesson = store.write({ kind: 'lesson', action: 'create', scope: project.projectId, idempotencyKey: 'typed-evidence', data });
-    const invoke = async (query, json = true) => (await promisify(childProcess.execFile)(process.execPath, [toolPath, 'retrieve', '--project', workspace, '--global', globalRoot, '--query', query, ...(json ? ['--json'] : [])], { encoding: 'utf8' })).stdout;
+    const invoke = async (query, json = true) => (await promisify(childProcess.execFile)(process.execPath, [toolPath, 'retrieve', '--project', workspace, '--global', globalRoot, '--query', query, ...(json ? ['--json'] : [])], { encoding: 'utf8', env })).stdout;
     const result = JSON.parse(await invoke('stablereplaynonce 验证'));
     assert.equal(result.payload.lessons.length, 1, 'a term present only in formal evidence must retrieve its lesson');
     assert.equal(result.payload.lessons[0].id, lesson.objectId);
@@ -171,8 +176,9 @@ test('an ordinary revision uses its current confidence while preserving the orig
   const server = await startRuntimeControlServer({ globalDataPath: globalRoot, runtimeId: 'confidence-revision-owner', onCommand: () => ({ status: 'running' }), onData: ops }); let client;
   try {
     const { projectId } = await ops({ operation: 'register_project', input: { root: workspace } }); client = runtimeMcpSource(globalRoot, projectId, true);
+    const env = anonymousToolEnv();
     const original = store.write({ kind: 'lesson', action: 'create', scope: projectId, idempotencyKey: 'original-high-source', data: { status: 'approved', summary: 'currentconfidencerevision preserves observed applicability after a new result', applies_when: 'currentconfidencerevision', confidence: 1, external_confidence: 'high' } });
-    const invoke = async () => JSON.parse((await promisify(childProcess.execFile)(process.execPath, [toolPath, 'retrieve', '--project', workspace, '--global', globalRoot, '--query', 'currentconfidencerevision', '--json'], { encoding: 'utf8' })).stdout).payload.lessons[0];
+    const invoke = async () => JSON.parse((await promisify(childProcess.execFile)(process.execPath, [toolPath, 'retrieve', '--project', workspace, '--global', globalRoot, '--query', 'currentconfidencerevision', '--json'], { encoding: 'utf8', env })).stdout).payload.lessons[0];
     assert.equal((await invoke()).confidence, 'high');
     const next = store.write({ kind: 'lesson', action: 'patch', scope: projectId, objectId: original.objectId, expectedRevision: 1, idempotencyKey: 'native-confidence-decrease', data: { confidence: 0.2 } });
     assert.equal((await invoke()).confidence, 0.2, 'the current value must not be shadowed by the original imported label');

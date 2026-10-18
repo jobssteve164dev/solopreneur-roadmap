@@ -12,6 +12,7 @@ const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.j
 const { getAgentRunDeliveryOwner } = require('../out/agentRunPreparation.js');
 const { reviewHash } = require('../out/learningReview.js');
 const { buildLearningRetrievalContext } = require('../out/learningLedger.js');
+const { anonymousToolEnv } = require('./analysis-fixture.js');
 
 const report = (usage) => ({
   schemaVersion: 1,
@@ -182,14 +183,15 @@ test('an explicit fixed experience adoption creates one durable policy use and o
     f.store.write({ kind: 'lesson', action: 'create', scope: first.run.projectId, idempotencyKey: 'rsi-promoted-legacy', data: { status: 'promoted', summary: '旧 promoted 固定版本经验不得进入正式任务召回结果', applies_when: '正式任务检索固定经验版本时', do_this: '只召回 approved 经验', confidence: 1 } });
     const server = await startRuntimeControlServer({ globalDataPath: f.root, runtimeId: 'rsi-cli-fixture', onCommand: () => ({ status: 'running' }), onData: request => f.request(request) });
     try {
-      const { stdout } = await promisify(childProcess.execFile)(process.execPath, [path.join(__dirname, '..', 'resources', 'tools', 'solomap-experience.cjs'), 'rsi', '--project', f.project, '--global', f.root, '--json']);
+      const env = anonymousToolEnv();
+      const { stdout } = await promisify(childProcess.execFile)(process.execPath, [path.join(__dirname, '..', 'resources', 'tools', 'solomap-experience.cjs'), 'rsi', '--project', f.project, '--global', f.root, '--json'], { env });
       const external = JSON.parse(stdout);
       assert.equal(external.payload.cycles.length, 1);
       assert.deepEqual(external.payload.cycles[0].lessonRef, { objectId: lesson.objectId, revision: lesson.revision });
       assert.equal(external.payload.cycles[0].verdict, 'effective');
-      const retrieved = JSON.parse((await promisify(childProcess.execFile)(process.execPath, [path.join(__dirname, '..', 'resources', 'tools', 'solomap-experience.cjs'), 'retrieve', '--project', f.project, '--global', f.root, '--query', '该经验已经撤销', '--json'])).stdout);
+      const retrieved = JSON.parse((await promisify(childProcess.execFile)(process.execPath, [path.join(__dirname, '..', 'resources', 'tools', 'solomap-experience.cjs'), 'retrieve', '--project', f.project, '--global', f.root, '--query', '该经验已经撤销', '--json'], { env })).stdout);
       assert.deepEqual(retrieved.payload.lessons, [], 'revoked lessons remain historical but cannot be recalled by the production CLI');
-      const promoted = JSON.parse((await promisify(childProcess.execFile)(process.execPath, [path.join(__dirname, '..', 'resources', 'tools', 'solomap-experience.cjs'), 'retrieve', '--project', f.project, '--global', f.root, '--query', '旧 promoted 固定版本经验召回', '--json'])).stdout);
+      const promoted = JSON.parse((await promisify(childProcess.execFile)(process.execPath, [path.join(__dirname, '..', 'resources', 'tools', 'solomap-experience.cjs'), 'retrieve', '--project', f.project, '--global', f.root, '--query', '旧 promoted 固定版本经验召回', '--json'], { env })).stdout);
       assert.deepEqual(promoted.payload.lessons, [], 'legacy promoted lessons remain historical but cannot be recalled by the production CLI');
     } finally { await server.close(); }
   } finally { await f.close(); }

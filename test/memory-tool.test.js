@@ -9,9 +9,15 @@ const { promisify } = require('node:util');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
+const { anonymousToolEnv } = require('./analysis-fixture.js');
 
 const projectRoot = path.resolve(__dirname, '..');
 const toolPath = path.join(projectRoot, 'resources', 'tools', 'solomap-memory.cjs');
+const formalEnvironments = new Map();
+
+function formalKey(workspace, globalRoot) {
+  return `${globalRoot}\0${workspace}`;
+}
 
 function write(filePath, content) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -52,7 +58,7 @@ async function runTool(workspace, globalRoot, query, extra = []) {
     '--query', query,
     '--json',
     ...extra
-  ], { encoding: 'utf8' });
+  ], { encoding: 'utf8', env: formalEnvironments.get(formalKey(workspace, globalRoot)) });
   return JSON.parse(result.stdout);
 }
 
@@ -65,7 +71,7 @@ async function runRoute(workspace, globalRoot, kind, title = '') {
     '--kind', kind,
     ...(title ? ['--title', title] : []),
     '--json'
-  ], { encoding: 'utf8' });
+  ], { encoding: 'utf8', env: formalEnvironments.get(formalKey(workspace, globalRoot)) });
   return JSON.parse(result.stdout);
 }
 
@@ -93,6 +99,8 @@ async function openFixture(workspace, globalRoot) {
   const close = async () => { await server.close(); await ops.close(); store.close(); };
   try {
     const project = await ops({ operation: 'register_project', input: { root: workspace } });
+    const env = anonymousToolEnv();
+    formalEnvironments.set(formalKey(workspace, globalRoot), env);
     const otherPath = path.join(path.dirname(workspace), 'other-app'); fs.mkdirSync(otherPath, { recursive: true });
     const other = await ops({ operation: 'register_project', input: { root: otherPath } });
     const sourceRoot = path.join(globalRoot, 'memory'); let migration;
@@ -101,7 +109,7 @@ async function openFixture(workspace, globalRoot) {
       await ops.waitForMigrations(); migration = await ops({ operation: 'migration_status', input: { jobId: job.jobId } });
       fs.renameSync(sourceRoot, `${sourceRoot}-retained-evidence`);
     }
-    return { store, ops, project: project.projectId, migration, close };
+    return { store, ops, project: project.projectId, migration, env, close: async () => { formalEnvironments.delete(formalKey(workspace, globalRoot)); await close(); } };
   } catch (error) { await close(); throw error; }
 }
 
@@ -131,7 +139,7 @@ test('memory retrieve returns scoped high-value sections with fixed database loc
   assert.match(projectResult.reason, /命中/);
   assert.doesNotMatch(JSON.stringify(output), /other-app\.md/);
   assert.doesNotMatch(JSON.stringify(output), /Stripe subscription/);
-  const markdown = (await promisify(execFile)(process.execPath, [toolPath, 'retrieve', '--project', workspace, '--global', globalRoot, '--query', '侧边栏对话启动链路和历史查询'])).stdout;
+  const markdown = (await promisify(execFile)(process.execPath, [toolPath, 'retrieve', '--project', workspace, '--global', globalRoot, '--query', '侧边栏对话启动链路和历史查询'], { env: fixture.env })).stdout;
   assert.match(markdown, new RegExp(`solomap://objects/${projectResult.sourceRef.objectId}.*revision[=: ]+1`));
   assert.equal(fs.existsSync(memoryRoot), false);
   } finally { await fixture.close(); }
@@ -383,8 +391,8 @@ test('memory route rejects unknown kinds and missing topic titles', async () => 
 
   const fixture = await openFixture(workspace, globalRoot);
   try {
-    await assert.rejects(promisify(execFile)(process.execPath, [toolPath, 'route', '--project', workspace, '--global', globalRoot, '--kind', 'unknown']), error => error.code === 1 && /Unknown memory kind/.test(error.stderr));
-    await assert.rejects(promisify(execFile)(process.execPath, [toolPath, 'route', '--project', workspace, '--global', globalRoot, '--kind', 'pattern']), error => error.code === 1 && /--title is required/.test(error.stderr));
+    await assert.rejects(promisify(execFile)(process.execPath, [toolPath, 'route', '--project', workspace, '--global', globalRoot, '--kind', 'unknown'], { env: fixture.env }), error => error.code === 1 && /Unknown memory kind/.test(error.stderr));
+    await assert.rejects(promisify(execFile)(process.execPath, [toolPath, 'route', '--project', workspace, '--global', globalRoot, '--kind', 'pattern'], { env: fixture.env }), error => error.code === 1 && /--title is required/.test(error.stderr));
   } finally { await fixture.close(); }
 });
 
@@ -421,7 +429,7 @@ test('the actual memory CLI reads only indexed matches and keeps full pinned sou
     fixture.store.write({ kind: 'memory', action: 'patch', scope: fixture.project, objectId: match.objectId, expectedRevision: 1, idempotencyKey: 'changed', data: { content: '更新后的 OAuth nonce callback 正文。' } });
     await fixture.close(); fixture = await openFixture(workspace, globalRoot);
     const { openDataClient } = require('../resources/tools/solomap-data-client.cjs');
-    const client = await openDataClient(globalRoot, workspace);
+    const client = await openDataClient(globalRoot, workspace, null);
     try {
       assert.equal(await client.content({ objectId: match.objectId, revision: 1 }), body);
       assert.equal((await runTool(workspace, globalRoot, 'OAuth nonce callback')).payload.results[0].sourceRef.revision, 2);

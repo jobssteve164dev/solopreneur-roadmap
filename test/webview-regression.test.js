@@ -1369,7 +1369,7 @@ test('built-in MCP tools appear in the shared connector settings without enterin
   assert.ok(builtIn);
   assert.equal(builtIn.source.kind, 'builtin');
   assert.deepEqual(builtIn.permissions.tools.sort(),
-    ['get_current_project', 'get_plugin_settings', 'get_today_review', 'list_projects']);
+    ['get_current_project', 'get_plugin_settings', 'get_today_review', 'list_projects', 'set_time_schedule']);
   assert.equal(builtIn.permissions.externalAccess, false);
   assert.equal((await readSolomapMcpRegistry(projectRoot, globalRoot)).connectors.some(connector => connector.id === builtIn.id), false);
   assert.doesNotMatch(await buildSolomapMcpCandidateInstructions(projectRoot, globalRoot, '查询当前项目'), /solomap-intelligence/);
@@ -3637,14 +3637,10 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(
     postedMessages.filter((message) => message.command === 'conversation.getProjectSnapshot' && message.projectPath === '/workspace/second').length,
-    1
+    0,
+    'project selection must let the host serve the cached snapshot instead of issuing a duplicate webview request'
   );
   assert.equal(postedMessages.filter((message) => message.command === 'project.select' && message.projectPath === '/workspace/second').length, 1);
-  assert.ok(
-    postedMessages.findIndex((message) => message.command === 'project.select' && message.projectPath === '/workspace/second')
-      < postedMessages.findIndex((message) => message.command === 'conversation.getProjectSnapshot' && message.projectPath === '/workspace/second'),
-    'the host must start selecting the project before the direct snapshot convergence request'
-  );
   assert.equal(
     postedMessages.filter((message) => message.command === 'conversation.getHistory' || message.command === 'conversation.getProjectHistory').length,
     0
@@ -7779,7 +7775,10 @@ test('roadmap revision launches bind each concurrent project without changing th
       await Promise.resolve();
       completed.push(target.workspaceRoot);
     };
-    sidebarProvider = { refreshProjectConversationSnapshotAfterStatusChange: async () => {} };
+    sidebarProvider = {
+      reconcileProjectMessage: payload => payload,
+      refreshProjectConversationSnapshotAfterStatusChange: async () => {}
+    };
   `, {
     './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js'),
     './db/syncEngine': { SyncEngine: ProjectSyncEngine }
@@ -15164,7 +15163,7 @@ test('native continuation stops old lineage processes before launching the same 
     const runnerOutput='第336轮完整结果保留🌿\n'.repeat(10000), quote=require('../out/agentCli.js').shellQuote;
     const run=await prepareControlledClaudeRun({agentCli:'claude',selectedModel:'',prompt:'原任务完整输入',workspaceRoot:project,nodeId:'__solo__',executionLogId:336,userMessage:'保持原会话继续讨论',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',...(mode==='running'?{directExecutionCommand:`exec ${quote(process.execPath)} -e ${quote(`process.stdout.write('第336轮完整结果保留🌿\\n'.repeat(10000));setInterval(()=>{},1000)`)}`} : {}),metadata:{terminalName:'old window',...(mode==='verified'?identity(wrappers[0]):mode==='unverified'?{agentPid:wrappers[2].pid,processBirth:'proc:wrong-birth-marker'}:{})}},operation);
     if(mode==='running'){
-      const runner=childProcess.spawn(process.execPath,[path.join(projectRoot,'out/runAgentProcess.js'),'--global-data-path',root,'--project-path',project,'--execution-log-id','336'],{cwd:project,stdio:'pipe'});wrappers[0]=runner;
+      const runner=childProcess.spawn(process.execPath,[path.join(projectRoot,'out/runAgentProcess.js'),'--global-data-path',root,'--project-path',project,'--execution-log-id','336'],{cwd:project,stdio:'pipe',env:require('./analysis-fixture.js').anonymousToolEnv()});wrappers[0]=runner;
       t.after(async()=>{if(live(runner)){const ended=once(runner,'exit');runner.kill('SIGTERM');await ended;}});
       const stdout=[],stderr=[];runner.stdout.on('data',bytes=>stdout.push(bytes));runner.stderr.on('data',bytes=>stderr.push(bytes));
       const deadline=Date.now()+10000;
@@ -16956,7 +16955,11 @@ const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcon
     let ready, terminalCount = 0, childResult;
     const terminal = { show() {}, processId: new Promise(resolve => { ready = resolve; }), sendText(command) {
       commands.push(command); order.push('agent-command');
-      const child = require('node:child_process').spawn('bash', ['-c', command], { cwd: workspace, env: { ...process.env, CLAUDE_CONFIG_DIR: config }, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = require('node:child_process').spawn('bash', ['-c', command], {
+        cwd: workspace,
+        env: { ...require('./analysis-fixture.js').anonymousToolEnv(), CLAUDE_CONFIG_DIR: config },
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
       const output = [], errors = []; child.stdout.on('data', b => output.push(b)); child.stderr.on('data', b => errors.push(b));
       childResult = new Promise((resolve, reject) => { child.on('error', reject); child.on('close', (code, signal) => resolve({ code, signal, stdout: Buffer.concat(output).toString('utf8'), stderr: Buffer.concat(errors).toString('utf8') })); }); children.push(childResult);
     } };
@@ -17147,7 +17150,9 @@ const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcon
     const built = extensionModule.__buildAgentShellScript(cli, '', 'Save and verify a memory.', workspace, 'task', 1, '', undefined, '', '', 'maintenance', '', root);
     assert.match(fs.readFileSync(built.promptFilePath, 'utf8'), /solomap_write.*|SoloMap 数据库工具/s);
     childProcess.execFileSync('bash', ['-n', built.runScriptPath]);
-    await new Promise((resolve, reject) => childProcess.execFile('bash', [built.runScriptPath], { env: { ...process.env, CLAUDE_CONFIG_DIR: configDirectory } }, (error, stdout, stderr) => error ? reject(new Error(String(stderr || error))) : resolve(stdout)));
+    await new Promise((resolve, reject) => childProcess.execFile('bash', [built.runScriptPath], {
+      env: { ...require('./analysis-fixture.js').anonymousToolEnv(), CLAUDE_CONFIG_DIR: configDirectory }
+    }, (error, stdout, stderr) => error ? reject(new Error(String(stderr || error))) : resolve(stdout)));
     assert.match(fs.readFileSync(built.outputFilePath, 'utf8'), /database-cli-readback/);
     assert.equal(store.search({ scope: JSON.parse(fs.readFileSync(path.join(workspace, '.solopreneur', 'project.json'), 'utf8')).projectId, kinds: ['memory'] }).items.length, 1);
   } finally {
@@ -17204,7 +17209,9 @@ const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcon
     assert.equal(fs.existsSync(path.join(root, 'solomap.db')), true);
     childProcess.execFileSync(process.execPath, ['--check', built.runScriptPath]);
     childProcess.execFileSync('bash', ['-n', '-c', built.finalCommand]);
-    await new Promise((resolve,reject) => childProcess.execFile('bash',['-c', built.finalCommand],{env:{...process.env,CLAUDE_CONFIG_DIR:config}},(error,stdout,stderr)=>error?reject(new Error(String(stderr||error))):resolve(stdout)));
+    await new Promise((resolve,reject) => childProcess.execFile('bash',['-c', built.finalCommand],{
+      env:{...require('./analysis-fixture.js').anonymousToolEnv(),CLAUDE_CONFIG_DIR:config}
+    },(error,stdout,stderr)=>error?reject(new Error(String(stderr||error))):resolve(stdout)));
     assert.match((await client.readData(built.outputFilePath)).toString('utf8'), /first-task-config-ready/);
     const status = await client.readStatus(runStatusReference(workspace, 2));
     assert.equal(status.status, 'In Progress');
