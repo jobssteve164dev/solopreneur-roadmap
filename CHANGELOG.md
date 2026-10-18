@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.597 - 2026-10-18
+
+### Changed
+- Fix bound-session test isolation (bd7d265)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.596 - 2026-10-18
 
 ### Changed
