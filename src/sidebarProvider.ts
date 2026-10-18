@@ -42,7 +42,6 @@ import {
   SidebarConversationSnapshot,
   writeCachedConversationSnapshot
 } from './sidebarSnapshotCache';
-import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import {
   resolveAgentCli,
   shellQuote
@@ -657,8 +656,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private captureDataRoot(globalDataPath: string, projectPath = ''): { root: string; generation: number } {
-    const root = normalizeGlobalDataPathForExtension(globalDataPath, projectPath || process.cwd());
+  private captureDataRoot(globalDataPath: string, _projectPath = ''): { root: string; generation: number } {
+    const root = normalizeGlobalDataPath(globalDataPath, this._getProjects().projects);
     if (root !== this._activeDataRoot) {
       this._activeDataRoot = root;
       this._dataRootGeneration += 1;
@@ -861,7 +860,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const rootState = this.captureDataRoot(globalDataPath, projectPath);
       requestKey = `${rootState.root}\0${projectPath}`;
       this._latestConversationSnapshotRequest.set(requestKey, requestId);
-      const cached = supersedeInFlight ? null : await readCachedConversationSnapshot(globalDataPath, projectPath);
+      const cached = supersedeInFlight ? null : await readCachedConversationSnapshot(rootState.root, projectPath);
       if (cached) {
         if (this._latestConversationSnapshotRequest.get(requestKey) === requestId && this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) {
           this.postProjectConversationSnapshot(projectPath, cached);
@@ -871,7 +870,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (!this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) return;
       let snapshotLoad = this._conversationSnapshotLoads.get(requestKey);
       if (!snapshotLoad || supersedeInFlight) {
-        const sourceSignature = await buildConversationDatabaseSignature(globalDataPath, projectPath);
+        const sourceSignature = await buildConversationDatabaseSignature(rootState.root, projectPath);
         if (!supersedeInFlight) snapshotLoad = this._conversationSnapshotLoads.get(requestKey);
         if (!snapshotLoad || supersedeInFlight) {
           snapshotLoad = {
@@ -885,13 +884,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       claimedSnapshotLoad = snapshotLoad.promise;
       const snapshot = await snapshotLoad.promise;
       if (this._latestConversationSnapshotRequest.get(requestKey) === requestId && this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) {
-        if (snapshotLoad.sourceSignature !== await buildConversationDatabaseSignature(globalDataPath, projectPath)) {
+        if (snapshotLoad.sourceSignature !== await buildConversationDatabaseSignature(rootState.root, projectPath)) {
           if (!this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) return;
           await this.sendProjectConversationSnapshot(projectPath, true, true);
           return;
         }
         if (!this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) return;
-        await writeCachedConversationSnapshot(globalDataPath, projectPath, snapshotLoad.sourceSignature, snapshot);
+        await writeCachedConversationSnapshot(rootState.root, projectPath, snapshotLoad.sourceSignature, snapshot);
         if (!this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) return;
         this.postProjectConversationSnapshot(projectPath, snapshot);
       }

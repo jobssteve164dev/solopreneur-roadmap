@@ -1548,6 +1548,8 @@ function makeSidebarSnapshotCacheStub(options = {}) {
   const actual = require('../out/sidebarSnapshotCache.js');
   const conversations = new Map();
   const coreReadRoots = [];
+  const conversationReadRoots = [];
+  const conversationWriteRoots = [];
   let core = null;
   let generation = 0;
   const signature = options.buildConversationDatabaseSignature || (async (_globalDataPath, projectPath) => `fixture:${projectPath}`);
@@ -1567,15 +1569,19 @@ function makeSidebarSnapshotCacheStub(options = {}) {
       core = { version: 3, projectSignature, portfolio: structuredClone(portfolio) };
       return true;
     },
-    async readCachedConversationSnapshot(_globalDataPath, projectPath) {
+    async readCachedConversationSnapshot(globalDataPath, projectPath) {
+      conversationReadRoots.push(globalDataPath);
       return conversations.has(projectPath) ? structuredClone(conversations.get(projectPath)) : null;
     },
-    async writeCachedConversationSnapshot(_globalDataPath, projectPath, _sourceRevision, snapshot) {
+    async writeCachedConversationSnapshot(globalDataPath, projectPath, _sourceRevision, snapshot) {
+      conversationWriteRoots.push(globalDataPath);
       conversations.set(projectPath, structuredClone(snapshot));
     },
     __setConversation(projectPath, snapshot) { conversations.set(projectPath, structuredClone(snapshot)); },
     __setCore(snapshot) { core = structuredClone(snapshot); },
     __getCoreReadRoots() { return [...coreReadRoots]; },
+    __getConversationReadRoots() { return [...conversationReadRoots]; },
+    __getConversationWriteRoots() { return [...conversationWriteRoots]; },
     __getConversation(projectPath) { return conversations.has(projectPath) ? structuredClone(conversations.get(projectPath)) : null; },
     __getCore() { return core ? structuredClone(core) : null; }
   };
@@ -6157,6 +6163,56 @@ test('sidebar shared action rejects every project response after its data root c
     { command: 'projectRefreshCompleted', expectedDataRoot: '/data-a/.solomap-global' }
   ]);
   assert.deepEqual(postedMessages, []);
+});
+
+test('sidebar conversation reads share the canonical data root across registered project parents', async () => {
+  const signatureRoots = [];
+  const snapshotCache = makeSidebarSnapshotCacheStub({
+    buildConversationDatabaseSignature: async (globalDataPath) => {
+      signatureRoots.push(globalDataPath);
+      return 'fixture:other';
+    }
+  });
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
+  );
+  const projects = [
+    { name: 'app', path: '/workspace/app' },
+    { name: 'other', path: '/elsewhere/other' }
+  ];
+  const postedMessages = [];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects, selectedProjectPath: '/workspace/app' }),
+      getProjectConversationHistory: async () => [{ id: 1, title: 'Other project conversation' }],
+      getProjectConversationSnapshot: async () => ({ solo: [], project: [], flow: [], revision: [] })
+    }
+  );
+  provider._view = {
+    webview: {
+      postMessage(message) {
+        postedMessages.push(message);
+        return Promise.resolve(true);
+      }
+    }
+  };
+  provider._activeDataRoot = '/workspace/.solomap-global';
+
+  await provider.sendProjectConversationHistory('/elsewhere/other');
+  await provider.sendProjectConversationSnapshot('/elsewhere/other');
+
+  assert.equal(provider._activeDataRoot, '/workspace/.solomap-global');
+  assert.equal(postedMessages[0]?.command, 'sidebarProjectConversationLoaded');
+  assert.equal(postedMessages[1]?.command, 'sidebarProjectConversationSnapshotLoaded');
+  assert.deepEqual(snapshotCache.__getConversationReadRoots(), ['/workspace/.solomap-global']);
+  assert.deepEqual(snapshotCache.__getConversationWriteRoots(), ['/workspace/.solomap-global']);
+  assert.deepEqual(signatureRoots, ['/workspace/.solomap-global', '/workspace/.solomap-global']);
 });
 
 test('sidebar core snapshot restarts when a new project roadmap appears during collection', async (t) => {
