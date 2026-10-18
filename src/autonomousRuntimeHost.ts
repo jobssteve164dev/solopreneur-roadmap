@@ -9,6 +9,7 @@ import { RuntimeControlCommand, RuntimeControlResponse, sendRuntimeControlComman
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 import { PiMainPathRequest, PiMainPathResult } from './piMainPathDelivery';
 import { runtimeBuildId, runtimeReleaseVersion } from './runtimeBuildIdentity';
+import { recordLocalDiagnosticError } from './localDiagnostics';
 import { isProcessOwnerAlive as processOwnerAlive, isProcessZombie } from './processIdentity.js';
 
 interface RuntimeChild {
@@ -274,6 +275,15 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
       if (health.healthy) return { started: false, pid: current.pid, runtimeId: current.runtimeId };
       const verify = options.verifyRuntimeProcess || verifiedRuntimeProcess;
       if (!['control_unavailable', 'stale_heartbeat'].includes(health.reason) || !verify(current.pid, current.runtimeId, globalDataPath)) throw new Error(health.reason);
+      const latest = readRuntimeState(globalDataPath) as (RuntimeState & { entryPath?: string; buildId?: string; releaseVersion?: string }) | null;
+      const heartbeatAge = latest ? Date.now() - Date.parse(latest.heartbeatAt) : Infinity;
+      const matchingBuild = latest?.entryPath === entryPath && latest?.buildId === buildId;
+      const newerBuild = isStrictlyNewerRuntimeRelease(latest?.releaseVersion, releaseVersion);
+      if (latest?.runtimeId === current.runtimeId && latest.pid === current.pid
+        && ['running', 'paused'].includes(latest.status) && heartbeatAge >= -5_000 && heartbeatAge <= 90_000
+        && (matchingBuild || newerBuild)) {
+        return { started: false, pid: current.pid, runtimeId: current.runtimeId };
+      }
       // A packaged Runtime can be temporarily unable to answer health while a
       // synchronous SQLite request owns its event loop. Preserve the exact
       // build or a strictly newer build while its accepted-work lease is
@@ -281,6 +291,8 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
       if (releaseVersion && runtimeHasActiveDataLease(globalDataPath, current.runtimeId, entryPath, buildId, releaseVersion, true)) {
         return { started: false, pid: current.pid, runtimeId: current.runtimeId };
       }
+      recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.recovery',
+        `pid=${current.pid} reason=${health.reason} heartbeatAgeMs=${heartbeatAge}`);
       await (options.terminateProcess || terminateVerifiedRuntimeProcess)(current.pid);
       if (isOwnerAlive(current.pid, current.processBirth || '')) throw new Error('runtime_termination_failed');
     } else {

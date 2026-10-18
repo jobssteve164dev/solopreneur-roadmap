@@ -24,6 +24,14 @@ export interface RuntimeDataRequest {
   sessionToken?: string;
 }
 
+export function isRuntimeDataTransportError(error: unknown): boolean {
+  const failure = error as NodeJS.ErrnoException;
+  return ['ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT'].includes(String(failure?.code))
+    || error instanceof SyntaxError
+    || ['Invalid Runtime endpoint.', 'different_runtime', 'runtime_data_response_incomplete',
+      'Runtime data service is unavailable.'].includes(String(failure?.message));
+}
+
 interface RuntimeControlEndpoint {
   schemaVersion: 1;
   runtimeId: string;

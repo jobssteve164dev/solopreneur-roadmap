@@ -1,3 +1,5 @@
+import { isRuntimeDataTransportError } from './autonomousRuntimeControl';
+
 export interface DatabaseOverview {
   databaseBytes: number;
   freePageBytes: number;
@@ -11,8 +13,14 @@ export interface DatabaseOverviewDependencies {
 }
 
 export async function readDatabaseOverview(root: string, dependencies: DatabaseOverviewDependencies): Promise<DatabaseOverview> {
-  await dependencies.ensureReady(root);
-  return dependencies.readStorage(root);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await dependencies.ensureReady(root);
+      return await dependencies.readStorage(root);
+    } catch (error) {
+      if (attempt > 0 || !isRuntimeDataTransportError(error)) throw error;
+    }
+  }
 }
 
 export function formatDatabaseOverview(overview: DatabaseOverview, language: string): {

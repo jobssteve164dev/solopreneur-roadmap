@@ -6899,9 +6899,9 @@ function createAgentTerminal(
   const terminalEnvironment = withDesktopSessionEnvironment(env);
   const reservedTerminals = reservedAgentTerminalsByProject.get(workspaceRoot);
   const environmentSignature = JSON.stringify(terminalEnvironment);
-  const liveTerminals = new Set(vscode.window.terminals);
   if (reservedTerminals) {
-    const liveReservations = reservedTerminals.filter((entry) => liveTerminals.has(entry.terminal));
+    // Newly created terminals can precede VS Code's terminals-list update.
+    const liveReservations = reservedTerminals.filter((entry) => entry.terminal.exitStatus === undefined);
     if (liveReservations.length > 0) {
       reservedAgentTerminalsByProject.set(workspaceRoot, liveReservations);
     } else {

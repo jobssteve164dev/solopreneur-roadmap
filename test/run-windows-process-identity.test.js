@@ -69,7 +69,7 @@ test('the final shared runner registers Windows wrapper and gated child identiti
     child: { spawn: () => child },
     modules: {
       './agentCli': { ...require('../out/agentCli.js'), getAgentProvider: () => 'fixture' },
-      './autonomousRuntimeControl': { sendRuntimeDataRequest: async (_root, request) => {
+      './autonomousRuntimeControl': { ...require('../out/autonomousRuntimeControl.js'), sendRuntimeDataRequest: async (_root, request) => {
         const { operation, input } = request;
         if (operation === 'read_run_execution_plan') return { ...state, command: 'fixture command', prompt: '完整输入' };
         if (operation === 'claim_run') { registrations.push({ pid: input.agentPid, birth: input.processBirth }); return state; }

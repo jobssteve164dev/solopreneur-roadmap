@@ -180,6 +180,7 @@ test('a fresh packaged Runtime stays owned while a long database request blocks 
   assert.equal(terminated, false);
   assert.equal(spawned, false);
   fs.writeFileSync(busyPath, JSON.stringify({ ...busyLease, busySince: new Date(Date.now() - 7 * 60 * 60 * 1000).toISOString() }));
+  fs.writeFileSync(statePath, JSON.stringify({ ...endpoint, heartbeatAt: new Date(0).toISOString() }));
   await assert.rejects(host.ensureHealthyAutonomousRuntime({
     extensionPath: '/opt/solomap', globalDataPath: globalRoot, buildId: 'packaged-build', releaseVersion: '0.0.526',
     isProcessAlive: () => true,

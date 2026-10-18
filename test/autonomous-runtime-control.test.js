@@ -410,6 +410,12 @@ test('standalone runtime keeps Today suggestions fresh while autonomous executio
     await control.sendRuntimeControlCommand(globalRoot, 'stop');
     await events.once(child, 'exit');
     assert.equal(fs.existsSync(path.join(runtimeRoot, 'control.json')), false);
+    const stoppedStore = require('../out/db/unifiedDataStore.js').UnifiedDataStore.open(globalRoot);
+    try {
+      const events = stoppedStore.readDiagnosticEvents({ kind: 'operation', limit: 100 }).items;
+      assert.ok(events.some(event => event.scope === 'runtime.shutdown.control_stop' && event.payload.pid === child.pid),
+        'Runtime shutdown must retain its initiating reason and exact process identity');
+    } finally { stoppedStore.close(); }
   } finally {
     if (child.exitCode === null) child.kill('SIGTERM');
     for (const fileName of ['control.json', 'owner.json', 'events.jsonl', 'execution-runtime.json', 'today-shadow.json']) {

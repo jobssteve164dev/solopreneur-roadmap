@@ -94,3 +94,27 @@ test('database overview action reads storage without exposing maintenance operat
   ]);
   assert.equal(result.contents.records, 59174);
 });
+
+test('database overview reconnects after discovery changes between readiness and the read', async () => {
+  const overview = loadOverviewModule();
+  let ready = 0, reads = 0;
+  const result = await overview.readDatabaseOverview('/isolated/.solomap-global', {
+    ensureReady: async () => { ready++; },
+    readStorage: async () => {
+      if (++reads === 1) throw new Error('Invalid Runtime endpoint.');
+      return { databaseBytes: 4096, freePageBytes: 0, contents: { records: 3 }, lastMaintenance: null };
+    }
+  });
+  assert.equal(result.contents.records, 3);
+  assert.equal(ready, 2);
+  assert.equal(reads, 2);
+});
+
+test('database overview preserves real query errors instead of masking them as a reconnect', async () => {
+  let reads = 0;
+  await assert.rejects(loadOverviewModule().readDatabaseOverview('/isolated/.solomap-global', {
+    ensureReady: async () => {},
+    readStorage: async () => { reads++; throw new Error('no such table: contents'); }
+  }), /no such table: contents/);
+  assert.equal(reads, 1);
+});

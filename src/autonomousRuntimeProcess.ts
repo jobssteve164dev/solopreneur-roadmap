@@ -17,7 +17,7 @@ import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig, refreshCogn
 import { EmbeddedPiAgentEngine } from './piAgentEngine';
 import { sendRuntimeControlCommand, startRuntimeControlServer } from './autonomousRuntimeControl';
 import { runtimeBuildId, runtimeReleaseVersion } from './runtimeBuildIdentity';
-import { classifyDiagnosticFailure, configureLocalDiagnosticPersistence, importLegacyLocalDiagnostics, recordLocalDiagnosticError } from './localDiagnostics';
+import { classifyDiagnosticFailure, configureLocalDiagnosticPersistence, createLocalDiagnosticTrace, importLegacyLocalDiagnostics, recordLocalDiagnosticError } from './localDiagnostics';
 import { runPiMainPathRequestFile } from './piMainPathRuntime';
 import { startTelegramBackgroundRuntime } from './telegramRuntime';
 import { UnifiedDataStore } from './db/unifiedDataStore';
@@ -152,10 +152,12 @@ async function main(): Promise<void> {
   let telegram = startTelegramBackgroundRuntime(globalDataPath, dataOperations);
   let shutdownPromise: Promise<void> | undefined;
   if (paused) { updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' }); await heartbeatRuntime('paused'); }
-  const stop = (exitCode = 0): Promise<void> => {
+  const stop = (exitCode = 0, reason = 'lease_lost'): Promise<void> => {
     if (exitCode !== 0) process.exitCode = exitCode;
     if (shutdownPromise) return shutdownPromise;
     stopping = true;
+    createLocalDiagnosticTrace(globalDataPath, `runtime.shutdown.${reason}`, { targetId: runtimeId })
+      .record(`runtime.shutdown.${reason}`, exitCode ? 'error' : 'ok', 0, undefined, { pid: process.pid, exitCode });
     shutdownPromise = (async () => {
       if (timer) clearInterval(timer);
       const telegramClosed = telegram?.close();
@@ -191,7 +193,7 @@ async function main(): Promise<void> {
         if (command === 'drain') activeEngine?.cancel();
         updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' });
         await heartbeatRuntime('paused');
-        if (command === 'drain') setTimeout(stop, 25).unref();
+        if (command === 'drain') setTimeout(() => stop(0, 'upgrade_drain'), 25).unref();
         return { status: 'paused' };
       }
       if (command === 'resume') {
@@ -210,7 +212,7 @@ async function main(): Promise<void> {
         return { status: paused ? 'paused' : 'running' };
       }
       if (command === 'stop') {
-        stop();
+        stop(0, 'control_stop');
         return { status: 'stopped' };
       }
       return { status: paused ? 'paused' : 'running' };
@@ -232,7 +234,7 @@ async function main(): Promise<void> {
   catch (error) {
     releaseStartupMigrationBusy();
     rejectStorageMaintenanceBarrier(error);
-    await stop();
+    await stop(1, 'startup_failed');
     throw error;
   }
   dataOperations.recoverRuns();
@@ -252,7 +254,10 @@ async function main(): Promise<void> {
   })();
   void startupMigrationReady.then(resolveStorageMaintenanceBarrier, rejectStorageMaintenanceBarrier);
   startupMigration = startupMigrationReady.catch(error => { process.stderr.write(`SoloMap Runtime memory migration: ${String(error)}\n`); });
-  void startupMigrationReady.catch(() => { void stop(1); });
+  void startupMigrationReady.catch(error => {
+    recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.migration.failed', error);
+    void stop(1, 'migration_failed');
+  });
   storageMaintenance = (async () => {
     await startupMigrationReady;
     if (!stopping) await dataOperations({ operation: 'maintain_database_storage', input: { compact: false, automatic: true } });
@@ -333,8 +338,8 @@ async function main(): Promise<void> {
       }
     }
   }
-  process.once('SIGTERM', () => { void stop(); });
-  process.once('SIGINT', () => { void stop(); });
+  process.once('SIGTERM', () => { void stop(0, 'sigterm'); });
+  process.once('SIGINT', () => { void stop(0, 'sigint'); });
   runCycleObserved();
   timer = setInterval(runCycleObserved, intervalValue());
 }

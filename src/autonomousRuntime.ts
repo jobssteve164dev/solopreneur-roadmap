@@ -446,6 +446,12 @@ export function claimRuntimeLease(globalDataPath: string, options: RuntimeLeaseO
   try {
   const now = options.now || new Date();
   const current = readRuntimeState(globalDataPath);
+  // Parent and child both publish the same lease during startup. The child
+  // may already have bound its server before the parent's claim arrives.
+  if (current && current.runtimeId === options.runtimeId && current.pid === options.pid
+    && (!current.processBirth || current.processBirth === processBirth)) {
+    return { acquired: true, owner: current };
+  }
   if (
     current
     && (current.runtimeId !== options.runtimeId || current.pid !== options.pid || Boolean(current.processBirth && processBirth && current.processBirth !== processBirth))

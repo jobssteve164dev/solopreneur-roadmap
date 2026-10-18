@@ -554,19 +554,32 @@ test('runtime lease recovers after an interrupted disk-full claim left two empty
 
 test('two simultaneous runtime contenders serialize through the database and elect one owner', async () => {
   const fixture = await createFixture();
-  const source = `const runtime=require(${JSON.stringify(path.resolve(__dirname, '../out/autonomousRuntime.js'))});const root=process.argv[1],id=process.argv[2];const result=runtime.claimRuntimeLease(root,{runtimeId:id,pid:process.pid});process.stdout.write(JSON.stringify({id,acquired:result.acquired,owner:result.owner.runtimeId})+'\\n');setTimeout(()=>{},800);`;
+  const children = [];
+  const source = `const runtime=require(${JSON.stringify(path.resolve(__dirname, '../out/autonomousRuntime.js'))});process.on('message',()=>process.exit(0));const root=process.argv[1],id=process.argv[2];const result=runtime.claimRuntimeLease(root,{runtimeId:id,pid:process.pid});process.stdout.write(JSON.stringify({id,acquired:result.acquired,owner:result.owner.runtimeId}));`;
   const launch = id => new Promise((resolve, reject) => {
-    const child = childProcess.spawn(process.execPath, ['-e', source, fixture.globalRoot, id], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '', stderr = ''; child.stdout.on('data', chunk => stdout += chunk); child.stderr.on('data', chunk => stderr += chunk);
-    child.once('error', reject); child.once('exit', code => code === 0 ? resolve(JSON.parse(stdout.trim())) : reject(new Error(stderr || `contender ${id} exited ${code}`)));
+    const child = childProcess.spawn(process.execPath, ['-e', source, fixture.globalRoot, id], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    const ended = require('node:events').once(child, 'exit');
+    children.push({child,ended});
+    let stdout = '', stderr = '';
+    child.stdout.on('data', chunk => {
+      stdout += chunk;
+      try { resolve(JSON.parse(stdout)); } catch { /* Wait for the complete result. */ }
+    });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.once('error', reject);
+    child.once('exit', code => { if (code !== 0) reject(new Error(stderr || `contender ${id} exited ${code}`)); });
   });
   try {
     const results = await Promise.all([launch('contender-a'), launch('contender-b')]);
+    assert.ok(children.every(({child}) => child.exitCode === null && child.signalCode === null), 'both contenders must remain alive until ownership is checked');
     assert.equal(results.filter(result => result.acquired).length, 1);
     assert.equal(results[0].owner, results[1].owner);
     assert.equal(runtime.readRuntimeState(fixture.globalRoot).runtimeId, results[0].owner);
     assert.equal(fs.existsSync(path.join(fixture.globalRoot, 'runtime', 'control.claim')), false);
-  } finally { await removeFixture(fixture); }
+  } finally {
+    for (const {child,ended} of children) { if (child.connected) child.send('release'); await ended; }
+    await removeFixture(fixture);
+  }
 });
 
 test('a paused runtime keeps its single-writer lease until it resumes', async () => {

@@ -3,7 +3,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { once } from 'events';
-import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import { isRuntimeDataTransportError, sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { shellQuote, getAgentProvider } from './agentCli';
 import { buildDatabaseAgentCommand, DatabaseAgentLaunch } from './agentDatabaseLaunch';
 import { prepareNativeAgentLaunch, CapturedAgentProcess } from './agentRunPreflight';
@@ -38,12 +38,15 @@ async function main(): Promise<void> {
   const projectRoot = argument('--project-path');
   const executionLogId = Number(argument('--execution-log-id'));
   if (!globalDataPath || !projectRoot || !Number.isInteger(executionLogId) || executionLogId < 1) throw new Error('run_execution_arguments_required');
+  let requestedSignal: NodeJS.Signals | undefined;
   const request = async <T>(operation: string, input: Record<string, unknown>): Promise<T> => {
     for (;;) {
       try { return await sendRuntimeDataRequest<T>(globalDataPath, { operation, input }); }
       catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (!['ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE'].includes(String(code)) && !(error instanceof SyntaxError) && (error as Error).message !== 'different_runtime') throw error;
+        if (requestedSignal) throw Object.assign(new Error(`执行已停止：${requestedSignal}`), { exitCode: requestedSignal === 'SIGINT' ? 130 : 143 });
+        // Persistence is an observer of a live conversation, never its stop
+        // authority. Keep this exact batch and idempotency key until recovery.
+        if (operation !== 'append_run_log' && !isRuntimeDataTransportError(error)) throw error;
         // Keep accepted output queued while the same database owner restarts.
         await new Promise(resolve => setTimeout(resolve, 250));
       }
@@ -111,7 +114,6 @@ async function main(): Promise<void> {
   let exited: Promise<[number | null, NodeJS.Signals | null]> | undefined;
   let captures: Promise<void>[] = [];
   let temporaryInput = false;
-  let requestedSignal: NodeJS.Signals | undefined;
   let terminationDecision = Promise.resolve();
   const continuationStopSummary = (exitCode: number): string | undefined => {
     const intent = state.status.stopRequestIntent as { outcome?: string } | undefined;

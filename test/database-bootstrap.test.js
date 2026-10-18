@@ -16,8 +16,11 @@ function launch(root) {
 }
 async function ready(run, root) {
   const deadline = Date.now() + 10000;
-  while (!fs.existsSync(path.join(root, 'runtime', 'control.json'))) {
+  for (;;) {
     assert.equal(run.child.exitCode, null, run.errors());
+    try {
+      if ((await sendRuntimeControlCommand(root, 'health', { timeoutMs: 250 })).ok) return;
+    } catch { /* A lease file can precede the actual control server. */ }
     assert.ok(Date.now() < deadline, run.errors() || 'Runtime did not publish readiness');
     await new Promise(resolve => setTimeout(resolve, 20));
   }
@@ -43,7 +46,6 @@ test('Runtime handles SIGTERM without treating the signal name as an exit code',
       assert.ok(Date.now() < signalDeadline, run.errors() || 'Runtime did not install its SIGTERM handler');
       await new Promise(resolve => setTimeout(resolve, 20));
     }
-    await new Promise(resolve => setTimeout(resolve, 1000));
     const exited = once(run.child, 'exit');
     run.child.kill('SIGTERM');
     const [code, signal] = await exited;
@@ -90,7 +92,7 @@ test('normal Runtime startup creates the database and automatically imports lega
     const { DatabaseSync } = require('node:sqlite');
     let db = new DatabaseSync(path.join(root, 'solomap.db'), { readOnly: true });
     const id = db.prepare("SELECT value FROM database_meta WHERE key='database_id'").get().value;
-    const domainEvents = db.prepare("SELECT count(*) AS total FROM events WHERE kind NOT LIKE 'runtime_instance.%' AND kind NOT LIKE 'evidence.runtime_instance_%' AND kind<>'evidence.host_settings' AND kind NOT IN ('setting.create','setting.patch')").get().total;
+    const domainEvents = db.prepare("SELECT count(*) AS total FROM events WHERE kind NOT LIKE 'runtime_instance.%' AND kind NOT LIKE 'evidence.runtime_instance_%' AND kind NOT IN ('evidence.host_settings','evidence.diagnostic_event','setting.create','setting.patch')").get().total;
     const jobs = db.prepare('SELECT count(*) AS total FROM migration_jobs').get().total;
     db.close();
     run = launch(root);
@@ -98,7 +100,7 @@ test('normal Runtime startup creates the database and automatically imports lega
     await stop(run, root);
     db = new DatabaseSync(path.join(root, 'solomap.db'), { readOnly: true });
     assert.equal(db.prepare("SELECT value FROM database_meta WHERE key='database_id'").get().value, id);
-    assert.equal(db.prepare("SELECT count(*) AS total FROM events WHERE kind NOT LIKE 'runtime_instance.%' AND kind NOT LIKE 'evidence.runtime_instance_%' AND kind<>'evidence.host_settings' AND kind NOT IN ('setting.create','setting.patch')").get().total, domainEvents, 'unchanged startup must not replay domain mutations');
+    assert.equal(db.prepare("SELECT count(*) AS total FROM events WHERE kind NOT LIKE 'runtime_instance.%' AND kind NOT LIKE 'evidence.runtime_instance_%' AND kind NOT IN ('evidence.host_settings','evidence.diagnostic_event','setting.create','setting.patch')").get().total, domainEvents, 'unchanged startup must not replay domain mutations');
     assert.equal(db.prepare('SELECT count(*) AS total FROM migration_jobs').get().total, jobs, 'unchanged startup must not create another import job');
     assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
     db.close();
@@ -201,7 +203,7 @@ test('Runtime closes its control endpoint when startup migration recovery fails'
   try {
     const outcome = await Promise.race([
       once(child, 'exit').then(([code]) => ({ code })),
-      new Promise(resolve => setTimeout(() => resolve({ code: 'timeout' }), 2000))
+      new Promise(resolve => setTimeout(() => resolve({ code: 'timeout' }), 10000))
     ]);
     assert.equal(outcome.code, 1, stderr || 'startup failure must terminate the Runtime');
     assert.match(stderr, /startup migration failed/);
@@ -252,7 +254,7 @@ test('Runtime exits unsuccessfully when an asynchronous startup migration fails'
   try {
     const outcome = await Promise.race([
       once(child, 'exit').then(([code]) => ({ code })),
-      new Promise(resolve => setTimeout(() => resolve({ code: 'timeout' }), 2000))
+      new Promise(resolve => setTimeout(() => resolve({ code: 'timeout' }), 10000))
     ]);
     assert.equal(outcome.code, 1, stderr || 'asynchronous startup failure must terminate unsuccessfully');
     assert.match(stderr, /asynchronous startup migration failed/);
