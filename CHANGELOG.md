@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.603 - 2026-10-18
+
+### Added
+- support safe project path updates (18d777b)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.602 - 2026-10-18
 
 ### Changed
