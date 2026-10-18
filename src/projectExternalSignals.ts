@@ -206,7 +206,17 @@ export interface SecurityCacheFile {
   message: string;
 }
 
-export interface ExternalSignalLoadOptions extends ExternalDataLoadOptions { globalDataPath?: string }
+export interface CachedExternalSignals {
+  issues: ProjectIssueSummary | null;
+  pullRequests: ProjectPullRequestSummary | null;
+  delivery: ProjectDeliverySummary | null;
+  security: ProjectSecuritySummary | null;
+}
+
+export interface ExternalSignalLoadOptions extends ExternalDataLoadOptions {
+  globalDataPath?: string;
+  resolvedRepo?: string | null;
+}
 interface AnalysisState<T> { objectId: string | null; revision: number; value: T | null }
 interface ExternalProjection<T> { generation?: number; requestedAt: number; requestId?: string; cache: T }
 interface ExternalRefreshToken { generation: number; requestId: string; requestedAt: number }
@@ -518,6 +528,17 @@ function getGithubRepoSlug(projectPath: string): string {
   return repo;
 }
 
+export async function resolveGithubRepoSlug(projectPath: string): Promise<string | null> {
+  if (!projectPath || !fs.existsSync(projectPath)) return '';
+  const result = await runProcessAsync('git', ['-C', projectPath, 'remote', 'get-url', 'origin'], 1800);
+  if (!result.ok) {
+    return /timed out|enoent|spawn/i.test(result.stderr) ? null : '';
+  }
+  const remote = String(result.stdout || '').trim();
+  const match = remote.match(/github\.com[:/](.+?)(?:\.git)?$/i);
+  return match ? match[1].replace(/\.git$/i, '') : '';
+}
+
 function normalizeIssueLabel(label: string): string {
   return String(label || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
@@ -676,8 +697,8 @@ function runProcessAsync(command: string, args: string[], timeout = 6000): Promi
   });
 }
 
-async function runGhIssueCommandAsync(projectPath: string, args: string[], timeout = 6000): Promise<{ ok: boolean; stdout: string; stderr: string; repo: string }> {
-  const repo = getGithubRepoSlug(projectPath);
+async function runGhIssueCommandAsync(projectPath: string, args: string[], timeout = 6000, resolvedRepo?: string): Promise<{ ok: boolean; stdout: string; stderr: string; repo: string }> {
+  const repo = resolvedRepo !== undefined ? resolvedRepo : getGithubRepoSlug(projectPath);
   if (!repo) {
     return { ok: false, stdout: '', stderr: 'No GitHub remote', repo: '' };
   }
@@ -689,8 +710,8 @@ async function runGhIssueCommandAsync(projectPath: string, args: string[], timeo
   return { ...result, repo };
 }
 
-async function runGhApiCommandAsync(projectPath: string, endpoint: string, timeout = 6500): Promise<{ ok: boolean; stdout: string; stderr: string; repo: string }> {
-  const repo = getGithubRepoSlug(projectPath);
+async function runGhApiCommandAsync(projectPath: string, endpoint: string, timeout = 6500, resolvedRepo?: string): Promise<{ ok: boolean; stdout: string; stderr: string; repo: string }> {
+  const repo = resolvedRepo !== undefined ? resolvedRepo : getGithubRepoSlug(projectPath);
   if (!repo) {
     return { ok: false, stdout: '', stderr: 'No GitHub remote', repo: '' };
   }
@@ -702,8 +723,7 @@ async function runGhApiCommandAsync(projectPath: string, endpoint: string, timeo
   return { ...result, repo };
 }
 
-async function readProjectDeliverySummaryAsync(projectPath: string, globalDataPath: string, request: ExternalRefreshToken, isCurrent: () => boolean): Promise<ProjectDeliverySummary> {
-  const repo = getGithubRepoSlug(projectPath);
+async function readProjectDeliverySummaryAsync(projectPath: string, repo: string, globalDataPath: string, request: ExternalRefreshToken, isCurrent: () => boolean): Promise<ProjectDeliverySummary> {
   if (!repo) {
     return createEmptyDeliverySummary('No GitHub remote');
   }
@@ -719,7 +739,7 @@ async function readProjectDeliverySummaryAsync(projectPath: string, globalDataPa
       '1',
       '--json',
       'tagName,name,publishedAt'
-    ], 4500),
+    ], 4500, repo),
     runGhIssueCommandAsync(projectPath, [
       'run',
       'list',
@@ -727,7 +747,7 @@ async function readProjectDeliverySummaryAsync(projectPath: string, globalDataPa
       String(DELIVERY_WORKFLOW_RUN_FETCH_LIMIT),
       '--json',
       'name,displayTitle,status,conclusion,createdAt,updatedAt,url'
-    ], 4500)
+    ], 4500, repo)
   ]);
   if (!releaseResult.ok && !runResult.ok) {
     const cache = await readExternalCache<DeliveryCacheFile>(globalDataPath, projectPath, 'delivery', repo);
@@ -803,8 +823,7 @@ function parseCodeScanningAlert(raw: any): ProjectSecurityAlert {
   };
 }
 
-async function readProjectSecuritySummaryAsync(projectPath: string, globalDataPath: string, request: ExternalRefreshToken, isCurrent: () => boolean): Promise<ProjectSecuritySummary> {
-  const repo = getGithubRepoSlug(projectPath);
+async function readProjectSecuritySummaryAsync(projectPath: string, repo: string, globalDataPath: string, request: ExternalRefreshToken, isCurrent: () => boolean): Promise<ProjectSecuritySummary> {
   if (!repo) {
     return createEmptySecuritySummary('No GitHub remote');
   }
@@ -813,8 +832,8 @@ async function readProjectSecuritySummaryAsync(projectPath: string, globalDataPa
     return cache ? summarizeSecurityCache(repo, cache, true) : { ...createEmptySecuritySummary('GitHub CLI not found'), repo };
   }
   const [dependabotResult, codeScanningResult] = await Promise.all([
-    runGhApiCommandAsync(projectPath, `/repos/${repo}/dependabot/alerts?state=open&per_page=100`, 6500),
-    runGhApiCommandAsync(projectPath, `/repos/${repo}/code-scanning/alerts?state=open&per_page=100`, 6500)
+    runGhApiCommandAsync(projectPath, `/repos/${repo}/dependabot/alerts?state=open&per_page=100`, 6500, repo),
+    runGhApiCommandAsync(projectPath, `/repos/${repo}/code-scanning/alerts?state=open&per_page=100`, 6500, repo)
   ]);
   const alerts: ProjectSecurityAlert[] = [];
   const messages: string[] = [];
@@ -860,8 +879,7 @@ async function readProjectSecuritySummaryAsync(projectPath: string, globalDataPa
   return summarizeSecurityCache(repo, committed, committed !== cache);
 }
 
-async function readProjectIssueSummaryAsync(projectPath: string, globalDataPath: string, request: ExternalRefreshToken, isCurrent: () => boolean): Promise<ProjectIssueSummary> {
-  const repo = getGithubRepoSlug(projectPath);
+async function readProjectIssueSummaryAsync(projectPath: string, repo: string, globalDataPath: string, request: ExternalRefreshToken, isCurrent: () => boolean): Promise<ProjectIssueSummary> {
   if (!repo) {
     return createEmptyIssueSummary('No GitHub remote');
   }
@@ -874,7 +892,7 @@ async function readProjectIssueSummaryAsync(projectPath: string, globalDataPath:
     '100',
     '--json',
     'number,title,body,state,labels,comments,reactionGroups,updatedAt,url'
-  ], 4500);
+  ], 4500, repo);
   if (!result.ok) {
     const cache = await readExternalCache<IssueCacheFile>(globalDataPath, projectPath, 'issues', repo);
     if (cache) {
@@ -906,8 +924,7 @@ async function readProjectIssueSummaryAsync(projectPath: string, globalDataPath:
   return summarizeIssueItems(repo, committed.issues, committed.syncedAt, committed !== cache);
 }
 
-async function readProjectPullRequestSummaryAsync(projectPath: string, globalDataPath: string, request: ExternalRefreshToken, isCurrent: () => boolean): Promise<ProjectPullRequestSummary> {
-  const repo = getGithubRepoSlug(projectPath);
+async function readProjectPullRequestSummaryAsync(projectPath: string, repo: string, globalDataPath: string, request: ExternalRefreshToken, isCurrent: () => boolean): Promise<ProjectPullRequestSummary> {
   if (!repo) {
     return createEmptyPullRequestSummary('No GitHub remote');
   }
@@ -920,7 +937,7 @@ async function readProjectPullRequestSummaryAsync(projectPath: string, globalDat
     '50',
     '--json',
     'number,title,body,state,isDraft,author,headRefName,baseRefName,reviewDecision,mergeStateStatus,comments,updatedAt,url'
-  ], 5000);
+  ], 5000, repo);
   if (!result.ok) {
     const cache = await readExternalCache<PullRequestCacheFile>(globalDataPath, projectPath, 'pullRequests', repo);
     if (cache) {
@@ -958,11 +975,11 @@ async function readProjectPullRequestSummaryAsync(projectPath: string, globalDat
 
 export function loadExternalIssueSummary(projectPath: string, options: ExternalSignalLoadOptions = {}): Promise<ProjectIssueSummary> {
   const globalDataPath = externalDataRoot(options.globalDataPath || '', projectPath);
-  const repo = getGithubRepoSlug(projectPath);
+  const repo = options.resolvedRepo !== undefined ? (options.resolvedRepo || '') : getGithubRepoSlug(projectPath);
   return loadExternalData(
     'github-issues',
     projectPath,
-    async (isCurrent) => readProjectIssueSummaryAsync(projectPath, globalDataPath, await beginExternalRefresh(globalDataPath, projectPath, 'issues'), isCurrent),
+    async (isCurrent) => readProjectIssueSummaryAsync(projectPath, repo, globalDataPath, await beginExternalRefresh(globalDataPath, projectPath, 'issues'), isCurrent),
     options,
     `${globalDataPath}\0${repo}`
   );
@@ -970,11 +987,11 @@ export function loadExternalIssueSummary(projectPath: string, options: ExternalS
 
 export function loadExternalPullRequestSummary(projectPath: string, options: ExternalSignalLoadOptions = {}): Promise<ProjectPullRequestSummary> {
   const globalDataPath = externalDataRoot(options.globalDataPath || '', projectPath);
-  const repo = getGithubRepoSlug(projectPath);
+  const repo = options.resolvedRepo !== undefined ? (options.resolvedRepo || '') : getGithubRepoSlug(projectPath);
   return loadExternalData(
     'github-pull-requests',
     projectPath,
-    async (isCurrent) => readProjectPullRequestSummaryAsync(projectPath, globalDataPath, await beginExternalRefresh(globalDataPath, projectPath, 'pullRequests'), isCurrent),
+    async (isCurrent) => readProjectPullRequestSummaryAsync(projectPath, repo, globalDataPath, await beginExternalRefresh(globalDataPath, projectPath, 'pullRequests'), isCurrent),
     options,
     `${globalDataPath}\0${repo}`
   );
@@ -982,11 +999,11 @@ export function loadExternalPullRequestSummary(projectPath: string, options: Ext
 
 export function loadExternalDeliverySummary(projectPath: string, options: ExternalSignalLoadOptions = {}): Promise<ProjectDeliverySummary> {
   const globalDataPath = externalDataRoot(options.globalDataPath || '', projectPath);
-  const repo = getGithubRepoSlug(projectPath);
+  const repo = options.resolvedRepo !== undefined ? (options.resolvedRepo || '') : getGithubRepoSlug(projectPath);
   return loadExternalData(
     'github-delivery',
     projectPath,
-    async (isCurrent) => readProjectDeliverySummaryAsync(projectPath, globalDataPath, await beginExternalRefresh(globalDataPath, projectPath, 'delivery'), isCurrent),
+    async (isCurrent) => readProjectDeliverySummaryAsync(projectPath, repo, globalDataPath, await beginExternalRefresh(globalDataPath, projectPath, 'delivery'), isCurrent),
     options,
     `${globalDataPath}\0${repo}`
   );
@@ -994,14 +1011,32 @@ export function loadExternalDeliverySummary(projectPath: string, options: Extern
 
 export function loadExternalSecuritySummary(projectPath: string, options: ExternalSignalLoadOptions = {}): Promise<ProjectSecuritySummary> {
   const globalDataPath = externalDataRoot(options.globalDataPath || '', projectPath);
-  const repo = getGithubRepoSlug(projectPath);
+  const repo = options.resolvedRepo !== undefined ? (options.resolvedRepo || '') : getGithubRepoSlug(projectPath);
   return loadExternalData(
     'github-security',
     projectPath,
-    async (isCurrent) => readProjectSecuritySummaryAsync(projectPath, globalDataPath, await beginExternalRefresh(globalDataPath, projectPath, 'security'), isCurrent),
+    async (isCurrent) => readProjectSecuritySummaryAsync(projectPath, repo, globalDataPath, await beginExternalRefresh(globalDataPath, projectPath, 'security'), isCurrent),
     options,
     `${globalDataPath}\0${repo}`
   );
+}
+
+export async function readCachedExternalSignals(projectPath: string, globalDataPath = '', resolvedRepo?: string | null): Promise<CachedExternalSignals | null> {
+  const root = externalDataRoot(globalDataPath, projectPath);
+  const repo = resolvedRepo !== undefined ? resolvedRepo : await resolveGithubRepoSlug(projectPath);
+  if (repo === null || !repo) return null;
+  const [issues, pullRequests, delivery, security] = await Promise.all([
+    readExternalCache<IssueCacheFile>(root, projectPath, 'issues', repo),
+    readExternalCache<PullRequestCacheFile>(root, projectPath, 'pullRequests', repo),
+    readExternalCache<DeliveryCacheFile>(root, projectPath, 'delivery', repo),
+    readExternalCache<SecurityCacheFile>(root, projectPath, 'security', repo)
+  ]);
+  return {
+    issues: issues ? summarizeIssueItems(repo, issues.issues, issues.syncedAt, true) : null,
+    pullRequests: pullRequests ? summarizePullRequestItems(repo, pullRequests.pullRequests, pullRequests.syncedAt, true) : null,
+    delivery: delivery ? summarizeDeliveryCache(repo, delivery, true) : null,
+    security: security ? summarizeSecurityCache(repo, security, true) : null
+  };
 }
 
 export function invalidateExternalIssueSummary(projectPath: string): void {

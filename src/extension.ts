@@ -41,8 +41,6 @@ import {
   closeProjectPullRequest,
   createProjectIssue,
   loadExternalDeliverySummary,
-  loadExternalIssueSummary,
-  loadExternalPullRequestSummary,
   loadExternalSecuritySummary,
   readCachedIssueDetails,
   readProjectIssueDetails
@@ -2131,12 +2129,17 @@ async function handleSharedWebviewAction(
     'ability.uninstallSkill': async (request) => handleUninstallSolomapSkill(context, request.skillId || ''),
     'ability.uninstallMcp': async (request) => handleUninstallSolomapMcp(context, request.mcpId || ''),
     'project.getAll': async () => {
+      const initialSidebarState = surface === 'sidebar' && sidebarProvider ? getProjectState(context) : null;
+      const initialSidebarSignature = initialSidebarState ? JSON.stringify(initialSidebarState) : '';
+      if (initialSidebarState && sidebarProvider) void sidebarProvider.sendProjects();
       const registryRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
       await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: registryRoot });
       await refreshProjectRegistryForContext(context, registryRoot);
       await refreshProjectAutonomyAuthorizations(context, registryRoot);
       if (surface === 'sidebar' && sidebarProvider) {
-        await sidebarProvider.sendProjects();
+        if (JSON.stringify(getProjectState(context)) !== initialSidebarSignature) {
+          await sidebarProvider.sendProjects();
+        }
       } else {
         const projectState = getProjectState(context);
         await postProjectsLoaded(target, projectState);
@@ -2236,6 +2239,7 @@ async function handleSharedWebviewAction(
     },
     'issue.create': async (request) => {
       const projectPath = String(request.projectPath || '');
+      const signalDataPath = getPersistedSettings(context).globalDataPath;
       const result = createProjectIssue(
         projectPath,
         String(request.title || '').trim(),
@@ -2253,7 +2257,7 @@ async function handleSharedWebviewAction(
         sourceMessageId: String(request.sourceMessageId || '')
       });
       if (result.ok) {
-        const issues = await loadExternalIssueSummary(projectPath, { force: true, globalDataPath: getPersistedSettings(context).globalDataPath }).catch(() => null);
+        const issues = await sidebarProvider?.refreshProjectSignal(projectPath, 'issues', signalDataPath).catch(() => null);
         if (issues && externalSignalResponseVersions.isCurrent(projectPath, 'issues', issueVersion)) {
           await respond({ command: 'projectIssuesLoaded', projectPath, issues });
         }
@@ -2261,12 +2265,13 @@ async function handleSharedWebviewAction(
     },
     'issue.close': async (request) => {
       const projectPath = String(request.projectPath || '');
+      const signalDataPath = getPersistedSettings(context).globalDataPath;
       const result = closeProjectIssue(projectPath, Number(request.issueNumber || 0));
       const issueVersion = result.ok ? externalSignalResponseVersions.next(projectPath, ['issues']).issues : 0;
       if (result.ok) sidebarProvider?.invalidateProjectSignals(projectPath, ['issues']);
       await respond({ command: 'issueActionCompleted', projectPath, success: result.ok, message: result.message });
       if (result.ok) {
-        const issues = await loadExternalIssueSummary(projectPath, { force: true, globalDataPath: getPersistedSettings(context).globalDataPath }).catch(() => null);
+        const issues = await sidebarProvider?.refreshProjectSignal(projectPath, 'issues', signalDataPath).catch(() => null);
         if (issues && externalSignalResponseVersions.isCurrent(projectPath, 'issues', issueVersion)) {
           await respond({ command: 'projectIssuesLoaded', projectPath, issues });
         }
@@ -2274,39 +2279,48 @@ async function handleSharedWebviewAction(
     },
     'pullRequest.close': async (request) => {
       const projectPath = String(request.projectPath || '');
+      const signalDataPath = getPersistedSettings(context).globalDataPath;
       const result = closeProjectPullRequest(projectPath, Number(request.pullRequestNumber || 0));
       const pullRequestVersion = result.ok ? externalSignalResponseVersions.next(projectPath, ['pullRequests']).pullRequests : 0;
       if (result.ok) sidebarProvider?.invalidateProjectSignals(projectPath, ['pullRequests']);
       await respond({ command: 'pullRequestActionCompleted', projectPath, success: result.ok, message: result.message });
-      const pullRequests = await loadExternalPullRequestSummary(projectPath, { force: true, globalDataPath: getPersistedSettings(context).globalDataPath }).catch(() => null);
+      const pullRequests = await sidebarProvider?.refreshProjectSignal(projectPath, 'pullRequests', signalDataPath).catch(() => null);
       if (pullRequests && externalSignalResponseVersions.isCurrent(projectPath, 'pullRequests', pullRequestVersion)) {
         await respond({ command: 'projectPullRequestsLoaded', projectPath, pullRequests });
       }
     },
     'project.refreshExternalData': async (request) => {
       const projectPath = String(request.projectPath || '');
+      const refreshGlobalDataPath = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+      const refreshDataRootIsCurrent = () => surface !== 'sidebar' || sidebarResponseDataRoot === normalizeGlobalDataPathForRegistry(
+        getPersistedSettings(context).globalDataPath,
+        getProjects(context)[0]?.path || getWorkspaceRoot()
+      );
       const responseVersions = externalSignalResponseVersions.next(projectPath, ['issues', 'pullRequests', 'delivery', 'security']);
       sidebarProvider?.invalidateProjectSignals(projectPath, ['issues', 'pullRequests', 'delivery', 'security']);
-      const [issues, pullRequests, delivery, security, runIndexHealth, growthView] = await Promise.all([
-        loadExternalIssueSummary(projectPath, { force: true, globalDataPath: getPersistedSettings(context).globalDataPath }).catch(() => null),
-        loadExternalPullRequestSummary(projectPath, { force: true, globalDataPath: getPersistedSettings(context).globalDataPath }).catch(() => null),
-        loadExternalDeliverySummary(projectPath, { force: true, globalDataPath: getPersistedSettings(context).globalDataPath }).catch(() => null),
-        loadExternalSecuritySummary(projectPath, { force: true, globalDataPath: getPersistedSettings(context).globalDataPath }).catch(() => null),
-        backfillRunIndexFromDigests(projectPath, context.extensionPath, normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)).catch((error) => {
-          recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'project.refresh.run_index', error);
+      const [externalSignals, runIndexHealth, growthView] = await Promise.all([
+        sidebarProvider?.refreshProjectSignals(projectPath).catch(() => null),
+        backfillRunIndexFromDigests(projectPath, context.extensionPath, refreshGlobalDataPath).catch((error) => {
+          recordLocalDiagnosticError(refreshGlobalDataPath, 'project.refresh.run_index', error);
           console.error('SoloMap run index backfill failed during project refresh:', error);
           return null;
         }),
         refreshProjectGrowthSnapshot(projectPath, context.extensionPath, {
-          globalDataPath: normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath),
+          globalDataPath: refreshGlobalDataPath,
           scanReason: 'project_refresh',
           maxFiles: 5000
         }).catch((error) => {
-          recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'project.refresh.growth', error);
+          recordLocalDiagnosticError(refreshGlobalDataPath, 'project.refresh.growth', error);
           console.error('SoloMap project growth refresh failed during project refresh:', error);
           return null;
         })
       ]);
+      const { issues, pullRequests, delivery, security } = externalSignals || {
+        issues: null,
+        pullRequests: null,
+        delivery: null,
+        security: null
+      };
       if (issues && externalSignalResponseVersions.isCurrent(projectPath, 'issues', responseVersions.issues)) {
         await respond({ command: 'projectIssuesLoaded', projectPath, issues });
       }
@@ -2319,7 +2333,7 @@ async function handleSharedWebviewAction(
       if (security && externalSignalResponseVersions.isCurrent(projectPath, 'security', responseVersions.security)) {
         await respond({ command: 'projectSecurityLoaded', projectPath, security });
       }
-      if (runIndexHealth?.backfilledCount) {
+      if (runIndexHealth?.backfilledCount && refreshDataRootIsCurrent()) {
         sendLocalProjectsToWebviews(context, projectPath);
       }
       if (growthView) {
@@ -3580,6 +3594,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   }
   const syncReady = ensureSyncEngine(context);
   void sidebarProvider?.sendProjectConversationSnapshot(projectPath, true);
+  sidebarProvider?.prioritizeProjectSignals(projectPath);
   if (activePanel) {
     void postWebviewContainerMessage(activePanel, { command: 'roadmapLoading', projectPath });
     void postWebviewContainerMessage(activePanel, { command: 'projectsLoaded', projects: { projects, selectedProjectPath: projectPath } });

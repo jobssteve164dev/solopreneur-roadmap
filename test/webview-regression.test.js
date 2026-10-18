@@ -1571,6 +1571,9 @@ function makeSidebarSnapshotCacheStub(options = {}) {
     },
     async readCachedConversationSnapshot(globalDataPath, projectPath) {
       conversationReadRoots.push(globalDataPath);
+      if (options.readCachedConversationSnapshot) {
+        return options.readCachedConversationSnapshot(globalDataPath, projectPath);
+      }
       return conversations.has(projectPath) ? structuredClone(conversations.get(projectPath)) : null;
     },
     async writeCachedConversationSnapshot(globalDataPath, projectPath, _sourceRevision, snapshot) {
@@ -5572,7 +5575,8 @@ test('sidebar discards a progressive portfolio scan when project settings change
       }
     }
   };
-  provider._projectLoader.scheduleAll = () => {
+  provider._projectLoader.scheduleExternalSignals = () => {};
+  provider._projectLoader.schedulePortfolioEnrichment = () => {
     scanCompleted = true;
     resolveCompleted();
   };
@@ -5618,7 +5622,7 @@ test('closing an issue refreshes only that project issue data', () => {
   const action = source.match(/'issue\.close': async \(request\) => \{([\s\S]*?)\n    \},/);
   assert.ok(action);
   assert.match(action[1], /invalidateProjectSignals\(projectPath, \['issues'\]\)/);
-  assert.match(action[1], /loadExternalIssueSummary\(projectPath, \{ force: true, globalDataPath: getPersistedSettings\(context\)\.globalDataPath \}\)/);
+  assert.match(action[1], /refreshProjectSignal\(projectPath, 'issues', signalDataPath\)/);
   assert.match(action[1], /projectIssuesLoaded/);
   assert.doesNotMatch(action[1], /sendProjectsToWebviews\(context\)/);
 });
@@ -5629,7 +5633,7 @@ test('a project-local refresh keeps other projects remote loads in flight', () =
   const localRefresh = provider.match(/public sendLocalProjects\(projectPath = ''\) \{([\s\S]*?)\n  \}/);
   assert.ok(localRefresh);
   assert.match(localRefresh[1], /if \(!projectPath\) this\._projectLoader\.cancelExternalLoads\(\)/);
-  assert.match(extension, /if \(runIndexHealth\?\.backfilledCount\) \{\s*sendLocalProjectsToWebviews\(context, projectPath\)/);
+  assert.match(extension, /if \(runIndexHealth\?\.backfilledCount && refreshDataRootIsCurrent\(\)\) \{\s*sendLocalProjectsToWebviews\(context, projectPath\)/);
 });
 
 test('closing the roadmap panel keeps the project sentinel alive for sidebar status refreshes', async t => {
@@ -6064,15 +6068,12 @@ test('sidebar discards a core snapshot read when the data root changes in flight
   assert.equal(provider._latestPortfolio.length, 0);
 });
 
-test('sidebar discards a local refresh snapshot read when the data root changes in flight', async () => {
-  let signalSnapshotRead;
-  const snapshotReadStarted = new Promise((resolve) => { signalSnapshotRead = resolve; });
-  let resolveSnapshot;
-  const snapshotRead = new Promise((resolve) => { resolveSnapshot = resolve; });
+test('sidebar local refresh starts without reading the removed core snapshot cache', async () => {
+  let snapshotReads = 0;
   const snapshotCache = makeSidebarSnapshotCacheStub({
     readSidebarCoreSnapshot: () => {
-      signalSnapshotRead();
-      return snapshotRead;
+      snapshotReads += 1;
+      return new Promise(() => {});
     }
   });
   const { SolopreneurSidebarProvider } = loadCompiledModule(
@@ -6098,18 +6099,19 @@ test('sidebar discards a local refresh snapshot read when the data root changes 
   provider._projectLoader.schedulePortfolioEnrichment = () => { enrichmentCount += 1; };
 
   provider.sendLocalProjects('/workspace/app');
-  await snapshotReadStarted;
-  globalDataPath = '/data-b';
-  resolveSnapshot(null);
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await new Promise((resolve) => setTimeout(resolve, 50));
 
-  assert.deepEqual(postedMessages, []);
-  assert.equal(enrichmentCount, 0);
+  assert.equal(postedMessages.some(message => message.command === 'projectsLoaded'), true);
+  assert.equal(snapshotReads, 0);
+  assert.equal(enrichmentCount, 1);
 });
 
 test('sidebar shared action rejects every project response after its data root changes', async () => {
   let resolveIssues;
   const issueSummary = new Promise((resolve) => { resolveIssues = resolve; });
+  let rejectGrowth;
+  const growthRefresh = new Promise((_resolve, reject) => { rejectGrowth = reject; });
+  const diagnosticWrites = [];
   const projectExternalSignals = {
     ...require('../out/projectExternalSignals.js'),
     loadExternalIssueSummary: () => issueSummary,
@@ -6131,17 +6133,31 @@ test('sidebar shared action rejects every project response after its data root c
     './projectExternalSignals': projectExternalSignals,
     './runIndexMaintenance': {
       ...require('../out/runIndexMaintenance.js'),
-      backfillRunIndexFromDigests: async () => null
+      backfillRunIndexFromDigests: async () => ({ ok: true, backfilledCount: 1 })
     },
     './projectGrowth': {
       ...require('../out/projectGrowth.js'),
-      refreshProjectGrowthSnapshot: async () => null
+      refreshProjectGrowthSnapshot: () => growthRefresh
+    },
+    './localDiagnostics': {
+      ...require('../out/localDiagnostics.js'),
+      recordLocalDiagnosticError: (root, kind) => { diagnosticWrites.push({ root, kind }); }
     }
   });
   const reconciled = [];
   const postedMessages = [];
+  let localRefreshes = 0;
   extension.connect({
     invalidateProjectSignals() {},
+    sendLocalProjects() { localRefreshes += 1; },
+    async refreshProjectSignals() {
+      return {
+        issues: await issueSummary,
+        pullRequests: null,
+        delivery: null,
+        security: null
+      };
+    },
     reconcileProjectMessage(payload, expectedDataRoot) {
       reconciled.push({ command: payload.command, expectedDataRoot });
       return payload.projectPath && expectedDataRoot !== '/data-b/.solomap-global' ? null : payload;
@@ -6155,6 +6171,7 @@ test('sidebar shared action rejects every project response after its data root c
     { postMessage: (message) => { postedMessages.push(message); return Promise.resolve(true); } }
   );
   extension.switchRoot();
+  rejectGrowth(new Error('growth unavailable'));
   resolveIssues({ available: true, repo: 'SZLK/root-a', open: 2 });
   await pending;
 
@@ -6163,6 +6180,10 @@ test('sidebar shared action rejects every project response after its data root c
     { command: 'projectRefreshCompleted', expectedDataRoot: '/data-a/.solomap-global' }
   ]);
   assert.deepEqual(postedMessages, []);
+  assert.equal(localRefreshes, 0);
+  assert.deepEqual(diagnosticWrites, [
+    { root: '/data-a/.solomap-global', kind: 'project.refresh.growth' }
+  ]);
 });
 
 test('sidebar conversation reads share the canonical data root across registered project parents', async () => {
@@ -6285,7 +6306,8 @@ test('sidebar core snapshot restarts when a new project roadmap appears during c
       }
     }
   };
-  provider._projectLoader.scheduleAll = () => resolveComplete();
+  provider._projectLoader.scheduleExternalSignals = () => {};
+  provider._projectLoader.schedulePortfolioEnrichment = () => resolveComplete();
 
   provider.sendProjects();
   await Promise.race([completed, new Promise((resolve) => setTimeout(resolve, 500))]);
@@ -7154,7 +7176,23 @@ test('local-first loading paints and launches before optional or durable work', 
     extensionSource.indexOf("'project.getAll': async"),
     extensionSource.indexOf("'project.select': async")
   );
+  assert.ok(
+    projectGetAllBody.indexOf('sidebarProvider.sendProjects()') < projectGetAllBody.indexOf('ensureHealthyAutonomousRuntime'),
+    'the sidebar must start local cards before runtime and authorization preparation'
+  );
+  assert.match(projectGetAllBody, /JSON\.stringify\(getProjectState\(context\)\) !== initialSidebarSignature/);
   assert.match(projectGetAllBody, /readCachedConversationSnapshot[\s\S]*?nodeId: soloConversationId[\s\S]*?conversations: recentSnapshot\.solo/);
+  const externalRefreshBody = extensionSource.slice(
+    extensionSource.indexOf("'project.refreshExternalData': async"),
+    extensionSource.indexOf("'project.openFile': async")
+  );
+  assert.match(externalRefreshBody, /sidebarProvider\?\.refreshProjectSignals\(projectPath\)/);
+  assert.doesNotMatch(externalRefreshBody, /loadExternal(?:Issue|PullRequest|Delivery|Security)Summary/);
+  const selectProjectBody = extensionSource.slice(
+    extensionSource.indexOf('async function selectProject'),
+    extensionSource.indexOf('function scheduleProjectRunIndexBackfill')
+  );
+  assert.match(selectProjectBody, /sidebarProvider\?\.prioritizeProjectSignals\(projectPath\)/);
 
   assert.match(extensionSource, /let persistedSettingsCache: SolopreneurSettings \| null = null/);
   assert.match(extensionSource, /persistedSettingsCacheWorkspaceRoot === settingsWorkspaceRoot[\s\S]*?return persistedSettingsCache/);
@@ -7237,7 +7275,8 @@ test('sidebar paints the selected local project before snapshot reservation comp
     }
   );
   provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
-  provider._projectLoader.scheduleAll = () => {};
+  provider._projectLoader.scheduleExternalSignals = () => {};
+  provider._projectLoader.schedulePortfolioEnrichment = () => {};
   provider.sendDailyReview = () => {};
 
   await provider.sendProjects();
@@ -7249,7 +7288,225 @@ test('sidebar paints the selected local project before snapshot reservation comp
   assert.equal(snapshotCache.__getCore()?.portfolio[0]?.path, '/fixture/app');
 });
 
-test('sidebar paints a compatible database snapshot before refreshing a changed project signature', async () => {
+test('sidebar local cards and external signals start before the conversation cache returns', async () => {
+  let resolveConversation;
+  const conversationRead = new Promise(resolve => { resolveConversation = resolve; });
+  const snapshotCache = makeSidebarSnapshotCacheStub({
+    readCachedConversationSnapshot: () => conversationRead
+  });
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
+  );
+  const posted = [];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '/fixture/global' }),
+      updateSettings: async () => {},
+      getProjects: () => ({
+        projects: [{ name: 'App', path: '/fixture/app' }],
+        selectedProjectPath: '/fixture/app'
+      })
+    }
+  );
+  provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
+  let externalStarts = 0;
+  provider._projectLoader.scheduleExternalSignals = () => { externalStarts += 1; };
+  provider._projectLoader.schedulePortfolioEnrichment = () => {};
+  provider.sendDailyReview = () => {};
+
+  const load = provider.sendProjects();
+  await new Promise(resolve => setTimeout(resolve, 15));
+
+  assert.equal(posted.some(message => message.command === 'projectsLoaded' && message.projects.portfolio[0]?.path === '/fixture/app'), true);
+  assert.equal(externalStarts, 1);
+
+  resolveConversation(null);
+  await load;
+});
+
+test('sidebar replays cached Issues and Actions that arrive before the first local card', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
+  );
+  const posted = [];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '/fixture/global' }),
+      updateSettings: async () => {},
+      getProjects: () => ({
+        projects: [{ name: 'App', path: '/fixture/app' }],
+        selectedProjectPath: '/fixture/app'
+      })
+    }
+  );
+  provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
+  provider._projectLoader.scheduleExternalSignals = () => {
+    provider.reconcileProjectMessage({
+      command: 'projectIssuesLoaded',
+      projectPath: '/fixture/app',
+      issues: { available: true, loading: false, stale: true, repo: 'owner/app', open: 3 }
+    });
+    provider.reconcileProjectMessage({
+      command: 'projectDeliveryLoaded',
+      projectPath: '/fixture/app',
+      delivery: { available: true, loading: false, stale: true, repo: 'owner/app', latestWorkflowStatus: 'completed' }
+    });
+  };
+  provider._projectLoader.schedulePortfolioEnrichment = () => {};
+  provider.sendDailyReview = () => {};
+
+  await provider.sendProjects();
+  await new Promise(resolve => setTimeout(resolve, 10));
+
+  const portfolio = posted.filter(message => message.command === 'projectsLoaded').at(-1)?.projects?.portfolio;
+  assert.equal(portfolio?.[0]?.issues?.open, 3);
+  assert.equal(portfolio?.[0]?.delivery?.latestWorkflowStatus, 'completed');
+});
+
+test('sidebar never restores external signals from an old repository snapshot', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
+  snapshotCache.__setCore({
+    version: 3,
+    projectSignature: '/fixture/app',
+    portfolio: [{
+      name: 'App',
+      path: '/fixture/app',
+      issues: { available: true, stale: true, repo: 'owner/old', open: 9 },
+      delivery: { available: true, stale: true, repo: 'owner/old', latestWorkflowStatus: 'failure' }
+    }]
+  });
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
+  );
+  const posted = [];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '/fixture/global' }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects: [{ name: 'App', path: '/fixture/app' }], selectedProjectPath: '/fixture/app' })
+    }
+  );
+  provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
+  provider._projectLoader.scheduleExternalSignals = () => {};
+  provider._projectLoader.schedulePortfolioEnrichment = () => {};
+  provider.sendDailyReview = () => {};
+
+  await provider.sendProjects();
+  await new Promise(resolve => setTimeout(resolve, 10));
+
+  const portfolios = posted.filter(message => message.command === 'projectsLoaded').map(message => message.projects?.portfolio || []);
+  assert.equal(portfolios.some(portfolio => portfolio[0]?.issues?.repo === 'owner/old'), false);
+  assert.equal(portfolios.some(portfolio => portfolio[0]?.delivery?.repo === 'owner/old'), false);
+});
+
+test('sidebar clears visible signals as soon as a changed repository is resolved', () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js');
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '/fixture/global' }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects: [{ name: 'App', path: '/fixture/app' }], selectedProjectPath: '/fixture/app' })
+    }
+  );
+  provider._latestPortfolio = [{
+    name: 'App',
+    path: '/fixture/app',
+    issues: { available: true, stale: false, repo: 'owner/old', open: 9 },
+    pullRequests: { available: false, repo: '' },
+    delivery: { available: true, stale: false, repo: 'owner/old', latestWorkflowStatus: 'failure' },
+    security: { available: false, repo: '' }
+  }];
+
+  const message = provider.reconcileProjectMessage({
+    command: 'projectRepositoryResolved',
+    projectPath: '/fixture/app',
+    repo: 'owner/new'
+  });
+
+  assert.equal(message.command, 'projectsLoaded');
+  assert.equal(message.projects.portfolio[0].issues.available, false);
+  assert.equal(message.projects.portfolio[0].issues.repo, '');
+  assert.equal(message.projects.portfolio[0].delivery.available, false);
+});
+
+test('a late stale cache cannot overwrite a completed live external refresh', () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js');
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '/fixture/global' }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects: [{ name: 'App', path: '/fixture/app' }], selectedProjectPath: '/fixture/app' })
+    }
+  );
+  const live = provider.reconcileProjectMessage({
+    command: 'projectIssuesLoaded',
+    projectPath: '/fixture/app',
+    issues: { available: true, loading: false, stale: false, repo: 'owner/app', open: 2, syncedAt: '2026-10-18T10:00:00.000Z' }
+  });
+  const cached = provider.reconcileProjectMessage({
+    command: 'projectIssuesLoaded',
+    projectPath: '/fixture/app',
+    issues: { available: true, loading: false, stale: true, repo: 'owner/app', open: 5, syncedAt: '2026-10-18T09:00:00.000Z' }
+  });
+
+  assert.equal(live.command, 'projectIssuesLoaded');
+  assert.equal(cached, null);
+  assert.equal(provider._latestProjectSignals.get('/fixture/app').issues.open, 2);
+});
+
+test('sidebar keeps local cards when the database snapshot read fails', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub({
+    readCachedConversationSnapshot: async () => { throw new Error('runtime unavailable'); }
+  });
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
+  );
+  const posted = [];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '/fixture/global' }),
+      updateSettings: async () => {},
+      getProjects: () => ({
+        projects: [{ name: 'App', path: '/fixture/app' }],
+        selectedProjectPath: '/fixture/app'
+      })
+    }
+  );
+  provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
+  provider._projectLoader.scheduleExternalSignals = () => {};
+  provider._projectLoader.schedulePortfolioEnrichment = () => {};
+  provider.sendDailyReview = () => {};
+
+  await provider.sendProjects();
+  await new Promise(resolve => setTimeout(resolve, 10));
+
+  const portfolios = posted.filter(message => message.command === 'projectsLoaded').map(message => message.projects?.portfolio || []);
+  assert.equal(portfolios.some(portfolio => portfolio[0]?.path === '/fixture/app'), true);
+  assert.equal(portfolios.some(portfolio => portfolio.length === 0), false);
+});
+
+test('sidebar keeps current local data ahead of a stale database snapshot', async () => {
   const snapshotCache = makeSidebarSnapshotCacheStub();
   snapshotCache.__setCore({
     version: 3,
@@ -7272,20 +7529,23 @@ test('sidebar paints a compatible database snapshot before refreshing a changed 
     }
   );
   provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
-  provider._projectLoader.scheduleAll = () => {};
+  provider._projectLoader.scheduleExternalSignals = () => {};
+  provider._projectLoader.schedulePortfolioEnrichment = () => {};
   provider.sendDailyReview = () => {};
 
   await provider.sendProjects();
+  await new Promise(resolve => setTimeout(resolve, 10));
 
-  const firstPortfolio = posted.find(message => message.command === 'projectsLoaded')?.projects?.portfolio;
-  assert.equal(firstPortfolio?.[0]?.recommendedNodeTitle, 'Cached next action');
-  assert.equal(snapshotCache.__getCoreReadRoots()[0], '/fixture/.solomap-global');
+  const portfolios = posted.filter(message => message.command === 'projectsLoaded').map(message => message.projects?.portfolio || []);
+  assert.equal(portfolios.some(portfolio => portfolio[0]?.recommendedNodeTitle === 'Cached next action'), false);
+  assert.equal(portfolios.some(portfolio => portfolio[0]?.path === '/fixture/app'), true);
+  assert.equal(snapshotCache.__getCoreReadRoots().length, 0);
 });
 
 test('an older sidebar cache read cannot repaint the previous project after a newer cold-start request', async () => {
   const pendingReads = [];
   const snapshotCache = makeSidebarSnapshotCacheStub({
-    readSidebarCoreSnapshot: () => new Promise(resolve => pendingReads.push(resolve))
+    readCachedConversationSnapshot: () => new Promise(resolve => pendingReads.push(resolve))
   });
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
@@ -7304,17 +7564,19 @@ test('an older sidebar cache read cannot repaint the previous project after a ne
     }
   );
   provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
-  provider._projectLoader.scheduleAll = () => {};
+  provider._projectLoader.scheduleExternalSignals = () => {};
+  provider._projectLoader.schedulePortfolioEnrichment = () => {};
   provider.sendDailyReview = () => {};
 
   const older = provider.sendProjects();
   projectState = { projects: [{ name: 'B', path: '/fixture/b' }], selectedProjectPath: '/fixture/b' };
   const newer = provider.sendProjects();
   assert.equal(pendingReads.length, 2);
-  pendingReads[1]({ version: 3, projectSignature: snapshotCache.buildSidebarProjectSignature(projectState.projects), portfolio: [{ name: 'B', path: '/fixture/b' }] });
+  pendingReads[1](null);
   await newer;
-  pendingReads[0]({ version: 3, projectSignature: snapshotCache.buildSidebarProjectSignature([{ name: 'A', path: '/fixture/a' }]), portfolio: [{ name: 'A', path: '/fixture/a' }] });
+  pendingReads[0](null);
   await older;
+  await new Promise(resolve => setTimeout(resolve, 10));
 
   const loads = posted.filter(message => message.command === 'projectsLoaded');
   assert.equal(loads.at(-1)?.projects?.selectedProjectPath, '/fixture/b');
@@ -7398,7 +7660,8 @@ test('sidebar does not commit a superseded core snapshot when its reservation ar
     }
   );
   provider._view = { webview: { postMessage() { return Promise.resolve(true); } } };
-  provider._projectLoader.scheduleAll = () => {};
+  provider._projectLoader.scheduleExternalSignals = () => {};
+  provider._projectLoader.schedulePortfolioEnrichment = () => {};
   provider.sendDailyReview = () => {};
 
   await provider.sendProjects();
