@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.596 - 2026-10-18
+
+### Changed
+- Fix local-first sidebar signal loading (6f16e03)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.595 - 2026-10-18
 
 ### Fixed
