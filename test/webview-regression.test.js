@@ -1982,7 +1982,7 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
   return context.module.exports;
 }
 
-test('automatic sidebar card refresh reloads every project without changing the selected project', () => {
+test('automatic sidebar card refresh scopes each status event to the project that changed', () => {
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.refreshCards = refreshSidebarProjectCards;
     module.exports.connectRefreshCards = (provider, projectPath) => {
@@ -1995,7 +1995,7 @@ test('automatic sidebar card refresh reloads every project without changing the 
 
   extension.refreshCards();
 
-  assert.deepEqual(calls, [[]], 'automatic refresh must not narrow the update to the selected card');
+  assert.deepEqual(calls, [['/workspace/selected']], 'one project event must not rebuild unrelated cards');
 });
 
 test('intelligence time schedules use the existing settings mutation and await its ledger synchronization', async () => {
@@ -5906,6 +5906,54 @@ test('sidebar completes local core cards before starting automatic external refr
   assert.deepEqual(events.slice(0, 3), ['core:/workspace/app', 'core:/workspace/other', 'external']);
 });
 
+test('sidebar publishes the persisted local core snapshot before background refreshes', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
+  const projects = [
+    { name: 'app', path: '/workspace/app' },
+    { name: 'other', path: '/workspace/other' }
+  ];
+  snapshotCache.__setCore({
+    version: 3,
+    projectSignature: snapshotCache.buildSidebarProjectSignature(projects),
+    portfolio: [
+      { name: 'app', path: '/workspace/app', recommendedNodeTitle: 'Cached app' },
+      { name: 'other', path: '/workspace/other', recommendedNodeTitle: 'Cached other' }
+    ]
+  });
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
+  );
+  const events = [];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '/data' }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects, selectedProjectPath: '/workspace/app' }),
+      getProjectConversationSnapshot: async () => ({ solo: [], project: [], flow: [], revision: [] })
+    }
+  );
+  provider._view = { webview: { postMessage(message) {
+    if (message.command === 'projectsLoaded') events.push(`portfolio:${message.projects.portfolio?.[0]?.recommendedNodeTitle || 'core'}`);
+    return Promise.resolve(true);
+  } } };
+  provider.sendDailyReview = () => {};
+  provider._projectLoader.scheduleAll = () => events.push('external');
+  provider._projectLoader.scheduleExternalSignals = () => events.push('external-early');
+  provider._projectLoader.schedulePortfolioEnrichment = () => {};
+
+  await provider.sendProjects();
+  await new Promise(resolve => setTimeout(resolve, 40));
+
+  assert.deepEqual(snapshotCache.__getCoreReadRoots(), ['/data/.solomap-global']);
+  assert.equal(events[0], 'portfolio:Cached app');
+  assert.equal(events.includes('external-early'), false);
+  assert.ok(events.indexOf('external') > events.indexOf('portfolio:Cached app'));
+});
+
 test('sidebar local portfolio updates preserve newer GitHub signals', async () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
@@ -6144,6 +6192,53 @@ test('sidebar local refresh isolates GitHub signals after the data root changes'
   assert.equal(provider._activeDataRoot, '/data-b/.solomap-global');
   assert.equal(provider._latestPortfolio[0].issues.available, false);
   assert.notEqual(provider._latestPortfolio[0].issues.repo, 'SZLK/root-a');
+});
+
+test('a scoped card refresh cannot cancel the pending all-project external refresh', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
+  );
+  const projects = [
+    { name: 'app', path: '/workspace/app' },
+    { name: 'other', path: '/workspace/other' }
+  ];
+  let provider;
+  let scopedRefreshQueued = false;
+  let resolveExternal;
+  const externalScheduled = new Promise(resolve => { resolveExternal = resolve; });
+  provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '/workspace/.solomap-global' }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects, selectedProjectPath: '/workspace/app' })
+    }
+  );
+  provider._view = { webview: { postMessage(message) {
+    if (!scopedRefreshQueued && message.projects?.updatedProjectPaths?.length) {
+      scopedRefreshQueued = true;
+      provider.sendLocalProjects('/workspace/app');
+    }
+    return Promise.resolve(true);
+  } } };
+  provider.sendDailyReview = () => {};
+  provider._projectLoader.scheduleAll = (scheduledProjects) => {
+    assert.deepEqual(scheduledProjects.map(project => project.path), projects.map(project => project.path));
+    resolveExternal();
+  };
+  provider._projectLoader.schedulePortfolioEnrichment = () => {};
+
+  void provider.sendProjects();
+  await Promise.race([
+    externalScheduled,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('all-project external refresh was cancelled')), 600))
+  ]);
+
+  assert.equal(scopedRefreshQueued, true);
 });
 
 test('sidebar discards a core snapshot read when the data root changes in flight', async () => {
@@ -7233,6 +7328,131 @@ test('full settings hydration delivers saved local settings before optional capa
   assert.ok(optionalEnrichment > localResponse, 'capabilities and secret-state enrichment must start after the L1 response');
 });
 
+test('project registry data is delivered before optional runtime health and autonomy enrichment', () => {
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const start = extensionSource.indexOf("'project.getAll': async");
+  const end = extensionSource.indexOf("'project.select': async", start);
+  const handler = extensionSource.slice(start, end);
+  const initialDelivery = handler.indexOf('sidebarProvider.sendProjects');
+  const registryRead = handler.indexOf('refreshProjectRegistryForContext');
+  const optionalHealth = handler.indexOf('ensureHealthyAutonomousRuntime');
+  const autonomyRead = handler.indexOf('refreshProjectAutonomyAuthorizations');
+  const recoveredRegistryRead = handler.indexOf('refreshProjectRegistryForContext', optionalHealth);
+
+  assert.ok(initialDelivery >= 0 && initialDelivery < registryRead, 'the existing local project state must be delivered first');
+  assert.ok(registryRead >= 0 && registryRead < optionalHealth, 'the database registry read must not wait for runtime health work');
+  assert.ok(optionalHealth >= 0 && optionalHealth < recoveredRegistryRead, 'a cold endpoint failure must retry the registry after runtime readiness');
+  assert.ok(recoveredRegistryRead < autonomyRead, 'project data recovery must precede optional autonomy enrichment');
+  assert.match(handler, /registryWasHydrated = Boolean\(readProjectRegistry\(context\)\)/);
+  assert.match(handler, /deliveredInitialState = initialProjectState\.projects\.length > 0 \|\| registryWasHydrated/);
+  assert.match(handler, /if \(!deliveredInitialState \|\| registrySignature !== deliveredSignature\)/);
+});
+
+test('cold registry recovery never publishes a false empty state and restores the recovered selection snapshot', async () => {
+  const state = { hydrated: false, registryReads: 0, snapshotPaths: [] };
+  const project = { name: 'Recovered project', path: '/workspace/recovered' };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.action = handleSharedWebviewAction;
+    module.exports.connect = state => {
+      sidebarProvider = null;
+      getPersistedSettings = () => ({ globalDataPath: '/fixture/data', language: 'zh', automationTasks: {} });
+      getProjects = () => state.hydrated ? [${JSON.stringify({ name: 'Recovered project', path: '/workspace/recovered' })}] : [];
+      readProjectRegistry = () => state.hydrated ? { schemaVersion: 1, updatedAt: 'now', projects: getProjects(), hiddenProjects: [], selectedProjectPath: '/workspace/recovered' } : null;
+      getProjectState = () => ({ projects: getProjects().map(project => ({ ...project, autonomyEnabled: false, toolNetworkDisabled: false, autonomyEpoch: 0 })), selectedProjectPath: state.hydrated ? '/workspace/recovered' : '' });
+      refreshProjectRegistryForContext = async () => {
+        state.registryReads += 1;
+        if (state.registryReads === 1) throw new Error('runtime endpoint is still starting');
+        state.hydrated = true;
+        return { registry: readProjectRegistry() };
+      };
+      refreshProjectAutonomyAuthorizations = async () => {};
+    };
+  `, {
+    './sidebarSnapshotCache': {
+      ...require('../out/sidebarSnapshotCache.js'),
+      readCachedConversationSnapshot: async (_root, projectPath) => {
+        state.snapshotPaths.push(projectPath);
+        return { solo: [{ id: 9, projectPath }], project: [], flow: [], revision: [] };
+      }
+    },
+    './localDiagnostics': {
+      ...require('../out/localDiagnostics.js'),
+      recordLocalDiagnosticError: () => {}
+    }
+  });
+  extension.connect(state);
+  const messages = [];
+
+  await extension.action(
+    { extensionPath: projectRoot },
+    { command: 'project.getAll' },
+    'roadmap',
+    { postMessage: async message => { messages.push(message); return true; } }
+  );
+  await new Promise(resolve => setTimeout(resolve, 25));
+
+  const projectMessages = messages.filter(message => message.command === 'projectsLoaded');
+  assert.equal(projectMessages.some(message => (message.projects?.projects || []).length === 0), false, 'an unavailable cold transport must not manufacture an empty project registry');
+  assert.equal(JSON.stringify(projectMessages.at(-1)?.projects?.projects?.map(item => item.path)), JSON.stringify([project.path]));
+  assert.deepEqual(state.snapshotPaths, [project.path]);
+  assert.equal(messages.some(message => message.command === 'nodeConversationsLoaded' && message.projectPath === project.path), true);
+});
+
+test('roadmap cache follows the registry-selected project and rejects stale selection or data roots', () => {
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const start = extensionSource.indexOf("'project.getAll': async");
+  const end = extensionSource.indexOf("'project.select': async", start);
+  const handler = extensionSource.slice(start, end);
+
+  assert.match(handler, /latestProjectState = getProjectState\(context\)/);
+  assert.match(handler, /snapshotProjectPath = projectState\.selectedProjectPath/);
+  assert.match(handler, /scheduleRoadmapSnapshot\(latestProjectState\)/);
+  assert.match(handler, /scheduleRoadmapSnapshot\(recoveredProjectState\)/);
+  assert.match(handler, /normalizeGlobalDataPathForExtension\(getPersistedSettings\(context\)\.globalDataPath\) !== registryRoot/);
+  assert.match(handler, /getProjectState\(context\)\.selectedProjectPath !== snapshotProjectPath/);
+  assert.doesNotMatch(handler, /initialProjectState\.selectedProjectPath[\s\S]*?readCachedConversationSnapshot/);
+});
+
+test('roadmap panel, manual, interactive, launch and Flow node mutations refresh their project card', () => {
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const updateNodeHandler = extensionSource.slice(
+    extensionSource.indexOf("case 'updateNode':"),
+    extensionSource.indexOf("case 'completeNode':")
+  );
+  const manualCompletion = extensionSource.slice(
+    extensionSource.indexOf('async function completeNodeManually'),
+    extensionSource.indexOf('function buildContinuationMetadataBlock')
+  );
+  const interactiveRegistration = extensionSource.slice(
+    extensionSource.indexOf('async function registerInteractiveConversationTurn'),
+    extensionSource.indexOf('async function createInteractiveConversationTurn')
+  );
+  const runAgent = extensionSource.slice(
+    extensionSource.indexOf('async function handleRunAgent'),
+    extensionSource.indexOf('function extractUserSupplementFromExecutionOutput')
+  );
+  const settlementEffect = extensionSource.slice(
+    extensionSource.indexOf('async function applyRunSettlementEffect'),
+    extensionSource.indexOf('async function pollRunSettlementEffects')
+  );
+
+  assert.match(updateNodeHandler, /await syncEngine\.updateNode[\s\S]*?refreshSidebarProjectCards\(activeProjectRoot\)/);
+  assert.match(manualCompletion, /await syncEngine\.updateNode[\s\S]*?refreshSidebarProjectCards\(activeProjectRoot\)/);
+  assert.match(interactiveRegistration, /await engine\.updateNode[\s\S]*?refreshSidebarProjectCards\(workspaceRoot\)/);
+  assert.ok((runAgent.match(/refreshSidebarProjectCards\(workspaceRoot\)/g) || []).length >= 3, 'both launch failures and the Running transition must refresh the affected card');
+  assert.match(settlementEffect, /statusSyncEngine\.updateNode[\s\S]*?refreshSidebarProjectCards\(workspaceRoot\)/);
+});
+
+test('ui state patch acknowledgements cannot masquerade as hydration snapshots', () => {
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const start = extensionSource.indexOf("'uiState.patch': async");
+  const end = extensionSource.indexOf("'conversation.runStep': async", start);
+  const handler = extensionSource.slice(start, end);
+
+  assert.match(handler, /command: 'uiStatePatched'/);
+  assert.doesNotMatch(handler, /command: 'uiStateLoaded'/);
+});
+
 test('local-first loading paints and launches before optional or durable work', () => {
   const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
   const sqliteStoreSource = fs.readFileSync(path.join(projectRoot, 'src/db/sqliteStore.ts'), 'utf8');
@@ -7311,7 +7531,7 @@ test('local-first loading paints and launches before optional or durable work', 
     projectGetAllBody.indexOf('sidebarProvider.sendProjects()') < projectGetAllBody.indexOf('ensureHealthyAutonomousRuntime'),
     'the sidebar must start local cards before runtime and authorization preparation'
   );
-  assert.match(projectGetAllBody, /JSON\.stringify\(getProjectState\(context\)\) !== initialSidebarSignature/);
+  assert.match(projectGetAllBody, /registrySignature !== deliveredSignature/);
   assert.match(projectGetAllBody, /readCachedConversationSnapshot[\s\S]*?nodeId: soloConversationId[\s\S]*?conversations: recentSnapshot\.solo/);
   const externalRefreshBody = extensionSource.slice(
     extensionSource.indexOf("'project.refreshExternalData': async"),
@@ -7331,10 +7551,10 @@ test('local-first loading paints and launches before optional or durable work', 
   assert.match(extensionSource, /getAgentExecutionPage\(nodeId, pageSize, requestedPage \* pageSize\)/);
 
   const sidebarWebviewSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
-  assert.match(sidebarWebviewSource, /function isProjectComposerInteractionActive\(\)[\s\S]*?data-project-continue-composer/);
-  assert.match(sidebarWebviewSource, /function isProjectComposerInteractionActive\(\)[\s\S]*?data-roadmap-revision-input/);
+  assert.match(sidebarWebviewSource, /function isProjectComposerInteractionActive\(\)[\s\S]*?\.portfolio-card input[\s\S]*?\.portfolio-card textarea[\s\S]*?role="combobox"/);
   assert.match(sidebarWebviewSource, /isConversationCardInteractionActive\(\) \|\| isProjectComposerInteractionActive\(\)/);
-  assert.match(sidebarWebviewSource, /compositionstart[\s\S]*?data-roadmap-revision-input[\s\S]*?projectComposerComposing = true/);
+  assert.match(sidebarWebviewSource, /compositionstart[\s\S]*?\.portfolio-card input[\s\S]*?projectComposerComposing = true/);
+  assert.match(sidebarWebviewSource, /function renderPortfolioAfterAttachmentUpdate[\s\S]*?renderPortfolioFromAsyncUpdate/);
   assert.match(sidebarWebviewSource, /case 'sidebarActionFailed':[\s\S]*?conversation\.runRoadmapRevision[\s\S]*?renderPortfolioFromAsyncUpdate[\s\S]*?break;[\s\S]*?pendingConversationContinuations\.clear/);
 
   const dispatchBody = extensionSource.slice(
@@ -7459,7 +7679,7 @@ test('sidebar local cards and external signals start before the conversation cac
   await load;
 });
 
-test('sidebar replays cached Issues and Actions that arrive before the first local card', async () => {
+test('sidebar applies cached Issues and Actions after the first local card', async () => {
   const snapshotCache = makeSidebarSnapshotCacheStub();
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
@@ -7481,16 +7701,18 @@ test('sidebar replays cached Issues and Actions that arrive before the first loc
   );
   provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
   provider._projectLoader.scheduleExternalSignals = () => {
-    provider.reconcileProjectMessage({
+    const issues = provider.reconcileProjectMessage({
       command: 'projectIssuesLoaded',
       projectPath: '/fixture/app',
       issues: { available: true, loading: false, stale: true, repo: 'owner/app', open: 3 }
     });
-    provider.reconcileProjectMessage({
+    const delivery = provider.reconcileProjectMessage({
       command: 'projectDeliveryLoaded',
       projectPath: '/fixture/app',
       delivery: { available: true, loading: false, stale: true, repo: 'owner/app', latestWorkflowStatus: 'completed' }
     });
+    if (issues) posted.push(issues);
+    if (delivery) posted.push(delivery);
   };
   provider._projectLoader.schedulePortfolioEnrichment = () => {};
   provider.sendDailyReview = () => {};
@@ -7498,9 +7720,12 @@ test('sidebar replays cached Issues and Actions that arrive before the first loc
   await provider.sendProjects();
   await new Promise(resolve => setTimeout(resolve, 10));
 
-  const portfolio = posted.filter(message => message.command === 'projectsLoaded').at(-1)?.projects?.portfolio;
-  assert.equal(portfolio?.[0]?.issues?.open, 3);
-  assert.equal(portfolio?.[0]?.delivery?.latestWorkflowStatus, 'completed');
+  const localIndex = posted.findIndex(message => message.command === 'projectsLoaded');
+  const issuesIndex = posted.findIndex(message => message.command === 'projectIssuesLoaded');
+  const deliveryIndex = posted.findIndex(message => message.command === 'projectDeliveryLoaded');
+  assert.ok(localIndex >= 0 && issuesIndex > localIndex && deliveryIndex > localIndex);
+  assert.equal(provider._latestPortfolio[0]?.issues?.open, 3);
+  assert.equal(provider._latestPortfolio[0]?.delivery?.latestWorkflowStatus, 'completed');
 });
 
 test('sidebar never restores external signals from an old repository snapshot', async () => {
@@ -7670,7 +7895,7 @@ test('sidebar keeps current local data ahead of a stale database snapshot', asyn
   const portfolios = posted.filter(message => message.command === 'projectsLoaded').map(message => message.projects?.portfolio || []);
   assert.equal(portfolios.some(portfolio => portfolio[0]?.recommendedNodeTitle === 'Cached next action'), false);
   assert.equal(portfolios.some(portfolio => portfolio[0]?.path === '/fixture/app'), true);
-  assert.equal(snapshotCache.__getCoreReadRoots().length, 0);
+  assert.deepEqual(snapshotCache.__getCoreReadRoots(), ['/fixture/.solomap-global']);
 });
 
 test('an older sidebar cache read cannot repaint the previous project after a newer cold-start request', async () => {

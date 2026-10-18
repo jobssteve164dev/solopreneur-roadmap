@@ -35,6 +35,7 @@ import {
 import {
   buildSidebarProjectSignature,
   buildConversationDatabaseSignature,
+  readSidebarCoreSnapshot,
   readCachedConversationSnapshot,
   reserveSidebarPortfolioSnapshot,
   commitSidebarPortfolioSnapshot,
@@ -116,6 +117,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private _localRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private _refreshAllLocalProjects = false;
   private readonly _pendingLocalProjectPaths = new Set<string>();
+  private _externalRefreshPending = false;
   private _agentAccountStatusRequest = 0;
   private _intelligenceListRequest = 0;
   private _intelligenceGetRequest = 0;
@@ -639,6 +641,24 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const localPortfolio = this._latestPortfolio.filter((summary) => availablePaths.has(summary.path));
       if (localPortfolio.length) {
         this.postCorePortfolio(projectState.projects, projectState.selectedProjectPath, localPortfolio, globalDataPath);
+      } else {
+        const cachedCoreRead = readSidebarCoreSnapshot(globalDataPath).catch(error => {
+          console.error('SoloMap sidebar failed to read the cached core snapshot:', error);
+          return null;
+        });
+        let cachedCoreTimeout: ReturnType<typeof setTimeout> | undefined;
+        const cachedCore = await Promise.race([
+          cachedCoreRead,
+          new Promise<null>((resolve) => { cachedCoreTimeout = setTimeout(() => resolve(null), 250); })
+        ]).finally(() => {
+          if (cachedCoreTimeout) clearTimeout(cachedCoreTimeout);
+        });
+        if (!this._view
+          || requestId !== this._projectLoadRequest
+          || !this.isCurrentDataRoot(rootState.root, rootState.generation)) return;
+        if (cachedCore?.projectSignature === buildSidebarProjectSignature(projectState.projects)) {
+          this.postCorePortfolio(projectState.projects, projectState.selectedProjectPath, cachedCore.portfolio, globalDataPath);
+        }
       }
       this.scheduleCorePortfolio(projectState.projects, projectState.selectedProjectPath, globalDataPath, localPortfolio, {
         includeExternal: true
@@ -796,6 +816,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     stalePortfolio: ProjectPortfolioSummary[],
     options: { includeExternal: boolean; projectPaths?: string[] }
   ): void {
+    if (options.includeExternal) this._externalRefreshPending = true;
     const requestId = ++this._corePortfolioRequest;
     const rootState = this.captureDataRoot(globalDataPath, selectedProjectPath);
     const reservation = reserveSidebarPortfolioSnapshot(globalDataPath)
@@ -843,7 +864,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             ? commitSidebarPortfolioSnapshot(globalDataPath, value, sourceProjectSignature, portfolio)
             : false).catch(error => console.error('SoloMap sidebar failed to persist core snapshot:', error));
         }
-        if (options.includeExternal) {
+        if (options.includeExternal || this._externalRefreshPending) {
+          this._externalRefreshPending = false;
           this._projectLoader.scheduleAll(projects, selectedProjectPath, portfolio);
         } else {
           this._projectLoader.schedulePortfolioEnrichment(

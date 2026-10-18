@@ -1,7 +1,0 @@
-- generic [ref=e3]:
-  - generic [ref=e4]:
-    - heading "Welcome to code-server" [level=1] [ref=e5]
-    - generic [ref=e6]: Please log in below. Check the config file for the password.
-  - generic [ref=e9]:
-    - textbox "PASSWORD" [active] [ref=e10]
-    - button "SUBMIT" [ref=e11] [cursor=pointer]

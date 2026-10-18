@@ -29,9 +29,22 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
       await page.setContent(html);
       await page.addStyleTag({ content: require('node:fs').readFileSync(path.join(root, 'node_modules/@vscode/codicons/dist/codicon.css'), 'utf8') });
       const send = message => page.evaluate(message => window.dispatchEvent(new MessageEvent('message', { data: message })), message);
+      const uiStateLoadRequestId = scopeKey => page.evaluate(scope => window.messages
+        .filter(message => message.command === 'uiState.load' && message.scopeKey === scope)
+        .at(-1)?.loadRequestId || '', scopeKey);
+      const loadUiState = async (scopeKey, state) => send({
+        command: 'uiStateLoaded', view: surface, scopeKey,
+        loadRequestId: await uiStateLoadRequestId(scopeKey), state
+      });
+      let projectDataRoot = '/fixture/data-a';
       const projects = selected => {
         const listed = [project, { ...project, path: '/fixture/b', name: 'Project B' }];
-        return send({ command: 'projectsLoaded', projects: { projects: listed, selectedProjectPath: selected, portfolio: listed } });
+        return send({ command: 'projectsLoaded', projects: {
+          projects: listed,
+          selectedProjectPath: selected,
+          portfolio: listed,
+          globalStore: { dataPath: projectDataRoot, portfolio: [], dependencies: [], learningCandidateCount: 0 }
+        } });
       };
       await send({ command: 'settingsLoaded', settings });
       await projects(project.path);
@@ -64,8 +77,8 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
           el.setSelectionRange(3, 6);
           el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
         });
-        await send({ command: 'uiStateLoaded', view: 'sidebar', scopeKey: 'global', state: { portfolioFilter: 'all' } });
-        await send({ command: 'uiStateLoaded', view: 'sidebar', scopeKey: project.path, state: {} });
+        await loadUiState('global', { portfolioFilter: 'all' });
+        await loadUiState(project.path, {});
         await projects(project.path);
         check(await projectComposer.evaluate(el => el === window.originalSidebarProjectComposer), 'sidebar late startup data preserves the active composer DOM');
         check(await projectComposer.inputValue() === '冷启动后继续输入', 'sidebar late startup data preserves composing text');
@@ -75,17 +88,19 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
 
         const activeComposer = page.locator('[data-project-conversation-input][data-project-path="/fixture/a"]');
         await activeComposer.focus();
-        await page.evaluate(() => {
-          window.dispatchEvent(new MessageEvent('message', { data: { command: 'uiStateLoaded', view: 'sidebar', scopeKey: 'global', state: { portfolioFilter: 'all' } } }));
+        const globalLoadRequestId = await uiStateLoadRequestId('global');
+        await page.evaluate((loadRequestId) => {
+          window.dispatchEvent(new MessageEvent('message', { data: { command: 'uiStateLoaded', view: 'sidebar', scopeKey: 'global', loadRequestId, state: { portfolioFilter: 'all' } } }));
           document.querySelector('[data-project-conversation-input][data-project-path="/fixture/a"]').blur();
           document.querySelector('[data-select-project-path="/fixture/b"]').click();
-        });
+        }, globalLoadRequestId);
         await page.waitForTimeout(20);
         check(await page.locator('.portfolio-card.is-selected').getAttribute('data-select-project-path') === '/fixture/b', 'sidebar user project switch wins over queued startup refresh');
         check(await page.locator('[data-project-conversation-input]').getAttribute('data-project-path') === '/fixture/b', 'sidebar queued startup refresh cannot restore the previous project composer');
         check(await page.evaluate(() => window.messages.some(message => message.command === 'project.select' && message.projectPath === '/fixture/b')), 'sidebar project switch reaches the extension');
         await projects('/fixture/b');
 
+        const projectBLoadRequestId = await uiStateLoadRequestId('/fixture/b');
         await page.evaluate(() => { window.messages = []; });
         const projectBComposer = page.locator('[data-project-conversation-input][data-project-path="/fixture/b"]');
         await projectBComposer.evaluate(el => {
@@ -93,7 +108,7 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
           el.focus();
           el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
         });
-        await send({ command: 'uiStateLoaded', view: 'sidebar', scopeKey: '/fixture/b', state: { soloDraft: '数据库里的草稿', conversationMode: 'solo' } });
+        await send({ command: 'uiStateLoaded', view: 'sidebar', scopeKey: '/fixture/b', loadRequestId: projectBLoadRequestId, state: { soloDraft: '数据库里的草稿', conversationMode: 'solo' } });
         await projectBComposer.evaluate(el => el.blur());
         await projectBComposer.evaluate(el => el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })));
         await page.waitForTimeout(20);
@@ -102,14 +117,14 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
         check(await restoredProjectBComposer.inputValue() === '数据库里的草稿', 'sidebar applies the loaded database draft after composition ends');
         check(!await page.evaluate(() => window.messages.some(message => message.command === 'uiState.patch' && message.scopeKey === '/fixture/b' && message.key === 'soloDraft' && message.value === '')), 'sidebar never overwrites a loaded database draft with stale DOM input');
 
-        const localDraftDuringLateState = await restoredProjectBComposer.evaluate(el => {
+        const localDraftDuringLateState = await restoredProjectBComposer.evaluate((el, loadRequestId) => {
           el.value = '用户刚输入';
           el.dispatchEvent(new Event('input', { bubbles: true }));
-          window.dispatchEvent(new MessageEvent('message', { data: { command: 'uiStateLoaded', view: 'sidebar', scopeKey: '/fixture/b', state: { soloDraft: '数据库旧草稿', conversationMode: 'solo' } } }));
+          window.dispatchEvent(new MessageEvent('message', { data: { command: 'uiStateLoaded', view: 'sidebar', scopeKey: '/fixture/b', loadRequestId, state: { soloDraft: '数据库旧草稿', conversationMode: 'solo' } } }));
           const value = el.value;
           el.blur();
           return value;
-        });
+        }, projectBLoadRequestId);
         check(localDraftDuringLateState === '用户刚输入', 'sidebar keeps newer local input while an older database state is queued');
         await page.waitForTimeout(150);
         check(await page.locator('[data-project-conversation-input][data-project-path="/fixture/b"]').inputValue() === '用户刚输入', 'sidebar keeps newer local input after the queued database state is rendered');
@@ -118,13 +133,14 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
         await page.waitForTimeout(150);
         await projects('/fixture/b');
         const roadmapRevisionInput = page.locator('[data-roadmap-revision-input="/fixture/b"]');
-        const roadmapDraftDuringLateState = await roadmapRevisionInput.evaluate(el => {
+        const roadmapDraftDuringLateState = await roadmapRevisionInput.evaluate((el, loadRequestId) => {
           el.value = '用户刚输入的路线修订';
           el.dispatchEvent(new Event('input', { bubbles: true }));
           window.dispatchEvent(new MessageEvent('message', { data: {
             command: 'uiStateLoaded',
             view: 'sidebar',
             scopeKey: '/fixture/b',
+            loadRequestId,
             state: {
               'interaction.expandedRoadmapRevisionProjectPath': '/fixture/b',
               'interaction.roadmapRevisionDrafts.%2Ffixture%2Fb': '数据库旧路线修订'
@@ -133,10 +149,24 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
           const value = el.value;
           el.blur();
           return value;
-        });
+        }, projectBLoadRequestId);
         check(roadmapDraftDuringLateState === '用户刚输入的路线修订', 'sidebar keeps newer roadmap revision input while an older database state is queued');
         await page.waitForTimeout(150);
         check(await page.locator('[data-roadmap-revision-input="/fixture/b"]').inputValue() === '用户刚输入的路线修订', 'sidebar keeps newer roadmap revision input after the queued database state is rendered');
+
+        await page.locator('[data-select-project-path="/fixture/a"]').evaluate(element => element.click());
+        await projects('/fixture/a');
+        check(await page.locator('.portfolio-card.is-selected').getAttribute('data-select-project-path') === '/fixture/a', 'old data root selects project A before the root switch');
+        const oldRootLoadRequestId = await uiStateLoadRequestId('/fixture/b');
+        projectDataRoot = '/fixture/data-b';
+        await projects('/fixture/b');
+        check(await page.locator('.portfolio-card.is-selected').getAttribute('data-select-project-path') === '/fixture/b', 'new data root authoritative project B replaces the old-root active selection');
+        const newRootLoadRequestId = await uiStateLoadRequestId('/fixture/b');
+        check(newRootLoadRequestId && newRootLoadRequestId !== oldRootLoadRequestId, 'sidebar reloads project UI state when the data root changes under the same selected path');
+        await send({ command: 'uiStateLoaded', view: 'sidebar', scopeKey: '/fixture/b', loadRequestId: oldRootLoadRequestId, state: { soloDraft: '旧数据根草稿', conversationMode: 'solo' } });
+        await send({ command: 'uiStateLoaded', view: 'sidebar', scopeKey: '/fixture/b', loadRequestId: newRootLoadRequestId, state: { soloDraft: '新数据根草稿', conversationMode: 'solo' } });
+        await page.waitForTimeout(20);
+        check(await page.locator('[data-project-conversation-input][data-project-path="/fixture/b"]').inputValue() === '新数据根草稿', 'sidebar rejects old-root UI state and applies the new-root hydration');
 
         await page.locator('#setting-language [data-solo-trigger]').click();
         await page.locator('#setting-language [data-solo-option-value="en"]').click();

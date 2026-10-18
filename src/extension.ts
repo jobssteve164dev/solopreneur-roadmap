@@ -1451,7 +1451,8 @@ async function handleSharedWebviewAction(
       const scopeKey = String(request.scopeKey || 'global').slice(0, 1024);
       const key = String(request.key || '').slice(0, 1024);
       if (!key || request.value === undefined) throw new Error('invalid_ui_state_patch');
-      await respond({ command: 'uiStateLoaded', view: surface, scopeKey, state: await patchUiState(context, surface, scopeKey, key, request.value, String(request.requestId || `ui-state:${crypto.randomUUID()}`)) });
+      await patchUiState(context, surface, scopeKey, key, request.value, String(request.requestId || `ui-state:${crypto.randomUUID()}`));
+      await respond({ command: 'uiStatePatched', view: surface, scopeKey, requestId: String(request.requestId || '') });
     },
     'conversation.runStep': async (request) => {
       await revealAgentStartupTerminal(
@@ -2151,35 +2152,71 @@ async function handleSharedWebviewAction(
     'ability.uninstallSkill': async (request) => handleUninstallSolomapSkill(context, request.skillId || ''),
     'ability.uninstallMcp': async (request) => handleUninstallSolomapMcp(context, request.mcpId || ''),
     'project.getAll': async () => {
-      const initialSidebarState = surface === 'sidebar' && sidebarProvider ? getProjectState(context) : null;
-      const initialSidebarSignature = initialSidebarState ? JSON.stringify(initialSidebarState) : '';
-      if (initialSidebarState && sidebarProvider) void sidebarProvider.sendProjects();
-      const registryRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
-      await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: registryRoot });
-      await refreshProjectRegistryForContext(context, registryRoot);
-      await refreshProjectAutonomyAuthorizations(context, registryRoot);
-      if (surface === 'sidebar' && sidebarProvider) {
-        if (JSON.stringify(getProjectState(context)) !== initialSidebarSignature) {
-          await sidebarProvider.sendProjects();
-        }
-      } else {
-        const projectState = getProjectState(context);
-        await postProjectsLoaded(target, projectState);
-        if (surface === 'roadmap' && target && projectState.selectedProjectPath) {
-          const recentSnapshot = await readCachedConversationSnapshot(
-            getPersistedSettings(context).globalDataPath,
-            projectState.selectedProjectPath
-          );
-          if (recentSnapshot) {
-            await postWebviewMessage(target, {
-              command: 'nodeConversationsLoaded',
-              nodeId: soloConversationId,
-              conversations: recentSnapshot.solo,
-              projectPath: projectState.selectedProjectPath
-            });
-          }
-        }
+      const deliverProjects = async () => {
+        if (surface === 'sidebar' && sidebarProvider) await sidebarProvider.sendProjects();
+        else await postProjectsLoaded(target, getProjectState(context));
+      };
+      const initialProjectState = getProjectState(context);
+      const registryWasHydrated = Boolean(readProjectRegistry(context));
+      let deliveredSignature = JSON.stringify(initialProjectState);
+      let deliveredInitialState = initialProjectState.projects.length > 0 || registryWasHydrated;
+      if (deliveredInitialState) {
+        if (surface === 'sidebar' && sidebarProvider) void sidebarProvider.sendProjects();
+        else await postProjectsLoaded(target, initialProjectState);
       }
+      const registryRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+      let latestProjectState = initialProjectState;
+      let roadmapSnapshotScheduled = false;
+      const scheduleRoadmapSnapshot = (projectState: ReturnType<typeof getProjectState>) => {
+        const snapshotProjectPath = projectState.selectedProjectPath;
+        if (roadmapSnapshotScheduled || surface !== 'roadmap' || !target || !snapshotProjectPath) return;
+        roadmapSnapshotScheduled = true;
+        void readCachedConversationSnapshot(
+          registryRoot,
+          snapshotProjectPath
+        ).then(recentSnapshot => {
+          if (!recentSnapshot
+            || normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath) !== registryRoot
+            || getProjectState(context).selectedProjectPath !== snapshotProjectPath) return false;
+          return postWebviewMessage(target, {
+            command: 'nodeConversationsLoaded',
+            nodeId: soloConversationId,
+            conversations: recentSnapshot.solo,
+            projectPath: snapshotProjectPath
+          });
+        }).catch(error => recordLocalDiagnosticError(registryRoot, 'project.conversation.snapshot', error));
+      };
+      try {
+        await refreshProjectRegistryForContext(context, registryRoot);
+        latestProjectState = getProjectState(context);
+        const registrySignature = JSON.stringify(latestProjectState);
+        if (!deliveredInitialState || registrySignature !== deliveredSignature) {
+          deliveredInitialState = true;
+          deliveredSignature = registrySignature;
+          await deliverProjects();
+        }
+      } catch (error) {
+        recordLocalDiagnosticError(registryRoot, 'project.registry.local', error);
+      }
+      scheduleRoadmapSnapshot(latestProjectState);
+      void (async () => {
+        await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: registryRoot });
+        await refreshProjectRegistryForContext(context, registryRoot);
+        const recoveredProjectState = getProjectState(context);
+        const recoveredRegistrySignature = JSON.stringify(recoveredProjectState);
+        if (!deliveredInitialState || recoveredRegistrySignature !== deliveredSignature) {
+          deliveredInitialState = true;
+          deliveredSignature = recoveredRegistrySignature;
+          await deliverProjects();
+        }
+        scheduleRoadmapSnapshot(recoveredProjectState);
+        await refreshProjectAutonomyAuthorizations(context, registryRoot);
+        const enrichedSignature = JSON.stringify(getProjectState(context));
+        if (enrichedSignature !== deliveredSignature) {
+          deliveredSignature = enrichedSignature;
+          await deliverProjects();
+        }
+      })().catch(error => recordLocalDiagnosticError(registryRoot, 'project.autonomy.enrichment', error));
     },
     'project.select': async (request) => selectProject(context, String(request.projectPath || '')),
     'project.add': async () => addProjectFromDialog(context),
@@ -4572,6 +4609,7 @@ async function openRoadmapPanel(
           if (syncEngine) {
             await syncEngine.updateNode(message.nodeId, message.updates);
             sendNodesToWebview();
+            refreshSidebarProjectCards(activeProjectRoot);
           }
           break;
 
@@ -5355,6 +5393,7 @@ async function completeNodeManually(nodeId: string): Promise<void> {
   }
 
   sendNodesToWebview();
+  refreshSidebarProjectCards(activeProjectRoot);
 }
 
 function buildContinuationMetadataBlock(parentConversationId: number, sessionId: string): string {
@@ -7823,7 +7862,10 @@ async function registerInteractiveConversationTurn(workspaceRoot: string, conver
     await engine.readAgentExecutionById(Number(started.executionLogId));
     if (!preserveRoadmapState && started.nodeId !== soloConversationId && started.nodeId !== roadmapRevisionId) {
       const node = engine.getNodes().find(candidate => candidate.id === started.nodeId);
-      if (node && node.status !== 'Completed') await engine.updateNode(String(started.nodeId), { status: 'Running', completedAt: '' });
+      if (node && node.status !== 'Completed') {
+        await engine.updateNode(String(started.nodeId), { status: 'Running', completedAt: '' });
+        refreshSidebarProjectCards(workspaceRoot);
+      }
     }
   }
   const terminalName = String(started.terminalName || (globalDataPath === undefined ? agentTerminalNamesByConversationId.get(Number(started.rootExecutionLogId)) : '') || '');
@@ -8724,6 +8766,7 @@ async function handleRunAgent(
     const candidates = getAgentCliCandidates(requestedAgentCli, selectedAgentCli ? '' : configuredCliPath).join(', ');
     const failureReason = `Agent CLI not found. Tried: ${candidates}.`;
     await projectSyncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
+    refreshSidebarProjectCards(workspaceRoot);
     await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId, runKind: 'step', agentCli: requestedAgentCli || agentCli,
       selectedModel, userMessage: userMessage.trim() || node.agentPrompt || node.title, failureCode: 'cli_not_found', failureReason,
       globalDataPath, launchIntentId: target?.launchIntentId });
@@ -8735,6 +8778,7 @@ async function handleRunAgent(
   const automation = ensureAgentTaskAutomation(agentCli);
   if (!automation.ok) {
     await projectSyncEngine.updateNode(nodeId, { status: 'Failed', completedAt: '' });
+    refreshSidebarProjectCards(workspaceRoot);
     await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId, runKind: 'step', agentCli, selectedModel,
       userMessage: userMessage.trim() || node.agentPrompt || node.title, failureCode: 'agent_automation_not_ready', failureReason: automation.message,
       globalDataPath, launchIntentId: target?.launchIntentId });
@@ -10437,6 +10481,7 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
       if (!['paused', 'abandoned'].includes(flow.status)) {
         if (effect.payload.roadmapStepId && flow.status === 'completed' && flow.source.roadmapStepId === effect.payload.roadmapStepId) {
           await statusSyncEngine.updateNode(String(effect.payload.roadmapStepId), { status: 'Completed', completedAt: String(effect.payload.finishedAt) });
+          refreshSidebarProjectCards(workspaceRoot);
         }
         const role = effect.payload.nextRole as FlowRole | undefined;
         const loop = flow.loops.find(candidate => candidate.index === Number(effect.payload.nextLoopIndex));
