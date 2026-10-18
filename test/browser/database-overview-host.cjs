@@ -97,7 +97,12 @@ async function freePort() {
     await command('Overview Fixture: Restore'); await frame.locator('[data-database-overview-refresh]').click();
     await status.getByText('运行正常', { exact: true }).waitFor();
     assert.equal(await frame.locator('#database-overview-card').getAttribute('aria-busy'), 'false');
-    console.log(JSON.stringify({ realExtensionHost: true, generatedScriptsParse: true, automaticReconnect: true, failedReadRetainsMetrics: true, refreshRecovers: true, base }));
+    const readsBeforeReopen = JSON.parse(fs.readFileSync(receipt)).reads;
+    await frame.locator('#btn-toggle-settings').click();
+    await frame.locator('#btn-toggle-settings').click();
+    await wait(() => JSON.parse(fs.readFileSync(receipt)).reads > readsBeforeReopen);
+    await status.getByText('运行正常', { exact: true }).waitFor();
+    console.log(JSON.stringify({ realExtensionHost: true, generatedScriptsParse: true, automaticReconnect: true, failedReadRetainsMetrics: true, refreshRecovers: true, reopenRefreshes: true, base }));
   } finally {
     if (browser) await browser.close();
     server.kill('SIGTERM');

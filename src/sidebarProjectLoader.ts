@@ -82,7 +82,7 @@ export class SidebarProjectLoader {
       }
       return pending;
     };
-    this.publishSelectedCachedSignals(projects, selectedProjectPath, resolveRepo, globalDataPath, isCurrentRoot);
+    this.publishCachedSignals(projects, selectedProjectPath, resolveRepo, scoped, globalDataPath, isCurrentRoot);
     this.scheduleIssueLoads(projects, selectedProjectPath, resolveRepo, scoped, globalDataPath, isCurrentRoot);
     this.schedulePullRequestLoads(projects, selectedProjectPath, resolveRepo, scoped, globalDataPath, isCurrentRoot);
     this.scheduleDeliveryLoads(projects, selectedProjectPath, resolveRepo, scoped, globalDataPath, isCurrentRoot);
@@ -152,23 +152,29 @@ export class SidebarProjectLoader {
     }
   }
 
-  private publishSelectedCachedSignals(
+  private publishCachedSignals(
     projects: SolopreneurProject[],
     selectedProjectPath: string,
     resolveRepo: (project: SolopreneurProject) => Promise<string | null>,
+    scoped: boolean,
     globalDataPath: string,
     isCurrentRoot: () => boolean
   ): void {
-    const selected = projects.find(project => project.path === selectedProjectPath) || projects[0];
-    if (!selected) return;
-    const requestId = ++this.cachedSignalRequest;
-    void resolveRepo(selected).then(repo => repo === null || !isCurrentRoot() ? null : readCachedExternalSignals(selected.path, globalDataPath, repo)).then((cached) => {
-      if (!cached || !isCurrentRoot() || !this.options.isAvailable() || requestId !== this.cachedSignalRequest) return;
-      if (cached.issues) this.options.postMessage({ command: 'projectIssuesLoaded', projectPath: selected.path, issues: cached.issues });
-      if (cached.pullRequests) this.options.postMessage({ command: 'projectPullRequestsLoaded', projectPath: selected.path, pullRequests: cached.pullRequests });
-      if (cached.delivery) this.options.postMessage({ command: 'projectDeliveryLoaded', projectPath: selected.path, delivery: cached.delivery });
-      if (cached.security) this.options.postMessage({ command: 'projectSecurityLoaded', projectPath: selected.path, security: cached.security });
-    }).catch(error => console.error('SoloMap sidebar failed to read cached external signals:', error));
+    const requestId = scoped ? this.cachedSignalRequest : ++this.cachedSignalRequest;
+    this.scheduleSignalQueue(projects, selectedProjectPath, 0, 0,
+      () => isCurrentRoot() && this.options.isAvailable() && requestId === this.cachedSignalRequest,
+      async project => {
+        const repo = await resolveRepo(project);
+        return repo === null || !isCurrentRoot() ? undefined : readCachedExternalSignals(project.path, globalDataPath, repo);
+      },
+      (project, cached) => {
+        if (!cached) return;
+        if (cached.issues) this.options.postMessage({ command: 'projectIssuesLoaded', projectPath: project.path, issues: cached.issues });
+        if (cached.pullRequests) this.options.postMessage({ command: 'projectPullRequestsLoaded', projectPath: project.path, pullRequests: cached.pullRequests });
+        if (cached.delivery) this.options.postMessage({ command: 'projectDeliveryLoaded', projectPath: project.path, delivery: cached.delivery });
+        if (cached.security) this.options.postMessage({ command: 'projectSecurityLoaded', projectPath: project.path, security: cached.security });
+      },
+      'SoloMap sidebar failed to read cached external signals:');
   }
 
   public schedulePortfolioEnrichment(

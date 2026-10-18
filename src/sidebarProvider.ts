@@ -687,7 +687,6 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     if (this._localRefreshTimer) return;
     this._projectLoadRequest += 1;
     this._corePortfolioRequest += 1;
-    if (!projectPath) this._projectLoader.cancelExternalLoads();
     this._localRefreshTimer = setTimeout(() => void (async () => {
       this._localRefreshTimer = null;
       try {

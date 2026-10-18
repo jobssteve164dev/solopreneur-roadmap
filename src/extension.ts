@@ -5320,7 +5320,7 @@ function postRoadmapLoadFailed(projectPath: string, error: unknown): void {
 
 function refreshSidebarProjectCards(): void {
   if (sidebarProvider) {
-    sidebarProvider.sendLocalProjects(activeProjectRoot || '');
+    sidebarProvider.sendLocalProjects();
   }
 }
 

@@ -154,7 +154,7 @@ function bindDatabaseOverviewSettings(vscode: { postMessage(message: unknown): v
     render(String(message.error || ''));
   });
   const observer = typeof MutationObserver === 'function' ? new MutationObserver(() => {
-    if (visible() && !current) request();
+    if (visible()) request();
   }) : undefined;
   observer?.observe(panel, { attributes: true, attributeFilter: ['style'] });
   window.addEventListener('unload', () => observer?.disconnect());

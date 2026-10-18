@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
 
@@ -117,4 +118,54 @@ test('database overview preserves real query errors instead of masking them as a
     readStorage: async () => { reads++; throw new Error('no such table: contents'); }
   }), /no such table: contents/);
   assert.equal(reads, 1);
+});
+
+test('database overview reloads every time settings opens', () => {
+  const overview = loadOverviewModule();
+  const elements = new Map();
+  const listeners = new Map();
+  const messages = [];
+  let observe;
+  const element = selector => {
+    if (!elements.has(selector)) elements.set(selector, {
+      disabled: false,
+      textContent: '',
+      classList: { toggle() {} },
+      addEventListener: (name, listener) => listeners.set(selector + '-' + name, listener)
+    });
+    return elements.get(selector);
+  };
+  const panel = { style: { display: 'none' } };
+  const card = {
+    querySelector: element,
+    setAttribute() {}
+  };
+  vm.runInNewContext(overview.getDatabaseOverviewScript(), {
+    currentLanguage: 'zh',
+    vscode: { postMessage: message => messages.push(message) },
+    document: { getElementById: id => id === 'settings-panel' ? panel : card },
+    window: { addEventListener: (name, listener) => listeners.set(name, listener) },
+    MutationObserver: class {
+      constructor(callback) { observe = callback; }
+      observe() {}
+      disconnect() {}
+    }
+  });
+
+  listeners.get('message')({ data: { command: 'settingsLoaded', settings: { globalDataPath: '/data' } } });
+  panel.style.display = 'block';
+  observe();
+  const first = messages.at(-1);
+  assert.equal(first.command, 'databaseOverview.get');
+  listeners.get('message')({ data: {
+    command: 'databaseOverviewLoaded',
+    requestId: first.requestId,
+    overview: { databaseBytes: 10, freePageBytes: 0, contents: { records: 1 }, lastMaintenance: null }
+  } });
+
+  panel.style.display = 'none';
+  observe();
+  panel.style.display = 'block';
+  observe();
+  assert.equal(messages.filter(message => message.command === 'databaseOverview.get').length, 2);
 });

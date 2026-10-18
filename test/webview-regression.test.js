@@ -1982,6 +1982,22 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
   return context.module.exports;
 }
 
+test('automatic sidebar card refresh reloads every project without changing the selected project', () => {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.refreshCards = refreshSidebarProjectCards;
+    module.exports.connectRefreshCards = (provider, projectPath) => {
+      sidebarProvider = provider;
+      activeProjectRoot = projectPath;
+    };
+  `);
+  const calls = [];
+  extension.connectRefreshCards({ sendLocalProjects: (...args) => calls.push(args) }, '/workspace/selected');
+
+  extension.refreshCards();
+
+  assert.deepEqual(calls, [[]], 'automatic refresh must not narrow the update to the selected card');
+});
+
 test('intelligence time schedules use the existing settings mutation and await its ledger synchronization', async () => {
   const project = '/workspace/alpha';
   const state = { patch: null, options: null, directScheduleCalls: 0 };
@@ -5648,12 +5664,12 @@ test('closing an issue refreshes only that project issue data', () => {
   assert.doesNotMatch(action[1], /sendProjectsToWebviews\(context\)/);
 });
 
-test('a project-local refresh keeps other projects remote loads in flight', () => {
+test('local card refreshes keep every project remote load in flight', () => {
   const provider = fs.readFileSync(path.join(projectRoot, 'src', 'sidebarProvider.ts'), 'utf8');
   const extension = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
   const localRefresh = provider.match(/public sendLocalProjects\(projectPath = ''\) \{([\s\S]*?)\n  \}/);
   assert.ok(localRefresh);
-  assert.match(localRefresh[1], /if \(!projectPath\) this\._projectLoader\.cancelExternalLoads\(\)/);
+  assert.doesNotMatch(localRefresh[1], /this\._projectLoader\.cancelExternalLoads\(\)/);
   assert.match(extension, /if \(runIndexHealth\?\.backfilledCount && refreshDataRootIsCurrent\(\)\) \{\s*sendLocalProjectsToWebviews\(context, projectPath\)/);
 });
 
@@ -5809,6 +5825,36 @@ test('sidebar local project refresh batches core cards before scheduling enrichm
   assert.equal(JSON.stringify(postedMessages[0].projects.updatedProjectPaths), JSON.stringify(['/workspace/app']));
   assert.equal(postedMessages[0].projects.portfolio[0].pinnedAt, '2026-01-01T00:00:00.000Z');
   assert.equal(postedMessages[0].projects.portfolio[1].recommendedNodeTitle, 'Keep other');
+});
+
+test('automatic all-project local refresh keeps the external signal queue alive', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const projects = [
+    { name: 'app', path: '/workspace/app' },
+    { name: 'other', path: '/workspace/other' }
+  ];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects, selectedProjectPath: '/workspace/app' })
+    }
+  );
+  provider._view = { webview: { postMessage: () => Promise.resolve(true) } };
+  provider._latestPortfolio = projects;
+  provider._activeDataRoot = '/workspace/.solomap-global';
+  let cancellations = 0;
+  let resolveEnrichment;
+  const enrichment = new Promise(resolve => { resolveEnrichment = resolve; });
+  provider._projectLoader.cancelExternalLoads = () => { cancellations += 1; };
+  provider._projectLoader.schedulePortfolioEnrichment = () => resolveEnrichment();
+
+  provider.sendLocalProjects();
+  await Promise.race([enrichment, new Promise(resolve => setTimeout(resolve, 200))]);
+
+  assert.equal(cancellations, 0);
 });
 
 test('sidebar local portfolio updates preserve newer GitHub signals', async () => {

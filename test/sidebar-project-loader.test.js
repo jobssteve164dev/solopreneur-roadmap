@@ -163,6 +163,63 @@ test('selected project cached Issues and Actions render before live GitHub refre
   liveIssues.resolve({ available: true, stale: false, open: 4 });
 });
 
+test('cached external signals render automatically for every project card', async () => {
+  const posted = [];
+  const Loader = loadLoader({ signals: {
+    readCachedExternalSignals: async projectPath => ({
+      issues: { available: true, stale: true, open: projectPath === '/alpha' ? 1 : 2 },
+      pullRequests: null,
+      delivery: null,
+      security: null
+    })
+  } });
+  const loader = createLoader(Loader, posted);
+
+  loader.scheduleExternalSignals([
+    { name: 'Alpha', path: '/alpha' },
+    { name: 'Beta', path: '/beta' }
+  ], '/alpha');
+  await new Promise(resolve => setTimeout(resolve, 30));
+
+  assert.deepEqual(
+    new Set(posted.filter(message => message.command === 'projectIssuesLoaded').map(message => message.projectPath)),
+    new Set(['/alpha', '/beta'])
+  );
+});
+
+test('cached signal replay limits repository work to two projects at a time', async () => {
+  let active = 0;
+  let maximum = 0;
+  const pending = [];
+  const Loader = loadLoader({ signals: {
+    resolveGithubRepoSlug: projectPath => new Promise(resolve => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      pending.push(() => {
+        active -= 1;
+        resolve(`owner/${path.basename(projectPath)}`);
+      });
+    }),
+    readCachedExternalSignals: async () => null
+  } });
+  const loader = createLoader(Loader, []);
+  loader.scheduleExternalSignals([
+    { name: 'Alpha', path: '/alpha' },
+    { name: 'Beta', path: '/beta' },
+    { name: 'Gamma', path: '/gamma' },
+    { name: 'Delta', path: '/delta' }
+  ], '/alpha');
+
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(active, 2);
+  let released = 0;
+  while (released < 4) {
+    while (released < pending.length) pending[released++]();
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(maximum, 2);
+});
+
 test('background Issue refresh keeps at most two projects in flight', async () => {
   const pending = new Map();
   const starts = [];
