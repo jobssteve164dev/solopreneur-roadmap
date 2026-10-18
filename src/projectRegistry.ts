@@ -34,6 +34,12 @@ export interface ProjectRegistryPatch {
   projectPatches?: Array<{ path: string; fields?: Partial<Omit<SolopreneurProject, 'path'>>; remove?: boolean }>;
   hiddenPatches?: Array<{ path: string; hidden: boolean }>;
   selectedProjectPath?: string;
+  autonomyMove?: {
+    sourcePath: string;
+    targetPath: string;
+    enabled?: boolean;
+    toolNetworkDisabled?: boolean;
+  };
 }
 
 export interface ProjectRegistryBootstrap {

@@ -2106,6 +2106,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         <input type="text" class="settings-input" id="project-name-input" placeholder="Project name">
       </div>
       <div class="settings-field">
+        <label class="settings-lbl-title" id="label-project-path">Project Path</label>
+        <input type="text" class="settings-input" id="project-path-input" placeholder="/path/to/project">
+        <span class="settings-help" id="help-project-path">Update this after moving the project folder.</span>
+      </div>
+      <div class="settings-field">
         <label class="settings-lbl-title" id="label-project-description">One-line Description</label>
         <textarea class="settings-input settings-textarea project-description-input" id="project-description-input" placeholder="What is this project for?"></textarea>
       </div>
@@ -2238,6 +2243,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     const projectTypeSelect = document.getElementById('project-type-select');
     const projectPrioritySelect = document.getElementById('project-priority-select');
     const projectNameInput = document.getElementById('project-name-input');
+    const projectPathInput = document.getElementById('project-path-input');
     const projectDescriptionInput = document.getElementById('project-description-input');
     const projectNotesInput = document.getElementById('project-notes-input');
     const projectAutonomyEnabled = document.getElementById('project-autonomy-enabled');
@@ -2264,7 +2270,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     function captureProjectSettingsDraft() {
       if (!renderedSettingsProjectPath) return;
       projectSettingsDrafts.set(renderedSettingsProjectPath, {
-        path: renderedSettingsProjectPath,
+        path: projectPathInput ? projectPathInput.value : renderedSettingsProjectPath,
         name: projectNameInput.value,
         description: projectDescriptionInput.value,
         notes: projectNotesInput.value,
@@ -2279,6 +2285,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       const control = target && target.closest ? (target.closest('[data-solo-select]') || target) : target;
       const id = String(control && control.id || '');
       const key = id === 'project-name-input' ? 'name'
+        : id === 'project-path-input' ? 'projectPath'
         : id === 'project-description-input' ? 'description'
         : id === 'project-notes-input' ? 'notes'
         : id === 'project-type-select' ? 'projectType'
@@ -2323,6 +2330,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     let soloDraft = '';
     let flowDraft = '';
     const uiStateSaveTimers = new Map();
+    const uiStatePendingValues = new Map();
     const uiStateLoadRevisions = new Map();
     const uiStateLoadRequestIds = new Map();
     const uiStateLeafEditRevisions = new Map();
@@ -2337,10 +2345,45 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       uiStateLeafEditRevisions.set(scopeKey + '\\n' + key, uiStateEditRevision);
       const timerKey = scopeKey + ':' + key;
       clearTimeout(uiStateSaveTimers.get(timerKey));
+      uiStatePendingValues.set(timerKey, { scopeKey, key, value });
       uiStateSaveTimers.set(timerKey, setTimeout(() => {
         uiStateSaveTimers.delete(timerKey);
+        uiStatePendingValues.delete(timerKey);
         vscode.postMessage({ command: 'uiState.patch', scopeKey, key, value, requestId: 'roadmap-ui-' + Date.now() + '-' + key });
       }, 120));
+    }
+
+    function flushRoadmapUiState(scopeKey) {
+      for (const [timerKey, pending] of [...uiStatePendingValues.entries()]) {
+        if (pending.scopeKey !== scopeKey) continue;
+        clearTimeout(uiStateSaveTimers.get(timerKey));
+        uiStateSaveTimers.delete(timerKey);
+        uiStatePendingValues.delete(timerKey);
+        vscode.postMessage({ command: 'uiState.patch', scopeKey, key: pending.key, value: pending.value, requestId: 'roadmap-ui-' + Date.now() + '-' + pending.key });
+      }
+    }
+
+    function migrateRoadmapProjectPath(sourcePath, targetPath) {
+      if (!sourcePath || !targetPath || sourcePath === targetPath) return;
+      if (projectInteractionStates.has(sourcePath)) projectInteractionStates.set(targetPath, projectInteractionStates.get(sourcePath));
+      projectInteractionStates.delete(sourcePath);
+      if (activeProjectPath === sourcePath) activeProjectPath = targetPath;
+      for (const [revisionKey, revision] of [...uiStateLeafEditRevisions.entries()]) {
+        const prefix = sourcePath + '\\n';
+        if (!revisionKey.startsWith(prefix)) continue;
+        const targetKey = targetPath + '\\n' + revisionKey.slice(prefix.length);
+        uiStateLeafEditRevisions.set(targetKey, Math.max(uiStateLeafEditRevisions.get(targetKey) || 0, revision));
+        uiStateLeafEditRevisions.delete(revisionKey);
+      }
+      for (const [timerKey, pending] of [...uiStatePendingValues.entries()]) {
+        if (pending.scopeKey !== sourcePath) continue;
+        clearTimeout(uiStateSaveTimers.get(timerKey));
+        uiStateSaveTimers.delete(timerKey);
+        uiStatePendingValues.delete(timerKey);
+        saveRoadmapUiState(pending.key, pending.value, targetPath);
+      }
+      uiStateLoadRevisions.delete(sourcePath);
+      uiStateLoadRequestIds.delete(sourcePath);
     }
 
     function currentRoadmapInteractionState() {
@@ -2421,6 +2464,9 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         removeProject: '移除项目',
         projectName: '项目名称',
         projectNamePlaceholder: '用于在项目列表里识别这个项目',
+        projectPath: '项目路径',
+        projectPathPlaceholder: '项目文件夹的绝对路径',
+        projectPathHelp: '项目文件夹移动后，在这里填写新路径。',
         projectDescription: '一句话简介',
         projectDescriptionPlaceholder: '这个项目服务谁，解决什么问题？',
         projectNotes: '备注',
@@ -2638,6 +2684,9 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         removeProject: 'Remove project',
         projectName: 'Project name',
         projectNamePlaceholder: 'Name used to recognize this project',
+        projectPath: 'Project path',
+        projectPathPlaceholder: 'Absolute path to the project folder',
+        projectPathHelp: 'Enter the new path after moving the project folder.',
         projectDescription: 'One-line description',
         projectDescriptionPlaceholder: 'Who is this for, and what problem does it solve?',
         projectNotes: 'Notes',
@@ -3084,6 +3133,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       setText('text-test-cli', t('testCli'));
       setText('text-save-settings', t('save'));
       setText('label-project-name', t('projectName'));
+      setText('label-project-path', t('projectPath'));
+      setText('help-project-path', t('projectPathHelp'));
       setText('label-project-description', t('projectDescription'));
       setText('label-project-notes', t('projectNotes'));
       setText('label-project-type', t('projectType'));
@@ -3093,6 +3144,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       setText('label-project-tool-network', t('projectToolNetwork'));
       setText('help-project-tool-network', t('projectToolNetworkHelp'));
       if (projectNameInput) projectNameInput.placeholder = t('projectNamePlaceholder');
+      if (projectPathInput) projectPathInput.placeholder = t('projectPathPlaceholder');
       if (projectDescriptionInput) projectDescriptionInput.placeholder = t('projectDescriptionPlaceholder');
       if (projectNotesInput) projectNotesInput.placeholder = t('projectNotesPlaceholder');
       renderProjects(currentProjects.projects, currentProjects.selectedProjectPath);
@@ -3578,13 +3630,29 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           renderFlowPanel();
           break;
         case 'projectMetadataSaved': {
-          const pending = projectSettingsSaves.get(message.projectPath);
+          const pending = projectSettingsSaves.get(message.requestId);
           if (!pending || pending.requestId !== message.requestId) break;
-          projectSettingsSaves.delete(message.projectPath);
-          projectSettingsDirtyKeys.delete(message.projectPath);
-          if (projectSettingsDrafts.get(message.projectPath) === pending.draft) {
+          projectSettingsSaves.delete(message.requestId);
+          const currentDraft = projectSettingsDrafts.get(message.projectPath);
+          if (currentDraft === pending.draft) {
+            projectSettingsDirtyKeys.delete(message.projectPath);
             projectSettingsDrafts.delete(message.projectPath);
+          } else if (currentDraft && message.effectiveProjectPath && message.effectiveProjectPath !== message.projectPath) {
+            const dirty = projectSettingsDirtyKeys.get(message.projectPath);
+            projectSettingsDrafts.delete(message.projectPath);
+            projectSettingsDirtyKeys.delete(message.projectPath);
+            projectSettingsDrafts.set(message.effectiveProjectPath, { ...currentDraft, path: message.effectiveProjectPath });
+            if (dirty) projectSettingsDirtyKeys.set(message.effectiveProjectPath, dirty);
+            if (renderedSettingsProjectPath === message.projectPath) renderedSettingsProjectPath = message.effectiveProjectPath;
           }
+          migrateRoadmapProjectPath(message.projectPath, message.effectiveProjectPath);
+          break;
+        }
+        case 'projectMetadataSaveFailed': {
+          const pending = projectSettingsSaves.get(message.requestId);
+          if (!pending || pending.requestId !== message.requestId) break;
+          projectSettingsSaves.delete(message.requestId);
+          settingsPanel.style.display = 'flex';
           break;
         }
         case 'agentModelsLoaded': {
@@ -3764,18 +3832,24 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     });
 
     // Save configurations
-    btnSaveSettings.addEventListener('click', () => {
+    btnSaveSettings.addEventListener('click', async () => {
       const projectPath = getSoloSelectValue(projectSelect);
       if (!projectPath) return;
       captureProjectSettingsDraft();
       const dirty = projectSettingsDirtyKeys.get(projectPath) || new Set();
       const requestId = 'roadmap-project-save-' + (++settingsRequestSeq);
-      projectSettingsSaves.set(projectPath, { requestId, draft: projectSettingsDrafts.get(projectPath) });
+      projectSettingsSaves.set(requestId, { requestId, projectPath, draft: projectSettingsDrafts.get(projectPath) });
       const payload = {
         command: 'project.updateMetadata',
         requestId,
         projectPath
       };
+      if (dirty.has('projectPath')) {
+        payload.newProjectPath = projectPathInput ? projectPathInput.value.trim() : '';
+        payload.autonomyEnabled = Boolean(projectAutonomyEnabled && projectAutonomyEnabled.checked);
+        payload.toolNetworkDisabled = Boolean(projectToolNetworkDisabled && projectToolNetworkDisabled.checked);
+        payload.autonomyChanged = dirty.has('autonomyEnabled') || dirty.has('toolNetworkDisabled');
+      }
       if (dirty.has('name')) payload.name = projectNameInput ? projectNameInput.value.trim() : '';
       if (dirty.has('description')) payload.description = projectDescriptionInput ? projectDescriptionInput.value.trim() : '';
       if (dirty.has('notes')) payload.notes = projectNotesInput ? projectNotesInput.value.trim() : '';
@@ -3783,6 +3857,10 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (dirty.has('priority')) payload.priority = getSoloSelectValue(projectPrioritySelect);
       if (dirty.has('autonomyEnabled')) payload.autonomyEnabled = Boolean(projectAutonomyEnabled && projectAutonomyEnabled.checked);
       if (dirty.has('toolNetworkDisabled')) payload.toolNetworkDisabled = Boolean(projectToolNetworkDisabled && projectToolNetworkDisabled.checked);
+      if (dirty.has('projectPath')) {
+        flushRoadmapUiState(projectPath);
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
       vscode.postMessage(payload);
       settingsPanel.style.display = 'none';
       if (cliTestBadge) cliTestBadge.style.display = 'none';
@@ -3922,6 +4000,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       project = draft || project;
       if (!project) {
         if (projectNameInput) projectNameInput.value = '';
+        if (projectPathInput) projectPathInput.value = '';
         if (projectDescriptionInput) projectDescriptionInput.value = '';
         if (projectNotesInput) projectNotesInput.value = '';
         if (projectAutonomyEnabled) projectAutonomyEnabled.checked = false;
@@ -3931,6 +4010,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         return;
       }
       if (projectNameInput) projectNameInput.value = project.name || '';
+      if (projectPathInput) projectPathInput.value = project.path || '';
       if (projectDescriptionInput) projectDescriptionInput.value = project.description || '';
       if (projectNotesInput) projectNotesInput.value = project.notes || '';
       if (projectAutonomyEnabled) projectAutonomyEnabled.checked = Boolean(project.autonomyEnabled);

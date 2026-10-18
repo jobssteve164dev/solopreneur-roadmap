@@ -3339,7 +3339,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     elements['automation-trigger-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'stopped'),
     elements['automation-action-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'retry')
   ]) elements['settings-panel'].listeners.click({ target });
-  elements['btn-save-settings'].listeners.click();
+  await elements['btn-save-settings'].listeners.click();
   assert.ok(postedMessages.some((message) => message.command === 'settings.update' && !Object.prototype.hasOwnProperty.call(message, 'cliPath')));
   assert.ok(postedMessages.some((message) =>
     message.command === 'settings.update'
@@ -4428,6 +4428,7 @@ test('full roadmap webview runtime script parses and opens settings panel', asyn
     'btn-close-settings',
     'settings-panel',
     'project-name-input',
+    'project-path-input',
     'project-description-input',
     'project-notes-input',
     'project-type-select',
@@ -4463,15 +4464,16 @@ test('full roadmap webview runtime script parses and opens settings panel', asyn
   elements['btn-toggle-settings'].listeners.click();
   assert.equal(elements['settings-panel'].style.display, 'flex');
   assert.equal(elements['project-name-input'].value, 'App');
+  assert.equal(elements['project-path-input'].value, '/workspace/app');
   assert.equal(elements['project-description-input'].value, 'Old desc');
   assert.equal(elements['project-notes-input'].value, 'Old notes');
   assert.equal(elements['project-autonomy-enabled'].checked, true);
   assert.equal(elements['project-tool-network-disabled'].checked, true);
   elements['project-name-input'].value = 'New App';
+  elements['project-path-input'].value = '/workspace/moved-app';
   elements['project-description-input'].value = 'Project intro';
   elements['project-notes-input'].value = 'Project notes';
   elements['project-autonomy-enabled'].checked = false;
-  elements['project-tool-network-disabled'].checked = false;
   elements['project-type-select'].listeners.click({
     target: elements['project-type-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'content'),
     stopPropagation() {}
@@ -4480,12 +4482,10 @@ test('full roadmap webview runtime script parses and opens settings panel', asyn
     target: elements['project-priority-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'P0'),
     stopPropagation() {}
   });
-  for (const target of [elements['project-name-input'], elements['project-description-input'], elements['project-notes-input']]) {
+  for (const target of [elements['project-name-input'], elements['project-path-input'], elements['project-description-input'], elements['project-notes-input']]) {
     elements['settings-panel'].listeners.input({ target });
   }
-  for (const target of [elements['project-autonomy-enabled'], elements['project-tool-network-disabled']]) {
-    elements['settings-panel'].listeners.change({ target });
-  }
+  elements['settings-panel'].listeners.change({ target: elements['project-autonomy-enabled'] });
   for (const target of [
     elements['project-type-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'content'),
     elements['project-priority-select'].__options.find((option) => option.getAttribute('data-solo-option-value') === 'P0')
@@ -4496,14 +4496,46 @@ test('full roadmap webview runtime script parses and opens settings panel', asyn
   assert.ok(postedMessages.some((message) =>
     message.command === 'project.updateMetadata'
     && message.projectPath === '/workspace/app'
+    && message.newProjectPath === '/workspace/moved-app'
     && message.name === 'New App'
     && message.description === 'Project intro'
     && message.notes === 'Project notes'
     && message.autonomyEnabled === false
-    && message.toolNetworkDisabled === false
+    && message.toolNetworkDisabled === true
+    && message.autonomyChanged === true
     && message.projectType === 'content'
     && message.priority === 'P0'
   ));
+  const pendingSave = postedMessages.find((message) => message.command === 'project.updateMetadata');
+  dispatchMessage({
+    command: 'projectMetadataSaveFailed',
+    projectPath: '/workspace/app',
+    requestId: pendingSave.requestId,
+    error: '项目路径不存在：/workspace/moved-app'
+  });
+  assert.equal(elements['settings-panel'].style.display, 'flex', 'a rejected save must return the user to their draft');
+  assert.equal(elements['project-path-input'].value, '/workspace/moved-app');
+  await elements['btn-save-settings'].listeners.click();
+  const retry = postedMessages.filter((message) => message.command === 'project.updateMetadata').at(-1);
+  elements['btn-toggle-settings'].listeners.click();
+  elements['project-notes-input'].value = 'Edited while saving';
+  elements['settings-panel'].listeners.input({ target: elements['project-notes-input'] });
+  await elements['btn-save-settings'].listeners.click();
+  const overlappingSave = postedMessages.filter((message) => message.command === 'project.updateMetadata').at(-1);
+  assert.notEqual(overlappingSave.requestId, retry.requestId);
+  dispatchMessage({
+    command: 'projectMetadataSaved', projectPath: '/workspace/app', effectiveProjectPath: '/workspace/moved-app', requestId: retry.requestId
+  });
+  dispatchMessage({
+    command: 'projectMetadataSaveFailed', projectPath: '/workspace/app', requestId: overlappingSave.requestId, error: '原项目路径已被其他窗口修改'
+  });
+  dispatchMessage({
+    command: 'projectsLoaded',
+    projects: { selectedProjectPath: '/workspace/moved-app', projects: [{
+      name: 'New App', path: '/workspace/moved-app', type: 'content', priority: 'P0', description: 'Project intro', notes: 'Project notes', autonomyEnabled: false, toolNetworkDisabled: true
+    }] }
+  });
+  assert.equal(elements['project-notes-input'].value, 'Edited while saving', 'edits made during a path save must follow the project to its new path');
   assert.ok(postedMessages.some((message) => message.command === 'settings.get' && message.requestId));
   assert.ok(!postedMessages.some((message) =>
     message.command === 'settings.update'
@@ -13715,6 +13747,759 @@ test('compiled project metadata, hidden state and pin actions preserve partial f
   const restored = await f.ops({ operation: 'read_project_registry', input: {} });
   assert.equal(restored.registry.projects[0].pinnedAt, undefined); assert.deepEqual(restored.registry.hiddenProjects, []);
   assert.equal(fs.existsSync(path.join(f.root, 'projects.json')), false);
+});
+
+test('changing a project path rebinds the registry to an existing destination without overwriting either identity', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 981);
+  const base = path.dirname(f.project), oldPath = path.join(base, 'offline-project'), retiredPath = path.join(base, 'offline-project-retained'), newPath = path.join(base, 'moved-project');
+  fs.mkdirSync(oldPath); fs.mkdirSync(newPath);
+  const oldRegistration = await f.ops({ operation: 'register_project', input: { root: oldPath } });
+  const newRegistration = await f.ops({ operation: 'register_project', input: { root: newPath } });
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Fixture', path: f.project }], legacySelectedProjectPath: f.project } });
+  const before = await f.ops({ operation: 'read_project_registry', input: {} });
+  await f.ops({ operation: 'patch_project_registry', input: {
+    expectedRevision: before.revision,
+    projectPatches: [{ path: oldPath, fields: { name: 'TRANS-MES', type: 'daily_work', priority: 'P99', notes: '保留备注' } }],
+    selectedProjectPath: oldPath,
+    idempotencyKey: 'path-setting-fixture'
+  } });
+  const oldIdentity = fs.readFileSync(path.join(oldPath, '.solopreneur', 'project.json'));
+  const newIdentity = fs.readFileSync(path.join(newPath, '.solopreneur', 'project.json'));
+  fs.renameSync(oldPath, retiredPath);
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const extension = loadProjectManagementHost(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => assert.fail('path changes must not write legacy globalState') } };
+
+  const effectivePath = await extension.update(context, oldPath, { description: '生产消息系统' }, true, newPath);
+
+  assert.equal(effectivePath, newPath);
+  const current = await f.ops({ operation: 'read_project_registry', input: {} });
+  assert.equal(current.registry.selectedProjectPath, newPath);
+  assert.equal(current.registry.projects.some(project => project.path === oldPath), false);
+  assert.deepEqual(current.registry.projects.find(project => project.path === newPath), {
+    name: 'TRANS-MES', path: newPath, type: 'daily_work', priority: 'P99', description: '生产消息系统', notes: '保留备注'
+  });
+  assert.deepEqual(fs.readFileSync(path.join(retiredPath, '.solopreneur', 'project.json')), oldIdentity);
+  assert.deepEqual(fs.readFileSync(path.join(newPath, '.solopreneur', 'project.json')), newIdentity);
+  assert.notEqual(oldRegistration.projectId, newRegistration.projectId);
+  assert.equal(f.store.read(oldRegistration.projectId).objectId, oldRegistration.projectId, 'the old project history owner must remain retained');
+  assert.equal(f.store.read(newRegistration.projectId).objectId, newRegistration.projectId);
+});
+
+test('saving metadata without a path field preserves the exact registered path', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 993);
+  const storedPath = path.join(f.project, '..', path.basename(f.project));
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Fixture', path: storedPath }], legacySelectedProjectPath: storedPath } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const extension = loadProjectManagementHost(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback } };
+
+  const effective = await extension.update(context, storedPath, { name: 'Renamed' });
+
+  assert.equal(effective, storedPath);
+  const current = await f.ops({ operation: 'read_project_registry', input: {} });
+  assert.equal(current.registry.projects[0].path, storedPath);
+  assert.equal(current.registry.projects[0].name, 'Renamed');
+});
+
+test('changing a project path rejects a missing destination without changing the registry', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 982);
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Fixture', path: f.project }], legacySelectedProjectPath: f.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const extension = loadProjectManagementHost(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => assert.fail('path changes must not write legacy globalState') } };
+  const before = await f.ops({ operation: 'read_project_registry', input: {} });
+  const missing = path.join(path.dirname(f.project), 'missing-project');
+
+  await assert.rejects(extension.update(context, f.project, {}, true, missing), /项目路径不存在/);
+
+  assert.deepEqual(await f.ops({ operation: 'read_project_registry', input: {} }), before);
+  assert.equal(fs.existsSync(missing), false);
+});
+
+test('changing an unselected project path does not switch the current project', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 983);
+  const other = path.join(path.dirname(f.project), 'other-project');
+  const moved = path.join(path.dirname(f.project), 'moved-other-project');
+  fs.mkdirSync(other); fs.mkdirSync(moved);
+  await f.ops({ operation: 'register_project', input: { root: moved } });
+  await f.ops({ operation: 'initialize_project_registry', input: {
+    legacyProjects: [{ name: '当前项目', path: f.project }, { name: '其他项目', path: other }],
+    legacySelectedProjectPath: f.project
+  } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const messages = [], errors = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.handle = handleSharedWebviewAction;
+    module.exports.connect = (workspace, root, reportError) => {
+      selectedProjectPathInMemory = workspace; activeProjectRoot = workspace; syncEngine = null; sidebarProvider = null; activePanel = null;
+      getWorkspaceRoot = () => workspace; getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude' });
+      synchronizeTelegramChannel = scheduleProjectRunIndexBackfill = sendNodesToWebview = () => {};
+      ensureSyncEngine = async () => false; vscode.window.showErrorMessage = reportError;
+    };
+  `, { './projectRegistry': registry, './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
+  extension.connect(f.project, f.root, message => errors.push(message));
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => assert.fail('path changes must not write legacy globalState') } };
+
+  assert.equal(await extension.handle(context, {
+    command: 'project.updateMetadata', requestId: 'unselected-move', projectPath: other, newProjectPath: moved
+  }, 'roadmap', { postMessage: async message => { messages.push(message); return true; } }), true);
+
+  const current = await f.ops({ operation: 'read_project_registry', input: {} });
+  assert.equal(current.registry.selectedProjectPath, f.project);
+  assert.equal(messages.find(message => message.command === 'projectMetadataSaved')?.effectiveProjectPath, moved);
+  assert.deepEqual(errors, []);
+});
+
+test('a rejected project path save responds with a visible error and leaves the registry unchanged', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 984);
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Fixture', path: f.project }], legacySelectedProjectPath: f.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const messages = [], errors = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.handle = handleSharedWebviewAction;
+    module.exports.connect = (workspace, root, reportError) => {
+      selectedProjectPathInMemory = workspace; activeProjectRoot = workspace; syncEngine = null; sidebarProvider = null; activePanel = null;
+      getWorkspaceRoot = () => workspace; getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude' });
+      vscode.window.showErrorMessage = reportError;
+    };
+  `, { './projectRegistry': registry, './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
+  extension.connect(f.project, f.root, message => errors.push(message));
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback } };
+  const before = await f.ops({ operation: 'read_project_registry', input: {} });
+  const missing = path.join(path.dirname(f.project), 'missing-handler-project');
+
+  assert.equal(await extension.handle(context, {
+    command: 'project.updateMetadata', requestId: 'missing-path', projectPath: f.project, newProjectPath: missing
+  }, 'roadmap', { postMessage: async message => { messages.push(message); return true; } }), true);
+
+  assert.match(errors[0], /项目路径不存在/);
+  assert.equal(JSON.stringify(messages.find(message => message.command === 'projectMetadataSaveFailed')), JSON.stringify({
+    command: 'projectMetadataSaveFailed', projectPath: f.project, requestId: 'missing-path', error: `项目路径不存在：${missing}`
+  }));
+  assert.deepEqual(await f.ops({ operation: 'read_project_registry', input: {} }), before);
+});
+
+test('a project path retry rebuilds its replacement from the latest registry metadata', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 985);
+  const moved = path.join(path.dirname(f.project), 'moved-project'); fs.mkdirSync(moved);
+  await f.ops({ operation: 'register_project', input: { root: moved } });
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Fixture', path: f.project, notes: '旧备注' }], legacySelectedProjectPath: f.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
+  let raced = false;
+  transport.sendRuntimeDataRequest = async (root, request) => {
+    if (!raced && request.operation === 'patch_project_registry' && request.input.projectPatches?.some(patch => patch.remove)) {
+      raced = true;
+      const latest = await f.ops({ operation: 'read_project_registry', input: {} });
+      await f.ops({ operation: 'patch_project_registry', input: {
+        expectedRevision: latest.revision,
+        projectPatches: [{ path: f.project, fields: { notes: '并发窗口新备注' } }],
+        idempotencyKey: 'concurrent-project-notes'
+      } });
+    }
+    return previous(root, request);
+  };
+  t.after(() => { transport.sendRuntimeDataRequest = previous; });
+  const extension = loadProjectManagementHost(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback } };
+
+  await extension.update(context, f.project, { description: '新描述' }, true, moved);
+
+  const current = await f.ops({ operation: 'read_project_registry', input: {} });
+  const project = current.registry.projects.find(project => project.path === moved);
+  assert.equal(raced, true); assert.equal(project.notes, '并发窗口新备注'); assert.equal(project.description, '新描述');
+});
+
+test('a project path retry rejects a destination claimed by another window', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 986);
+  const moved = path.join(path.dirname(f.project), 'claimed-project'); fs.mkdirSync(moved);
+  await f.ops({ operation: 'register_project', input: { root: moved } });
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Fixture', path: f.project }], legacySelectedProjectPath: f.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
+  let raced = false;
+  transport.sendRuntimeDataRequest = async (root, request) => {
+    if (!raced && request.operation === 'patch_project_registry' && request.input.projectPatches?.some(patch => patch.remove)) {
+      raced = true;
+      const latest = await f.ops({ operation: 'read_project_registry', input: {} });
+      await f.ops({ operation: 'patch_project_registry', input: {
+        expectedRevision: latest.revision,
+        projectPatches: [{ path: moved, fields: { name: '另一个窗口项目' } }],
+        idempotencyKey: 'concurrent-target-claim'
+      } });
+    }
+    return previous(root, request);
+  };
+  t.after(() => { transport.sendRuntimeDataRequest = previous; });
+  const extension = loadProjectManagementHost(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback } };
+
+  await assert.rejects(extension.update(context, f.project, {}, true, moved), /项目路径已被其他项目使用/);
+
+  const current = await f.ops({ operation: 'read_project_registry', input: {} });
+  assert.equal(raced, true);
+  assert.equal(current.registry.projects.find(project => project.path === f.project).name, 'Fixture');
+  assert.equal(current.registry.projects.find(project => project.path === moved).name, '另一个窗口项目');
+});
+
+test('a project path move atomically transfers autonomy and clears the old path after a concurrent grant change', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 987);
+  const moved = path.join(path.dirname(f.project), 'moved-active-project'); fs.mkdirSync(moved);
+  await f.ops({ operation: 'register_project', input: { root: moved } });
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Fixture', path: f.project }], legacySelectedProjectPath: f.project } });
+  const originalGrant = await f.ops({ operation: 'read_project_autonomy_authorization', input: { projectPath: f.project } });
+  await f.ops({ operation: 'patch_project_autonomy_authorization', input: {
+    projectPath: f.project, registeredProjectPaths: [f.project], enabled: true, toolNetworkDisabled: false,
+    expectedEpoch: originalGrant.epoch, idempotencyKey: 'original-path-grant'
+  } });
+  await f.ops({ operation: 'patch_ui_state', input: {
+    view: 'roadmap', scopeKey: f.project,
+    patches: [{ key: 'interaction.soloDraft', expectedRevision: 0, value: '迁移中的草稿' }],
+    idempotencyKey: 'old-path-ui-state'
+  } });
+  await f.ops({ operation: 'patch_ui_state', input: {
+    view: 'roadmap', scopeKey: moved,
+    patches: [{ key: 'interaction.soloDraft', expectedRevision: 0, value: '目标路径残留旧草稿' }],
+    idempotencyKey: 'stale-target-ui-state'
+  } });
+  await f.ops({ operation: 'patch_host_settings', input: {
+    namespace: 'extension', ownerScope: 'global',
+    patches: [{ key: 'automationTasks', expectedRevision: 0, value: {
+      scheduledTasks: [{ id: 'path-task', title: '路径任务', enabled: true, projectPath: f.project, sourceTimePlanProjectPath: f.project }]
+    } }],
+    idempotencyKey: 'old-path-automation-settings'
+  } });
+  await f.ops({ operation: 'sync_schedules', input: {
+    schedules: [{ id: 'path-task', timezone: 'UTC', trigger: { kind: 'daily', timeOfDay: '09:00' }, enabled: true, nextDueAt: Date.now() + 3600000,
+      task: { id: 'path-task', title: '路径任务', enabled: true, projectPath: f.project, sourceTimePlanProjectPath: f.project } }],
+    idempotencyKey: 'old-path-schedule'
+  } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
+  let raced = false;
+  transport.sendRuntimeDataRequest = async (root, request) => {
+    if (!raced && request.operation === 'patch_project_registry' && request.input.autonomyMove) {
+      raced = true;
+      const grant = await f.ops({ operation: 'read_project_autonomy_authorization', input: { projectPath: f.project } });
+      await f.ops({ operation: 'patch_project_autonomy_authorization', input: {
+        projectPath: f.project, registeredProjectPaths: [f.project], enabled: false, toolNetworkDisabled: false,
+        expectedEpoch: grant.epoch, idempotencyKey: 'concurrent-old-path-revoke'
+      } });
+    }
+    return previous(root, request);
+  };
+  t.after(() => { transport.sendRuntimeDataRequest = previous; });
+  const messages = [], warnings = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.handle = handleSharedWebviewAction; module.exports.selected = getSelectedProjectPath; module.exports.state = getProjectState;
+    module.exports.connect = (workspace, root, reportWarning) => {
+      selectedProjectPathInMemory = workspace; activeProjectRoot = workspace; syncEngine = null; sidebarProvider = null; activePanel = null;
+      getWorkspaceRoot = () => workspace; getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude' });
+      synchronizeTelegramChannel = scheduleProjectRunIndexBackfill = sendNodesToWebview = () => {};
+      ensureSyncEngine = async () => false; vscode.window.showWarningMessage = reportWarning;
+    };
+  `, { './projectRegistry': registry, './autonomousRuntimeControl': transport });
+  extension.connect(f.project, f.root, message => warnings.push(message));
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => assert.fail('path changes must not write legacy globalState') } };
+
+  assert.equal(await extension.handle(context, {
+    command: 'project.updateMetadata', requestId: 'partial-autonomy', projectPath: f.project, newProjectPath: moved,
+    autonomyEnabled: true, toolNetworkDisabled: true, autonomyChanged: true
+  }, 'roadmap', { postMessage: async message => { messages.push(message); return true; } }), true);
+
+  const current = await f.ops({ operation: 'read_project_registry', input: {} });
+  const oldGrant = await f.ops({ operation: 'read_project_autonomy_authorization', input: { projectPath: f.project } });
+  const newGrant = await f.ops({ operation: 'read_project_autonomy_authorization', input: { projectPath: moved } });
+  assert.equal(raced, true);
+  assert.equal(current.registry.selectedProjectPath, moved);
+  assert.equal(extension.selected(context), moved);
+  assert.equal(oldGrant.enabled, false); assert.equal(oldGrant.toolNetworkDisabled, false);
+  assert.equal(newGrant.enabled, true); assert.equal(newGrant.toolNetworkDisabled, true);
+  assert.equal(extension.state(context).projects.find(project => project.path === moved).autonomyEnabled, true, 'the visible project state must refresh the moved grant');
+  assert.equal((await f.ops({ operation: 'read_ui_state', input: { view: 'roadmap', scopeKey: moved } })).items.find(item => item.key === 'interaction.soloDraft').value, '迁移中的草稿');
+  const automation = await f.ops({ operation: 'read_host_settings', input: { namespace: 'extension', ownerScope: 'global' } });
+  assert.equal(automation.items.find(item => item.key === 'automationTasks').value.scheduledTasks[0].projectPath, moved);
+  assert.equal(automation.items.find(item => item.key === 'automationTasks').value.scheduledTasks[0].sourceTimePlanProjectPath, moved);
+  const scheduled = await f.ops({ operation: 'read_schedule_ledger', input: {} });
+  assert.equal(scheduled.tasks.find(item => item.task.id === 'path-task').task.projectPath, moved);
+  assert.deepEqual(warnings, []);
+  const saved = messages.find(message => message.command === 'projectMetadataSaved');
+  assert.equal(saved.effectiveProjectPath, moved); assert.equal(saved.warning, undefined);
+});
+
+test('a path move waits for an already posted old-scope UI write and migrates its latest value', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 997);
+  const moved = path.join(path.dirname(f.project), 'moved-project'); fs.mkdirSync(moved);
+  await f.ops({ operation: 'register_project', input: { root: moved } });
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Fixture', path: f.project }], legacySelectedProjectPath: f.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
+  let releaseWrite, markWriteStarted;
+  const writeGate = new Promise(resolve => { releaseWrite = resolve; });
+  const writeStarted = new Promise(resolve => { markWriteStarted = resolve; });
+  let registryMoveStarted = false;
+  transport.sendRuntimeDataRequest = async (root, request) => {
+    if (request.operation === 'patch_ui_state' && request.input.scopeKey === f.project) {
+      markWriteStarted(); await writeGate;
+    }
+    if (request.operation === 'patch_project_registry' && request.input.autonomyMove) registryMoveStarted = true;
+    return previous(root, request);
+  };
+  t.after(() => { transport.sendRuntimeDataRequest = previous; });
+  const messages = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.handle = handleSharedWebviewAction;
+    module.exports.connect = (workspace, root) => {
+      selectedProjectPathInMemory = workspace; activeProjectRoot = workspace; syncEngine = null; sidebarProvider = null; activePanel = null;
+      getWorkspaceRoot = () => workspace; getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude' });
+      synchronizeTelegramChannel = scheduleProjectRunIndexBackfill = sendNodesToWebview = () => {}; ensureSyncEngine = async () => false;
+    };
+  `, { './projectRegistry': registry, './autonomousRuntimeControl': transport });
+  extension.connect(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => {} } };
+  const view = { postMessage: async message => { messages.push(message); return true; } };
+  const pendingUiWrite = extension.handle(context, { command: 'uiState.patch', scopeKey: f.project, key: 'interaction.soloDraft', value: '最后输入的草稿', requestId: 'late-ui' }, 'roadmap', view);
+  await writeStarted;
+  const pendingMove = extension.handle(context, { command: 'project.updateMetadata', projectPath: f.project, newProjectPath: moved, requestId: 'move-after-ui' }, 'roadmap', view);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(registryMoveStarted, false, 'the registry move must wait behind the old-scope UI write');
+  releaseWrite();
+  await Promise.all([pendingUiWrite, pendingMove]);
+
+  assert.equal((await f.ops({ operation: 'read_ui_state', input: { view: 'roadmap', scopeKey: moved } })).items.find(item => item.key === 'interaction.soloDraft').value, '最后输入的草稿');
+  assert.equal((await f.ops({ operation: 'read_ui_state', input: { view: 'roadmap', scopeKey: f.project } })).items.find(item => item.key === 'interaction.soloDraft').value, '最后输入的草稿', 'old-scope readers follow the durable redirect');
+});
+
+test('a cross-surface old-scope UI write arriving after the move is durably redirected', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 998);
+  const moved = path.join(path.dirname(f.project), 'moved-project'); fs.mkdirSync(moved);
+  await f.ops({ operation: 'register_project', input: { root: moved } });
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Fixture', path: f.project }], legacySelectedProjectPath: f.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
+  let releaseWrite, markWriteStarted;
+  const writeGate = new Promise(resolve => { releaseWrite = resolve; });
+  const writeStarted = new Promise(resolve => { markWriteStarted = resolve; });
+  transport.sendRuntimeDataRequest = async (root, request) => {
+    if (request.operation === 'patch_ui_state' && request.input.scopeKey === f.project) { markWriteStarted(); await writeGate; }
+    return previous(root, request);
+  };
+  t.after(() => { transport.sendRuntimeDataRequest = previous; });
+  const messages = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.handle = handleSharedWebviewAction;
+    module.exports.connect = (workspace, root) => {
+      selectedProjectPathInMemory = workspace; activeProjectRoot = workspace; syncEngine = null; sidebarProvider = null; activePanel = null;
+      getWorkspaceRoot = () => workspace; getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude' });
+      synchronizeTelegramChannel = scheduleProjectRunIndexBackfill = sendNodesToWebview = () => {}; ensureSyncEngine = async () => false;
+    };
+  `, { './projectRegistry': registry, './autonomousRuntimeControl': transport });
+  extension.connect(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => {} } };
+  const view = { postMessage: async message => { messages.push(message); return true; } };
+  const pendingSidebarWrite = extension.handle(context, { command: 'uiState.patch', scopeKey: f.project, key: 'interaction.issueDraftTitle', value: '侧边栏最后输入', requestId: 'late-sidebar-ui' }, 'sidebar', view);
+  await writeStarted;
+  await extension.handle(context, { command: 'project.updateMetadata', projectPath: f.project, newProjectPath: moved, requestId: 'move-before-sidebar-write' }, 'roadmap', view);
+  assert.equal(messages.some(message => message.command === 'projectMetadataSaved'), true);
+  releaseWrite(); await pendingSidebarWrite;
+
+  assert.equal((await f.ops({ operation: 'read_ui_state', input: { view: 'sidebar', scopeKey: moved } })).items.find(item => item.key === 'interaction.issueDraftTitle').value, '侧边栏最后输入');
+});
+
+test('project path redirects remain acyclic when a project moves back to an earlier path', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 1002);
+  const original = path.join(path.dirname(f.project), 'roundtrip-original');
+  const moved = path.join(path.dirname(f.project), 'roundtrip-moved');
+  fs.mkdirSync(original);
+  await f.ops({ operation: 'register_project', input: { root: original } });
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Roundtrip', path: original }], legacySelectedProjectPath: original } });
+  fs.renameSync(original, moved);
+  let registry = await f.ops({ operation: 'read_project_registry', input: {} });
+  await f.ops({ operation: 'patch_project_registry', input: {
+    expectedRevision: registry.revision,
+    projectPatches: [{ path: original, remove: true }, { path: moved, fields: { name: 'Roundtrip' } }],
+    selectedProjectPath: moved,
+    autonomyMove: { sourcePath: original, targetPath: moved },
+    idempotencyKey: 'roundtrip-a-to-b'
+  } });
+  fs.renameSync(moved, original);
+  registry = await f.ops({ operation: 'read_project_registry', input: {} });
+  await f.ops({ operation: 'patch_project_registry', input: {
+    expectedRevision: registry.revision,
+    projectPatches: [{ path: moved, remove: true }, { path: original, fields: { name: 'Roundtrip' } }],
+    selectedProjectPath: original,
+    autonomyMove: { sourcePath: moved, targetPath: original },
+    idempotencyKey: 'roundtrip-b-to-a'
+  } });
+
+  await f.ops({ operation: 'patch_ui_state', input: {
+    view: 'sidebar', scopeKey: moved,
+    patches: [{ key: 'interaction.issueDraftTitle', expectedRevision: 0, value: '返回原路径后的迟到输入' }],
+    idempotencyKey: 'roundtrip-late-old-scope-write'
+  } });
+  const atCurrent = await f.ops({ operation: 'read_ui_state', input: { view: 'sidebar', scopeKey: original } });
+  assert.equal(atCurrent.items.find(item => item.key === 'interaction.issueDraftTitle').value, '返回原路径后的迟到输入');
+});
+
+test('a registered project reusing an old path is not redirected into the moved project', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 1005);
+  const moved = path.join(path.dirname(f.project), 'redirect-reuse-target');
+  fs.mkdirSync(moved);
+  await f.ops({ operation: 'register_project', input: { root: moved } });
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Original', path: f.project }], legacySelectedProjectPath: f.project } });
+  let registry = await f.ops({ operation: 'read_project_registry', input: {} });
+  await f.ops({ operation: 'patch_project_registry', input: {
+    expectedRevision: registry.revision,
+    projectPatches: [{ path: f.project, remove: true }, { path: moved, fields: { name: 'Moved' } }],
+    selectedProjectPath: moved,
+    autonomyMove: { sourcePath: f.project, targetPath: moved },
+    idempotencyKey: 'redirect-reuse-move'
+  } });
+  registry = await f.ops({ operation: 'read_project_registry', input: {} });
+  await f.ops({ operation: 'patch_project_registry', input: {
+    expectedRevision: registry.revision,
+    projectPatches: [{ path: f.project, fields: { name: 'Replacement' } }],
+    idempotencyKey: 'redirect-reuse-register-old-path'
+  } });
+  await f.ops({ operation: 'patch_ui_state', input: {
+    view: 'sidebar', scopeKey: f.project,
+    patches: [{ key: 'interaction.issueDraftTitle', expectedRevision: 0, value: '新项目独立输入' }],
+    idempotencyKey: 'redirect-reuse-independent-state'
+  } });
+
+  const replacement = await f.ops({ operation: 'read_ui_state', input: { view: 'sidebar', scopeKey: f.project } });
+  const movedState = await f.ops({ operation: 'read_ui_state', input: { view: 'sidebar', scopeKey: moved } });
+  assert.equal(replacement.items.find(item => item.key === 'interaction.issueDraftTitle').value, '新项目独立输入');
+  assert.equal(movedState.items.some(item => item.key === 'interaction.issueDraftTitle'), false);
+});
+
+test('a restored moved identity is rejected even when its other location is already active', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 1003);
+  const original = path.join(path.dirname(f.project), 'restored-original');
+  const moved = path.join(path.dirname(f.project), 'restored-moved');
+  fs.mkdirSync(original);
+  await f.ops({ operation: 'register_project', input: { root: original } });
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Restored', path: original }], legacySelectedProjectPath: original } });
+  fs.renameSync(original, moved);
+  let registry = await f.ops({ operation: 'read_project_registry', input: {} });
+  await f.ops({ operation: 'patch_project_registry', input: {
+    expectedRevision: registry.revision,
+    projectPatches: [{ path: original, remove: true }, { path: moved, fields: { name: 'Restored' } }],
+    selectedProjectPath: moved,
+    autonomyMove: { sourcePath: original, targetPath: moved },
+    idempotencyKey: 'bind-restored-moved'
+  } });
+  fs.cpSync(moved, original, { recursive: true });
+  const source = path.join(path.dirname(f.project), 'second-registry-source');
+  registry = await f.ops({ operation: 'read_project_registry', input: {} });
+  await f.ops({ operation: 'patch_project_registry', input: {
+    expectedRevision: registry.revision,
+    projectPatches: [{ path: source, fields: { name: 'Second source' } }],
+    idempotencyKey: 'add-second-registry-source'
+  } });
+  registry = await f.ops({ operation: 'read_project_registry', input: {} });
+  await assert.rejects(f.ops({ operation: 'patch_project_registry', input: {
+    expectedRevision: registry.revision,
+    projectPatches: [{ path: source, remove: true }, { path: moved, fields: { name: 'Restored' } }],
+    autonomyMove: { sourcePath: source, targetPath: moved },
+    idempotencyKey: 'reject-restored-clone'
+  } }), /project_clone_identity_conflict/);
+});
+
+test('a path move retargets an existing pending roadmap projection', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 1004);
+  const original = path.join(path.dirname(f.project), 'projection-original');
+  const moved = path.join(path.dirname(f.project), 'projection-moved');
+  fs.mkdirSync(path.join(original, '.solopreneur'), { recursive: true });
+  const csv = path.join(original, '.solopreneur', 'roadmap.csv');
+  fs.writeFileSync(csv, 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n1,初始,,实施,,codex,,Pending,,');
+  await f.ops({ operation: 'register_project', input: { root: original } });
+  const accepted = await f.ops({ operation: 'accept_roadmap_csv', input: { root: original } });
+  const deliver = f.store.deliverRoadmapProjection.bind(f.store);
+  f.store.deliverRoadmapProjection = async () => { throw new Error('hold_projection_for_path_move'); };
+  const pending = await f.ops({ operation: 'update_roadmap', input: {
+    root: original,
+    expectedRevision: accepted.revision,
+    nodes: accepted.nodes.map(node => ({ ...node, title: '迁移后投递' })),
+    idempotencyKey: 'pending-projection-before-path-move'
+  } });
+  assert.equal(pending.pending, true);
+  fs.renameSync(original, moved);
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Projection', path: original }], legacySelectedProjectPath: original } });
+  const registry = await f.ops({ operation: 'read_project_registry', input: {} });
+  await f.ops({ operation: 'patch_project_registry', input: {
+    expectedRevision: registry.revision,
+    projectPatches: [{ path: original, remove: true }, { path: moved, fields: { name: 'Projection' } }],
+    selectedProjectPath: moved,
+    autonomyMove: { sourcePath: original, targetPath: moved },
+    idempotencyKey: 'move-pending-projection'
+  } });
+  f.store.deliverRoadmapProjection = deliver;
+
+  const recovered = await f.store.recoverOutbox();
+  assert.equal(recovered.pending.length, 0);
+  assert.match(fs.readFileSync(path.join(moved, '.solopreneur', 'roadmap.csv'), 'utf8'), /迁移后投递/);
+});
+
+test('a moved but not yet rebound identity is atomically registered with the path change', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 999);
+  const retired = path.join(path.dirname(f.project), 'registered-before-move');
+  const moved = path.join(path.dirname(f.project), 'registered-after-move'); fs.mkdirSync(retired);
+  await f.ops({ operation: 'register_project', input: { root: retired } });
+  fs.renameSync(retired, moved);
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Fixture', path: f.project }], legacySelectedProjectPath: f.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const extension = loadProjectManagementHost(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback } };
+
+  await extension.update(context, f.project, {}, true, moved);
+
+  assert.equal(f.store.registeredProjectRoots().includes(moved), true);
+  assert.equal(f.store.registeredProjectRoots().includes(retired), false);
+  assert.equal((await f.ops({ operation: 'read_project_registry', input: {} })).registry.selectedProjectPath, moved);
+});
+
+test('a live identity clone cannot be accepted as a project path change', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 1000);
+  const original = path.join(path.dirname(f.project), 'identity-original'), clone = path.join(path.dirname(f.project), 'identity-clone');
+  fs.mkdirSync(original); fs.mkdirSync(path.join(clone, '.solopreneur'), { recursive: true });
+  await f.ops({ operation: 'register_project', input: { root: original } });
+  fs.copyFileSync(path.join(original, '.solopreneur', 'project.json'), path.join(clone, '.solopreneur', 'project.json'));
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Fixture', path: f.project }], legacySelectedProjectPath: f.project } });
+  const before = await f.ops({ operation: 'read_project_registry', input: {} });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const extension = loadProjectManagementHost(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback } };
+
+  await assert.rejects(extension.update(context, f.project, {}, true, clone), /project_clone_identity_conflict/);
+
+  assert.deepEqual(await f.ops({ operation: 'read_project_registry', input: {} }), before);
+  assert.equal(f.store.registeredProjectRoots().includes(clone), false);
+});
+
+test('a registry conflict does not register or write identity into a fresh destination', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 994);
+  const destination = path.join(path.dirname(f.project), 'fresh-destination'); fs.mkdirSync(destination);
+  fs.mkdirSync(path.join(destination, '.solopreneur'));
+  const identityBytes = Buffer.from(JSON.stringify({ schemaVersion: 1, projectId: crypto.randomUUID() }) + '\n');
+  fs.writeFileSync(path.join(destination, '.solopreneur', 'project.json'), identityBytes);
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Fixture', path: f.project }], legacySelectedProjectPath: f.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
+  let injected = false;
+  transport.sendRuntimeDataRequest = async (root, request) => {
+    if (!injected && request.operation === 'patch_project_registry' && request.input.autonomyMove) {
+      injected = true;
+      const latest = await f.ops({ operation: 'read_project_registry', input: {} });
+      await f.ops({ operation: 'patch_project_registry', input: {
+        expectedRevision: latest.revision,
+        projectPatches: [{ path: destination, fields: { name: 'Concurrent project' } }],
+        idempotencyKey: 'claim-fresh-destination'
+      } });
+    }
+    return previous(root, request);
+  };
+  t.after(() => { transport.sendRuntimeDataRequest = previous; });
+  const extension = loadProjectManagementHost(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback } };
+
+  await assert.rejects(extension.update(context, f.project, {}, true, destination), /项目路径已被其他项目使用/);
+
+  assert.deepEqual(fs.readFileSync(path.join(destination, '.solopreneur', 'project.json')), identityBytes);
+  assert.equal(f.store.registeredProjectRoots().includes(destination), false);
+});
+
+test('a path save rejects a folder without SoloMap identity before changing the registry', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 995);
+  const destination = path.join(path.dirname(f.project), 'plain-folder'); fs.mkdirSync(destination);
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Fixture', path: f.project }], legacySelectedProjectPath: f.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const extension = loadProjectManagementHost(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback } };
+  const before = await f.ops({ operation: 'read_project_registry', input: {} });
+
+  await assert.rejects(extension.update(context, f.project, {}, true, destination), /不是已移动的 SoloMap 项目/);
+
+  assert.deepEqual(await f.ops({ operation: 'read_project_registry', input: {} }), before);
+  assert.equal(fs.existsSync(path.join(destination, '.solopreneur')), false);
+});
+
+test('a committed path save acknowledges success even when its follow-up cache refresh fails', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 996);
+  const moved = path.join(path.dirname(f.project), 'moved-project'); fs.mkdirSync(moved);
+  await f.ops({ operation: 'register_project', input: { root: moved } });
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Fixture', path: f.project }], legacySelectedProjectPath: f.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
+  let committed = false, failedRefresh = false;
+  transport.sendRuntimeDataRequest = async (root, request) => {
+    const result = await previous(root, request);
+    if (request.operation === 'patch_project_registry' && request.input.autonomyMove) committed = true;
+    if (committed && !failedRefresh && request.operation === 'read_project_autonomy_authorization') {
+      failedRefresh = true;
+      throw new Error('transient refresh failure');
+    }
+    return result;
+  };
+  t.after(() => { transport.sendRuntimeDataRequest = previous; });
+  const messages = [], warnings = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.handle = handleSharedWebviewAction;
+    module.exports.connect = (workspace, root, reportWarning) => {
+      selectedProjectPathInMemory = workspace; activeProjectRoot = workspace; syncEngine = null; sidebarProvider = null; activePanel = null;
+      getWorkspaceRoot = () => workspace; getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude' });
+      synchronizeTelegramChannel = scheduleProjectRunIndexBackfill = sendNodesToWebview = () => {}; ensureSyncEngine = async () => false;
+      vscode.window.showWarningMessage = reportWarning;
+    };
+  `, { './projectRegistry': registry, './autonomousRuntimeControl': transport });
+  extension.connect(f.project, f.root, message => warnings.push(message));
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => {} } };
+
+  await extension.handle(context, { command: 'project.updateMetadata', requestId: 'refresh-failure', projectPath: f.project, newProjectPath: moved }, 'roadmap', {
+    postMessage: async message => { messages.push(message); return true; }
+  });
+
+  assert.equal(messages.find(message => message.command === 'projectMetadataSaved').effectiveProjectPath, moved);
+  assert.equal(messages.some(message => message.command === 'projectMetadataSaveFailed'), false);
+  assert.match(warnings[0], /部分状态将在下次刷新时更新/);
+});
+
+test('a project selection made while a path save is pending remains selected', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 988);
+  const moved = path.join(path.dirname(f.project), 'moved-project');
+  const other = path.join(path.dirname(f.project), 'other-project');
+  fs.mkdirSync(moved); fs.mkdirSync(other);
+  await f.ops({ operation: 'register_project', input: { root: moved } });
+  await f.ops({ operation: 'initialize_project_registry', input: {
+    legacyProjects: [{ name: '原项目', path: f.project }, { name: '用户新选项目', path: other }], legacySelectedProjectPath: f.project
+  } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
+  let raced = false, extension;
+  transport.sendRuntimeDataRequest = async (root, request) => {
+    if (!raced && request.operation === 'patch_project_registry' && request.input.projectPatches?.some(patch => patch.remove)) {
+      raced = true;
+      await extension.select(context, other);
+    }
+    return previous(root, request);
+  };
+  t.after(() => { transport.sendRuntimeDataRequest = previous; });
+  extension = loadCompiledModule('out/extension.js', `
+    module.exports.handle = handleSharedWebviewAction; module.exports.select = selectProject; module.exports.selected = getSelectedProjectPath;
+    module.exports.connect = (workspace, root) => {
+      selectedProjectPathInMemory = workspace; activeProjectRoot = workspace; syncEngine = null; sidebarProvider = null; activePanel = null;
+      getWorkspaceRoot = () => workspace; getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude' });
+      synchronizeTelegramChannel = scheduleProjectRunIndexBackfill = sendNodesToWebview = () => {}; ensureSyncEngine = async () => false;
+    };
+  `, { './projectRegistry': registry, './autonomousRuntimeControl': transport });
+  extension.connect(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => {} } };
+  const messages = [];
+
+  await extension.handle(context, {
+    command: 'project.updateMetadata', requestId: 'selection-race', projectPath: f.project, newProjectPath: moved,
+    autonomyEnabled: false, toolNetworkDisabled: false
+  }, 'roadmap', { postMessage: async message => { messages.push(message); return true; } });
+
+  assert.equal(raced, true);
+  assert.equal(extension.selected(context), other);
+  assert.equal((await f.ops({ operation: 'read_project_registry', input: {} })).registry.selectedProjectPath, other);
+  assert.equal(messages.find(message => message.command === 'projectMetadataSaved').effectiveProjectPath, moved);
+});
+
+test('saving a project that another window already moved reports a conflict', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 989);
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Fixture', path: f.project }], legacySelectedProjectPath: f.project } });
+  const before = await f.ops({ operation: 'read_project_registry', input: {} });
+  await f.ops({ operation: 'patch_project_registry', input: {
+    expectedRevision: before.revision, projectPatches: [{ path: f.project, remove: true }], idempotencyKey: 'concurrent-source-removal'
+  } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const extension = loadProjectManagementHost(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback } };
+
+  await assert.rejects(extension.update(context, f.project, { description: '不能静默丢失' }), /已被其他窗口移动或移除/);
+});
+
+test('an autonomy save failure keeps the project settings request retryable', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 990);
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Fixture', path: f.project }], legacySelectedProjectPath: f.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
+  transport.sendRuntimeDataRequest = async (root, request) => {
+    if (request.operation === 'patch_project_autonomy_authorization') throw new Error('autonomy fixture failure');
+    return previous(root, request);
+  };
+  t.after(() => { transport.sendRuntimeDataRequest = previous; });
+  const messages = [], errors = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.handle = handleSharedWebviewAction;
+    module.exports.connect = (workspace, root, reportError) => {
+      selectedProjectPathInMemory = workspace; activeProjectRoot = workspace; syncEngine = null; sidebarProvider = null; activePanel = null;
+      getWorkspaceRoot = () => workspace; getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude' });
+      sendNodesToWebview = () => {}; vscode.window.showErrorMessage = reportError;
+    };
+  `, { './projectRegistry': registry, './autonomousRuntimeControl': transport });
+  extension.connect(f.project, f.root, message => errors.push(message));
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback } };
+
+  await extension.handle(context, {
+    command: 'project.updateMetadata', requestId: 'autonomy-failure', projectPath: f.project,
+    description: '已保存的简介', autonomyEnabled: true, toolNetworkDisabled: true
+  }, 'roadmap', { postMessage: async message => { messages.push(message); return true; } });
+
+  assert.match(errors[0], /自动工作设置未保存/);
+  assert.equal(messages.some(message => message.command === 'projectMetadataSaved'), false);
+  assert.match(messages.find(message => message.command === 'projectMetadataSaveFailed').error, /autonomy fixture failure/);
+  assert.equal((await f.ops({ operation: 'read_project_registry', input: {} })).registry.projects[0].description, '已保存的简介');
+});
+
+test('moving a project from a broken path alias revokes its original physical authorization', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 991);
+  const base = path.dirname(f.project), physical = path.join(base, 'physical-project'), alias = path.join(base, 'project-alias'), moved = path.join(base, 'moved-project');
+  fs.mkdirSync(physical); fs.symlinkSync(physical, alias);
+  await f.ops({ operation: 'register_project', input: { root: physical } });
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Alias project', path: alias }], legacySelectedProjectPath: alias } });
+  const initialGrant = await f.ops({ operation: 'read_project_autonomy_authorization', input: { projectPath: alias } });
+  await f.ops({ operation: 'patch_project_autonomy_authorization', input: {
+    projectPath: alias, registeredProjectPaths: [alias], enabled: true, toolNetworkDisabled: true,
+    expectedEpoch: initialGrant.epoch, idempotencyKey: 'alias-original-grant'
+  } });
+  fs.renameSync(physical, moved);
+  await f.ops({ operation: 'register_project', input: { root: moved } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const extension = loadProjectManagementHost(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback } };
+
+  await extension.update(context, alias, {}, true, moved);
+
+  const settings = await f.ops({ operation: 'read_host_settings', input: { namespace: 'project_autonomy', ownerScope: 'global' } });
+  const grants = settings.items.map(item => item.value);
+  assert.equal(grants.find(grant => grant.projectPath === physical).enabled, false);
+  assert.equal(grants.find(grant => grant.projectPath === moved).enabled, true);
+  assert.equal(grants.find(grant => grant.projectPath === moved).toolNetworkDisabled, true);
+});
+
+test('changing a live alias to the same physical project keeps its existing autonomy grant', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 992);
+  const base = path.dirname(f.project), physical = path.join(base, 'physical-project'), alias = path.join(base, 'project-alias');
+  fs.mkdirSync(physical); fs.symlinkSync(physical, alias);
+  await f.ops({ operation: 'register_project', input: { root: physical } });
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'Alias project', path: alias }], legacySelectedProjectPath: alias } });
+  const initialGrant = await f.ops({ operation: 'read_project_autonomy_authorization', input: { projectPath: alias } });
+  await f.ops({ operation: 'patch_project_autonomy_authorization', input: {
+    projectPath: alias, registeredProjectPaths: [alias], enabled: true, toolNetworkDisabled: true,
+    expectedEpoch: initialGrant.epoch, idempotencyKey: 'live-alias-original-grant'
+  } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  const extension = loadProjectManagementHost(f.project, f.root);
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback } };
+
+  await extension.update(context, alias, {}, true, physical);
+
+  const grant = await f.ops({ operation: 'read_project_autonomy_authorization', input: { projectPath: physical } });
+  assert.equal(grant.enabled, true); assert.equal(grant.toolNetworkDisabled, true);
 });
 
 async function openProviderCheckpointFixture(t, provider, executionLogId, nodeId = '__solo__', runKind = 'solo') {

@@ -2079,10 +2079,62 @@ export class UnifiedDataStore {
         || patch.remove !== true && patch.fields === undefined) throw new Error('invalid_project_registry_patch');
     }
     for (const patch of input.hiddenPatches || []) if (!patch || !validPath(patch.path) || typeof patch.hidden !== 'boolean') throw new Error('invalid_project_registry_patch');
+    if (input.autonomyMove && (!validPath(input.autonomyMove.sourcePath) || !validPath(input.autonomyMove.targetPath)
+      || input.autonomyMove.sourcePath === input.autonomyMove.targetPath
+      || (input.autonomyMove.enabled === undefined) !== (input.autonomyMove.toolNetworkDisabled === undefined)
+      || input.autonomyMove.enabled !== undefined && typeof input.autonomyMove.enabled !== 'boolean'
+      || input.autonomyMove.toolNetworkDisabled !== undefined && typeof input.autonomyMove.toolNetworkDisabled !== 'boolean'
+      || !input.projectPatches?.some(patch => patch.path === input.autonomyMove!.sourcePath && patch.remove)
+      || !input.projectPatches?.some(patch => patch.path === input.autonomyMove!.targetPath && patch.fields))) throw new Error('invalid_project_registry_patch');
     const { expectedRevision: _expectedRevision, ...intent } = input;
     const receipt = this.recordMutation({ operation: 'patch_project_registry', input: intent }, input.idempotencyKey, 'project_registry', () => {
       const current = this.readProjectRegistry() as ProjectRegistrySnapshot | null;
       if (!current || current.revision !== input.expectedRevision) throw new Error('revision_conflict');
+      let autonomyPatches: Array<{ key: string; expectedRevision: number; value: unknown }> = [];
+      let movedProjectId: string | undefined;
+      if (input.autonomyMove) {
+        const logicalSource = path.resolve(input.autonomyMove.sourcePath);
+        const sourceBindings = this.rows("SELECT DISTINCT project_id FROM project_locations WHERE device_id=? AND root_path=? AND status IN ('active','alias','moved')", [this.deviceId, logicalSource]);
+        if (sourceBindings.length > 1) throw new Error('project_registry_alias_conflict');
+        const sourceRoots = new Set([logicalSource]);
+        if (sourceBindings.length === 1) {
+          for (const location of this.rows("SELECT root_path FROM project_locations WHERE device_id=? AND project_id=? AND status IN ('active','alias','moved')", [this.deviceId, sourceBindings[0].project_id])) {
+            sourceRoots.add(path.resolve(String(location.root_path)));
+          }
+        }
+        const settings = this.readHostSettings({ namespace: 'project_autonomy', ownerScope: 'global' }).items;
+        const targetProjectPath = this.autonomyProjectPath(input.autonomyMove.targetPath, true);
+        movedProjectId = this.bindExistingProjectLocation(targetProjectPath);
+        const targetProjectId = digest(targetProjectPath);
+        const target = settings.find(item => item.key === targetProjectId);
+        const targetValue = target?.value as Record<string, unknown> | undefined;
+        const sources = settings.filter(item => {
+          if (item.key === targetProjectId) return false;
+          const value = item.value as Record<string, unknown> | undefined;
+          return typeof value?.projectPath === 'string' && sourceRoots.has(path.resolve(value.projectPath));
+        }).sort((left, right) => {
+          const leftValue = left.value as Record<string, unknown>, rightValue = right.value as Record<string, unknown>;
+          return String(rightValue.updatedAt || '').localeCompare(String(leftValue.updatedAt || '')) || Number(rightValue.epoch || 0) - Number(leftValue.epoch || 0);
+        });
+        const sourceValue = (sources[0]?.value || (sourceRoots.has(path.resolve(targetProjectPath)) ? targetValue : undefined)) as Record<string, unknown> | undefined;
+        const updatedAt = new Date().toISOString();
+        for (const source of sources) autonomyPatches.push({ key: source.key, expectedRevision: source.revision, value: {
+          ...(source.value as Record<string, unknown>),
+          projectId: source.key,
+          enabled: false,
+          toolNetworkDisabled: false,
+          epoch: Number((source.value as Record<string, unknown>).epoch || 0) + 1,
+          updatedAt
+        } });
+        autonomyPatches.push({ key: targetProjectId, expectedRevision: target?.revision || 0, value: {
+          projectId: targetProjectId,
+          projectPath: targetProjectPath,
+          enabled: input.autonomyMove.enabled ?? Boolean(sourceValue?.enabled),
+          toolNetworkDisabled: input.autonomyMove.toolNetworkDisabled ?? Boolean(sourceValue?.toolNetworkDisabled),
+          epoch: Number(targetValue?.epoch || 0) + 1,
+          updatedAt
+        } });
+      }
       let projects = [...current.registry.projects];
       for (const patch of input.projectPatches || []) {
         if (patch.remove) projects = projects.filter(project => project.path !== patch.path);
@@ -2099,10 +2151,131 @@ export class UnifiedDataStore {
       this.syncKnownRegistryProjects(registry, [...(input.projectPatches || []).map(patch => patch.path), ...(input.hiddenPatches || []).map(patch => patch.path)], current.registry);
       this.db.run('UPDATE settings SET content_id=? WHERE id=?', [this.putContent(canonical(registry), 'application/json'), current.objectId]);
       this.db.run('UPDATE objects SET revision=revision+1,updated_at=? WHERE id=?', [Date.now(), current.objectId]);
+      if (autonomyPatches.length) this.patchHostSettings({
+        namespace: 'project_autonomy',
+        ownerScope: 'global',
+        patches: autonomyPatches,
+        idempotencyKey: `${input.idempotencyKey}:autonomy-move`
+      });
+      if (input.autonomyMove) this.migrateProjectPathState(input.autonomyMove.sourcePath, input.autonomyMove.targetPath, movedProjectId!, input.idempotencyKey);
       return this.current(current.objectId, false);
     });
     const object = this.read(receipt.objectId, receipt.revision);
     return { objectId: object.objectId, revision: object.revision, legacyContextImported: this.projectRegistryContextImported(), registry: JSON.parse(String(object.data.content)) };
+  }
+
+  private bindExistingProjectLocation(root: string): string {
+    const controlBefore = this.assertProjectControlDirectory(root);
+    const identityPath = path.join(root, '.solopreneur', 'project.json');
+    const before = fs.lstatSync(identityPath);
+    if (!before.isFile() || before.isSymbolicLink()) throw new Error('project_identity_invalid');
+    let identity: { schemaVersion?: number; projectId?: string };
+    try { identity = JSON.parse(fs.readFileSync(identityPath, 'utf8')); }
+    catch { throw new Error('project_identity_invalid'); }
+    const after = fs.lstatSync(identityPath), controlAfter = this.assertProjectControlDirectory(root);
+    const projectId = String(identity.projectId || '');
+    if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs
+      || controlBefore.dev !== controlAfter.dev || controlBefore.ino !== controlAfter.ino
+      || identity.schemaVersion !== 1 || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(projectId)) throw new Error('project_identity_invalid');
+    const object = this.rows("SELECT kind FROM objects WHERE id=? AND archived_at IS NULL", [projectId])[0];
+    if (!object || object.kind !== 'project') throw new Error('project_identity_unregistered');
+    const current = this.rows("SELECT project_id FROM project_locations WHERE device_id=? AND root_path=? AND status='active'", [this.deviceId, root])[0];
+    if (current && String(current.project_id) !== projectId) throw new Error('project_identity_conflict');
+    const targetPhysicalRoot = fs.realpathSync(root);
+    const knownLocations = this.rows("SELECT id,root_path,status FROM project_locations WHERE device_id=? AND project_id=? AND status IN ('active','alias','moved') AND root_path<>?", [this.deviceId, projectId, root]);
+    const previous = knownLocations.filter(location => location.status === 'active');
+    for (const location of knownLocations) {
+      const previousRoot = String(location.root_path), previousIdentity = path.join(previousRoot, '.solopreneur', 'project.json');
+      try {
+        const rootStat = fs.lstatSync(previousRoot), identityStat = fs.lstatSync(previousIdentity);
+        if (rootStat.isDirectory() && !rootStat.isSymbolicLink() && identityStat.isFile() && !identityStat.isSymbolicLink()) {
+          const value = JSON.parse(fs.readFileSync(previousIdentity, 'utf8')) as { schemaVersion?: number; projectId?: string };
+          if (value.schemaVersion === 1 && value.projectId === projectId && fs.realpathSync(previousRoot) !== targetPhysicalRoot) throw new Error('project_clone_identity_conflict');
+        }
+      } catch (error) {
+        if ((error as Error).message === 'project_clone_identity_conflict') throw error;
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+      }
+    }
+    if (current) return projectId;
+    for (const location of previous) this.db.run("UPDATE project_locations SET status='moved' WHERE id=? AND status='active'", [location.id]);
+    this.db.run('INSERT INTO project_locations VALUES(?,?,?,?,?)', [crypto.randomUUID(), projectId, this.deviceId, root, 'active']);
+    if (previous.length) this.db.run("UPDATE outbox SET destination_ref=? WHERE channel='roadmap_projection' AND state<>'delivered' AND content_id=(SELECT pending_content_id FROM roadmap_file_states WHERE project_id=?)", [path.join(root, '.solopreneur', 'roadmap.csv'), projectId]);
+    return projectId;
+  }
+
+  private resolveProjectPathRedirect(scopeKey: string): string {
+    let current = scopeKey;
+    const seen = new Set<string>();
+    const registeredPaths = new Set(((this.readProjectRegistry() as ProjectRegistrySnapshot | null)?.registry.projects || []).map(project => project.path));
+    const redirects = new Map(this.readHostSettings({ namespace: 'project_path_redirect', ownerScope: 'global' }).items.map(item => {
+      const value = item.value as { sourcePath?: unknown; targetPath?: unknown; projectId?: unknown } | undefined;
+      return [String(value?.sourcePath || ''), { targetPath: String(value?.targetPath || ''), projectId: String(value?.projectId || '') }] as const;
+    }).filter(([source, value]) => source && value.targetPath));
+    while (redirects.has(current) && !seen.has(current)) {
+      const active = this.rows("SELECT project_id FROM project_locations WHERE device_id=? AND root_path=? AND status='active'", [this.deviceId, current])[0];
+      if (active && registeredPaths.has(current)) break;
+      const redirect = redirects.get(current)!;
+      seen.add(current);
+      current = redirect.targetPath;
+    }
+    return current;
+  }
+
+  private migrateProjectPathState(sourcePath: string, targetPath: string, projectId: string, idempotencyKey: string): void {
+    const replaceTaskPaths = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(replaceTaskPaths);
+      if (!value || typeof value !== 'object') return value;
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, child]) => [key,
+        (key === 'projectPath' || key === 'sourceTimePlanProjectPath') && child === sourcePath ? targetPath : replaceTaskPaths(child)
+      ]));
+    };
+    const migrateValue = (value: unknown): { changed: boolean; value: unknown } => {
+      const migrated = replaceTaskPaths(value);
+      return { changed: canonical(migrated) !== canonical(value), value: migrated };
+    };
+
+    this.db.run(`INSERT INTO ui_state(device_id,view,scope_key,key,value_json,revision)
+      SELECT device_id,view,?,key,value_json,revision FROM ui_state WHERE device_id=? AND scope_key=?
+      ON CONFLICT(device_id,view,scope_key,key) DO UPDATE SET value_json=excluded.value_json,revision=MAX(ui_state.revision,excluded.revision)+1`, [targetPath, this.deviceId, sourcePath]);
+    this.db.run('DELETE FROM ui_state WHERE device_id=? AND scope_key=?', [this.deviceId, sourcePath]);
+    const redirectSettings = this.readHostSettings({ namespace: 'project_path_redirect', ownerScope: 'global' }).items;
+    const redirectKey = digest(sourcePath), targetRedirectKey = digest(targetPath);
+    const redirect = redirectSettings.find(item => item.key === redirectKey);
+    const targetRedirect = redirectSettings.find(item => item.key === targetRedirectKey);
+    this.patchHostSettings({ namespace: 'project_path_redirect', ownerScope: 'global',
+      patches: [
+        { key: redirectKey, expectedRevision: redirect?.revision || 0, value: { sourcePath, targetPath, projectId, updatedAt: new Date().toISOString() } },
+        { key: targetRedirectKey, expectedRevision: targetRedirect?.revision || 0, value: { sourcePath: targetPath, targetPath, projectId, updatedAt: new Date().toISOString() } }
+      ],
+      idempotencyKey: `${idempotencyKey}:ui-state-redirect` });
+
+    const automation = this.readHostSettings({ namespace: 'extension', ownerScope: 'global' }).items.find(item => item.key === 'automationTasks');
+    if (automation?.value !== undefined) {
+      const migrated = migrateValue(automation.value);
+      if (migrated.changed) this.patchHostSettings({
+        namespace: 'extension', ownerScope: 'global',
+        patches: [{ key: automation.key, expectedRevision: automation.revision, value: migrated.value }],
+        idempotencyKey: `${idempotencyKey}:automation-path-move`
+      });
+    }
+
+    for (const row of this.rows('SELECT schedule_id FROM schedule_bindings ORDER BY external_id')) {
+      const schedule = this.read(String(row.schedule_id));
+      const rawTask = String(schedule.data.task_template_content || '{}');
+      let task: unknown;
+      try { task = JSON.parse(rawTask); } catch { continue; }
+      const migrated = migrateValue(task);
+      if (!migrated.changed) continue;
+      this.write({ kind: 'schedule', action: 'patch', scope: null, objectId: schedule.objectId, expectedRevision: schedule.revision,
+        idempotencyKey: `${idempotencyKey}:schedule-path-move:${schedule.objectId}`, data: { task_template_content: canonical(migrated.value) } });
+    }
+    for (const row of this.rows("SELECT id,payload_content_id FROM scheduled_occurrences WHERE status IN ('pending','failed')")) {
+      let task: unknown;
+      try { task = JSON.parse(this.content(String(row.payload_content_id)).toString('utf8')); } catch { continue; }
+      const migrated = migrateValue(task);
+      if (migrated.changed) this.db.run('UPDATE scheduled_occurrences SET payload_content_id=?,updated_at=? WHERE id=?', [this.putContent(canonical(migrated.value), 'application/json'), Date.now(), row.id]);
+    }
   }
 
   public readHostSettings(input: { namespace: string; ownerScope: string; secretStateRef?: string }): { items: Array<{ key: string; objectId: string; revision: number; value?: unknown; secretRef?: string }>; secretState?: { fingerprint: string; revision: number } } {
@@ -2432,7 +2605,8 @@ export class UnifiedDataStore {
 
   public readUiState(input: { view: string; scopeKey: string }): { items: Array<{ key: string; revision: number; value: unknown }> } {
     if (!input.view || !input.scopeKey) throw new Error('invalid_ui_state_scope');
-    return { items: this.rows('SELECT key,value_json,revision FROM ui_state WHERE device_id=? AND view=? AND scope_key=? ORDER BY key', [this.deviceId, input.view, input.scopeKey])
+    const scopeKey = this.resolveProjectPathRedirect(input.scopeKey);
+    return { items: this.rows('SELECT key,value_json,revision FROM ui_state WHERE device_id=? AND view=? AND scope_key=? ORDER BY key', [this.deviceId, input.view, scopeKey])
       .map(row => ({ key: String(row.key), revision: Number(row.revision), value: JSON.parse(String(row.value_json)) })) };
   }
 
@@ -2441,13 +2615,14 @@ export class UnifiedDataStore {
     const keys = new Set<string>();
     for (const patch of input.patches) if (!patch || !patch.key || keys.has(patch.key) || !Number.isInteger(patch.expectedRevision) || patch.expectedRevision < 0 || patch.value === undefined) throw new Error('invalid_ui_state_patch'); else keys.add(patch.key);
     this.recordMutation(input, input.idempotencyKey, 'ui_state', () => {
+      const scopeKey = this.resolveProjectPathRedirect(input.scopeKey);
       for (const patch of input.patches) {
-        const row = this.rows('SELECT revision FROM ui_state WHERE device_id=? AND view=? AND scope_key=? AND key=?', [this.deviceId, input.view, input.scopeKey, patch.key])[0];
+        const row = this.rows('SELECT revision FROM ui_state WHERE device_id=? AND view=? AND scope_key=? AND key=?', [this.deviceId, input.view, scopeKey, patch.key])[0];
         if (Number(row?.revision || 0) !== patch.expectedRevision) throw new Error('revision_conflict');
-        if (row) this.db.run('UPDATE ui_state SET value_json=?,revision=revision+1 WHERE device_id=? AND view=? AND scope_key=? AND key=?', [canonical(patch.value), this.deviceId, input.view, input.scopeKey, patch.key]);
-        else this.db.run('INSERT INTO ui_state VALUES(?,?,?,?,?,1)', [this.deviceId, input.view, input.scopeKey, patch.key, canonical(patch.value)]);
+        if (row) this.db.run('UPDATE ui_state SET value_json=?,revision=revision+1 WHERE device_id=? AND view=? AND scope_key=? AND key=?', [canonical(patch.value), this.deviceId, input.view, scopeKey, patch.key]);
+        else this.db.run('INSERT INTO ui_state VALUES(?,?,?,?,?,1)', [this.deviceId, input.view, scopeKey, patch.key, canonical(patch.value)]);
       }
-      return this.createNotificationEvidence('ui_state', { view: input.view, scopeKey: input.scopeKey, keys: [...keys] });
+      return this.createNotificationEvidence('ui_state', { view: input.view, scopeKey, keys: [...keys] });
     });
     return this.readUiState(input);
   }

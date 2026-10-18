@@ -323,6 +323,7 @@ let persistedSettingsWriteQueue: Promise<void> = Promise.resolve();
 const databaseSettingsByRoot = new Map<string, Partial<SolopreneurSettings>>();
 const databaseSettingRevisionsByRoot = new Map<string, Map<string, number>>();
 const uiStateRevisionsByRoot = new Map<string, Map<string, number>>();
+const uiStateWrites = new Map<string, Promise<Record<string, unknown>>>();
 const projectAutonomyByRoot = new Map<string, Map<string, { enabled: boolean; toolNetworkDisabled: boolean; epoch: number }>>();
 let persistedGlobalDataPathWrite: { root: string; observedDifferentRoot: boolean } | undefined;
 const nativeConfigurationProjectionValues = new Map<string, string>();
@@ -1451,7 +1452,14 @@ async function handleSharedWebviewAction(
       const scopeKey = String(request.scopeKey || 'global').slice(0, 1024);
       const key = String(request.key || '').slice(0, 1024);
       if (!key || request.value === undefined) throw new Error('invalid_ui_state_patch');
-      await patchUiState(context, surface, scopeKey, key, request.value, String(request.requestId || `ui-state:${crypto.randomUUID()}`));
+      const dataRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+      const writeKey = `${dataRoot}\n${surface}\n${scopeKey}`;
+      const previous = uiStateWrites.get(writeKey);
+      const write = (previous ? previous.catch(() => ({})) : Promise.resolve({})).then(() =>
+        patchUiState(context, surface, scopeKey, key, request.value, String(request.requestId || `ui-state:${crypto.randomUUID()}`)));
+      uiStateWrites.set(writeKey, write);
+      try { await write; }
+      finally { if (uiStateWrites.get(writeKey) === write) uiStateWrites.delete(writeKey); }
       await respond({ command: 'uiStatePatched', view: surface, scopeKey, requestId: String(request.requestId || '') });
     },
     'conversation.runStep': async (request) => {
@@ -2223,28 +2231,75 @@ async function handleSharedWebviewAction(
     'project.remove': async (request) => removeProject(context, String(request.projectPath || '')),
     'project.updateMetadata': async (request) => {
       const projectPath = String(request.projectPath || '');
-      const updatesAutonomy = request.autonomyEnabled !== undefined || request.toolNetworkDisabled !== undefined;
-      await updateProjectMetadata(context, projectPath, {
-        ...(Object.prototype.hasOwnProperty.call(request, 'name') ? { name: request.name } : {}),
-        ...(Object.prototype.hasOwnProperty.call(request, 'projectType') ? { type: request.projectType } : {}),
-        ...(Object.prototype.hasOwnProperty.call(request, 'priority') ? { priority: request.priority } : {}),
-        ...(Object.prototype.hasOwnProperty.call(request, 'description') ? { description: request.description } : {}),
-        ...(Object.prototype.hasOwnProperty.call(request, 'notes') ? { notes: request.notes } : {})
-      }, !updatesAutonomy);
-      if (updatesAutonomy) {
-        const projects = getProjects(context);
-        const root = normalizeGlobalDataPathForRegistry(getPersistedSettings(context).globalDataPath, getWorkspaceRoot());
-        const current = await sendRuntimeDataRequest<{ enabled: boolean; toolNetworkDisabled: boolean; epoch: number }>(root, { operation: 'read_project_autonomy_authorization', input: { projectPath } });
-        await sendRuntimeDataRequest(root, { operation: 'patch_project_autonomy_authorization', input: {
-          projectPath, registeredProjectPaths: projects.map(project => project.path),
-          enabled: request.autonomyEnabled === undefined ? current.enabled : Boolean(request.autonomyEnabled),
-          toolNetworkDisabled: request.toolNetworkDisabled === undefined ? current.toolNetworkDisabled : Boolean(request.toolNetworkDisabled),
-          expectedEpoch: current.epoch, idempotencyKey: `project-autonomy:${crypto.randomUUID()}`
-        } });
-        await refreshProjectAutonomyAuthorizations(context, root, projects);
-        sendLocalProjectsToWebviews(context);
+      const requestId = String(request.requestId || '');
+      const changesPath = Object.prototype.hasOwnProperty.call(request, 'newProjectPath');
+      const updatesAutonomy = (request.autonomyEnabled !== undefined || request.toolNetworkDisabled !== undefined)
+        && (!changesPath || request.autonomyChanged === true);
+      const root = normalizeGlobalDataPathForRegistry(getPersistedSettings(context).globalDataPath, getWorkspaceRoot());
+      await uiStateWrites.get(`${root}\n${surface}\n${projectPath}`)?.catch(() => ({}));
+      const wasSelected = getProjectState(context).selectedProjectPath === projectPath;
+      const selectionGenerationAtSave = projectSelectionGeneration;
+      let effectiveProjectPath: string;
+      try {
+        effectiveProjectPath = await updateProjectMetadata(context, projectPath, {
+          ...(Object.prototype.hasOwnProperty.call(request, 'name') ? { name: request.name } : {}),
+          ...(Object.prototype.hasOwnProperty.call(request, 'projectType') ? { type: request.projectType } : {}),
+          ...(Object.prototype.hasOwnProperty.call(request, 'priority') ? { priority: request.priority } : {}),
+          ...(Object.prototype.hasOwnProperty.call(request, 'description') ? { description: request.description } : {}),
+          ...(Object.prototype.hasOwnProperty.call(request, 'notes') ? { notes: request.notes } : {})
+        }, false, changesPath ? String(request.newProjectPath || '') : undefined,
+        updatesAutonomy ? {
+          enabled: Boolean(request.autonomyEnabled),
+          toolNetworkDisabled: Boolean(request.toolNetworkDisabled)
+        } : undefined);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        vscode.window.showErrorMessage(`项目设置保存失败：${detail}`);
+        await respond({ command: 'projectMetadataSaveFailed', projectPath, requestId, error: detail });
+        return;
       }
-      await respond({ command: 'projectMetadataSaved', projectPath, requestId: String(request.requestId || '') });
+      if (updatesAutonomy && effectiveProjectPath === projectPath) {
+        try {
+          await updateProjectAutonomyWithRetry(context, root, effectiveProjectPath, request);
+        } catch (error) {
+          const detail = `自动工作设置未保存：${error instanceof Error ? error.message : String(error)}`;
+          vscode.window.showErrorMessage(detail);
+          sendLocalProjectsToWebviews(context);
+          await respond({ command: 'projectMetadataSaveFailed', projectPath, requestId, error: detail });
+          return;
+        }
+      }
+      const warnings: string[] = [];
+      if (effectiveProjectPath !== projectPath) {
+        const authorizations = projectAutonomyByRoot.get(root);
+        const previous = authorizations?.get(projectPath);
+        if (authorizations) {
+          authorizations.delete(projectPath);
+          authorizations.set(effectiveProjectPath, updatesAutonomy ? {
+            enabled: Boolean(request.autonomyEnabled),
+            toolNetworkDisabled: Boolean(request.toolNetworkDisabled),
+            epoch: Number(previous?.epoch || 0) + 1
+          } : previous || { enabled: false, toolNetworkDisabled: false, epoch: 0 });
+        }
+      }
+      await respond({ command: 'projectMetadataSaved', projectPath, effectiveProjectPath, requestId });
+      if (effectiveProjectPath !== projectPath) {
+        try {
+          await refreshProjectAutonomyAuthorizations(context, root, getProjects(context));
+          await refreshExtensionSettingsFromDatabase(context, root);
+        } catch (error) {
+          warnings.push(`项目路径已保存，但部分状态将在下次刷新时更新：${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      try {
+        const registrySelectedPath = readProjectRegistry(context)?.selectedProjectPath || '';
+        if (effectiveProjectPath !== projectPath && wasSelected && projectSelectionGeneration === selectionGenerationAtSave && registrySelectedPath === effectiveProjectPath) await selectProject(context, effectiveProjectPath);
+        else sendLocalProjectsToWebviews(context);
+      } catch (error) {
+        sendLocalProjectsToWebviews(context);
+        warnings.push(`项目路径已保存，但当前项目刷新失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (warnings.length) vscode.window.showWarningMessage(warnings.join('；'));
     },
     'project.togglePinned': async (request) => toggleProjectPinned(context, String(request.projectPath || '')),
     'project.openRoadmap': async (request) => {
@@ -3658,7 +3713,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   sidebarProvider?.prioritizeProjectSignals(projectPath);
   if (activePanel) {
     void postWebviewContainerMessage(activePanel, { command: 'roadmapLoading', projectPath });
-    void postWebviewContainerMessage(activePanel, { command: 'projectsLoaded', projects: { projects, selectedProjectPath: projectPath } });
+    void postWebviewContainerMessage(activePanel, { command: 'projectsLoaded', projects: { ...getProjectState(context), selectedProjectPath: projectPath } });
   }
   if (activeProjectGrowthPanel) {
     const copy = getProjectGrowthPanelCopy(context);
@@ -3707,14 +3762,103 @@ async function updateProjectMetadata(
   context: vscode.ExtensionContext,
   projectPath: string,
   updates: Partial<Pick<SolopreneurProject, 'name' | 'type' | 'priority' | 'description' | 'notes'>>,
-  broadcast = true
-): Promise<void> {
+  broadcast = true,
+  newProjectPath?: string,
+  autonomyUpdate?: { enabled: boolean; toolNetworkDisabled: boolean }
+): Promise<string> {
   const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
   const snapshot = await refreshProjectRegistryForContext(context, root);
-  if (!snapshot.registry.projects.some(project => project.path === projectPath)) return;
-  const fields = Object.fromEntries(Object.entries(updates).filter(([, value]) => value !== undefined).map(([key, value]) => [key, key === 'name' ? String(value || projectName(projectPath)) : String(value || '')]));
-  if (Object.keys(fields).length) await patchProjectRegistry(root, { projectPatches: [{ path: projectPath, fields }] });
+  const currentProject = snapshot.registry.projects.find(project => project.path === projectPath);
+  if (!currentProject) throw new Error(`项目已被其他窗口移动或移除：${projectPath}`);
+  const requestedPath = newProjectPath === undefined ? projectPath : newProjectPath.trim();
+  if (!requestedPath) throw new Error('项目路径不能为空。');
+  if (!path.isAbsolute(requestedPath)) throw new Error('项目路径必须是绝对路径。');
+  const effectiveProjectPath = newProjectPath === undefined ? projectPath : path.resolve(requestedPath);
+  const pathChanged = newProjectPath !== undefined && effectiveProjectPath !== projectPath;
+  if (pathChanged) {
+    let destination: fs.Stats;
+    try { destination = await fs.promises.stat(effectiveProjectPath); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`项目路径不存在：${effectiveProjectPath}`);
+      throw new Error(`无法访问项目路径：${effectiveProjectPath}（${error instanceof Error ? error.message : String(error)}）`);
+    }
+    if (!destination.isDirectory()) throw new Error(`项目路径不是文件夹：${effectiveProjectPath}`);
+    const identityPath = path.join(effectiveProjectPath, '.solopreneur', 'project.json');
+    try {
+      const before = await fs.promises.lstat(identityPath);
+      if (!before.isFile() || before.isSymbolicLink()) throw new Error('invalid');
+      const identity = JSON.parse(await fs.promises.readFile(identityPath, 'utf8')) as { schemaVersion?: number; projectId?: string };
+      const after = await fs.promises.lstat(identityPath);
+      if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs
+        || identity.schemaVersion !== 1 || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(String(identity.projectId || ''))) throw new Error('invalid');
+    } catch {
+      throw new Error(`目标文件夹不是已移动的 SoloMap 项目：${effectiveProjectPath}`);
+    }
+  }
+  const fields = Object.fromEntries(Object.entries(updates).filter(([, value]) => value !== undefined).map(([key, value]) => [key, key === 'name' ? String(value || projectName(effectiveProjectPath)) : String(value || '')]));
+  if (pathChanged) {
+    const idempotencyKey = `project-path:${crypto.randomUUID()}`;
+    let moved = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const latest = await refreshProjectRegistryForContext(context, root);
+      const latestProject = latest.registry.projects.find(project => project.path === projectPath);
+      if (!latestProject) throw new Error(`原项目路径已被其他窗口修改：${projectPath}`);
+      if (latest.registry.projects.some(project => project.path === effectiveProjectPath)) throw new Error(`项目路径已被其他项目使用：${effectiveProjectPath}`);
+      const replacement = { ...latestProject, ...fields, path: effectiveProjectPath };
+      const { path: _path, ...replacementFields } = replacement;
+      const wasHidden = latest.registry.hiddenProjects.includes(projectPath);
+      try {
+        await sendRuntimeDataRequest(root, { operation: 'patch_project_registry', input: {
+          expectedRevision: latest.revision,
+          idempotencyKey,
+          projectPatches: [{ path: projectPath, remove: true }, { path: effectiveProjectPath, fields: replacementFields }],
+          hiddenPatches: [{ path: projectPath, hidden: false }, ...(wasHidden ? [{ path: effectiveProjectPath, hidden: true }] : [])],
+          ...(latest.registry.selectedProjectPath === projectPath ? { selectedProjectPath: effectiveProjectPath } : {}),
+          autonomyMove: {
+            sourcePath: projectPath,
+            targetPath: effectiveProjectPath,
+            ...(autonomyUpdate ? { enabled: autonomyUpdate.enabled, toolNetworkDisabled: autonomyUpdate.toolNetworkDisabled } : {})
+          }
+        } });
+        await refreshProjectRegistryForContext(context, root);
+        moved = true;
+        break;
+      } catch (error) {
+        if ((error as Error).message !== 'revision_conflict') throw error;
+      }
+    }
+    if (!moved) throw new Error('项目路径同时被其他窗口修改，请重试。');
+  } else if (Object.keys(fields).length) await patchProjectRegistry(root, { projectPatches: [{ path: projectPath, fields }] });
   if (broadcast) sendLocalProjectsToWebviews(context);
+  return effectiveProjectPath;
+}
+
+async function updateProjectAutonomyWithRetry(
+  context: vscode.ExtensionContext,
+  root: string,
+  projectPath: string,
+  request: PluginActionRequest
+): Promise<void> {
+  const idempotencyKey = `project-autonomy:${crypto.randomUUID()}`;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const snapshot = await refreshProjectRegistryForContext(context, root);
+    const current = await sendRuntimeDataRequest<{ enabled: boolean; toolNetworkDisabled: boolean; epoch: number }>(root, { operation: 'read_project_autonomy_authorization', input: { projectPath } });
+    try {
+      await sendRuntimeDataRequest(root, { operation: 'patch_project_autonomy_authorization', input: {
+        projectPath,
+        registeredProjectPaths: snapshot.registry.projects.map(project => project.path),
+        enabled: request.autonomyEnabled === undefined ? current.enabled : Boolean(request.autonomyEnabled),
+        toolNetworkDisabled: request.toolNetworkDisabled === undefined ? current.toolNetworkDisabled : Boolean(request.toolNetworkDisabled),
+        expectedEpoch: current.epoch,
+        idempotencyKey
+      } });
+      await refreshProjectAutonomyAuthorizations(context, root, snapshot.registry.projects);
+      return;
+    } catch (error) {
+      if ((error as Error).message !== 'revision_conflict') throw error;
+    }
+  }
+  throw new Error('设置同时被其他窗口修改，请重试。');
 }
 
 async function toggleProjectPinned(context: vscode.ExtensionContext, projectPath: string): Promise<void> {
