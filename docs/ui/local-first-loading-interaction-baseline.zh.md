@@ -367,6 +367,14 @@ projectPath + projectGeneration + interactionId
 
 记录保存在本地诊断数据中，不上传项目内容、Prompt 或对话正文。
 
+### 关键路径日志读法
+
+- 同一次操作用 `interactionId` 串联入口与页面，`traceId` 区分宿主中的执行段；耗时使用单调时钟，`elapsedMs` 始终从该执行段开始累计，`durationMs` 表示具体阶段耗时。超出前台预算以 `budgetExceeded` 标记，不中断任务。
+- 侧边栏从 `sidebar.resolve` 开始，依次记录 HTML、设置与本地核心数据交付。`sidebar.browser.core.ready` 只有在浏览器已经接收设置、渲染核心数据并完成初始化后才成立。侧边栏打开战略金字塔时，原页面以同一 `interactionId` 回传从点击开始的浏览器耗时。
+- 战略金字塔记录本地授权、远端复核、缓存命中或失配、本地数据、宿主交付、浏览器就绪及后台智能判断。`strategy.local.delivered` 不等于浏览器已可操作；验收使用 `strategy.browser.local.ready` 或 `strategy.browser.complete.ready`。后台更新与普通设置广播统一经过源版本复核，并在浏览器实际应用时再次检查编辑、焦点和组词状态；宿主发送完成不等于更新已显示。
+- 智能调用记录 `model.cli.spawn`、`model.cli.first_output`、`model.cli.timeout` 与 `model.cli.exit`，包含进程身份、退出码、信号和输出字节数。保留原始失败类别，不将执行超时包装成 JSON 解析错误；日志不包含命令参数、Prompt、模型正文或凭据。
+- 诊断摘要按最近执行链展示阶段，不能把 Runtime 存活、宿主已发送 HTML 或某一后台阶段完成当成用户动作完成。
+
 ### 必测场景
 
 1. 插件宿主首次启动，包含多个登记项目。

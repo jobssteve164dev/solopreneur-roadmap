@@ -306,6 +306,22 @@ function intelligenceLocalTimeContext(now = new Date()): string {
   return `当前时间：${local}；当前时区：${Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'}。解析今天、明天和钟点时以此为准。`;
 }
 
+function strategyJudgmentSchema(input: StrategyPyramidCognitiveInput): Record<string, unknown> {
+  const text = { type: 'string', minLength: 1 };
+  const object = (properties: Record<string, unknown>) => ({ type: 'object', properties, required: Object.keys(properties), additionalProperties: false });
+  return object({
+    confidence: { type: 'string', enum: ['low', 'medium', 'high'] },
+    stageTitle: text, mainJudgment: text, strategicAction: text, constraint: text,
+    risks: { type: 'array', items: text },
+    moves: { type: 'array', minItems: 1, items: object({ horizon: text, title: text, reason: text, evidence: { type: 'array', items: text } }) },
+    recommendedScenarioPath: text,
+    projects: { type: 'array', minItems: input.projects.length, maxItems: input.projects.length, items: object({
+      id: input.projects.length ? { type: 'string', enum: input.projects.map(project => project.id) } : text,
+      action: text, risk: text, advice: object({ doubleDown: text, reduce: text, observe: text })
+    }) }
+  });
+}
+
 export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
   public readonly framework = '@earendil-works/pi-agent-core';
   public readonly id: string;
@@ -612,6 +628,7 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
     const pi = await loadPi();
     if (this.cancelled) throw new Error('Pi Agent model pipe was cancelled.');
     const model = embeddedModel(this.agentCli, this.model, pi.ai);
+    let invocationError: unknown;
     const agent = new pi.agent.Agent({
       initialState: {
         systemPrompt: '你是 SoloMap 战略金字塔的只读智能内核。只根据提供的项目事实判断一人公司的战略状态，不得调用工具、读取文件或执行任务。',
@@ -626,9 +643,10 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
         }
         stream.push({ type: 'start', partial: assistantMessage(this.model, '', 'pending') });
         const invocation = buildCognitiveCliInvocation(this.agentCli, this.model, transcriptPrompt(context), this.workingDirectory);
-        void this.runner(invocation).then(output => {
+        void observeLocalDiagnosticStage('model.cli', () => this.runner({ ...invocation, timeoutMs: 300_000, outputSchema: strategyJudgmentSchema(input) })).then(output => {
           stream.push({ type: 'done', reason: 'stop', message: assistantMessage(this.model, output, 'stop') });
         }, error => {
+          invocationError = error;
           const message = error instanceof Error ? error.message : String(error);
           stream.push({ type: 'error', reason: 'error', error: assistantMessage(this.model, '', 'error', message) });
         });
@@ -642,9 +660,12 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
         '尊重每个项目 strategy 中的当前战略标记，尤其不得给冻结或收缩中的项目生成相反建议。',
         '只输出一行合法 JSON，字段必须为：confidence(low|medium|high)、stageTitle、mainJudgment、strategicAction、constraint、risks、moves、recommendedScenarioPath、projects。',
         'moves 每项包含 horizon、title、reason、evidence；projects 每项包含输入中的 id、action、risk、advice，advice 包含 doubleDown、reduce、observe。',
+        `projects 必须恰好包含全部 ${input.projects.length} 个项目，每个 id 原样出现且只出现一次。所有字符串字段必须非空；暂停项目的 doubleDown 请明确写“维持暂停”，不要留空。`,
+        '输出必须符合这个 JSON Schema：' + JSON.stringify(strategyJudgmentSchema(input)),
         '项目事实：',
         JSON.stringify(input)
       ].join('\n'));
+      if (invocationError) throw invocationError;
       const response = [...agent.state.messages].reverse().find(message => message.role === 'assistant');
       if (!response) throw new Error('Pi Agent did not return a strategy pyramid judgment.');
       const source = messageText(response).trim();
@@ -671,6 +692,7 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
       }
       return parsed;
     } catch (error) {
+      if (invocationError) throw invocationError;
       if (error instanceof Error && /Pi Agent/.test(error.message)) throw error;
       throw new Error('Pi Agent model pipe did not return a valid JSON strategy pyramid judgment.');
     } finally {

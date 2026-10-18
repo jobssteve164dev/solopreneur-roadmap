@@ -148,6 +148,7 @@ export interface StrategyPyramidScenario {
 }
 
 export interface StrategyPyramidSnapshot {
+  sourceRevision?: string;
   generatedAt: string;
   confidence: 'low' | 'medium' | 'high';
   stageTitle: string;
@@ -175,7 +176,7 @@ export interface StrategyPyramidSnapshot {
   decisionSource?: 'rules' | 'cognitive' | 'rules_fallback';
   engineId?: string;
   engineConfigRevision?: string;
-  engineStatus?: 'completed' | 'failed' | 'unavailable';
+  engineStatus?: 'completed' | 'failed' | 'unavailable' | 'updating';
   engineError?: string;
 }
 
@@ -1100,6 +1101,9 @@ async function writeStrategyPyramidSnapshot(
 }
 
 interface StrategySource { signature: string; databaseRevision: string; projectIds: string[] }
+export async function readStrategyPyramidSourceRevision(projectEntries: StrategyPyramidProject[], globalDataPath: string): Promise<string> {
+  return (await strategySourceSignature(projectEntries, globalDataPath)).signature;
+}
 async function strategySourceSignature(projectEntries: StrategyPyramidProject[], globalDataPath: string): Promise<StrategySource> {
   const globalRoot = normalizeGlobalDataPath(globalDataPath);
   const source = await observeLocalDiagnosticStage('strategy.source', () => sendRuntimeDataRequest<{ revision: string; projectIds: string[] }>(globalRoot, { operation: 'read_strategy_source_revision', input: { roots: projectEntries.filter(project => project?.path).map(project => project.path) } }));
@@ -1116,12 +1120,13 @@ async function strategySourceSignature(projectEntries: StrategyPyramidProject[],
 export async function readCachedStrategyPyramidSnapshot(
   projectEntries: StrategyPyramidProject[],
   globalDataPath: string,
-  engineConfigRevision = ''
+  engineConfigRevision = '',
+  localFactsOnly = false
 ): Promise<StrategyPyramidSnapshot | null> {
   const state = await strategyState(globalDataPath);
   const value = state.value as { signature: string; engineConfigRevision?: string; snapshot: StrategyPyramidSnapshot } | null;
-  if (!value || value.signature !== (await strategySourceSignature(projectEntries, globalDataPath)).signature || String(value.engineConfigRevision || '') !== engineConfigRevision) return null;
-  return value.snapshot;
+  if (!value || value.signature !== (await strategySourceSignature(projectEntries, globalDataPath)).signature || (!localFactsOnly && String(value.engineConfigRevision || '') !== engineConfigRevision)) return null;
+  return { ...value.snapshot, engineConfigRevision: String(value.engineConfigRevision || ''), sourceRevision: value.signature };
 }
 
 export async function buildStrategyPyramidSnapshotData(
@@ -1129,7 +1134,8 @@ export async function buildStrategyPyramidSnapshotData(
   globalDataPath: string,
   fallbackWorkspaceRoot = process.cwd(),
   persist = true,
-  beforeCommit?: () => boolean
+  beforeCommit?: () => boolean,
+  failure?: { engineId: string; engineConfigRevision: string; engineError: string }
 ): Promise<StrategyPyramidSnapshot> {
   if (beforeCommit && !beforeCommit()) throw new Error('Strategy pyramid request is no longer current.');
   const previous = persist ? await strategyState(globalDataPath) : undefined;
@@ -1283,15 +1289,16 @@ export async function buildStrategyPyramidSnapshotData(
     recommendedScenarioPath: inferRecommendedScenarioPath(projects, sellCount, learnCount),
     projects,
     decisionSource: 'rules_fallback',
-    engineStatus: 'unavailable'
+    engineStatus: failure ? 'failed' : 'unavailable',
+    ...(failure || {})
   };
 
+  if ((await strategySourceSignature(projectEntries, globalDataPath)).signature !== signature.signature) throw new Error('Strategy pyramid facts changed while judgment was running.');
+  if (beforeCommit && !beforeCommit()) throw new Error('Strategy pyramid request is no longer current.');
   if (persist) {
-    if ((await strategySourceSignature(projectEntries, globalDataPath)).signature !== signature.signature) throw new Error('Strategy pyramid facts changed while judgment was running.');
-    if (beforeCommit && !beforeCommit()) throw new Error('Strategy pyramid request is no longer current.');
-    await observeLocalDiagnosticStage('strategy.persist', () => writeStrategyPyramidSnapshot(globalDataPath, previous!, snapshot, signature));
+    await observeLocalDiagnosticStage('strategy.persist', () => writeStrategyPyramidSnapshot(globalDataPath, previous!, snapshot, signature, failure?.engineConfigRevision));
   }
-  return snapshot;
+  return { ...snapshot, sourceRevision: signature.signature };
 }
 
 export async function buildCognitiveStrategyPyramidSnapshotData(
@@ -1322,7 +1329,7 @@ export async function buildCognitiveStrategyPyramidSnapshotData(
       engineConfigRevision
     });
     await observeLocalDiagnosticStage('strategy.persist', () => writeStrategyPyramidSnapshot(globalDataPath, previous, snapshot, sourceSignature, engineConfigRevision, false));
-    return snapshot;
+    return { ...snapshot, sourceRevision: sourceSignature.signature };
   }
   throw new Error('Strategy pyramid facts changed while intelligent judgment was running.');
 }

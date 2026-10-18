@@ -1,4 +1,5 @@
 import * as crypto from 'crypto';
+import { performance } from 'node:perf_hooks';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -13,13 +14,26 @@ const MAX_OPERATION_EVENTS = 200;
 const PROCESS_DIAGNOSTIC_ID = `${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
 
 type DiagnosticStageStatus = 'start' | 'ok' | 'error' | 'cancel';
-interface DiagnosticOperationEvent {
+interface DiagnosticOperationEvent extends DiagnosticProcessDetails {
   at: string;
   traceId: string;
   stage: string;
   status: DiagnosticStageStatus;
   durationMs: number;
   message?: string;
+  elapsedMs?: number;
+  interactionId?: string;
+  targetId?: string;
+  generation?: number;
+  budgetExceeded?: boolean;
+}
+interface DiagnosticInteraction { interactionId?: string; targetId?: string; generation?: number; budgetMs?: number }
+interface DiagnosticProcessDetails { pid?: number; exitCode?: number | null; signal?: string | null; stdoutBytes?: number; stderrBytes?: number; timeoutMs?: number }
+function safeProcessDetails(details: Record<string, unknown>): DiagnosticProcessDetails {
+  return {
+    ...Object.fromEntries(Object.entries(details).filter(([key, value]) => ['pid', 'exitCode', 'stdoutBytes', 'stderrBytes', 'timeoutMs'].includes(key) && (value === null || Number.isSafeInteger(value)))),
+    ...(typeof details.signal === 'string' && /^SIG[A-Z0-9]+$/.test(details.signal) ? { signal: details.signal } : {})
+  };
 }
 export interface LocalDiagnosticEvent {
   kind: 'error' | 'operation';
@@ -34,7 +48,8 @@ interface LocalDiagnosticPersistence {
 }
 export interface LocalDiagnosticTrace {
   id: string;
-  record(stage: string, status: DiagnosticStageStatus, durationMs?: number, error?: unknown): void;
+  interactionId?: string;
+  record(stage: string, status: DiagnosticStageStatus, durationMs?: number, error?: unknown, processDetails?: DiagnosticProcessDetails): void;
 }
 const activeTrace = new AsyncLocalStorage<LocalDiagnosticTrace>();
 let persistence: LocalDiagnosticPersistence | undefined;
@@ -70,7 +85,13 @@ function loadDatabaseDiagnostics(globalDataPath: string): Promise<void> {
       if (item.kind === 'operation') operations.push({
         at: String(item.occurredAt || ''), traceId: String(payload.traceId || ''),
         stage: String(item.scope || ''), status: String(payload.status || 'error') as DiagnosticStageStatus,
-        durationMs: Number(payload.durationMs || 0), ...(payload.message ? { message: String(payload.message) } : {})
+        durationMs: Number(payload.durationMs || 0), ...(payload.message ? { message: String(payload.message) } : {}),
+        ...(typeof payload.elapsedMs === 'number' ? { elapsedMs: payload.elapsedMs } : {}),
+        ...(typeof payload.interactionId === 'string' && /^[a-z0-9_.:-]{1,80}$/i.test(payload.interactionId) ? { interactionId: payload.interactionId } : {}),
+        ...(typeof payload.targetId === 'string' && /^[a-z0-9_.:-]{1,80}$/i.test(payload.targetId) ? { targetId: payload.targetId } : {}),
+        ...(Number.isSafeInteger(payload.generation) ? { generation: Number(payload.generation) } : {}),
+        ...(typeof payload.budgetExceeded === 'boolean' ? { budgetExceeded: payload.budgetExceeded } : {}),
+        ...safeProcessDetails(payload)
       });
     }
     databaseErrors.set(root, errors.slice(-MAX_ENTRIES));
@@ -159,6 +180,7 @@ export function classifyDiagnosticFailure(error: unknown): string {
   if (/unknown read tool/.test(message)) return 'unknown_tool';
   if (/tool call limit/.test(message)) return 'tool_limit';
   if (/did not return an answer/.test(message)) return 'empty_answer';
+  if (/valid json|invalid.*judgment/.test(message)) return 'invalid_model_output';
   return 'unknown_error';
 }
 
@@ -182,22 +204,36 @@ function readRecentOperationEvents(globalDataPath: string): DiagnosticOperationE
     .slice(-MAX_OPERATION_EVENTS);
 }
 
-export function createLocalDiagnosticTrace(globalDataPath: string, source: string): LocalDiagnosticTrace {
+export function createLocalDiagnosticTrace(globalDataPath: string, source: string, interaction: DiagnosticInteraction = {}): LocalDiagnosticTrace {
   const id = crypto.randomBytes(8).toString('hex');
+  const started = performance.now();
+  let sequence = 0;
+  const token = (value: string | undefined) => value && /^[a-z0-9_.:-]{1,80}$/i.test(value) ? value : undefined;
+  const metadata = {
+    interactionId: token(interaction.interactionId) || id,
+    ...(token(interaction.targetId) ? { targetId: token(interaction.targetId) } : {}),
+    ...(Number.isSafeInteger(interaction.generation) ? { generation: interaction.generation } : {})
+  };
   const trace: LocalDiagnosticTrace = {
     id,
-    record(stage, status, durationMs = 0, error) {
+    interactionId: metadata.interactionId,
+    record(stage, status, durationMs = 0, error, processDetails = {}) {
       const normalizedStage = String(stage || 'unknown').replace(/[^a-z0-9._-]/gi, '_').slice(0, 80);
+      const elapsedMs = Math.max(0, Math.round(performance.now() - started));
+      const details = safeProcessDetails({ ...processDetails });
       const entry: DiagnosticOperationEvent = {
         at: new Date().toISOString(), traceId: id, stage: normalizedStage, status,
+        ...metadata, elapsedMs, ...details,
+        ...(interaction.budgetMs !== undefined ? { budgetExceeded: elapsedMs > interaction.budgetMs } : {}),
         durationMs: Math.max(0, Math.round(Number(durationMs) || 0)),
         ...(error === undefined ? {} : { message: diagnosticStageMessage(normalizedStage, error) })
       };
       remember(currentOperations, globalDataPath, entry, MAX_OPERATION_EVENTS);
       appendDiagnostic(globalDataPath, {
         kind: 'operation', occurredAt: entry.at, scope: normalizedStage,
-        payload: { traceId: id, status, durationMs: entry.durationMs, ...(entry.message ? { message: entry.message } : {}) },
-        idempotencyKey: `diagnostic-operation:${PROCESS_DIAGNOSTIC_ID}:${id}:${entry.at}:${normalizedStage}:${status}`
+        payload: { traceId: id, ...metadata, elapsedMs, ...(entry.budgetExceeded !== undefined ? { budgetExceeded: entry.budgetExceeded } : {}), status, durationMs: entry.durationMs, ...(entry.message ? { message: entry.message } : {}),
+          ...details },
+        idempotencyKey: `diagnostic-operation:${PROCESS_DIAGNOSTIC_ID}:${id}:${++sequence}`
       });
     }
   };
@@ -213,19 +249,19 @@ export function getCurrentLocalDiagnosticTrace(): LocalDiagnosticTrace | undefin
   return activeTrace.getStore();
 }
 
-export function recordCurrentDiagnosticStage(stage: string, status: DiagnosticStageStatus, durationMs = 0, error?: unknown): void {
-  activeTrace.getStore()?.record(stage, status, durationMs, error);
+export function recordCurrentDiagnosticStage(stage: string, status: DiagnosticStageStatus, durationMs = 0, error?: unknown, details?: DiagnosticProcessDetails): void {
+  activeTrace.getStore()?.record(stage, status, durationMs, error, details);
 }
 
 export async function observeLocalDiagnosticStage<T>(stage: string, operation: () => Promise<T>): Promise<T> {
-  const started = Date.now();
+  const started = performance.now();
   recordCurrentDiagnosticStage(stage, 'start');
   try {
     const result = await operation();
-    recordCurrentDiagnosticStage(stage, 'ok', Date.now() - started);
+    recordCurrentDiagnosticStage(stage, 'ok', performance.now() - started);
     return result;
   } catch (error) {
-    recordCurrentDiagnosticStage(stage, 'error', Date.now() - started, error);
+    recordCurrentDiagnosticStage(stage, 'error', performance.now() - started, error);
     throw error;
   }
 }
@@ -312,7 +348,9 @@ export async function buildLocalDiagnosticSummary(
 ): Promise<string> {
   await loadDatabaseDiagnostics(globalDataPath);
   const entries = readRecentErrors(globalDataPath).slice(-10);
-  const operationEvents = readRecentOperationEvents(globalDataPath).slice(-20);
+  const recentOperations = readRecentOperationEvents(globalDataPath);
+  const recentTraces = new Set([...new Set(recentOperations.map(event => event.traceId))].slice(-4));
+  const operationEvents = recentOperations.filter(event => recentTraces.has(event.traceId)).slice(-100);
   return [
     'Runtime environment:',
     `- Host: ${sanitizeDiagnosticText(host.appName || 'unknown')} ${sanitizeDiagnosticText(host.version || 'unknown')}`,
@@ -328,7 +366,7 @@ export async function buildLocalDiagnosticSummary(
     '',
     `Recent operation events: ${operationEvents.length}`,
     ...(operationEvents.length > 0
-      ? operationEvents.map((event) => `- ${event.at} [${event.traceId}] ${event.stage} ${event.status} ${event.durationMs}ms${event.message ? `: ${event.message}` : ''}`)
+      ? operationEvents.map((event) => `- ${event.at} [${event.traceId}${event.interactionId ? ` interaction=${event.interactionId}` : ''}] ${event.stage} ${event.status} ${event.durationMs}ms${event.elapsedMs === undefined ? '' : ` elapsed=${event.elapsedMs}ms`}${event.targetId ? ` target=${event.targetId}` : ''}${event.generation === undefined ? '' : ` generation=${event.generation}`}${event.budgetExceeded ? ' budget_exceeded' : ''}${Object.entries(safeProcessDetails({ ...event })).map(([key, value]) => ` ${key === 'exitCode' ? 'exit' : key}=${value}`).join('')}${event.message ? `: ${event.message}` : ''}`)
       : ['- None recorded.']),
     '',
     'Diagnostic privacy:',

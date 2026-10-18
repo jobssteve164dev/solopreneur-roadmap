@@ -7,6 +7,36 @@ const test = require('node:test');
 const { LocalAgentCliEngine, buildCognitiveCliInvocation, runCognitiveCliInvocation } = require('../out/localAgentCliEngine.js');
 const { cognitiveRuntimeConfigRevision, persistCognitiveRuntimeConfig, readCognitiveRuntimeConfig, refreshCognitiveRuntimeConfig, writeCognitiveRuntimeConfig } = require('../out/cognitiveRuntimeConfig.js');
 
+test('a real cognitive subprocess records spawn, first byte and actual exit without logging content', async t => {
+  const diagnostics = require('../out/localDiagnostics.js'); const events = [];
+  diagnostics.configureLocalDiagnosticPersistence({ append: (_root, event) => events.push(event) });
+  t.after(() => diagnostics.configureLocalDiagnosticPersistence(undefined));
+  const trace = diagnostics.createLocalDiagnosticTrace('/fixture', 'strategy.load');
+  await diagnostics.withLocalDiagnosticTrace(trace, () => runCognitiveCliInvocation({ command: process.execPath, args: ['-e', 'process.stdout.write("private output"); process.stderr.write("API_KEY=private");'], stdin: 'private prompt', shell: false }, () => {}));
+  assert.ok(events.some(e => e.scope === 'model.cli.spawn' && e.payload.status === 'ok' && e.payload.pid > 0));
+  assert.ok(events.some(e => e.scope === 'model.cli.first_output'));
+  const exit = events.find(e => e.scope === 'model.cli.exit');
+  assert.equal(exit?.payload.exitCode, 0);
+  assert.equal(exit?.payload.stdoutBytes, 14);
+  assert.doesNotMatch(JSON.stringify(events), /private|API_KEY/);
+});
+
+test('a Codex structured judgment receives a private schema and retires it after exit', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cognitive-schema-test-'));
+  const binary = path.join(base, 'codex');
+  fs.writeFileSync(binary, '#!' + process.execPath + '\nconst fs=require("fs"); const index=process.argv.indexOf("--output-schema"); const file=index<0?null:process.argv[index+1]; console.log(JSON.stringify({file, schema:file?JSON.parse(fs.readFileSync(file)):null}));', { mode: 0o700 });
+  const schema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false };
+  const result = JSON.parse(await runCognitiveCliInvocation({ command: binary, args: ['exec'], stdin: 'private prompt', shell: false, outputSchema: schema }, () => {}));
+  assert.deepEqual(result.schema, schema);
+  assert.equal(fs.existsSync(result.file), false);
+  assert.equal(fs.existsSync(path.dirname(result.file)), false);
+});
+
+test('a complete structured response is not silently truncated at 64K characters', async () => {
+  const output = await runCognitiveCliInvocation({ command: process.execPath, args: ['-e', 'process.stdout.write("x".repeat(70000))'], stdin: '', shell: false }, () => {});
+  assert.equal(output.length, 70000);
+});
+
 test('Codex cognitive invocation is headless, read-only, and shell-free', () => {
   const previousBus = process.env.DBUS_SESSION_BUS_ADDRESS;
   const previousKeyring = process.env.GNOME_KEYRING_CONTROL;

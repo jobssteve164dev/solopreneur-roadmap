@@ -1693,7 +1693,7 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
                   asWebviewUri(uri) {
                     return String(uri && (uri.fsPath || uri.path || uri));
                   },
-                  onDidReceiveMessage() {},
+                  onDidReceiveMessage(listener) { this.__fireMessage = listener; },
                   postMessage() { return Promise.resolve(true); }
                 },
                 reveal() {},
@@ -2195,6 +2195,7 @@ function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
   ]);
   const context = {
     Event,
+    performance: require('node:perf_hooks').performance,
     document: {
       body: createElement('body'),
       getElementById: (id) => elements[id] || null,
@@ -3036,7 +3037,13 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   context.__setDeliveryActionPanelExpanded(false);
 
   elements['btn-open-strategy-pyramid'].listeners.click();
-  assert.ok(postedMessages.some((message) => message.command === 'showStrategyPyramid'));
+  const navigation = postedMessages.find((message) => message.command === 'showStrategyPyramid');
+  assert.ok(navigation);
+  assert.match(navigation.interactionId, /^[a-z0-9_.:-]+$/i);
+  dispatchMessage({ command: 'navigationReady', interactionId: navigation.interactionId });
+  const completion = postedMessages.find(message => message.command === 'interactionCompleted');
+  assert.equal(completion.interactionId, navigation.interactionId);
+  assert.ok(Number.isFinite(completion.elapsedMs) && completion.elapsedMs >= 0);
   postedMessages.length = 0;
 
   elements['btn-toggle-settings'].listeners.click();
@@ -4018,6 +4025,24 @@ test('sidebar hydrates untouched settings without overwriting a field edited dur
   assert.equal(elements['setting-global-data-path'].value, '/real-data');
   assert.ok(postedMessages.some(message => message.command === 'checkDependencies' && message.cliPath === 'claude'));
   assert.ok(postedMessages.some(message => message.command === 'agentImpact.get' && message.cliPath === 'claude'));
+});
+
+test('sidebar cold-start diagnostics finish only after the browser acknowledges core data', async t => {
+  const diagnostics = require('../out/localDiagnostics.js'); const events = [], messages = [];
+  diagnostics.configureLocalDiagnosticPersistence({ append: (_root, event) => events.push(event) });
+  t.after(() => diagnostics.configureLocalDiagnosticPersistence(undefined));
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  let listener;
+  const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, { getSettings: () => ({ globalDataPath: '/fixture' }), updateSettings: async () => {}, getProjects: () => ({ projects: [], selectedProjectPath: '' }) });
+  provider.resolveWebviewView({ webview: { options: {}, html: '', asWebviewUri: uri => String(uri), postMessage: async message => { messages.push(message); return true; }, onDidReceiveMessage: callback => { listener = callback; } } }, {}, {});
+  provider.sendSettings(); provider.postCorePortfolio([], '', [], '/fixture');
+  assert.equal(events.some(e => e.scope === 'sidebar.browser.core.ready'), false);
+  const traceId = messages.find(m => m.command === 'projectsLoaded').projects.diagnosticTraceId;
+  assert.ok(traceId);
+  await listener({ command: 'sidebarCoreDataReady', traceId });
+  const ready = events.find(e => e.scope === 'sidebar.browser.core.ready');
+  assert.equal(ready.payload.traceId, traceId);
+  assert.ok(ready.payload.elapsedMs >= 0);
 });
 
 test('sidebar starts background service reconciliation once after its ready signal', async () => {
@@ -8262,6 +8287,9 @@ test('strategy pyramid snapshot sends portfolio facts through the intelligent ke
   assert.equal(fallback.decisionSource, 'rules_fallback');
   assert.equal(fallback.engineStatus, 'failed');
   assert.equal(fallback.totalProjects, 2);
+  const failedState = native.store.readStrategyState(null).value;
+  assert.equal(failedState.engineConfigRevision, 'strategy-failure');
+  assert.equal(failedState.snapshot.engineStatus, 'failed');
   const derived = native.store.readStrategyState(null).value.derivedRegistries;
   assert.ok(derived.projects.some(project => project.projectPath === coreProject));
   assert.ok(derived.abilities.length > 0);
@@ -8278,6 +8306,177 @@ test('strategy pyramid snapshot sends portfolio facts through the intelligent ke
   finishOld(judgment('迟到的判断'));
   assert.equal((await older).mainJudgment, '较新的判断');
   assert.equal(native.store.readStrategyState(null).value.snapshot.mainJudgment, '较新的判断');
+});
+
+test('strategy local access uses a valid retained grant while remote verification is pending', async () => {
+  let release;
+  const remote = new Promise(resolve => { release = resolve; });
+  // The compiled module runs in its own VM; replace only the remote verification boundary.
+  const subject = loadCompiledModule('out/extension.js', 'module.exports.localAccess = hasLocalStrategyPyramidAccess;', {
+    './proAccount': { ...require('../out/proAccount.js'), verifyPassportGrant: () => remote }
+  });
+  const expiry = '2999-01-01T00:00:00.000Z';
+  const context = { secrets: { get: async () => JSON.stringify({ grant: 'retained-grant', email: 'fixture@example.invalid', userId: 'fixture-user', entitlements: ['strategy_pyramid'], expiresAt: expiry, checkedAt: new Date().toISOString() }) }, globalState: { get: key => key === 'solopreneur.settings' ? { globalDataPath: '/fixture', proEntitlements: { strategy_pyramid: true }, proAccount: { authenticated: true, allowed: true, expiresAt: expiry } } : undefined } };
+  const access = subject.localAccess(context);
+  try { assert.equal(await Promise.race([access, new Promise(resolve => setImmediate(() => resolve('still waiting')))]), true); }
+  finally { release({ allowed: false, verificationUnavailable: true, reason: 'verify_failed' }); await access; }
+});
+
+test('strategy first document render failure retains a retry instead of an infinite opening page', async () => {
+  const extension = loadCompiledModule('out/extension.js', `module.exports.refresh = refreshStrategyPyramidPanel; module.exports.connect = panel => { activeStrategyPyramidPanel = panel; }; hasLocalStrategyPyramidAccess = async () => true;`, {
+    './strategyPyramid': { ...require('../out/strategyPyramid.js'), readCachedStrategyPyramidSnapshot: async () => ({ projects: [], sourceRevision: 'fixture' }) },
+    './strategyPyramidWebview': { getStrategyPyramidWebviewHtml: () => 'data-page' },
+    './cognitiveRuntimeConfig': { readCognitiveRuntimeConfig: () => ({ mode: 'none' }), cognitiveRuntimeConfigRevision: () => '' }
+  });
+  let html = 'opening';
+  const panel = { webview: { asWebviewUri: uri => String(uri.fsPath || uri), get html() { return html; }, set html(value) { if (value === 'data-page') throw new Error('render_failure'); html = value; } } };
+  extension.connect(panel);
+  await extension.refresh({ extensionUri: createUri(projectRoot), globalState: { get: () => ({ globalDataPath: '/fixture' }) } });
+  assert.match(html, /战略金字塔加载失败/);
+  assert.match(html, /refreshStrategyPyramid/);
+});
+
+test('strategy remote verification cannot revoke a newer account', async () => {
+  let grant = 'account-a';
+  const checks = [];
+  const subject = loadCompiledModule('out/extension.js', `
+    module.exports.localAccess = hasLocalStrategyPyramidAccess;
+    module.exports.connect = panel => { activeStrategyPyramidPanel = panel; };
+    hasStrategyPyramidAccess = context => context.verify();
+    buildLocalDataStatusHtml = () => 'access denied';
+  `);
+  const panel = { webview: { html: 'current account data' } }; subject.connect(panel);
+  const context = {
+    secrets: { get: async () => JSON.stringify({ grant, email: 'fixture@example.invalid', userId: grant, entitlements: ['strategy_pyramid'], expiresAt: '2999-01-01T00:00:00Z' }) },
+    globalState: { get: () => ({ globalDataPath: '/fixture', proEntitlements: { strategy_pyramid: true }, proAccount: { authenticated: true, allowed: true, expiresAt: '2999-01-01T00:00:00Z' } }) },
+    verify: () => new Promise(resolve => checks.push(resolve))
+  };
+  try {
+    assert.equal(await subject.localAccess(context), true);
+    grant = 'account-b';
+    assert.equal(await subject.localAccess(context), true);
+    assert.equal(checks.length, 2, 'different credentials require distinct checks');
+    checks[0](false); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(panel.webview.html, 'current account data', 'old denial cannot revoke the new account');
+  } finally { for (const finish of checks) finish(true); }
+});
+
+for (const scenario of ['logout', 'disable', 'late-source', 'reenter', 'unchanged', 'access-metadata', 'repeat-open', 'source-save']) test(`strategy delivery respects ${scenario} after local content is ready`, async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-strategy-delivery-'));
+  const project = path.join(base, 'project'); fs.mkdirSync(path.join(project, '.solopreneur'), { recursive: true });
+  const roadmap = path.join(project, '.solopreneur/roadmap.csv');
+  fs.writeFileSync(roadmap, 'id,title,stage,status\n1,Current work,Build,Pending\n');
+  const root = path.join(base, '.solomap-global'), projects = [{ name: 'Current product', path: project }];
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, projects);
+  await require('../out/projectRegistry.js').refreshProjectRegistry(root, () => ({ legacyProjects: projects }), (operation, input) => native.ops({ operation, input }));
+  let mode = 'agent_cli', allowed = true, entered, finish, sourceProbe, secondEntered, modelCalls = 0;
+  const secondStarted = new Promise(resolve => { secondEntered = resolve; });
+  const started = new Promise(resolve => { entered = resolve; });
+  const result = new Promise(resolve => { finish = resolve; });
+  const config = { readCognitiveRuntimeConfig: () => ({ mode, agentCli: 'codex', model: 'auto', revision: 'model-v1' }), cognitiveRuntimeConfigRevision: config => config.mode === 'agent_cli' ? config.revision : '' };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.open = openStrategyPyramidPanel; module.exports.refresh = refreshStrategyPyramidPanel;
+    module.exports.logout = clearStoredProAccess;
+    module.exports.writeGrant = writePassportGrant;
+    module.exports.wait = () => strategyPanelRefresh?.promise;
+    module.exports.connectSidebar = value => { sidebarProvider = value; };
+    module.exports.save = saveProjectStrategy;
+    hasLocalStrategyPyramidAccess = context => context.allowed();
+    buildLocalDataStatusHtml = () => 'access denied';
+    syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {}; activateObservedBackgroundRuntime = async () => {};
+  `, {
+    './cognitiveRuntimeConfig': config,
+    './strategyPyramid': { ...require('../out/strategyPyramid.js'), readStrategyPyramidSourceRevision: async (...args) => { if (sourceProbe) await sourceProbe(); return require('../out/strategyPyramid.js').readStrategyPyramidSourceRevision(...args); } },
+    './piAgentEngine': { EmbeddedPiAgentEngine: class { constructor() { this.id = 'fixture:model-v1'; } async judgeStrategyPyramid() { if (++modelCalls === 2) secondEntered(); entered(); return result; } } },
+    './strategyPyramidWebview': { getStrategyPyramidWebviewHtml: (_webview, _context, snapshot, options) => JSON.stringify({ mainJudgment: snapshot.mainJudgment, source: snapshot.decisionSource, traceId: options.traceId, projects: snapshot.projects }) }
+  });
+  const context = { extensionPath: projectRoot, extensionUri: createUri(projectRoot), subscriptions: [], allowed: () => allowed,
+    secrets: { get: async () => allowed ? JSON.stringify({ grant: 'fixture-grant' }) : undefined, delete: async () => { allowed = false; }, store: async () => {} },
+    globalState: { get: key => key === 'solopreneur.settings' ? { globalDataPath: root, proEntitlements: { strategy_pyramid: allowed }, proAccount: { authenticated: allowed, allowed, email: 'fixture@example.invalid', expiresAt: '2999-01-01T00:00:00Z' } } : undefined, update: async () => {} } };
+  await extension.open(context); await started;
+  const originalFlight = extension.wait();
+  const panel = extension.__vscodeTestState.webviewPanels[0];
+  const messages = []; panel.webview.postMessage = async message => { messages.push(message); return true; };
+  const judgment = { confidence: 'medium', stageTitle: '验证期', mainJudgment: 'Fresh intelligent judgment', strategicAction: '验证', constraint: '保持聚焦', risks: [], moves: [], recommendedScenarioPath: '验证', projects: [] };
+  try {
+    if (scenario === 'logout') {
+      await extension.logout(context, { broadcast: false });
+      const denied = extension.refresh(context);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.match(panel.webview.html, /需要 SoloMap Pro/, 'logout must not coalesce with the authorized request');
+      finish(judgment); await denied;
+      await extension.refresh(context);
+      assert.match(panel.webview.html, /需要 SoloMap Pro/, 'late authorized results cannot restore access');
+    } else if (scenario === 'source-save') {
+      await extension.save(context, project, '冻结项目', 'validation', 'none', 'low', '维持暂停', ['已保存能力']);
+      const refreshed = extension.refresh(context, true);
+      await Promise.race([secondStarted, new Promise((_resolve, reject) => setTimeout(() => reject(new Error('saved local facts remained blocked by the old model')), 1500))]);
+      const saved = JSON.parse(panel.webview.html).projects[0];
+      assert.equal(saved.role, '冻结项目');
+      assert.ok(saved.abilities.includes('已保存能力'));
+      finish(judgment); await refreshed; await originalFlight;
+    } else if (scenario === 'repeat-open') {
+      const navigation = []; extension.connectSidebar({ postMessage: async message => { navigation.push(message); return true; } });
+      await panel.webview.__fireMessage({ command: 'strategy.rendered', phase: 'local', traceId: JSON.parse(panel.webview.html).traceId });
+      const diagnostics = require('../out/localDiagnostics.js');
+      await diagnostics.withLocalDiagnosticTrace(diagnostics.createLocalDiagnosticTrace(root, 'strategy.click', { interactionId: 'repeat-open-click' }), () => extension.open(context));
+      assert.ok(navigation.some(message => message.command === 'navigationReady' && message.interactionId === 'repeat-open-click'), 'coalescing work must still acknowledge each user interaction');
+    } else if (scenario === 'access-metadata') {
+      await extension.writeGrant(context, { allowed: true, email: 'corrected@example.invalid', userId: 'fixture-user', entitlements: ['base_access', 'strategy_pyramid'], expiresAt: '2999-01-01T00:00:00Z' }, 'fixture-grant', { broadcast: false });
+      finish(judgment); await originalFlight;
+      assert.ok(messages.some(message => message.command === 'strategy.updateAvailable'), 'successful same-credential verification must not cancel the judgment');
+    } else {
+      finish(judgment); await extension.refresh(context);
+      if (scenario === 'disable') {
+        mode = 'none'; await extension.refresh(context);
+        await panel.webview.__fireMessage({ command: 'strategy.applyUpdate', traceId: JSON.parse(panel.webview.html).traceId });
+        const update = messages.findLast(message => message.command === 'strategy.update');
+        assert.ok(update, 'the new configuration must deliver its own result');
+        assert.notEqual(JSON.parse(update.html).source, 'cognitive', 'disabled intelligence cannot reuse model judgments');
+      } else if (scenario === 'unchanged') {
+        const original = panel.webview.html;
+        await extension.refresh(context);
+        assert.equal(panel.webview.html, original, 'settings refresh must leave the existing editing document intact');
+      } else if (scenario === 'reenter') {
+        const original = panel.webview.html, traceId = JSON.parse(original).traceId;
+        let release, entered; const gate = new Promise(resolve => { release = resolve; }); const started = new Promise(resolve => { entered = resolve; });
+        sourceProbe = () => { entered(); return gate; };
+        const apply = panel.webview.__fireMessage({ command: 'strategy.applyUpdate', traceId });
+        try { await started; release(); await apply; assert.equal(panel.webview.html, original, 'source checking must not directly replace a document that can resume editing'); }
+        finally { release(); sourceProbe = undefined; }
+        assert.equal(JSON.parse(messages.findLast(message => message.command === 'strategy.update').html).mainJudgment, judgment.mainJudgment);
+      } else {
+        const original = panel.webview.html, traceId = JSON.parse(original).traceId;
+        fs.appendFileSync(roadmap, '2,New local work,Build,Pending\n');
+        await panel.webview.__fireMessage({ command: 'strategy.applyUpdate', traceId });
+        assert.notEqual(JSON.parse(panel.webview.html).mainJudgment, judgment.mainJudgment, 'late delivery must revalidate current local facts');
+        assert.ok(!messages.some(message => message.command === 'strategy.update'), 'stale facts cannot be sent for browser application');
+      }
+    }
+  } finally { finish(judgment); await extension.refresh(context); }
+});
+
+test('strategy local content renders before a slow judgment and a failed unchanged reopen reuses it', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-strategy-local-first-'));
+  const project = path.join(base, 'project'); fs.mkdirSync(path.join(project, '.solopreneur'), { recursive: true });
+  fs.writeFileSync(path.join(project, '.solopreneur', 'roadmap.csv'), 'id,title,stage,status\n1,Reach customers,Sell,Pending\n');
+  const root = path.join(base, '.solomap-global'), projects = [{ name: 'Local portfolio project', path: project }];
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, projects);
+  await require('../out/projectRegistry.js').refreshProjectRegistry(root, () => ({ legacyProjects: projects }), (operation, input) => native.ops({ operation, input }));
+  let enter, fail; const entered = new Promise(resolve => { enter = resolve; }); const result = new Promise((_resolve, reject) => { fail = reject; }); let calls = 0;
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.refresh = refreshStrategyPyramidPanel; module.exports.connect = panel => { activeStrategyPyramidPanel = panel; }; hasLocalStrategyPyramidAccess = async () => true;', {
+    './cognitiveRuntimeConfig': { readCognitiveRuntimeConfig: () => ({ mode: 'agent_cli', agentCli: 'codex', model: 'auto', revision: 'local-first-model' }), cognitiveRuntimeConfigRevision: config => config.revision },
+    './piAgentEngine': { EmbeddedPiAgentEngine: class { constructor() { this.id = 'fixture-engine:local-first-model'; } async judgeStrategyPyramid() { calls++; enter(); return result; } } }
+  });
+  const panel = { webview: { html: '', asWebviewUri: uri => String(uri), postMessage: async () => true } };
+  extension.connect(panel);
+  const context = { extensionPath: projectRoot, extensionUri: { fsPath: projectRoot }, globalState: { get: key => key === 'solopreneur.settings' ? { globalDataPath: root } : undefined, update: async () => {} } };
+  const loading = extension.refresh(context);
+  await entered;
+  try { assert.match(panel.webview.html, /Local portfolio project/); assert.match(panel.webview.html, /Reach customers|项目组合/); }
+  finally { fail(new Error('Local Agent CLI cognitive call timed out.')); await loading; }
+  await extension.refresh(context);
+  assert.equal(calls, 1, 'opening unchanged saved data must not repeat the failed model call');
 });
 
 test('strategy pyramid rules entry preserves request eligibility through fallback publication', async t => {
@@ -8387,8 +8586,9 @@ test('strategy command renders an offline portfolio and persists its diagnostic 
     if (failRender) { failRender = false; throw new Error('render failed API_KEY=private-fixture-key'); }
     rendered = value;
   } });
-  await extension.refresh(context);
-  assert.match(rendered, /战略金字塔加载失败/);
+  const beforeFailure = rendered;
+  await extension.refresh(context, true);
+  assert.equal(rendered, beforeFailure, 'a failed refresh must preserve the usable local document');
   const failedRender = native.store.readDiagnosticEvents().items;
   assert.ok(failedRender.some(e => e.scope === 'strategy.render' && e.payload.status === 'error'));
   const error = failedRender.filter(e => e.kind === 'error' && e.scope === 'strategy.load').at(-1);
@@ -8448,7 +8648,7 @@ test('strategy cache connection failures reach the existing failure page and ret
   const complete = successful.filter(e => e.scope === 'strategy.load' && e.payload.status === 'ok').at(-1);
   assert.ok(complete);
   const stages = successful.filter(e => e.payload.traceId === complete.payload.traceId);
-  for (const stage of ['strategy.access', 'strategy.build', 'strategy.source', 'strategy.investment', 'strategy.learning', 'strategy.persist', 'strategy.render']) {
+  for (const stage of ['strategy.access', 'strategy.local', 'strategy.source', 'strategy.investment', 'strategy.learning', 'strategy.persist', 'strategy.render']) {
     assert.ok(stages.some(e => e.scope === stage && e.payload.status === 'ok'), stage);
   }
   assert.notEqual(complete.payload.traceId, failed.find(e => e.scope === 'strategy.load').payload.traceId);
@@ -8465,12 +8665,13 @@ test('a late failed strategy cache request cannot replace a newer successful pan
   await require('../out/projectRegistry.js').refreshProjectRegistry(root, () => ({ legacyProjects: projects }),
     (operation, input) => native.ops({ operation, input }));
   await require('../out/strategyPyramid.js').buildStrategyPyramidSnapshotData(projects, root, project);
+  let modelRevision = 1;
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.refresh = refreshStrategyPyramidPanel;
     module.exports.connect = panel => { activeStrategyPyramidPanel = panel; };
     hasLocalStrategyPyramidAccess = async () => true;
   `, {
-    './cognitiveRuntimeConfig': { readCognitiveRuntimeConfig: () => ({ mode: 'none' }), cognitiveRuntimeConfigRevision: () => '' },
+    './cognitiveRuntimeConfig': { readCognitiveRuntimeConfig: () => ({ mode: 'none', revision: modelRevision }), cognitiveRuntimeConfigRevision: () => '' },
     './strategyPyramidWebview': { getStrategyPyramidWebviewHtml: () => '当前请求已成功' }
   });
   const context = { globalState: { get: key => key === 'solopreneur.settings' ? { globalDataPath: root } : undefined } };
@@ -8480,7 +8681,7 @@ test('a late failed strategy cache request cannot replace a newer successful pan
   native.store.readStrategyState = async (...args) => { if (++reads === 1) { enter(); await gate; throw new Error('old cache read unavailable'); } return original(...args); };
   const prior = extension.refresh(context).then(() => null, error => error);
   try {
-    await entered; await extension.refresh(context); release();
+    await entered; modelRevision++; await extension.refresh(context); release();
     assert.equal(await prior, null, 'the existing load handler must absorb the transport rejection');
     assert.equal(panel.webview.html, '当前请求已成功');
   } finally { release(); native.store.readStrategyState = original; }

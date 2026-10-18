@@ -4932,6 +4932,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const roadmapRevisionResults = {};
     let currentDailyReview = null;
     let initialDataReadyReported = false;
+    let coreDiagnosticTraceId = '';
+    let coreDiagnosticReadyReported = false;
+    const navigationStartedAt = new Map();
+    function reportSidebarCoreReady() {
+      if (!settingsDataLoaded || !coreDiagnosticTraceId || coreDiagnosticReadyReported) return;
+      coreDiagnosticReadyReported = true;
+      const report = () => vscode.postMessage({ command: 'sidebarCoreDataReady', traceId: coreDiagnosticTraceId });
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => requestAnimationFrame(report));
+      else setTimeout(report, 0);
+    }
     const ignoredTodayDecisionIds = new Set();
     let dailyReviewPollTimer = null;
     let currentFeedbackType = 'not_working';
@@ -8690,9 +8700,18 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
+        case 'navigationReady': {
+          const startedAt = navigationStartedAt.get(message.interactionId);
+          if (startedAt !== undefined) {
+            navigationStartedAt.delete(message.interactionId);
+            vscode.postMessage({ command: 'interactionCompleted', interactionId: message.interactionId, elapsedMs: performance.now() - startedAt });
+          }
+          break;
+        }
         case 'settingsLoaded':
           if (message.requestId && message.requestId !== latestSettingsRequestId) break;
           settingsDataLoaded = true;
+          reportSidebarCoreReady();
           const loadedSettings = message.settings || {};
           const authoritativeHydration = message.hydrated === true
             || (message.hydrated === undefined && latestSettingsRequestMode === 'full');
@@ -8880,6 +8899,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             if (typeof requestAnimationFrame === 'function') {
               requestAnimationFrame(() => requestAnimationFrame(reportInitialDataReady));
             }
+          }
+          if (message.projects.coreLoaded && message.projects.diagnosticTraceId) {
+            coreDiagnosticTraceId = message.projects.diagnosticTraceId;
+            reportSidebarCoreReady();
           }
           break;
 
@@ -9385,7 +9408,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     });
 
     btnOpenStrategyPyramid.addEventListener('click', () => {
-      vscode.postMessage({ command: 'showStrategyPyramid' });
+      const interactionId = 'strategy-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+      navigationStartedAt.set(interactionId, performance.now());
+      if (navigationStartedAt.size > 16) navigationStartedAt.delete(navigationStartedAt.keys().next().value);
+      vscode.postMessage({ command: 'showStrategyPyramid', interactionId });
     });
 
     bindSoloSelect(projectSelect, (value) => {

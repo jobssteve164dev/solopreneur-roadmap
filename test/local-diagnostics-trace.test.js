@@ -4,6 +4,31 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
+for (const persisted of [false, true]) test(`process diagnostic summary preserves lifecycle details from ${persisted ? 'database' : 'memory'}`, async t => {
+  const diagnostics = require('../out/localDiagnostics.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-process-summary-'));
+  const entries = [];
+  const payload = { traceId: 'restored-process', status: 'error', durationMs: 52, pid: 12345, exitCode: null, signal: 'SIGTERM', stdoutBytes: 70000, stderrBytes: 14, timeoutMs: 300000 };
+  diagnostics.configureLocalDiagnosticPersistence({ append: (_root, event) => entries.push(event), ...(persisted ? { read: async () => ({ items: [{ kind: 'operation', occurredAt: new Date().toISOString(), scope: 'model.cli.exit', payload }] }) } : {}) });
+  t.after(() => { diagnostics.configureLocalDiagnosticPersistence(undefined); fs.rmdirSync(root); });
+  if (!persisted) diagnostics.createLocalDiagnosticTrace(root, 'model.cli').record('model.cli.exit', 'error', 52, undefined, payload);
+  const summary = await diagnostics.buildLocalDiagnosticSummary({ extensionMode: 1 }, root, { appName: 'Code' });
+  for (const field of ['pid=12345', 'exit=null', 'signal=SIGTERM', 'stdoutBytes=70000', 'stderrBytes=14', 'timeoutMs=300000']) assert.ok(summary.includes(field), `missing ${field}`);
+});
+
+test('interaction diagnostics retain one monotonic timeline and a safe target across asynchronous stages', async t => {
+  const diagnostics = require('../out/localDiagnostics.js');
+  const entries = [];
+  diagnostics.configureLocalDiagnosticPersistence({ append: (_root, event) => entries.push(event) });
+  t.after(() => diagnostics.configureLocalDiagnosticPersistence(undefined));
+  const trace = diagnostics.createLocalDiagnosticTrace('/fixture', 'strategy.open', { interactionId: 'interaction-7', targetId: 'portfolio', generation: 3, budgetMs: 20 });
+  await diagnostics.withLocalDiagnosticTrace(trace, () => diagnostics.observeLocalDiagnosticStage('strategy.local', async () => new Promise(resolve => setTimeout(resolve, 25))));
+  assert.ok(entries.every(e => e.payload.interactionId === 'interaction-7' && e.payload.targetId === 'portfolio' && e.payload.generation === 3));
+  assert.ok(entries.at(-1).payload.elapsedMs >= 20);
+  assert.ok(entries.every((e, i) => i === 0 || e.payload.elapsedMs >= entries[i - 1].payload.elapsedMs));
+  assert.ok(entries.some(e => e.scope === 'strategy.local' && e.payload.budgetExceeded === true));
+});
+
 test('runtime handoff failures retain their diagnostic categories', () => {
   const diagnostics = require('../out/localDiagnostics.js');
   assert.equal(diagnostics.classifyDiagnosticFailure(new Error('different_runtime_build')), 'different_runtime_build');

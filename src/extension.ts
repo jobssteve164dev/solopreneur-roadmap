@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { performance } from 'node:perf_hooks';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -56,6 +57,7 @@ import {
   buildStrategyPyramidSnapshotData,
   createStrategyPyramidRequestGate,
   readCachedStrategyPyramidSnapshot,
+  readStrategyPyramidSourceRevision,
   saveProjectStrategyData,
   StrategyPyramidCognitiveEngine
 } from './strategyPyramid';
@@ -188,6 +190,7 @@ import {
 import {
   classifyDiagnosticFailure,
   createLocalDiagnosticTrace,
+  getCurrentLocalDiagnosticTrace,
   configureLocalDiagnosticPersistence,
   observeLocalDiagnosticStage,
   recordLocalDiagnosticError,
@@ -279,6 +282,11 @@ let telegramConnection: ReturnType<typeof createTelegramBackgroundConnection> | 
 let activePanel: vscode.WebviewPanel | null = null;
 let activeStrategyPyramidPanel: vscode.WebviewPanel | null = null;
 const strategyPyramidRequestGate = createStrategyPyramidRequestGate();
+let strategyPanelRefresh: { panel: vscode.WebviewPanel; key: string; promise: Promise<void>; interactions: Set<string> } | undefined;
+const strategyAccessChecks = new WeakMap<vscode.ExtensionContext, { grant: string; promise: Promise<boolean> }>();
+let strategyCredentialGeneration = 0;
+let strategySourceGeneration = 0;
+const strategyRenderDeliveries = new WeakMap<vscode.WebviewPanel, { trace: ReturnType<typeof createLocalDiagnosticTrace>; current: () => boolean; root: string; documentTraceId: string; browserReady?: boolean; pendingHtml?: string; pendingPhase?: 'local' | 'complete'; sourceRevision?: string }>();
 const externalSignalResponseVersions = new ExternalSignalResponseVersions();
 let activeProjectGrowthPanel: vscode.WebviewPanel | null = null;
 let activeProjectGrowthPath = '';
@@ -2635,6 +2643,7 @@ async function clearStoredProAccess(
       const current = await readPassportGrant(context);
       if (current?.grant !== options.expectedGrant) return false;
     }
+    strategyCredentialGeneration++;
     await context.secrets.delete(passportGrantSecretKey);
     const saved = getPersistedSettings(context);
     const proEntitlements = clearProEntitlements(saved.proEntitlements || {});
@@ -2734,6 +2743,7 @@ async function writePassportGrant(
       const current = await readPassportGrant(context);
       if (current?.grant !== options.expectedGrant) return false;
     }
+    if ((await readPassportGrant(context))?.grant !== payload.grant) strategyCredentialGeneration++;
     await context.secrets.store(passportGrantSecretKey, JSON.stringify(payload));
     const saved = getPersistedSettings(context);
     const verifiedEntitlements = result.allowed && Array.isArray(result.entitlements)
@@ -4850,22 +4860,41 @@ async function handleOpenStrategyPyramid(context: vscode.ExtensionContext): Prom
   await openStrategyPyramidPanel(context);
 }
 
+function strategyAccessRevision(context: vscode.ExtensionContext): string {
+  const settings = getPersistedSettings(context);
+  return JSON.stringify([strategyCredentialGeneration, hasProEntitlement(settings, 'strategyPyramid')]);
+}
+
 async function hasLocalStrategyPyramidAccess(context: vscode.ExtensionContext): Promise<boolean> {
-  return hasStrategyPyramidAccess(context);
+  const cached = await readPassportGrant(context);
+  if (!cached || !buildProAccountStatus(cached).authenticated || !cached.entitlements?.includes(strategyPyramidFeature)
+    || !hasProEntitlement(getPersistedSettings(context), 'strategyPyramid')) return hasStrategyPyramidAccess(context);
+  const panel = activeStrategyPyramidPanel;
+  const root = getPersistedSettings(context).globalDataPath;
+  let check = strategyAccessChecks.get(context);
+  if (!check || check.grant !== cached.grant) {
+    check = { grant: cached.grant, promise: observeLocalDiagnosticStage('strategy.access.remote', () => hasStrategyPyramidAccess(context)) };
+    strategyAccessChecks.set(context, check);
+    void check.promise.finally(() => { if (strategyAccessChecks.get(context) === check) strategyAccessChecks.delete(context); }).catch(() => {});
+  }
+  void check.promise.then(async allowed => {
+    if (allowed || !panel || activeStrategyPyramidPanel !== panel || getPersistedSettings(context).globalDataPath !== root) return;
+    const current = await readPassportGrant(context);
+    if (current && current.grant !== cached.grant) return;
+    if (activeStrategyPyramidPanel !== panel || getPersistedSettings(context).globalDataPath !== root) return;
+    strategyPyramidRequestGate.begin();
+    strategyRenderDeliveries.delete(panel);
+    panel.webview.html = buildLocalDataStatusHtml(panel.webview, context, {
+      title: '需要 SoloMap Pro', message: '登录或升级后继续查看战略金字塔。', actionLabel: '登录 / 升级 Pro', actionCommand: 'openProAuthorization'
+    });
+  }).catch(error => recordLocalDiagnosticError(root, 'strategy.access.remote', error));
+  return true;
 }
 
 async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promise<void> {
   if (activeStrategyPyramidPanel) {
     activeStrategyPyramidPanel.title = getStrategyPyramidPanelTitle(context);
     activeStrategyPyramidPanel.reveal(vscode.ViewColumn.One);
-    activeStrategyPyramidPanel.webview.html = buildLocalDataStatusHtml(
-      activeStrategyPyramidPanel.webview,
-      context,
-      {
-        title: '正在打开战略金字塔',
-        message: '先打开视图，再读取本地项目组合数据。'
-      }
-    );
     void refreshStrategyPyramidPanel(context);
     return;
   }
@@ -4895,15 +4924,50 @@ async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promi
   activeStrategyPyramidPanel.webview.onDidReceiveMessage(
     async (message) => {
       switch (message.command) {
-        case 'refreshStrategyPyramid':
-          activeStrategyPyramidPanel!.webview.html = buildLocalDataStatusHtml(
-            activeStrategyPyramidPanel!.webview,
-            context,
-            {
-              title: '正在刷新战略金字塔',
-              message: '正在重新读取本地项目组合数据。'
+        case 'strategy.rendered': {
+          const delivery = activeStrategyPyramidPanel && strategyRenderDeliveries.get(activeStrategyPyramidPanel);
+          if (delivery?.current() && delivery.trace.id === message.traceId) {
+            delivery.documentTraceId = message.traceId;
+            delivery.browserReady = true;
+            delivery.trace.record(message.phase === 'local' ? 'strategy.browser.local.ready' : 'strategy.browser.complete.ready', 'ok');
+            void sidebarProvider?.postMessage({ command: 'navigationReady', interactionId: delivery.trace.interactionId });
+            if (strategyPanelRefresh?.panel === activeStrategyPyramidPanel) {
+              for (const interactionId of strategyPanelRefresh.interactions) void sidebarProvider?.postMessage({ command: 'navigationReady', interactionId });
+              strategyPanelRefresh.interactions.clear();
             }
-          );
+            if (delivery.pendingPhase === message.phase) {
+              delivery.pendingHtml = undefined;
+              delivery.trace.record('strategy.background.delivered', 'ok');
+            }
+            if (delivery.pendingHtml) void postWebviewMessage(activeStrategyPyramidPanel!.webview, { command: 'strategy.updateAvailable', traceId: delivery.documentTraceId });
+          }
+          break;
+        }
+        case 'strategy.applyUpdate': {
+          const panel = activeStrategyPyramidPanel;
+          const delivery = panel && strategyRenderDeliveries.get(panel);
+          if (panel && delivery?.current() && delivery.documentTraceId === message.traceId && delivery.pendingHtml) {
+            const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+            let revision: string;
+            try {
+              revision = await withLocalDiagnosticTrace(delivery.trace, () => observeLocalDiagnosticStage('strategy.delivery.source', () => readStrategyPyramidSourceRevision(getProjects(context), root)));
+            } catch (error) {
+              delivery.trace.record('strategy.background.delivery', 'error', 0, error);
+              break;
+            }
+            if (!delivery.current() || strategyRenderDeliveries.get(panel) !== delivery) break;
+            if (revision !== delivery.sourceRevision) {
+              delivery.pendingHtml = undefined;
+              delivery.trace.record('strategy.background.superseded', 'cancel');
+              void refreshStrategyPyramidPanel(context);
+              break;
+            }
+            await postWebviewMessage(panel.webview, { command: 'strategy.update', traceId: delivery.documentTraceId, html: delivery.pendingHtml });
+            delivery.trace.record('strategy.background.sent', 'ok');
+          }
+          break;
+        }
+        case 'refreshStrategyPyramid':
           void refreshStrategyPyramidPanel(context, true);
           break;
         case 'openProAuthorization':
@@ -4947,66 +5011,124 @@ async function openStrategyPyramidPanel(context: vscode.ExtensionContext): Promi
 
 async function refreshStrategyPyramidPanel(context: vscode.ExtensionContext, forceRefresh = false): Promise<void> {
   const panel = activeStrategyPyramidPanel;
+  if (!panel) return;
+  const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+  const key = JSON.stringify([root, readCognitiveRuntimeConfig(root), getProjects(context), strategyAccessRevision(context), strategySourceGeneration]);
+  if (strategyPanelRefresh?.panel === panel && strategyPanelRefresh.key === key) {
+    const interactionId = getCurrentLocalDiagnosticTrace()?.interactionId;
+    if (interactionId) {
+      if (strategyRenderDeliveries.get(panel)?.browserReady) void sidebarProvider?.postMessage({ command: 'navigationReady', interactionId });
+      else strategyPanelRefresh.interactions.add(interactionId);
+    }
+    return strategyPanelRefresh.promise;
+  }
+  const promise = loadStrategyPyramidPanel(context, forceRefresh);
+  const refresh = { panel, key, promise, interactions: new Set<string>() };
+  strategyPanelRefresh = refresh;
+  try { await promise; }
+  finally { if (strategyPanelRefresh === refresh) strategyPanelRefresh = undefined; }
+}
+
+async function loadStrategyPyramidPanel(context: vscode.ExtensionContext, forceRefresh = false): Promise<void> {
+  const panel = activeStrategyPyramidPanel;
   if (!panel) {
     return;
   }
   const isLatestRequest = strategyPyramidRequestGate.begin();
   const canPublishToPanel = () => activeStrategyPyramidPanel === panel && isLatestRequest();
   const strategyGlobalDataPath = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
-  const trace = createLocalDiagnosticTrace(strategyGlobalDataPath, 'strategy.load');
-  const startedAt = Date.now();
+  let localContentAvailable = strategyRenderDeliveries.get(panel)?.root === strategyGlobalDataPath;
+  const trace = createLocalDiagnosticTrace(strategyGlobalDataPath, 'strategy.load', { interactionId: getCurrentLocalDiagnosticTrace()?.interactionId, targetId: 'portfolio', budgetMs: 20_000 });
+  const startedAt = performance.now();
   let canPublishCurrentSource = () => canPublishToPanel()
     && path.resolve(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) === path.resolve(strategyGlobalDataPath);
   await withLocalDiagnosticTrace(trace, async () => {
     try {
       if (!await observeLocalDiagnosticStage('strategy.access', () => hasLocalStrategyPyramidAccess(context))) {
-        if (canPublishCurrentSource()) panel.webview.html = buildLocalDataStatusHtml(panel.webview, context, {
+        if (canPublishCurrentSource()) {
+          strategyRenderDeliveries.delete(panel);
+          panel.webview.html = buildLocalDataStatusHtml(panel.webview, context, {
           title: '需要 SoloMap Pro',
           message: '战略金字塔需要 Pro。你仍然可以先使用本地路线图和项目卡片；登录或升级后这里会读取本地项目组合数据。',
           actionLabel: '登录 / 升级 Pro',
           actionCommand: 'openProAuthorization'
-        });
-        trace.record('strategy.load', 'cancel', Date.now() - startedAt);
+          });
+        }
+        trace.record('strategy.load', 'cancel', performance.now() - startedAt);
         return;
       }
       const strategyProjects = getProjects(context);
+      const sourceGeneration = strategySourceGeneration;
+      const accessRevision = strategyAccessRevision(context);
       const cognitiveConfig = readCognitiveRuntimeConfig(strategyGlobalDataPath);
       const engineConfigRevision = cognitiveConfig.mode === 'agent_cli' ? cognitiveRuntimeConfigRevision(cognitiveConfig) : '';
       const projectRevision = JSON.stringify(strategyProjects.map(project => [project.path, project.name, project.type || '']));
       canPublishCurrentSource = () => {
         if (!canPublishToPanel()) return false;
+        if (strategySourceGeneration !== sourceGeneration) return false;
+        if (strategyAccessRevision(context) !== accessRevision) return false;
         if (path.resolve(normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) !== path.resolve(strategyGlobalDataPath)) return false;
         const currentConfig = readCognitiveRuntimeConfig(strategyGlobalDataPath);
         const currentEngineRevision = currentConfig.mode === 'agent_cli' ? cognitiveRuntimeConfigRevision(currentConfig) : '';
         const currentProjectRevision = JSON.stringify(getProjects(context).map(project => [project.path, project.name, project.type || '']));
         return currentEngineRevision === engineConfigRevision && currentProjectRevision === projectRevision;
       };
-      const cachedSnapshot = forceRefresh ? null : await observeLocalDiagnosticStage('strategy.cache', () => readCachedStrategyPyramidSnapshot(
+      const cachedSnapshot = forceRefresh && cognitiveConfig.mode !== 'agent_cli' ? null : await observeLocalDiagnosticStage('strategy.cache', () => readCachedStrategyPyramidSnapshot(
         strategyProjects,
         strategyGlobalDataPath,
-        engineConfigRevision
+        engineConfigRevision,
+        cognitiveConfig.mode === 'agent_cli'
       ));
       trace.record(cachedSnapshot ? 'strategy.cache.hit' : 'strategy.cache.miss', 'ok');
-      const snapshot = cachedSnapshot || await observeLocalDiagnosticStage('strategy.build', () => buildStrategyPyramidSnapshot(context, undefined, canPublishCurrentSource));
+      const needsJudgment = cognitiveConfig.mode === 'agent_cli' && (forceRefresh || !cachedSnapshot || cachedSnapshot.engineConfigRevision !== engineConfigRevision);
+      const snapshot = cachedSnapshot || await observeLocalDiagnosticStage('strategy.local', () => buildStrategyPyramidSnapshotData(
+        strategyProjects, strategyGlobalDataPath, getWorkspaceRoot() || process.cwd(), !needsJudgment, canPublishCurrentSource
+      ));
       if (!canPublishCurrentSource()) {
-        trace.record('strategy.load', 'cancel', Date.now() - startedAt);
+        trace.record('strategy.load', 'cancel', performance.now() - startedAt);
         return;
       }
       await observeLocalDiagnosticStage('strategy.render', async () => {
-        panel.webview.html = getStrategyPyramidWebviewHtml(
+        const html = getStrategyPyramidWebviewHtml(
           panel.webview,
           context,
-          snapshot
+          needsJudgment ? { ...snapshot, engineStatus: 'updating' } : snapshot,
+          { traceId: trace.id }
         );
+        const previous = strategyRenderDeliveries.get(panel);
+        const delivery = { trace, current: canPublishCurrentSource, root: strategyGlobalDataPath,
+          documentTraceId: trace.id, sourceRevision: snapshot.sourceRevision };
+        if (previous?.root === strategyGlobalDataPath && !forceRefresh) {
+          strategyRenderDeliveries.set(panel, { ...delivery, documentTraceId: previous.documentTraceId, pendingHtml: html, pendingPhase: needsJudgment ? 'local' : 'complete' });
+          await postWebviewMessage(panel.webview, { command: 'strategy.updateAvailable', traceId: previous.documentTraceId });
+        } else {
+          strategyRenderDeliveries.set(panel, delivery);
+          panel.webview.html = html;
+        }
       });
-      trace.record('strategy.load', 'ok', Date.now() - startedAt);
+      localContentAvailable = true;
+      trace.record('strategy.local.delivered', 'ok', performance.now() - startedAt);
+      if (needsJudgment) {
+        const intelligent = await observeLocalDiagnosticStage('strategy.background', () => buildStrategyPyramidSnapshot(context, undefined, canPublishCurrentSource));
+        if (!canPublishCurrentSource()) { trace.record('strategy.load', 'cancel', performance.now() - startedAt); return; }
+        const delivery = strategyRenderDeliveries.get(panel);
+        if (delivery) {
+          delivery.pendingHtml = getStrategyPyramidWebviewHtml(panel.webview, context, intelligent, { traceId: trace.id });
+          delivery.sourceRevision = intelligent.sourceRevision;
+          delivery.pendingPhase = 'complete';
+          await postWebviewMessage(panel.webview, { command: 'strategy.updateAvailable', traceId: delivery.documentTraceId });
+        }
+      }
+      trace.record('strategy.load', 'ok', performance.now() - startedAt);
     } catch (error) {
       const current = canPublishCurrentSource();
-      trace.record('strategy.load', current ? 'error' : 'cancel', Date.now() - startedAt, error);
+      trace.record('strategy.load', current ? 'error' : 'cancel', performance.now() - startedAt, error);
       const message = error instanceof Error ? error.message : String(error);
       recordLocalDiagnosticError(strategyGlobalDataPath, 'strategy.load', `trace=${trace.id} ${message}`);
       if (!current) return;
       console.error('SoloMap strategy pyramid load failed:', sanitizeDiagnosticText(message));
+      if (localContentAvailable) return;
+      strategyRenderDeliveries.delete(panel);
       panel.webview.html = buildLocalDataStatusHtml(panel.webview, context, {
         title: '战略金字塔加载失败',
         message: '暂时无法读取项目组合，请稍后重试。',
@@ -5055,16 +5177,10 @@ async function buildStrategyPyramidSnapshot(
       if (current) return current;
       throw error;
     }
-    recordLocalDiagnosticError(globalDataPath, 'strategy.judgment', error);
-    const fallback = await observeLocalDiagnosticStage('strategy.fallback', () => buildStrategyPyramidSnapshotData(projects, globalDataPath, workspaceRoot, true, beforeCommit));
-    return {
-      ...fallback,
-      decisionSource: 'rules_fallback' as const,
-      engineId: engine.id,
-      engineConfigRevision,
-      engineStatus: 'failed' as const,
-      engineError: error instanceof Error ? error.message : String(error)
-    };
+    recordLocalDiagnosticError(globalDataPath, 'strategy.judgment', classifyDiagnosticFailure(error));
+    return observeLocalDiagnosticStage('strategy.fallback', () => buildStrategyPyramidSnapshotData(projects, globalDataPath, workspaceRoot, true, beforeCommit, {
+      engineId: engine.id, engineConfigRevision, engineError: classifyDiagnosticFailure(error)
+    }));
   }
 }
 
@@ -5078,7 +5194,7 @@ async function saveProjectStrategy(
   strategicAction: string,
   abilities: string[]
 ): Promise<void> {
-  return saveProjectStrategyData(
+  await saveProjectStrategyData(
     normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath),
     projectPath,
     role,
@@ -5088,6 +5204,7 @@ async function saveProjectStrategy(
     strategicAction,
     abilities
   );
+  strategySourceGeneration++;
 }
 
 

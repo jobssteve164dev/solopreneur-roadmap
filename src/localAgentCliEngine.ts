@@ -1,10 +1,13 @@
 import * as childProcess from 'child_process';
+import { performance } from 'node:perf_hooks';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 
 import { getAgentCliFamily, resolveAgentCliWithinFamily } from './agentCli';
 import { CognitiveShadowEngine, CognitiveShadowInput, CognitiveShadowProposal } from './autonomousRuntime';
 import { desktopSessionEnvironment } from './desktopSessionEnvironment';
+import { recordCurrentDiagnosticStage } from './localDiagnostics';
 
 export interface CognitiveCliInvocation {
   command: string;
@@ -15,6 +18,7 @@ export interface CognitiveCliInvocation {
   shell: false;
   timeoutMs?: number;
   maxOutputCharacters?: number;
+  outputSchema?: Record<string, unknown>;
 }
 
 export type CognitiveCliRunner = (invocation: CognitiveCliInvocation) => Promise<string>;
@@ -69,15 +73,36 @@ export function cognitiveCliEnvironment(): NodeJS.ProcessEnv {
 
 export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, registerCancel: (cancel?: () => void) => void): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = childProcess.spawn(invocation.command, invocation.args, {
+    const started = performance.now();
+    recordCurrentDiagnosticStage('model.cli.spawn', 'start');
+    let schemaDirectory: string | undefined;
+    let schemaFile: string | undefined;
+    const args = [...invocation.args];
+    const retireSchema = () => {
+      if (schemaFile && fs.existsSync(schemaFile)) fs.unlinkSync(schemaFile);
+      if (schemaDirectory) fs.rmdirSync(schemaDirectory);
+      schemaFile = undefined; schemaDirectory = undefined;
+    };
+    try {
+      if (invocation.outputSchema && getAgentCliFamily(invocation.command) === 'codex') {
+        schemaDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cognitive-schema-'));
+        schemaFile = path.join(schemaDirectory, 'judgment.json');
+        fs.writeFileSync(schemaFile, JSON.stringify(invocation.outputSchema), { mode: 0o600, flag: 'wx' });
+        args.push('--output-schema', schemaFile);
+      }
+    } catch (error) { retireSchema(); reject(error); return; }
+    const child = (() => { try { return childProcess.spawn(invocation.command, args, {
       cwd: invocation.cwd,
       env: invocation.env || cognitiveCliEnvironment(),
       shell: false,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe']
-    });
+    }); } catch (error) { retireSchema(); throw error; } })();
     let stdout = '';
     let stderr = '';
+    let stdoutBytes = 0; let stderrBytes = 0;
+    const timeoutMs = invocation.timeoutMs || 60_000;
+    child.once('spawn', () => recordCurrentDiagnosticStage('model.cli.spawn', 'ok', performance.now() - started, undefined, { pid: child.pid, timeoutMs }));
     let settled = false;
     let terminationError: Error | undefined;
     let forceKillTimer: NodeJS.Timeout | undefined;
@@ -87,6 +112,7 @@ export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, re
       clearTimeout(timer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
       registerCancel(undefined);
+      try { retireSchema(); } catch (error) { reject(error); return; }
       callback();
     };
     const terminate = (error: Error) => {
@@ -100,25 +126,31 @@ export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, re
     };
     registerCancel(() => terminate(new Error('Local Agent CLI cognitive call was cancelled.')));
     const timer = setTimeout(() => {
+      recordCurrentDiagnosticStage('model.cli.timeout', 'error', performance.now() - started, new Error('timeout'), { pid: child.pid, timeoutMs });
       terminate(new Error('Local Agent CLI cognitive call timed out.'));
-    }, invocation.timeoutMs || 60_000);
+    }, timeoutMs);
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', chunk => {
       const text = String(chunk);
+      if (stdoutBytes === 0) recordCurrentDiagnosticStage('model.cli.first_output', 'ok', performance.now() - started, undefined, { pid: child.pid });
+      stdoutBytes += Buffer.byteLength(text);
       if (invocation.maxOutputCharacters !== undefined && stdout.length + text.length > invocation.maxOutputCharacters) {
         terminate(new Error(`Local Agent CLI exceeded its ${invocation.maxOutputCharacters}-character output budget.`));
         return;
       }
-      stdout += text.slice(0, 65_536 - stdout.length);
+      stdout += text;
     });
-    child.stderr.on('data', chunk => { stderr += String(chunk).slice(0, 8_192 - stderr.length); });
-    child.once('error', error => finish(() => reject(error)));
-    child.once('close', code => finish(() => terminationError
+    child.stderr.on('data', chunk => { stderrBytes += Buffer.byteLength(String(chunk)); stderr += String(chunk).slice(0, 8_192 - stderr.length); });
+    child.once('error', error => { recordCurrentDiagnosticStage('model.cli.spawn', 'error', performance.now() - started, error); finish(() => reject(error)); });
+    child.once('close', (code, signal) => {
+      recordCurrentDiagnosticStage('model.cli.exit', code === 0 && !terminationError ? 'ok' : 'error', performance.now() - started, terminationError || (code === 0 ? undefined : new Error(`process exited (${code})`)), { pid: child.pid, exitCode: code, signal, stdoutBytes, stderrBytes });
+      finish(() => terminationError
       ? reject(terminationError)
       : code === 0
         ? resolve(stdout.trim())
-        : reject(new Error(`Local Agent CLI cognitive call failed (${code ?? 'unknown'}): ${stderr.trim()}`))));
+        : reject(new Error(`Local Agent CLI cognitive call failed (${code ?? 'unknown'}): ${stderr.trim()}`)));
+    });
     child.stdin.end(invocation.stdin);
   });
 }

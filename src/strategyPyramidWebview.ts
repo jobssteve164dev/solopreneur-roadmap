@@ -28,7 +28,8 @@ function strategyEscapeHtml(value: string | number): string {
 export function getStrategyPyramidWebviewHtml(
   webview: vscode.Webview,
   context: vscode.ExtensionContext,
-  snapshot: any
+  snapshot: any,
+  diagnostic?: { traceId: string }
 ): string {
   const codiconsUri = webview.asWebviewUri(joinExtensionUri(context, 'node_modules', '@vscode', 'codicons', 'dist', 'codicon.css'));
   const wordmarkUri = webview.asWebviewUri(joinExtensionUri(context, 'resources', 'logo_with_text.svg'));
@@ -39,6 +40,8 @@ export function getStrategyPyramidWebviewHtml(
   const isCognitive = snapshot.decisionSource === 'cognitive' && snapshot.engineStatus === 'completed';
   const decisionMeta = isCognitive
     ? '智能内核判断 · 基于本地项目、路线图和学习信号'
+    : snapshot.engineStatus === 'updating'
+      ? '智能分析更新中，你可以先查看和调整项目'
     : snapshot.engineStatus === 'failed'
       ? '智能判断暂不可用，当前显示基础判断'
       : '当前显示基础判断 · 在设置中选择模型额度来源后启用智能判断';
@@ -1359,7 +1362,53 @@ export function getStrategyPyramidWebviewHtml(
   </aside>
 
   <script>
-    const vscode = acquireVsCodeApi();
+    (() => {
+    const vscode = window.__solomapStrategyApi || (window.__solomapStrategyApi = acquireVsCodeApi());
+    window.__solomapStrategyListeners?.abort();
+    const listenerController = new AbortController();
+    window.__solomapStrategyListeners = listenerController;
+    const listenerOptions = { signal: listenerController.signal };
+    const diagnosticTraceId = ${JSON.stringify(diagnostic?.traceId || '')};
+    const diagnosticPhase = ${JSON.stringify(snapshot.engineStatus === 'updating' ? 'local' : 'complete')};
+    let pendingStrategyUpdate = '';
+    let composingStrategy = false;
+    const previousView = vscode.getState?.() || {};
+    function applyPendingStrategyUpdate() {
+      if (!pendingStrategyUpdate || composingStrategy || document.querySelector('.drawer.open')
+        || document.querySelector('input:focus, textarea:focus, select:focus')) return;
+      vscode.setState?.({ tab: document.querySelector('.tab-btn.active')?.getAttribute('data-tab'),
+        layer: document.querySelector('.pyramid-layer.selected')?.getAttribute('data-layer-key'), scrollY: window.scrollY });
+      const traceId = pendingStrategyUpdate;
+      pendingStrategyUpdate = '';
+      vscode.postMessage({ command: 'strategy.applyUpdate', traceId });
+    }
+    window.addEventListener('message', event => {
+      if (event.data?.traceId !== diagnosticTraceId) return;
+      if (event.data.command === 'strategy.update') {
+        if (composingStrategy || document.querySelector('.drawer.open') || document.querySelector('input:focus, textarea:focus, select:focus')) {
+          pendingStrategyUpdate = event.data.traceId;
+          return;
+        }
+        const updated = new DOMParser().parseFromString(event.data.html, 'text/html');
+        const initialization = updated.body.querySelector('script');
+        if (!initialization) return;
+        const script = document.createElement('script');
+        script.textContent = initialization.textContent;
+        initialization.remove();
+        pendingStrategyUpdate = '';
+        listenerController.abort();
+        document.body.replaceChildren(...Array.from(updated.body.childNodes));
+        document.body.appendChild(script);
+        return;
+      }
+      if (event.data.command !== 'strategy.updateAvailable') return;
+      pendingStrategyUpdate = event.data.traceId;
+      applyPendingStrategyUpdate();
+    }, listenerOptions);
+    document.addEventListener('compositionstart', () => { composingStrategy = true; }, listenerOptions);
+    document.addEventListener('compositionend', () => { composingStrategy = false; setTimeout(applyPendingStrategyUpdate, 0); }, listenerOptions);
+    document.addEventListener('focusout', () => setTimeout(applyPendingStrategyUpdate, 0), listenerOptions);
+    document.addEventListener('click', () => setTimeout(applyPendingStrategyUpdate, 0), listenerOptions);
     const projectRoles = ${projectRoleJson};
     const layers = ${layersJson};
 
@@ -1432,7 +1481,7 @@ export function getStrategyPyramidWebviewHtml(
         badge.innerHTML = '<span class="codicon codicon-star-full"></span> 优先聚焦';
         layer.appendChild(badge);
         // 默认选中该优先聚焦层
-        setTimeout(() => selectLayer(layer.getAttribute('data-layer-key')), 100);
+        if (!previousView.layer) setTimeout(() => selectLayer(layer.getAttribute('data-layer-key')), 100);
       }
     });
 
@@ -1616,6 +1665,15 @@ export function getStrategyPyramidWebviewHtml(
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
     }
+    if (previousView.tab) document.querySelector('[data-tab="' + previousView.tab + '"]')?.click();
+    if (previousView.layer) selectLayer(previousView.layer);
+    window.scrollTo(0, Number(previousView.scrollY) || 0);
+    const reportStrategyReady = () => {
+      if (diagnosticTraceId) vscode.postMessage({ command: 'strategy.rendered', traceId: diagnosticTraceId, phase: diagnosticPhase });
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => requestAnimationFrame(reportStrategyReady));
+    else setTimeout(reportStrategyReady, 0);
+    })();
   </script>
 </body>
 </html>`;

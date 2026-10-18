@@ -7,7 +7,7 @@ import { SyncEngine } from './db/syncEngine';
 import { AgentConversation } from './db/types';
 import { SolopreneurSettings } from './pluginContracts';
 import { getSidebarFallbackHtml, getSidebarWebviewHtml } from './sidebarWebview';
-import { recordLocalDiagnosticError } from './localDiagnostics';
+import { createLocalDiagnosticTrace, recordLocalDiagnosticError, withLocalDiagnosticTrace } from './localDiagnostics';
 
 function getDiagnosticDataPath(getSettings: () => SolopreneurSettings): string {
   try {
@@ -92,6 +92,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private readonly _sendIntelligenceMessage?: SidebarProviderDependencies['sendIntelligenceMessage'];
   private readonly _readAgentAccountStatuses: typeof readAgentAccountStatuses;
   private _initialDataReady = false;
+  private _startupTrace?: ReturnType<typeof createLocalDiagnosticTrace>;
+  private _coreReady = false;
+  private _startupSettingsSent = false;
+  private readonly _navigationTraces = new Map<string, ReturnType<typeof createLocalDiagnosticTrace>>();
   private readonly _conversationSnapshotLoads = new Map<string, {
     promise: Promise<SidebarConversationSnapshot>;
     startedAt: number;
@@ -259,6 +263,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
 
   public postMessage(message: Record<string, unknown>): Thenable<boolean> | Promise<boolean> {
     try {
+      if (this._startupTrace && !this._coreReady && !this._startupSettingsSent && message.command === 'settingsLoaded') {
+        this._startupSettingsSent = true;
+        this._startupTrace.record('sidebar.settings.sent', 'ok');
+      }
       return postWebviewMessage(this._view?.webview, message);
     } catch {
       return Promise.resolve(false);
@@ -327,6 +335,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     _context: vscode.WebviewViewResolveContext,
     _token: vscode.CancellationToken
   ) {
+    this._startupTrace = createLocalDiagnosticTrace(getDiagnosticDataPath(this._getSettings), 'sidebar.resolve', { targetId: 'sidebar', budgetMs: 15_000 });
+    this._coreReady = false; this._startupSettingsSent = false;
     this._view = webviewView;
     const webview = webviewView.webview;
     webviewView.onDidDispose?.(() => {
@@ -345,6 +355,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       };
 
       webviewView.webview.html = getSidebarWebviewHtml(webviewView.webview, this._extensionUri);
+      this._startupTrace.record('sidebar.html.sent', 'ok');
     } catch (error) {
       recordLocalDiagnosticError(getDiagnosticDataPath(this._getSettings), 'sidebar.render', error);
       console.error('SoloMap sidebar failed to render initial HTML:', error);
@@ -358,7 +369,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       void this.postMessage({ command: 'intelligenceConversationsLoaded', conversations });
     };
     // Listen to messages from the webview
-    webviewView.webview.onDidReceiveMessage(async (data) => {
+    const handleMessage = async (data: any) => {
       try {
         if (this._dispatchSharedAction && await this._dispatchSharedAction(data, webviewView.webview)) {
           return;
@@ -405,6 +416,20 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               this._onInitialDataReady?.();
             }
             break;
+          case 'sidebarCoreDataReady':
+            if (!this._coreReady && data.traceId === this._startupTrace?.id && this._view === webviewView) {
+              this._coreReady = true;
+              this._startupTrace?.record('sidebar.browser.core.ready', 'ok');
+            }
+            break;
+          case 'interactionCompleted': {
+            const trace = this._navigationTraces.get(String(data.interactionId || ''));
+            if (trace && Number.isFinite(data.elapsedMs) && data.elapsedMs >= 0 && data.elapsedMs < 3_600_000) {
+              trace.record('sidebar.navigation.browser.ready', 'ok', data.elapsedMs);
+              this._navigationTraces.delete(String(data.interactionId));
+            }
+            break;
+          }
           case 'getNodes':
             this.sendNodesToWebview();
             break;
@@ -502,6 +527,19 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           projectPath: String(data?.projectPath || '')
         });
       }
+    };
+    webviewView.webview.onDidReceiveMessage((data) => {
+      const command = String(data?.command || '');
+      if (!/^(?:getNodes|getSettings|getProjects|bootstrap\.get|settings\.get|project\.select|showStrategyPyramid|showFullRoadmap)$/.test(command)) return handleMessage(data);
+      const trace = createLocalDiagnosticTrace(getDiagnosticDataPath(this._getSettings), `sidebar.action.${command}`, { interactionId: data.interactionId, targetId: 'sidebar' });
+      if (command === 'showStrategyPyramid') {
+        this._navigationTraces.set(trace.interactionId!, trace);
+        if (this._navigationTraces.size > 16) this._navigationTraces.delete(this._navigationTraces.keys().next().value!);
+      }
+      return withLocalDiagnosticTrace(trace, async () => {
+        try { await handleMessage(data); trace.record(`sidebar.action.${command}`, 'ok'); }
+        catch (error) { trace.record(`sidebar.action.${command}`, 'error', 0, error); throw error; }
+      });
     });
 
     // The Webview owns the single cold-start request. Pushing the same payload
@@ -731,7 +769,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const globalStore = createGlobalEngineeringSnapshotPlaceholder(globalDataPath, currentPortfolio);
     void this.postMessage({
       command: 'projectsLoaded',
-      projects: { projects, selectedProjectPath, portfolio: currentPortfolio, globalStore, recentConversationSnapshot }
+      projects: { projects, selectedProjectPath, portfolio: currentPortfolio, globalStore, recentConversationSnapshot, coreLoaded: true, diagnosticTraceId: this._startupTrace?.id }
     });
   }
 

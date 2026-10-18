@@ -51,6 +51,11 @@ test('Pi runtime bundles the pinned Harness adapter surface used by the VSIX', a
   assert.equal(typeof runtime.DEFAULT_COMPACTION_SETTINGS, 'object');
 });
 
+test('strategy model failures preserve the underlying CLI timeout instead of becoming invalid JSON', async () => {
+  const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async () => { throw new Error('Local Agent CLI cognitive call timed out.'); } });
+  await assert.rejects(engine.judgeStrategyPyramid({ projects: [], totals: { projects: 0 } }), /Local Agent CLI cognitive call timed out/);
+});
+
 test('embedded Pi Agent plans through the selected Agent CLI model pipe', async () => {
   const invocations = [];
   const engine = new EmbeddedPiAgentEngine({
