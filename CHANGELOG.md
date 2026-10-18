@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.594 - 2026-10-18
+
+### Fixed
+- preserve external signals during local refresh (f178597)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.593 - 2026-10-18
 
 ### Added
