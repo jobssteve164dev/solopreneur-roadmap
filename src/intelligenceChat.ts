@@ -8,6 +8,7 @@ import {
   observeLocalDiagnosticStage,
   withLocalDiagnosticTrace
 } from './localDiagnostics';
+import type { IntelligenceContextCheckpoint, StagedIntelligenceContextCheckpoint } from './intelligenceContextCheckpoint';
 
 export interface IntelligenceMessage {
   role: 'user' | 'assistant';
@@ -22,6 +23,16 @@ export interface IntelligenceConversation {
   messages: IntelligenceMessage[];
 }
 
+export interface IntelligenceReplyContext {
+  checkpoint?: IntelligenceContextCheckpoint;
+  stageCheckpoint(checkpoint: StagedIntelligenceContextCheckpoint): void;
+}
+
+export interface IntelligenceCommitGuard {
+  type: 'telegram-reply-generation';
+  generation: number;
+}
+
 type IntelligenceDataRequest = <T>(root: string, request: { operation: string; input: Record<string, unknown> }) => Promise<T>;
 
 export class IntelligenceConversationStore {
@@ -29,7 +40,7 @@ export class IntelligenceConversationStore {
 
   constructor(
     private readonly globalDataPath: string,
-    private readonly reply: (messages: IntelligenceMessage[]) => Promise<string>,
+    private readonly reply: (messages: IntelligenceMessage[], context: IntelligenceReplyContext) => Promise<string>,
     private readonly dataRequest: IntelligenceDataRequest = sendRuntimeDataRequest
   ) {}
 
@@ -50,7 +61,7 @@ export class IntelligenceConversationStore {
     return this.dataRequest(this.databaseRoot, { operation: 'list_intelligence_conversations', input: {} });
   }
 
-  send(text: string, conversationId = '', canCommit: () => boolean = () => true): Promise<IntelligenceConversation> {
+  send(text: string, conversationId = '', canCommit: () => boolean = () => true, commitGuard?: IntelligenceCommitGuard): Promise<IntelligenceConversation> {
     const content = String(text || '').trim();
     if (!content) return Promise.reject(new Error('Please enter a message.'));
     const trace = getCurrentLocalDiagnosticTrace() || createLocalDiagnosticTrace(this.globalDataPath, 'sidebar.chat');
@@ -64,11 +75,15 @@ export class IntelligenceConversationStore {
       trace.record('conversation.queue', 'ok', Date.now() - startedAt);
       const requestId = crypto.randomUUID();
       for (;;) {
-        const state = await this.dataRequest<{ conversation: IntelligenceConversation; revision: number } | null>(this.databaseRoot, { operation: 'read_intelligence_conversation', input: { id } });
+        const state = await this.dataRequest<{ conversation: IntelligenceConversation; revision: number; contextCheckpoint?: IntelligenceContextCheckpoint } | null>(this.databaseRoot, { operation: 'read_intelligence_conversation', input: { id } });
         const current = state?.conversation || null;
         if (conversationId && !current) throw new Error('Intelligence conversation was not found.');
         const messages: IntelligenceMessage[] = [...(current?.messages || []), { role: 'user', content }];
-        const answer = String(await observeLocalDiagnosticStage('conversation.reply', () => this.reply(messages))).trim();
+        let contextCheckpoint: StagedIntelligenceContextCheckpoint | undefined;
+        const answer = String(await observeLocalDiagnosticStage('conversation.reply', () => this.reply(messages, {
+          ...(state?.contextCheckpoint ? { checkpoint: state.contextCheckpoint } : {}),
+          stageCheckpoint(checkpoint) { contextCheckpoint = checkpoint; }
+        }))).trim();
         if (!answer) throw new Error('Intelligence did not return an answer.');
         if (!canCommit()) throw new Error('intelligence_reply_revoked');
         const now = new Date().toISOString();
@@ -80,7 +95,13 @@ export class IntelligenceConversationStore {
           messages: [...messages, { role: 'assistant', content: answer }]
         };
         try { await observeLocalDiagnosticStage('conversation.persist', async () => {
-          await this.dataRequest(this.databaseRoot, { operation: 'write_intelligence_conversation', input: { conversation, expectedRevision: state?.revision || 0, idempotencyKey: `${requestId}:${state?.revision || 0}` } });
+          await this.dataRequest(this.databaseRoot, { operation: 'write_intelligence_conversation', input: {
+            conversation,
+            expectedRevision: state?.revision || 0,
+            idempotencyKey: `${requestId}:${state?.revision || 0}`,
+            ...(commitGuard ? { commitGuard } : {}),
+            ...(contextCheckpoint ? { contextCheckpoint } : {})
+          } });
         }); } catch (error) {
           if (error instanceof Error && error.message === 'revision_conflict') continue;
           throw error;

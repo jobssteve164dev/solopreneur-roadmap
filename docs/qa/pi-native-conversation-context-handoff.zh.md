@@ -6,6 +6,16 @@
 
 依赖基线：`@earendil-works/pi-agent-core@0.87.1`、`@earendil-works/pi-ai@0.87.1`
 
+## 2026-10-18 实施状态
+
+- 角色化历史已恢复到 Pi `AgentMessage[]`，当前 user 继续通过 `agent.prompt()` 进入；侧边栏与 Telegram 共用同一路径。
+- 长上下文不再使用 SoloMap 的固定字符预算或自定义切点。`transformContext` 只承担适配：将数据库消息映射为 Pi Harness `Entry[]`，调用上游默认 `DEFAULT_COMPACTION_SETTINGS`、`estimateContextTokens`、`shouldCompact`、`prepareCompaction`、`compactWithRequest` 与 `buildSessionContext`；MCP 工具输出使用 Pi 上游 `truncateHead` 的行数/字节限界。
+- 摘要仍通过用户已选择的 Agent CLI 模型管道生成。明确选择的模型从 Pi 模型目录读取 `contextWindow`/`maxTokens`；CLI 使用 `auto` 或目录中没有该模型时，有目录映射的 family 采用 Pi 目录最小能力，未暴露映射的 CLI 使用 65,536 token 的保守传输合同。未达到 Pi 阈值时不增加模型请求；达到阈值时才增加 Harness 摘要请求，摘要输出服从 Harness 下发的 `maxTokens`。
+- 完整 user/assistant 历史仍只保存在 SoloMap 统一数据库。Harness checkpoint 是带来源消息数、来源哈希、源修订和 token 计数的派生投影，与最终回答在同一事务提交；失败、取消、撤销或 revision conflict 不会留下 checkpoint。
+- 每个对话只保留一条当前 checkpoint 投影。替换下来的 content 会进入既有数据库存储清理队列，并由同一 Runtime 的有界后台维护回收，不要求重启；不引入 Pi SQLite、JSONL、第二数据库或 Agent CLI native session。
+- Telegram 将 `replyGeneration` 作为事务提交守卫交给统一数据库；解绑或换绑与消息/checkpoint 提交在同一权威数据库边界竞争，旧代际不能留下整轮或半轮写入。
+- 本文后续“已观察到的当前实现”保留的是 `v0.0.589` 实施前审计事实，用于解释根因，不再代表 2026-10-18 的代码现状。
+
 ## 最终目标
 
 让侧边栏智能内核和 Telegram 共用的每个对话，真正以 Pi `Agent` 的原生消息状态运行：SoloMap 数据库继续作为唯一持久化对话账本，每轮开始把该对话的历史恢复为 Pi `AgentMessage[]`，本轮用户消息、工具调用、工具结果和最终回答由 Pi 原生 Agent 循环处理，最终用户可见消息再原子写回原对话账本。
@@ -34,9 +44,9 @@
 - 禁止只改提示词、只改序列化格式，或只证明 stdin 中仍能搜到旧文本，就宣称已经使用 Pi 原生上下文。
 - 禁止以截断全部旧消息、提前失败或降低回答能力代替长上下文治理。
 
-## 已观察到的当前实现
+## 实施前观察到的实现
 
-以下均为当前代码事实，不是历史设计推断。
+以下均为审计基线 `v0.0.589` 的代码事实，不是对 2026-10-18 实施结果的描述。
 
 ### 1. 数据库已经正确承担持久对话账本
 
@@ -157,17 +167,17 @@ context: { ...context, messages: await loadDatabaseMessages() }
 
 ### 6. 长上下文必须有有界且可验证的治理
 
-切换到 `AgentMessage[]` 后不能继续无限注入全部历史。Pi 0.87.1 的 `transformContext` 可以在每次 provider 请求前生成临时上下文投影；它必须返回消息数组且不得抛错或 reject。Pi harness 另有 token estimate、session context 和 compaction primitives，但它们依赖 session `Entry[]`、harness `Context`、`Models` 或调用方提供的摘要请求边界，不能直接套用到当前 `AgentMessage[] + Agent CLI streamFn` 链路。SoloMap 当前 bundle 也只显式导出 `Agent` 与事件流，且 assistant usage 被填为零。
+切换到 `AgentMessage[]` 后不能继续无限注入全部历史，也不应由 SoloMap 平行维护一套截断策略。正式边界如下：
 
-实施顺序：
+1. SoloMap 把数据库账本和可用 checkpoint 映射为 Pi Harness `Entry[]`，但不决定 token 阈值、切点、摘要格式或保留尾部。
+2. Pi Harness 使用其默认设置完成 token 估算、阈值判断、compaction preparation、摘要生成和 session context 重建。
+3. Agent CLI 只是 Harness 摘要请求与正常回答请求共用的模型传输边界，不保存隐藏会话。
+4. 完整历史继续留在统一数据库；checkpoint 只能作为可校验、可替换的派生投影，不能覆盖原消息。
+5. checkpoint 与成功回答原子提交；冲突重试必须丢弃基于旧修订生成的 checkpoint 并从新历史重算。
+6. checkpoint 存储保持一对话一条当前投影，替换内容进入现有清理队列，避免派生摘要形成无界增长。
+7. Codex、Claude、Copilot、Cursor、Antigravity 的聊天调用均从 stdin 接收完整上下文，并为每次 provider 请求启动新进程；Codex/Claude 显式关闭会话持久化，其他三类调用不携带 continue/resume/session-id 参数。SoloMap 从不读取或恢复 Agent CLI 会话，Agent CLI 不成为第二份会话账本。
 
-1. 先让角色化 transcript 正确成立，并为真实长对话建立字符/token 估算基线。
-2. 第一版在 `transformContext` 中做不抛异常的确定性投影：按完整 user/assistant 轮次保留最近上下文，始终保留 leading system、当前 user 与当前轮完整工具组。只有已经确认原消息没有超出预算时，异常回退才可返回原消息；输入大小未知或已经超预算时，必须使用经过专门测试的保守有界投影，不能清空上下文，也不能让无界原消息重新进入 CLI。
-3. `transformContext` 只影响本次 provider 输入，不修改 `agent.state.messages`，也不修改 SoloMap 数据库中的完整用户历史。
-4. 若测量证明仅裁剪会损害必要上下文，再单独设计 harness compaction adapter：先把账本投影为 Pi session `Entry[]`，建立独立的 harness `Context` adapter，提供兼容 Agent CLI 的摘要请求边界，并定义摘要 checkpoint 的来源范围、源修订、幂等和回读合同。
-5. 只有上述 adapter 在隔离测试中成立后，才能把 compaction exports 加入 `scripts/bundle-pi-runtime.cjs`；不能把 `prepareCompaction` 或 `compact` 当成可直接消费聊天消息的函数，也不能因为包里存在 API 就扩大 VSIX bundle。
-
-第一版若只完成角色化恢复但完全没有长上下文界限，仍属于未闭环；至少要有明确预算、通过 `transformContext` 按完整轮次投影的负向测试、不丢当前 user 的保证，以及异常时不抛出或清空上下文的回退。是否另行接入 harness compaction 与持久摘要，由真实历史规模和回答保真证据决定，不能作为本轮默认实现。
+Pi 默认阈值以下保持原消息并且不增加摘要调用；阈值以上的额外一次摘要调用（拆分超大 turn 时可能两次）属于 Harness 的正式 compaction 成本，不由 SoloMap 的字符预算提前触发。
 
 ## 影响面
 

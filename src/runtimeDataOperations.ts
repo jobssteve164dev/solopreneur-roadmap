@@ -782,7 +782,13 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       case 'import_project_data': return migrations.enqueue(input);
       case 'read_intelligence_conversation': return store.readIntelligenceConversation(String(input.id || ''));
       case 'list_intelligence_conversations': return store.listIntelligenceConversations();
-      case 'write_intelligence_conversation': return store.writeIntelligenceConversation(input as unknown as Parameters<UnifiedDataStore['writeIntelligenceConversation']>[0]);
+      case 'write_intelligence_conversation': {
+        const result = store.writeIntelligenceConversation(input as unknown as Parameters<UnifiedDataStore['writeIntelligenceConversation']>[0]);
+        if (input.contextCheckpoint && store.hasDatabaseStorageCleanupCandidates()) {
+          void maintainDatabaseStorage(false, true).catch(() => undefined);
+        }
+        return result;
+      }
       case 'migration_status': {
         const scope = await migrationScope(input); const job = store.readMigrationJob(String(input.jobId || ''));
         if (scope && !recycling.jobBelongsToProject(job, scope)) throw new Error('maintenance_scope_denied');

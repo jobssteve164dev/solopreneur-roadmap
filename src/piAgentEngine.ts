@@ -6,7 +6,12 @@ import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 
 import { getAgentCliFamily, resolveAgentCliWithinFamily } from './agentCli';
 import { CognitiveShadowEngine, CognitiveShadowInput, CognitiveShadowProposal } from './autonomousRuntime';
-import { IntelligenceMessage } from './intelligenceChat';
+import { IntelligenceMessage, IntelligenceReplyContext } from './intelligenceChat';
+import {
+  intelligenceMessagePrefixHash,
+  MAX_INTELLIGENCE_CONTEXT_SUMMARY_CHARACTERS,
+  StagedIntelligenceContextCheckpoint
+} from './intelligenceContextCheckpoint';
 import { getIntelligenceMcpConnector, intelligenceActionToolNames } from './intelligenceMcp';
 import { unifiedToolNames } from './unifiedMcp';
 import { buildAgentDatabaseInstructions } from './agentDatabaseConfig';
@@ -28,14 +33,58 @@ type PiAgentModule = {
     prompt(input: string): Promise<void>;
     abort(): void;
   };
+  DEFAULT_COMPACTION_SETTINGS: { enabled: boolean; reserveTokens: number; keepRecentTokens: number };
+  convertToLlm(messages: PiMessage[]): PiMessage[];
+  estimateContextTokens(messages: PiMessage[]): { tokens: number };
+  shouldCompact(contextTokens: number, contextWindow: number, settings: { enabled: boolean; reserveTokens: number; keepRecentTokens: number }): boolean;
+  prepareCompaction(entries: PiEntry[], settings: { enabled: boolean; reserveTokens: number; keepRecentTokens: number }): PiResult<Record<string, unknown> | undefined>;
+  formatSize(bytes: number): string;
+  truncateHead(content: string): {
+    content: string;
+    truncated: boolean;
+    totalLines: number;
+    totalBytes: number;
+    outputLines: number;
+    outputBytes: number;
+  };
+  compactWithRequest(
+    preparation: Record<string, unknown>,
+    options: { model: Record<string, unknown>; thinkingLevel?: string },
+    request: (context: { systemPrompt?: string; messages?: PiMessage[] }, options: Record<string, unknown>, requestContext: unknown) => Promise<Record<string, unknown>>,
+    context: unknown
+  ): Promise<PiResult<{ summary: string; retainedTail: PiMessage[]; tokensBefore: number; details?: unknown }>>;
+  buildSessionContext(entries: PiEntry[], options: undefined, context: unknown): Promise<PiMessage[]>;
+  TODO_CONTEXT: unknown;
+  withAbortSignal(signal: AbortSignal, context: unknown): unknown;
 };
 
 type PiMessage = Record<string, unknown>;
+type PiEntry = {
+  id: string;
+  parentId: string | null;
+  seq: number;
+  timestamp: number;
+  type: 'message' | 'compaction';
+  message?: PiMessage;
+  summary?: string;
+  retainedTail?: PiMessage[];
+  tokensBefore?: number;
+  fromHook?: boolean;
+};
+type PiResult<T> = { ok: true; value: T } | { ok: false; error: { message?: string } };
 
 type PiAiModule = {
   createAssistantMessageEventStream(): {
     push(event: Record<string, unknown>): void;
   };
+  getBuiltinModel(provider: string, model: string): {
+    contextWindow: number;
+    maxTokens: number;
+  } | undefined;
+  getBuiltinModels(provider: string): Array<{
+    contextWindow: number;
+    maxTokens: number;
+  }>;
 };
 
 export interface PiDeliveryInput {
@@ -97,105 +146,14 @@ function messageBody(message: PiMessage): string {
   }).filter(Boolean).join('\n');
 }
 
-function transcriptPrompt(context: { messages?: Array<Record<string, unknown>> }): string {
-  return (context.messages || []).map((message) => {
+function transcriptPrompt(context: { systemPrompt?: string; messages?: Array<Record<string, unknown>> }): string {
+  const messages = context.messages || [];
+  const transcript = messages.map((message) => {
     const role = String(message.role || 'user').toUpperCase();
     return `${role}:\n${messageBody(message)}`;
   }).filter(block => block.trim()).join('\n\n');
-}
-
-const CHAT_INPUT_CHARACTER_BUDGET = 600_000;
-const CONTEXT_TRUNCATION_MARKER = '\n…[context truncated]…\n';
-
-function boundedText(value: string, limit: number): string {
-  if (value.length <= limit) return value;
-  if (limit <= CONTEXT_TRUNCATION_MARKER.length) return CONTEXT_TRUNCATION_MARKER.slice(0, Math.max(0, limit));
-  const retained = Math.max(0, limit - CONTEXT_TRUNCATION_MARKER.length);
-  const prefix = Math.ceil(retained / 2);
-  return `${value.slice(0, prefix)}${CONTEXT_TRUNCATION_MARKER}${value.slice(value.length - (retained - prefix))}`;
-}
-
-function boundedJsonValue(value: unknown, limit: number): unknown {
-  const serialized = safeJson(value);
-  if (serialized.length <= limit) return value;
-  return { contextTruncated: true, preview: boundedText(serialized, Math.max(64, limit)) };
-}
-
-function boundedMessage(message: PiMessage, bodyLimit: number): PiMessage {
-  const copy = { ...message };
-  if (typeof message.content === 'string') return { ...copy, content: boundedText(message.content, bodyLimit) };
-  if (!Array.isArray(message.content)) return copy;
-  if (message.role === 'toolResult' && messageBody(message).length > bodyLimit) {
-    const text = messageText(message) || safeJson(message.content);
-    return { ...copy, content: [{ type: 'text', text: boundedText(text, Math.max(0, bodyLimit - 32)) }] };
-  }
-  const itemLimit = Math.max(0, Math.floor(bodyLimit / Math.max(1, message.content.length)));
-  return {
-    ...copy,
-    content: message.content.map(item => {
-      if (!item || typeof item !== 'object') return item;
-      const content = item as Record<string, unknown>;
-      if (content.type === 'text') return { ...content, text: boundedText(String(content.text || ''), itemLimit) };
-      if (content.type === 'toolCall') return {
-        ...content,
-        arguments: boundedJsonValue(content.arguments, itemLimit)
-      };
-      return boundedJsonValue(content, itemLimit);
-    })
-  };
-}
-
-function boundedProtectedContext(messages: PiMessage[]): PiMessage[] {
-  let bodyLimit = Math.max(0, Math.floor((CHAT_INPUT_CHARACTER_BUDGET - messages.length * 32) / Math.max(1, messages.length)));
-  let projected = messages.map(message => boundedMessage(message, bodyLimit));
-  while (bodyLimit > 0 && transcriptPrompt({ messages: projected }).length > CHAT_INPUT_CHARACTER_BUDGET) {
-    bodyLimit = Math.floor(bodyLimit * 0.75);
-    projected = messages.map(message => boundedMessage(message, bodyLimit));
-  }
-  if (transcriptPrompt({ messages: projected }).length <= CHAT_INPUT_CHARACTER_BUDGET) return projected;
-  const currentUser = [...messages].reverse().find(message => message.role === 'user');
-  return [{
-    role: 'user',
-    content: boundedText(currentUser ? messageText(currentUser) : '', CHAT_INPUT_CHARACTER_BUDGET - 7),
-    ...(typeof currentUser?.timestamp === 'number' ? { timestamp: currentUser.timestamp } : {})
-  }];
-}
-
-function projectChatContext(messages: PiMessage[]): PiMessage[] {
-  const source = Array.isArray(messages) ? messages.slice() : [];
-  try {
-    if (!source.length || transcriptPrompt({ messages: source }).length <= CHAT_INPUT_CHARACTER_BUDGET) return source;
-    let leadingSystemCount = 0;
-    while (source[leadingSystemCount]?.role === 'system') leadingSystemCount += 1;
-    const leading = source.slice(0, leadingSystemCount);
-    const conversation = source.slice(leadingSystemCount);
-    const turns: PiMessage[][] = [];
-    for (const message of conversation) {
-      if (message.role === 'user' || turns.length === 0) turns.push([message]);
-      else turns[turns.length - 1].push(message);
-    }
-    const selected: PiMessage[][] = [];
-    for (let index = turns.length - 1; index >= 0; index -= 1) {
-      const candidate = [...leading, ...turns[index], ...selected.flat()];
-      if (transcriptPrompt({ messages: candidate }).length > CHAT_INPUT_CHARACTER_BUDGET) {
-        if (selected.length === 0) return boundedProtectedContext(candidate);
-        break;
-      }
-      selected.unshift(turns[index]);
-    }
-    return [...leading, ...selected.flat()];
-  } catch {
-    const leading = source.filter((message, index) => message?.role === 'system' && source.slice(0, index).every(item => item?.role === 'system'));
-    let currentUserIndex = -1;
-    for (let index = source.length - 1; index >= 0; index -= 1) {
-      if (source[index]?.role === 'user') {
-        currentUserIndex = index;
-        break;
-      }
-    }
-    const currentTurn = currentUserIndex >= 0 ? source.slice(currentUserIndex) : source.slice(-1);
-    return boundedProtectedContext([...leading, ...currentTurn]);
-  }
+  if (!context.systemPrompt || messages.some(message => message.role === 'system')) return transcript;
+  return `SYSTEM:\n${context.systemPrompt}\n\n${transcript}`;
 }
 
 function emptyUsage(): Record<string, unknown> {
@@ -230,18 +188,112 @@ function restoredChatMessages(messages: IntelligenceMessage[], model: string): P
     : assistantMessage(model, message.content, 'stop', '', baseTimestamp + index));
 }
 
-function embeddedModel(model: string): Record<string, unknown> {
+function messageSignature(message: PiMessage): string {
+  return safeJson({
+    role: message.role,
+    body: messageBody(message),
+    ...(message.role === 'toolResult' ? {
+      toolCallId: message.toolCallId,
+      toolName: message.toolName,
+      isError: message.isError
+    } : {})
+  });
+}
+
+function piEntries(messages: PiMessage[], startSequence = 1, parentId: string | null = null): PiEntry[] {
+  let parent = parentId;
+  return messages.map((message, index) => {
+    const id = `message:${startSequence + index}`;
+    const entry: PiEntry = {
+      id,
+      parentId: parent,
+      seq: startSequence + index,
+      timestamp: typeof message.timestamp === 'number' ? message.timestamp : Date.now() + index,
+      type: 'message',
+      message
+    };
+    parent = id;
+    return entry;
+  });
+}
+
+function sameMessagePrefix(left: PiMessage[], right: PiMessage[], count: number): boolean {
+  if (left.length < count || right.length < count) return false;
+  for (let index = 0; index < count; index += 1) {
+    if (messageSignature(left[index]) !== messageSignature(right[index])) return false;
+  }
+  return true;
+}
+
+interface ActiveHarnessCheckpoint {
+  sourceMessageCount: number;
+  sourceSignature: PiMessage[];
+  summary: string;
+  retainedTail: PiMessage[];
+  tokensBefore: number;
+  createdAt: number;
+}
+
+function checkpointEntry(checkpoint: ActiveHarnessCheckpoint): PiEntry {
   return {
-    id: model || 'auto',
-    name: `Agent CLI ${model || 'auto'}`,
+    id: `compaction:${checkpoint.createdAt}:${checkpoint.sourceMessageCount}`,
+    parentId: null,
+    seq: checkpoint.sourceMessageCount,
+    timestamp: checkpoint.createdAt,
+    type: 'compaction',
+    summary: checkpoint.summary,
+    retainedTail: checkpoint.retainedTail,
+    tokensBefore: checkpoint.tokensBefore,
+    fromHook: false
+  };
+}
+
+const AGENT_CLI_MODEL_PROVIDERS: Record<string, string> = {
+  codex: 'openai-codex',
+  claude: 'anthropic',
+  copilot: 'github-copilot',
+  antigravity: 'google'
+};
+
+function embeddedModel(agentCli: string, model: string, ai: PiAiModule): Record<string, unknown> {
+  const selectedModel = model || 'auto';
+  const provider = AGENT_CLI_MODEL_PROVIDERS[getAgentCliFamily(agentCli)];
+  const familyModels = provider ? ai.getBuiltinModels(provider) : [];
+  const catalogModel = provider && selectedModel !== 'auto'
+    ? ai.getBuiltinModel(provider, selectedModel)
+    : undefined;
+  const conservativeContextWindow = familyModels.length
+    ? Math.min(...familyModels.map(candidate => candidate.contextWindow))
+    : 65_536;
+  const familyMaxTokens = familyModels.map(candidate => candidate.maxTokens).filter(value => value > 0);
+  const conservativeMaxTokens = familyMaxTokens.length ? Math.min(...familyMaxTokens) : 8_192;
+  return {
+    id: selectedModel,
+    name: `Agent CLI ${selectedModel}`,
     api: 'agent-cli',
     provider: 'agent-cli',
     baseUrl: 'local-agent-cli://model-pipe',
     reasoning: true,
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 200_000,
-    maxTokens: 8_192
+    // Agent CLIs do not expose the resolved model when `auto` is selected.
+    // Use Pi's smallest family capability then; explicit models use their exact Pi catalog entry.
+    contextWindow: catalogModel?.contextWindow || conservativeContextWindow,
+    maxTokens: catalogModel?.maxTokens || conservativeMaxTokens
+  };
+}
+
+function boundedToolContent(agent: PiAgentModule, content: unknown): { content: Array<{ type: 'text'; text: string }>; details?: unknown } {
+  const textParts = (Array.isArray(content) ? content : [])
+    .filter((part: unknown): part is { type: 'text'; text: string } =>
+      Boolean(part && typeof part === 'object' && (part as { type?: unknown }).type === 'text'));
+  const combined = textParts.map(part => String(part.text || '')).join('\n');
+  const bounded = agent.truncateHead(combined);
+  if (!bounded.truncated) return { content: textParts };
+  const notice = `[Pi Harness tool output limit: showing ${bounded.outputLines} of ${bounded.totalLines} lines, ${agent.formatSize(bounded.outputBytes)} of ${agent.formatSize(bounded.totalBytes)}.]`;
+  return {
+    content: [{ type: 'text', text: [bounded.content, notice].filter(Boolean).join('\n\n') }],
+    details: { truncation: { ...bounded, content: undefined } }
   };
 }
 
@@ -278,7 +330,8 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
     projects: Array<string | { name: string; priority?: string; description?: string }>;
     today?: { summary: string; items: string[] };
     currentSteps?: Array<{ title: string; status: string }>;
-  }, readTools?: Pick<Client, 'listTools' | 'callTool'> & Partial<Pick<Client, 'readResource'>>): Promise<string> {
+  }, readTools?: Pick<Client, 'listTools' | 'callTool'> & Partial<Pick<Client, 'readResource'>>,
+  replyContext?: IntelligenceReplyContext): Promise<string> {
     if (!messages.length || messages[messages.length - 1].role !== 'user') {
       throw new Error('Intelligence chat requires a user message.');
     }
@@ -309,7 +362,19 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
     const pi = await loadPi();
     let chatError: Error | undefined;
     let toolCalls = 0;
-    const model = embeddedModel(this.model);
+    const model = embeddedModel(this.agentCli, this.model, pi.ai);
+    const durablePiMessages = restoredChatMessages(messages, this.model);
+    let activeCheckpoint: ActiveHarnessCheckpoint | undefined = replyContext?.checkpoint ? {
+      sourceMessageCount: replyContext.checkpoint.sourceMessageCount,
+      sourceSignature: durablePiMessages.slice(0, replyContext.checkpoint.sourceMessageCount),
+      summary: replyContext.checkpoint.summary,
+      retainedTail: durablePiMessages.slice(
+        replyContext.checkpoint.sourceMessageCount - replyContext.checkpoint.retainedMessageCount,
+        replyContext.checkpoint.sourceMessageCount
+      ),
+      tokensBefore: replyContext.checkpoint.tokensBefore,
+      createdAt: replyContext.checkpoint.createdAt
+    } : undefined;
     const agent = new pi.agent.Agent({
       initialState: {
         systemPrompt,
@@ -328,8 +393,7 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
                 if (result.isError) throw new Error(`Intelligence read tool failed: ${tool.name}`);
                 return result;
               });
-              return { content: (Array.isArray(response.content) ? response.content : []).filter((part: unknown): part is { type: 'text'; text: string } =>
-                Boolean(part && typeof part === 'object' && (part as { type?: unknown }).type === 'text')), details: undefined };
+              return boundedToolContent(pi.agent, response.content);
             } catch (error) {
               chatError = error instanceof Error ? error : new Error(String(error));
               throw chatError;
@@ -337,9 +401,100 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
           }
         }))
       },
-      transformContext: (contextMessages: PiMessage[]) => projectChatContext(contextMessages),
+      convertToLlm: (contextMessages: PiMessage[]) => pi.agent.convertToLlm(contextMessages),
+      transformContext: async (contextMessages: PiMessage[], signal: AbortSignal) => {
+        const source = Array.isArray(contextMessages) ? contextMessages.slice() : [];
+        let leadingSystemCount = 0;
+        while (source[leadingSystemCount]?.role === 'system') leadingSystemCount += 1;
+        const leading = source.slice(0, leadingSystemCount);
+        const conversation = source.slice(leadingSystemCount);
+        let entries: PiEntry[];
+        if (activeCheckpoint
+          && activeCheckpoint.sourceMessageCount <= conversation.length
+          && sameMessagePrefix(activeCheckpoint.sourceSignature, conversation, activeCheckpoint.sourceMessageCount)) {
+          const compacted = checkpointEntry(activeCheckpoint);
+          entries = [compacted, ...piEntries(conversation.slice(activeCheckpoint.sourceMessageCount), activeCheckpoint.sourceMessageCount + 1, compacted.id)];
+        } else {
+          activeCheckpoint = undefined;
+          entries = piEntries(conversation);
+        }
+        try {
+          const harnessContext = pi.agent.withAbortSignal(signal, pi.agent.TODO_CONTEXT);
+          const projected = await pi.agent.buildSessionContext(entries, undefined, harnessContext);
+          const usage = pi.agent.estimateContextTokens([...leading, ...projected]);
+          if (!pi.agent.shouldCompact(usage.tokens, Number(model.contextWindow), pi.agent.DEFAULT_COMPACTION_SETTINGS)) {
+            return [...leading, ...projected];
+          }
+          const preparation = pi.agent.prepareCompaction(entries, pi.agent.DEFAULT_COMPACTION_SETTINGS);
+          if (!preparation.ok) throw new Error(preparation.error.message || 'Pi Harness could not prepare context compaction.');
+          if (!preparation.value) return [...leading, ...projected];
+          const compacted = await pi.agent.compactWithRequest(preparation.value, { model, thinkingLevel: 'off' },
+            async (summaryContext: { systemPrompt?: string; messages?: PiMessage[] }, summaryOptions: Record<string, unknown>) => {
+              if (this.cancelled) return assistantMessage(this.model, '', 'aborted', 'Intelligence chat was cancelled.');
+              const maxTokens = Math.max(1, Math.floor(Number(summaryOptions.maxTokens) || 1));
+              const maxOutputCharacters = maxTokens * 4;
+              const invocation = {
+                ...buildCognitiveCliInvocation(this.agentCli, this.model, transcriptPrompt(summaryContext), this.workingDirectory),
+                timeoutMs: 300_000,
+                maxOutputCharacters
+              };
+              try {
+                const output = String(await observeLocalDiagnosticStage('model.cli.compaction', () => this.runner(invocation))).trim();
+                if (this.cancelled) return assistantMessage(this.model, '', 'aborted', 'Intelligence chat was cancelled.');
+                if (!output) return assistantMessage(this.model, '', 'error', 'Pi Harness did not return a context checkpoint.');
+                if (output.length > maxOutputCharacters) {
+                  return assistantMessage(this.model, '', 'error', `Agent CLI exceeded the Pi Harness summary output budget (${maxOutputCharacters} characters).`);
+                }
+                return assistantMessage(this.model, output, 'stop');
+              } catch (error) {
+                return assistantMessage(this.model, '', 'error', error instanceof Error ? error.message : String(error));
+              }
+            }, harnessContext);
+          if (!compacted.ok) throw new Error(compacted.error.message || 'Pi Harness context compaction failed.');
+          if (!compacted.value.summary || compacted.value.summary.length > MAX_INTELLIGENCE_CONTEXT_SUMMARY_CHARACTERS) {
+            throw new Error('Pi Harness returned an invalid context checkpoint.');
+          }
+          const createdAt = Date.now();
+          activeCheckpoint = {
+            sourceMessageCount: conversation.length,
+            sourceSignature: conversation.slice(),
+            summary: compacted.value.summary,
+            retainedTail: compacted.value.retainedTail,
+            tokensBefore: compacted.value.tokensBefore,
+            createdAt
+          };
+          if (replyContext
+            && conversation.length === durablePiMessages.length
+            && sameMessagePrefix(durablePiMessages, conversation, conversation.length)) {
+            const staged: StagedIntelligenceContextCheckpoint = {
+              schemaVersion: 1,
+              engine: 'pi-harness',
+              sourceMessageCount: messages.length,
+              sourceHash: intelligenceMessagePrefixHash(messages),
+              retainedMessageCount: compacted.value.retainedTail.length,
+              tokensBefore: compacted.value.tokensBefore,
+              summary: compacted.value.summary,
+              createdAt
+            };
+            replyContext.stageCheckpoint(staged);
+          }
+          const rebuilt = [...leading, ...await pi.agent.buildSessionContext([...entries, checkpointEntry(activeCheckpoint)], undefined, harnessContext)];
+          const rebuiltUsage = pi.agent.estimateContextTokens(rebuilt);
+          if (rebuiltUsage.tokens > Number(model.contextWindow)) {
+            throw new Error(`Pi Harness rebuilt context exceeds the selected model window (${rebuiltUsage.tokens}/${model.contextWindow} tokens).`);
+          }
+          return rebuilt;
+        } catch (error) {
+          chatError = error instanceof Error ? error : new Error(String(error));
+          return source;
+        }
+      },
       streamFn: (_selectedModel: unknown, context: { messages?: Array<Record<string, unknown>> }) => {
         const stream = pi.ai.createAssistantMessageEventStream();
+        if (chatError) {
+          stream.push({ type: 'error', reason: 'error', error: assistantMessage(this.model, '', 'error', chatError.message) });
+          return stream;
+        }
         const partial = assistantMessage(this.model, '', 'pending');
         stream.push({ type: 'start', partial });
         const invocation = { ...buildCognitiveCliInvocation(this.agentCli, this.model, transcriptPrompt(context), this.workingDirectory), timeoutMs: 300_000 };
@@ -398,7 +553,7 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
     if (this.workingDirectory) fs.mkdirSync(this.workingDirectory, { recursive: true });
     const pi = await loadPi();
     if (this.cancelled) throw new Error('Pi Agent model pipe was cancelled.');
-    const model = embeddedModel(this.model);
+    const model = embeddedModel(this.agentCli, this.model, pi.ai);
     const agent = new pi.agent.Agent({
       initialState: {
         systemPrompt: '你是 SoloMap 今日安排的只读决策器。只能选择候选，不得调用工具、读取文件或执行任务。',
@@ -456,7 +611,7 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
     if (this.workingDirectory) fs.mkdirSync(this.workingDirectory, { recursive: true });
     const pi = await loadPi();
     if (this.cancelled) throw new Error('Pi Agent model pipe was cancelled.');
-    const model = embeddedModel(this.model);
+    const model = embeddedModel(this.agentCli, this.model, pi.ai);
     const agent = new pi.agent.Agent({
       initialState: {
         systemPrompt: '你是 SoloMap 战略金字塔的只读智能内核。只根据提供的项目事实判断一人公司的战略状态，不得调用工具、读取文件或执行任务。',
@@ -530,7 +685,7 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
     const pi = await loadPi();
     if (this.cancelled) throw new Error('Pi Agent model pipe was cancelled.');
     const allowed = new Set(input.allowedFiles.map(file => file.path));
-    const model = embeddedModel(this.model);
+    const model = embeddedModel(this.agentCli, this.model, pi.ai);
     const agent = new pi.agent.Agent({
       initialState: {
         systemPrompt: '你是 SoloMap 内置 Pi Agent，负责完成用户交付任务。Agent CLI 只提供模型能力；请根据输入文件提出可直接执行的修改。',

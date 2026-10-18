@@ -9,7 +9,12 @@ esbuild.buildSync({
   stdin: {
     contents: [
       "export { Agent } from '@earendil-works/pi-agent-core';",
-      "export { createAssistantMessageEventStream } from '@earendil-works/pi-ai';"
+      "export { convertToLlm, DEFAULT_COMPACTION_SETTINGS, estimateContextTokens, formatSize, prepareCompaction, shouldCompact, truncateHead } from '@earendil-works/pi-agent-core';",
+      "export { compactWithRequest } from './node_modules/@earendil-works/pi-agent-core/dist/harness/compaction/compaction.js';",
+      "export { buildSessionContext } from './node_modules/@earendil-works/pi-agent-core/dist/harness/session/context.js';",
+      "export { TODO_CONTEXT, withAbortSignal } from '@earendil-works/pi-agent-core/harness/context';",
+      "export { createAssistantMessageEventStream } from '@earendil-works/pi-ai';",
+      "export { getBuiltinModel, getBuiltinModels } from '@earendil-works/pi-ai/providers/all';"
     ].join('\n'),
     resolveDir: projectRoot,
     sourcefile: 'pi-agent-runtime-entry.mjs',

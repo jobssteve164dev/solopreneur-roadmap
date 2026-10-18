@@ -14,6 +14,7 @@ export interface CognitiveCliInvocation {
   env?: NodeJS.ProcessEnv;
   shell: false;
   timeoutMs?: number;
+  maxOutputCharacters?: number;
 }
 
 export type CognitiveCliRunner = (invocation: CognitiveCliInvocation) => Promise<string>;
@@ -103,7 +104,14 @@ export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, re
     }, invocation.timeoutMs || 60_000);
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
-    child.stdout.on('data', chunk => { stdout += String(chunk).slice(0, 65_536 - stdout.length); });
+    child.stdout.on('data', chunk => {
+      const text = String(chunk);
+      if (invocation.maxOutputCharacters !== undefined && stdout.length + text.length > invocation.maxOutputCharacters) {
+        terminate(new Error(`Local Agent CLI exceeded its ${invocation.maxOutputCharacters}-character output budget.`));
+        return;
+      }
+      stdout += text.slice(0, 65_536 - stdout.length);
+    });
     child.stderr.on('data', chunk => { stderr += String(chunk).slice(0, 8_192 - stderr.length); });
     child.once('error', error => finish(() => reject(error)));
     child.once('close', code => finish(() => terminationError

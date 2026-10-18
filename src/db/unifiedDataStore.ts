@@ -11,7 +11,15 @@ import { unifiedSchemaSql } from './unifiedSchema';
 import { indexTokens, queryTokens } from './searchIndex';
 import { agentReadableObject, canAgentRead } from '../dataAuthorization';
 import { unifiedSchemaMigrations, runtimeEntityDefinitions as entityDefinitions } from './unifiedSchemaMigrations';
-import type { IntelligenceConversation } from '../intelligenceChat';
+import type { IntelligenceCommitGuard, IntelligenceConversation } from '../intelligenceChat';
+import {
+  INTELLIGENCE_CONTEXT_CHECKPOINT_KEY,
+  INTELLIGENCE_CONTEXT_CHECKPOINT_NAMESPACE,
+  IntelligenceContextCheckpoint,
+  normalizeStagedIntelligenceContextCheckpoint,
+  StagedIntelligenceContextCheckpoint,
+  validIntelligenceContextCheckpoint
+} from '../intelligenceContextCheckpoint';
 import type { GrowthSnapshotData, GrowthSnapshotRecord } from './types';
 import type { AgentConversation, RoadmapNode, RunIndexEntry, RunIndexFile, RunIndexRecord, RunIndexSignal, RunImpactRecord } from './types';
 import type { PrepareRunInput, RunState, RunCheckpointInput, RunOutputFinalizationInput, RunLogInput, RunConsumerInput, RunConsumerLease, RunSettlementInput, RunEffect, RunEffectReference } from '../runLifecycleTypes';
@@ -7475,21 +7483,39 @@ export class UnifiedDataStore {
     const items = matches.slice(0, limit);
     return { items, cursor: matches.length > limit ? Buffer.from(canonical({ id: items[items.length - 1].objectId, sequence: after?.sequence ?? sequence, fingerprint })).toString('base64url') : null, sourceSequence: sequence, sourceChanged };
   }
-  public readIntelligenceConversation(id: string): { conversation: IntelligenceConversation; revision: number } | null {
+  public readIntelligenceConversation(id: string): { conversation: IntelligenceConversation; revision: number; contextCheckpoint?: IntelligenceContextCheckpoint } | null {
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id)) throw new Error('Invalid intelligence conversation ID.');
     const row = this.rows("SELECT o.* FROM objects o JOIN conversations c ON c.id=o.id WHERE o.id=? AND o.project_id IS NULL AND c.mode='intelligence' AND o.archived_at IS NULL", [id])[0];
     if (!row) return null;
     const object = this.current(id, false);
     const messages = this.rows('SELECT role,content_id FROM messages WHERE conversation_id=? ORDER BY sequence', [id]).map(message => ({ role: String(message.role) as 'user' | 'assistant', content: this.decodedContent(String(message.content_id)) as string }));
-    return { revision: Number(row.revision), conversation: { id, title: String(object.data.title), createdAt: new Date(Number(row.created_at)).toISOString(), updatedAt: new Date(Number(row.updated_at)).toISOString(), messages } };
+    const conversation = { id, title: String(object.data.title), createdAt: new Date(Number(row.created_at)).toISOString(), updatedAt: new Date(Number(row.updated_at)).toISOString(), messages };
+    const projection = this.rows('SELECT content_id FROM projections WHERE namespace=? AND scope_key=? AND projection_key=?', [
+      INTELLIGENCE_CONTEXT_CHECKPOINT_NAMESPACE, id, INTELLIGENCE_CONTEXT_CHECKPOINT_KEY
+    ])[0];
+    let contextCheckpoint: IntelligenceContextCheckpoint | undefined;
+    if (projection) {
+      try {
+        const value = JSON.parse(this.content(String(projection.content_id)).toString('utf8'));
+        if (validIntelligenceContextCheckpoint(value, messages) && value.sourceRevision <= Number(row.revision)) contextCheckpoint = value;
+      } catch { /* A malformed derived checkpoint never invalidates the authoritative conversation. */ }
+    }
+    return { revision: Number(row.revision), conversation, ...(contextCheckpoint ? { contextCheckpoint } : {}) };
   }
   public listIntelligenceConversations(): Array<Pick<IntelligenceConversation, 'id' | 'title' | 'updatedAt'>> {
     return this.rows("SELECT o.id,c.title,o.updated_at FROM objects o JOIN conversations c ON c.id=o.id WHERE o.project_id IS NULL AND c.mode='intelligence' AND o.archived_at IS NULL ORDER BY o.updated_at DESC,o.id").map(row => ({ id: String(row.id), title: String(row.title), updatedAt: new Date(Number(row.updated_at)).toISOString() }));
   }
-  public writeIntelligenceConversation(input: { conversation: IntelligenceConversation; expectedRevision: number; idempotencyKey: string }): WriteReceipt {
+  public writeIntelligenceConversation(input: { conversation: IntelligenceConversation; expectedRevision: number; idempotencyKey: string; commitGuard?: IntelligenceCommitGuard; contextCheckpoint?: StagedIntelligenceContextCheckpoint }): WriteReceipt {
     const value = input.conversation;
     if (!value || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value.id) || typeof value.title !== 'string' || !Array.isArray(value.messages) || value.messages.some(message => !message || !['user', 'assistant'].includes(message.role) || typeof message.content !== 'string') || !Number.isFinite(Date.parse(value.createdAt)) || !Number.isFinite(Date.parse(value.updatedAt))) throw new Error('Intelligence conversation data is invalid.');
+    if (input.commitGuard && (input.commitGuard.type !== 'telegram-reply-generation'
+      || !Number.isInteger(input.commitGuard.generation) || input.commitGuard.generation < 0)) throw new Error('Intelligence commit guard is invalid.');
     return this.recordMutation(input, input.idempotencyKey, 'append_messages', () => {
+      if (input.commitGuard?.type === 'telegram-reply-generation') {
+        const generation = this.readHostSettings({ namespace: 'telegram', ownerScope: 'global' }).items
+          .find(item => item.key === 'replyGeneration')?.value;
+        if (generation !== input.commitGuard.generation) throw new Error('intelligence_reply_revoked');
+      }
       const current = this.readIntelligenceConversation(value.id);
       if ((current?.revision || 0) !== input.expectedRevision) throw new Error('revision_conflict');
       const oldMessages = current?.conversation.messages || [];
@@ -7504,6 +7530,19 @@ export class UnifiedDataStore {
       }
       for (let i = oldMessages.length; i < value.messages.length; i++) {
         this.write({ kind: 'message', action: 'create', scope: null, idempotencyKey: `${input.idempotencyKey}:message:${i}`, data: { conversation_id: value.id, sequence: i, role: value.messages[i].role, content: value.messages[i].content } });
+      }
+      if (input.contextCheckpoint !== undefined) {
+        const contextCheckpoint = normalizeStagedIntelligenceContextCheckpoint(input.contextCheckpoint, value.messages, (current?.revision || 0) + 1);
+        const contentId = this.putContent(canonical(contextCheckpoint), 'application/json');
+        const previousProjection = this.rows('SELECT content_id FROM projections WHERE namespace=? AND scope_key=? AND projection_key=?', [
+          INTELLIGENCE_CONTEXT_CHECKPOINT_NAMESPACE, value.id, INTELLIGENCE_CONTEXT_CHECKPOINT_KEY
+        ])[0];
+        this.db.run(`INSERT INTO projections(namespace,scope_key,projection_key,source_sequence,expires_at,content_id,last_error)
+          VALUES(?,?,?,?,NULL,?,NULL)
+          ON CONFLICT(namespace,scope_key,projection_key) DO UPDATE SET
+            source_sequence=excluded.source_sequence,expires_at=NULL,content_id=excluded.content_id,last_error=NULL`,
+        [INTELLIGENCE_CONTEXT_CHECKPOINT_NAMESPACE, value.id, INTELLIGENCE_CONTEXT_CHECKPOINT_KEY, contextCheckpoint.sourceRevision, contentId]);
+        if (previousProjection && previousProjection.content_id !== contentId) this.queueStorageCleanupContents([String(previousProjection.content_id)]);
       }
       return this.current(value.id);
     });

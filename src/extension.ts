@@ -1043,7 +1043,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const globalDataPath = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
     let store = intelligenceConversationStores.get(globalDataPath);
     if (!store) {
-      store = new IntelligenceConversationStore(globalDataPath, async (messages) => {
+      store = new IntelligenceConversationStore(globalDataPath, async (messages, replyContext) => {
         await syncCognitiveRuntimeConfig(context, getPersistedSettings(context));
         const config = readCognitiveRuntimeConfig(globalDataPath);
         if (config.mode !== 'agent_cli') throw new Error('Choose an Agent in SoloMap settings to start a conversation.');
@@ -1088,7 +1088,7 @@ export async function activate(context: vscode.ExtensionContext) {
           setTimeSchedule: input => setIntelligenceTimeSchedule(context, selectedProjectPathForChat, input)
         }));
         try {
-          return await observeLocalDiagnosticStage('pi.chat', () => engine.chat(messages, projectContext, mcp.client));
+          return await observeLocalDiagnosticStage('pi.chat', () => engine.chat(messages, projectContext, mcp.client, replyContext));
         } finally {
           await observeLocalDiagnosticStage('mcp.close', () => mcp.close());
         }

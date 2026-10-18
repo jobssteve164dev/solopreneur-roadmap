@@ -4,7 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
-const { LocalAgentCliEngine, buildCognitiveCliInvocation } = require('../out/localAgentCliEngine.js');
+const { LocalAgentCliEngine, buildCognitiveCliInvocation, runCognitiveCliInvocation } = require('../out/localAgentCliEngine.js');
 const { cognitiveRuntimeConfigRevision, persistCognitiveRuntimeConfig, readCognitiveRuntimeConfig, refreshCognitiveRuntimeConfig, writeCognitiveRuntimeConfig } = require('../out/cognitiveRuntimeConfig.js');
 
 test('Codex cognitive invocation is headless, read-only, and shell-free', () => {
@@ -87,6 +87,18 @@ test('every chat model pipe starts a fresh non-resumed CLI invocation', () => {
     assert.equal(invocation.stdin, 'turn', family);
     assert.equal(invocation.args.some(argument => /^(--continue|-c|--resume|-r|--conversation|--session-id)(=|$)/.test(argument)), false, family);
   }
+});
+
+test('the real Agent CLI runner enforces a Pi Harness summary output budget', async () => {
+  let cancel;
+  await assert.rejects(() => runCognitiveCliInvocation({
+    command: process.execPath,
+    args: ['-e', 'process.stdout.write("x".repeat(1000))'],
+    stdin: '',
+    shell: false,
+    maxOutputCharacters: 100
+  }, value => { cancel = value; }), /100-character output budget/);
+  assert.equal(cancel, undefined);
 });
 
 test('Runtime reloads a normalized local Agent CLI choice from its config file', () => {

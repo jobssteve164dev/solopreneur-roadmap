@@ -123,7 +123,7 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
     const project = selectedProject();
     return project ? new CsvStore(path.join(project.path, '.solopreneur', 'roadmap.csv')).readNodes() : [];
   };
-  const store = new IntelligenceConversationStore(globalDataPath, async messages => {
+  const store = new IntelligenceConversationStore(globalDataPath, async (messages, replyContext) => {
     await refreshProjectRegistry(globalDataPath, undefined, call);
     await refreshCognitiveRuntimeConfig(globalDataPath, operation);
     const config = readCognitiveRuntimeConfig(globalDataPath);
@@ -161,7 +161,7 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
       }
     }));
     engines.add(engine);
-    try { return await observeLocalDiagnosticStage('pi.chat', () => engine.chat(messages, projectContext, mcp.client)); }
+    try { return await observeLocalDiagnosticStage('pi.chat', () => engine.chat(messages, projectContext, mcp.client, replyContext)); }
     finally { engines.delete(engine); await observeLocalDiagnosticStage('mcp.close', () => mcp.close()); }
   });
   const reply = createTelegramIntelligenceReply(() => store, () => {

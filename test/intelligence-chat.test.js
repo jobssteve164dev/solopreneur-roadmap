@@ -176,6 +176,52 @@ test('smart kernel chat uses the selected read-only model pipe with conversation
   assert.match(invocations[0].args.join(' '), /--sandbox read-only/);
 });
 
+test('smart kernel delegates long conversation compaction to Pi Harness', async () => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const messages = [];
+  for (let index = 0; index < 90; index += 1) {
+    messages.push({ role: 'user', content: `question-${index}-${'u'.repeat(6_000)}` });
+    messages.push({ role: 'assistant', content: `answer-${index}-${'a'.repeat(6_000)}` });
+  }
+  messages.push({ role: 'user', content: 'current-question-must-survive' });
+  const invocations = [];
+  const engine = new EmbeddedPiAgentEngine({
+    agentCli: 'codex', model: 'gpt-test', runner: async invocation => {
+      invocations.push(invocation);
+      return invocation.stdin.includes('You are a context summarization assistant')
+        ? 'HARNESS-CHECKPOINT-SUMMARY'
+        : 'answer after harness compaction';
+    }
+  });
+
+  assert.equal(await engine.chat(messages, { selectedProject: '', projects: [] }), 'answer after harness compaction');
+  assert.equal(invocations.length, 2, 'Pi Harness must make one summary request before the answer request');
+  assert.equal(invocations[0].maxOutputCharacters, 52_428,
+    'the Agent CLI summary boundary must consume Pi Harness maxTokens');
+  assert.match(invocations[0].stdin, /Create a structured context checkpoint summary/);
+  assert.match(invocations[0].stdin, /question-0-/);
+  assert.match(invocations[1].stdin, /The conversation history before this point was compacted/);
+  assert.match(invocations[1].stdin, /HARNESS-CHECKPOINT-SUMMARY/);
+  assert.doesNotMatch(invocations[1].stdin, /question-0-/);
+  assert.match(invocations[1].stdin, /question-89-/);
+  assert.match(invocations[1].stdin, /current-question-must-survive/);
+});
+
+test('smart kernel adds no summary request or checkpoint below the Pi Harness threshold', async () => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const prompts = [];
+  const checkpoints = [];
+  const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async invocation => {
+    prompts.push(invocation.stdin);
+    return 'ordinary answer';
+  } });
+
+  assert.equal(await engine.chat([{ role: 'user', content: 'short question' }],
+    { selectedProject: '', projects: [] }, undefined, { stageCheckpoint: checkpoint => checkpoints.push(checkpoint) }), 'ordinary answer');
+  assert.equal(prompts.length, 1);
+  assert.deepEqual(checkpoints, []);
+});
+
 test('smart kernel chat answers a project question after reading current plugin data', async t => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
   const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
@@ -225,7 +271,7 @@ test('smart kernel chat answers a project question after reading current plugin 
   assert.doesNotMatch(JSON.stringify(events), /完成登录|验证付费|\/beta/);
 });
 
-test('smart kernel bounds long Pi context by complete recent turns while retaining the current user', async () => {
+test('smart kernel uses Pi Harness compaction boundaries while retaining complete recent turns', async () => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
   const messages = [];
   for (let index = 0; index < 90; index += 1) {
@@ -243,8 +289,8 @@ test('smart kernel bounds long Pi context by complete recent turns while retaini
   });
 
   assert.equal(await engine.chat(messages, { selectedProject: '', projects: [] }), 'bounded answer');
-  assert.ok(prompt.length <= 600_000, `projected prompt is unexpectedly large: ${prompt.length}`);
   assert.doesNotMatch(prompt, /question-0-|answer-0-/);
+  assert.match(prompt, /The conversation history before this point was compacted/);
   assert.match(prompt, /USER:\nquestion-89-/);
   assert.match(prompt, /ASSISTANT:\nanswer-89-/);
   assert.match(prompt, /USER:\ncurrent-question-must-survive/);
@@ -252,34 +298,33 @@ test('smart kernel bounds long Pi context by complete recent turns while retaini
   assert.deepEqual(messages, originalMessages, 'context projection must not mutate durable conversation messages');
 });
 
-test('smart kernel bounds one oversized current user message without losing either edge', async () => {
+test('smart kernel leaves a request below the selected Pi catalog model threshold intact', async () => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
   const messages = [{ role: 'user', content: `current-start-${'x'.repeat(700_000)}-current-end` }];
   const originalMessages = structuredClone(messages);
   let prompt = '';
   const engine = new EmbeddedPiAgentEngine({
-    agentCli: 'codex', runner: async invocation => {
+    agentCli: 'codex', model: 'gpt-5.5', runner: async invocation => {
       prompt = invocation.stdin;
       return 'bounded answer';
     }
   });
 
   assert.equal(await engine.chat(messages, { selectedProject: '', projects: [] }), 'bounded answer');
-  assert.ok(prompt.length <= 600_000, `projected prompt is unexpectedly large: ${prompt.length}`);
   assert.match(prompt, /USER:\ncurrent-start-/);
-  assert.match(prompt, /…\[context truncated\]…/);
   assert.match(prompt, /-current-end/);
+  assert.doesNotMatch(prompt, /context truncated/);
   assert.deepEqual(messages, originalMessages);
 });
 
-test('smart kernel bounds an oversized tool result while preserving its call linkage and current turn', async () => {
+test('smart kernel leaves a tool result below the Pi Harness output limit intact', async () => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
   const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
   const prompts = [];
   const session = await createIntelligenceMcpSession({
     getProjects: () => [{ name: 'Alpha', path: '/alpha' }],
     getSelectedProjectPath: () => '/alpha',
-    getCurrentSteps: () => [{ title: `tool-start-${'t'.repeat(700_000)}-tool-end`, status: 'Pending' }],
+    getCurrentSteps: () => [{ title: `tool-start-${'t'.repeat(40_000)}-tool-end`, status: 'Pending' }],
     getSettings: () => ({ language: 'zh' })
   });
   const engine = new EmbeddedPiAgentEngine({
@@ -296,16 +341,15 @@ test('smart kernel bounds an oversized tool result while preserving its call lin
     await session.close();
   }
   assert.equal(prompts.length, 2);
-  assert.ok(prompts[1].length <= 600_000, `projected prompt is unexpectedly large: ${prompts[1].length}`);
   assert.match(prompts[1], /USER:\nkeep-current-turn/);
   assert.match(prompts[1], /"type":"toolCall","id":"read-1","name":"get_current_project"/);
   assert.match(prompts[1], /TOOLRESULT:\n[^\n]*"toolCallId":"read-1","toolName":"get_current_project"/);
   assert.match(prompts[1], /tool-start-/);
-  assert.match(prompts[1], /…\\?\[context truncated\\?\]…/);
   assert.match(prompts[1], /-tool-end/);
+  assert.doesNotMatch(prompts[1], /context truncated/);
 });
 
-test('smart kernel bounds tool results containing many short content blocks', async () => {
+test('smart kernel applies the Pi Harness tool-output limit before the next model request', async () => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
   const prompts = [];
   const readTools = {
@@ -326,19 +370,90 @@ test('smart kernel bounds tool results containing many short content blocks', as
   const engine = new EmbeddedPiAgentEngine({
     agentCli: 'codex', runner: async invocation => {
       prompts.push(invocation.stdin);
+      if (invocation.stdin.includes('You are a context summarization assistant')) return 'MULTI-BLOCK-HARNESS-CHECKPOINT';
       return prompts.length === 1 ? '{"toolCall":{"name":"get_current_project"}}' : 'bounded blocks answer';
     }
   });
 
   assert.equal(await engine.chat([{ role: 'user', content: 'keep-many-blocks-turn' }],
     { selectedProject: '', projects: [] }, readTools), 'bounded blocks answer');
-  assert.equal(prompts.length, 2);
-  assert.ok(prompts[1].length <= 600_000, `projected prompt is unexpectedly large: ${prompts[1].length}`);
+  assert.equal(prompts.length, 2, 'bounded tool output must not need conversation compaction');
   assert.match(prompts[1], /USER:\nkeep-many-blocks-turn/);
   assert.match(prompts[1], /"type":"toolCall","id":"read-1","name":"get_current_project"/);
   assert.match(prompts[1], /TOOLRESULT:\n[^\n]*"toolCallId":"read-1","toolName":"get_current_project"/);
   assert.match(prompts[1], /block-0-/);
-  assert.match(prompts[1], /block-19999-/);
+  assert.doesNotMatch(prompts[1], /block-19999-/);
+  assert.match(prompts[1], /Pi Harness tool output limit/);
+  assert.ok(prompts[1].length < 128_000 * 4, 'the final provider input must stay inside the model window');
+});
+
+test('smart kernel uses Pi catalog context windows for an explicitly selected Agent CLI model', async () => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const messages = [];
+  for (let index = 0; index < 50; index += 1) {
+    messages.push({ role: 'user', content: `question-${index}-${'u'.repeat(4_500)}` });
+    messages.push({ role: 'assistant', content: `answer-${index}-${'a'.repeat(4_500)}` });
+  }
+  messages.push({ role: 'user', content: 'catalog-window-question' });
+  const compactModelCalls = [];
+  const compactModel = new EmbeddedPiAgentEngine({
+    agentCli: 'codex', model: 'gpt-5.3-codex-spark', runner: async invocation => {
+      compactModelCalls.push(invocation);
+      return invocation.stdin.includes('You are a context summarization assistant') ? 'CATALOG-SUMMARY' : 'compact answer';
+    }
+  });
+  const largeModelCalls = [];
+  const largeModel = new EmbeddedPiAgentEngine({
+    agentCli: 'codex', model: 'gpt-5.5', runner: async invocation => {
+      largeModelCalls.push(invocation);
+      return 'large-window answer';
+    }
+  });
+
+  assert.equal(await compactModel.chat(messages, { selectedProject: '', projects: [] }), 'compact answer');
+  assert.equal(await largeModel.chat(messages, { selectedProject: '', projects: [] }), 'large-window answer');
+  assert.ok(compactModelCalls.length > 1, 'the 128k Pi catalog model must compact this history');
+  assert.equal(largeModelCalls.length, 1, 'the 272k Pi catalog model must keep the same history intact');
+});
+
+test('smart kernel preserves Pi split-turn summary budgets across the Agent CLI boundary', async () => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const calls = [];
+  const messages = [
+    { role: 'user', content: `old-question-${'q'.repeat(60_000)}` },
+    { role: 'assistant', content: `old-answer-${'r'.repeat(60_000)}` },
+    { role: 'user', content: 'large-turn-question' },
+    { role: 'assistant', content: `large-turn-answer-${'s'.repeat(350_000)}` },
+    { role: 'user', content: 'current-split-turn-question' }
+  ];
+  const engine = new EmbeddedPiAgentEngine({
+    agentCli: 'codex', model: 'gpt-5.3-codex-spark', runner: async invocation => {
+      calls.push(invocation);
+      if (invocation.stdin.includes('You are a context summarization assistant')) return 'SPLIT-TURN-SUMMARY';
+      return 'split-turn answer';
+    }
+  });
+
+  assert.equal(await engine.chat(messages, { selectedProject: '', projects: [] }), 'split-turn answer');
+  const summaryCalls = calls.filter(call => call.stdin.includes('You are a context summarization assistant'));
+  assert.deepEqual(summaryCalls.map(call => call.maxOutputCharacters), [52_428, 32_768]);
+  assert.ok(calls.at(-1).stdin.length < 128_000 * 4, 'the rebuilt split turn must fit the Pi catalog model window');
+});
+
+test('smart kernel rejects a compaction response beyond the Pi Harness output budget', async () => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const messages = [];
+  for (let index = 0; index < 50; index += 1) {
+    messages.push({ role: 'user', content: `question-${index}-${'u'.repeat(4_500)}` });
+    messages.push({ role: 'assistant', content: `answer-${index}-${'a'.repeat(4_500)}` });
+  }
+  messages.push({ role: 'user', content: 'summary-budget-question' });
+  const engine = new EmbeddedPiAgentEngine({
+    agentCli: 'codex', model: 'gpt-5.3-codex-spark', runner: async invocation =>
+      invocation.stdin.includes('You are a context summarization assistant') ? 'x'.repeat(52_429) : 'must not answer'
+  });
+
+  await assert.rejects(() => engine.chat(messages, { selectedProject: '', projects: [] }), /summary output budget/i);
 });
 
 test('smart kernel does not treat a historical project as the current topic for a greeting', async () => {
@@ -770,6 +885,7 @@ test('a revision retry regenerates from committed history and commits one comple
     if (request.operation === 'list_intelligence_conversations') return [];
     if (request.operation === 'write_intelligence_conversation') {
       if (firstWrite) {
+        assert.equal(request.input.contextCheckpoint?.summary, 'discard with conflicted generation');
         firstWrite = false;
         const requested = request.input.conversation;
         values.set(requested.id, {
@@ -786,6 +902,8 @@ test('a revision retry regenerates from committed history and commits one comple
       }
       const current = values.get(request.input.conversation.id);
       assert.equal(request.input.expectedRevision, current.revision);
+      assert.equal(Object.prototype.hasOwnProperty.call(request.input, 'contextCheckpoint'), false,
+        'a checkpoint staged against conflicted history must not leak into the retry');
       values.set(request.input.conversation.id, {
         revision: current.revision + 1,
         conversation: structuredClone(request.input.conversation)
@@ -795,8 +913,18 @@ test('a revision retry regenerates from committed history and commits one comple
     throw new Error(`unexpected intelligence operation: ${request.operation}`);
   };
   const seen = [];
-  const store = new IntelligenceConversationStore(root, async messages => {
+  const store = new IntelligenceConversationStore(root, async (messages, context) => {
     seen.push(structuredClone(messages));
+    if (seen.length === 1) context.stageCheckpoint({
+      schemaVersion: 1,
+      engine: 'pi-harness',
+      sourceMessageCount: messages.length,
+      sourceHash: '0'.repeat(64),
+      retainedMessageCount: 1,
+      tokensBefore: 200_000,
+      summary: 'discard with conflicted generation',
+      createdAt: Date.now()
+    });
     return seen.length === 1 ? '应被冲突丢弃的回答' : '基于最新历史的回答';
   }, requests);
 
@@ -818,6 +946,36 @@ test('smart kernel chat keeps the draft available when generation fails', async 
   const store = new IntelligenceConversationStore(root, async () => { throw new Error('model unavailable'); }, createConversationDataRequest());
   await assert.rejects(() => store.send('继续这个问题'), /model unavailable/);
   assert.deepEqual(await store.list(), []);
+});
+
+test('a failed answer persists neither the turn nor a staged Pi Harness checkpoint', async t => {
+  const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
+  const { IntelligenceConversationStore } = require('../out/intelligenceChat.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-intelligence-compaction-failure-'));
+  t.after(() => cleanupExact(root));
+  const dataRequest = createConversationDataRequest();
+  const messages = [];
+  for (let index = 0; index < 90; index += 1) {
+    messages.push({ role: 'user', content: `question-${index}-${'u'.repeat(6_000)}` });
+    messages.push({ role: 'assistant', content: `answer-${index}-${'a'.repeat(6_000)}` });
+  }
+  let writes = 0;
+  const observingRequest = async (databaseRoot, request) => {
+    if (request.operation === 'read_intelligence_conversation') {
+      return { revision: 1, conversation: { id: request.input.id, title: 'Long history', createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(), messages } };
+    }
+    if (request.operation === 'write_intelligence_conversation') writes += 1;
+    return dataRequest(databaseRoot, request);
+  };
+  const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async invocation => {
+    if (invocation.stdin.includes('You are a context summarization assistant')) return 'UNCOMMITTED-CHECKPOINT';
+    throw new Error('answer generation failed');
+  } });
+  const store = new IntelligenceConversationStore(root,
+    (history, context) => engine.chat(history, { selectedProject: '', projects: [] }, undefined, context), observingRequest);
+
+  await assert.rejects(() => store.send('current question', 'be9f6c55-2cee-4fad-bf47-c4635c5884e8'), /answer generation failed/);
+  assert.equal(writes, 0);
 });
 
 test('cancelling a Pi chat commits neither the current user nor a partial assistant turn', async t => {

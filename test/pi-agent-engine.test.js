@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
 
 const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
 const { buildStrategyPyramidCognitiveInput } = require('../out/strategyPyramid.js');
@@ -34,13 +35,20 @@ test('Pi uses the same database MCP write and immediate read operations without 
   } finally { await mcp.close(); await operations.close(); store.close(); }
 });
 
-test('Pi runtime is bundled for VSIX delivery instead of shipping its full provider dependency tree', () => {
+test('Pi runtime bundles the pinned Harness adapter surface used by the VSIX', async () => {
   const projectRoot = path.resolve(__dirname, '..');
   const manifest = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
   assert.match(manifest.scripts.compile, /bundle-pi-runtime/);
   assert.equal(manifest.dependencies['@earendil-works/pi-agent-core'], undefined);
   assert.equal(manifest.devDependencies['@earendil-works/pi-agent-core'], '0.87.1');
-  assert.ok(fs.existsSync(path.join(projectRoot, 'out', 'piAgentRuntime.mjs')));
+  const runtimePath = path.join(projectRoot, 'out', 'piAgentRuntime.mjs');
+  assert.ok(fs.existsSync(runtimePath));
+  const runtime = await import(pathToFileURL(runtimePath).href + `?test=${Date.now()}`);
+  for (const name of ['Agent', 'buildSessionContext', 'compactWithRequest', 'convertToLlm', 'estimateContextTokens',
+    'formatSize', 'getBuiltinModel', 'getBuiltinModels', 'prepareCompaction', 'shouldCompact', 'truncateHead', 'withAbortSignal']) {
+    assert.equal(typeof runtime[name], 'function', name);
+  }
+  assert.equal(typeof runtime.DEFAULT_COMPACTION_SETTINGS, 'object');
 });
 
 test('embedded Pi Agent plans through the selected Agent CLI model pipe', async () => {
