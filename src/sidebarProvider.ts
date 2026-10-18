@@ -143,11 +143,59 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     this._readAgentAccountStatuses = dependencies.readAgentAccountStatuses || readAgentAccountStatuses;
     this._projectLoader = new SidebarProjectLoader({
       isAvailable: () => Boolean(this._view),
-      postMessage: (message) => { void this.postMessage(message); },
+      postMessage: (message) => { void this.postMessage(this.reconcileProjectMessage(message)); },
       getGlobalDataPath: () => this._getSettings().globalDataPath,
       getExtensionPath: () => this._extensionUri.fsPath,
       buildGlobalStore: ensureGlobalEngineeringStore,
       buildGlobalStorePlaceholder: createGlobalEngineeringSnapshotPlaceholder
+    });
+  }
+
+  public reconcileProjectMessage(message: any, expectedDataRoot = ''): any {
+    const projectPath = String(message?.projectPath || '');
+    const signalField = message?.command === 'projectIssuesLoaded'
+      ? 'issues'
+      : message?.command === 'projectPullRequestsLoaded'
+        ? 'pullRequests'
+        : message?.command === 'projectDeliveryLoaded'
+          ? 'delivery'
+          : message?.command === 'projectSecurityLoaded'
+            ? 'security'
+            : '';
+    const isPortfolioMessage = message?.command === 'projectsLoaded' && Array.isArray(message?.projects?.portfolio);
+    if (expectedDataRoot && (projectPath || isPortfolioMessage)) {
+      const projectState = this._getProjects();
+      const currentDataRoot = normalizeGlobalDataPath(this._getSettings().globalDataPath, projectState.projects);
+      if (expectedDataRoot !== this._activeDataRoot || expectedDataRoot !== currentDataRoot) {
+        return null;
+      }
+    }
+    if (projectPath && signalField && message[signalField]) {
+      this._latestPortfolio = this._latestPortfolio.map(project => project.path === projectPath
+        ? { ...project, [signalField]: message[signalField] }
+        : project);
+    } else if (isPortfolioMessage) {
+      const portfolio = this.preserveCurrentExternalSignals(message.projects.portfolio);
+      this._latestPortfolio = portfolio;
+      message = {
+        ...message,
+        projects: { ...message.projects, portfolio }
+      };
+    }
+    return message;
+  }
+
+  private preserveCurrentExternalSignals(portfolio: ProjectPortfolioSummary[]): ProjectPortfolioSummary[] {
+    const currentByPath = new Map(this._latestPortfolio.map(project => [project.path, project]));
+    return portfolio.map(project => {
+      const current = currentByPath.get(project.path);
+      return current ? {
+        ...project,
+        issues: current.issues,
+        pullRequests: current.pullRequests,
+        delivery: current.delivery,
+        security: current.security
+      } : project;
     });
   }
 
@@ -480,6 +528,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       this._projectLoader.cancelExternalLoads();
       const projectState = this._getProjects();
       const globalDataPath = normalizeGlobalDataPath(this._getSettings().globalDataPath, projectState.projects);
+      const rootState = this.captureDataRoot(globalDataPath, projectState.selectedProjectPath);
       if (projectState.projects.length === 0) {
         this.postCorePortfolio([], projectState.selectedProjectPath, [], globalDataPath);
         this.sendDailyReview();
@@ -490,7 +539,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         readSidebarCoreSnapshot(globalDataPath),
         readCachedConversationSnapshot(globalDataPath, projectState.selectedProjectPath)
       ]);
-      if (!this._view || requestId !== this._corePortfolioRequest) return;
+      if (!this._view
+        || requestId !== this._corePortfolioRequest
+        || !this.isCurrentDataRoot(rootState.root, rootState.generation)) return;
       const availablePaths = new Set(projectState.projects.map((project) => project.path));
       const stalePortfolio = (this._latestPortfolio.length > 0 ? this._latestPortfolio : (cached?.portfolio || []))
         .filter((summary) => availablePaths.has(summary.path));
@@ -557,7 +608,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         if (!this._view) return;
         const projectState = this._getProjects();
         const globalDataPath = normalizeGlobalDataPath(this._getSettings().globalDataPath, projectState.projects);
+        const rootState = this.captureDataRoot(globalDataPath, projectState.selectedProjectPath);
         const cached = await readSidebarCoreSnapshot(globalDataPath);
+        if (!this._view || !this.isCurrentDataRoot(rootState.root, rootState.generation)) return;
         const availablePaths = new Set(projectState.projects.map((project) => project.path));
         const stalePortfolio = (this._latestPortfolio.length > 0 ? this._latestPortfolio : (cached?.portfolio || []))
           .filter((summary) => availablePaths.has(summary.path));
@@ -590,7 +643,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     globalDataPath: string,
     recentConversationSnapshot: SidebarConversationSnapshot | null = null
   ): void {
-    const currentPortfolio = applyProjectRegistryToPortfolio(projects, portfolio);
+    const previousDataRoot = this._activeDataRoot;
+    const rootState = this.captureDataRoot(globalDataPath, selectedProjectPath);
+    const corePortfolio = applyProjectRegistryToPortfolio(projects, portfolio);
+    const currentPortfolio = previousDataRoot && previousDataRoot === rootState.root
+      ? this.preserveCurrentExternalSignals(corePortfolio)
+      : corePortfolio;
     this._latestPortfolio = currentPortfolio;
     const globalStore = createGlobalEngineeringSnapshotPlaceholder(globalDataPath, currentPortfolio);
     void this.postMessage({
@@ -604,14 +662,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     if (root !== this._activeDataRoot) {
       this._activeDataRoot = root;
       this._dataRootGeneration += 1;
+      this._latestPortfolio = [];
+      this._projectLoader.cancelExternalLoads();
     }
     return { root, generation: this._dataRootGeneration };
   }
 
-  private isCurrentDataRoot(root: string, generation: number, projectPath = ''): boolean {
+  private isCurrentDataRoot(root: string, generation: number, _projectPath = ''): boolean {
     return generation === this._dataRootGeneration
       && root === this._activeDataRoot
-      && root === normalizeGlobalDataPathForExtension(this._getSettings().globalDataPath, projectPath || process.cwd());
+      && root === normalizeGlobalDataPath(this._getSettings().globalDataPath, this._getProjects().projects);
   }
 
   private scheduleCorePortfolio(
@@ -653,7 +713,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         return;
       }
       if (index >= ordered.length) {
-        const portfolio = projects.map((project) => summaries.get(project.path)).filter(Boolean) as ProjectPortfolioSummary[];
+        const portfolio = this.preserveCurrentExternalSignals(
+          projects.map((project) => summaries.get(project.path)).filter(Boolean) as ProjectPortfolioSummary[]
+        );
+        this._latestPortfolio = portfolio;
         if (projects.length === 0) {
           this.postCorePortfolio(projects, selectedProjectPath, portfolio, globalDataPath);
         }
@@ -692,9 +755,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         reusableSignals: previous.reusableSignals,
         investment: previous.investment
       } : core);
-      const portfolio = applyProjectRegistryToPortfolio(
-        projects,
-        projects.map((item) => summaries.get(item.path)).filter(Boolean) as ProjectPortfolioSummary[]
+      const portfolio = this.preserveCurrentExternalSignals(
+        applyProjectRegistryToPortfolio(
+          projects,
+          projects.map((item) => summaries.get(item.path)).filter(Boolean) as ProjectPortfolioSummary[]
+        )
       );
       this._latestPortfolio = portfolio;
       const globalStore = createGlobalEngineeringSnapshotPlaceholder(globalDataPath, portfolio);

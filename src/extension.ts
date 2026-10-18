@@ -1354,7 +1354,19 @@ async function handleSharedWebviewAction(
   target?: vscode.Webview
 ): Promise<boolean> {
   if (handleAutomationSoundMessage(target, message)) return true;
-  const respond = (payload: Record<string, unknown>) => postWebviewMessage(target, payload);
+  const sidebarProjects = surface === 'sidebar' ? getProjects(context) : [];
+  const sidebarResponseDataRoot = surface === 'sidebar'
+    ? normalizeGlobalDataPathForRegistry(
+      getPersistedSettings(context).globalDataPath,
+      sidebarProjects[0]?.path || getWorkspaceRoot()
+    )
+    : '';
+  const respond = (payload: Record<string, unknown>) => {
+    const responsePayload = surface === 'sidebar' && sidebarProvider
+      ? sidebarProvider.reconcileProjectMessage(payload, sidebarResponseDataRoot)
+      : payload;
+    return responsePayload ? postWebviewMessage(target, responsePayload) : Promise.resolve(false);
+  };
   if (message.command === 'databaseOverview.get') {
     const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
     try {

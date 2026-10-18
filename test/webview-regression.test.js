@@ -5711,9 +5711,11 @@ test('database sentinel dispatches fixed formal results across projects without 
 });
 
 test('sidebar local project refresh batches core cards before scheduling enrichment', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
-    ''
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
   );
   const postedMessages = [];
   const provider = new SolopreneurSidebarProvider(
@@ -5754,6 +5756,7 @@ test('sidebar local project refresh batches core cards before scheduling enrichm
     path: '/workspace/other',
     recommendedNodeTitle: 'Keep other'
   }];
+  provider._activeDataRoot = '/workspace/.solomap-global';
   provider._projectLoader.cancelExternalLoads = () => { externalLoads += 1; };
   provider._projectLoader.scheduleAll = () => {
     throw new Error('local refresh must not restart external loads');
@@ -5775,6 +5778,385 @@ test('sidebar local project refresh batches core cards before scheduling enrichm
   assert.equal(JSON.stringify(postedMessages[0].projects.updatedProjectPaths), JSON.stringify(['/workspace/app']));
   assert.equal(postedMessages[0].projects.portfolio[0].pinnedAt, '2026-01-01T00:00:00.000Z');
   assert.equal(postedMessages[0].projects.portfolio[1].recommendedNodeTitle, 'Keep other');
+});
+
+test('sidebar local portfolio updates preserve newer GitHub signals', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    ''
+  );
+  const postedMessages = [];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
+      updateSettings: async () => {},
+      getProjects: () => ({
+        projects: [{ name: 'app', path: '/workspace/app' }],
+        selectedProjectPath: '/workspace/app'
+      })
+    }
+  );
+  provider._view = {
+    webview: {
+      postMessage(message) {
+        postedMessages.push(message);
+        return Promise.resolve(true);
+      }
+    }
+  };
+  provider._latestPortfolio = [{
+    name: 'app',
+    path: '/workspace/app',
+    recommendedNodeTitle: '旧的本地建议',
+    issues: { available: false, repo: '', open: 0, byPriority: {}, byCategory: {} },
+    pullRequests: { available: false, repo: '', open: 0 },
+    delivery: { available: false, repo: '', failedWorkflowRuns: 0 },
+    security: { available: false, repo: '', openCriticalHigh: 0 }
+  }];
+  const loaderPostMessage = provider._projectLoader.options.postMessage;
+
+  loaderPostMessage({
+    command: 'projectIssuesLoaded',
+    projectPath: '/workspace/app',
+    issues: { available: true, repo: 'SZLK/app', open: 2, byPriority: { P1: 1 }, byCategory: {} }
+  });
+  loaderPostMessage({
+    command: 'projectDeliveryLoaded',
+    projectPath: '/workspace/app',
+    delivery: { available: true, repo: 'SZLK/app', failedWorkflowRuns: 0, latestWorkflowStatus: 'success' }
+  });
+  loaderPostMessage({
+    command: 'projectPullRequestsLoaded',
+    projectPath: '/workspace/app',
+    pullRequests: { available: true, repo: 'SZLK/app', open: 1 }
+  });
+  loaderPostMessage({
+    command: 'projectSecurityLoaded',
+    projectPath: '/workspace/app',
+    security: { available: true, repo: 'SZLK/app', openCriticalHigh: 0, status: 'healthy' }
+  });
+  loaderPostMessage({
+    command: 'projectsLoaded',
+    projects: {
+      projects: [{ name: 'app', path: '/workspace/app' }],
+      selectedProjectPath: '/workspace/app',
+      portfolio: [{
+        name: 'app',
+        path: '/workspace/app',
+        recommendedNodeTitle: '新的本地建议',
+        issues: { available: false, repo: '', open: 0, byPriority: {}, byCategory: {} },
+        pullRequests: { available: false, repo: '', open: 0 },
+        delivery: { available: false, repo: '', failedWorkflowRuns: 0 },
+        security: { available: false, repo: '', openCriticalHigh: 0 }
+      }],
+      updatedProjectPaths: ['/workspace/app']
+    }
+  });
+
+  const mergedProject = provider._latestPortfolio[0];
+  assert.equal(mergedProject.recommendedNodeTitle, '新的本地建议');
+  assert.equal(mergedProject.issues.available, true);
+  assert.equal(mergedProject.issues.repo, 'SZLK/app');
+  assert.equal(mergedProject.delivery.available, true);
+  assert.equal(mergedProject.delivery.repo, 'SZLK/app');
+  assert.equal(mergedProject.pullRequests.open, 1);
+  assert.equal(mergedProject.security.status, 'healthy');
+  const localUpdate = postedMessages.at(-1);
+  assert.equal(localUpdate.command, 'projectsLoaded');
+  assert.equal(localUpdate.projects.portfolio[0].issues.available, true);
+  assert.equal(localUpdate.projects.portfolio[0].delivery.latestWorkflowStatus, 'success');
+  assert.equal(localUpdate.projects.portfolio[0].pullRequests.open, 1);
+  assert.equal(localUpdate.projects.portfolio[0].security.status, 'healthy');
+});
+
+test('sidebar keeps a GitHub signal that arrives during a batched local refresh', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
+  );
+  const projects = [
+    { name: 'app', path: '/workspace/app' },
+    { name: 'other', path: '/workspace/other' }
+  ];
+  let signalInjected = false;
+  let resolvePortfolioBatch;
+  const portfolioBatchDone = new Promise((resolve) => { resolvePortfolioBatch = resolve; });
+  const postedMessages = [];
+  const unavailableSignals = {
+    issues: { available: false, repo: '', open: 0, byPriority: {}, byCategory: {} },
+    pullRequests: { available: false, repo: '', open: 0 },
+    delivery: { available: false, repo: '', failedWorkflowRuns: 0 },
+    security: { available: false, repo: '', openCriticalHigh: 0 }
+  };
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects, selectedProjectPath: '/workspace/app' })
+    }
+  );
+  provider._latestPortfolio = projects.map(project => ({ ...project, ...unavailableSignals }));
+  provider._view = {
+    webview: {
+      postMessage(message) {
+        postedMessages.push(message);
+        if (!signalInjected && message.projects?.updatedProjectPaths?.[0] === '/workspace/app') {
+          signalInjected = true;
+          provider._projectLoader.options.postMessage({
+            command: 'projectIssuesLoaded',
+            projectPath: '/workspace/app',
+            issues: { available: true, repo: 'SZLK/app', open: 2, byPriority: { P1: 1 }, byCategory: {} }
+          });
+        }
+        return Promise.resolve(true);
+      }
+    }
+  };
+  provider._projectLoader.scheduleAll = () => {
+    throw new Error('a local refresh must not start external loads');
+  };
+  provider._projectLoader.schedulePortfolioEnrichment = () => { resolvePortfolioBatch(); };
+
+  provider.sendLocalProjects('/workspace/app');
+  provider.sendLocalProjects('/workspace/other');
+  await Promise.race([portfolioBatchDone, new Promise((resolve) => setTimeout(resolve, 500))]);
+
+  assert.equal(signalInjected, true);
+  assert.equal(provider._latestPortfolio.find(project => project.path === '/workspace/app').issues.available, true);
+  const finalLocalUpdate = postedMessages.filter(message => message.projects?.updatedProjectPaths?.[0] === '/workspace/other').at(-1);
+  assert.equal(finalLocalUpdate.projects.portfolio.find(project => project.path === '/workspace/app').issues.repo, 'SZLK/app');
+});
+
+test('sidebar cached core refresh preserves same-root GitHub signals without leaking them across data roots', () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const projects = [{ name: 'app', path: '/workspace/app' }];
+  const unavailable = {
+    name: 'app',
+    path: '/workspace/app',
+    issues: { available: false, repo: '', open: 0 },
+    pullRequests: { available: false, repo: '', open: 0 },
+    delivery: { available: false, repo: '', failedWorkflowRuns: 0 },
+    security: { available: false, repo: '', openCriticalHigh: 0 }
+  };
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '/data-a' }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects, selectedProjectPath: '/workspace/app' })
+    }
+  );
+  provider._view = { webview: { postMessage: () => Promise.resolve(true) } };
+  provider._activeDataRoot = '/data-a/.solomap-global';
+  provider._latestPortfolio = [{
+    ...unavailable,
+    issues: { available: true, repo: 'SZLK/app', open: 2 }
+  }];
+
+  provider.postCorePortfolio(projects, '/workspace/app', [unavailable], '/data-a');
+  assert.equal(provider._latestPortfolio[0].issues.repo, 'SZLK/app');
+
+  provider.postCorePortfolio(projects, '/workspace/app', [unavailable], '/data-b');
+  assert.equal(provider._latestPortfolio[0].issues.available, false);
+  const staleResponse = provider.reconcileProjectMessage({
+    command: 'projectIssuesLoaded',
+    projectPath: '/workspace/app',
+    issues: { available: true, repo: 'SZLK/old-root', open: 9 }
+  }, '/data-a/.solomap-global');
+  assert.equal(staleResponse, null);
+  assert.equal(provider.reconcileProjectMessage({
+    command: 'projectRefreshCompleted',
+    projectPath: '/workspace/app',
+    success: true
+  }, '/data-a/.solomap-global'), null);
+  assert.equal(provider._latestPortfolio[0].issues.available, false);
+});
+
+test('sidebar local refresh isolates GitHub signals after the data root changes', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
+  );
+  const projects = [{ name: 'app', path: '/workspace/app' }];
+  let globalDataPath = '/data-a';
+  let resolvePortfolioBatch;
+  const portfolioBatchDone = new Promise((resolve) => { resolvePortfolioBatch = resolve; });
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects, selectedProjectPath: '/workspace/app' })
+    }
+  );
+  provider._view = { webview: { postMessage: () => Promise.resolve(true) } };
+  provider._activeDataRoot = '/data-a/.solomap-global';
+  provider._latestPortfolio = [{
+    name: 'app',
+    path: '/workspace/app',
+    issues: { available: true, repo: 'SZLK/root-a', open: 3 }
+  }];
+  provider._projectLoader.scheduleAll = () => {
+    throw new Error('a local refresh must not start external loads');
+  };
+  provider._projectLoader.schedulePortfolioEnrichment = () => { resolvePortfolioBatch(); };
+
+  globalDataPath = '/data-b';
+  provider.sendLocalProjects('/workspace/app');
+  await Promise.race([portfolioBatchDone, new Promise((resolve) => setTimeout(resolve, 500))]);
+
+  assert.equal(provider._activeDataRoot, '/data-b/.solomap-global');
+  assert.equal(provider._latestPortfolio[0].issues.available, false);
+  assert.notEqual(provider._latestPortfolio[0].issues.repo, 'SZLK/root-a');
+});
+
+test('sidebar discards a core snapshot read when the data root changes in flight', async () => {
+  let resolveSnapshot;
+  const snapshotRead = new Promise((resolve) => { resolveSnapshot = resolve; });
+  const snapshotCache = makeSidebarSnapshotCacheStub({
+    readSidebarCoreSnapshot: () => snapshotRead
+  });
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
+  );
+  const projects = [{ name: 'app', path: '/workspace/app' }];
+  let globalDataPath = '/data-a';
+  const postedMessages = [];
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects, selectedProjectPath: '/workspace/app' })
+    }
+  );
+  provider._view = { webview: { postMessage: (message) => { postedMessages.push(message); return Promise.resolve(true); } } };
+  provider.sendDailyReview = () => {};
+
+  const pending = provider.sendProjects();
+  globalDataPath = '/data-b';
+  resolveSnapshot({
+    projectSignature: 'stale-root-a',
+    portfolio: [{ name: 'app', path: '/workspace/app', issues: { available: true, repo: 'SZLK/root-a', open: 4 } }]
+  });
+  await pending;
+
+  assert.deepEqual(postedMessages, []);
+  assert.equal(provider._latestPortfolio.length, 0);
+});
+
+test('sidebar discards a local refresh snapshot read when the data root changes in flight', async () => {
+  let signalSnapshotRead;
+  const snapshotReadStarted = new Promise((resolve) => { signalSnapshotRead = resolve; });
+  let resolveSnapshot;
+  const snapshotRead = new Promise((resolve) => { resolveSnapshot = resolve; });
+  const snapshotCache = makeSidebarSnapshotCacheStub({
+    readSidebarCoreSnapshot: () => {
+      signalSnapshotRead();
+      return snapshotRead;
+    }
+  });
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    '',
+    { './sidebarSnapshotCache': snapshotCache }
+  );
+  const projects = [{ name: 'app', path: '/workspace/app' }];
+  let globalDataPath = '/data-a';
+  const postedMessages = [];
+  let enrichmentCount = 0;
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects, selectedProjectPath: '/workspace/app' })
+    }
+  );
+  provider._view = { webview: { postMessage: (message) => { postedMessages.push(message); return Promise.resolve(true); } } };
+  provider._activeDataRoot = '/data-a/.solomap-global';
+  provider._projectLoader.schedulePortfolioEnrichment = () => { enrichmentCount += 1; };
+
+  provider.sendLocalProjects('/workspace/app');
+  await snapshotReadStarted;
+  globalDataPath = '/data-b';
+  resolveSnapshot(null);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.deepEqual(postedMessages, []);
+  assert.equal(enrichmentCount, 0);
+});
+
+test('sidebar shared action rejects every project response after its data root changes', async () => {
+  let resolveIssues;
+  const issueSummary = new Promise((resolve) => { resolveIssues = resolve; });
+  const projectExternalSignals = {
+    ...require('../out/projectExternalSignals.js'),
+    loadExternalIssueSummary: () => issueSummary,
+    loadExternalPullRequestSummary: async () => null,
+    loadExternalDeliverySummary: async () => null,
+    loadExternalSecuritySummary: async () => null
+  };
+  const extension = loadCompiledModule('out/extension.js', `
+    let fixtureDataRoot = '/data-a';
+    module.exports.action = handleSharedWebviewAction;
+    module.exports.switchRoot = () => { fixtureDataRoot = '/data-b'; };
+    module.exports.connect = provider => {
+      sidebarProvider = provider;
+      getPersistedSettings = () => ({ globalDataPath: fixtureDataRoot, automationTasks: {} });
+      getProjects = () => [{ name: 'app', path: '/workspace/app' }];
+      getSelectedProjectPath = () => '/workspace/app';
+    };
+  `, {
+    './projectExternalSignals': projectExternalSignals,
+    './runIndexMaintenance': {
+      ...require('../out/runIndexMaintenance.js'),
+      backfillRunIndexFromDigests: async () => null
+    },
+    './projectGrowth': {
+      ...require('../out/projectGrowth.js'),
+      refreshProjectGrowthSnapshot: async () => null
+    }
+  });
+  const reconciled = [];
+  const postedMessages = [];
+  extension.connect({
+    invalidateProjectSignals() {},
+    reconcileProjectMessage(payload, expectedDataRoot) {
+      reconciled.push({ command: payload.command, expectedDataRoot });
+      return payload.projectPath && expectedDataRoot !== '/data-b/.solomap-global' ? null : payload;
+    }
+  });
+
+  const pending = extension.action(
+    { extensionPath: projectRoot },
+    { command: 'project.refreshExternalData', projectPath: '/workspace/app' },
+    'sidebar',
+    { postMessage: (message) => { postedMessages.push(message); return Promise.resolve(true); } }
+  );
+  extension.switchRoot();
+  resolveIssues({ available: true, repo: 'SZLK/root-a', open: 2 });
+  await pending;
+
+  assert.deepEqual(reconciled, [
+    { command: 'projectIssuesLoaded', expectedDataRoot: '/data-a/.solomap-global' },
+    { command: 'projectRefreshCompleted', expectedDataRoot: '/data-a/.solomap-global' }
+  ]);
+  assert.deepEqual(postedMessages, []);
 });
 
 test('sidebar core snapshot restarts when a new project roadmap appears during collection', async (t) => {
