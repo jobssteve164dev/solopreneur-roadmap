@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.605 - 2026-10-19
+
+### Added
+- adopt Pi Core native conversation runtime (c6f8c48)
+
+### Docs
+- define Pi core native execution blueprint (6448a07)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.604 - 2026-10-19
 
 ### Fixed
