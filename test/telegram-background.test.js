@@ -278,6 +278,55 @@ test('a compatible release with recorded old-host drain routes Telegram through 
   } finally { verified.close(); }
 });
 
+test('Runtime-owned native Harness lets Telegram recover from an MCP tool error before replying', async t => {
+  const fixture = await backgroundFixture(t, {}, 5000, '0.0.606');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { runtimeBuildId } = require('../out/runtimeBuildIdentity.js');
+  const currentBuild = runtimeBuildId(path.resolve(__dirname, '..'));
+  const seeded = new UnifiedDataStore(fixture.globalRoot);
+  seeded.registerPiCompatibilityRelease('0.0.605', 'compatibility-release-605', 'runtime-605');
+  seeded.recordPiCompatibilityDrain({ runtimeId: 'runtime-605', releaseVersion: '0.0.605', buildId: 'compatibility-release-605',
+    replacementVersion: '0.0.606', replacementBuildId: currentBuild });
+  seeded.close();
+  const recoveredReply = '暂时读不到详细记录，但我可以继续帮你判断下一步。';
+  fs.writeFileSync(fixture.cli, `#!/usr/bin/env node
+const fs=require('fs'),counter=${JSON.stringify(fixture.modelInput)};let input='';process.stdin.on('data',bytes=>input+=bytes);process.stdin.on('end',()=>{
+  if(!input.includes('你是 SoloMap 的智能内核')){console.log('background cycle');return;}
+  const attempts=fs.existsSync(counter)?Number(fs.readFileSync(counter,'utf8')):0;fs.writeFileSync(counter,String(attempts+1));
+  console.log(input.includes('"isError":true')?${JSON.stringify(recoveredReply)}:attempts>=2?'工具错误未进入恢复上下文':JSON.stringify({toolCall:{name:'set_time_schedule',arguments:{title:'过期安排',scheduleKind:'once',scheduledAt:'2020-01-01T00:00:00Z',assignee:'user'}}}));
+});
+`, { mode: 0o700 });
+
+  await fixture.start();
+  fixture.updates.push(fixture.update(105, '工具失败时也要继续回答'));
+  try { await waitFor(() => fixture.sent.some(message => message.text === recoveredReply),
+    'Native Harness must return the tool failure to the model before Telegram receives a reply', 12_000); }
+  catch (error) {
+    await fixture.stop();
+    const failed = UnifiedDataStore.open(fixture.globalRoot);
+    try {
+      error.message += `; stderr=${fixture.childStderr()}; sent=${JSON.stringify(fixture.sent)}; operations=${JSON.stringify(failed.rows('SELECT operation_id,status,terminal_content_id,settlement_content_id FROM pi_conversation_operations'))}; tools=${JSON.stringify(failed.rows('SELECT invocation_id,tool_name,status FROM pi_tool_invocations'))}; diagnostics=${JSON.stringify(failed.rows('SELECT kind,payload_json FROM diagnostic_events ORDER BY sequence DESC LIMIT 12'))}`;
+    } finally { failed.close(); }
+    throw error;
+  }
+  await fixture.stop();
+  const verified = UnifiedDataStore.open(fixture.globalRoot);
+  try {
+    assert.equal(verified.rows("SELECT COUNT(*) AS count FROM pi_conversation_operations WHERE status='settled'")[0].count, 1);
+    assert.equal(verified.rows('SELECT COUNT(*) AS count FROM pi_tool_invocations')[0].count, 1);
+    assert.equal(verified.rows("SELECT COUNT(*) AS count FROM pi_tool_invocations WHERE status='admitted'")[0].count, 1,
+      'a failed tool call stays incomplete rather than manufacturing a successful mutation');
+    assert.equal(verified.readHostSettings({ namespace: 'extension', ownerScope: 'global' }).items.some(item => item.key === 'automationTasks'), false);
+    assert.equal(verified.rows('SELECT COUNT(*) AS count FROM scheduled_occurrences')[0].count, 0,
+      'recovery must not create the rejected schedule');
+    const toolStages = verified.rows("SELECT payload_json FROM diagnostic_events WHERE kind='operation' AND scope='mcp.set_time_schedule' ORDER BY sequence")
+      .map(row => JSON.parse(String(row.payload_json)).status);
+    assert.deepEqual(toolStages, ['start', 'error'], 'the one underlying MCP call must be observed as one failed attempt');
+    assert.equal(Number(fs.readFileSync(fixture.modelInput, 'utf8')), 2, 'one failed tool call requires exactly one model recovery turn');
+    assert.equal(fixture.sent.some(message => String(message.text).includes('智能内核暂时无法回答')), false);
+  } finally { verified.close(); }
+});
+
 test('a new data root takes over a live Telegram daemon when the old root has no editor host', async t => {
   const oldRoot = await backgroundFixture(t, {}, 1000);
   const newRoot = await backgroundFixture(t, {}, 1000);

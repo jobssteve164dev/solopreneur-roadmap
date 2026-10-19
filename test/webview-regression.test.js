@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const childProcess = require('node:child_process');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -17468,6 +17469,58 @@ test('partial settings updates preserve existing user settings after extension u
     try { fs.rmdirSync(path.join(globalRoot, 'skills')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     fs.rmdirSync(globalRoot); fs.rmdirSync(tempRoot);
   }
+});
+
+test('database authority registration persists a root only once while every caller restores the in-memory guard', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__rememberDatabaseAuthorityRoot = rememberDatabaseAuthorityRoot;'
+  );
+  const runtime = require('../out/autonomousRuntime.js');
+  const root = path.join(os.tmpdir(), `solomap-authority-${crypto.randomUUID()}`);
+  const normalized = path.resolve(root, '.solomap-global');
+  const key = `solopreneur.databaseAuthorityRoot.v1.${crypto.createHash('sha256').update(normalized).digest('hex')}`;
+  const state = new Map();
+  const writes = [];
+  const context = {
+    globalState: {
+      get(name) { return state.get(name); },
+      update(name, value) { writes.push([name, value]); state.set(name, value); return Promise.resolve(); }
+    }
+  };
+
+  await extensionModule.__rememberDatabaseAuthorityRoot(context, root);
+  await extensionModule.__rememberDatabaseAuthorityRoot(context, root);
+
+  assert.deepEqual(writes, [[key, normalized]], 'an unchanged authority must not re-enter VS Code storage');
+  assert.equal(runtime.runtimeDatabaseAuthorityRegistered(normalized), true,
+    'the fast path must still restore the process-local database guard');
+});
+
+test('concurrent database authority registration has one persistent writer', async () => {
+  const extensionModule = loadCompiledModule(
+    'out/extension.js',
+    'module.exports.__rememberDatabaseAuthorityRoot = rememberDatabaseAuthorityRoot;'
+  );
+  const root = path.join(os.tmpdir(), `solomap-authority-race-${crypto.randomUUID()}`);
+  let releaseWrite;
+  const writeGate = new Promise(resolve => { releaseWrite = resolve; });
+  const state = new Map();
+  let writes = 0;
+  const context = {
+    globalState: {
+      get(name) { return state.get(name); },
+      async update(name, value) { writes += 1; await writeGate; state.set(name, value); }
+    }
+  };
+
+  const first = extensionModule.__rememberDatabaseAuthorityRoot(context, root);
+  const second = extensionModule.__rememberDatabaseAuthorityRoot(context, root);
+  await Promise.resolve();
+  assert.equal(writes, 1, 'one logical authority must have one active storage write');
+  releaseWrite();
+  await Promise.all([first, second]);
+  assert.equal(writes, 1);
 });
 
 test('cognitive Runtime config uses the same normalized data root as the detached Runtime', () => {

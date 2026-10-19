@@ -468,19 +468,23 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
       description: tool.description || '',
       parameters: tool.inputSchema,
       replay: tool.annotations?.readOnlyHint === true ? 'safe' : 'never',
-      execute: async (_id: string, args: Record<string, unknown>, _onUpdate: unknown, _toolContext: unknown, invocation: { invocationId: string }) => {
-        if (!readTools) return { content: [{ type: 'text', text: 'Intelligence tools are unavailable.' }], isError: true };
+      execute: async (_toolCallId: string, args: Record<string, unknown>, _onUpdate: unknown, _toolContext: unknown, invocation: { invocationId: string }) => {
+        if (!readTools) throw new Error('Intelligence tools are unavailable.');
         try {
           const acceptsIdempotency = Boolean((tool.inputSchema as any)?.properties?.idempotencyKey);
           const callArguments = acceptsIdempotency && !args.idempotencyKey ? { ...args, idempotencyKey: `pi:${invocation.invocationId}` } : args;
           const replay = tool.annotations?.readOnlyHint === true ? 'safe' : 'never';
           input.authorizeTool?.({ invocationId: invocation.invocationId, toolName: tool.name, arguments: callArguments, replay });
-          const call = () => observeLocalDiagnosticStage(`mcp.${tool.name}`, () => readTools.callTool({ name: tool.name, arguments: callArguments }));
+          const call = () => observeLocalDiagnosticStage(`mcp.${tool.name}`, async () => {
+            const response = await readTools.callTool({ name: tool.name, arguments: callArguments });
+            if (response.isError) throw new Error(`Intelligence read tool failed: ${tool.name}`);
+            return response;
+          });
           const response = await (input.withToolFence ? input.withToolFence(invocation.invocationId, call) : call());
           const bounded = boundedToolContent(pi.agent, response.content);
-          return { ...bounded, isError: Boolean(response.isError) };
+          return bounded;
         } catch (error) {
-          return { content: [{ type: 'text', text: `Intelligence tool unavailable: ${tool.name} (${classifyDiagnosticFailure(error)})` }], isError: true };
+          throw new Error(`Intelligence tool unavailable: ${tool.name} (${classifyDiagnosticFailure(error)})`);
         }
       }
     }));

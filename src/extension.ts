@@ -441,6 +441,7 @@ const completedLegacyPortableOperationPrefix = 'solopreneur.completedLegacyPorta
 const portableOperationRootsKey = 'solopreneur.portableOperationRoots.v1';
 const portableOperationRootPrefix = 'solopreneur.portableOperationRoot.v2.';
 const databaseAuthorityRootPrefix = 'solopreneur.databaseAuthorityRoot.v1.';
+const databaseAuthorityWrites = new Map<string, Promise<void>>();
 type PortableOperationName = 'backup' | 'restore_backup' | 'export_project' | 'import_project';
 interface PendingPortableOperation { id: string; root: string; operation: PortableOperationName; input: Record<string, unknown>; intent: string; legacy?: true }
 interface DatabasePortableOperation extends PendingPortableOperation { status: 'pending' | 'completed'; updatedAt: number }
@@ -458,7 +459,14 @@ function indexedDatabaseAuthorityRoots(context: vscode.ExtensionContext): string
 async function rememberDatabaseAuthorityRoot(context: vscode.ExtensionContext, root: string): Promise<void> {
   const normalized = normalizeGlobalDataPathForExtension(root);
   const key = `${databaseAuthorityRootPrefix}${crypto.createHash('sha256').update(normalized).digest('hex')}`;
-  await context.globalState.update(key, normalized);
+  let pending = databaseAuthorityWrites.get(key);
+  if (!pending && context.globalState.get<string>(key) !== normalized) {
+    pending = Promise.resolve(context.globalState.update(key, normalized)).finally(() => {
+      if (databaseAuthorityWrites.get(key) === pending) databaseAuthorityWrites.delete(key);
+    });
+    databaseAuthorityWrites.set(key, pending);
+  }
+  if (pending) await pending;
   registerRuntimeDatabaseAuthority(normalized);
 }
 
