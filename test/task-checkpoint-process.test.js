@@ -8,6 +8,7 @@ const { once } = require('node:events');
 const { promisify } = require('node:util');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { sendRuntimeDataRequest, sendRuntimeControlCommand } = require('../out/autonomousRuntimeControl.js');
+const { readProcessBirthMarker } = require('../out/processIdentity.js');
 
 function cleanupExact(root) {
   if (!fs.existsSync(root)) return;
@@ -75,7 +76,8 @@ test('the shared checkpoint submits a report with its actual turn and leaves no 
   const projectRoot = path.join(base, 'project'); fs.mkdirSync(projectRoot);
   const seed = new UnifiedDataStore(root);
   const project = await seed.registerProject({ root: projectRoot });
-  const prepared = seed.prepareRun(project.projectId, project.locationId, { root: projectRoot, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '输入', command: 'codex', userMessage: '用户目标', metadata: { interactiveSession: true }, idempotencyKey: 'prepare' });
+  const queued = seed.prepareRun(project.projectId, project.locationId, { root: projectRoot, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '输入', command: 'codex', userMessage: '用户目标', metadata: { interactiveSession: true }, idempotencyKey: 'prepare' });
+  const prepared = seed.claimRun(project.projectId, { executionLogId: 1, expectedRevision: queued.revision, agentPid: process.pid, processBirth: readProcessBirthMarker(process.pid), idempotencyKey: 'claim-checkpoint-fixture' });
   seed.close();
   const runtime = spawn(process.execPath, [path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root], { stdio: 'pipe' });
   let errors = ''; runtime.stderr.on('data', b => { errors += b; }); runtime.stdout.resume();

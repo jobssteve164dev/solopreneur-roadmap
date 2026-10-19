@@ -59,7 +59,12 @@ test('real Extension Host keeps sidebar actions alive across a card refresh', as
     exports.activate = async context => { try {
       const filename = path.join(repo, 'out/extension.js');
       const subject = new Module(filename, module); subject.filename = filename; subject.paths = Module._nodeModulePaths(path.dirname(filename));
-      subject._compile(fs.readFileSync(filename, 'utf8') + '\\nmodule.exports.action=handleSharedWebviewAction;module.exports.connect=(p,pr,se)=>{sidebarProvider=p;getPersistedSettings=()=>se;getSettingsWithRuntimeState=()=>se;getSettingsWithOpenCodeSecretState=async()=>se;refreshExtensionSettingsFromDatabase=async()=>{};refreshProAccountStatus=async()=>{};getProjects=()=>[pr];getProjectState=()=>({projects:[{...pr,autonomyEnabled:false,toolNetworkDisabled:false,autonomyEpoch:0}],selectedProjectPath:pr.path});readProjectRegistry=()=>({schemaVersion:1,updatedAt:new Date().toISOString(),projects:[pr],hiddenProjects:[],selectedProjectPath:pr.path});refreshProjectRegistryForContext=async()=>({registry:readProjectRegistry()});refreshProjectAutonomyAuthorizations=async()=>{};readUiState=async()=>({});patchUiState=async()=>({});activeProjectRoot=pr.path;};module.exports.panels=()=>({roadmap:Boolean(activePanel),growth:Boolean(activeProjectGrowthPanel)});', filename);
+      subject._compile(fs.readFileSync(filename, 'utf8') + '\\nmodule.exports.action=handleSharedWebviewAction;module.exports.connect=(p,pr,se)=>{sidebarProvider=p;getPersistedSettings=()=>se;getSettingsWithRuntimeState=()=>se;getSettingsWithOpenCodeSecretState=async()=>se;refreshExtensionSettingsFromDatabase=async()=>{};refreshProAccountStatus=async()=>{};autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime=async()=>({started:false});getProjects=()=>[pr];getProjectState=()=>({projects:[{...pr,autonomyEnabled:false,toolNetworkDisabled:false,autonomyEpoch:0}],selectedProjectPath:pr.path});readProjectRegistry=()=>({schemaVersion:1,updatedAt:new Date().toISOString(),projects:[pr],hiddenProjects:[],selectedProjectPath:pr.path});refreshProjectRegistryForContext=async()=>({registry:readProjectRegistry()});refreshProjectAutonomyAuthorizations=async()=>{};readUiState=async()=>({});patchUiState=async()=>({});activeProjectRoot=pr.path;};module.exports.panels=()=>({roadmap:Boolean(activePanel),growth:Boolean(activeProjectGrowthPanel)});', filename);
+      const store = new (require(path.join(repo, 'out/db/unifiedDataStore.js')).UnifiedDataStore)(settings.globalDataPath);
+      const operations = require(path.join(repo, 'out/runtimeDataOperations.js')).createRuntimeDataOperations(store);
+      const registered = await store.registerProject({ root: project.path });
+      store.upsertProjectRunIndex(registered.projectId, { executionLogId: 1, nodeId: '__solo__', runKind: 'solo', agentCli: 'codex', status: 'Completed', durationMs: 600000, startedAt: '2026-10-19T09:00:00Z', finishedAt: '2026-10-19T09:10:00Z', totalTokens: 123 }, [{ filePath: 'src/result.ts', role: 'changed' }]);
+      await require(path.join(repo, 'out/autonomousRuntimeControl.js')).startRuntimeControlServer({ globalDataPath: settings.globalDataPath, runtimeId: 'sidebar-host-fixture', onCommand: () => ({ status: 'running' }), onData: operations });
       const Provider = require(path.join(repo, 'out/sidebarProvider.js')).SolopreneurSidebarProvider;
       const actionContext = { ...context, extensionPath: repo, extensionUri: vscode.Uri.file(repo) };
       provider = new Provider(vscode.Uri.file(repo), { getNodes: () => [] }, {
@@ -127,6 +132,11 @@ test('real Extension Host keeps sidebar actions alive across a card refresh', as
     assert.equal(await frame.locator('.portfolio-card').count(), 1);
     await frame.locator('#btn-toggle-settings').click();
     assert.equal(await frame.locator('#setting-global-prompt').inputValue(), '宿主保存的设置');
+    await waitFor(async () => await frame.locator('#impact-tokens').textContent() === '123', 'project data card did not receive its actual database contribution');
+    await waitFor(async () => await frame.locator('#database-overview-card [data-database-size]').textContent() !== '—', 'database overview did not render its actual storage metrics');
+    assert.equal(await frame.locator('#impact-minutes').textContent(), '10');
+    assert.equal(await frame.locator('#impact-files').textContent(), '1');
+    assert.equal(JSON.parse(fs.readFileSync(receipt, 'utf8')).commands.filter(command => command === 'agentImpact.get').length, 1, 'hydration and optional enrichment must retain the opening contribution request');
     await frame.locator('#btn-close-settings').click();
 
     const roadmapButton = frame.locator('[data-open-project-path]');
@@ -149,7 +159,7 @@ test('real Extension Host keeps sidebar actions alive across a card refresh', as
     assert.ok(result.commands.includes('uiState.load'));
     assert.ok(result.commands.includes('project.openRoadmap'));
     assert.ok(result.commands.includes('project.openGrowth'));
-    t.diagnostic(JSON.stringify({ realExtensionHost: true, productionBridge: true, settingsLoaded: true, projectDataLoaded: true, uiStateLoaded: true, refreshDuringPointerAction: true, roadmapOpened: true, growthOpened: true }));
+    t.diagnostic(JSON.stringify({ realExtensionHost: true, productionBridge: true, settingsLoaded: true, projectDataLoaded: true, contributionRendered: true, databaseOverviewRendered: true, uiStateLoaded: true, refreshDuringPointerAction: true, roadmapOpened: true, growthOpened: true }));
   } finally {
     if (browser) await browser.close();
     server.kill('SIGTERM');

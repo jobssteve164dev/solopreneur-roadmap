@@ -5,6 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
+const { randomUUID } = require('node:crypto');
 const { sendRuntimeControlCommand, sendRuntimeDataRequest } = require('../out/autonomousRuntimeControl.js');
 
 const projectRoot = path.resolve(__dirname, '..');
@@ -44,11 +45,12 @@ function createRoadmapNode(id, title) {
 }
 
 function launchRuntime(root) {
-  const child = spawn(process.execPath, [path.join(projectRoot, 'out', 'autonomousRuntimeProcess.js'), '--global-data-path', root], { stdio: 'pipe' });
+  const runtimeId = randomUUID();
+  const child = spawn(process.execPath, [path.join(projectRoot, 'out', 'autonomousRuntimeProcess.js'), '--global-data-path', root, '--runtime-id', runtimeId], { stdio: 'pipe' });
   let stderr = '';
   child.stderr.on('data', bytes => { stderr += bytes; });
   child.stdout.resume();
-  return { child, errors: () => stderr };
+  return { child, runtimeId, errors: () => stderr };
 }
 
 async function waitForRuntime(run, root) {
@@ -58,6 +60,9 @@ async function waitForRuntime(run, root) {
     assert.ok(Date.now() < deadline, run.errors() || 'Runtime did not publish readiness');
     await new Promise(resolve => setTimeout(resolve, 20));
   }
+  const endpoint = JSON.parse(fs.readFileSync(path.join(root, 'runtime', 'control.json'), 'utf8'));
+  assert.equal(endpoint.runtimeId, run.runtimeId);
+  assert.equal(endpoint.pid, run.child.pid);
 }
 
 async function stopRuntime(run, root) {

@@ -175,13 +175,8 @@ export function readShellPath(shellPath: string): string[] {
   }
 }
 
-export function getExecutableSearchPaths(): string[] {
+function mergeExecutableSearchPaths(shellPaths: string[]): string[] {
   const configuredPath = String(process.env.PATH || '').split(path.delimiter).filter(Boolean);
-  const shellPaths = [
-    ...readShellPath(process.env.SHELL || ''),
-    ...readShellPath('/bin/zsh'),
-    ...readShellPath('/bin/bash')
-  ];
   const home = process.env.HOME || '';
   const commonPaths = [
     '/opt/homebrew/bin',
@@ -205,7 +200,26 @@ export function getExecutableSearchPaths(): string[] {
     .filter((candidate, index, all) => candidate && all.indexOf(candidate) === index);
 }
 
-export function resolveCommandOnSearchPath(command: string): string {
+export function getExecutableSearchPaths(): string[] {
+  return mergeExecutableSearchPaths([
+    ...readShellPath(process.env.SHELL || ''),
+    ...readShellPath('/bin/zsh'),
+    ...readShellPath('/bin/bash')
+  ]);
+}
+
+export async function getExecutableSearchPathsAsync(): Promise<string[]> {
+  const shells = [...new Set([process.env.SHELL || '', '/bin/zsh', '/bin/bash'].map(expandHomePath))]
+    .filter(shell => shell && fs.existsSync(shell));
+  const paths = await Promise.all(shells.map(shell => new Promise<string[]>(resolve => {
+    childProcess.execFile(shell, ['-lc', 'printf %s "$PATH"'], { encoding: 'utf8', timeout: 1800 }, (error, stdout) => {
+      resolve(error ? [] : String(stdout || '').split(path.delimiter).filter(Boolean));
+    });
+  })));
+  return mergeExecutableSearchPaths(paths.flat());
+}
+
+export function resolveCommandOnSearchPath(command: string, searchPaths?: string[]): string {
   const trimmed = String(command || '').trim();
   if (!trimmed) {
     return '';
@@ -217,7 +231,7 @@ export function resolveCommandOnSearchPath(command: string): string {
   const extensions = process.platform === 'win32'
     ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
     : [''];
-  for (const dir of getExecutableSearchPaths()) {
+  for (const dir of searchPaths || getExecutableSearchPaths()) {
     for (const ext of extensions) {
       const candidate = path.join(dir, `${expanded}${ext}`);
       if (isExecutableFile(candidate)) {

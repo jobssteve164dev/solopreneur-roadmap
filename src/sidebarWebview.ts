@@ -8750,6 +8750,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           const loadedSettings = message.settings || {};
           const authoritativeHydration = message.hydrated === true
             || (message.hydrated === undefined && latestSettingsRequestMode === 'full');
+          const defaultAgentChanged = (loadedSettings.cliPath || 'agy') !== (currentSettings.cliPath || 'agy');
           currentSettings = loadedSettings;
           if (!settingsFormDirty && !settingsSavePending) {
             settingsDirtyKeys.clear();
@@ -8792,10 +8793,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           applyLanguage();
           restartFocusTimerTick();
           renderCollaborationPanel();
-          syncAgentImpactSettings(loadedSettings, !authoritativeHydration);
-          if (authoritativeHydration && message.enriched !== true && settingsPanel && settingsPanel.style.display === 'block') {
+          syncAgentImpactSettings(loadedSettings);
+          if (((message.requestId && authoritativeHydration && message.enriched !== true) || defaultAgentChanged)
+            && settingsPanel && settingsPanel.style.display === 'block') {
             requestDependencyCheck();
-            requestAgentImpact();
           }
           break;
 

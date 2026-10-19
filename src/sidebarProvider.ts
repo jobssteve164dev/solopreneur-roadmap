@@ -7,7 +7,7 @@ import { SyncEngine } from './db/syncEngine';
 import { AgentConversation } from './db/types';
 import { SolopreneurSettings } from './pluginContracts';
 import { getSidebarFallbackHtml, getSidebarWebviewHtml } from './sidebarWebview';
-import { createLocalDiagnosticTrace, LocalDiagnosticTrace, recordLocalDiagnosticError, withLocalDiagnosticTrace } from './localDiagnostics';
+import { createLocalDiagnosticTrace, LocalDiagnosticTrace, observeLocalDiagnosticStage, recordLocalDiagnosticError, withLocalDiagnosticTrace } from './localDiagnostics';
 
 async function runTracedSidebarAction(trace: LocalDiagnosticTrace, stage: string, action: () => Promise<void>): Promise<boolean> {
   try {
@@ -33,8 +33,7 @@ import { readTodayReviewFromDatabase, startDailyReviewAgent } from './dailyRevie
 import {
   buildAgentAutomationWrapper,
   buildAgentInstallCommand,
-  getDependencyStatus,
-  getSupportedAgentStatuses
+  getDependencyStatus
 } from './sidebarDependencies';
 import {
   applyProjectRegistryToPortfolio,
@@ -314,10 +313,11 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     };
   }
 
-  private refreshDependencyStatus(webviewView: vscode.WebviewView, cliPath: string): void {
-    const dependencyStatus = getDependencyStatus(cliPath);
-    void this.postMessage({ command: 'dependenciesChecked', status: dependencyStatus });
+  private async refreshDependencyStatus(webviewView: vscode.WebviewView, cliPath: string): Promise<void> {
     const accountRequest = ++this._agentAccountStatusRequest;
+    const dependencyStatus = await observeLocalDiagnosticStage('sidebar.dependencies', () => getDependencyStatus(cliPath));
+    if (accountRequest !== this._agentAccountStatusRequest || this._view !== webviewView) return;
+    void this.postMessage({ command: 'dependenciesChecked', status: dependencyStatus });
     const accountByFamily = new Map();
     const publish = () => {
       if (accountRequest !== this._agentAccountStatusRequest || this._view !== webviewView) return;
@@ -456,7 +456,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             await vscode.commands.executeCommand('solopreneur.showFlow');
             break;
           case 'checkDependencies': {
-            this.refreshDependencyStatus(webviewView, data.cliPath || this._getSettings().cliPath || 'agy');
+            await this.refreshDependencyStatus(webviewView, data.cliPath || this._getSettings().cliPath || 'agy');
             break;
           }
           case 'agent.setDefault': {
@@ -467,7 +467,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               break;
             }
             await this._updateSettings({ cliPath });
-            this.refreshDependencyStatus(webviewView, cliPath);
+            await this.refreshDependencyStatus(webviewView, cliPath);
             vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
             vscode.window.showInformationMessage(`Default Agent set to ${cliPath}.`);
             break;
@@ -480,7 +480,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
               await this._updateSettings({ cliPath: prepared.wrapperPath });
               vscode.commands.executeCommand('solopreneur.settingsSavedBroadcast');
             }
-            this.refreshDependencyStatus(webviewView, prepared.wrapperPath || data.cliPath || settings.cliPath || 'agy');
+            await this.refreshDependencyStatus(webviewView, prepared.wrapperPath || data.cliPath || settings.cliPath || 'agy');
             if (prepared.ok) {
               vscode.window.showInformationMessage(prepared.message);
             } else {
@@ -544,7 +544,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     };
     webviewView.webview.onDidReceiveMessage((data) => {
       const command = String(data?.command || '');
-      if (!/^(?:getNodes|getSettings|getProjects|bootstrap\.get|settings\.get|databaseOverview\.get|agentImpact\.get|conversation\.runSolo|project\.select|showStrategyPyramid|showFullRoadmap)$/.test(command)) return handleMessage(data).catch(() => undefined);
+      if (!/^(?:getNodes|getSettings|getProjects|bootstrap\.get|settings\.get|databaseOverview\.get|agentImpact\.get|checkDependencies|conversation\.runSolo|project\.select|showStrategyPyramid|showFullRoadmap)$/.test(command)) return handleMessage(data).catch(() => undefined);
       const trace = createLocalDiagnosticTrace(getDiagnosticDataPath(this._getSettings), `sidebar.action.${command}`, { interactionId: data.interactionId, targetId: 'sidebar' });
       if (command === 'showStrategyPyramid') {
         this._navigationTraces.set(trace.interactionId!, trace);
@@ -588,8 +588,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       void this.postMessage({
         command: 'settingsLoaded',
         settings,
-        projectRoot: this._getProjects().selectedProjectPath || '',
-        supportedAgents: getSupportedAgentStatuses(settings.cliPath || 'agy')
+        projectRoot: this._getProjects().selectedProjectPath || ''
       });
     } catch (error) {
       console.error('SoloMap sidebar failed to send settings:', error);

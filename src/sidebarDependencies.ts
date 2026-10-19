@@ -6,8 +6,10 @@ import {
   getAgentCliCandidates,
   getAgentCliFamily,
   getAgentTaskAutomationStatus,
+  getExecutableSearchPaths,
+  getExecutableSearchPathsAsync,
   getKnownAgentCliCandidates,
-  resolveExecutablePath,
+  resolveCommandOnSearchPath,
   resolveAgentCli,
   shellQuote
 } from './agentCli';
@@ -52,14 +54,14 @@ const supportedAgentFamilies = [
   { family: 'grok', title: 'Grok' }
 ];
 
-export function getSupportedAgentStatuses(configuredCliPath: string): SupportedAgentStatus[] {
-  const selectedCli = resolveAgentCli(configuredCliPath || 'agy', configuredCliPath || 'agy');
+export function getSupportedAgentStatuses(configuredCliPath: string, searchPaths = getExecutableSearchPaths()): SupportedAgentStatus[] {
+  const resolveCommand = (command: string) => resolveCommandOnSearchPath(command, searchPaths);
+  const selectedCli = getAgentCliCandidates(configuredCliPath || 'agy', configuredCliPath || 'agy').map(resolveCommand).find(Boolean) || configuredCliPath || 'agy';
   const selectedFamily = getAgentCliFamily(selectedCli || configuredCliPath || 'agy');
 
   return supportedAgentFamilies.map((agent) => {
     const candidates = getKnownAgentCliCandidates(agent.family);
-    const detected = candidates.find(commandExists) || '';
-    const command = detected ? resolveExecutablePath(detected) : '';
+    const command = candidates.map(resolveCommand).find(Boolean) || '';
     const automation = command
       ? getAgentTaskAutomationStatus(command)
       : { supported: false, preconfigured: false, permissionArgs: '', message: 'Agent CLI is not installed.' };
@@ -82,22 +84,23 @@ export function getSupportedAgentStatuses(configuredCliPath: string): SupportedA
   });
 }
 
-export function getDependencyStatus(cliPath: string): DependencyStatus {
-  const agentCli = resolveAgentCli(cliPath || 'agy', cliPath || 'agy');
-  const agentReady = commandExists(agentCli);
+export async function getDependencyStatus(cliPath: string): Promise<DependencyStatus> {
+  const searchPaths = await getExecutableSearchPathsAsync();
+  const resolveCommand = (command: string) => resolveCommandOnSearchPath(command, searchPaths);
+  const candidates = getAgentCliCandidates(cliPath || 'agy', cliPath || 'agy');
+  const agentCli = candidates.map(resolveCommand).find(Boolean) || candidates[0] || 'agy';
+  const agentReady = Boolean(resolveCommand(agentCli));
   const automation = agentReady
     ? getAgentTaskAutomationStatus(agentCli)
     : { supported: false, preconfigured: false, permissionArgs: '', message: 'Agent CLI is not ready yet.' };
-  const githubCliReady = commandExists('gh');
+  const githubCli = resolveCommand('gh');
+  const githubCliReady = Boolean(githubCli);
   let githubAuthReady = false;
   let githubMessage = githubCliReady ? 'GitHub CLI is installed.' : 'GitHub CLI is not installed.';
   if (githubCliReady) {
-    const auth = childProcess.spawnSync('gh', ['auth', 'status'], {
-      encoding: 'utf8',
-      timeout: 3000,
-      stdio: ['ignore', 'pipe', 'pipe']
+    githubAuthReady = await new Promise<boolean>(resolve => {
+      childProcess.execFile(githubCli, ['auth', 'status'], { encoding: 'utf8', timeout: 3000 }, error => resolve(!error));
     });
-    githubAuthReady = auth.status === 0;
     githubMessage = githubAuthReady ? 'GitHub is authorized.' : 'GitHub authorization is needed.';
   }
   return {
@@ -110,7 +113,7 @@ export function getDependencyStatus(cliPath: string): DependencyStatus {
     githubCliReady,
     githubAuthReady,
     githubMessage,
-    supportedAgents: getSupportedAgentStatuses(cliPath || 'agy')
+    supportedAgents: getSupportedAgentStatuses(cliPath || 'agy', searchPaths)
   };
 }
 

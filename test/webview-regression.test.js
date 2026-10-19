@@ -4044,6 +4044,30 @@ test('sidebar hydrates untouched settings without overwriting a field edited dur
   assert.ok(postedMessages.some(message => message.command === 'agentImpact.get' && message.cliPath === 'claude'));
 });
 
+test('settings hydration and broadcasts preserve the in-flight contribution response', () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), ids);
+  const settings = { cliPath: 'codex', language: 'zh', globalDataPath: '/data' };
+  dispatchMessage({ command: 'settingsLoaded', settings, hydrated: false });
+  elements['btn-toggle-settings'].listeners.click();
+  const read = postedMessages.filter(message => message.command === 'agentImpact.get').at(-1);
+  const hydration = postedMessages.filter(message => message.command === 'settings.get').at(-1);
+  dispatchMessage({ command: 'settingsLoaded', settings, hydrated: true, requestId: hydration.requestId });
+  dispatchMessage({ command: 'settingsLoaded', settings });
+  dispatchMessage({ command: 'settingsLoaded', settings });
+  assert.equal(postedMessages.filter(message => message.command === 'agentImpact.get').length, 1, 'unchanged settings must not supersede the active contribution read');
+  assert.equal(postedMessages.filter(message => message.command === 'checkDependencies').length, 1, 'settings broadcasts must not restart account probes');
+  dispatchMessage({ command: 'agentImpactLoaded', requestId: read.requestId, status: { impact: { totalMinutes: 42, totalTokens: 120, changedFiles: 3, projectProgressPercent: 50 } } });
+  assert.equal(elements['impact-minutes'].textContent, '42');
+  assert.equal(elements['impact-tokens'].textContent, '120');
+  dispatchMessage({ command: 'settingsLoaded', settings: { ...settings, cliPath: 'claude' } });
+  const checks = postedMessages.filter(message => message.command === 'checkDependencies');
+  assert.equal(checks.length, 2, 'a default Agent changed from another panel must refresh its readiness');
+  assert.equal(checks.at(-1).cliPath, 'claude');
+  assert.equal(postedMessages.filter(message => message.command === 'agentImpact.get').length, 1, 'changing the Agent must not discard contribution for the same data root');
+});
+
 test('sidebar cold-start diagnostics finish only after the browser acknowledges core data', async t => {
   const diagnostics = require('../out/localDiagnostics.js'); const events = [], messages = [];
   diagnostics.configureLocalDiagnosticPersistence({ append: (_root, event) => events.push(event) });
@@ -11456,7 +11480,7 @@ test('agent command builder keeps background one-shot commands and uses native i
     assert.equal(extensionModule.__commandExists('solo-test-agent'), true);
     assert.equal(sidebarModule.__resolveExecutablePath('solo-test-agent'), fakeCliPath);
     assert.equal(sidebarModule.__commandExists('solo-test-agent'), true);
-    const dependencyStatus = sidebarModule.__getDependencyStatus('agy');
+    const dependencyStatus = await sidebarModule.__getDependencyStatus('agy');
     assert.equal(dependencyStatus.agentAutomationReady, true);
     assert.equal(dependencyStatus.agentAutomationCanPrepare || dependencyStatus.agentAutomationPreconfigured, true);
     const wrapperRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solopreneur-wrapper-root-'));
@@ -11464,7 +11488,7 @@ test('agent command builder keeps background one-shot commands and uses native i
     assert.equal(prepared.ok, true);
     assert.match(prepared.wrapperPath, /\/agy$/);
     assert.match(fs.readFileSync(prepared.wrapperPath, 'utf8'), /--dangerously-skip-permissions/);
-    assert.equal(sidebarModule.__getDependencyStatus(prepared.wrapperPath).agentAutomationPreconfigured, true);
+    assert.equal((await sidebarModule.__getDependencyStatus(prepared.wrapperPath)).agentAutomationPreconfigured, true);
   } finally {
     process.env.HOME = previousHome;
     process.env.PATH = previousPath;
