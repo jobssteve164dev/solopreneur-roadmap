@@ -11934,8 +11934,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           const agentCli = projectConversationAgentSelections[targetId] || getEffectiveSettingCliPath() || 'agy';
           const model = getTargetModelValue(targetId, agentCli);
           projectConversationModes[projectPath] = 'solo';
-          deliveryActionMessage = t('deliveryActionStarted');
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
             command: 'conversation.runSolo',
             projectPath,
@@ -11944,6 +11942,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             model,
             supplementFiles: []
           });
+          deliveryActionMessage = t('deliveryActionStarted');
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
       portfolioList.querySelectorAll('[data-agent-review-pr]').forEach(button => {

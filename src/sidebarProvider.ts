@@ -7,7 +7,18 @@ import { SyncEngine } from './db/syncEngine';
 import { AgentConversation } from './db/types';
 import { SolopreneurSettings } from './pluginContracts';
 import { getSidebarFallbackHtml, getSidebarWebviewHtml } from './sidebarWebview';
-import { createLocalDiagnosticTrace, recordLocalDiagnosticError, withLocalDiagnosticTrace } from './localDiagnostics';
+import { createLocalDiagnosticTrace, LocalDiagnosticTrace, recordLocalDiagnosticError, withLocalDiagnosticTrace } from './localDiagnostics';
+
+async function runTracedSidebarAction(trace: LocalDiagnosticTrace, stage: string, action: () => Promise<void>): Promise<boolean> {
+  try {
+    await action();
+    trace.record(stage, 'ok');
+    return true;
+  } catch (error) {
+    trace.record(stage, 'error', 0, error);
+    return false;
+  }
+}
 
 function getDiagnosticDataPath(getSettings: () => SolopreneurSettings): string {
   try {
@@ -528,20 +539,18 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           action: String(data?.command || ''),
           projectPath: String(data?.projectPath || '')
         });
+        throw error;
       }
     };
     webviewView.webview.onDidReceiveMessage((data) => {
       const command = String(data?.command || '');
-      if (!/^(?:getNodes|getSettings|getProjects|bootstrap\.get|settings\.get|project\.select|showStrategyPyramid|showFullRoadmap)$/.test(command)) return handleMessage(data);
+      if (!/^(?:getNodes|getSettings|getProjects|bootstrap\.get|settings\.get|databaseOverview\.get|agentImpact\.get|conversation\.runSolo|project\.select|showStrategyPyramid|showFullRoadmap)$/.test(command)) return handleMessage(data).catch(() => undefined);
       const trace = createLocalDiagnosticTrace(getDiagnosticDataPath(this._getSettings), `sidebar.action.${command}`, { interactionId: data.interactionId, targetId: 'sidebar' });
       if (command === 'showStrategyPyramid') {
         this._navigationTraces.set(trace.interactionId!, trace);
         if (this._navigationTraces.size > 16) this._navigationTraces.delete(this._navigationTraces.keys().next().value!);
       }
-      return withLocalDiagnosticTrace(trace, async () => {
-        try { await handleMessage(data); trace.record(`sidebar.action.${command}`, 'ok'); }
-        catch (error) { trace.record(`sidebar.action.${command}`, 'error', 0, error); throw error; }
-      });
+      return withLocalDiagnosticTrace(trace, () => runTracedSidebarAction(trace, `sidebar.action.${command}`, () => handleMessage(data)));
     });
 
     // The Webview owns the single cold-start request. Pushing the same payload

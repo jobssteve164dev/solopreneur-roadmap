@@ -6,6 +6,7 @@ import { AgentTokenUsage, normalizeTokenUsage } from './tokenUsage';
 import { getTrustedWorkDurationMs } from './workHabits';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
+import { observeLocalDiagnosticStage, recordCurrentDiagnosticStage } from './localDiagnostics';
 
 export interface AgentImpactProject {
   name: string;
@@ -231,12 +232,27 @@ function buildAgentImpactSummaryFromProjectRuns(
 
 export async function buildAgentImpactSummaryFromDatabase(projects: AgentImpactProject[], extensionPath: string, now = new Date(), globalDataPath = ''): Promise<AgentImpactSummary> {
   const runsByProject = new Map<string, AgentImpactRun[]>();
-  for (const project of projects) {
+  let slowestQuery: { index: number; durationMs: number } | undefined;
+  for (const [index, project] of projects.entries()) {
     const root = normalizeGlobalDataPathForExtension(globalDataPath, project.path);
-    const indexedRuns = await sendRuntimeDataRequest<RunImpactRecord[]>(root, { operation: 'read_project_impact_runs', input: { root: project.path } });
+    const startedAt = Date.now();
+    let indexedRuns: RunImpactRecord[];
+    try {
+      indexedRuns = await sendRuntimeDataRequest<RunImpactRecord[]>(root, { operation: 'read_project_impact_runs', input: { root: project.path } });
+    } catch (error) {
+      recordCurrentDiagnosticStage(`agentImpact.project.${index + 1}.query`, 'error', Date.now() - startedAt, error);
+      throw error;
+    }
+    const durationMs = Date.now() - startedAt;
+    if (!slowestQuery || durationMs > slowestQuery.durationMs) slowestQuery = { index: index + 1, durationMs };
     runsByProject.set(project.path, readRunsFromRunIndexEntries(indexedRuns));
   }
-  return buildAgentImpactSummaryFromProjectRuns(projects, (project) => runsByProject.get(project.path) || [], now);
+  if (slowestQuery && slowestQuery.durationMs >= 250) {
+    recordCurrentDiagnosticStage(`agentImpact.project.${slowestQuery.index}.query`, 'ok', slowestQuery.durationMs);
+  }
+  return observeLocalDiagnosticStage('agentImpact.aggregate', async () =>
+    buildAgentImpactSummaryFromProjectRuns(projects, (project) => runsByProject.get(project.path) || [], now)
+  );
 }
 
 export async function getAgentImpactStatusFromDatabase(projects: AgentImpactProject[], extensionPath: string, globalDataPath = ''): Promise<AgentImpactStatus> {

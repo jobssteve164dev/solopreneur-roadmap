@@ -1363,6 +1363,10 @@ function buildScheduledTasksFromTimePlan(
 
 const agentImpactRequests = new WeakMap<vscode.Webview, object>();
 
+async function requireWebviewDelivery(delivery: Thenable<boolean> | Promise<boolean>): Promise<void> {
+  if (!await delivery) throw new Error('webview_delivery_failed');
+}
+
 async function handleSharedWebviewAction(
   context: vscode.ExtensionContext,
   message: PluginActionRequest,
@@ -1386,22 +1390,23 @@ async function handleSharedWebviewAction(
   if (message.command === 'databaseOverview.get') {
     const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
     try {
-      const overview = await readDatabaseOverview(root, {
+      const overview = await observeLocalDiagnosticStage('database.overview.read', () => readDatabaseOverview(root, {
         ensureReady: async expectedRoot => {
-          await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: expectedRoot });
+          await observeLocalDiagnosticStage('database.overview.runtime', () => ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: expectedRoot }));
         },
-        readStorage: expectedRoot => sendRuntimeDataRequest<DatabaseOverview>(expectedRoot, { operation: 'read_database_overview', input: {} })
-      });
+        readStorage: expectedRoot => observeLocalDiagnosticStage('database.overview.query', () => sendRuntimeDataRequest<DatabaseOverview>(expectedRoot, { operation: 'read_database_overview', input: {} }))
+      }));
       if (root !== normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) throw new Error('data_location_changed');
-      await respond({ command: 'databaseOverviewLoaded', requestId: String(message.requestId || ''), overview });
+      await observeLocalDiagnosticStage('database.overview.delivery', () => requireWebviewDelivery(respond({ command: 'databaseOverviewLoaded', requestId: String(message.requestId || ''), overview })));
     } catch (error) {
+      if ((error as Error).message === 'webview_delivery_failed') throw error;
       const language = getPersistedSettings(context).language;
       recordLocalDiagnosticError(root, 'database.overview.settings', error);
-      await respond({
+      await observeLocalDiagnosticStage('database.overview.delivery', () => requireWebviewDelivery(respond({
         command: 'databaseOverviewLoaded',
         requestId: String(message.requestId || ''),
         error: language === 'en' ? 'Database details are temporarily unavailable. Try again.' : '暂时无法读取数据库概览，请重试。'
-      });
+      })));
     }
     return true;
   }
@@ -1491,9 +1496,9 @@ async function handleSharedWebviewAction(
     },
     'conversation.runSolo': async (request) => {
       const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
-      const startupTerminal = await revealAgentStartupTerminal(context, workspaceRoot, 'solo', String(request.agentCli || ''), String(request.model || ''));
+      const startupTerminal = await observeLocalDiagnosticStage('conversation.runSolo.terminal', () => revealAgentStartupTerminal(context, workspaceRoot, 'solo', String(request.agentCli || ''), String(request.model || '')));
       try {
-        const projectPath = await ensureActionProject(context, request.projectPath || '');
+        const projectPath = await observeLocalDiagnosticStage('conversation.runSolo.project', () => ensureActionProject(context, request.projectPath || ''));
         if (!projectPath && request.projectPath) return;
         await handleRunSoloConversation(
           context,
@@ -2012,12 +2017,13 @@ async function handleSharedWebviewAction(
         && dataRoot === normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)
         && projectPaths === JSON.stringify(getProjects(context).map(project => project.path));
       try {
-        const status = await getAgentImpactStatusFromDatabase(projects, context.extensionPath, dataRoot);
-        if (isCurrent()) await respond({ command: 'agentImpactLoaded', requestId: request.requestId, status });
+        const status = await observeLocalDiagnosticStage('agentImpact.read', () => getAgentImpactStatusFromDatabase(projects, context.extensionPath, dataRoot));
+        if (isCurrent()) await observeLocalDiagnosticStage('agentImpact.delivery', () => requireWebviewDelivery(respond({ command: 'agentImpactLoaded', requestId: request.requestId, status })));
       } catch (error) {
+        if ((error as Error).message === 'webview_delivery_failed') throw error;
         console.error('Unable to load agent contribution', error);
-        if (isCurrent()) await respond({ command: 'agentImpactLoaded', requestId: request.requestId, status: null,
-          error: settings.language === 'en' ? 'Unable to read contribution. Click Refresh to try again.' : '暂时无法读取贡献，请点击刷新重试。' });
+        if (isCurrent()) await observeLocalDiagnosticStage('agentImpact.delivery', () => requireWebviewDelivery(respond({ command: 'agentImpactLoaded', requestId: request.requestId, status: null,
+          error: settings.language === 'en' ? 'Unable to read contribution. Click Refresh to try again.' : '暂时无法读取贡献，请点击刷新重试。' })));
       }
     },
     'projectGrowth.get': async (request) => {
@@ -2067,15 +2073,16 @@ async function handleSharedWebviewAction(
       }
       invalidatePersistedSettingsCache();
       const settingsRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
-      await refreshExtensionSettingsFromDatabase(context, settingsRoot);
-      await respond({
+      await observeLocalDiagnosticStage('settings.database', () => refreshExtensionSettingsFromDatabase(context, settingsRoot));
+      const settings = await observeLocalDiagnosticStage('settings.snapshot', async () => getSettingsWithRuntimeState(context));
+      await observeLocalDiagnosticStage('settings.delivery', () => requireWebviewDelivery(respond({
         command: 'settingsLoaded',
-        settings: getSettingsWithRuntimeState(context),
+        settings,
         projectRoot: getMigrationProjectRoot(context) || '',
         requestId: String(request.requestId || ''),
         editRevision: Number(request.editRevision || 0),
         hydrated: true
-      });
+      })));
       void getSettingsWithOpenCodeSecretState(context).then(async settings => {
         await respond({
           command: 'settingsLoaded',
@@ -2567,7 +2574,7 @@ const databaseSettingKeys: Array<keyof SolopreneurSettings> = [
 ];
 
 async function refreshExtensionSettingsFromDatabase(context: vscode.ExtensionContext, root: string): Promise<void> {
-  const result = await sendRuntimeDataRequest<{ items: Array<{ key: string; revision: number; value?: unknown }> }>(root, { operation: 'read_host_settings', input: { namespace: 'extension', ownerScope: 'global' } });
+  const result = await observeLocalDiagnosticStage('settings.host.read', () => sendRuntimeDataRequest<{ items: Array<{ key: string; revision: number; value?: unknown }> }>(root, { operation: 'read_host_settings', input: { namespace: 'extension', ownerScope: 'global' } }));
   const present = new Set(result.items.map(item => item.key));
   const missing = databaseSettingKeys.filter(key => !present.has(key));
   if (missing.length) {
@@ -2575,22 +2582,22 @@ async function refreshExtensionSettingsFromDatabase(context: vscode.ExtensionCon
     const patches = missing.filter(key => seed[key] !== undefined).map(key => ({ key, expectedRevision: 0, value: seed[key] }));
     if (patches.length) {
       try {
-        await sendRuntimeDataRequest(root, { operation: 'patch_host_settings', input: { namespace: 'extension', ownerScope: 'global', patches, idempotencyKey: `extension-settings-bootstrap:${crypto.randomUUID()}` } });
+        await observeLocalDiagnosticStage('settings.host.bootstrap', () => sendRuntimeDataRequest(root, { operation: 'patch_host_settings', input: { namespace: 'extension', ownerScope: 'global', patches, idempotencyKey: `extension-settings-bootstrap:${crypto.randomUUID()}` } }));
       } catch (error) {
         if ((error as Error).message !== 'revision_conflict') throw error;
       }
       return refreshExtensionSettingsFromDatabase(context, root);
     }
   }
-  let policy = await sendRuntimeDataRequest<{ objectId?: string; revision?: number; data: { content: string } } | null>(root, { operation: 'read_global_prompt_policy', input: {} });
+  let policy = await observeLocalDiagnosticStage('settings.policy.read', () => sendRuntimeDataRequest<{ objectId?: string; revision?: number; data: { content: string } } | null>(root, { operation: 'read_global_prompt_policy', input: {} }));
   const legacy = context.globalState.get<Partial<SolopreneurSettings>>(settingsKey) || {};
   if (!policy && !databaseSettingsByRoot.has(root) && Object.prototype.hasOwnProperty.call(legacy, 'globalPrompt')) {
     try {
-      await sendRuntimeDataRequest(root, { operation: 'save_global_prompt', input: { policy: null, content: String(legacy.globalPrompt || ''), source: 'user', idempotencyKey: `global-prompt-bootstrap:${nativeProjectionValueHash(String(legacy.globalPrompt || ''))}` } });
+      await observeLocalDiagnosticStage('settings.policy.bootstrap', () => sendRuntimeDataRequest(root, { operation: 'save_global_prompt', input: { policy: null, content: String(legacy.globalPrompt || ''), source: 'user', idempotencyKey: `global-prompt-bootstrap:${nativeProjectionValueHash(String(legacy.globalPrompt || ''))}` } }));
     } catch (error) {
       if (!['revision_conflict', 'global_prompt_revision_conflict'].includes((error as Error).message)) throw error;
     }
-    policy = await sendRuntimeDataRequest<{ objectId?: string; revision?: number; data: { content: string } } | null>(root, { operation: 'read_global_prompt_policy', input: {} });
+    policy = await observeLocalDiagnosticStage('settings.policy.read', () => sendRuntimeDataRequest<{ objectId?: string; revision?: number; data: { content: string } } | null>(root, { operation: 'read_global_prompt_policy', input: {} }));
   }
   databaseSettingsByRoot.set(root, {
     ...Object.fromEntries(result.items.filter(item => databaseSettingKeys.includes(item.key as keyof SolopreneurSettings)).map(item => [item.key, item.value])),
@@ -8482,11 +8489,13 @@ async function readStoredNativeSessionId(workspaceRoot: string, nodeId: string, 
 async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = [], occurrenceId = '', interactiveConversation = true, target?: AgentLaunchTarget, runMetadata: Record<string, unknown> = {}): Promise<number> {
   const workspaceRoot = target?.workspaceRoot || activeProjectRoot;
   const projectSyncEngine = target?.engine || syncEngine;
-  await ensureTaskRuntimeReady(context);
+  await observeLocalDiagnosticStage('conversation.runSolo.runtime', () => ensureTaskRuntimeReady(context));
   if (!projectSyncEngine || !workspaceRoot) {
     return 0;
   }
-  const resumed = await resumeOrdinaryConversation(context, workspaceRoot, target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), target?.globalDataPath);
+  const resumed = await observeLocalDiagnosticStage('conversation.runSolo.resume', () =>
+    resumeOrdinaryConversation(context, workspaceRoot, target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), target?.globalDataPath)
+  );
   if (resumed !== null) return resumed;
   const request = userMessage.trim();
   if (!request) {
@@ -8529,7 +8538,9 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
 
   void recordLocalUsageEvent(context, 'soloConversation').catch(error => console.error('SoloMap failed to record local usage:', error));
 
-  const nativeSessionId = await readStoredNativeSessionId(workspaceRoot, soloConversationId, agentCli, globalDataPath);
+  const nativeSessionId = await observeLocalDiagnosticStage('conversation.runSolo.session', () =>
+    readStoredNativeSessionId(workspaceRoot, soloConversationId, agentCli, globalDataPath)
+  );
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
   const runStartedAt = new Date().toISOString();
   const buildLaunchSummary = (preGitHash = '') => [
@@ -8543,10 +8554,12 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     `User supplement:\n${request}`,
     attachedFiles.length > 0 ? `Attached files:\n${attachedFiles.join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
-  const conversationPrompt = await buildSoloConversationPrompt(request, workspaceRoot, settings.globalPrompt, attachedFiles, globalDataPath, settings.enabledEnhancements, interactiveConversation);
-  const prepared = await prepareOrdinaryConversation(context, { agentCli, selectedModel, prompt: conversationPrompt, globalPrompt: settings.globalPrompt, workspaceRoot, nodeId: soloConversationId, executionLogId: 0, userMessage: request, runKind: interactiveConversation ? 'solo' : 'solo_background', globalDataPath, taskPermissionMode: settings.taskPermissionMode || 'auto', nativeSessionId, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), metadata: { launchSummary: buildLaunchSummary(), captureRoadmapBackup: true, preSessionGitBackup: true, ...runMetadata } });
+  const conversationPrompt = await observeLocalDiagnosticStage('conversation.runSolo.prompt', () =>
+    buildSoloConversationPrompt(request, workspaceRoot, settings.globalPrompt, attachedFiles, globalDataPath, settings.enabledEnhancements, interactiveConversation)
+  );
+  const prepared = await observeLocalDiagnosticStage('conversation.runSolo.prepare', () => prepareOrdinaryConversation(context, { agentCli, selectedModel, prompt: conversationPrompt, globalPrompt: settings.globalPrompt, workspaceRoot, nodeId: soloConversationId, executionLogId: 0, userMessage: request, runKind: interactiveConversation ? 'solo' : 'solo_background', globalDataPath, taskPermissionMode: settings.taskPermissionMode || 'auto', nativeSessionId, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), metadata: { launchSummary: buildLaunchSummary(), captureRoadmapBackup: true, preSessionGitBackup: true, ...runMetadata } }));
   postNodeConversations(soloConversationId);
-  return deliverOrdinaryConversation(context, prepared);
+  return observeLocalDiagnosticStage('conversation.runSolo.delivery', () => deliverOrdinaryConversation(context, prepared));
 }
 
 async function getCurrentFlowTrace(projectPath: string): Promise<FlowTrace | null> {

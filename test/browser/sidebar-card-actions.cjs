@@ -109,7 +109,55 @@ const projects = [
       'keyboard activation remains available after background updates'
     );
 
-    console.log(JSON.stringify({ stableUiStateLoads: true, pointerActionSurvivesRefresh: true, keyboardActionWorks: true, focusedInputSurvivesRefresh: true }));
+    const securityPage = await browser.newPage();
+    await securityPage.route('**/*', route => route.abort());
+    await securityPage.evaluate(() => {
+      window.messages = [];
+      window.acquireVsCodeApi = () => ({
+        postMessage: message => window.messages.push(message),
+        getState: () => ({}),
+        setState() {}
+      });
+    });
+    await securityPage.setContent(html);
+    const sendSecurity = message => securityPage.evaluate(value => {
+      window.dispatchEvent(new MessageEvent('message', { data: value }));
+    }, message);
+    await sendSecurity({ command: 'settingsLoaded', settings: { language: 'zh', cliPath: 'codex', agentModelPreferences: {} } });
+    await sendSecurity({
+      command: 'projectsLoaded',
+      projects: {
+        projects,
+        selectedProjectPath: projects[0].path,
+        portfolio: [{
+          ...projects[0],
+          security: {
+            available: true,
+            openCriticalHigh: 1,
+            alerts: [{ title: 'Fixture high risk', source: 'Dependabot', severity: 'high', state: 'open' }]
+          }
+        }, projects[1]]
+      }
+    });
+    await securityPage.evaluate(() => document.querySelector('[data-toggle-delivery-panel]').click());
+    await securityPage.evaluate(() => {
+      window.messages = [];
+      const portfolio = document.getElementById('portfolio-list');
+      const querySelectorAll = portfolio.querySelectorAll.bind(portfolio);
+      portfolio.querySelectorAll = selector => {
+        if (selector === '[data-select-project-path]') throw new Error('fixture_render_interrupted');
+        return querySelectorAll(selector);
+      };
+    });
+    await securityPage.evaluate(() => document.querySelector('[data-agent-fix-security-project-path="/fixture/a"]').click());
+    assert.deepEqual(
+      await securityPage.evaluate(() => window.messages.filter(message => message.command === 'conversation.runSolo').map(message => ({ command: message.command, projectPath: message.projectPath }))),
+      [{ command: 'conversation.runSolo', projectPath: projects[0].path }],
+      'security repair must leave the webview before status rendering can delay or interrupt it'
+    );
+    await securityPage.close();
+
+    console.log(JSON.stringify({ stableUiStateLoads: true, pointerActionSurvivesRefresh: true, keyboardActionWorks: true, focusedInputSurvivesRefresh: true, securityActionEscapesRender: true }));
   } finally {
     await browser.close();
   }

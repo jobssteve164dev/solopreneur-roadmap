@@ -71,6 +71,16 @@ test('roadmap CSV is accepted into the unified database and remains readable whe
   fs.renameSync(isolated, f.csvPath);
 });
 
+test('roadmap acceptance preserves legacy semicolon dependency lists as canonical dependencies', async t => {
+  const f = fixture(t);
+  fs.appendFileSync(f.csvPath, '\n3,第三步,兼容旧路线图,交付,1;2,codex,执行第三步,Pending,2026-01-03T00:00:00.000Z,');
+
+  const accepted = await f.call('accept_roadmap_csv', { root: f.project });
+
+  assert.equal(accepted.nodes.find(node => node.id === '3').dependencies, '1,2');
+  assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM roadmap_dependencies')[0].count, 3);
+});
+
 test('roadmap acceptance rejects unknown, missing and duplicate CSV columns before persisting', async t => {
   const f = fixture(t), original = fs.readFileSync(f.csvPath, 'utf8'), [header, ...rows] = original.split('\n');
   for (const invalidHeader of [

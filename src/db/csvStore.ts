@@ -7,6 +7,16 @@ export const roadmapCsvColumns = [
   'agentPrompt', 'status', 'createdAt', 'completedAt'
 ];
 
+function parseDependencyIds(value: unknown, ids: Set<string>): string[] {
+  return String(value || '').split(',').map(dependency => dependency.trim()).filter(Boolean).flatMap((dependency) => {
+    if (ids.has(dependency)) return [dependency];
+    const legacyDependencies = dependency.split(';').map(item => item.trim()).filter(Boolean);
+    return legacyDependencies.length > 1 && legacyDependencies.every(item => ids.has(item))
+      ? legacyDependencies
+      : [dependency];
+  });
+}
+
 export function parseRoadmapCsv(fileContent: string, options: { strictHeader?: boolean } = {}): RoadmapNode[] {
   const headerResult = Papa.parse<string[]>(fileContent, { preview: 1, skipEmptyLines: true });
   const header = (headerResult.data[0] || []).map(value => String(value));
@@ -28,8 +38,12 @@ export function parseRoadmapCsv(fileContent: string, options: { strictHeader?: b
     if (!node.id || !node.title || ids.has(node.id) || !statuses.has(node.status)) throw new Error('roadmap_csv_invalid:node_identity');
     ids.add(node.id);
   }
-  for (const node of nodes) for (const dependency of String(node.dependencies || '').split(',').map(value => value.trim()).filter(Boolean)) {
-    if (dependency === node.id || !ids.has(dependency)) throw new Error('roadmap_csv_invalid:dependency');
+  for (const node of nodes) {
+    const dependencies = parseDependencyIds(node.dependencies, ids);
+    for (const dependency of dependencies) {
+      if (dependency === node.id || !ids.has(dependency)) throw new Error('roadmap_csv_invalid:dependency');
+    }
+    node.dependencies = dependencies.join(',');
   }
   return nodes;
 }

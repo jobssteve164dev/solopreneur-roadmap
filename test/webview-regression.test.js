@@ -7361,6 +7361,56 @@ test('full settings hydration delivers saved local settings before optional capa
   assert.ok(optionalEnrichment > localResponse, 'capabilities and secret-state enrichment must start after the L1 response');
 });
 
+test('sidebar diagnostics split settings, overview, contribution, and Solo launch stages', () => {
+  const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const impactSource = fs.readFileSync(path.join(projectRoot, 'src/agentImpact.ts'), 'utf8');
+  const providerSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarProvider.ts'), 'utf8');
+  for (const stage of [
+    'settings.database', 'settings.host.read', 'settings.host.bootstrap', 'settings.policy.read', 'settings.policy.bootstrap', 'settings.snapshot', 'settings.delivery',
+    'database.overview.read', 'database.overview.runtime', 'database.overview.query', 'database.overview.delivery',
+    'agentImpact.read', 'agentImpact.delivery',
+    'conversation.runSolo.terminal', 'conversation.runSolo.project', 'conversation.runSolo.runtime', 'conversation.runSolo.resume',
+    'conversation.runSolo.session', 'conversation.runSolo.prompt', 'conversation.runSolo.prepare', 'conversation.runSolo.delivery'
+  ]) assert.match(extensionSource, new RegExp(`observeLocalDiagnosticStage\\('${stage.replaceAll('.', '\\.')}'`));
+  assert.match(impactSource, /recordCurrentDiagnosticStage\(`agentImpact\.project\.\$\{index \+ 1\}\.query`, 'error'/);
+  assert.match(impactSource, /slowestQuery\.durationMs >= 250/);
+  assert.match(impactSource, /recordCurrentDiagnosticStage\(`agentImpact\.project\.\$\{slowestQuery\.index\}\.query`, 'ok'/);
+  assert.match(impactSource, /observeLocalDiagnosticStage\('agentImpact\.aggregate'/);
+  for (const command of ['databaseOverview.get', 'agentImpact.get', 'conversation.runSolo']) assert.ok(providerSource.includes(command.replaceAll('.', '\\.')));
+
+  const handlerStart = providerSource.indexOf('const handleMessage = async');
+  const handlerEnd = providerSource.indexOf('webviewView.webview.onDidReceiveMessage', handlerStart);
+  const handlerSource = providerSource.slice(handlerStart, handlerEnd);
+  assert.match(handlerSource, /catch \(error\) \{[\s\S]*?recordLocalDiagnosticError\([\s\S]*?throw error;/);
+});
+
+test('security repair dispatches the Solo request before card status rendering', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
+  const handlerStart = source.indexOf("querySelectorAll('[data-agent-fix-security-project-path]')");
+  const handlerEnd = source.indexOf("querySelectorAll('[data-agent-review-pr]')", handlerStart);
+  assert.ok(handlerStart >= 0 && handlerEnd > handlerStart, 'security repair handler must remain present');
+  const handler = source.slice(handlerStart, handlerEnd);
+  const dispatch = handler.indexOf("command: 'conversation.runSolo'");
+  const render = handler.indexOf('renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath)');
+  assert.ok(dispatch >= 0, 'security repair must dispatch a Solo conversation');
+  assert.ok(render >= 0, 'security repair must keep its immediate status redraw');
+  assert.ok(dispatch < render, 'security repair must leave the webview before status rendering can delay or interrupt it');
+});
+
+test('sidebar diagnostics record delivery and action failures as errors', async () => {
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.requireDelivery = requireWebviewDelivery;');
+  await assert.doesNotReject(() => extension.requireDelivery(Promise.resolve(true)));
+  await assert.rejects(() => extension.requireDelivery(Promise.resolve(false)), /webview_delivery_failed/);
+
+  const provider = loadCompiledModule('out/sidebarProvider.js', 'module.exports.runTraced = runTracedSidebarAction;');
+  const events = [];
+  const trace = { record: (...event) => events.push(event) };
+  assert.equal(await provider.runTraced(trace, 'sidebar.action.settings.get', async () => {}), true);
+  assert.equal(await provider.runTraced(trace, 'sidebar.action.settings.get', async () => { throw new Error('fixture_failure'); }), false);
+  assert.deepEqual(events.map(event => event[1]), ['ok', 'error']);
+  assert.match(events[1][3].message, /fixture_failure/);
+});
+
 test('project registry data is delivered before optional runtime health and autonomy enrichment', () => {
   const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
   const start = extensionSource.indexOf("'project.getAll': async");
