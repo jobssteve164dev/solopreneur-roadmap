@@ -1,5 +1,5 @@
 import * as fs from 'fs';
-import { observeLocalDiagnosticStage } from './localDiagnostics';
+import { classifyDiagnosticFailure, observeLocalDiagnosticStage } from './localDiagnostics';
 import * as path from 'path';
 import { pathToFileURL } from 'url';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -411,8 +411,7 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
               });
               return boundedToolContent(pi.agent, response.content);
             } catch (error) {
-              chatError = error instanceof Error ? error : new Error(String(error));
-              throw chatError;
+              throw new Error(`Intelligence tool unavailable: ${tool.name} (${classifyDiagnosticFailure(error)})`);
             }
           }
         }))

@@ -803,23 +803,31 @@ test('smart kernel chat does not show a malformed tool request as a reply', asyn
     { selectedProject: '', projects: [] }, { listTools: async () => ({ tools: [] }) }), /invalid read tool request/i);
 });
 
-test('smart kernel chat reports an MCP transport failure instead of answering from an error result', async () => {
+test('smart kernel chat lets the model answer after an MCP transport failure', async () => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
   let calls = 0;
+  const prompts = [];
   const engine = new EmbeddedPiAgentEngine({
-    agentCli: 'codex', runner: async () => ++calls === 1
-      ? '{"toolCall":{"name":"get_current_project"}}'
-      : '当前项目正常。'
+    agentCli: 'codex', runner: async invocation => {
+      prompts.push(invocation.stdin);
+      return ++calls === 1
+        ? '{"toolCall":{"name":"get_current_project"}}'
+        : '暂时无法读取当前项目，请稍后再试。';
+    }
   });
   const readTools = {
     listTools: async () => ({ tools: [{ name: 'get_current_project', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true, destructiveHint: false } }] }),
     callTool: async () => { throw new Error('MCP transport disconnected'); }
   };
-  await assert.rejects(() => engine.chat([{ role: 'user', content: '当前项目状态？' }],
-    { selectedProject: '', projects: [] }, readTools), /MCP transport disconnected/);
+  assert.equal(await engine.chat([{ role: 'user', content: '当前项目状态？' }],
+    { selectedProject: '', projects: [] }, readTools), '暂时无法读取当前项目，请稍后再试。');
+  assert.equal(calls, 2);
+  assert.match(prompts[1], /"isError":true/);
+  assert.match(prompts[1], /mcp_transport_error/);
+  assert.doesNotMatch(prompts[1], /MCP transport disconnected/);
 });
 
-test('MCP tool error is recorded on the tool stage', async t => {
+test('smart kernel records an MCP tool error and lets the model continue', async t => {
   const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
   const diagnostics = require('../out/localDiagnostics.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-mcp-error-'));
@@ -831,16 +839,24 @@ test('MCP tool error is recorded on the tool stage', async t => {
     fs.rmdirSync(root);
   });
   let modelCalls = 0;
-  const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async () => ++modelCalls === 1
-    ? '{"toolCall":{"name":"get_current_project"}}'
-    : '无法读取当前项目。' });
+  const prompts = [];
+  const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async invocation => {
+    prompts.push(invocation.stdin);
+    return ++modelCalls === 1
+      ? '{"toolCall":{"name":"get_current_project"}}'
+      : '无法读取当前项目。';
+  } });
   const tools = {
     listTools: async () => ({ tools: [{ name: 'get_current_project', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true, destructiveHint: false } }] }),
     callTool: async () => ({ isError: true, content: [{ type: 'text', text: 'private project detail' }] })
   };
   const trace = diagnostics.createLocalDiagnosticTrace(globalRoot, 'sidebar.chat');
-  await assert.rejects(() => diagnostics.withLocalDiagnosticTrace(trace, () => engine.chat([{ role: 'user', content: '查项目' }],
-    { selectedProject: '', projects: [] }, tools)), /Intelligence read tool failed/);
+  assert.equal(await diagnostics.withLocalDiagnosticTrace(trace, () => engine.chat([{ role: 'user', content: '查项目' }],
+    { selectedProject: '', projects: [] }, tools)), '无法读取当前项目。');
+  assert.equal(modelCalls, 2);
+  assert.match(prompts[1], /"isError":true/);
+  assert.match(prompts[1], /mcp_tool_error/);
+  assert.doesNotMatch(prompts[1], /private project detail/);
   assert.ok(events.some(event => event.stage === 'mcp.get_current_project' && event.status === 'error' && event.message === 'mcp_tool_error'));
   assert.ok(!events.some(event => event.stage === 'mcp.get_current_project' && event.status === 'ok'));
   assert.doesNotMatch(JSON.stringify(events), /private project detail/);
