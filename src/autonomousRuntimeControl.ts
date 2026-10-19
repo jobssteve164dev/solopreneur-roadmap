@@ -22,6 +22,7 @@ export interface RuntimeDataRequest {
   operation: string;
   input: Record<string, unknown>;
   sessionToken?: string;
+  piToolFence?: { operationId: string; invocationId: string; ownerId: string; ownerGeneration: number };
 }
 
 export function isRuntimeDataTransportError(error: unknown): boolean {
@@ -64,7 +65,7 @@ interface RuntimeControlServerOptions {
   buildId?: string;
   releaseVersion?: string;
   owner?: string;
-  onCommand(command: RuntimeControlCommand): RuntimeControlResponse | Pick<RuntimeControlResponse, 'status'> | Promise<RuntimeControlResponse | Pick<RuntimeControlResponse, 'status'>>;
+  onCommand(command: RuntimeControlCommand, replacement?: { buildId: string; releaseVersion: string }): RuntimeControlResponse | Pick<RuntimeControlResponse, 'status'> | Promise<RuntimeControlResponse | Pick<RuntimeControlResponse, 'status'>>;
   onData?(request: RuntimeDataRequest): unknown | Promise<unknown>;
 }
 
@@ -235,7 +236,10 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
           socket.end(JSON.stringify({ ok: true, runtimeId: options.runtimeId, result }) + '\n');
           return;
         }
-        const result = await options.onCommand(command);
+        const replacement = command === 'drain' && parsed.replacementBuildId && parsed.replacementVersion
+          ? { buildId: parsed.replacementBuildId, releaseVersion: parsed.replacementVersion }
+          : undefined;
+        const result = await options.onCommand(command, replacement);
         socket.end(JSON.stringify({ ok: true, runtimeId: options.runtimeId, ...result, entryPath: options.entryPath, buildId: options.buildId, releaseVersion: options.releaseVersion, owner: options.owner }) + '\n');
       } catch (error) {
         socket.end(JSON.stringify({

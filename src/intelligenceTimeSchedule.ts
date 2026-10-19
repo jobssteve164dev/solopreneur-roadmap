@@ -1,9 +1,10 @@
 import * as crypto from 'crypto';
 import { IntelligenceTimeScheduleInput, validateIntelligenceTimeScheduleInput } from './intelligenceMcp';
 import { SolomapScheduledAutomationTask } from './pluginContracts';
-import { readScheduledTaskDatabase, syncScheduledTaskDatabase } from './scheduledTaskLedger';
+import { occurrenceForTask, readScheduledTaskDatabase, syncScheduledTaskDatabase } from './scheduledTaskLedger';
 
 type Operation = (operation: string, input: Record<string, unknown>) => Promise<unknown>;
+type SynchronousOperation = (operation: string, input: Record<string, unknown>) => unknown;
 type Project = { name: string; path: string };
 
 export function intelligenceTimeScheduleTaskId(projectPath: string, input: IntelligenceTimeScheduleInput): string {
@@ -54,6 +55,40 @@ export async function setIntelligenceTimeScheduleInDatabase(globalDataPath: stri
     .map(item => item.task)
     .filter(item => item.internalKind === 'focus_reminder');
   await syncScheduledTaskDatabase(project.path, globalDataPath, [...tasks, ...internalTasks], new Date(), operation);
+  return { taskId, title: task.title, scheduleKind: task.scheduleKind,
+    ...(task.scheduledAt ? { scheduledAt: task.scheduledAt } : {}), ...(task.timeOfDay ? { timeOfDay: task.timeOfDay } : {}), assignee: task.assignee };
+}
+
+/** Native Pi tool path: the caller holds one SQLite writer transaction for this entire synchronous function. */
+export function setIntelligenceTimeScheduleInDatabaseSync(project: Project, raw: IntelligenceTimeScheduleInput, operation: SynchronousOperation): Record<string, unknown> {
+  const input = validateIntelligenceTimeScheduleInput(raw);
+  if (!project.path) throw new Error('请先在 SoloMap 中选择要安排任务的项目。');
+  const taskId = intelligenceTimeScheduleTaskId(project.path, input);
+  const task: SolomapScheduledAutomationTask = {
+    id: taskId, title: input.title, enabled: true, projectPath: project.path, projectName: project.name,
+    scheduleKind: input.scheduleKind, assignee: input.assignee,
+    ...(input.scheduleKind === 'once' ? { scheduledAt: input.scheduledAt } : { timeOfDay: input.timeOfDay }),
+    ...(input.assignee === 'agent' ? { prompt: input.prompt } : {})
+  };
+  const current = operation('read_host_settings', { namespace: 'extension', ownerScope: 'global' }) as { items: Array<{ key: string; revision: number; value?: unknown }> };
+  const item = current.items.find(entry => entry.key === 'automationTasks');
+  const automation = item?.value && typeof item.value === 'object' ? item.value as Record<string, unknown> : {};
+  let tasks = existingScheduledTasks(automation);
+  if (!tasks.some(entry => entry.id === taskId)) {
+    tasks = [...tasks, task];
+    operation('patch_host_settings', { namespace: 'extension', ownerScope: 'global', patches: [{ key: 'automationTasks', expectedRevision: item?.revision || 0, value: { ...automation, scheduledTasks: tasks } }], idempotencyKey: `intelligence-time-schedule:${taskId}:${item?.revision || 0}` });
+  }
+  const ledger = operation('read_schedule_ledger', {}) as { tasks: Array<{ task: SolomapScheduledAutomationTask }> };
+  const allTasks = [...tasks, ...ledger.tasks.map(item => item.task).filter(item => item.internalKind === 'focus_reminder')];
+  const now = new Date();
+  const schedules = allTasks.filter(item => item.id).map(item => {
+    const occurrence = occurrenceForTask(item, now);
+    return { id: item.id, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', trigger: { kind: item.scheduleKind || 'daily', timeOfDay: item.timeOfDay || '', scheduledAt: item.scheduledAt || '' }, enabled: item.enabled !== false,
+      nextDueAt: occurrence ? Date.parse(occurrence.dueAt) : now.getTime(), task: item };
+  });
+  const desiredHash = crypto.createHash('sha256').update(JSON.stringify(schedules)).digest('hex');
+  const state = operation('read_schedule_sync_state', {}) as { version: string };
+  operation('sync_schedules', { schedules, expectedVersion: state.version, idempotencyKey: `schedule-sync:${state.version}:${desiredHash}` });
   return { taskId, title: task.title, scheduleKind: task.scheduleKind,
     ...(task.scheduledAt ? { scheduledAt: task.scheduledAt } : {}), ...(task.timeOfDay ? { timeOfDay: task.timeOfDay } : {}), assignee: task.assignee };
 }

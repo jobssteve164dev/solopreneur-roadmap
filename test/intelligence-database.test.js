@@ -25,6 +25,21 @@ function messagePrefixHash(messages, count = messages.length) {
   return crypto.createHash('sha256').update(JSON.stringify(messages.slice(0, count))).digest('hex');
 }
 
+test('production conversation client submits one action to the Runtime owner', async () => {
+  const id = '105f896d-ca66-4574-a166-74f32f69c876';
+  const requests = [];
+  const expected = { id, title: 'Owned by Runtime', createdAt: '2026-10-19T00:00:00.000Z', updatedAt: '2026-10-19T00:00:00.000Z', messages: [{ role: 'user', content: 'hello' }, { role: 'assistant', content: 'hi' }] };
+  const store = new IntelligenceConversationStore('/unused', undefined, async (_root, request) => {
+    requests.push(request);
+    return expected;
+  });
+  assert.deepEqual(await store.send('hello', id), expected);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].operation, 'send_intelligence_message');
+  assert.equal(requests[0].input.conversationId, id);
+  assert.equal(requests[0].input.text, 'hello');
+});
+
 test('chat fails closed when the database owner is unavailable and never recreates legacy JSON', async t => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-chat-no-authority-'));
   t.after(() => cleanupExact(fixture));

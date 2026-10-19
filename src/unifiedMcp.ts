@@ -8,6 +8,7 @@ export interface UnifiedMcpSource {
   globalReads?: boolean;
   close?(): Promise<void>;
   sessionInfo?(): Promise<{ runKind: string; migrationKind: string | null }>;
+  setPiToolFence?(fence?: { operationId: string; invocationId: string; ownerId: string; ownerGeneration: number }): void;
   call(operation: string, input: Record<string, unknown>): Promise<unknown>;
 }
 export const unifiedToolNames = ['solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_export', 'solomap_conversation_status'];

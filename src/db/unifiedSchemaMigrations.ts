@@ -698,4 +698,92 @@ CREATE TRIGGER growth_label_semantic_update AFTER UPDATE ON growth_module_labels
 CREATE TRIGGER growth_label_semantic_delete AFTER DELETE ON growth_module_labels BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=OLD.snapshot_id; END;
 ` }, { version: 47, sql: `
 CREATE INDEX growth_items_parent ON growth_items(snapshot_id,parent_id);
+` }, { version: 48, sql: `
+CREATE TABLE pi_sessions(
+ session_id TEXT PRIMARY KEY,conversation_id TEXT UNIQUE,created_at INTEGER NOT NULL,storage_version INTEGER NOT NULL DEFAULT 1,
+ cwd TEXT,parent_session_id TEXT,legacy_parent_session_path TEXT,next_seq INTEGER NOT NULL DEFAULT 1 CHECK(next_seq>0),
+ message_count INTEGER NOT NULL DEFAULT 0 CHECK(message_count>=0),usage_json TEXT NOT NULL,owner_generation INTEGER NOT NULL DEFAULT 1 CHECK(owner_generation>0));
+CREATE TABLE pi_storage_ids(
+ session_id TEXT NOT NULL REFERENCES pi_sessions(session_id) ON DELETE CASCADE,id TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('entry','usage')),
+ PRIMARY KEY(session_id,id));
+CREATE TABLE pi_entries(
+ session_id TEXT NOT NULL,id TEXT NOT NULL,parent_id TEXT,seq INTEGER NOT NULL,timestamp INTEGER NOT NULL,
+ type TEXT NOT NULL CHECK(type IN ('message','compaction','branch_summary','custom')),custom_type TEXT,payload_json TEXT NOT NULL,
+ PRIMARY KEY(session_id,id),UNIQUE(session_id,seq),
+ FOREIGN KEY(session_id,id) REFERENCES pi_storage_ids(session_id,id) ON DELETE CASCADE,
+ FOREIGN KEY(session_id,parent_id) REFERENCES pi_entries(session_id,id));
+CREATE INDEX pi_entries_scan ON pi_entries(session_id,seq);
+CREATE INDEX pi_entries_parent ON pi_entries(session_id,parent_id,seq);
+CREATE TABLE pi_usage(
+ session_id TEXT NOT NULL,id TEXT NOT NULL,seq INTEGER NOT NULL,entry_id TEXT,adjustment INTEGER NOT NULL CHECK(adjustment IN (0,1)),
+ usage_json TEXT NOT NULL,details_json TEXT,PRIMARY KEY(session_id,id),UNIQUE(session_id,seq),
+ FOREIGN KEY(session_id,id) REFERENCES pi_storage_ids(session_id,id) ON DELETE CASCADE,
+ FOREIGN KEY(session_id,entry_id) REFERENCES pi_entries(session_id,id));
+CREATE INDEX pi_usage_scan ON pi_usage(session_id,seq);
+CREATE TABLE pi_values(
+ session_id TEXT NOT NULL REFERENCES pi_sessions(session_id) ON DELETE CASCADE,namespace TEXT NOT NULL,key TEXT NOT NULL,
+ value_json TEXT NOT NULL,seq INTEGER NOT NULL,PRIMARY KEY(session_id,namespace,key));
+CREATE INDEX pi_values_prefix ON pi_values(session_id,namespace,key);
+CREATE TABLE pi_list_values(
+ session_id TEXT NOT NULL REFERENCES pi_sessions(session_id) ON DELETE CASCADE,namespace TEXT NOT NULL,key TEXT NOT NULL,
+ seq INTEGER NOT NULL,value_json TEXT NOT NULL,PRIMARY KEY(session_id,namespace,key,seq));
+CREATE INDEX pi_list_values_read ON pi_list_values(session_id,namespace,key,seq);
+` }, { version: 49, sql: `
+CREATE TABLE pi_execution_owner(
+ id INTEGER PRIMARY KEY CHECK(id=1),owner_id TEXT NOT NULL,generation INTEGER NOT NULL CHECK(generation>0),claimed_at INTEGER NOT NULL);
+CREATE TABLE pi_conversation_bindings(
+ conversation_id TEXT PRIMARY KEY,session_id TEXT NOT NULL UNIQUE REFERENCES pi_sessions(session_id),lane TEXT NOT NULL,
+ cutover_generation INTEGER NOT NULL CHECK(cutover_generation>0),engine TEXT NOT NULL CHECK(engine='pi-harness'),
+ source_revision INTEGER NOT NULL,source_message_count INTEGER NOT NULL,source_hash TEXT NOT NULL,created_at INTEGER NOT NULL);
+CREATE TABLE pi_conversation_operations(
+ operation_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES pi_conversation_bindings(conversation_id),session_id TEXT NOT NULL REFERENCES pi_sessions(session_id),
+ request_key TEXT NOT NULL UNIQUE,acceptance_content_id TEXT NOT NULL REFERENCES contents(id),acceptance_hash TEXT NOT NULL,
+ baseline_revision INTEGER NOT NULL,cutover_generation INTEGER NOT NULL,owner_generation INTEGER NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('queued','accepted','running','completed','failed','aborted','declined','missing_final_assistant','discarded','settled')),
+ cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0,1)),
+ terminal_content_id TEXT REFERENCES contents(id),settlement_content_id TEXT REFERENCES contents(id),created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+CREATE UNIQUE INDEX pi_conversation_one_active ON pi_conversation_operations(conversation_id) WHERE status IN ('accepted','running','completed');
+CREATE INDEX pi_conversation_operations_recovery ON pi_conversation_operations(status,updated_at);
+CREATE INDEX content_ref_pi_operations_acceptance ON pi_conversation_operations(acceptance_content_id);
+CREATE INDEX content_ref_pi_operations_terminal ON pi_conversation_operations(terminal_content_id);
+CREATE INDEX content_ref_pi_operations_settlement ON pi_conversation_operations(settlement_content_id);
+` }, { version: 50, sql: `
+CREATE TABLE pi_tool_invocations(
+ operation_id TEXT NOT NULL REFERENCES pi_conversation_operations(operation_id),invocation_id TEXT NOT NULL,tool_name TEXT NOT NULL,
+ arguments_hash TEXT NOT NULL,replay TEXT NOT NULL CHECK(replay IN ('safe','never')),owner_generation INTEGER NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('admitted','completed')),created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,
+ PRIMARY KEY(operation_id,invocation_id));
+` }, { version: 51, sql: `
+CREATE TABLE pi_compatible_releases(
+ release_version TEXT PRIMARY KEY,build_id TEXT NOT NULL,first_seen_at INTEGER NOT NULL,last_seen_at INTEGER NOT NULL);
+CREATE TABLE pi_rollout_state(
+ id INTEGER PRIMARY KEY CHECK(id=1),minimum_release TEXT NOT NULL,drain_proof TEXT NOT NULL,activated_at INTEGER NOT NULL);
+CREATE TABLE pi_conversation_cutovers(
+ conversation_id TEXT PRIMARY KEY,generation INTEGER NOT NULL CHECK(generation>0),engine TEXT NOT NULL CHECK(engine IN ('legacy-agent','pi-harness')),updated_at INTEGER NOT NULL);
+CREATE TABLE pi_visible_settlement_authorizations(
+ conversation_id TEXT PRIMARY KEY REFERENCES pi_conversation_cutovers(conversation_id),operation_id TEXT NOT NULL,owner_generation INTEGER NOT NULL);
+CREATE TRIGGER pi_fence_harness_visible_message BEFORE INSERT ON messages
+WHEN EXISTS(SELECT 1 FROM pi_conversation_cutovers c WHERE c.conversation_id=NEW.conversation_id AND c.engine='pi-harness')
+ AND NOT EXISTS(SELECT 1 FROM pi_visible_settlement_authorizations a WHERE a.conversation_id=NEW.conversation_id)
+BEGIN SELECT RAISE(ABORT,'intelligence_conversation_migrated'); END;
+CREATE TABLE pi_legacy_conversation_operations(
+ operation_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,request_key TEXT NOT NULL UNIQUE,prompt_hash TEXT NOT NULL,
+ baseline_revision INTEGER NOT NULL,cutover_generation INTEGER NOT NULL,source TEXT NOT NULL,
+ owner_pid INTEGER NOT NULL,owner_birth TEXT NOT NULL,side_effects_started INTEGER NOT NULL DEFAULT 0 CHECK(side_effects_started IN (0,1)),
+ status TEXT NOT NULL CHECK(status IN ('running','settled','failed','unknown')),
+ created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+CREATE INDEX pi_legacy_conversation_operations_drain ON pi_legacy_conversation_operations(conversation_id,cutover_generation,status);
+` }, { version: 52, sql: `
+CREATE TABLE pi_release_drains(
+ replacement_release TEXT NOT NULL,replacement_build_id TEXT NOT NULL,
+ predecessor_release TEXT NOT NULL,predecessor_build_id TEXT NOT NULL,predecessor_runtime_id TEXT NOT NULL,
+ drained_at INTEGER NOT NULL,PRIMARY KEY(replacement_release,replacement_build_id));
+CREATE TABLE pi_compatibility_runtime_observations(
+ runtime_id TEXT PRIMARY KEY,release_version TEXT NOT NULL,build_id TEXT NOT NULL,first_seen_at INTEGER NOT NULL,last_seen_at INTEGER NOT NULL);
+CREATE TABLE pi_retention_runs(
+ session_id TEXT PRIMARY KEY REFERENCES pi_sessions(session_id) ON DELETE CASCADE,
+ boundary_entry_id TEXT,archived_entries INTEGER NOT NULL DEFAULT 0,archived_usage INTEGER NOT NULL DEFAULT 0,
+ pruned_tool_invocations INTEGER NOT NULL DEFAULT 0,last_run_at INTEGER NOT NULL);
+ALTER TABLE pi_conversation_operations ADD COLUMN request_hash TEXT;
+UPDATE pi_conversation_operations SET request_hash=acceptance_hash WHERE request_hash IS NULL;
 ` }];

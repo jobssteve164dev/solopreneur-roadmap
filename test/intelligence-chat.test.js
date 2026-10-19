@@ -98,6 +98,23 @@ test('smart kernel read tools are discovered and called through standard MCP', a
   }
 });
 
+test('conversation store drain waits for accepted work without turning shutdown into user cancellation', async () => {
+  const { IntelligenceConversationStore } = require('../out/intelligenceChat.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-intelligence-drain-'));
+  let release;
+  const waiting = new Promise(resolve => { release = resolve; });
+  const store = new IntelligenceConversationStore(root, async () => { await waiting; return '完成'; }, createConversationDataRequest());
+  const sending = store.send('继续完成');
+  let drained = false;
+  const draining = store.drain().then(() => { drained = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(drained, false);
+  release();
+  await Promise.all([sending, draining]);
+  assert.equal(drained, true);
+  cleanupExact(root);
+});
+
 test('smart kernel gives Pi the current project context before tool selection', async () => {
   const { buildIntelligenceProjectContext } = require('../out/intelligenceReadTools.js');
   const context = await buildIntelligenceProjectContext({

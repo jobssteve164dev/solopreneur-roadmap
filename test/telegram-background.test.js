@@ -62,7 +62,7 @@ function removeFixtureDiagnostics(globalRoot) {
   fs.rmdirSync(diagnosticsRoot);
 }
 
-async function backgroundFixture(t, overrides = {}, intervalMs = 5000) {
+async function backgroundFixture(t, overrides = {}, intervalMs = 5000, runtimeVersion = '') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-tg-background-'));
   const globalRoot = path.join(root, '.solomap-global');
   const runtimeRoot = path.join(globalRoot, 'runtime');
@@ -143,7 +143,8 @@ const request=https.request;https.request=function(options,callback){if(options.
   async function start() {
     if (child && child.exitCode === null && child.signalCode === null) return;
     unlinkFixtureFile(path.join(runtimeRoot, 'control.json'));
-    child = cp.spawn(process.execPath, ['--require', preload, path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', globalRoot, '--interval-ms', String(intervalMs)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    child = cp.spawn(process.execPath, ['--require', preload, path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', globalRoot,
+      '--interval-ms', String(intervalMs), ...(runtimeVersion ? ['--runtime-version', runtimeVersion] : [])], { stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.resume();
     child.stderr.on('data', chunk => { childStderr += String(chunk); });
     await waitFor(() => fs.existsSync(path.join(runtimeRoot, 'control.json')), 'Daemon must start its authenticated endpoint');
@@ -246,6 +247,35 @@ test('standalone smart kernel still calls Pi for a new project without roadmap.c
   assert.match(chatPrompt, /SYSTEM:[\s\S]*"currentSteps":\[\]/);
   assert.doesNotMatch(chatPrompt, /USER:[^]*"selectedProject":"Alpha"/);
   await fixture.stop();
+});
+
+test('a compatible release with recorded old-host drain routes Telegram through the Runtime-owned native Harness', async t => {
+  const fixture = await backgroundFixture(t, {}, 5000, '0.0.606');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { runtimeBuildId } = require('../out/runtimeBuildIdentity.js');
+  const currentBuild = runtimeBuildId(path.resolve(__dirname, '..'));
+  const seeded = new UnifiedDataStore(fixture.globalRoot);
+  seeded.registerPiCompatibilityRelease('0.0.605', 'compatibility-release-605', 'runtime-605');
+  seeded.recordPiCompatibilityDrain({ runtimeId: 'runtime-605', releaseVersion: '0.0.605', buildId: 'compatibility-release-605',
+    replacementVersion: '0.0.606', replacementBuildId: currentBuild });
+  seeded.close();
+  await fixture.start();
+  fixture.updates.push(fixture.update(104, '原生执行测试'));
+  try { await waitFor(() => fixture.sent.some(message => message.text === 'Alpha 的下一步是 Ship Alpha。'), 'Native Harness must deliver the Telegram answer', 12_000); }
+  catch (error) {
+    await fixture.stop();
+    const failed = UnifiedDataStore.open(fixture.globalRoot);
+    try {
+      error.message += `; stderr=${fixture.childStderr()}; sent=${JSON.stringify(fixture.sent)}; operations=${JSON.stringify(failed.rows('SELECT operation_id,status FROM pi_conversation_operations'))}; diagnostics=${JSON.stringify(failed.rows('SELECT kind,payload_json FROM diagnostic_events ORDER BY sequence DESC LIMIT 10'))}`;
+    } finally { failed.close(); }
+    throw error;
+  }
+  await fixture.stop();
+  const verified = UnifiedDataStore.open(fixture.globalRoot);
+  try {
+    assert.equal(verified.rows("SELECT COUNT(*) AS count FROM pi_conversation_operations WHERE status='settled'")[0].count, 1);
+    assert.equal(verified.rows('SELECT COUNT(*) AS count FROM pi_legacy_conversation_operations')[0].count, 0);
+  } finally { verified.close(); }
 });
 
 test('a new data root takes over a live Telegram daemon when the old root has no editor host', async t => {

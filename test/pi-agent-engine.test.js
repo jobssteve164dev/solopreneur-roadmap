@@ -44,10 +44,11 @@ test('Pi runtime bundles the pinned Harness adapter surface used by the VSIX', a
   const runtimePath = path.join(projectRoot, 'out', 'piAgentRuntime.mjs');
   assert.ok(fs.existsSync(runtimePath));
   const runtime = await import(pathToFileURL(runtimePath).href + `?test=${Date.now()}`);
-  for (const name of ['Agent', 'buildSessionContext', 'compactWithRequest', 'convertToLlm', 'estimateContextTokens',
+  for (const name of ['Agent', 'StorageBackedSession', 'buildSessionContext', 'compactWithRequest', 'convertToLlm', 'estimateContextTokens',
     'formatSize', 'getBuiltinModel', 'getBuiltinModels', 'prepareCompaction', 'shouldCompact', 'truncateHead', 'withAbortSignal']) {
     assert.equal(typeof runtime[name], 'function', name);
   }
+  assert.equal(typeof runtime.AgentHarness?.create, 'function');
   assert.equal(typeof runtime.DEFAULT_COMPACTION_SETTINGS, 'object');
 });
 

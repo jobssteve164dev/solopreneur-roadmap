@@ -28,11 +28,14 @@ import { isAutonomousRuntimeDisabled } from './autonomousRuntimeService';
 import { importLegacyRuntimeState } from './runtimeStateMigration';
 import { readRuntimePauseState, writeRuntimePauseState } from './runtimePauseState';
 import { reapFinishedLegacyRunProcesses } from './legacyRunProcessRecovery';
+import { IntelligenceRuntime } from './intelligenceRuntime';
 
 function argumentValue(name: string): string {
   const index = process.argv.indexOf(name);
   return index >= 0 ? String(process.argv[index + 1] || '') : '';
 }
+
+let closeFailedRuntimeInitialization: (() => Promise<void>) | undefined;
 
 function intervalValue(): number {
   const parsed = Number(argumentValue('--interval-ms') || 30_000);
@@ -109,9 +112,33 @@ async function main(): Promise<void> {
   const dataStore = databaseId || runtimeWasInitialized || fs.existsSync(path.join(databaseRoot, 'solomap.db'))
     ? UnifiedDataStore.open(databaseRoot, databaseId || undefined)
     : new UnifiedDataStore(databaseRoot);
+  let rawStoreClosed = false;
+  closeFailedRuntimeInitialization = async () => {
+    if (!rawStoreClosed) {
+      rawStoreClosed = true;
+      try { dataStore.close(); } catch { /* Preserve the initialization failure. */ }
+      updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
+    }
+  };
   importLegacyRuntimeState(dataStore, databaseRoot);
   updateRuntimeState(globalDataPath, runtimeId, { databaseId: dataStore.databaseId });
   const dataOperations = createRuntimeDataOperations(dataStore);
+  let initializationTelegram: ReturnType<typeof startTelegramBackgroundRuntime> | undefined;
+  let heartbeatStopped: (() => Promise<unknown>) | undefined;
+  let earlyCleanup: Promise<void> | undefined;
+  closeFailedRuntimeInitialization = () => {
+    if (earlyCleanup) return earlyCleanup;
+    earlyCleanup = (async () => {
+      dataOperations.interruptMigrations();
+      dataOperations.interruptRuns();
+      await initializationTelegram?.close('handoff').catch(() => undefined);
+      await heartbeatStopped?.().catch(() => undefined);
+      await dataOperations.close().catch(() => undefined);
+      try { dataStore.close(); } catch { /* Preserve the initialization failure. */ }
+      updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
+    })();
+    return earlyCleanup;
+  };
   configureLocalDiagnosticPersistence({
     append: (_root, event) => dataOperations({ operation: 'append_diagnostic_event', input: event as unknown as Record<string, unknown> }).then(() => undefined),
     read: (_root) => dataOperations({ operation: 'read_diagnostic_events', input: { limit: 250 } }) as Promise<{ items: Record<string, unknown>[] }>
@@ -129,6 +156,9 @@ async function main(): Promise<void> {
     const heartbeatAt = Date.now();
     return dataOperations({ operation: 'heartbeat_runtime_instance', input: { runtimeId, generation: registeredRuntime.generation, status, heartbeatAt, idempotencyKey: `runtime-heartbeat:${runtimeId}:${status}:${heartbeatAt}` } });
   };
+  heartbeatStopped = () => heartbeatRuntime('stopped');
+  const intelligenceRuntime = new IntelligenceRuntime(databaseRoot, dataStore, dataOperations, runtimeId, releaseVersion, runtimeBuild);
+  dataOperations.setIntelligenceRuntime(intelligenceRuntime);
   await refreshCognitiveRuntimeConfig(databaseRoot, dataOperations);
   await refreshShadowRuntimeState(databaseRoot, dataOperations);
   let outboxRecovery: Promise<unknown> | undefined;
@@ -149,8 +179,9 @@ async function main(): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   let activeEngine: EmbeddedPiAgentEngine | undefined;
   let controlServer: { beginBusy(): () => void; close(): Promise<void> } | undefined;
-  let telegram = startTelegramBackgroundRuntime(globalDataPath, dataOperations);
+  let telegram = initializationTelegram = startTelegramBackgroundRuntime(globalDataPath, dataOperations);
   let shutdownPromise: Promise<void> | undefined;
+  let upgradeReplacement: { buildId: string; releaseVersion: string } | undefined;
   if (paused) { updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' }); await heartbeatRuntime('paused'); }
   const stop = (exitCode = 0, reason = 'lease_lost'): Promise<void> => {
     if (exitCode !== 0) process.exitCode = exitCode;
@@ -159,25 +190,38 @@ async function main(): Promise<void> {
     createLocalDiagnosticTrace(globalDataPath, `runtime.shutdown.${reason}`, { targetId: runtimeId })
       .record(`runtime.shutdown.${reason}`, exitCode ? 'error' : 'ok', 0, undefined, { pid: process.pid, exitCode });
     shutdownPromise = (async () => {
+      let shutdownError: unknown;
+      const attempt = async (action: () => unknown | Promise<unknown>): Promise<void> => {
+        try { await action(); }
+        catch (error) { shutdownError ||= error; }
+      };
       if (timer) clearInterval(timer);
-      const telegramClosed = telegram?.close();
+      const telegramClosed = telegram?.close(reason === 'upgrade_drain' ? 'drain' : 'handoff');
       activeEngine?.cancel();
       dataOperations.interruptMigrations();
       dataOperations.interruptRuns();
-      await controlServer?.close();
-      await telegramClosed;
-      await startupMigration;
-      await storageMaintenance;
-      await heartbeatRuntime('stopped');
-      await dataOperations.close();
-      await outboxRecovery;
-      dataStore?.close();
-      updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
+      await attempt(() => controlServer?.close());
+      await attempt(() => telegramClosed);
+      await attempt(() => startupMigration);
+      await attempt(() => storageMaintenance);
+      await attempt(() => heartbeatRuntime('stopped'));
+      await attempt(() => dataOperations.close());
+      await attempt(() => outboxRecovery);
+      const replacement = upgradeReplacement;
+      if (reason === 'upgrade_drain' && replacement) await attempt(() => dataStore.recordPiCompatibilityDrain({
+        runtimeId, releaseVersion, buildId: runtimeBuild,
+        replacementVersion: replacement.releaseVersion, replacementBuildId: replacement.buildId
+      }));
+      try { dataStore?.close(); }
+      catch (error) { shutdownError ||= error; }
+      finally { updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' }); }
+      if (shutdownError) throw shutdownError;
     })();
     void shutdownPromise.catch(error => { process.stderr.write(`SoloMap Runtime shutdown: ${String(error)}\n`); process.exitCode = 1; });
     process.exitCode ??= exitCode;
     return shutdownPromise;
   };
+  closeFailedRuntimeInitialization = async () => { await stop(1, 'initialization_failed').catch(() => undefined); };
   try { controlServer = await startRuntimeControlServer({
     globalDataPath,
     runtimeId,
@@ -186,11 +230,11 @@ async function main(): Promise<void> {
     releaseVersion,
     owner: argumentValue('--runtime-owner') === 'service' ? 'service' : 'fallback',
     onData: dataOperations,
-    async onCommand(command) {
+    async onCommand(command, replacement) {
       if (command === 'pause' || command === 'drain') {
         paused = true;
         if (command === 'pause') await writeRuntimePauseState(dataOperations, true);
-        if (command === 'drain') activeEngine?.cancel();
+        if (command === 'drain') upgradeReplacement = replacement;
         updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' });
         await heartbeatRuntime('paused');
         if (command === 'drain') setTimeout(() => stop(0, 'upgrade_drain'), 25).unref();
@@ -219,10 +263,7 @@ async function main(): Promise<void> {
     }
   }); } catch (error) {
     rejectStorageMaintenanceBarrier(error);
-    telegram?.close();
-    await heartbeatRuntime('failed').catch(() => undefined);
-    dataStore?.close();
-    updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
+    await stop(1, 'control_start_failed').catch(() => undefined);
     throw error;
   }
   let releaseStartupMigrationBusy = () => {};
@@ -238,6 +279,7 @@ async function main(): Promise<void> {
     throw error;
   }
   dataOperations.recoverRuns();
+  void intelligenceRuntime.recover().catch(error => process.stderr.write(`SoloMap intelligence recovery: ${String(error)}\n`));
   outboxRecovery = dataStore?.recoverOutbox().catch(error => process.stderr.write(`SoloMap Runtime outbox recovery: ${String(error)}\n`));
   const startupMigrationReady = (async () => {
     try {
@@ -344,9 +386,11 @@ async function main(): Promise<void> {
   timer = setInterval(runCycleObserved, intervalValue());
 }
 
-void main().catch(error => {
+void main().catch(async error => {
   const globalDataPath = argumentValue('--global-data-path');
   if (globalDataPath) recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.initialize', classifyDiagnosticFailure(error));
+  try { await closeFailedRuntimeInitialization?.(); }
+  catch (cleanupError) { process.stderr.write(`SoloMap Runtime initialization cleanup: ${String(cleanupError)}\n`); }
   process.stderr.write(`SoloMap Runtime could not initialize autonomous execution: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 });

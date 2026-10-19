@@ -20,6 +20,7 @@ import { RunStop } from './runStop';
 import { executeTelegramExtensionCommand, registerTelegramEditorEndpoint } from './telegramExtensionBridge';
 import { persistTelegramRuntimeSecret } from './telegramRuntimeConfig';
 import { migrationRunKinds, soloConversationRunKinds } from './runLifecycleTypes';
+import { setIntelligenceTimeScheduleInDatabaseSync } from './intelligenceTimeSchedule';
 
 export interface RuntimeDataOperations {
   (request: RuntimeDataRequest): Promise<unknown>;
@@ -29,6 +30,15 @@ export interface RuntimeDataOperations {
   interruptMigrations(): void;
   interruptRuns(): void;
   waitForMigrations(): Promise<void>;
+  close(): Promise<void>;
+  setIntelligenceRuntime(runtime: IntelligenceRuntimeActions): void;
+}
+
+export interface IntelligenceRuntimeActions {
+  mode(): { mode: 'legacy' | 'harness' };
+  send(input: Record<string, unknown>): Promise<unknown>;
+  cancel(input: Record<string, unknown>): Promise<unknown>;
+  recover(): Promise<unknown>;
   close(): Promise<void>;
 }
 
@@ -49,6 +59,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
   const runInputs = new RunInputMaterialization(store);
   let storageMaintenanceTail: Promise<void> = Promise.resolve();
   let storageMaintenanceBarrier: Promise<unknown> = Promise.resolve();
+  let intelligenceRuntime: IntelligenceRuntimeActions | undefined;
   type ProjectSession = { kind: 'project'; actorId: string; scope: string; runIdentity?: McpRunIdentity; reviewBatchId?: string; migrationKind?: MigrationRunKind; migrationTargetId?: string | null; migrationProjectRoot?: string | null; migrationProjectId?: string | null; migrationPhysicalRoot?: string | null };
   type McpSessionResponse = { actorId: string; proof: string; authorityActorId: string; sessionToken: string; runKind: string; migrationKind: MigrationRunKind | null };
   const sessions = new Map<string, ProjectSession>();
@@ -796,6 +807,29 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         }
         return result;
       }
+      case 'read_intelligence_execution_mode': {
+        if (!intelligenceRuntime) throw new Error('intelligence_runtime_unavailable');
+        return intelligenceRuntime.mode();
+      }
+      case 'begin_legacy_intelligence_operation': return store.admitLegacyIntelligenceOperation(input as unknown as Parameters<UnifiedDataStore['admitLegacyIntelligenceOperation']>[0]);
+      case 'read_legacy_intelligence_operation': return store.readLegacyIntelligenceOperation(String(input.operationId || ''));
+      case 'mark_legacy_intelligence_operation': return store.markLegacyIntelligenceOperation(String(input.operationId || ''), String(input.status || '') as 'failed' | 'unknown');
+      case 'mark_legacy_intelligence_side_effect': return store.markLegacyIntelligenceSideEffect(String(input.operationId || ''));
+      case 'fail_legacy_intelligence_operation': return store.failLegacyIntelligenceOperation(String(input.operationId || ''));
+      case 'write_legacy_intelligence_conversation': {
+        const { operationId, ...writeInput } = input;
+        const result = store.writeLegacyIntelligenceConversation(String(operationId || ''), writeInput as unknown as Parameters<UnifiedDataStore['writeIntelligenceConversation']>[0]);
+        if (writeInput.contextCheckpoint && store.hasDatabaseStorageCleanupCandidates()) void maintainDatabaseStorage(false, true).catch(() => undefined);
+        return result;
+      }
+      case 'send_intelligence_message': {
+        if (!intelligenceRuntime) throw new Error('intelligence_runtime_unavailable');
+        return intelligenceRuntime.send(input);
+      }
+      case 'cancel_intelligence_operation': {
+        if (!intelligenceRuntime) throw new Error('intelligence_runtime_unavailable');
+        return intelligenceRuntime.cancel(input);
+      }
       case 'migration_status': {
         const scope = await migrationScope(input); const job = store.readMigrationJob(String(input.jobId || ''));
         if (scope && !recycling.jobBelongsToProject(job, scope)) throw new Error('maintenance_scope_denied');
@@ -903,7 +937,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       default: throw new Error('unknown_data_operation');
     }
   };
-  const operations = async (request: RuntimeDataRequest) => {
+  const executeOperation = async (request: RuntimeDataRequest) => {
     if (!request.sessionToken) return dispatch(request);
     const session = sessions.get(request.sessionToken);
     if (!session) throw new Error('mcp_session_expired');
@@ -1052,7 +1086,43 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       return result;
     });
   };
-  return Object.assign(operations, { setStorageMaintenanceBarrier: (barrier: Promise<unknown>) => { storageMaintenanceBarrier = barrier; }, recoverMigrations: () => migrations.recover(), recoverRuns: () => runs.start(), interruptMigrations: () => migrations.interrupt(), interruptRuns: () => runStops.interrupt(), waitForMigrations: () => migrations.wait(), close: async () => { await storageMaintenanceTail; await runs.close(); await migrations.close(); } });
+  const setIntelligenceTimeSchedule = (input: Record<string, unknown>): Record<string, unknown> => {
+    const projectPath = String(input.projectPath || '');
+    const projectName = String(input.projectName || '').trim();
+    if (!path.isAbsolute(projectPath) || !projectName || projectName.length > 1024) throw new Error('project_scope_denied');
+    const registered = store.existingRegisteredProjectScopes().find(candidate => samePhysicalRoot(candidate.root, projectPath));
+    if (!registered) throw new Error('project_scope_denied');
+    return setIntelligenceTimeScheduleInDatabaseSync({ name: projectName, path: path.resolve(registered.root) },
+      input as unknown as Parameters<typeof setIntelligenceTimeScheduleInDatabaseSync>[1], (operation, nestedInput) => {
+        switch (operation) {
+          case 'read_host_settings': return store.readHostSettings(nestedInput as Parameters<UnifiedDataStore['readHostSettings']>[0]);
+          case 'patch_host_settings': return store.patchHostSettings(nestedInput as unknown as Parameters<UnifiedDataStore['patchHostSettings']>[0]);
+          case 'read_schedule_ledger': return store.readScheduleLedger();
+          case 'read_schedule_sync_state': return store.readScheduleSyncState();
+          case 'sync_schedules': return store.syncSchedules(nestedInput as unknown as Parameters<UnifiedDataStore['syncSchedules']>[0]);
+          default: throw new Error('invalid_time_schedule_operation');
+        }
+      });
+  };
+  const operations = async (request: RuntimeDataRequest): Promise<unknown> => {
+    if (request.operation === 'set_intelligence_time_schedule') {
+      if (!request.piToolFence) throw new Error('pi_tool_invocation_fenced');
+      return store.withPiToolInvocationFenceSync(request.piToolFence.operationId, request.piToolFence.invocationId, {
+        ownerId: request.piToolFence.ownerId, generation: request.piToolFence.ownerGeneration
+      }, () => setIntelligenceTimeSchedule(request.input));
+    }
+    return request.piToolFence
+      ? store.withPiToolInvocationFence(request.piToolFence.operationId, request.piToolFence.invocationId, {
+        ownerId: request.piToolFence.ownerId, generation: request.piToolFence.ownerGeneration
+      }, () => executeOperation(request))
+      : executeOperation(request);
+  };
+  return Object.assign(operations, {
+    setStorageMaintenanceBarrier: (barrier: Promise<unknown>) => { storageMaintenanceBarrier = barrier; },
+    setIntelligenceRuntime: (runtime: IntelligenceRuntimeActions) => { intelligenceRuntime = runtime; },
+    recoverMigrations: () => migrations.recover(), recoverRuns: () => runs.start(), interruptMigrations: () => migrations.interrupt(), interruptRuns: () => runStops.interrupt(),
+    waitForMigrations: () => migrations.wait(), close: async () => { await intelligenceRuntime?.close(); await storageMaintenanceTail; await runs.close(); await migrations.close(); }
+  });
 }
 
 export function runtimeMcpSource(globalDataPath: string, scope: string | null, globalReads = false, runIdentity?: McpRunIdentity): UnifiedMcpSource {
@@ -1061,6 +1131,7 @@ export function runtimeMcpSource(globalDataPath: string, scope: string | null, g
   let resume: { actorId: string; proof: string } | undefined;
   let openRequestId = crypto.randomUUID();
   let opening: Promise<void> | undefined;
+  let piToolFence: RuntimeDataRequest['piToolFence'];
   const establish = async (): Promise<void> => {
     if (session) return;
     if (!opening) opening = sendRuntimeDataRequest<McpSession>(globalDataPath, { operation: 'open_mcp_session', input: { projectId: scope, openRequestId, ...(runIdentity ? { runIdentity } : {}), ...(resume ? { resume } : {}) } }).then(value => {
@@ -1083,7 +1154,7 @@ export function runtimeMcpSource(globalDataPath: string, scope: string | null, g
     const ambiguous = /(?:ECONNRESET|EPIPE|socket hang up|runtime_data_response_incomplete)/.test(message);
     return { retry: ambiguous && safeReplay(operation, input), resetSession: false };
   };
-  return { scope, globalReads, async sessionInfo() {
+  return { scope, globalReads, setPiToolFence(fence) { piToolFence = fence; }, async sessionInfo() {
     const deadline = Date.now() + 10_000;
     for (let attempt = 1; !session; attempt += 1) {
       try { await establish(); }
@@ -1110,7 +1181,7 @@ export function runtimeMcpSource(globalDataPath: string, scope: string | null, g
       }
       const attempted = session!;
       try {
-        return await sendRuntimeDataRequest(globalDataPath, { operation, input, sessionToken: attempted.sessionToken });
+        return await sendRuntimeDataRequest(globalDataPath, { operation, input, sessionToken: attempted.sessionToken, ...(piToolFence ? { piToolFence } : {}) });
       } catch (error) {
         const decision = retryOperation(error, operation, input);
         if (!decision.retry || Date.now() >= deadline) throw error;

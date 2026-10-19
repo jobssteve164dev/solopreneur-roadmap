@@ -26,7 +26,7 @@ interface TelegramRuntimeState {
   conversationIds: Record<string, string>;
 }
 
-export function startTelegramBackgroundRuntime(globalDataPath: string, operation?: RuntimeDataOperations): { close(): Promise<void> } {
+export function startTelegramBackgroundRuntime(globalDataPath: string, operation?: RuntimeDataOperations): { close(mode?: 'handoff' | 'drain'): Promise<void> } {
   const call = (name: string, input: Record<string, unknown>) => operation ? operation({ operation: name, input }) : sendRuntimeDataRequest(globalDataPath, { operation: name, input });
   let state: TelegramRuntimeState = { offset: 0, bindingGeneration: 0, conversationIds: {} };
   let signature = '';
@@ -163,7 +163,7 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
     engines.add(engine);
     try { return await observeLocalDiagnosticStage('pi.chat', () => engine.chat(messages, projectContext, mcp.client, replyContext)); }
     finally { engines.delete(engine); await observeLocalDiagnosticStage('mcp.close', () => mcp.close()); }
-  });
+  }, (_root, request) => call(request.operation, request.input) as Promise<any>, true);
   const reply = createTelegramIntelligenceReply(() => store, () => {
     const current = readTelegramRuntimeConfig(globalDataPath);
     if (state.bindingGeneration !== current.bindingGeneration) {
@@ -260,6 +260,7 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
       stopTelegramRemoteService();
       activeHost = undefined;
       engines.forEach(engine => engine.cancel());
+      await store.cancelAll();
       await drained;
       const replacementConfig = await refreshTelegramRuntimeConfig(globalDataPath, operation);
       for (const [claimKey, claim] of inboxClaims) {
@@ -384,13 +385,14 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
     void sendOutbox().catch(error => recordLocalDiagnosticError(globalDataPath, 'telegram.delivery', classifyDiagnosticFailure(error)));
     void wakeScheduledAutomation();
   }, 1000);
-  return { async close() {
+  return { async close(mode = 'handoff') {
     closed = true;
     handoffPending = true;
     clearInterval(timer);
     stopTelegramRemoteService();
     activeHost = undefined;
-    engines.forEach(engine => engine.cancel());
+    if (mode === 'handoff') engines.forEach(engine => engine.cancel());
+    await store.drain();
     await sending;
     if (channelLease) {
       for (let attempt = 0; attempt < 3 && channelLease; attempt++) {

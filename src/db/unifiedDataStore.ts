@@ -34,6 +34,10 @@ import type { FlowTrace } from '../flowStore';
 import { parseStepMemorySource } from '../stepMemorySource.js';
 import { digestToRunIndex, executionQueryTokens, parseRunDigestSource, RunDigestReference } from '../runDigestData.js';
 import type { RunDigest, ExecutionExperienceQuery } from '../runDigest';
+import type {
+  PiBranchScan, PiCommitResult, PiEntry, PiEntryScan, PiEntryStructure, PiListElement, PiListReadOptions,
+  PiSessionStats, PiSessionStorage, PiStoredValue, PiUsage, PiUsageRow, PiUsageScan, PiValue, PiValueList, PiWrite
+} from '../piSessionStorage';
 import type { LearningOverview } from '../learningLedger';
 import { isTrashOrLocalPrivate } from '../learningQuality.js';
 import { extractTokenUsageFromOutput, normalizeTokenUsage } from '../tokenUsage';
@@ -116,6 +120,22 @@ export interface WriteReceipt {
   committedSequence: number;
   status: 'committed';
   pendingEffects: string[];
+}
+export interface PiExecutionOwner { ownerId: string; generation: number }
+export interface PiConversationAcceptance {
+  schemaVersion: 1; conversationId: string; operationId: string; requestKey: string; prompt: string;
+  attachments: unknown[]; baselineRevision: number; source: string; sourceGeneration: number; projectScope: string;
+  systemPrompt: string; projectContext: unknown; model: { provider: string; modelId: string }; tools: unknown[];
+  executionProfile: string; options: Record<string, unknown>; commitGuard?: IntelligenceCommitGuard;
+}
+export interface PiConversationOperation {
+  operationId: string; conversationId: string; sessionId: string; lane: string; status: string;
+  ownerGeneration: number; baselineRevision: number; cancelRequested: boolean; acceptance: PiConversationAcceptance;
+  terminal?: { status: string; tipId?: string | null; finalAssistant?: string };
+}
+export interface LegacyIntelligenceOperation {
+  operationId: string; conversationId: string; requestKey: string; baselineRevision: number;
+  cutoverGeneration: number; status: 'running' | 'settled' | 'failed' | 'unknown'; replay?: boolean;
 }
 export interface GrowthSnapshotCleanupManifest {
   schemaVersion: 2;
@@ -450,6 +470,767 @@ export class UnifiedDataStore {
   public withActor<T>(actorId: string, action: () => T): T {
     if (!this.rows('SELECT id FROM actors WHERE id=?', [actorId]).length) throw new Error('actor_missing');
     return this.actorContext.run(actorId, action);
+  }
+
+  public registerPiCompatibilityRelease(releaseVersion: string, buildId: string, runtimeId: string): { mode: 'legacy' | 'harness'; releaseVersion: string } {
+    const version = String(releaseVersion || '').trim(), build = String(buildId || '').trim(), runtime = String(runtimeId || '').trim();
+    if (!/^\d+\.\d+\.\d+(?:[-+].*)?$/.test(version) || !build || !runtime) throw new Error('invalid_pi_compatibility_release');
+    const parts = (value: string) => value.split(/[.+-]/, 3).map(part => Number(part) || 0);
+    const atLeast = (value: string, minimum: string) => {
+      const left = parts(value), right = parts(minimum);
+      return left[0] !== right[0] ? left[0] > right[0] : left[1] !== right[1] ? left[1] > right[1] : left[2] >= right[2];
+    };
+    const now = Date.now();
+    return this.transaction(() => {
+      const existing = this.rows('SELECT build_id FROM pi_compatible_releases WHERE release_version=?', [version])[0];
+      if (existing && existing.build_id !== build) throw new Error('pi_release_build_conflict');
+      this.db.run(`INSERT INTO pi_compatible_releases(release_version,build_id,first_seen_at,last_seen_at) VALUES(?,?,?,?)
+        ON CONFLICT(release_version) DO UPDATE SET last_seen_at=excluded.last_seen_at`, [version, build, now, now]);
+      const observedRuntime = this.rows('SELECT release_version,build_id FROM pi_compatibility_runtime_observations WHERE runtime_id=?', [runtime])[0];
+      if (observedRuntime && (observedRuntime.release_version !== version || observedRuntime.build_id !== build)) throw new Error('pi_runtime_release_conflict');
+      this.db.run(`INSERT INTO pi_compatibility_runtime_observations VALUES(?,?,?,?,?)
+        ON CONFLICT(runtime_id) DO UPDATE SET last_seen_at=excluded.last_seen_at`, [runtime, version, build, now, now]);
+      const handoff = this.rows(`SELECT predecessor_release,predecessor_build_id,predecessor_runtime_id,drained_at
+        FROM pi_release_drains WHERE replacement_release=? AND replacement_build_id=?`, [version, build])[0];
+      if (handoff && atLeast(version, String(handoff.predecessor_release)) && version !== String(handoff.predecessor_release)) {
+        const proof = canonical({ schemaVersion: 1, predecessorRelease: handoff.predecessor_release,
+          predecessorBuildId: handoff.predecessor_build_id, predecessorRuntimeId: handoff.predecessor_runtime_id,
+          replacementRelease: version, replacementBuildId: build, runtimeId: runtime, drainedAt: Number(handoff.drained_at) });
+        this.db.run(`INSERT INTO pi_rollout_state VALUES(1,?,?,?)
+          ON CONFLICT(id) DO UPDATE SET minimum_release=excluded.minimum_release,drain_proof=excluded.drain_proof,activated_at=excluded.activated_at`,
+        [version, proof, now]);
+      }
+      const activation = this.rows('SELECT minimum_release,drain_proof FROM pi_rollout_state WHERE id=1')[0];
+      const mode = activation && String(activation.drain_proof).trim() && atLeast(version, String(activation.minimum_release)) ? 'harness' : 'legacy';
+      return { mode, releaseVersion: version };
+    });
+  }
+
+  /** Records the exact replacement authorized by a fully drained older Runtime. */
+  public recordPiCompatibilityDrain(input: {
+    runtimeId: string; releaseVersion: string; buildId: string; replacementVersion: string; replacementBuildId: string;
+  }): boolean {
+    const predecessor = String(input.releaseVersion || '').trim(), predecessorBuild = String(input.buildId || '').trim();
+    const replacement = String(input.replacementVersion || '').trim(), replacementBuild = String(input.replacementBuildId || '').trim();
+    const runtimeId = String(input.runtimeId || '').trim();
+    if (!runtimeId || !predecessorBuild || !replacementBuild || !/^\d+\.\d+\.\d+(?:[-+].*)?$/.test(predecessor)
+      || !/^\d+\.\d+\.\d+(?:[-+].*)?$/.test(replacement)) throw new Error('invalid_pi_rollout_evidence');
+    if (predecessor === replacement) {
+      if (predecessorBuild !== replacementBuild) throw new Error('invalid_pi_rollout_evidence');
+      return false;
+    }
+    const parts = (value: string) => value.split(/[.+-]/, 3).map(part => Number(part) || 0);
+    const left = parts(replacement), right = parts(predecessor);
+    const later = left[0] !== right[0] ? left[0] > right[0] : left[1] !== right[1] ? left[1] > right[1] : left[2] > right[2];
+    if (!later) throw new Error('invalid_pi_rollout_evidence');
+    this.transaction(() => {
+      const previous = this.rows('SELECT build_id FROM pi_compatible_releases WHERE release_version=?', [predecessor])[0];
+      if (!previous || previous.build_id !== predecessorBuild) throw new Error('pi_rollout_predecessor_unobserved');
+      const runtime = this.rows('SELECT release_version,build_id FROM pi_compatibility_runtime_observations WHERE runtime_id=?', [runtimeId])[0];
+      if (!runtime || runtime.release_version !== predecessor || runtime.build_id !== predecessorBuild) throw new Error('pi_rollout_predecessor_runtime_unobserved');
+      const running = this.rows("SELECT operation_id,owner_pid,owner_birth,side_effects_started FROM pi_legacy_conversation_operations WHERE status='running'");
+      for (const legacy of running) if (!isProcessOwnerAlive(Number(legacy.owner_pid), String(legacy.owner_birth))) {
+        this.db.run('UPDATE pi_legacy_conversation_operations SET status=?,updated_at=? WHERE operation_id=?',
+          [Number(legacy.side_effects_started) ? 'unknown' : 'failed', Date.now(), legacy.operation_id]);
+      }
+      if (this.rows("SELECT 1 FROM pi_legacy_conversation_operations WHERE status='running' LIMIT 1")[0]) throw new Error('pi_rollout_legacy_not_drained');
+      const existing = this.rows('SELECT * FROM pi_release_drains WHERE replacement_release=? AND replacement_build_id=?', [replacement, replacementBuild])[0];
+      if (existing && (existing.predecessor_release !== predecessor || existing.predecessor_build_id !== predecessorBuild
+        || existing.predecessor_runtime_id !== runtimeId)) throw new Error('pi_rollout_drain_conflict');
+      this.db.run(`INSERT INTO pi_release_drains VALUES(?,?,?,?,?,?) ON CONFLICT(replacement_release,replacement_build_id) DO NOTHING`,
+        [replacement, replacementBuild, predecessor, predecessorBuild, runtimeId, Date.now()]);
+    });
+    return true;
+  }
+
+  public admitLegacyIntelligenceOperation(input: {
+    operationId: string; conversationId: string; requestKey: string; prompt: string; baselineRevision: number; source: string;
+    ownerPid: number; ownerBirth: string;
+  }): LegacyIntelligenceOperation {
+    if (!input.operationId || !input.requestKey || !input.prompt.trim() || !/^[a-f0-9-]{36}$/i.test(input.conversationId)
+      || !Number.isInteger(input.baselineRevision) || input.baselineRevision < 0 || !Number.isInteger(input.ownerPid) || input.ownerPid < 1
+      || !input.ownerBirth) throw new Error('invalid_legacy_intelligence_operation');
+    return this.transaction(() => {
+      const promptHash = digest(input.prompt), now = Date.now();
+      const replay = this.rows('SELECT * FROM pi_legacy_conversation_operations WHERE request_key=?', [input.requestKey])[0];
+      if (replay) {
+        if (replay.operation_id !== input.operationId || replay.conversation_id !== input.conversationId
+          || replay.prompt_hash !== promptHash || Number(replay.baseline_revision) !== input.baselineRevision) throw new Error('idempotency_conflict');
+        return { ...this.readLegacyIntelligenceOperation(input.operationId)!, replay: true };
+      }
+      const current = this.readIntelligenceConversation(input.conversationId);
+      if ((current?.revision || 0) !== input.baselineRevision) throw new Error('revision_conflict');
+      let cutover = this.rows('SELECT generation,engine FROM pi_conversation_cutovers WHERE conversation_id=?', [input.conversationId])[0];
+      if (!cutover) {
+        this.db.run("INSERT INTO pi_conversation_cutovers VALUES(?,1,'legacy-agent',?)", [input.conversationId, now]);
+        cutover = { generation: 1, engine: 'legacy-agent' };
+      }
+      if (cutover.engine !== 'legacy-agent') throw new Error('intelligence_conversation_migrated');
+      const active = this.rows("SELECT 1 FROM pi_legacy_conversation_operations WHERE conversation_id=? AND status IN ('running','unknown')", [input.conversationId])[0];
+      if (active) throw new Error('intelligence_conversation_busy');
+      this.db.run(`INSERT INTO pi_legacy_conversation_operations(operation_id,conversation_id,request_key,prompt_hash,baseline_revision,cutover_generation,source,owner_pid,owner_birth,status,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,'running',?,?)`, [input.operationId, input.conversationId, input.requestKey, promptHash, input.baselineRevision, Number(cutover.generation), input.source, input.ownerPid, input.ownerBirth, now, now]);
+      return { ...this.readLegacyIntelligenceOperation(input.operationId)!, replay: false };
+    });
+  }
+
+  public readLegacyIntelligenceOperation(operationId: string): LegacyIntelligenceOperation | null {
+    const row = this.rows('SELECT * FROM pi_legacy_conversation_operations WHERE operation_id=?', [operationId])[0];
+    return row ? { operationId: String(row.operation_id), conversationId: String(row.conversation_id), requestKey: String(row.request_key),
+      baselineRevision: Number(row.baseline_revision), cutoverGeneration: Number(row.cutover_generation), status: String(row.status) as LegacyIntelligenceOperation['status'] } : null;
+  }
+
+  public markLegacyIntelligenceOperation(operationId: string, status: 'failed' | 'unknown'): LegacyIntelligenceOperation {
+    return this.transaction(() => {
+      const current = this.readLegacyIntelligenceOperation(operationId);
+      if (!current) throw new Error('legacy_intelligence_operation_not_found');
+      if (current.status === status) return current;
+      if (current.status !== 'running') throw new Error('legacy_intelligence_operation_terminal');
+      this.db.run('UPDATE pi_legacy_conversation_operations SET status=?,updated_at=? WHERE operation_id=?', [status, Date.now(), operationId]);
+      return this.readLegacyIntelligenceOperation(operationId)!;
+    });
+  }
+
+  public markLegacyIntelligenceSideEffect(operationId: string): LegacyIntelligenceOperation {
+    return this.transaction(() => {
+      const current = this.readLegacyIntelligenceOperation(operationId);
+      if (!current) throw new Error('legacy_intelligence_operation_not_found');
+      if (current.status !== 'running') throw new Error('legacy_intelligence_operation_terminal');
+      this.db.run('UPDATE pi_legacy_conversation_operations SET side_effects_started=1,updated_at=? WHERE operation_id=?', [Date.now(), operationId]);
+      return this.readLegacyIntelligenceOperation(operationId)!;
+    });
+  }
+
+  public failLegacyIntelligenceOperation(operationId: string): LegacyIntelligenceOperation {
+    return this.transaction(() => {
+      const row = this.rows('SELECT status,side_effects_started FROM pi_legacy_conversation_operations WHERE operation_id=?', [operationId])[0];
+      if (!row) throw new Error('legacy_intelligence_operation_not_found');
+      if (row.status !== 'running') return this.readLegacyIntelligenceOperation(operationId)!;
+      this.db.run('UPDATE pi_legacy_conversation_operations SET status=?,updated_at=? WHERE operation_id=?', [Number(row.side_effects_started) ? 'unknown' : 'failed', Date.now(), operationId]);
+      return this.readLegacyIntelligenceOperation(operationId)!;
+    });
+  }
+
+  public writeLegacyIntelligenceConversation(operationId: string, input: Parameters<UnifiedDataStore['writeIntelligenceConversation']>[0]): WriteReceipt {
+    return this.transaction(() => {
+      const operation = this.readLegacyIntelligenceOperation(operationId);
+      if (!operation) throw new Error('legacy_intelligence_operation_not_found');
+      if (operation.status === 'settled') return this.writeIntelligenceConversation(input);
+      if (operation.status !== 'running' || operation.conversationId !== input.conversation.id
+        || operation.baselineRevision !== input.expectedRevision) throw new Error('legacy_intelligence_operation_terminal');
+      const cutover = this.rows('SELECT generation,engine FROM pi_conversation_cutovers WHERE conversation_id=?', [operation.conversationId])[0];
+      if (!cutover || cutover.engine !== 'legacy-agent' || Number(cutover.generation) !== operation.cutoverGeneration) throw new Error('intelligence_conversation_migrated');
+      const receipt = this.writeIntelligenceConversation(input);
+      this.db.run("UPDATE pi_legacy_conversation_operations SET status='settled',updated_at=? WHERE operation_id=?", [Date.now(), operationId]);
+      return receipt;
+    });
+  }
+
+  public claimPiExecutionOwner(ownerId: string): PiExecutionOwner {
+    if (!ownerId) throw new Error('pi_owner_id_required');
+    return this.transaction(() => {
+      const current = this.rows('SELECT owner_id,generation FROM pi_execution_owner WHERE id=1')[0];
+      if (current && current.owner_id === ownerId) return { ownerId, generation: Number(current.generation) };
+      const generation = Number(current?.generation || 0) + 1;
+      this.db.run(`INSERT INTO pi_execution_owner(id,owner_id,generation,claimed_at) VALUES(1,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET owner_id=excluded.owner_id,generation=excluded.generation,claimed_at=excluded.claimed_at`, [ownerId, generation, Date.now()]);
+      return { ownerId, generation };
+    });
+  }
+
+  private assertPiExecutionOwner(owner: PiExecutionOwner): void {
+    const current = this.rows('SELECT owner_id,generation FROM pi_execution_owner WHERE id=1')[0];
+    if (!current || current.owner_id !== owner.ownerId || Number(current.generation) !== owner.generation) throw new Error('pi_owner_fenced');
+  }
+
+  private seedPiConversationSession(sessionId: string, conversation: IntelligenceConversation | undefined, acceptance: PiConversationAcceptance, owner: PiExecutionOwner, now: number): void {
+    const messages = conversation?.messages || [];
+    const emptyUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+    this.db.run('INSERT INTO pi_sessions(session_id,conversation_id,created_at,usage_json,owner_generation) VALUES(?,?,?,?,?)',
+      [sessionId, acceptance.conversationId, now, canonical(emptyUsage), owner.generation]);
+    let parentId: string | null = null;
+    const baseTimestamp = conversation ? Date.parse(conversation.createdAt) : now;
+    for (const [index, source] of messages.entries()) {
+      const id = `bootstrap:${acceptance.conversationId}:${index + 1}`;
+      const message = source.role === 'user'
+        ? { role: 'user', content: source.content, timestamp: baseTimestamp + index }
+        : { role: 'assistant', content: source.content ? [{ type: 'text', text: source.content }] : [], api: 'agent-cli', provider: 'agent-cli',
+          model: acceptance.model.modelId, usage: emptyUsage, stopReason: 'stop', timestamp: baseTimestamp + index };
+      const entry = { id, parentId, type: 'message', message };
+      const seq = index + 1;
+      this.db.run('INSERT INTO pi_storage_ids VALUES(?,?,?)', [sessionId, id, 'entry']);
+      this.db.run('INSERT INTO pi_entries VALUES(?,?,?,?,?,?,?,?)', [sessionId, id, parentId, seq, now, 'message', null, canonical(entry)]);
+      parentId = id;
+    }
+    const branchSeq = messages.length + 1;
+    this.db.run('INSERT INTO pi_values VALUES(?,?,?,?,?)', [sessionId, 'pi.branch.tip', 'main', canonical(parentId), branchSeq]);
+    this.db.run('UPDATE pi_sessions SET next_seq=?,message_count=? WHERE session_id=?', [branchSeq + 1, messages.length, sessionId]);
+  }
+
+  public admitPiConversationOperation(acceptance: PiConversationAcceptance, owner: PiExecutionOwner): PiConversationOperation {
+    if (!acceptance || acceptance.schemaVersion !== 1 || !acceptance.operationId || !acceptance.requestKey || !acceptance.prompt.trim()
+      || !/^[a-f0-9-]{36}$/i.test(acceptance.conversationId) || !Number.isInteger(acceptance.baselineRevision) || acceptance.baselineRevision < 0
+      || acceptance.executionProfile !== 'pi-core-0.87.1-v1' || !acceptance.model?.provider || !acceptance.model?.modelId) throw new Error('invalid_pi_conversation_acceptance');
+    const serialized = canonical(acceptance), acceptanceHash = digest(serialized);
+    return this.transaction(() => {
+      this.assertPiExecutionOwner(owner);
+      const byRequest = this.rows('SELECT * FROM pi_conversation_operations WHERE request_key=?', [acceptance.requestKey])[0];
+      if (byRequest) {
+        if (String(byRequest.request_hash || byRequest.acceptance_hash) !== acceptanceHash) throw new Error('idempotency_conflict');
+        return this.readPiConversationOperation(String(byRequest.operation_id))!;
+      }
+      if (this.rows('SELECT 1 FROM pi_conversation_operations WHERE operation_id=?', [acceptance.operationId]).length) throw new Error('idempotency_conflict');
+      const current = this.readIntelligenceConversation(acceptance.conversationId);
+      if ((current?.revision || 0) !== acceptance.baselineRevision) throw new Error('revision_conflict');
+      let binding = this.rows('SELECT * FROM pi_conversation_bindings WHERE conversation_id=?', [acceptance.conversationId])[0];
+      if (!binding) {
+        const sessionId = crypto.randomUUID(), now = Date.now();
+        const sourceMessages = current?.conversation.messages || [];
+        let cutover = this.rows('SELECT generation,engine FROM pi_conversation_cutovers WHERE conversation_id=?', [acceptance.conversationId])[0];
+        if (!cutover) {
+          this.db.run("INSERT INTO pi_conversation_cutovers VALUES(?,1,'legacy-agent',?)", [acceptance.conversationId, now]);
+          cutover = { generation: 1, engine: 'legacy-agent' };
+        }
+        if (cutover.engine === 'legacy-agent') {
+          const running = this.rows("SELECT operation_id,owner_pid,owner_birth,side_effects_started FROM pi_legacy_conversation_operations WHERE conversation_id=? AND cutover_generation=? AND status='running'", [acceptance.conversationId, Number(cutover.generation)]);
+          for (const legacy of running) {
+            if (isProcessOwnerAlive(Number(legacy.owner_pid), String(legacy.owner_birth))) continue;
+            this.db.run('UPDATE pi_legacy_conversation_operations SET status=?,updated_at=? WHERE operation_id=?', [Number(legacy.side_effects_started) ? 'unknown' : 'failed', now, legacy.operation_id]);
+          }
+          const unresolved = this.rows("SELECT 1 FROM pi_legacy_conversation_operations WHERE conversation_id=? AND cutover_generation=? AND status IN ('running','unknown')", [acceptance.conversationId, Number(cutover.generation)])[0];
+          if (unresolved) throw new Error('上一次处理尚未完成，SoloMap 正在保留进度，请稍后再试。');
+          const nextGeneration = Number(cutover.generation) + 1;
+          this.db.run("UPDATE pi_conversation_cutovers SET generation=?,engine='pi-harness',updated_at=? WHERE conversation_id=? AND generation=? AND engine='legacy-agent'", [nextGeneration, now, acceptance.conversationId, Number(cutover.generation)]);
+          cutover = { generation: nextGeneration, engine: 'pi-harness' };
+        }
+        this.seedPiConversationSession(sessionId, current?.conversation, acceptance, owner, now);
+        this.db.run("INSERT INTO pi_conversation_bindings VALUES(?,?,?,?,'pi-harness',?,?,?,?)", [acceptance.conversationId, sessionId, 'main', Number(cutover.generation), acceptance.baselineRevision, sourceMessages.length, digest(canonical(sourceMessages)), now]);
+        binding = this.rows('SELECT * FROM pi_conversation_bindings WHERE conversation_id=?', [acceptance.conversationId])[0];
+      }
+      const currentCutover = this.rows('SELECT generation,engine FROM pi_conversation_cutovers WHERE conversation_id=?', [acceptance.conversationId])[0];
+      if (!currentCutover || currentCutover.engine !== 'pi-harness' || Number(currentCutover.generation) !== Number(binding.cutover_generation)) throw new Error('pi_conversation_cutover_invalid');
+      const active = this.rows("SELECT operation_id FROM pi_conversation_operations WHERE conversation_id=? AND status IN ('accepted','running','completed')", [acceptance.conversationId])[0];
+      const now = Date.now(), contentId = this.putContent(serialized, 'application/json');
+      this.db.run(`INSERT INTO pi_conversation_operations(operation_id,conversation_id,session_id,request_key,acceptance_content_id,acceptance_hash,baseline_revision,cutover_generation,owner_generation,status,created_at,updated_at,request_hash)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, [acceptance.operationId, acceptance.conversationId, binding.session_id, acceptance.requestKey, contentId, acceptanceHash, acceptance.baselineRevision, binding.cutover_generation, owner.generation, active ? 'queued' : 'accepted', now, now, acceptanceHash]);
+      return this.readPiConversationOperation(acceptance.operationId)!;
+    });
+  }
+
+  public readPiConversationOperation(operationId: string): PiConversationOperation | null {
+    const row = this.rows(`SELECT o.*,b.lane FROM pi_conversation_operations o JOIN pi_conversation_bindings b ON b.conversation_id=o.conversation_id WHERE o.operation_id=?`, [operationId])[0];
+    if (!row) return null;
+    return {
+      operationId: String(row.operation_id), conversationId: String(row.conversation_id), sessionId: String(row.session_id),
+      lane: String(row.lane), status: String(row.status), ownerGeneration: Number(row.owner_generation), baselineRevision: Number(row.baseline_revision), cancelRequested: Number(row.cancel_requested) === 1,
+      acceptance: JSON.parse(this.content(String(row.acceptance_content_id)).toString('utf8')) as PiConversationAcceptance,
+      ...(row.terminal_content_id ? { terminal: JSON.parse(this.content(String(row.terminal_content_id)).toString('utf8')) } : {})
+    };
+  }
+
+  public admitPiToolInvocation(operationId: string, owner: PiExecutionOwner, input: {
+    invocationId: string; toolName: string; arguments: Record<string, unknown>; replay: 'safe' | 'never';
+  }): { operationId: string; invocationId: string; admitted: true } {
+    if (!input.invocationId || !input.toolName || !['safe', 'never'].includes(input.replay)) throw new Error('invalid_pi_tool_invocation');
+    return this.transaction(() => {
+      this.assertPiExecutionOwner(owner);
+      const operation = this.rows('SELECT status FROM pi_conversation_operations WHERE operation_id=?', [operationId])[0];
+      if (!operation) throw new Error('pi_operation_not_found');
+      if (!['accepted', 'running'].includes(String(operation.status))) throw new Error('pi_operation_not_running');
+      const argumentsHash = digest(canonical(input.arguments));
+      const existing = this.rows('SELECT tool_name,arguments_hash,replay FROM pi_tool_invocations WHERE operation_id=? AND invocation_id=?', [operationId, input.invocationId])[0];
+      if (existing) {
+        if (existing.tool_name !== input.toolName || existing.arguments_hash !== argumentsHash || existing.replay !== input.replay) throw new Error('idempotency_conflict');
+        const stored = this.rows('SELECT owner_generation,status FROM pi_tool_invocations WHERE operation_id=? AND invocation_id=?', [operationId, input.invocationId])[0];
+        if (Number(stored.owner_generation) !== owner.generation) {
+          if (input.replay !== 'safe' || stored.status !== 'admitted') throw new Error('pi_tool_replay_forbidden');
+          this.db.run('UPDATE pi_tool_invocations SET owner_generation=?,updated_at=? WHERE operation_id=? AND invocation_id=?', [owner.generation, Date.now(), operationId, input.invocationId]);
+        }
+        return { operationId, invocationId: input.invocationId, admitted: true };
+      }
+      const now = Date.now();
+      this.db.run("INSERT INTO pi_tool_invocations VALUES(?,?,?,?,?,?,'admitted',?,?)", [operationId, input.invocationId, input.toolName, argumentsHash, input.replay, owner.generation, now, now]);
+      return { operationId, invocationId: input.invocationId, admitted: true };
+    });
+  }
+
+  public assertPiToolInvocationActive(operationId: string, invocationId: string, owner: PiExecutionOwner): void {
+    this.assertPiExecutionOwner(owner);
+    const row = this.rows(`SELECT o.status,o.cancel_requested,t.status AS tool_status,t.owner_generation
+      FROM pi_conversation_operations o JOIN pi_tool_invocations t ON t.operation_id=o.operation_id
+      WHERE o.operation_id=? AND t.invocation_id=?`, [operationId, invocationId])[0];
+    if (!row || !['accepted', 'running'].includes(String(row.status)) || Number(row.cancel_requested) === 1
+      || row.tool_status !== 'admitted' || Number(row.owner_generation) !== owner.generation) throw new Error('pi_tool_invocation_fenced');
+  }
+
+  /** Holds SQLite's writer lock from fence validation through the business mutation and revalidates before commit. */
+  public async withPiToolInvocationFence<T>(operationId: string, invocationId: string, owner: PiExecutionOwner, action: () => Promise<T>): Promise<T> {
+    if (this.transactionDepth) throw new Error('pi_tool_transaction_nested');
+    this.db.run('BEGIN IMMEDIATE');
+    this.transactionDepth++;
+    try {
+      this.assertPiToolInvocationActive(operationId, invocationId, owner);
+      const result = await action();
+      this.assertPiToolInvocationActive(operationId, invocationId, owner);
+      this.db.run('COMMIT');
+      return result;
+    } catch (error) {
+      try { this.db.run('ROLLBACK'); } catch { /* Preserve the fence or business error. */ }
+      throw error;
+    } finally { this.transactionDepth--; }
+  }
+
+  /** Synchronous variant for composite mutations that must never yield while the writer transaction is open. */
+  public withPiToolInvocationFenceSync<T>(operationId: string, invocationId: string, owner: PiExecutionOwner, action: () => T): T {
+    if (this.transactionDepth) throw new Error('pi_tool_transaction_nested');
+    this.db.run('BEGIN IMMEDIATE');
+    this.transactionDepth++;
+    try {
+      this.assertPiToolInvocationActive(operationId, invocationId, owner);
+      const result = action();
+      this.assertPiToolInvocationActive(operationId, invocationId, owner);
+      this.db.run('COMMIT');
+      return result;
+    } catch (error) {
+      try { this.db.run('ROLLBACK'); } catch { /* Preserve the fence or business error. */ }
+      throw error;
+    } finally { this.transactionDepth--; }
+  }
+
+  public completePiToolInvocation(operationId: string, invocationId: string, owner: PiExecutionOwner): void {
+    this.transaction(() => {
+      this.assertPiToolInvocationActive(operationId, invocationId, owner);
+      this.db.run("UPDATE pi_tool_invocations SET status='completed',updated_at=? WHERE operation_id=? AND invocation_id=?", [Date.now(), operationId, invocationId]);
+    });
+  }
+
+  public requestPiConversationCancellation(input: { operationId?: string; source?: string; sourceGeneration?: number }, owner: PiExecutionOwner): string[] {
+    return this.transaction(() => {
+      this.assertPiExecutionOwner(owner);
+      const clauses = ["status IN ('queued','accepted','running')"], values: SqlValue[] = [];
+      if (input.operationId) { clauses.push('operation_id=?'); values.push(input.operationId); }
+      if (input.source) { clauses.push('acceptance_content_id IN (SELECT id FROM contents)'); }
+      const rows = this.rows(`SELECT operation_id,acceptance_content_id FROM pi_conversation_operations WHERE ${clauses.join(' AND ')}`, values)
+        .filter(row => {
+          if (!input.source) return true;
+          const acceptance = JSON.parse(this.content(String(row.acceptance_content_id)).toString('utf8')) as PiConversationAcceptance;
+          return acceptance.source === input.source && (input.sourceGeneration === undefined || acceptance.sourceGeneration === input.sourceGeneration);
+        });
+      for (const row of rows) this.db.run(`UPDATE pi_conversation_operations SET
+        status=CASE WHEN status='queued' THEN 'aborted' ELSE status END,cancel_requested=1,updated_at=? WHERE operation_id=?`, [Date.now(), row.operation_id]);
+      return rows.map(row => String(row.operation_id));
+    });
+  }
+
+  public promoteNextPiConversationOperation(conversationId: string, owner: PiExecutionOwner): PiConversationOperation | null {
+    return this.transaction(() => {
+      this.assertPiExecutionOwner(owner);
+      const active = this.rows("SELECT 1 FROM pi_conversation_operations WHERE conversation_id=? AND status IN ('accepted','running','completed')", [conversationId])[0];
+      if (active) return null;
+      const next = this.rows("SELECT operation_id FROM pi_conversation_operations WHERE conversation_id=? AND status='queued' ORDER BY created_at,operation_id LIMIT 1", [conversationId])[0];
+      if (!next) return null;
+      const revision = this.readIntelligenceConversation(conversationId)?.revision || 0;
+      const queued = this.readPiConversationOperation(String(next.operation_id))!;
+      const acceptance = { ...queued.acceptance, baselineRevision: revision };
+      const serialized = canonical(acceptance);
+      this.db.run("UPDATE pi_conversation_operations SET status='accepted',acceptance_content_id=?,acceptance_hash=?,baseline_revision=?,owner_generation=?,updated_at=? WHERE operation_id=? AND status='queued'",
+        [this.putContent(serialized, 'application/json'), digest(serialized), revision, owner.generation, Date.now(), next.operation_id]);
+      return this.readPiConversationOperation(String(next.operation_id));
+    });
+  }
+
+  public promoteRecoverablePiConversationOperations(owner: PiExecutionOwner): void {
+    const conversations = this.rows("SELECT DISTINCT conversation_id FROM pi_conversation_operations WHERE status='queued'");
+    for (const row of conversations) this.promoteNextPiConversationOperation(String(row.conversation_id), owner);
+  }
+
+  public listRecoverablePiConversationOperations(): PiConversationOperation[] {
+    return this.rows("SELECT operation_id FROM pi_conversation_operations WHERE status IN ('accepted','running','completed') ORDER BY created_at,operation_id")
+      .map(row => this.readPiConversationOperation(String(row.operation_id))!);
+  }
+
+  public markPiConversationOperation(operationId: string, owner: PiExecutionOwner, terminal: { status: 'running' | 'completed' | 'failed' | 'aborted' | 'declined' | 'missing_final_assistant'; tipId?: string | null; finalAssistant?: string }): PiConversationOperation {
+    return this.transaction(() => {
+      this.assertPiExecutionOwner(owner);
+      const operation = this.readPiConversationOperation(operationId);
+      if (!operation) throw new Error('pi_operation_not_found');
+      const current = this.rows('SELECT status,terminal_content_id FROM pi_conversation_operations WHERE operation_id=?', [operationId])[0];
+      if (current.status === 'settled') return operation;
+      if (terminal.status === 'running') {
+        if (!['accepted', 'running'].includes(String(current.status))) throw new Error('pi_operation_terminal');
+        this.db.run("UPDATE pi_conversation_operations SET status='running',owner_generation=?,updated_at=? WHERE operation_id=?", [owner.generation, Date.now(), operationId]);
+        return this.readPiConversationOperation(operationId)!;
+      }
+      const payload = canonical(terminal);
+      if (!['accepted', 'running'].includes(String(current.status))) {
+        if (current.status === terminal.status && current.terminal_content_id
+          && canonical(JSON.parse(this.content(String(current.terminal_content_id)).toString('utf8'))) === payload) return operation;
+        throw new Error('pi_operation_terminal');
+      }
+      this.db.run('UPDATE pi_conversation_operations SET status=?,terminal_content_id=?,owner_generation=?,updated_at=? WHERE operation_id=?', [terminal.status, this.putContent(payload, 'application/json'), owner.generation, Date.now(), operationId]);
+      return this.readPiConversationOperation(operationId)!;
+    });
+  }
+
+  public discardCompletedPiConversationOperation(operationId: string, owner: PiExecutionOwner, reason: string): PiConversationOperation {
+    return this.transaction(() => {
+      this.assertPiExecutionOwner(owner);
+      const row = this.rows('SELECT status,terminal_content_id FROM pi_conversation_operations WHERE operation_id=?', [operationId])[0];
+      if (!row) throw new Error('pi_operation_not_found');
+      if (row.status === 'discarded') return this.readPiConversationOperation(operationId)!;
+      if (row.status !== 'completed' || !row.terminal_content_id) throw new Error('pi_operation_not_completed');
+      const terminal = JSON.parse(this.content(String(row.terminal_content_id)).toString('utf8')) as Record<string, unknown>;
+      const terminalContentId = this.putContent(canonical({ ...terminal, settlementDiscarded: reason }), 'application/json');
+      this.db.run("UPDATE pi_conversation_operations SET status='discarded',terminal_content_id=?,owner_generation=?,updated_at=? WHERE operation_id=?",
+        [terminalContentId, owner.generation, Date.now(), operationId]);
+      return this.readPiConversationOperation(operationId)!;
+    });
+  }
+
+  public settlePiConversationOperation(operationId: string, owner: PiExecutionOwner, terminal: { status: string; tipId: string | null; finalAssistant?: string }): WriteReceipt {
+    if (terminal.status !== 'completed') {
+      this.markPiConversationOperation(operationId, owner, { status: terminal.status as 'failed' | 'aborted' | 'declined', tipId: terminal.tipId });
+      throw new Error('pi_operation_not_completed');
+    }
+    const answer = String(terminal.finalAssistant || '').trim();
+    if (!answer) {
+      this.markPiConversationOperation(operationId, owner, { status: 'missing_final_assistant', tipId: terminal.tipId });
+      throw new Error('missing_final_assistant');
+    }
+    return this.transaction(() => {
+      this.assertPiExecutionOwner(owner);
+      const operation = this.readPiConversationOperation(operationId);
+      if (!operation) throw new Error('pi_operation_not_found');
+      const row = this.rows('SELECT status,settlement_content_id FROM pi_conversation_operations WHERE operation_id=?', [operationId])[0];
+      if (row.status === 'settled' && row.settlement_content_id) return JSON.parse(this.content(String(row.settlement_content_id)).toString('utf8')) as WriteReceipt;
+      if (!['accepted', 'running', 'completed'].includes(String(row.status))) throw new Error('pi_operation_terminal');
+      const durableResult = this.rows("SELECT value_json FROM pi_values WHERE session_id=? AND namespace='pi.result' AND key=?", [operation.sessionId, operationId])[0];
+      if (!durableResult) throw new Error('pi_terminal_not_durable');
+      const result = JSON.parse(String(durableResult.value_json)) as { operationId?: string; kind?: string; status?: string; fromTipId?: string | null; tipId?: string | null };
+      if (result.operationId !== operationId || result.kind !== 'run' || result.status !== 'completed'
+        || result.tipId !== terminal.tipId || !terminal.tipId || result.tipId === result.fromTipId) throw new Error('pi_terminal_mismatch');
+      const branchTip = this.rows("SELECT value_json FROM pi_values WHERE session_id=? AND namespace='pi.branch.tip' AND key=?", [operation.sessionId, operation.lane])[0];
+      if (!branchTip || JSON.parse(String(branchTip.value_json)) !== terminal.tipId) throw new Error('pi_terminal_path_mismatch');
+      let cursor: string | null = terminal.tipId;
+      const visited = new Set<string>();
+      while (cursor !== (result.fromTipId ?? null)) {
+        if (!cursor || visited.has(cursor)) throw new Error('pi_terminal_path_mismatch');
+        visited.add(cursor);
+        const currentEntry: Record<string, SqlValue> | undefined = this.rows('SELECT parent_id FROM pi_entries WHERE session_id=? AND id=?', [operation.sessionId, cursor])[0];
+        if (!currentEntry) throw new Error('pi_terminal_path_mismatch');
+        cursor = currentEntry.parent_id === null ? null : String(currentEntry.parent_id);
+      }
+      const tip = this.rows('SELECT type,payload_json FROM pi_entries WHERE session_id=? AND id=?', [operation.sessionId, terminal.tipId])[0];
+      if (!tip || tip.type !== 'message') throw new Error('pi_terminal_tip_missing');
+      const entry = JSON.parse(String(tip.payload_json)) as { message?: { role?: string; content?: unknown; stopReason?: string } };
+      const content = entry.message?.content;
+      const durableAnswer = typeof content === 'string' ? content : Array.isArray(content)
+        ? content.filter((part): part is { type: string; text: string } => Boolean(part && typeof part === 'object' && (part as any).type === 'text')).map(part => String(part.text || '')).join('\n') : '';
+      if (entry.message?.role !== 'assistant' || entry.message.stopReason === 'pending' || durableAnswer.trim() !== answer) throw new Error('pi_terminal_answer_mismatch');
+      const current = this.readIntelligenceConversation(operation.conversationId);
+      if ((current?.revision || 0) !== operation.baselineRevision) throw new Error('revision_conflict');
+      const now = new Date().toISOString();
+      const conversation: IntelligenceConversation = {
+        id: operation.conversationId,
+        title: current?.conversation.title || operation.acceptance.prompt.replace(/\s+/g, ' ').slice(0, 72),
+        createdAt: current?.conversation.createdAt || new Date(Number(this.rows('SELECT created_at FROM pi_conversation_operations WHERE operation_id=?', [operationId])[0].created_at)).toISOString(),
+        updatedAt: now,
+        messages: [...(current?.conversation.messages || []), { role: 'user', content: operation.acceptance.prompt }, { role: 'assistant', content: answer }]
+      };
+      this.db.run('INSERT INTO pi_visible_settlement_authorizations VALUES(?,?,?)', [operation.conversationId, operationId, owner.generation]);
+      const receipt = this.writeIntelligenceConversation({
+        conversation, expectedRevision: operation.baselineRevision,
+        idempotencyKey: `pi-settlement:${operationId}`,
+        ...(operation.acceptance.commitGuard ? { commitGuard: operation.acceptance.commitGuard } : {})
+      });
+      const settlementContentId = this.putContent(canonical(receipt), 'application/json');
+      const terminalContentId = this.putContent(canonical(terminal), 'application/json');
+      this.db.run('DELETE FROM pi_visible_settlement_authorizations WHERE conversation_id=? AND operation_id=?', [operation.conversationId, operationId]);
+      this.db.run("UPDATE pi_conversation_operations SET status='settled',terminal_content_id=?,settlement_content_id=?,owner_generation=?,updated_at=? WHERE operation_id=?", [terminalContentId, settlementContentId, owner.generation, Date.now(), operationId]);
+      return receipt;
+    });
+  }
+
+  /** Reclaims settled Pi-only detail after a native compaction entry proves the remaining branch is self-contained. */
+  public maintainPiExecutionRetention(conversationId: string, owner: PiExecutionOwner): {
+    compacted: boolean; reclaimedEntries: number; reclaimedUsage: number; prunedToolInvocations: number;
+  } {
+    return this.transaction(() => {
+      this.assertPiExecutionOwner(owner);
+      const binding = this.rows('SELECT session_id,lane FROM pi_conversation_bindings WHERE conversation_id=?', [conversationId])[0];
+      if (!binding) return { compacted: false, reclaimedEntries: 0, reclaimedUsage: 0, prunedToolInvocations: 0 };
+      if (this.rows("SELECT 1 FROM pi_conversation_operations WHERE conversation_id=? AND status IN ('queued','accepted','running','completed') LIMIT 1", [conversationId])[0]) {
+        return { compacted: false, reclaimedEntries: 0, reclaimedUsage: 0, prunedToolInvocations: 0 };
+      }
+      const sessionId = String(binding.session_id), lane = String(binding.lane);
+      const tipValue = this.rows("SELECT value_json FROM pi_values WHERE session_id=? AND namespace='pi.branch.tip' AND key=?", [sessionId, lane])[0];
+      let cursor = tipValue ? String(JSON.parse(String(tipValue.value_json)) || '') : '';
+      let boundary: Record<string, SqlValue> | undefined;
+      const visited = new Set<string>();
+      while (cursor && !visited.has(cursor)) {
+        visited.add(cursor);
+        const row = this.rows('SELECT * FROM pi_entries WHERE session_id=? AND id=?', [sessionId, cursor])[0];
+        if (!row) break;
+        if (row.type === 'compaction') { boundary = row; break; }
+        cursor = row.parent_id === null ? '' : String(row.parent_id);
+      }
+      let reclaimedEntries = 0, reclaimedUsage = 0;
+      if (boundary?.parent_id !== null && boundary?.parent_id !== undefined) {
+        const payload = JSON.parse(String(boundary.payload_json)) as { type?: string; summary?: unknown; retainedTail?: unknown[]; parentId?: string | null };
+        if (payload.type === 'compaction' && typeof payload.summary === 'string' && payload.summary.trim() && Array.isArray(payload.retainedTail)) {
+          const ancestorIds: string[] = [];
+          let ancestor: string | null = String(boundary.parent_id);
+          const ancestorSeen = new Set<string>();
+          while (ancestor) {
+            if (ancestorSeen.has(ancestor)) throw new Error('pi_retention_cycle');
+            ancestorSeen.add(ancestor); ancestorIds.push(ancestor);
+            const row: Record<string, SqlValue> | undefined = this.rows('SELECT parent_id FROM pi_entries WHERE session_id=? AND id=?', [sessionId, ancestor])[0];
+            if (!row) throw new Error('pi_retention_missing_ancestor');
+            ancestor = row.parent_id === null ? null : String(row.parent_id);
+          }
+          const ancestorSet = new Set(ancestorIds);
+          for (let offset = 0; offset < ancestorIds.length; offset += 250) {
+            const batch = ancestorIds.slice(offset, offset + 250), placeholders = batch.map(() => '?').join(',');
+            const shared = this.rows(`SELECT id FROM pi_entries WHERE session_id=? AND parent_id IN (${placeholders})`, [sessionId, ...batch])
+              .some(row => String(row.id) !== String(boundary!.id) && !ancestorSet.has(String(row.id)));
+            if (shared) return { compacted: false, reclaimedEntries: 0, reclaimedUsage: 0, prunedToolInvocations: 0 };
+          }
+          const usageIds: string[] = [];
+          for (let offset = 0; offset < ancestorIds.length; offset += 250) {
+            const batch = ancestorIds.slice(offset, offset + 250), placeholders = batch.map(() => '?').join(',');
+            usageIds.push(...this.rows(`SELECT id FROM pi_usage WHERE session_id=? AND entry_id IN (${placeholders})`, [sessionId, ...batch]).map(row => String(row.id)));
+          }
+          const rooted = canonical({ ...payload, parentId: null });
+          this.db.run('UPDATE pi_entries SET parent_id=NULL,payload_json=? WHERE session_id=? AND id=?', [rooted, sessionId, boundary.id]);
+          for (let offset = 0; offset < ancestorIds.length; offset += 250) {
+            const batch = ancestorIds.slice(offset, offset + 250), placeholders = batch.map(() => '?').join(',');
+            this.db.run(`DELETE FROM pi_usage WHERE session_id=? AND entry_id IN (${placeholders})`, [sessionId, ...batch]);
+            this.db.run(`DELETE FROM pi_entries WHERE session_id=? AND id IN (${placeholders})`, [sessionId, ...batch]);
+            this.db.run(`DELETE FROM pi_storage_ids WHERE session_id=? AND id IN (${placeholders})`, [sessionId, ...batch]);
+          }
+          for (let offset = 0; offset < usageIds.length; offset += 250) {
+            const batch = usageIds.slice(offset, offset + 250), placeholders = batch.map(() => '?').join(',');
+            this.db.run(`DELETE FROM pi_storage_ids WHERE session_id=? AND id IN (${placeholders})`, [sessionId, ...batch]);
+          }
+          reclaimedEntries = ancestorIds.length; reclaimedUsage = usageIds.length;
+        }
+      }
+      const retained = this.rows("SELECT operation_id FROM pi_conversation_operations WHERE conversation_id=? AND status IN ('settled','discarded','failed','aborted','declined','missing_final_assistant') ORDER BY updated_at DESC,operation_id DESC LIMIT 128", [conversationId]);
+      const retainedIds = new Set(retained.map(row => String(row.operation_id)));
+      const pruneIds = this.rows("SELECT operation_id FROM pi_conversation_operations WHERE conversation_id=? AND status IN ('settled','discarded','failed','aborted','declined','missing_final_assistant')", [conversationId])
+        .map(row => String(row.operation_id)).filter(id => !retainedIds.has(id));
+      let prunedToolInvocations = 0;
+      for (let offset = 0; offset < pruneIds.length; offset += 250) {
+        const batch = pruneIds.slice(offset, offset + 250), placeholders = batch.map(() => '?').join(',');
+        prunedToolInvocations += Number(this.rows(`SELECT COUNT(*) AS count FROM pi_tool_invocations WHERE operation_id IN (${placeholders})`, batch)[0].count);
+        this.db.run(`DELETE FROM pi_tool_invocations WHERE operation_id IN (${placeholders})`, batch);
+        this.db.run(`DELETE FROM pi_values WHERE session_id=? AND namespace='pi.result' AND key IN (${placeholders})`, [sessionId, ...batch]);
+      }
+      this.db.run(`INSERT INTO pi_retention_runs VALUES(?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET
+        boundary_entry_id=excluded.boundary_entry_id,archived_entries=pi_retention_runs.archived_entries+excluded.archived_entries,
+        archived_usage=pi_retention_runs.archived_usage+excluded.archived_usage,
+        pruned_tool_invocations=pi_retention_runs.pruned_tool_invocations+excluded.pruned_tool_invocations,last_run_at=excluded.last_run_at`,
+      [sessionId, boundary ? String(boundary.id) : null, reclaimedEntries, reclaimedUsage, prunedToolInvocations, Date.now()]);
+      return { compacted: reclaimedEntries > 0, reclaimedEntries, reclaimedUsage, prunedToolInvocations };
+    });
+  }
+
+  /** Pi core private durable state. Runtime remains the only database owner. */
+  public createPiSessionStorage(sessionId: string, owner?: PiExecutionOwner): PiSessionStorage {
+    if (!sessionId) throw new Error('pi_session_id_required');
+    const emptyUsage = (): PiUsage => ({
+      input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }
+    });
+    const addUsage = (left: PiUsage, right: PiUsage): PiUsage => ({
+      input: left.input + right.input,
+      output: left.output + right.output,
+      cacheRead: left.cacheRead + right.cacheRead,
+      cacheWrite: left.cacheWrite + right.cacheWrite,
+      ...(left.cacheWrite1h === undefined && right.cacheWrite1h === undefined ? {} : { cacheWrite1h: (left.cacheWrite1h || 0) + (right.cacheWrite1h || 0) }),
+      ...(left.reasoning === undefined && right.reasoning === undefined ? {} : { reasoning: (left.reasoning || 0) + (right.reasoning || 0) }),
+      totalTokens: left.totalTokens + right.totalTokens,
+      cost: {
+        input: left.cost.input + right.cost.input,
+        output: left.cost.output + right.cost.output,
+        cacheRead: left.cost.cacheRead + right.cost.cacheRead,
+        cacheWrite: left.cost.cacheWrite + right.cost.cacheWrite,
+        total: left.cost.total + right.cost.total
+      }
+    });
+    const parse = <T>(value: SqlValue): T => JSON.parse(String(value)) as T;
+    const session = () => {
+      let row = this.rows('SELECT next_seq,message_count,usage_json FROM pi_sessions WHERE session_id=?', [sessionId])[0];
+      if (!row) {
+        this.db.run('INSERT INTO pi_sessions(session_id,created_at,usage_json) VALUES(?,?,?)', [sessionId, Date.now(), canonical(emptyUsage())]);
+        row = this.rows('SELECT next_seq,message_count,usage_json FROM pi_sessions WHERE session_id=?', [sessionId])[0];
+      }
+      return row;
+    };
+    const entryFromRow = (row: Record<string, SqlValue>): PiEntry => ({
+      ...parse<Record<string, unknown>>(row.payload_json),
+      id: String(row.id),
+      parentId: row.parent_id === null ? null : String(row.parent_id),
+      seq: Number(row.seq),
+      timestamp: Number(row.timestamp),
+      type: String(row.type),
+      ...(row.custom_type === null ? {} : { customType: String(row.custom_type) })
+    } as PiEntry);
+    const selectEntries = (where: string, values: SqlValue[], order: 'ASC' | 'DESC' = 'ASC', limit?: number): PiEntry[] => {
+      const bounded = limit === undefined ? '' : ` LIMIT ${Math.max(0, Math.trunc(limit))}`;
+      return this.rows(`SELECT * FROM pi_entries WHERE session_id=?${where} ORDER BY seq ${order}${bounded}`, [sessionId, ...values]).map(entryFromRow);
+    };
+    const stats = (): PiSessionStats => {
+      const row = session();
+      return { messageCount: Number(row.message_count), usage: parse<PiUsage>(row.usage_json) };
+    };
+    let closed = false;
+    const assertOpen = () => { if (closed) throw new Error('pi_storage_closed'); };
+    const assertWritable = () => { assertOpen(); if (owner) this.assertPiExecutionOwner(owner); };
+    const scanBranch = (query: PiBranchScan): PiEntry[] => {
+      assertOpen();
+      const start = this.rows('SELECT * FROM pi_entries WHERE session_id=? AND id=?', [sessionId, query.start])[0];
+      if (!start) throw new Error(`Unknown branch start: ${query.start}`);
+      const path: PiEntry[] = [];
+      let current: Record<string, SqlValue> | undefined = start;
+      while (current) {
+        const entry = entryFromRow(current); path.push(entry);
+        if (entry.parentId === null) break;
+        current = this.rows('SELECT * FROM pi_entries WHERE session_id=? AND id=?', [sessionId, entry.parentId])[0];
+        if (!current) throw new Error('Corrupt branch: missing parent');
+      }
+      if (query.order === 'oldestFirst') path.reverse();
+      const stopped: PiEntry[] = [];
+      for (const entry of path) { stopped.push(entry); if (entry.id === query.stopAtId || entry.type === query.stopAtType) break; }
+      const filtered = stopped.filter(entry => (query.type === undefined || entry.type === query.type)
+        && (query.customType === undefined || entry.customType === query.customType)
+        && (query.cursor === undefined || (query.order === 'oldestFirst' ? entry.seq > query.cursor.seq : entry.seq < query.cursor.seq)));
+      return query.limit === undefined ? filtered : filtered.slice(0, Math.max(0, query.limit));
+    };
+    session();
+    const metadataRow = this.rows('SELECT created_at,storage_version,cwd,parent_session_id,legacy_parent_session_path FROM pi_sessions WHERE session_id=?', [sessionId])[0];
+    if (Number(metadataRow.storage_version) !== 1) throw new Error('unsupported_pi_storage_version');
+    return {
+      metadata: {
+        id: sessionId, createdAt: Number(metadataRow.created_at), storageVersion: Number(metadataRow.storage_version),
+        ...(metadataRow.cwd === null ? {} : { cwd: String(metadataRow.cwd) }),
+        ...(metadataRow.parent_session_id === null ? {} : { parentSessionId: String(metadataRow.parent_session_id) }),
+        ...(metadataRow.legacy_parent_session_path === null ? {} : { legacyParentSessionPath: String(metadataRow.legacy_parent_session_path) })
+      },
+      commit: async (writes: PiWrite[]): Promise<PiCommitResult> => this.transaction(() => {
+        assertWritable();
+        const current = session();
+        const firstSeq = Number(current.next_seq);
+        const timestamp = Date.now();
+        const seqs = writes.map((_, index) => firstSeq + index);
+        const knownEntries = new Set(this.rows('SELECT id FROM pi_entries WHERE session_id=?', [sessionId]).map(row => String(row.id)));
+        const knownIds = new Set(this.rows('SELECT id FROM pi_storage_ids WHERE session_id=?', [sessionId]).map(row => String(row.id)));
+        const introduced = new Set<string>();
+        for (const [index, write] of writes.entries()) {
+          if (write.kind === 'entry' || write.kind === 'usage') {
+            const id = write.kind === 'entry' ? write.entry.id : write.row.id;
+            if (knownIds.has(id) || introduced.has(id)) throw new Error('pi_storage_duplicate_id');
+            introduced.add(id);
+          }
+          if (write.kind === 'entry' && write.entry.parentId !== null && !knownEntries.has(write.entry.parentId)) throw new Error('pi_storage_missing_parent');
+          if (write.kind === 'entry') knownEntries.add(write.entry.id);
+          if (write.kind === 'usage' && write.row.entryId && !knownEntries.has(write.row.entryId)) throw new Error('pi_storage_missing_usage_entry');
+          if (!Number.isSafeInteger(seqs[index])) throw new Error('pi_storage_sequence_exhausted');
+        }
+        let aggregate = parse<PiUsage>(current.usage_json);
+        let messageCount = Number(current.message_count);
+        for (const [index, write] of writes.entries()) {
+          const seq = seqs[index];
+          if (write.kind === 'entry') {
+            const entry = write.entry;
+            this.db.run('INSERT INTO pi_storage_ids VALUES(?,?,?)', [sessionId, entry.id, 'entry']);
+            this.db.run('INSERT INTO pi_entries VALUES(?,?,?,?,?,?,?,?)', [sessionId, entry.id, entry.parentId, seq, timestamp, entry.type, entry.customType || null, canonical(entry)]);
+            if (entry.type === 'message') messageCount++;
+          } else if (write.kind === 'usage') {
+            const row = write.row;
+            this.db.run('INSERT INTO pi_storage_ids VALUES(?,?,?)', [sessionId, row.id, 'usage']);
+            this.db.run('INSERT INTO pi_usage VALUES(?,?,?,?,?,?,?)', [sessionId, row.id, seq, row.entryId || null, row.adjustment ? 1 : 0, canonical(row.usage), row.details === undefined ? null : canonical(row.details)]);
+            aggregate = addUsage(aggregate, row.usage);
+          } else if (write.kind === 'value') {
+            if (write.op === 'delete') this.db.run('DELETE FROM pi_values WHERE session_id=? AND namespace=? AND key=?', [sessionId, write.namespace, write.key]);
+            else this.db.run('INSERT INTO pi_values VALUES(?,?,?,?,?) ON CONFLICT(session_id,namespace,key) DO UPDATE SET value_json=excluded.value_json,seq=excluded.seq', [sessionId, write.namespace, write.key, canonical(write.value), seq]);
+          } else if (write.op === 'delete') {
+            this.db.run('DELETE FROM pi_list_values WHERE session_id=? AND namespace=? AND key=?', [sessionId, write.namespace, write.key]);
+          } else {
+            this.db.run('INSERT INTO pi_list_values VALUES(?,?,?,?,?)', [sessionId, write.namespace, write.key, seq, canonical(write.value)]);
+          }
+        }
+        this.db.run('UPDATE pi_sessions SET next_seq=?,message_count=?,usage_json=? WHERE session_id=?', [firstSeq + writes.length, messageCount, canonical(aggregate), sessionId]);
+        return { firstSeq, seqs, timestamp, stats: { messageCount, usage: aggregate } };
+      }),
+      getEntries: async (ids: string[]): Promise<Map<string, PiEntry>> => {
+        assertOpen();
+        const result = new Map<string, PiEntry>();
+        for (const id of ids) {
+          const row = this.rows('SELECT * FROM pi_entries WHERE session_id=? AND id=?', [sessionId, id])[0];
+          if (row) result.set(id, entryFromRow(row));
+        }
+        return result;
+      },
+      getValue: async <T>(address: PiValue<T>): Promise<PiStoredValue<T> | undefined> => {
+        assertOpen();
+        const row = this.rows('SELECT value_json,seq FROM pi_values WHERE session_id=? AND namespace=? AND key=?', [sessionId, address.namespace, address.key])[0];
+        return row ? { address, value: parse<T>(row.value_json), seq: Number(row.seq) } : undefined;
+      },
+      scanValues: async <T>(prefix: PiValue<T>): Promise<PiStoredValue<T>[]> => {
+        assertOpen();
+        const rows = this.rows('SELECT key,value_json,seq FROM pi_values WHERE session_id=? AND namespace=?', [sessionId, prefix.namespace]);
+        const codePoints = (value: string) => Array.from(value, character => character.codePointAt(0) || 0);
+        const compare = (left: string, right: string) => {
+          const a = codePoints(left), b = codePoints(right), length = Math.min(a.length, b.length);
+          for (let index = 0; index < length; index++) if (a[index] !== b[index]) return a[index] - b[index];
+          return a.length - b.length;
+        };
+        return rows.filter(row => String(row.key).startsWith(prefix.key)).sort((left, right) => compare(String(left.key), String(right.key))).map(row => ({
+          address: { kind: 'value', namespace: prefix.namespace, key: String(row.key) } as PiValue<T>, value: parse<T>(row.value_json), seq: Number(row.seq)
+        }));
+      },
+      readList: async <T>(address: PiValueList<T>, options?: PiListReadOptions): Promise<PiListElement<T>[]> => {
+        assertOpen();
+        const order = options?.order === 'desc' ? 'DESC' : 'ASC';
+        const cursor = options?.cursor ? ` AND seq${order === 'ASC' ? '>' : '<'}?` : '';
+        const values: SqlValue[] = [sessionId, address.namespace, address.key];
+        if (options?.cursor) values.push(options.cursor.seq);
+        const requestedLimit = options?.limit ?? 1_000;
+        if (!Number.isSafeInteger(requestedLimit) || requestedLimit <= 0) throw new TypeError('List read limit must be a positive safe integer');
+        const limit = Math.min(requestedLimit, 10_000);
+        return this.rows(`SELECT seq,value_json FROM pi_list_values WHERE session_id=? AND namespace=? AND key=?${cursor} ORDER BY seq ${order} LIMIT ${limit}`, values)
+          .map(row => ({ seq: Number(row.seq), value: parse<T>(row.value_json) }));
+      },
+      scanBranch: async (query: PiBranchScan): Promise<PiEntry[]> => scanBranch(query),
+      scanBranchStructure: async (query: PiBranchScan): Promise<PiEntryStructure[]> => {
+        const entries = scanBranch(query);
+        return entries.map(entry => ({ id: entry.id, parentId: entry.parentId, seq: entry.seq, timestamp: entry.timestamp, type: entry.type, ...(entry.customType === undefined ? {} : { customType: entry.customType }) }));
+      },
+      scanEntries: async (query: PiEntryScan): Promise<PiEntry[]> => {
+        assertOpen();
+        const clauses: string[] = [], values: SqlValue[] = [];
+        if (query.type !== undefined) { clauses.push('type=?'); values.push(query.type); }
+        if (query.customType !== undefined) { clauses.push('custom_type=?'); values.push(query.customType); }
+        if (query.fromSeq !== undefined) { clauses.push('seq>=?'); values.push(query.fromSeq); }
+        if (query.toSeq !== undefined) { clauses.push('seq<=?'); values.push(query.toSeq); }
+        return selectEntries(clauses.length ? ` AND ${clauses.join(' AND ')}` : '', values, query.order === 'desc' ? 'DESC' : 'ASC', query.limit);
+      },
+      scanUsage: async (query: PiUsageScan): Promise<PiUsageRow[]> => {
+        assertOpen();
+        const clauses: string[] = [], values: SqlValue[] = [sessionId];
+        if (query.fromSeq !== undefined) { clauses.push('seq>=?'); values.push(query.fromSeq); }
+        if (query.toSeq !== undefined) { clauses.push('seq<=?'); values.push(query.toSeq); }
+        const limit = query.limit === undefined ? '' : ` LIMIT ${Math.max(0, Math.trunc(query.limit))}`;
+        return this.rows(`SELECT * FROM pi_usage WHERE session_id=?${clauses.length ? ` AND ${clauses.join(' AND ')}` : ''} ORDER BY seq ${query.order === 'desc' ? 'DESC' : 'ASC'}${limit}`, values).map(row => ({
+          id: String(row.id), seq: Number(row.seq), usage: parse<PiUsage>(row.usage_json), adjustment: Number(row.adjustment) === 1,
+          ...(row.entry_id === null ? {} : { entryId: String(row.entry_id) }), ...(row.details_json === null ? {} : { details: parse(row.details_json) })
+        }));
+      },
+      getStats: async (): Promise<PiSessionStats> => { assertOpen(); return stats(); },
+      close: async (): Promise<void> => { closed = true; }
+    };
   }
   public enqueueMemoryMigration(args: Record<string, unknown>, idempotencyKey: string): MigrationJob {
     if (!idempotencyKey || typeof args.sourceRoot !== 'string' || !args.sourceRoot) throw new Error('invalid_migration_request');
@@ -7699,6 +8480,8 @@ export class UnifiedDataStore {
     if (input.commitGuard && (input.commitGuard.type !== 'telegram-reply-generation'
       || !Number.isInteger(input.commitGuard.generation) || input.commitGuard.generation < 0)) throw new Error('Intelligence commit guard is invalid.');
     return this.recordMutation(input, input.idempotencyKey, 'append_messages', () => {
+      const cutover = this.rows('SELECT engine FROM pi_conversation_cutovers WHERE conversation_id=?', [value.id])[0];
+      if (cutover?.engine === 'pi-harness' && !String(input.idempotencyKey || '').startsWith('pi-settlement:')) throw new Error('intelligence_conversation_migrated');
       if (input.commitGuard?.type === 'telegram-reply-generation') {
         const generation = this.readHostSettings({ namespace: 'telegram', ownerScope: 'global' }).items
           .find(item => item.key === 'replyGeneration')?.value;

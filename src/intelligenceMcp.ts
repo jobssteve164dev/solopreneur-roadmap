@@ -112,6 +112,7 @@ export function createIntelligenceMcpServer(source: IntelligenceReadToolSource, 
 
 export async function createIntelligenceMcpSession(source: IntelligenceReadToolSource, dataSource?: UnifiedMcpSource, actions?: IntelligenceActionSource): Promise<{
   client: Client;
+  setPiToolFence(fence?: { operationId: string; invocationId: string; ownerId: string; ownerGeneration: number }): void;
   close(): Promise<void>;
 }> {
   const server = createIntelligenceMcpServer(source, dataSource, actions);
@@ -130,6 +131,7 @@ export async function createIntelligenceMcpSession(source: IntelligenceReadToolS
   }
   return {
     client,
+    setPiToolFence(fence) { dataSource?.setPiToolFence?.(fence); },
     async close(): Promise<void> {
       await client.close();
       await server.close();

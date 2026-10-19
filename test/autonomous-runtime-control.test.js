@@ -40,8 +40,8 @@ test('runtime control authenticates local health, pause and resume commands', as
       entryPath: '/opt/solomap/out/autonomousRuntimeProcess.js',
       buildId: 'build-a',
       releaseVersion: '0.0.513',
-      onCommand(command) {
-        calls.push(command);
+      onCommand(command, replacement) {
+        calls.push(replacement ? `${command}:${replacement.releaseVersion}:${replacement.buildId}` : command);
         return { status: command === 'pause' ? 'paused' : 'running' };
       }
     });
@@ -78,7 +78,7 @@ test('runtime control authenticates local health, pause and resume commands', as
     assert.equal(paused.status, 'paused');
     assert.equal(resumed.status, 'running');
     assert.equal(drained.status, 'running');
-    assert.deepEqual(calls, ['health', 'pause', 'resume', 'drain']);
+    assert.deepEqual(calls, ['health', 'pause', 'resume', 'drain:0.0.514:build-b']);
     const endpointPath = path.join(globalRoot, 'runtime', 'control.json');
     assert.equal(fs.statSync(endpointPath).mode & 0o777, 0o600);
   } finally {

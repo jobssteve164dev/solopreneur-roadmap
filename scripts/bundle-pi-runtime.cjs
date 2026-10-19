@@ -8,7 +8,7 @@ const projectRoot = path.resolve(__dirname, '..');
 esbuild.buildSync({
   stdin: {
     contents: [
-      "export { Agent } from '@earendil-works/pi-agent-core';",
+      "export { Agent, AgentHarness, StorageBackedSession } from '@earendil-works/pi-agent-core';",
       "export { convertToLlm, DEFAULT_COMPACTION_SETTINGS, estimateContextTokens, formatSize, prepareCompaction, shouldCompact, truncateHead } from '@earendil-works/pi-agent-core';",
       "export { compactWithRequest } from './node_modules/@earendil-works/pi-agent-core/dist/harness/compaction/compaction.js';",
       "export { buildSessionContext } from './node_modules/@earendil-works/pi-agent-core/dist/harness/session/context.js';",

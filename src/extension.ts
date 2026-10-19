@@ -1100,7 +1100,7 @@ export async function activate(context: vscode.ExtensionContext) {
         } finally {
           await observeLocalDiagnosticStage('mcp.close', () => mcp.close());
         }
-      });
+      }, sendRuntimeDataRequest, true);
       intelligenceConversationStores.set(globalDataPath, store);
     }
     return store;

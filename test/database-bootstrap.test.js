@@ -218,6 +218,80 @@ test('Runtime closes its control endpoint when startup migration recovery fails'
   }
 });
 
+test('Runtime safely closes database-owned work when control server startup fails', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-bootstrap-control-failure-'));
+  const root = path.join(fixture, '.solomap-global');
+  const preload = path.join(fixture, 'fail-control.cjs');
+  fs.writeFileSync(preload, `
+    const Module = require('node:module');
+    const originalLoad = Module._load;
+    Module._load = function(request, parent, isMain) {
+      if (request === './autonomousRuntimeControl') {
+        const actual = originalLoad.call(this, request, parent, isMain);
+        return { ...actual, async startRuntimeControlServer() { throw new Error('control startup failed'); } };
+      }
+      return originalLoad.call(this, request, parent, isMain);
+    };
+  `);
+  const child = spawn(process.execPath, ['--require', preload, path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root], { stdio: 'pipe' });
+  let stderr = '';
+  child.stderr.on('data', bytes => { stderr += bytes; });
+  child.stdout.resume();
+  try {
+    const outcome = await Promise.race([
+      once(child, 'exit').then(([code]) => ({ code })),
+      new Promise(resolve => setTimeout(() => resolve({ code: 'timeout' }), 10000))
+    ]);
+    assert.equal(outcome.code, 1, stderr || 'control startup failure must terminate the Runtime');
+    assert.match(stderr, /control startup failed/);
+    const { DatabaseSync } = require('node:sqlite');
+    const database = new DatabaseSync(path.join(root, 'solomap.db'), { readOnly: true });
+    try {
+      assert.equal(database.prepare('SELECT status FROM runtime_instances LIMIT 1').get().status, 'stopped');
+      assert.equal(database.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+    } finally { database.close(); }
+  } finally {
+    if (child.exitCode === null) {
+      child.kill('SIGKILL');
+      await once(child, 'exit');
+    }
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('Runtime records stopped when Pi compatibility registration fails after runtime admission', async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-bootstrap-pi-registration-failure-'));
+  const root = path.join(fixture, '.solomap-global');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const seeded = new UnifiedDataStore(root);
+  seeded.registerPiCompatibilityRelease('0.0.604', 'conflicting-build', 'seed-runtime');
+  seeded.close();
+  const child = spawn(process.execPath, [path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root, '--runtime-version', '0.0.604'], { stdio: 'pipe' });
+  let stderr = '';
+  child.stderr.on('data', bytes => { stderr += bytes; });
+  child.stdout.resume();
+  try {
+    const outcome = await Promise.race([
+      once(child, 'exit').then(([code]) => ({ code })),
+      new Promise(resolve => setTimeout(() => resolve({ code: 'timeout' }), 10000))
+    ]);
+    assert.equal(outcome.code, 1, stderr || 'Pi compatibility conflict must terminate the Runtime');
+    assert.match(stderr, /pi_release_build_conflict/);
+    const { DatabaseSync } = require('node:sqlite');
+    const database = new DatabaseSync(path.join(root, 'solomap.db'), { readOnly: true });
+    try {
+      assert.equal(database.prepare('SELECT status FROM runtime_instances LIMIT 1').get().status, 'stopped');
+      assert.equal(database.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+    } finally { database.close(); }
+  } finally {
+    if (child.exitCode === null) {
+      child.kill('SIGKILL');
+      await once(child, 'exit');
+    }
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test('Runtime exits unsuccessfully when an asynchronous startup migration fails', async () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-bootstrap-async-migration-failure-'));
   const root = path.join(fixture, '.solomap-global');
