@@ -327,6 +327,50 @@ const fs=require('fs'),counter=${JSON.stringify(fixture.modelInput)};let input='
   } finally { verified.close(); }
 });
 
+test('Telegram natural language launches a Solo task through the native kernel and existing editor bridge', async t => {
+  const fixture = await backgroundFixture(t, {}, 5000, '0.0.606');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { runtimeBuildId } = require('../out/runtimeBuildIdentity.js');
+  const seeded = new UnifiedDataStore(fixture.globalRoot);
+  await seeded.initializeProjectRegistry({ legacyProjects: [{ name: 'Alpha', path: fixture.projectRoot }], legacySelectedProjectPath: fixture.projectRoot });
+  seeded.registerPiCompatibilityRelease('0.0.605', 'compatibility-release-605', 'runtime-605');
+  seeded.recordPiCompatibilityDrain({ runtimeId: 'runtime-605', releaseVersion: '0.0.605', buildId: 'compatibility-release-605',
+    replacementVersion: '0.0.606', replacementBuildId: runtimeBuildId(path.resolve(__dirname, '..')) });
+  seeded.close();
+  fs.writeFileSync(fixture.cli, `#!/usr/bin/env node
+let input='';process.stdin.on('data',bytes=>input+=bytes);process.stdin.on('end',()=>{
+  if(!input.includes('你是 SoloMap 的智能内核')){console.log('background cycle');return;}
+  console.log(input.includes('TOOLRESULT:')?(input.includes('"isError":true')?'任务未启动。':'已开始检查 Alpha 的发布流程。'):JSON.stringify({toolCall:{name:'solomap_start_conversation',arguments:{project:'Alpha',mode:'solo',message:'检查发布流程',idempotencyKey:'telegram-solo-launch'}}}));
+});
+`, { mode: 0o700 });
+  await fixture.start();
+  const launches = [];
+  const bridge = await require('../out/telegramExtensionBridge.js').startTelegramExtensionBridge(fixture.globalRoot, async (command, args) => {
+    const payload = JSON.parse(args[0]);
+    launches.push({ command, ...payload });
+    return { status: 'started', projectPath: payload.projectPath, mode: payload.mode };
+  });
+  try {
+    fixture.updates.push(fixture.update(106, '帮我检查 Alpha 的发布流程'));
+    await waitFor(() => fixture.sent.some(message => message.text === '已开始检查 Alpha 的发布流程。'), 'Telegram must receive the launch result', 12_000);
+    assert.equal(launches.length, 1);
+    assert.deepEqual({ ...launches[0], launchIntentId: '<stable>' }, { command: 'solopreneur.internalStartConversation',
+      projectPath: fixture.projectRoot, mode: 'solo', message: '检查发布流程', launchIntentId: '<stable>' });
+  } catch (error) {
+    await fixture.stop();
+    const failed = UnifiedDataStore.open(fixture.globalRoot);
+    try {
+      error.message += `; sent=${JSON.stringify(fixture.sent)}; launches=${JSON.stringify(launches)}; stderr=${fixture.childStderr()}; piResults=${JSON.stringify(failed.rows("SELECT value_json FROM pi_values WHERE namespace='pi.result'"))}; selected=${JSON.stringify(failed.readProjectRegistry()?.registry?.selectedProjectPath)}; diagnostics=${JSON.stringify(failed.rows('SELECT kind,scope,payload_json FROM diagnostic_events ORDER BY sequence DESC LIMIT 10'))}`;
+    } finally { failed.close(); }
+    throw error;
+  } finally { bridge.dispose(); await fixture.stop(); }
+  const verified = UnifiedDataStore.open(fixture.globalRoot);
+  try {
+    assert.equal(verified.rows("SELECT COUNT(*) AS count FROM pi_conversation_operations WHERE status='settled'")[0].count, 1);
+    assert.equal(verified.rows("SELECT COUNT(*) AS count FROM pi_tool_invocations WHERE tool_name='solomap_start_conversation' AND replay='never' AND status='completed'")[0].count, 1);
+  } finally { verified.close(); }
+});
+
 test('a new data root takes over a live Telegram daemon when the old root has no editor host', async t => {
   const oldRoot = await backgroundFixture(t, {}, 1000);
   const newRoot = await backgroundFixture(t, {}, 1000);

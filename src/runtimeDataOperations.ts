@@ -1014,40 +1014,61 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       return dispatch(request);
     }
     if (request.operation === 'start_conversation') {
-      store.authorizeMcpAction(session.actorId, session.scope, request.operation);
-      const selector = String(input.project || '').trim();
-      const mode = String(input.mode || '');
-      const message = String(input.message || '').trim();
-      const stepId = String(input.stepId || '').trim();
-      const idempotencyKey = String(input.idempotencyKey || '').trim();
-      if (!selector || selector.length > 4096 || !['step', 'solo', 'flow'].includes(mode) || !message || message.length > 32768
-        || stepId.length > 1024 || String(input.agentCli || '').length > 4096 || String(input.model || '').length > 1024
-        || !idempotencyKey || idempotencyKey.length > 256) throw new Error('invalid_conversation_request');
-      if (mode === 'step' && !stepId) throw new Error('step_id_required');
-      if (mode !== 'step' && stepId) throw new Error('step_id_not_allowed');
-      const registry = store.readProjectRegistry() as { registry?: { projects?: Array<{ name?: string; path?: string }>; hiddenProjects?: string[] } } | null;
-      const hidden = new Set((registry?.registry?.hiddenProjects || []).map(value => path.resolve(String(value))));
-      const registered = store.existingRegisteredProjectScopes().filter(candidate => !hidden.has(path.resolve(candidate.root)));
-      const metadataByRoot = new Map((registry?.registry?.projects || []).map(project => [path.resolve(String(project.path || '')), project]));
-      const matches = registered.filter(candidate => {
-        const root = path.resolve(candidate.root);
-        const metadata = metadataByRoot.get(root);
-        return selector === candidate.projectId || selector === candidate.root || selector === root || selector === String(metadata?.name || '');
+      const authorizeLaunch = () => {
+        store.authorizeMcpAction(session.actorId, session.scope, request.operation);
+        if (request.piToolFence) store.assertPiToolInvocationActive(request.piToolFence.operationId, request.piToolFence.invocationId, {
+          ownerId: request.piToolFence.ownerId, generation: request.piToolFence.ownerGeneration
+        });
+      };
+      const reserveLaunch = () => {
+        authorizeLaunch();
+        const selector = String(input.project || '').trim();
+        const mode = String(input.mode || '');
+        const message = String(input.message || '').trim();
+        const stepId = String(input.stepId || '').trim();
+        const idempotencyKey = String(input.idempotencyKey || '').trim();
+        if (!selector || selector.length > 4096 || !['step', 'solo', 'flow'].includes(mode) || !message || message.length > 32768
+          || stepId.length > 1024 || String(input.agentCli || '').length > 4096 || String(input.model || '').length > 1024
+          || !idempotencyKey || idempotencyKey.length > 256) throw new Error('invalid_conversation_request');
+        if (mode === 'step' && !stepId) throw new Error('step_id_required');
+        if (mode !== 'step' && stepId) throw new Error('step_id_not_allowed');
+        const registry = store.readProjectRegistry() as { registry?: { projects?: Array<{ name?: string; path?: string }>; hiddenProjects?: string[] } } | null;
+        const hidden = new Set((registry?.registry?.hiddenProjects || []).map(value => path.resolve(String(value))));
+        const registered = store.existingRegisteredProjectScopes().filter(candidate => !hidden.has(path.resolve(candidate.root)));
+        const metadataByRoot = new Map((registry?.registry?.projects || []).map(project => [path.resolve(String(project.path || '')), project]));
+        const matches = registered.filter(candidate => {
+          const root = path.resolve(candidate.root);
+          const metadata = metadataByRoot.get(root);
+          return selector === candidate.projectId || selector === candidate.root || selector === root || selector === String(metadata?.name || '');
+        });
+        if (matches.length !== 1) throw new Error(matches.length ? 'project_selector_ambiguous' : 'project_scope_denied');
+        const projectPath = path.resolve(matches[0].root);
+        const agentCli = String(input.agentCli || '').trim();
+        const model = String(input.model || '').trim();
+        store.reserveMcpConversationLaunch(session.actorId, idempotencyKey, {
+          projectId: matches[0].projectId, mode, message, stepId, agentCli, model
+        });
+        const launchIntentId = `mcp:${session.actorId}:${crypto.createHash('sha256').update(idempotencyKey).digest('hex')}`;
+        return [JSON.stringify({
+          projectPath, mode, message, ...(stepId ? { stepId } : {}),
+          ...(agentCli ? { agentCli } : {}),
+          ...(model ? { model } : {}),
+          launchIntentId
+        })];
+      };
+      // Commit the launch reservation before the editor makes its own Runtime writes.
+      const args = request.piToolFence
+        ? store.withPiToolInvocationFenceSync(request.piToolFence.operationId, request.piToolFence.invocationId, {
+          ownerId: request.piToolFence.ownerId, generation: request.piToolFence.ownerGeneration
+        }, reserveLaunch)
+        : reserveLaunch();
+      return executeTelegramExtensionCommand(store.root, 'solopreneur.internalStartConversation', args, write => {
+        const send = () => store.withMcpActionAuthorizationSync(session.actorId, session.scope, request.operation, write);
+        if (request.piToolFence) store.withPiToolInvocationFenceSync(request.piToolFence.operationId, request.piToolFence.invocationId, {
+          ownerId: request.piToolFence.ownerId, generation: request.piToolFence.ownerGeneration
+        }, send);
+        else send();
       });
-      if (matches.length !== 1) throw new Error(matches.length ? 'project_selector_ambiguous' : 'project_scope_denied');
-      const projectPath = path.resolve(matches[0].root);
-      const agentCli = String(input.agentCli || '').trim();
-      const model = String(input.model || '').trim();
-      store.reserveMcpConversationLaunch(session.actorId, idempotencyKey, {
-        projectId: matches[0].projectId, mode, message, stepId, agentCli, model
-      });
-      const launchIntentId = `mcp:${session.actorId}:${crypto.createHash('sha256').update(idempotencyKey).digest('hex')}`;
-      return executeTelegramExtensionCommand(store.root, 'solopreneur.internalStartConversation', [JSON.stringify({
-        projectPath, mode, message, ...(stepId ? { stepId } : {}),
-        ...(agentCli ? { agentCli } : {}),
-        ...(model ? { model } : {}),
-        launchIntentId
-      })]);
     }
     if (!['write', 'read', 'search', 'link', 'context', 'export'].includes(request.operation)) throw new Error('action_denied');
     store.authorizeMcpAction(session.actorId, session.scope, request.operation);
@@ -1111,7 +1132,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         ownerId: request.piToolFence.ownerId, generation: request.piToolFence.ownerGeneration
       }, () => setIntelligenceTimeSchedule(request.input));
     }
-    return request.piToolFence
+    return request.piToolFence && request.operation !== 'start_conversation'
       ? store.withPiToolInvocationFence(request.piToolFence.operationId, request.piToolFence.invocationId, {
         ownerId: request.piToolFence.ownerId, generation: request.piToolFence.ownerGeneration
       }, () => executeOperation(request))

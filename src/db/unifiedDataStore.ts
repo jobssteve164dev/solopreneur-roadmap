@@ -1657,6 +1657,9 @@ export class UnifiedDataStore {
       return value.schemaVersion === 1 && Array.isArray(value.actions) && value.actions.includes(action);
     })) throw new Error('action_denied');
   }
+  public withMcpActionAuthorizationSync(actorId: string, projectId: string, action: string, dispatch: () => void): void {
+    this.transaction(() => { this.authorizeMcpAction(actorId, projectId, action); dispatch(); });
+  }
   public reserveMcpConversationLaunch(actorId: string, idempotencyKey: string, intent: Record<string, unknown>): { replayed: boolean } {
     const requestKey = `mcp-conversation-launch:${idempotencyKey}`;
     const inputHash = digest(canonical(intent));

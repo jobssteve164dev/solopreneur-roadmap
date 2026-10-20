@@ -8,7 +8,7 @@
 - `solomap.db` 内新增独立的 Pi session、entry、usage、value、list、operation、tool invocation、owner fencing、兼容发布和 conversation cutover 表；用户可见历史仍只由既有 conversation/message 合同管理。
 - 受理时冻结 prompt、项目快照、模型、工具 schema、来源、revision 和 Telegram generation。恢复继续同一 operation，不重建动态上下文。
 - conversation binding、完整旧历史 seed、branch tip 与首个 operation 受理在同一数据库事务完成，不存在“已绑定但只写入部分历史”的恢复状态。
-- storage commit、operation mutation和工具受理都校验 Runtime fencing token；MCP fence 校验、实际业务 dispatch 与提交处于同一个 `BEGIN IMMEDIATE` 写事务，并在提交前再次校验。新 owner 只能在旧事务结束后接管，旧事务若在同连接内失去 owner 则整体回滚。
+- storage commit、operation mutation和工具受理都校验 Runtime fencing token；数据库内 MCP 业务的 fence 校验、dispatch 与提交处于同一个 `BEGIN IMMEDIATE` 写事务，并在提交前再次校验。新 owner 只能在旧事务结束后接管，旧事务若在同连接内失去 owner 则整体回滚。跨编辑器的对话发起边界见下方工具恢复合同。
 - 只有数据库中可核验的 `kind=run && status=completed` 结果、从 `fromTipId` 可达的当前 lane tip、settled assistant entry 与非空 final assistant 完全一致，才在一个事务中写入可见 user/assistant 消息对；其他终态不写可见消息。
 - Pi 原生 retry、abort、tool replay policy、compaction 和 terminal result 是执行状态机；Agent CLI 只保留为模型传输适配器。
 - 同一 conversation 的后续动作先进入数据库持久队列；前一 operation 收口后按顺序晋升，并在任何模型/工具副作用前以当时真实 revision 生成不可变 acceptance。原始排队请求 hash 独立保留，因此晋升前后的网络重试仍返回同一 operation。取消请求先持久化，再传到当前 Harness operation。
@@ -33,12 +33,17 @@
 | `list_projects`、`get_current_project`、`get_plugin_settings`、`get_today_review` | 只读 | 允许 | MCP annotation 为 read-only，不产生业务写入 |
 | `solomap_search`、`solomap_read`、`solomap_context`、`solomap_memory`、`solomap_experience` | 只读 | 允许 | MCP annotation 为 read-only，读取固定数据库合同 |
 | `set_time_schedule` | 写入 | 禁止 Harness 自动重放 | 业务层使用确定性 task ID 和数据库幂等写入；未知结果仍按不可重放收口 |
+| `solomap_start_conversation` | 写入 | 禁止 Harness 自动重放 | TG 与侧边栏智能内核共用现有 Step、Solo、Flow 发起入口，保留项目授权、稳定 launch intent 和编辑器启动去重；返回 started 只表示任务已启动 |
 | `solomap_write`、`solomap_link`、`solomap_export` | 写入 | 禁止 Harness 自动重放 | 调用参数含业务幂等键，键由稳定 invocation ID 派生；重复送达读取同一回执 |
 | `solomap_conversation_status` | 写入 | 禁止 Harness 自动重放 | 由正式会话生命周期合同自行绑定身份；Harness 不猜测未知写入结果 |
 
 工具 transport 错误统一作为 `isError` tool result 返回给模型继续判断；错误文本不会被当作成功结果。不可证明安全的写工具不会由 Harness 自动重复执行。
 
-每次工具调用由 Pi invocation ID 绑定数据库 admission。实际 MCP 请求携带 operation、invocation 与 owner generation；Runtime 从最终 fence 校验到业务 dispatch 和数据库提交持续持有 SQLite writer lock，并在 commit 前复验，关闭 check-then-dispatch 接管窗口。
+工具目录新增能力时，已受理 operation 仍只使用受理时冻结的工具集合；新增工具不会使旧 operation 失效，也不会扩大其权限。冻结工具缺失或合同改变时仍拒绝恢复。
+
+每次工具调用由 Pi invocation ID 绑定数据库 admission。实际 MCP 请求携带 operation、invocation 与 owner generation；数据库内工具从最终 fence 校验到业务 dispatch 和数据库提交持续持有 SQLite writer lock，并在 commit 前复验。
+
+`solomap_start_conversation` 在短事务内校验权限与 fence 并预留稳定启动身份，最终权限/fence 校验与同步 `socket.write` 共用另一个短写事务；等待编辑器启动时不持有 writer transaction。新任务沿既有入口拥有独立生命周期，来源聊天失败或取消不得回滚编辑器已确认的任务记录和其他并发写入。
 
 ## 容量预算 v1
 

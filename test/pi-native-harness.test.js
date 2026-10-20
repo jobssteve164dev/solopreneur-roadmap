@@ -6,6 +6,44 @@ const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
 
+test('new MCP capabilities do not invalidate an accepted native operation or expand its frozen tools', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-pi-native-snapshot-'));
+  t.after(() => cleanupExact(root));
+  const { prepareNativeIntelligenceExecution } = require('../out/piAgentEngine.js');
+  const tools = [{ name: 'list_projects', description: 'projects', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true } }];
+  const mcp = { listTools: async () => ({ tools }), callTool: async () => { throw new Error('no tools requested'); } };
+  const projectContext = { selectedProject: '', projects: [] };
+  const accepted = await prepareNativeIntelligenceExecution(projectContext, mcp);
+  tools.push({ name: 'get_today_review', description: 'new-tool-after-acceptance', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true } });
+  const database = new UnifiedDataStore(root);
+  try {
+    const owner = database.claimPiExecutionOwner('snapshot-owner');
+    const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async invocation => {
+      assert.doesNotMatch(invocation.stdin, /new-tool-after-acceptance/);
+      return 'Accepted task resumed';
+    } });
+    const result = await engine.chatNative({ sessionId: 'snapshot-session', lane: 'main', operationId: 'snapshot-operation',
+      messages: [{ role: 'user', content: 'Continue the accepted task' }], projectContext,
+      systemPrompt: accepted.systemPrompt, toolSnapshot: accepted.toolSnapshot
+    }, database.createPiSessionStorage('snapshot-session', owner), mcp);
+    assert.equal(result.finalAssistant, 'Accepted task resumed');
+    const expanded = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async () => JSON.stringify({
+      toolCall: { name: 'get_today_review', arguments: {} }
+    }) });
+    const denied = await expanded.chatNative({ sessionId: 'snapshot-denied', lane: 'main', operationId: 'snapshot-denied',
+      messages: [{ role: 'user', content: 'Try the newly added tool' }], projectContext,
+      systemPrompt: accepted.systemPrompt, toolSnapshot: accepted.toolSnapshot
+    }, database.createPiSessionStorage('snapshot-denied', owner), mcp);
+    assert.equal(denied.status, 'failed');
+    for (const catalog of [[], [{ ...tools[0], inputSchema: { type: 'object', properties: { changed: { type: 'string' } } } }]]) {
+      await assert.rejects(engine.chatNative({ sessionId: 'snapshot-changed', lane: 'main', operationId: 'snapshot-changed',
+        messages: [{ role: 'user', content: 'Continue' }], projectContext,
+        systemPrompt: accepted.systemPrompt, toolSnapshot: accepted.toolSnapshot
+      }, database.createPiSessionStorage('snapshot-changed', owner), { ...mcp, listTools: async () => ({ tools: catalog }) }), /pi_execution_profile_unsupported/);
+    }
+  } finally { database.close(); }
+});
+
 function cleanupExact(root) {
   if (!fs.existsSync(root)) return;
   const directories = [root], files = [];

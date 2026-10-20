@@ -106,7 +106,7 @@ export function createIntelligenceMcpServer(source: IntelligenceReadToolSource, 
       }
     });
   }
-  if (dataSource) registerUnifiedMcpTools(server, dataSource);
+  if (dataSource) registerUnifiedMcpTools(server, dataSource, { conversationLaunch: true });
   return server;
 }
 

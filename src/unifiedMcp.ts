@@ -11,7 +11,7 @@ export interface UnifiedMcpSource {
   setPiToolFence?(fence?: { operationId: string; invocationId: string; ownerId: string; ownerGeneration: number }): void;
   call(operation: string, input: Record<string, unknown>): Promise<unknown>;
 }
-export const unifiedToolNames = ['solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_export', 'solomap_conversation_status'];
+export const unifiedToolNames = ['solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_export', 'solomap_conversation_status', 'solomap_start_conversation'];
 export const migrationToolNames = ['solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply'];
 
 function registerMigrationTools(server: McpServer, source: UnifiedMcpSource, includeRecyclingApply: boolean): void {

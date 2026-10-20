@@ -85,7 +85,7 @@ export async function startTelegramExtensionBridge(globalDataPath: string,
   } };
 }
 
-export async function executeTelegramExtensionCommand(globalDataPath: string, command: string, args: string[]): Promise<unknown> {
+export async function executeTelegramExtensionCommand(globalDataPath: string, command: string, args: string[], send?: (write: () => void) => void): Promise<unknown> {
   if (!commands.has(command)) throw new Error('Unknown Telegram editor command.');
   const root = normalizeGlobalDataPathForExtension(globalDataPath);
   const endpoint = runtimeEditorEndpoints.get(root);
@@ -94,7 +94,13 @@ export async function executeTelegramExtensionCommand(globalDataPath: string, co
     const socket = net.createConnection({ host: '127.0.0.1', port: endpoint.port });
     let response = '';
     socket.setEncoding('utf8');
-    socket.once('connect', () => socket.write(JSON.stringify({ token: endpoint.token, command, args }) + '\n'));
+    socket.once('connect', () => {
+      try {
+        const write = () => { socket.write(JSON.stringify({ token: endpoint.token, command, args }) + '\n'); };
+        if (send) send(write);
+        else write();
+      } catch (error) { socket.destroy(); reject(error); }
+    });
     socket.on('data', chunk => { response += chunk; });
     socket.once('error', () => reject(new Error(unavailable)));
     socket.once('end', () => {
