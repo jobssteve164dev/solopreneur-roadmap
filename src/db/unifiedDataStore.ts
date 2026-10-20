@@ -1,4 +1,5 @@
 import * as crypto from 'crypto';
+import { ConversationTracking } from '../conversationTracking';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -545,13 +546,15 @@ export class UnifiedDataStore {
 
   public admitLegacyIntelligenceOperation(input: {
     operationId: string; conversationId: string; requestKey: string; prompt: string; baselineRevision: number; source: string;
-    ownerPid: number; ownerBirth: string;
+    ownerPid: number; ownerBirth: string; sourceGeneration?: number;
   }): LegacyIntelligenceOperation {
     if (!input.operationId || !input.requestKey || !input.prompt.trim() || !/^[a-f0-9-]{36}$/i.test(input.conversationId)
       || !Number.isInteger(input.baselineRevision) || input.baselineRevision < 0 || !Number.isInteger(input.ownerPid) || input.ownerPid < 1
       || !input.ownerBirth) throw new Error('invalid_legacy_intelligence_operation');
     return this.transaction(() => {
       const promptHash = digest(input.prompt), now = Date.now();
+      const currentGeneration = Number(this.readHostSettings({ namespace: 'telegram', ownerScope: 'global' }).items.find(item => item.key === 'replyGeneration')?.value || 0);
+      if (input.source === 'telegram' && input.sourceGeneration !== undefined && input.sourceGeneration !== currentGeneration) throw new Error('intelligence_reply_revoked');
       const replay = this.rows('SELECT * FROM pi_legacy_conversation_operations WHERE request_key=?', [input.requestKey])[0];
       if (replay) {
         if (replay.operation_id !== input.operationId || replay.conversation_id !== input.conversationId
@@ -568,8 +571,9 @@ export class UnifiedDataStore {
       if (cutover.engine !== 'legacy-agent') throw new Error('intelligence_conversation_migrated');
       const active = this.rows("SELECT 1 FROM pi_legacy_conversation_operations WHERE conversation_id=? AND status IN ('running','unknown')", [input.conversationId])[0];
       if (active) throw new Error('intelligence_conversation_busy');
-      this.db.run(`INSERT INTO pi_legacy_conversation_operations(operation_id,conversation_id,request_key,prompt_hash,baseline_revision,cutover_generation,source,owner_pid,owner_birth,status,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,'running',?,?)`, [input.operationId, input.conversationId, input.requestKey, promptHash, input.baselineRevision, Number(cutover.generation), input.source, input.ownerPid, input.ownerBirth, now, now]);
+      const sourceGeneration = input.source === 'telegram' ? input.sourceGeneration ?? currentGeneration : 0;
+      this.db.run(`INSERT INTO pi_legacy_conversation_operations(operation_id,conversation_id,request_key,prompt_hash,baseline_revision,cutover_generation,source,owner_pid,owner_birth,status,created_at,updated_at,source_generation)
+        VALUES(?,?,?,?,?,?,?,?,?,'running',?,?,?)`, [input.operationId, input.conversationId, input.requestKey, promptHash, input.baselineRevision, Number(cutover.generation), input.source, input.ownerPid, input.ownerBirth, now, now, sourceGeneration]);
       return { ...this.readLegacyIntelligenceOperation(input.operationId)!, replay: false };
     });
   }
@@ -1659,6 +1663,13 @@ export class UnifiedDataStore {
   }
   public withMcpActionAuthorizationSync(actorId: string, projectId: string, action: string, dispatch: () => void): void {
     this.transaction(() => { this.authorizeMcpAction(actorId, projectId, action); dispatch(); });
+  }
+  public conversationTracking(): ConversationTracking {
+    return new ConversationTracking(this, {
+      rows: (sql, values) => this.rows(sql, values),
+      run: (sql, values) => { this.db.run(sql, values); },
+      transaction: action => this.transaction(action)
+    });
   }
   public reserveMcpConversationLaunch(actorId: string, idempotencyKey: string, intent: Record<string, unknown>): { replayed: boolean } {
     const requestKey = `mcp-conversation-launch:${idempotencyKey}`;
@@ -5049,6 +5060,7 @@ export class UnifiedDataStore {
       const { executionLogId } = this.appendProjectJournal(projectId, key, { nodeId: input.nodeId, timestamp: new Date().toISOString(), agentCli: String(input.metadata?.agentCli || ''), command: input.command, output: String(input.metadata?.launchSummary || input.userMessage), status: input.status || 'Preparing' });
       const state = this.prepareRun(projectId, locationId, { ...input, executionLogId, ...(input.launchRequest ? { launchRequest: { ...input.launchRequest, executionLogId } } : {}), idempotencyKey: key });
       this.db.run('INSERT INTO run_launch_intents VALUES(?,?,?)', [projectId, input.launchIntentId, state.runId]);
+      this.db.run('UPDATE mcp_conversation_launches SET run_id=? WHERE project_id=? AND launch_intent_id=? AND run_id IS NULL', [state.runId, projectId, input.launchIntentId]);
       return state;
     });
   }
@@ -5729,9 +5741,11 @@ export class UnifiedDataStore {
       }
       this.db.run('INSERT INTO run_settlements VALUES(?,?,?,?,?,?,?,?,?,?,?)', [row.run_id, input.expectedTurnId, source.checkpoint_sequence, projectId, journal.executionLogId, input.expectedRevision, payloadId, digestId, handoffId, learningEventId, now]);
       const effectKinds = new Set<string>();
+      const tracked = this.rows("SELECT 1 FROM mcp_conversation_launches l JOIN run_launch_intents i ON i.project_id=l.project_id AND i.launch_intent_id=l.launch_intent_id WHERE i.run_id=? AND l.source='telegram'", [row.run_id]).length > 0;
       for (const effect of input.effects || []) {
         if (!effect || !['roadmap', 'review', 'revision', 'refresh', 'telegram', 'automation', 'flow'].includes(effect.kind) || !effect.payload || typeof effect.payload !== 'object' || Array.isArray(effect.payload) || effectKinds.has(effect.kind)) throw new Error('invalid_run_effect');
         effectKinds.add(effect.kind);
+        if (tracked && effect.kind === 'telegram') continue;
         if (previousTurn && effect.kind !== 'refresh') continue;
         this.db.run("INSERT INTO run_effects(id,project_id,run_id,turn_id,checkpoint_sequence,execution_log_id,source_revision,kind,payload_content_id,state) VALUES(?,?,?,?,?,?,?,?,?,'queued')", [crypto.randomUUID(), projectId, row.run_id, input.expectedTurnId, source.checkpoint_sequence, journal.executionLogId, input.expectedRevision, effect.kind, this.putContent(canonical(effect.payload), 'application/json')]);
       }
@@ -5747,9 +5761,14 @@ export class UnifiedDataStore {
       this.db.run("UPDATE run_consumer_leases SET state='committed' WHERE run_id=? AND token=?", [row.run_id, input.token]);
       this.db.run('UPDATE objects SET revision=revision+1,updated_at=? WHERE id=?', [now, row.run_id]);
       this.saveRunControlRevision(String(row.run_id));
+      this.conversationTracking().notifyRun(projectId, String(row.run_id), input.expectedTurnId, input.expectedRevision);
       return this.current(String(row.run_id), false);
     }, undefined, false);
     return { ...this.readRunState(projectId, input.executionLogId, receipt.revision), receipt };
+  }
+  public readLatestRunSettlement(projectId: string, runId: string, turnId: string, sourceRevision = Number.MAX_SAFE_INTEGER): Record<string, any> | null {
+    const row = this.rows('SELECT * FROM run_settlements WHERE project_id=? AND run_id=? AND turn_id=? AND source_revision<=? ORDER BY checkpoint_sequence DESC LIMIT 1', [projectId, runId, turnId, sourceRevision])[0];
+    return row ? { ...JSON.parse(this.content(String(row.payload_content_id)).toString('utf8')), sourceRevision: Number(row.source_revision), checkpointSequence: Number(row.checkpoint_sequence) } : null;
   }
   public readRunSettlements(projectId: string, input: { executionLogId?: number; turnId?: string; cursor?: number; limit?: number }): { items: Array<Record<string, unknown>>; nextCursor: number | null } {
     const limit = input.limit ?? 100;
@@ -5984,6 +6003,7 @@ export class UnifiedDataStore {
         const conversation = this.write({ kind: 'conversation', action: 'create', scope: projectId, data: { mode: 'flow', status: flow.status, title: flow.goal }, idempotencyKey: `${input.idempotencyKey}:conversation` });
         const task = this.write({ kind: 'task', action: 'create', scope: projectId, data: { conversation_id: conversation.objectId, original_request_content: flow.source.userInput || flow.goal, status: flow.status }, idempotencyKey: `${input.idempotencyKey}:task` });
         this.db.run('INSERT INTO flow_control VALUES(?,?,?,?)', [projectId, flow.flowId, task.objectId, headerReceipt.objectId]);
+        this.db.run('UPDATE mcp_conversation_launches SET flow_object_id=? WHERE project_id=? AND flow_id=? AND flow_object_id IS NULL', [headerReceipt.objectId, projectId, flow.flowId]);
         this.db.run('INSERT INTO relations VALUES(?,?,?)', [task.objectId, 'source', headerReceipt.objectId]);
         row = { project_id: projectId, flow_id: flow.flowId, task_id: task.objectId, object_id: headerReceipt.objectId };
       } else {
@@ -6021,6 +6041,7 @@ export class UnifiedDataStore {
         versions.push({ objectId: evidenceReceipt.objectId, revision: evidenceReceipt.revision });
       }
       this.db.run('INSERT INTO flow_revisions VALUES(?,?,?)', [headerReceipt.objectId, headerReceipt.revision, this.putContent(canonical(versions), 'application/json')]);
+      this.conversationTracking().notifyFlow(projectId, flow.flowId, headerReceipt.revision);
       return this.current(headerReceipt.objectId);
     });
     return this.readFlowTrace(projectId, flow.flowId, receipt.revision)!;
@@ -9092,6 +9113,7 @@ export class UnifiedDataStore {
     contents: { records: number; logicalBytes: number; storedBytes: number };
     runArtifacts: { records: number; storedBytes: number; pendingByproductRecords: number; pendingByproductStoredBytes: number; byKind: Record<string, { records: number; storedBytes: number }> };
     migrationSources: { records: number; storedBytes: number; pendingByproductRecords: number; pendingByproductStoredBytes: number; byKind: Record<string, { records: number; storedBytes: number }> };
+    conversationLaunches: { records: number; taskBacked: number; failedAttempts: number; activeDispatches: number };
     lastMaintenance: { startedAt: number; finishedAt: number | null; status: string; error: string; deletedArtifacts: number; deletedSources: number; deletedContents: number; reclaimedStoredBytes: number; compacted: boolean; beforeBytes: number; afterBytes: number; integrity: string } | null;
   } {
     const { dataBytes, walBytes } = this.databaseStorageFileSizes();
@@ -9116,6 +9138,8 @@ export class UnifiedDataStore {
       contents: { records: Number(content.records), logicalBytes: Number(content.logical_bytes), storedBytes: Number(content.stored_bytes) },
       runArtifacts: { records, storedBytes, pendingByproductRecords, pendingByproductStoredBytes, byKind },
       migrationSources: { records: sourceRecords, storedBytes: sourceStoredBytes, pendingByproductRecords: pendingSourceRecords, pendingByproductStoredBytes: pendingSourceStoredBytes, byKind: sourceByKind },
+      conversationLaunches: (() => { const row = this.rows("SELECT COUNT(*) AS records,COALESCE(SUM(run_id IS NOT NULL OR flow_object_id IS NOT NULL),0) AS task_backed,COALESCE(SUM(acknowledged=0 AND error<>'' AND run_id IS NULL AND flow_object_id IS NULL),0) AS failed_attempts FROM mcp_conversation_launches")[0];
+        return { records: Number(row.records), taskBacked: Number(row.task_backed), failedAttempts: Number(row.failed_attempts), activeDispatches: Number(this.rows('SELECT COUNT(*) AS n FROM mcp_conversation_dispatches')[0].n) }; })(),
       lastMaintenance: maintenance ? { startedAt: Number(maintenance.started_at), finishedAt: maintenance.finished_at === null ? null : Number(maintenance.finished_at), status: String(maintenance.status), error: String(maintenance.error), deletedArtifacts: Number(maintenance.deleted_artifacts), deletedSources: Number(maintenance.deleted_sources), deletedContents: Number(maintenance.deleted_contents), reclaimedStoredBytes: Number(maintenance.reclaimed_stored_bytes), compacted: Boolean(maintenance.compacted), beforeBytes: Number(maintenance.before_bytes), afterBytes: Number(maintenance.after_bytes), integrity: String(maintenance.integrity) } : null };
   }
   public readDatabaseOverview(): {
@@ -9354,7 +9378,7 @@ export class UnifiedDataStore {
     }
     const tableRows = new Map<string, Map<string, Record<string, SqlValue>>>();
     const tables = this.rows("SELECT name FROM sqlite_master WHERE type='table' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY name")
-      .map(row => String(row.name)).filter(name => !name.startsWith('object_search'));
+      .map(row => String(row.name)).filter(name => !name.startsWith('object_search') && !['mcp_conversation_launches', 'mcp_conversation_dispatches'].includes(name));
     const columns = new Map(tables.map(table => [table, this.rows(`PRAGMA table_info(${quoteSqlIdentifier(table)})`).map(row => String(row.name))]));
     const foreignKeys = new Map(tables.map(table => [table, this.rows(`PRAGMA foreign_key_list(${quoteSqlIdentifier(table)})`)]));
     const rowKey = (row: Record<string, SqlValue>) => canonical(Object.fromEntries(Object.entries(row).map(([key, value]) => [key, encodePortableCell(value)])));
@@ -9471,7 +9495,7 @@ export class UnifiedDataStore {
   }
   private validatePortableProjectArchive(archive: PortableProjectArchive, tables: Map<string, Record<string, SqlValue>[]>): void {
     if (archive.tables.length !== tables.size) throw new Error('project_archive_table_invalid');
-    const schemaTables = new Set(this.rows("SELECT name FROM sqlite_master WHERE type='table' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%'").map(row => String(row.name)).filter(name => !name.startsWith('object_search')));
+    const schemaTables = new Set(this.rows("SELECT name FROM sqlite_master WHERE type='table' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%'").map(row => String(row.name)).filter(name => !name.startsWith('object_search') && !['mcp_conversation_launches', 'mcp_conversation_dispatches'].includes(name)));
     const columns = new Map([...schemaTables].map(table => [table, this.rows(`PRAGMA table_info(${quoteSqlIdentifier(table)})`).map(row => String(row.name))]));
     const foreignKeys = new Map([...schemaTables].map(table => [table, this.rows(`PRAGMA foreign_key_list(${quoteSqlIdentifier(table)})`)]));
     for (const [table, rows] of tables) {
@@ -9539,6 +9563,7 @@ export class UnifiedDataStore {
       const selectedEventIds = new Set((tables.get('events') || []).map((row, index) => marked.get('events')?.has(index) ? String(row.id) : '').filter(Boolean));
       const selectedContentIds = new Set((tables.get('contents') || []).map((row, index) => marked.get('contents')?.has(index) ? String(row.id) : '').filter(Boolean));
       const selectedRoadmapNodeIds = new Set((tables.get('roadmap_nodes') || []).map((row, index) => marked.get('roadmap_nodes')?.has(index) ? String(row.id) : '').filter(Boolean));
+      const selectedRunIds = new Set((tables.get('runs') || []).map((row, index) => marked.get('runs')?.has(index) ? String(row.id) : '').filter(Boolean));
       const entityTables = new Set(Object.values(entityDefinitions).map(definition => definition.table));
       for (const [table, rows] of tables) rows.forEach((row, index) => {
         if (marked.get(table)?.has(index)) return;
@@ -9551,7 +9576,8 @@ export class UnifiedDataStore {
           || table === 'content_chunks' && selectedContentIds.has(String(row.content_id))
           || table === 'roadmap_dependencies' && selectedRoadmapNodeIds.has(String(row.node_id)) && selectedRoadmapNodeIds.has(String(row.dependency_id))
           || table === 'roadmap_node_fields' && selectedRoadmapNodeIds.has(String(row.node_id));
-        if (belongs && mark(table, index)) changed = true;
+        const runOwned = selectedRunIds.has(String(row.run_id || '')) && (foreignKeys.get(table) || []).some(fk => fk.table === 'runs' && fk.from === 'run_id');
+        if ((belongs || runOwned) && mark(table, index)) changed = true;
       });
       const referencedContentIds = new Set<string>();
       const formalReferenceContentIds = new Set([

@@ -1099,7 +1099,7 @@ export async function activate(context: vscode.ExtensionContext) {
           }
         };
         const projectContext = await buildIntelligenceProjectContext(intelligenceSource);
-        const dataSource = await runtimeProjectMcpSource(globalDataPath, selectedProjectPathForChat);
+        const dataSource = await runtimeProjectMcpSource(globalDataPath, selectedProjectPathForChat, replyContext.operationId);
         const mcp = await observeLocalDiagnosticStage('mcp.connect', () => createIntelligenceMcpSession(intelligenceSource, dataSource, {
           setTimeSchedule: input => setIntelligenceTimeSchedule(context, selectedProjectPathForChat, input)
         }));
@@ -8677,6 +8677,19 @@ async function handleRunFlow(
     const existing = await readFlowTrace(projectPath, stableFlowId, globalDataPath);
     if (existing) {
       if (!matchesFlowLaunchIntent(existing, request, { supplementFiles, selectedAgentCli, selectedModel })) throw new Error('idempotency_conflict');
+      const operation = (operation: string, input: Record<string, unknown>) => sendRuntimeDataRequest(globalDataPath, { operation, input });
+      for (const loop of existing.loops) for (const role of ['planner', 'builder', 'verifier'] as const) {
+        const executionLogId = loop[role].executionLogId;
+        if (!executionLogId) continue;
+        const state = await operation('read_run_state', { root: projectPath, executionLogId }) as import('./runLifecycleTypes').RunState;
+        if (!state.status.deliveryPending || state.status.terminalCommandSubmittedAt) continue;
+        if (['failed', 'abandoned'].includes(existing.status) || ['Failed', 'Cancelled', 'Interrupted'].includes(String(state.status.status))) throw new Error(String(state.status.failureReason || 'conversation_launch_failed'));
+        const prepared = await resumePreparedAgentRun(state, operation, globalDataPath);
+        await launchAgentConversationTerminal({ workspaceRoot: projectPath, globalDataPath: prepared.dataRoot, context,
+          label: `flow-${existing.flowId}-${role}-${executionLogId}`, conversationId: executionLogId, nodeId: String(state.status.nodeId),
+          statusFilePath: runStatusReference(projectPath, executionLogId), runKind: String(state.status.runKind),
+          agentCli: String(state.status.agentCli || ''), model: String(state.status.selectedModel || ''), command: prepared.finalCommand });
+      }
       return true;
     }
   }

@@ -60,7 +60,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
   let storageMaintenanceTail: Promise<void> = Promise.resolve();
   let storageMaintenanceBarrier: Promise<unknown> = Promise.resolve();
   let intelligenceRuntime: IntelligenceRuntimeActions | undefined;
-  type ProjectSession = { kind: 'project'; actorId: string; scope: string; runIdentity?: McpRunIdentity; reviewBatchId?: string; migrationKind?: MigrationRunKind; migrationTargetId?: string | null; migrationProjectRoot?: string | null; migrationProjectId?: string | null; migrationPhysicalRoot?: string | null };
+  type ProjectSession = { kind: 'project'; actorId: string; scope: string; intelligenceOperationId?: string; runIdentity?: McpRunIdentity; reviewBatchId?: string; migrationKind?: MigrationRunKind; migrationTargetId?: string | null; migrationProjectRoot?: string | null; migrationProjectId?: string | null; migrationPhysicalRoot?: string | null };
   type McpSessionResponse = { actorId: string; proof: string; authorityActorId: string; sessionToken: string; runKind: string; migrationKind: MigrationRunKind | null };
   const sessions = new Map<string, ProjectSession>();
   const openSessions = new Map<string, { intent: string; response: McpSessionResponse }>();
@@ -202,7 +202,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const scope = String(input.projectId || '');
         const openRequestId = String(input.openRequestId || '');
         if (openRequestId && (openRequestId.length < 16 || openRequestId.length > 128)) throw new Error('invalid_mcp_open_request');
-        const openIntent = JSON.stringify({ scope, runIdentity: input.runIdentity || null, resume: input.resume || null });
+        const openIntent = JSON.stringify({ scope, runIdentity: input.runIdentity || null, resume: input.resume || null, intelligenceOperationId: input.intelligenceOperationId || null });
         const previous = openRequestId ? openSessions.get(openRequestId) : undefined;
         if (previous) {
           if (previous.intent !== openIntent) throw new Error('idempotency_conflict');
@@ -224,6 +224,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const identity = store.establishMcpActor(scope, input.resume as { actorId: string; proof: string } | undefined, openRequestId || undefined);
         const sessionToken = crypto.randomBytes(32).toString('hex');
         sessions.set(sessionToken, { kind: 'project', actorId: identity.actorId, scope, runIdentity, reviewBatchId, migrationKind,
+          intelligenceOperationId: String(input.intelligenceOperationId || '') || undefined,
           migrationTargetId: migrationKind ? String(authorizedRun?.status.migrationTargetId || '') || null : undefined,
           migrationProjectRoot: migrationProject?.root || null,
           migrationProjectId: migrationProject?.projectId || null,
@@ -1013,7 +1014,15 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       if (scope.projectId !== session.scope || scope.physicalRoot !== session.migrationPhysicalRoot) throw new Error('maintenance_scope_denied');
       return dispatch(request);
     }
+    if (request.operation === 'get_conversation') {
+      store.authorizeMcpAction(session.actorId, session.scope, 'read');
+      const tracking = store.conversationTracking();
+      const parent = session.runIdentity ? store.authorizedRunState(session.scope, session.runIdentity).conversationId : undefined;
+      const origin = tracking.origin(session.actorId, request.piToolFence?.operationId || session.intelligenceOperationId, parent);
+      return tracking.query(origin, input);
+    }
     if (request.operation === 'start_conversation') {
+      const tracking = store.conversationTracking();
       const authorizeLaunch = () => {
         store.authorizeMcpAction(session.actorId, session.scope, request.operation);
         if (request.piToolFence) store.assertPiToolInvocationActive(request.piToolFence.operationId, request.piToolFence.invocationId, {
@@ -1045,30 +1054,54 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const projectPath = path.resolve(matches[0].root);
         const agentCli = String(input.agentCli || '').trim();
         const model = String(input.model || '').trim();
-        store.reserveMcpConversationLaunch(session.actorId, idempotencyKey, {
-          projectId: matches[0].projectId, mode, message, stepId, agentCli, model
-        });
-        const launchIntentId = `mcp:${session.actorId}:${crypto.createHash('sha256').update(idempotencyKey).digest('hex')}`;
-        return [JSON.stringify({
+        const parent = session.runIdentity ? store.authorizedRunState(session.scope, session.runIdentity).conversationId : undefined;
+        const origin = tracking.origin(session.actorId, request.piToolFence?.operationId || session.intelligenceOperationId, parent);
+        const reservation = tracking.reserve(session.scope, matches[0].projectId, origin, { ...input, mode, message, stepId, agentCli, model, idempotencyKey });
+        return { ...reservation, args: [JSON.stringify({
           projectPath, mode, message, ...(stepId ? { stepId } : {}),
           ...(agentCli ? { agentCli } : {}),
           ...(model ? { model } : {}),
-          launchIntentId
-        })];
+          launchIntentId: reservation.launch.launch_intent_id
+        })] };
       };
       // Commit the launch reservation before the editor makes its own Runtime writes.
-      const args = request.piToolFence
+      const { launch, dispatchToken, args } = request.piToolFence
         ? store.withPiToolInvocationFenceSync(request.piToolFence.operationId, request.piToolFence.invocationId, {
           ownerId: request.piToolFence.ownerId, generation: request.piToolFence.ownerGeneration
         }, reserveLaunch)
         : reserveLaunch();
-      return executeTelegramExtensionCommand(store.root, 'solopreneur.internalStartConversation', args, write => {
-        const send = () => store.withMcpActionAuthorizationSync(session.actorId, session.scope, request.operation, write);
-        if (request.piToolFence) store.withPiToolInvocationFenceSync(request.piToolFence.operationId, request.piToolFence.invocationId, {
-          ownerId: request.piToolFence.ownerId, generation: request.piToolFence.ownerGeneration
-        }, send);
-        else send();
-      });
+      const receipt = () => {
+        const view = tracking.describe(launch);
+        return { status: 'started', projectPath: JSON.parse(args[0]).projectPath, mode: launch.mode,
+          conversationRef: launch.ref, projectId: launch.project_id,
+          ...(view.runId ? { runId: view.runId, executionLogId: view.executionLogId } : {}), ...(launch.flow_id ? { flowId: launch.flow_id } : {}) };
+      };
+      try {
+        const existing = tracking.describe(launch);
+        const existingRun = existing.runId ? store.readRunIntent(String(launch.project_id), String(launch.launch_intent_id)) : null;
+        if (launch.acknowledged || (existingRun && (!existingRun.status.deliveryPending || existingRun.status.terminalCommandSubmittedAt))) {
+          if (!launch.acknowledged) tracking.acknowledge(launch);
+          return receipt();
+        }
+        const result = await executeTelegramExtensionCommand(store.root, 'solopreneur.internalStartConversation', args, write => {
+          const send = () => store.withMcpActionAuthorizationSync(session.actorId, session.scope, request.operation, () => {
+            tracking.origin(session.actorId, request.piToolFence?.operationId || session.intelligenceOperationId);
+            write();
+          });
+          if (request.piToolFence) store.withPiToolInvocationFenceSync(request.piToolFence.operationId, request.piToolFence.invocationId, {
+            ownerId: request.piToolFence.ownerId, generation: request.piToolFence.ownerGeneration
+          }, send);
+          else send();
+        });
+        if ((result as { status?: string })?.status !== 'started') throw new Error('conversation_not_started');
+        tracking.acknowledge(launch);
+        return receipt();
+      } catch (error) {
+        tracking.fail(String(launch.ref), error instanceof Error ? error.message : String(error));
+        throw error;
+      } finally {
+        if (dispatchToken) tracking.finishDispatch(dispatchToken, String(launch.origin_key));
+      }
     }
     if (!['write', 'read', 'search', 'link', 'context', 'export'].includes(request.operation)) throw new Error('action_denied');
     store.authorizeMcpAction(session.actorId, session.scope, request.operation);
@@ -1141,12 +1174,12 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
   return Object.assign(operations, {
     setStorageMaintenanceBarrier: (barrier: Promise<unknown>) => { storageMaintenanceBarrier = barrier; },
     setIntelligenceRuntime: (runtime: IntelligenceRuntimeActions) => { intelligenceRuntime = runtime; },
-    recoverMigrations: () => migrations.recover(), recoverRuns: () => runs.start(), interruptMigrations: () => migrations.interrupt(), interruptRuns: () => runStops.interrupt(),
+    recoverMigrations: () => migrations.recover(), recoverRuns: () => { store.conversationTracking().recoverDispatches(); runs.start(); }, interruptMigrations: () => migrations.interrupt(), interruptRuns: () => runStops.interrupt(),
     waitForMigrations: () => migrations.wait(), close: async () => { await intelligenceRuntime?.close(); await storageMaintenanceTail; await runs.close(); await migrations.close(); }
   });
 }
 
-export function runtimeMcpSource(globalDataPath: string, scope: string | null, globalReads = false, runIdentity?: McpRunIdentity): UnifiedMcpSource {
+export function runtimeMcpSource(globalDataPath: string, scope: string | null, globalReads = false, runIdentity?: McpRunIdentity, intelligenceOperationId?: string): UnifiedMcpSource {
   type McpSession = { actorId: string; proof: string; sessionToken: string; runKind: string; migrationKind: string | null };
   let session: McpSession | undefined;
   let resume: { actorId: string; proof: string } | undefined;
@@ -1155,7 +1188,7 @@ export function runtimeMcpSource(globalDataPath: string, scope: string | null, g
   let piToolFence: RuntimeDataRequest['piToolFence'];
   const establish = async (): Promise<void> => {
     if (session) return;
-    if (!opening) opening = sendRuntimeDataRequest<McpSession>(globalDataPath, { operation: 'open_mcp_session', input: { projectId: scope, openRequestId, ...(runIdentity ? { runIdentity } : {}), ...(resume ? { resume } : {}) } }).then(value => {
+    if (!opening) opening = sendRuntimeDataRequest<McpSession>(globalDataPath, { operation: 'open_mcp_session', input: { projectId: scope, openRequestId, ...(runIdentity ? { runIdentity } : {}), ...(resume ? { resume } : {}), ...(intelligenceOperationId ? { intelligenceOperationId } : {}) } }).then(value => {
       session = value;
       resume = value ? { actorId: value.actorId, proof: value.proof } : resume;
     }).finally(() => { opening = undefined; });
@@ -1164,7 +1197,7 @@ export function runtimeMcpSource(globalDataPath: string, scope: string | null, g
   const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
   const retryableHandshake = (error: unknown): boolean => /(?:ECONNREFUSED|ECONNRESET|EPIPE|socket hang up|runtime_data_response_incomplete|Invalid Runtime endpoint|ENOENT|different_runtime)/.test(errorMessage(error));
   const safeReplay = (operation: string, input: Record<string, unknown>): boolean =>
-    ['read', 'search', 'context', 'migration_overview', 'migration_status', 'read_recycling_plan'].includes(operation) ||
+    ['read', 'search', 'context', 'get_conversation', 'migration_overview', 'migration_status', 'read_recycling_plan'].includes(operation) ||
     operation === 'checkpoint_current_run' ||
     (['write', 'link', 'export', 'start_conversation'].includes(operation) && typeof input.idempotencyKey === 'string' && input.idempotencyKey.length > 0);
   const retryOperation = (error: unknown, operation: string, input: Record<string, unknown>): { retry: boolean; resetSession: boolean } => {
@@ -1213,8 +1246,8 @@ export function runtimeMcpSource(globalDataPath: string, scope: string | null, g
   } };
 }
 
-export async function runtimeProjectMcpSource(globalDataPath: string, projectRoot: string): Promise<UnifiedMcpSource | undefined> {
+export async function runtimeProjectMcpSource(globalDataPath: string, projectRoot: string, intelligenceOperationId?: string): Promise<UnifiedMcpSource | undefined> {
   if (!projectRoot || !fs.existsSync(path.join(globalDataPath, 'solomap.db'))) return undefined;
   const project = await sendRuntimeDataRequest<{ projectId: string }>(globalDataPath, { operation: 'register_project', input: { root: projectRoot } });
-  return runtimeMcpSource(globalDataPath, project.projectId, true);
+  return runtimeMcpSource(globalDataPath, project.projectId, true, undefined, intelligenceOperationId);
 }

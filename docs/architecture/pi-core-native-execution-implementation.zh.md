@@ -34,6 +34,7 @@
 | `solomap_search`、`solomap_read`、`solomap_context`、`solomap_memory`、`solomap_experience` | 只读 | 允许 | MCP annotation 为 read-only，读取固定数据库合同 |
 | `set_time_schedule` | 写入 | 禁止 Harness 自动重放 | 业务层使用确定性 task ID 和数据库幂等写入；未知结果仍按不可重放收口 |
 | `solomap_start_conversation` | 写入 | 禁止 Harness 自动重放 | TG 与侧边栏智能内核共用现有 Step、Solo、Flow 发起入口，保留项目授权、稳定 launch intent 和编辑器启动去重；返回 started 只表示任务已启动 |
+| `solomap_get_conversation` | 只读 | 允许 | 按启动回执的 conversationRef 查询当前状态与正式结算结果；省略引用列出当前聊天最近发起的任务 |
 | `solomap_write`、`solomap_link`、`solomap_export` | 写入 | 禁止 Harness 自动重放 | 调用参数含业务幂等键，键由稳定 invocation ID 派生；重复送达读取同一回执 |
 | `solomap_conversation_status` | 写入 | 禁止 Harness 自动重放 | 由正式会话生命周期合同自行绑定身份；Harness 不猜测未知写入结果 |
 
@@ -44,6 +45,14 @@
 每次工具调用由 Pi invocation ID 绑定数据库 admission。实际 MCP 请求携带 operation、invocation 与 owner generation；数据库内工具从最终 fence 校验到业务 dispatch 和数据库提交持续持有 SQLite writer lock，并在 commit 前复验。
 
 `solomap_start_conversation` 在短事务内校验权限与 fence 并预留稳定启动身份，最终权限/fence 校验与同步 `socket.write` 共用另一个短写事务；等待编辑器启动时不持有 writer transaction。新任务沿既有入口拥有独立生命周期，来源聊天失败或取消不得回滚编辑器已确认的任务记录和其他并发写入。
+
+发起与结果追踪共用同一稳定引用。原生调用从受理 operation/fence 绑定聊天，兼容调用端通过宿主传入的 legacy operation 绑定；模型不能选择来源聊天。普通项目 Agent 绑定自身会话，无 run 身份的连接按持久 MCP session 隔离。旧调用端仍可启动及使用原有通知，新聊天追踪由新版宿主传递身份；新增工具不改变旧 operation 冻结的启动工具合同。
+
+查询直接读取当前轮、最新正式结算及固定报告；新轮或修正结果尚未结算时不会返回旧报告。交互会话等待输入与任务完成分别表达，Flow 读取整个流程的权威状态。通知按被结算轮次的固定来源生成，在原结算事务中幂等入队；后续关闭不重复回报，迟到结算不受当前轮变化影响。仅 TG 来源替换普通通知，原绑定失效或项目归档后不投递，也不阻断主结算。
+
+schema 53 的宿主关联索引不进入项目导出，也不接受项目导入。每次启动仅保存一条关联；任务已创建的引用绑定原 run/Flow 对象并随其物理回收；没有创建任务的失败尝试每个来源只保留最近 20 条。容量进入现有数据库空间观测，包含任务关联与失败尝试计数；无新增轮询、周期写入或模型调用，重试与查询不得重复增长任务关联。
+
+启动预留与临时投递登记原子保存，主对象与关联外键也在同一创建事务内写入，硬中断不会留下无法恢复的中间窗口。等待编辑器时只保存按进程出生身份绑定的临时投递占用；完成即释放，Runtime 启动和后续投递时按真实 PID 与出生身份回收死宿主的占用。查询保持只读，仍活跃的投递不受固定超时影响。失败尝试回收跳过仍有真实投递占用的记录，避免并发重试被回收；实际角色执行或流程终态始终优先于旧启动错误。
 
 ## 容量预算 v1
 

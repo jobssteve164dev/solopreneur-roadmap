@@ -113,6 +113,7 @@ export class IntelligenceConversationStore {
         if (this.runtimeRouting) legacy = await this.dataRequest(this.databaseRoot, { operation: 'begin_legacy_intelligence_operation', input: {
           operationId: requestId, conversationId: id, requestKey: requestId, prompt: content,
           baselineRevision: state?.revision || 0, source: commitGuard ? 'telegram' : 'sidebar',
+          ...(commitGuard ? { sourceGeneration: commitGuard.generation } : {}),
           ownerPid: process.pid, ownerBirth: readProcessBirthMarker(process.pid) || `pid:${process.pid}`
         } });
         if (legacy?.replay) {

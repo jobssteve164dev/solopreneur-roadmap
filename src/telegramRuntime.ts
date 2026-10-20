@@ -149,7 +149,7 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
       }
     };
     const projectContext = await buildIntelligenceProjectContext(intelligenceSource);
-    const dataSource = await runtimeProjectMcpSource(globalDataPath, projectForChat?.path || '');
+    const dataSource = await runtimeProjectMcpSource(globalDataPath, projectForChat?.path || '', replyContext.operationId);
     const mcp = await observeLocalDiagnosticStage('mcp.connect', () => createIntelligenceMcpSession(intelligenceSource, dataSource, {
       setTimeSchedule: input => {
         if (!projectForChat) throw new Error('请先在 SoloMap 中选择要安排任务的项目。');

@@ -46,8 +46,15 @@ const fs = require('node:fs');
 let input = '';
 process.stdin.on('data', bytes => input += bytes);
 process.stdin.on('end', () => {
-  if (input.includes('TOOLRESULT:')) console.log(input.includes('"isError":true') ? '任务未启动。' : '任务已启动。');
-  else console.log(JSON.stringify({ toolCall: { name: 'solomap_start_conversation', arguments: JSON.parse(fs.readFileSync(${JSON.stringify(requestFile)}, 'utf8')) } }));
+  if (input.lastIndexOf('TOOLRESULT:') > input.lastIndexOf('USER:')) {
+    const line = input.slice(input.lastIndexOf('TOOLRESULT:') + 'TOOLRESULT:'.length).trim().split('\\n')[0];
+    const result = JSON.parse(line);
+    if (result.isError) console.log('任务未启动。');
+    else if (result.toolName === 'solomap_get_conversation') {
+      const value = JSON.parse(result.content[0].text);
+      console.log(value.latest[0]?.turnCompleted ? '任务本轮已完成。' : '任务正在执行。');
+    } else console.log('任务已启动。');
+  } else console.log(JSON.stringify({ toolCall: JSON.parse(fs.readFileSync(${JSON.stringify(requestFile)}, 'utf8')) }));
 });
 `, { mode: 0o700 });
   owner.store.patchHostSettings({ namespace: 'cognitive', ownerScope: 'global', idempotencyKey: 'launch-model', patches: [
@@ -56,7 +63,8 @@ process.stdin.on('end', () => {
     { key: 'model', expectedRevision: 0, value: 'auto' }
   ] });
   owner.store.patchHostSettings({ namespace: 'telegram', ownerScope: 'global', idempotencyKey: 'launch-chat-generation',
-    patches: [{ key: 'replyGeneration', expectedRevision: 0, value: 0 }] });
+    patches: [{ key: 'replyGeneration', expectedRevision: 0, value: 0 },
+      { key: 'enabled', expectedRevision: 0, value: true }, { key: 'chatId', expectedRevision: 0, value: '1234' }] });
   if (mode === 'harness') {
     owner.store.registerPiCompatibilityRelease('0.0.605', 'previous-build', 'previous-runtime');
     owner.store.recordPiCompatibilityDrain({ runtimeId: 'previous-runtime', releaseVersion: '0.0.605', buildId: 'previous-build',
@@ -69,7 +77,7 @@ process.stdin.on('end', () => {
     const mcp = await createIntelligenceMcpSession({
       getProjects: () => [{ name: 'Alpha', path: project }], getSelectedProjectPath: () => project,
       getCurrentSteps: () => [], getSettings: () => ({ language: 'zh' })
-    }, await runtimeProjectMcpSource(root, project));
+    }, await runtimeProjectMcpSource(root, project, context.operationId));
     try { return await new EmbeddedPiAgentEngine({ agentCli: cli, workingDirectory: root }).chat(messages, { selectedProject: 'Alpha', projects: ['Alpha'] }, mcp.client, context); }
     finally { await mcp.close(); }
   }, (_root, request) => owner.ops(request), true);
@@ -85,9 +93,8 @@ process.stdin.on('end', () => {
     return { status: 'started', projectPath: payload.projectPath, mode: payload.mode };
   });
   return { ...owner, database: owner.store, root, project, launches, store,
-    async ask(input) {
-      fs.writeFileSync(requestFile, JSON.stringify(input));
-      const chatId = crypto.randomUUID();
+    async ask(input, chatId = crypto.randomUUID(), toolName = 'solomap_start_conversation') {
+      fs.writeFileSync(requestFile, JSON.stringify({ name: toolName, arguments: input }));
       const answer = await reply(chatId, '请开始这项任务');
       assert.equal((await store.get(ids[chatId])).messages.at(-1).content, answer);
       return answer;
@@ -97,6 +104,31 @@ process.stdin.on('end', () => {
 }
 
 for (const mode of ['legacy', 'harness']) {
+  test(`${mode} Telegram follow-up queries the original task and its settled result in the same chat`, async t => {
+    let run;
+    const f = await fixture(t, mode, async ({ ops, payload }) => {
+      run = await ops({ operation: 'prepare_run_intent', input: { root: payload.projectPath, launchIntentId: payload.launchIntentId,
+        nodeId: '__solo__', runKind: 'solo', prompt: payload.message, command: 'isolated-agent', userMessage: payload.message,
+        status: 'Running', metadata: { interactiveSession: true, launchIntentHash: 'follow-up-fixture' }, idempotencyKey: payload.launchIntentId } });
+    });
+    const chatId = '1234';
+    assert.equal(await f.ask({ project: 'Alpha', mode: 'solo', message: '执行后查询结果', idempotencyKey: 'follow-up' }, chatId), '任务已启动。');
+    assert.equal(await f.ask({}, chatId, 'solomap_get_conversation'), '任务正在执行。');
+    const done = f.database.checkpointRun(run.projectId, { executionLogId: run.status.executionLogId, generation: run.generation,
+      proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete',
+      outcome: 'candidate_complete', summary: '交付已验证', idempotencyKey: 'follow-up-done' });
+    const owner = await require('../out/agentRunPreparation.js').getAgentRunDeliveryOwner();
+    const scope = { executionLogId: run.status.executionLogId, generation: done.generation, expectedRevision: done.revision, expectedTurnId: done.turnId };
+    const lease = f.database.claimRunConsumer(run.projectId, { ...scope, owner });
+    f.database.commitRunSettlement(run.projectId, { ...scope, token: lease.token,
+      journal: { agentCli: 'isolated-agent', command: 'isolated-agent', output: '交付已验证', status: 'Completed' },
+      digest: { schemaVersion: 2, runId: run.runId, nodeId: '__solo__', executionLogId: run.status.executionLogId, outcome: '交付已验证' }, idempotencyKey: 'follow-up-settle' });
+    assert.equal(await f.ask({}, chatId, 'solomap_get_conversation'), '任务本轮已完成。');
+    assert.equal(f.launches.length, 1);
+    assert.equal(f.database.listNotificationDeliveries({ channel: 'telegram' }).items.length, 1);
+    if (mode === 'harness') assert.deepEqual(f.database.rows("SELECT replay FROM pi_tool_invocations WHERE tool_name='solomap_get_conversation'").map(row => row.replay), ['safe', 'safe']);
+  });
+
   test(`${mode} intelligence chat launches Solo, Step and Flow through the existing project bridge`, async t => {
     const f = await fixture(t, mode);
     for (const targetMode of ['solo', 'step', 'flow']) {
@@ -106,7 +138,7 @@ for (const mode of ['legacy', 'harness']) {
         command: 'solopreneur.internalStartConversation', projectPath: f.project, mode: targetMode,
         message: `执行 ${targetMode} 任务`, ...(targetMode === 'step' ? { stepId: 'S01' } : {}), launchIntentId: '<stable>'
       });
-      assert.match(f.launches.at(-1).launchIntentId, /^mcp:solomap-mcp:/);
+      assert.match(f.launches.at(-1).launchIntentId, /^mcp:[a-f0-9-]{36}$/);
     }
     assert.equal(f.launches.length, 3);
     if (mode === 'harness') {

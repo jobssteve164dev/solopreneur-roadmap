@@ -11,7 +11,7 @@ export interface UnifiedMcpSource {
   setPiToolFence?(fence?: { operationId: string; invocationId: string; ownerId: string; ownerGeneration: number }): void;
   call(operation: string, input: Record<string, unknown>): Promise<unknown>;
 }
-export const unifiedToolNames = ['solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_export', 'solomap_conversation_status', 'solomap_start_conversation'];
+export const unifiedToolNames = ['solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_export', 'solomap_conversation_status', 'solomap_start_conversation', 'solomap_get_conversation'];
 export const migrationToolNames = ['solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply'];
 
 function registerMigrationTools(server: McpServer, source: UnifiedMcpSource, includeRecyclingApply: boolean): void {
@@ -244,6 +244,9 @@ export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSou
       catch (error) { return { isError: true, content: [{ type: 'text' as const, text: error instanceof Error ? error.message : String(error) }] }; }
     });
   };
+  if (!options.readOnly && options.conversationLaunch) register('solomap_get_conversation', '查询本聊天发起的任务对话状态和结果。提供启动返回的 conversationRef 作为 ref；省略 ref 列出本聊天最近发起的任务，用于回答“刚才那个任务怎么样了”。等待输入表示本轮已结束，Flow 以整个流程的状态为准。', {
+    ref: z.string().uuid().optional(), limit: z.number().int().min(1).max(20).optional()
+  }, true, input => source.call('get_conversation', input));
   if (!options.readOnly && options.conversationLaunch) register('solomap_start_conversation', '在已登记项目中发起新的 Step、Solo 或 Flow 对话。Step 需要 stepId；Solo 和 Flow 不需要。', {
     project: z.string().min(1).max(4096).describe('已登记项目的名称、ID 或绝对路径。'),
     mode: z.enum(['step', 'solo', 'flow']),

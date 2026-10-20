@@ -153,8 +153,12 @@ test('an Agent CLI starts a new conversation in another registered project throu
   ] });
   const launches = [];
   const bridge = await require('../out/telegramExtensionBridge.js').startTelegramExtensionBridge(root, async (command, args) => {
-    launches.push({ command, payload: JSON.parse(args[0]) });
-    return { status: 'started', projectPath: targetProject, mode: 'step' };
+    const payload = JSON.parse(args[0]); launches.push({ command, payload });
+    await owner.ops({ operation: 'prepare_run_intent', input: { root: payload.projectPath, launchIntentId: payload.launchIntentId,
+      nodeId: payload.stepId || '__solo__', runKind: payload.mode, prompt: payload.message, command: 'fixture-agent',
+      userMessage: payload.message, status: 'Running', metadata: { interactiveSession: true, launchIntentHash: 'fixture-hash' },
+      launchRequest: { workspaceRoot: payload.projectPath, agentCli: 'fixture-agent' }, idempotencyKey: payload.launchIntentId } });
+    return { status: 'started', projectPath: targetProject, mode: payload.mode };
   });
   const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
   const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
@@ -172,7 +176,27 @@ test('an Agent CLI starts a new conversation in another registered project throu
     assert.deepEqual({ ...launches[0].payload, launchIntentId: '<stable>' }, {
       projectPath: targetProject, mode: 'step', stepId: 'S01', message: '开始目标项目环节', agentCli: 'codex', model: 'auto', launchIntentId: '<stable>'
     });
-    assert.match(launches[0].payload.launchIntentId, /^mcp:solomap-mcp:[a-f0-9]+:[a-f0-9]{64}$/);
+    const receipt = JSON.parse(response.content[0].text);
+    assert.match(receipt.conversationRef, /^[a-f0-9-]{36}$/);
+    assert.equal(launches[0].payload.launchIntentId, `mcp:${receipt.conversationRef}`);
+    const query = await client.callTool({ name: 'solomap_get_conversation', arguments: { ref: receipt.conversationRef } });
+    assert.equal(query.isError, undefined, JSON.stringify(query.content));
+    assert.equal(JSON.parse(query.content[0].text).state, 'running');
+    const state = owner.store.readRunCheckpointState(receipt.projectId, receipt.executionLogId);
+    const done = await owner.ops({ operation: 'checkpoint_run', input: { projectId: state.projectId, executionLogId: receipt.executionLogId,
+      generation: state.generation, proof: state.proof, expectedRevision: state.revision, expectedTurnId: state.turnId,
+      action: 'complete', outcome: 'candidate_complete', summary: '目标环节已完成', idempotencyKey: 'stdio-task-complete' } });
+    const scope = { projectId: state.projectId, executionLogId: receipt.executionLogId, generation: done.generation,
+      expectedRevision: done.revision, expectedTurnId: done.turnId };
+    const consumer = await owner.ops({ operation: 'claim_run_consumer', input: { ...scope, owner: await require('../out/agentRunPreparation.js').getAgentRunDeliveryOwner() } });
+    await owner.ops({ operation: 'commit_run_settlement', input: { ...scope, token: consumer.token,
+      journal: { agentCli: 'fixture-agent', command: 'fixture-agent', output: '任务结果', status: 'Completed' },
+      digest: { schemaVersion: 2, runId: state.runId, executionLogId: receipt.executionLogId, nodeId: 'S01', outcome: '目标环节已完成' },
+      idempotencyKey: 'stdio-task-settled' } });
+    const completed = await client.callTool({ name: 'solomap_get_conversation', arguments: { ref: receipt.conversationRef } });
+    assert.equal(completed.isError, undefined, JSON.stringify(completed.content));
+    assert.equal(JSON.parse(completed.content[0].text).state, 'waiting');
+    assert.equal(JSON.parse(completed.content[0].text).result.summary, '目标环节已完成');
     const crossProjectConflict = await client.callTool({ name: 'solomap_start_conversation', arguments: {
       project: 'Source', mode: 'step', stepId: 'S01', message: '开始目标项目环节', agentCli: 'codex', model: 'auto', idempotencyKey: 'cross-project-step'
     } });

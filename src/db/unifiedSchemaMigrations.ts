@@ -786,4 +786,22 @@ CREATE TABLE pi_retention_runs(
  pruned_tool_invocations INTEGER NOT NULL DEFAULT 0,last_run_at INTEGER NOT NULL);
 ALTER TABLE pi_conversation_operations ADD COLUMN request_hash TEXT;
 UPDATE pi_conversation_operations SET request_hash=acceptance_hash WHERE request_hash IS NULL;
+` }, { version: 53, sql: `
+ALTER TABLE pi_legacy_conversation_operations ADD COLUMN source_generation INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE mcp_conversation_launches(
+ ref TEXT PRIMARY KEY,origin_key TEXT NOT NULL,owner_project_id TEXT NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
+ project_id TEXT NOT NULL REFERENCES objects(id) ON DELETE CASCADE,request_key TEXT NOT NULL,intent_hash TEXT NOT NULL,
+ launch_intent_id TEXT NOT NULL UNIQUE,mode TEXT NOT NULL CHECK(mode IN ('solo','step','flow')),flow_id TEXT NOT NULL,
+ title TEXT NOT NULL,source TEXT NOT NULL,chat_id TEXT NOT NULL,reply_generation INTEGER NOT NULL,created_at INTEGER NOT NULL,error TEXT NOT NULL,
+ notified_flow_state TEXT NOT NULL DEFAULT '',
+ acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(acknowledged IN (0,1)),
+ run_id TEXT REFERENCES runs(id) ON DELETE CASCADE,flow_object_id TEXT REFERENCES objects(id) ON DELETE CASCADE,
+ UNIQUE(origin_key,request_key));
+CREATE INDEX mcp_conversation_launches_recent ON mcp_conversation_launches(origin_key);
+CREATE INDEX mcp_conversation_launches_flow ON mcp_conversation_launches(project_id,flow_id);
+CREATE INDEX mcp_conversation_launches_owner ON mcp_conversation_launches(owner_project_id);
+CREATE TABLE mcp_conversation_dispatches(
+ id TEXT PRIMARY KEY,ref TEXT NOT NULL REFERENCES mcp_conversation_launches(ref) ON DELETE CASCADE,
+ owner_pid INTEGER NOT NULL,owner_birth TEXT NOT NULL);
+CREATE INDEX mcp_conversation_dispatches_ref ON mcp_conversation_dispatches(ref);
 ` }];

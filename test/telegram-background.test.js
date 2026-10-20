@@ -327,7 +327,7 @@ const fs=require('fs'),counter=${JSON.stringify(fixture.modelInput)};let input='
   } finally { verified.close(); }
 });
 
-test('Telegram natural language launches a Solo task through the native kernel and existing editor bridge', async t => {
+test('Telegram launches a Solo task, receives its settled result, and queries it through the native kernel', async t => {
   const fixture = await backgroundFixture(t, {}, 5000, '0.0.606');
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   const { runtimeBuildId } = require('../out/runtimeBuildIdentity.js');
@@ -340,14 +340,27 @@ test('Telegram natural language launches a Solo task through the native kernel a
   fs.writeFileSync(fixture.cli, `#!/usr/bin/env node
 let input='';process.stdin.on('data',bytes=>input+=bytes);process.stdin.on('end',()=>{
   if(!input.includes('你是 SoloMap 的智能内核')){console.log('background cycle');return;}
-  console.log(input.includes('TOOLRESULT:')?(input.includes('"isError":true')?'任务未启动。':'已开始检查 Alpha 的发布流程。'):JSON.stringify({toolCall:{name:'solomap_start_conversation',arguments:{project:'Alpha',mode:'solo',message:'检查发布流程',idempotencyKey:'telegram-solo-launch'}}}));
+  if(input.lastIndexOf('TOOLRESULT:')>input.lastIndexOf('USER:')){
+    const result=JSON.parse(input.slice(input.lastIndexOf('TOOLRESULT:')+11).trim().split('\\n')[0]);
+    if(result.isError){console.log('任务未启动。');return;}
+    const value=JSON.parse(result.content[0].text);
+    console.log(result.toolName==='solomap_get_conversation'?'查询结果：'+value.latest[0].result.summary:'已开始检查 Alpha 的发布流程。');
+  }else console.log(JSON.stringify({toolCall:input.slice(input.lastIndexOf('USER:')).includes('刚才那个任务怎么样了')?
+    {name:'solomap_get_conversation',arguments:{}}:{name:'solomap_start_conversation',arguments:{project:'Alpha',mode:'solo',message:'检查发布流程',idempotencyKey:'telegram-solo-launch'}}}));
 });
 `, { mode: 0o700 });
   await fixture.start();
   const launches = [];
+  let launched;
+  const call = (operation, input) => control.sendRuntimeDataRequest(fixture.globalRoot, { operation, input });
+  const owner = await require('../out/agentRunPreparation.js').getAgentRunDeliveryOwner();
   const bridge = await require('../out/telegramExtensionBridge.js').startTelegramExtensionBridge(fixture.globalRoot, async (command, args) => {
     const payload = JSON.parse(args[0]);
     launches.push({ command, ...payload });
+    launched = await call('prepare_run_intent', { root: payload.projectPath, launchIntentId: payload.launchIntentId,
+      nodeId: '__solo__', runKind: 'solo', prompt: payload.message, command: 'isolated-editor-agent', userMessage: payload.message,
+      metadata: { interactiveSession: true, launchIntentHash: 'telegram-launch-fixture' }, deliveryOwner: owner,
+      launchRequest: { workspaceRoot: payload.projectPath, agentCli: 'isolated-editor-agent' }, idempotencyKey: payload.launchIntentId });
     return { status: 'started', projectPath: payload.projectPath, mode: payload.mode };
   });
   try {
@@ -356,6 +369,25 @@ let input='';process.stdin.on('data',bytes=>input+=bytes);process.stdin.on('end'
     assert.equal(launches.length, 1);
     assert.deepEqual({ ...launches[0], launchIntentId: '<stable>' }, { command: 'solopreneur.internalStartConversation',
       projectPath: fixture.projectRoot, mode: 'solo', message: '检查发布流程', launchIntentId: '<stable>' });
+    const report = { schemaVersion: 1, summary: '发布流程检查已完成，验证通过。', unmetRequirements: [], decisions: [], corrections: [],
+      verification: ['隔离检查通过'], commits: [], experienceUsage: [], lessons: [] };
+    await call('submit_run_report', { root: fixture.projectRoot, executionLogId: launched.status.executionLogId,
+      generation: launched.generation, turnId: launched.turnId, report, idempotencyKey: 'telegram-complete-report' });
+    const current = await call('read_run_checkpoint_state', { projectId: launched.projectId, executionLogId: launched.status.executionLogId });
+    const done = await call('checkpoint_run', { projectId: launched.projectId, executionLogId: launched.status.executionLogId,
+      generation: current.generation, proof: current.proof, expectedRevision: current.revision, expectedTurnId: current.turnId,
+      action: 'complete', outcome: 'candidate_complete', summary: report.summary, idempotencyKey: 'telegram-complete' });
+    const scope = { projectId: launched.projectId, executionLogId: launched.status.executionLogId, generation: done.generation,
+      expectedRevision: done.revision, expectedTurnId: done.turnId };
+    const lease = await call('claim_run_consumer', { ...scope, owner });
+    const settlement = { ...scope, token: lease.token, journal: { agentCli: 'isolated-editor-agent', command: 'isolated-editor-agent', output: report.summary, status: 'Completed' },
+      digest: { schemaVersion: 2, runId: launched.runId, nodeId: '__solo__', executionLogId: launched.status.executionLogId, outcome: report.summary }, idempotencyKey: 'telegram-settle' };
+    await call('commit_run_settlement', settlement); await call('commit_run_settlement', settlement);
+    await waitFor(() => fixture.sent.some(message => message.text.startsWith('[Alpha]') && message.text.includes(report.summary)), 'Telegram must receive the task result notification', 12_000);
+    fixture.updates.push(fixture.update(107, '刚才那个任务怎么样了'));
+    await waitFor(() => fixture.sent.some(message => message.text === `查询结果：${report.summary}`), 'Telegram follow-up must read the settled result', 12_000);
+    assert.equal(launches.length, 1);
+    assert.equal(fixture.sent.filter(message => message.text.startsWith('[Alpha]') && message.text.includes(report.summary)).length, 1);
   } catch (error) {
     await fixture.stop();
     const failed = UnifiedDataStore.open(fixture.globalRoot);
@@ -366,8 +398,9 @@ let input='';process.stdin.on('data',bytes=>input+=bytes);process.stdin.on('end'
   } finally { bridge.dispose(); await fixture.stop(); }
   const verified = UnifiedDataStore.open(fixture.globalRoot);
   try {
-    assert.equal(verified.rows("SELECT COUNT(*) AS count FROM pi_conversation_operations WHERE status='settled'")[0].count, 1);
+    assert.equal(verified.rows("SELECT COUNT(*) AS count FROM pi_conversation_operations WHERE status='settled'")[0].count, 2);
     assert.equal(verified.rows("SELECT COUNT(*) AS count FROM pi_tool_invocations WHERE tool_name='solomap_start_conversation' AND replay='never' AND status='completed'")[0].count, 1);
+    assert.equal(verified.rows("SELECT COUNT(*) AS count FROM pi_tool_invocations WHERE tool_name='solomap_get_conversation' AND replay='safe' AND status='completed'")[0].count, 1);
   } finally { verified.close(); }
 });
 
