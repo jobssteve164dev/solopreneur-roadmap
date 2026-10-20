@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.612 - 2026-10-20
+
+### Added
+- track Solo, Step and Flow results after launch (eefa38f)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.611 - 2026-10-20
 
 ### Fixed
