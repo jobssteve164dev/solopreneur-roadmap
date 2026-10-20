@@ -3,7 +3,7 @@ import type { DataObject, DataWrite } from './db/unifiedDataStore';
 const reviewedKinds = ['memory', 'lesson', 'review_batch'];
 const candidateStates = ['captured', 'candidate', 'pending', 'draft', 'rejected'];
 const hostKinds = ['project', 'roadmap_node', 'grant', 'runtime_instance', 'setting', 'integration', 'package_version', 'policy', 'policy_use', 'application', 'verification', 'evaluation', 'lesson_decision'];
-const externalMemoryFields = ['external_source', 'external_revision', 'canonical_hash', 'external_entry_revision', 'external_scope', 'legacy_entry_id', 'layer', 'provenance_json', 'validity_json', 'supersedes_json', 'metadata_json'];
+const externalMemoryFields = ['external_source', 'external_revision', 'canonical_hash', 'external_entry_revision', 'external_scope', 'legacy_entry_id'];
 
 export function agentReadableObject(object: DataObject): DataObject {
   if (object.kind !== 'review_batch' || object.projection?.hostReview !== true) return object;

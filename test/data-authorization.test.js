@@ -62,6 +62,35 @@ test('ordinary agent cannot strip the host provenance from a pending external me
   assert.deepEqual(store.read(memory.objectId), before);
 }));
 
+test('ordinary agent can save and update local memory metadata without acquiring host authority', () => fixture(async ({ store, project, call }) => {
+  const metadata = { layer: 'candidate', provenance_json: { sourceType: 'agent', evidenceRefs: ['src/dataAuthorization.ts'] }, validity_json: {}, supersedes_json: [], metadata_json: { purpose: 'handoff' } };
+  const input = { kind: 'memory', action: 'create', scope: project, idempotencyKey: 'local-metadata', data: { category: 'active', title: 'Local handoff', status: 'captured', content: 'Observed code boundary', ...metadata } };
+  const created = await call('write', input);
+  assert.deepEqual(await call('write', input), created);
+  let memory = store.read(created.objectId);
+  assert.equal(memory.data.status, 'captured');
+  assert.equal(memory.data.external_source, null);
+  assert.equal(memory.data.layer, 'candidate');
+  assert.deepEqual(JSON.parse(memory.data.provenance_json), metadata.provenance_json);
+  assert.deepEqual(JSON.parse(memory.data.validity_json), {});
+  assert.deepEqual(JSON.parse(memory.data.supersedes_json), []);
+  assert.deepEqual(JSON.parse(memory.data.metadata_json), metadata.metadata_json);
+  const patched = await call('write', { ...input, action: 'patch', objectId: created.objectId, expectedRevision: created.revision, idempotencyKey: 'local-metadata-patch', data: { provenance_json: { sourceType: 'agent', evidenceRefs: ['test/data-authorization.test.js'] } } });
+  memory = store.read(patched.objectId);
+  assert.deepEqual(JSON.parse(memory.data.provenance_json), { sourceType: 'agent', evidenceRefs: ['test/data-authorization.test.js'] });
+  assert.equal(memory.data.layer, 'candidate');
+  await assert.rejects(call('write', { ...input, action: 'patch', objectId: patched.objectId, expectedRevision: patched.revision, idempotencyKey: 'local-metadata-promote', data: { status: 'verified' } }), /promotion_requires_existing_review/);
+  assert.equal(store.read(patched.objectId).revision, patched.revision);
+}));
+
+for (const [field, value] of Object.entries({ external_source: 'cloudmcp:forged', external_revision: '1', canonical_hash: 'sha256:forged', external_entry_revision: 1, external_scope: 'memory_scope:project:forged', legacy_entry_id: 'forged' })) {
+  test(`ordinary agent cannot forge external memory identity ${field}`, () => fixture(async ({ store, project, call }) => {
+    const input = { kind: 'memory', action: 'create', scope: project, idempotencyKey: `external-identity-${field}`, data: { category: 'project', title: 'Forged external source', status: 'captured', content: 'claim', [field]: value } };
+    await assert.rejects(call('write', input), /host_observation_requires_authorization/);
+    assert.equal(store.search({ scope: project, kinds: ['memory'] }).items.length, 0);
+  }));
+}
+
 test('ordinary agent cannot create or promote a forged verified learning event', () => fixture(async ({ store, project, call }) => {
   const source = store.write({ kind: 'evidence', action: 'create', scope: project, idempotencyKey: 'source', data: {
     type: 'host_observation', source_actor_id: store.actorId, content: 'ordinary result', observed_at: Date.now()

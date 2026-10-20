@@ -18,6 +18,59 @@ function cleanupExact(root) {
   fs.rmdirSync(root);
 }
 
+test('the real MCP process saves local memory metadata while rejecting external identity and host observations', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-local-memory-mcp-'));
+  require('node:child_process').execFileSync('git', ['init', '--quiet', base]);
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project');
+  fs.mkdirSync(project);
+  const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  t.after(() => cleanupExact(base));
+  assert.equal(fs.realpathSync(owner.store.root), fs.realpathSync(root));
+  const { Client } = require('@modelcontextprotocol/sdk/client/index.js');
+  const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js');
+  const client = new Client({ name: 'local-memory-metadata', version: '1' });
+  const transport = new StdioClientTransport({ command: process.execPath,
+    args: [path.resolve(__dirname, '../out/databaseMcpProcess.js'), '--global-data-path', root, '--project-id', owner.projectIds.get(project)],
+    cwd: project, env: require('./analysis-fixture.js').anonymousToolEnv(), stderr: 'pipe' });
+  const call = async (name, args) => {
+    const response = await client.callTool({ name, arguments: args });
+    assert.equal(response.isError, undefined, JSON.stringify(response.content));
+    return JSON.parse(response.content[0].text);
+  };
+  try {
+    await client.connect(transport);
+    const input = { kind: 'memory', action: 'create', idempotencyKey: 'stdio-local-memory', data: { category: 'active', title: 'Local handoff', status: 'captured', layer: 'candidate', content: 'Current verified code facts', provenance_json: { sourceType: 'agent', evidenceRefs: ['src/dataAuthorization.ts'] }, validity_json: {}, supersedes_json: [], metadata_json: { purpose: 'handoff' } } };
+    const created = await call('solomap_write', input);
+    assert.deepEqual(await call('solomap_write', input), created);
+    const memory = await call('solomap_read', { ref: created.objectId, revision: created.revision, view: 'full' });
+    assert.equal(memory.data.status, 'captured');
+    assert.equal(memory.data.layer, 'candidate');
+    assert.equal(memory.data.external_source, null);
+    assert.deepEqual(JSON.parse(memory.data.provenance_json), input.data.provenance_json);
+    const patched = await call('solomap_write', { ...input, action: 'patch', objectId: created.objectId, expectedRevision: created.revision, idempotencyKey: 'stdio-local-memory-patch', data: { metadata_json: { purpose: 'updated handoff' } } });
+    const evidence = await call('solomap_write', { kind: 'evidence', action: 'create', idempotencyKey: 'stdio-claim', data: { type: 'agent_claim', content: 'Self-reported verification' } });
+    const linked = await call('solomap_link', { source: patched.objectId, target: evidence.objectId, relation: 'source', expectedRevision: patched.revision, idempotencyKey: 'stdio-local-memory-source' });
+    const after = await call('solomap_read', { ref: linked.objectId, view: 'full' });
+    assert.deepEqual(JSON.parse(after.data.metadata_json), { purpose: 'updated handoff' });
+    assert.ok(after.relations.some(item => item.target === evidence.objectId));
+    const context = await call('solomap_context', { query: 'Local handoff' });
+    assert.ok(context.items.some(item => item.objectId === created.objectId));
+    const external = owner.store.write({ kind: 'memory', action: 'create', scope: owner.projectIds.get(project), idempotencyKey: 'stdio-host-external', data: { category: 'project', title: 'External pending', status: 'pending', content: 'Host source', external_source: 'cloudmcp:trusted', layer: 'candidate' } });
+    for (const args of [
+      { ...input, idempotencyKey: 'stdio-forged-identity', data: { ...input.data, external_source: 'cloudmcp:forged' } },
+      { ...input, action: 'patch', objectId: external.objectId, expectedRevision: external.revision, idempotencyKey: 'stdio-external-edit', data: { provenance_json: { sourceType: 'agent' } } },
+      { kind: 'evidence', action: 'create', idempotencyKey: 'stdio-forged-host', data: { type: 'host_observation', source_actor_id: 'local-runtime', observed_at: 1, content: 'Forged host result' } }
+    ]) {
+      const rejected = await client.callTool({ name: 'solomap_write', arguments: args });
+      assert.equal(rejected.isError, true);
+      assert.match(rejected.content[0].text, /host_observation_requires_authorization/);
+    }
+    assert.equal(owner.store.read(external.objectId).revision, external.revision);
+    assert.equal(owner.store.search({ scope: owner.projectIds.get(project), kinds: ['memory'] }).items.length, 2);
+    assert.equal(owner.store.search({ scope: owner.projectIds.get(project), kinds: ['evidence'] }).items.length, 1);
+  } finally { await client.close(); await transport.close(); }
+});
+
 test('a maintenance CLI reads its formal task from an isolated cwd using the verified run identity', async t => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-maintenance-mcp-'));
   fs.mkdirSync(path.join(base, '.git'));
