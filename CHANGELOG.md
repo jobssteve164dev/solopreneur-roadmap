@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.616 - 2026-10-21
+
+### Fixed
+- unblock continuation when terminal output is paused (57a05c4)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.615 - 2026-10-21
 
 ### Changed
