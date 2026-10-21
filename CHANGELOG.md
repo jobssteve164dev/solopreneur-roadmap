@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.617 - 2026-10-21
+
+### Changed
+- Fix local-first loading races and terminal stop backpressure (73347dd)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.616 - 2026-10-21
 
 ### Fixed
