@@ -1868,10 +1868,10 @@ async function handleSharedWebviewAction(
         let continuation = nativeContinuationByConversationKey.get(key);
         if (!continuation) {
           continuation = Promise.resolve().then(async () => {
-            await revealAgentStartupTerminal(context, terminalProjectRoot, 'continue', String(conversation?.agentCli || ''));
-            const projectPath = await ensureActionProject(context, request.projectPath || '');
+            await observeLocalDiagnosticStage('conversation.continue.terminal', () => revealAgentStartupTerminal(context, terminalProjectRoot, 'continue', String(conversation?.agentCli || '')));
+            const projectPath = await observeLocalDiagnosticStage('conversation.continue.project', () => ensureActionProject(context, request.projectPath || ''));
             if (!projectPath && request.projectPath) return;
-            await waitForAgentProcessCleanup(terminalProjectRoot, rootConversationId);
+            await observeLocalDiagnosticStage('conversation.continue.cleanup', () => waitForAgentProcessCleanup(terminalProjectRoot, rootConversationId));
             await handleContinueNativeConversation(context, nodeId, conversationId);
             refreshConversation(nodeId);
           });
@@ -8162,12 +8162,51 @@ async function closeConversationProcessesForContinuation(
       && (Number(status.rootExecutionLogId) === rootConversationId
         || Number(status.lineageRootExecutionLogId) === rootConversationId
         || (sessionId && status.sessionProvider === registered.status.sessionProvider && status.nativeSessionId === sessionId)));
-    const terminalNames = new Set<string>();
+    const ownedTerminals = new Set<vscode.Terminal>();
+    const reserved = new Set([...reservedAgentTerminalsByProject.values()].flatMap(entries => entries.map(entry => entry.terminal)));
     for (const { reference, status } of related) {
-      if (status.terminalName) terminalNames.add(String(status.terminalName));
+      for (const terminal of vscode.window.terminals) {
+        if (reserved.has(terminal) || terminal.name !== status.terminalName) continue;
+        const target = agentTerminalRunTargets.get(terminal);
+        if (target) {
+          const source = family?.find(record => record.reference === reference)
+            || await client.findConversation(workspaceRoot, Number(status.rootExecutionLogId));
+          if (target.workspaceRoot === workspaceRoot && target.globalDataPath === client.dataRoot
+            && target.executionLogId === Number(status.rootExecutionLogId)
+            && source && isAgentTerminalRunTargetCurrent(target, source)) ownedTerminals.add(terminal);
+          continue;
+        }
+        const options = terminal.creationOptions;
+        const cwd = options && 'cwd' in options ? typeof options.cwd === 'string' ? options.cwd : options.cwd?.fsPath : '';
+        if (!cwd || path.resolve(cwd) !== path.resolve(workspaceRoot)) continue;
+        const root = options && 'env' in options ? options.env?.SOLOMAP_GLOBAL_DATA_PATH : '';
+        if (root) {
+          if (path.resolve(root) === client.dataRoot) ownedTerminals.add(terminal);
+          continue;
+        }
+        if (!status.agentPid || !status.processBirth || readProcessBirthMarker(Number(status.agentPid)) !== status.processBirth) continue;
+        const shellPid = await terminal.processId;
+        if (!shellPid) continue;
+        let parentPid = 0;
+        if (process.platform === 'linux') {
+          try {
+            const stat = await fs.promises.readFile(`/proc/${Number(status.agentPid)}/stat`, 'utf8');
+            parentPid = Number(stat.slice(stat.lastIndexOf(') ') + 2).trim().split(/\s+/)[1]);
+          } catch { /* A runner can finish while its terminal is being matched. */ }
+        } else if (process.platform !== 'win32') {
+          parentPid = await new Promise<number>(resolve => childProcess.execFile('ps', ['-o', 'ppid=', '-p', String(status.agentPid)], { encoding: 'utf8' }, (error, value) => resolve(error ? 0 : Number(value.trim()))));
+        }
+        if (shellPid === Number(status.agentPid) || shellPid === parentPid) ownedTerminals.add(terminal);
+      }
       if (!status.interactiveSessionClosed) {
         const current = await client.readStatus(reference);
         if (current && !current.interactiveSessionClosed) {
+          if (current.agentPid) {
+            // Reattach the old display before asking its runner to flush. Older
+            // runners can be blocked by a persistent terminal's paused PTY.
+            const terminal = [...ownedTerminals].find(candidate => candidate.name === current.terminalName);
+            terminal?.show(true);
+          }
           try { await client.stop(reference, current, '正在原会话中继续处理。', `run:${reference}:native-resume-stop:${current.turnId}`, true, 'partial'); }
           catch (error) {
             if ((error as Error).message === 'run_process_identity_unverified') throw new Error('无法确认原会话进程身份，未启动新会话。');
@@ -8177,18 +8216,12 @@ async function closeConversationProcessesForContinuation(
       }
       for (const id of [Number(status.rootExecutionLogId), Number(status.executionLogId)]) {
         if (agentTerminalProjectRootsByConversationId.get(id) === workspaceRoot) {
-          const name = agentTerminalNamesByConversationId.get(id);
-          if (name) terminalNames.add(name);
           agentTerminalNamesByConversationId.delete(id);
           agentTerminalProjectRootsByConversationId.delete(id);
         }
       }
     }
-    const reserved = new Set([...reservedAgentTerminalsByProject.values()].flatMap(entries => entries.map(entry => entry.terminal)));
-    for (const terminal of vscode.window.terminals) {
-      const target = agentTerminalRunTargets.get(terminal);
-      if (!reserved.has(terminal) && terminalNames.has(terminal.name) && (!target || target.workspaceRoot === workspaceRoot && target.globalDataPath === client.dataRoot)) terminal.dispose();
-    }
+    for (const terminal of ownedTerminals) terminal.dispose();
     return;
   }
   throw new Error('未找到这段对话的完整会话记录，无法继续。');
@@ -8203,10 +8236,10 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
   const settings = getPersistedSettings(context);
   const globalDataPath = normalizeSolomapGlobalPath(workspaceRoot, projectSyncEngine.dataRoot || settings.globalDataPath);
   const client = runLifecycleClient(workspaceRoot, globalDataPath);
-  const registered = await client.adoptConversationHistory(workspaceRoot, conversationId);
+  const registered = await observeLocalDiagnosticStage('conversation.continue.lookup', () => client.adoptConversationHistory(workspaceRoot, conversationId));
   if (syncEngine !== projectSyncEngine || activeProjectRoot !== workspaceRoot) return;
   if (registered) {
-    const records = await client.listConversationStatuses(workspaceRoot, conversationId);
+    const records = await observeLocalDiagnosticStage('conversation.continue.family', () => client.listConversationStatuses(workspaceRoot, conversationId));
     // Imported legacy chains may predate durable conversation ownership.
     // Keep their existing history resolver until that relationship is known.
     const family = records.some(record => record.status.historicalAdopted) ? undefined : records;
@@ -8225,7 +8258,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     let source = family?.find(record => Number(record.status.rootExecutionLogId) === leaf?.id)
       || (leaf ? await client.adoptConversationHistory(workspaceRoot, Number(leaf.id)) : registered);
     if (!source) throw new Error('run_conversation_missing');
-    let binding = await client.readBinding(source.reference, source.status);
+    let binding = await observeLocalDiagnosticStage('conversation.continue.binding', () => client.readBinding(source!.reference, source!.status));
     if (binding && ['codex', 'claude'].includes(binding.provider) && ['preparing', 'planned'].includes(binding.revisions[binding.headRevision - 1].state)) {
       await client.recoverNativeIdentity(source.reference, source.status);
       source = await client.findConversation(workspaceRoot, Number(source.status.journalExecutionLogId || source.status.rootExecutionLogId));
@@ -8252,9 +8285,9 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     const providerContext = [...binding!.revisions].reverse().find(revision => revision.providerContext)?.providerContext;
     const root = resolveContinuationRootConversationFromList(conversations, continuationId);
     const rootId = Number(root?.id || registered.status.lineageRootExecutionLogId || family?.[family.length - 1]?.status.rootExecutionLogId || registered.status.rootExecutionLogId);
-    await closeConversationProcessesForContinuation(workspaceRoot, nodeId, conversations, rootId, session.sessionId, globalDataPath, family);
-    const preGitHash = await createPreSessionGitCommit(workspaceRoot);
-    const prepared = await prepareOrdinaryConversation(context, {
+    await observeLocalDiagnosticStage('conversation.continue.stop', () => closeConversationProcessesForContinuation(workspaceRoot, nodeId, conversations, rootId, session.sessionId, globalDataPath, family));
+    const preGitHash = await observeLocalDiagnosticStage('conversation.continue.backup', () => createPreSessionGitCommit(workspaceRoot));
+    const prepared = await observeLocalDiagnosticStage('conversation.continue.prepare', () => prepareOrdinaryConversation(context, {
       agentCli, selectedModel: String(source.status.selectedModel || ''), prompt: '继续当前 Agent 对话',
       globalPrompt: settings.globalPrompt, workspaceRoot, nodeId, executionLogId: 0, userMessage: '继续当前 Agent 对话',
       runKind: nodeId === soloConversationId ? 'solo_continue' : 'step_continue', globalDataPath,
@@ -8264,8 +8297,8 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
       metadata: { lineageRootExecutionLogId: rootId, ...(transcriptPath ? { codexResumeTranscriptPath: transcriptPath } : {}),
         ...(providerContext ? { nativeResumeProviderContext: providerContext } : {}),
         launchSummary: [preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '', 'Agent continuation started.', buildContinuationMetadataBlock(rootId, session.sessionId), 'User supplement:\n继续当前 Agent 对话'].filter(Boolean).join('\n\n') }
-    }, { ...settings, globalDataPath });
-    await deliverOrdinaryConversation(context, prepared);
+    }, { ...settings, globalDataPath }));
+    await observeLocalDiagnosticStage('conversation.continue.delivery', () => deliverOrdinaryConversation(context, prepared));
     return;
   }
 

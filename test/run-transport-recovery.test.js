@@ -133,7 +133,7 @@ test('a temporary health failure cannot terminate a verified current Runtime wit
   assert.deepEqual(result, { started: false, pid: process.pid, runtimeId: 'fresh-owner' });
 });
 
-test('explicit user interruption exits the runner even while Runtime discovery remains unavailable', async t => {
+test('explicit user interruption stops the Agent and preserves pending output until the same Runtime owner returns', async t => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-offline-interrupt-'));
   const project = path.join(base, 'project'), root = path.join(base, '.solomap-global');
   fs.mkdirSync(project); execFileSync('git', ['init', '-q', project]);
@@ -142,6 +142,8 @@ test('explicit user interruption exits the runner even while Runtime discovery r
   const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'interrupt-owner',
     onCommand: () => ({ status: 'running' }), onData: ops });
   const file = path.join(root, 'runtime/control.json'), endpoint = fs.readFileSync(file);
+  const release = path.join(base, 'release-output'), accepted = path.join(base, 'output-accepted');
+  const source = `const fs=require('fs');process.stdout.write('ready\\n');const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)})){clearInterval(timer);process.stdout.write('accepted offline🌿\\n',()=>fs.writeFileSync(${JSON.stringify(accepted)},'accepted'));setInterval(()=>{},1000)}},20)`;
   let runner;
   t.after(async () => {
     fs.writeFileSync(file, endpoint);
@@ -149,18 +151,25 @@ test('explicit user interruption exits the runner even while Runtime discovery r
     await server.close(); await ops.close(); store.close();
   });
   await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: 'isolated interruption', userMessage: 'explicit cancellation',
-    command: `${shellQuote(process.execPath)} -e ${shellQuote("setInterval(()=>process.stdout.write('alive'+String.fromCharCode(10)),100)")}`,
+    command: `${shellQuote(process.execPath)} -e ${shellQuote(source)}`,
     metadata: { interactiveSession: true }, idempotencyKey: 'interrupt:prepare' } });
   runner = spawn(process.execPath, [path.resolve(__dirname, '../out/runAgentProcess.js'), '--global-data-path', root, '--project-path', project, '--execution-log-id', '1'],
     { cwd: project, env: require('./analysis-fixture.js').anonymousToolEnv(), stdio: 'pipe' });
   let visible = '';
   runner.stdout.on('data', bytes => { visible += bytes; }); runner.stderr.resume();
-  await until(() => visible.includes('alive'));
+  await until(() => visible.includes('ready'));
   const state = await ops({ operation: 'read_run_state', input: { root: project, executionLogId: 1 } });
   fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, runtimeId: 'starting', pid: process.pid }));
-  await pause(4000);
+  fs.writeFileSync(release, 'release');
+  await until(() => fs.existsSync(accepted));
+  await pause(700);
   runner.kill('SIGINT');
+  await until(() => !require('../out/processIdentity.js').isProcessOwnerAlive(state.status.agentChildPid, state.status.processChildBirth));
+  assert.equal(runner.exitCode, null, 'received output must remain pending while persistence is unavailable');
+  fs.writeFileSync(file, endpoint);
   await until(() => runner.exitCode !== null || runner.signalCode !== null);
   assert.equal(runner.exitCode, 130);
   assert.equal(require('../out/processIdentity.js').isProcessOwnerAlive(state.status.agentChildPid, state.status.processChildBirth), false);
+  const log = await ops({ operation: 'read_run_log', input: { root: project, executionLogId: 1, stream: 'stdout' } });
+  assert.equal(Buffer.from(log.bytes, 'base64').toString().replace(/\r/g, ''), 'ready\naccepted offline🌿\n');
 });

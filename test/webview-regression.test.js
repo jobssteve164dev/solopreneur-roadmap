@@ -7431,17 +7431,39 @@ test('sidebar diagnostics split settings, overview, contribution, and Solo launc
   assert.match(handlerSource, /catch \(error\) \{[\s\S]*?recordLocalDiagnosticError\([\s\S]*?throw error;/);
 });
 
-test('security repair dispatches the Solo request before card status rendering', () => {
-  const source = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
-  const handlerStart = source.indexOf("querySelectorAll('[data-agent-fix-security-project-path]')");
-  const handlerEnd = source.indexOf("querySelectorAll('[data-agent-review-pr]')", handlerStart);
-  assert.ok(handlerStart >= 0 && handlerEnd > handlerStart, 'security repair handler must remain present');
-  const handler = source.slice(handlerStart, handlerEnd);
-  const dispatch = handler.indexOf("command: 'conversation.runSolo'");
-  const render = handler.indexOf('renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath)');
-  assert.ok(dispatch >= 0, 'security repair must dispatch a Solo conversation');
-  assert.ok(render >= 0, 'security repair must keep its immediate status redraw');
-  assert.ok(dispatch < render, 'security repair must leave the webview before status rendering can delay or interrupt it');
+test('security repair dispatches once while focused and defers the card refresh', () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const fixture = runScriptWithMinimalDom(extractLastScript(html), ids, `
+    globalThis.securityActionTest = { render: renderPortfolio, flush: flushPendingAsyncPortfolioRender,
+      setup(project) { Object.assign(currentProjects, { projects: [project], portfolio: [project], selectedProjectPath: project.path }); }
+    };
+  `);
+  const project = { name: 'app', path: '/workspace/app', nodes: [], security: { available: true, openCriticalHigh: 1 } };
+  const card = createElement('security-card'), button = createElement('security-repair');
+  card.setAttribute('data-select-project-path', project.path);
+  button.setAttribute('data-agent-fix-security-project-path', project.path);
+  button.hasAttribute = name => Object.hasOwn(button.attributes, name);
+  button.closest = () => card;
+  const list = fixture.elements['portfolio-list'];
+  list.querySelectorAll = selector => selector.includes('[data-agent-fix-security-project-path]') ? [button] : [];
+  let renders = 0, rendered = '';
+  Object.defineProperty(list, 'innerHTML', { get: () => rendered, set: value => { rendered = value; renders++; } });
+  fixture.context.securityActionTest.setup(project);
+  fixture.context.securityActionTest.render([project], project.path);
+  const initialRenders = renders;
+  fixture.context.document.activeElement = button;
+  button.listeners.click({ stopPropagation() {} });
+  button.listeners.click({ stopPropagation() {} });
+  const launches = fixture.postedMessages.filter(message => message.command === 'conversation.runSolo');
+  assert.equal(launches.length, 1);
+  assert.equal(launches[0].projectPath, project.path);
+  assert.ok(launches[0].launchActionId);
+  assert.equal(button.disabled, true);
+  assert.equal(renders, initialRenders, 'a focused action must not rebuild its own card');
+  fixture.context.document.activeElement = null;
+  fixture.context.securityActionTest.flush();
+  assert.equal(renders, initialRenders + 1, 'the card must converge after the interaction ends');
 });
 
 test('sidebar diagnostics record delivery and action failures as errors', async () => {
@@ -7456,6 +7478,28 @@ test('sidebar diagnostics record delivery and action failures as errors', async 
   assert.equal(await provider.runTraced(trace, 'sidebar.action.settings.get', async () => { throw new Error('fixture_failure'); }), false);
   assert.deepEqual(events.map(event => event[1]), ['ok', 'error']);
   assert.match(events[1][3].message, /fixture_failure/);
+});
+
+test('the sidebar continuation entry correlates its stage timings with the user action', async t => {
+  const diagnostics = require('../out/localDiagnostics.js'), events = [];
+  diagnostics.configureLocalDiagnosticPersistence({ append: (_root, event) => events.push(event) });
+  t.after(() => diagnostics.configureLocalDiagnosticPersistence(undefined));
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  let listener;
+  const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
+    getSettings: () => ({ globalDataPath: '/fixture' }), updateSettings: async () => {},
+    getProjects: () => ({ projects: [], selectedProjectPath: '' }),
+    dispatchSharedAction: async () => { await diagnostics.observeLocalDiagnosticStage('fixture.continue.stop', async () => {}); return true; }
+  });
+  provider.resolveWebviewView({ webview: { options: {}, html: '', asWebviewUri: uri => String(uri),
+    postMessage: async () => true, onDidReceiveMessage: callback => { listener = callback; } } }, {}, {});
+  events.length = 0;
+  await listener({ command: 'conversation.continue', interactionId: 'continue-click-1' });
+  assert.deepEqual(events.map(e => [e.scope, e.payload.status]), [
+    ['sidebar.action.conversation.continue', 'start'], ['fixture.continue.stop', 'start'],
+    ['fixture.continue.stop', 'ok'], ['sidebar.action.conversation.continue', 'ok']
+  ]);
+  assert.ok(events.every(e => e.payload.interactionId === 'continue-click-1'));
 });
 
 test('project registry data is delivered before optional runtime health and autonomy enrichment', () => {
@@ -16482,7 +16526,7 @@ test('continuing a stopped interactive conversation opens a new terminal and set
   await finishControlledClaudeTurn(request=>operation(request.operation,request.input),project,336,'受控原生完整回复🌿',native.store);
   const sent = [], created = [], posted = [], errors = [], preparedRuns = [], launchReads = [];
   let staleShown = 0, staleDisposed = 0;
-  const stale = {name:'solomap stopped terminal',show(){staleShown++;},dispose(){staleDisposed++;}};
+  const stale = {name:'solomap stopped terminal',creationOptions:{cwd:project,env:{SOLOMAP_GLOBAL_DATA_PATH:root}},show(){staleShown++;},dispose(){staleDisposed++;}};
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;
     module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
@@ -16573,7 +16617,7 @@ test('continuing an earlier turn opens a new session terminal once for concurren
   const read = (workspace,id)=>operation('read_run_state',{root:workspace,executionLogId:id}), peer = await read(project,13), foreign = await read(other,338);
   const sent = [], created = [], posted = [], errors = [], preparedRuns = [], registrations = [];
   let oldShown = 0, oldDisposed = 0;
-  const oldTerminal = {name:'solomap open root terminal',show(){oldShown++;},dispose(){oldDisposed++;}};
+  const oldTerminal = {name:'solomap open root terminal',creationOptions:{cwd:project,env:{SOLOMAP_GLOBAL_DATA_PATH:root}},show(){oldShown++;},dispose(){oldDisposed++;}};
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;
     module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
@@ -16676,8 +16720,8 @@ test('native continuation stops old lineage processes before launching the same 
     }
     for(const [workspace,id,child] of [[project,13,wrappers[2]],[other,337,wrappers[3]]])await operation('prepare_run',{root:workspace,executionLogId:id,nodeId:'__solo__',runKind:'solo',prompt:'其他对话',command:'owned Node fixture',userMessage:'其他任务',metadata:{interactiveSession:true,agentCli:'claude',sessionProvider:'claude',nativeSessionId:workspace===other?run.status.plannedNativeSessionId:'another-session',...identity(child)},idempotencyKey:`lineage-peer:${workspace}:${id}`});
     const peer=await read(project,13), foreign=await read(other,337), sent=[], preparedRuns=[];
-    let oldDisposed=0, startupDisposed=0;
-    const oldTerminal={name:'old window',show(){assert.fail('must not reuse old window');},dispose(){if(mode!=='unverified'){assert.equal(live(wrappers[0]),false);assert.equal(live(wrappers[1]),false);}oldDisposed++;}};
+    let oldDisposed=0, startupDisposed=0, oldShown=0;
+    const oldTerminal={name:'old window',creationOptions:{cwd:project},processId:Promise.resolve(process.pid),show(){oldShown++;},sendText(){assert.fail('resume must use its fresh terminal');},dispose(){if(mode!=='unverified'){assert.equal(live(wrappers[0]),false);assert.equal(live(wrappers[1]),false);}oldDisposed++;}};
     const startup={name:'old window',show(){},sendText(text){if(mode!=='unverified'&&text.includes('SOLOMAP_TERMINAL_DELIVERY_ID=')){assert.equal(live(wrappers[0]),false,'root writer exits before the resume command');assert.equal(live(wrappers[1]),false,'latest writer exits before the resume command');assert.equal(live(wrappers[2]),true);assert.equal(live(wrappers[3]),true);assert.equal(oldDisposed,1);assert.equal(startupDisposed,0);}sent.push(text);},dispose(){startupDisposed++;}};
     const extension=loadCompiledModule('out/extension.js', `
       module.exports.resume=handleContinueNativeConversation;module.exports.reveal=revealAgentStartupTerminal;module.exports.settle=processAgentStatusFile;
@@ -16687,9 +16731,14 @@ test('native continuation stops old lineage processes before launching the same 
         getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
         agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';getOpenCodeTerminalEnvironment=async()=>({});prepareOrdinaryConversation=prepare;
         sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
-        agentTerminalNamesByConversationId.set(336,oldTerminal.name);agentTerminalProjectRootsByConversationId.set(336,project);vscode.window.terminals.push(oldTerminal);
+        agentTerminalNamesByConversationId.set(336,oldTerminal.name);agentTerminalProjectRootsByConversationId.set(336,project);
+        vscode.window.terminals.push({name:oldTerminal.name,creationOptions:{cwd:project+'/foreign'},show(){throw new Error('must not reveal same-name foreign project');},dispose(){throw new Error('must not dispose same-name foreign project');}},
+          {name:oldTerminal.name,creationOptions:{cwd:project,env:{SOLOMAP_GLOBAL_DATA_PATH:root+'/foreign'}},show(){throw new Error('must not reveal same-name foreign data root');},dispose(){throw new Error('must not dispose same-name foreign data root');}},oldTerminal);
         vscode.window.createTerminal=()=>{vscode.window.terminals.push(startup);return startup;};};
-    `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
+    `,{'./autonomousRuntimeControl':{...require('../out/autonomousRuntimeControl.js'),sendRuntimeDataRequest:async(dataRoot,request)=>{
+      if(mode!=='unverified'&&request.operation==='stop_run')assert.ok(oldShown>0,'reattach the original terminal before waiting for its wrapper to flush and exit');
+      return require('../out/autonomousRuntimeControl.js').sendRuntimeDataRequest(dataRoot,request);
+    }},'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
     extension.connect(engine,project,root,oldTerminal,startup,async(_context,input)=>{
       if(mode!=='unverified'){assert.equal(live(wrappers[0]),false);assert.equal(live(wrappers[1]),false);}
       const prepared=await prepareControlledClaudeRun({...input,launchIntentId:'lineage-resume-button'},operation);preparedRuns.push(prepared);return prepared;
@@ -16762,7 +16811,7 @@ test('continuing a conversation never reuses a same-numbered terminal from anoth
   assert.notEqual(runs[0].taskId,runs[1].taskId);assert.notEqual(runs[0].conversationId,runs[1].conversationId);assert.equal(runs[0].status.plannedNativeSessionId,runs[1].status.plannedNativeSessionId);
   await operation('prepare_run',{root:projectB,executionLogId:13,nodeId:'__solo__',runKind:'solo',prompt:'其他本项目任务',command:'not executed',userMessage:'其他任务',metadata:{interactiveSession:true},idempotencyKey:'cross-project-peer'});
   const sent=[],created=[],posted=[],preparedRuns=[],errors=[];let aShown=0,aDisposed=0,bShown=0,bDisposed=0;
-  const terminalA={name:'project A terminal',show(){aShown++;},sendText(){assert.fail('must not write to another project terminal');},dispose(){aDisposed++;}},terminalB={name:'project B terminal',show(){bShown++;},sendText(){assert.fail('must use the new resume window');},dispose(){bDisposed++;assert.equal(live(wrappers[1]),false);assert.equal(live(wrappers[0]),true);}};
+  const terminalA={name:'project A terminal',creationOptions:{cwd:projectA},processId:Promise.resolve(process.pid),show(){aShown++;},sendText(){assert.fail('must not write to another project terminal');},dispose(){aDisposed++;}},terminalB={name:'project B terminal',creationOptions:{cwd:projectB},processId:Promise.resolve(process.pid),show(){bShown++;},sendText(){assert.fail('must use the new resume window');},dispose(){bDisposed++;assert.equal(live(wrappers[1]),false);assert.equal(live(wrappers[0]),true);}};
   const extension=loadCompiledModule('out/extension.js',`
     module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;module.exports.find=findReusableAgentTerminal;
     module.exports.select=(engine,project)=>{syncEngine=engine;activeProjectRoot=project;};
@@ -16796,7 +16845,7 @@ test('continuing a conversation never reuses a same-numbered terminal from anoth
   assert.deepEqual({...extension.owned(336)},{name:terminalA.name,root:projectA});assert.equal(await extension.find(projectA,336),terminalA);assert.equal(await extension.find(projectB,336),terminalB);
   for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:projectA},{path:projectB}]);await engine.initAndSync();assert.deepEqual(await read(projectA,336),beforeA.state);assert.deepEqual(await read(projectB,336),beforeB.state);
   const click=()=>extension.action({}, {command:'conversation.continue',projectPath:projectB,nodeId:'__solo__',conversationId:336},'sidebar',{postMessage(message){posted.push(message);return Promise.resolve(true);}});
-  assert.deepEqual(await Promise.all([click(),click()]),[true,true]);assert.deepEqual(errors,[]);assert.equal(preparedRuns.length,1);assert.equal(created.length,1);assert.equal(aShown,0);assert.equal(aDisposed,0);assert.equal(bShown,0);assert.equal(bDisposed,1);assert.notEqual(created[0].terminal,terminalA);assert.notEqual(created[0].terminal,terminalB);assert.equal(created[0].options.cwd,projectB);assert.equal(created[0].terminal.disposed,undefined);assert.ok(created[0].terminal.shown>=1);
+  assert.deepEqual(await Promise.all([click(),click()]),[true,true]);assert.deepEqual(errors,[]);assert.equal(preparedRuns.length,1);assert.equal(created.length,1);assert.equal(aShown,0);assert.equal(aDisposed,0);assert.ok(bShown>=1);assert.equal(bDisposed,1);assert.notEqual(created[0].terminal,terminalA);assert.notEqual(created[0].terminal,terminalB);assert.equal(created[0].options.cwd,projectB);assert.equal(created[0].terminal.disposed,undefined);assert.ok(created[0].terminal.shown>=1);
   const prepared=preparedRuns[0],newId=Number(prepared.status.rootExecutionLogId),delivered=await read(projectB,newId);assert.equal(delivered.taskId,runs[1].taskId);assert.equal(delivered.conversationId,runs[1].conversationId);assert.notEqual(delivered.taskId,runs[0].taskId);assert.equal(delivered.status.sourceParentRunId,runs[1].runId);assert.equal(delivered.status.sourceParentTurnId,beforeB.state.turnId);assert.equal(delivered.status.plannedNativeSessionId,runs[1].status.plannedNativeSessionId);assert.ok(delivered.status.terminalDeliveryId);assert.ok(delivered.status.terminalCommandSubmittedAt);
   assert.equal(sent.filter(x=>x.text.includes('SOLOMAP_TERMINAL_DELIVERY_ID=')).length,1);assert.ok(sent.some(x=>x.text.endsWith(prepared.finalCommand)));assert.equal(posted.filter(x=>x.command==='conversationActionSettled'&&x.projectPath===projectB&&Number(x.conversationId)===336).length,2);
   await extension.settle(ref(projectB,336),undefined,root);await extension.drain();if(mode==='new-turn'){await extension.settle(ref(projectB,336),undefined,root);await extension.drain();}const closedB={state:await read(projectB,336),journal:await client.readJournal(ref(projectB,336)),binding:await client.readBinding(ref(projectB,336)),settlements:await client.readSettlements(ref(projectB,336),await client.readStatus(ref(projectB,336)))};

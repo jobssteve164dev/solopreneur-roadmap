@@ -177,10 +177,16 @@ test('real Extension Host keeps sidebar actions alive across a card refresh', as
     await frame.locator('#btn-close-settings').click();
 
     const roadmapButton = frame.locator('[data-open-project-path]');
-    await roadmapButton.waitFor({ state: 'visible' });
-    await roadmapButton.scrollIntoViewIfNeeded();
-    const box = await roadmapButton.boundingBox();
-    assert.ok(box);
+    const box = await waitFor(async () => {
+      if (!await roadmapButton.isVisible()) return null;
+      try {
+        await roadmapButton.scrollIntoViewIfNeeded({ timeout: 500 });
+        return await roadmapButton.boundingBox({ timeout: 500 });
+      } catch (error) {
+        if (/not attached|Timeout/.test(error.message)) return null;
+        throw error;
+      }
+    }, 'roadmap pointer target did not settle after closing settings');
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.mouse.down();
     fs.writeFileSync(refreshMarker, String(Date.now()));

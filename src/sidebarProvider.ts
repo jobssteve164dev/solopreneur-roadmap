@@ -544,7 +544,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     };
     webviewView.webview.onDidReceiveMessage((data) => {
       const command = String(data?.command || '');
-      if (!/^(?:getNodes|getSettings|getProjects|bootstrap\.get|settings\.get|databaseOverview\.get|agentImpact\.get|checkDependencies|conversation\.runSolo|project\.select|showStrategyPyramid|showFullRoadmap)$/.test(command)) return handleMessage(data).catch(() => undefined);
+      if (!/^(?:getNodes|getSettings|getProjects|bootstrap\.get|settings\.get|databaseOverview\.get|agentImpact\.get|checkDependencies|conversation\.runSolo|conversation\.continue|project\.select|showStrategyPyramid|showFullRoadmap)$/.test(command)) return handleMessage(data).catch(() => undefined);
       const trace = createLocalDiagnosticTrace(getDiagnosticDataPath(this._getSettings), `sidebar.action.${command}`, { interactionId: data.interactionId, targetId: 'sidebar' });
       if (command === 'showStrategyPyramid') {
         this._navigationTraces.set(trace.interactionId!, trace);

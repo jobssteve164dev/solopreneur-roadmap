@@ -684,6 +684,153 @@ test('closing the display pipe keeps the accepted Agent running and preserves it
   } finally { await f.close(); }
 });
 
+for (const nextTurn of [false, true]) test(`a continuation stop drains accepted output when the terminal stops reading (${nextTurn ? 'later turn' : 'first turn'})`, { skip: process.platform !== 'linux' }, async () => {
+  const expected = 'accepted output before continuation\n'.repeat(4096);
+  const program = "process.stdout.write('accepted output before continuation\\n'.repeat(4096));setInterval(()=>{},1000)";
+  const f = await executionFixture(`exec ${shellQuote(process.execPath)} -e ${shellQuote(program)}`, { interactiveSession: true });
+  // Keep a real PTY open without consuming it, as a disconnected display can.
+  const bridge = spawn('python3', ['-c', [
+    'import os, pty, subprocess, sys',
+    'master, slave = pty.openpty()',
+    'runner = subprocess.Popen(sys.argv[1:], stdin=slave, stdout=slave, stderr=slave)',
+    'os.close(slave)',
+    'print(runner.pid, flush=True)',
+    'code = runner.wait()',
+    'os.close(master)',
+    'sys.exit(code if code >= 0 else 128 - code)'
+  ].join('\n'), process.execPath, path.resolve(__dirname, '../out/runAgentProcess.js'), '--global-data-path', f.root, '--project-path', f.projectRoot, '--execution-log-id', '1'], {
+    stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, SOLOMAP_TERMINAL_DELIVERY_ID: '' }
+  });
+  let wrapperPid; let timer;
+  const ended = once(bridge, 'exit');
+  bridge.stderr.resume();
+  try {
+    wrapperPid = Number((await once(bridge.stdout, 'data'))[0].toString().trim());
+    assert.ok(wrapperPid > 1);
+    const deadline = Date.now() + 10000;
+    while ((await f.call('read_run_log_head', { stream: 'stdout' })).totalBytes < Buffer.byteLength(expected)) {
+      assert.equal(bridge.exitCode, null, 'the runner must reach the blocked terminal display');
+      assert.ok(Date.now() < deadline, 'the full output must reach persistence before stopping');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    let state = await f.call('read_run_checkpoint_state');
+    if (nextTurn) {
+      state = await f.call('checkpoint_run', { generation: state.generation, proof: state.proof, expectedRevision: state.revision, expectedTurnId: state.turnId,
+        action: 'complete', outcome: 'partial', summary: '已保存上一轮结果', idempotencyKey: 'blocked-display-first-complete' });
+      state = await f.call('read_run_checkpoint_state');
+      state = await f.call('checkpoint_run', { generation: state.generation, proof: state.proof, expectedRevision: state.revision, expectedTurnId: state.turnId,
+        action: 'start', message: '继续当前任务', idempotencyKey: 'blocked-display-next-start' });
+    }
+    const stopping = f.call('stop_run', { generation: state.generation, expectedRevision: state.revision, expectedTurnId: state.turnId,
+      reason: '正在原会话中继续处理。', requireVerifiedIdentity: true, outcome: 'partial', idempotencyKey: 'stop-blocked-terminal' });
+    void stopping.catch(() => {});
+    const stopped = await Promise.race([
+      stopping,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('continuation is stuck waiting for the blocked display wrapper')), 5000); })
+    ]);
+    assert.equal(stopped.status.interactiveSessionClosed, true);
+    assert.equal(stopped.status.checkpointOutcome, 'partial');
+    assert.equal((await ended)[0], 143);
+    const parts = []; let offset = 0;
+    do {
+      const page = await f.call('read_run_log', { stream: 'stdout', offset, limit: 8192 });
+      parts.push(Buffer.from(page.bytes, 'base64')); offset = page.nextOffset;
+    } while (offset !== null);
+    assert.equal(Buffer.concat(parts).toString().replace(/\r\n/g, '\n'), expected);
+  } finally {
+    clearTimeout(timer);
+    if (bridge.exitCode === null && bridge.signalCode === null && wrapperPid) {
+      try { process.kill(wrapperPid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+      await ended;
+    }
+    await f.close();
+  }
+});
+
+test('an accepted stop retries the exact output batch after a transient persistence failure', async () => {
+  const source = "process.on('SIGTERM',()=>setTimeout(()=>{process.stdout.write('accepted while stopping\\n');process.exit(0)},100));process.stdout.write('ready\\n');setInterval(()=>{},1000)";
+  const f = await executionFixture(`exec ${shellQuote(process.execPath)} -e ${shellQuote(source)}`);
+  const hook = path.join(path.dirname(f.root), 'fail-stopping-append.cjs');
+  fs.writeFileSync(hook, `const api=require(${JSON.stringify(path.resolve(__dirname, '../out/autonomousRuntimeControl.js'))});const original=api.sendRuntimeDataRequest;let stopping=false,failed=false;
+api.sendRuntimeDataRequest=async function(root,request){
+ if(stopping&&!failed&&request.operation==='append_run_log'){failed=true;throw new Error('ECONNRESET');}
+ const result=await original(root,request);
+ if(request.operation==='read_run_state'&&result.status.stopRequested)stopping=true;
+ return result;
+};`);
+  try {
+    const agent = f.startAgent({ NODE_OPTIONS: `--require=${hook}` }); const ended = once(agent, 'exit');
+    const deadline = Date.now() + 10000;
+    while (!f.stdout().includes(Buffer.from('ready\n'))) {
+      assert.equal(agent.exitCode, null, f.stderr().toString()); assert.ok(Date.now() < deadline);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    const state = await f.call('read_run_state');
+    const stopping = f.call('stop_run', { generation: state.generation, expectedRevision: state.revision, expectedTurnId: state.turnId,
+      reason: '正在原会话中继续处理。', requireVerifiedIdentity: true, outcome: 'partial', idempotencyKey: 'stop-with-transient-append' });
+    assert.equal((await ended)[0], 143); await stopping;
+    const log = await f.call('read_run_log', { stream: 'stdout' });
+    assert.equal(Buffer.from(log.bytes, 'base64').toString(), 'ready\naccepted while stopping\n');
+  } finally { await f.close(); }
+});
+
+test('a real terminal displays complete Unicode and ANSI output after its reader resumes', { skip: process.platform !== 'linux' }, async () => {
+  const expected = '\x1b[32m完整结果🌿\x1b[0m\n'.repeat(4096);
+  const program = "process.stdout.write('\\x1b[32m完整结果🌿\\x1b[0m\\n'.repeat(4096))";
+  const f = await executionFixture(`exec ${shellQuote(process.execPath)} -e ${shellQuote(program)}`, { interactiveSession: true });
+  const bridge = spawn('python3', ['-c', [
+    'import errno, hashlib, os, pty, subprocess, sys, threading',
+    'master, slave = pty.openpty()',
+    'runner = subprocess.Popen(sys.argv[1:], stdin=slave, stdout=slave, stderr=slave)',
+    'os.close(slave)',
+    'print(runner.pid, flush=True)',
+    'chunks = []',
+    'def read_display():',
+    ' sys.stdin.readline()',
+    ' while True:',
+    '  try:',
+    '   chunk = os.read(master, 65536)',
+    '   if not chunk: break',
+    '   chunks.append(chunk)',
+    '  except OSError as error:',
+    '   if error.errno != errno.EIO: raise',
+    '   break',
+    'reader = threading.Thread(target=read_display)',
+    'reader.start()',
+    'code = runner.wait()',
+    'reader.join()',
+    'os.close(master)',
+    "print(hashlib.sha256(b''.join(chunks).replace(b'\\r', b'')).hexdigest(), flush=True)",
+    'sys.exit(code if code >= 0 else 128 - code)'
+  ].join('\n'), process.execPath, path.resolve(__dirname, '../out/runAgentProcess.js'), '--global-data-path', f.root, '--project-path', f.projectRoot, '--execution-log-id', '1'], {
+    stdio: 'pipe', env: { ...process.env, SOLOMAP_TERMINAL_DELIVERY_ID: '' }
+  });
+  const output = []; bridge.stdout.on('data', bytes => output.push(bytes)); bridge.stderr.resume();
+  const ended = once(bridge, 'exit'); let wrapperPid;
+  try {
+    wrapperPid = Number((await once(bridge.stdout, 'data'))[0].toString().trim());
+    const deadline = Date.now() + 10000;
+    while ((await f.call('read_run_log_head', { stream: 'stdout' })).totalBytes < Buffer.byteLength(expected)) {
+      assert.equal(bridge.exitCode, null); assert.ok(Date.now() < deadline);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    bridge.stdin.end('resume\n');
+    assert.equal((await ended)[0], 0);
+    assert.equal(Buffer.concat(output).toString().trim().split('\n')[1], require('node:crypto').createHash('sha256').update(expected).digest('hex'));
+    const parts = []; let offset = 0;
+    do { const page = await f.call('read_run_log', { stream: 'stdout', offset, limit: 8192 }); parts.push(Buffer.from(page.bytes, 'base64')); offset = page.nextOffset; } while (offset !== null);
+    assert.equal(Buffer.concat(parts).toString().replace(/\r/g, ''), expected);
+    assert.equal((await f.call('read_run_state')).status.interactiveSessionClosed, true);
+  } finally {
+    bridge.stdin.end();
+    if (bridge.exitCode === null && bridge.signalCode === null && wrapperPid) {
+      try { process.kill(wrapperPid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+      await ended;
+    }
+    await f.close();
+  }
+});
+
 test('an unsolicited SIGTERM cannot stop a live interactive run without a persisted stop intent', async () => {
   const source = "process.stdout.write('ready\\n');setTimeout(()=>process.stdout.write('still running\\n'),500);setInterval(()=>{},1000)";
   const f = await executionFixture(`env -u NO_COLOR ${shellQuote(process.execPath)} -e ${shellQuote(source)}`, { interactiveSession: true });

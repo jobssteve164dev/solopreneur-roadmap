@@ -43,7 +43,7 @@ async function main(): Promise<void> {
     for (;;) {
       try { return await sendRuntimeDataRequest<T>(globalDataPath, { operation, input }); }
       catch (error) {
-        if (requestedSignal) throw Object.assign(new Error(`执行已停止：${requestedSignal}`), { exitCode: requestedSignal === 'SIGINT' ? 130 : 143 });
+        if (requestedSignal && operation !== 'append_run_log') throw Object.assign(new Error(`执行已停止：${requestedSignal}`), { exitCode: requestedSignal === 'SIGINT' ? 130 : 143 });
         // Persistence is an observer of a live conversation, never its stop
         // authority. Keep this exact batch and idempotency key until recovery.
         if (operation !== 'append_run_log' && !isRuntimeDataTransportError(error)) throw error;
@@ -115,6 +115,7 @@ async function main(): Promise<void> {
   let captures: Promise<void>[] = [];
   let temporaryInput = false;
   let terminationDecision = Promise.resolve();
+  const stopDisplays = new Set<() => void>();
   const continuationStopSummary = (exitCode: number): string | undefined => {
     const intent = state.status.stopRequestIntent as { outcome?: string } | undefined;
     if (state.status.stopRequested && intent?.outcome === 'partial' && !state.status.failureCode && !state.status.failureReason
@@ -130,23 +131,52 @@ async function main(): Promise<void> {
     terminationDecision = (async () => {
       try {
         const latest = await request<RunState>('read_run_state', identity);
-        if (latest.generation !== generation || latest.turnId !== state.turnId || !latest.status.stopRequested) return;
+        const intent = latest.status.stopRequestIntent as { expectedTurnId?: string } | undefined;
+        if (latest.generation !== generation || !latest.status.stopRequested || intent?.expectedTurnId !== latest.turnId) return;
         state = latest;
         requestedSignal = 'SIGTERM';
+        stopDisplays.forEach(stop => stop());
         signalChild('SIGTERM');
       } catch { /* A transport or stale-owner failure is not authority to stop a live Agent. */ }
     })();
   };
-  const onInterrupt = () => { requestedSignal = 'SIGINT'; signalChild('SIGINT'); };
+  const onInterrupt = () => { requestedSignal = 'SIGINT'; stopDisplays.forEach(stop => stop()); signalChild('SIGINT'); };
   process.on('SIGTERM', onTerminate);
   process.on('SIGINT', onInterrupt);
   const displayErrors = new Map<NodeJS.WritableStream, () => void>();
-  const display = (output: NodeJS.WritableStream): ((bytes: Buffer) => Promise<void>) => {
+  const displayFiles: Array<Promise<fs.promises.FileHandle | undefined>> = [];
+  const display = (output: NodeJS.WriteStream, fd: number): ((bytes: Buffer) => Promise<void>) => {
     let available = true;
-    const onError = () => { available = false; };
+    let wake: (() => void) | undefined;
+    const onError = () => { available = false; wake?.(); };
     output.on('error', onError); displayErrors.set(output, onError);
+    stopDisplays.add(onError);
+    // Node's normal POSIX TTY writes can block the event loop. Use an owned
+    // nonblocking descriptor so a paused display cannot prevent a formal stop.
+    const file = output.isTTY && process.platform !== 'win32'
+      ? fs.promises.open(`/dev/fd/${fd}`, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOCTTY).catch(() => undefined)
+      : undefined;
+    if (file) displayFiles.push(file);
     return async bytes => {
       if (!available) return;
+      if (file) {
+        const handle = await file;
+        if (!handle) { onError(); return; }
+        let offset = 0;
+        while (available && offset < bytes.length) {
+          try { offset += (await handle.write(bytes, offset, bytes.length - offset)).bytesWritten; }
+          catch (error) {
+            if (!['EAGAIN', 'EWOULDBLOCK', 'EINTR'].includes(String((error as NodeJS.ErrnoException).code))) { onError(); return; }
+            await new Promise<void>(resolve => {
+              const timer = setTimeout(done, 20);
+              function done() { clearTimeout(timer); wake = undefined; resolve(); }
+              wake = done;
+              if (!available) done();
+            });
+          }
+        }
+        return;
+      }
       await new Promise<void>(resolve => {
         const onBroken = () => { available = false; resolve(); };
         output.once('error', onBroken);
@@ -155,7 +185,7 @@ async function main(): Promise<void> {
       });
     };
   };
-  const stdoutDisplay = display(process.stdout); const stderrDisplay = display(process.stderr);
+  const stdoutDisplay = display(process.stdout, 1); const stderrDisplay = display(process.stderr, 2);
   const capture = async (stream: NodeJS.ReadableStream, name: string, forward: (bytes: Buffer) => Promise<void>, head: { nextSequence: number; totalBytes: number }): Promise<void> => {
     let sequence = head.nextSequence;
     let offset = head.totalBytes;
@@ -348,6 +378,7 @@ async function main(): Promise<void> {
     if (child && child.exitCode === null && child.signalCode === null) { signalChild('SIGTERM'); await exited?.catch(() => undefined); }
     if (temporaryInput) await request('release_run_prompt', { ...identity, generation, proof });
     displayErrors.forEach((listener, output) => output.removeListener('error', listener));
+    await Promise.all(displayFiles.map(async file => { await (await file)?.close(); }));
   }
 }
 
