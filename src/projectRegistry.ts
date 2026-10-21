@@ -61,8 +61,8 @@ function acceptRegistrySnapshot(root: string, snapshot: ProjectRegistrySnapshot)
 
 async function registryOperation(root: string, operation?: RegistryOperation): Promise<RegistryOperation> {
   if (operation) return operation;
-  const { sendRuntimeDataRequest } = await import('./autonomousRuntimeControl');
-  return (name, input) => sendRuntimeDataRequest(root, { operation: name, input });
+  const { default: runtimeControl } = await import('./autonomousRuntimeControl.js');
+  return (name, input) => runtimeControl.sendRuntimeDataRequest(root, { operation: name, input });
 }
 
 export async function refreshProjectRegistry(globalDataPath: string, bootstrap?: () => ProjectRegistryBootstrap, operation?: RegistryOperation): Promise<ProjectRegistrySnapshot> {

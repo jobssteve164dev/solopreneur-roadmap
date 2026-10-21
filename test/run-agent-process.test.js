@@ -747,6 +747,49 @@ for (const nextTurn of [false, true]) test(`a continuation stop drains accepted 
   }
 });
 
+for (const stream of ['stdout', 'stderr']) test(`a continuation stop drains accepted output when a real ${stream} display pipe stops reading`, async () => {
+  const expected = 'accepted before pipe pause\n'.repeat(6000);
+  const program = `process.${stream}.write('accepted before pipe pause\\n'.repeat(6000));setInterval(()=>{},1000)`;
+  // An interactive PTY merges the native child's stderr into stdout.
+  const f = await executionFixture(`exec ${shellQuote(process.execPath)} -e ${shellQuote(program)}`, { interactiveSession: stream === 'stdout' });
+  let timer;
+  try {
+    const agent = f.startAgent();
+    agent[stream].removeAllListeners('data'); agent[stream].pause();
+    const ended = once(agent, 'exit');
+    const deadline = Date.now() + 10000;
+    while ((await f.call('read_run_log_head', { stream })).totalBytes < Buffer.byteLength(expected)) {
+      assert.ok(Date.now() < deadline, 'the accepted output must reach persistence');
+      assert.equal(agent.exitCode, null);
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    let state = await f.call('read_run_checkpoint_state');
+    const savedOutcome = stream === 'stderr' ? 'failed' : 'partial';
+    state = await f.call('checkpoint_run', { generation: state.generation, proof: state.proof, expectedRevision: state.revision,
+      expectedTurnId: state.turnId, action: 'complete', outcome: savedOutcome, summary: '原轮结果已保存', idempotencyKey: 'save-before-pipe-stop' });
+    const stopping = f.call('stop_run', { generation: state.generation, expectedRevision: state.revision, expectedTurnId: state.turnId,
+      reason: '正在原会话中继续处理。', requireVerifiedIdentity: true, outcome: 'partial', idempotencyKey: 'stop-paused-pipe' });
+    void stopping.catch(() => {});
+    const stopped = await Promise.race([stopping, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('continuation is blocked by display pipe backpressure')), 5000);
+    })]);
+    assert.equal(stopped.status.interactiveSessionClosed, true);
+    assert.equal(stopped.status.checkpointOutcome, savedOutcome);
+    assert.equal(stopped.status.checkpointSummary, '原轮结果已保存');
+    assert.equal(stopped.turnId, state.turnId);
+    assert.equal((await ended)[0], 143);
+    const chunks = []; let offset = 0;
+    do {
+      const page = await f.call('read_run_log', { stream, offset, limit: 8192 });
+      chunks.push(Buffer.from(page.bytes, 'base64')); offset = page.nextOffset;
+    } while (offset !== null);
+    assert.equal(Buffer.concat(chunks).toString().replace(/\r\n/g, '\n'), expected);
+    const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation, input) => f.call(operation, input), f.root);
+    const reference = require('../out/runLifecycleClient.js').runStatusReference(f.projectRoot, 1);
+    assert.equal((await client.readLog(reference, stream, await client.readStatus(reference))).toString().replace(/\r\n/g, '\n'), expected);
+  } finally { clearTimeout(timer); await f.close(); }
+});
+
 test('an accepted stop retries the exact output batch after a transient persistence failure', async () => {
   const source = "process.on('SIGTERM',()=>setTimeout(()=>{process.stdout.write('accepted while stopping\\n');process.exit(0)},100));process.stdout.write('ready\\n');setInterval(()=>{},1000)";
   const f = await executionFixture(`exec ${shellQuote(process.execPath)} -e ${shellQuote(source)}`);

@@ -72,7 +72,7 @@ import {
 interface SidebarProviderDependencies {
   getSettings: () => SolopreneurSettings;
   updateSettings: (settings: Partial<SolopreneurSettings>) => Promise<void>;
-  getProjects: () => { projects: SolopreneurProject[]; selectedProjectPath: string };
+  getProjects: () => { projects: SolopreneurProject[]; selectedProjectPath: string; projectGeneration?: number };
   getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
   getStepConversationHistory?: (projectPath: string, nodeId: string) => Promise<AgentConversation[]>;
   getProjectConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
@@ -91,7 +91,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   private readonly _projectLoader: SidebarProjectLoader;
   private readonly _getSettings: () => SolopreneurSettings;
   private readonly _updateSettings: (settings: Partial<SolopreneurSettings>) => Promise<void>;
-  private readonly _getProjects: () => { projects: SolopreneurProject[]; selectedProjectPath: string };
+  private readonly _getProjects: SidebarProviderDependencies['getProjects'];
+  private _projectSelectionGeneration = 0;
   private readonly _getSoloConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
   private readonly _getStepConversationHistory?: (projectPath: string, nodeId: string) => Promise<AgentConversation[]>;
   private readonly _getProjectConversationHistory?: (projectPath: string) => Promise<AgentConversation[]>;
@@ -252,7 +253,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       this._latestPortfolio = portfolio;
       message = {
         ...message,
-        projects: { ...message.projects, portfolio }
+        projects: { ...message.projects, selectedProjectPath: this._getProjects().selectedProjectPath,
+          projectGeneration: this.currentProjectGeneration(), portfolio }
       };
     }
     return message;
@@ -569,6 +571,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       return postWebviewMessage(this._view.webview, {
         command: 'nodesUpdated',
         nodes: nodes,
+        projectGeneration: this.currentProjectGeneration(),
         projectPath: this._getProjects().selectedProjectPath
       });
     } catch (error) {
@@ -595,8 +598,15 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  public sendProjectSelection(projectRoot: string, generation: number) {
-    void this.postMessage({ command: 'projectSelectionChanged', projectRoot, generation });
+  public sendProjectSelection(projectRoot: string, generation: number, interactionId = '', accepted = true) {
+    this._projectSelectionGeneration = generation;
+    this._latestConversationSnapshotRequest.clear();
+    this._latestConversationHistoryRequest.clear();
+    void this.postMessage({ command: 'projectSelectionChanged', projectRoot, generation, interactionId, accepted });
+  }
+
+  private currentProjectGeneration(): number {
+    return this._getProjects().projectGeneration ?? this._projectSelectionGeneration;
   }
 
   public postSkillInstallResult(success: boolean, message: string) {
@@ -634,10 +644,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       this._corePortfolioRequest += 1;
       this._projectLoader.cancelExternalLoads();
       const projectState = this._getProjects();
+      const conversationGeneration = this.currentProjectGeneration();
+      const conversationLedgerRevision = this._conversationLedgerRevisions.get(projectState.selectedProjectPath) || 0;
       const globalDataPath = normalizeGlobalDataPath(this._getSettings().globalDataPath, projectState.projects);
       const rootState = this.captureDataRoot(globalDataPath, projectState.selectedProjectPath);
       if (projectState.projects.length === 0) {
-        this.postCorePortfolio([], projectState.selectedProjectPath, [], globalDataPath);
+        this.postCorePortfolio([], projectState.selectedProjectPath, [], globalDataPath, null, true);
         this.sendDailyReview();
         return;
       }
@@ -677,8 +689,9 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       if (!this._view
         || requestId !== this._projectLoadRequest
         || !this.isCurrentDataRoot(rootState.root, rootState.generation)) return;
-      if (cachedConversation) {
-        this.postProjectConversationSnapshot(projectState.selectedProjectPath, cachedConversation);
+      if (conversationGeneration !== this.currentProjectGeneration()) return;
+      if (cachedConversation && conversationLedgerRevision === (this._conversationLedgerRevisions.get(projectState.selectedProjectPath) || 0)) {
+        this.postProjectConversationSnapshot(projectState.selectedProjectPath, cachedConversation, conversationGeneration);
       }
       if (!cachedConversation) {
         void this.sendProjectConversationSnapshot(projectState.selectedProjectPath);
@@ -750,9 +763,13 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   ): Promise<void> {
     for (const project of projects) {
       if (!project.path || project.path === selectedProjectPath) continue;
+      const projectGeneration = this.currentProjectGeneration();
+      const ledgerRevision = this._conversationLedgerRevisions.get(project.path) || 0;
       const projectConversation = await readCachedConversationSnapshot(globalDataPath, project.path);
       if (!this._view || requestId !== this._projectLoadRequest || !this.isCurrentDataRoot(rootState.root, rootState.generation)) return;
-      if (projectConversation) this.postProjectConversationSnapshot(project.path, projectConversation);
+      if (projectGeneration !== this.currentProjectGeneration()) return;
+      if (ledgerRevision !== (this._conversationLedgerRevisions.get(project.path) || 0)) continue;
+      if (projectConversation) this.postProjectConversationSnapshot(project.path, projectConversation, projectGeneration);
       else void this.sendProjectConversationSnapshot(project.path);
     }
   }
@@ -783,7 +800,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     selectedProjectPath: string,
     portfolio: ProjectPortfolioSummary[],
     globalDataPath: string,
-    recentConversationSnapshot: SidebarConversationSnapshot | null = null
+    recentConversationSnapshot: SidebarConversationSnapshot | null = null,
+    coreLoaded = false
   ): void {
     const previousDataRoot = this._activeDataRoot;
     const rootState = this.captureDataRoot(globalDataPath, selectedProjectPath);
@@ -795,7 +813,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     const globalStore = createGlobalEngineeringSnapshotPlaceholder(globalDataPath, currentPortfolio);
     void this.postMessage({
       command: 'projectsLoaded',
-      projects: { projects, selectedProjectPath, portfolio: currentPortfolio, globalStore, recentConversationSnapshot, coreLoaded: true, diagnosticTraceId: this._startupTrace?.id }
+      projects: { projects, selectedProjectPath: this._getProjects().selectedProjectPath, projectGeneration: this.currentProjectGeneration(), portfolio: currentPortfolio, globalStore, recentConversationSnapshot, coreLoaded, diagnosticTraceId: this._startupTrace?.id }
     });
   }
 
@@ -861,9 +879,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           projects.map((project) => summaries.get(project.path)).filter(Boolean) as ProjectPortfolioSummary[]
         );
         this._latestPortfolio = portfolio;
-        if (projects.length === 0) {
-          this.postCorePortfolio(projects, selectedProjectPath, portfolio, globalDataPath);
-        }
+        if (ordered.length === 0) this.postCorePortfolio(projects, selectedProjectPath, portfolio, globalDataPath, null, true);
         if (portfolio.length === projects.length && this.isCurrentDataRoot(rootState.root, rootState.generation, selectedProjectPath)) {
           void reservation.then(value => value
             && requestId === this._corePortfolioRequest
@@ -912,9 +928,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         command: 'projectsLoaded',
         projects: {
           projects,
-          selectedProjectPath,
+          selectedProjectPath: currentProjectState.selectedProjectPath,
+          projectGeneration: this.currentProjectGeneration(),
           portfolio,
           globalStore,
+          coreLoaded: index === ordered.length - 1,
+          diagnosticTraceId: this._startupTrace?.id,
           updatedProjectPaths: [project.path]
         }
       });
@@ -924,6 +943,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   public async sendSoloConversationHistory(projectPath: string) {
+    const projectGeneration = this.currentProjectGeneration();
     const ledgerRevision = this._conversationLedgerRevisions.get(projectPath) || 0;
     try {
       if (!this._view || !this._getSoloConversationHistory || !projectPath) {
@@ -934,11 +954,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const requestId = ++this._conversationHistoryRequest;
       this._latestConversationHistoryRequest.set(requestKey, requestId);
       const conversations = await this._getSoloConversationHistory(projectPath);
-      if (ledgerRevision !== (this._conversationLedgerRevisions.get(projectPath) || 0)
+      if (projectGeneration !== this.currentProjectGeneration() || ledgerRevision !== (this._conversationLedgerRevisions.get(projectPath) || 0)
         || this._latestConversationHistoryRequest.get(requestKey) !== requestId
         || !this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) return;
       void this.postMessage({
         command: 'sidebarSoloConversationLoaded',
+        projectGeneration,
         projectPath,
         conversations
       });
@@ -948,6 +969,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   public async sendStepConversationHistory(projectPath: string, nodeId: string) {
+    const projectGeneration = this.currentProjectGeneration();
     const ledgerRevision = this._conversationLedgerRevisions.get(projectPath) || 0;
     try {
       if (!this._view || !this._getStepConversationHistory || !projectPath || !nodeId) {
@@ -958,11 +980,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const requestId = ++this._conversationHistoryRequest;
       this._latestConversationHistoryRequest.set(requestKey, requestId);
       const conversations = await this._getStepConversationHistory(projectPath, nodeId);
-      if (ledgerRevision !== (this._conversationLedgerRevisions.get(projectPath) || 0)
+      if (projectGeneration !== this.currentProjectGeneration() || ledgerRevision !== (this._conversationLedgerRevisions.get(projectPath) || 0)
         || this._latestConversationHistoryRequest.get(requestKey) !== requestId
         || !this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) return;
       void this.postMessage({
         command: 'sidebarStepConversationLoaded',
+        projectGeneration,
         projectPath,
         nodeId,
         conversations
@@ -973,6 +996,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   public async sendProjectConversationHistory(projectPath: string) {
+    const projectGeneration = this.currentProjectGeneration();
     const ledgerRevision = this._conversationLedgerRevisions.get(projectPath) || 0;
     try {
       if (!this._view || !this._getProjectConversationHistory || !projectPath) {
@@ -983,11 +1007,12 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const requestId = ++this._conversationHistoryRequest;
       this._latestConversationHistoryRequest.set(requestKey, requestId);
       const conversations = await this._getProjectConversationHistory(projectPath);
-      if (ledgerRevision !== (this._conversationLedgerRevisions.get(projectPath) || 0)
+      if (projectGeneration !== this.currentProjectGeneration() || ledgerRevision !== (this._conversationLedgerRevisions.get(projectPath) || 0)
         || this._latestConversationHistoryRequest.get(requestKey) !== requestId
         || !this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) return;
       void this.postMessage({
         command: 'sidebarProjectConversationLoaded',
+        projectGeneration,
         projectPath,
         conversations
       });
@@ -997,6 +1022,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
   }
 
   public async sendProjectConversationSnapshot(projectPath: string, force = false, supersedeInFlight = false) {
+    const projectGeneration = this.currentProjectGeneration();
     const requestId = ++this._conversationSnapshotRequest;
     let claimedSnapshotLoad: Promise<SidebarConversationSnapshot> | null = null;
     let requestKey = '';
@@ -1006,10 +1032,16 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       const rootState = this.captureDataRoot(globalDataPath, projectPath);
       requestKey = `${rootState.root}\0${projectPath}`;
       this._latestConversationSnapshotRequest.set(requestKey, requestId);
+      const ledgerRevision = this._conversationLedgerRevisions.get(projectPath) || 0;
+      const isCurrent = () => this._latestConversationSnapshotRequest.get(requestKey) === requestId
+        && projectGeneration === this.currentProjectGeneration()
+        && ledgerRevision === (this._conversationLedgerRevisions.get(projectPath) || 0)
+        && this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath);
       const cached = supersedeInFlight ? null : await readCachedConversationSnapshot(rootState.root, projectPath);
+      if (!isCurrent()) return;
       if (cached) {
         if (this._latestConversationSnapshotRequest.get(requestKey) === requestId && this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) {
-          this.postProjectConversationSnapshot(projectPath, cached);
+          this.postProjectConversationSnapshot(projectPath, cached, projectGeneration);
         }
         if (!force || !this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) return;
       }
@@ -1017,6 +1049,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       let snapshotLoad = this._conversationSnapshotLoads.get(requestKey);
       if (!snapshotLoad || supersedeInFlight) {
         const sourceSignature = await buildConversationDatabaseSignature(rootState.root, projectPath);
+        if (!isCurrent()) return;
         if (!supersedeInFlight) snapshotLoad = this._conversationSnapshotLoads.get(requestKey);
         if (!snapshotLoad || supersedeInFlight) {
           snapshotLoad = {
@@ -1029,16 +1062,17 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
       }
       claimedSnapshotLoad = snapshotLoad.promise;
       const snapshot = await snapshotLoad.promise;
-      if (this._latestConversationSnapshotRequest.get(requestKey) === requestId && this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) {
-        if (snapshotLoad.sourceSignature !== await buildConversationDatabaseSignature(rootState.root, projectPath)) {
-          if (!this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) return;
+      if (isCurrent()) {
+        const sourceSignature = await buildConversationDatabaseSignature(rootState.root, projectPath);
+        if (!isCurrent()) return;
+        if (snapshotLoad.sourceSignature !== sourceSignature) {
           await this.sendProjectConversationSnapshot(projectPath, true, true);
           return;
         }
         if (!this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) return;
         await writeCachedConversationSnapshot(rootState.root, projectPath, snapshotLoad.sourceSignature, snapshot);
-        if (!this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) return;
-        this.postProjectConversationSnapshot(projectPath, snapshot);
+        if (!isCurrent()) return;
+        this.postProjectConversationSnapshot(projectPath, snapshot, projectGeneration);
       }
     } catch (error) {
       console.error('SoloMap sidebar failed to send project conversation snapshot:', error);
@@ -1058,9 +1092,10 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     await this.sendProjectConversationSnapshot(projectPath, true, true);
   }
 
-  private postProjectConversationSnapshot(projectPath: string, snapshot: SidebarConversationSnapshot): void {
+  private postProjectConversationSnapshot(projectPath: string, snapshot: SidebarConversationSnapshot, projectGeneration: number): void {
     void this.postMessage({
       command: 'sidebarProjectConversationSnapshotLoaded',
+      projectGeneration,
       projectPath,
       soloConversations: snapshot.solo,
       projectConversations: snapshot.project,

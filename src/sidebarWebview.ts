@@ -4896,6 +4896,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     ${getDatabaseOverviewScript()}
     let currentNodes = [];
     let activeProjectPath = '';
+    let projectGeneration = 0;
+    let lastNodesMessage = '';
+    let pendingProjectSelectionPath = '';
+    let pendingProjectSelectionInteractionId = '';
+    let projectSelectionRequestSequence = 0;
+    const projectSelectionClientId = Math.random().toString(36).slice(2);
     let activePortfolioFilter = 'all';
     let sidebarSoloConversations = [];
     const sidebarSoloConversationsByProject = {};
@@ -4934,9 +4940,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let initialDataReadyReported = false;
     let coreDiagnosticTraceId = '';
     let coreDiagnosticReadyReported = false;
+    let coreNodesProjectPath = '';
+    let coreNodesGeneration = -1;
+    const coreConversationProjects = new Map();
     const navigationStartedAt = new Map();
     function reportSidebarCoreReady() {
-      if (!settingsDataLoaded || !coreDiagnosticTraceId || coreDiagnosticReadyReported) return;
+      if (!settingsDataLoaded || !projectDataLoaded || !coreDiagnosticTraceId || coreDiagnosticReadyReported) return;
+      const projectPath = currentProjects.selectedProjectPath;
+      if (projectPath && (coreNodesProjectPath !== projectPath || coreNodesGeneration !== projectGeneration
+        || coreConversationProjects.get(projectPath) !== projectGeneration)) return;
       coreDiagnosticReadyReported = true;
       const report = () => vscode.postMessage({ command: 'sidebarCoreDataReady', traceId: coreDiagnosticTraceId });
       if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => requestAnimationFrame(report));
@@ -5532,7 +5544,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       collaborationNotice = t('collaborationAddedToAgent');
       collaborationPanel.style.display = 'none';
       if (projectPath !== currentProjects.selectedProjectPath) {
-        vscode.postMessage({ command: 'project.select', projectPath });
+        selectProjectInSidebar(projectPath);
       } else {
         renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
       }
@@ -6896,6 +6908,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     function resetProjectScopedState(projectPath, clearNodes) {
       if (activeProjectPath) sidebarProjectInteractionStates.set(activeProjectPath, currentSidebarInteractionState());
       activeProjectPath = projectPath || '';
+      lastNodesMessage = '';
       issueDraftTitle = '';
       issueDraftBody = '';
       issueDraftCategory = '';
@@ -8643,6 +8656,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     // Handle messages
     window.addEventListener('message', event => {
       const message = event.data;
+      if (Number(message.projectGeneration ?? message.projects?.projectGeneration) < projectGeneration) return;
+      if (pendingProjectSelectionPath && ['nodesUpdated', 'sidebarSoloConversationLoaded', 'sidebarStepConversationLoaded',
+        'sidebarProjectConversationLoaded', 'sidebarProjectConversationSnapshotLoaded'].includes(message.command)) return;
       switch (message.command) {
         case 'uiStateLoaded': {
           if (message.view !== 'sidebar') break;
@@ -8766,16 +8782,41 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           intelligenceError.textContent = t('intelligenceError');
           intelligenceError.style.display = 'block';
           break;
+        case 'projectSelectionChanged':
+          if (pendingProjectSelectionInteractionId && message.interactionId !== pendingProjectSelectionInteractionId) break;
+          if (Number(message.generation) < projectGeneration) break;
+          projectGeneration = Number(message.generation) || 0;
+          pendingProjectSelectionPath = '';
+          pendingProjectSelectionInteractionId = '';
+          if (message.projectRoot !== activeProjectPath) {
+            if (message.projectRoot) activateProjectInSidebar(message.projectRoot);
+            else {
+              resetProjectScopedState('', true);
+              currentProjects.selectedProjectPath = '';
+              renderProjects(currentProjects.projects, '');
+              renderPortfolioFromAsyncUpdate(currentProjects.portfolio, '');
+            }
+            renderSidebar(currentNodes);
+          }
+          break;
         case 'nodesUpdated':
+          if (Number(message.projectGeneration) < projectGeneration) break;
           if (message.projectPath && activeProjectPath && message.projectPath !== activeProjectPath) {
             return;
           }
           if (message.projectPath && !activeProjectPath) {
             activeProjectPath = message.projectPath;
           }
+          const nodesGeneration = Number(message.projectGeneration ?? projectGeneration);
+          const nodesMessage = JSON.stringify([activeProjectPath, nodesGeneration, message.nodes || []]);
+          if (nodesMessage === lastNodesMessage) break;
+          lastNodesMessage = nodesMessage;
           currentNodes = message.nodes || [];
           renderSidebar(message.nodes);
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          coreNodesProjectPath = message.projectPath || activeProjectPath;
+          coreNodesGeneration = nodesGeneration;
+          reportSidebarCoreReady();
           break;
 
         case 'navigationReady': {
@@ -8788,7 +8829,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         }
         case 'settingsLoaded':
           if (message.requestId && message.requestId !== latestSettingsRequestId) break;
-          settingsDataLoaded = true;
+          if (message.hydrated !== false) settingsDataLoaded = true;
           reportSidebarCoreReady();
           const loadedSettings = message.settings || {};
           const authoritativeHydration = message.hydrated === true
@@ -8915,6 +8956,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         }
 
         case 'projectsLoaded':
+          if (Number(message.projects.projectGeneration) < projectGeneration) break;
+          projectGeneration = Number(message.projects.projectGeneration) || projectGeneration;
           projectDataLoaded = true;
           const previousSelectedProjectPath = currentProjects.selectedProjectPath;
           const previousProjectDataRoot = String(currentProjects.globalStore && currentProjects.globalStore.dataPath || '');
@@ -8927,6 +8970,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
               ? activeProjectPath
               : incomingSelectedProjectPath;
           if (projectDataRootChanged) {
+            pendingProjectSelectionPath = '';
+            pendingProjectSelectionInteractionId = '';
+            coreConversationProjects.clear();
             pendingSidebarAgentActions.clear();
             pendingConversationContinuations.clear();
             for (const timer of uiStateSaveTimers.values()) clearTimeout(timer);
@@ -9210,6 +9256,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
         case 'dailyReviewLoaded':
           currentDailyReview = message.review || null;
+          startDailyReviewPolling();
           if (currentDailyReview && currentDailyReview.feedbackOutcome === 'ignored' && currentDailyReview.decisionId) {
             ignoredTodayDecisionIds.add(String(currentDailyReview.decisionId));
           }
@@ -9311,6 +9358,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'sidebarProjectConversationSnapshotLoaded':
+          coreConversationProjects.set(message.projectPath, Number(message.projectGeneration ?? projectGeneration));
+          reportSidebarCoreReady();
           if (sidebarProjectConversationRequested[message.projectPath]
             && sameConversations(sidebarSoloConversationsByProject[message.projectPath], message.soloConversations)
             && sameConversations(sidebarProjectConversations[message.projectPath], message.projectConversations)
@@ -9534,11 +9583,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         searchInput.value = '';
         searchInput.dispatchEvent(new Event('input', { bubbles: true }));
       }
-      activateProjectInSidebar(value);
-      vscode.postMessage({
-        command: 'project.select',
-        projectPath: value
-      });
+      selectProjectInSidebar(value);
     });
 
     projectSelect.addEventListener('input', (event) => {
@@ -10819,8 +10864,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         const projectPath = item && item.projectPath ? String(item.projectPath) : '';
         if (!projectPath) return;
         recordTodayDecisionFeedback(projectPath);
-        activateProjectInSidebar(projectPath);
-        vscode.postMessage({ command: 'project.select', projectPath });
+        selectProjectInSidebar(projectPath);
         if (item.nodeId) {
           vscode.postMessage({ command: 'showFullRoadmap' });
         }
@@ -10981,11 +11025,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             const projectPath = item.getAttribute('data-global-focus-project') || '';
             recordTodayDecisionFeedback(projectPath);
             if (projectPath === currentProjects.selectedProjectPath) return;
-            activateProjectInSidebar(projectPath);
-            vscode.postMessage({
-              command: 'project.select',
-              projectPath
-            });
+            selectProjectInSidebar(projectPath);
             const proj = (portfolio || []).find(p => p.path === projectPath);
             if (proj && proj.recommendedNodeId) {
               vscode.postMessage({ command: 'showFullRoadmap' });
@@ -11006,8 +11046,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
                 agentCli: getEffectiveSettingCliPath()
               });
             } else {
-              activateProjectInSidebar(projectPath);
-              vscode.postMessage({ command: 'project.select', projectPath });
+              selectProjectInSidebar(projectPath);
               vscode.postMessage({ command: 'showFullRoadmap' });
             }
           });
@@ -11028,7 +11067,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         });
         const ignoreTodayDecisionButton = globalFocusPanel.querySelector('[data-ignore-today-decision]');
         if (ignoreTodayDecisionButton) ignoreTodayDecisionButton.addEventListener('click', ignoreTodayDecision);
-        startDailyReviewPolling();
       }
 
 
@@ -11831,11 +11869,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (event.target.closest('button') || event.target.closest('input') || event.target.closest('textarea') || event.target.closest('[data-solo-select]') || event.target.closest('[data-sidebar-solo-history]') || event.target.closest('[data-issue-panel]') || event.target.closest('[data-delivery-action-panel]')) return;
           const projectPath = card.getAttribute('data-select-project-path') || '';
           if (projectPath === currentProjects.selectedProjectPath) return;
-          activateProjectInSidebar(projectPath, true);
-          vscode.postMessage({
-            command: 'project.select',
-            projectPath
-          });
+          selectProjectInSidebar(projectPath, true);
         });
       });
       portfolioList.querySelectorAll('[data-open-project-path]').forEach(button => {
@@ -12290,6 +12324,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           previouslyFocused.focus();
         }
       }
+    }
+
+    function selectProjectInSidebar(projectPath, preservePortfolioFilter = false) {
+      if (!projectPath) return;
+      pendingProjectSelectionPath = projectPath;
+      pendingProjectSelectionInteractionId = 'sidebar-project-' + projectSelectionClientId + '-' + (++projectSelectionRequestSequence);
+      activateProjectInSidebar(projectPath, preservePortfolioFilter);
+      vscode.postMessage({ command: 'project.select', projectPath, interactionId: pendingProjectSelectionInteractionId });
     }
 
     function activateProjectInSidebar(projectPath, preservePortfolioFilter = false) {

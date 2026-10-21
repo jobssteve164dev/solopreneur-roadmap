@@ -3688,6 +3688,8 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     'project selection must let the host serve the cached snapshot instead of issuing a duplicate webview request'
   );
   assert.equal(postedMessages.filter((message) => message.command === 'project.select' && message.projectPath === '/workspace/second').length, 1);
+  dispatchMessage({ command: 'projectSelectionChanged', projectRoot: '/workspace/second', generation: 2,
+    interactionId: postedMessages.filter(message => message.command === 'project.select').at(-1).interactionId });
   assert.equal(
     postedMessages.filter((message) => message.command === 'conversation.getHistory' || message.command === 'conversation.getProjectHistory').length,
     0
@@ -3989,6 +3991,160 @@ test('sidebar starts background work after rendering when the webview cannot pai
   assert.equal(postedMessages.filter(message => message.command === 'sidebarInitialDataReady').length, 1);
 });
 
+for (const surface of ['sidebar', 'roadmap']) test(`${surface} consumes authoritative selection and rejects an older A-B-A reply`, () => {
+  const html = surface === 'sidebar'
+    ? require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot))
+    : require('../out/roadmapWebview.js').getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  const { context, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]), `
+    this.selection = () => ({ active: activeProjectPath, selected: currentProjects.selectedProjectPath, nodes: currentNodes.map(node => node.id) });
+  `);
+  const projects = [{ name: 'A', path: '/fixture/a' }, { name: 'B', path: '/fixture/b' }];
+  dispatchMessage({ command: 'projectsLoaded', projects: { projects, selectedProjectPath: '/fixture/a', portfolio: [], projectGeneration: 1 } });
+  dispatchMessage({ command: 'projectSelectionChanged', projectRoot: '/fixture/b', generation: 2 });
+  assert.equal(context.selection().active, '/fixture/b', 'the other view must follow the host selection');
+  assert.equal(context.selection().selected, '/fixture/b');
+  dispatchMessage({ command: 'projectSelectionChanged', projectRoot: '/fixture/a', generation: 3 });
+  dispatchMessage({ command: 'nodesUpdated', projectPath: '/fixture/a', projectGeneration: 3, nodes: [{ id: 'new-a', title: '当前任务', stage: '实施', status: 'Pending', dependencies: '' }] });
+  dispatchMessage({ command: 'nodesUpdated', projectPath: '/fixture/a', projectGeneration: 1, nodes: [] });
+  dispatchMessage({ command: 'projectsLoaded', projects: { projects, selectedProjectPath: '/fixture/b', portfolio: [], projectGeneration: 2 } });
+  dispatchMessage({ command: 'projectSelectionChanged', projectRoot: '/fixture/b', generation: 2 });
+  assert.equal(context.selection().active, '/fixture/a');
+  assert.equal(context.selection().selected, '/fixture/a');
+  assert.deepEqual(Array.from(context.selection().nodes), ['new-a']);
+});
+
+for (const surface of ['sidebar', 'roadmap']) test(`${surface} leaves task DOM intact for identical node replies`, () => {
+  const html = surface === 'sidebar'
+    ? require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot))
+    : require('../out/roadmapWebview.js').getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  const { elements, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]));
+  const target = elements[surface === 'sidebar' ? 'portfolio-list' : 'canvas'];
+  let writes = 0, content = target.innerHTML;
+  Object.defineProperty(target, 'innerHTML', { get: () => content, set: value => { writes++; content = value; } });
+  dispatchMessage({ command: 'nodesUpdated', projectPath: '/fixture/app', nodes: [] });
+  const first = writes;
+  assert.ok(first > 0);
+  dispatchMessage({ command: 'nodesUpdated', projectPath: '/fixture/app', nodes: [] });
+  assert.equal(writes, first, 'the unchanged result must not replace an actionable DOM');
+});
+
+test('a delayed host acknowledgement cannot undo the latest optimistic sidebar selection', () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const { context, postedMessages, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]), `
+    this.choose = selectProjectInSidebar;
+    this.active = () => activeProjectPath;
+    this.nodes = () => currentNodes.map(node => node.id);
+  `);
+  dispatchMessage({ command: 'projectsLoaded', projects: { projects: [{ name: 'A', path: '/fixture/a' }, { name: 'B', path: '/fixture/b' }], selectedProjectPath: '/fixture/a', portfolio: [], projectGeneration: 1 } });
+  context.choose('/fixture/b'); context.choose('/fixture/a');
+  const choices = postedMessages.filter(message => message.command === 'project.select');
+  dispatchMessage({ command: 'nodesUpdated', projectPath: '/fixture/a', projectGeneration: 1, nodes: [{ id: 'stale-a' }] });
+  assert.deepEqual(Array.from(context.nodes()), [], 'the old A request cannot commit before the latest click is acknowledged');
+  dispatchMessage({ command: 'projectSelectionChanged', projectRoot: '/fixture/b', generation: 2, interactionId: choices[0].interactionId });
+  assert.equal(context.active(), '/fixture/a');
+  dispatchMessage({ command: 'projectSelectionChanged', projectRoot: '/fixture/a', generation: 3, interactionId: choices[1].interactionId });
+  assert.equal(context.active(), '/fixture/a');
+});
+
+test('roadmap project choices stay authoritative while earlier host acknowledgements arrive', () => {
+  const html = require('../out/roadmapWebview.js').getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  const { context, elements, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]), 'this.active = () => activeProjectPath; this.nodes = () => currentNodes.map(node => node.id);');
+  const select = elements['project-select'];
+  const choose = value => select.listeners.click({ target: select.__options.find(option => option.getAttribute('data-solo-option-value') === value), stopPropagation() {} });
+  dispatchMessage({ command: 'projectsLoaded', projects: { projects: [{ name: 'A', path: '/fixture/a' }, { name: 'B', path: '/fixture/b' }], selectedProjectPath: '/fixture/a', portfolio: [], projectGeneration: 1 } });
+  choose('/fixture/b'); assert.equal(context.active(), '/fixture/b');
+  choose('/fixture/a');
+  dispatchMessage({ command: 'nodesUpdated', projectPath: '/fixture/a', projectGeneration: 1, nodes: [{ id: 'stale-a', title: '旧任务', stage: '实施', status: 'Pending', dependencies: '' }] });
+  assert.deepEqual(Array.from(context.nodes()), [], 'the old A request cannot commit before the latest click is acknowledged');
+  dispatchMessage({ command: 'projectSelectionChanged', projectRoot: '/fixture/b', generation: 2 });
+  dispatchMessage({ command: 'roadmapLoading', projectPath: '/fixture/b', projectGeneration: 2 });
+  assert.equal(context.active(), '/fixture/a');
+  dispatchMessage({ command: 'projectSelectionChanged', projectRoot: '/fixture/a', generation: 3 });
+  assert.equal(context.active(), '/fixture/a');
+});
+
+for (const surface of ['sidebar', 'roadmap']) test(`${surface} matches repeated project choices to their own host acknowledgements`, () => {
+  const html = surface === 'sidebar'
+    ? require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot))
+    : require('../out/roadmapWebview.js').getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  const { context, elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]), 'this.active = () => activeProjectPath;');
+  dispatchMessage({ command: 'projectsLoaded', projects: { projects: [{ name: 'A', path: '/fixture/a' }, { name: 'B', path: '/fixture/b' }], selectedProjectPath: '/fixture/a', portfolio: [], projectGeneration: 1 } });
+  const select = elements['project-select'];
+  for (const value of ['/fixture/b', '/fixture/a', '/fixture/b']) {
+    select.listeners.click({ target: select.__options.find(option => option.getAttribute('data-solo-option-value') === value), stopPropagation() {} });
+  }
+  const requests = postedMessages.filter(message => message.command === 'project.select');
+  assert.equal(requests.length, 3);
+  assert.ok(requests.every(request => request.interactionId));
+  assert.equal(new Set(requests.map(request => request.interactionId)).size, 3);
+  requests.forEach((request, index) => {
+    dispatchMessage({ command: 'projectSelectionChanged', projectRoot: request.projectPath, generation: index + 2, interactionId: request.interactionId });
+    assert.equal(context.active(), '/fixture/b');
+  });
+  select.listeners.click({ target: select.__options.find(option => option.getAttribute('data-solo-option-value') === '/fixture/a'), stopPropagation() {} });
+  const rejected = postedMessages.filter(message => message.command === 'project.select').at(-1).interactionId;
+  dispatchMessage({ command: 'projectSelectionChanged', projectRoot: '/fixture/b', generation: 4, interactionId: rejected, accepted: false });
+  assert.equal(context.active(), '/fixture/b');
+});
+
+for (const view of ['solo', 'flow']) test(`roadmap restores ${view} reads only after the matching project selection is confirmed`, () => {
+  const html = require('../out/roadmapWebview.js').getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  const { context, elements, postedMessages, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]), `
+    this.openView = setMainView;
+    this.historyState = () => ({ paging: nodeConversationPaging[soloConversationId], ids: (nodeConversations[soloConversationId] || []).map(item => item.id), flow: currentFlowState.flow });
+  `);
+  const projects = [{ name: 'A', path: '/fixture/a' }, { name: 'B', path: '/fixture/b' }];
+  dispatchMessage({ command: 'projectsLoaded', projects: { projects, selectedProjectPath: '/fixture/b', portfolio: [], projectGeneration: 1 } });
+  context.openView(view);
+  dispatchMessage({ command: 'nodeConversationsLoaded', projectPath: '/fixture/b', projectGeneration: 1, nodeId: '__solo__', conversations: [{ id: 1 }], pagination: { page: 0, hasMore: false } });
+  dispatchMessage({ command: 'projectSelectionChanged', projectRoot: '/fixture/a', generation: 2 });
+  postedMessages.length = 0;
+  const select = elements['project-select'];
+  select.listeners.click({ target: select.__options.find(option => option.getAttribute('data-solo-option-value') === '/fixture/b'), stopPropagation() {} });
+  const reads = () => postedMessages.filter(message => ['conversation.getHistory', 'getFlowState'].includes(message.command));
+  assert.equal(reads().length, 0, 'the host still owns A until it acknowledges the B selection');
+  const choice = postedMessages.find(message => message.command === 'project.select');
+  dispatchMessage({ command: 'nodeConversationsLoaded', projectPath: '/fixture/b', projectGeneration: 1, nodeId: '__solo__', conversations: [{ id: 99 }], pagination: { page: 0, hasMore: false } });
+  dispatchMessage({ command: 'projectSelectionChanged', projectRoot: '/fixture/a', generation: 2, interactionId: 'earlier-click' });
+  assert.equal(reads().length, 0);
+  dispatchMessage({ command: 'projectSelectionChanged', projectRoot: '/fixture/b', generation: 3, interactionId: choice.interactionId });
+  assert.equal(reads().length, 1, 'confirmation must restart the remembered view read exactly once');
+  assert.equal(reads()[0].projectPath, '/fixture/b');
+  if (view === 'solo') {
+    dispatchMessage({ command: 'nodeConversationsLoaded', projectPath: '/fixture/b', projectGeneration: 1, nodeId: '__solo__', conversations: [{ id: 99 }], pagination: { page: 0, hasMore: false } });
+    dispatchMessage({ command: 'nodeConversationsLoaded', projectPath: '/fixture/b', projectGeneration: 3, nodeId: '__solo__', conversations: [{ id: 3 }], pagination: { page: 0, hasMore: false } });
+    assert.equal(context.historyState().paging.loading, false);
+    assert.deepEqual(Array.from(context.historyState().ids), [3]);
+  } else {
+    dispatchMessage({ command: 'flowStateLoaded', projectPath: '/fixture/b', projectGeneration: 3, state: { flow: { id: 'b-flow' }, history: [] } });
+    assert.equal(context.historyState().flow.id, 'b-flow');
+  }
+});
+
+test('ordinary focus renders do not reschedule daily review reads', () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const { context, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]), `
+    this.renderFocus = () => renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
+  `);
+  const timers = [];
+  context.setTimeout = (callback, delay) => { timers.push({ callback, delay }); return timers.length; };
+  context.clearTimeout = () => {};
+  dispatchMessage({ command: 'projectsLoaded', projects: {
+    projects: [{ name: 'App', path: '/fixture/app' }], selectedProjectPath: '/fixture/app',
+    portfolio: [{ name: 'App', path: '/fixture/app', globalPriority: 'P1', pendingNodes: 1 }]
+  } });
+  timers.length = 0;
+  dispatchMessage({ command: 'dailyReviewLoaded', review: { status: 'running' } });
+  const before = timers.length;
+  context.renderFocus(); context.renderFocus();
+  assert.equal(timers.length, before, 'rendering consumes state and cannot restart a reader');
+  assert.equal(timers.filter(timer => timer.delay === 2500).length, 1, 'the running review still owns its poll');
+  dispatchMessage({ command: 'dailyReviewLoaded', review: { status: 'completed', source: 'manual' } });
+  const settled = timers.length;
+  context.renderFocus();
+  assert.equal(timers.length, settled);
+});
+
 test('sidebar defers agent account checks until settings opens', () => {
   const { getSidebarWebviewHtml } = require(path.join(projectRoot, 'out/sidebarWebview.js'));
   const html = getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
@@ -4089,6 +4245,34 @@ test('settings hydration and broadcasts preserve the in-flight contribution resp
   assert.equal(checks.length, 2, 'a default Agent changed from another panel must refresh its readiness');
   assert.equal(checks.at(-1).cliPath, 'claude');
   assert.equal(postedMessages.filter(message => message.command === 'agentImpact.get').length, 1, 'changing the Agent must not discard contribution for the same data root');
+});
+
+test('sidebar core readiness waits for authoritative settings, current nodes and conversations', async () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const { postedMessages, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]));
+  const ready = () => postedMessages.filter(message => message.command === 'sidebarCoreDataReady');
+  dispatchMessage({ command: 'projectsLoaded', projects: { projects: [{ path: '/fixture/app', name: 'App' }], selectedProjectPath: '/fixture/app', portfolio: [], coreLoaded: true, diagnosticTraceId: 'cold-trace' } });
+  dispatchMessage({ command: 'settingsLoaded', hydrated: false, settings: { cliPath: 'codex', language: 'zh' } });
+  await new Promise(resolve => setTimeout(resolve, 0)); assert.equal(ready().length, 0);
+  dispatchMessage({ command: 'settingsLoaded', hydrated: true, settings: { cliPath: 'codex', language: 'zh' } });
+  await new Promise(resolve => setTimeout(resolve, 0)); assert.equal(ready().length, 0);
+  dispatchMessage({ command: 'nodesUpdated', projectPath: '/fixture/app', nodes: [] });
+  await new Promise(resolve => setTimeout(resolve, 0)); assert.equal(ready().length, 0);
+  dispatchMessage({ command: 'sidebarProjectConversationSnapshotLoaded', projectPath: '/fixture/app', soloConversations: [], projectConversations: [], flowConversations: [], revisionConversations: [] });
+  await new Promise(resolve => setTimeout(resolve, 0)); assert.equal(ready().length, 1);
+});
+
+for (const coreFirst of [true, false]) test(`sidebar reopened at generation seven records source generations with coreFirst=${coreFirst}`, async () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const { postedMessages, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]));
+  const projects = { command: 'projectsLoaded', projects: { projects: [{ path: '/fixture/app', name: 'App' }], selectedProjectPath: '/fixture/app', portfolio: [], coreLoaded: true, diagnosticTraceId: 'reopened-trace', projectGeneration: 7 } };
+  if (!coreFirst) dispatchMessage(projects);
+  dispatchMessage({ command: 'nodesUpdated', projectPath: '/fixture/app', projectGeneration: 7, nodes: [] });
+  dispatchMessage({ command: 'sidebarProjectConversationSnapshotLoaded', projectPath: '/fixture/app', projectGeneration: 7, soloConversations: [], projectConversations: [], flowConversations: [], revisionConversations: [] });
+  if (coreFirst) dispatchMessage(projects);
+  dispatchMessage({ command: 'settingsLoaded', hydrated: true, settings: { cliPath: 'codex', language: 'zh' } });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(postedMessages.filter(message => message.command === 'sidebarCoreDataReady').length, 1);
 });
 
 test('sidebar cold-start diagnostics finish only after the browser acknowledges core data', async t => {
@@ -5222,7 +5406,7 @@ test('sidebar keeps project creation focused on the project switcher', () => {
   assert.doesNotMatch(html, /id="progress-text"/);
   assert.match(html, /function activateProjectInSidebar/);
   assert.match(html, /padding:\s*12px 12px 78px/);
-  assert.match(html, /bindSoloSelect\(projectSelect,\s*\(value\) => \{[\s\S]*?activateProjectInSidebar\(value\)/);
+  assert.match(html, /bindSoloSelect\(projectSelect,\s*\(value\) => \{[\s\S]*?selectProjectInSidebar\(value\)/);
   assert.match(html, /project\.select/);
   assert.match(html, /project\.continue/);
   assert.match(html, /project\.openRoadmap/);
@@ -6663,6 +6847,29 @@ test('sidebar conversation snapshots share one in-flight database read and only 
   );
 });
 
+test('A-B-A selection revokes old snapshot subscribers while reusing the in-flight database read', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '', { './sidebarSnapshotCache': snapshotCache });
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  let reads = 0, selected = '/fixture/a'; const messages = [];
+  const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
+    getSettings: () => ({ globalDataPath: '' }), updateSettings: async () => {},
+    getProjects: () => ({ projects: [{ path: '/fixture/a' }, { path: '/fixture/b' }], selectedProjectPath: selected }),
+    getProjectConversationSnapshot: async () => { reads++; await gate; return { solo: [], project: [], flow: [], revision: [] }; }
+  });
+  provider._view = { webview: { postMessage: message => { messages.push(message); return Promise.resolve(true); } } };
+  const first = provider.sendProjectConversationSnapshot(selected, true);
+  await new Promise(resolve => setImmediate(resolve));
+  selected = '/fixture/b'; provider.sendProjectSelection(selected, 1);
+  selected = '/fixture/a'; provider.sendProjectSelection(selected, 2);
+  const latest = provider.sendProjectConversationSnapshot(selected, true);
+  try { await new Promise(resolve => setImmediate(resolve)); assert.equal(reads, 1); }
+  finally { release(); await Promise.all([first, latest]); }
+  const snapshots = messages.filter(message => message.command === 'sidebarProjectConversationSnapshotLoaded');
+  assert.equal(snapshots.length, 1);
+  assert.equal(snapshots[0].projectGeneration, 2);
+});
+
 test('sidebar conversation snapshot carries the current roadmap revision state', async () => {
   const snapshotCache = makeSidebarSnapshotCacheStub();
   const { SolopreneurSidebarProvider } = loadCompiledModule(
@@ -6844,6 +7051,41 @@ test('terminal status refresh supersedes a stale running conversation snapshot',
   assert.equal(postedMessages.length, 1);
   assert.equal(postedMessages[0].command, 'sidebarProjectConversationSnapshotLoaded');
   assert.equal(postedMessages[0].soloConversations[0].status, 'Completed');
+});
+
+test('a late cache-write response cannot publish a superseded running snapshot', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
+  const write = snapshotCache.writeCachedConversationSnapshot;
+  let releaseWrite;
+  let announceWrite;
+  const writeStarted = new Promise(resolve => { announceWrite = resolve; });
+  const delayedResponse = new Promise(resolve => { releaseWrite = resolve; });
+  snapshotCache.writeCachedConversationSnapshot = async (...args) => {
+    await write(...args);
+    if (args[3].solo[0].status === 'Running') {
+      announceWrite();
+      await delayedResponse;
+    }
+  };
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '', { './sidebarSnapshotCache': snapshotCache });
+  const posted = [];
+  let status = 'Running';
+  const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
+    getSettings: () => ({ globalDataPath: '' }), updateSettings: async () => {},
+    getProjects: () => ({ projects: [{ path: '/workspace/app' }], selectedProjectPath: '/workspace/app' }),
+    getProjectConversationSnapshot: async () => ({ solo: [{ id: 7, status }], project: [], flow: [], revision: [] })
+  });
+  provider._view = { webview: { postMessage: message => { posted.push(message); return Promise.resolve(true); } } };
+  const oldRead = provider.sendProjectConversationSnapshot('/workspace/app', true);
+  await writeStarted;
+  status = 'Completed';
+  try {
+    await provider.refreshProjectConversationSnapshotAfterStatusChange('/workspace/app');
+  } finally {
+    releaseWrite();
+    await oldRead;
+  }
+  assert.deepEqual(posted.map(message => message.soloConversations[0].status), ['Completed']);
 });
 
 test('a ledger refresh invalidates older per-conversation sidebar reads', async () => {
@@ -7502,6 +7744,93 @@ test('the sidebar continuation entry correlates its stage timings with the user 
   assert.ok(events.every(e => e.payload.interactionId === 'continue-click-1'));
 });
 
+test('cold settings snapshots wait for database model preferences instead of publishing defaults', async () => {
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  const state = { loaded: false, messages: [] };
+  const host = loadCompiledModule('out/extension.js', `
+    module.exports.action = handleSharedWebviewAction;
+    module.exports.connect = (state, gate) => {
+      getProjects = () => []; getPersistedSettings = () => ({ globalDataPath: '/fixture/data' });
+      getSettingsWithRuntimeState = () => ({ cliPath: 'codex', agentModelPreferences: state.loaded ? { codex: 'saved-model' } : {} });
+      refreshExtensionSettingsFromDatabase = async () => { await gate; state.loaded = true; };
+    };
+  `);
+  host.connect(state, gate);
+  const request = host.action({ extensionPath: projectRoot }, { command: 'settings.get', mode: 'snapshot', requestId: 'cold' }, 'roadmap', {
+    postMessage: async message => { state.messages.push(message); return true; }
+  });
+  try { await new Promise(resolve => setImmediate(resolve)); assert.equal(state.messages.length, 0); }
+  finally { release(); await request; }
+  assert.equal(state.messages[0].hydrated, true);
+  assert.deepEqual({ ...state.messages[0].settings.agentModelPreferences }, { codex: 'saved-model' });
+});
+
+test('empty portable-operation recovery does not restart project initialization', async () => {
+  const state = { fullRefreshes: 0, localRefreshes: 0 };
+  const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-empty-recovery-')), '.solomap-global');
+  const host = loadCompiledModule('out/extension.js', `
+    module.exports.recover = recoverDurablePortableOperations;
+    module.exports.connect = (state, root) => {
+      getPersistedSettings = () => ({ globalDataPath: root });
+      indexedPortableOperationRoots = legacyPortableOperations = () => [];
+      importLegacyPortableOperations = readDatabasePortableOperations = async () => [];
+      rememberPortableOperationRoot = async () => {};
+      sendProjectsToWebviews = () => { state.fullRefreshes++; };
+      sendLocalProjectsToWebviews = () => { state.localRefreshes++; };
+    };
+  `, { './autonomousRuntimeHost': { ensureHealthyAutonomousRuntime: async () => {} } });
+  host.connect(state, root);
+  await host.recover({ extensionPath: projectRoot }, root);
+  assert.equal(state.fullRefreshes, 0);
+  assert.equal(state.localRefreshes, 0);
+});
+
+test('a selection change during background registry checks cannot restart cold project loading', async () => {
+  const state = { selected: '/fixture/a', full: 0 };
+  let release; const gate = new Promise(resolve => { release = resolve; });
+  let finish; const done = new Promise(resolve => { finish = resolve; });
+  const host = loadCompiledModule('out/extension.js', `
+    module.exports.action = handleSharedWebviewAction;
+    module.exports.connect = (state, finish) => {
+      getProjects = () => [{ name: 'App', path: '/fixture/a' }];
+      getPersistedSettings = () => ({ globalDataPath: '/fixture/data' });
+      readProjectRegistry = () => ({}); refreshProjectRegistryForContext = async () => {};
+      getProjectState = () => ({ projects: getProjects(), selectedProjectPath: state.selected });
+      refreshProjectAutonomyAuthorizations = async () => { finish(); };
+      sidebarProvider = { sendProjects: async () => { state.full++; }, sendLocalProjects: () => {}, reconcileProjectMessage: message => message };
+    };
+  `, { './autonomousRuntimeHost': { ensureHealthyAutonomousRuntime: () => gate } });
+  host.connect(state, finish);
+  await host.action({ extensionPath: projectRoot }, { command: 'project.getAll' }, 'sidebar');
+  state.selected = '/fixture/b'; release();
+  await done; await new Promise(resolve => setImmediate(resolve));
+  assert.equal(state.full, 1);
+});
+
+test('autonomy enrichment updates local fields without restarting external project loads', async () => {
+  const state = { full: 0, local: 0, enriched: false };
+  let settled; const enriched = new Promise(resolve => { settled = resolve; });
+  const host = loadCompiledModule('out/extension.js', `
+    module.exports.action = handleSharedWebviewAction;
+    module.exports.connect = (state, settled) => {
+      getProjects = () => []; getPersistedSettings = () => ({ globalDataPath: '/fixture/data' });
+      readProjectRegistry = () => ({}); refreshProjectRegistryForContext = async () => {};
+      getProjectState = () => ({ projects: [{ path: '/fixture/app', autonomyEnabled: state.enriched }], selectedProjectPath: '' });
+      refreshProjectAutonomyAuthorizations = async () => { state.enriched = true; };
+      sidebarProvider = {
+        sendProjects: async () => { state.full++; if (state.enriched) settled(); },
+        sendLocalProjects: () => { state.local++; settled(); },
+        reconcileProjectMessage: message => message
+      };
+    };
+  `, { './autonomousRuntimeHost': { ensureHealthyAutonomousRuntime: async () => {} } });
+  host.connect(state, settled);
+  await host.action({ extensionPath: projectRoot }, { command: 'project.getAll' }, 'sidebar');
+  await enriched;
+  assert.equal(state.full, 1);
+  assert.equal(state.local, 1);
+});
+
 test('project registry data is delivered before optional runtime health and autonomy enrichment', () => {
   const extensionSource = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
   const start = extensionSource.indexOf("'project.getAll': async");
@@ -7634,7 +7963,7 @@ test('local-first loading paints and launches before optional or durable work', 
     extensionSource.indexOf('async function selectProject'),
     extensionSource.indexOf('function scheduleProjectRunIndexBackfill')
   );
-  assert.match(selectBody, /\{ command: 'roadmapLoading', projectPath \}/);
+  assert.match(selectBody, /\{ command: 'roadmapLoading', projectPath, projectGeneration: selectionGeneration \}/);
   assert.doesNotMatch(
     selectBody,
     /sendLocalProjectsToWebviews\(context\)/,
@@ -13577,6 +13906,33 @@ test('a historical Solo settlement does not parse or refresh the active project 
   assert.equal(fs.readFileSync(path.join(fixture.project, '.solopreneur', 'roadmap.csv'), 'utf8'), invalidRoadmap);
 });
 
+test('a terminal refresh effect does not hydrate the entire node history before updating its snapshot', async () => {
+  const state = { historyReads: 0, initOptions: [], snapshots: 0 };
+  const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-refresh-history-')), '.solomap-global');
+  const host = loadCompiledModule('out/extension.js', `
+    module.exports.apply = applyRunSettlementEffect;
+    module.exports.connect = (state, root) => {
+      activeProjectRoot = '/fixture/project';
+      syncEngine = { dataRoot: root,
+        readAgentExecutionById: async () => ({}),
+        readAgentExecutions: async () => { state.historyReads++; return []; },
+        initAndSync: async options => { state.initOptions.push(options); }
+      };
+      runLifecycleClient = () => ({ readStatus: async () => ({ turnId: 'turn', executionLogId: 1 }) });
+      sidebarProvider = { refreshProjectConversationSnapshotAfterStatusChange: async () => { state.snapshots++; } };
+      sendNodesToWebview = postNodeConversations = refreshSidebarProjectCards = () => {};
+    };
+  `);
+  host.connect(state, root);
+  await host.apply({ kind: 'refresh', turnId: 'turn', payload: {
+    workspaceRoot: '/fixture/project', globalDataPath: root, nodeId: '__solo__', executionLogId: 1,
+    originalExecutionLogId: 1, shouldRefreshRoadmap: true
+  } }, root);
+  assert.equal(state.historyReads, 0);
+  assert.equal(state.snapshots, 1);
+  assert.deepEqual(state.initOptions.map(options => options?.history), ['skip']);
+});
+
 test('queued historical live side effects become inert when an upgrade resumes settlement delivery', async () => {
   const extension = loadCompiledModule('out/extension.js', 'module.exports.applyEffect = applyRunSettlementEffect;');
   await extension.applyEffect({
@@ -13689,6 +14045,59 @@ test('project management reads the committed database registry after bootstrap i
   assert.equal(fs.existsSync(path.join(f.root, 'projects.json')), false);
 });
 
+test('delayed background device hydration cannot take back a newer project click', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 9781);
+  const other = path.join(path.dirname(f.project), 'other'); fs.mkdirSync(other);
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'A', path: f.project }, { name: 'B', path: other }], legacySelectedProjectPath: f.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; }), reading = new Promise(resolve => { entered = resolve; });
+  const host = loadCompiledModule('out/extension.js', `
+    module.exports.reconcile = reconcileBackgroundIntelligenceService;
+    module.exports.select = selectProject; module.exports.selected = getSelectedProjectPath;
+    module.exports.connect = (project, root, read) => {
+      getWorkspaceRoot = () => project; getPersistedSettings = () => ({ globalDataPath: root });
+      readUiState = read;
+      activateObservedBackgroundRuntime = refreshExtensionSettingsFromDatabase = syncCognitiveRuntimeConfig = refreshProjectAutonomyAuthorizations = refreshSolomapCapabilityRegistries = resumeCapabilityOperations = async () => {};
+      patchUiState = async () => {};
+      synchronizeTelegramChannel = scheduleProjectRunIndexBackfill = refreshSidebarProjectCards = () => {};
+      ensureSyncEngine = async () => false;
+    };
+  `, { './projectRegistry': registry, './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
+  host.connect(f.project, f.root, async () => { entered(); await gate; return { selectedProjectPath: f.project }; });
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback } };
+  const background = host.reconcile(context);
+  try {
+    await reading;
+    await host.select(context, other);
+  } finally { release(); await background; }
+  assert.equal(host.selected(context), other);
+});
+
+test('known project CSV nodes are visible while runtime health is still preparing', async t => {
+  const f = await openProviderCheckpointFixture(t, 'claude', 9782);
+  await f.ops({ operation: 'initialize_project_registry', input: { legacyProjects: [{ name: 'App', path: f.project }], legacySelectedProjectPath: f.project } });
+  const registry = require('../out/projectRegistry.js'); await registry.refreshProjectRegistry(f.root);
+  fs.writeFileSync(path.join(f.project, '.solopreneur', 'roadmap.csv'), 'id,title,status\nlocal,已保存的任务,Pending\n');
+  let release; const health = new Promise(resolve => { release = resolve; });
+  const nodes = [];
+  const host = loadCompiledModule('out/extension.js', `
+    module.exports.initialize = ensureSyncEngine;
+    module.exports.close = () => syncEngine?.close();
+    module.exports.connect = (project, root, nodes) => {
+      getWorkspaceRoot = () => project; getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude' });
+      sendNodesToWebview = () => { nodes.push(syncEngine.getNodes().map(node => node.id)); };
+      setupFileSentinelWatcher = () => {};
+      setTimeout = () => 0;
+    };
+  `, { './projectRegistry': registry, './db/syncEngine': require('../out/db/syncEngine.js'), './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js'),
+    './autonomousRuntimeHost': { ensureHealthyAutonomousRuntime: () => health } });
+  host.connect(f.project, f.root, nodes); t.after(() => host.close());
+  const loading = host.initialize({ extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback } });
+  try { await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(nodes.map(items => Array.from(items)), [['local']]); }
+  finally { release(); await loading; }
+});
+
 test('cold roadmap initialization uses the database selected project before constructing its real sync engine', async t => {
   const f = await openProviderCheckpointFixture(t, 'claude', 972);
   const selected = path.join(path.dirname(f.project), 'selected-project'); fs.mkdirSync(selected);
@@ -13784,6 +14193,26 @@ function loadProjectManagementHost(workspace, root) {
   `, { './projectRegistry': require('../out/projectRegistry.js'), './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js'), './projectFoundation': require('../out/projectFoundation.js') });
   extension.connect(workspace, root); return extension;
 }
+
+test('a rejected project choice settles its own interaction with the current valid selection', async () => {
+  const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-rejected-choice-')), '.solomap-global');
+  const events = [];
+  const registry = require('../out/projectRegistry.js');
+  const host = loadCompiledModule('out/extension.js', `
+    module.exports.select = selectProject;
+    module.exports.connect = (root, events) => {
+      getPersistedSettings = () => ({ globalDataPath: root }); getProjects = () => [{ path: '/fixture/a' }];
+      getSelectedProjectPath = () => '/fixture/a';
+      broadcastProjectSelection = (...args) => { events.push(args); };
+      activeProjectRoot = '/fixture/a'; syncEngine = { dataRoot: root };
+      sendNodesToWebview = () => events.push(['nodes']);
+      sidebarProvider = { sendProjectConversationSnapshot: async path => { events.push(['snapshot', path]); } };
+    };
+  `, { './projectRegistry': { ...registry, readProjectRegistry: () => ({}) } });
+  host.connect(root, events);
+  await host.select({}, '/fixture/removed', 'rejected-click');
+  assert.deepEqual(events.map(event => Array.from(event)), [['/fixture/a', 0, 'rejected-click', false], ['nodes'], ['snapshot', '/fixture/a']]);
+});
 
 test('project selection belongs to its data root when the same projects appear in two registries', async t => {
   const a = await openProviderCheckpointFixture(t, 'claude', 974), b = await openProviderCheckpointFixture(t, 'claude', 975);

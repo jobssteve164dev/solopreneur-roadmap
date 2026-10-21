@@ -150,21 +150,29 @@ async function main(): Promise<void> {
     let wake: (() => void) | undefined;
     const onError = () => { available = false; wake?.(); };
     output.on('error', onError); displayErrors.set(output, onError);
-    stopDisplays.add(onError);
-    // Node's normal POSIX TTY writes can block the event loop. Use an owned
-    // nonblocking descriptor so a paused display cannot prevent a formal stop.
+    // TTY writes can block the event loop; pipe writes can retain a pending
+    // WriteWrap after cancellation. Node opens its POSIX pipe descriptors in
+    // nonblocking mode, so write them directly and own a descriptor for TTYs.
+    let pipeDisplay = false;
+    try { const stat = fs.fstatSync(fd); pipeDisplay = stat.isFIFO() || stat.isSocket(); } catch { /* Use the host stream if the descriptor cannot be inspected. */ }
     const file = output.isTTY && process.platform !== 'win32'
       ? fs.promises.open(`/dev/fd/${fd}`, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOCTTY).catch(() => undefined)
       : undefined;
     if (file) displayFiles.push(file);
+    stopDisplays.add(onError);
     return async bytes => {
       if (!available) return;
-      if (file) {
-        const handle = await file;
-        if (!handle) { onError(); return; }
+      const handle = file ? await file : undefined;
+      if (file && !handle) { onError(); return; }
+      const descriptor = handle?.fd ?? (pipeDisplay && process.platform !== 'win32' ? fd : undefined);
+      if (descriptor !== undefined) {
         let offset = 0;
         while (available && offset < bytes.length) {
-          try { offset += (await handle.write(bytes, offset, bytes.length - offset)).bytesWritten; }
+          try {
+            offset += await new Promise<number>((resolve, reject) => {
+              fs.write(descriptor, bytes, offset, bytes.length - offset, null, (error, written) => error ? reject(error) : resolve(written));
+            });
+          }
           catch (error) {
             if (!['EAGAIN', 'EWOULDBLOCK', 'EINTR'].includes(String((error as NodeJS.ErrnoException).code))) { onError(); return; }
             await new Promise<void>(resolve => {
@@ -178,10 +186,17 @@ async function main(): Promise<void> {
         return;
       }
       await new Promise<void>(resolve => {
-        const onBroken = () => { available = false; resolve(); };
+        const done = () => {
+          output.removeListener('error', onBroken);
+          if (wake === done) wake = undefined;
+          resolve();
+        };
+        const onBroken = () => { available = false; done(); };
+        wake = done;
         output.once('error', onBroken);
-        try { output.write(bytes, () => { output.removeListener('error', onBroken); resolve(); }); }
-        catch { output.removeListener('error', onBroken); available = false; resolve(); }
+        if (!available) { done(); return; }
+        try { output.write(bytes, done); }
+        catch { onBroken(); }
       });
     };
   };

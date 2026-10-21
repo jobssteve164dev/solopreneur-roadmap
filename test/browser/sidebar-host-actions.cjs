@@ -65,10 +65,11 @@ test('real Extension Host keeps sidebar actions alive across a card refresh', as
     const repo = ${JSON.stringify(repo)}, receipt = ${JSON.stringify(receipt)}, refreshMarker = ${JSON.stringify(refreshMarker)};
     const project = { path: ${JSON.stringify(workspace)}, name: 'Host project' };
     const settings = { globalDataPath: ${JSON.stringify(path.join(base, '.solomap-global'))}, language: 'zh', cliPath: ${JSON.stringify(nativeCli)}, globalPrompt: '宿主保存的设置', collaborationReviewMode: 'off', agentModelPreferences: {}, automationTasks: {} };
-    const state = { ready: false, commands: [], refreshes: 0, errors: [], roadmap: false, growth: false };
+    const state = { ready: false, commands: [], refreshes: 0, errors: [], roadmap: false, growth: false, diagnostics: [] };
     const save = () => fs.writeFileSync(receipt, JSON.stringify(state));
     let provider;
     exports.activate = async context => { try {
+      require(path.join(repo, 'out/localDiagnostics.js')).configureLocalDiagnosticPersistence({ append: (_root, event) => { state.diagnostics.push(event); save(); } });
       const filename = path.join(repo, 'out/extension.js');
       const subject = new Module(filename, module); subject.filename = filename; subject.paths = Module._nodeModulePaths(path.dirname(filename));
       subject._compile(fs.readFileSync(filename, 'utf8') + '\\nmodule.exports.action=handleSharedWebviewAction;module.exports.connect=(p,pr,se)=>{sidebarProvider=p;getPersistedSettings=()=>se;getSettingsWithRuntimeState=()=>se;getSettingsWithOpenCodeSecretState=async()=>se;refreshExtensionSettingsFromDatabase=async()=>{};refreshProAccountStatus=async()=>{};autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime=async()=>({started:false});getProjects=()=>[pr];getProjectState=()=>({projects:[{...pr,autonomyEnabled:false,toolNetworkDisabled:false,autonomyEpoch:0}],selectedProjectPath:pr.path});readProjectRegistry=()=>({schemaVersion:1,updatedAt:new Date().toISOString(),projects:[pr],hiddenProjects:[],selectedProjectPath:pr.path});refreshProjectRegistryForContext=async()=>({registry:readProjectRegistry()});refreshProjectAutonomyAuthorizations=async()=>{};readUiState=async()=>({});patchUiState=async()=>({});activeProjectRoot=pr.path;};module.exports.bindEngine=(e,p)=>{syncEngine=e;syncEngineReady=true;getSelectedProjectPath=()=>p;};module.exports.snapshot=(c,p)=>getProjectConversationSnapshotForProject(c,p);module.exports.panels=()=>({roadmap:Boolean(activePanel),growth:Boolean(activeProjectGrowthPanel)});', filename);
@@ -79,7 +80,7 @@ test('real Extension Host keeps sidebar actions alive across a card refresh', as
       await require(path.join(repo, 'out/autonomousRuntimeControl.js')).startRuntimeControlServer({ globalDataPath: settings.globalDataPath, runtimeId: 'sidebar-host-fixture', onCommand: () => ({ status: 'running' }), onData: operations });
       const Provider = require(path.join(repo, 'out/sidebarProvider.js')).SolopreneurSidebarProvider;
       const actionContext = { ...context, extensionPath: repo, extensionUri: vscode.Uri.file(repo) };
-      provider = new Provider(vscode.Uri.file(repo), { getNodes: () => [] }, {
+      provider = new Provider(vscode.Uri.file(repo), { getNodes: () => engine.getNodes() }, {
         getSettings: () => settings, updateSettings: async () => {},
         getProjects: () => ({ projects: [project], selectedProjectPath: project.path }),
         readAgentAccountStatuses: async () => [],
@@ -167,6 +168,12 @@ test('real Extension Host keeps sidebar actions alive across a card refresh', as
       return null;
     }, 'sidebar webview did not render');
     assert.equal(await frame.locator('.portfolio-card').count(), 1);
+    const coreReady = await waitFor(() => JSON.parse(fs.readFileSync(receipt, 'utf8')).diagnostics.find(event => event.scope === 'sidebar.browser.core.ready'), 'the browser never confirmed complete local core data');
+    assert.match(await frame.locator('[data-project-continue-step]').textContent(), /1.*Ship the fix/);
+    await frame.locator('[data-project-conversation-mode="solo"]').click();
+    assert.ok(await frame.locator('[data-conversation-expand-id="42"]').count(), 'the saved recent conversation must be rendered');
+    assert.ok(coreReady.payload.elapsedMs <= 15000, 'cold core data must render within the local experience baseline');
+    t.diagnostic(JSON.stringify({ coldCoreMs: Math.round(coreReady.payload.elapsedMs), completeLocalCore: true }));
     await frame.locator('#btn-toggle-settings').click();
     assert.equal(await frame.locator('#setting-global-prompt').inputValue(), '宿主保存的设置');
     await waitFor(async () => await frame.locator('#impact-tokens').textContent() === '123', 'project data card did not receive its actual database contribution');
@@ -188,11 +195,20 @@ test('real Extension Host keeps sidebar actions alive across a card refresh', as
       }
     }, 'roadmap pointer target did not settle after closing settings');
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    const roadmapOpenedAt = performance.now();
     await page.mouse.down();
     fs.writeFileSync(refreshMarker, String(Date.now()));
     await waitFor(() => JSON.parse(fs.readFileSync(receipt, 'utf8')).refreshes > 0, 'host refresh did not reach the webview');
     await page.mouse.up();
     await waitFor(() => JSON.parse(fs.readFileSync(receipt, 'utf8')).roadmap, 'roadmap action was swallowed');
+    await waitFor(async () => {
+      for (const candidate of page.frames()) {
+        if (await candidate.locator('[data-node-card-id="1"]').count()) return true;
+      }
+      return false;
+    }, 'the roadmap opened without its saved local task');
+    const roadmapCompleteMs = Math.round(performance.now() - roadmapOpenedAt);
+    assert.ok(roadmapCompleteMs <= 20000, 'the roadmap must render its complete local nodes within twenty seconds');
 
     await frame.locator('[data-open-project-growth-path]').focus();
     await frame.locator('[data-open-project-growth-path]').press('Enter');
@@ -200,24 +216,32 @@ test('real Extension Host keeps sidebar actions alive across a card refresh', as
 
     await frame.locator('[data-project-conversation-mode="solo"]').click();
     await frame.locator('[data-conversation-expand-id="42"]').click();
-    const continuedAt = Date.now();
+    const continuedAt = performance.now();
     await frame.locator('[data-continue-id="42"]').click();
     await waitFor(() => fs.existsSync(nativeReceipt), 'native continuation did not reach the isolated CLI');
     const nativeLaunch = JSON.parse(fs.readFileSync(nativeReceipt, 'utf8').trim().split('\n')[0]);
     assert.equal(nativeLaunch.cwd, workspace);
     assert.ok(nativeLaunch.args.includes('--resume'));
-    t.diagnostic(JSON.stringify({ nativeContinuationMs: Date.now() - continuedAt, realTerminalDelivery: true, isolatedNativeCli: true }));
+    const nativeContinuationMs = Math.round(performance.now() - continuedAt);
+    assert.ok(nativeContinuationMs <= 5000, 'continuation must actually execute its CLI within five seconds');
+    t.diagnostic(JSON.stringify({ nativeContinuationMs, realTerminalDelivery: true, isolatedNativeCli: true }));
     await frame.locator('[data-toggle-delivery-panel]').click();
+    const actionStartedAt = performance.now();
     await frame.locator('[data-agent-fix-delivery-project-path]').click();
     await waitFor(() => fs.readFileSync(nativeReceipt, 'utf8').trim().split('\n').length >= 2, 'Actions button did not launch its Agent');
+    const actionLaunchMs = Math.round(performance.now() - actionStartedAt);
+    assert.ok(actionLaunchMs <= 5000, 'Actions must execute its CLI within five seconds');
     await waitFor(async () => await frame.locator('[data-agent-fix-delivery-project-path]').isEnabled(), 'Actions button did not receive its completion acknowledgement');
     const issueData = { command: 'projectIssuesLoaded', projectPath: workspace,
       issues: { available: true, open: 1, items: [{ number: 13, title: 'Improve home', state: 'OPEN' }] } };
     await frame.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), issueData);
     await frame.locator('[data-toggle-issue-panel]').click();
     await frame.locator('[data-expand-issue-number="13"]').click();
+    const issueStartedAt = performance.now();
     await frame.locator('[data-agent-fix-issue]').click();
     await waitFor(() => fs.readFileSync(nativeReceipt, 'utf8').trim().split('\n').length >= 3, 'Issue button did not launch its Agent');
+    const issueLaunchMs = Math.round(performance.now() - issueStartedAt);
+    assert.ok(issueLaunchMs <= 5000, 'Issues must execute its CLI within five seconds');
     await waitFor(async () => await frame.locator('[data-agent-fix-issue]').isEnabled(), 'Issue button did not receive its completion acknowledgement');
     const result = JSON.parse(fs.readFileSync(receipt, 'utf8'));
     assert.equal(result.errors.length, 0);
@@ -228,6 +252,7 @@ test('real Extension Host keeps sidebar actions alive across a card refresh', as
     assert.ok(result.commands.includes('project.openGrowth'));
     assert.ok(result.commands.includes('conversation.continue'));
     assert.equal(result.commands.filter(command => command === 'conversation.runSolo').length, 2);
+    t.diagnostic(JSON.stringify({ roadmapCompleteMs, actionLaunchMs, issueLaunchMs }));
     t.diagnostic(JSON.stringify({ realExtensionHost: true, productionBridge: true, settingsLoaded: true, projectDataLoaded: true, contributionRendered: true, databaseOverviewRendered: true, uiStateLoaded: true, refreshDuringPointerAction: true, roadmapOpened: true, growthOpened: true }));
   } finally {
     if (browser) await browser.close();

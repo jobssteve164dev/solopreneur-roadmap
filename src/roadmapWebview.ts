@@ -2255,6 +2255,12 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     let activeMethodologyStage = '';
     let activeConversationId = '';
     let activeProjectPath = '';
+    let projectGeneration = 0;
+    let lastNodesMessage = '';
+    let pendingProjectSelectionPath = '';
+    let pendingProjectSelectionInteractionId = '';
+    let projectSelectionRequestSequence = 0;
+    const projectSelectionClientId = Math.random().toString(36).slice(2);
     let currentCliPath = 'agy';
     let currentFeedbackType = 'not_working';
     let activeMainView = 'roadmap';
@@ -2996,6 +3002,17 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (el) el.textContent = value;
     }
 
+    function activateProjectInRoadmap(projectPath) {
+      const changed = projectPath !== activeProjectPath;
+      if (changed) resetProjectScopedState(projectPath, true);
+      currentProjects.selectedProjectPath = projectPath;
+      renderProjects(currentProjects.projects, projectPath);
+      if (changed) {
+        renderRoadmap(currentNodes);
+        loadRoadmapUiState(projectPath || 'global');
+      }
+    }
+
     function resetProjectScopedState(projectPath, clearNodes) {
       if (activeProjectPath) {
         projectInteractionStates.set(activeProjectPath, {
@@ -3012,6 +3029,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       }
       deferredRenders.clear();
       activeProjectPath = projectPath || '';
+      lastNodesMessage = '';
       expandedNodeId = '';
       activeMethodologyStage = '';
       roadmapRevisionExpanded = false;
@@ -3159,10 +3177,26 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     const currentProjects = { projects: [], selectedProjectPath: '' };
 
     function requestSoloConversationPage(page) {
+      if (pendingProjectSelectionPath || !activeProjectPath) return;
       const current = nodeConversationPaging[soloConversationId] || { page: -1, hasMore: true, loading: false, initialized: false };
       if (current.loading || (page > 0 && !current.hasMore)) return;
       nodeConversationPaging[soloConversationId] = { ...current, loading: true };
-      vscode.postMessage({ command: 'conversation.getHistory', nodeId: soloConversationId, page, pageSize: 20 });
+      vscode.postMessage({ command: 'conversation.getHistory', projectPath: activeProjectPath, nodeId: soloConversationId, page, pageSize: 20 });
+    }
+
+    function requestMainViewData() {
+      if (pendingProjectSelectionPath || !activeProjectPath) return;
+      const soloPaging = nodeConversationPaging[soloConversationId];
+      if (activeMainView === 'solo' && (!soloPaging || !soloPaging.initialized)) {
+        requestSoloConversationPage(0);
+      }
+      if (activeMainView === 'solo') {
+        ensureAgentModelsLoaded(soloAgentSelection || currentCliPath || 'agy', soloConversationId);
+      }
+      if (activeMainView === 'flow') {
+        ensureAgentModelsLoaded(flowAgentSelection || currentCliPath || 'agy', 'flow');
+        vscode.postMessage({ command: 'getFlowState', projectPath: activeProjectPath });
+      }
     }
 
     function setMainView(view) {
@@ -3175,17 +3209,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (btnToggleRoadmapView) btnToggleRoadmapView.classList.toggle('active', activeMainView === 'roadmap');
       if (btnToggleSolo) btnToggleSolo.classList.toggle('active', activeMainView === 'solo');
       if (btnToggleFlow) btnToggleFlow.classList.toggle('active', activeMainView === 'flow');
-      const soloPaging = nodeConversationPaging[soloConversationId];
-      if (activeMainView === 'solo' && (!soloPaging || !soloPaging.initialized)) {
-        requestSoloConversationPage(0);
-      }
-      if (activeMainView === 'solo') {
-        ensureAgentModelsLoaded(soloAgentSelection || currentCliPath || 'agy', soloConversationId);
-      }
-      if (activeMainView === 'flow') {
-        ensureAgentModelsLoaded(flowAgentSelection || currentCliPath || 'agy', 'flow');
-        vscode.postMessage({ command: 'getFlowState' });
-      }
+      requestMainViewData();
       if (activeMainView === 'solo' && (soloPanelDirty || !soloBody || !soloBody.innerHTML)) {
         renderSoloPanel(currentNodes);
       }
@@ -3522,9 +3546,21 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     // Handle messages from Extension Host
     window.addEventListener('message', event => {
       const message = event.data;
+      if (Number(message.projectGeneration ?? message.projects?.projectGeneration) < projectGeneration) return;
+      if (pendingProjectSelectionPath && ['nodesUpdated', 'nodeConversationsLoaded', 'flowStateLoaded'].includes(message.command)) return;
       backgroundUpdate = true;
       try {
       switch (message.command) {
+        case 'projectSelectionChanged':
+          if (pendingProjectSelectionInteractionId && message.interactionId !== pendingProjectSelectionInteractionId) break;
+          if (Number(message.generation) < projectGeneration) break;
+          const resumeSelectedView = Boolean(pendingProjectSelectionInteractionId) && message.projectRoot === activeProjectPath;
+          projectGeneration = Number(message.generation) || 0;
+          pendingProjectSelectionPath = '';
+          pendingProjectSelectionInteractionId = '';
+          activateProjectInRoadmap(String(message.projectRoot || ''));
+          if (resumeSelectedView) requestMainViewData();
+          break;
         case 'uiStateLoaded':
           if (message.view !== 'roadmap') break;
           if (message.loadRequestId && uiStateLoadRequestIds.get(message.scopeKey) !== message.loadRequestId) break;
@@ -3563,6 +3599,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           }
           break;
         case 'roadmapLoading':
+          if (pendingProjectSelectionPath && message.projectPath !== pendingProjectSelectionPath) break;
+          lastNodesMessage = '';
           currentRoadmapLoading = true;
           currentRoadmapError = '';
           if (message.projectPath && message.projectPath !== activeProjectPath) {
@@ -3571,6 +3609,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           renderRoadmap(currentNodes);
           break;
         case 'roadmapLoadFailed':
+          if (pendingProjectSelectionPath && message.projectPath !== pendingProjectSelectionPath) break;
+          lastNodesMessage = '';
           currentRoadmapLoading = false;
           currentRoadmapError = message.message || '';
           if (message.projectPath && message.projectPath !== activeProjectPath) {
@@ -3582,8 +3622,12 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           currentRoadmapLoading = false;
           currentRoadmapError = '';
           if (message.projectPath && message.projectPath !== activeProjectPath) {
+            if (activeProjectPath) break;
             resetProjectScopedState(message.projectPath, false);
           }
+          const nodesMessage = JSON.stringify([activeProjectPath, projectGeneration, message.nodes || []]);
+          if (nodesMessage === lastNodesMessage) break;
+          lastNodesMessage = nodesMessage;
           currentNodes = message.nodes || [];
           if (pendingFocusedNodeId && currentNodes.some(node => node.id === pendingFocusedNodeId)) {
             expandedNodeId = pendingFocusedNodeId;
@@ -3701,20 +3745,23 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           }
           break;
         case 'projectsLoaded':
+          projectGeneration = Number(message.projects.projectGeneration) || projectGeneration;
+          const previousRoadmapProjectPath = currentProjects.selectedProjectPath;
+          const selectedRoadmapProjectPath = pendingProjectSelectionPath || message.projects.selectedProjectPath || '';
           if (
-            message.projects.selectedProjectPath &&
+            selectedRoadmapProjectPath &&
             activeProjectPath &&
-            message.projects.selectedProjectPath !== activeProjectPath
+            selectedRoadmapProjectPath !== activeProjectPath
           ) {
-            resetProjectScopedState(message.projects.selectedProjectPath, true);
+            resetProjectScopedState(selectedRoadmapProjectPath, true);
             renderRoadmap(currentNodes);
-          } else if (message.projects.selectedProjectPath && !activeProjectPath) {
-            activeProjectPath = message.projects.selectedProjectPath;
+          } else if (selectedRoadmapProjectPath && !activeProjectPath) {
+            activeProjectPath = selectedRoadmapProjectPath;
           }
           currentProjects.projects = message.projects.projects || [];
-          currentProjects.selectedProjectPath = message.projects.selectedProjectPath || '';
-          loadRoadmapUiState(currentProjects.selectedProjectPath || 'global');
-          renderProjects(message.projects.projects, message.projects.selectedProjectPath);
+          currentProjects.selectedProjectPath = selectedRoadmapProjectPath;
+          if (previousRoadmapProjectPath !== currentProjects.selectedProjectPath || !uiStateLoadRequestIds.has(currentProjects.selectedProjectPath || 'global')) loadRoadmapUiState(currentProjects.selectedProjectPath || 'global');
+          renderProjects(message.projects.projects, selectedRoadmapProjectPath);
           break;
         case 'nodeConversationsLoaded':
           if (message.projectPath && message.projectPath !== activeProjectPath) {
@@ -3953,8 +4000,12 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     });
 
     bindSoloSelect(projectSelect, (value) => {
+      pendingProjectSelectionPath = value;
+      pendingProjectSelectionInteractionId = 'roadmap-project-' + projectSelectionClientId + '-' + (++projectSelectionRequestSequence);
+      activateProjectInRoadmap(value);
       vscode.postMessage({
         command: 'project.select',
+        interactionId: pendingProjectSelectionInteractionId,
         projectPath: value
       });
     });

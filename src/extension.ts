@@ -594,6 +594,7 @@ async function runDurablePortableOperation<T>(context: vscode.ExtensionContext, 
 }
 
 async function recoverDurablePortableOperations(context: vscode.ExtensionContext, currentRoot: string): Promise<void> {
+  let projectsChanged = false;
   const knownRoots = [...new Set([...indexedPortableOperationRoots(context), ...legacyPortableOperations(context).map(item => normalizeGlobalDataPathForExtension(item.root))])];
   knownRoots.forEach(registerRuntimeDatabaseAuthority);
   const importedLegacy = await importLegacyPortableOperations(context);
@@ -607,13 +608,16 @@ async function recoverDurablePortableOperations(context: vscode.ExtensionContext
         if (entry.status !== 'pending') continue;
         await sendRuntimeDataRequest(root, { operation: entry.operation, input: { ...entry.input, idempotencyKey: `portable-operation:${entry.id}` } });
         await completeDatabasePortableOperation(root, entry);
-        if (entry.operation === 'import_project' && root === currentRoot) await refreshProjectRegistryForContext(context, root);
+        if (entry.operation === 'import_project' && root === currentRoot) {
+          await refreshProjectRegistryForContext(context, root);
+          projectsChanged = true;
+        }
       }
     } catch (error) {
       console.error('SoloMap portable operation recovery failed for data root:', root, error);
     }
   }
-  if (normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath) === currentRoot) sendProjectsToWebviews(context);
+  if (projectsChanged && normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath) === currentRoot) sendLocalProjectsToWebviews(context);
 }
 const automationPromptConversationIds = new Set<string>();
 let activeAgentTerminalName = '';
@@ -1209,6 +1213,8 @@ async function reconcileBackgroundIntelligenceService(context: vscode.ExtensionC
   try {
     const runtimeSettings = getPersistedSettings(context);
     const globalDataPath = normalizeGlobalDataPathForExtension(runtimeSettings.globalDataPath);
+    const selectionGeneration = projectSelectionGeneration;
+    const restoreDeviceSelection = selectionGeneration === 0 && !selectedProjectPathsByDataRoot.has(globalDataPath);
     await activateObservedBackgroundRuntime(context, globalDataPath);
     await refreshExtensionSettingsFromDatabase(context, globalDataPath);
     await syncCognitiveRuntimeConfig(context, getPersistedSettings(context));
@@ -1216,9 +1222,11 @@ async function reconcileBackgroundIntelligenceService(context: vscode.ExtensionC
     await refreshProjectAutonomyAuthorizations(context, globalDataPath);
     const deviceUi = await readUiState(context, 'extension', 'global');
     const deviceSelection = String(deviceUi.selectedProjectPath || '');
-    if (deviceSelection && getProjects(context).some(project => project.path === deviceSelection)) {
-      selectedProjectPathInMemory = deviceSelection;
-      selectedProjectPathsByDataRoot.set(globalDataPath, deviceSelection);
+    if (restoreDeviceSelection && selectionGeneration === projectSelectionGeneration
+      && globalDataPath === normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)
+      && deviceSelection && deviceSelection !== getSelectedProjectPath(context)
+      && getProjects(context).some(project => project.path === deviceSelection)) {
+      await selectProject(context, deviceSelection);
     }
     await refreshSolomapCapabilityRegistries(getSettingsEnhancementWorkspaceRoot(), globalDataPath);
     await resumeCapabilityOperations(context, getSettingsEnhancementWorkspaceRoot());
@@ -1381,7 +1389,11 @@ async function handleSharedWebviewAction(
       sidebarProjects[0]?.path || getWorkspaceRoot()
     )
     : '';
+  const responseProjectGeneration = projectSelectionGeneration;
   const respond = (payload: Record<string, unknown>) => {
+    if (payload.command === 'nodeConversationsLoaded' || payload.command === 'flowStateLoaded') {
+      payload = { ...payload, projectGeneration: responseProjectGeneration };
+    }
     const responsePayload = surface === 'sidebar' && sidebarProvider
       ? sidebarProvider.reconcileProjectMessage(payload, sidebarResponseDataRoot)
       : payload;
@@ -1792,7 +1804,7 @@ async function handleSharedWebviewAction(
         }
         return;
       }
-      if (syncEngine && target && nodeId) {
+      if (syncEngine && target && nodeId && projectPath === activeProjectRoot) {
         const historyEngine = syncEngine;
         const historyProject = activeProjectRoot || '';
         const requestedPage = Number.isFinite(Number(request.page)) ? Math.max(0, Math.floor(Number(request.page))) : null;
@@ -2063,13 +2075,19 @@ async function handleSharedWebviewAction(
     },
     'settings.get': async (request) => {
       if (request.mode === 'snapshot') {
+        const settingsRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+        if (!databaseSettingsByRoot.has(settingsRoot)) {
+          await observeLocalDiagnosticStage('settings.runtime', () => ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: settingsRoot }));
+        }
+        await observeLocalDiagnosticStage('settings.database', () => refreshExtensionSettingsFromDatabase(context, settingsRoot));
+        if (settingsRoot !== normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) return;
         await respond({
           command: 'settingsLoaded',
           settings: getSettingsWithRuntimeState(context),
           projectRoot: getMigrationProjectRoot(context) || '',
           requestId: String(request.requestId || ''),
           editRevision: Number(request.editRevision || 0),
-          hydrated: false
+          hydrated: true
         });
         return;
       }
@@ -2183,17 +2201,19 @@ async function handleSharedWebviewAction(
       };
       const initialProjectState = getProjectState(context);
       const registryWasHydrated = Boolean(readProjectRegistry(context));
-      let deliveredSignature = JSON.stringify(initialProjectState);
+      let deliveredSignature = JSON.stringify(initialProjectState.projects);
       let deliveredInitialState = initialProjectState.projects.length > 0 || registryWasHydrated;
       if (deliveredInitialState) {
         if (surface === 'sidebar' && sidebarProvider) void sidebarProvider.sendProjects();
         else await postProjectsLoaded(target, initialProjectState);
       }
       const registryRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+      const isCurrentRegistryRoot = () => registryRoot === normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
       let latestProjectState = initialProjectState;
       let roadmapSnapshotScheduled = false;
       const scheduleRoadmapSnapshot = (projectState: ReturnType<typeof getProjectState>) => {
         const snapshotProjectPath = projectState.selectedProjectPath;
+        const snapshotGeneration = projectSelectionGeneration;
         if (roadmapSnapshotScheduled || surface !== 'roadmap' || !target || !snapshotProjectPath) return;
         roadmapSnapshotScheduled = true;
         void readCachedConversationSnapshot(
@@ -2201,20 +2221,23 @@ async function handleSharedWebviewAction(
           snapshotProjectPath
         ).then(recentSnapshot => {
           if (!recentSnapshot
+            || snapshotGeneration !== projectSelectionGeneration
             || normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath) !== registryRoot
             || getProjectState(context).selectedProjectPath !== snapshotProjectPath) return false;
           return postWebviewMessage(target, {
             command: 'nodeConversationsLoaded',
             nodeId: soloConversationId,
             conversations: recentSnapshot.solo,
+            projectGeneration: snapshotGeneration,
             projectPath: snapshotProjectPath
           });
         }).catch(error => recordLocalDiagnosticError(registryRoot, 'project.conversation.snapshot', error));
       };
       try {
         await refreshProjectRegistryForContext(context, registryRoot);
+        if (!isCurrentRegistryRoot()) return;
         latestProjectState = getProjectState(context);
-        const registrySignature = JSON.stringify(latestProjectState);
+        const registrySignature = JSON.stringify(latestProjectState.projects);
         if (!deliveredInitialState || registrySignature !== deliveredSignature) {
           deliveredInitialState = true;
           deliveredSignature = registrySignature;
@@ -2226,9 +2249,11 @@ async function handleSharedWebviewAction(
       scheduleRoadmapSnapshot(latestProjectState);
       void (async () => {
         await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: registryRoot });
+        if (!isCurrentRegistryRoot()) return;
         await refreshProjectRegistryForContext(context, registryRoot);
+        if (!isCurrentRegistryRoot()) return;
         const recoveredProjectState = getProjectState(context);
-        const recoveredRegistrySignature = JSON.stringify(recoveredProjectState);
+        const recoveredRegistrySignature = JSON.stringify(recoveredProjectState.projects);
         if (!deliveredInitialState || recoveredRegistrySignature !== deliveredSignature) {
           deliveredInitialState = true;
           deliveredSignature = recoveredRegistrySignature;
@@ -2236,14 +2261,16 @@ async function handleSharedWebviewAction(
         }
         scheduleRoadmapSnapshot(recoveredProjectState);
         await refreshProjectAutonomyAuthorizations(context, registryRoot);
-        const enrichedSignature = JSON.stringify(getProjectState(context));
+        if (!isCurrentRegistryRoot()) return;
+        const enrichedSignature = JSON.stringify(getProjectState(context).projects);
         if (enrichedSignature !== deliveredSignature) {
           deliveredSignature = enrichedSignature;
-          await deliverProjects();
+          if (surface === 'sidebar' && sidebarProvider) sidebarProvider.sendLocalProjects();
+          else await postProjectsLoaded(target, getProjectState(context));
         }
       })().catch(error => recordLocalDiagnosticError(registryRoot, 'project.autonomy.enrichment', error));
     },
-    'project.select': async (request) => selectProject(context, String(request.projectPath || '')),
+    'project.select': async (request) => selectProject(context, String(request.projectPath || ''), String(request.interactionId || '')),
     'project.add': async () => addProjectFromDialog(context),
     'project.remove': async (request) => removeProject(context, String(request.projectPath || '')),
     'project.updateMetadata': async (request) => {
@@ -2814,7 +2841,7 @@ async function postFlowStateToWebview(context: vscode.ExtensionContext): Promise
   const state = await buildFlowStatePayload(projectPath, hasAccess, flowRuntimeRoot());
   if (panel !== activePanel || projectPath !== activeProjectRoot || generation !== projectSelectionGeneration) return;
   await postWebviewContainerMessage(panel, {
-    command: 'flowStateLoaded', projectPath,
+    command: 'flowStateLoaded', projectPath, projectGeneration: generation,
     state
   });
 }
@@ -3637,11 +3664,12 @@ function getMigrationProjectRoot(context: vscode.ExtensionContext): string | und
   return getSelectedProjectPath(context) || activeProjectRoot || undefined;
 }
 
-function getProjectState(context: vscode.ExtensionContext): { projects: Array<SolopreneurProject & { autonomyEnabled: boolean; toolNetworkDisabled: boolean; autonomyEpoch: number }>; selectedProjectPath: string } {
+function getProjectState(context: vscode.ExtensionContext): { projects: Array<SolopreneurProject & { autonomyEnabled: boolean; toolNetworkDisabled: boolean; autonomyEpoch: number }>; selectedProjectPath: string; projectGeneration: number } {
   const projects = getProjects(context);
   const root = normalizeGlobalDataPathForRegistry(getPersistedSettings(context).globalDataPath, getWorkspaceRoot());
   const authorizations = projectAutonomyByRoot.get(root) || new Map();
   return {
+    projectGeneration: projectSelectionGeneration,
     projects: projects.map(project => {
       const grant = authorizations.get(project.path) || { enabled: false, toolNetworkDisabled: false, epoch: 0 };
       return {
@@ -3693,12 +3721,14 @@ async function persistProjectSelection(dataRoot: string, projectPath: string): P
     () => selectedProjectPathsByDataRoot.get(dataRoot) === projectPath);
 }
 
-function broadcastProjectSelection(projectRoot: string, generation: number): void {
-  sidebarProvider?.sendProjectSelection(projectRoot, generation);
-  void postWebviewContainerMessage(activePanel, { command: 'projectSelectionChanged', projectRoot, generation });
+function broadcastProjectSelection(projectRoot: string, generation: number, interactionId = '', accepted = true): void {
+  sidebarProvider?.sendProjectSelection(projectRoot, generation, interactionId, accepted);
+  void postWebviewContainerMessage(activePanel, { command: 'projectSelectionChanged', projectRoot, generation, interactionId, accepted });
 }
 
-async function selectProject(context: vscode.ExtensionContext, projectPath: string): Promise<void> {
+async function selectProject(context: vscode.ExtensionContext, projectPath: string, interactionId = ''): Promise<void> {
+  let accepted = false;
+  try {
   const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
   if (!readProjectRegistryFile(root, projectRegistryFileName)) await refreshProjectRegistryForContext(context, root);
   if (normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath) !== root) return;
@@ -3711,7 +3741,8 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   const selectionGeneration = ++projectSelectionGeneration;
   selectedProjectPathInMemory = projectPath;
   selectedProjectPathsByDataRoot.set(root, projectPath);
-  broadcastProjectSelection(projectPath, selectionGeneration);
+  accepted = true;
+  broadcastProjectSelection(projectPath, selectionGeneration, interactionId);
   synchronizeTelegramChannel(context);
   const persistSelection = persistProjectSelection(root, projectPath);
   const persistDeviceSelection = patchUiState(context, 'extension', 'global', 'selectedProjectPath', projectPath);
@@ -3729,7 +3760,7 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
   void sidebarProvider?.sendProjectConversationSnapshot(projectPath, true);
   sidebarProvider?.prioritizeProjectSignals(projectPath);
   if (activePanel) {
-    void postWebviewContainerMessage(activePanel, { command: 'roadmapLoading', projectPath });
+    void postWebviewContainerMessage(activePanel, { command: 'roadmapLoading', projectPath, projectGeneration: selectionGeneration });
     void postWebviewContainerMessage(activePanel, { command: 'projectsLoaded', projects: { ...getProjectState(context), selectedProjectPath: projectPath } });
   }
   if (activeProjectGrowthPanel) {
@@ -3755,6 +3786,15 @@ async function selectProject(context: vscode.ExtensionContext, projectPath: stri
     }
   });
   await Promise.all([persistSelection, persistDeviceSelection]);
+  } finally {
+    if (!accepted) {
+      const selectedProjectPath = getSelectedProjectPath(context) || '';
+      broadcastProjectSelection(selectedProjectPath, projectSelectionGeneration, interactionId, false);
+      if (syncEngine && activeProjectRoot === selectedProjectPath
+        && normalizeGlobalDataPathForExtension(syncEngine.dataRoot) === normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath)) sendNodesToWebview();
+      if (selectedProjectPath) void sidebarProvider?.sendProjectConversationSnapshot(selectedProjectPath, true);
+    }
+  }
 }
 
 function scheduleProjectRunIndexBackfill(context: vscode.ExtensionContext, projectPath: string): void {
@@ -4593,8 +4633,8 @@ function hydrateProjectConversationContinuations(projectPath: string, conversati
  */
 async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boolean> {
   const dataRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
-  await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: dataRoot });
   if (!readProjectRegistryFile(dataRoot, projectRegistryFileName)) {
+    await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: dataRoot });
     await refreshProjectRegistryForContext(context, dataRoot);
     if (normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath) !== dataRoot) return false;
   }
@@ -4635,6 +4675,8 @@ async function ensureSyncEngine(context: vscode.ExtensionContext): Promise<boole
     && normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath) === dataRoot;
   syncEngineInitPromise = (async () => {
     try {
+      await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: dataRoot });
+      if (!isCurrent()) return false;
       await nextSyncEngine.initAndSync({ history: 'background' });
       if (!isCurrent()) {
         nextSyncEngine.close();
@@ -5454,7 +5496,7 @@ async function sendNodesToWebview(): Promise<void> {
   const selection = projectSelectionGeneration; const sequence = ++completionCriteriaViewSequence;
   const sourceNodes = engine?.getNodes() || []; const source = JSON.stringify(sourceNodes);
   const nodes = nodesWithVisibleCompletionCriteria(engine, sourceNodes);
-  void postWebviewContainerMessage(activePanel, { command: 'nodesUpdated', nodes, projectPath: workspaceRoot });
+  void postWebviewContainerMessage(activePanel, { command: 'nodesUpdated', nodes, projectPath: workspaceRoot, projectGeneration: selection });
   sidebarProvider?.sendNodesToWebview();
   if (extensionContextRef) void postFlowStateToWebview(extensionContextRef);
   if (!engine || !workspaceRoot) return;
@@ -5471,8 +5513,8 @@ async function sendNodesToWebview(): Promise<void> {
       completionCriteriaViews.set(engine, new Map(hydrated.map(node => [node.id, node.completionCriteria || []])));
       completionCriteriaViewRevisions.set(engine, revision);
       completionCriteriaViewRoots.set(engine, dataRoot);
-      void postWebviewContainerMessage(activePanel, { command: 'nodesUpdated', nodes: hydrated, projectPath: workspaceRoot });
-      sidebarProvider?.postMessage({ command: 'nodesUpdated', nodes: hydrated, projectPath: workspaceRoot });
+      void postWebviewContainerMessage(activePanel, { command: 'nodesUpdated', nodes: hydrated, projectPath: workspaceRoot, projectGeneration: selection });
+      sidebarProvider?.postMessage({ command: 'nodesUpdated', nodes: hydrated, projectPath: workspaceRoot, projectGeneration: selection });
       return;
     }
   } catch (error) { console.warn('SoloMap completion criteria refresh failed:', error); }
@@ -6963,6 +7005,7 @@ function postNodeConversations(
     void postWebviewContainerMessage(activePanel, {
       command: 'nodeConversationsLoaded',
       nodeId,
+      projectGeneration: projectSelectionGeneration,
       conversations: buildConversationPresentations(activeProjectRoot || '', nodeId, payloadConversations),
       projectPath: activeProjectRoot || '',
       ...(page ? { pagination: { page: 0, pageSize, hasMore: page.hasMore, append: false } } : {})
@@ -10005,7 +10048,7 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
         skipHistoricalSoloRoadmap ? { roadmap: 'skip' } : undefined
       );
       statusSyncEngine = transientStatusSyncEngine;
-      await statusSyncEngine.initAndSync(skipHistoricalSoloRoadmap ? { history: 'skip' } : undefined);
+      await statusSyncEngine.initAndSync({ history: 'skip' });
     }
 
     if (!statusSyncEngine) {
@@ -10020,7 +10063,8 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
         if (row?.nodeId) settlementNodes.add(row.nodeId);
       }
     }
-    if (!skipHistoricalSoloRoadmap && typeof statusSyncEngine.readAgentExecutions === 'function') {
+    if (!skipHistoricalSoloRoadmap && status !== 'Session Closed' && statusData.interactiveSessionClosed !== true
+      && typeof statusSyncEngine.readAgentExecutions === 'function') {
       for (const scope of settlementNodes) await statusSyncEngine.readAgentExecutions(scope);
     }
     isActiveProject = Boolean(workspaceRoot && workspaceRoot === activeProjectRoot && statusSyncEngine === syncEngine);
@@ -10036,14 +10080,11 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
           idempotencyKey: `run:${consumerLease.expectedTurnId}:close-settlement:${statusData.checkpointSequence}`
         });
         await pollRunSettlementEffects(consumerClient);
-        await statusSyncEngine.readAgentExecutionById(executionLogId);
         const terminalConversationId = Number(statusData.rootExecutionLogId || executionLogId);
         if (agentTerminalProjectRootsByConversationId.get(terminalConversationId) === workspaceRoot) {
           agentTerminalNamesByConversationId.delete(terminalConversationId);
           agentTerminalProjectRootsByConversationId.delete(terminalConversationId);
         }
-        if (isActiveProject) postNodeConversations(nodeId, [], false);
-        await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);
         return;
       }
       status = statusData.checkpointOutcome === 'failed' ? 'Failed' : 'In Progress';
@@ -10594,9 +10635,9 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
     skipHistoricalSoloRoadmap ? { roadmap: 'skip' } : undefined
   );
   try {
-    if (!isActiveProject) await statusSyncEngine.initAndSync(skipHistoricalSoloRoadmap ? { history: 'skip' } : undefined);
+    if (!isActiveProject) await statusSyncEngine.initAndSync({ history: 'skip' });
     await statusSyncEngine.readAgentExecutionById(Number(executionLogId));
-    if (!skipHistoricalSoloRoadmap) await statusSyncEngine.readAgentExecutions(String(nodeId));
+    if (!skipHistoricalSoloRoadmap && effect.kind !== 'refresh') await statusSyncEngine.readAgentExecutions(String(nodeId));
     const committedStatus = await runLifecycleClient(workspaceRoot, globalDataPath).readStatus(runStatusReference(workspaceRoot, Number(originalExecutionLogId)));
     if (!committedStatus) throw new Error('run_effect_source_missing');
     if ((effect.kind === 'roadmap' || effect.kind === 'revision') && isReviewRun) {
@@ -10726,7 +10767,7 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
       if (extensionContextRef && isActiveProject) await postFlowStateToWebview(extensionContextRef);
     } else if (effect.kind === 'refresh') {
     if (workspaceRoot && shouldRefreshRoadmap) {
-      await statusSyncEngine.initAndSync();
+      await statusSyncEngine.initAndSync({ history: 'skip' });
       if (preserveCompletedNode && nodeId !== roadmapRevisionId && statusSyncEngine.getNodes().some((node) => node.id === nodeId)) {
         await statusSyncEngine.updateNode(nodeId, {
           status: 'Completed',
@@ -10735,7 +10776,7 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
       }
     }
 
-    if (isActiveProject) {
+    if (isActiveProject && syncEngine === statusSyncEngine && activeProjectRoot === workspaceRoot) {
       sendNodesToWebview();
       postNodeConversations(nodeId, [], false);
     }

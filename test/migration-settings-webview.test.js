@@ -207,7 +207,7 @@ test('the host sends the Sidebar migration binder each authoritative project sel
   const extension = fs.readFileSync(path.resolve(__dirname, '../src/extension.ts'), 'utf8');
   const provider = fs.readFileSync(path.resolve(__dirname, '../src/sidebarProvider.ts'), 'utf8');
   const selectProject = extension.slice(extension.indexOf('async function selectProject('), extension.indexOf('function scheduleProjectRunIndexBackfill('));
-  assert.match(selectProject, /selectedProjectPathsByDataRoot\.set\(root, projectPath\);\s*broadcastProjectSelection\(projectPath, selectionGeneration\);/);
+  assert.match(selectProject, /selectedProjectPathsByDataRoot\.set\(root, projectPath\);\s*accepted = true;\s*broadcastProjectSelection\(projectPath, selectionGeneration, interactionId\);/);
   assert.ok((extension.match(/broadcastProjectSelection\(/g) || []).length >= 4, 'selection, addition, and removal must all publish the authoritative scope');
-  assert.match(provider, /sendProjectSelection\(projectRoot: string, generation: number\)[\s\S]*?command: 'projectSelectionChanged', projectRoot, generation/);
+  assert.match(provider, /sendProjectSelection\(projectRoot: string, generation: number, interactionId = '', accepted = true\)[\s\S]*?command: 'projectSelectionChanged', projectRoot, generation, interactionId, accepted/);
 });

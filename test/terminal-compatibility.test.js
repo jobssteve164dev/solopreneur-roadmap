@@ -44,17 +44,32 @@ test('terminal commands remain compatible with hosts that do not expose processI
   assert.deepEqual(delivered, [{ text: 'codex --version', addNewLine: false }]);
 });
 
-test('terminal command delivery does not wait forever when a compatible host never resolves processId', async () => {
+test('a slow supported shell cannot receive commands when the five second display budget expires', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let resolveProcess;
   const delivered = [];
   const terminal = {
-    processId: new Promise(() => {}),
+    processId: new Promise(resolve => { resolveProcess = resolve; }),
     sendText(text, addNewLine) {
       delivered.push({ text, addNewLine });
     }
   };
 
-  assert.equal(await sendTextWhenTerminalReady(terminal, 'agy --print=task', true, 10), true);
-  assert.deepEqual(delivered, [{ text: 'agy --print=task', addNewLine: true }]);
+  const preparing = sendTextWhenTerminalReady(terminal, 'prepare');
+  const launching = sendTextWhenTerminalReady(terminal, 'codex resume original-session');
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    t.mock.timers.tick(6000);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(delivered, [], 'a visible terminal is not evidence that its shell can accept input');
+  } finally {
+    resolveProcess(4321);
+    await Promise.all([preparing, launching]);
+  }
+  assert.deepEqual(delivered, [
+    { text: 'prepare', addNewLine: true },
+    { text: 'codex resume original-session', addNewLine: true }
+  ]);
 });
 
 test('Codex continuation uses one explicit paste followed by submit outside the paste', async () => {
