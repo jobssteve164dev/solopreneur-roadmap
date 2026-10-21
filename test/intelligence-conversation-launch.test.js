@@ -50,6 +50,19 @@ let input = '';
 process.stdin.on('data', bytes => input += bytes);
 process.stdin.on('end', () => {
   const request = JSON.parse(fs.readFileSync(${JSON.stringify(requestFile)}, 'utf8'));
+  if (request.signalQuery) {
+    const results = input.slice(input.lastIndexOf('USER:')).split('TOOLRESULT:').slice(1)
+      .map(text => JSON.parse(text.trim().split('\\n')[0]));
+    const page = results.length ? JSON.parse(results.at(-1).content[0].text) : null;
+    if (!page || page.cursor) {
+      const call = JSON.stringify({ toolCall: { name: 'solomap_project_signals', arguments: {
+        project: 'Beta', kind: 'delivery', ...(page ? { cursor: page.cursor } : {})
+      } } });
+      return console.log(request.prefix + '\\n' + call);
+    }
+    const data = JSON.parse(results.map(result => JSON.parse(result.content[0].text).content).join(''));
+    return console.log('已查到 ' + data.workflowRuns.length + ' 条 Actions，其中 ' + data.workflowRuns.filter(run => run.conclusion === 'failure').length + ' 条失败。');
+  }
   if (request.maintenance) {
     const call = (name, args) => console.log(JSON.stringify({ toolCall: { name, arguments: args } }));
     if (input.lastIndexOf('TOOLRESULT:') <= input.lastIndexOf('USER:')) return call('solomap_project_signals', {});
@@ -112,8 +125,8 @@ process.stdin.on('end', () => {
   });
   return { ...owner, database: owner.store, root, project, otherProject, launches, store,
     async ask(input, chatId = crypto.randomUUID(), toolName = 'solomap_start_conversation') {
-      fs.writeFileSync(requestFile, JSON.stringify(input.maintenance ? input : { name: toolName, arguments: input }));
-      const answer = await reply(chatId, '请开始这项任务');
+      fs.writeFileSync(requestFile, JSON.stringify(input.maintenance || input.signalQuery ? input : { name: toolName, arguments: input }));
+      const answer = await reply(chatId, input.signalQuery ? 'Action没有数据吗' : '请开始这项任务');
       assert.equal((await store.get(ids[chatId])).messages.at(-1).content, answer);
       return answer;
     },
@@ -122,6 +135,27 @@ process.stdin.on('end', () => {
 }
 
 for (const mode of ['legacy', 'harness']) {
+  test(`${mode} Telegram executes a project query after a model preamble and reads every page before replying`, async t => {
+    const f = await fixture(t, mode);
+    const targetId = f.projectIds.get(f.otherProject);
+    const token = f.database.reserveExternalRefresh(targetId, 'delivery', 'preamble-query');
+    f.database.commitExternalRefresh(targetId, { key: 'delivery', ...token, requestedAt: Date.now(), cache: {
+      schemaVersion: 1, syncedAt: '2026-10-21T04:10:29.484Z',
+      workflowRuns: Array.from({ length: 26 }, (_, index) => ({ name: 'Security',
+        displayTitle: 'Complete retained workflow record ' + index + ' '.repeat(160),
+        status: 'completed', conclusion: index < 3 ? 'failure' : 'success' }))
+    } });
+    const answer = await f.ask({ signalQuery: true, prefix: '刚才只查了 Issues，还没查 Actions，所以目前不能判断有没有数据。' }, '1234');
+    assert.equal(answer, '已查到 26 条 Actions，其中 3 条失败。');
+    assert.doesNotMatch(answer, /toolCall|尚未返回|还没有返回/);
+    assert.equal(f.launches.length, 0);
+    if (mode === 'harness') {
+      const calls = f.database.rows("SELECT status FROM pi_tool_invocations WHERE tool_name='solomap_project_signals'");
+      assert.ok(calls.length > 1, 'the original JSON cache spans multiple tool result pages');
+      assert.ok(calls.every(call => call.status === 'completed'));
+    }
+  });
+
   test(`${mode} Telegram reads another project database signals and starts an evidence-based task with queryable completion`, async t => {
     let run;
     const f = await fixture(t, mode, async ({ ops, payload }) => {
