@@ -969,6 +969,7 @@ test('project switching during historical reads cannot continue or display the o
       activeProjectRoot = '/fixture/old';
       getPersistedSettings = () => ({ globalDataPath: '/fixture/data/.solomap-global' });
       syncEngine = { readAgentExecutions: () => gate, readAgentExecutionPage: async () => { await gate; return { logs: [], hasMore: false }; } };
+      runLifecycleClient = () => ({ adoptConversationHistory: async () => { await gate; return null; } });
     };
     module.exports.switchProject = () => { activeProjectRoot = '/fixture/new'; syncEngine = { getAgentExecutions: () => { throw new Error('wrong project read'); } }; };
     module.exports.turn = handleContinueConversationTurn; module.exports.native = handleContinueNativeConversation;
@@ -1026,6 +1027,29 @@ test('new Solo launch opens its terminal while a full history refresh is pending
     assert.equal(state.status.terminalName, 'solo'); assert.ok(state.status.terminalCommandSubmittedAt);
     assert.deepEqual(fs.readdirSync(path.join(projectPath, '.solopreneur')), ['project.json']);
   } finally { await server.close(); await ops.close(); store.close(); }
+});
+
+test('project action launch acknowledges only its request after delivery or preparation failure', async t => {
+  for (const mode of ['delivered', 'terminal-failed', 'launch-failed']) await t.test(mode, async () => {
+    const extension = loadCompiledModule('out/extension.js', `
+      module.exports.configure = mode => {
+        getProjects = () => [{ path: '/isolated/project' }];
+        getPersistedSettings = () => ({ globalDataPath: '/isolated/.solomap-global' });
+        sidebarProvider = null;
+        revealAgentStartupTerminal = async () => { if (mode === 'terminal-failed') throw new Error('fixture_terminal_failed'); return undefined; };
+        ensureActionProject = async () => '/isolated/project';
+        handleRunSoloConversation = async () => { if (mode === 'launch-failed') throw new Error('fixture_launch_failed'); return 42; };
+      };
+      module.exports.action = handleSharedWebviewAction;
+    `);
+    extension.configure(mode);
+    const messages = [];
+    const action = extension.action({}, { command: 'conversation.runSolo', projectPath: '/isolated/project', userMessage: '处理当前问题', launchActionId: 'only-this-action' },
+      'sidebar', { postMessage: message => { messages.push(message); return Promise.resolve(true); } });
+    if (mode === 'delivered') await action;
+    else await assert.rejects(action, /fixture_(terminal|launch)_failed/);
+    assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{ command: 'conversationActionSettled', action: 'runSolo', projectPath: '/isolated/project', launchActionId: 'only-this-action' }]);
+  });
 });
 
 test('a cached sidebar snapshot is refreshed from the global journal after plugin restart', async () => {
@@ -2634,7 +2658,6 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(script, /conversation\.getProjectSnapshot/);
   assert.doesNotMatch(script, /conversation\.getProjectHistory/);
   assert.match(script, /function mergePortfolioUpdate\(/);
-  assert.match(script, /pendingConversationContinuations\.add\(conversationId\)[\s\S]*?renderPortfolio\([\s\S]*?conversation\.continue/);
   assert.match(script, /case 'conversationActionSettled':[\s\S]*?pendingConversationContinuations\.delete/);
   assert.match(script, /checksCached/);
   assert.match(html, /id="dependency-panel"/);
@@ -16457,7 +16480,7 @@ test('continuing a stopped interactive conversation opens a new terminal and set
   const env = {...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:head.projectId,SOLOMAP_EXECUTION_LOG_ID:'336',SOLOMAP_RUN_GENERATION:String(head.generation),SOLOMAP_RUN_PROOF:head.proof,SOLOMAP_TASK_TURN_ID:head.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId};
   await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),'complete','--outcome','partial','--summary','上一轮完整结果'],{env});
   await finishControlledClaudeTurn(request=>operation(request.operation,request.input),project,336,'受控原生完整回复🌿',native.store);
-  const sent = [], created = [], posted = [], errors = [], preparedRuns = [];
+  const sent = [], created = [], posted = [], errors = [], preparedRuns = [], launchReads = [];
   let staleShown = 0, staleDisposed = 0;
   const stale = {name:'solomap stopped terminal',show(){staleShown++;},dispose(){staleDisposed++;}};
   const extension = loadCompiledModule('out/extension.js', `
@@ -16473,7 +16496,9 @@ test('continuing a stopped interactive conversation opens a new terminal and set
       sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
       agentTerminalNamesByConversationId.set(336,stale.name);agentTerminalProjectRootsByConversationId.set(336,project);vscode.window.terminals.push(stale);
       const factory=create;vscode.window.createTerminal=options=>{const terminal=factory(options);vscode.window.terminals.push(terminal);return terminal;};};
-  `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
+  `,{'./autonomousRuntimeControl':{...require('../out/autonomousRuntimeControl.js'),sendRuntimeDataRequest:async(dataRoot,request)=>{
+    launchReads.push(request);return require('../out/autonomousRuntimeControl.js').sendRuntimeDataRequest(dataRoot,request);
+  }},'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
   extension.connect(engine,project,root,stale,options=>{const terminal={name:options.name,show(){terminal.shown=(terminal.shown||0)+1;},sendText(text){sent.push({terminal,text});},dispose(){terminal.disposed=true;}};created.push({options,terminal});return terminal;},
     async(_context,input)=>{const prepared=await prepareControlledClaudeRun({...input,launchIntentId:'stopped-continue-button'},operation);preparedRuns.push(prepared);return prepared;},message=>errors.push(message));
   await extension.settle(reference,undefined,root);await extension.drain();
@@ -16484,14 +16509,23 @@ test('continuing a stopped interactive conversation opens a new terminal and set
   assert.equal(stopped.status.interactiveSessionClosed,true);assert.equal(stopped.status.status,'Processed');assert.equal(stopped.status.stopRequested,true);assert.equal(stopped.status.stopReason,'用户停止当前对话');assert.equal(stopped.taskId,run.taskId);assert.equal(originalSettlements.length,2);
   for(const close of closes.splice(0).reverse())await close();
   native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await read(project,336),stopped);assert.deepEqual(await client.readBinding(reference),binding);
+  for (const [id,runKind] of [[337,'agent_review'],[338,'solo_continue']]) await operation('prepare_run', {
+    root:project,executionLogId:id,nodeId:'__solo__',runKind,prompt:'辅助记录',command:'fixture never executes',userMessage:'辅助记录',
+    parentExecutionLogId:336,expectedParentTurnId:stopped.turnId,metadata:{launchSummary:runKind==='agent_review'?'Agent review started.':'CLI unavailable.',failureCode:'fixture_unavailable'},idempotencyKey:`stopped-continue-auxiliary:${id}`
+  });
+  launchReads.length=0;
+  const originalJournalRead=engine.readAgentExecutions.bind(engine);
+  let fullHistoryReads=0;engine.readAgentExecutions=async(...args)=>{fullHistoryReads++;return originalJournalRead(...args);};
   const click=()=>extension.action({}, {command:'conversation.continue',projectPath:project,nodeId:'__solo__',conversationId:336},'sidebar',{postMessage(message){posted.push(message);return Promise.resolve(true);}});
   assert.deepEqual(await Promise.all([click(),click()]),[true,true]);
+  assert.equal(fullHistoryReads,0,'a continuation click must not hydrate every historical turn and its complete output');
+  assert.equal(launchReads.filter(request=>request.operation==='list_run_states').length,0,'continuation must not scan unrelated project runs');
   assert.deepEqual(errors,[]);assert.equal(staleShown,0);assert.equal(staleDisposed,1);assert.equal(created.length,1,'concurrent button actions reserve one fresh terminal');assert.equal(preparedRuns.length,1);
   const terminal = created[0].terminal, continuation = preparedRuns[0], newId = Number(continuation.status.rootExecutionLogId), nextReference = require('../out/runLifecycleClient.js').runStatusReference(project,newId);
   assert.equal(created[0].options.cwd,project);assert.deepEqual(created[0].options.env,require('../out/desktopSessionEnvironment.js').desktopSessionEnvironment());assert.ok(terminal.shown>=1);assert.notEqual(terminal.name,stale.name);
   assert.equal(extension.reservations(project),0,'actual delivery consumes the startup reservation rather than creating another terminal');assert.deepEqual({...extension.owned(newId)},{name:terminal.name,root:project});assert.deepEqual({...extension.owned(336)},{name:undefined,root:undefined});
   assert.equal(sent.length,2);assert.equal(sent[0].terminal,terminal);assert.equal(sent[1].terminal,terminal);assert.match(sent[0].text,/正在准备本地对话/);assert.match(sent[1].text,/SOLOMAP_TERMINAL_DELIVERY_ID=/);assert.ok(sent[1].text.endsWith(continuation.finalCommand));assert.match(continuation.finalCommand,/runAgentProcess\.js/);
-  const states = await native.ops({operation:'list_run_states',input:{root:project,cursor:0,limit:10}});assert.equal(states.items.length,3);
+  const states = await native.ops({operation:'list_run_states',input:{root:project,cursor:0,limit:10}});assert.equal(states.items.length,5);
   const delivered = await read(project,newId);assert.equal(delivered.taskId,run.taskId);assert.equal(delivered.conversationId,run.conversationId);assert.notEqual(delivered.turnId,run.turnId);assert.equal(delivered.status.sourceParentRunId,run.runId);assert.equal(delivered.status.sourceParentTurnId,run.turnId);assert.equal(delivered.status.lineageRootExecutionLogId,336);assert.equal(delivered.status.plannedNativeSessionId,run.status.plannedNativeSessionId);assert.equal(delivered.status.terminalName,terminal.name);assert.ok(delivered.status.terminalCommandSubmittedAt);assert.ok(delivered.status.terminalDeliveryId);
   assert.equal(posted.filter(message=>message.command==='conversationActionSettled'&&message.action==='continue'&&Number(message.conversationId)===336&&message.projectPath===project).length,2);
   assert.deepEqual(await read(project,336),stopped);assert.deepEqual(await client.readJournal(reference),originalJournal);assert.deepEqual(await client.readSettlements(reference,await client.readStatus(reference)),originalSettlements);assert.deepEqual(await client.readBinding(reference),binding);assert.equal((await client.readLog(reference,'stdout')).toString('utf8'),output);

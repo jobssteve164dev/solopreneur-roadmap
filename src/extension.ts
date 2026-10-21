@@ -1496,8 +1496,9 @@ async function handleSharedWebviewAction(
     },
     'conversation.runSolo': async (request) => {
       const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
-      const startupTerminal = await observeLocalDiagnosticStage('conversation.runSolo.terminal', () => revealAgentStartupTerminal(context, workspaceRoot, 'solo', String(request.agentCli || ''), String(request.model || '')));
+      let startupTerminal: vscode.Terminal | undefined;
       try {
+        startupTerminal = await observeLocalDiagnosticStage('conversation.runSolo.terminal', () => revealAgentStartupTerminal(context, workspaceRoot, 'solo', String(request.agentCli || ''), String(request.model || '')));
         const projectPath = await observeLocalDiagnosticStage('conversation.runSolo.project', () => ensureActionProject(context, request.projectPath || ''));
         if (!projectPath && request.projectPath) return;
         await handleRunSoloConversation(
@@ -1509,6 +1510,7 @@ async function handleSharedWebviewAction(
         );
       } finally {
         discardReservedAgentStartupTerminal(workspaceRoot, startupTerminal);
+        if (request.launchActionId) await respond({ command: 'conversationActionSettled', action: 'runSolo', projectPath: workspaceRoot, launchActionId: request.launchActionId });
       }
     },
     'timePlan.generate': async (request) => {
@@ -7470,7 +7472,10 @@ async function waitForAgentProcessCleanup(workspaceRoot: string, conversationId:
   const existing = agentProcessCleanupByConversationKey.get(key);
   if (existing) return existing;
   const cleanup = (async () => {
-    const latest = (await client.listStatuses(workspaceRoot))
+    const family = await client.listConversationStatuses(workspaceRoot, conversationId);
+    const records = !family.length || family.some(record => record.status.historicalAdopted)
+      ? await client.listStatuses(workspaceRoot) : family;
+    const latest = records
       .filter(({ status }) => [status.cleanupRootConversationId, status.lineageRootExecutionLogId, status.rootExecutionLogId]
         .some(id => Number(id) === Number(conversationId)))
       .sort((left, right) => Number(right.status.rootExecutionLogId || right.status.executionLogId) - Number(left.status.rootExecutionLogId || left.status.executionLogId))[0];
@@ -8147,12 +8152,13 @@ async function handleContinueConversationTurn(
 }
 
 async function closeConversationProcessesForContinuation(
-  workspaceRoot: string, nodeId: string, conversations: AgentConversation[], rootConversationId: number, sessionId: string, globalDataPath?: string
+  workspaceRoot: string, nodeId: string, conversations: AgentConversation[], rootConversationId: number, sessionId: string, globalDataPath?: string,
+  family?: Awaited<ReturnType<RunLifecycleClient['listConversationStatuses']>>
 ): Promise<void> {
   const client = runLifecycleClient(workspaceRoot, globalDataPath);
   const registered = await client.adoptConversationHistory(workspaceRoot, rootConversationId);
   if (registered) {
-    const related = (await client.listStatuses(workspaceRoot)).filter(({ status }) => status.nodeId === nodeId
+    const related = (family ? [...family].reverse() : await client.listStatuses(workspaceRoot)).filter(({ status }) => status.nodeId === nodeId
       && (Number(status.rootExecutionLogId) === rootConversationId
         || Number(status.lineageRootExecutionLogId) === rootConversationId
         || (sessionId && status.sessionProvider === registered.status.sessionProvider && status.nativeSessionId === sessionId)));
@@ -8194,22 +8200,30 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
   }
   const workspaceRoot = activeProjectRoot;
   const projectSyncEngine = syncEngine;
-  if (typeof projectSyncEngine.readAgentExecutions === 'function') await projectSyncEngine.readAgentExecutions(nodeId);
-  if (syncEngine !== projectSyncEngine || activeProjectRoot !== workspaceRoot) return;
-  const resolvedNodeId = resolveConversationNodeIdForContinuation(nodeId, conversationId);
-  if (resolvedNodeId) {
-    nodeId = resolvedNodeId;
-  }
-
   const settings = getPersistedSettings(context);
   const globalDataPath = normalizeSolomapGlobalPath(workspaceRoot, projectSyncEngine.dataRoot || settings.globalDataPath);
   const client = runLifecycleClient(workspaceRoot, globalDataPath);
   const registered = await client.adoptConversationHistory(workspaceRoot, conversationId);
+  if (syncEngine !== projectSyncEngine || activeProjectRoot !== workspaceRoot) return;
   if (registered) {
+    const records = await client.listConversationStatuses(workspaceRoot, conversationId);
+    // Imported legacy chains may predate durable conversation ownership.
+    // Keep their existing history resolver until that relationship is known.
+    const family = records.some(record => record.status.historicalAdopted) ? undefined : records;
+    if (!family) {
+      if (typeof projectSyncEngine.readAgentExecutions === 'function') await projectSyncEngine.readAgentExecutions(nodeId);
+      nodeId = resolveConversationNodeIdForContinuation(nodeId, conversationId) || nodeId;
+    }
+    if (syncEngine !== projectSyncEngine || activeProjectRoot !== workspaceRoot) return;
     if (registered.status.nodeId !== nodeId) throw new Error('run_conversation_node_mismatch');
-    const conversations = projectSyncEngine.getAgentExecutions(nodeId);
-    const leaf = resolveContinuationLeafConversationFromList(conversations, conversationId);
-    let source = leaf ? await client.adoptConversationHistory(workspaceRoot, Number(leaf.id)) : registered;
+    const conversations: AgentConversation[] = family ? family.map(({ status }) => ({
+      id: Number(status.rootExecutionLogId), nodeId: String(status.nodeId), timestamp: String(status.startedAt || ''),
+      agentCli: String(status.agentCli || ''), command: '', output: String(status.launchSummary || ''), status: String(status.status)
+    })) : projectSyncEngine.getAgentExecutions(nodeId);
+    const continuationId = family ? Number(registered.status.rootExecutionLogId) : conversationId;
+    const leaf = resolveContinuationLeafConversationFromList(conversations, continuationId);
+    let source = family?.find(record => Number(record.status.rootExecutionLogId) === leaf?.id)
+      || (leaf ? await client.adoptConversationHistory(workspaceRoot, Number(leaf.id)) : registered);
     if (!source) throw new Error('run_conversation_missing');
     let binding = await client.readBinding(source.reference, source.status);
     if (binding && ['codex', 'claude'].includes(binding.provider) && ['preparing', 'planned'].includes(binding.revisions[binding.headRevision - 1].state)) {
@@ -8236,9 +8250,9 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     const transcriptPath = session.provider === 'codex' ? String(head.evidence?.transcriptPath || '') : '';
     if (session.provider === 'codex' && !transcriptPath) throw new Error('尚未确认这段 Codex 对话的原生记录，暂时无法接续。');
     const providerContext = [...binding!.revisions].reverse().find(revision => revision.providerContext)?.providerContext;
-    const root = resolveContinuationRootConversationFromList(conversations, conversationId);
-    const rootId = Number(root?.id || registered.status.lineageRootExecutionLogId || registered.status.rootExecutionLogId);
-    await closeConversationProcessesForContinuation(workspaceRoot, nodeId, conversations, rootId, session.sessionId, globalDataPath);
+    const root = resolveContinuationRootConversationFromList(conversations, continuationId);
+    const rootId = Number(root?.id || registered.status.lineageRootExecutionLogId || family?.[family.length - 1]?.status.rootExecutionLogId || registered.status.rootExecutionLogId);
+    await closeConversationProcessesForContinuation(workspaceRoot, nodeId, conversations, rootId, session.sessionId, globalDataPath, family);
     const preGitHash = await createPreSessionGitCommit(workspaceRoot);
     const prepared = await prepareOrdinaryConversation(context, {
       agentCli, selectedModel: String(source.status.selectedModel || ''), prompt: '继续当前 Agent 对话',

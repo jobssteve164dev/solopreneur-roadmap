@@ -5022,6 +5022,13 @@ export class UnifiedDataStore {
     if (!row) return null;
     return { state: this.readRunState(projectId, Number(row.execution_log_id)), turnId: String(row.turn_id) };
   }
+  public listConversationRunStates(projectId: string, executionLogId: number): { items: RunState[] } {
+    const source = this.resolveRunConversation(projectId, executionLogId);
+    if (!source) return { items: [] };
+    const rows = this.rows(`SELECT c.execution_log_id FROM run_control c JOIN runs r ON r.id=c.run_id
+      WHERE c.project_id=? AND r.conversation_id=? ORDER BY c.execution_log_id DESC`, [projectId, source.state.conversationId]);
+    return { items: rows.map(row => this.readRunState(projectId, Number(row.execution_log_id))) };
+  }
   public resolveRunConversationTurn(projectId: string, executionLogId: number): { state: RunState; turnId: string } | null {
     if (!Number.isInteger(executionLogId) || executionLogId < 1) throw new Error('invalid_execution_log_id');
     const row = this.rows('SELECT run_control.run_id,run_control.execution_log_id,run_control.current_turn_id,run_turn_journals.turn_id FROM run_turn_journals JOIN run_control ON run_control.run_id=run_turn_journals.run_id AND run_control.project_id=run_turn_journals.project_id WHERE run_turn_journals.project_id=? AND run_turn_journals.execution_log_id=?', [projectId, executionLogId])[0];

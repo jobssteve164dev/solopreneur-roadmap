@@ -111,6 +111,14 @@ export class RunLifecycleClient {
     return { reference, status: this.status(reference, result.state), turnId: result.turnId, runId: result.state.runId, generation: result.state.generation, revision: result.state.revision };
   }
 
+  public async listConversationStatuses(root: string, executionLogId: number) {
+    const { items } = await this.operation('list_conversation_run_states', { root, executionLogId }) as { items: RunState[] };
+    return items.map(state => {
+      const reference = runStatusReference(root, Number(state.status.rootExecutionLogId));
+      return { reference, status: this.status(reference, state), turnId: state.turnId, runId: state.runId, generation: state.generation, revision: state.revision };
+    });
+  }
+
   public async adoptConversationHistory(root: string, executionLogId: number): ReturnType<RunLifecycleClient['findConversation']> {
     const existing = await this.findConversation(root, executionLogId);
     if (existing) return existing;

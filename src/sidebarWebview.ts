@@ -4991,10 +4991,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const pastedAttachmentEpochs = {};
     const projectRefreshPaths = new Set();
     const pendingConversationContinuations = new Set();
+    const pendingSidebarAgentActions = new Map();
     const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [], globalStore: null };
     let projectDataLoaded = false;
     let hoveredConversationCard = null;
     let focusedConversationCard = null;
+    const projectCardActionSelector = '[data-card-trigger-id], .sidebar-conversation-detail-panel, [data-agent-fix-delivery-project-path], [data-agent-fix-security-project-path], [data-agent-fix-foundation-project-path], [data-agent-review-pr], [data-agent-fix-issue]';
     let projectComposerComposing = false;
     let projectCardPointerInteractionActive = false;
     let projectCardKeyboardInteractionActive = false;
@@ -5088,6 +5090,47 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function sameConversations(left, right) {
       return conversationsSignature(left) === conversationsSignature(right);
+    }
+
+    function updateContinuationButtons(projectPath, conversationId, pending) {
+      portfolioList.querySelectorAll('[data-select-project-path]').forEach(card => {
+        if (card.getAttribute('data-select-project-path') !== projectPath) return;
+        card.querySelectorAll('[data-continue-id]').forEach(button => {
+          if (button.getAttribute('data-continue-id') !== conversationId) return;
+          button.disabled = pending;
+          button.classList.toggle('is-pending', pending);
+          button.title = t(pending ? 'continuingNative' : 'continueNative');
+          button.innerHTML = '<span class="codicon ' + (pending ? 'codicon-loading loading-spin' : 'codicon-play') + '"></span>'
+            + (button.classList.contains('mini-btn-continue') ? '' : ' ' + escapeHtml(button.title));
+        });
+      });
+    }
+
+    function sidebarAgentActionKey(button) {
+      const card = button.closest('[data-select-project-path]');
+      const projectPath = card && card.getAttribute('data-select-project-path');
+      const attributes = ['data-agent-fix-delivery-project-path', 'data-agent-fix-security-project-path',
+        'data-agent-fix-foundation-project-path', 'data-agent-review-pr', 'data-agent-fix-issue'];
+      const attribute = attributes.find(name => button.hasAttribute(name));
+      return JSON.stringify([projectPath, attribute, button.getAttribute(attribute)]);
+    }
+
+    function updateSidebarAgentActionButtons() {
+      portfolioList.querySelectorAll('[data-agent-fix-delivery-project-path], [data-agent-fix-security-project-path], [data-agent-fix-foundation-project-path], [data-agent-review-pr], [data-agent-fix-issue]').forEach(button => {
+        const pending = pendingSidebarAgentActions.has(sidebarAgentActionKey(button));
+        button.disabled = pending;
+        if (pending) button.setAttribute('aria-busy', 'true');
+        else button.removeAttribute('aria-busy');
+      });
+    }
+
+    function beginSidebarAgentAction(button, projectPath) {
+      const key = sidebarAgentActionKey(button);
+      if (pendingSidebarAgentActions.has(key)) return '';
+      const id = Date.now() + ':' + Math.random().toString(36).slice(2);
+      pendingSidebarAgentActions.set(key, { id, projectPath });
+      updateSidebarAgentActionButtons();
+      return id;
     }
 
     function collaborationRandomId(byteLength) {
@@ -5645,7 +5688,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (projectComposerComposing) return true;
       const active = document.activeElement;
       return Boolean(active && active.closest && active.closest(
-        '.portfolio-card input, .portfolio-card textarea, .portfolio-card select, .portfolio-card [contenteditable="true"], .portfolio-card [role="combobox"], .portfolio-card [role="listbox"]'
+        '.portfolio-card input, .portfolio-card textarea, .portfolio-card select, .portfolio-card button, .portfolio-card [contenteditable="true"], .portfolio-card [role="combobox"], .portfolio-card [role="listbox"]'
       ));
     }
 
@@ -5709,7 +5752,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         }, 0);
       }, true);
       portfolioList.addEventListener('pointerover', (event) => {
-        const card = event.target.closest ? event.target.closest('[data-card-trigger-id]') : null;
+        const card = event.target.closest ? event.target.closest(projectCardActionSelector) : null;
         if (card) hoveredConversationCard = card;
       });
       portfolioList.addEventListener('pointerout', (event) => {
@@ -5720,12 +5763,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         setTimeout(flushPendingAsyncPortfolioRender, 0);
       });
       portfolioList.addEventListener('focusin', (event) => {
-        focusedConversationCard = event.target.closest ? event.target.closest('[data-card-trigger-id]') : null;
+        focusedConversationCard = event.target.closest ? event.target.closest(projectCardActionSelector) : null;
       });
       portfolioList.addEventListener('focusout', () => {
         setTimeout(() => {
           const active = document.activeElement;
-          focusedConversationCard = active && active.closest ? active.closest('[data-card-trigger-id]') : null;
+          focusedConversationCard = active && active.closest ? active.closest(projectCardActionSelector) : null;
           flushPendingAsyncPortfolioRender();
         }, 0);
       });
@@ -8884,6 +8927,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
               ? activeProjectPath
               : incomingSelectedProjectPath;
           if (projectDataRootChanged) {
+            pendingSidebarAgentActions.clear();
+            pendingConversationContinuations.clear();
             for (const timer of uiStateSaveTimers.values()) clearTimeout(timer);
             uiStateSaveTimers.clear();
             uiStateLoadRevisions.clear();
@@ -9148,8 +9193,18 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
         case 'conversationActionSettled':
           if (message.action === 'continue') {
-            pendingConversationContinuations.delete(String(message.conversationId || ''));
-            renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+            const conversationId = String(message.conversationId || '');
+            if (!pendingConversationContinuations.delete(conversationId)) break;
+            updateContinuationButtons(message.projectPath, conversationId, false);
+            flushPendingAsyncPortfolioRender();
+          } else if (message.action === 'runSolo') {
+            for (const [key, action] of pendingSidebarAgentActions) {
+              if (action.id !== message.launchActionId || action.projectPath !== message.projectPath) continue;
+              pendingSidebarAgentActions.delete(key);
+              updateSidebarAgentActionButtons();
+              flushPendingAsyncPortfolioRender();
+              break;
+            }
           }
           break;
 
@@ -9256,6 +9311,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'sidebarProjectConversationSnapshotLoaded':
+          if (sidebarProjectConversationRequested[message.projectPath]
+            && sameConversations(sidebarSoloConversationsByProject[message.projectPath], message.soloConversations)
+            && sameConversations(sidebarProjectConversations[message.projectPath], message.projectConversations)
+            && sameConversations(sidebarFlowConversations[message.projectPath], message.flowConversations)
+            && sameConversations(sidebarRoadmapRevisionConversations[message.projectPath], message.revisionConversations)) break;
           sidebarSoloConversationsByProject[message.projectPath] = message.soloConversations || [];
           sidebarProjectConversations[message.projectPath] = message.projectConversations || [];
           sidebarFlowConversations[message.projectPath] = message.flowConversations || [];
@@ -9978,7 +10038,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (!conversationId || pendingConversationContinuations.has(conversationId)) return;
           const targetNodeId = item.getAttribute('data-continue-node-id') || nodeId;
           pendingConversationContinuations.add(conversationId);
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          updateContinuationButtons(projectPath, conversationId, true);
           if (isSolo) {
             vscode.postMessage({
               command: 'conversation.continue',
@@ -11909,14 +11969,17 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           const projectPath = button.getAttribute('data-agent-fix-delivery-project-path') || '';
           const project = (currentProjects.portfolio || []).find(item => item.path === projectPath);
           if (!projectPath || !project) return;
+          const launchActionId = beginSidebarAgentAction(button, projectPath);
+          if (!launchActionId) return;
           const targetId = projectSoloTargetId(projectPath);
           const agentCli = projectConversationAgentSelections[targetId] || getEffectiveSettingCliPath() || 'agy';
           const model = getTargetModelValue(targetId, agentCli);
           projectConversationModes[projectPath] = 'solo';
           deliveryActionMessage = t('deliveryActionStarted');
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
             command: 'conversation.runSolo',
+            launchActionId,
             projectPath,
             userMessage: buildDeliveryActionPrompt(project),
             agentCli,
@@ -11931,12 +11994,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           const projectPath = button.getAttribute('data-agent-fix-security-project-path') || '';
           const project = (currentProjects.portfolio || []).find(item => item.path === projectPath);
           if (!projectPath || !project) return;
+          const launchActionId = beginSidebarAgentAction(button, projectPath);
+          if (!launchActionId) return;
           const targetId = projectSoloTargetId(projectPath);
           const agentCli = projectConversationAgentSelections[targetId] || getEffectiveSettingCliPath() || 'agy';
           const model = getTargetModelValue(targetId, agentCli);
           projectConversationModes[projectPath] = 'solo';
           vscode.postMessage({
             command: 'conversation.runSolo',
+            launchActionId,
             projectPath,
             userMessage: buildSecurityActionPrompt(project),
             agentCli,
@@ -11944,7 +12010,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             supplementFiles: []
           });
           deliveryActionMessage = t('deliveryActionStarted');
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
       portfolioList.querySelectorAll('[data-agent-review-pr]').forEach(button => {
@@ -11957,14 +12023,17 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             ? project.pullRequests.items.find(item => Number(item.number || 0) === prNumber)
             : null;
           if (!projectPath || !project || !pullRequest) return;
+          const launchActionId = beginSidebarAgentAction(button, projectPath);
+          if (!launchActionId) return;
           const targetId = projectSoloTargetId(projectPath);
           const agentCli = projectConversationAgentSelections[targetId] || getEffectiveSettingCliPath() || 'agy';
           const model = getTargetModelValue(targetId, agentCli);
           projectConversationModes[projectPath] = 'solo';
           deliveryActionMessage = t('pullRequestActionStarted');
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
             command: 'conversation.runSolo',
+            launchActionId,
             projectPath,
             userMessage: buildPullRequestReviewPrompt(project, pullRequest),
             agentCli,
@@ -11989,14 +12058,17 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           const projectPath = button.getAttribute('data-agent-fix-foundation-project-path') || '';
           const project = (currentProjects.portfolio || []).find(item => item.path === projectPath);
           if (!projectPath || !project) return;
+          const launchActionId = beginSidebarAgentAction(button, projectPath);
+          if (!launchActionId) return;
           const targetId = projectSoloTargetId(projectPath);
           const agentCli = projectConversationAgentSelections[targetId] || getEffectiveSettingCliPath() || 'agy';
           const model = getTargetModelValue(targetId, agentCli);
           projectConversationModes[projectPath] = 'solo';
           deliveryActionMessage = t('deliveryActionStarted');
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
             command: 'conversation.runSolo',
+            launchActionId,
             projectPath,
             userMessage: buildFoundationActionPrompt(project),
             agentCli,
@@ -12187,14 +12259,17 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           const project = (currentProjects.portfolio || []).find(item => item.path === projectPath);
           const issueNumber = Number(button.getAttribute('data-agent-fix-issue') || 0);
           if (!projectPath || !project || !issueNumber || !issueDetails || issueDetails.error) return;
+          const launchActionId = beginSidebarAgentAction(button, projectPath);
+          if (!launchActionId) return;
           const targetId = projectSoloTargetId(projectPath);
           const agentCli = projectConversationAgentSelections[targetId] || getEffectiveSettingCliPath() || 'agy';
           const model = getTargetModelValue(targetId, agentCli);
           projectConversationModes[projectPath] = 'solo';
           issueActionMessage = t('issueAgentStarted');
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
             command: 'conversation.runSolo',
+            launchActionId,
             projectPath,
             userMessage: buildIssueActionPrompt(project, issueDetails),
             agentCli,
@@ -12204,6 +12279,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         });
       });
       bindProjectContinueComposer(portfolioList);
+      updateSidebarAgentActionButtons();
       if (preserveComposerInput) restoreProjectConversationInputState(preservedComposerState);
       if (updatedProjectPath) {
         portfolioList.querySelectorAll('[data-select-project-path]').forEach(card => {

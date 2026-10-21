@@ -402,6 +402,10 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const project = await runProject(input);
         return store.resolveRunConversation(project.projectId, Number(input.executionLogId));
       }
+      case 'list_conversation_run_states': {
+        const project = await runProject(input);
+        return store.listConversationRunStates(project.projectId, Number(input.executionLogId));
+      }
       case 'resolve_run_conversation_turn': {
         const project = await runProject(input);
         return store.resolveRunConversationTurn(project.projectId, Number(input.executionLogId));

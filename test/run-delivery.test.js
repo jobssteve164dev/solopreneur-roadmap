@@ -6,6 +6,29 @@ const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
 
+test('continuation reads only its durable conversation family without decoding unrelated history', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-continuation-family-'));
+  fs.mkdirSync(path.join(base, '.git'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'), other = path.join(base, 'other');
+  fs.mkdirSync(project); fs.mkdirSync(other);
+  const store = new UnifiedDataStore(root), ops = createRuntimeDataOperations(store);
+  const call = (operation, input) => ops({ operation, input });
+  try {
+    const prepare = (workspace, id, parent) => call('prepare_run', { root: workspace, executionLogId: id, nodeId: '__solo__', runKind: parent ? 'solo_continue' : 'solo',
+      prompt: '完整用户请求', command: '', userMessage: '用户目标', ...(parent ? { parentExecutionLogId: parent.status.rootExecutionLogId, expectedParentTurnId: parent.turnId } : {}),
+      idempotencyKey: `family:${workspace}:${id}` });
+    const parent = await prepare(project, 1);
+    const child = await prepare(project, 3, parent);
+    await prepare(project, 4); await prepare(other, 3);
+    const originalRead = store.readRunState.bind(store), reads = [];
+    store.readRunState = (...args) => { reads.push(args.slice(0, 2)); return originalRead(...args); };
+    const family = await call('list_conversation_run_states', { root: project, executionLogId: 1 });
+    assert.deepEqual(family.items.map(state => state.runId), [child.runId, parent.runId]);
+    assert.ok(reads.every(([scope, id]) => scope === parent.projectId && [1, 3].includes(id)), 'unrelated run metadata must not be hydrated');
+    assert.equal((await call('list_conversation_run_states', { root: project, executionLogId: 999 })).items.length, 0);
+  } finally { await ops.close(); store.close(); }
+});
+
 test('delivery polling lists only recoverable queued tasks and keeps active creators and stopped tasks untouched', async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-delivery-poll-'));
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
