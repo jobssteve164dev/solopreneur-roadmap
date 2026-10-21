@@ -4166,6 +4166,10 @@ export class UnifiedDataStore {
       .map(row => ({ root: String(row.root_path), projectId: String(row.project_id) }))
       .filter(project => !stale.has(project.projectId));
   }
+  public registeredProjectLocationsForRead(): Array<{ root: string; projectId: string }> {
+    return this.rows("SELECT l.root_path,l.project_id FROM project_locations l JOIN objects o ON o.id=l.project_id WHERE l.device_id=? AND l.status IN ('active','alias') AND o.archived_at IS NULL", [this.deviceId])
+      .map(row => ({ root: String(row.root_path), projectId: String(row.project_id) }));
+  }
   private isVanishedSolomapTestProjectRoot(root: string): boolean {
     const resolved = path.resolve(root), relative = path.relative(path.resolve(os.tmpdir()), resolved);
     return relative !== ''

@@ -21,6 +21,7 @@ import { executeTelegramExtensionCommand, registerTelegramEditorEndpoint } from 
 import { persistTelegramRuntimeSecret } from './telegramRuntimeConfig';
 import { migrationRunKinds, soloConversationRunKinds } from './runLifecycleTypes';
 import { setIntelligenceTimeScheduleInDatabaseSync } from './intelligenceTimeSchedule';
+import { projectSignalProjects, readProjectSignals } from './projectSignalsRead';
 
 export interface RuntimeDataOperations {
   (request: RuntimeDataRequest): Promise<unknown>;
@@ -262,6 +263,13 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       }
       case 'initialize_project_registry': return store.initializeProjectRegistry(input as Parameters<UnifiedDataStore['initializeProjectRegistry']>[0]);
       case 'read_project_registry': return store.readProjectRegistry(input as Parameters<UnifiedDataStore['readProjectRegistry']>[0]);
+      case 'project_signals': return readProjectSignals(store, input);
+      case 'resolve_project_signals_scope': {
+        const { projects } = projectSignalProjects(store);
+        const root = String(input.root || '');
+        const selected = root ? projects.find(project => path.resolve(project.path) === path.resolve(root)) : projects.find(project => project.projectId);
+        return { projectId: selected?.projectId || null };
+      }
       case 'patch_project_registry': return store.patchProjectRegistry(input as unknown as Parameters<UnifiedDataStore['patchProjectRegistry']>[0]);
       case 'read_host_settings': return store.readHostSettings(input as Parameters<UnifiedDataStore['readHostSettings']>[0]);
       case 'patch_host_settings': return store.patchHostSettings(input as unknown as Parameters<UnifiedDataStore['patchHostSettings']>[0]);
@@ -1014,6 +1022,10 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       if (scope.projectId !== session.scope || scope.physicalRoot !== session.migrationPhysicalRoot) throw new Error('maintenance_scope_denied');
       return dispatch(request);
     }
+    if (request.operation === 'project_signals') {
+      store.authorizeMcpAction(session.actorId, session.scope, 'read');
+      return readProjectSignals(store, input);
+    }
     if (request.operation === 'get_conversation') {
       store.authorizeMcpAction(session.actorId, session.scope, 'read');
       const tracking = store.conversationTracking();
@@ -1197,7 +1209,7 @@ export function runtimeMcpSource(globalDataPath: string, scope: string | null, g
   const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
   const retryableHandshake = (error: unknown): boolean => /(?:ECONNREFUSED|ECONNRESET|EPIPE|socket hang up|runtime_data_response_incomplete|Invalid Runtime endpoint|ENOENT|different_runtime)/.test(errorMessage(error));
   const safeReplay = (operation: string, input: Record<string, unknown>): boolean =>
-    ['read', 'search', 'context', 'get_conversation', 'migration_overview', 'migration_status', 'read_recycling_plan'].includes(operation) ||
+    ['read', 'search', 'context', 'project_signals', 'get_conversation', 'migration_overview', 'migration_status', 'read_recycling_plan'].includes(operation) ||
     operation === 'checkpoint_current_run' ||
     (['write', 'link', 'export', 'start_conversation'].includes(operation) && typeof input.idempotencyKey === 'string' && input.idempotencyKey.length > 0);
   const retryOperation = (error: unknown, operation: string, input: Record<string, unknown>): { retry: boolean; resetSession: boolean } => {
@@ -1247,7 +1259,14 @@ export function runtimeMcpSource(globalDataPath: string, scope: string | null, g
 }
 
 export async function runtimeProjectMcpSource(globalDataPath: string, projectRoot: string, intelligenceOperationId?: string): Promise<UnifiedMcpSource | undefined> {
-  if (!projectRoot || !fs.existsSync(path.join(globalDataPath, 'solomap.db'))) return undefined;
-  const project = await sendRuntimeDataRequest<{ projectId: string }>(globalDataPath, { operation: 'register_project', input: { root: projectRoot } });
-  return runtimeMcpSource(globalDataPath, project.projectId, true, undefined, intelligenceOperationId);
+  if (!fs.existsSync(path.join(globalDataPath, 'solomap.db'))) return undefined;
+  const existing = await sendRuntimeDataRequest<{ projectId: string | null }>(globalDataPath, { operation: 'resolve_project_signals_scope', input: { root: projectRoot } });
+  if (!existing.projectId && !projectRoot) return undefined;
+  const project = existing.projectId ? existing : await sendRuntimeDataRequest<{ projectId: string }>(globalDataPath, { operation: 'register_project', input: { root: projectRoot } });
+  const source = runtimeMcpSource(globalDataPath, project.projectId, true, undefined, intelligenceOperationId);
+  if (projectRoot && fs.existsSync(projectRoot)) return source;
+  return { ...source, projectSignalsOnly: true, call: (operation, input) => {
+    if (!['project_signals', 'start_conversation', 'get_conversation'].includes(operation)) return Promise.reject(new Error('action_denied'));
+    return source.call(operation, input);
+  } };
 }

@@ -28,6 +28,7 @@ export async function readIntelligenceCurrentSteps(root: string, operation: Inte
   };
   try { return await read('read_roadmap'); }
   catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT' || error instanceof Error && /\bENOENT\b/.test(error.message)) return [];
     if (!(error instanceof Error) || error.message !== 'roadmap_import_required') throw error;
     try { return await read('accept_roadmap_csv'); }
     catch (acceptError) {

@@ -332,7 +332,7 @@ export async function prepareNativeIntelligenceExecution(projectContext: {
 }> {
   const listed = readTools ? (await observeLocalDiagnosticStage('mcp.list', () => readTools.listTools())).tools : [];
   const database = listed.some(tool => tool.name === 'solomap_write');
-  const allowedNames = new Set(getIntelligenceMcpConnector(database).permissions?.tools || []);
+  const allowedNames = new Set(getIntelligenceMcpConnector(database || listed.some(tool => tool.name === 'solomap_project_signals')).permissions?.tools || []);
   const availableTools = listed.filter(tool => allowedNames.has(tool.name)
     && (tool.annotations?.readOnlyHint === true || intelligenceActionToolNames.includes(tool.name) || (database && unifiedToolNames.includes(tool.name)))
     && tool.annotations?.destructiveHint !== true);
@@ -540,7 +540,7 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
     if (this.workingDirectory) fs.mkdirSync(this.workingDirectory, { recursive: true });
     const listed = readTools ? (await observeLocalDiagnosticStage('mcp.list', () => readTools.listTools())).tools : [];
     const database = listed.some(tool => tool.name === 'solomap_write');
-    const allowedNames = new Set(getIntelligenceMcpConnector(database).permissions?.tools || []);
+    const allowedNames = new Set(getIntelligenceMcpConnector(database || listed.some(tool => tool.name === 'solomap_project_signals')).permissions?.tools || []);
     const availableTools = listed.filter(tool =>
       allowedNames.has(tool.name) && (tool.annotations?.readOnlyHint === true || intelligenceActionToolNames.includes(tool.name) || (database && unifiedToolNames.includes(tool.name)))
       && tool.annotations?.destructiveHint !== true);

@@ -33,12 +33,15 @@ async function fixture(t, mode, onLaunch) {
   fs.mkdirSync(path.join(base, '.git'));
   const root = path.join(base, '.solomap-global');
   const project = path.join(base, 'alpha');
+  const otherProject = path.join(base, 'beta');
   fs.mkdirSync(path.join(project, '.git'), { recursive: true });
+  fs.mkdirSync(path.join(otherProject, '.git'), { recursive: true });
   let bridge;
   t.after(() => bridge?.dispose());
-  const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project, name: 'Alpha' }]);
+  const projects = [{ path: project, name: 'Alpha' }, { path: otherProject, name: 'Beta' }];
+  const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, root, projects);
   t.after(() => cleanupExact(base));
-  await owner.store.initializeProjectRegistry({ legacyProjects: [{ path: project, name: 'Alpha' }], legacySelectedProjectPath: project });
+  await owner.store.initializeProjectRegistry({ legacyProjects: projects, legacySelectedProjectPath: project });
   const requestFile = path.join(base, 'model-request.json');
   const cli = path.join(base, 'codex');
   fs.writeFileSync(cli, `#!/usr/bin/env node
@@ -46,6 +49,21 @@ const fs = require('node:fs');
 let input = '';
 process.stdin.on('data', bytes => input += bytes);
 process.stdin.on('end', () => {
+  const request = JSON.parse(fs.readFileSync(${JSON.stringify(requestFile)}, 'utf8'));
+  if (request.maintenance) {
+    const call = (name, args) => console.log(JSON.stringify({ toolCall: { name, arguments: args } }));
+    if (input.lastIndexOf('TOOLRESULT:') <= input.lastIndexOf('USER:')) return call('solomap_project_signals', {});
+    const line = input.slice(input.lastIndexOf('TOOLRESULT:') + 'TOOLRESULT:'.length).trim().split('\\n')[0];
+    const result = JSON.parse(line);
+    if (result.isError) return console.log('维护数据读取失败。');
+    const value = JSON.parse(result.content[0].text);
+    if (value.status === 'projects') return call('solomap_project_signals', { project: JSON.parse(value.content).projects.find(p => p.name === 'Beta').projectId, kind: 'security' });
+    if (value.status === 'saved') {
+      const alert = JSON.parse(value.content).alerts[0];
+      return call('solomap_start_conversation', { project: value.projectId, mode: 'solo', message: alert.title + ' ' + alert.url, idempotencyKey: 'maintain-beta' });
+    }
+    return console.log(value.status === 'started' ? '维护任务已启动。' : '维护任务未启动。');
+  }
   if (input.lastIndexOf('TOOLRESULT:') > input.lastIndexOf('USER:')) {
     const line = input.slice(input.lastIndexOf('TOOLRESULT:') + 'TOOLRESULT:'.length).trim().split('\\n')[0];
     const result = JSON.parse(line);
@@ -75,7 +93,7 @@ process.stdin.on('end', () => {
   assert.equal(runtime.mode().mode, mode);
   const store = new IntelligenceConversationStore(root, async (messages, context) => {
     const mcp = await createIntelligenceMcpSession({
-      getProjects: () => [{ name: 'Alpha', path: project }], getSelectedProjectPath: () => project,
+      getProjects: () => projects, getSelectedProjectPath: () => project,
       getCurrentSteps: () => [], getSettings: () => ({ language: 'zh' })
     }, await runtimeProjectMcpSource(root, project, context.operationId));
     try { return await new EmbeddedPiAgentEngine({ agentCli: cli, workingDirectory: root }).chat(messages, { selectedProject: 'Alpha', projects: ['Alpha'] }, mcp.client, context); }
@@ -92,9 +110,9 @@ process.stdin.on('end', () => {
     await onLaunch?.({ ...owner, root, runtime, payload });
     return { status: 'started', projectPath: payload.projectPath, mode: payload.mode };
   });
-  return { ...owner, database: owner.store, root, project, launches, store,
+  return { ...owner, database: owner.store, root, project, otherProject, launches, store,
     async ask(input, chatId = crypto.randomUUID(), toolName = 'solomap_start_conversation') {
-      fs.writeFileSync(requestFile, JSON.stringify({ name: toolName, arguments: input }));
+      fs.writeFileSync(requestFile, JSON.stringify(input.maintenance ? input : { name: toolName, arguments: input }));
       const answer = await reply(chatId, '请开始这项任务');
       assert.equal((await store.get(ids[chatId])).messages.at(-1).content, answer);
       return answer;
@@ -104,6 +122,38 @@ process.stdin.on('end', () => {
 }
 
 for (const mode of ['legacy', 'harness']) {
+  test(`${mode} Telegram reads another project database signals and starts an evidence-based task with queryable completion`, async t => {
+    let run;
+    const f = await fixture(t, mode, async ({ ops, payload }) => {
+      run = await ops({ operation: 'prepare_run_intent', input: { root: payload.projectPath, launchIntentId: payload.launchIntentId,
+        nodeId: '__solo__', runKind: 'solo', prompt: payload.message, command: 'isolated-agent', userMessage: payload.message,
+        status: 'Running', metadata: { interactiveSession: true, launchIntentHash: 'maintenance-fixture' }, idempotencyKey: payload.launchIntentId } });
+    });
+    const targetId = f.projectIds.get(f.otherProject);
+    const token = f.database.reserveExternalRefresh(targetId, 'security', 'maintenance-signal');
+    f.database.commitExternalRefresh(targetId, { key: 'security', ...token, requestedAt: Date.now(), cache: {
+      schemaVersion: 1, repo: 'owner/beta', syncedAt: '2026-10-20T00:00:00Z', message: '',
+      alerts: [{ source: 'dependabot', title: '修复 Beta 依赖漏洞', severity: 'high', state: 'open', url: 'https://example.test/beta/security/7' }]
+    } });
+    fs.renameSync(f.project, f.project + '-unavailable');
+    assert.equal(await f.ask({ maintenance: true }, '1234'), '维护任务已启动。');
+    assert.equal(f.launches.length, 1);
+    assert.equal(f.launches[0].projectPath, f.otherProject);
+    assert.equal(f.launches[0].message, '修复 Beta 依赖漏洞 https://example.test/beta/security/7');
+    assert.equal(await f.ask({}, '1234', 'solomap_get_conversation'), '任务正在执行。');
+    const done = f.database.checkpointRun(targetId, { executionLogId: run.status.executionLogId, generation: run.generation,
+      proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'candidate_complete',
+      summary: '依赖漏洞已修复并验证', idempotencyKey: 'maintenance-complete' });
+    const owner = await require('../out/agentRunPreparation.js').getAgentRunDeliveryOwner();
+    const scope = { executionLogId: run.status.executionLogId, generation: done.generation, expectedRevision: done.revision, expectedTurnId: done.turnId };
+    const lease = f.database.claimRunConsumer(targetId, { ...scope, owner });
+    f.database.commitRunSettlement(targetId, { ...scope, token: lease.token,
+      journal: { agentCli: 'isolated-agent', command: 'isolated-agent', output: '依赖漏洞已修复并验证', status: 'Completed' },
+      digest: { schemaVersion: 2, runId: run.runId, nodeId: '__solo__', executionLogId: run.status.executionLogId, outcome: '依赖漏洞已修复并验证' }, idempotencyKey: 'maintenance-settle' });
+    assert.equal(await f.ask({}, '1234', 'solomap_get_conversation'), '任务本轮已完成。');
+    if (mode === 'harness') assert.deepEqual(f.database.rows("SELECT replay FROM pi_tool_invocations WHERE tool_name='solomap_project_signals'").map(row => row.replay), ['safe', 'safe']);
+  });
+
   test(`${mode} Telegram follow-up queries the original task and its settled result in the same chat`, async t => {
     let run;
     const f = await fixture(t, mode, async ({ ops, payload }) => {

@@ -25,7 +25,7 @@ export interface IntelligenceActionSource {
   setTimeSchedule(input: IntelligenceTimeScheduleInput): Promise<unknown>;
 }
 
-export const intelligenceActionToolNames = ['set_time_schedule'];
+export const intelligenceActionToolNames = ['set_time_schedule', 'solomap_start_conversation'];
 
 export function validateIntelligenceTimeScheduleInput(input: IntelligenceTimeScheduleInput): IntelligenceTimeScheduleInput {
   const normalized: IntelligenceTimeScheduleInput = {
@@ -59,7 +59,8 @@ export function getIntelligenceMcpConnector(database = false): SolomapMcpRegistr
     status: 'installed',
     source: { kind: 'builtin' },
     permissions: {
-      tools: [...toolDescriptions.map(tool => tool.name), ...intelligenceActionToolNames, ...(database ? unifiedToolNames : [])],
+      tools: [...new Set([...toolDescriptions.map(tool => tool.name),
+        ...intelligenceActionToolNames.filter(name => database || name === 'set_time_schedule'), ...(database ? unifiedToolNames : [])])],
       requiresCredentials: false,
       externalAccess: false,
       writeAccess: true
@@ -106,7 +107,7 @@ export function createIntelligenceMcpServer(source: IntelligenceReadToolSource, 
       }
     });
   }
-  if (dataSource) registerUnifiedMcpTools(server, dataSource, { conversationLaunch: true });
+  if (dataSource) registerUnifiedMcpTools(server, dataSource, { conversationLaunch: true, projectSignals: true });
   return server;
 }
 

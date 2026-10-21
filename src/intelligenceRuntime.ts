@@ -78,6 +78,7 @@ export class IntelligenceRuntime {
     const dataSource: UnifiedMcpSource | undefined = rawDataSource ? {
       scope: rawDataSource.scope,
       globalReads: rawDataSource.globalReads,
+      projectSignalsOnly: rawDataSource.projectSignalsOnly,
       close: () => rawDataSource.close?.() || Promise.resolve(),
       sessionInfo: rawDataSource.sessionInfo ? () => rawDataSource.sessionInfo!() : undefined,
       setPiToolFence(fence) { activeToolFence = fence; rawDataSource.setPiToolFence?.(fence); },

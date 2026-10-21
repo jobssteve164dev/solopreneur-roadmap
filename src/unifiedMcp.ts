@@ -2,16 +2,18 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ContentPage, DataObject } from './db/unifiedDataStore';
 import { validateAgentLink, validateAgentWrite } from './dataAuthorization';
 import { dataSchema, type DataField } from './db/dataSchema';
+import { projectSignalKinds } from './projectSignalsRead';
 
 export interface UnifiedMcpSource {
   scope: string | null;
   globalReads?: boolean;
+  projectSignalsOnly?: boolean;
   close?(): Promise<void>;
   sessionInfo?(): Promise<{ runKind: string; migrationKind: string | null }>;
   setPiToolFence?(fence?: { operationId: string; invocationId: string; ownerId: string; ownerGeneration: number }): void;
   call(operation: string, input: Record<string, unknown>): Promise<unknown>;
 }
-export const unifiedToolNames = ['solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_export', 'solomap_conversation_status', 'solomap_start_conversation', 'solomap_get_conversation'];
+export const unifiedToolNames = ['solomap_search', 'solomap_read', 'solomap_write', 'solomap_link', 'solomap_context', 'solomap_memory', 'solomap_experience', 'solomap_export', 'solomap_conversation_status', 'solomap_start_conversation', 'solomap_get_conversation', 'solomap_project_signals'];
 export const migrationToolNames = ['solomap_migration_start', 'solomap_migration_status', 'solomap_migration_retry', 'solomap_recycling_preview', 'solomap_recycling_apply'];
 
 function registerMigrationTools(server: McpServer, source: UnifiedMcpSource, includeRecyclingApply: boolean): void {
@@ -33,7 +35,7 @@ function registerMigrationTools(server: McpServer, source: UnifiedMcpSource, inc
 
 export function registerMigrationMcpTools(server: McpServer, source: UnifiedMcpSource, includeRecyclingApply = true): void { registerMigrationTools(server, source, includeRecyclingApply); }
 
-export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSource, options: { readOnly?: boolean; conversationLifecycle?: boolean; conversationLaunch?: boolean } = {}): void {
+export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSource, options: { readOnly?: boolean; conversationLifecycle?: boolean; conversationLaunch?: boolean; projectSignals?: boolean } = {}): void {
   const z = require('zod') as typeof import('zod');
   const scope = z.string().nullable().optional();
   const schema = dataSchema();
@@ -256,6 +258,10 @@ export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSou
     model: z.string().min(1).max(1024).optional(),
     idempotencyKey: z.string().min(1).max(256)
   }, false, input => source.call('start_conversation', input));
+  if (options.projectSignals) register('solomap_project_signals', '读取各已登记项目卡片已入库的原始数据，不请求外部服务。省略参数读取项目目录（status=projects，content拼接后含projects与kinds），cursor非空时只传cursor继续；提供project（项目ID、路径或唯一名称）和kind读取Issues、PR、Actions/Release或安全告警。content是JSON文本：始终拼接全部页content后解析，不把片段当完整JSON。数据分页用相同project、kind和返回的cursor继续，固定版本；项目列表变化时报project_list_changed，从头列出。syncedAt表示同步时间，not_synced表示尚无缓存，不能解释为没有问题。处理问题时把项目及证据交给solomap_start_conversation，再用solomap_get_conversation查询结果。', {
+    project: z.string().trim().min(1).max(4096).optional(), kind: z.enum(projectSignalKinds).optional(), cursor: z.string().min(1).max(2048).optional()
+  }, true, input => source.call('project_signals', input));
+  if (source.projectSignalsOnly) return;
   register('solomap_search', '查找项目记录、记忆和执行证据。', { scope, query: z.string().optional(), terms: z.array(z.string().min(1)).nonempty().optional(), kinds: z.array(z.string()).optional(), limit: z.number().int().min(1).max(500).optional(), cursor: z.string().optional() }, true, async input => {
     if ((input.scope ?? source.scope) !== source.scope) throw new Error('scope_denied');
     return source.call('search', { ...input, scope: source.scope });
