@@ -196,7 +196,8 @@ test('project discovery survives the actual Pi output boundary with very long pr
     assert.doesNotMatch(input, /Pi Harness tool output limit/);
     const result = JSON.parse(input.slice(input.lastIndexOf('TOOLRESULT:') + 11).trim().split('\n')[0]);
     assert.equal(Boolean(result.isError), false);
-    const page = JSON.parse(result.content[0].text);
+    const envelope = JSON.parse(result.content[0].text);
+    const page = envelope.structuredContent || JSON.parse(envelope.content.find(item => item.type === 'text').text);
     content += page.content;
     if (page.cursor) return JSON.stringify({ toolCall: { name: 'solomap_project_signals', arguments: { cursor: page.cursor } } });
     assert.equal(JSON.parse(content).projects[1].name, name);

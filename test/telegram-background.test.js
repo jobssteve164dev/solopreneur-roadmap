@@ -343,7 +343,8 @@ let input='';process.stdin.on('data',bytes=>input+=bytes);process.stdin.on('end'
   if(input.lastIndexOf('TOOLRESULT:')>input.lastIndexOf('USER:')){
     const result=JSON.parse(input.slice(input.lastIndexOf('TOOLRESULT:')+11).trim().split('\\n')[0]);
     if(result.isError){console.log('任务未启动。');return;}
-    const value=JSON.parse(result.content[0].text);
+    const envelope=JSON.parse(result.content[0].text);
+    const value=envelope.structuredContent||JSON.parse(envelope.content.find(item=>item.type==='text').text);
     console.log(result.toolName==='solomap_get_conversation'?'查询结果：'+value.latest[0].result.summary:'已开始检查 Alpha 的发布流程。');
   }else console.log(JSON.stringify({toolCall:input.slice(input.lastIndexOf('USER:')).includes('刚才那个任务怎么样了')?
     {name:'solomap_get_conversation',arguments:{}}:{name:'solomap_start_conversation',arguments:{project:'Alpha',mode:'solo',message:'检查发布流程',idempotencyKey:'telegram-solo-launch'}}}));

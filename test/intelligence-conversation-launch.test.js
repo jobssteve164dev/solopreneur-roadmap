@@ -49,18 +49,22 @@ const fs = require('node:fs');
 let input = '';
 process.stdin.on('data', bytes => input += bytes);
 process.stdin.on('end', () => {
+  const unwrap = result => {
+    const envelope = JSON.parse(result.content[0].text);
+    return envelope.structuredContent || JSON.parse(envelope.content.find(item => item.type === 'text').text);
+  };
   const request = JSON.parse(fs.readFileSync(${JSON.stringify(requestFile)}, 'utf8'));
   if (request.signalQuery) {
     const results = input.slice(input.lastIndexOf('USER:')).split('TOOLRESULT:').slice(1)
       .map(text => JSON.parse(text.trim().split('\\n')[0]));
-    const page = results.length ? JSON.parse(results.at(-1).content[0].text) : null;
+    const page = results.length ? unwrap(results.at(-1)) : null;
     if (!page || page.cursor) {
       const call = JSON.stringify({ toolCall: { name: 'solomap_project_signals', arguments: {
         project: 'Beta', kind: 'delivery', ...(page ? { cursor: page.cursor } : {})
       } } });
-      return console.log(request.prefix + '\\n' + call);
+      return console.log(input.includes('上一轮输出不符合回合协议') ? call : request.prefix + '\\n' + call);
     }
-    const data = JSON.parse(results.map(result => JSON.parse(result.content[0].text).content).join(''));
+    const data = JSON.parse(results.map(result => unwrap(result).content).join(''));
     return console.log('已查到 ' + data.workflowRuns.length + ' 条 Actions，其中 ' + data.workflowRuns.filter(run => run.conclusion === 'failure').length + ' 条失败。');
   }
   if (request.maintenance) {
@@ -69,7 +73,7 @@ process.stdin.on('end', () => {
     const line = input.slice(input.lastIndexOf('TOOLRESULT:') + 'TOOLRESULT:'.length).trim().split('\\n')[0];
     const result = JSON.parse(line);
     if (result.isError) return console.log('维护数据读取失败。');
-    const value = JSON.parse(result.content[0].text);
+    const value = unwrap(result);
     if (value.status === 'projects') return call('solomap_project_signals', { project: JSON.parse(value.content).projects.find(p => p.name === 'Beta').projectId, kind: 'security' });
     if (value.status === 'saved') {
       const alert = JSON.parse(value.content).alerts[0];
@@ -82,7 +86,7 @@ process.stdin.on('end', () => {
     const result = JSON.parse(line);
     if (result.isError) console.log('任务未启动。');
     else if (result.toolName === 'solomap_get_conversation') {
-      const value = JSON.parse(result.content[0].text);
+      const value = unwrap(result);
       console.log(value.latest[0]?.turnCompleted ? '任务本轮已完成。' : '任务正在执行。');
     } else console.log('任务已启动。');
   } else console.log(JSON.stringify({ toolCall: JSON.parse(fs.readFileSync(${JSON.stringify(requestFile)}, 'utf8')) }));

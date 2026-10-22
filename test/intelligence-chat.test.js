@@ -276,8 +276,8 @@ test('smart kernel chat answers a project question after reading current plugin 
   assert.equal(reply, '当前项目 Beta 尚需验证付费。');
   assert.equal(prompts.length, 2);
   assert.match(prompts[1], /USER:\n当前项目还要做什么/);
-  assert.match(prompts[1], /ASSISTANT:\n[^\n]*"type":"toolCall"[^\n]*"id":"read-1"[^\n]*"name":"get_current_project"[^\n]*"arguments":\{\}/);
-  assert.match(prompts[1], /TOOLRESULT:\n[^\n]*"toolCallId":"read-1"[^\n]*"toolName":"get_current_project"/);
+  assert.match(prompts[1], /ASSISTANT:\n[^\n]*"type":"toolCall"[^\n]*"id":"tool:direct:[a-f0-9-]+:1"[^\n]*"name":"get_current_project"[^\n]*"arguments":\{\}/);
+  assert.match(prompts[1], /TOOLRESULT:\n[^\n]*"toolCallId":"tool:direct:[a-f0-9-]+:1"[^\n]*"toolName":"get_current_project"/);
   assert.match(prompts[1], /Beta/);
   assert.match(prompts[1], /验证付费/);
   assert.doesNotMatch(prompts[0], /Alpha/);
@@ -359,8 +359,8 @@ test('smart kernel leaves a tool result below the Pi Harness output limit intact
   }
   assert.equal(prompts.length, 2);
   assert.match(prompts[1], /USER:\nkeep-current-turn/);
-  assert.match(prompts[1], /"type":"toolCall","id":"read-1","name":"get_current_project"/);
-  assert.match(prompts[1], /TOOLRESULT:\n[^\n]*"toolCallId":"read-1","toolName":"get_current_project"/);
+  assert.match(prompts[1], /"type":"toolCall","id":"tool:direct:[a-f0-9-]+:1","name":"get_current_project"/);
+  assert.match(prompts[1], /TOOLRESULT:\n[^\n]*"toolCallId":"tool:direct:[a-f0-9-]+:1","toolName":"get_current_project"/);
   assert.match(prompts[1], /tool-start-/);
   assert.match(prompts[1], /-tool-end/);
   assert.doesNotMatch(prompts[1], /context truncated/);
@@ -396,8 +396,8 @@ test('smart kernel applies the Pi Harness tool-output limit before the next mode
     { selectedProject: '', projects: [] }, readTools), 'bounded blocks answer');
   assert.equal(prompts.length, 2, 'bounded tool output must not need conversation compaction');
   assert.match(prompts[1], /USER:\nkeep-many-blocks-turn/);
-  assert.match(prompts[1], /"type":"toolCall","id":"read-1","name":"get_current_project"/);
-  assert.match(prompts[1], /TOOLRESULT:\n[^\n]*"toolCallId":"read-1","toolName":"get_current_project"/);
+  assert.match(prompts[1], /"type":"toolCall","id":"tool:direct:[a-f0-9-]+:1","name":"get_current_project"/);
+  assert.match(prompts[1], /TOOLRESULT:\n[^\n]*"toolCallId":"tool:direct:[a-f0-9-]+:1","toolName":"get_current_project"/);
   assert.match(prompts[1], /block-0-/);
   assert.doesNotMatch(prompts[1], /block-19999-/);
   assert.match(prompts[1], /Pi Harness tool output limit/);
@@ -528,10 +528,10 @@ test('Telegram replies continue in the sidebar Pi conversation and can use read-
   assert.equal(await reply('123456', '先做哪一步？'), '先验证付费流程。');
   assert.equal((await store.list()).length, 1);
   assert.equal((await store.get(savedIds['123456'])).messages.length, 4);
-  assert.match(prompts[1], /"toolCallId":"read-1"/);
+  assert.match(prompts[1], /"toolCallId":"tool:direct:[a-f0-9-]+:1"/);
   assert.match(prompts[1], /验证付费/);
   assert.match(prompts[2], /当前项目 Beta 尚需验证付费/);
-  assert.doesNotMatch(prompts[2], /"toolCallId":"read-1"/,
+  assert.doesNotMatch(prompts[2], /"toolCallId":"tool:direct:[a-f0-9-]+:1"/,
     'internal tool messages from a completed turn must not be persisted into the next request');
   assert.doesNotMatch(prompts.join('\n'), /\/private\/beta/);
 });
@@ -841,7 +841,7 @@ test('smart kernel chat lets the model answer after an MCP transport failure', a
   assert.equal(calls, 2);
   assert.match(prompts[1], /"isError":true/);
   assert.match(prompts[1], /mcp_transport_error/);
-  assert.doesNotMatch(prompts[1], /MCP transport disconnected/);
+  assert.match(prompts[1], /MCP transport disconnected/);
 });
 
 test('smart kernel records an MCP tool error and lets the model continue', async t => {
@@ -873,7 +873,7 @@ test('smart kernel records an MCP tool error and lets the model continue', async
   assert.equal(modelCalls, 2);
   assert.match(prompts[1], /"isError":true/);
   assert.match(prompts[1], /mcp_tool_error/);
-  assert.doesNotMatch(prompts[1], /private project detail/);
+  assert.match(prompts[1], /private project detail/);
   assert.ok(events.some(event => event.stage === 'mcp.get_current_project' && event.status === 'error' && event.message === 'mcp_tool_error'));
   assert.ok(!events.some(event => event.stage === 'mcp.get_current_project' && event.status === 'ok'));
   assert.doesNotMatch(JSON.stringify(events), /private project detail/);

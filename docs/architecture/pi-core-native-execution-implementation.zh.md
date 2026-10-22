@@ -26,6 +26,30 @@
 
 因此，代码能力已经完整落地，但生产切流仍遵守蓝图规定的跨版本兼容窗口；首个发布的职责是建立可证明的排空边界，不以版本号、启动次数或一次部署代替旧进程排空事实。
 
+## Agent CLI 工具执行循环 v1
+
+本轮修复不改变执行架构：Pi Core 仍拥有对话状态、工具生命周期、重试、恢复与终态；Agent CLI 仍是无状态模型传输层，MCP 仍是唯一工具入口。修复集中在 Pi 与 Agent CLI 之间的单轮协议，以及 MCP 结果返回 Pi 的投影边界。
+
+每次模型回合使用两个互斥的 JSON envelope：
+
+```json
+{"kind":"tool_call","call":{"name":"工具名","arguments":{}}}
+{"kind":"final","content":"给用户的最终回答"}
+```
+
+- Codex CLI 通过 `outputSchema` 在传输层约束该 envelope；其他 Agent CLI 由同一 system prompt 与运行时解析器约束。
+- 解析器继续接受旧 `{"toolCall":...}` 和纯文本最终回答，保证旧会话与不同 CLI 家族平滑过渡；新 prompt 只教授 v1 envelope。
+- 输出看起来是工具协议但 JSON 或字段不合法时，不执行工具。适配层携带原上下文追加一次协议纠错提示，并只重试一次；第二次仍不合法才把错误交回 Pi 状态机。
+- 原生 Harness 工具调用 ID 使用 `tool:<operationId>:<sequence>`；兼容直调在没有 operation ID 时生成每请求唯一 scope，不再让不同请求共享固定前缀。数据库 admission 仍使用 Pi 生成的 invocation ID，两者职责不变。
+
+MCP 结果被投影为一个有界的规范对象，完整保留 `content` 中的文本、嵌入资源等内容、`structuredContent` 与 `isError`。结果过大时仍沿用 Pi 的头部截断与明确截断说明；不会因为内容不是 `type=text` 而变成空结果。MCP 返回的错误内容和 transport 异常原因会进入 Pi 的错误 tool result，供下一轮修正参数或向用户解释。
+
+循环保护按语义结果判断，不设置全局工具次数上限：同一 operation 内，只有同一工具、模型给出的同一参数、同一有界规范结果第三次重复时才产生 `tool_loop_no_progress`。MCP 错误与 transport 错误同样参与判断，任一工具、参数或结果变化都会重置连续计数；宿主补入的 invocation 幂等键不改变业务语义。合法的分页、轮询状态变化和长链路不会因为调用次数本身被中止。
+
+工具序号与连续结果状态都从 Pi 已持久化的 tool call/tool result 重建，而不是只保存在当前进程变量里。因此，工具结果已经提交、但提交确认丢失或进程随后重启时，同一 operation 会从下一个序号继续，恢复前的连续重复也仍计入第三次保护。
+
+恢复边界保持不变：Pi session 会持久保存已进入 Harness 的 tool call/tool result，写工具仍由 invocation admission、owner fence 和业务幂等键保护。MCP 外部副作用成功、但进程在结果进入 Pi session 前硬中断的窗口，仍按下方不可自动重放合同处理；本版没有用一份并不与外部系统原子提交的“结果缓存”冒充 exactly-once。
+
 ## 工具恢复合同 v1
 
 | 工具 | 分类 | 自动重放 | 依据 |
@@ -38,7 +62,7 @@
 | `solomap_write`、`solomap_link`、`solomap_export` | 写入 | 禁止 Harness 自动重放 | 调用参数含业务幂等键，键由稳定 invocation ID 派生；重复送达读取同一回执 |
 | `solomap_conversation_status` | 写入 | 禁止 Harness 自动重放 | 由正式会话生命周期合同自行绑定身份；Harness 不猜测未知写入结果 |
 
-工具 transport 错误统一作为 `isError` tool result 返回给模型继续判断；错误文本不会被当作成功结果。不可证明安全的写工具不会由 Harness 自动重复执行。
+工具 transport 错误统一作为 error tool result 返回给模型继续判断；MCP 的 `isError` 内容和实际异常原因会被保留，不会被当作成功结果。不可证明安全的写工具不会由 Harness 自动重复执行。
 
 工具目录新增能力时，已受理 operation 仍只使用受理时冻结的工具集合；新增工具不会使旧 operation 失效，也不会扩大其权限。冻结工具缺失或合同改变时仍拒绝恢复。
 
@@ -60,14 +84,14 @@ schema 53 的宿主关联索引不进入项目导出，也不接受项目导入�
 
 | 指标 | 实测 | 上限 |
 | --- | ---: | ---: |
-| 数据库与索引总增长 | 4,964,352 bytes | 16 MiB |
-| 每个含工具调用回合平均增长 | 35,460 bytes | 以总增长门禁约束 |
+| 数据库与索引总增长 | 5,054,464 bytes | 16 MiB |
+| 每个含工具调用回合平均增长 | 36,104 bytes | 以总增长门禁约束 |
 | Pi entries / retained tool invocations | 560 / 128 | 工具明细自动裁剪 12 条并保持 128 条上限 |
-| WAL 峰值 | 4,499,072 bytes | 32 MiB |
-| 完整备份体积 | 4,968,448 bytes | 32 MiB |
-| 维护临时空间（主库、WAL 与备份合计） | 14,435,968 bytes | 64 MiB |
-| 140 轮总耗时 | 36,817 ms | 65,000 ms |
-| 恢复扫描 | 0 ms | 1,000 ms |
+| WAL 峰值 | 4,593,832 bytes | 32 MiB |
+| 完整备份体积 | 5,058,560 bytes | 32 MiB |
+| 维护临时空间（主库、WAL 与备份合计） | 14,710,952 bytes | 64 MiB |
+| 140 轮总耗时 | 50,974 ms | 65,000 ms |
+| 恢复扫描 | 1 ms | 1,000 ms |
 
 验收由 `test/pi-capacity-budget.test.js` 执行，超过任一上限即失败。当前主库约 14.5 GB，验证时可用空间约 42.9 GB；本次 schema 是前向增量迁移，不复制主库，也不批量迁移旧会话。
 
@@ -76,7 +100,7 @@ schema 53 的宿主关联索引不进入项目导出，也不接受项目导入�
 ## 验证入口
 
 - `test/pi-session-storage.test.js`：Pi 官方 Storage conformance 21 项、事务、序列化和重开。
-- `test/pi-native-harness.test.js`：同 operation 重开、原生模型重试、工具错误恢复。
+- `test/pi-native-harness.test.js`：同 operation 重开、提交确认丢失后的工具循环恢复、原生模型重试、结构化回合协议、协议纠错、完整 MCP 结果投影、稳定调用 ID、工具错误恢复与语义空转保护。
 - `test/pi-conversation-operations.test.js`：owner fencing 与业务事务竞态回滚、原子历史 seed、持久队列/取消、精确 drain handoff、legacy cutover、Pi terminal 路径结算和 compaction/128-operation 生命周期保留。
 - `test/intelligence-database.test.js`：Runtime 单一入口与现有 conversation 合同。
 - `test/telegram-background.test.js`：无编辑器后台、接管、代次撤销、重启与交付闭环。
