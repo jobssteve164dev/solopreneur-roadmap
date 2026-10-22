@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.619 - 2026-10-22
+
+### Fixed
+- restore smart kernel Codex conversations (0faf351)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.618 - 2026-10-22
 
 ### Changed
