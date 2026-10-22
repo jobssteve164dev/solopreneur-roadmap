@@ -37,6 +37,21 @@ test('a complete structured response is not silently truncated at 64K characters
   assert.equal(output.length, 70000);
 });
 
+test('a failed cognitive subprocess retains an actionable stderr tail after a long prompt echo', async () => {
+  const tail = 'ACTIONABLE_INVALID_SCHEMA_ERROR';
+  await assert.rejects(() => runCognitiveCliInvocation({
+    command: process.execPath,
+    args: ['-e', `process.stderr.write("echoed prompt ".repeat(900)); process.stderr.write("${tail}"); process.exit(1)`],
+    stdin: '',
+    shell: false
+  }, () => {}), error => {
+    assert.match(error.message, /stderr truncated/);
+    assert.match(error.message, new RegExp(tail));
+    assert.ok(error.message.length < 9_000, `bounded error exceeded 9,000 characters: ${error.message.length}`);
+    return true;
+  });
+});
+
 test('Codex cognitive invocation is headless, read-only, and shell-free', () => {
   const previousBus = process.env.DBUS_SESSION_BUS_ADDRESS;
   const previousKeyring = process.env.GNOME_KEYRING_CONTROL;

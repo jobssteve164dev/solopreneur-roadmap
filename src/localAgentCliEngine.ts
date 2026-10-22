@@ -100,6 +100,8 @@ export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, re
     }); } catch (error) { retireSchema(); throw error; } })();
     let stdout = '';
     let stderr = '';
+    let stderrTail = '';
+    let stderrTruncated = false;
     let stdoutBytes = 0; let stderrBytes = 0;
     const timeoutMs = invocation.timeoutMs || 60_000;
     child.once('spawn', () => recordCurrentDiagnosticStage('model.cli.spawn', 'ok', performance.now() - started, undefined, { pid: child.pid, timeoutMs }));
@@ -141,15 +143,30 @@ export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, re
       }
       stdout += text;
     });
-    child.stderr.on('data', chunk => { stderrBytes += Buffer.byteLength(String(chunk)); stderr += String(chunk).slice(0, 8_192 - stderr.length); });
+    child.stderr.on('data', chunk => {
+      const text = String(chunk);
+      stderrBytes += Buffer.byteLength(text);
+      if (!stderrTruncated) {
+        const combined = stderr + text;
+        if (combined.length <= 8_192) stderr = combined;
+        else {
+          stderrTruncated = true;
+          stderr = combined.slice(0, 4_096);
+          stderrTail = combined.slice(-4_096);
+        }
+      } else stderrTail = (stderrTail + text).slice(-4_096);
+    });
     child.once('error', error => { recordCurrentDiagnosticStage('model.cli.spawn', 'error', performance.now() - started, error); finish(() => reject(error)); });
     child.once('close', (code, signal) => {
       recordCurrentDiagnosticStage('model.cli.exit', code === 0 && !terminationError ? 'ok' : 'error', performance.now() - started, terminationError || (code === 0 ? undefined : new Error(`process exited (${code})`)), { pid: child.pid, exitCode: code, signal, stdoutBytes, stderrBytes });
+      const diagnosticStderr = stderrTruncated
+        ? `${stderr}\n...[stderr truncated; ${stderrBytes} bytes total]...\n${stderrTail}`
+        : stderr;
       finish(() => terminationError
       ? reject(terminationError)
       : code === 0
         ? resolve(stdout.trim())
-        : reject(new Error(`Local Agent CLI cognitive call failed (${code ?? 'unknown'}): ${stderr.trim()}`)));
+        : reject(new Error(`Local Agent CLI cognitive call failed (${code ?? 'unknown'}): ${diagnosticStderr.trim()}`)));
     });
     child.stdin.end(invocation.stdin);
   });

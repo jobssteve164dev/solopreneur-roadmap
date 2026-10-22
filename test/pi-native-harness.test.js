@@ -121,13 +121,30 @@ test('native Pi Harness uses the structured Agent CLI turn protocol for tool cal
   let modelCalls = 0, toolCalls = 0;
   const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async invocation => {
     modelCalls++;
-    assert.ok(invocation.outputSchema, 'the Agent CLI turn must be constrained by a JSON schema');
+    assert.deepEqual(invocation.outputSchema, {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['tool_call', 'final'] },
+        call: {
+          type: ['object', 'null'],
+          properties: {
+            name: { type: 'string' },
+            argumentsJson: { type: 'string' }
+          },
+          required: ['name', 'argumentsJson'],
+          additionalProperties: false
+        },
+        content: { type: ['string', 'null'] }
+      },
+      required: ['kind', 'call', 'content'],
+      additionalProperties: false
+    }, 'Codex requires a root object without a top-level union');
     if (modelCalls === 1) {
-      return JSON.stringify({ kind: 'tool_call', call: { name: 'list_projects', arguments: {} } });
+      return JSON.stringify({ kind: 'tool_call', call: { name: 'list_projects', argumentsJson: '{}' }, content: null });
     }
     assert.match(invocation.stdin, /tool:native-protocol-operation:1/);
     assert.match(invocation.stdin, /project-a/);
-    return JSON.stringify({ kind: 'final', content: 'Structured answer' });
+    return JSON.stringify({ kind: 'final', call: null, content: 'Structured answer' });
   } });
   const readTools = {
     async listTools() { return { tools: [{ name: 'list_projects', description: 'projects', inputSchema: { type: 'object', properties: {} }, annotations: { readOnlyHint: true, destructiveHint: false } }] }; },

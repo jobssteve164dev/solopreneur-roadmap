@@ -149,28 +149,22 @@ function stableJson(value: unknown): string {
 }
 
 const agentCliTurnSchema: Record<string, unknown> = {
-  oneOf: [
-    {
-      type: 'object',
+  type: 'object',
+  properties: {
+    kind: { type: 'string', enum: ['tool_call', 'final'] },
+    call: {
+      type: ['object', 'null'],
       properties: {
-        kind: { const: 'tool_call' },
-        call: {
-          type: 'object',
-          properties: { name: { type: 'string', minLength: 1 }, arguments: { type: 'object' } },
-          required: ['name', 'arguments'],
-          additionalProperties: false
-        }
+        name: { type: 'string' },
+        argumentsJson: { type: 'string' }
       },
-      required: ['kind', 'call'],
+      required: ['name', 'argumentsJson'],
       additionalProperties: false
     },
-    {
-      type: 'object',
-      properties: { kind: { const: 'final' }, content: { type: 'string', minLength: 1 } },
-      required: ['kind', 'content'],
-      additionalProperties: false
-    }
-  ]
+    content: { type: ['string', 'null'] }
+  },
+  required: ['kind', 'call', 'content'],
+  additionalProperties: false
 };
 
 type AgentCliTurn =
@@ -198,11 +192,16 @@ function parseAgentCliTurn(output: unknown): AgentCliTurn {
   }
   if (parsed?.kind === 'tool_call') {
     const call = parsed.call;
+    let args = call?.arguments;
+    if (args === undefined && typeof call?.argumentsJson === 'string') {
+      try { args = JSON.parse(call.argumentsJson); }
+      catch { throw new AgentCliTurnProtocolError('Intelligence returned invalid tool arguments JSON.'); }
+    }
     if (!call || typeof call.name !== 'string' || !call.name
-      || !call.arguments || typeof call.arguments !== 'object' || Array.isArray(call.arguments)) {
+      || !args || typeof args !== 'object' || Array.isArray(args)) {
       throw new AgentCliTurnProtocolError('Intelligence returned an invalid read tool request.');
     }
-    return { kind: 'tool_call', call: { name: call.name, arguments: call.arguments } };
+    return { kind: 'tool_call', call: { name: call.name, arguments: args } };
   }
   // Compatibility for sessions and Agent CLI families still using the v0 envelope.
   if (parsed && typeof parsed === 'object' && Object.prototype.hasOwnProperty.call(parsed, 'toolCall')) {
@@ -507,7 +506,7 @@ export async function prepareNativeIntelligenceExecution(projectContext: {
     '使用与用户最后一条消息相同的语言回答。',
     intelligenceLocalTimeContext(),
     readTools
-      ? `你可以使用 SoloMap 的 MCP 工具：${JSON.stringify(toolSnapshot.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema })))}。每轮只输出一个 JSON 对象：调用工具时输出 {"kind":"tool_call","call":{"name":"工具名","arguments":{}}}；回答用户时输出 {"kind":"final","content":"回答"}。收到工具结果后再继续。只使用已提供的工具，不直接读写项目文件或执行命令。${availableTools.some(tool => tool.name === 'solomap_start_conversation') ? '用户明确要求开始任务时，使用 solomap_start_conversation 交给项目 Agent 执行：普通任务使用 solo，明确指定已有环节时使用 step 并填写 stepId，用户要求 Flow 时使用 flow；普通任务不需要先选择路线图环节。项目不明确时先确认项目，不编造环节 ID。同一启动请求重试沿用同一个 idempotencyKey。只有工具返回 status=started 才能告知用户任务已启动，启动不代表完成；保存 conversationRef。用户追问进度或结果时调用 solomap_get_conversation，提供该引用；引用不在上下文时省略 ref 查询本聊天最近任务，有多个候选时按用户请求定位，不能编造结果。state=waiting 表示本轮已结束、会话可继续，Flow 只有 state=completed 才表示整个流程完成；失败时说明原因。' : '用户要执行任务时，指出需要回到对应项目操作。'}时间安排必须使用 set_time_schedule，其他设置修改仍使用既有操作。`
+      ? `你可以使用 SoloMap 的 MCP 工具：${JSON.stringify(toolSnapshot.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema })))}。每轮只输出一个 JSON 对象：调用工具时输出 {"kind":"tool_call","call":{"name":"工具名","argumentsJson":"参数对象的合法 JSON 字符串"},"content":null}；回答用户时输出 {"kind":"final","call":null,"content":"回答"}。收到工具结果后再继续。只使用已提供的工具，不直接读写项目文件或执行命令。${availableTools.some(tool => tool.name === 'solomap_start_conversation') ? '用户明确要求开始任务时，使用 solomap_start_conversation 交给项目 Agent 执行：普通任务使用 solo，明确指定已有环节时使用 step 并填写 stepId，用户要求 Flow 时使用 flow；普通任务不需要先选择路线图环节。项目不明确时先确认项目，不编造环节 ID。同一启动请求重试沿用同一个 idempotencyKey。只有工具返回 status=started 才能告知用户任务已启动，启动不代表完成；保存 conversationRef。用户追问进度或结果时调用 solomap_get_conversation，提供该引用；引用不在上下文时省略 ref 查询本聊天最近任务，有多个候选时按用户请求定位，不能编造结果。state=waiting 表示本轮已结束、会话可继续，Flow 只有 state=completed 才表示整个流程完成；失败时说明原因。' : '用户要执行任务时，指出需要回到对应项目操作。'}时间安排必须使用 set_time_schedule，其他设置修改仍使用既有操作。`
       : '这里只进行对话，不调用工具、不读取文件、不执行任务。用户要执行时，指出需要回到对应项目操作。',
     database ? buildAgentDatabaseInstructions() : '',
     schema ? `数据库字段合同：${JSON.stringify(schema.contents)}` : '',
@@ -718,7 +717,7 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
       '使用与用户最后一条消息相同的语言回答。',
       intelligenceLocalTimeContext(),
       readTools
-        ? `你可以使用 SoloMap 的 MCP 工具：${JSON.stringify(availableTools.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema })))}。每轮只输出一个 JSON 对象：调用工具时输出 {"kind":"tool_call","call":{"name":"工具名","arguments":{}}}；回答用户时输出 {"kind":"final","content":"回答"}。收到工具结果后再继续。只使用已提供的工具，不直接读写项目文件或执行命令。${availableTools.some(tool => tool.name === 'solomap_start_conversation') ? '用户明确要求开始任务时，使用 solomap_start_conversation 交给项目 Agent 执行：普通任务使用 solo，明确指定已有环节时使用 step 并填写 stepId，用户要求 Flow 时使用 flow；普通任务不需要先选择路线图环节。项目不明确时先确认项目，不编造环节 ID。同一启动请求重试沿用同一个 idempotencyKey。只有工具返回 status=started 才能告知用户任务已启动，启动不代表完成；保存 conversationRef。用户追问进度或结果时调用 solomap_get_conversation，提供该引用；引用不在上下文时省略 ref 查询本聊天最近任务，有多个候选时按用户请求定位，不能编造结果。state=waiting 表示本轮已结束、会话可继续，Flow 只有 state=completed 才表示整个流程完成；失败时说明原因。' : '用户要执行任务时，指出需要回到对应项目操作。'}时间安排必须使用 set_time_schedule，其他设置修改仍使用既有操作。`
+        ? `你可以使用 SoloMap 的 MCP 工具：${JSON.stringify(availableTools.map(tool => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema })))}。每轮只输出一个 JSON 对象：调用工具时输出 {"kind":"tool_call","call":{"name":"工具名","argumentsJson":"参数对象的合法 JSON 字符串"},"content":null}；回答用户时输出 {"kind":"final","call":null,"content":"回答"}。收到工具结果后再继续。只使用已提供的工具，不直接读写项目文件或执行命令。${availableTools.some(tool => tool.name === 'solomap_start_conversation') ? '用户明确要求开始任务时，使用 solomap_start_conversation 交给项目 Agent 执行：普通任务使用 solo，明确指定已有环节时使用 step 并填写 stepId，用户要求 Flow 时使用 flow；普通任务不需要先选择路线图环节。项目不明确时先确认项目，不编造环节 ID。同一启动请求重试沿用同一个 idempotencyKey。只有工具返回 status=started 才能告知用户任务已启动，启动不代表完成；保存 conversationRef。用户追问进度或结果时调用 solomap_get_conversation，提供该引用；引用不在上下文时省略 ref 查询本聊天最近任务，有多个候选时按用户请求定位，不能编造结果。state=waiting 表示本轮已结束、会话可继续，Flow 只有 state=completed 才表示整个流程完成；失败时说明原因。' : '用户要执行任务时，指出需要回到对应项目操作。'}时间安排必须使用 set_time_schedule，其他设置修改仍使用既有操作。`
         : '这里只进行对话，不调用工具、不读取文件、不执行任务。用户要执行时，指出需要回到对应项目操作。',
       database ? buildAgentDatabaseInstructions() : '',
       schema ? `数据库字段合同：${JSON.stringify(schema.contents)}` : '',

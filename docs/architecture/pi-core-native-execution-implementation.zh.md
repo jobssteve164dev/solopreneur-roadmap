@@ -30,15 +30,16 @@
 
 本轮修复不改变执行架构：Pi Core 仍拥有对话状态、工具生命周期、重试、恢复与终态；Agent CLI 仍是无状态模型传输层，MCP 仍是唯一工具入口。修复集中在 Pi 与 Agent CLI 之间的单轮协议，以及 MCP 结果返回 Pi 的投影边界。
 
-每次模型回合使用两个互斥的 JSON envelope：
+每次模型回合在 Pi 内部仍归一化为两个互斥的 JSON envelope：
 
 ```json
 {"kind":"tool_call","call":{"name":"工具名","arguments":{}}}
 {"kind":"final","content":"给用户的最终回答"}
 ```
 
-- Codex CLI 通过 `outputSchema` 在传输层约束该 envelope；其他 Agent CLI 由同一 system prompt 与运行时解析器约束。
-- 解析器继续接受旧 `{"toolCall":...}` 和纯文本最终回答，保证旧会话与不同 CLI 家族平滑过渡；新 prompt 只教授 v1 envelope。
+- Codex CLI 通过 `outputSchema` 在传输层约束该 envelope。由于 Codex Structured Outputs 要求根节点是 `type: object`、禁止根级 union，传输对象固定包含 `kind`、`call`、`content` 三个字段：工具参数放在 `call.argumentsJson` 的 JSON 字符串中，final 的 `call` 为 `null`，工具调用的 `content` 为 `null`；适配层解析后恢复为上面的内部对象。其他 Agent CLI 使用同一传输提示和运行时解析器。
+- 解析器继续接受旧 `{"toolCall":...}`、旧参数对象和纯文本最终回答，保证旧会话与不同 CLI 家族平滑过渡；新 prompt 只教授当前传输 envelope。
+- Agent CLI 失败输出保持有界，但同时保留 stderr 的头部和尾部，并注明被截断的总字节数；CLI 在长提示词回显后输出的真实 API 错误不会再被截掉。
 - 输出看起来是工具协议但 JSON 或字段不合法时，不执行工具。适配层携带原上下文追加一次协议纠错提示，并只重试一次；第二次仍不合法才把错误交回 Pi 状态机。
 - 原生 Harness 工具调用 ID 使用 `tool:<operationId>:<sequence>`；兼容直调在没有 operation ID 时生成每请求唯一 scope，不再让不同请求共享固定前缀。数据库 admission 仍使用 Pi 生成的 invocation ID，两者职责不变。
 
