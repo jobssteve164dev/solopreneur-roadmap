@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.618 - 2026-10-22
+
+### Changed
+- Document local-first concurrency constraints (e1ac81d)
+
+### Fixed
+- harden agent CLI tool execution loop (31e3aad)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.617 - 2026-10-21
 
 ### Changed
