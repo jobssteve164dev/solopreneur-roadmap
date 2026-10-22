@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.620 - 2026-10-22
+
+### Fixed
+- route agent reporting through MCP (7d98b4b)
+- measure consented acquisition actions (5012c0a)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.619 - 2026-10-22
 
 ### Fixed
