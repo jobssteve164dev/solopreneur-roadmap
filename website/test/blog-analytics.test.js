@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
 import worker from "../src/worker.js";
+import { AnalyticsOutbox, buildAnalyticsClientScript } from "../src/analyticsOutbox.js";
 import { BlogProjection } from "../src/blogProjection.js";
 
 const post = {
@@ -158,6 +159,139 @@ test("analytics endpoint rejects missing consent and enqueues an allowed anonymo
   assert.equal(received.event_name, "page_view");
   assert.equal(received.anonymous_id, "web:visitor");
   assert.equal(received.source, "solomap.web");
+});
+
+test("analytics outbox treats the synchronous Cloudapi 200 response as delivered", async () => {
+  const records = new Map();
+  const storage = {
+    async get(key) { return records.get(key); },
+    async put(key, value) { records.set(key, value); },
+    async delete(key) { records.delete(key); },
+    async list() { return new Map(records); },
+    async setAlarm() {}
+  };
+  const originalFetch = globalThis.fetch;
+  let delivered = null;
+  globalThis.fetch = async (_url, init) => {
+    delivered = JSON.parse(init.body);
+    return Response.json({ status: "accepted" }, { status: 200 });
+  };
+  try {
+    const outbox = new AnalyticsOutbox({ storage }, { CLOUDAPI_PROJECT_KEY: "test-key" });
+    const response = await outbox.fetch(new Request("https://analytics-outbox/events", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ event_id: "event-1", event_name: "page_view", anonymous_id: "web:visitor", page: "/blog" })
+    }));
+
+    assert.equal(response.status, 202);
+    assert.equal(delivered.page, "/blog");
+    assert.equal(records.size, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("analytics client records allowlisted outbound actions after consent", async () => {
+  const listeners = new Map();
+  const requests = [];
+  const document = {
+    cookie: "solomap_analytics_consent=yes",
+    addEventListener(type, listener) { listeners.set(type, listener); }
+  };
+  const script = buildAnalyticsClientScript("en").match(/^<script>([\s\S]*)<\/script>$/)[1];
+  vm.runInNewContext(script, {
+    document,
+    location: { pathname: "/blog/ai-coding-agent-handoff-checklist" },
+    localStorage: { getItem() { return "visitor-1"; }, setItem() {} },
+    crypto: { randomUUID: () => `event-${requests.length + 1}` },
+    fetch: async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      return Response.json({ accepted: true }, { status: 202 });
+    }
+  });
+
+  assert.equal(requests[0].event_name, "page_view");
+  listeners.get("click")({
+    target: { closest() { return { getAttribute() { return "/go/marketplace"; } }; } }
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(requests[1])), {
+    event_id: "event-2",
+    event_name: "outbound_click",
+    anonymous_id: "visitor-1",
+    page: "/blog/ai-coding-agent-handoff-checklist",
+    destination: "marketplace"
+  });
+});
+
+test("analytics client sends nothing before consent", async () => {
+  const listeners = new Map();
+  const requests = [];
+  const document = {
+    cookie: "",
+    addEventListener(type, listener) { listeners.set(type, listener); },
+    createElement() {
+      return { className: "", innerHTML: "", addEventListener() {}, remove() {} };
+    },
+    querySelector() { return null; },
+    body: { prepend() {} }
+  };
+  const script = buildAnalyticsClientScript("en").match(/^<script>([\s\S]*)<\/script>$/)[1];
+  vm.runInNewContext(script, {
+    document,
+    location: { pathname: "/" },
+    localStorage: { getItem() { return null; }, setItem() {} },
+    crypto: { randomUUID: () => "unused" },
+    fetch: async (_url, init) => { requests.push(JSON.parse(init.body)); }
+  });
+
+  listeners.get("click")({
+    target: { closest() { return { getAttribute() { return "/go/github"; } }; } }
+  });
+  assert.equal(requests.length, 0);
+});
+
+test("analytics endpoint accepts only known outbound destinations", async () => {
+  const received = [];
+  const env = {
+    ANALYTICS_OUTBOX: {
+      idFromName(name) { return name; },
+      get() {
+        return {
+          async fetch(_url, init) {
+            received.push(JSON.parse(init.body));
+            return Response.json({ accepted: true }, { status: 202 });
+          }
+        };
+      }
+    }
+  };
+  const send = (destination) => worker.fetch(new Request("https://solomap.app/api/analytics/events", {
+    method: "POST",
+    headers: { origin: "https://solomap.app", cookie: "solomap_analytics_consent=yes", "content-type": "application/json" },
+    body: JSON.stringify({ event_name: "outbound_click", anonymous_id: "visitor", page: "/blog", destination })
+  }), env, ctx);
+
+  for (const destination of ["marketplace", "open-vsx", "github", "feedback"]) {
+    assert.equal((await send(destination)).status, 202);
+    assert.equal(received.at(-1).properties.destination, destination);
+  }
+  assert.equal((await send("untrusted-target")).status, 400);
+  assert.equal(received.length, 4);
+});
+
+test("privacy and local-first pages disclose consented outbound destination analytics", async () => {
+  const pages = await Promise.all([
+    worker.fetch(new Request("https://solomap.app/privacy-local-first"), {}, ctx),
+    worker.fetch(new Request("https://solomap.app/zh/privacy-local-first"), {}, ctx),
+    worker.fetch(new Request("https://solomap.app/docs/local-first-ai-project-management"), {}, ctx),
+    worker.fetch(new Request("https://solomap.app/zh/docs/local-first-ai-project-management"), {}, ctx)
+  ]);
+  const html = await Promise.all(pages.map((response) => response.text()));
+  assert.match(html[0], /anonymous page visits and outbound destination choices/);
+  assert.match(html[1], /匿名页面访问和出站目的地选择/);
+  assert.match(html[2], /anonymous page visits and outbound destination choices/);
+  assert.match(html[3], /匿名页面访问和出站目的地选择/);
 });
 
 test("Blog projection activates a complete candidate atomically and deduplicates its event", async () => {

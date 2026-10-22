@@ -255,7 +255,7 @@ const content = {
       items: [
         "Your AI provider usage depends on the local Agent CLI you choose.",
         "GitHub data is used when you connect or refresh GitHub-backed signals.",
-        "If you allow analytics, the public website records anonymous page visits using a first-party preference cookie and random browser identifier; it never receives your repository, roadmap, prompts, or local Agent history.",
+        "If you allow analytics, the public website uses a first-party preference cookie and random browser identifier to record anonymous page visits and outbound destination choices limited to VS Code Marketplace, Open VSX, GitHub, and feedback; it never receives your repository, roadmap, prompts, or local Agent history.",
         "Feedback is sent only when you open or submit a feedback issue yourself."
       ]
     },
@@ -450,7 +450,7 @@ const content = {
       items: [
         "AI 服务的使用取决于你选择的本地 Agent CLI。",
         "GitHub 数据只在你连接或刷新相关信号时使用。",
-        "只有在你允许统计后，官网才会使用第一方偏好 Cookie 与随机浏览器标识记录匿名页面访问；它不会接收你的仓库、路线图、提示词或本地 Agent 历史。",
+        "只有在你允许统计后，官网才会使用第一方偏好 Cookie 与随机浏览器标识记录匿名页面访问和出站目的地选择，目的地仅限 VS Code Marketplace、Open VSX、GitHub 与反馈；它不会接收你的仓库、路线图、提示词或本地 Agent 历史。",
         "反馈只会在你主动打开或提交反馈 Issue 时发送。"
       ]
     },
@@ -4761,7 +4761,7 @@ function buildPrivacyPolicyPage(locale, origin) {
   
   const contentHtml = isZh ? `
     <h1>隐私政策</h1>
-    <p>更新日期：2026年6月6日</p>
+    <p>更新日期：2026年10月22日</p>
     <p>我们非常重视您的隐私。本隐私政策适用于由 SZLK LTD（运营方，注册于英国伦敦，公司编号 16843016）提供服务的独道 (SoloMap) 插件、官方网站（solomap.app）及相关授权同步服务。请在使用我们的产品前仔细阅读以下条款：</p>
     
     <h2>1. 核心本地优先（Local-First）数据架构</h2>
@@ -4777,6 +4777,7 @@ function buildPrivacyPolicyPage(locale, origin) {
     <ul>
       <li><strong>账户与订阅激活数据</strong>：为了支持您使用独道 (SoloMap) Pro，我们会使用 OIDC 流程通过 SZLK Passport 安全登录以激活您的授权。我们只拉取您的加密用户 ID 和邮箱地址作为判定订阅状态的唯一凭证，我们不拉取也不存储您的 GitHub 密码或其他账户凭证。</li>
       <li><strong>支付与交易数据</strong>：所有的付款和订阅账单均由 Stripe 独立且安全地进行托管处理，严格遵循 PCI-DSS 支付安全标准。我们不接触、不收集、不存储您的任何信用卡号、CVV 码或敏感的交易财务数据。</li>
+      <li><strong>经同意的第一方网站统计</strong>：只有在您允许统计后，官网才会使用随机第一方浏览器标识记录匿名页面访问和出站目的地选择；出站目的地仅限 VS Code Marketplace、Open VSX、GitHub 与反馈。官网不会接收您的仓库、路线图、提示词或本地 Agent 历史。</li>
       <li><strong>自愿提交的环境与错误日志</strong>：仅在您主动点击“提交反馈”并选择提交 GitHub Issue 时，会上传您同意披露的必要环境数据（如插件版本号、VS Code 版本号和脱敏后的错误日志）。</li>
     </ul>
 
@@ -4801,14 +4802,14 @@ function buildPrivacyPolicyPage(locale, origin) {
     <ul>
       <li><code>lang_pref</code>：用于记录您的偏好语言（中/英文），为您提供无缝的本地化访问体验，避免重复跳转。</li>
       <li>SZLK Passport 登录会话：用于在您跳转至 Passport 并返回时维持安全的临时校验会话。</li>
-      <li><code>solomap_analytics_consent</code>：保存你的统计选择，最长 180 天。只有在你允许后，官网才会使用随机第一方浏览器标识记录匿名页面访问。</li>
+      <li><code>solomap_analytics_consent</code>：保存你的统计选择，最长 180 天。只有在你允许后，官网才会使用随机第一方浏览器标识记录匿名页面访问和上述四类出站目的地选择。</li>
     </ul>
 
     <h2>6. 变更与联系方式</h2>
     <p>我们可能会根据服务升级或法律法规的要求适时更新本隐私政策。如有任何疑问或隐私保障相关的权利主张，请通过 GitHub Issue 或发信至官方支持通道（SZLK LTD, London, UK）与我们取得联系。</p>
   ` : `
     <h1>Privacy Policy</h1>
-    <p>Last updated: June 6, 2026</p>
+    <p>Last updated: October 22, 2026</p>
     <p>We respect your privacy. This Privacy Policy applies to the SoloMap extension, the official website (solomap.app), and related services operated by SZLK LTD (registered in London, UK, under Company No. 16843016). Please read the terms below carefully:</p>
     
     <h2>1. Core Local-First Data Architecture</h2>
@@ -4824,6 +4825,7 @@ function buildPrivacyPolicyPage(locale, origin) {
     <ul>
       <li><strong>Account &amp; Entitlement Management</strong>: When upgrading to SoloMap Pro, we verify your subscription via OIDC using SZLK Passport. We only retrieve your unique user ID and email to associate and validate your entitlement. We never access or store your primary passwords.</li>
       <li><strong>Payment and Billing Information</strong>: All payment transactions are securely handled by Stripe under PCI-DSS compliance standards. We do not access, process, or store your credit card numbers, billing addresses, or financial credentials.</li>
+      <li><strong>Consented First-Party Website Analytics</strong>: Only after you allow analytics, the website uses a random first-party browser identifier to record anonymous page visits and outbound destination choices limited to VS Code Marketplace, Open VSX, GitHub, and feedback. It never receives your repository, roadmap, prompts, or local Agent history.</li>
       <li><strong>Diagnostic Data</strong>: Diagnostic information or usage logs are only transmitted if you explicitly choose to click "Send Feedback" to submit a GitHub issue.</li>
     </ul>
 
@@ -4847,7 +4849,7 @@ function buildPrivacyPolicyPage(locale, origin) {
     <ul>
       <li><code>lang_pref</code>: To remember your localized language preference (English/Chinese) and ensure seamless redirection.</li>
       <li>SZLK Passport session parameters: Temporary cookies required for OIDC authentication.</li>
-      <li><code>solomap_analytics_consent</code>: Stores your analytics choice for up to 180 days. If allowed, a random first-party browser identifier is used only for anonymous page analytics.</li>
+      <li><code>solomap_analytics_consent</code>: Stores your analytics choice for up to 180 days. If allowed, a random first-party browser identifier records anonymous page visits and the four outbound destination choices listed above.</li>
     </ul>
 
     <h2>6. Updates and Contact</h2>

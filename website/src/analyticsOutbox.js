@@ -64,7 +64,7 @@ export class AnalyticsOutbox {
         } finally {
           clearTimeout(timer);
         }
-        if (response.status !== 202) throw new Error(`Cloudapi analytics returned ${response.status}`);
+        if (!response.ok) throw new Error(`Cloudapi analytics returned ${response.status}`);
         await this.state.storage.delete(key);
       } catch (error) {
         const attempts = Number(record.attempts || 0) + 1;
@@ -95,13 +95,17 @@ export async function handleAnalyticsEvent(request, env) {
   try { body = await request.json(); } catch { return json({ error: "Invalid JSON body" }, 400); }
   const anonymousId = optionalString(body.anonymous_id, 200);
   const page = optionalString(body.page, 500);
-  if (body.event_name !== "page_view" || !anonymousId || !page) return json({ error: "Invalid page view" }, 400);
+  const destination = optionalString(body.destination, 50);
+  const isPageView = body.event_name === "page_view";
+  const isOutboundClick = body.event_name === "outbound_click"
+    && ["marketplace", "open-vsx", "github", "feedback"].includes(destination);
+  if ((!isPageView && !isOutboundClick) || !anonymousId || !page) return json({ error: "Invalid analytics event" }, 400);
   const eventId = typeof body.event_id === "string" && /^[0-9a-f-]{36}$/i.test(body.event_id)
     ? body.event_id
     : crypto.randomUUID();
   const payload = {
     event_id: eventId,
-    event_name: "page_view",
+    event_name: body.event_name,
     anonymous_id: `web:${anonymousId}`,
     occurred_at: new Date().toISOString(),
     source: "solomap.web",
@@ -110,7 +114,8 @@ export async function handleAnalyticsEvent(request, env) {
     properties: {
       collection_scope: "analytics_consent",
       page_title: optionalString(body.page_title, 300),
-      referrer: optionalString(body.referrer, 1000)
+      referrer: optionalString(body.referrer, 1000),
+      destination: isOutboundClick ? destination : undefined
     }
   };
   const id = env.ANALYTICS_OUTBOX.idFromName("solomap-web");
@@ -125,5 +130,5 @@ export function buildAnalyticsClientScript(locale) {
   const copy = locale === "zh"
     ? { text: "允许 SoloMap 使用匿名访问统计，帮助我们改进网站？", accept: "允许统计", reject: "仅必要功能" }
     : { text: "Allow anonymous usage analytics to help improve SoloMap?", accept: "Allow analytics", reject: "Necessary only" };
-  return `<script>(()=>{const c="solomap_analytics_consent",read=()=>document.cookie.split("; ").find(v=>v.startsWith(c+"="))?.split("=")[1],set=v=>{document.cookie=c+"="+v+"; Path=/; Max-Age=15552000; SameSite=Lax; Secure"},track=()=>{if(read()!=="yes")return;let id=localStorage.getItem("solomap_visitor_id");if(!id){id=crypto.randomUUID();localStorage.setItem("solomap_visitor_id",id)}fetch("/api/analytics/events",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({event_id:crypto.randomUUID(),event_name:"page_view",anonymous_id:id,page:location.pathname,page_title:document.title,referrer:document.referrer})}).catch(()=>{})};if(!read()){const n=document.createElement("div");n.className="consent-banner";n.innerHTML='<p>${copy.text}</p><div><button data-choice="no">${copy.reject}</button><button class="primary" data-choice="yes">${copy.accept}</button></div>';n.addEventListener("click",e=>{const v=e.target?.dataset?.choice;if(!v)return;set(v);n.remove();if(v==="yes")track()});const h=document.querySelector(".topbar");h?h.after(n):document.body.prepend(n)}else track()})()</script>`;
+  return `<script>(()=>{const c="solomap_analytics_consent",destinations=new Set(["marketplace","open-vsx","github","feedback"]),read=()=>document.cookie.split("; ").find(v=>v.startsWith(c+"="))?.split("=")[1],set=v=>{document.cookie=c+"="+v+"; Path=/; Max-Age=15552000; SameSite=Lax; Secure"},send=(event_name,extra={})=>{if(read()!=="yes")return;let id=localStorage.getItem("solomap_visitor_id");if(!id){id=crypto.randomUUID();localStorage.setItem("solomap_visitor_id",id)}fetch("/api/analytics/events",{method:"POST",headers:{"content-type":"application/json"},keepalive:true,body:JSON.stringify({event_id:crypto.randomUUID(),event_name,anonymous_id:id,page:location.pathname,...extra})}).catch(()=>{})},track=()=>send("page_view",{page_title:document.title,referrer:document.referrer});document.addEventListener("click",e=>{const link=e.target?.closest?.("a[href^='/go/']"),destination=link?.getAttribute("href")?.slice(4);if(destinations.has(destination))send("outbound_click",{destination})});if(!read()){const n=document.createElement("div");n.className="consent-banner";n.innerHTML='<p>${copy.text}</p><div><button data-choice="no">${copy.reject}</button><button class="primary" data-choice="yes">${copy.accept}</button></div>';n.addEventListener("click",e=>{const v=e.target?.dataset?.choice;if(!v)return;set(v);n.remove();if(v==="yes")track()});const h=document.querySelector(".topbar");h?h.after(n):document.body.prepend(n)}else track()})()</script>`;
 }
