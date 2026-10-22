@@ -27,7 +27,7 @@
 
 | 入口 | 当前可复用行为 | 生长图下一阶段增量 |
 | --- | --- | --- |
-| `src/taskCheckpoint.ts` / `src/taskReport.ts` | complete 可选 report-file，报告绑定任务与轮次，缺失不阻断结算 | 兼容读取报告、投影与按轮次展示 |
+| `src/taskCheckpoint.ts` / `src/taskReport.ts` | `solomap_conversation_status.complete` 接收完整报告参数，服务端校验后绑定任务与轮次并写入统一数据库；缺失或无效报告不阻断原任务结算 | 兼容读取报告、投影与按轮次展示 |
 | `src/learningReview.ts` | 保留独立事实刷新与共享证据读取能力，不再由手动复盘 runner 在 Agent 启动前调用 | 用户主动的验证刷新继续独立存在；手动复盘由 Agent 自行读取和查询 |
 | `src/learningReviewRunner.ts` / `src/learningReviewApply.ts` | 跨窗口只允许一个 run；先启动 Agent；Agent 生成增量证据索引和“完整提示词 + 变更账本”；插件校验未记录删改、证据引用、输入版本及写入回读后立即应用，并推进接续游标 | 旧 schema 只用于历史兼容，不再定义新复盘主流程 |
 | `src/learningLedger.ts` | 日常写事件与召回，不自动提炼或晋升；手动处置使用独立版本 | 展示报告不生成语义处理凭据 |
@@ -41,7 +41,7 @@
 
 沿现有任务命令扩展报告，不要求适配各 CLI 私有输出格式。插件提供当前项目、会话、任务及轮次的绑定信息；Agent 不能通过报告字段更改归属。Solo 不要求先关联路线图。
 
-报告按轮次记录增量，当前通过 complete 命令的可选 `--report-file` 提交 schemaVersion=1 的 JSON，由 `taskReport.ts` 保存到原运行目录；不改变旧命令结算协议。报告包含：
+报告按轮次记录增量，当前通过 `solomap_conversation_status` 的 `complete` 动作提交 schemaVersion=1 的 JSON，由服务端校验后写入统一数据库；不创建项目内中间报告文件。报告包含：
 
 | 内容 | 必需语义 |
 | --- | --- |
@@ -112,7 +112,7 @@ SoloMap-Task: <插件提供的不含秘密的稳定任务标识>
 - `.solomap-global/learning/ledger/` 的事件索引、事件账本和 `sources/`，以及 `candidates/`、`approved/`、`rejected/`、`promotion-suggestions/`、`candidate-decisions/`。
 - 每个已登记项目的 `agent.md`、`AGENTS.md`、兼容 `PROJECT_MEMORY.md`、`.solopreneur/documentation.json` 指向的 active 正式文档、`.solopreneur/run-digests/`、任务报告及精确提交与检查证据。
 
-复盘 Agent 先读精简索引，并可使用 `.solomap-global/tools/solomap-memory.cjs` 与 `solomap-experience.cjs` 定位相关分层记忆、候选、run digest 和 SQLite 执行记录，再按 source id 核对原文。字符限制用于约束今后新产生的单份工作汇报与留档噪音，不能据此从全局复盘中删除旧报告、项目约束、记忆或反证。旧材料按来源版本和处置状态分批读取，不把整个历史正文一次塞入提示词，也不批量重写历史。
+复盘 Agent 默认先用 `solomap_context` 取得与目标相关的综合上下文；只有需要专查长期记忆分类或历史运行时，才分别使用 `solomap_memory` 或 `solomap_experience`。这些检索入口返回固定对象引用，需要核对某个对象的精确全文时再使用 `solomap_read`。字符限制用于约束今后新产生的单份工作汇报与留档噪音，不能据此从全局复盘中删除旧报告、项目约束、记忆或反证。旧材料按来源版本和处置状态分批读取，不把整个历史正文一次塞入提示词，也不批量重写历史。
 
 `candidate-decisions/` 同时兼容旧 schemaVersion 1 条件抽取记录和 schemaVersion 2 语义复盘处置。后者不依赖 `projectPath`，作为全局处置依据登记；不能因缺少项目字段而从清单消失。
 

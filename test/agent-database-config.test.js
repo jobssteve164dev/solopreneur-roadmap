@@ -117,6 +117,10 @@ test('task instructions teach revision-safe database writes and complete content
   assert.match(instructions, /每个任务必须执行/);
   assert.match(instructions, /当前用户目标.*当前项目/);
   assert.match(instructions, /实现或判断前.*solomap_context/);
+  assert.match(instructions, /长期记忆分类或写入路由时使用 solomap_memory/);
+  assert.match(instructions, /历史运行、失败或交接时使用 solomap_experience/);
+  assert.match(instructions, /候选、文档或其他数据库记录时使用 solomap_search/);
+  assert.match(instructions, /已定位对象的精确全文时.*solomap_read/);
   assert.match(instructions, /任务收尾/);
   assert.match(instructions, /未来任务仍会复用/);
   assert.match(instructions, /旧全局 Markdown 记忆目录.*迁移来源/);

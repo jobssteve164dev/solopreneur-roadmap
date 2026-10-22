@@ -34,7 +34,7 @@
 | 上一轮做到哪里 | `active/current-session.md` |
 | 正式项目文档在哪里 | `.solopreneur/documentation.json` |
 | 是否有明确领域技能 | 技能 registry，再读命中的 `SKILL.md` |
-| 是否需要历史运行经验 | `solomap-experience.cjs retrieve` |
+| 是否需要历史运行经验 | `solomap_experience`，`action="retrieve"` |
 
 ### 第三步：决定是否查询账本
 

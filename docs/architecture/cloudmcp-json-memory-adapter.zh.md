@@ -68,7 +68,7 @@ SoloMap 不负责：
 ## 完成标准
 
 - VS Code 宿主能连接、重连、对账和断开一个明确身份的 JSON v1 目标。
-- `solomap-memory.cjs retrieve` 只从统一数据库检索已导入且仍获授权的条目。
+- `solomap_memory` MCP 工具的 `retrieve` 动作只从统一数据库检索已导入且仍获授权的条目。
 - JSON 状态、有效期、scope、哈希和相关性过滤有测试。
 - 旧 Markdown 只读导入保持兼容，生产消费者不回退到文件读取。
 - SoloMap 全局提示词、默认技能和初始化目录不依赖 CloudMCP；未接入用户的行为与接入前一致。

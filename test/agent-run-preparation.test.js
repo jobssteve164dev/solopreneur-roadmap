@@ -57,7 +57,7 @@ test('host preparation persists all task input and native identity without produ
     assert.match(plan.prompt, new RegExp(`SoloMap-Task: task-${state.taskId}`));
     assert.match(plan.prompt, /solomap_conversation_status\(\{action:"start"\}\)/);
     assert.match(plan.prompt, /complete 动作/);
-    assert.doesNotMatch(plan.prompt, /--report-json|taskCheckpointProcess\.js|SOLOMAP_TASK_COMMAND/);
+    assert.doesNotMatch(plan.prompt, /--report-json|taskCheckpointProcess\.js|taskReport\.js|validateTaskReport|SOLOMAP_TASK_COMMAND/);
     assert.doesNotMatch(plan.prompt, /agent-runs\/|\.solopreneur\/runtime/);
     assert.equal(spawnSync('bash', ['-n', '-c', prepared.finalCommand], { encoding: 'utf8' }).status, 0);
     assert.deepEqual(fs.readdirSync(path.join(projectRoot, '.solopreneur')), ['project.json']);
@@ -157,6 +157,10 @@ test('Grok read-only review receives bounded memory and only the dedicated MCP c
     assert.match(plan.prompt, /宿主按本轮目标加载的固定版本/);
     assert.match(plan.prompt, /必须核对真实测试证据/);
     assert.match(plan.prompt, /不需要为了启动再次调用 MCP/);
+    assert.match(plan.prompt, /solomap_memory 检索长期记忆或写入路由/);
+    assert.match(plan.prompt, /solomap_experience 检索历史运行、失败或交接/);
+    assert.match(plan.prompt, /solomap_search 定位候选、文档或其他数据库记录/);
+    assert.match(plan.prompt, /定位对象后再按固定版本引用调用 solomap_read/);
     assert.match(plan.prompt, /solomap_conversation_status\(\{action:"start"\}\)/);
     assert.match(plan.command, /--allow 'MCPTool\(solomap_data__solomap_conversation_status\)'/);
     assert.doesNotMatch(plan.command, /--deny 'MCPTool'/);

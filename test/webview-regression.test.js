@@ -280,7 +280,7 @@ for (const mode of ['solo', 'step']) test(`the final ${mode} conversation prompt
     assert.doesNotMatch(plan.prompt, /\.solopreneur\/runtime\/task-checkpoint\.cjs|检查点命令已由插件生成/);
     assert.equal(plan.prompt.split('SoloMap 对话状态由 MCP 工具管理').length - 1, 1, 'the final database prompt must contain exactly one MCP checkpoint contract');
     assert.match(plan.prompt, /solomap_conversation_status\(\{action:"start"\}\)/);
-    assert.doesNotMatch(plan.prompt, /SOLOMAP_TASK_COMMAND|taskCheckpointProcess\.js/);
+    assert.doesNotMatch(plan.prompt, /SOLOMAP_TASK_COMMAND|taskCheckpointProcess\.js|taskReport\.js|validateTaskReport/);
     assert.ok(plan.prompt.includes('实现用户目标'));
     assert.equal(fs.existsSync(path.join(project, '.solopreneur/runtime/task-checkpoint.cjs')), false);
   } finally { await runtime.close(); }

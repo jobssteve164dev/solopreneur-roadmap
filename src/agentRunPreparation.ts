@@ -66,12 +66,7 @@ function identityPolicy(provider: string): { method: SessionIdentityMethod; cont
 }
 
 function reportInstructions(taskId: string): string {
-  return buildTaskReportInstructions(taskId, '{{SOLOMAP_REPORT_JSON}}', true).split('\n').map(line => {
-    if (line.startsWith('- 在 {{SOLOMAP_REPORT_JSON}}')) return '- 本轮汇报使用严格 JSON：schemaVersion=1，summary 为本轮结果，其余字段为数组：unmetRequirements、decisions、corrections、verification、commits、experienceUsage、lessons。没有内容用 []，不制造经验或提交。';
-    if (line.startsWith('- 保存报告后、结算前')) return `- 提交前，在 Node 中加载 ${JSON.stringify(path.join(__dirname, 'taskReport.js'))}，调用 validateTaskReport(报告对象, 当前项目绝对路径) 预检；校验失败先精简原稿并重检。`;
-    if (line.startsWith('- 沿原有 complete')) return '- 使用 solomap_conversation_status 的 complete 动作结算，并把上述完整 JSON 作为 report 参数；报告问题不阻断原任务。不要为报告额外结算，也不需要生成内部报告文件。';
-    return line;
-  }).join('\n');
+  return buildTaskReportInstructions(taskId);
 }
 
 function sharedRunnerCommand(workspaceRoot: string, globalDataPath: string, executionLogId: number): string {

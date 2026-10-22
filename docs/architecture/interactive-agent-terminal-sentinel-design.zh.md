@@ -1,6 +1,6 @@
 # 交互式任务终端与任务哨兵解耦设计
 
-> 决策更新（2026-08-30）：SoloMap 不再用非交互 CLI 进程退出判断用户对话完成。Solo、用户主动发起的路线图环节对话和续聊统一使用 Agent CLI 原生交互终端；Agent 通过插件生成的受约束检查点命令上报每轮结果，插件沿用既有结算、复核与路线图完成判断。自建 Chat UI 与 ACP 方案禁止进入交互式对话实现，下文相关内容只作为已否决的历史调研保留。
+> 决策更新（2026-10-17）：Solo、路线图环节对话和续聊统一使用 Agent CLI 原生交互终端，并通过 `solomap_conversation_status` MCP 工具上报每轮结果。下文的 `SOLOMAP_TASK_COMMAND`、自建 Chat UI 与 ACP 方案只作为已退役或已否决的历史调研保留，不再是 Agent 正式入口。
 >
 > 身份绑定更新（2026-09-01）：各 Agent CLI 首次交互如何取得可验证的会话 ID，以[交互式 Agent 会话身份稳定绑定设计](./interactive-agent-session-identity-design.zh.md)为准；本文件继续负责终端、轮次和任务检查点边界。
 

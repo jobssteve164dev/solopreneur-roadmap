@@ -145,8 +145,8 @@ export function buildAgentDatabaseInstructions(options: { migrationTools?: boole
     'SoloMap 数据库记忆系统（每个任务必须执行）：',
     '- SoloMap 数据库工具通过 MCP 服务器 solomap_data 提供；项目范围由当前工作目录绑定，不自行更换范围或直接操作数据库文件。',
     options.contextProvided
-      ? '- SoloMap 已根据当前用户目标和当前项目绑定加载本轮相关记忆，并在下方提供固定版本上下文；先使用该上下文，不需要为了启动再次调用 MCP。上下文不足时，用 solomap_memory 检索记忆、用 solomap_experience 检索经验或交接，再按固定版本引用调用 solomap_read。'
-      : '- 每个任务开始时，根据当前用户目标和当前项目绑定构造简洁 query；在实现或判断前先调用 solomap_context 获取相关上下文，也可分别用 solomap_memory 和 solomap_experience 检索记忆与经验。需要完整历史记录时调用 solomap_experience 或 solomap_search，并用返回的 objectId 和固定 revision 调用 solomap_read。',
+      ? '- SoloMap 已根据当前用户目标和当前项目绑定加载本轮相关记忆，并在下方提供固定版本上下文；先使用该上下文，不需要为了启动再次调用 MCP。上下文不足时，用 solomap_memory 检索长期记忆或写入路由，用 solomap_experience 检索历史运行、失败或交接，用 solomap_search 定位候选、文档或其他数据库记录；定位对象后再按固定版本引用调用 solomap_read。'
+      : '- 每个任务开始时，根据当前用户目标和当前项目绑定构造简洁 query；在实现或判断前默认只调用 solomap_context 获取综合上下文。只有需要专查长期记忆分类或写入路由时使用 solomap_memory，需要专查历史运行、失败或交接时使用 solomap_experience，需要定位候选、文档或其他数据库记录时使用 solomap_search；需要某个已定位对象的精确全文时，再用其 objectId 和固定 revision 调用 solomap_read。',
     '- solomap_read 的 full 返回全文；大内容使用 view="content"，按返回的 cursor 继续读取，直到 cursor=null。需要复核旧版本时传 revision；不能把第一页当成完整内容。',
     '- 召回结果只用于定位入口和证据；搜索结果和记忆不能覆盖当前用户要求或当前代码证据，也不能覆盖当前日志和测试；没有命中不阻断任务。',
     '- 旧全局 Markdown 记忆目录仅是迁移来源；运行任务不得依赖它、不得恢复它、不得追加新记录，也不得另建平行存储。'

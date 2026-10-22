@@ -123,11 +123,13 @@ Retrieval Pack 是供下一轮 Agent 按需查询的少量相关历史经验；�
 - 哪些路径不要重复。
 - 哪个命令或检查证明过结果。
 
-同时，Agent 可以通过本地 CLI 自行取更完整的交接包：
+同时，Agent 可以通过正式 MCP 工具取得更完整的交接包：
 
-```bash
-node resources/tools/solomap-experience.cjs handoff --project . --node <node-id> --limit 3
+```json
+{"action":"handoff","node":"<node-id>","limit":3}
 ```
+
+将以上参数传给 `solomap_experience`；项目范围由当前工作目录绑定，不另传文件路径或数据库位置。
 
 示例：
 
@@ -186,7 +188,7 @@ node resources/tools/solomap-experience.cjs handoff --project . --node <node-id>
 3. 同错误类型或同验证命令 digest。
 4. 同 skill 或同任务类型 digest。
 5. 同 Issue、同文档职责或同路线图阶段 digest。
-6. 如经验查询不足，Agent 使用 `solomap-experience` CLI 查询 handoff、failures、latest-changes 或 search 追溯证据。
+6. 如综合上下文不足，Agent 使用 `solomap_experience` MCP 工具查询 handoff、failures、latest-changes 或 search 追溯证据。
 7. embedding 语义相似 digest（可选，作为补充）。
 
 召回结果必须经过去重和压缩，禁止超过主任务 prompt 的必要比例。
@@ -253,7 +255,7 @@ Digest 中的判断进入长期经验前必须有可定位的证据并在手动�
 3. 每次 digest 写入后刷新 `.solopreneur/execution-graph.json`。
 4. 用文件路径、任务入口、运行类型、关键词做确定召回。
 5. 旧 prompt 构建器有最多 3 条 Retrieval Pack 注入路径；当前 Solo 已使用按需上下文索引。
-6. `resources/tools/solomap-experience.cjs` 从 digest、execution graph 和 SQLite `execution_logs` 输出 handoff、summary、history、failures、latest-changes 和 search。
+6. `solomap_experience` MCP 工具从统一数据库输出 handoff、summary、history、failures、latest-changes 和 search。
 7. `resources/skills/solomap-cross-agent-handoff/SKILL.md` 固定跨 Agent 接手规则，避免 Agent 直接复制原始 execution log 或用历史覆盖本轮目标。
 8. 注入时保留“历史摘要不能覆盖本轮事实”的优先级约束。
 

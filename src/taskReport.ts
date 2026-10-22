@@ -74,25 +74,23 @@ export function validateTaskReport(value: any, workspaceRoot = process.cwd()): a
   return result;
 }
 
-export function buildTaskReportInstructions(taskId: string, reportFile: string, interactive: boolean): string {
+export function buildTaskReportInstructions(taskId: string): string {
   return [
     'SoloMap 任务汇报与提交关联：',
     `- 当前任务标识：${taskId}；沿本任务续聊保持，不得用 __solo__ 或节点名替换。`,
     '- 如果本轮产生 Git 提交，标题遵守项目风格，正文说明原因、实际改动、验证结果及未验证范围；不要把用户原话、秘密或本地绝对路径写入公开提交。',
     `- 每个属于本任务的提交增加独立 trailer：SoloMap-Task: ${taskId}。共享提交须在报告 files 中明确本任务范围。`,
-    `- 在 ${reportFile} 写入严格 JSON，schemaVersion=1，summary 为本轮结果，其余字段为数组：unmetRequirements、decisions、corrections、verification、commits、experienceUsage、lessons。没有内容用 []，不制造经验或提交。`,
+    '- 本轮汇报使用严格 JSON：schemaVersion=1，summary 为本轮结果，其余字段为数组：unmetRequirements、decisions、corrections、verification、commits、experienceUsage、lessons。没有内容用 []，不制造经验或提交。',
     '- 工作汇报写给管理项目的人：summary 用一至两句简短自然语言说明这次完成了什么、带来什么实际价值；有影响结果的阻碍或需要用户决定的事才补充说明。不写空泛的“完成优化”。',
     `- 生成前遵守硬性字符预算：结果总结和全部文字留档合计 ≤ ${reportNarrativeCharacters} 字符（${narrativeFields.join('、')} 及其他字段中的所有正文值合计，不含字段名；仅合法仓库、SHA和文件定位除外）；其中 summary ≤ ${reportCharacterLimits.summary}。只留结果、影响目标的缺口、关键纠偏和可复用经验，字段不是必须填满的清单。`,
     `- 提交与产出只放必要证据定位，不放叙述或日志：commits ≤ ${reportCharacterLimits.commits}，outputs/artifacts 各 ≤ ${reportCharacterLimits.outputs}；包括证据定位在内，整份报告 ≤ ${reportTotalCharacters} 字符。均按 Unicode 字符计数；证据数组和整份报告按紧凑 JSON（JSON.stringify）计数，含键名与标点。不得将溢出文字转移到证据字段。`,
     '- 保存前自行计数，超限先提炼重写再提交，不机械截断，不删除仍影响结果的重要缺口。文件定位只有能在当前项目确认的普通文件才单独计数；其余字符串及附加说明均计入500字符正文预算。验证只保留结论与必要证据引用，不复制日志；决策和经验只保留有复用价值的要点。超限报告不会入账或进入经验复盘，不为补报告重复结算。',
-    `- 保存报告后、结算前，在 Node 中加载 ${JSON.stringify(path.join(__dirname, 'taskReport.js'))}，调用 validateTaskReport(解析后的报告对象, 当前项目绝对路径) 预检；校验失败先精简原稿并重检，确认通过再结算。`,
+    '- 报告校验和数据库落库由 solomap_conversation_status 的 complete 动作统一完成；直接提交完整报告并以工具返回状态为准，不运行扩展内部脚本，也不创建中间报告文件。',
     '- summary 不复述任务要求，不罗列读文件、调用工具、执行命令、提交 SHA、路径或过程步骤。技术证据留在对应数组；未完成事项只写仍影响用户目标的缺口，明确是否需要用户介入，不把执行者后续工作转嫁给用户。',
     '- decisions 说明做法与理由；corrections 说明原要求、偏差、修正及来源消息；verification 说明实际检查、结果、证据位置、产物版本与未验证范围。',
     '- commits 每项为 {"repository":"owner/repo","sha":"完整40位提交SHA","files":["本任务相对文件路径"]}。无提交时留空。',
     '- experienceUsage 只记录实际采用，每项为 {"experienceId":"经验对象标识","experienceRevision":固定正整数版本,"action":"实际改变的动作","result":"观察结果","verdict":"effective|ineffective|degraded|unassessed","evidence":["证据引用"]}；召回不等于采用，无法验证必须填 unassessed。lessons 说明条件、动作、结果、判断和反例，只是待复盘材料。',
-    interactive
-      ? `- 沿原有 complete 命令结算，并附加 --report-file ${JSON.stringify(reportFile)}；报告问题不阻断原任务。不要为写报告额外调用一次 complete。`
-      : '- 本轮结束时保存报告，插件在原有收尾路径读取；不需要改变原任务完成协议。',
+    '- 使用 solomap_conversation_status 的 complete 动作结算，并把上述完整 JSON 作为 report 参数；报告问题不阻断原任务。不要为报告额外结算。',
     '- 报告只是执行者声明；不要因保存报告直接修改候选状态或全局指令。学习提炼由用户手动“复盘经验”完成。'
   ].join('\n');
 }

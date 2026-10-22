@@ -85,7 +85,7 @@ Solo 首次索引至少覆盖：
 - `active/current-session.md`：当前会话交接。
 - `.solopreneur/documentation.json`：项目正式文档目录。
 - 技能 registry：技能发现入口。
-- `solomap-experience.cjs retrieve`：高信号历史经验入口。
+- `solomap_experience` 的 `retrieve` 动作：高信号历史经验入口。
 
 ### 3. 用户全局要求索引
 
@@ -97,13 +97,11 @@ Solo 首次索引至少覆盖：
 
 正式入口为：
 
-```bash
-node resources/tools/solomap-experience.cjs retrieve \
-  --project "<project-root>" \
-  --global "<solomap-global-root>" \
-  --query "<具体功能、文件、错误或目标>" \
-  --limit 5
+```json
+{"action":"retrieve","query":"<具体功能、文件、错误或目标>","limit":5}
 ```
+
+将以上参数传给 `solomap_experience`；项目范围由当前工作目录绑定。
 
 检索同时消费：
 

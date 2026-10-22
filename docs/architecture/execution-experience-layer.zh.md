@@ -93,7 +93,7 @@ Agent 命令报告 + 精确提交及验证证据
 - 每个经验节点都有中心语义、适用条件、建议动作、避免项、检查项、来源 run，以及使用边统计。
 - 当前 `alpha/beta` 与 win/loss/neutral 由 digest 状态及摘要信号推算，不能证明后续实际采用及效果。下一阶段须将其与有证据的采用反馈分开，不据此自动晋升。
 - 旧 prompt 构建器按入口、运行类型、文件和关键词召回；当前 Solo 已改用按需上下文索引。新学习设计保持该按需路径，不把旧自动注入描述当成所有入口现状。
-- `resources/tools/solomap-experience.cjs` 可从 digest、execution graph 和 SQLite `execution_logs` 生成 `handoff`、`summary`、`history`、`failures`、`latest-changes`、`search` 等查询结果。
+- `solomap_experience` MCP 工具从统一数据库生成 `handoff`、`summary`、`history`、`failures`、`latest-changes`、`search` 等查询结果。
 - `resources/skills/solomap-cross-agent-handoff/SKILL.md` 固定 Agent 接手另一位 Agent 工作时的查询顺序、验证边界和原始日志使用规则。
 - 注入内容只包含上次目标、结果、交接简报、相关文件、可复用信号、验证信号和风险信号，不注入原始日志全文。
 - 历史经验在 prompt 中被明确标注为“历史结构化摘要”，不能覆盖用户本轮要求、当前代码、测试或日志。
@@ -231,7 +231,7 @@ SoloMap 可以对 Run Digest 的自然语言字段做 embedding，用于补充�
 - `.solopreneur/step-memory/`
 - `.solopreneur/run-digests/`
 - `.solopreneur/execution-graph.json`
-- `resources/tools/solomap-experience.cjs`
+- `solomap_experience` MCP 工具
 - `resources/skills/solomap-cross-agent-handoff/SKILL.md`
 - `.solomap-global/memory/`
 - `.solomap-global/learning/`
