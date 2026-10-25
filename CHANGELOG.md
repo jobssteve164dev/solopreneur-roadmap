@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.621 - 2026-10-25
+
+### Fixed
+- make agent terminal delivery observable and recoverable (d8622a3)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.620 - 2026-10-22
 
 ### Fixed
