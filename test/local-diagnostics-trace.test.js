@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
 
 for (const persisted of [false, true]) test(`process diagnostic summary preserves lifecycle details from ${persisted ? 'database' : 'memory'}`, async t => {
   const diagnostics = require('../out/localDiagnostics.js');
@@ -33,6 +34,7 @@ test('runtime handoff failures retain their diagnostic categories', () => {
   const diagnostics = require('../out/localDiagnostics.js');
   assert.equal(diagnostics.classifyDiagnosticFailure(new Error('different_runtime_build')), 'different_runtime_build');
   assert.equal(diagnostics.classifyDiagnosticFailure(new Error('runtime_drain_timeout')), 'runtime_drain_timeout');
+  assert.equal(diagnostics.classifyDiagnosticFailure(vm.runInNewContext("new Error('runner_claim_timeout')")), 'runner_claim_timeout');
 });
 test('diagnostic trace follows async stages through the database sink without writing JSON', async t => {
   const diagnostics = require('../out/localDiagnostics.js');

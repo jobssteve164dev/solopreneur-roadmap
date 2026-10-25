@@ -44,6 +44,33 @@ test('terminal commands remain compatible with hosts that do not expose processI
   assert.deepEqual(delivered, [{ text: 'codex --version', addNewLine: false }]);
 });
 
+test('terminal readiness timeout reports the exact failed stage and never submits the command', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const delivered = [];
+  const events = [];
+  const terminal = {
+    processId: new Promise(() => {}),
+    sendText(text, addNewLine) {
+      delivered.push({ text, addNewLine });
+    }
+  };
+
+  const pending = sendTextWhenTerminalReady(terminal, 'codex resume original-session', true, {
+    readinessTimeoutMs: 10_000,
+    observe: event => events.push(event)
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(10_001);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(await Promise.race([pending, new Promise(resolve => setImmediate(() => resolve('still-pending')))]), false);
+  assert.deepEqual(delivered, []);
+  assert.deepEqual(events.map(event => [event.stage, event.status, event.error]), [
+    ['terminal.process.wait', 'start', undefined],
+    ['terminal.process.wait', 'error', 'terminal_process_timeout']
+  ]);
+});
+
 test('a slow supported shell cannot receive commands when the five second display budget expires', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let resolveProcess;

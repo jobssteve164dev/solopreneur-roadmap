@@ -26,7 +26,7 @@ async function openAnalysisOwner(t, root, projects) {
 
 function anonymousToolEnv() {
   const env = { ...process.env };
-  for (const key of ['SOLOMAP_PROJECT_ID', 'SOLOMAP_EXECUTION_LOG_ID', 'SOLOMAP_RUN_GENERATION', 'SOLOMAP_RUN_PROOF', 'SOLOMAP_RUN_KIND', 'SOLOMAP_TERMINAL_DELIVERY_ID']) delete env[key];
+  for (const key of ['SOLOMAP_PROJECT_ID', 'SOLOMAP_EXECUTION_LOG_ID', 'SOLOMAP_RUN_GENERATION', 'SOLOMAP_RUN_PROOF', 'SOLOMAP_RUN_KIND', 'SOLOMAP_TERMINAL_DELIVERY_ID', 'SOLOMAP_DIAGNOSTIC_TRACE_ID', 'SOLOMAP_DELIVERY_STARTED_AT']) delete env[key];
   return env;
 }
 

@@ -524,7 +524,9 @@ test('production polling resumes an undelivered task after its creating window a
     await extension.poll({});
     const state = await call({ operation: 'read_run_state', input: { projectId: prepared.projectId, executionLogId: 1 } });
     assert.match(state.status.terminalDeliveryId, /^[a-f0-9-]{36}$/);
-    assert.deepEqual(commands, [`SOLOMAP_TERMINAL_DELIVERY_ID=${require('../out/agentCli.js').shellQuote(state.status.terminalDeliveryId)} ${prepared.finalCommand}`]);
+    assert.equal(commands.length, 1);
+    assert.match(commands[0], /^SOLOMAP_DIAGNOSTIC_TRACE_ID='[a-f0-9]{16}' SOLOMAP_DELIVERY_STARTED_AT='\d+' /);
+    assert.ok(commands[0].endsWith(`SOLOMAP_TERMINAL_DELIVERY_ID=${require('../out/agentCli.js').shellQuote(state.status.terminalDeliveryId)} ${prepared.finalCommand}`));
     assert.equal(state.taskId, prepared.taskId); assert.equal(state.runId, prepared.runId); assert.equal(state.turnId, prepared.turnId);
     assert.equal(state.status.selectedModel, 'original-model');
     await extension.poll({}); assert.equal(creates, 1); assert.equal(commands.length, 1);
@@ -824,11 +826,109 @@ test('production terminal delivery keeps the shell readiness gate and one durabl
     assert.equal(creates, 1);
     const state = await ops({ operation: 'read_run_state', input: { projectId: prepared.projectId, executionLogId: 1 } });
     assert.match(state.status.terminalDeliveryId, /^[a-f0-9-]{36}$/);
-    assert.deepEqual(commands, [`SOLOMAP_TERMINAL_DELIVERY_ID=${require('../out/agentCli.js').shellQuote(state.status.terminalDeliveryId)} ${prepared.finalCommand}`]);
+    assert.equal(commands.length, 1);
+    assert.match(commands[0], /^SOLOMAP_DIAGNOSTIC_TRACE_ID='[a-f0-9]{16}' SOLOMAP_DELIVERY_STARTED_AT='\d+' /);
+    assert.ok(commands[0].endsWith(`SOLOMAP_TERMINAL_DELIVERY_ID=${require('../out/agentCli.js').shellQuote(state.status.terminalDeliveryId)} ${prepared.finalCommand}`));
     assert.equal(state.status.terminalName, terminal.name);
     assert.equal(fs.existsSync(path.join(root, 'active-conversations')), false);
     assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
   } finally { extension.restore(); await ops.close(); store.close(); }
+});
+
+test('a submitted terminal command that no runner claims releases its live delivery lease for automatic recovery', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runner-claim-watchdog-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const diagnostics = require('../out/localDiagnostics.js');
+  diagnostics.configureLocalDiagnosticPersistence({ append: (_dataRoot, event) => native.ops({ operation: 'append_diagnostic_event', input: event }) });
+  t.after(() => diagnostics.configureLocalDiagnosticPersistence(undefined));
+  const { prepareAgentRun } = require('../out/agentRunPreparation.js');
+  const prepared = await prepareAgentRun({ agentCli: 'claude', selectedModel: '', prompt: '原始目标', workspaceRoot: project, nodeId: '__solo__', executionLogId: 1, userMessage: '目标', runKind: 'solo', globalDataPath: root, taskPermissionMode: 'auto' },
+    (operation, input) => native.ops({ operation, input }));
+  const terminal = { name: 'runner never appeared', processId: Promise.resolve(process.pid), show() {}, sendText() {}, dispose() {} };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.launch = launchAgentConversationTerminal;
+    module.exports.connect = value => { createAgentTerminal = () => value; };
+    module.exports.targetCount = () => agentTerminalRunTargets.size;
+  `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
+  extension.connect(terminal);
+
+  await extension.launch({ workspaceRoot: project, label: 'solo', conversationId: 1, nodeId: '__solo__', statusFilePath: require('../out/runLifecycleClient.js').runStatusReference(project, 1), runKind: 'solo', globalDataPath: root, command: prepared.finalCommand, agentCli: 'claude', runnerClaimTimeoutMs: 10 });
+  let state = await native.ops({ operation: 'read_run_state', input: { root: project, executionLogId: 1 } });
+  assert.equal(state.status.deliveryPending, true); assert.ok(state.status.deliveryOwnerId);
+  t.mock.timers.tick(11);
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await new Promise(resolve => setImmediate(resolve));
+    state = await native.ops({ operation: 'read_run_state', input: { root: project, executionLogId: 1 } });
+    if (!state.status.deliveryOwnerId) break;
+  }
+  assert.equal(state.status.deliveryPending, true);
+  assert.equal(state.status.deliveryOwnerId, '', 'the live extension host must not retain a failed terminal delivery forever');
+  assert.equal(extension.targetCount(), 0, 'the disposed unclaimed terminal must not remain strongly referenced');
+  assert.equal((await native.ops({ operation: 'list_run_deliveries', input: { root: project } })).items.length, 1);
+  let stages = [];
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const events = await native.ops({ operation: 'read_diagnostic_events', input: { kind: 'operation', limit: 100 } });
+    stages = events.items
+      .filter(event => event.payload.traceId === state.status.terminalDeliveryTraceId)
+      .map(event => [event.scope, event.payload.status, event.payload.message]);
+    if (stages.some(([stage, status]) => stage === 'terminal.delivery.runner.claim.watchdog' && status === 'error')) break;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  for (const expected of [
+    ['terminal.delivery.claim', 'ok'],
+    ['terminal.delivery.identity.persist', 'ok'],
+    ['terminal.delivery.process.wait', 'ok'],
+    ['terminal.delivery.command.send', 'ok'],
+    ['terminal.delivery.submission.persist', 'ok'],
+    ['terminal.delivery.runner.claim.watchdog', 'error', 'runner_claim_timeout']
+  ]) assert.ok(stages.some(actual => expected.every((value, index) => actual[index] === value)), `missing diagnostic stage ${expected.join(':')} in ${JSON.stringify(stages)}`);
+});
+
+test('terminal process readiness exhaustion retries with a fresh terminal and returns the run to the delivery queue', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-terminal-readiness-recovery-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const { prepareAgentRun } = require('../out/agentRunPreparation.js');
+  const prepared = await prepareAgentRun({ agentCli: 'claude', selectedModel: '', prompt: '原始目标', workspaceRoot: project, nodeId: '__solo__', executionLogId: 1, userMessage: '目标', runKind: 'solo', globalDataPath: root, taskPermissionMode: 'auto' },
+    (operation, input) => native.ops({ operation, input }));
+  const terminals = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.launch = launchAgentConversationTerminal;
+    const previousCall = autonomousRuntimeControl_1.sendRuntimeDataRequest;
+    module.exports.connect = (call, factory) => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request); createAgentTerminal = factory; };
+    module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; };
+    module.exports.targetCount = () => agentTerminalRunTargets.size;
+  `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
+  let failFirstRelease = true;
+  extension.connect(request => {
+    if (request.operation === 'release_run_delivery' && failFirstRelease) { failFirstRelease = false; throw new Error('runtime_temporarily_unavailable'); }
+    return native.ops(request);
+  }, () => {
+    const terminal = { name: `never-ready-${terminals.length + 1}`, processId: new Promise(() => {}), sent: 0, disposed: 0,
+      show() {}, sendText() { this.sent++; }, dispose() { this.disposed++; } };
+    terminals.push(terminal); return terminal;
+  });
+
+  t.after(() => extension.restore());
+  await assert.rejects(extension.launch({ workspaceRoot: project, label: 'solo', conversationId: 1, nodeId: '__solo__', statusFilePath: require('../out/runLifecycleClient.js').runStatusReference(project, 1), runKind: 'solo', globalDataPath: root, command: prepared.finalCommand, agentCli: 'claude', terminalReadyTimeoutMs: 5, deliveryReleaseRetryMs: 5 }), /terminal_process_timeout/);
+  let state;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    state = await native.ops({ operation: 'read_run_state', input: { root: project, executionLogId: 1 } });
+    if (!state.status.deliveryOwnerId) break;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(terminals.length, 2);
+  assert.deepEqual(terminals.map(terminal => [terminal.sent, terminal.disposed]), [[0, 1], [0, 1]]);
+  assert.equal(extension.targetCount(), 0, 'both disposed readiness attempts must be released from the target map');
+  assert.equal(state.status.deliveryPending, true);
+  assert.equal(state.status.deliveryOwnerId, '');
+  assert.equal(state.status.deliveryLastError, 'terminal_process_timeout');
+  assert.equal(failFirstRelease, false, 'the initial lease release failure must be exercised');
+  assert.equal((await native.ops({ operation: 'list_run_deliveries', input: { root: project } })).items.length, 1);
 });
 
 test('the production stop action settles the database task without writing run files', async () => {
@@ -16997,7 +17097,7 @@ test('continuing a stopped interactive conversation opens a new terminal and set
   const terminal = created[0].terminal, continuation = preparedRuns[0], newId = Number(continuation.status.rootExecutionLogId), nextReference = require('../out/runLifecycleClient.js').runStatusReference(project,newId);
   assert.equal(created[0].options.cwd,project);assert.deepEqual(created[0].options.env,require('../out/desktopSessionEnvironment.js').desktopSessionEnvironment());assert.ok(terminal.shown>=1);assert.notEqual(terminal.name,stale.name);
   assert.equal(extension.reservations(project),0,'actual delivery consumes the startup reservation rather than creating another terminal');assert.deepEqual({...extension.owned(newId)},{name:terminal.name,root:project});assert.deepEqual({...extension.owned(336)},{name:undefined,root:undefined});
-  assert.equal(sent.length,2);assert.equal(sent[0].terminal,terminal);assert.equal(sent[1].terminal,terminal);assert.match(sent[0].text,/正在准备本地对话/);assert.match(sent[1].text,/SOLOMAP_TERMINAL_DELIVERY_ID=/);assert.ok(sent[1].text.endsWith(continuation.finalCommand));assert.match(continuation.finalCommand,/runAgentProcess\.js/);
+  assert.equal(sent.length,1);assert.equal(sent[0].terminal,terminal);assert.match(sent[0].text,/SOLOMAP_TERMINAL_DELIVERY_ID=/);assert.ok(sent[0].text.endsWith(continuation.finalCommand));assert.match(continuation.finalCommand,/runAgentProcess\.js/);
   const states = await native.ops({operation:'list_run_states',input:{root:project,cursor:0,limit:10}});assert.equal(states.items.length,5);
   const delivered = await read(project,newId);assert.equal(delivered.taskId,run.taskId);assert.equal(delivered.conversationId,run.conversationId);assert.notEqual(delivered.turnId,run.turnId);assert.equal(delivered.status.sourceParentRunId,run.runId);assert.equal(delivered.status.sourceParentTurnId,run.turnId);assert.equal(delivered.status.lineageRootExecutionLogId,336);assert.equal(delivered.status.plannedNativeSessionId,run.status.plannedNativeSessionId);assert.equal(delivered.status.terminalName,terminal.name);assert.ok(delivered.status.terminalCommandSubmittedAt);assert.ok(delivered.status.terminalDeliveryId);
   assert.equal(posted.filter(message=>message.command==='conversationActionSettled'&&message.action==='continue'&&Number(message.conversationId)===336&&message.projectPath===project).length,2);
@@ -17090,7 +17190,7 @@ test('continuing an earlier turn opens a new session terminal once for concurren
   assert.deepEqual(await Promise.all([click(),click()]),[true,true]);assert.deepEqual(errors,[]);assert.equal(oldShown,0);assert.equal(oldDisposed,1);assert.equal(created.length,1);assert.equal(preparedRuns.length,1);assert.deepEqual(registrations,[],'continue from an earlier turn does not register input against the old terminal');
   const prepared = preparedRuns[0], newId = Number(prepared.status.rootExecutionLogId), terminal = created[0].terminal;
   assert.equal(created[0].options.cwd,project);assert.deepEqual(created[0].options.env,require('../out/desktopSessionEnvironment.js').desktopSessionEnvironment());assert.notEqual(terminal.name,oldTerminal.name);assert.ok(terminal.shown>=1);assert.equal(extension.reservations(project),0);assert.deepEqual({...extension.owned(newId)},{name:terminal.name,root:project});assert.deepEqual({...extension.owned(336)},{name:undefined,root:undefined});
-  assert.equal(sent.length,2);assert.equal(sent[0].terminal,terminal);assert.equal(sent[1].terminal,terminal);assert.match(sent[0].text,/正在准备本地对话/);assert.match(sent[1].text,/SOLOMAP_TERMINAL_DELIVERY_ID=/);assert.ok(sent[1].text.endsWith(prepared.finalCommand));assert.match(prepared.finalCommand,/runAgentProcess\.js/);
+  assert.equal(sent.length,1);assert.equal(sent[0].terminal,terminal);assert.match(sent[0].text,/SOLOMAP_TERMINAL_DELIVERY_ID=/);assert.ok(sent[0].text.endsWith(prepared.finalCommand));assert.match(prepared.finalCommand,/runAgentProcess\.js/);
   const delivered = await read(project,newId);assert.equal(delivered.taskId,run.taskId);assert.equal(delivered.conversationId,run.conversationId);assert.notEqual(delivered.turnId,parent.turnId);assert.equal(delivered.status.sourceParentRunId,parent.runId);assert.equal(delivered.status.sourceParentTurnId,parent.turnId);assert.equal(delivered.status.lineageRootExecutionLogId,336);assert.equal(delivered.status.plannedNativeSessionId,run.status.plannedNativeSessionId);assert.equal(delivered.status.terminalName,terminal.name);assert.ok(delivered.status.terminalDeliveryId);assert.ok(delivered.status.terminalCommandSubmittedAt);
   assert.equal((await operation('list_run_states',{root:project,cursor:0,limit:10})).items.length,5);assert.equal(posted.filter(m=>m.command==='conversationActionSettled'&&m.action==='continue'&&m.projectPath===project&&Number(m.conversationId)===earlierId).length,2);
   const closed = new Map();

@@ -38,6 +38,21 @@ async function main(): Promise<void> {
   const projectRoot = argument('--project-path');
   const executionLogId = Number(argument('--execution-log-id'));
   if (!globalDataPath || !projectRoot || !Number.isInteger(executionLogId) || executionLogId < 1) throw new Error('run_execution_arguments_required');
+  const diagnosticTraceId = /^[a-f0-9]{16}$/i.test(String(process.env.SOLOMAP_DIAGNOSTIC_TRACE_ID || '')) ? String(process.env.SOLOMAP_DIAGNOSTIC_TRACE_ID) : '';
+  const deliveryStartedAt = Number(process.env.SOLOMAP_DELIVERY_STARTED_AT || Date.now());
+  let diagnosticSequence = 0;
+  let diagnosticQueue = Promise.resolve();
+  const recordDeliveryStage = (scope: string, pid = process.pid): void => {
+    if (!diagnosticTraceId) return;
+    const occurredAt = new Date().toISOString();
+    diagnosticQueue = diagnosticQueue.then(() => sendRuntimeDataRequest(globalDataPath, { operation: 'append_diagnostic_event', input: {
+        kind: 'operation', occurredAt, scope,
+        payload: { traceId: diagnosticTraceId, interactionId: diagnosticTraceId, status: 'ok', durationMs: 0,
+          elapsedMs: Math.max(0, Date.now() - deliveryStartedAt), ...(Number.isInteger(pid) && pid > 0 ? { pid } : {}) },
+        idempotencyKey: `runner-diagnostic:${diagnosticTraceId}:${process.pid}:${++diagnosticSequence}`
+      } }).then(() => undefined)).catch(() => undefined);
+  };
+  recordDeliveryStage('terminal.delivery.runner.start');
   let requestedSignal: NodeJS.Signals | undefined;
   const request = async <T>(operation: string, input: Record<string, unknown>): Promise<T> => {
     for (;;) {
@@ -69,6 +84,7 @@ async function main(): Promise<void> {
       break;
     } catch (error) { if ((error as Error).message !== 'revision_conflict') throw error; }
   }
+  recordDeliveryStage('terminal.delivery.runner.claim');
   const generation = state.generation;
   const proof = state.proof!;
   const checkpoint = async (fields: Record<string, unknown>): Promise<RunState> => {
@@ -240,6 +256,7 @@ async function main(): Promise<void> {
     void exited.catch(() => undefined);
     if (!child.pid) await exited;
     await patch({ agentChildPid: child.pid!, processChildBirth: processBirth(child.pid!) });
+    recordDeliveryStage('terminal.delivery.agent.spawn', child.pid!);
     await checkStopped();
     // Attach readers before releasing the gate. Node drains unread pipes when
     // a short-lived child exits, so asynchronous discovery must happen first.
@@ -265,6 +282,8 @@ async function main(): Promise<void> {
       await new Promise(resolve => setTimeout(resolve, 250));
     }
     (child.stdio[3] as NodeJS.WritableStream).end('launch\n');
+    recordDeliveryStage('terminal.delivery.agent.launch', child.pid!);
+    await diagnosticQueue;
     const result = await finished;
     const [exitCode, signal] = result[2] as [number | null, NodeJS.Signals | null];
     const code = exitCode ?? (signal === 'SIGINT' ? 130 : 143);

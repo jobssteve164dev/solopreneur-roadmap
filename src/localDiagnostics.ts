@@ -145,7 +145,9 @@ function diagnosticFiles(globalDataPath: string, kind: 'errors' | 'operations'):
 export function sanitizeDiagnosticText(value: unknown): string {
   const home = os.homedir();
   const escapedHome = home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return String(value instanceof Error ? value.message : value || 'Unknown error')
+  const message = value && typeof value === 'object' && typeof (value as { message?: unknown }).message === 'string'
+    ? (value as { message: string }).message : value;
+  return String(message || 'Unknown error')
     .replace(/\/bot\d{5,}:[A-Za-z0-9_-]{10,}\/[A-Za-z]+/gi, '<telegram-endpoint>')
     .replace(/\b\d{5,}:[A-Za-z0-9_-]{10,}\b/g, '<redacted>')
     .replace(escapedHome ? new RegExp(escapedHome, 'g') : /$^/, '<home>')
@@ -159,8 +161,10 @@ export function sanitizeDiagnosticText(value: unknown): string {
 }
 
 export function classifyDiagnosticFailure(error: unknown): string {
-  const message = String(error instanceof Error ? error.message : error || '').toLowerCase();
-  if (/^(?:missing_state|different_process|not_running|stale_heartbeat|process_exited|control_unavailable|different_runtime|different_runtime_build|different_runtime_owner|control_not_running|runtime_drain_timeout|runtime_service_rollback|runtime_service_upgrade_failed|runtime_service_cleanup_failed)$/.test(message)) return message;
+  const errorMessage = error && typeof error === 'object' && typeof (error as { message?: unknown }).message === 'string'
+    ? (error as { message: string }).message : error;
+  const message = String(errorMessage || '').toLowerCase();
+  if (/^(?:missing_state|different_process|not_running|stale_heartbeat|process_exited|control_unavailable|different_runtime|different_runtime_build|different_runtime_owner|control_not_running|runtime_drain_timeout|runtime_service_rollback|runtime_service_upgrade_failed|runtime_service_cleanup_failed|terminal_process_timeout|terminal_process_unavailable|runner_claim_timeout)$/.test(message)) return message;
   if (/failed to connect to (?:user scope )?bus|user bus.*(?:unavailable|not found)/.test(message)) return 'user_systemd_bus_unavailable';
   const httpStatus = message.match(/telegram[^\n]*?http\s*(\d{3})/);
   if (httpStatus) return `telegram_http_${httpStatus[1]}`;

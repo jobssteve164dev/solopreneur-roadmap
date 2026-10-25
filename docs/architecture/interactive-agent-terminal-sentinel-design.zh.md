@@ -39,6 +39,38 @@
 
 现有任务哨兵不是必须依赖非交互终端。真正的耦合是：系统把“Agent 命令退出”当成“当前任务轮次完成”。交互式 TUI 完成一轮后仍会等待下一次输入，因此不能再用进程退出作为主要完成信号。
 
+### 对话唤起观测与恢复契约
+
+对话唤起不能再用单个 `delivery` 耗时代表整条链路。每次唤起使用同一个 trace，按真实因果顺序记录：
+
+```text
+delivery.claim
+  → delivery.identity.persist
+  → delivery.process.wait
+  → delivery.command.send
+  → delivery.submission.persist
+  → delivery.runner.start
+  → delivery.runner.claim
+  → delivery.agent.spawn
+  → delivery.agent.launch
+```
+
+- `process.wait` 只表示 VS Code PTY 已返回可用 Shell PID；终端对象已创建或已经显示不算就绪。
+- `command.send` 只表示正式命令已交给已就绪 Shell；它不等于 runner 已启动。
+- `runner.claim` 是 `runAgentProcess` 已启动并成功认领运行的权威信号。只有从这里开始，运行才不再属于“待投递”。
+- `agent.spawn` 表示 runner 已创建受控 Agent 子进程并持久化其 PID；`agent.launch` 表示持久化与执行许可均成立，启动门已放行。
+- 阶段事件只保存 trace、阶段、耗时、受控进程字段和分类错误，不保存用户输入、命令正文、路径或凭据。
+
+恢复规则：
+
+- PTY 在单次就绪预算内没有返回 PID 时，记录 `terminal_process_timeout`，关闭本次无效终端并新建终端重试；不得向未就绪 Shell 发送命令。
+- 两次终端就绪尝试都失败时，本次投递释放租约，运行继续保持 `deliveryPending`，由既有持久恢复轮询再次投递；超时不是任务终态。
+- Shell 接收命令后若 runner 在认领预算内仍未出现，记录 `runner_claim_timeout`，校验 run、generation 和 delivery ID 后释放投递租约并关闭失效终端。迟到的旧命令因 delivery ID 不匹配不能认领运行，避免重复执行。
+- 释放租约若恰逢 Runtime 切换或短暂断连，按同一 generation、owner、delivery ID 和幂等键后台重试；活着的 Extension Host 不得因为一次释放 RPC 失败而永久挡住持久投递队列。
+- 准备提示不再作为一条 Shell 命令排在正式命令之前；终端可见性由 `show` 保证，正式命令是该终端唯一的首次投递，避免两个命令串行等待同一个未就绪 PID。
+
+上述预算只界定一次基础设施尝试，不缩短 Agent 任务执行时间，也不把慢任务改成提前失败。
+
 ### 已落地的检查点协议
 
 Agent 每轮从插件提示词获得唯一命令入口：

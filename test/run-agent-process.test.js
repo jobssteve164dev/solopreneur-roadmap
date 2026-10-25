@@ -87,6 +87,28 @@ api.sendRuntimeDataRequest=async function(root,request){
   } finally { await f.close(); }
 });
 
+test('the shared runner records claim and Agent launch stages in the originating terminal trace', async () => {
+  const f = await executionFixture(`env -u NO_COLOR ${shellQuote(process.execPath)} -e ${shellQuote("process.stdout.write('observed launch')")}`);
+  const traceId = '0123456789abcdef';
+  try {
+    const agent = f.startAgent({
+      SOLOMAP_DIAGNOSTIC_TRACE_ID: traceId,
+      SOLOMAP_DELIVERY_STARTED_AT: String(Date.now())
+    });
+    assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
+    const diagnostics = await f.call('read_diagnostic_events', { kind: 'operation', limit: 100 });
+    const stages = diagnostics.items
+      .filter(event => event.payload.traceId === traceId)
+      .map(event => [event.scope, event.payload.status]);
+    assert.deepEqual(stages, [
+      ['terminal.delivery.runner.start', 'ok'],
+      ['terminal.delivery.runner.claim', 'ok'],
+      ['terminal.delivery.agent.spawn', 'ok'],
+      ['terminal.delivery.agent.launch', 'ok']
+    ]);
+  } finally { await f.close(); }
+});
+
 for (const exitCode of [0, 7]) test(`maintenance execution captures its full result and logs before exit ${exitCode}`, async () => {
   const resultBytes = Buffer.from(JSON.stringify({ success: exitCode === 0, detail: '完整安装回执🌿'.repeat(10000) }) + '\n');
   const output = '完整安装输出🌿\n'.repeat(10000);

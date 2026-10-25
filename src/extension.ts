@@ -7249,11 +7249,11 @@ async function revealAgentStartupTerminal(
   reservedAgentTerminalsByProject.set(workspaceRoot, reservations);
   activeAgentTerminalName = terminal.name;
   terminal.show(true);
-  void sendTextWhenTerminalReady(terminal, `printf '%s\\n' ${shellQuote('SoloMap 正在准备本地对话…')}`);
   return terminal;
 }
 
 const agentTerminalDeliveries = new Map<string, Promise<vscode.Terminal>>();
+const agentTerminalDeliveryWatchdogs = new Map<string, NodeJS.Timeout>();
 
 async function launchAgentConversationTerminal(input: {
   workspaceRoot: string;
@@ -7268,6 +7268,9 @@ async function launchAgentConversationTerminal(input: {
   agentCli: string;
   model?: string;
   refreshNodeId?: string;
+  terminalReadyTimeoutMs?: number;
+  runnerClaimTimeoutMs?: number;
+  deliveryReleaseRetryMs?: number;
 }): Promise<vscode.Terminal> {
   const key = JSON.stringify([input.globalDataPath, path.resolve(input.workspaceRoot), input.conversationId]);
   const existing = agentTerminalDeliveries.get(key);
@@ -7280,17 +7283,89 @@ async function launchAgentConversationTerminal(input: {
     const identity = { root: input.workspaceRoot, executionLogId: input.conversationId };
     const owner = await getAgentRunDeliveryOwner();
     let state = await operation('read_run_state', identity) as import('./runLifecycleTypes').RunState;
+    const deliveryGeneration = state.generation;
+    const trace = getCurrentLocalDiagnosticTrace() || createLocalDiagnosticTrace(globalDataPath, 'terminal.delivery', { targetId: state.runId, generation: state.generation });
+    const deliveryStartedAt = Date.now();
+    const record = async <T>(stage: string, action: () => Promise<T>): Promise<T> => {
+      const started = performance.now(); trace.record(stage, 'start');
+      try { const result = await action(); trace.record(stage, 'ok', performance.now() - started); return result; }
+      catch (error) { trace.record(stage, 'error', performance.now() - started, error); throw error; }
+    };
+    const scheduleDeliveryReleaseRetry = (errorCode: string, terminal?: vscode.Terminal, deliveryId = '') => {
+      const releaseKey = `release:${key}:${deliveryGeneration}:${deliveryId || 'unbound'}`;
+      if (agentTerminalDeliveryWatchdogs.has(releaseKey)) return;
+      const timeoutMs = Math.max(1, Number(input.deliveryReleaseRetryMs || 5_000));
+      trace.record('terminal.delivery.release.retry', 'start', 0, undefined, { timeoutMs });
+      const timer = setTimeout(() => {
+        agentTerminalDeliveryWatchdogs.delete(releaseKey);
+        void operation('release_run_delivery', { ...identity, generation: deliveryGeneration, owner, error: errorCode,
+          idempotencyKey: `run:${state.runId}:${deliveryGeneration}:release-terminal-retry:${deliveryId || 'unbound'}:${errorCode}` })
+          .then(() => {
+            if (terminal && agentTerminalRunTargets.delete(terminal)) terminal.dispose();
+            trace.record('terminal.delivery.release.retry', 'ok');
+            if (extensionContextRef) ensureActiveConversationPoller(extensionContextRef);
+          })
+          .catch(error => {
+            if (['run_already_delivered', 'run_owner_conflict', 'run_delivery_lease_lost'].includes((error as Error).message)) return;
+            trace.record('terminal.delivery.release.retry', 'error', 0, error);
+            scheduleDeliveryReleaseRetry(errorCode, terminal, deliveryId);
+          });
+      }, timeoutMs);
+      timer.unref?.();
+      agentTerminalDeliveryWatchdogs.set(releaseKey, timer);
+    };
+    const scheduleRunnerClaimWatchdog = (terminal: vscode.Terminal, target: AgentTerminalRunTarget, generation: number) => {
+      const watchdogKey = `${key}:${target.deliveryId}`;
+      if (agentTerminalDeliveryWatchdogs.has(watchdogKey)) return;
+      const timeoutMs = Math.max(1, Number(input.runnerClaimTimeoutMs || 10_000));
+      trace.record('terminal.delivery.runner.claim.watchdog', 'start', 0, undefined, { timeoutMs });
+      const timer = setTimeout(() => {
+        agentTerminalDeliveryWatchdogs.delete(watchdogKey);
+        void (async () => {
+          const current = await operation('read_run_state', identity) as import('./runLifecycleTypes').RunState;
+          if (!current.status.deliveryPending || current.generation !== generation) {
+            trace.record('terminal.delivery.runner.claim.watchdog', 'ok', Date.now() - deliveryStartedAt,
+              undefined, { pid: Number(current.status.agentPid || 0), timeoutMs });
+            return;
+          }
+          if (String(current.status.terminalDeliveryId || '') !== target.deliveryId) return;
+          trace.record('terminal.delivery.runner.claim.watchdog', 'error', Date.now() - deliveryStartedAt,
+            new Error('runner_claim_timeout'), { timeoutMs });
+          try {
+            await operation('release_run_delivery', { ...identity, generation, owner, error: 'runner_claim_timeout',
+              idempotencyKey: `run:${current.runId}:${generation}:runner-claim-timeout:${target.deliveryId}` });
+            agentTerminalRunTargets.delete(terminal);
+            terminal.dispose();
+            if (extensionContextRef) ensureActiveConversationPoller(extensionContextRef);
+          } catch (error) {
+            if (!['run_already_delivered', 'run_owner_conflict', 'run_delivery_lease_lost'].includes((error as Error).message)) {
+              trace.record('terminal.delivery.release', 'error', 0, error);
+              scheduleDeliveryReleaseRetry('runner_claim_timeout', terminal, target.deliveryId || '');
+            }
+          }
+        })().catch(error => {
+          trace.record('terminal.delivery.runner.claim.watchdog', 'error', Date.now() - deliveryStartedAt, error, { timeoutMs });
+          scheduleRunnerClaimWatchdog(terminal, target, generation);
+        });
+      }, timeoutMs);
+      timer.unref?.();
+      agentTerminalDeliveryWatchdogs.set(watchdogKey, timer);
+    };
     const recordedTerminal = vscode.window.terminals.find(terminal => {
       const existingTarget = agentTerminalRunTargets.get(terminal);
       return terminal.name === state.status.terminalName && existingTarget?.globalDataPath === globalDataPath && isAgentTerminalRunTargetCurrent(existingTarget, state);
     });
-    const target: AgentTerminalRunTarget = { workspaceRoot: input.workspaceRoot, globalDataPath, executionLogId: input.conversationId, runId: state.runId, generation: state.generation, deliveryId: recordedTerminal ? String(state.status.terminalDeliveryId || '') : crypto.randomUUID() };
-    if (recordedTerminal && state.status.terminalCommandSubmittedAt) { agentTerminalRunTargets.set(recordedTerminal, target); recordedTerminal.show(true); return recordedTerminal; }
+    const recordedTarget: AgentTerminalRunTarget = { workspaceRoot: input.workspaceRoot, globalDataPath, executionLogId: input.conversationId, runId: state.runId, generation: state.generation, deliveryId: recordedTerminal ? String(state.status.terminalDeliveryId || '') : crypto.randomUUID() };
+    if (recordedTerminal && state.status.terminalCommandSubmittedAt) {
+      agentTerminalRunTargets.set(recordedTerminal, recordedTarget); recordedTerminal.show(true);
+      scheduleRunnerClaimWatchdog(recordedTerminal, recordedTarget, state.generation);
+      return recordedTerminal;
+    }
     if (!state.status.deliveryPending) throw new Error('run_already_delivered');
     const generation = state.generation;
     for (;;) {
       try {
-        state = await operation('claim_run_delivery', { ...identity, generation, expectedRevision: state.revision, owner, idempotencyKey: `run:${state.runId}:${generation}:terminal-delivery:${owner.id}:${state.revision}` }) as import('./runLifecycleTypes').RunState;
+        state = await record('terminal.delivery.claim', () => operation('claim_run_delivery', { ...identity, generation, expectedRevision: state.revision, owner, idempotencyKey: `run:${state.runId}:${generation}:terminal-delivery:${owner.id}:${state.revision}` }) as Promise<import('./runLifecycleTypes').RunState>);
         break;
       } catch (error) {
         if ((error as Error).message !== 'revision_conflict') throw error;
@@ -7298,15 +7373,14 @@ async function launchAgentConversationTerminal(input: {
         if (state.generation !== generation) throw new Error('run_owner_conflict');
       }
     }
+    let terminalForPersistence: vscode.Terminal | undefined;
+    let lastDeliveryId = '';
     try {
-    const terminal = recordedTerminal || createAgentTerminal(input.workspaceRoot, input.label, input.conversationId, input.context ? await getOpenCodeTerminalEnvironment(input.context, input.agentCli, input.model) : undefined);
-    agentTerminalRunTargets.set(terminal, target);
-    terminal.show(true);
     const persist = async (patch: Record<string, unknown>, commandSubmitted = false) => {
       for (;;) {
         const current = await operation('read_run_state', identity) as import('./runLifecycleTypes').RunState;
         if (current.runId !== state.runId || (commandSubmitted
-          ? !isAgentTerminalRunTargetCurrent(target, current)
+          ? !terminalForPersistence || !isAgentTerminalRunTargetCurrent(agentTerminalRunTargets.get(terminalForPersistence)!, current)
           : current.generation !== generation)) throw new Error('run_owner_conflict');
         if (current.turnId !== state.turnId) throw new Error('checkpoint_turn_conflict');
         const status = await client.readStatus(reference, current.revision);
@@ -7320,17 +7394,52 @@ async function launchAgentConversationTerminal(input: {
         }
       }
     };
-    await persist({ terminalName: terminal.name, terminalDeliveryId: target.deliveryId });
-    if (!await sendTextWhenTerminalReady(terminal, `SOLOMAP_TERMINAL_DELIVERY_ID=${shellQuote(target.deliveryId!)} ${input.command}`)) throw new Error('terminal_delivery_failed');
-    await persist({ terminalCommandSubmittedAt: new Date().toISOString() }, true);
-    if (extensionContextRef) ensureActiveConversationPoller(extensionContextRef);
-    if (input.refreshNodeId) postNodeConversations(input.refreshNodeId);
-    return terminal;
+    const terminalEnvironment = input.context ? await getOpenCodeTerminalEnvironment(input.context, input.agentCli, input.model) : undefined;
+    let lastDeliveryFailure = 'terminal_delivery_failed';
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const terminal = attempt === 1 && recordedTerminal
+        ? recordedTerminal
+        : createAgentTerminal(input.workspaceRoot, input.label, input.conversationId, terminalEnvironment);
+      terminalForPersistence = terminal;
+      const target: AgentTerminalRunTarget = { workspaceRoot: input.workspaceRoot, globalDataPath, executionLogId: input.conversationId,
+        runId: state.runId, generation, deliveryId: crypto.randomUUID() };
+      lastDeliveryId = target.deliveryId || '';
+      agentTerminalRunTargets.set(terminal, target);
+      terminal.show(true);
+      await record('terminal.delivery.identity.persist', () => persist({ terminalName: terminal.name, terminalDeliveryId: target.deliveryId,
+        terminalDeliveryTraceId: trace.id, terminalDeliveryStartedAt: new Date(deliveryStartedAt).toISOString(), terminalDeliveryAttempt: attempt }));
+      const submitted = await sendTextWhenTerminalReady(terminal,
+        `SOLOMAP_DIAGNOSTIC_TRACE_ID=${shellQuote(trace.id)} SOLOMAP_DELIVERY_STARTED_AT=${shellQuote(String(deliveryStartedAt))} SOLOMAP_TERMINAL_DELIVERY_ID=${shellQuote(target.deliveryId!)} ${input.command}`,
+        true, { readinessTimeoutMs: Math.max(1, Number(input.terminalReadyTimeoutMs || 10_000)), observe: event => {
+          if (event.status === 'error') lastDeliveryFailure = event.error || 'terminal_delivery_failed';
+          const stage = event.stage.replace(/^terminal\./, 'terminal.delivery.');
+          trace.record(stage, event.status, event.durationMs, event.error ? new Error(event.error) : undefined,
+            { ...(event.pid ? { pid: event.pid } : {}), ...(event.timeoutMs ? { timeoutMs: event.timeoutMs } : {}) });
+        } });
+      if (!submitted) {
+        trace.record('terminal.delivery.retry', attempt < 2 ? 'ok' : 'error', 0, attempt < 2 ? undefined : new Error(lastDeliveryFailure));
+        agentTerminalRunTargets.delete(terminal);
+        terminal.dispose();
+        continue;
+      }
+      await record('terminal.delivery.submission.persist', () => persist({ terminalCommandSubmittedAt: new Date().toISOString() }, true));
+      scheduleRunnerClaimWatchdog(terminal, target, generation);
+      if (extensionContextRef) ensureActiveConversationPoller(extensionContextRef);
+      if (input.refreshNodeId) postNodeConversations(input.refreshNodeId);
+      return terminal;
+    }
+    throw new Error(lastDeliveryFailure);
     } catch (error) {
+      const errorCode = error instanceof Error ? error.message : String(error);
       try {
-        await operation('release_run_delivery', { ...identity, generation, owner, error: error instanceof Error ? error.message : String(error), idempotencyKey: `run:${state.runId}:${generation}:release-terminal:${state.revision}` });
+        await operation('release_run_delivery', { ...identity, generation, owner, error: errorCode, idempotencyKey: `run:${state.runId}:${generation}:release-terminal:${lastDeliveryId || 'unbound'}:${errorCode}` });
+        if (terminalForPersistence && agentTerminalRunTargets.delete(terminalForPersistence)) terminalForPersistence.dispose();
+        if (extensionContextRef) ensureActiveConversationPoller(extensionContextRef);
       } catch (releaseError) {
-        if (!['run_already_delivered', 'run_owner_conflict', 'run_delivery_lease_lost'].includes((releaseError as Error).message)) throw releaseError;
+        if (!['run_already_delivered', 'run_owner_conflict', 'run_delivery_lease_lost'].includes((releaseError as Error).message)) {
+          trace.record('terminal.delivery.release', 'error', 0, releaseError);
+          scheduleDeliveryReleaseRetry(errorCode, terminalForPersistence, lastDeliveryId);
+        }
       }
       throw error;
     }
@@ -11043,6 +11152,8 @@ export async function deactivate() {
     clearInterval(statusPoller);
     statusPoller = null;
   }
+  for (const timer of agentTerminalDeliveryWatchdogs.values()) clearTimeout(timer);
+  agentTerminalDeliveryWatchdogs.clear();
   if (scheduledAutomationPoller) {
     clearInterval(scheduledAutomationPoller);
     scheduledAutomationPoller = null;
