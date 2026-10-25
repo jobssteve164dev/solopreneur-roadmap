@@ -28,11 +28,30 @@ interface DiagnosticOperationEvent extends DiagnosticProcessDetails {
   budgetExceeded?: boolean;
 }
 interface DiagnosticInteraction { interactionId?: string; targetId?: string; generation?: number; budgetMs?: number }
-interface DiagnosticProcessDetails { pid?: number; exitCode?: number | null; signal?: string | null; stdoutBytes?: number; stderrBytes?: number; timeoutMs?: number }
+interface DiagnosticProcessDetails {
+  pid?: number;
+  exitCode?: number | null;
+  signal?: string | null;
+  stdoutBytes?: number;
+  stderrBytes?: number;
+  timeoutMs?: number;
+  budgetMs?: number;
+  projectId?: string;
+  terminalId?: string;
+  activeTerminalId?: string;
+  focusRequested?: boolean;
+  terminalProjectMatched?: boolean;
+}
 function safeProcessDetails(details: Record<string, unknown>): DiagnosticProcessDetails {
+  const safeToken = (value: unknown) => typeof value === 'string' && /^[a-z0-9_.:-]{1,80}$/i.test(value) ? value : undefined;
   return {
-    ...Object.fromEntries(Object.entries(details).filter(([key, value]) => ['pid', 'exitCode', 'stdoutBytes', 'stderrBytes', 'timeoutMs'].includes(key) && (value === null || Number.isSafeInteger(value)))),
-    ...(typeof details.signal === 'string' && /^SIG[A-Z0-9]+$/.test(details.signal) ? { signal: details.signal } : {})
+    ...Object.fromEntries(Object.entries(details).filter(([key, value]) => ['pid', 'exitCode', 'stdoutBytes', 'stderrBytes', 'timeoutMs', 'budgetMs'].includes(key) && (value === null || Number.isSafeInteger(value)))),
+    ...(typeof details.signal === 'string' && /^SIG[A-Z0-9]+$/.test(details.signal) ? { signal: details.signal } : {}),
+    ...(safeToken(details.projectId) ? { projectId: safeToken(details.projectId) } : {}),
+    ...(safeToken(details.terminalId) ? { terminalId: safeToken(details.terminalId) } : {}),
+    ...(safeToken(details.activeTerminalId) ? { activeTerminalId: safeToken(details.activeTerminalId) } : {}),
+    ...(typeof details.focusRequested === 'boolean' ? { focusRequested: details.focusRequested } : {}),
+    ...(typeof details.terminalProjectMatched === 'boolean' ? { terminalProjectMatched: details.terminalProjectMatched } : {})
   };
 }
 export interface LocalDiagnosticEvent {
@@ -164,7 +183,7 @@ export function classifyDiagnosticFailure(error: unknown): string {
   const errorMessage = error && typeof error === 'object' && typeof (error as { message?: unknown }).message === 'string'
     ? (error as { message: string }).message : error;
   const message = String(errorMessage || '').toLowerCase();
-  if (/^(?:missing_state|different_process|not_running|stale_heartbeat|process_exited|control_unavailable|different_runtime|different_runtime_build|different_runtime_owner|control_not_running|runtime_drain_timeout|runtime_service_rollback|runtime_service_upgrade_failed|runtime_service_cleanup_failed|terminal_process_timeout|terminal_process_unavailable|runner_claim_timeout)$/.test(message)) return message;
+  if (/^(?:missing_state|different_process|not_running|stale_heartbeat|process_exited|control_unavailable|different_runtime|different_runtime_build|different_runtime_owner|control_not_running|runtime_drain_timeout|runtime_service_rollback|runtime_service_upgrade_failed|runtime_service_cleanup_failed|terminal_process_slow|terminal_process_timeout|terminal_process_unavailable|runner_claim_timeout)$/.test(message)) return message;
   if (/failed to connect to (?:user scope )?bus|user bus.*(?:unavailable|not found)/.test(message)) return 'user_systemd_bus_unavailable';
   const httpStatus = message.match(/telegram[^\n]*?http\s*(\d{3})/);
   if (httpStatus) return `telegram_http_${httpStatus[1]}`;

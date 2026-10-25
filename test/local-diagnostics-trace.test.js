@@ -9,12 +9,14 @@ for (const persisted of [false, true]) test(`process diagnostic summary preserve
   const diagnostics = require('../out/localDiagnostics.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-process-summary-'));
   const entries = [];
-  const payload = { traceId: 'restored-process', status: 'error', durationMs: 52, pid: 12345, exitCode: null, signal: 'SIGTERM', stdoutBytes: 70000, stderrBytes: 14, timeoutMs: 300000 };
+  const payload = { traceId: 'restored-process', status: 'error', durationMs: 52, pid: 12345, exitCode: null, signal: 'SIGTERM', stdoutBytes: 70000, stderrBytes: 14, timeoutMs: 300000, budgetMs: 5000,
+    projectId: 'project-a1b2c3', terminalId: 'terminal-d4e5f6', activeTerminalId: 'terminal-foreign', focusRequested: true, terminalProjectMatched: true };
   diagnostics.configureLocalDiagnosticPersistence({ append: (_root, event) => entries.push(event), ...(persisted ? { read: async () => ({ items: [{ kind: 'operation', occurredAt: new Date().toISOString(), scope: 'model.cli.exit', payload }] }) } : {}) });
   t.after(() => { diagnostics.configureLocalDiagnosticPersistence(undefined); fs.rmdirSync(root); });
   if (!persisted) diagnostics.createLocalDiagnosticTrace(root, 'model.cli').record('model.cli.exit', 'error', 52, undefined, payload);
   const summary = await diagnostics.buildLocalDiagnosticSummary({ extensionMode: 1 }, root, { appName: 'Code' });
-  for (const field of ['pid=12345', 'exit=null', 'signal=SIGTERM', 'stdoutBytes=70000', 'stderrBytes=14', 'timeoutMs=300000']) assert.ok(summary.includes(field), `missing ${field}`);
+  for (const field of ['pid=12345', 'exit=null', 'signal=SIGTERM', 'stdoutBytes=70000', 'stderrBytes=14', 'timeoutMs=300000', 'budgetMs=5000',
+    'projectId=project-a1b2c3', 'terminalId=terminal-d4e5f6', 'activeTerminalId=terminal-foreign', 'focusRequested=true', 'terminalProjectMatched=true']) assert.ok(summary.includes(field), `missing ${field}`);
 });
 
 test('interaction diagnostics retain one monotonic timeline and a safe target across asynchronous stages', async t => {
@@ -34,6 +36,7 @@ test('runtime handoff failures retain their diagnostic categories', () => {
   const diagnostics = require('../out/localDiagnostics.js');
   assert.equal(diagnostics.classifyDiagnosticFailure(new Error('different_runtime_build')), 'different_runtime_build');
   assert.equal(diagnostics.classifyDiagnosticFailure(new Error('runtime_drain_timeout')), 'runtime_drain_timeout');
+  assert.equal(diagnostics.classifyDiagnosticFailure(new Error('terminal_process_slow')), 'terminal_process_slow');
   assert.equal(diagnostics.classifyDiagnosticFailure(vm.runInNewContext("new Error('runner_claim_timeout')")), 'runner_claim_timeout');
 });
 test('diagnostic trace follows async stages through the database sink without writing JSON', async t => {

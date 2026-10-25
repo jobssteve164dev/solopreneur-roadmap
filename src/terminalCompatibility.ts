@@ -4,16 +4,18 @@ import { performance } from 'node:perf_hooks';
 const terminalInputQueues = new WeakMap<Terminal, Promise<boolean>>();
 
 export interface TerminalDeliveryObservation {
-  stage: 'terminal.queue.wait' | 'terminal.process.wait' | 'terminal.command.send';
+  stage: 'terminal.queue.wait' | 'terminal.process.wait' | 'terminal.process.slow' | 'terminal.command.send';
   status: 'start' | 'ok' | 'error';
   durationMs: number;
   error?: string;
   pid?: number;
   timeoutMs?: number;
+  budgetMs?: number;
 }
 
 export interface TerminalDeliveryOptions {
   readinessTimeoutMs?: number;
+  readinessBudgetMs?: number;
   observe?: (event: TerminalDeliveryObservation) => void;
 }
 
@@ -38,7 +40,15 @@ async function waitForTerminalProcess(terminal: Terminal, options: TerminalDeliv
     return undefined;
   }
   let timer: NodeJS.Timeout | undefined;
+  let budgetTimer: NodeJS.Timeout | undefined;
   try {
+    if (options.readinessBudgetMs) {
+      budgetTimer = setTimeout(() => observe(options, {
+        stage: 'terminal.process.slow', status: 'error', durationMs: performance.now() - started,
+        error: 'terminal_process_slow', budgetMs: options.readinessBudgetMs
+      }), options.readinessBudgetMs);
+      budgetTimer.unref?.();
+    }
     const pid = await (options.readinessTimeoutMs
       ? Promise.race([
         processId,
@@ -54,6 +64,7 @@ async function waitForTerminalProcess(terminal: Terminal, options: TerminalDeliv
     throw error;
   } finally {
     if (timer) clearTimeout(timer);
+    if (budgetTimer) clearTimeout(budgetTimer);
   }
 }
 

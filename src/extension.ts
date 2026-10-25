@@ -193,6 +193,7 @@ import {
   getCurrentLocalDiagnosticTrace,
   configureLocalDiagnosticPersistence,
   observeLocalDiagnosticStage,
+  recordCurrentDiagnosticStage,
   recordLocalDiagnosticError,
   sanitizeDiagnosticText,
   withLocalDiagnosticTrace
@@ -627,8 +628,21 @@ let focusReminderNextAt = '';
 let focusReminderIdentity = '';
 let scheduledAutomationPoller: NodeJS.Timeout | null = null;
 let scheduledAutomationNextAt = '';
-const agentTerminalNamesByConversationId = new Map<number, string>();
-const agentTerminalProjectRootsByConversationId = new Map<number, string>();
+interface AgentTerminalBinding { workspaceRoot: string; conversationId: number; terminalName: string }
+const agentTerminalBindings = new Map<string, AgentTerminalBinding>();
+function agentTerminalBindingKey(workspaceRoot: string, conversationId: number): string {
+  return `${path.resolve(workspaceRoot)}:${Number(conversationId)}`;
+}
+function getAgentTerminalBinding(workspaceRoot: string, conversationId: number): AgentTerminalBinding | undefined {
+  return workspaceRoot && conversationId ? agentTerminalBindings.get(agentTerminalBindingKey(workspaceRoot, conversationId)) : undefined;
+}
+function setAgentTerminalBinding(workspaceRoot: string, conversationId: number, terminalName: string): void {
+  if (!workspaceRoot || !conversationId || !terminalName) return;
+  agentTerminalBindings.set(agentTerminalBindingKey(workspaceRoot, conversationId), { workspaceRoot, conversationId: Number(conversationId), terminalName });
+}
+function deleteAgentTerminalBinding(workspaceRoot: string, conversationId: number): void {
+  if (workspaceRoot && conversationId) agentTerminalBindings.delete(agentTerminalBindingKey(workspaceRoot, conversationId));
+}
 interface AgentTerminalRunTarget { workspaceRoot: string; globalDataPath: string; executionLogId: number; runId: string; generation: number; deliveryId?: string }
 const agentTerminalRunTargets = new Map<vscode.Terminal, AgentTerminalRunTarget>();
 
@@ -950,8 +964,14 @@ export async function activate(context: vscode.ExtensionContext) {
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalRunAgent', async (nodeId: string) => {
-    await revealAgentStartupTerminal(context, activeProjectRoot || getSelectedProjectPath(context) || '', `step-${nodeId || 'conversation'}`);
-    await handleRunAgent(context, nodeId, '');
+    const workspaceRoot = activeProjectRoot || getSelectedProjectPath(context) || '';
+    const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
+    if (!launchSnapshot) return;
+    await revealAgentStartupTerminal(context, workspaceRoot, `step-${nodeId || 'conversation'}`, '', '', launchSnapshot.settings);
+    const launchTarget = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, launchSnapshot);
+    if (!launchTarget) return;
+    try { await handleRunAgent(context, nodeId, '', '', '', [], true, () => {}, launchTarget); }
+    finally { launchTarget.engine?.close(); }
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalStartConversation', async (serialized: string) => {
@@ -970,13 +990,13 @@ export async function activate(context: vscode.ExtensionContext) {
     try {
       if (mode === 'step') {
         let registered = false;
-        const startupTerminal = await revealAgentStartupTerminal(context, projectPath, `step-${String(input.stepId)}`, String(input.agentCli || ''), String(input.model || ''));
+        const startupTerminal = await revealAgentStartupTerminal(context, projectPath, `step-${String(input.stepId)}`, String(input.agentCli || ''), String(input.model || ''), settings);
         try {
           await handleRunAgent(context, String(input.stepId), message, String(input.agentCli || ''), String(input.model || ''), [], true, () => { registered = true; }, target);
           if (!registered) throw new Error('conversation_not_started');
         } finally { if (!registered) discardReservedAgentStartupTerminal(projectPath, startupTerminal); }
       } else if (mode === 'solo') {
-        const startupTerminal = await revealAgentStartupTerminal(context, projectPath, 'solo', String(input.agentCli || ''), String(input.model || ''));
+        const startupTerminal = await revealAgentStartupTerminal(context, projectPath, 'solo', String(input.agentCli || ''), String(input.model || ''), settings);
         try {
           const executionLogId = await handleRunSoloConversation(context, message, String(input.agentCli || ''), String(input.model || ''), [], '', true, target);
           if (!executionLogId) throw new Error('conversation_not_started');
@@ -1004,22 +1024,26 @@ export async function activate(context: vscode.ExtensionContext) {
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalApproveNode', async (nodeId: string) => {
-    if (syncEngine) {
-      await syncEngine.updateNode(nodeId, { status: 'Completed', completedAt: new Date().toISOString() });
-      sendNodesToWebview();
-      refreshSidebarProjectCards();
-      postNodeConversations(nodeId);
+    const projectSyncEngine = syncEngine;
+    const workspaceRoot = activeProjectRoot;
+    if (projectSyncEngine && workspaceRoot) {
+      await projectSyncEngine.updateNode(nodeId, { status: 'Completed', completedAt: new Date().toISOString() });
+      if (syncEngine === projectSyncEngine && activeProjectRoot === workspaceRoot) sendNodesToWebview();
+      refreshSidebarProjectCards(workspaceRoot);
+      postNodeConversations(nodeId, [], true, workspaceRoot);
       return true;
     }
     return false;
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalDenyNode', async (nodeId: string) => {
-    if (syncEngine) {
-      await syncEngine.updateNode(nodeId, { status: 'Failed' });
-      sendNodesToWebview();
-      refreshSidebarProjectCards();
-      postNodeConversations(nodeId);
+    const projectSyncEngine = syncEngine;
+    const workspaceRoot = activeProjectRoot;
+    if (projectSyncEngine && workspaceRoot) {
+      await projectSyncEngine.updateNode(nodeId, { status: 'Failed' });
+      if (syncEngine === projectSyncEngine && activeProjectRoot === workspaceRoot) sendNodesToWebview();
+      refreshSidebarProjectCards(workspaceRoot);
+      postNodeConversations(nodeId, [], true, workspaceRoot);
       for (const t of vscode.window.terminals) {
         if (t.name.startsWith(`step-${nodeId}-`) || t.name.startsWith(`step-${nodeId}`)) {
           t.dispose();
@@ -1324,6 +1348,34 @@ async function ensureActionProject(context: vscode.ExtensionContext, projectPath
   return ready && activeProjectRoot === requestedPath ? requestedPath : '';
 }
 
+interface RegisteredConversationLaunchSnapshot {
+  workspaceRoot: string;
+  globalDataPath: string;
+  settings: SolopreneurSettings;
+}
+
+function captureRegisteredConversationLaunchSnapshot(
+  context: vscode.ExtensionContext,
+  projectPath: string
+): RegisteredConversationLaunchSnapshot | null {
+  const workspaceRoot = String(projectPath || '');
+  const isActiveProject = Boolean(activeProjectRoot && path.resolve(activeProjectRoot) === path.resolve(workspaceRoot));
+  if (!workspaceRoot || (!isActiveProject && !getProjects(context).some((project) => project.path === workspaceRoot))) return null;
+  const settings = getPersistedSettings(context);
+  const globalDataPath = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
+  return { workspaceRoot, globalDataPath, settings: { ...settings, globalDataPath } };
+}
+
+async function captureRegisteredConversationLaunchTarget(
+  context: vscode.ExtensionContext,
+  projectPath: string,
+  snapshot?: RegisteredConversationLaunchSnapshot | null
+): Promise<AgentLaunchTarget | null> {
+  const launch = snapshot || captureRegisteredConversationLaunchSnapshot(context, projectPath);
+  if (!launch || path.resolve(launch.workspaceRoot) !== path.resolve(String(projectPath || launch.workspaceRoot))) return null;
+  return captureConversationLaunchTarget(context, launch.workspaceRoot, launch.globalDataPath, launch.settings);
+}
+
 async function buildTimePlansPayload(context: vscode.ExtensionContext): Promise<{
   plans: Array<{ projectPath: string; projectName: string; plan: TimePlanDraft }>;
 }> {
@@ -1462,9 +1514,9 @@ async function handleSharedWebviewAction(
     }
     return true;
   }
-  const refreshConversation = (nodeId: string) => {
+  const refreshConversation = (nodeId: string, workspaceRoot = activeProjectRoot) => {
     if (nodeId) {
-      postNodeConversations(nodeId);
+      postNodeConversations(nodeId, [], true, workspaceRoot);
     }
   };
   try {
@@ -1488,56 +1540,78 @@ async function handleSharedWebviewAction(
       await respond({ command: 'uiStatePatched', view: surface, scopeKey, requestId: String(request.requestId || '') });
     },
     'conversation.runStep': async (request) => {
+      const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
+      if (!launchSnapshot) return;
       await revealAgentStartupTerminal(
         context,
-        String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''),
+        workspaceRoot,
         `step-${String(request.nodeId || 'conversation')}`,
         String(request.agentCli || ''),
-        String(request.model || '')
-      );
-      const projectPath = await ensureActionProject(context, request.projectPath || '');
-      if (!projectPath && request.projectPath) return;
-      await handleRunAgent(
-        context,
-        String(request.nodeId || ''),
-        String(request.userMessage || ''),
-        String(request.agentCli || ''),
         String(request.model || ''),
-        normalizeSupplementFiles(request.supplementFiles)
+        launchSnapshot.settings
       );
-    },
-    'conversation.runSolo': async (request) => {
-      const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
-      let startupTerminal: vscode.Terminal | undefined;
+      const launchTarget = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, launchSnapshot);
+      if (!launchTarget) return;
       try {
-        startupTerminal = await observeLocalDiagnosticStage('conversation.runSolo.terminal', () => revealAgentStartupTerminal(context, workspaceRoot, 'solo', String(request.agentCli || ''), String(request.model || '')));
-        const projectPath = await observeLocalDiagnosticStage('conversation.runSolo.project', () => ensureActionProject(context, request.projectPath || ''));
-        if (!projectPath && request.projectPath) return;
-        await handleRunSoloConversation(
+        await handleRunAgent(
           context,
+          String(request.nodeId || ''),
           String(request.userMessage || ''),
           String(request.agentCli || ''),
           String(request.model || ''),
-          normalizeSupplementFiles(request.supplementFiles)
+          normalizeSupplementFiles(request.supplementFiles),
+          true,
+          () => {},
+          launchTarget
         );
+      } finally { launchTarget.engine?.close(); }
+    },
+    'conversation.runSolo': async (request) => {
+      const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
+      if (!launchSnapshot) return;
+      let startupTerminal: vscode.Terminal | undefined;
+      try {
+        startupTerminal = await observeLocalDiagnosticStage('conversation.runSolo.terminal', () => revealAgentStartupTerminal(context, workspaceRoot, 'solo', String(request.agentCli || ''), String(request.model || ''), launchSnapshot.settings));
+        const launchTarget = await observeLocalDiagnosticStage('conversation.runSolo.project', () => captureRegisteredConversationLaunchTarget(context, workspaceRoot, launchSnapshot));
+        if (!launchTarget) return;
+        try {
+          await handleRunSoloConversation(
+            context,
+            String(request.userMessage || ''),
+            String(request.agentCli || ''),
+            String(request.model || ''),
+            normalizeSupplementFiles(request.supplementFiles),
+            '',
+            true,
+            launchTarget
+          );
+        } finally { launchTarget.engine?.close(); }
       } finally {
         discardReservedAgentStartupTerminal(workspaceRoot, startupTerminal);
         if (request.launchActionId) await respond({ command: 'conversationActionSettled', action: 'runSolo', projectPath: workspaceRoot, launchActionId: request.launchActionId });
       }
     },
     'timePlan.generate': async (request) => {
-      await revealAgentStartupTerminal(context, String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'solo-time-plan', String(request.agentCli || ''), String(request.model || ''));
-      const projectPath = await ensureActionProject(context, request.projectPath || '');
-      if (!projectPath) return;
-      await handleGenerateTimePlan(
-        context,
-        String(request.requirements || ''),
-        String(request.agentCli || ''),
-        String(request.model || ''),
-        String(request.language || 'zh'),
-        String(request.timeZone || ''),
-        String(request.localTime || '')
-      );
+      const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
+      if (!launchSnapshot) return;
+      await revealAgentStartupTerminal(context, workspaceRoot, 'solo-time-plan', String(request.agentCli || ''), String(request.model || ''), launchSnapshot.settings);
+      const launchTarget = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, launchSnapshot);
+      if (!launchTarget) return;
+      try {
+        await handleGenerateTimePlan(
+          context,
+          String(request.requirements || ''),
+          String(request.agentCli || ''),
+          String(request.model || ''),
+          String(request.language || 'zh'),
+          String(request.timeZone || ''),
+          String(request.localTime || ''),
+          launchTarget
+        );
+      } finally { launchTarget.engine?.close(); }
     },
     'timePlan.get': async () => {
       await respond({ command: 'timePlansLoaded', ...await buildTimePlansPayload(context) });
@@ -1761,37 +1835,47 @@ async function handleSharedWebviewAction(
       }
     },
     'flow.run': async (request) => {
-      await revealAgentStartupTerminal(context, String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'flow', String(request.agentCli || ''), String(request.model || ''));
-      const projectPath = await ensureActionProject(context, request.projectPath || '');
-      if (!projectPath && request.projectPath) return;
-      await handleRunFlow(
-        context,
-        String(request.goal || ''),
-        String(request.agentCli || ''),
-        String(request.model || ''),
-        normalizeSupplementFiles(request.supplementFiles)
-      );
+      const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
+      if (!launchSnapshot) return;
+      await revealAgentStartupTerminal(context, workspaceRoot, 'flow', String(request.agentCli || ''), String(request.model || ''), launchSnapshot.settings);
+      const launchTarget = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, launchSnapshot);
+      if (!launchTarget) return;
+      try {
+        await handleRunFlow(
+          context,
+          String(request.goal || ''),
+          String(request.agentCli || ''),
+          String(request.model || ''),
+          normalizeSupplementFiles(request.supplementFiles),
+          launchTarget
+        );
+      } finally { launchTarget.engine?.close(); }
     },
     'flow.pause': async (request) => {
-      if (!activeProjectRoot || !request.flowId) return;
-      (await updateFlowTrace(activeProjectRoot, request.flowId, (trace) => {
+      const workspaceRoot = String(request.projectPath || '');
+      const launch = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
+      if (!launch || !request.flowId) return;
+      (await updateFlowTrace(workspaceRoot, request.flowId, (trace) => {
         trace.status = 'paused';
         trace.latestSummary = 'Flow 已被用户手动暂停推进。';
         return trace;
-      }, flowRuntimeRoot()));
-      await postFlowStateToWebview(context);
+      }, launch.globalDataPath));
+      if (activeProjectRoot && path.resolve(activeProjectRoot) === path.resolve(workspaceRoot)) await postFlowStateToWebview(context);
     },
     'flow.abandon': async (request) => {
-      if (!activeProjectRoot || !request.flowId) return;
-      (await updateFlowTrace(activeProjectRoot, request.flowId, (trace) => {
+      const workspaceRoot = String(request.projectPath || '');
+      const launch = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
+      if (!launch || !request.flowId) return;
+      (await updateFlowTrace(workspaceRoot, request.flowId, (trace) => {
         trace.status = 'abandoned';
         trace.latestSummary = 'Flow 已被用户手动放弃。';
         if (trace.loops.length > 0) {
           trace.loops[trace.loops.length - 1].status = 'abandoned';
         }
         return trace;
-      }, flowRuntimeRoot()));
-      await postFlowStateToWebview(context);
+      }, launch.globalDataPath));
+      if (activeProjectRoot && path.resolve(activeProjectRoot) === path.resolve(workspaceRoot)) await postFlowStateToWebview(context);
     },
     'conversation.getHistory': async (request) => {
       const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
@@ -1872,20 +1956,30 @@ async function handleSharedWebviewAction(
       const conversationId = Number(request.conversationId || 0);
       try {
         const nodeId = String(request.nodeId || '');
-        const conversation = syncEngine?.getAgentExecutions(nodeId).find((item) => Number(item.id) === conversationId);
-        const rootConversation = resolveContinuationRootConversation(nodeId, conversationId) || conversation;
-        const rootConversationId = Number(rootConversation?.id || conversationId);
         const terminalProjectRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
-        const key = getAgentProcessCleanupKey(terminalProjectRoot, rootConversationId);
+        const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, terminalProjectRoot);
+        if (!launchSnapshot) return;
+        const initiallySelectedConversation = terminalProjectRoot && activeProjectRoot && path.resolve(terminalProjectRoot) === path.resolve(activeProjectRoot)
+          ? syncEngine?.getAgentExecutions(nodeId).find((item) => Number(item.id) === conversationId)
+          : undefined;
+        const key = getAgentProcessCleanupKey(terminalProjectRoot, conversationId);
         let continuation = nativeContinuationByConversationKey.get(key);
         if (!continuation) {
           continuation = Promise.resolve().then(async () => {
-            await observeLocalDiagnosticStage('conversation.continue.terminal', () => revealAgentStartupTerminal(context, terminalProjectRoot, 'continue', String(conversation?.agentCli || '')));
-            const projectPath = await observeLocalDiagnosticStage('conversation.continue.project', () => ensureActionProject(context, request.projectPath || ''));
-            if (!projectPath && request.projectPath) return;
-            await observeLocalDiagnosticStage('conversation.continue.cleanup', () => waitForAgentProcessCleanup(terminalProjectRoot, rootConversationId));
-            await handleContinueNativeConversation(context, nodeId, conversationId);
-            refreshConversation(nodeId);
+            await observeLocalDiagnosticStage('conversation.continue.terminal', () => revealAgentStartupTerminal(context, terminalProjectRoot, 'continue', String(initiallySelectedConversation?.agentCli || request.agentCli || ''), '', launchSnapshot.settings));
+            const launchTarget = await observeLocalDiagnosticStage('conversation.continue.project', () => captureRegisteredConversationLaunchTarget(context, terminalProjectRoot, launchSnapshot));
+            if (!launchTarget) return;
+            const projectPath = launchTarget.workspaceRoot;
+            try {
+              if (typeof launchTarget.engine?.readAgentExecutions === 'function') await launchTarget.engine.readAgentExecutions(nodeId);
+              const conversations = launchTarget.engine?.getAgentExecutions(nodeId) || [];
+              const conversation = conversations.find((item) => Number(item.id) === conversationId);
+              const rootConversation = resolveContinuationRootConversationFromList(conversations, conversationId) || conversation;
+              const rootConversationId = Number(rootConversation?.id || conversationId);
+              await observeLocalDiagnosticStage('conversation.continue.cleanup', () => waitForAgentProcessCleanup(projectPath, rootConversationId, launchTarget.globalDataPath));
+              await handleContinueNativeConversation(context, nodeId, conversationId, launchTarget);
+              refreshConversation(nodeId, projectPath);
+            } finally { launchTarget.engine?.close(); }
           });
           nativeContinuationByConversationKey.set(key, continuation);
           void continuation.finally(() => {
@@ -1907,58 +2001,77 @@ async function handleSharedWebviewAction(
       }
     },
     'conversation.stop': async (request) => {
-      const projectPath = await ensureActionProject(context, request.projectPath || '');
-      if (!projectPath && request.projectPath) return;
+      const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      if (!projectPath || !getProjects(context).some((project) => project.path === projectPath)) return;
       const nodeId = String(request.nodeId || '');
-      await stopAgentRun(nodeId, Number(request.conversationId || 0));
-      refreshConversation(nodeId);
+      await stopAgentRun(nodeId, Number(request.conversationId || 0), projectPath);
+      refreshConversation(nodeId, projectPath);
     },
     'conversation.retry': async (request) => {
       const nodeId = String(request.nodeId || '');
       const conversationId = Number(request.conversationId || 0);
-      const conversation = syncEngine?.getAgentExecutions(nodeId).find((item) => Number(item.id) === conversationId);
-      await revealAgentStartupTerminal(context, String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''), 'retry', String(conversation?.agentCli || ''));
-      const projectPath = await ensureActionProject(context, request.projectPath || '');
-      if (!projectPath && request.projectPath) return;
-      await handleRetryConversation(context, nodeId, conversationId);
+      const requestedProjectRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, requestedProjectRoot);
+      if (!launchSnapshot) return;
+      const conversation = requestedProjectRoot && activeProjectRoot && path.resolve(requestedProjectRoot) === path.resolve(activeProjectRoot)
+        ? syncEngine?.getAgentExecutions(nodeId).find((item) => Number(item.id) === conversationId)
+        : undefined;
+      await revealAgentStartupTerminal(context, requestedProjectRoot, 'retry', String(conversation?.agentCli || request.agentCli || ''), '', launchSnapshot.settings);
+      const launchTarget = await captureRegisteredConversationLaunchTarget(context, requestedProjectRoot, launchSnapshot);
+      if (!launchTarget) return;
+      try { await handleRetryConversation(context, nodeId, conversationId, true, launchTarget); }
+      finally { launchTarget.engine?.close(); }
     },
     'conversation.continueTurn': async (request) => {
       const nodeId = String(request.nodeId || '');
       const conversationId = Number(request.conversationId || 0);
-      const conversation = syncEngine?.getAgentExecutions(nodeId).find((item) => Number(item.id) === conversationId);
       const requestedProjectRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
-      const rootConversation = resolveContinuationRootConversation(nodeId, conversationId) || conversation;
-      const rootConversationId = Number(rootConversation?.id || conversationId);
+      const launchTarget = await captureRegisteredConversationLaunchTarget(context, requestedProjectRoot);
+      if (!launchTarget) return;
       try {
-        await waitForAgentProcessCleanup(requestedProjectRoot, rootConversationId);
-      } catch {
-        vscode.window.showErrorMessage('上一个 Agent 进程仍未退出，暂时无法续聊。请稍后重试。');
-        return;
-      }
-      if (!await findReusableAgentTerminal(requestedProjectRoot, rootConversationId)) {
-        await revealAgentStartupTerminal(context, requestedProjectRoot, 'continue', String(conversation?.agentCli || ''), String(request.model || ''));
-      }
-      const projectPath = await ensureActionProject(context, request.projectPath || '');
-      if (!projectPath && request.projectPath) return;
-      await handleContinueConversationTurn(
-        context,
-        nodeId,
-        conversationId,
-        String(request.userMessage || ''),
-        String(request.model || ''),
-        normalizeSupplementFiles(request.supplementFiles)
-      );
+        if (typeof launchTarget.engine?.readAgentExecutions === 'function') await launchTarget.engine.readAgentExecutions(nodeId);
+        const conversations = launchTarget.engine?.getAgentExecutions(nodeId) || [];
+        const conversation = conversations.find((item) => Number(item.id) === conversationId);
+        const rootConversation = resolveContinuationRootConversationFromList(conversations, conversationId) || conversation;
+        const rootConversationId = Number(rootConversation?.id || conversationId);
+        try {
+          await waitForAgentProcessCleanup(requestedProjectRoot, rootConversationId, launchTarget.globalDataPath);
+        } catch {
+          vscode.window.showErrorMessage('上一个 Agent 进程仍未退出，暂时无法续聊。请稍后重试。');
+          return;
+        }
+        if (!await findReusableAgentTerminal(requestedProjectRoot, rootConversationId, launchTarget.globalDataPath)) {
+          await revealAgentStartupTerminal(context, requestedProjectRoot, 'continue', String(conversation?.agentCli || ''), String(request.model || ''), launchTarget.settings);
+        }
+        await handleContinueConversationTurn(
+          context,
+          nodeId,
+          conversationId,
+          String(request.userMessage || ''),
+          String(request.model || ''),
+          normalizeSupplementFiles(request.supplementFiles),
+          false,
+          launchTarget
+        );
+      } finally { launchTarget.engine?.close(); }
     },
     'conversation.linkToStep': async (request) => {
-      await linkSoloConversationToNode(Number(request.conversationId || 0), String(request.nodeId || ''));
+      const requestedProjectRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      const launchTarget = await captureRegisteredConversationLaunchTarget(context, requestedProjectRoot);
+      if (!launchTarget) return;
+      try { await linkSoloConversationToNode(Number(request.conversationId || 0), String(request.nodeId || ''), launchTarget); }
+      finally { launchTarget.engine?.close(); }
     },
     'conversation.rollback': async (request) => {
       const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
       await rollbackProjectToPreSessionGitHash(context, projectPath, String(request.gitHash || ''));
-      refreshConversation(String(request.nodeId || ''));
+      refreshConversation(String(request.nodeId || ''), projectPath);
     },
     'conversation.openTerminal': async (request) => {
-      showAgentTerminal(Number(request.conversationId || 0));
+      await showAgentTerminal(
+        String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''),
+        Number(request.conversationId || 0)
+      );
     },
     'attachment.choose': async (request) => {
       const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
@@ -2357,31 +2470,42 @@ async function handleSharedWebviewAction(
       setTimeout(() => void selectProject(context, projectPath), 0);
     },
     'project.continue': async (request) => {
-      await enqueueProjectActionLaunch(async (registered) => {
+      const requestedProjectRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      const launchSnapshot = request.nodeId ? captureRegisteredConversationLaunchSnapshot(context, requestedProjectRoot) : null;
+      if (request.nodeId && !launchSnapshot) return;
+      const selectionGenerationAtRequest = projectSelectionGeneration;
+      await enqueueProjectActionLaunch(requestedProjectRoot, async (registered) => {
         if (request.nodeId) {
           await revealAgentStartupTerminal(
             context,
-            String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''),
+            requestedProjectRoot,
             `step-${String(request.nodeId)}`,
-            String(request.agentCli || getPersistedSettings(context).cliPath || '')
-          );
-        }
-        const projectPath = await ensureActionProject(context, String(request.projectPath || ''));
-        if (!projectPath) return;
-        if (request.nodeId) {
-          await handleRunAgent(
-            context,
-            String(request.nodeId),
+            String(request.agentCli || launchSnapshot?.settings.cliPath || ''),
             '',
-            String(request.agentCli || getPersistedSettings(context).cliPath || ''),
-            '',
-            [],
-            true,
-            registered
+            launchSnapshot?.settings
           );
+          const launchTarget = await captureRegisteredConversationLaunchTarget(context, requestedProjectRoot, launchSnapshot);
+          if (!launchTarget) return;
+          try {
+            await handleRunAgent(
+              context,
+              String(request.nodeId),
+              '',
+              String(request.agentCli || launchTarget.settings?.cliPath || ''),
+              '',
+              [],
+              true,
+              registered,
+              launchTarget
+            );
+          } finally { launchTarget.engine?.close(); }
         } else {
+          if (!requestedProjectRoot || !getProjects(context).some((project) => project.path === requestedProjectRoot)) return;
+          if (projectSelectionGeneration !== selectionGenerationAtRequest
+            && getSelectedProjectPath(context) !== requestedProjectRoot) return;
           registered();
-          await vscode.commands.executeCommand('solopreneur.showRoadmap');
+          await selectProject(context, requestedProjectRoot);
+          await openRoadmapPanel(context, 'roadmap', requestedProjectRoot);
         }
       });
     },
@@ -3370,12 +3494,13 @@ async function getSettingsWithOpenCodeSecretState(context: vscode.ExtensionConte
 async function getOpenCodeTerminalEnvironment(
   context: vscode.ExtensionContext,
   agentCli: string,
-  model = ''
+  model = '',
+  settingsSnapshot?: SolopreneurSettings
 ): Promise<Record<string, string> | undefined> {
   if (getAgentCliFamily(agentCli) !== 'opencode') {
     return undefined;
   }
-  const settings = getPersistedSettings(context);
+  const settings = settingsSnapshot || getPersistedSettings(context);
   const provider = getOpenCodeProviderFromModel(model) || normalizeOpenCodeProvider(settings.openCodeProvider);
   const secretKey = getOpenCodeApiKeySecretKey(provider);
   const apiKey = secretKey ? await readOpenCodeApiKey(context.secrets, provider) : '';
@@ -6200,7 +6325,7 @@ async function runGlobalPromptReview(
       throw new Error(automation.message);
     }
     const terminal = createAgentTerminal(context.extensionPath, `prompt-review-${runId.slice(-6)}`);
-    terminal.show(true);
+    terminal.show(false);
     await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: globalRoot });
     await sendRuntimeDataRequest(globalRoot, { operation: 'register_project', input: { root: workspaceRoot } });
     const result = await runDatabaseLearningReview({
@@ -6988,9 +7113,11 @@ function buildLocalRoadmap(prompt: string, cliPath: string): RoadmapNode[] {
 function postNodeConversations(
   nodeId: string,
   fallbackConversations: import('./db/types').AgentConversation[] = [],
-  refreshSidebarSnapshot = true
+  refreshSidebarSnapshot = true,
+  workspaceRoot = activeProjectRoot
 ): void {
-  if (syncEngine && activePanel) {
+  const isActiveProject = Boolean(workspaceRoot && activeProjectRoot && path.resolve(workspaceRoot) === path.resolve(activeProjectRoot));
+  if (syncEngine && activePanel && isActiveProject) {
     const pageSize = 20;
     const page = nodeId === soloConversationId
       ? (typeof syncEngine.getAgentExecutionPage === 'function'
@@ -7013,7 +7140,7 @@ function postNodeConversations(
   }
   if (
     sidebarProvider
-    && activeProjectRoot
+    && workspaceRoot
     && refreshSidebarSnapshot
     && nodeId !== roadmapRevisionId
     && typeof sidebarProvider.refreshProjectConversationSnapshotAfterStatusChange === 'function'
@@ -7021,7 +7148,7 @@ function postNodeConversations(
     // A ledger mutation must supersede any snapshot that started before the
     // new row was persisted. Reusing the ordinary cached/in-flight read can
     // repaint the sidebar without the newly created conversation.
-    void sidebarProvider.refreshProjectConversationSnapshotAfterStatusChange(activeProjectRoot);
+    void sidebarProvider.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);
   }
 }
 
@@ -7072,26 +7199,49 @@ function makeAgentTerminalName(workspaceRoot: string, label: string): string {
   return name;
 }
 
-async function findActiveAgentTerminal(conversationId = 0): Promise<vscode.Terminal | undefined> {
+function terminalSelectionDiagnostics(workspaceRoot: string, terminal: vscode.Terminal, knownTerminalRoot = ''): {
+  projectId: string;
+  terminalId: string;
+  activeTerminalId?: string;
+  focusRequested: boolean;
+  terminalProjectMatched: boolean;
+} {
+  const token = (prefix: string, value: string) => `${prefix}-${crypto.createHash('sha256').update(value).digest('hex').slice(0, 12)}`;
+  const target = agentTerminalRunTargets.get(terminal);
+  const cwd = terminal.creationOptions && 'cwd' in terminal.creationOptions
+    ? terminal.creationOptions.cwd
+    : undefined;
+  const terminalRoot = target?.workspaceRoot || knownTerminalRoot || (typeof cwd === 'string' ? cwd : cwd?.fsPath || '');
+  const activeTerminalName = vscode.window.activeTerminal?.name || '';
+  return {
+    projectId: token('project', path.resolve(workspaceRoot)),
+    terminalId: token('terminal', terminal.name),
+    ...(activeTerminalName ? { activeTerminalId: token('terminal', activeTerminalName) } : {}),
+    focusRequested: true,
+    terminalProjectMatched: Boolean(terminalRoot && path.resolve(terminalRoot) === path.resolve(workspaceRoot))
+  };
+}
+
+async function findActiveAgentTerminal(conversationId = 0, workspaceRoot = activeProjectRoot): Promise<vscode.Terminal | undefined> {
   const terminals = [...vscode.window.terminals];
-  const mappedName = conversationId ? agentTerminalNamesByConversationId.get(Number(conversationId)) : '';
-  if (mappedName) {
-    const mapped = terminals.find((candidate) => candidate.name === mappedName);
-    if (mapped) {
-      return mapped;
+  const mapped = workspaceRoot ? getAgentTerminalBinding(workspaceRoot, conversationId) : undefined;
+  if (mapped) {
+    const mappedTerminal = terminals.find((candidate) => candidate.name === mapped.terminalName);
+    if (mappedTerminal) {
+      return mappedTerminal;
     }
   }
-  if (conversationId && activeProjectRoot) {
-    const statusData = await findAgentStatusForConversation(activeProjectRoot, conversationId);
+  if (conversationId && workspaceRoot) {
+    const statusData = await findAgentStatusForConversation(workspaceRoot, conversationId);
     const statusTerminalName = String(statusData?.terminalName || '');
     if (statusTerminalName) {
       const recorded = terminals.find((candidate) => candidate.name === statusTerminalName);
       if (recorded) return recorded;
     }
     const rootExecutionLogId = Number(statusData?.rootExecutionLogId || 0);
-    const rootTerminalName = rootExecutionLogId ? agentTerminalNamesByConversationId.get(rootExecutionLogId) : '';
-    if (rootTerminalName) {
-      const rootTerminal = terminals.find((candidate) => candidate.name === rootTerminalName);
+    const rootBinding = getAgentTerminalBinding(workspaceRoot, rootExecutionLogId);
+    if (rootBinding) {
+      const rootTerminal = terminals.find((candidate) => candidate.name === rootBinding.terminalName);
       if (rootTerminal) return rootTerminal;
     }
     return undefined;
@@ -7129,12 +7279,9 @@ async function findReusableAgentTerminal(workspaceRoot: string, conversationId: 
   ].filter(Boolean))];
   for (const mappedConversationId of mappedConversationIds) {
     if (globalDataPath !== undefined) break;
-    const mappedProjectRoot = agentTerminalProjectRootsByConversationId.get(mappedConversationId);
-    const mappedName = agentTerminalNamesByConversationId.get(mappedConversationId);
-    if (mappedProjectRoot
-      && mappedName
-      && path.resolve(mappedProjectRoot) === normalizedWorkspaceRoot) {
-      const mappedTerminal = terminals.find((candidate) => candidate.name === mappedName);
+    const binding = getAgentTerminalBinding(normalizedWorkspaceRoot, mappedConversationId);
+    if (binding) {
+      const mappedTerminal = terminals.find((candidate) => candidate.name === binding.terminalName);
       if (mappedTerminal) {
         return mappedTerminal;
       }
@@ -7174,16 +7321,14 @@ function createAgentTerminal(
     const reservedTerminal = reserved.terminal;
     activeAgentTerminalName = reservedTerminal.name;
     if (conversationId) {
-      agentTerminalNamesByConversationId.set(Number(conversationId), reservedTerminal.name);
-      agentTerminalProjectRootsByConversationId.set(Number(conversationId), workspaceRoot);
+      setAgentTerminalBinding(workspaceRoot, conversationId, reservedTerminal.name);
     }
     return reservedTerminal;
   }
   const terminalName = makeAgentTerminalName(workspaceRoot, label);
   activeAgentTerminalName = terminalName;
   if (conversationId) {
-    agentTerminalNamesByConversationId.set(Number(conversationId), terminalName);
-    agentTerminalProjectRootsByConversationId.set(Number(conversationId), workspaceRoot);
+    setAgentTerminalBinding(workspaceRoot, conversationId, terminalName);
   }
   let iconPath: vscode.Uri | vscode.ThemeIcon;
   if (extensionContextRef) {
@@ -7221,15 +7366,17 @@ async function revealAgentStartupTerminal(
   workspaceRoot: string,
   label: string,
   agentCli = '',
-  model = ''
+  model = '',
+  settingsSnapshot?: SolopreneurSettings
 ): Promise<vscode.Terminal | undefined> {
   if (!workspaceRoot) {
     return undefined;
   }
   const terminalEnvironment = await getOpenCodeTerminalEnvironment(
     context,
-    agentCli || getPersistedSettings(context).cliPath,
-    model
+    agentCli || settingsSnapshot?.cliPath || getPersistedSettings(context).cliPath,
+    model,
+    settingsSnapshot
   );
   const resolvedTerminalEnvironment = withDesktopSessionEnvironment(terminalEnvironment);
   const terminal = vscode.window.createTerminal({
@@ -7248,7 +7395,15 @@ async function revealAgentStartupTerminal(
   });
   reservedAgentTerminalsByProject.set(workspaceRoot, reservations);
   activeAgentTerminalName = terminal.name;
-  terminal.show(true);
+  const selection = terminalSelectionDiagnostics(workspaceRoot, terminal, workspaceRoot);
+  recordCurrentDiagnosticStage('terminal.startup.focus', 'start', 0, undefined, selection);
+  try {
+    terminal.show(false);
+    recordCurrentDiagnosticStage('terminal.startup.focus', 'ok', 0, undefined, selection);
+  } catch (error) {
+    recordCurrentDiagnosticStage('terminal.startup.focus', 'error', 0, error, selection);
+    throw error;
+  }
   return terminal;
 }
 
@@ -7267,6 +7422,7 @@ async function launchAgentConversationTerminal(input: {
   context?: vscode.ExtensionContext;
   agentCli: string;
   model?: string;
+  settings?: SolopreneurSettings;
   refreshNodeId?: string;
   terminalReadyTimeoutMs?: number;
   runnerClaimTimeoutMs?: number;
@@ -7357,7 +7513,11 @@ async function launchAgentConversationTerminal(input: {
     });
     const recordedTarget: AgentTerminalRunTarget = { workspaceRoot: input.workspaceRoot, globalDataPath, executionLogId: input.conversationId, runId: state.runId, generation: state.generation, deliveryId: recordedTerminal ? String(state.status.terminalDeliveryId || '') : crypto.randomUUID() };
     if (recordedTerminal && state.status.terminalCommandSubmittedAt) {
-      agentTerminalRunTargets.set(recordedTerminal, recordedTarget); recordedTerminal.show(true);
+      agentTerminalRunTargets.set(recordedTerminal, recordedTarget);
+      const selection = terminalSelectionDiagnostics(input.workspaceRoot, recordedTerminal);
+      trace.record('terminal.delivery.focus', 'start', 0, undefined, selection);
+      recordedTerminal.show(false);
+      trace.record('terminal.delivery.focus', 'ok', 0, undefined, selection);
       scheduleRunnerClaimWatchdog(recordedTerminal, recordedTarget, state.generation);
       return recordedTerminal;
     }
@@ -7394,7 +7554,7 @@ async function launchAgentConversationTerminal(input: {
         }
       }
     };
-    const terminalEnvironment = input.context ? await getOpenCodeTerminalEnvironment(input.context, input.agentCli, input.model) : undefined;
+    const terminalEnvironment = input.context ? await getOpenCodeTerminalEnvironment(input.context, input.agentCli, input.model, input.settings) : undefined;
     let lastDeliveryFailure = 'terminal_delivery_failed';
     for (let attempt = 1; attempt <= 2; attempt++) {
       const terminal = attempt === 1 && recordedTerminal
@@ -7405,16 +7565,27 @@ async function launchAgentConversationTerminal(input: {
         runId: state.runId, generation, deliveryId: crypto.randomUUID() };
       lastDeliveryId = target.deliveryId || '';
       agentTerminalRunTargets.set(terminal, target);
-      terminal.show(true);
+      const selection = terminalSelectionDiagnostics(input.workspaceRoot, terminal);
+      trace.record('terminal.delivery.focus', 'start', 0, undefined, selection);
+      try {
+        terminal.show(false);
+        trace.record('terminal.delivery.focus', 'ok', 0, undefined, selection);
+      } catch (error) {
+        trace.record('terminal.delivery.focus', 'error', 0, error, selection);
+        throw error;
+      }
       await record('terminal.delivery.identity.persist', () => persist({ terminalName: terminal.name, terminalDeliveryId: target.deliveryId,
         terminalDeliveryTraceId: trace.id, terminalDeliveryStartedAt: new Date(deliveryStartedAt).toISOString(), terminalDeliveryAttempt: attempt }));
+      const readinessTimeoutMs = input.terminalReadyTimeoutMs === undefined
+        ? undefined
+        : Math.max(1, Number(input.terminalReadyTimeoutMs));
       const submitted = await sendTextWhenTerminalReady(terminal,
         `SOLOMAP_DIAGNOSTIC_TRACE_ID=${shellQuote(trace.id)} SOLOMAP_DELIVERY_STARTED_AT=${shellQuote(String(deliveryStartedAt))} SOLOMAP_TERMINAL_DELIVERY_ID=${shellQuote(target.deliveryId!)} ${input.command}`,
-        true, { readinessTimeoutMs: Math.max(1, Number(input.terminalReadyTimeoutMs || 10_000)), observe: event => {
-          if (event.status === 'error') lastDeliveryFailure = event.error || 'terminal_delivery_failed';
+        true, { readinessTimeoutMs, readinessBudgetMs: 5_000, observe: event => {
+          if (event.status === 'error' && event.stage !== 'terminal.process.slow') lastDeliveryFailure = event.error || 'terminal_delivery_failed';
           const stage = event.stage.replace(/^terminal\./, 'terminal.delivery.');
           trace.record(stage, event.status, event.durationMs, event.error ? new Error(event.error) : undefined,
-            { ...(event.pid ? { pid: event.pid } : {}), ...(event.timeoutMs ? { timeoutMs: event.timeoutMs } : {}) });
+            { ...(event.pid ? { pid: event.pid } : {}), ...(event.timeoutMs ? { timeoutMs: event.timeoutMs } : {}), ...(event.budgetMs ? { budgetMs: event.budgetMs } : {}) });
         } });
       if (!submitted) {
         trace.record('terminal.delivery.retry', attempt < 2 ? 'ok' : 'error', 0, attempt < 2 ? undefined : new Error(lastDeliveryFailure));
@@ -7425,7 +7596,7 @@ async function launchAgentConversationTerminal(input: {
       await record('terminal.delivery.submission.persist', () => persist({ terminalCommandSubmittedAt: new Date().toISOString() }, true));
       scheduleRunnerClaimWatchdog(terminal, target, generation);
       if (extensionContextRef) ensureActiveConversationPoller(extensionContextRef);
-      if (input.refreshNodeId) postNodeConversations(input.refreshNodeId);
+      if (input.refreshNodeId) postNodeConversations(input.refreshNodeId, [], true, input.workspaceRoot);
       return terminal;
     }
     throw new Error(lastDeliveryFailure);
@@ -7661,15 +7832,13 @@ async function handleAgentTerminalClosed(
       reservedAgentTerminalsByProject.delete(workspaceRoot);
     }
   }
-  const matchedConversations = [...agentTerminalNamesByConversationId.entries()]
-    .filter(([, name]) => name === terminalName);
-  const matched = matchedConversations[0];
+  const matched = [...agentTerminalBindings.values()].find((binding) => binding.terminalName === terminalName);
   const captured = source || [...agentTerminalRunTargets.entries()].find(([terminal]) => terminal.name === terminalName)?.[1];
   if (!matched && !captured) {
     return false;
   }
-  const conversationId = captured?.executionLogId || matched![0];
-  const workspaceRoot = captured?.workspaceRoot || agentTerminalProjectRootsByConversationId.get(Number(conversationId)) || activeProjectRoot || '';
+  const conversationId = captured?.executionLogId || matched!.conversationId;
+  const workspaceRoot = captured?.workspaceRoot || matched?.workspaceRoot || activeProjectRoot || '';
   if (!workspaceRoot) {
     return false;
   }
@@ -7688,10 +7857,8 @@ async function handleAgentTerminalClosed(
     if (pending.reference !== resolved.reference) continue;
     await processRegisteredStatusFile(extensionContextRef, resolved.reference, true, pending.status, captured?.globalDataPath);
   }
-  for (const [mappedConversationId, mappedTerminalName] of agentTerminalNamesByConversationId.entries()) {
-    if (mappedTerminalName !== terminalName) continue;
-    agentTerminalNamesByConversationId.delete(mappedConversationId);
-    agentTerminalProjectRootsByConversationId.delete(mappedConversationId);
+  for (const [key, binding] of agentTerminalBindings.entries()) {
+    if (binding.terminalName === terminalName) agentTerminalBindings.delete(key);
   }
   for (const [terminal, target] of agentTerminalRunTargets) {
     if (terminal.name === terminalName && target.runId === resolved.runId && target.generation === resolved.generation) agentTerminalRunTargets.delete(terminal);
@@ -7699,10 +7866,10 @@ async function handleAgentTerminalClosed(
   return true;
 }
 
-async function showAgentTerminal(conversationId = 0): Promise<void> {
-  const terminal = await findActiveAgentTerminal(conversationId);
+async function showAgentTerminal(workspaceRoot: string, conversationId = 0): Promise<void> {
+  const terminal = await findActiveAgentTerminal(conversationId, workspaceRoot);
   if (terminal) {
-    terminal.show(true);
+    terminal.show(false);
     return;
   }
   vscode.window.showInformationMessage('No active SoloMap Agent terminal is available.');
@@ -8184,10 +8351,9 @@ async function registerInteractiveConversationTurn(workspaceRoot: string, conver
       }
     }
   }
-  const terminalName = String(started.terminalName || (globalDataPath === undefined ? agentTerminalNamesByConversationId.get(Number(started.rootExecutionLogId)) : '') || '');
+  const terminalName = String(started.terminalName || (globalDataPath === undefined ? getAgentTerminalBinding(workspaceRoot, Number(started.rootExecutionLogId))?.terminalName : '') || '');
   if (terminalName && (globalDataPath === undefined || syncEngine === engine)) {
-    agentTerminalNamesByConversationId.set(Number(started.executionLogId), terminalName);
-    agentTerminalProjectRootsByConversationId.set(Number(started.executionLogId), workspaceRoot);
+    setAgentTerminalBinding(workspaceRoot, Number(started.executionLogId), terminalName);
   }
   return started;
 }
@@ -8242,11 +8408,11 @@ async function handleContinueConversationTurn(
     const terminalMessage = [request, attachedFiles.length ? `补充文件（开始前先读取）：\n${attachedFiles.map(file => `- ${file}`).join('\n')}` : ''].filter(Boolean).join('\n\n');
     if (reusable) {
       const started = await registerInteractiveConversationTurn(continuationProject, reusable.conversationId, terminalMessage, preserveRoadmapState, settings.globalDataPath, continuationEngine);
-      reusable.terminal.show(true);
+      reusable.terminal.show(false);
       if (started) {
         const delivered = await sendAgentTextWhenTerminalReady(reusable.terminal, [terminalMessage, `本轮已由 SoloMap 预登记。本轮 turnId：${started.turnId}。开始处理前仍调用 MCP 工具 solomap_conversation_status 的 start 动作，插件会幂等确认同一轮；完成时调用同一工具的 complete 动作并沿用原汇报要求。不要运行检查点命令。`].join('\n\n'), getAgentProvider(String(started.agentCli)));
         if (!delivered) throw new Error('无法把本轮消息发送到当前 Agent 终端。');
-        if (syncEngine === continuationEngine) postNodeConversations(nodeId);
+        if (syncEngine === continuationEngine) postNodeConversations(nodeId, [], true, continuationProject);
       } else vscode.window.showInformationMessage('当前 Agent 终端仍在处理上一轮，已为你打开现有会话。');
       return;
     }
@@ -8297,7 +8463,7 @@ async function handleContinueConversationTurn(
       await continuationEngine.updateNode(nodeId, { status: 'Running' });
       if (syncEngine === continuationEngine) { sendNodesToWebview(); refreshSidebarProjectCards(continuationProject); }
     }
-    await deliverOrdinaryConversation(context, prepared);
+    await deliverOrdinaryConversation(context, prepared, settings);
     return;
   }
   throw new Error('未找到这段对话的完整会话记录，无法继续。');
@@ -8357,7 +8523,7 @@ async function closeConversationProcessesForContinuation(
             // Reattach the old display before asking its runner to flush. Older
             // runners can be blocked by a persistent terminal's paused PTY.
             const terminal = [...ownedTerminals].find(candidate => candidate.name === current.terminalName);
-            terminal?.show(true);
+            terminal?.show(false);
           }
           try { await client.stop(reference, current, '正在原会话中继续处理。', `run:${reference}:native-resume-stop:${current.turnId}`, true, 'partial'); }
           catch (error) {
@@ -8367,10 +8533,7 @@ async function closeConversationProcessesForContinuation(
         }
       }
       for (const id of [Number(status.rootExecutionLogId), Number(status.executionLogId)]) {
-        if (agentTerminalProjectRootsByConversationId.get(id) === workspaceRoot) {
-          agentTerminalNamesByConversationId.delete(id);
-          agentTerminalProjectRootsByConversationId.delete(id);
-        }
+        deleteAgentTerminalBinding(workspaceRoot, id);
       }
     }
     for (const terminal of ownedTerminals) terminal.dispose();
@@ -8379,17 +8542,17 @@ async function closeConversationProcessesForContinuation(
   throw new Error('未找到这段对话的完整会话记录，无法继续。');
 }
 
-async function handleContinueNativeConversation(context: vscode.ExtensionContext, nodeId: string, conversationId: number): Promise<void> {
-  if (!syncEngine || !activeProjectRoot || !nodeId || !conversationId) {
+async function handleContinueNativeConversation(context: vscode.ExtensionContext, nodeId: string, conversationId: number, target?: AgentLaunchTarget): Promise<void> {
+  const projectSyncEngine = target?.engine || syncEngine;
+  const workspaceRoot = target?.workspaceRoot || activeProjectRoot;
+  if (!projectSyncEngine || !workspaceRoot || !nodeId || !conversationId) {
     return;
   }
-  const workspaceRoot = activeProjectRoot;
-  const projectSyncEngine = syncEngine;
-  const settings = getPersistedSettings(context);
-  const globalDataPath = normalizeSolomapGlobalPath(workspaceRoot, projectSyncEngine.dataRoot || settings.globalDataPath);
+  const settings = target?.settings || getPersistedSettings(context);
+  const globalDataPath = normalizeSolomapGlobalPath(workspaceRoot, target?.globalDataPath || projectSyncEngine.dataRoot || settings.globalDataPath);
   const client = runLifecycleClient(workspaceRoot, globalDataPath);
   const registered = await observeLocalDiagnosticStage('conversation.continue.lookup', () => client.adoptConversationHistory(workspaceRoot, conversationId));
-  if (syncEngine !== projectSyncEngine || activeProjectRoot !== workspaceRoot) return;
+  if (!target && (syncEngine !== projectSyncEngine || activeProjectRoot !== workspaceRoot)) return;
   if (registered) {
     const records = await observeLocalDiagnosticStage('conversation.continue.family', () => client.listConversationStatuses(workspaceRoot, conversationId));
     // Imported legacy chains may predate durable conversation ownership.
@@ -8397,9 +8560,9 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     const family = records.some(record => record.status.historicalAdopted) ? undefined : records;
     if (!family) {
       if (typeof projectSyncEngine.readAgentExecutions === 'function') await projectSyncEngine.readAgentExecutions(nodeId);
-      nodeId = resolveConversationNodeIdForContinuation(nodeId, conversationId) || nodeId;
+      nodeId = resolveConversationNodeIdForContinuation(nodeId, conversationId, projectSyncEngine) || nodeId;
     }
-    if (syncEngine !== projectSyncEngine || activeProjectRoot !== workspaceRoot) return;
+    if (!target && (syncEngine !== projectSyncEngine || activeProjectRoot !== workspaceRoot)) return;
     if (registered.status.nodeId !== nodeId) throw new Error('run_conversation_node_mismatch');
     const conversations: AgentConversation[] = family ? family.map(({ status }) => ({
       id: Number(status.rootExecutionLogId), nodeId: String(status.nodeId), timestamp: String(status.startedAt || ''),
@@ -8450,7 +8613,7 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
         ...(providerContext ? { nativeResumeProviderContext: providerContext } : {}),
         launchSummary: [preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '', 'Agent continuation started.', buildContinuationMetadataBlock(rootId, session.sessionId), 'User supplement:\n继续当前 Agent 对话'].filter(Boolean).join('\n\n') }
     }, { ...settings, globalDataPath }));
-    await observeLocalDiagnosticStage('conversation.continue.delivery', () => deliverOrdinaryConversation(context, prepared));
+    await observeLocalDiagnosticStage('conversation.continue.delivery', () => deliverOrdinaryConversation(context, prepared, settings));
     return;
   }
 
@@ -8482,15 +8645,14 @@ async function hasRunningAgentConversation(workspaceRoot: string, nodes: Roadmap
   return (await runLifecycleClient(workspaceRoot).listStatuses(workspaceRoot)).some(({ status }) => status.status === 'Running');
 }
 
-async function stopAgentRun(nodeId: string, conversationId: number): Promise<void> {
-  if (!syncEngine || !activeProjectRoot || !nodeId) return;
-  const workspaceRoot = activeProjectRoot;
+async function stopAgentRun(nodeId: string, conversationId: number, workspaceRoot = activeProjectRoot || ''): Promise<void> {
+  if (!workspaceRoot || !nodeId) return;
   const resolved = await runLifecycleClient(workspaceRoot).findConversation(workspaceRoot, conversationId);
   if (!resolved || resolved.status.nodeId !== nodeId || resolved.status.interactiveSessionClosed) {
     vscode.window.showInformationMessage('This Agent conversation is no longer running.');
     return;
   }
-  const terminal = await findActiveAgentTerminal(conversationId);
+  const terminal = await findActiveAgentTerminal(conversationId, workspaceRoot);
   try {
     await runLifecycleClient(workspaceRoot).stop(resolved.reference, resolved.status, '用户已停止当前对话。', `run:${resolved.reference}:user-stop:${resolved.turnId}`);
   } catch (error) {
@@ -8499,8 +8661,7 @@ async function stopAgentRun(nodeId: string, conversationId: number): Promise<voi
   }
   const rootExecutionLogId = Number(resolved.status.rootExecutionLogId || conversationId);
   for (const id of new Set([rootExecutionLogId, conversationId])) {
-    agentTerminalNamesByConversationId.delete(id);
-    agentTerminalProjectRootsByConversationId.delete(id);
+    deleteAgentTerminalBinding(workspaceRoot, id);
   }
   terminal?.dispose();
   await processRegisteredStatusFile(extensionContextRef, resolved.reference, true);
@@ -8515,7 +8676,7 @@ async function captureConversationLaunchTarget(context: vscode.ExtensionContext,
   return { workspaceRoot, globalDataPath, engine, settings: { ...settings, globalDataPath }, launchIntentId: `user-action:${crypto.randomUUID()}` };
 }
 
-async function resumeOrdinaryConversation(context: vscode.ExtensionContext, workspaceRoot: string, launchIntentId?: string, dataRoot = ''): Promise<number | null> {
+async function resumeOrdinaryConversation(context: vscode.ExtensionContext, workspaceRoot: string, launchIntentId?: string, dataRoot = '', settings?: SolopreneurSettings): Promise<number | null> {
   if (!launchIntentId) return null;
   const globalDataPath = normalizeGlobalDataPathForExtension(dataRoot || getPersistedSettings(context).globalDataPath || '');
   await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
@@ -8523,7 +8684,7 @@ async function resumeOrdinaryConversation(context: vscode.ExtensionContext, work
   const existing = await operation('read_run_intent', { root: workspaceRoot, launchIntentId }) as import('./runLifecycleTypes').RunState | null;
   if (!existing) return null;
   if (!existing.status.deliveryPending) return Number(existing.status.rootExecutionLogId);
-  return deliverOrdinaryConversation(context, await resumePreparedAgentRun(existing, operation, globalDataPath));
+  return deliverOrdinaryConversation(context, await resumePreparedAgentRun(existing, operation, globalDataPath), settings);
 }
 
 async function prepareOrdinaryConversation(context: vscode.ExtensionContext, input: AgentRunPreparationInput, settings = getPersistedSettings(context)): Promise<Awaited<ReturnType<typeof prepareAgentRun>>> {
@@ -8575,11 +8736,11 @@ async function recordUndeliverableAgentRun(context: vscode.ExtensionContext, inp
   return executionLogId;
 }
 
-async function deliverOrdinaryConversation(context: vscode.ExtensionContext, prepared: Awaited<ReturnType<typeof prepareAgentRun>>): Promise<number> {
+async function deliverOrdinaryConversation(context: vscode.ExtensionContext, prepared: Awaited<ReturnType<typeof prepareAgentRun>>, settings?: SolopreneurSettings): Promise<number> {
   const executionLogId = Number(prepared.status.rootExecutionLogId);
   if (!prepared.status.deliveryPending) return executionLogId;
   const workspaceRoot = String(prepared.status.workspaceRoot); const nodeId = String(prepared.status.nodeId);
-  await launchAgentConversationTerminal({ workspaceRoot, label: `${prepared.status.runKind}-${nodeId}-${executionLogId}`, conversationId: executionLogId, nodeId, statusFilePath: runStatusReference(workspaceRoot, executionLogId), runKind: String(prepared.status.runKind), globalDataPath: prepared.dataRoot, context, agentCli: String(prepared.status.agentCli), model: String(prepared.status.selectedModel || ''), command: prepared.finalCommand, refreshNodeId: nodeId });
+  await launchAgentConversationTerminal({ workspaceRoot, label: `${prepared.status.runKind}-${nodeId}-${executionLogId}`, conversationId: executionLogId, nodeId, statusFilePath: runStatusReference(workspaceRoot, executionLogId), runKind: String(prepared.status.runKind), globalDataPath: prepared.dataRoot, context, agentCli: String(prepared.status.agentCli), model: String(prepared.status.selectedModel || ''), settings, command: prepared.finalCommand, refreshNodeId: nodeId });
   return executionLogId;
 }
 
@@ -8600,7 +8761,7 @@ async function handleRoadmapRevision(
     await ensureTaskRuntimeReady(context);
   }
   if (!projectSyncEngine || !workspaceRoot) return;
-  if (await resumeOrdinaryConversation(context, workspaceRoot, target?.launchIntentId, target?.globalDataPath) !== null) { onExecutionRegistered(); return; }
+  if (await resumeOrdinaryConversation(context, workspaceRoot, target?.launchIntentId, target?.globalDataPath, target?.settings) !== null) { onExecutionRegistered(); return; }
   const revisionRequest = userMessage.trim();
   if (!revisionRequest) {
     vscode.window.showWarningMessage('Describe how you want to adjust the roadmap before sending.');
@@ -8616,7 +8777,7 @@ async function handleRoadmapRevision(
     await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId: roadmapRevisionId, runKind: 'roadmap_revision',
       agentCli: requestedAgentCli || agentCli, selectedModel, userMessage: revisionRequest, failureCode: 'cli_not_found', failureReason,
       globalDataPath, launchIntentId: target?.launchIntentId });
-    postNodeConversations(roadmapRevisionId);
+    postNodeConversations(roadmapRevisionId, [], true, workspaceRoot);
     vscode.window.showErrorMessage(`${failureReason} Set SoloMap CLI Command or Path to an installed executable such as agy or codex.`);
     return;
   }
@@ -8625,7 +8786,7 @@ async function handleRoadmapRevision(
     await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId: roadmapRevisionId, runKind: 'roadmap_revision',
       agentCli, selectedModel, userMessage: revisionRequest, failureCode: 'agent_automation_not_ready', failureReason: automation.message,
       globalDataPath, launchIntentId: target?.launchIntentId });
-    postNodeConversations(roadmapRevisionId);
+    postNodeConversations(roadmapRevisionId, [], true, workspaceRoot);
     vscode.window.showErrorMessage(automation.message);
     return;
   }
@@ -8642,11 +8803,11 @@ async function handleRoadmapRevision(
   ].filter(Boolean).join('\n\n');
   const prepared = await prepareOrdinaryConversation(context, { agentCli, selectedModel, prompt: conversationPrompt, globalPrompt: settings.globalPrompt, workspaceRoot, nodeId: roadmapRevisionId, executionLogId: 0, userMessage: revisionRequest, runKind: 'roadmap_revision', globalDataPath, taskPermissionMode: settings.taskPermissionMode || 'auto', launchIntentId: target?.launchIntentId, metadata: { launchSummary, captureRoadmapBackup: true } });
   onExecutionRegistered();
-  await deliverOrdinaryConversation(context, prepared);
+  await deliverOrdinaryConversation(context, prepared, settings);
 }
 
-async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirements: string, selectedAgentCli = '', selectedModel = '', language = 'zh', timeZone = '', localTime = ''): Promise<void> {
-  if (!activeProjectRoot) return;
+async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirements: string, selectedAgentCli = '', selectedModel = '', language = 'zh', timeZone = '', localTime = '', target?: AgentLaunchTarget): Promise<void> {
+  if (!(target?.workspaceRoot || activeProjectRoot)) return;
   const isEnglish = language === 'en';
   const userRequirements = requirements.trim() || (isEnglish
     ? 'Prioritize the most valuable work to move forward today.'
@@ -8677,7 +8838,7 @@ async function handleGenerateTimePlan(context: vscode.ExtensionContext, requirem
     '最终把校验后的 JSON 放在精确标签 <solomap-time-plan> 与 </solomap-time-plan> 之间；标签内不要写其他文字。',
     '结束标签之后只需说明草案已生成，等待用户在 SoloMap 中确认。'
   ]).join('\n\n');
-  await handleRunSoloConversation(context, prompt, selectedAgentCli, selectedModel, [], '', false, undefined, { timePlanDraft: true });
+  await handleRunSoloConversation(context, prompt, selectedAgentCli, selectedModel, [], '', false, target, { timePlanDraft: true });
 }
 
 async function readStoredNativeSessionId(workspaceRoot: string, nodeId: string, agentCli: string, globalDataPath: string): Promise<string> {
@@ -8688,12 +8849,18 @@ async function readStoredNativeSessionId(workspaceRoot: string, nodeId: string, 
 async function handleRunSoloConversation(context: vscode.ExtensionContext, userMessage: string, selectedAgentCli = '', selectedModel = '', supplementFiles: string[] = [], occurrenceId = '', interactiveConversation = true, target?: AgentLaunchTarget, runMetadata: Record<string, unknown> = {}): Promise<number> {
   const workspaceRoot = target?.workspaceRoot || activeProjectRoot;
   const projectSyncEngine = target?.engine || syncEngine;
-  await observeLocalDiagnosticStage('conversation.runSolo.runtime', () => ensureTaskRuntimeReady(context));
+  await observeLocalDiagnosticStage('conversation.runSolo.runtime', async () => {
+    if (target?.globalDataPath) {
+      await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: target.globalDataPath });
+    } else {
+      await ensureTaskRuntimeReady(context);
+    }
+  });
   if (!projectSyncEngine || !workspaceRoot) {
     return 0;
   }
   const resumed = await observeLocalDiagnosticStage('conversation.runSolo.resume', () =>
-    resumeOrdinaryConversation(context, workspaceRoot, target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), target?.globalDataPath)
+    resumeOrdinaryConversation(context, workspaceRoot, target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), target?.globalDataPath, target?.settings)
   );
   if (resumed !== null) return resumed;
   const request = userMessage.trim();
@@ -8711,7 +8878,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     if (existing) return Number(existing.id || 0);
   }
 
-  const settings = getPersistedSettings(context);
+  const settings = target?.settings || getPersistedSettings(context);
   const globalDataPath = normalizeSolomapGlobalPath(workspaceRoot, target?.globalDataPath || settings.globalDataPath);
   const requestedAgentCli = (selectedAgentCli || settings.cliPath || 'agy').trim();
   const agentCli = resolveAgentCli(requestedAgentCli, selectedAgentCli ? '' : settings.cliPath);
@@ -8721,7 +8888,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId: soloConversationId, runKind: interactiveConversation ? 'solo' : 'solo_background',
       agentCli: requestedAgentCli || agentCli, selectedModel, userMessage: request, failureCode: 'cli_not_found', failureReason,
       globalDataPath, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined) });
-    postNodeConversations(soloConversationId);
+    postNodeConversations(soloConversationId, [], true, workspaceRoot);
     vscode.window.showErrorMessage(`${failureReason} Set SoloMap CLI Command or Path to an installed executable such as agy or codex.`);
     return 0;
   }
@@ -8730,7 +8897,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId: soloConversationId, runKind: interactiveConversation ? 'solo' : 'solo_background',
       agentCli, selectedModel, userMessage: request, failureCode: 'agent_automation_not_ready', failureReason: automation.message,
       globalDataPath, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined) });
-    postNodeConversations(soloConversationId);
+    postNodeConversations(soloConversationId, [], true, workspaceRoot);
     vscode.window.showErrorMessage(automation.message);
     return 0;
   }
@@ -8757,8 +8924,8 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     buildSoloConversationPrompt(request, workspaceRoot, settings.globalPrompt, attachedFiles, globalDataPath, settings.enabledEnhancements, interactiveConversation)
   );
   const prepared = await observeLocalDiagnosticStage('conversation.runSolo.prepare', () => prepareOrdinaryConversation(context, { agentCli, selectedModel, prompt: conversationPrompt, globalPrompt: settings.globalPrompt, workspaceRoot, nodeId: soloConversationId, executionLogId: 0, userMessage: request, runKind: interactiveConversation ? 'solo' : 'solo_background', globalDataPath, taskPermissionMode: settings.taskPermissionMode || 'auto', nativeSessionId, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), metadata: { launchSummary: buildLaunchSummary(), captureRoadmapBackup: true, preSessionGitBackup: true, ...runMetadata } }));
-  postNodeConversations(soloConversationId);
-  return observeLocalDiagnosticStage('conversation.runSolo.delivery', () => deliverOrdinaryConversation(context, prepared));
+  postNodeConversations(soloConversationId, [], true, workspaceRoot);
+  return observeLocalDiagnosticStage('conversation.runSolo.delivery', () => deliverOrdinaryConversation(context, prepared, settings));
 }
 
 async function getCurrentFlowTrace(projectPath: string): Promise<FlowTrace | null> {
@@ -8777,15 +8944,16 @@ async function startFlowRoleRun(
     selectedModel?: string;
     initialFlow?: FlowTrace;
     globalDataPath?: string;
+    settings?: SolopreneurSettings;
   }
 ): Promise<void> {
-  const settings = { ...getPersistedSettings(context), ...(input.globalDataPath ? { globalDataPath: input.globalDataPath } : {}) };
+  const settings = input.settings || getPersistedSettings(context);
   const loop = input.flow.loops.find((candidate) => candidate.index === input.loopIndex);
   if (!loop) {
     throw new Error(`Flow loop ${input.loopIndex} not found.`);
   }
   const nodeId = buildFlowExecutionNodeId(input.flow.flowId, loop.loopId, input.role);
-  const globalDataPath = normalizeSolomapGlobalPath(input.projectPath, settings.globalDataPath);
+  const globalDataPath = normalizeSolomapGlobalPath(input.projectPath, input.globalDataPath || settings.globalDataPath);
   const requestedAgentCli = (input.selectedAgentCli || input.flow.source.selectedAgentCli || settings.cliPath || 'agy').trim();
   const agentCli = resolveAgentCli(requestedAgentCli, input.selectedAgentCli ? '' : settings.cliPath);
   if (!commandExists(agentCli)) {
@@ -8818,7 +8986,7 @@ async function startFlowRoleRun(
     '',
     `flow_${input.role}`,
     '',
-    settings.globalDataPath,
+    globalDataPath,
     settings.taskPermissionMode,
     '',
     'off',
@@ -8841,6 +9009,7 @@ async function startFlowRoleRun(
     context,
     agentCli,
     model: effectiveModel,
+    settings,
     command: prepared.finalCommand
   });
 }
@@ -8887,7 +9056,7 @@ async function handleRunFlow(
         await launchAgentConversationTerminal({ workspaceRoot: projectPath, globalDataPath: prepared.dataRoot, context,
           label: `flow-${existing.flowId}-${role}-${executionLogId}`, conversationId: executionLogId, nodeId: String(state.status.nodeId),
           statusFilePath: runStatusReference(projectPath, executionLogId), runKind: String(state.status.runKind),
-          agentCli: String(state.status.agentCli || ''), model: String(state.status.selectedModel || ''), command: prepared.finalCommand });
+          agentCli: String(state.status.agentCli || ''), model: String(state.status.selectedModel || ''), settings, command: prepared.finalCommand });
       }
       return true;
     }
@@ -8917,30 +9086,41 @@ async function handleRunFlow(
     }),
     selectedAgentCli,
     selectedModel,
-    globalDataPath
+    globalDataPath,
+    settings
   });
   return true;
 }
 
-async function linkSoloConversationToNode(conversationId: number, nodeId: string): Promise<void> {
-  if (!syncEngine || !conversationId || !nodeId) {
+async function linkSoloConversationToNode(conversationId: number, nodeId: string, target?: AgentLaunchTarget): Promise<void> {
+  const projectSyncEngine = target?.engine || syncEngine;
+  const workspaceRoot = target?.workspaceRoot || activeProjectRoot;
+  if (!projectSyncEngine || !workspaceRoot || !conversationId || !nodeId) {
     return;
   }
-  const node = syncEngine.getNodes().find((candidate) => candidate.id === nodeId);
-  const conversation = syncEngine.getAgentExecutions(soloConversationId)
+  projectSyncEngine.refreshNodes?.();
+  if (typeof projectSyncEngine.readAgentExecutions === 'function') {
+    await Promise.all([
+      projectSyncEngine.readAgentExecutions(soloConversationId),
+      projectSyncEngine.readAgentExecutions(nodeId)
+    ]);
+  }
+  if (!target && (syncEngine !== projectSyncEngine || activeProjectRoot !== workspaceRoot)) return;
+  const node = projectSyncEngine.getNodes().find((candidate) => candidate.id === nodeId);
+  const conversation = projectSyncEngine.getAgentExecutions(soloConversationId)
     .find((entry) => Number(entry.id) === conversationId);
   if (!node || !conversation || conversation.status === 'Running') {
     vscode.window.showWarningMessage('This Solo conversation cannot be associated with that step.');
     return;
   }
-  const existingStepConversations = syncEngine.getAgentExecutions(nodeId);
+  const existingStepConversations = projectSyncEngine.getAgentExecutions(nodeId);
   if (existingStepConversations.some((entry) => Number(entry.id) === conversationId)) {
     vscode.window.showInformationMessage('This Solo conversation is already associated with that step.');
     return;
   }
-  const linked = await syncEngine.linkAgentExecution(conversationId, nodeId);
-  postNodeConversations(nodeId, [linked, ...existingStepConversations]);
-  postNodeConversations(soloConversationId);
+  const linked = await projectSyncEngine.linkAgentExecution(conversationId, nodeId);
+  postNodeConversations(nodeId, [linked, ...existingStepConversations], true, workspaceRoot);
+  postNodeConversations(soloConversationId, [], true, workspaceRoot);
   vscode.window.showInformationMessage(`Solo conversation associated with step: ${node.title}`);
 }
 
@@ -9110,17 +9290,24 @@ async function handleRunAgent(
 ) {
   const projectSyncEngine = target?.engine || syncEngine;
   const workspaceRoot = target?.workspaceRoot || activeProjectRoot || '';
-  await ensureTaskRuntimeReady(context);
+  if (target?.globalDataPath) {
+    await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: target.globalDataPath });
+  } else {
+    await ensureTaskRuntimeReady(context);
+  }
   if (!projectSyncEngine) return;
   if (!workspaceRoot) {
     vscode.window.showErrorMessage('Choose a project folder before running an Agent task.');
     return;
   }
 
-  if (await resumeOrdinaryConversation(context, workspaceRoot, target?.launchIntentId, target?.globalDataPath) !== null) { onExecutionRegistered(); return; }
+  if (await resumeOrdinaryConversation(context, workspaceRoot, target?.launchIntentId, target?.globalDataPath, target?.settings) !== null) { onExecutionRegistered(); return; }
 
+  const refreshActiveRoadmap = () => {
+    if (activeProjectRoot && path.resolve(activeProjectRoot) === path.resolve(workspaceRoot)) void sendNodesToWebview();
+  };
   projectSyncEngine.refreshNodes?.();
-  sendNodesToWebview();
+  refreshActiveRoadmap();
 
   const nodes = projectSyncEngine.getNodes();
   const node = nodes.find((n) => n.id === nodeId);
@@ -9133,7 +9320,7 @@ async function handleRunAgent(
   const attachedFiles = filterProjectRelativeFiles(workspaceRoot, supplementFiles);
 
   // Resolve CLI path from config if applicable
-  const settings = getPersistedSettings(context);
+  const settings = target?.settings || getPersistedSettings(context);
   const globalDataPath = normalizeSolomapGlobalPath(workspaceRoot, target?.globalDataPath || settings.globalDataPath);
   const configuredCliPath = settings.cliPath;
   const requestedAgentCli = (selectedAgentCli || node.agentCli || configuredCliPath || 'agy').trim();
@@ -9147,8 +9334,8 @@ async function handleRunAgent(
     await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId, runKind: 'step', agentCli: requestedAgentCli || agentCli,
       selectedModel, userMessage: userMessage.trim() || node.agentPrompt || node.title, failureCode: 'cli_not_found', failureReason,
       globalDataPath, launchIntentId: target?.launchIntentId });
-    sendNodesToWebview();
-    postNodeConversations(nodeId);
+    refreshActiveRoadmap();
+    postNodeConversations(nodeId, [], true, workspaceRoot);
     vscode.window.showErrorMessage(`${failureReason} Set SoloMap CLI Command or Path to an installed executable such as agy or codex.`);
     return;
   }
@@ -9159,8 +9346,8 @@ async function handleRunAgent(
     await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId, runKind: 'step', agentCli, selectedModel,
       userMessage: userMessage.trim() || node.agentPrompt || node.title, failureCode: 'agent_automation_not_ready', failureReason: automation.message,
       globalDataPath, launchIntentId: target?.launchIntentId });
-    sendNodesToWebview();
-    postNodeConversations(nodeId);
+    refreshActiveRoadmap();
+    postNodeConversations(nodeId, [], true, workspaceRoot);
     vscode.window.showErrorMessage(automation.message);
     return;
   }
@@ -9168,7 +9355,7 @@ async function handleRunAgent(
   // Update node status to Running
   void recordLocalUsageEvent(context, 'agentRun').catch(error => console.error('SoloMap failed to record local usage:', error));
   await projectSyncEngine.updateNode(nodeId, { status: 'Running' });
-  sendNodesToWebview();
+  refreshActiveRoadmap();
   refreshSidebarProjectCards(workspaceRoot);
 
   const nativeSessionId = await readStoredNativeSessionId(workspaceRoot, nodeId, agentCli, globalDataPath);
@@ -9189,9 +9376,9 @@ async function handleRunAgent(
   const roadmapValidationCommand = `${shellQuote(process.execPath)} ${shellQuote(path.join(extensionPath, 'resources', 'tools', 'validate-roadmap.cjs'))} --mode ${roadmapValidationMode}`;
   const conversationPrompt = await buildAgentConversationPrompt(node, userMessage, workspaceRoot, '', '', '', nativeSessionId, attachedFiles, settings.globalPrompt, '', globalDataPath, settings.enabledEnhancements, false, interactiveConversation, roadmapValidationCommand);
   const prepared = await prepareOrdinaryConversation(context, { agentCli, selectedModel, prompt: conversationPrompt, globalPrompt: settings.globalPrompt, workspaceRoot, nodeId, executionLogId: 0, userMessage: userMessage.trim(), runKind, globalDataPath, taskPermissionMode: settings.taskPermissionMode || 'auto', nativeSessionId, launchIntentId: target?.launchIntentId, metadata: { launchSummary: buildLaunchSummary(), preSessionGitBackup: true } });
-  postNodeConversations(nodeId);
+  postNodeConversations(nodeId, [], true, workspaceRoot);
   onExecutionRegistered();
-  await deliverOrdinaryConversation(context, prepared);
+  await deliverOrdinaryConversation(context, prepared, settings);
 }
 
 function extractUserSupplementFromExecutionOutput(output: string): string {
@@ -9200,16 +9387,16 @@ function extractUserSupplementFromExecutionOutput(output: string): string {
   return match ? match[1].trim() : '';
 }
 
-async function handleRetryConversation(context: vscode.ExtensionContext, nodeId: string, conversationId: number, interactiveConversation = true): Promise<void> {
-  if (!syncEngine || !nodeId || !conversationId) {
+async function handleRetryConversation(context: vscode.ExtensionContext, nodeId: string, conversationId: number, interactiveConversation = true, target?: AgentLaunchTarget): Promise<void> {
+  const retryEngine = target?.engine || syncEngine;
+  const retryProject = target?.workspaceRoot || activeProjectRoot;
+  if (!retryEngine || !retryProject || !nodeId || !conversationId) {
     return;
   }
-  const retryEngine = syncEngine;
-  const retryProject = activeProjectRoot;
   if (typeof retryEngine.readAgentExecutionById === 'function') await retryEngine.readAgentExecutionById(conversationId);
-  if (syncEngine !== retryEngine || activeProjectRoot !== retryProject) return;
+  if (!target && (syncEngine !== retryEngine || activeProjectRoot !== retryProject)) return;
 
-  const conversation = syncEngine.getAgentExecutions(nodeId).find((item) => Number(item.id) === Number(conversationId));
+  const conversation = retryEngine.getAgentExecutions(nodeId).find((item) => Number(item.id) === Number(conversationId));
   if (!conversation) {
     vscode.window.showErrorMessage(`Conversation ${conversationId} not found for step ${nodeId}.`);
     return;
@@ -9222,14 +9409,14 @@ async function handleRetryConversation(context: vscode.ExtensionContext, nodeId:
 
   const retryUserMessage = extractUserSupplementFromExecutionOutput(conversation.output || '');
   if (nodeId === roadmapRevisionId) {
-    await handleRoadmapRevision(context, retryUserMessage, conversation.agentCli || '');
+    await handleRoadmapRevision(context, retryUserMessage, conversation.agentCli || '', '', [], () => {}, target);
     return;
   }
   if (nodeId === soloConversationId) {
-    await handleRunSoloConversation(context, retryUserMessage, conversation.agentCli || '', '', [], '', interactiveConversation);
+    await handleRunSoloConversation(context, retryUserMessage, conversation.agentCli || '', '', [], '', interactiveConversation, target);
     return;
   }
-  await handleRunAgent(context, nodeId, retryUserMessage, conversation.agentCli || '', '', [], interactiveConversation);
+  await handleRunAgent(context, nodeId, retryUserMessage, conversation.agentCli || '', '', [], interactiveConversation, () => {}, target);
 }
 
 function automationTriggerFromRunStatus(nextStatus: string, failureCode: string): SolomapAutomationTrigger | '' {
@@ -9565,8 +9752,9 @@ async function runScheduledAutomationTask(context: vscode.ExtensionContext, task
   let executionLogId: number;
   try {
     await engine.initAndSync();
-    await revealAgentStartupTerminal(context, workspaceRoot, 'solo-scheduled', persisted.cliPath || '');
-    executionLogId = await handleRunSoloConversation(context, prompt, persisted.cliPath || '', '', [], occurrenceId, false, { workspaceRoot, engine, globalDataPath: scheduledDataRoot, launchIntentId: `scheduled:${occurrenceId}` });
+    const scheduledSettings = { ...persisted, globalDataPath: scheduledDataRoot };
+    await revealAgentStartupTerminal(context, workspaceRoot, 'solo-scheduled', persisted.cliPath || '', '', scheduledSettings);
+    executionLogId = await handleRunSoloConversation(context, prompt, persisted.cliPath || '', '', [], occurrenceId, false, { workspaceRoot, engine, globalDataPath: scheduledDataRoot, settings: scheduledSettings, launchIntentId: `scheduled:${occurrenceId}` });
   } finally { engine.close(); }
   const timeOfDay = String(task.timeOfDay || '09:00');
   if (!executionLogId) {
@@ -9926,7 +10114,7 @@ async function processFlowStatusFile(
   });
   await input.engine.readAgentExecutionById(Number(statusData.executionLogId));
   await pollRunSettlementEffects(client);
-  agentTerminalNamesByConversationId.delete(Number(statusData.executionLogId));
+  deleteAgentTerminalBinding(workspaceRoot, Number(statusData.executionLogId));
   return true;
 }
 
@@ -10190,10 +10378,7 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
         });
         await pollRunSettlementEffects(consumerClient);
         const terminalConversationId = Number(statusData.rootExecutionLogId || executionLogId);
-        if (agentTerminalProjectRootsByConversationId.get(terminalConversationId) === workspaceRoot) {
-          agentTerminalNamesByConversationId.delete(terminalConversationId);
-          agentTerminalProjectRootsByConversationId.delete(terminalConversationId);
-        }
+        deleteAgentTerminalBinding(workspaceRoot, terminalConversationId);
         return;
       }
       status = statusData.checkpointOutcome === 'failed' ? 'Failed' : 'In Progress';
@@ -10691,10 +10876,7 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
 
     if (!keepInteractiveSessionOpen) {
       for (const id of new Set([Number(statusData.rootExecutionLogId || executionLogId || 0), Number(executionLogId || 0)])) {
-        if (agentTerminalProjectRootsByConversationId.get(id) === workspaceRoot) {
-          agentTerminalNamesByConversationId.delete(id);
-          agentTerminalProjectRootsByConversationId.delete(id);
-        }
+        deleteAgentTerminalBinding(workspaceRoot, id);
       }
     }
   } catch (e) {
@@ -10845,7 +11027,7 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
           failureCode: 'reviewer_cli_not_found', failureReason, globalDataPath: String(globalDataPath || ''),
           parentExecutionLogId: Number(executionLogId || 0), launchIntentId: `run-effect:${effect.effectId}:review-unavailable` });
         if (isActiveProject) {
-          postNodeConversations(nodeId);
+          postNodeConversations(nodeId, [], true, workspaceRoot);
         }
       }
     }
@@ -10887,7 +11069,7 @@ async function applyRunSettlementEffect(effect: import('./runLifecycleTypes').Ru
 
     if (isActiveProject && syncEngine === statusSyncEngine && activeProjectRoot === workspaceRoot) {
       sendNodesToWebview();
-      postNodeConversations(nodeId, [], false);
+      postNodeConversations(nodeId, [], false, workspaceRoot);
     }
     if (workspaceRoot) {
       await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);

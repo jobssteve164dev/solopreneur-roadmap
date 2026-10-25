@@ -33,12 +33,14 @@ test('real Extension Host keeps sidebar actions alive across a card refresh', as
   const extensions = path.join(base, 'extensions');
   const driver = path.join(extensions, 'fixture.sidebar-host-1.0.0');
   const workspace = path.join(base, 'workspace');
+  const foreignWorkspace = path.join(base, 'foreign-workspace');
   const receipt = path.join(base, 'receipt.json');
   const refreshMarker = path.join(base, 'refresh.marker');
   const nativeReceipt = path.join(base, 'native-receipt.json');
   const nativeCli = path.join(base, 'claude');
   fs.mkdirSync(driver, { recursive: true });
   fs.mkdirSync(path.join(workspace, '.solopreneur'), { recursive: true });
+  fs.mkdirSync(foreignWorkspace);
   fs.writeFileSync(path.join(workspace, '.solopreneur', 'roadmap.csv'),
     'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n1,Ship the fix,Preserve the current goal,Build,,claude,Ship the fix,Pending,2026-10-21T00:00:00.000Z,\n');
   childProcess.execFileSync('git', ['init', '--quiet', workspace]);
@@ -62,7 +64,7 @@ test('real Extension Host keeps sidebar actions alive across a card refresh', as
   }));
   const source = `
     const vscode = require('vscode'), fs = require('node:fs'), path = require('node:path'), Module = require('node:module');
-    const repo = ${JSON.stringify(repo)}, receipt = ${JSON.stringify(receipt)}, refreshMarker = ${JSON.stringify(refreshMarker)};
+    const repo = ${JSON.stringify(repo)}, receipt = ${JSON.stringify(receipt)}, refreshMarker = ${JSON.stringify(refreshMarker)}, foreignWorkspace = ${JSON.stringify(foreignWorkspace)};
     const project = { path: ${JSON.stringify(workspace)}, name: 'Host project' };
     const settings = { globalDataPath: ${JSON.stringify(path.join(base, '.solomap-global'))}, language: 'zh', cliPath: ${JSON.stringify(nativeCli)}, globalPrompt: '宿主保存的设置', collaborationReviewMode: 'off', agentModelPreferences: {}, automationTasks: {} };
     const state = { ready: false, commands: [], refreshes: 0, errors: [], roadmap: false, growth: false, diagnostics: [] };
@@ -126,6 +128,9 @@ test('real Extension Host keeps sidebar actions alive across a card refresh', as
       });
       context.subscriptions.push(vscode.window.registerWebviewViewProvider('solopreneur.sidebar', provider));
       context.subscriptions.push(vscode.commands.registerCommand('sidebarHost.open', () => vscode.commands.executeCommand('workbench.view.extension.sidebar-host')));
+      const foreignTerminal = vscode.window.createTerminal({ name: 'Foreign project terminal', cwd: foreignWorkspace });
+      foreignTerminal.show(false);
+      context.subscriptions.push(foreignTerminal);
       state.ready = true; save();
     } catch (error) { state.errors.push(String(error.stack || error)); save(); } };
     exports.deactivate = () => fs.unwatchFile(refreshMarker);
@@ -159,8 +164,15 @@ test('real Extension Host keeps sidebar actions alive across a card refresh', as
       if (current.errors?.length) throw new Error(current.errors.join('\n'));
       return current.ready;
     }, 'fixture extension did not activate');
-    await page.keyboard.press('F1');
-    await page.locator('.quick-input-widget input').fill('>Sidebar Host Fixture: Open');
+    const commandInput = page.locator('.quick-input-widget input').filter({ visible: true });
+    for (let attempt = 0; attempt < 3 && !await commandInput.isVisible(); attempt += 1) {
+      await page.locator('.monaco-workbench').click({ position: { x: 8, y: 8 } });
+      await page.keyboard.press('Control+Shift+P');
+      try { await commandInput.waitFor({ state: 'visible', timeout: 5000 }); }
+      catch { await page.keyboard.press('Escape'); }
+    }
+    await commandInput.waitFor({ state: 'visible', timeout: 5000 });
+    await commandInput.fill('>Sidebar Host Fixture: Open');
     await page.getByRole('option').filter({ hasText: 'Sidebar Host Fixture: Open' }).first().waitFor();
     await page.keyboard.press('Enter');
     const frame = await waitFor(async () => {

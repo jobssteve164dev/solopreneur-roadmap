@@ -247,7 +247,7 @@ function extensionHost(t, f, options = {}) {
     this.runPortable = (root, operation, input) => runDurablePortableOperation(context, root, operation, input);
     this.recoverPortable = root => recoverDurablePortableOperations(context, root);
     this.clearGrowthPanel = () => { activeProjectGrowthPanel = null; };
-    this.mapTerminal = (id, name) => { agentTerminalNamesByConversationId.set(id, name); agentTerminalProjectRootsByConversationId.set(id, project); };
+    this.mapTerminal = (id, name) => { setAgentTerminalBinding(project, id, name); };
     if (typeof captureConversationLaunchTarget === 'function') {
       const capture = captureConversationLaunchTarget;
       captureConversationLaunchTarget = async (...args) => { const target = await capture(...args); retainEngine(target.engine); return target; };

@@ -69,6 +69,62 @@ test('continuation keeps its button through duplicate snapshots and background u
   } finally { await browser.close(); }
 });
 
+test('same-numbered conversations keep pending and settled state isolated by project', async () => {
+  const html = getSidebarWebviewHtml({ asWebviewUri: () => '', cspSource: '' }, { fsPath: path.resolve(__dirname, '../..') });
+  const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium', headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 700, height: 1400 } });
+    await page.route('**/*', route => route.abort());
+    await page.evaluate(() => {
+      window.messages = [];
+      window.acquireVsCodeApi = () => ({ postMessage: message => window.messages.push(message), getState: () => ({}), setState() {} });
+    });
+    await page.setContent(html);
+    const projects = [
+      { name: 'Project A', path: '/isolated/project-a', nodes: [] },
+      { name: 'Project B', path: '/isolated/project-b', nodes: [] }
+    ];
+    const deliver = message => page.evaluate(data => window.dispatchEvent(new MessageEvent('message', { data })), message);
+    const snapshot = projectPath => ({
+      command: 'sidebarProjectConversationSnapshotLoaded', projectPath,
+      soloConversations: [{ id: 42, nodeId: '__solo__', agentCli: 'codex', status: 'Completed', summary: projectPath,
+        capabilities: { canContinue: true, canStop: false }, dataState: { runId: projectPath, runRevision: 1 } }],
+      projectConversations: [], flowConversations: [], revisionConversations: []
+    });
+    await deliver({ command: 'projectsLoaded', projects: { projects, portfolio: projects, selectedProjectPath: projects[0].path } });
+    await deliver(snapshot(projects[0].path));
+    await page.evaluate(() => { window.projectACardBeforeForeignSnapshot = document.querySelector('[data-select-project-path="/isolated/project-a"]'); });
+    await deliver(snapshot(projects[1].path));
+    assert.equal(await page.evaluate(() => window.projectACardBeforeForeignSnapshot === document.querySelector('[data-select-project-path="/isolated/project-a"]')), true,
+      'a foreign project snapshot may update its cache but must not rebuild the selected project UI');
+    const card = projectPath => page.locator(`[data-select-project-path="${projectPath}"]`);
+    const pending = projectPath => card(projectPath).locator('[data-continue-id="42"]').evaluate(element => element.classList.contains('is-pending'));
+    await card(projects[0].path).locator('[data-continue-id="42"]').click();
+    assert.deepEqual(await page.evaluate(() => window.messages.filter(message => message.command === 'conversation.continue').at(-1)), {
+      command: 'conversation.continue', projectPath: projects[0].path, nodeId: '__solo__', conversationId: '42'
+    });
+    assert.equal(await pending(projects[0].path), true);
+    await deliver({ command: 'projectSelectionChanged', projectRoot: projects[1].path, generation: 1 });
+    await deliver(snapshot(projects[1].path));
+    assert.equal(await pending(projects[1].path), false,
+      'switching projects must not copy project A pending state onto the same numeric id in project B');
+    await page.evaluate(() => { window.projectBCardBeforeForeignActionResult = document.querySelector('[data-select-project-path="/isolated/project-b"]'); });
+    await deliver({ command: 'sidebarActionFailed', action: 'conversation.continue', projectPath: projects[0].path, conversationId: 999, message: 'Project A failed' });
+    assert.equal(await page.evaluate(() => window.projectBCardBeforeForeignActionResult === document.querySelector('[data-select-project-path="/isolated/project-b"]')), true,
+      'a failure from project A must not rebuild the selected project B UI');
+    await deliver({ command: 'roadmapRevisionLaunchRegistered', projectPath: projects[0].path });
+    assert.equal(await page.evaluate(() => window.projectBCardBeforeForeignActionResult === document.querySelector('[data-select-project-path="/isolated/project-b"]')), true,
+      'a launch acknowledgement from project A must not rebuild the selected project B UI');
+    await deliver({ command: 'conversationActionSettled', action: 'continue', projectPath: projects[1].path, conversationId: 42 });
+    await deliver({ command: 'projectSelectionChanged', projectRoot: projects[0].path, generation: 2 });
+    await deliver({ ...snapshot(projects[0].path), soloConversations: [{ ...snapshot(projects[0].path).soloConversations[0], dataState: { runId: projects[0].path, runRevision: 2 } }] });
+    assert.equal(await pending(projects[0].path), true,
+      'a stale acknowledgement for project B must not release project A');
+    await deliver({ command: 'conversationActionSettled', action: 'continue', projectPath: projects[0].path, conversationId: 42 });
+    assert.equal(await pending(projects[0].path), false);
+  } finally { await browser.close(); }
+});
+
 test('Actions and Issues launch once while refreshes cross pointer and keyboard activation', async t => {
   const html = getSidebarWebviewHtml({ asWebviewUri: () => '', cspSource: '' }, { fsPath: path.resolve(__dirname, '../..') });
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium', headless: true });

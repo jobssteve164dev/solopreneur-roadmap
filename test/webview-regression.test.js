@@ -797,7 +797,8 @@ test('the production interactive turn entry starts from the formal Waiting conve
   } finally { extension.restore(); await ops.close(); store.close(); }
 });
 
-test('production terminal delivery keeps the shell readiness gate and one durable launch without active ledger files', async () => {
+test('production terminal delivery keeps waiting for real shell readiness beyond the former ten second cutoff', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
   const { prepareAgentRun } = require('../out/agentRunPreparation.js');
@@ -805,9 +806,12 @@ test('production terminal delivery keeps the shell readiness gate and one durabl
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
   const prepared = await prepareAgentRun({ agentCli: 'claude', selectedModel: '', prompt: '原始目标', workspaceRoot: project, nodeId: '__solo__', executionLogId: 1, userMessage: '目标', runKind: 'solo', globalDataPath: root, taskPermissionMode: 'auto' }, (operation, input) => ops({ operation, input }));
-  let ready; let created; const commands = []; let creates = 0;
+  let ready; let created; let processObserved; const commands = []; let creates = 0;
   const createdGate = new Promise(resolve => { created = resolve; });
-  const terminal = { name: 'user original terminal', processId: new Promise(resolve => { ready = resolve; }), show() {}, sendText(text) { commands.push(text); } };
+  const processGate = new Promise(resolve => { processObserved = resolve; });
+  const readyGate = new Promise(resolve => { ready = resolve; });
+  let processReads = 0;
+  const terminal = { name: 'user original terminal', get processId() { processReads++; if (processReads >= 2) processObserved(); return readyGate; }, show() {}, sendText(text) { commands.push(text); }, dispose() { this.disposed = true; } };
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.launch = launchAgentConversationTerminal;
     const previousCall = autonomousRuntimeControl_1.sendRuntimeDataRequest;
@@ -821,7 +825,11 @@ test('production terminal delivery keeps the shell readiness gate and one durabl
   try {
     const input = { workspaceRoot: project, label: 'solo', conversationId: 1, nodeId: '__solo__', statusFilePath: `solomap://run-state/1?root=${encodeURIComponent(project)}`, runKind: 'solo', globalDataPath: root, command: prepared.finalCommand, agentCli: 'claude' };
     const first = extension.launch(input); const duplicate = extension.launch(input);
-    await createdGate; assert.deepEqual(commands, []);
+    await createdGate; await processGate; assert.deepEqual(commands, []);
+    t.mock.timers.tick(10_001);
+    for (let attempt = 0; attempt < 10; attempt++) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(creates, 1, 'a slow supported PTY must not be replaced on a fixed timer');
+    assert.equal(terminal.disposed, undefined);
     ready(process.pid); await Promise.all([first, duplicate]);
     assert.equal(creates, 1);
     const state = await ops({ operation: 'read_run_state', input: { projectId: prepared.projectId, executionLogId: 1 } });
@@ -977,7 +985,7 @@ test('the production terminal-close callback preserves a settled turn and closes
     module.exports.connect = (call, root, project, observed) => {
       autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
       activeProjectRoot = project; extensionContextRef = {}; getPersistedSettings = () => ({ globalDataPath: root });
-      agentTerminalNamesByConversationId.set(1, 'original terminal'); agentTerminalProjectRootsByConversationId.set(1, project);
+      setAgentTerminalBinding(project, 1, 'original terminal');
       processRegisteredStatusFile = async (_context, reference) => { observed.push(reference); };
     };
     module.exports.restore = () => { autonomousRuntimeControl_1.sendRuntimeDataRequest = previousCall; };
@@ -2123,6 +2131,123 @@ test('automatic sidebar card refresh scopes each status event to the project tha
   assert.deepEqual(calls, [['/workspace/selected']], 'one project event must not rebuild unrelated cards');
 });
 
+test('a delayed conversation delivery refreshes its originating project after the user switches projects', () => {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.post = postNodeConversations;
+    module.exports.connect = (provider, activeProject) => {
+      activeProjectRoot = activeProject;
+      syncEngine = { getAgentExecutions: () => { throw new Error('a foreign delivery must not read the selected project engine'); } };
+      activePanel = null;
+      sidebarProvider = provider;
+    };
+  `);
+  const refreshed = [];
+  extension.connect({ refreshProjectConversationSnapshotAfterStatusChange: projectPath => refreshed.push(projectPath) }, '/workspace/project-b');
+
+  extension.post('__solo__', [], true, '/workspace/project-a');
+
+  assert.deepEqual(refreshed, ['/workspace/project-a']);
+});
+
+test('every asynchronous conversation launch refresh stays bound to its originating project', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const functionBody = (name, nextName, nextAsync = true) => source.slice(
+    source.indexOf(`async function ${name}(`),
+    source.indexOf(`${nextAsync ? 'async ' : ''}function ${nextName}(`, source.indexOf(`async function ${name}(`) + 1)
+  );
+  const cases = [
+    ['handleRoadmapRevision', 'handleGenerateTimePlan'],
+    ['handleRunSoloConversation', 'getCurrentFlowTrace'],
+    ['handleRunAgent', 'extractUserSupplementFromExecutionOutput', false]
+  ];
+  for (const [name, nextName, nextAsync] of cases) {
+    const body = functionBody(name, nextName, nextAsync);
+    const refreshes = [...body.matchAll(/postNodeConversations\(([^;]+)\);/g)].map(match => match[1]);
+    assert.ok(refreshes.length > 0, `${name} must refresh conversation state`);
+    for (const refresh of refreshes) {
+      assert.match(refresh, /,\s*\[\],\s*true,\s*workspaceRoot\s*$/, `${name} must not refresh whichever project is active later`);
+    }
+  }
+});
+
+test('every conversation refresh call supplies an explicit project identity', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const calls = source.split('\n').filter(line => line.includes('postNodeConversations(') && !line.includes('function postNodeConversations('));
+  assert.ok(calls.length > 10);
+  for (const call of calls) {
+    assert.match(call, /,\s*(?:workspaceRoot|continuationProject|input\.workspaceRoot)\s*\);?\s*$/, call.trim());
+  }
+});
+
+test('native continuation keeps an independent project target while the visible project changes', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const actionStart = source.indexOf("'conversation.continue': async");
+  const actionBody = source.slice(actionStart, source.indexOf("'conversation.stop': async", actionStart));
+  const handlerStart = source.indexOf('async function handleContinueNativeConversation(');
+  const handlerBody = source.slice(handlerStart, source.indexOf('async function readAgentStatus(', handlerStart));
+
+  assert.match(actionBody, /captureRegisteredConversationLaunchTarget\(context, terminalProjectRoot\)/);
+  assert.match(actionBody, /handleContinueNativeConversation\(context, nodeId, conversationId, launchTarget\)/);
+  assert.match(actionBody, /finally \{ launchTarget\.engine\?\.close\(\); \}/);
+  assert.match(handlerBody, /target\?: AgentLaunchTarget/);
+  assert.match(handlerBody, /const projectSyncEngine = target\?\.engine \|\| syncEngine/);
+  assert.match(handlerBody, /resolveConversationNodeIdForContinuation\(nodeId, conversationId, projectSyncEngine\)/);
+  assert.match(handlerBody, /if \(!target && \(syncEngine !== projectSyncEngine \|\| activeProjectRoot !== workspaceRoot\)\) return;/);
+});
+
+test('conversation actions never reselect an older project after showing their terminal', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const commands = ['conversation.runStep', 'conversation.runSolo', 'timePlan.generate', 'conversation.continue',
+    'conversation.stop', 'conversation.retry', 'conversation.continueTurn', 'flow.run', 'project.continue'];
+  for (const command of commands) {
+    const start = source.indexOf(`'${command}': async`);
+    assert.ok(start > 0, command);
+    const next = source.indexOf("\n    '", start + 1);
+    const body = source.slice(start, next);
+    assert.doesNotMatch(body, /ensureActionProject\(/, `${command} must keep the user's newer project selection authoritative`);
+  }
+  assert.match(source, /captureRegisteredConversationLaunchTarget/);
+});
+
+test('message continuation resolves cleanup and terminal reuse from its captured project target', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const start = source.indexOf("'conversation.continueTurn': async");
+  const body = source.slice(start, source.indexOf("\n    'conversation.linkToStep'", start));
+  const captureIndex = body.indexOf('captureRegisteredConversationLaunchTarget(context, requestedProjectRoot)');
+  const cleanupIndex = body.indexOf('waitForAgentProcessCleanup(');
+  const reuseIndex = body.indexOf('findReusableAgentTerminal(');
+  assert.ok(captureIndex > 0 && captureIndex < cleanupIndex && captureIndex < reuseIndex,
+    'cleanup identity and reusable terminal lookup must come from the immutable launch target');
+  assert.match(body, /resolveContinuationRootConversationFromList\(conversations, conversationId\)/);
+  assert.doesNotMatch(body, /resolveContinuationRootConversation\(nodeId, conversationId\)/);
+});
+
+test('command-palette conversation launch keeps the project captured across terminal startup', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const start = source.indexOf("registerCommand('solopreneur.internalRunAgent'");
+  const body = source.slice(start, source.indexOf("registerCommand('solopreneur.internalStartConversation'", start));
+  const workspaceIndex = body.indexOf('const workspaceRoot =');
+  const captureIndex = body.indexOf('captureRegisteredConversationLaunchTarget(');
+  const terminalIndex = body.indexOf('revealAgentStartupTerminal(');
+  assert.ok(workspaceIndex > 0 && workspaceIndex < terminalIndex && captureIndex > terminalIndex);
+  assert.match(body, /handleRunAgent\([^;]+launchTarget/s);
+});
+
+test('captured project launches never read later settings or refresh another selected roadmap', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const section = (startName, endName) => {
+    const start = source.indexOf(`async function ${startName}(`);
+    return source.slice(start, source.indexOf(`async function ${endName}(`, start + 1));
+  };
+  const solo = section('handleRunSoloConversation', 'buildFlowPlannerPrompt');
+  const step = section('handleRunAgent', 'handleRetryConversation');
+  assert.match(solo, /const settings = target\?\.settings \|\| getPersistedSettings\(context\)/);
+  assert.match(step, /const settings = target\?\.settings \|\| getPersistedSettings\(context\)/);
+  assert.match(step, /const refreshActiveRoadmap = \(\) => \{/);
+  assert.doesNotMatch(step, /^\s*sendNodesToWebview\(\);/m,
+    'a background project launch must not rebuild the currently selected roadmap');
+});
+
 test('intelligence time schedules use the existing settings mutation and await its ledger synchronization', async () => {
   const project = '/workspace/alpha';
   const state = { patch: null, options: null, directScheduleCalls: 0 };
@@ -2758,7 +2883,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(script, /conversation\.getProjectSnapshot/);
   assert.doesNotMatch(script, /conversation\.getProjectHistory/);
   assert.match(script, /function mergePortfolioUpdate\(/);
-  assert.match(script, /case 'conversationActionSettled':[\s\S]*?pendingConversationContinuations\.delete/);
+  assert.match(script, /case 'conversationActionSettled':[\s\S]*?pendingConversationContinuations\.delete\(conversationContinuationKey/);
   assert.match(script, /checksCached/);
   assert.match(html, /id="dependency-panel"/);
   assert.match(html, /id="dependency-panel" style="display: none;/);
@@ -3950,7 +4075,8 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
     flowConversations: [],
     revisionConversations: [{ id: 91, nodeId: '__roadmap_revision__', status: 'Running' }]
   });
-  assert.match(elements['portfolio-list'].innerHTML, /推进 Alpha[\s\S]*?Agent 正在调整路线图/);
+  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /Agent 正在调整路线图/,
+    'a background snapshot for an unselected project must not rebuild the visible portfolio');
 });
 
 test('sidebar resolve survives persisted state and startup data failures', async () => {
@@ -8158,7 +8284,7 @@ test('local-first loading paints and launches before optional or durable work', 
   assert.match(sidebarWebviewSource, /isConversationCardInteractionActive\(\) \|\| isProjectComposerInteractionActive\(\)/);
   assert.match(sidebarWebviewSource, /compositionstart[\s\S]*?\.portfolio-card input[\s\S]*?projectComposerComposing = true/);
   assert.match(sidebarWebviewSource, /function renderPortfolioAfterAttachmentUpdate[\s\S]*?renderPortfolioFromAsyncUpdate/);
-  assert.match(sidebarWebviewSource, /case 'sidebarActionFailed':[\s\S]*?conversation\.runRoadmapRevision[\s\S]*?renderPortfolioFromAsyncUpdate[\s\S]*?break;[\s\S]*?pendingConversationContinuations\.clear/);
+  assert.match(sidebarWebviewSource, /case 'sidebarActionFailed':[\s\S]*?conversation\.continue[\s\S]*?pendingConversationContinuations\.delete\(conversationContinuationKey/);
 
   const dispatchBody = extensionSource.slice(
     extensionSource.indexOf('async function handleSharedWebviewAction'),
@@ -11169,6 +11295,91 @@ test('legacy and canonical webview commands dispatch through one plugin action c
   assert.equal(received[3].command, 'projectGrowth.refresh');
 });
 
+test('roadmap conversation entrypoints carry the visible project identity to the host', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/roadmapWebview.ts'), 'utf8');
+  for (const command of ['conversation.runStep', 'conversation.retry', 'conversation.continue', 'conversation.stop', 'conversation.linkToStep', 'flow.run', 'flow.pause', 'flow.abandon']) {
+    const calls = [...source.matchAll(new RegExp(`command: '${command.replace('.', '\\.')}'`, 'g'))];
+    assert.ok(calls.length > 0, `missing ${command} action`);
+    for (const call of calls) {
+      const payload = source.slice(call.index, source.indexOf('});', call.index) + 3);
+      assert.match(payload, /projectPath:\s*activeProjectPath/, `${command} must not fall back to whichever project the host last activated`);
+    }
+  }
+});
+
+test('sidebar step launch binds the clicked project before posting to the host', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
+  assert.match(source, /function runNodeAgent\(projectPath, nodeId, userMessage, agentCli, model, supplementFiles\)/);
+  const start = source.indexOf('function runNodeAgent(');
+  const body = source.slice(start, source.indexOf('\n    vscode.postMessage', start + 30));
+  assert.match(body, /projectPath:\s*projectPath/);
+  assert.match(source, /runNodeAgent\(projectPath, nodeId,/);
+  assert.match(source, /runNodeAgent\(currentProjects\.selectedProjectPath, node\.id,/);
+});
+
+test('project card continuation queues by captured project and fences stale navigation', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const start = source.indexOf("'project.continue': async");
+  const body = source.slice(start, source.indexOf("\n    'issue.getDetails'", start));
+  assert.match(body, /const requestedProjectRoot = [^;]+;[\s\S]*?const selectionGenerationAtRequest = projectSelectionGeneration;/);
+  assert.match(body, /enqueueProjectActionLaunch\(requestedProjectRoot,/);
+  assert.match(body, /projectSelectionGeneration !== selectionGenerationAtRequest/);
+});
+
+test('captured Flow settings and native cleanup stay on the launch target', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  assert.match(source, /waitForAgentProcessCleanup\(projectPath, rootConversationId, launchTarget\.globalDataPath\)/);
+  const flowStart = source.indexOf('async function startFlowRoleRun(');
+  const flowBody = source.slice(flowStart, source.indexOf('async function handleRunFlow(', flowStart));
+  assert.match(flowBody, /settings\?: SolopreneurSettings/);
+  assert.match(flowBody, /const settings = input\.settings \|\| getPersistedSettings\(context\)/);
+  const runFlowBody = source.slice(source.indexOf('async function handleRunFlow('), source.indexOf('async function linkSoloConversationToNode(', source.indexOf('async function handleRunFlow(')));
+  assert.match(runFlowBody, /\n\s+settings\s*\n\s*\}\);/);
+});
+
+test('terminal delivery resolves OpenCode credentials from the captured launch settings', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src', 'extension.ts'), 'utf8');
+  assert.match(source, /async function getOpenCodeTerminalEnvironment\([\s\S]*?settingsSnapshot\?: SolopreneurSettings/);
+  assert.match(source, /const settings = settingsSnapshot \|\| getPersistedSettings\(context\)/);
+  assert.match(source, /settings\?: SolopreneurSettings;[\s\S]*?getOpenCodeTerminalEnvironment\(input\.context, input\.agentCli, input\.model, input\.settings\)/);
+  assert.match(source, /async function deliverOrdinaryConversation\([\s\S]*?settings\?: SolopreneurSettings[\s\S]*?settings, command: prepared\.finalCommand/);
+  assert.match(source, /deliverOrdinaryConversation\(context, prepared, settings\)/);
+  assert.match(source, /function captureRegisteredConversationLaunchSnapshot\([\s\S]*?settings: \{ \.\.\.settings, globalDataPath \}/);
+  for (const command of ["'conversation.runStep': async", "'conversation.runSolo': async", "'timePlan.generate': async", "'flow.run': async", "'conversation.continue': async", "'conversation.retry': async", "'project.continue': async"]) {
+    const start = source.indexOf(command);
+    const end = source.indexOf("\n    '", start + command.length);
+    const body = source.slice(start, end < 0 ? source.length : end);
+    assert.ok(body.indexOf('captureRegisteredConversationLaunchSnapshot(') >= 0, `${command} must snapshot settings before terminal startup`);
+    assert.ok(body.indexOf('captureRegisteredConversationLaunchSnapshot(') < body.indexOf('revealAgentStartupTerminal('), `${command} must snapshot settings before its first terminal await`);
+  }
+});
+
+test('step launch keeps one settings snapshot while startup terminal readiness is pending', async () => {
+  const project = '/workspace/snapshot-a';
+  const settingsA = { globalDataPath: '/data/a', cliPath: 'opencode', openCodeProvider: 'provider-a', taskPermissionMode: 'auto', automationTasks: {} };
+  const settingsB = { ...settingsA, globalDataPath: '/data/b', openCodeProvider: 'provider-b' };
+  const observations = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.action=handleSharedWebviewAction;
+    module.exports.connect=(project,a,b,observe)=>{activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;let current=a;
+      getProjects=()=>[{path:project}];getSelectedProjectPath=()=>project;getPersistedSettings=()=>current;
+      revealAgentStartupTerminal=async(...args)=>{observe('terminal',args[5]);current=b;return {name:'snapshot terminal'};};
+      captureConversationLaunchTarget=async(_context,workspaceRoot,globalDataPath,settings)=>{observe('target',settings);return {workspaceRoot,globalDataPath,settings,engine:{close(){}}};};
+      handleRunAgent=async(...args)=>{observe('run',args[8].settings);};};
+  `);
+  extension.connect(project, settingsA, settingsB, (stage, settings) => observations.push({ stage, settings: { ...settings } }));
+  assert.equal(await extension.action({}, { command: 'conversation.runStep', projectPath: project, nodeId: '3', agentCli: 'opencode' }, 'roadmap', { postMessage() { return Promise.resolve(true); } }), true);
+  assert.deepEqual(observations.map(entry => entry.stage), ['terminal', 'target', 'run']);
+  assert.ok(observations.every(entry => entry.settings.globalDataPath === '/data/a/.solomap-global' && entry.settings.openCodeProvider === 'provider-a'), JSON.stringify(observations));
+});
+
+test('foreign sidebar failures cannot clear the selected project attachment state', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
+  const start = source.indexOf("case 'sidebarActionFailed':");
+  const body = source.slice(start, source.indexOf("case 'roadmapRevisionLaunchRegistered':", start));
+  assert.ok(body.indexOf("message.projectPath !== currentProjects.selectedProjectPath") < body.indexOf('Object.keys(pendingPastedAttachments)'));
+});
+
 test('sidebar conversation controls are scoped to one history tree', () => {
   const sidebarSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
 
@@ -11266,7 +11477,7 @@ test('agent launch path uses one terminal-first startup component', async t => {
   const events = [];
   let resolveShell, resolveShown;
   const shown = new Promise(resolve => { resolveShown = resolve; });
-  const terminal = { name: 'Owned test terminal', processId: new Promise(resolve => { resolveShell = resolve; }), show() { events.push('show'); resolveShown(); }, sendText(command) { events.push(command); } };
+  const terminal = { name: 'Owned test terminal', processId: new Promise(resolve => { resolveShell = resolve; }), show(preserveFocus) { events.push(`show:${preserveFocus}`); resolveShown(); }, sendText(command) { events.push(command); } };
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.launch = launchAgentConversationTerminal;
     module.exports.connect = (terminal, events, project) => {
@@ -11279,7 +11490,7 @@ test('agent launch path uses one terminal-first startup component', async t => {
   const input = { workspaceRoot: project, label: 'Solo', conversationId: 1, nodeId: '__solo__', statusFilePath: require('../out/runLifecycleClient.js').runStatusReference(project, 1), runKind: 'solo', globalDataPath: root, command: 'fixture-command', agentCli: 'claude', refreshNodeId: '__solo__' };
   const first = extension.launch(input), concurrent = extension.launch(input);
   await shown;
-  assert.deepEqual(events, ['create', 'show'], 'the terminal must be visible while its shell is not ready');
+  assert.deepEqual(events, ['create', 'show:false'], 'the target terminal must be selected so a lazy remote PTY actually starts');
   const claimed = await native.ops({ operation: 'read_run_state', input: { root: project, executionLogId: 1 } });
   assert.ok(claimed.status.deliveryOwnerId, 'the formal run must have a delivery owner before the terminal command');
   assert.equal(claimed.status.terminalCommandSubmittedAt, undefined);
@@ -11290,13 +11501,56 @@ test('agent launch path uses one terminal-first startup component', async t => {
   assert.equal(delivered.status.terminalName, terminal.name);
   assert.ok(delivered.status.terminalCommandSubmittedAt);
   assert.equal(events.length, 4);
-  assert.match(events[2], /^SOLOMAP_TERMINAL_DELIVERY_ID=.+ fixture-command$/);
+  assert.match(events[2], /^SOLOMAP_DIAGNOSTIC_TRACE_ID=.+ SOLOMAP_DELIVERY_STARTED_AT=.+ SOLOMAP_TERMINAL_DELIVERY_ID=.+ fixture-command$/);
   assert.equal(events[3], 'refresh:__solo__', 'history must refresh after successful command delivery');
   assert.equal(await extension.launch(input), terminal);
   assert.equal(events.filter(item => item === 'create').length, 1);
   assert.equal(events.filter(item => /fixture-command$/.test(item)).length, 1, 'concurrent and later retries must not submit a second command');
   assert.equal(fs.existsSync(path.join(project, '.solopreneur', 'agent-runs')), false);
   assert.equal(fs.existsSync(path.join(root, 'active-conversations')), false);
+});
+
+test('startup terminal selects its own project terminal instead of preserving another project tab', async () => {
+  const shown = [];
+  const terminal = { name: 'Project B startup', show: preserveFocus => shown.push(preserveFocus), dispose() {} };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.reveal = revealAgentStartupTerminal;
+    module.exports.connect = terminal => {
+      extensionContextRef = { extensionPath: ${JSON.stringify(projectRoot)}, extensionUri: vscode.Uri.file(${JSON.stringify(projectRoot)}) };
+      getPersistedSettings = () => ({ cliPath: 'codex' });
+      getOpenCodeTerminalEnvironment = async () => undefined;
+      vscode.window.createTerminal = () => terminal;
+    };
+  `);
+  extension.connect(terminal);
+  await extension.reveal({}, '/workspace/project-b', 'solo', 'codex');
+  assert.deepEqual(shown, [false], 'preserving focus leaves the previously active project terminal selected and its lazy PTY unopened');
+});
+
+test('terminal lookup rejects a colliding conversation id owned by another project', async () => {
+  const projectA = '/workspace/project-a', projectB = '/workspace/project-b';
+  const terminalA = { name: 'Project A terminal' }, terminalB = { name: 'Project B terminal' };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.find = (project, id) => findActiveAgentTerminal(id, project);
+    module.exports.remove = deleteAgentTerminalBinding;
+    module.exports.connect = (projectA, projectB, terminalA, terminalB) => {
+      activeProjectRoot = projectA;
+      setAgentTerminalBinding(projectA, 41, terminalA.name);
+      setAgentTerminalBinding(projectB, 41, terminalB.name);
+      setAgentTerminalBinding(projectB, 9, terminalB.name);
+      vscode.window.terminals.push(terminalA, terminalB);
+      findAgentStatusForConversation = async (workspaceRoot, conversationId) => {
+        if (conversationId === 41) return { terminalName: workspaceRoot === projectA ? terminalA.name : terminalB.name, rootExecutionLogId: 41 };
+        return { rootExecutionLogId: 9 };
+      };
+    };
+  `);
+  extension.connect(projectA, projectB, terminalA, terminalB);
+  assert.equal(await extension.find(projectA, 41), terminalA);
+  assert.equal(await extension.find(projectB, 41), terminalB);
+  extension.remove(projectA, 41);
+  assert.equal(await extension.find(projectB, 41), terminalB, 'removing project A must preserve project B same-numbered ownership');
+  assert.equal(await extension.find(projectA, 42), undefined, 'a foreign root-conversation mapping must not be used as a fallback');
 });
 
 test('a closed startup reservation cannot consume the next Agent launch command', () => {
@@ -16934,12 +17188,12 @@ test('stopping an Agent run records the user decision on the active conversation
     await native.ops({operation:'append_run_log',input:{projectId:run.projectId,executionLogId:11,generation:run.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:'user-stop-output'}});
     let disposed = 0;
     const extension = loadCompiledModule('out/extension.js', `
-      module.exports.stop=stopAgentRun;module.exports.settle=processAgentStatusFile;
-      module.exports.owned=id=>agentTerminalNamesByConversationId.has(id)||agentTerminalProjectRootsByConversationId.has(id);
+      let connectedProject;module.exports.stop=stopAgentRun;module.exports.settle=processAgentStatusFile;
+      module.exports.owned=id=>Boolean(getAgentTerminalBinding(connectedProject,id));
       module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
-      module.exports.connect=(engine,project,root,terminal)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
+      module.exports.connect=(engine,project,root,terminal)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
         getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
-        agentTerminalNamesByConversationId.set(11,terminal.name);agentTerminalProjectRootsByConversationId.set(11,project);vscode.window.terminals.push(terminal);};
+        setAgentTerminalBinding(project,11,terminal.name);vscode.window.terminals.push(terminal);};
     `, {'./db/syncEngine':require('../out/db/syncEngine.js'),'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js')});
     extension.connect(engine,project,root,{name:'solomap owned stop test',dispose(){assert.equal(extension.owned(11),false,'terminal ownership must be cleared before dispose/close callback');assert.notEqual(wrapper.signalCode,null,'Runtime must stop the owned process before terminal disposal');disposed++;}});
     await extension.stop(nodeId,11);await ended;await extension.drain();assert.equal(disposed,1);assert.equal(wrapper.signalCode,'SIGTERM');assert.equal(extension.owned(11),false);
@@ -16986,12 +17240,12 @@ test('a closed interactive conversation cannot reuse its stale terminal when con
   const before = await require('../out/runWorkspace.js').snapshotWorkspace(project);
   await native.ops({operation:'write_run_document',input:{projectId:run.projectId,executionLogId:336,generation:run.generation,turnId:run.turnId,purpose:require('../out/runWorkspace.js').workspaceDocumentPurpose(run.turnId,'before'),bytes:Buffer.from(JSON.stringify(before)).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:'stale-terminal-before'}});
   const extension = loadCompiledModule('out/extension.js', `
-    module.exports.reuse=findReusableAgentTerminal;module.exports.settle=processAgentStatusFile;
-    module.exports.owned=id=>agentTerminalNamesByConversationId.has(id)&&agentTerminalProjectRootsByConversationId.has(id);
+    let connectedProject;module.exports.reuse=findReusableAgentTerminal;module.exports.settle=processAgentStatusFile;
+    module.exports.owned=id=>Boolean(getAgentTerminalBinding(connectedProject,id));
     module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
-    module.exports.connect=(engine,project,root,terminal,foreignTerminal)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
+    module.exports.connect=(engine,project,root,terminal,foreignTerminal)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
       getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
-      agentTerminalNamesByConversationId.set(336,terminal.name);agentTerminalProjectRootsByConversationId.set(336,project);vscode.window.terminals.push(terminal,foreignTerminal);};
+      setAgentTerminalBinding(project,336,terminal.name);vscode.window.terminals.push(terminal,foreignTerminal);};
   `, {'./db/syncEngine':require('../out/db/syncEngine.js'),'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js')});
   extension.connect(engine,project,root,terminal,foreignTerminal);
   assert.equal(await extension.reuse(project,336),terminal);assert.equal(await extension.reuse(project,336,root),terminal);
@@ -17059,15 +17313,15 @@ test('continuing a stopped interactive conversation opens a new terminal and set
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;
     module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
-    module.exports.reservations=project=>reservedAgentTerminalsByProject.get(project)?.length||0;
-    module.exports.owned=id=>({name:agentTerminalNamesByConversationId.get(id),root:agentTerminalProjectRootsByConversationId.get(id)});
-    module.exports.connect=(engine,project,root,stale,create,prepare,reportError)=>{syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
+    let connectedProject;module.exports.reservations=project=>reservedAgentTerminalsByProject.get(project)?.length||0;
+    module.exports.owned=id=>{const b=getAgentTerminalBinding(connectedProject,id);return {name:b?.terminalName,root:b?.workspaceRoot};};
+    module.exports.connect=(engine,project,root,stale,create,prepare,reportError)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
       getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
       agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';getOpenCodeTerminalEnvironment=async()=>({});
       ensureActionProject=async(_context,requested)=>{if(requested!==project)throw new Error('unexpected selected project');return project;};
       prepareOrdinaryConversation=prepare;vscode.window.createTerminal=create;vscode.window.showErrorMessage=reportError;
       sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
-      agentTerminalNamesByConversationId.set(336,stale.name);agentTerminalProjectRootsByConversationId.set(336,project);vscode.window.terminals.push(stale);
+      setAgentTerminalBinding(project,336,stale.name);vscode.window.terminals.push(stale);
       const factory=create;vscode.window.createTerminal=options=>{const terminal=factory(options);vscode.window.terminals.push(terminal);return terminal;};};
   `,{'./autonomousRuntimeControl':{...require('../out/autonomousRuntimeControl.js'),sendRuntimeDataRequest:async(dataRoot,request)=>{
     launchReads.push(request);return require('../out/autonomousRuntimeControl.js').sendRuntimeDataRequest(dataRoot,request);
@@ -17150,16 +17404,16 @@ test('continuing an earlier turn opens a new session terminal once for concurren
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;
     module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
-    module.exports.reservations=project=>reservedAgentTerminalsByProject.get(project)?.length||0;
-    module.exports.owned=id=>({name:agentTerminalNamesByConversationId.get(id),root:agentTerminalProjectRootsByConversationId.get(id)});
-    module.exports.connect=(engine,project,root,oldTerminal,create,prepare,reportError,recordRegistration)=>{syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
+    let connectedProject;module.exports.reservations=project=>reservedAgentTerminalsByProject.get(project)?.length||0;
+    module.exports.owned=id=>{const b=getAgentTerminalBinding(connectedProject,id);return {name:b?.terminalName,root:b?.workspaceRoot};};
+    module.exports.connect=(engine,project,root,oldTerminal,create,prepare,reportError,recordRegistration)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
       getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
       agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';getOpenCodeTerminalEnvironment=async()=>({});
       ensureActionProject=async(_context,requested)=>{if(requested!==project)throw new Error('unexpected selected project');return project;};
       const originalRegister=registerInteractiveConversationTurn;registerInteractiveConversationTurn=async(...args)=>{recordRegistration(args);return originalRegister(...args);};
       prepareOrdinaryConversation=prepare;vscode.window.showErrorMessage=reportError;
       sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
-      agentTerminalNamesByConversationId.set(336,oldTerminal.name);agentTerminalProjectRootsByConversationId.set(336,project);vscode.window.terminals.push(oldTerminal);
+      setAgentTerminalBinding(project,336,oldTerminal.name);vscode.window.terminals.push(oldTerminal);
       vscode.window.createTerminal=options=>{const terminal=create(options);vscode.window.terminals.push(terminal);return terminal;};};
   `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
   extension.connect(engine,project,root,oldTerminal,options=>{const terminal={name:options.name,show(){terminal.shown=(terminal.shown||0)+1;},sendText(text){sent.push({terminal,text});},dispose(){terminal.disposed=true;}};created.push({options,terminal});return terminal;},
@@ -17260,7 +17514,7 @@ test('native continuation stops old lineage processes before launching the same 
         getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
         agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';getOpenCodeTerminalEnvironment=async()=>({});prepareOrdinaryConversation=prepare;
         sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
-        agentTerminalNamesByConversationId.set(336,oldTerminal.name);agentTerminalProjectRootsByConversationId.set(336,project);
+        setAgentTerminalBinding(project,336,oldTerminal.name);
         vscode.window.terminals.push({name:oldTerminal.name,creationOptions:{cwd:project+'/foreign'},show(){throw new Error('must not reveal same-name foreign project');},dispose(){throw new Error('must not dispose same-name foreign project');}},
           {name:oldTerminal.name,creationOptions:{cwd:project,env:{SOLOMAP_GLOBAL_DATA_PATH:root+'/foreign'}},show(){throw new Error('must not reveal same-name foreign data root');},dispose(){throw new Error('must not dispose same-name foreign data root');}},oldTerminal);
         vscode.window.createTerminal=()=>{vscode.window.terminals.push(startup);return startup;};};
@@ -17345,12 +17599,12 @@ test('continuing a conversation never reuses a same-numbered terminal from anoth
     module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;module.exports.find=findReusableAgentTerminal;
     module.exports.select=(engine,project)=>{syncEngine=engine;activeProjectRoot=project;};
     module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
-    module.exports.owned=id=>({name:agentTerminalNamesByConversationId.get(id),root:agentTerminalProjectRootsByConversationId.get(id)});
-    module.exports.connect=(engine,projectA,projectB,root,terminalA,terminalB,create,prepare,error)=>{syncEngine=engine;activeProjectRoot=projectB;sidebarProvider=null;extensionContextRef=null;
+    let connectedProjectA;module.exports.owned=id=>{const b=getAgentTerminalBinding(connectedProjectA,id);return {name:b?.terminalName,root:b?.workspaceRoot};};
+    module.exports.connect=(engine,projectA,projectB,root,terminalA,terminalB,create,prepare,error)=>{connectedProjectA=projectA;syncEngine=engine;activeProjectRoot=projectB;sidebarProvider=null;extensionContextRef=null;
       getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
       agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';getOpenCodeTerminalEnvironment=async()=>({});prepareOrdinaryConversation=prepare;vscode.window.showErrorMessage=error;
       ensureActionProject=async(_context,requested)=>{if(requested!==projectB)throw new Error('wrong selected project');return projectB;};sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
-      agentTerminalNamesByConversationId.set(336,terminalA.name);agentTerminalProjectRootsByConversationId.set(336,projectA);vscode.window.terminals.push(terminalA,terminalB);
+      setAgentTerminalBinding(projectA,336,terminalA.name);vscode.window.terminals.push(terminalA,terminalB);
       vscode.window.createTerminal=options=>{const terminal=create(options);vscode.window.terminals.push(terminal);return terminal;};};
   `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});
   extension.connect(engine,projectA,projectB,root,terminalA,terminalB,options=>{const terminal={name:options.name,show(){terminal.shown=(terminal.shown||0)+1;},sendText(text){if(text.includes('SOLOMAP_TERMINAL_DELIVERY_ID=')){assert.equal(live(wrappers[0]),true);assert.equal(live(wrappers[1]),false);}sent.push({terminal,text});},dispose(){terminal.disposed=true;}};created.push({options,terminal});return terminal;},async(_context,input)=>{assert.equal(input.workspaceRoot,projectB);assert.equal(live(wrappers[0]),true);assert.equal(live(wrappers[1]),false);const prepared=await prepareControlledClaudeRun({...input,launchIntentId:'cross-project-resume-button'},operation);preparedRuns.push(prepared);return prepared;},message=>errors.push(message));
@@ -17408,7 +17662,7 @@ test('window reload keeps a running Agent conversation recoverable', async t => 
     module.exports.subscribe=context=>{${registration}};
     module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};
     module.exports.closed=handleAgentTerminalClosed;module.exports.launch=launchAgentConversationTerminal;module.exports.find=findReusableAgentTerminal;module.exports.snapshot=getProjectConversationSnapshotForProject;module.exports.settle=processAgentStatusFile;
-    module.exports.owned=()=>({names:agentTerminalNamesByConversationId.size,roots:agentTerminalProjectRootsByConversationId.size,targets:agentTerminalRunTargets.size});
+    module.exports.owned=()=>({names:agentTerminalBindings.size,roots:agentTerminalBindings.size,targets:agentTerminalRunTargets.size});
     module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
     module.exports.connect=(engine,project,root,terminals,factory)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef=null;sidebarProvider=null;getProjects=()=>[{path:project}];
       getPersistedSettings=()=>({globalDataPath:root,automationTasks:{},collaborationReviewMode:'off'});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
@@ -17459,7 +17713,7 @@ test('closing an interactive terminal terminates its tracked Agent process befor
       module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};
       module.exports.launch=launchAgentConversationTerminal;module.exports.settle=processAgentStatusFile;
       module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
-      module.exports.owned=()=>({names:agentTerminalNamesByConversationId.size,roots:agentTerminalProjectRootsByConversationId.size,targets:agentTerminalRunTargets.size});
+      module.exports.owned=()=>({names:agentTerminalBindings.size,roots:agentTerminalBindings.size,targets:agentTerminalRunTargets.size});
       module.exports.connect=(engine,project,root,create,observe)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef=null;sidebarProvider=null;
         getPersistedSettings=()=>({globalDataPath:root,automationTasks:{},collaborationReviewMode:'off'});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
         vscode.window.createTerminal=create;vscode.window.onDidCloseTerminal=callback=>{closeCallback=callback;return {dispose(){}};};
@@ -17511,7 +17765,7 @@ test('closing a terminal after switching projects keeps the persisted conversati
     module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};
     module.exports.launch=launchAgentConversationTerminal;module.exports.settle=processAgentStatusFile;
     module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
-    module.exports.owned=()=>({names:agentTerminalNamesByConversationId.size,roots:agentTerminalProjectRootsByConversationId.size,targets:agentTerminalRunTargets.size});
+    module.exports.owned=()=>({names:agentTerminalBindings.size,roots:agentTerminalBindings.size,targets:agentTerminalRunTargets.size});
     module.exports.enableBackground=()=>{extensionContextRef={extensionPath:${JSON.stringify(projectRoot)},extensionUri:{fsPath:${JSON.stringify(projectRoot)}}};};
     module.exports.switch=(engine,workspace)=>{syncEngine=engine;activeProjectRoot=workspace;};
     module.exports.connect=(engine,workspace,root,create,observe)=>{syncEngine=engine;activeProjectRoot=workspace;extensionContextRef=null;sidebarProvider=null;
@@ -17568,8 +17822,8 @@ test('continuing a root conversation immediately after its continuation terminal
     module.exports.subscribe=context=>{${registration}};module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};
     module.exports.launch=launchAgentConversationTerminal;module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;
     module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
-    module.exports.reservations=project=>reservedAgentTerminalsByProject.get(project)?.length||0;module.exports.owned=id=>({name:agentTerminalNamesByConversationId.get(id),root:agentTerminalProjectRootsByConversationId.get(id)});
-    module.exports.connect=(engine,project,root,create,prepare,reportError)=>{syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
+    let connectedProject;module.exports.reservations=project=>reservedAgentTerminalsByProject.get(project)?.length||0;module.exports.owned=id=>{const b=getAgentTerminalBinding(connectedProject,id);return {name:b?.terminalName,root:b?.workspaceRoot};};
+    module.exports.connect=(engine,project,root,create,prepare,reportError)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
       getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
       agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';getOpenCodeTerminalEnvironment=async()=>({});
       ensureActionProject=async(_context,requested)=>{if(requested!==project)throw new Error('unexpected selected project');return project;};prepareOrdinaryConversation=prepare;vscode.window.showErrorMessage=reportError;
@@ -17611,7 +17865,7 @@ test('a delayed terminal close preserves a checkpoint arriving during process cl
     const originalClosed=handleAgentTerminalClosed,closedPromises=[];let closeCallback;
     handleAgentTerminalClosed=(...args)=>{const promise=originalClosed(...args);closedPromises.push(promise);return promise;};
     module.exports.subscribe=context=>{${registration}};module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};module.exports.launch=launchAgentConversationTerminal;module.exports.settle=processAgentStatusFile;
-    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};module.exports.owned=()=>({names:agentTerminalNamesByConversationId.size,roots:agentTerminalProjectRootsByConversationId.size,targets:agentTerminalRunTargets.size});
+    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};module.exports.owned=()=>({names:agentTerminalBindings.size,roots:agentTerminalBindings.size,targets:agentTerminalRunTargets.size});
     module.exports.connect=(engine,project,root,create,observe)=>{syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
       getPersistedSettings=()=>({globalDataPath:root,automationTasks:{},collaborationReviewMode:'off'});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
       vscode.window.createTerminal=create;vscode.window.onDidCloseTerminal=callback=>{closeCallback=callback;return {dispose(){}};};const originalConsumer=processRegisteredStatusFile;processRegisteredStatusFile=async(...args)=>{await observe(args);return originalConsumer(...args);};};
@@ -17687,10 +17941,10 @@ test('stopping a continuation records it without marking the task failed', async
     let closingSeen=false;for(let index=0;index<3;index++){const program=index===0?"let closing=false;process.on('SIGTERM',()=>{if(closing)return;closing=true;process.stdout.write('closing');setTimeout(()=>process.exit(0),350)});process.stdout.write('ready');setInterval(()=>{},1000)":"process.stdout.write('ready');setInterval(()=>{},1000)";const writer=childProcess.spawn(process.execPath,['-e',program],{cwd:index===2?other:project,stdio:'pipe'});writers.push(writer);await once(writer.stdout,'data');writer.stdout.on('data',bytes=>{if(index===0&&bytes.toString().includes('closing'))closingSeen=true;});writer.stderr.resume();}
     let childStatus=await client.readStatus(ref(project,31));await client.writeStatus(ref(project,31),{...childStatus,agentPid:writers[0].pid,processBirth:getProcessBirthMarker(writers[0].pid)});for(const [workspace,id,writer] of [[project,13,writers[1]],[other,31,writers[2]]])await operation('prepare_run',{root:workspace,executionLogId:id,nodeId,runKind:'step',prompt:'其它原任务',command:'controlled peer writer',userMessage:'其它对话不能停止',metadata:{interactiveSession:true,agentCli:'claude',collaborationReviewMode:'off',agentPid:writer.pid,processBirth:getProcessBirthMarker(writer.pid)},idempotencyKey:`stop-continuation-peer:${workspace}:${id}`});
     let disposed=0;const errors=[],terminal={name:'solomap owned continuation',dispose(){assert.equal(extension.owned(31),false,'ownership clears before terminal disposal');assert.equal(live(writers[0]),false,'owned writer must exit before terminal disposal');disposed++;}},extension=loadCompiledModule('out/extension.js',`
-      module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;module.exports.stop=stopAgentRun;
-      module.exports.owned=id=>agentTerminalNamesByConversationId.has(id)||agentTerminalProjectRootsByConversationId.has(id);
+      let connectedProject;module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;module.exports.stop=stopAgentRun;
+      module.exports.owned=id=>Boolean(getAgentTerminalBinding(connectedProject,id));
       module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
-      module.exports.connect=(engine,project,root,terminal,error)=>{syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};ensureActionProject=async(_context,target)=>{if(target!==project)throw new Error('unexpected selected project');return project;};vscode.window.showErrorMessage=error;agentTerminalNamesByConversationId.set(31,terminal.name);agentTerminalProjectRootsByConversationId.set(31,project);vscode.window.terminals.push(terminal);};
+      module.exports.connect=(engine,project,root,terminal,error)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};ensureActionProject=async(_context,target)=>{if(target!==project)throw new Error('unexpected selected project');return project;};vscode.window.showErrorMessage=error;setAgentTerminalBinding(project,31,terminal.name);vscode.window.terminals.push(terminal);};
     `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./solomapGlobal':require('../out/solomapGlobal.js'),'./projectGrowth':require('../out/projectGrowth.js')});extension.connect(engine,project,root,terminal,message=>errors.push(message));await extension.settle(ref(project,29),undefined,root);await extension.drain();
     const snapshot=async(workspace,id)=>{const reference=ref(workspace,id),state=await read(workspace,id),status=await client.readStatus(reference);return {state,journal:await client.readJournal(reference,status),settlements:await client.readSettlements(reference,status),binding:await client.readBinding(reference),report:await client.readReport(reference,status)};};const saved=new Map();for(const [workspace,id] of [[project,29],[project,31],[project,13],[other,31]])saved.set(`${workspace}:${id}`,await snapshot(workspace,id));assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(saved.get(`${project}:31`).state.status.interactiveSession,true);assert.equal((await client.getResumableSession(ref(project,31))).sessionId,prepared.status.plannedNativeSessionId);
     for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await snapshot(project,29),saved.get(`${project}:29`));for(const id of [29,31])assert.equal((await client.readLog(ref(project,id),'stdout')).toString('utf8'),outputs.get(id));const hash=bytes=>require('node:crypto').createHash('sha256').update(bytes).digest('hex'),walPath=path.join(root,'solomap.db-wal'),beforeWrong=hash(fs.readFileSync(walPath));await extension.stop('not-the-requested-node',31);assert.equal(hash(fs.readFileSync(walPath)),beforeWrong);assert.ok(writers.every(live));assert.equal(disposed,0);
@@ -17714,10 +17968,10 @@ test('closing a continuation terminal records the conversation as stopped', asyn
     const errors=[],sent=[],consumerEntries=[],terminal={name:'solomap owned continuation',exitStatus:{reason:3},show(){},sendText(text){sent.push(text);},dispose(){assert.fail('OS close must not dispose a terminal');}};const compiled=fs.readFileSync(path.join(projectRoot,'out/extension.js'),'utf8'),registrationStart=compiled.indexOf("    if (typeof vscode.window.onDidCloseTerminal === 'function') {"),registrationEnd=compiled.indexOf('\n    // Register settings saved broadcast',registrationStart);assert.ok(registrationStart>=0&&registrationEnd>registrationStart);const registration=compiled.slice(registrationStart,registrationEnd),extension=loadCompiledModule('out/extension.js',`
       const originalClosed=handleAgentTerminalClosed,closedPromises=[];let closeCallback;handleAgentTerminalClosed=(...args)=>{const promise=originalClosed(...args);closedPromises.push(promise);return promise;};
       module.exports.subscribe=context=>{${registration}};module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};module.exports.closed=originalClosed;module.exports.launch=launchAgentConversationTerminal;module.exports.target=terminal=>agentTerminalRunTargets.get(terminal);module.exports.targetCount=()=>agentTerminalRunTargets.size;module.exports.shutdownReason=vscode.TerminalExitReason.Shutdown;
-      module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;module.exports.stop=stopAgentRun;
-      module.exports.owned=id=>agentTerminalNamesByConversationId.has(id)||agentTerminalProjectRootsByConversationId.has(id);
+      let connectedProject;module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;module.exports.stop=stopAgentRun;
+      module.exports.owned=id=>Boolean(getAgentTerminalBinding(connectedProject,id));
       module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
-      module.exports.connect=(engine,project,root,terminal,error,observe)=>{syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};ensureActionProject=async(_context,target)=>{if(target!==project)throw new Error('unexpected selected project');return project;};vscode.window.showErrorMessage=error;vscode.window.createTerminal=options=>{terminal.name=options.name;vscode.window.terminals.push(terminal);return terminal;};vscode.window.onDidCloseTerminal=callback=>{closeCallback=callback;return {dispose(){}};};const originalConsumer=processRegisteredStatusFile;processRegisteredStatusFile=async(...args)=>{await observe(args);return originalConsumer(...args);};};
+      module.exports.connect=(engine,project,root,terminal,error,observe)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};ensureActionProject=async(_context,target)=>{if(target!==project)throw new Error('unexpected selected project');return project;};vscode.window.showErrorMessage=error;vscode.window.createTerminal=options=>{terminal.name=options.name;vscode.window.terminals.push(terminal);return terminal;};vscode.window.onDidCloseTerminal=callback=>{closeCallback=callback;return {dispose(){}};};const originalConsumer=processRegisteredStatusFile;processRegisteredStatusFile=async(...args)=>{await observe(args);return originalConsumer(...args);};};
     `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./solomapGlobal':require('../out/solomapGlobal.js'),'./projectGrowth':require('../out/projectGrowth.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});extension.connect(engine,project,root,terminal,message=>errors.push(message),async args=>{assert.equal(live(writers[0]),false,'writer must exit before closure consumer');assert.equal(args[1],ref(project,31));assert.equal(args[4],root);consumerEntries.push(args);});extension.subscribe({subscriptions:[]});assert.equal(await extension.launch({workspaceRoot:project,label:kind,conversationId:31,nodeId,statusFilePath:ref(project,31),runKind:kind,globalDataPath:root,command:child.finalCommand,agentCli:'claude'}),terminal);const delivered=await read(project,31);await operation('claim_run',{root:project,executionLogId:31,expectedRevision:delivered.revision,agentPid:writers[0].pid,processBirth:getProcessBirthMarker(writers[0].pid),terminalDeliveryId:delivered.status.terminalDeliveryId,idempotencyKey:'close-continuation-controlled-writer-claim'});assert.equal(sent.filter(text=>text.includes('SOLOMAP_TERMINAL_DELIVERY_ID=')).length,1);assert.ok(sent.some(text=>text.endsWith(child.finalCommand)));assert.equal(extension.targetCount(),1);await extension.settle(ref(project,29),undefined,root);await extension.drain();
     const snapshot=async(workspace,id)=>{const reference=ref(workspace,id),state=await read(workspace,id),status=await client.readStatus(reference);return {state,journal:await client.readJournal(reference,status),settlements:await client.readSettlements(reference,status),binding:await client.readBinding(reference),report:await client.readReport(reference,status)};};const saved=new Map();for(const [workspace,id] of [[project,29],[project,31],[project,13],[other,31]])saved.set(`${workspace}:${id}`,await snapshot(workspace,id));assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(saved.get(`${project}:31`).state.status.interactiveSession,true);assert.equal((await client.getResumableSession(ref(project,31))).sessionId,prepared.status.plannedNativeSessionId);
     for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await snapshot(project,29),saved.get(`${project}:29`));for(const id of [29,31])assert.equal((await client.readLog(ref(project,id),'stdout')).toString('utf8'),outputs.get(id));const hash=bytes=>require('node:crypto').createHash('sha256').update(bytes).digest('hex'),walPath=path.join(root,'solomap.db-wal'),beforeWrong=hash(fs.readFileSync(walPath));terminal.exitStatus.reason=extension.shutdownReason;assert.deepEqual([...await extension.emit(terminal)],[false]);terminal.exitStatus.reason=3;assert.equal(await extension.closed(terminal.name,3,{...extension.target(terminal),generation:saved.get(`${project}:31`).state.generation+2}),false);assert.equal(hash(fs.readFileSync(walPath)),beforeWrong);assert.ok(writers.every(live));assert.equal(extension.owned(31),true);assert.equal(extension.targetCount(),1);
@@ -18736,10 +18990,10 @@ test('Flow pause and abandon commands work correctly', async t => {
   const messages = [], context = {}, panel = { webview: { postMessage: async message => { messages.push(message); return true; } } };
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.action = handleSharedWebviewAction;
-    module.exports.connect = (project, root, panel) => { activeProjectRoot = project; extensionContextRef = {}; activePanel = panel; sidebarProvider = null; getPersistedSettings = () => ({ globalDataPath: root }); hasFlowModeAccess = async () => true; };
+    module.exports.connect = (project, root, panel) => { activeProjectRoot = project; extensionContextRef = {}; activePanel = panel; sidebarProvider = null; getProjects = () => project ? [{ path: project }] : []; getPersistedSettings = () => ({ globalDataPath: root }); hasFlowModeAccess = async () => true; };
   `, { './autonomousRuntimeControl': transport, './flowStore': flowStore });
   extension.connect(project, root, panel);
-  const action = command => extension.action(context, { command, flowId: trace.flowId }, 'roadmap', panel.webview);
+  const action = command => extension.action(context, { command, flowId: trace.flowId, projectPath: project }, 'roadmap', panel.webview);
   assert.deepEqual([...await Promise.all([action('pauseFlow'), action('flow.pause')])], [true, true]);
   const paused = await state();
   assert.equal(paused.flow.status, 'paused'); assert.match(paused.flow.latestSummary, /暂停推进/);
@@ -18787,7 +19041,7 @@ test('Flow pause and abandon commands work correctly', async t => {
   const beforeNegative = hash(fs.readFileSync(wal));
   assert.equal(await extension.action(context, { command: 'pauseFlow' }, 'roadmap', panel.webview), true);
   assert.equal(await extension.action(context, { command: 'flow.abandon', flowId: 'not-registered' }, 'roadmap', panel.webview), true);
-  extension.connect('', root, panel); assert.equal(await action('flow.pause'), true);
+  extension.connect('', root, panel); assert.equal(await extension.action(context, { command: 'flow.pause', flowId: trace.flowId }, 'roadmap', panel.webview), true);
   assert.equal(hash(fs.readFileSync(wal)), beforeNegative); assert.deepEqual(await state(), abandoned);
   assert.deepEqual(await call('read_flow_trace', { root: project, flowId: peer.flowId }), peerBefore);
   assert.deepEqual(await call('read_flow_trace', { root: other, flowId: foreign.flowId }), foreignBefore);

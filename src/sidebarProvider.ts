@@ -539,7 +539,8 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
           command: 'sidebarActionFailed',
           message: error instanceof Error ? error.message : String(error),
           action: String(data?.command || ''),
-          projectPath: String(data?.projectPath || '')
+          projectPath: String(data?.projectPath || ''),
+          conversationId: Number(data?.conversationId || 0)
         });
         throw error;
       }

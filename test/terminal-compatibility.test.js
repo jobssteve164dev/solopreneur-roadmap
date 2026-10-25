@@ -99,6 +99,36 @@ test('a slow supported shell cannot receive commands when the five second displa
   ]);
 });
 
+test('a slow shell records the readiness budget breach without dropping the eventual command', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let resolveProcess;
+  const delivered = [];
+  const events = [];
+  const terminal = {
+    processId: new Promise(resolve => { resolveProcess = resolve; }),
+    sendText(text) { delivered.push(text); }
+  };
+
+  const pending = sendTextWhenTerminalReady(terminal, 'codex resume original-session', true, {
+    readinessBudgetMs: 5_000,
+    observe: event => events.push(event)
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(5_001);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(events.map(event => [event.stage, event.status, event.error]), [
+    ['terminal.process.wait', 'start', undefined],
+    ['terminal.process.slow', 'error', 'terminal_process_slow']
+  ]);
+  assert.deepEqual(delivered, []);
+
+  resolveProcess(4321);
+  assert.equal(await pending, true);
+  assert.deepEqual(delivered, ['codex resume original-session']);
+  assert.equal(events.at(-1).stage, 'terminal.command.send');
+  assert.equal(events.at(-1).status, 'ok');
+});
+
 test('Codex continuation uses one explicit paste followed by submit outside the paste', async () => {
   const { sendAgentTextWhenTerminalReady } = require('../out/terminalCompatibility.js');
   const delivered = []; const terminal = { processId: Promise.resolve(123), sendText: (text, addNewLine) => delivered.push({ text, addNewLine }) };

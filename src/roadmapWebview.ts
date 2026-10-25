@@ -4413,6 +4413,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             if (!conversationId) return;
             vscode.postMessage({
               command: 'conversation.retry',
+              projectPath: activeProjectPath,
               nodeId: node.id,
               conversationId
             });
@@ -4423,6 +4424,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             event.stopPropagation();
             vscode.postMessage({
               command: 'conversation.openTerminal',
+              projectPath: activeProjectPath,
               conversationId: item.getAttribute('data-show-agent-terminal')
             });
           });
@@ -4432,6 +4434,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             event.stopPropagation();
             vscode.postMessage({
               command: 'conversation.continue',
+              projectPath: activeProjectPath,
               nodeId: item.getAttribute('data-continue-native-node-id') || node.id,
               conversationId: item.getAttribute('data-continue-native-conversation-id')
             });
@@ -4442,6 +4445,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             event.stopPropagation();
             vscode.postMessage({
               command: 'conversation.stop',
+              projectPath: activeProjectPath,
               nodeId: node.id,
               conversationId: item.getAttribute('data-stop-agent-run')
             });
@@ -4732,6 +4736,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           if (!goal) return;
           vscode.postMessage({
             command: 'flow.run',
+            projectPath: activeProjectPath,
             goal,
             agentCli: getSoloSelectValue(agentSelect),
             model: getSoloSelectValue(modelSelect),
@@ -4776,14 +4781,14 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       if (pauseBtn) {
         pauseBtn.addEventListener('click', () => {
           const flowId = pauseBtn.getAttribute('data-pause-flow');
-          vscode.postMessage({ command: 'flow.pause', flowId });
+          vscode.postMessage({ command: 'flow.pause', flowId, projectPath: activeProjectPath });
         });
       }
       const abandonBtn = flowBody.querySelector('[data-abandon-flow]');
       if (abandonBtn) {
         abandonBtn.addEventListener('click', () => {
           const flowId = abandonBtn.getAttribute('data-abandon-flow');
-          vscode.postMessage({ command: 'flow.abandon', flowId });
+          vscode.postMessage({ command: 'flow.abandon', flowId, projectPath: activeProjectPath });
         });
       }
 
@@ -4973,6 +4978,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           if (!targetNodeId) return;
           vscode.postMessage({
             command: 'conversation.linkToStep',
+            projectPath: activeProjectPath,
             conversationId: item.getAttribute('data-link-solo-id'),
             nodeId: targetNodeId
           });
@@ -5019,6 +5025,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           event.stopPropagation();
           vscode.postMessage({
             command: 'conversation.retry',
+            projectPath: activeProjectPath,
             nodeId,
             conversationId: item.getAttribute('data-retry-conversation-id')
           });
@@ -5029,6 +5036,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           event.stopPropagation();
           vscode.postMessage({
             command: 'conversation.openTerminal',
+            projectPath: activeProjectPath,
             conversationId: item.getAttribute('data-show-agent-terminal')
           });
         });
@@ -5038,6 +5046,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           event.stopPropagation();
             vscode.postMessage({
               command: 'conversation.continue',
+              projectPath: activeProjectPath,
               nodeId: item.getAttribute('data-continue-native-node-id') || nodeId,
               conversationId: item.getAttribute('data-continue-native-conversation-id')
             });
@@ -5048,6 +5057,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           event.stopPropagation();
           vscode.postMessage({
             command: 'conversation.stop',
+            projectPath: activeProjectPath,
             nodeId,
             conversationId: item.getAttribute('data-stop-agent-run')
           });
@@ -5465,6 +5475,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     function triggerRun(nodeId, userMessage, agentCli, model, supplementFiles) {
       vscode.postMessage({
         command: 'conversation.runStep',
+        projectPath: activeProjectPath,
         nodeId: nodeId,
         userMessage: userMessage || '',
         agentCli: agentCli || '',
