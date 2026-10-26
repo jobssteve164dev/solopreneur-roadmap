@@ -80,6 +80,11 @@ jobs:
         if: steps.extension_changes.outputs.should_publish == 'true'
         run: npm ci
 
+      - name: Install website test dependencies
+        if: steps.extension_changes.outputs.should_publish == 'true'
+        run: npm ci
+        working-directory: website
+
       - name: Compile Extension
         if: steps.extension_changes.outputs.should_publish == 'true'
         run: npm run compile

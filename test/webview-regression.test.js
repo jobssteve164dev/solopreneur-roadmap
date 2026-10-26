@@ -2835,12 +2835,19 @@ test('website-only changes do not trigger extension publishing', () => {
 
 test('publishing verifies the full extension and builds the VSIX before pushing a release commit or tag', () => {
   const workflow = fs.readFileSync(path.join(projectRoot, '.github', 'workflows', 'publish.yml'), 'utf8');
+  const websiteInstallAt = workflow.indexOf('- name: Install website test dependencies');
   const testAt = workflow.indexOf('run: npm test');
   const compileAt = workflow.indexOf('run: npm run compile');
   const bumpAt = workflow.indexOf('- name: Bump Version');
   const packageAt = workflow.indexOf('- name: Package Extension');
   const pushAt = workflow.indexOf('- name: Push Version Changes and Tag');
-  for (const position of [testAt, compileAt, bumpAt, packageAt, pushAt]) assert.ok(position >= 0);
+  for (const position of [websiteInstallAt, testAt, compileAt, bumpAt, packageAt, pushAt]) assert.ok(position >= 0);
+  const websiteInstall = workflow.slice(websiteInstallAt, testAt);
+  assert.match(websiteInstall, /run:\s*npm ci/,
+    'the full suite must install the website modules it imports');
+  assert.match(websiteInstall, /working-directory:\s*website/,
+    'website dependencies must be installed in the website package');
+  assert.ok(websiteInstallAt < testAt, 'website dependencies must exist before the full suite starts');
   assert.ok(testAt < bumpAt && compileAt < bumpAt, 'no release mutation may precede validation');
   assert.ok(packageAt < pushAt, 'the exact VSIX must exist before its version commit and tag are pushed');
   assert.match(workflow, /timeout-minutes:\s*90/, 'a leaked test handle cannot hold the release runner indefinitely');
@@ -18815,13 +18822,20 @@ test('concurrent settings patches serialize without restoring stale values', asy
     }
     fs.rmdirSync(globalRoot); fs.rmdirSync(tempRoot);
   });
+  let backgroundRuntimeCalls = 0;
+  const runtimeService = {
+    ...require('../out/autonomousRuntimeService.js'),
+    isRuntimeServiceManagerAvailable: async () => { backgroundRuntimeCalls += 1; return true; },
+    ensureAutonomousRuntimeService: async () => { backgroundRuntimeCalls += 1; return { installed: true, definitionPath: '/fixture', changed: false }; }
+  };
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     [
       'module.exports.__updatePersistedSettings = updatePersistedSettings;',
       'module.exports.__getPersistedSettings = getPersistedSettings;',
-      'module.exports.__connectSettingsDatabase = (call) => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request); autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false }); };'
-    ].join('\n')
+      'module.exports.__connectSettingsDatabase = (call) => { autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request); autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false }); activateObservedBackgroundRuntime = async () => {}; };'
+    ].join('\n'),
+    { './autonomousRuntimeService': runtimeService }
   );
   const saved = {
     cliPath: 'codex',
@@ -18873,6 +18887,7 @@ test('concurrent settings patches serialize without restoring stale values', asy
   assert.equal(finalSettings.globalPrompt, 'Keep the newer prompt');
   const policy = await operations({ operation: 'read_global_prompt_policy', input: {} });
   assert.equal(policy.data.content, 'Keep the newer prompt');
+  assert.equal(backgroundRuntimeCalls, 0, 'a settings unit fixture must not invoke the machine Runtime service');
 });
 
 test('two settings windows project the committed agent and model combination after crossed writes', async t => {
@@ -18912,6 +18927,7 @@ test('two settings windows project the committed agent and model combination aft
           return result;
         };
         autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
+        activateObservedBackgroundRuntime = async () => {};
       };
     `, { './autonomousRuntimeControl': transport });
     extension.connect(operations, { firstCommitted, firstRelease, requests });
@@ -18961,6 +18977,7 @@ test('two independent settings hosts cannot restore an older global instruction 
           return result;
         };
         autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
+        activateObservedBackgroundRuntime = async () => {};
       };
     `, { './autonomousRuntimeControl': transport });
     extension.connect(operations, { committed: promptCommitted, release: promptRelease });
@@ -18998,7 +19015,7 @@ test('a committed global instruction remains authoritative after the host loses 
   const hooks = { interrupted: false };
   const first = loadCompiledModule('out/extension.js', `
     module.exports.update = updatePersistedSettings;
-    module.exports.connect = (call, hooks) => { autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false }); autonomousRuntimeControl_1.sendRuntimeDataRequest = async (_root, request) => { const result = await call(request); if (!hooks.interrupted && request.operation === 'save_global_prompt') { hooks.interrupted = true; throw new Error('host_lost_after_policy_commit'); } return result; }; };
+    module.exports.connect = (call, hooks) => { autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false }); activateObservedBackgroundRuntime = async () => {}; autonomousRuntimeControl_1.sendRuntimeDataRequest = async (_root, request) => { const result = await call(request); if (!hooks.interrupted && request.operation === 'save_global_prompt') { hooks.interrupted = true; throw new Error('host_lost_after_policy_commit'); } return result; }; };
   `);
   first.connect(operations, hooks);
   await assert.rejects(first.update(context, { globalPrompt: '中断后仍有效的新指令' }), /host_lost_after_policy_commit/);
@@ -20948,7 +20965,7 @@ for (const appliedFirst of [true, false]) test(`production default instruction s
       activeProjectRoot = project;
       autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request.operation, request.input);
       autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
-      syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {};
+      activateObservedBackgroundRuntime = async () => {}; syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {};
     };
   `);
   extension.connect(call, root, project);
@@ -20990,7 +21007,7 @@ for (const unchanged of [true, false]) test(`production default instruction save
       activeProjectRoot = project;
       autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request.operation, request.input);
       autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
-      syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {};
+      activateObservedBackgroundRuntime = async () => {}; syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {};
     };
   `);
   extension.connect(call, project);
@@ -21025,7 +21042,7 @@ for(const mixed of [false,true]) test(mixed?'production default instruction save
  let release,announce,held=false;const ready=new Promise(r=>{announce=r}),blocked=new Promise(r=>{release=r});
  const call=async(operation,input)=>{if(mixed&&!held&&operation==='read_global_prompt_policy'){held=true;announce();await blocked;}return ops({operation,input})};
  const extension=loadCompiledModule('out/extension.js',`module.exports.save=updatePersistedSettings;module.exports.readActual=getPersistedSettings;
- module.exports.connect=(call,project)=>{activeProjectRoot=project;autonomousRuntimeControl_1.sendRuntimeDataRequest=(_root,request)=>call(request.operation,request.input);autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime=async()=>({started:false});syncCognitiveRuntimeConfig=()=>{};synchronizeTelegramChannel=()=>{};scheduleFocusReminder=()=>{};};`);
+ module.exports.connect=(call,project)=>{activeProjectRoot=project;autonomousRuntimeControl_1.sendRuntimeDataRequest=(_root,request)=>call(request.operation,request.input);autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime=async()=>({started:false});activateObservedBackgroundRuntime=async()=>{};syncCognitiveRuntimeConfig=()=>{};synchronizeTelegramChannel=()=>{};scheduleFocusReminder=()=>{};};`);
  extension.__vscodeTestState.configurationValues.automationTasks={focusMinutes:10};extension.connect(call,project);
  try{
   const registered=await call('register_project',{root:project});
