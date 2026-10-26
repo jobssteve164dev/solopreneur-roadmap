@@ -4,6 +4,7 @@ import * as net from 'net';
 import * as path from 'path';
 
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
+import { RuntimePriorityScheduler, runtimeOperationPriority } from './runtimePriorityScheduler';
 
 export type RuntimeControlCommand = 'health' | 'refresh' | 'pause' | 'resume' | 'drain' | 'stop';
 
@@ -150,6 +151,7 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
   const busy = new Set<net.Socket>();
   let internalBusy = 0;
   let endpoint: RuntimeControlEndpoint;
+  const dataScheduler = new RuntimePriorityScheduler();
   const acquireBusyLease = () => {
     if (busy.size === 0 && internalBusy === 0) writeBusyLease(busyFilePath, {
       schemaVersion: 1,
@@ -225,7 +227,7 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
           acquireBusyLease();
           busy.add(socket);
           let result: unknown;
-          try { result = await options.onData(parsed.request); }
+          try { result = await dataScheduler.submit(runtimeOperationPriority(parsed.request.operation), () => Promise.resolve(options.onData!(parsed.request!))); }
           finally {
             busy.delete(socket);
             // Clearing a completed-work marker must not replace the operation's

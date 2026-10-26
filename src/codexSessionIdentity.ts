@@ -46,7 +46,7 @@ function sessionDayRoots(codexHome: string, startedMs: number): string[] {
   });
 }
 
-async function listTranscriptFiles(roots: string[]): Promise<string[]> {
+async function listTranscriptFiles(roots: string[], modifiedAfterMs = Number.NEGATIVE_INFINITY): Promise<string[]> {
   const files: string[] = [];
   const stack = [...roots];
   while (stack.length > 0) {
@@ -62,7 +62,15 @@ async function listTranscriptFiles(roots: string[]): Promise<string[]> {
       continue;
     }
   }
-  return files.sort();
+  if (!Number.isFinite(modifiedAfterMs)) return files.sort();
+  const recent = await Promise.all(files.map(async file => {
+    const match = path.basename(file).match(/^rollout-(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-/);
+    const namedAt = match ? Date.parse(`${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:${match[6]}Z`) : Number.NaN;
+    if (Number.isFinite(namedAt)) return namedAt >= modifiedAfterMs ? file : '';
+    try { return (await fs.promises.stat(file)).mtimeMs >= modifiedAfterMs ? file : ''; }
+    catch { return ''; }
+  }));
+  return recent.filter(Boolean).sort();
 }
 
 function containsExactNonce(text: string, bindingNonce: string): boolean {
@@ -136,17 +144,12 @@ async function inspectTranscript(
   startedMs: number
 ): Promise<CodexSessionCandidate | null> {
   let meta: any = null;
-  let matches = false;
+  let bodyOffset = 0;
   try {
-    await scanJsonLines(transcriptPath, 0, (row) => {
-      if (!meta && row?.type === 'session_meta') meta = row;
-      if (row?.type !== 'response_item' || row?.payload?.type !== 'message') return false;
-      if (row.payload.role === 'assistant') return true;
-      if (row.payload.role === 'user' && messageContainsExactNonce(row, bindingNonce)) {
-        matches = true;
-        return true;
-      }
-      return false;
+    bodyOffset = await scanJsonLines(transcriptPath, 0, (row) => {
+      if (row?.type !== 'session_meta') return false;
+      meta = row;
+      return true;
     });
   } catch {
     return null;
@@ -166,6 +169,20 @@ async function inspectTranscript(
     || !Number.isFinite(createdMs)
     || createdMs < startedMs
   ) {
+    return null;
+  }
+  let matches = false;
+  try {
+    await scanJsonLines(transcriptPath, bodyOffset, (row) => {
+      if (row?.type !== 'response_item' || row?.payload?.type !== 'message') return false;
+      if (row.payload.role === 'assistant') return true;
+      if (row.payload.role === 'user' && messageContainsExactNonce(row, bindingNonce)) {
+        matches = true;
+        return true;
+      }
+      return false;
+    });
+  } catch {
     return null;
   }
   return matches ? {
@@ -202,7 +219,7 @@ export async function locateCodexSessionByBindingNonce(input: CodexSessionLocato
   const codexHome = path.resolve(codexHomeInput);
   const workspaceRoot = path.resolve(workspaceInput);
   const candidates = new Map<string, CodexSessionCandidate>();
-  for (const transcriptPath of await listTranscriptFiles(sessionDayRoots(codexHome, startedMs))) {
+  for (const transcriptPath of await listTranscriptFiles(sessionDayRoots(codexHome, startedMs), startedMs - 60_000)) {
     const candidate = await inspectTranscript(transcriptPath, workspaceRoot, bindingNonce, startedMs);
     if (candidate && !candidates.has(candidate.sessionId)) {
       candidates.set(candidate.sessionId, candidate);

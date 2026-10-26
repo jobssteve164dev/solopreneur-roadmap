@@ -4881,6 +4881,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           if (!request) return;
           vscode.postMessage({
             command: 'conversation.runRoadmapRevision',
+            projectPath: activeProjectPath,
             userMessage: request,
             agentCli: getSoloSelectValue(agentSelect),
             model: getSoloSelectValue(modelSelect),

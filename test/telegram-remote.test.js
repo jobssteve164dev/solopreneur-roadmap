@@ -43,7 +43,11 @@ const vscodeMock = {
       }
       if (commandId === 'solopreneur.internalRunAgent') {
         runAgentCounter++;
-        assert.equal(args[0], '12');
+        const request = JSON.parse(args[0]);
+        assert.equal(request.nodeId, '12');
+        assert.equal(request.projectPath, '/home/ubuntu/project/test-project');
+        assert.equal(request.interactionBudget.schemaVersion, 1);
+        assert.match(request.interactionBudget.interactionId, /^[a-f0-9-]{36}$/);
         return;
       }
       if (commandId === 'solopreneur.internalStopAgent') {

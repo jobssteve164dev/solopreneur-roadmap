@@ -540,6 +540,10 @@ test('a previously initialized Runtime refuses to silently replace a missing aut
     const [code] = result;
     assert.notEqual(code, 0);
     assert.match(run.errors(), /database_restore_required/);
+    const failedState = JSON.parse(fs.readFileSync(path.join(root, 'runtime', 'control.json'), 'utf8'));
+    assert.equal(failedState.status, 'failed');
+    assert.equal(failedState.failureCode, 'database_restore_required');
+    assert.equal(failedState.failureReason, 'database_restore_required');
     assert.equal(fs.existsSync(path.join(root, 'solomap.db')), false);
     assert.equal(fs.existsSync(path.join(root, 'retained-original.db')), true);
   } finally { await stop(run, root); }

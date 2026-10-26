@@ -5,6 +5,7 @@ import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import type { RunState } from './runLifecycleTypes';
 import type { NativeSessionBinding } from './sessionIdentity';
 import type { DatabaseAgentLaunch } from './agentDatabaseLaunch';
+import { codexDatabaseProfileName } from './agentDatabaseConfig';
 
 async function main(): Promise<void> {
   const root = String(process.env.SOLOMAP_GLOBAL_DATA_PATH || '');
@@ -25,7 +26,7 @@ async function main(): Promise<void> {
   const sessionId = String(state.status.plannedNativeSessionId || '');
   if (!launch.continuation || !sessionId) throw new Error('native_resume_target_required');
   const head = await operation<{ nextSequence: number; totalBytes: number }>('read_run_log_head', { ...identity, stream: 'native:codex' });
-  const child = childProcess.spawn(launch.agentCli, ['--profile', 'solomap', 'app-server'], { cwd: String(state.status.workspaceRoot), stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = childProcess.spawn(launch.agentCli, ['--profile', launch.codexProfile || codexDatabaseProfileName(root), 'app-server'], { cwd: String(state.status.workspaceRoot), stdio: ['pipe', 'pipe', 'pipe'] });
   const closed = once(child, 'close') as Promise<[number | null, NodeJS.Signals | null]>;
   void closed.catch(() => undefined);
   let completed = false; let nativeTurnId = ''; let assistant = ''; let failure = '';

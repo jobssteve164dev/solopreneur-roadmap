@@ -357,6 +357,8 @@ export function registerUnifiedMcpTools(server: McpServer, source: UnifiedMcpSou
   });
   if (options.conversationLifecycle) register('solomap_conversation_status', '写入当前 Agent 对话的正式检查点状态。开始处理时使用 start；交付本轮结果时使用 complete。运行身份、版本和幂等性由插件绑定，不要自行读写账本。', {
     action: z.enum(['start', 'complete']),
+    turnId: z.string().uuid().optional(),
+    interactionId: z.string().min(1).optional(),
     message: z.string().min(1).optional(),
     outcome: z.enum(['partial', 'candidate_complete', 'blocked_user', 'blocked_external', 'failed']).optional(),
     summary: z.string().min(1).optional(),

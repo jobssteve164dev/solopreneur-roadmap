@@ -70,6 +70,8 @@ export interface RunCheckpointInput {
   gitAfterHash?: string;
   requireDeliverable?: boolean;
   preserveRoadmapState?: boolean;
+  foregroundStart?: boolean;
+  interactionId?: string;
   idempotencyKey: string;
 }
 

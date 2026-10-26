@@ -37,6 +37,95 @@ test('Codex uses a SoloMap-only profile and retires the managed bridge from the 
   assert.match(fs.readFileSync(base, 'utf8'), /model = "preserved"/);
   assert.match(fs.readFileSync(profile, 'utf8'), /mcp_servers\.solomap_data/);
 });
+
+test('Codex assigns a stable isolated profile to each SoloMap data root', () => {
+  const root = fixtureRoot('solomap-codex-isolated-profiles-'), home = path.join(root, 'codex-home');
+  fs.mkdirSync(home);
+  const module = require('../out/agentDatabaseConfig.js'), toml = require('@iarna/toml');
+  const firstRoot = path.join(root, 'first', '.solomap-global');
+  const secondRoot = path.join(root, 'second', '.solomap-global');
+  const firstName = module.codexDatabaseProfileName(firstRoot);
+  const secondName = module.codexDatabaseProfileName(secondRoot);
+  assert.match(firstName, /^solomap-[a-f0-9]{16}$/);
+  assert.notEqual(firstName, secondName);
+  assert.equal(module.codexDatabaseProfileName(firstRoot), firstName);
+
+  const firstProfile = module.codexDatabaseProfilePath(home, firstName);
+  const secondProfile = module.codexDatabaseProfilePath(home, secondName);
+  module.configureAgentDatabase({ provider: 'codex', configPath: firstProfile, command: '/runtime/node', globalDataPath: firstRoot });
+  module.configureAgentDatabase({ provider: 'codex', configPath: secondProfile, command: '/runtime/node', globalDataPath: secondRoot });
+
+  const firstArgs = toml.parse(fs.readFileSync(firstProfile, 'utf8')).mcp_servers.solomap_data.args;
+  const secondArgs = toml.parse(fs.readFileSync(secondProfile, 'utf8')).mcp_servers.solomap_data.args;
+  assert.equal(firstArgs.at(-1), firstRoot);
+  assert.equal(secondArgs.at(-1), secondRoot);
+  assert.equal(fs.existsSync(firstProfile), true, 'configuring another project must retain the first project profile');
+});
+
+test('Codex project trust is persisted in the base config without rewriting unrelated user configuration', () => {
+  const root = fixtureRoot('solomap-codex-project-trust-');
+  const home = path.join(root, 'codex-home');
+  const repository = path.join(root, 'repository');
+  const nestedWorkspace = path.join(repository, 'packages', 'app');
+  fs.mkdirSync(home);
+  fs.mkdirSync(path.join(repository, '.git'), { recursive: true });
+  fs.mkdirSync(nestedWorkspace, { recursive: true });
+  const config = path.join(home, 'config.toml');
+  const original = '# keep this comment\nmodel = "keep-model"\n\n[features]\ngoals = true\n';
+  fs.writeFileSync(config, original);
+  const module = require('../out/agentDatabaseConfig.js');
+
+  const trustedRoot = module.ensureCodexProjectTrusted(home, nestedWorkspace);
+  const once = fs.readFileSync(config, 'utf8');
+  assert.equal(trustedRoot, repository);
+  assert.ok(once.startsWith(original), 'unrelated user bytes and comments must remain unchanged');
+  assert.match(once, new RegExp(`\\[projects\\.${JSON.stringify(repository).replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\]\\ntrust_level = "trusted"`));
+
+  module.ensureCodexProjectTrusted(home, nestedWorkspace);
+  assert.equal(fs.readFileSync(config, 'utf8'), once, 'an already trusted project must not churn config.toml');
+});
+
+test('Codex project trust upgrades an exact existing entry and preserves neighboring project entries', () => {
+  const root = fixtureRoot('solomap-codex-project-upgrade-');
+  const home = path.join(root, 'codex-home');
+  const repository = path.join(root, 'repository');
+  fs.mkdirSync(home);
+  fs.mkdirSync(repository);
+  const config = path.join(home, 'config.toml');
+  fs.writeFileSync(config, [
+    `[projects.${JSON.stringify(repository)}]`,
+    'trust_level = "untrusted"',
+    '',
+    '[projects."/keep"]',
+    'trust_level = "trusted"',
+    ''
+  ].join('\n'));
+  const module = require('../out/agentDatabaseConfig.js');
+
+  module.ensureCodexProjectTrusted(home, repository);
+  const parsed = require('@iarna/toml').parse(fs.readFileSync(config, 'utf8'));
+  assert.equal(parsed.projects[repository].trust_level, 'trusted');
+  assert.equal(parsed.projects['/keep'].trust_level, 'trusted');
+});
+
+test('Codex project trust safely updates the regular config behind a CODEX_HOME symlink', () => {
+  const root = fixtureRoot('solomap-codex-project-symlink-');
+  const home = path.join(root, 'codex-home');
+  const shared = path.join(root, 'shared');
+  const repository = path.join(root, 'repository');
+  fs.mkdirSync(home);
+  fs.mkdirSync(shared);
+  fs.mkdirSync(repository);
+  const target = path.join(shared, 'config.toml');
+  fs.writeFileSync(target, 'model = "keep-model"\n');
+  fs.symlinkSync(target, path.join(home, 'config.toml'));
+  const module = require('../out/agentDatabaseConfig.js');
+
+  module.ensureCodexProjectTrusted(home, repository);
+  assert.equal(fs.lstatSync(path.join(home, 'config.toml')).isSymbolicLink(), true);
+  const parsed = require('@iarna/toml').parse(fs.readFileSync(target, 'utf8'));
+  assert.equal(parsed.projects[repository].trust_level, 'trusted');
+});
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');

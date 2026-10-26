@@ -1,7 +1,7 @@
 import * as crypto from 'crypto';
 import * as path from 'path';
 import { getAgentProvider, shellQuote } from './agentCli';
-import { agentDatabaseConfigPath, codexDatabaseProfilePath, databaseAgentProviders, DatabaseAgentProvider } from './agentDatabaseConfig';
+import { agentDatabaseConfigPath, codexDatabaseProfileName, codexDatabaseProfilePath, databaseAgentProviders, DatabaseAgentProvider, ensureCodexProjectTrusted } from './agentDatabaseConfig';
 import type { NativeSessionBinding } from './sessionIdentity';
 import { getCodexSessionHome } from './sessionIdentity';
 import type { RunState } from './runLifecycleTypes';
@@ -15,12 +15,14 @@ export async function prepareNativeAgentLaunch(input: {
   operation: Operation;
   execute: (command: string, stream: string) => Promise<CapturedAgentProcess>;
   prepareDatabase?: boolean;
+  globalDataPath?: string;
 }): Promise<RunState> {
   let state = input.state;
   const executionLogId = Number(state.status.executionLogId);
   const scope = { root: input.workspaceRoot, projectId: state.projectId, executionLogId, generation: state.generation };
   const cli = String(state.status.agentCli || (state.status.agentLaunch as { agentCli?: string } | undefined)?.agentCli || '');
   const provider = getAgentProvider(cli);
+  const launch = state.status.agentLaunch as { codexProfile?: string } | undefined;
   const unique = (purpose: string) => `run:${state.runId}:${state.generation}:${purpose}:${crypto.randomUUID()}`;
   const patch = async (value: Record<string, unknown>) => {
     const key = unique('preflight-state');
@@ -31,12 +33,13 @@ export async function prepareNativeAgentLaunch(input: {
       catch (error) { if ((error as Error).message !== 'revision_conflict') throw error; }
     }
   };
+  const binding = ['codex', 'claude'].includes(provider) ? await input.operation('read_run_binding', scope) as NativeSessionBinding | null : null;
+  const codexHome = provider === 'codex' ? getCodexSessionHome(binding) : '';
+  if (state.status.interactiveSession === true && provider === 'codex') ensureCodexProjectTrusted(codexHome, input.workspaceRoot);
   if (input.prepareDatabase !== false && databaseAgentProviders.includes(provider as DatabaseAgentProvider)) {
-    const binding = ['codex', 'claude'].includes(provider) ? await input.operation('read_run_binding', scope) as NativeSessionBinding | null : null;
-    const codexHome = provider === 'codex' ? getCodexSessionHome(binding) : '';
     const claude = provider === 'claude' ? [...(binding?.revisions || [])].reverse().find(value => value.providerContext?.claude)?.providerContext?.claude as Record<string, unknown> | undefined : undefined;
     const configPath = provider === 'codex'
-      ? codexDatabaseProfilePath(codexHome || undefined)
+      ? codexDatabaseProfilePath(codexHome || undefined, launch?.codexProfile || codexDatabaseProfileName(input.globalDataPath || String(state.status.globalDataPath || '')))
       : String(claude?.configPath || state.status.agentDatabaseConfigPath || agentDatabaseConfigPath(provider as DatabaseAgentProvider));
     await input.operation('prepare_agent_database', { root: input.workspaceRoot, provider, command: process.execPath, configPath });
   }
@@ -55,20 +58,10 @@ export async function prepareNativeAgentLaunch(input: {
     await patch({ failureCode: code, failureReason: reason, sessionBindingHeadRevision: headRevision });
     throw Object.assign(new Error(reason), { code, exitCode: 126 });
   };
-  if (['claude', 'copilot', 'grok'].includes(provider)) {
-    const help = await input.execute(`${shellQuote(cli)} --help`, 'identity-help');
-    if (help.code !== 0 || !Buffer.concat([help.stdout, help.stderr]).includes(Buffer.from('--session-id'))) await fail('identity_capability_missing', '当前 Agent CLI 不支持本次会话需要的会话标识参数，请升级后重试。', 'official_cli_help');
-    if (provider === 'claude') {
-      let supported = false;
-      if (Buffer.concat([help.stdout, help.stderr]).includes(Buffer.from('--plugin-dir'))) {
-        const version = await input.execute(`${shellQuote(cli)} --version`, 'native-version');
-        const match = Buffer.concat([version.stdout, version.stderr]).toString('utf8').match(/\b(\d+)\.(\d+)\.(\d+)\b/);
-        supported = version.code === 0 && Boolean(match && (Number(match[1]) > 2 || Number(match[1]) === 2 && (Number(match[2]) > 1 || Number(match[2]) === 1 && Number(match[3]) >= 287)));
-      }
-      await patch({ claudeNativeObserverCapable: supported,
-        ...(state.status.claudeNativeObserverGeneration === state.generation ? {} : { claudeNativeContract: 'transcript-v1', claudeNativeEventHead: 0, claudeNativeEventCursor: 0 }) });
-    }
-  }
+  // Caller-assigned session IDs are part of the formal provider invocation.
+  // Never put an extra --help/--version subprocess in front of a user task;
+  // unsupported versions fail as that one formal invocation, without delaying
+  // every compatible launch or creating a second attempt.
   if (provider === 'cursor') {
     state = await input.operation('read_run_state', scope) as RunState;
     if (state.generation !== scope.generation) throw new Error('run_owner_conflict');

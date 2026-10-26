@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as childProcess from 'child_process';
 import * as crypto from 'crypto';
+import { StringDecoder } from 'string_decoder';
 import { readWindowsProcessBirthMarker } from './processIdentity.js';
 import { withDesktopSessionEnvironment } from './desktopSessionEnvironment';
 import { automationSoundReady, deliverAutomationSound, disposeAutomationSoundView, handleAutomationSoundMessage } from './automationSound.js';
@@ -32,7 +33,6 @@ import { buildLearningRetrievalContext, LearningEvidenceRef } from './learningLe
 import { buildFeedbackIssueUrl, buildGithubDeliveryContext, buildGithubIssueContext, buildGithubSecurityContext } from './projectSignals';
 import { ExternalSignalResponseVersions } from './externalDataLoader';
 import { disconnectExternalMemoryTarget, syncExternalMemoryTarget } from './externalMemoryTarget';
-import { createPreSessionGitCommit } from './preSessionGit';
 import { reviewHash, collectGithubEvidence, projectGithubRepository } from './learningReview.js';
 import { queryGrowthReports, readRegisteredProjectSources, containedRegularPath, reportFiles, reportText } from './growthReports.js';
 import { observeGrowthReports } from './growthReportObserver.js';
@@ -52,6 +52,7 @@ import { backfillRunIndexFromDigests } from './runIndexMaintenance';
 import { captureProjectGrowthSnapshot, clearProjectGrowthViewCache, getCachedProjectGrowthView, getProjectGrowthView, refreshProjectGrowthSnapshot } from './projectGrowth';
 import { runProjectCoverageAnalysis } from './projectCoverage';
 import { moveUntrackedFilesToRollbackSafety } from './rollbackSafety';
+import { createPreSessionGitCommit } from './preSessionGit';
 import {
   buildCognitiveStrategyPyramidSnapshotData,
   buildStrategyPyramidSnapshotData,
@@ -126,7 +127,6 @@ import {
   buildInteractiveAgentContinuationCommandForPromptFile,
   buildAgentCommandFromShellVar,
   buildReadOnlyAgentCommandForPromptFile,
-  buildNativeContinueCommand,
   buildSdkSentinelCommandLabel,
   commandExists,
   ensureAgentTaskAutomation,
@@ -264,7 +264,10 @@ import {
   stripAnsiControlCodes
 } from './continuation';
 import { extractRunTokenUsage, normalizeTokenUsage } from './tokenUsage';
-import { sendTextWhenTerminalReady, sendAgentTextWhenTerminalReady } from './terminalCompatibility';
+import { agentTerminalInputFrame, sendTextWhenTerminalReady } from './terminalCompatibility';
+import { buildForegroundRunnerInvocation, ForegroundAgentTerminalBridge } from './foregroundAgentTerminal';
+import { advanceInteractionBudget, createInteractionBudget, currentInteractionBudget, runWithInteractionBudget, type InteractionBudget } from './interactionBudget';
+import { taskIngressDeadlineFields } from './providerTaskIngress';
 import {
   appendSessionBindingRevision,
   confirmSessionBinding,
@@ -645,6 +648,20 @@ function deleteAgentTerminalBinding(workspaceRoot: string, conversationId: numbe
 }
 interface AgentTerminalRunTarget { workspaceRoot: string; globalDataPath: string; executionLogId: number; runId: string; generation: number; deliveryId?: string }
 const agentTerminalRunTargets = new Map<vscode.Terminal, AgentTerminalRunTarget>();
+interface ForegroundAgentTerminalSurface {
+  pty: vscode.Pseudoterminal;
+  attach(bridge: ForegroundAgentTerminalBridge): void;
+  writeInputFrame(bytes: Buffer): Promise<void>;
+  detachForHostReload(): void;
+  stop(): void;
+  bridge?: ForegroundAgentTerminalBridge;
+  dimensions?: vscode.TerminalDimensions;
+}
+const foregroundAgentTerminalSurfaces = new Map<vscode.Terminal, ForegroundAgentTerminalSurface>();
+// This is mutated only by the VM-based compatibility suite. Packaged code
+// never enables the retired Shell delivery path or bypasses task ingress.
+let legacyConversationDeliveryHarnessForTests = false;
+let extensionHostDeactivating = false;
 
 function isAgentTerminalRunTargetCurrent(target: AgentTerminalRunTarget, state: { runId: string; generation: number; status: Record<string, unknown> }): boolean {
   if (target.runId !== state.runId || (target.deliveryId && target.deliveryId !== state.status.terminalDeliveryId)) return false;
@@ -655,6 +672,7 @@ const nativeContinuationByConversationKey = new Map<string, Promise<void>>();
 
 export async function activate(context: vscode.ExtensionContext) {
   console.log('SoloMap extension is now active!');
+  extensionHostDeactivating = false;
   indexedDatabaseAuthorityRoots(context).forEach(registerRuntimeDatabaseAuthority);
   const registeredServiceDataRoot = registeredAutonomousRuntimeDataRoot();
   if (registeredServiceDataRoot) registerRuntimeDatabaseAuthority(registeredServiceDataRoot);
@@ -896,6 +914,9 @@ export async function activate(context: vscode.ExtensionContext) {
   }));
   if (typeof vscode.window.onDidCloseTerminal === 'function') {
     context.subscriptions.push(vscode.window.onDidCloseTerminal((terminal) => {
+      const surface = foregroundAgentTerminalSurfaces.get(terminal);
+      foregroundAgentTerminalSurfaces.delete(terminal);
+      if (surface && terminal.exitStatus?.reason !== vscode.TerminalExitReason.Shutdown && !extensionHostDeactivating) surface.stop();
       void handleAgentTerminalClosed(terminal.name, terminal.exitStatus?.reason, agentTerminalRunTargets.get(terminal));
     }));
   }
@@ -963,19 +984,36 @@ export async function activate(context: vscode.ExtensionContext) {
     };
   }));
 
-  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalRunAgent', async (nodeId: string) => {
-    const workspaceRoot = activeProjectRoot || getSelectedProjectPath(context) || '';
-    const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
-    if (!launchSnapshot) return;
-    await revealAgentStartupTerminal(context, workspaceRoot, `step-${nodeId || 'conversation'}`, '', '', launchSnapshot.settings);
-    const launchTarget = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, launchSnapshot);
-    if (!launchTarget) return;
-    try { await handleRunAgent(context, nodeId, '', '', '', [], true, () => {}, launchTarget); }
-    finally { launchTarget.engine?.close(); }
+  context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalRunAgent', async (request: string) => {
+    let captured: { nodeId?: string; projectPath?: string; interactionBudget?: InteractionBudget } | undefined;
+    if (String(request || '').trimStart().startsWith('{')) {
+      try { captured = JSON.parse(request); } catch { throw new Error('invalid_conversation_request'); }
+    }
+    const nodeId = captured ? String(captured.nodeId || '') : String(request || '');
+    const workspaceRoot = captured
+      ? path.resolve(String(captured.projectPath || ''))
+      : activeProjectRoot || getSelectedProjectPath(context) || '';
+    if (!nodeId || !workspaceRoot || !getProjects(context).some(project => path.resolve(project.path) === workspaceRoot)) {
+      throw new Error('invalid_conversation_request');
+    }
+    const interactionBudget = captured?.interactionBudget?.schemaVersion === 1 && captured.interactionBudget.interactionId
+      ? captured.interactionBudget : createInteractionBudget();
+    return runWithInteractionBudget(interactionBudget, async () => {
+      const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
+      if (!launchSnapshot) return;
+      await revealAgentStartupTerminal(context, workspaceRoot, `step-${nodeId || 'conversation'}`, '', '', launchSnapshot.settings);
+      const launchTarget = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, launchSnapshot);
+      if (!launchTarget) return;
+      try { await handleRunAgent(context, nodeId, '', '', '', [], true, () => {}, launchTarget); }
+      finally { launchTarget.engine?.close(); }
+    });
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalStartConversation', async (serialized: string) => {
-    const input = JSON.parse(String(serialized || '')) as { projectPath?: string; mode?: string; message?: string; stepId?: string; agentCli?: string; model?: string; launchIntentId?: string };
+    const input = JSON.parse(String(serialized || '')) as { projectPath?: string; mode?: string; message?: string; stepId?: string; agentCli?: string; model?: string; launchIntentId?: string; interactionBudget?: import('./interactionBudget').InteractionBudget };
+    const interactionBudget = input.interactionBudget?.schemaVersion === 1 && input.interactionBudget.interactionId
+      ? input.interactionBudget : createInteractionBudget();
+    return runWithInteractionBudget(interactionBudget, async () => {
     const projectPath = path.resolve(String(input.projectPath || ''));
     const mode = String(input.mode || '');
     const message = String(input.message || '').trim();
@@ -1006,6 +1044,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       return { status: 'started', projectPath, mode };
     } finally { target.engine?.close(); }
+    });
   }));
 
   context.subscriptions.push(vscode.commands.registerCommand('solopreneur.internalRefreshTimedAutomation', async () => {
@@ -1520,7 +1559,7 @@ async function handleSharedWebviewAction(
     }
   };
   try {
-    return await dispatchPluginAction(message, surface, {
+    return await runWithInteractionBudget(createInteractionBudget(), () => dispatchPluginAction(message, surface, {
     'uiState.load': async (request) => {
       const scopeKey = String(request.scopeKey || 'global').slice(0, 1024);
       await respond({ command: 'uiStateLoaded', view: surface, scopeKey, loadRequestId: String(request.loadRequestId || ''), state: await readUiState(context, surface, scopeKey) });
@@ -1804,13 +1843,15 @@ async function handleSharedWebviewAction(
     },
     'conversation.runRoadmapRevision': async (request) => {
       const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
-      if (!workspaceRoot || !getProjects(context).some((project) => project.path === workspaceRoot)) {
+      const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
+      if (!launchSnapshot) {
         throw new Error('SoloMap could not prepare this project for roadmap adjustment.');
       }
-      const settings = getPersistedSettings(context);
-      const globalDataPath = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
-      const launchTarget = await captureConversationLaunchTarget(context, workspaceRoot, globalDataPath, settings);
+      const startupTerminal = await revealAgentStartupTerminal(context, workspaceRoot, 'roadmap-revision', String(request.agentCli || ''), String(request.model || ''), launchSnapshot.settings);
+      let launchTarget: AgentLaunchTarget | null = null;
       try {
+        launchTarget = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, launchSnapshot);
+        if (!launchTarget) return;
         await enqueueProjectActionLaunch(workspaceRoot, async (registered) => {
           await handleRoadmapRevision(
             context,
@@ -1822,16 +1863,18 @@ async function handleSharedWebviewAction(
               registered();
               void respond({ command: 'roadmapRevisionLaunchRegistered', projectPath: workspaceRoot });
             },
-            launchTarget
+            launchTarget || undefined
           );
         });
       } finally {
-        launchTarget.engine?.close();
+        launchTarget?.engine?.close();
+        discardReservedAgentStartupTerminal(workspaceRoot, startupTerminal);
       }
+      if (!launchTarget) return;
       try {
         await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);
       } catch (error) {
-        recordLocalDiagnosticError(globalDataPath, 'webview.sidebar.roadmap-revision.refresh', error);
+        recordLocalDiagnosticError(launchSnapshot.globalDataPath, 'webview.sidebar.roadmap-revision.refresh', error);
       }
     },
     'flow.run': async (request) => {
@@ -1962,7 +2005,8 @@ async function handleSharedWebviewAction(
         const initiallySelectedConversation = terminalProjectRoot && activeProjectRoot && path.resolve(terminalProjectRoot) === path.resolve(activeProjectRoot)
           ? syncEngine?.getAgentExecutions(nodeId).find((item) => Number(item.id) === conversationId)
           : undefined;
-        const key = getAgentProcessCleanupKey(terminalProjectRoot, conversationId);
+        const key = getAgentProcessCleanupKey(terminalProjectRoot, conversationId,
+          launchSnapshot.settings.globalDataPath, String(request.runId || ''), Number(request.generation || 0));
         let continuation = nativeContinuationByConversationKey.get(key);
         if (!continuation) {
           continuation = Promise.resolve().then(async () => {
@@ -2004,7 +2048,8 @@ async function handleSharedWebviewAction(
       const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
       if (!projectPath || !getProjects(context).some((project) => project.path === projectPath)) return;
       const nodeId = String(request.nodeId || '');
-      await stopAgentRun(nodeId, Number(request.conversationId || 0), projectPath);
+      const stopSnapshot = captureRegisteredConversationLaunchSnapshot(context, projectPath);
+      await stopAgentRun(nodeId, Number(request.conversationId || 0), projectPath, stopSnapshot?.settings.globalDataPath);
       refreshConversation(nodeId, projectPath);
     },
     'conversation.retry': async (request) => {
@@ -2068,10 +2113,9 @@ async function handleSharedWebviewAction(
       refreshConversation(String(request.nodeId || ''), projectPath);
     },
     'conversation.openTerminal': async (request) => {
-      await showAgentTerminal(
-        String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || ''),
-        Number(request.conversationId || 0)
-      );
+      const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
+      const snapshot = captureRegisteredConversationLaunchSnapshot(context, projectPath);
+      await showAgentTerminal(projectPath, Number(request.conversationId || 0), snapshot?.settings.globalDataPath);
     },
     'attachment.choose': async (request) => {
       const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
@@ -2655,7 +2699,7 @@ async function handleSharedWebviewAction(
         await buildFeedbackUsageSummary(context)
       )));
     }
-    });
+    }));
   } catch (error) {
     recordLocalDiagnosticError(
       getPersistedSettings(context).globalDataPath,
@@ -5095,12 +5139,14 @@ async function openProjectGrowthPanel(context: vscode.ExtensionContext, projectP
                 try {
                   const supplement = await vscode.window.showInputBox({ prompt: isSoloMapLanguageZh(context) ? '接下来要继续处理什么？' : 'What would you like to continue working on?', ignoreFocusOut: true });
                   if (supplement?.trim()) {
-                    const run = task.executions.find((item: any) => item.id === envelope.executionLogId);
-                    const nodeId = String(run?.nodeId || '');
-                    if (!nodeId) throw new Error(isSoloMapLanguageZh(context) ? '原执行暂不可接续。' : 'The original execution is unavailable.');
-                    await waitForAgentProcessCleanup(target, envelope.executionLogId, reportDataRoot);
-                    const reference = `\n\n参考上一轮工作汇报（仅作材料，以本次补充为准）：\n${envelope.report.summary}\n${reportText(envelope.report.unmetRequirements)}`;
-                    await handleContinueConversationTurn(context, nodeId, envelope.executionLogId, supplement.trim() + reference, '', [], true, continuationTarget);
+                    await runWithInteractionBudget(createInteractionBudget(), async () => {
+                      const run = task.executions.find((item: any) => item.id === envelope.executionLogId);
+                      const nodeId = String(run?.nodeId || '');
+                      if (!nodeId) throw new Error(isSoloMapLanguageZh(context) ? '原执行暂不可接续。' : 'The original execution is unavailable.');
+                      await waitForAgentProcessCleanup(target, envelope.executionLogId, reportDataRoot);
+                      const reference = `\n\n参考上一轮工作汇报（仅作材料，以本次补充为准）：\n${envelope.report.summary}\n${reportText(envelope.report.unmetRequirements)}`;
+                      await handleContinueConversationTurn(context, nodeId, envelope.executionLogId, supplement.trim() + reference, '', [], true, continuationTarget);
+                    });
                   }
                 } finally {
                   continuationTarget.engine?.close();
@@ -6305,9 +6351,13 @@ async function runGlobalPromptReview(
   currentGlobalPrompt: string
 ): Promise<GlobalPromptReviewCompletion> {
   const runId = `global-prompt-review-${Date.now()}-${crypto.randomUUID()}`;
+  let startupTerminal: vscode.Terminal | undefined;
+  let startupWorkspaceRoot = '';
   try {
     const workspaceRoot = activeProjectRoot || getWorkspaceRoot() || process.cwd();
+    startupWorkspaceRoot = workspaceRoot;
     const settings = getReviewLaunchSettings(context);
+    const launchSettings: SolopreneurSettings = { ...getPersistedSettings(context), ...settings };
     const globalRoot = normalizeSolomapGlobalPath(workspaceRoot, settings.globalDataPath);
     const agentCli = resolveAgentCli((settings.cliPath || 'agy').trim(), settings.cliPath);
     if (!commandExists(agentCli)) {
@@ -6324,8 +6374,7 @@ async function runGlobalPromptReview(
         globalDataPath: globalRoot, launchIntentId: `${runId}:unavailable` });
       throw new Error(automation.message);
     }
-    const terminal = createAgentTerminal(context.extensionPath, `prompt-review-${runId.slice(-6)}`);
-    terminal.show(false);
+    startupTerminal = await revealAgentStartupTerminal(context, workspaceRoot, `prompt-review-${runId.slice(-6)}`, agentCli, '', launchSettings);
     await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: globalRoot });
     await sendRuntimeDataRequest(globalRoot, { operation: 'register_project', input: { root: workspaceRoot } });
     const result = await runDatabaseLearningReview({
@@ -6342,9 +6391,15 @@ async function runGlobalPromptReview(
         const prepared = await prepareAgentRun({ agentCli, selectedModel: '', prompt, workspaceRoot, nodeId: '__solo__', executionLogId: 0,
           userMessage: '复盘经验并生成完整全局默认提示词。', runKind: 'learning_review', globalDataPath: globalRoot, taskPermissionMode: settings.taskPermissionMode || 'auto',
           launchIntentId: `learning-review:${batch.objectId}`, metadata: { learningReviewBatchId: batch.objectId, launchSummary: '开始经验复盘。' } });
-        if (terminal.exitStatus) throw new Error('复盘终端已关闭，请重新发起复盘。');
-        const activeTerminal = terminal;
-        if (!await sendTextWhenTerminalReady(activeTerminal, prepared.finalCommand)) throw new Error('复盘命令未能发送到终端，请重试。');
+        if (startupTerminal?.exitStatus) throw new Error('复盘终端已关闭，请重新发起复盘。');
+        const activeTerminal = await launchAgentConversationTerminal({
+          workspaceRoot, label: `prompt-review-${runId.slice(-6)}`,
+          conversationId: Number(prepared.status.rootExecutionLogId), nodeId: '__solo__',
+          statusFilePath: runStatusReference(workspaceRoot, Number(prepared.status.rootExecutionLogId)),
+          runKind: 'learning_review', globalDataPath: prepared.dataRoot, context, agentCli,
+          command: prepared.finalCommand, settings: launchSettings
+        });
+        startupTerminal = undefined;
         await new Promise<void>((resolve, reject) => {
           let reading = false;
           const poller = setInterval(() => {
@@ -6371,6 +6426,7 @@ async function runGlobalPromptReview(
     else vscode.window.showWarningMessage(`${message} ${result.errors.join('；')}`);
     return { command: 'globalPromptReviewCompleted', success: result.status === 'applied', globalPrompt: latestPrompt === (settings.globalPrompt || '') ? currentGlobalPrompt : latestPrompt, message };
   } catch (error: any) {
+    if (startupTerminal && startupWorkspaceRoot) discardReservedAgentStartupTerminal(startupWorkspaceRoot, startupTerminal);
     const message = `经验复盘尚未完成：${String(error?.message || error)}`;
     vscode.window.showWarningMessage(message);
     return { command: 'globalPromptReviewCompleted', success: false, message };
@@ -7184,7 +7240,8 @@ function runLifecycleClient(workspaceRoot: string, configuredGlobalDataPath?: st
 }
 
 async function findAgentStatusForConversation(workspaceRoot: string, conversationId: number, globalDataPath?: string): Promise<any | null> {
-  return (await runLifecycleClient(workspaceRoot, globalDataPath).findConversation(workspaceRoot, conversationId))?.status || null;
+  const resolved = await runLifecycleClient(workspaceRoot, globalDataPath).findConversation(workspaceRoot, conversationId);
+  return resolved ? { ...resolved.status, runId: resolved.runId, generation: resolved.generation } : null;
 }
 
 function makeAgentTerminalName(workspaceRoot: string, label: string): string {
@@ -7222,29 +7279,21 @@ function terminalSelectionDiagnostics(workspaceRoot: string, terminal: vscode.Te
   };
 }
 
-async function findActiveAgentTerminal(conversationId = 0, workspaceRoot = activeProjectRoot): Promise<vscode.Terminal | undefined> {
+async function findActiveAgentTerminal(conversationId = 0, workspaceRoot = activeProjectRoot, globalDataPath?: string): Promise<vscode.Terminal | undefined> {
   const terminals = [...vscode.window.terminals];
-  const mapped = workspaceRoot ? getAgentTerminalBinding(workspaceRoot, conversationId) : undefined;
-  if (mapped) {
-    const mappedTerminal = terminals.find((candidate) => candidate.name === mapped.terminalName);
-    if (mappedTerminal) {
-      return mappedTerminal;
-    }
-  }
   if (conversationId && workspaceRoot) {
-    const statusData = await findAgentStatusForConversation(workspaceRoot, conversationId);
-    const statusTerminalName = String(statusData?.terminalName || '');
-    if (statusTerminalName) {
-      const recorded = terminals.find((candidate) => candidate.name === statusTerminalName);
-      if (recorded) return recorded;
-    }
-    const rootExecutionLogId = Number(statusData?.rootExecutionLogId || 0);
-    const rootBinding = getAgentTerminalBinding(workspaceRoot, rootExecutionLogId);
-    if (rootBinding) {
-      const rootTerminal = terminals.find((candidate) => candidate.name === rootBinding.terminalName);
-      if (rootTerminal) return rootTerminal;
-    }
-    return undefined;
+    const requestedDataRoot = normalizeSolomapGlobalPath(workspaceRoot, globalDataPath);
+    const statusData = await findAgentStatusForConversation(workspaceRoot, conversationId, requestedDataRoot);
+    if (!statusData) return undefined;
+    const expectedExecutionIds = new Set([Number(conversationId), Number(statusData.rootExecutionLogId || 0)].filter(Boolean));
+    return terminals.find((candidate) => {
+      const target = agentTerminalRunTargets.get(candidate);
+      return target?.globalDataPath === requestedDataRoot
+        && path.resolve(target.workspaceRoot) === path.resolve(workspaceRoot)
+        && expectedExecutionIds.has(target.executionLogId)
+        && isAgentTerminalRunTargetCurrent(target, { runId: statusData.runId, generation: statusData.generation, status: statusData })
+        && Boolean(foregroundAgentTerminalSurfaces.get(candidate)?.bridge?.isRunning);
+    });
   }
   if (activeAgentTerminalName) {
     const active = terminals.find((candidate) => candidate.name === activeAgentTerminalName);
@@ -7273,6 +7322,10 @@ async function findReusableAgentTerminal(workspaceRoot: string, conversationId: 
   }
   const terminals = [...vscode.window.terminals];
   const normalizedWorkspaceRoot = path.resolve(workspaceRoot);
+  const requestedDataRoot = normalizeSolomapGlobalPath(
+    workspaceRoot,
+    globalDataPath ?? (extensionContextRef ? getPersistedSettings(extensionContextRef).globalDataPath : '')
+  );
   const mappedConversationIds = [...new Set([
     Number(conversationId),
     Number(statusData.rootExecutionLogId || 0)
@@ -7282,14 +7335,26 @@ async function findReusableAgentTerminal(workspaceRoot: string, conversationId: 
     const binding = getAgentTerminalBinding(normalizedWorkspaceRoot, mappedConversationId);
     if (binding) {
       const mappedTerminal = terminals.find((candidate) => candidate.name === binding.terminalName);
-      if (mappedTerminal) {
+      const target = mappedTerminal ? agentTerminalRunTargets.get(mappedTerminal) : undefined;
+      if (mappedTerminal && target && path.resolve(target.workspaceRoot) === normalizedWorkspaceRoot
+        && target.globalDataPath === requestedDataRoot && mappedConversationIds.includes(target.executionLogId)
+        && isAgentTerminalRunTargetCurrent(target, { runId: statusData.runId, generation: statusData.generation, status: statusData })
+        && foregroundAgentTerminalSurfaces.get(mappedTerminal)?.bridge?.isRunning) {
         return mappedTerminal;
       }
     }
   }
   const statusTerminalName = String(statusData.terminalName || '');
   return statusTerminalName
-    ? terminals.find((candidate) => candidate.name === statusTerminalName)
+    ? terminals.find((candidate) => {
+      const target = agentTerminalRunTargets.get(candidate);
+      return candidate.name === statusTerminalName && Boolean(target)
+        && path.resolve(target!.workspaceRoot) === normalizedWorkspaceRoot
+        && target!.globalDataPath === requestedDataRoot
+        && mappedConversationIds.includes(target!.executionLogId)
+        && isAgentTerminalRunTargetCurrent(target!, { runId: statusData.runId, generation: statusData.generation, status: statusData })
+        && foregroundAgentTerminalSurfaces.get(candidate)?.bridge?.isRunning;
+    })
     : undefined;
 }
 
@@ -7297,7 +7362,8 @@ function createAgentTerminal(
   workspaceRoot: string,
   label: string,
   conversationId = 0,
-  env?: Record<string, string>
+  env?: Record<string, string>,
+  foreground = false
 ): vscode.Terminal {
   const terminalEnvironment = withDesktopSessionEnvironment(env);
   const reservedTerminals = reservedAgentTerminalsByProject.get(workspaceRoot);
@@ -7325,6 +7391,7 @@ function createAgentTerminal(
     }
     return reservedTerminal;
   }
+  if (foreground) return createForegroundAgentTerminal(workspaceRoot, label, conversationId);
   const terminalName = makeAgentTerminalName(workspaceRoot, label);
   activeAgentTerminalName = terminalName;
   if (conversationId) {
@@ -7343,6 +7410,125 @@ function createAgentTerminal(
     cwd: workspaceRoot,
     env: terminalEnvironment,
   });
+}
+
+function createForegroundAgentTerminalSurface(): ForegroundAgentTerminalSurface {
+  const writeListeners = new Set<(value: string) => unknown>();
+  const closeListeners = new Set<(value: number | void) => unknown>();
+  const event = <T>(listeners: Set<(value: T) => unknown>): vscode.Event<T> => ((listener: (value: T) => unknown, thisArgs?: unknown, disposables?: vscode.Disposable[]) => {
+    const bound = thisArgs ? listener.bind(thisArgs) : listener;
+    listeners.add(bound);
+    const disposable = { dispose: () => listeners.delete(bound) };
+    disposables?.push(disposable);
+    return disposable;
+  }) as vscode.Event<T>;
+  const fire = <T>(listeners: Set<(value: T) => unknown>, value: T) => {
+    for (const listener of [...listeners]) {
+      try { listener(value); } catch { /* A terminal renderer cannot stop the runner. */ }
+    }
+  };
+  const decoder = new StringDecoder('utf8');
+  let opened = false;
+  let detached = false;
+  let detachOutput: (() => void) | undefined;
+  let detachExit: (() => void) | undefined;
+  const pendingInput: Buffer[] = [];
+  const surface: ForegroundAgentTerminalSurface = {
+    pty: {
+      onDidWrite: event(writeListeners),
+      onDidClose: event(closeListeners),
+      open: initialDimensions => {
+        if (initialDimensions) surface.dimensions = initialDimensions;
+        opened = true;
+        if (surface.bridge && !detachOutput) {
+          detachOutput = surface.bridge.attachOutput(bytes => {
+            const text = decoder.write(bytes);
+            if (text) fire(writeListeners, text);
+          });
+        }
+      },
+      close: () => {
+        opened = false;
+        detachOutput?.();
+        detachOutput = undefined;
+        if (extensionHostDeactivating || detached) surface.bridge?.detachForHostReload();
+        else surface.bridge?.stop('SIGTERM');
+      },
+      handleInput: data => {
+        surface.writeInputFrame(Buffer.from(data));
+      },
+      setDimensions: dimensions => { surface.dimensions = dimensions; }
+    },
+    attach: bridge => {
+      if (surface.bridge && surface.bridge !== bridge) throw new Error('foreground_terminal_already_bound');
+      surface.bridge = bridge;
+      if (opened && !detachOutput) {
+        detachOutput = bridge.attachOutput(bytes => {
+          const text = decoder.write(bytes);
+          if (text) fire(writeListeners, text);
+        });
+      }
+      if (!detachExit) detachExit = bridge.onExit(code => {
+        const remaining = decoder.end();
+        if (remaining) fire(writeListeners, remaining);
+        fire(closeListeners, Number.isInteger(code) ? Number(code) : undefined as void);
+      });
+      for (const bytes of pendingInput.splice(0)) void bridge.writeInputFrame(bytes).catch(() => undefined);
+    },
+    writeInputFrame: bytes => {
+      if (!surface.bridge) {
+        pendingInput.push(Buffer.from(bytes));
+        return Promise.resolve();
+      }
+      return surface.bridge.writeInputFrame(bytes);
+    },
+    detachForHostReload: () => {
+      detached = true;
+      detachOutput?.();
+      detachOutput = undefined;
+      detachExit?.();
+      detachExit = undefined;
+      bridgeDetach(surface.bridge);
+    },
+    stop: () => { surface.bridge?.stop('SIGTERM'); }
+  };
+  return surface;
+}
+
+function bridgeDetach(bridge?: ForegroundAgentTerminalBridge): void {
+  bridge?.detachForHostReload();
+}
+
+function createForegroundAgentTerminal(
+  workspaceRoot: string,
+  label: string,
+  conversationId = 0
+): vscode.Terminal {
+  const terminalName = makeAgentTerminalName(workspaceRoot, label);
+  activeAgentTerminalName = terminalName;
+  if (conversationId) setAgentTerminalBinding(workspaceRoot, conversationId, terminalName);
+  const surface = createForegroundAgentTerminalSurface();
+  const terminal = vscode.window.createTerminal({
+    name: terminalName,
+    iconPath: extensionContextRef
+      ? vscode.Uri.joinPath(extensionContextRef.extensionUri, 'resources', 'logo.png')
+      : new vscode.ThemeIcon('symbol-string'),
+    color: new vscode.ThemeColor('terminal.ansiCyan'),
+    pty: surface.pty
+  });
+  if ((terminal.creationOptions as vscode.ExtensionTerminalOptions | undefined)?.pty === surface.pty) {
+    foregroundAgentTerminalSurfaces.set(terminal, surface);
+  }
+  return terminal;
+}
+
+async function deliverAgentTerminalInput(terminal: vscode.Terminal, text: string, provider: string): Promise<boolean> {
+  const surface = foregroundAgentTerminalSurfaces.get(terminal);
+  if (surface?.bridge?.isRunning) {
+    await surface.writeInputFrame(agentTerminalInputFrame(text, provider));
+    return true;
+  }
+  return false;
 }
 
 const reservedAgentTerminalsByProject = new Map<string, Array<{
@@ -7372,36 +7558,29 @@ async function revealAgentStartupTerminal(
   if (!workspaceRoot) {
     return undefined;
   }
-  const terminalEnvironment = await getOpenCodeTerminalEnvironment(
-    context,
-    agentCli || settingsSnapshot?.cliPath || getPersistedSettings(context).cliPath,
-    model,
-    settingsSnapshot
-  );
-  const resolvedTerminalEnvironment = withDesktopSessionEnvironment(terminalEnvironment);
-  const terminal = vscode.window.createTerminal({
-    name: makeAgentTerminalName(workspaceRoot, label),
-    iconPath: extensionContextRef
-      ? vscode.Uri.joinPath(extensionContextRef.extensionUri, 'resources', 'logo.png')
-      : new vscode.ThemeIcon('symbol-string'),
-    color: new vscode.ThemeColor('terminal.ansiCyan'),
-    cwd: workspaceRoot,
-    env: resolvedTerminalEnvironment
-  });
-  const reservations = reservedAgentTerminalsByProject.get(workspaceRoot) || [];
-  reservations.push({
-    terminal,
-    environmentSignature: JSON.stringify(resolvedTerminalEnvironment)
-  });
-  reservedAgentTerminalsByProject.set(workspaceRoot, reservations);
+  const terminal = createAgentTerminal(workspaceRoot, label, 0, undefined, true);
   activeAgentTerminalName = terminal.name;
   const selection = terminalSelectionDiagnostics(workspaceRoot, terminal, workspaceRoot);
   recordCurrentDiagnosticStage('terminal.startup.focus', 'start', 0, undefined, selection);
   try {
     terminal.show(false);
     recordCurrentDiagnosticStage('terminal.startup.focus', 'ok', 0, undefined, selection);
+    const terminalEnvironment = await getOpenCodeTerminalEnvironment(
+      context,
+      agentCli || settingsSnapshot?.cliPath || getPersistedSettings(context).cliPath,
+      model,
+      settingsSnapshot
+    );
+    const reservations = reservedAgentTerminalsByProject.get(workspaceRoot) || [];
+    reservations.push({
+      terminal,
+      environmentSignature: JSON.stringify(withDesktopSessionEnvironment(terminalEnvironment))
+    });
+    reservedAgentTerminalsByProject.set(workspaceRoot, reservations);
   } catch (error) {
     recordCurrentDiagnosticStage('terminal.startup.focus', 'error', 0, error, selection);
+    foregroundAgentTerminalSurfaces.delete(terminal);
+    terminal.dispose();
     throw error;
   }
   return terminal;
@@ -7409,6 +7588,140 @@ async function revealAgentStartupTerminal(
 
 const agentTerminalDeliveries = new Map<string, Promise<vscode.Terminal>>();
 const agentTerminalDeliveryWatchdogs = new Map<string, NodeJS.Timeout>();
+
+async function submitLegacyAgentTerminalCommand(
+  terminal: vscode.Terminal,
+  command: string,
+  readinessTimeoutMs: number | undefined,
+  observe: (event: import('./terminalCompatibility').TerminalDeliveryObservation) => void
+): Promise<boolean> {
+  return sendTextWhenTerminalReady(terminal, command, true, { readinessTimeoutMs, readinessBudgetMs: 5_000, observe });
+}
+
+async function awaitAgentTaskIngress(
+  operation: (operation: string, data: Record<string, unknown>) => Promise<unknown>,
+  identity: { root: string; executionLogId: number },
+  expected: { generation: number; turnId: string; interactionId: string; budget?: InteractionBudget; initialState?: import('./runLifecycleTypes').RunState; deliveryId?: string },
+  trace?: { record(stage: string, status: 'start' | 'ok' | 'error', durationMs?: number, error?: unknown, details?: Record<string, unknown>): void },
+  pollMs = 50
+): Promise<import('./runLifecycleTypes').RunState> {
+  if (!expected.interactionId || !expected.budget || expected.budget.interactionId !== expected.interactionId) {
+    throw new Error('agent_task_ingress_budget_missing');
+  }
+  const started = Date.now();
+  let generation = expected.generation;
+  trace?.record('terminal.delivery.task.ingress', 'start');
+  const persistDeadline = async (initial: import('./runLifecycleTypes').RunState): Promise<import('./runLifecycleTypes').RunState> => {
+    let current = initial;
+    for (;;) {
+      const deadline = taskIngressDeadlineFields(current.status);
+      if (!Object.keys(deadline).length) return current;
+      try {
+        return await operation('patch_run_state', {
+          ...identity,
+          generation,
+          expectedRevision: current.revision,
+          patch: deadline,
+          idempotencyKey: `run:${current.runId}:${expected.generation}:task-ingress-deadline:${expected.interactionId}`
+        }) as import('./runLifecycleTypes').RunState;
+      } catch (error) {
+        if ((error as Error).message !== 'revision_conflict') throw error;
+        current = await operation('read_run_state', identity) as import('./runLifecycleTypes').RunState;
+        if (current.generation !== generation || current.turnId !== expected.turnId) throw new Error('run_owner_conflict');
+      }
+    }
+  };
+  const boundedOperation = async <T>(name: string, data: Record<string, unknown>): Promise<T> => {
+    const budget = advanceInteractionBudget(expected.budget!);
+    if (!budget.clockTrusted) throw new Error('agent_task_ingress_clock_untrusted');
+    if (budget.elapsedMs >= 10_000) throw new Error('agent_task_ingress_timeout');
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        operation(name, data) as Promise<T>,
+        new Promise<T>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('agent_task_ingress_timeout')),
+            Math.max(1, Math.ceil(10_000 - budget.elapsedMs)));
+        })
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+  let lastState = expected.initialState;
+  for (;;) {
+    const currentBudget = advanceInteractionBudget(expected.budget);
+    if (!currentBudget.clockTrusted || currentBudget.elapsedMs >= 10_000) {
+      const error = new Error(currentBudget.clockTrusted ? 'agent_task_ingress_timeout' : 'agent_task_ingress_clock_untrusted');
+      trace?.record('terminal.delivery.task.ingress', 'error', Date.now() - started, error,
+        { verdict: currentBudget.verdict, elapsedMs: currentBudget.elapsedMs });
+      if (currentBudget.clockTrusted && lastState) return persistDeadline(lastState);
+      throw error;
+    }
+    let state: import('./runLifecycleTypes').RunState;
+    try {
+      state = await boundedOperation('observe_run_task_ingress', {
+        ...identity,
+        generation,
+        expectedTurnId: expected.turnId
+      });
+    } catch (error) {
+      if ((error as Error).message === 'run_owner_conflict' && expected.deliveryId) {
+        const claimed = await boundedOperation<import('./runLifecycleTypes').RunState>('read_run_state', identity);
+        const claimedInteractionId = String(claimed.status.interactionId
+          || (claimed.status.interactionBudget as { interactionId?: string } | undefined)?.interactionId || '');
+        if (claimed.generation > generation
+          && claimed.turnId === expected.turnId
+          && claimedInteractionId === expected.interactionId
+          && claimed.status.deliveryPending !== true
+          && String(claimed.status.terminalClaimDeliveryId || '') === expected.deliveryId) {
+          generation = claimed.generation;
+          lastState = claimed;
+          continue;
+        }
+      }
+      trace?.record('terminal.delivery.task.ingress', 'error', Date.now() - started, error);
+      if ((error as Error).message === 'agent_task_ingress_timeout' && lastState) return persistDeadline(lastState);
+      throw error;
+    }
+    lastState = state;
+    if (state.generation !== generation) throw new Error('run_owner_conflict');
+    if (state.turnId !== expected.turnId) throw new Error('checkpoint_turn_conflict');
+    const receipt = state.status.taskIngressReceipt as { interactionId?: string } | undefined;
+    if (receipt?.interactionId === expected.interactionId) {
+      const verdict = String(state.status.taskIngressVerdict || '');
+      if (verdict === 'normal' || verdict === 'degraded') {
+        trace?.record('terminal.delivery.task.ingress', 'ok', Date.now() - started, undefined,
+          { verdict, elapsedMs: Number(state.status.taskIngressElapsedMs || 0) });
+        return state;
+      }
+      const error = new Error(verdict === 'clock_untrusted' ? 'agent_task_ingress_clock_untrusted' : 'agent_task_ingress_timeout');
+      trace?.record('terminal.delivery.task.ingress', 'error', Date.now() - started, error,
+        { verdict, elapsedMs: Number(state.status.taskIngressElapsedMs || 0) });
+      throw error;
+    }
+    const deadline = taskIngressDeadlineFields(state.status);
+    if (Object.keys(deadline).length) {
+      const code = String(deadline.taskIngressVerdict) === 'clock_untrusted'
+        ? 'agent_task_ingress_clock_untrusted' : 'agent_task_ingress_timeout';
+      const error = new Error(code);
+      trace?.record('terminal.delivery.task.ingress', 'error', Date.now() - started, error,
+        { verdict: deadline.taskIngressVerdict, elapsedMs: Number(deadline.taskIngressElapsedMs || 0) });
+      if (code === 'agent_task_ingress_timeout') return persistDeadline(state);
+      throw error;
+    }
+    if (['Failed', 'Cancelled', 'Interrupted'].includes(String(state.status.status)) || state.status.interactiveSessionClosed === true) {
+      const error = new Error(String(state.status.failureCode || 'agent_task_ingress_missing'));
+      trace?.record('terminal.delivery.task.ingress', 'error', Date.now() - started, error);
+      throw error;
+    }
+    await new Promise(resolve => setTimeout(resolve, Math.max(10, pollMs)));
+  }
+}
+
+function isTaskIngressDeadlineError(errorCode: string): boolean {
+  return errorCode === 'agent_task_ingress_timeout' || errorCode === 'agent_task_ingress_clock_untrusted';
+}
 
 async function launchAgentConversationTerminal(input: {
   workspaceRoot: string;
@@ -7427,6 +7740,7 @@ async function launchAgentConversationTerminal(input: {
   terminalReadyTimeoutMs?: number;
   runnerClaimTimeoutMs?: number;
   deliveryReleaseRetryMs?: number;
+  initialState?: import('./runLifecycleTypes').RunState;
 }): Promise<vscode.Terminal> {
   const key = JSON.stringify([input.globalDataPath, path.resolve(input.workspaceRoot), input.conversationId]);
   const existing = agentTerminalDeliveries.get(key);
@@ -7438,10 +7752,11 @@ async function launchAgentConversationTerminal(input: {
     const reference = getAgentStatusFilePath(input.workspaceRoot, input.conversationId);
     const identity = { root: input.workspaceRoot, executionLogId: input.conversationId };
     const owner = await getAgentRunDeliveryOwner();
-    let state = await operation('read_run_state', identity) as import('./runLifecycleTypes').RunState;
+    let state = input.initialState || await operation('read_run_state', identity) as import('./runLifecycleTypes').RunState;
     const deliveryGeneration = state.generation;
     const trace = getCurrentLocalDiagnosticTrace() || createLocalDiagnosticTrace(globalDataPath, 'terminal.delivery', { targetId: state.runId, generation: state.generation });
-    const deliveryStartedAt = Date.now();
+    const interactionBudget = state.status.interactionBudget as { acceptedWallMs?: number } | undefined;
+    const deliveryStartedAt = Number(interactionBudget?.acceptedWallMs || Date.now());
     const record = async <T>(stage: string, action: () => Promise<T>): Promise<T> => {
       const started = performance.now(); trace.record(stage, 'start');
       try { const result = await action(); trace.record(stage, 'ok', performance.now() - started); return result; }
@@ -7470,7 +7785,7 @@ async function launchAgentConversationTerminal(input: {
       timer.unref?.();
       agentTerminalDeliveryWatchdogs.set(releaseKey, timer);
     };
-    const scheduleRunnerClaimWatchdog = (terminal: vscode.Terminal, target: AgentTerminalRunTarget, generation: number) => {
+    const scheduleRunnerClaimWatchdog = (terminal: vscode.Terminal, target: AgentTerminalRunTarget, generation: number, attempt = 0) => {
       const watchdogKey = `${key}:${target.deliveryId}`;
       if (agentTerminalDeliveryWatchdogs.has(watchdogKey)) return;
       const timeoutMs = Math.max(1, Number(input.runnerClaimTimeoutMs || 10_000));
@@ -7479,29 +7794,37 @@ async function launchAgentConversationTerminal(input: {
         agentTerminalDeliveryWatchdogs.delete(watchdogKey);
         void (async () => {
           const current = await operation('read_run_state', identity) as import('./runLifecycleTypes').RunState;
-          if (!current.status.deliveryPending || current.generation !== generation) {
+          const currentStatus = String(current.status.status || '');
+          if (!current.status.deliveryPending || current.generation !== generation
+            || !['Preparing', 'Running'].includes(currentStatus)) {
             trace.record('terminal.delivery.runner.claim.watchdog', 'ok', Date.now() - deliveryStartedAt,
               undefined, { pid: Number(current.status.agentPid || 0), timeoutMs });
             return;
           }
           if (String(current.status.terminalDeliveryId || '') !== target.deliveryId) return;
+          await operation('patch_run_state', {
+            ...identity,
+            generation,
+            expectedRevision: current.revision,
+            patch: {
+              deliveryLastError: 'runner_claim_timeout',
+              runnerClaimDeadlineExceededAt: new Date().toISOString()
+            },
+            idempotencyKey: `run:${current.runId}:${generation}:runner-claim-deadline:${target.deliveryId}`
+          });
           trace.record('terminal.delivery.runner.claim.watchdog', 'error', Date.now() - deliveryStartedAt,
             new Error('runner_claim_timeout'), { timeoutMs });
-          try {
-            await operation('release_run_delivery', { ...identity, generation, owner, error: 'runner_claim_timeout',
-              idempotencyKey: `run:${current.runId}:${generation}:runner-claim-timeout:${target.deliveryId}` });
-            agentTerminalRunTargets.delete(terminal);
-            terminal.dispose();
-            if (extensionContextRef) ensureActiveConversationPoller(extensionContextRef);
-          } catch (error) {
-            if (!['run_already_delivered', 'run_owner_conflict', 'run_delivery_lease_lost'].includes((error as Error).message)) {
-              trace.record('terminal.delivery.release', 'error', 0, error);
-              scheduleDeliveryReleaseRetry('runner_claim_timeout', terminal, target.deliveryId || '');
-            }
-          }
+          // The ten-second boundary is a release verdict, not cancellation.
+          // A late but valid runner keeps the same delivery identity and may
+          // still finish the user's task; never amplify host pressure by
+          // releasing the lease or creating another terminal here.
         })().catch(error => {
-          trace.record('terminal.delivery.runner.claim.watchdog', 'error', Date.now() - deliveryStartedAt, error, { timeoutMs });
-          scheduleRunnerClaimWatchdog(terminal, target, generation);
+          trace.record('terminal.delivery.runner.claim.watchdog', 'error', Date.now() - deliveryStartedAt, error,
+            { timeoutMs });
+          // This watchdog is observability, not delivery. A missing Runtime
+          // must not create an unbounded endpoint polling loop after the
+          // terminal has already received the command.
+          if (attempt < 2) scheduleRunnerClaimWatchdog(terminal, target, generation, attempt + 1);
         });
       }, timeoutMs);
       timer.unref?.();
@@ -7509,7 +7832,9 @@ async function launchAgentConversationTerminal(input: {
     };
     const recordedTerminal = vscode.window.terminals.find(terminal => {
       const existingTarget = agentTerminalRunTargets.get(terminal);
-      return terminal.name === state.status.terminalName && existingTarget?.globalDataPath === globalDataPath && isAgentTerminalRunTargetCurrent(existingTarget, state);
+      return terminal.name === state.status.terminalName && existingTarget?.globalDataPath === globalDataPath
+        && isAgentTerminalRunTargetCurrent(existingTarget, state)
+        && foregroundAgentTerminalSurfaces.get(terminal)?.bridge?.isRunning;
     });
     const recordedTarget: AgentTerminalRunTarget = { workspaceRoot: input.workspaceRoot, globalDataPath, executionLogId: input.conversationId, runId: state.runId, generation: state.generation, deliveryId: recordedTerminal ? String(state.status.terminalDeliveryId || '') : crypto.randomUUID() };
     if (recordedTerminal && state.status.terminalCommandSubmittedAt) {
@@ -7519,6 +7844,14 @@ async function launchAgentConversationTerminal(input: {
       recordedTerminal.show(false);
       trace.record('terminal.delivery.focus', 'ok', 0, undefined, selection);
       scheduleRunnerClaimWatchdog(recordedTerminal, recordedTarget, state.generation);
+      if (!legacyConversationDeliveryHarnessForTests) await awaitAgentTaskIngress(operation, identity, {
+        generation: state.generation,
+        turnId: state.turnId,
+        interactionId: String(state.status.interactionId || (state.status.interactionBudget as { interactionId?: string } | undefined)?.interactionId || ''),
+        budget: state.status.interactionBudget as InteractionBudget | undefined,
+        initialState: state,
+        deliveryId: String(state.status.terminalClaimDeliveryId || state.status.terminalDeliveryId || '')
+      }, trace);
       return recordedTerminal;
     }
     if (!state.status.deliveryPending) throw new Error('run_already_delivered');
@@ -7535,31 +7868,52 @@ async function launchAgentConversationTerminal(input: {
     }
     let terminalForPersistence: vscode.Terminal | undefined;
     let lastDeliveryId = '';
+    let runnerSubmitted = false;
     try {
+    const readCurrentState = async (): Promise<import('./runLifecycleTypes').RunState> => {
+      for (let attempt = 0; ; attempt += 1) {
+        try { return await operation('read_run_state', identity) as import('./runLifecycleTypes').RunState; }
+        catch (error) {
+          const transient = ['ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT'].includes(String((error as NodeJS.ErrnoException).code || ''))
+            || (error as Error).message === 'different_runtime';
+          if (!transient || attempt >= 2) throw error;
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+      }
+    };
     const persist = async (patch: Record<string, unknown>, commandSubmitted = false) => {
+      let current = commandSubmitted ? await readCurrentState() : state;
       for (;;) {
-        const current = await operation('read_run_state', identity) as import('./runLifecycleTypes').RunState;
         if (current.runId !== state.runId || (commandSubmitted
           ? !terminalForPersistence || !isAgentTerminalRunTargetCurrent(agentTerminalRunTargets.get(terminalForPersistence)!, current)
           : current.generation !== generation)) throw new Error('run_owner_conflict');
         if (current.turnId !== state.turnId) throw new Error('checkpoint_turn_conflict');
-        const status = await client.readStatus(reference, current.revision);
-        if (!status) throw new Error('run_missing');
-        try { await client.writeStatus(reference, { ...status, ...patch }); return; }
+        if (Object.entries(patch).every(([key, value]) => current.status[key] === value)) { state = current; return; }
+        try {
+          state = await operation('patch_run_state', {
+            ...identity,
+            generation: current.generation,
+            expectedRevision: current.revision,
+            patch,
+            idempotencyKey: `run:${current.runId}:${current.generation}:terminal:${commandSubmitted ? 'submitted' : 'identity'}:${lastDeliveryId}`
+          }) as import('./runLifecycleTypes').RunState;
+          return;
+        }
         catch (error) {
           // The submitted runner claims this delivery by advancing generation.
           // Re-read and verify the delivery before recording its acknowledgement.
           if ((error as Error).message !== 'revision_conflict'
             && !(commandSubmitted && (error as Error).message === 'run_owner_conflict')) throw error;
+          current = await readCurrentState();
         }
       }
     };
     const terminalEnvironment = input.context ? await getOpenCodeTerminalEnvironment(input.context, input.agentCli, input.model, input.settings) : undefined;
     let lastDeliveryFailure = 'terminal_delivery_failed';
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      const terminal = attempt === 1 && recordedTerminal
+    for (let attempt = 1; attempt <= 1; attempt++) {
+      const terminal = recordedTerminal
         ? recordedTerminal
-        : createAgentTerminal(input.workspaceRoot, input.label, input.conversationId, terminalEnvironment);
+        : createAgentTerminal(input.workspaceRoot, input.label, input.conversationId, terminalEnvironment, true);
       terminalForPersistence = terminal;
       const target: AgentTerminalRunTarget = { workspaceRoot: input.workspaceRoot, globalDataPath, executionLogId: input.conversationId,
         runId: state.runId, generation, deliveryId: crypto.randomUUID() };
@@ -7579,29 +7933,78 @@ async function launchAgentConversationTerminal(input: {
       const readinessTimeoutMs = input.terminalReadyTimeoutMs === undefined
         ? undefined
         : Math.max(1, Number(input.terminalReadyTimeoutMs));
-      const submitted = await sendTextWhenTerminalReady(terminal,
-        `SOLOMAP_DIAGNOSTIC_TRACE_ID=${shellQuote(trace.id)} SOLOMAP_DELIVERY_STARTED_AT=${shellQuote(String(deliveryStartedAt))} SOLOMAP_TERMINAL_DELIVERY_ID=${shellQuote(target.deliveryId!)} ${input.command}`,
-        true, { readinessTimeoutMs, readinessBudgetMs: 5_000, observe: event => {
+      const observeTerminalDelivery = (event: import('./terminalCompatibility').TerminalDeliveryObservation) => {
           if (event.status === 'error' && event.stage !== 'terminal.process.slow') lastDeliveryFailure = event.error || 'terminal_delivery_failed';
           const stage = event.stage.replace(/^terminal\./, 'terminal.delivery.');
           trace.record(stage, event.status, event.durationMs, event.error ? new Error(event.error) : undefined,
             { ...(event.pid ? { pid: event.pid } : {}), ...(event.timeoutMs ? { timeoutMs: event.timeoutMs } : {}), ...(event.budgetMs ? { budgetMs: event.budgetMs } : {}) });
-        } });
+      };
+      const surface = foregroundAgentTerminalSurfaces.get(terminal);
+      let submitted = false;
+      if (surface) {
+        const invocation = buildForegroundRunnerInvocation({
+          extensionOutputRoot: __dirname,
+          globalDataPath,
+          workspaceRoot: input.workspaceRoot,
+          executionLogId: input.conversationId,
+          deliveryId: target.deliveryId!,
+          traceId: trace.id,
+          acceptedAtMs: deliveryStartedAt,
+          terminalColumns: surface.dimensions?.columns,
+          terminalRows: surface.dimensions?.rows,
+          environment: withDesktopSessionEnvironment(terminalEnvironment)
+        });
+        const foregroundBridge = new ForegroundAgentTerminalBridge(invocation);
+        surface.attach(foregroundBridge);
+        try {
+          const runner = foregroundBridge.start();
+          submitted = Boolean(runner.pid);
+          trace.record('terminal.delivery.runner.spawn', submitted ? 'ok' : 'error', Date.now() - deliveryStartedAt,
+            submitted ? undefined : new Error('foreground_runner_spawn_failed'), runner.pid ? { pid: runner.pid } : undefined);
+        } catch (error) {
+          lastDeliveryFailure = error instanceof Error ? error.message : String(error);
+          trace.record('terminal.delivery.runner.spawn', 'error', Date.now() - deliveryStartedAt, error);
+        }
+      } else if (legacyConversationDeliveryHarnessForTests || input.terminalReadyTimeoutMs !== undefined) {
+        // Explicit compatibility harness only. No production caller supplies
+        // terminalReadyTimeoutMs, so user conversations never enter this
+        // processId/sendText path.
+        submitted = await submitLegacyAgentTerminalCommand(terminal,
+          `SOLOMAP_DIAGNOSTIC_TRACE_ID=${shellQuote(trace.id)} SOLOMAP_DELIVERY_STARTED_AT=${shellQuote(String(deliveryStartedAt))} SOLOMAP_TERMINAL_DELIVERY_ID=${shellQuote(target.deliveryId!)} ${input.command}`,
+          readinessTimeoutMs, observeTerminalDelivery);
+      } else throw new Error('foreground_terminal_surface_unavailable');
       if (!submitted) {
-        trace.record('terminal.delivery.retry', attempt < 2 ? 'ok' : 'error', 0, attempt < 2 ? undefined : new Error(lastDeliveryFailure));
+        trace.record('terminal.delivery.retry', 'error', 0, new Error(lastDeliveryFailure));
         agentTerminalRunTargets.delete(terminal);
         terminal.dispose();
-        continue;
+        break;
       }
-      await record('terminal.delivery.submission.persist', () => persist({ terminalCommandSubmittedAt: new Date().toISOString() }, true));
+      runnerSubmitted = true;
+      await record('terminal.delivery.submission.persist', () => persist({
+        terminalCommandSubmittedAt: new Date().toISOString(),
+        foregroundRunnerSpawnedAt: new Date().toISOString(),
+        foregroundRunnerPid: surface?.bridge?.pid || 0
+      }, true));
       scheduleRunnerClaimWatchdog(terminal, target, generation);
       if (extensionContextRef) ensureActiveConversationPoller(extensionContextRef);
       if (input.refreshNodeId) postNodeConversations(input.refreshNodeId, [], true, input.workspaceRoot);
+      if (!legacyConversationDeliveryHarnessForTests) await awaitAgentTaskIngress(operation, identity, {
+        generation: state.generation,
+        turnId: state.turnId,
+        interactionId: String(state.status.interactionId || (state.status.interactionBudget as { interactionId?: string } | undefined)?.interactionId || ''),
+        budget: state.status.interactionBudget as InteractionBudget | undefined,
+        initialState: state,
+        deliveryId: lastDeliveryId
+      }, trace);
       return terminal;
     }
     throw new Error(lastDeliveryFailure);
     } catch (error) {
       const errorCode = error instanceof Error ? error.message : String(error);
+      if (runnerSubmitted && isTaskIngressDeadlineError(errorCode)) {
+        trace.record('terminal.delivery.deadline', 'error', Date.now() - deliveryStartedAt, error);
+        throw error;
+      }
       try {
         await operation('release_run_delivery', { ...identity, generation, owner, error: errorCode, idempotencyKey: `run:${state.runId}:${generation}:release-terminal:${lastDeliveryId || 'unbound'}:${errorCode}` });
         if (terminalForPersistence && agentTerminalRunTargets.delete(terminalForPersistence)) terminalForPersistence.dispose();
@@ -7620,8 +8023,14 @@ async function launchAgentConversationTerminal(input: {
   finally { if (agentTerminalDeliveries.get(key) === delivery) agentTerminalDeliveries.delete(key); }
 }
 
-function getAgentProcessCleanupKey(workspaceRoot: string, conversationId: number): string {
-  return `${path.resolve(workspaceRoot)}:${Number(conversationId)}`;
+function getAgentProcessCleanupKey(workspaceRoot: string, conversationId: number, globalDataPath = '', runId = '', generation = 0): string {
+  return JSON.stringify([
+    normalizeSolomapGlobalPath(workspaceRoot, globalDataPath),
+    path.resolve(workspaceRoot),
+    Number(conversationId),
+    String(runId || ''),
+    Number(generation || 0)
+  ]);
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -7788,10 +8197,8 @@ function beginAgentProcessCleanup(
 }
 
 async function waitForAgentProcessCleanup(workspaceRoot: string, conversationId: number, globalDataPath?: string): Promise<void> {
-  const legacyCleanup = agentProcessCleanupByConversationKey.get(getAgentProcessCleanupKey(workspaceRoot, conversationId));
-  if (legacyCleanup) await legacyCleanup;
   const client = runLifecycleClient(workspaceRoot, globalDataPath);
-  const key = `${client.dataRoot}:${getAgentProcessCleanupKey(workspaceRoot, conversationId)}`;
+  const key = getAgentProcessCleanupKey(workspaceRoot, conversationId, client.dataRoot);
   const existing = agentProcessCleanupByConversationKey.get(key);
   if (existing) return existing;
   const cleanup = (async () => {
@@ -7866,8 +8273,8 @@ async function handleAgentTerminalClosed(
   return true;
 }
 
-async function showAgentTerminal(workspaceRoot: string, conversationId = 0): Promise<void> {
-  const terminal = await findActiveAgentTerminal(conversationId, workspaceRoot);
+async function showAgentTerminal(workspaceRoot: string, conversationId = 0, globalDataPath?: string): Promise<void> {
+  const terminal = await findActiveAgentTerminal(conversationId, workspaceRoot, globalDataPath);
   if (terminal) {
     terminal.show(false);
     return;
@@ -8331,31 +8738,51 @@ function resolveContinuationRootConversation(nodeId: string, conversationId: num
   return resolveContinuationRootConversationFromList(syncEngine.getAgentExecutions(nodeId), conversationId);
 }
 
-async function registerInteractiveConversationTurn(workspaceRoot: string, conversationId: number, userMessage: string, preserveRoadmapState = false, globalDataPath?: string, engine = syncEngine): Promise<any | null> {
+async function registerInteractiveConversationTurn(workspaceRoot: string, conversationId: number, userMessage: string, preserveRoadmapState = false, globalDataPath?: string, engine = syncEngine, gitBaseline = ''): Promise<any | null> {
   const client = runLifecycleClient(workspaceRoot, globalDataPath);
   const resolved = await client.findConversation(workspaceRoot, conversationId);
   if (!resolved || resolved.status.interactiveSession !== true || resolved.status.status !== 'Waiting') return null;
   const request = String(userMessage || '').trim();
   if (!request) return null;
-  const started = await client.checkpoint(resolved.reference, resolved.status, {
-    action: 'start', message: request, preserveRoadmapState,
+  const interactionBudget = currentInteractionBudget() || createInteractionBudget();
+  const accepted = await client.writeStatus(resolved.reference, {
+    ...resolved.status,
+    interactionBudget,
+    interactionId: interactionBudget.interactionId,
+    taskIngressReceipt: null,
+    taskIngressElapsedMs: null,
+    taskIngressVerdict: '',
+    taskIngressObservedAt: ''
+  });
+  const started = await client.checkpoint(resolved.reference, accepted, {
+    action: 'start', message: request, preserveRoadmapState, foregroundStart: true,
+    gitBaseline,
+    interactionId: interactionBudget.interactionId,
     idempotencyKey: `run:${resolved.status.turnId}:host-start:${crypto.createHash('sha256').update(JSON.stringify({ request, preserveRoadmapState })).digest('hex')}`
   });
-  if (engine && (globalDataPath !== undefined || activeProjectRoot === workspaceRoot)) {
-    await engine.readAgentExecutionById(Number(started.executionLogId));
-    if (!preserveRoadmapState && started.nodeId !== soloConversationId && started.nodeId !== roadmapRevisionId) {
-      const node = engine.getNodes().find(candidate => candidate.id === started.nodeId);
-      if (node && node.status !== 'Completed') {
-        await engine.updateNode(String(started.nodeId), { status: 'Running', completedAt: '' });
-        refreshSidebarProjectCards(workspaceRoot);
-      }
-    }
-  }
   const terminalName = String(started.terminalName || (globalDataPath === undefined ? getAgentTerminalBinding(workspaceRoot, Number(started.rootExecutionLogId))?.terminalName : '') || '');
   if (terminalName && (globalDataPath === undefined || syncEngine === engine)) {
     setAgentTerminalBinding(workspaceRoot, Number(started.executionLogId), terminalName);
   }
   return started;
+}
+
+async function projectInteractiveConversationTurn(
+  workspaceRoot: string,
+  started: any,
+  preserveRoadmapState: boolean,
+  globalDataPath?: string,
+  engine = syncEngine
+): Promise<void> {
+  if (!engine || (globalDataPath === undefined && activeProjectRoot !== workspaceRoot)) return;
+  await engine.readAgentExecutionById(Number(started.executionLogId));
+  if (!preserveRoadmapState && started.nodeId !== soloConversationId && started.nodeId !== roadmapRevisionId) {
+    const node = engine.getNodes().find(candidate => candidate.id === started.nodeId);
+    if (node && node.status !== 'Completed') {
+      await engine.updateNode(String(started.nodeId), { status: 'Running', completedAt: '' });
+      refreshSidebarProjectCards(workspaceRoot);
+    }
+  }
 }
 
 async function findReusableContinuationTerminal(workspaceRoot: string, nodeId: string, rootConversationId: number, engine = syncEngine, globalDataPath?: string): Promise<{ terminal: vscode.Terminal; conversationId: number } | undefined> {
@@ -8407,11 +8834,32 @@ async function handleContinueConversationTurn(
     const attachedFiles = filterProjectRelativeFiles(continuationProject, supplementFiles);
     const terminalMessage = [request, attachedFiles.length ? `补充文件（开始前先读取）：\n${attachedFiles.map(file => `- ${file}`).join('\n')}` : ''].filter(Boolean).join('\n\n');
     if (reusable) {
-      const started = await registerInteractiveConversationTurn(continuationProject, reusable.conversationId, terminalMessage, preserveRoadmapState, settings.globalDataPath, continuationEngine);
+      const gitBaseline = await observeLocalDiagnosticStage('conversation.continue.rollbackSnapshot', () => createPreSessionGitCommit(continuationProject));
+      if (!gitBaseline) throw new Error('pre_session_git_backup_failed');
+      const started = await registerInteractiveConversationTurn(continuationProject, reusable.conversationId, terminalMessage, preserveRoadmapState, settings.globalDataPath, continuationEngine, gitBaseline);
       reusable.terminal.show(false);
       if (started) {
-        const delivered = await sendAgentTextWhenTerminalReady(reusable.terminal, [terminalMessage, `本轮已由 SoloMap 预登记。本轮 turnId：${started.turnId}。开始处理前仍调用 MCP 工具 solomap_conversation_status 的 start 动作，插件会幂等确认同一轮；完成时调用同一工具的 complete 动作并沿用原汇报要求。不要运行检查点命令。`].join('\n\n'), getAgentProvider(String(started.agentCli)));
-        if (!delivered) throw new Error('无法把本轮消息发送到当前 Agent 终端。');
+        const input = [terminalMessage, `本轮已由 SoloMap 预登记。本轮 turnId：${started.turnId}，interactionId：${started.interactionId}。开始处理前调用 MCP 工具 solomap_conversation_status({action:"start",turnId:"${started.turnId}",interactionId:"${started.interactionId}"})，插件只接受与本轮完全一致的确认；完成时调用 solomap_conversation_status({action:"complete",turnId:"${started.turnId}",interactionId:"${started.interactionId}",outcome:"...",summary:"..."}) 并沿用原汇报要求。不要运行检查点命令。`].join('\n\n');
+        let delivered = false;
+        try { delivered = await deliverAgentTerminalInput(reusable.terminal, input, getAgentProvider(String(started.agentCli))); }
+        catch (error) {
+          await client.writeStatus(registered.reference, { ...started,
+            taskIngressVerdict: 'delivery_failed', taskIngressObservedAt: new Date().toISOString(),
+            deliveryLastError: error instanceof Error ? error.message : String(error) }).catch(() => undefined);
+          throw error;
+        }
+        if (!delivered) throw new Error('foreground_terminal_not_attached');
+        const ingressDataRoot = normalizeSolomapGlobalPath(continuationProject, settings.globalDataPath);
+        const ingressOperation = (operation: string, data: Record<string, unknown>) => sendRuntimeDataRequest(ingressDataRoot, { operation, input: data });
+        const ingressState = await ingressOperation('read_run_state', parseRunStatusReference(registered.reference)) as import('./runLifecycleTypes').RunState;
+        await awaitAgentTaskIngress(ingressOperation, parseRunStatusReference(registered.reference), {
+          generation: ingressState.generation,
+          turnId: String(started.turnId),
+          interactionId: String(started.interactionId || (started.interactionBudget as { interactionId?: string } | undefined)?.interactionId || ''),
+          budget: ingressState.status.interactionBudget as InteractionBudget | undefined,
+          initialState: ingressState
+        });
+        await projectInteractiveConversationTurn(continuationProject, started, preserveRoadmapState, settings.globalDataPath, continuationEngine);
         if (syncEngine === continuationEngine) postNodeConversations(nodeId, [], true, continuationProject);
       } else vscode.window.showInformationMessage('当前 Agent 终端仍在处理上一轮，已为你打开现有会话。');
       return;
@@ -8445,7 +8893,6 @@ async function handleContinueConversationTurn(
       throw new Error(failureReason);
     }
     const node = nodeId === soloConversationId ? null : continuationEngine.getNodes().find(candidate => candidate.id === nodeId) || null;
-    const preGitHash = await createPreSessionGitCommit(continuationProject);
     const prompt = await buildInteractiveContinuationPrompt(node, request, continuationProject, '', attachedFiles, settings.globalPrompt, settings.globalDataPath);
     const prepared = await prepareOrdinaryConversation(context, {
       agentCli, selectedModel: selectedModel || String(source.status.selectedModel || ''), prompt, globalPrompt: settings.globalPrompt,
@@ -8455,9 +8902,10 @@ async function handleContinueConversationTurn(
       parentExecutionLogId: Number(source.status.rootExecutionLogId), expectedParentTurnId: String(source.status.turnId),
       launchIntentId: target?.launchIntentId || `user-action:${crypto.randomUUID()}`,
       metadata: { checkpointPreserveRoadmapState: preserveRoadmapState, lineageRootExecutionLogId: rootId,
+        preSessionGitBackup: true,
         ...(transcriptPath ? { codexResumeTranscriptPath: transcriptPath } : {}),
         ...(providerContext ? { nativeResumeProviderContext: providerContext } : {}),
-        launchSummary: [preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '', 'Agent continuation started.', buildContinuationMetadataBlock(rootId, session.sessionId), `User supplement:\n${request}`].filter(Boolean).join('\n\n') }
+        launchSummary: ['Agent continuation started.', buildContinuationMetadataBlock(rootId, session.sessionId), `User supplement:\n${request}`].join('\n\n') }
     }, settings);
     if (!preserveRoadmapState && node && node.status !== 'Completed') {
       await continuationEngine.updateNode(nodeId, { status: 'Running' });
@@ -8503,7 +8951,7 @@ async function closeConversationProcessesForContinuation(
           continue;
         }
         if (!status.agentPid || !status.processBirth || readProcessBirthMarker(Number(status.agentPid)) !== status.processBirth) continue;
-        const shellPid = await terminal.processId;
+        const shellPid = await readTerminalProcessIdBestEffort(terminal);
         if (!shellPid) continue;
         let parentPid = 0;
         if (process.platform === 'linux') {
@@ -8540,6 +8988,21 @@ async function closeConversationProcessesForContinuation(
     return;
   }
   throw new Error('未找到这段对话的完整会话记录，无法继续。');
+}
+
+async function readTerminalProcessIdBestEffort(terminal: vscode.Terminal, waitMs = 250): Promise<number | undefined> {
+  const processId = terminal.processId;
+  if (!processId || typeof processId.then !== 'function') return undefined;
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const value = await Promise.race([
+      Promise.resolve(processId).catch(() => undefined),
+      new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), waitMs); })
+    ]);
+    return Number.isInteger(value) && Number(value) > 0 ? Number(value) : undefined;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function handleContinueNativeConversation(context: vscode.ExtensionContext, nodeId: string, conversationId: number, target?: AgentLaunchTarget): Promise<void> {
@@ -8601,17 +9064,16 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     const root = resolveContinuationRootConversationFromList(conversations, continuationId);
     const rootId = Number(root?.id || registered.status.lineageRootExecutionLogId || family?.[family.length - 1]?.status.rootExecutionLogId || registered.status.rootExecutionLogId);
     await observeLocalDiagnosticStage('conversation.continue.stop', () => closeConversationProcessesForContinuation(workspaceRoot, nodeId, conversations, rootId, session.sessionId, globalDataPath, family));
-    const preGitHash = await observeLocalDiagnosticStage('conversation.continue.backup', () => createPreSessionGitCommit(workspaceRoot));
     const prepared = await observeLocalDiagnosticStage('conversation.continue.prepare', () => prepareOrdinaryConversation(context, {
       agentCli, selectedModel: String(source.status.selectedModel || ''), prompt: '继续当前 Agent 对话',
       globalPrompt: settings.globalPrompt, workspaceRoot, nodeId, executionLogId: 0, userMessage: '继续当前 Agent 对话',
       runKind: nodeId === soloConversationId ? 'solo_continue' : 'step_continue', globalDataPath,
       taskPermissionMode: settings.taskPermissionMode || 'auto', nativeSessionId: session.sessionId, continuation: true,
-      directExecutionCommand: buildNativeContinueCommand(agentCli, session.sessionId, workspaceRoot),
       parentExecutionLogId: Number(source.status.rootExecutionLogId), expectedParentTurnId: String(source.status.turnId),
       metadata: { lineageRootExecutionLogId: rootId, ...(transcriptPath ? { codexResumeTranscriptPath: transcriptPath } : {}),
+        preSessionGitBackup: true,
         ...(providerContext ? { nativeResumeProviderContext: providerContext } : {}),
-        launchSummary: [preGitHash ? `SoloMapPreGitHash: ${preGitHash}` : '', 'Agent continuation started.', buildContinuationMetadataBlock(rootId, session.sessionId), 'User supplement:\n继续当前 Agent 对话'].filter(Boolean).join('\n\n') }
+        launchSummary: ['Agent continuation started.', buildContinuationMetadataBlock(rootId, session.sessionId), 'User supplement:\n继续当前 Agent 对话'].join('\n\n') }
     }, { ...settings, globalDataPath }));
     await observeLocalDiagnosticStage('conversation.continue.delivery', () => deliverOrdinaryConversation(context, prepared, settings));
     return;
@@ -8645,16 +9107,17 @@ async function hasRunningAgentConversation(workspaceRoot: string, nodes: Roadmap
   return (await runLifecycleClient(workspaceRoot).listStatuses(workspaceRoot)).some(({ status }) => status.status === 'Running');
 }
 
-async function stopAgentRun(nodeId: string, conversationId: number, workspaceRoot = activeProjectRoot || ''): Promise<void> {
+async function stopAgentRun(nodeId: string, conversationId: number, workspaceRoot = activeProjectRoot || '', globalDataPath?: string): Promise<void> {
   if (!workspaceRoot || !nodeId) return;
-  const resolved = await runLifecycleClient(workspaceRoot).findConversation(workspaceRoot, conversationId);
+  const client = runLifecycleClient(workspaceRoot, globalDataPath);
+  const resolved = await client.findConversation(workspaceRoot, conversationId);
   if (!resolved || resolved.status.nodeId !== nodeId || resolved.status.interactiveSessionClosed) {
     vscode.window.showInformationMessage('This Agent conversation is no longer running.');
     return;
   }
-  const terminal = await findActiveAgentTerminal(conversationId, workspaceRoot);
+  const terminal = await findActiveAgentTerminal(conversationId, workspaceRoot, client.dataRoot);
   try {
-    await runLifecycleClient(workspaceRoot).stop(resolved.reference, resolved.status, '用户已停止当前对话。', `run:${resolved.reference}:user-stop:${resolved.turnId}`);
+    await client.stop(resolved.reference, resolved.status, '用户已停止当前对话。', `run:${resolved.reference}:user-stop:${resolved.turnId}`);
   } catch (error) {
     vscode.window.showErrorMessage(`停止尚未完成：${error instanceof Error ? error.message : String(error)}`);
     throw error;
@@ -8667,19 +9130,19 @@ async function stopAgentRun(nodeId: string, conversationId: number, workspaceRoo
   await processRegisteredStatusFile(extensionContextRef, resolved.reference, true);
 }
 
-interface AgentLaunchTarget { workspaceRoot: string; engine?: SyncEngine; launchIntentId?: string; globalDataPath?: string; settings?: SolopreneurSettings }
+interface AgentLaunchTarget { workspaceRoot: string; engine?: SyncEngine; launchIntentId?: string; globalDataPath?: string; settings?: SolopreneurSettings; runtimeReady?: boolean }
 
 async function captureConversationLaunchTarget(context: vscode.ExtensionContext, workspaceRoot: string, globalDataPath: string, settings: SolopreneurSettings): Promise<AgentLaunchTarget> {
   await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
   const directory = path.join(workspaceRoot, '.solopreneur');
   const engine = new SyncEngine(path.join(directory, 'roadmap.csv'), path.join(directory, 'project_journal.db'), context.extensionPath, globalDataPath);
-  return { workspaceRoot, globalDataPath, engine, settings: { ...settings, globalDataPath }, launchIntentId: `user-action:${crypto.randomUUID()}` };
+  return { workspaceRoot, globalDataPath, engine, settings: { ...settings, globalDataPath }, launchIntentId: `user-action:${crypto.randomUUID()}`, runtimeReady: true };
 }
 
-async function resumeOrdinaryConversation(context: vscode.ExtensionContext, workspaceRoot: string, launchIntentId?: string, dataRoot = '', settings?: SolopreneurSettings): Promise<number | null> {
+async function resumeOrdinaryConversation(context: vscode.ExtensionContext, workspaceRoot: string, launchIntentId?: string, dataRoot = '', settings?: SolopreneurSettings, runtimeReady = false): Promise<number | null> {
   if (!launchIntentId) return null;
   const globalDataPath = normalizeGlobalDataPathForExtension(dataRoot || getPersistedSettings(context).globalDataPath || '');
-  await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
+  if (!runtimeReady) await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
   const operation = (name: string, input: Record<string, unknown>) => sendRuntimeDataRequest(globalDataPath, { operation: name, input });
   const existing = await operation('read_run_intent', { root: workspaceRoot, launchIntentId }) as import('./runLifecycleTypes').RunState | null;
   if (!existing) return null;
@@ -8687,14 +9150,10 @@ async function resumeOrdinaryConversation(context: vscode.ExtensionContext, work
   return deliverOrdinaryConversation(context, await resumePreparedAgentRun(existing, operation, globalDataPath), settings);
 }
 
-async function prepareOrdinaryConversation(context: vscode.ExtensionContext, input: AgentRunPreparationInput, settings = getPersistedSettings(context)): Promise<Awaited<ReturnType<typeof prepareAgentRun>>> {
+async function prepareOrdinaryConversation(context: vscode.ExtensionContext, input: AgentRunPreparationInput, settings = getPersistedSettings(context), runtimeReady = false): Promise<Awaited<ReturnType<typeof prepareAgentRun>>> {
   const globalDataPath = normalizeSolomapGlobalPath(input.workspaceRoot, input.globalDataPath);
   const operation = (operation: string, data: Record<string, unknown>) => sendRuntimeDataRequest(globalDataPath, { operation, input: data });
-  await ensureHealthyAutonomousRuntime({ extensionPath: path.resolve(__dirname, '..'), globalDataPath });
-  const existing = input.launchIntentId ? await operation('read_run_intent', { root: input.workspaceRoot, launchIntentId: input.launchIntentId }) as import('./runLifecycleTypes').RunState | null : null;
-  if (existing) {
-    return resumePreparedAgentRun(existing, operation, globalDataPath);
-  }
+  if (!runtimeReady) await ensureHealthyAutonomousRuntime({ extensionPath: path.resolve(__dirname, '..'), globalDataPath });
   return prepareAgentRun({ ...input, globalDataPath, executionLogId: 0,
     ...(input.flowRole ? {} : { launchIntentId: input.launchIntentId || `user-action:${crypto.randomUUID()}` }),
     metadata: { ...input.metadata, reviewerCliPath: settings.reviewerCliPath || '', collaborationReviewMode: settings.collaborationReviewMode || 'high_risk' } }, operation);
@@ -8740,7 +9199,7 @@ async function deliverOrdinaryConversation(context: vscode.ExtensionContext, pre
   const executionLogId = Number(prepared.status.rootExecutionLogId);
   if (!prepared.status.deliveryPending) return executionLogId;
   const workspaceRoot = String(prepared.status.workspaceRoot); const nodeId = String(prepared.status.nodeId);
-  await launchAgentConversationTerminal({ workspaceRoot, label: `${prepared.status.runKind}-${nodeId}-${executionLogId}`, conversationId: executionLogId, nodeId, statusFilePath: runStatusReference(workspaceRoot, executionLogId), runKind: String(prepared.status.runKind), globalDataPath: prepared.dataRoot, context, agentCli: String(prepared.status.agentCli), model: String(prepared.status.selectedModel || ''), settings, command: prepared.finalCommand, refreshNodeId: nodeId });
+  await launchAgentConversationTerminal({ workspaceRoot, label: `${prepared.status.runKind}-${nodeId}-${executionLogId}`, conversationId: executionLogId, nodeId, statusFilePath: runStatusReference(workspaceRoot, executionLogId), runKind: String(prepared.status.runKind), globalDataPath: prepared.dataRoot, context, agentCli: String(prepared.status.agentCli), model: String(prepared.status.selectedModel || ''), settings, command: prepared.finalCommand, refreshNodeId: nodeId, initialState: prepared });
   return executionLogId;
 }
 
@@ -8850,6 +9309,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   const workspaceRoot = target?.workspaceRoot || activeProjectRoot;
   const projectSyncEngine = target?.engine || syncEngine;
   await observeLocalDiagnosticStage('conversation.runSolo.runtime', async () => {
+    if (target?.runtimeReady) return;
     if (target?.globalDataPath) {
       await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: target.globalDataPath });
     } else {
@@ -8860,7 +9320,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     return 0;
   }
   const resumed = await observeLocalDiagnosticStage('conversation.runSolo.resume', () =>
-    resumeOrdinaryConversation(context, workspaceRoot, target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), target?.globalDataPath, target?.settings)
+    resumeOrdinaryConversation(context, workspaceRoot, target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), target?.globalDataPath, target?.settings, true)
   );
   if (resumed !== null) return resumed;
   const request = userMessage.trim();
@@ -8923,7 +9383,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   const conversationPrompt = await observeLocalDiagnosticStage('conversation.runSolo.prompt', () =>
     buildSoloConversationPrompt(request, workspaceRoot, settings.globalPrompt, attachedFiles, globalDataPath, settings.enabledEnhancements, interactiveConversation)
   );
-  const prepared = await observeLocalDiagnosticStage('conversation.runSolo.prepare', () => prepareOrdinaryConversation(context, { agentCli, selectedModel, prompt: conversationPrompt, globalPrompt: settings.globalPrompt, workspaceRoot, nodeId: soloConversationId, executionLogId: 0, userMessage: request, runKind: interactiveConversation ? 'solo' : 'solo_background', globalDataPath, taskPermissionMode: settings.taskPermissionMode || 'auto', nativeSessionId, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), metadata: { launchSummary: buildLaunchSummary(), captureRoadmapBackup: true, preSessionGitBackup: true, ...runMetadata } }));
+  const prepared = await observeLocalDiagnosticStage('conversation.runSolo.prepare', () => prepareOrdinaryConversation(context, { agentCli, selectedModel, prompt: conversationPrompt, globalPrompt: settings.globalPrompt, workspaceRoot, nodeId: soloConversationId, executionLogId: 0, userMessage: request, runKind: interactiveConversation ? 'solo' : 'solo_background', globalDataPath, taskPermissionMode: settings.taskPermissionMode || 'auto', nativeSessionId, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), metadata: { launchSummary: buildLaunchSummary(), captureRoadmapBackup: true, preSessionGitBackup: true, ...runMetadata } }, settings, true));
   postNodeConversations(soloConversationId, [], true, workspaceRoot);
   return observeLocalDiagnosticStage('conversation.runSolo.delivery', () => deliverOrdinaryConversation(context, prepared, settings));
 }
@@ -9193,7 +9653,7 @@ async function openProjectFileDiff(projectPath: string, relativePath: string, gi
 async function rollbackProjectToPreSessionGitHash(context: vscode.ExtensionContext, projectPath: string, gitHash: string): Promise<void> {
   const normalizedProjectPath = String(projectPath || '').trim();
   const normalizedGitHash = String(gitHash || '').trim();
-  if (!normalizedProjectPath || !/^[a-f0-9]{7,40}$/i.test(normalizedGitHash)) {
+  if (!normalizedProjectPath || !/^[a-f0-9]{7,64}$/i.test(normalizedGitHash)) {
     vscode.window.showErrorMessage('Invalid rollback request.');
     return;
   }
@@ -9209,7 +9669,12 @@ async function rollbackProjectToPreSessionGitHash(context: vscode.ExtensionConte
       cwd: normalizedProjectPath,
       encoding: 'utf8'
     });
-    if (ancestorResult.status !== 0 && verifiedHash !== getGitCommandOutput(normalizedProjectPath, ['rev-parse', 'HEAD'])) {
+    const retainedBackup = childProcess.spawnSync('git', ['rev-parse', '--verify', `refs/solomap/backups/${verifiedHash}`], {
+      cwd: normalizedProjectPath,
+      encoding: 'utf8'
+    });
+    const isRetainedSoloMapBackup = retainedBackup.status === 0 && String(retainedBackup.stdout || '').trim() === verifiedHash;
+    if (ancestorResult.status !== 0 && !isRetainedSoloMapBackup && verifiedHash !== getGitCommandOutput(normalizedProjectPath, ['rev-parse', 'HEAD'])) {
       vscode.window.showErrorMessage('回滚失败：这次对话记录的 Git 哈希不是当前分支的祖先提交。');
       return;
     }
@@ -9692,6 +10157,7 @@ async function pollScheduledAutomationTasks(context: vscode.ExtensionContext): P
 }
 
 async function runScheduledAutomationTask(context: vscode.ExtensionContext, task: SolomapScheduledAutomationTask, occurrence: ScheduledTaskOccurrence): Promise<void> {
+  return runWithInteractionBudget(createInteractionBudget(), async () => {
   const persisted = getPersistedSettings(context);
   const referenceRoot = getScheduledAutomationLedgerReferenceRoot(context);
   const operation = (name: string, input: Record<string, unknown>) => sendRuntimeDataRequest(persisted.globalDataPath, { operation: name, input });
@@ -9774,6 +10240,7 @@ async function runScheduledAutomationTask(context: vscode.ExtensionContext, task
   if (task.scheduleKind === 'once') {
     await disableCompletedScheduledTask(context, task, persisted.globalDataPath);
   }
+  });
 }
 
 async function disableCompletedScheduledTask(context: vscode.ExtensionContext, task: SolomapScheduledAutomationTask, globalDataPath: string): Promise<void> {
@@ -10754,7 +11221,7 @@ async function processAgentStatusFile(statusFilePath: string, sourceStatus?: any
         console.warn('Failed to prepare learning event:', error);
       }
     }
-    let preGitHash = '';
+    let preGitHash = String(statusData.baseGitHash || '');
     let existingConversationOutput = '';
     if (executionLogId) {
       const existingLogs = (isSoloConversation && typeof statusSyncEngine.getProjectAgentExecutions === 'function')
@@ -11314,6 +11781,9 @@ function setupFileSentinelWatcher(_workspaceRoot: string): void {
  * Formulates the premium glassmorphic Webview page bundle.
  */
 export async function deactivate() {
+  extensionHostDeactivating = true;
+  for (const surface of foregroundAgentTerminalSurfaces.values()) surface.detachForHostReload();
+  foregroundAgentTerminalSurfaces.clear();
   automationUiClosing = true;
   if (roadmapWatcherTimer) { clearTimeout(roadmapWatcherTimer); roadmapWatcherTimer = null; }
   if (focusReminderTimer) { clearTimeout(focusReminderTimer); focusReminderTimer = null; }

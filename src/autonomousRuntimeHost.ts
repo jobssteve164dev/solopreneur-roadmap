@@ -179,7 +179,9 @@ export async function inspectAutonomousRuntimeHealth(
   const state = readRuntimeState(globalDataPath);
   if (!state) return { healthy: false, reason: 'missing_state' };
   if (state.pid !== pid) return { healthy: false, reason: 'different_process' };
-  if (state.status !== 'running' && state.status !== 'paused') return { healthy: false, reason: 'not_running' };
+  if (state.status !== 'running' && state.status !== 'paused') {
+    return { healthy: false, reason: state.status === 'failed' && state.failureCode ? state.failureCode : 'not_running' };
+  }
   const heartbeatAge = now - Date.parse(state.heartbeatAt);
   if (!defaultIsProcessAlive(pid)) return { healthy: false, reason: 'process_exited' };
   try {

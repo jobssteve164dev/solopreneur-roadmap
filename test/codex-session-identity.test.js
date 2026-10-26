@@ -91,6 +91,40 @@ test('native transcript discovery keeps the Runtime available by avoiding synchr
   } finally { fs.readdirSync = original; }
 });
 
+test('Codex compatibility locator rejects old session metadata before scanning its transcript body', async () => {
+  const { locateCodexSessionByBindingNonce } = require(path.join(projectRoot, 'out', 'codexSessionIdentity.js'));
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-codex-metadata-first-'));
+  const workspaceRoot = '/workspace/metadata-first'; const bindingNonce = '2'.repeat(64);
+  let oldPath = writeTranscript(codexHome, {
+    sessionId: '019ecd99-4325-7050-8e71-7def92359d97', workspaceRoot,
+    timestamp: '2026-10-09T00:00:00Z', messages: []
+  });
+  const officialOldPath = path.join(path.dirname(oldPath), 'rollout-2026-10-09T00-00-00-019ecd99-4325-7050-8e71-7def92359d97.jsonl');
+  fs.renameSync(oldPath, officialOldPath); oldPath = officialOldPath;
+  fs.appendFileSync(oldPath, `${JSON.stringify({ type: 'event_msg', payload: { type: 'irrelevant', text: 'x'.repeat(2 * 1024 * 1024) } })}\n`);
+  const oldTimestamp = new Date('2026-10-09T00:00:00Z');
+  fs.utimesSync(oldPath, oldTimestamp, oldTimestamp);
+  const expectedId = '019ecd99-4325-7050-8e71-7def92359d98';
+  writeTranscript(codexHome, { sessionId: expectedId, workspaceRoot, timestamp: '2026-10-09T00:10:01Z',
+    messages: [{ role: 'user', text: `SoloMap binding nonce: ${bindingNonce}.` }] });
+  const originalCreateReadStream = fs.createReadStream; const originalStat = fs.promises.stat; let oldBytesRead = 0; let oldStatCalls = 0;
+  fs.createReadStream = function measuredReadStream(filePath, ...args) {
+    const stream = originalCreateReadStream.call(this, filePath, ...args);
+    if (path.resolve(String(filePath)) === path.resolve(oldPath)) stream.on('data', chunk => { oldBytesRead += chunk.length; });
+    return stream;
+  };
+  fs.promises.stat = async function measuredStat(filePath, ...args) {
+    if (path.resolve(String(filePath)) === path.resolve(oldPath)) oldStatCalls++;
+    return originalStat.call(this, filePath, ...args);
+  };
+  try {
+    const result = await locateCodexSessionByBindingNonce({ codexHome, workspaceRoot, bindingNonce, startedAt: '2026-10-09T00:10:00Z' });
+    assert.equal(result.status, 'matched'); assert.equal(result.sessionId, expectedId);
+    assert.equal(oldBytesRead, 0, `old transcript scan read ${oldBytesRead} bytes`);
+    assert.equal(oldStatCalls, 0, `old transcript was statted ${oldStatCalls} times`);
+  } finally { fs.createReadStream = originalCreateReadStream; fs.promises.stat = originalStat; }
+});
+
 test('Codex compatibility locator reports ambiguity instead of selecting the newest transcript', async () => {
   const { locateCodexSessionByBindingNonce } = require(path.join(projectRoot, 'out', 'codexSessionIdentity.js'));
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-codex-conflict-'));

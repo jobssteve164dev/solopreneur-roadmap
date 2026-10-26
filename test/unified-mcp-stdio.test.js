@@ -173,9 +173,12 @@ test('an Agent CLI starts a new conversation in another registered project throu
     assert.equal(response.isError, undefined, JSON.stringify(response.content));
     assert.equal(launches.length, 1);
     assert.equal(launches[0].command, 'solopreneur.internalStartConversation');
-    assert.deepEqual({ ...launches[0].payload, launchIntentId: '<stable>' }, {
+    const { interactionBudget, ...launch } = launches[0].payload;
+    assert.deepEqual({ ...launch, launchIntentId: '<stable>' }, {
       projectPath: targetProject, mode: 'step', stepId: 'S01', message: '开始目标项目环节', agentCli: 'codex', model: 'auto', launchIntentId: '<stable>'
     });
+    assert.equal(interactionBudget.schemaVersion, 1);
+    assert.equal(interactionBudget.interactionId, `conversation:${launch.launchIntentId.slice(4)}`);
     const receipt = JSON.parse(response.content[0].text);
     assert.match(receipt.conversationRef, /^[a-f0-9-]{36}$/);
     assert.equal(launches[0].payload.launchIntentId, `mcp:${receipt.conversationRef}`);

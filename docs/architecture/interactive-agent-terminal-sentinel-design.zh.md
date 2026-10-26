@@ -11,6 +11,8 @@
 - 当前运行边界：用户对话使用原生交互终端；Flow、复核、定时任务、时间计划、自动重试和其他无人值守任务继续使用非交互命令。
 - 当前结论：不增加自建 Chat UI 或 ACP 运行时依赖；任务轮次结算依赖显式检查点，不依赖进程退出、终端空闲或输出文案匹配。
 
+> 2026-10-25 落地状态：正式 Agent 新任务已统一由受控 runner 直接启动，并通过 Custom Pseudoterminal 显示和转发输入；启动不再等待普通 VS Code Terminal `processId`。Codex/Claude native start 与实际 MCP start 已写入 interaction-bound `taskIngressReceipt`。当前 bridge 使用 Extension Host 到 runner 的直接 pipes，尚未实现跨 Extension Host 的显示重连；下文的本地 IPC endpoint/nonce/re-attach 是后续耐久化目标，不得当作已实现事实。
+
 ## 用户结果
 
 用户从 Solo 或路线图环节发起任务后，第一次就进入 Agent CLI 原生交互终端；Agent 完成当前回复后，终端继续等待用户输入，用户不需要回到侧边栏重新创建一次 CLI 运行才能补充要求。
@@ -29,19 +31,19 @@
 
 ### Observed in code
 
-- 用户主动发起的首次任务由 `buildInteractiveAgentCommandForPromptFile` 构造原生交互命令；后台任务继续调用 `buildAgentCommandForPromptFile`（`src/agentCli.ts`）。
-- 插件在项目内生成 `.solopreneur/runtime/task-checkpoint.cjs`，命令校验当前会话令牌后原子写入 `start`、`complete` 或 `session-close` 事件，并在 `complete` 时计算本轮工作区变化（`src/taskCheckpoint.ts`）。
-- `buildAgentShellScript` 只在用户对话中注入检查点环境变量；CLI 进程退出仅关闭 Session，未上报检查点时按协议缺失处理，不再被当作正常完成（`src/extension.ts`）。
-- `processAgentStatusFile` 消费同一状态管线：`Turn Started` 建立新轮次，完成检查点复用既有完成文件、复核、学习与通知逻辑，结算后写回 `Waiting` 并保留终端映射，`Session Closed` 才注销活动会话。
+- 用户主动发起的首次任务由数据库 launch plan 经 `buildDatabaseAgentCommand` 最终构造原生交互命令；后台 Flow、复核和维护任务仍可构造非交互命令（`src/agentRunPreparation.ts`、`src/agentDatabaseLaunch.ts`、`src/agentCli.ts`）。
+- 当前实现不再在项目内生成 `.solopreneur/runtime/task-checkpoint.cjs`；该文件只属于 legacy migration。run、turn、binding、prompt、日志和 checkpoint 都写入统一数据库（`src/legacyProjectFileMigration.ts`、`src/agentRunPreparation.ts`、`src/db/unifiedDataStore.ts`）。
+- runner 通过环境变量暴露扩展内的 `taskCheckpointProcess.js` 给 Claude native hook 等受控入口；普通 Agent 对话的显式状态协议是数据库 MCP `solomap_conversation_status(start|complete)`，不要求 Agent 执行项目内检查点脚本（`src/runAgentProcess.ts`、`src/taskCheckpointProcess.ts`、`src/unifiedMcp.ts`）。
+- Codex transcript 的 `task_started/task_complete/turn_aborted`、Claude native event/transcript 和 MCP checkpoint 进入同一数据库状态管线；start 建立/更新轮次，complete 进入结算，交互 Session 可在本轮完成后继续存活（`src/runNativeObserver.ts`、`src/runtimeDataOperations.ts`、`src/db/unifiedDataStore.ts`）。
 - 侧边栏通过统一投影把已结算但终端仍存在的会话显示为可继续，不要求数据库记录长期保持 `Running`（`src/conversationPresentation.ts`）。
 
 ### Inference
 
-现有任务哨兵不是必须依赖非交互终端。真正的耦合是：系统把“Agent 命令退出”当成“当前任务轮次完成”。交互式 TUI 完成一轮后仍会等待下一次输入，因此不能再用进程退出作为主要完成信号。
+现有任务哨兵已经不只依赖进程退出：native observer 与 MCP checkpoint 可以在交互式 TUI 仍存活时建立和结算轮次。事故版本 0.0.622 的对话唤起耦合发生在更早的启动链：正式 runner 仍通过普通集成终端 Shell 的 `processId` + `sendText` 才能启动，而且入口计时没有贯穿到已有真实 task-start 收据。2026-10-25 修复已经移除这条正式任务门闩；完整前后证据见现场审计第 14 节。
 
 ### 对话唤起观测与恢复契约
 
-对话唤起不能再用单个 `delivery` 耗时代表整条链路。每次唤起使用同一个 trace，按真实因果顺序记录：
+对话唤起不能再用单个 `delivery` 耗时代表整条链路。下列是事故版本 0.0.622 的实际事件链：
 
 ```text
 delivery.claim
@@ -53,55 +55,119 @@ delivery.claim
   → delivery.submission.persist
   → delivery.runner.start
   → delivery.runner.claim
-  → delivery.agent.spawn
-  → delivery.agent.launch
+  → Git/工作区基线与 Agent 数据库准备
+  → Provider preflight（部分 Provider；也会产生 agent.spawn/launch）
+  → 正式任务 agent.spawn（仍是 wrapper spawn）
+  → 正式任务 agent.launch（仍是 wrapper gate release）
+  → Provider adapter 从官方生命周期/持久机器状态确认 task ingress
+  → Agent 实际调用 MCP conversation_status(start) 时幂等补记辅助 receipt
 ```
+
+现有数据库能保存 Codex/Claude native start 的 Provider 身份与原始时间，但 Host 也会在发送前 checkpoint start，prepare 更会提前把 run 投影成 Running；因此普通 `turnStartedAt`、`checkpointEventId=:start` 和 `Running` 不是 task-start 收据。MCP start 若命中 Host 已登记状态会直接返回，当前不会保存独立调用到达记录。修复必须复用 native 强信号，并为实际 MCP 调用增加专用 receipt，再把它们关联入口 `interactionId` 形成 `delivery.agent-cli.task-start/turn-start`；不能另造平行任务真相，也不能沿用混合语义字段。诊断事件当前不存在，不能在实现完成前画进“已落地”链路或用于验收。
 
 - `process.wait` 只表示 VS Code PTY 已返回可用 Shell PID；终端对象已创建或已经显示不算就绪。
 - `focus` 必须选择本次请求对应的终端标签，不能用 `show(true)` 保留另一项目的活动终端。code-server 可能延迟创建未选中终端的 PTY，因此“面板已经打开”不能代替“目标终端已经选中”。
 - `command.send` 只表示正式命令已交给已就绪 Shell；它不等于 runner 已启动。
 - `runner.claim` 是 `runAgentProcess` 已启动并成功认领运行的权威信号。只有从这里开始，运行才不再属于“待投递”。
-- `agent.spawn` 表示 runner 已创建受控 Agent 子进程并持久化其 PID；`agent.launch` 表示持久化与执行许可均成立，启动门已放行。
+- 当前 `agent.spawn` 实际表示某次 `execute()` 已创建 `script`/Shell 包装进程并持久化其 PID；当前 `agent.launch` 只表示该次执行的 fd 3 启动门已放行。preflight 与正式任务都复用 `execute()`，所以历史事件不但不是 task-start，也未必属于正式任务。
+- 新 CLI 的 `agent-cli.task-start` 与已有 CLI 的 `agent-cli.turn-start` 都必须来自下文 7 类 Provider adapter 的官方生命周期/持久机器状态；独立进程树只证明 formal CLI 身份，terminal bridge 只负责输入 transport，二者都永远不能生成 task receipt。Host 预登记 checkpoint 与 MCP 自报也不算主收据。Provider adapter 收据分别是对应入口 5/10 秒计时的唯一完成事件。
 - 阶段事件只保存 trace、阶段、耗时、受控进程字段、不可逆的项目/终端标识和分类错误，不保存用户输入、命令正文、路径或凭据。`focus` 同时记录请求项目、目标终端、原活动终端、是否要求选中以及终端归属是否匹配，使“显示了错误项目终端”和“正确终端 PTY 未启动”可以直接区分。
 
-终端身份必须使用 `(规范化项目路径, conversationId)` 共同判定。`conversationId` 只在单个项目内稳定，任何打开、复用、关闭或清理逻辑都不得仅凭数字 ID 命中终端；即使两个项目恰好产生相同编号，也只能操作请求项目持久状态或内存归属明确匹配的终端。
+terminal binding、复用、关闭、续轮、cleanup、停止、恢复和 task-start receipt 必须共同使用完整身份 `(规范化 data root, 规范化项目路径, runId, executionLogId, generation, deliveryId/turnAttemptId, turnId, interactionId)`；任何控制逻辑都不得只使用该身份的前缀或数字 conversation ID。切换 data root 后同一项目可能产生相同数字 ID，也只能操作发起动作固定的数据根和整组持久身份。
+
+身份采用一次动作内不可分叉的两阶段升级，而不是要求 run 创建前凭空存在 runId：
+
+- 生产者接受动作时先持久化启动身份 `(dataRoot, normalizedProjectPath, interactionId, launchIntentId/turnAttemptId)`，其中 `interactionId`、`acceptedAt` 和时钟锚点此后不可覆盖。时钟锚点不是单独的 `Date.now()`：同一宿主进程使用 `performance.now()`；持久记录同时保存 `acceptedWallMs`、当前系统 boot identity、boot uptime/monotonic sample 与 `elapsedFloorMs`。每次跨进程阶段先把已消耗时长单调并入 `elapsedFloorMs`。
+- `prepare_run` 成功创建 run 时，在同一幂等动作下原子补齐为 `(dataRoot, normalizedProjectPath, runId, executionLogId, generation, deliveryId/turnAttemptId, turnId, interactionId)`。任何恢复、重试或重载只能读取并升级原身份，不能生成新 interaction 或重置预算。重载后若 boot identity 未变，使用 boot uptime 差与 `elapsedFloorMs` 的较大值继续计时；boot 已变化时使用非负 wall delta 并保留 floor；若 wall 回拨、boot identity/uptime 不可验证或出现相互矛盾的样本，直接产生 `clock_untrusted` 发布失败，绝不能给新进程一份新的 10 秒预算。
+- Webview pending、成功/失败确认和迟到回包至少携带 `interactionId`；只有完整身份与当前 pending interaction 同时匹配，才允许释放或覆盖状态。旧动作的迟到结果不能解除新动作的 pending。
 
 同一身份规则也适用于前台动作状态和异步刷新：
 
-- “正在续聊”和动作完成确认使用 `(projectPath, conversationId)`，另一个项目的同号对话不能继承或释放本项目状态。
+- “正在续聊”和动作完成确认使用上述完整身份；UI 在 run 尚未创建时使用其前置启动身份。`(projectPath, conversationId)` 只能用于只读展示索引，不能继承或释放 pending，也不能控制进程、终端、续轮或恢复。
 - 终端等待期间即使用户切换项目，命令投递后的历史刷新仍写回发起动作的项目；不得读取或刷新切换后的活动项目。
 - 所有对话历史刷新都必须显式携带发起项目，禁止在异步完成时回退到当时的 `activeProjectRoot`；新对话、续聊、重试、停止、关联步骤和结算副作用遵守同一规则。
 - 项目卡片继续、命令面板发起、消息续聊和时间计划同样属于对话入口：在第一次异步等待前捕获项目路径；终端显示后只能用该路径创建独立执行目标，不能再调用“切换到请求项目”来夺回用户后来选择的项目。
 - Webview 的每一个对话生产或控制入口都必须随动作发送当时可见的 `projectPath`，包括步骤运行、Flow 发起/暂停/放弃、关联步骤和项目卡片继续；Host 不得用收到消息时的全局选中项目补全缺失身份。
+- 当前 Roadmap 的路线图调整 sender 未发送 `projectPath`，Host 会回退活动/选中项目；这是待修复的确定缺陷，不得把其他入口已固定项目外推到该入口。
+- Telegram、定时任务和其他远程/自动生产者同样必须在动作被接受时持久化目标项目；当前 Telegram `/run` 只传 `nodeId`、Host 事后读取活动项目的行为必须移除，未取得真实 task-start 不能回复“已启动”。Telegram `/stop` 必须按持久项目/run/generation/delivery 身份取消，不能按终端标题前缀猜测。
+- scheduled occurrence 在首次 due claim 时必须原子写入不可变的 `acceptedAt/budgetOriginAt/interactionId` 以及项目、data root、CLI、模型、权限和 prompt policy 快照；reclaim 复用同一记录，不得以 `updated_at`、claim 时间或恢复时间代替 acceptedAt。当前逐项执行时重读 settings 的行为必须移除，且同批前一个 occurrence 不能阻塞后一个跨过 10 秒。
 - 发起动作按项目路径分别排队，不使用跨项目全局队列。排队结束后若用户已经切换项目，只允许原项目动作继续后台执行，不允许旧动作把界面导航回原项目。
 - 独立执行目标同时固定项目数据引擎、数据根和 Agent 设置。项目与设置快照必须在启动终端的第一个 `await` 前同步捕获；运行时准备、CLI/模型解析、进程清理、终端复用和后续刷新都读取这份快照，不能在任一 `await` 之后重新读取当前项目设置。
 - OpenCode 等需要供应方凭据的终端环境也属于 Agent 设置快照：最终命令投递必须用发起时捕获的供应方和密钥选择，Flow 恢复必须优先使用持久动作携带的数据根，不能因当前选中项目变化改写目标根。
 - 后台项目可以更新自己的数据库、缓存和侧边栏卡片；只有发起项目仍是当前项目时，才允许刷新路线图主视图。后台项目完成不能借一次无条件 `sendNodesToWebview` 重建用户正在操作的另一个项目。
 - 非当前项目的快照、动作成功确认或失败结果可以更新该项目缓存和动作账本，但不能触发当前项目 DOM 重建或显示成当前项目错误；只有路径与 generation 同时匹配的结果才能提交当前界面。
 - 原生续聊在项目准备完成后持有独立的项目执行目标；用户随后切换项目只能改变可见界面，不能取消原续聊、关闭其数据引擎或把它重新绑定到新项目。
+- Continue Turn 复用已存在的原生 CLI 时，不以新进程 spawn 为完成；terminal bridge 只负责把本轮输入和 run/turn 身份送到已绑定 CLI，随后仍由对应 Provider adapter 的官方机器状态确认本轮进入 task。`sendText()`、PTY write 和 bridge 自身返回都不算 5/10 秒终点。
+- 用户在 SoloMap 创建并维持的原生 Agent 终端中直接提交下一轮输入，同样是正式对话入口，但 Custom Pseudoterminal 的 `handleInput` 只传输原始按键，不能把 Enter 猜成对话提交。该入口的动作接受点由 Provider adapter 的官方 submit-accepted 候选确定：Codex/Antigravity 使用绑定 transcript 的新 user message；Claude 使用当前 observer 已接入的根 `session.append(door=prompt, message.type=user, !isMeta)` 及其 user UUID；Cursor 使用 `beforeSubmitPrompt` 候选（只定起点，全部 hooks 后的持久 user row 才是强终点）；Copilot 使用 `userPromptSubmitted` 候选；OpenCode 使用同 Session 的 user `message.updated`，随后仍须等 `session.status=busy`；Grok 使用 `UserPromptSubmit` 候选，随后仍须等持久 user row 与原生 phase。adapter 在候选到达的首段以 Provider 原始时间和当前宿主接收时间建立不可重置 interaction/turn 身份；随后只有更后的 task-ingress 强事件能回传 `agent-cli.turn-start`。从 Provider 接受提交到强收据正常目标 5 秒、硬上限 10 秒。此前原始按键仍记录为无语义 input hint，用来诊断 CLI 接受前延迟，但不创建 attempt；普通键盘回显、PTY write、换行、空 Enter、审批/提问回答、slash command、本地命令、bridge 输出或进程状态都不算对话接受或完成。
+- 项目动作队列、同对话 single-flight、进程 cleanup、成长汇报动作去重、terminal input queue、delivery recovery 与 run-effect consumer 都必须保留原始动作起点；去重只合并同一逻辑动作，不能让一个未就绪终端或未完成 cleanup 成为同 data root 其他前台对话的队头阻塞。
+- `RunRecovery` 的 5 秒整轮 single-flight 在观察任何 run 前还先等待全局 input materialization，随后才逐 run 调用 `RunNativeObserver`；observer 自身又 per-run 串行。它们属于 task-start 收据链的一部分，必须被前台新收据唤醒或让行，不能让输入物化、恢复分页、workspace snapshot 或其他 run 把本轮收据推迟到 10 秒之后。
+- 智能内核同一 launch reservation 同时最多一个 live dispatch；当前重复 reserve 会新增 dispatch，且 acknowledged/命令提交/`deliveryPending=false` 就可返回 `started`，必须改为绑定 task-start receipt 后才确认。
+- `prepare_run` 本身会在创建 run 时写入 live delivery owner，随后 binding、policy、prompt 和状态 patch 的任一步失败都可能在调用方取得 prepared result 前抛出；普通首发路径和全局提示词复盘都可能因此留下 recovery 持续排除的 pending run。所有 prepare 调用必须执行统一的 ownership guard：创建/取得 run 后，只有成功移交给已认领 runner 才 commit owner；任一失败、终端关闭、显示接入失败或取消都按完整身份释放 lease。释放暂时失败进入持久幂等重试，不能只依赖调用栈 finally 或内存 timer。
+- 全局提示词复盘当前绕过显式 delivery claim 直接投递，但 prepare owner 存活时 recovery 会排除该 run；真实风险是活 owner 卡死时 recovery 永久压住，以及 owner 死亡后旧 Shell/命令迟到并与恢复投递竞争。它还把已解析的 `workspaceRoot` 丢掉，调用 `createAgentTerminal(context.extensionPath, ...)`，导致终端 cwd 和 ownership key 错绑到扩展安装目录。它必须使用目标 workspaceRoot，并进入与普通路径相同的 delivery identity/lease/ownership guard，确保一个终端、一次命令、一个 runner owner。
+- 自动 effect 在持久化为可执行时建立不可变的父 `eligibleAt/parentInteractionId/budgetOriginAt`；claim 原子固定项目、data root、规则、CLI、模型、权限和 prompt policy。每个 retry/custom prompt 使用确定性的 childInteractionId，保留各自 acceptedAt 供追踪，但硬门禁共同继承父 effect 的 `budgetOriginAt=eligibleAt`，不能因派生、排队、claim 或 reclaim 重置。两个子动作独立启动、独立结算，前一个不得阻塞后一个。当前 claim 后重读 automation settings、`taskPermissionMode` 和 `globalPrompt` 的行为必须移除。
 
 恢复规则：
 
-- 生产路径必须持续等待目标终端返回真实 PTY PID；超过 5 秒时记录一次 `terminal_process_slow`，但不得关闭目标终端、释放投递租约或创建替代终端。固定时限只能用于显式故障注入测试，不能成为用户对话路径的默认行为。
-- 等待期间目标终端保持选中且可见，用户关闭或停止本次对话才终止等待。这样既不向未就绪 Shell 发送命令，也不会把宿主变慢放大成终端重建风暴。
-- Shell 接收命令后若 runner 在认领预算内仍未出现，记录 `runner_claim_timeout`，校验 run、generation 和 delivery ID 后释放投递租约并关闭失效终端。迟到的旧命令因 delivery ID 不匹配不能认领运行，避免重复执行。
+- 普通终端 Shell/PTY 只能是显示与原生输入输出表面，不能再充当 runner/Agent CLI 启动门。新任务必须通过不依赖普通 Shell `processId` 的受控进程路径启动；目标终端仍应立即显示，并在自身就绪后接入同一个 runner，而不是创建第二份任务。
+- 当前最小桥接实现使用 VS Code Custom Pseudoterminal：Extension 先以 `child_process.spawn(process.execPath, [runAgentProcess.js, ...])`、`shell=false` 和 `ELECTRON_RUN_AS_NODE=1` 直接启动唯一 runner；这一步不等待 `Pseudoterminal.open`、普通 Terminal `processId` 或焦点完成。Extension 与 runner 通过直接 stdin/stdout/stderr pipes 传输输入和显示输出；正式输出同时先写权威 run log。用户 trash/dispose 这个终端实例或点击显式“停止”才发起 stop；隐藏 panel 不停止任务。runner 退出则关闭该 surface。
+- 当前 Extension Host deactivate 只断开展示订阅，不主动 stop runner，runner 自己持有 Agent stdin，Host pipe EOF 不会被转译为 Agent EOF；但新宿主尚不能重新附着旧 pipes。后续耐久化目标是在 runner 内提供绑定完整 run/delivery 身份的本地 IPC endpoint（POSIX Unix socket、Windows named pipe）、attach nonce、带 sequence 的 input/output/resize/stop/attach 帧和持久 offset 补传。只有该 endpoint 经真实 reload 验收后，才能宣称 UI 已跨 Host 重连；在此之前 recovery 只能保证账本与任务不由显示层假终止，不能保证新 surface 复用旧显示流。
+- runner 内部可以继续用 `script` 为配置的 CLI 提供 TTY，但 `script` 是 runner 的唯一正式子树且不得充当 task-start 收据。正式执行和 `--help`、`--version`、`create-chat` preflight 必须传入明确 `executionKind=formal|preflight`；只有 formal 子树可产生 task ingress receipt。
+- 如果兼容路径仍需向普通 Shell 发送文本，该文本必须等待真实 PTY PID，且不得以超时后重建终端的方式恢复；但这段等待不能阻塞真实 Agent CLI 在 10 秒硬上限内进入本次任务。
+- 用户关闭或停止必须同时终止未完成的显示接入、runner 和 delivery lease；扩展宿主重载时，已启动 runner 依靠持久 run 身份恢复，不能因显示终端重建而重复启动 Agent。
+- runner 受控启动后若在认领预算内仍未出现，记录 `runner_claim_timeout`，校验 run、generation 和 delivery ID 后释放投递租约并关闭失效显示。迟到的旧进程因 delivery ID 不匹配不能认领运行，避免重复执行。
 - 释放租约若恰逢 Runtime 切换或短暂断连，按同一 generation、owner、delivery ID 和幂等键后台重试；活着的 Extension Host 不得因为一次释放 RPC 失败而永久挡住持久投递队列。
-- 准备提示不再作为一条 Shell 命令排在正式命令之前；终端可见性由 `show` 保证，正式命令是该终端唯一的首次投递，避免两个命令串行等待同一个未就绪 PID。
+- 准备提示不再作为一条 Shell 命令排在正式命令之前；终端可见性由 `show` 保证，runner 只允许按持久 delivery 身份启动一次，显示接入不能生成第二份命令或第二个 Agent。
 
 上述预算只界定一次基础设施尝试，不缩短 Agent 任务执行时间，也不把慢任务改成提前失败。
 
+### task ingress 收据与测试 oracle
+
+正式子进程被创建只能形成 `formal_process_spawned` 诊断事件，不能结束 5/10 秒计时。当前实现只接受两级收据：
+
+| authority | 当前来源 | 发布含义 |
+| --- | --- | --- |
+| `provider_native` | Codex 已绑定 rollout 的 `event_msg.task_started`；Claude observer plugin 的根 `turn.start` | Provider 自身已进入本轮任务，是最高权威 |
+| `agent_acknowledged` | Cursor、Copilot、OpenCode、Grok、Antigravity 或原生 observer 暂不可用时，正在执行本轮任务的 Agent loop 调用受治理 `solomap_conversation_status(start)` | Agent 已进入工具可用的本轮执行循环；Runtime 必须核对 run proof、session binding、generation、turn 与 interaction |
+
+`provider_native` 可以升级同一 interaction 先到的 `agent_acknowledged`；`agent_acknowledged` 不能覆盖已经存在的原生收据。普通 stdout/stderr、ANSI 重绘、spinner、键盘回显、历史 replay、进程存活、wrapper/CLI 启动 banner、模型普通文本、Host 预登记 checkpoint、`Running` 状态、runner spawn、PTY write 和 `sendText()` 均不是收据。
+
+Runtime 在治理型 MCP 调用到达的第一段轻量事务中先核对提示中精确的 `turnId + interactionId`，再保存收据；旧轮迟到调用不得认领当前轮。Host 的前台续轮 checkpoint 不读取 Git HEAD 或 workspace snapshot，完成阶段再收集这些证据；幂等 fast path 也不能跳过收据。该调用不是 Shell 自报，也不是由提示文本直接宣称成功，而是从已开始执行的 Agent 工具循环经 run-scoped MCP 通道返回的受控状态。它仍弱于 Provider 原生事件，因此保留明确的 authority 排序，便于后续原生 adapter 无缝升级。
+
+接受对话的调用方必须等待与本次 interaction 匹配的收据后才能返回“已启动”。到 10 秒仍无收据时，调用方持久化 `deadline_exceeded` 或 `clock_untrusted` 并返回失败；门禁失败不杀死已经在运行的 Agent、不吞掉输入，也不启动第二份 CLI。10 秒后才发生的 acknowledgement 只保留诊断价值；只有带可信 Provider 原始时间、并证明任务实际在门禁前开始的原生事件，才可纠正观察器晚到造成的判定。
+
+Continue 和成长汇报继续先创建新 turn，再把多行提示与唯一提交键组成一个原子 PTY frame；写入 Promise 必须真实结算，broken pipe 直接失败。frame 写入不是收据，调用方仍等待同一 interaction 的新 task-ingress。Host reload 后只按名字发现的旧终端不能复用：数据根、规范化项目、execution、run、generation/delivery 与当前 Host live bridge 必须全部匹配，否则启动新的正式 resume runner，避免把输入送进其他项目或失去管道的旧 TUI。现阶段不宣称 UI 可以跨 Host 重新附着旧 pipes。
+
+当前 OpenCode 仍使用标准受控 CLI runner 和 `agent_acknowledged` 收据。`opencode serve`、`run --attach`、`exec attach`、Server 事件订阅与跨 Host 可重附着属于后续原生 adapter 设计，尚未在本版实现或作为发布结论。其他非 Codex/Claude Provider 的 transcript/hook 原生事件接入同样是后续增强；本版不得把这些目标状态写成已落地事实。
+
+测试必须至少覆盖：无收据到 10 秒时调用失败并持久化门禁结果；MCP 收据与 interaction/run 身份不匹配时不能通过；后到原生收据可升级、反向不能降级；spawn、普通输出和 PTY write 不能通过；续轮 broken pipe 失败；多行输入只有一个提交键；Codex daemon 错误也只启动一份正式 CLI；Host reload 不复用无 live bridge 的同名终端。真实 Provider 账号验收只能报告实际可用并完成测试的 Provider，不能用 mock 或另一家 Provider 外推。
+
+计时测试还必须覆盖 Extension Host reload、Runtime restart、同 boot 续计、跨 boot 恢复、wall clock 前跳/回拨。`elapsedFloorMs` 只增不减，同 boot 不以新进程时钟重置；无法验证时钟连续性时失败关闭，正常 Agent 任务本身仍继续运行。
+
+自动复核是独立入口，但只读能力必须在动作接受前成立。当前生产命令只支持 Codex、Antigravity、Cursor、Claude 与 Grok；Copilot/OpenCode 在补齐并真实验证只读 argv/权限沙箱前，不得被设置为 reviewer。支持的 reviewer 一旦动作被接受，同样必须在 10 秒门禁前取得上述两级收据之一。
+
+### 本地优先的运行资源边界
+
+用户主动对话是最高优先级控制面，不只是调用图中的主路径。终端 create/show、PTY 就绪、run 登记、继续和停止不得与成长快照、后台智能循环、迁移、维护、诊断或外部刷新在同一无优先级队列中平权竞争。
+
+- 共享 Runtime 或数据库必须能识别前台对话控制请求，并让可延后的后台工作在请求到达时让行。
+- 同步 SQLite 大事务、持续 run-log 写入和批量衍生数据写入不得形成不可抢占区间，阻塞对话控制面超过本地体验基线。
+- Runtime、Extension Host、terminal service 与 pty host 之间的资源竞争必须在后台满载的真实宿主环境验证；空载单元测试不构成优先级证明。
+- 诊断属于辅助链路。慢路径产生的诊断写入不得继续放大被诊断的 I/O 竞争。
+- 2026-10-25 的完整现场审计见 [SoloMap 对话终端发起链路完整审计](../ui/conversation-terminal-launch-audit-2026-10-25.zh.md)。事故版本 0.0.622 尚未实现上述资源优先级；修复版已经增加前台 run 控制优先于 log/diagnostic/growth/capture 的 admission scheduler，并完成满载 Codex 首轮与续轮验收。已经开始的同步 SQLite 事务仍不可抢占，因此本节的数据库级隔离仍是约束，不能由 admission 排序冒充全部完成。
+- 正常目标仍为 5 秒；超过 5 秒但不超过 10 秒必须记录为体验退化，从入口动作接收到本次 Agent CLI 任务真实启动的发布硬上限为 10 秒。该上限覆盖所有插件可触发入口和后台满载宿主，不能用终端已创建、`show()`/`sendText()` 已返回、runner 已登记、`script`/Shell 包装层已启动、fd 启动门已放行或 10 秒时主动失败代替真实 Agent CLI 已进入任务。
+
 ### 已落地的检查点协议
 
-Agent 每轮从插件提示词获得唯一命令入口：
+Agent 每轮从插件提示词获得数据库 MCP 状态入口：
 
 ```text
-node "$SOLOMAP_TASK_COMMAND" start --message "当前要求"
-node "$SOLOMAP_TASK_COMMAND" complete --message "当前要求" --outcome <结果> --summary "本轮结果" --next "下一步"
+solomap_conversation_status({action:"start", turnId:"本轮标识", interactionId:"本次交互标识", message:"当前要求"})
+solomap_conversation_status({action:"complete", message:"当前要求", outcome:"...", summary:"...", next:"..."})
 ```
 
 其中 `complete` 的结果只允许：`partial`、`candidate_complete`、`blocked_user`、`blocked_external`、`failed`。`candidate_complete` 只提交路线图完成候选，不能绕过完成标准或副 Agent 复核。Agent 不能直接编辑状态文件、完成文件或 SQLite 账本。
 
-入账可靠性不再只依赖 Agent 是否完整执行提示词：用户点击“继续”时，插件必须先创建活动轮次，再开放现有终端输入；`Waiting` 是可长期保持的合法状态，不设置短时过期。若 Agent 在终端内漏掉 `start` 但执行了 `complete`，状态消费者必须为该完成事件补建独立轮次，不能覆盖上一条记录。状态事件按 `checkpointEventId` 防止旧结算覆盖新事件，处理期间到达的新事件进入待处理队列；`Waiting` 必须先于对话历史刷新落盘。
+Codex 和 Claude 的 native observer 为同一账本提供独立恢复信号；Claude native hook 可调用扩展内 `taskCheckpointProcess.js` 传输 native event，但这不是面向 Agent 的项目脚本协议。用户点击“继续”时，Host 会先创建活动轮次；这只能表示输入已被插件接受，不表示 Agent 已接收。随后 native start 在当前 turn 写入 Provider-native 身份、原始时间和 `taskIngressReceipt`，或在上一 turn 已结束时补建新 turn；实际 MCP `start` 到达也会在幂等快路径之前补写同 interaction receipt。若只有 `complete` 到达，状态消费者不能覆盖上一条记录。`checkpointEventId` 继续保护账本顺序，但不得兼任 task-start 真收据；`Waiting` 必须先于对话历史刷新落盘。
 
 ## 核心决策
 
@@ -466,7 +532,7 @@ ACP 路线满足首轮身份绑定、连续多轮、审批、用户回答、中�
 - 每轮完成后侧边栏及时进入“等待你继续”。
 - 多轮均归属于同一个主对话并保留独立执行记录。
 - 子 Agent 完成不会提前结算根 Agent。
-- 关闭对话视图不停止活动轮次；只有显式“停止”才取消当前轮。
+- 隐藏 terminal panel 或关闭对话视图不停止活动轮次；点击显式“停止”或 trash/dispose 该对话终端实例才取消当前轮，Extension Host reload/deactivate 仅断开展示并随后重连。
 - VS Code 重载后能恢复尚未结算的活动轮次。
 - 两个窗口不会重复写入执行记录、自动化动作或完成副作用。
 - Adapter 重启后能通过持久 Session 身份与事件游标恢复；若未来启用 Hook 支线，Hook 漏发时持久事件能够恢复。

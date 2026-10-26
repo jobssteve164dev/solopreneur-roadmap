@@ -9,6 +9,86 @@ const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { sendRuntimeDataRequest, sendRuntimeControlCommand } = require('../out/autonomousRuntimeControl.js');
 const { shellQuote } = require('../out/agentCli.js');
 
+test('interactive runner captures a retained rollback baseline before the formal Agent executes', async () => {
+  const source = "const fs=require('fs');const path=require('path');const refs=path.join(process.cwd(),'.git','refs','solomap','backups');if(!fs.existsSync(refs)||!fs.readdirSync(refs).length)process.exit(19);fs.writeFileSync('agent-result.txt','started after backup');";
+  const f = await executionFixture(`${shellQuote(process.execPath)} -e ${shellQuote(source)}`, {
+    interactiveSession: true,
+    preSessionGitBackup: true,
+    agentCli: 'fixture'
+  });
+  const git = (...args) => require('node:child_process').execFileSync('git', ['-C', f.projectRoot, ...args], { encoding: 'utf8' }).trim();
+  try {
+    git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
+    fs.writeFileSync(path.join(f.projectRoot, 'work.txt'), 'before'); git('add', '-A'); git('commit', '-m', 'baseline');
+    const originalHead = git('rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(f.projectRoot, 'work.txt'), 'dirty rollback state');
+    const agent = f.startAgent();
+    assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
+    const state = await f.call('read_run_state');
+    assert.match(String(state.status.baseGitHash || ''), /^[a-f0-9]{40}$/);
+    assert.notEqual(state.status.baseGitHash, originalHead);
+    assert.equal(git('rev-parse', 'HEAD'), originalHead, 'the rollback commit must not move the user branch');
+    assert.equal(git('show', `${state.status.baseGitHash}:work.txt`), 'dirty rollback state');
+    assert.equal(git('rev-parse', `refs/solomap/backups/${state.status.baseGitHash}`), state.status.baseGitHash);
+    assert.equal(fs.readFileSync(path.join(f.projectRoot, 'agent-result.txt'), 'utf8'), 'started after backup');
+  } finally { await f.close(); }
+});
+
+test('interactive runner does not start the formal Agent when rollback capture fails', async () => {
+  const f = await executionFixture(`${shellQuote(process.execPath)} -e ${shellQuote("require('fs').writeFileSync('must-not-start.txt','started')")}`, {
+    interactiveSession: true,
+    preSessionGitBackup: true,
+    agentCli: 'fixture'
+  });
+  const bin = path.join(path.dirname(f.root), 'failing-git-bin'); fs.mkdirSync(bin);
+  const wrapper = path.join(bin, 'git');
+  fs.writeFileSync(wrapper, '#!/bin/sh\nif [ "$1" = "add" ]; then echo forced-backup-failure >&2; exit 71; fi\nexec /usr/bin/git "$@"\n', { mode: 0o755 });
+  try {
+    const agent = f.startAgent({ PATH: `${bin}:${process.env.PATH || ''}` });
+    assert.notEqual((await once(agent, 'exit'))[0], 0);
+    assert.equal(fs.existsSync(path.join(f.projectRoot, 'must-not-start.txt')), false,
+      'rollback capture is a launch prerequisite, not optional post-launch evidence');
+    assert.match(f.stderr().toString(), /pre_session_git_backup_failed/);
+  } finally { await f.close(); }
+});
+
+test('interactive runner revalidates an existing rollback hash before starting the formal Agent', async () => {
+  const f = await executionFixture(`${shellQuote(process.execPath)} -e ${shellQuote("require('fs').writeFileSync('must-not-start-existing.txt','started')")}`, {
+    interactiveSession: true,
+    preSessionGitBackup: true,
+    agentCli: 'fixture',
+    baseGitHash: '0123456789012345678901234567890123456789'
+  });
+  try {
+    const agent = f.startAgent();
+    assert.notEqual((await once(agent, 'exit'))[0], 0);
+    assert.equal(fs.existsSync(path.join(f.projectRoot, 'must-not-start-existing.txt')), false);
+    assert.match(f.stderr().toString(), /pre_session_git_backup_failed/);
+  } finally { await f.close(); }
+});
+
+test('interactive runner restores a missing retention ref for a valid existing rollback hash', async () => {
+  const f = await executionFixture(`${shellQuote(process.execPath)} -e ${shellQuote("require('fs').writeFileSync('started-with-retained-existing.txt','started')")}`, {
+    interactiveSession: true,
+    preSessionGitBackup: true,
+    agentCli: 'fixture'
+  });
+  const git = (...args) => require('node:child_process').execFileSync('git', ['-C', f.projectRoot, ...args], { encoding: 'utf8' }).trim();
+  try {
+    git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
+    fs.writeFileSync(path.join(f.projectRoot, 'baseline.txt'), 'baseline'); git('add', '-A'); git('commit', '-q', '-m', 'baseline');
+    const baseline = git('rev-parse', 'HEAD');
+    const state = await f.call('read_run_state');
+    await f.call('patch_run_state', { generation: state.generation, expectedRevision: state.revision,
+      patch: { baseGitHash: baseline }, idempotencyKey: 'existing-valid-baseline' });
+
+    const agent = f.startAgent();
+    assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
+    assert.equal(git('rev-parse', `refs/solomap/backups/${baseline}`), baseline);
+    assert.equal(fs.readFileSync(path.join(f.projectRoot, 'started-with-retained-existing.txt'), 'utf8'), 'started');
+  } finally { await f.close(); }
+});
+
 test('the shared packaged runner commits complete output and host completion without generating per-run programs', async () => {
   const runner = path.resolve(__dirname, '../out/runAgentProcess.js');
   assert.ok(fs.existsSync(runner), 'a shared packaged runner must replace per-run program copies');
@@ -88,7 +168,10 @@ api.sendRuntimeDataRequest=async function(root,request){
 });
 
 test('the shared runner records claim and Agent launch stages in the originating terminal trace', async () => {
-  const f = await executionFixture(`env -u NO_COLOR ${shellQuote(process.execPath)} -e ${shellQuote("process.stdout.write('observed launch')")}`);
+  const f = await executionFixture(`env -u NO_COLOR ${shellQuote(process.execPath)} -e ${shellQuote("process.stdout.write('observed launch')")}`, {
+    interactiveSession: true,
+    preSessionGitBackup: true
+  });
   const traceId = '0123456789abcdef';
   try {
     const agent = f.startAgent({
@@ -103,6 +186,10 @@ test('the shared runner records claim and Agent launch stages in the originating
     assert.deepEqual(stages, [
       ['terminal.delivery.runner.start', 'ok'],
       ['terminal.delivery.runner.claim', 'ok'],
+      ['terminal.delivery.rollback.snapshot', 'start'],
+      ['terminal.delivery.rollback.snapshot', 'ok'],
+      ['terminal.delivery.workspace.baseline', 'start'],
+      ['terminal.delivery.workspace.baseline', 'ok'],
       ['terminal.delivery.agent.spawn', 'ok'],
       ['terminal.delivery.agent.launch', 'ok']
     ]);
@@ -294,8 +381,8 @@ for (const mode of ['auto', 'never']) for (const preconfirmed of [false, true]) 
   const home = path.join(cliRoot, 'source-codex-home'); fs.mkdirSync(home);
   fs.writeFileSync(path.join(home, 'config.toml'), 'model = "original-provider-model"\n');
   const text = '完整修正输出🌿'.repeat(20000);
-  const source = `if(JSON.stringify(process.argv.slice(1,4))!==JSON.stringify(['--profile','solomap','app-server']))process.exit(9);const rl=require('readline').createInterface({input:process.stdin});const send=m=>process.stdout.write(JSON.stringify(m)+'\\n');rl.on('line',line=>{const m=JSON.parse(line);if(m.method==='initialize'){if(m.params.capabilities!==null)process.exit(6);send({id:0,result:{}});}if(m.method==='thread/resume'){if(m.params.threadId!==${JSON.stringify(sessionId)}||${mode === 'auto' ? "m.params.sandbox!=='danger-full-access'||m.params.approvalPolicy!=='never'" : "m.params.sandbox!==undefined||m.params.approvalPolicy!==undefined"})process.exit(8);send({id:1,result:{thread:{id:m.params.threadId}}});}if(m.method==='turn/start'){if(m.params.input[0].text!=='任务原文'||!Array.isArray(m.params.input[0].text_elements))process.exit(7);require('fs').writeFileSync('correction.txt','交付');send({id:2,result:{turn:{id:'native-turn-one'}}});send({method:'item/agentMessage/delta',params:{threadId:${JSON.stringify(sessionId)},turnId:'native-turn-one',delta:'完整修正输出🌿'.repeat(20000)}});send({method:'turn/completed',params:{threadId:${JSON.stringify(sessionId)},turn:{id:'native-turn-one',status:'completed'}}});}});`;
-  const sourceContextCheck = `if(process.env.CODEX_HOME!==${JSON.stringify(home)}){process.stderr.write('source_codex_home_lost');process.exit(5);}if(!require('fs').readFileSync(require('path').join(process.env.CODEX_HOME,'solomap.config.toml'),'utf8').includes('SoloMap managed database MCP begin')){process.stderr.write('source_codex_mcp_missing');process.exit(4);}`;
+  const source = `if(process.argv[1]!=='--profile'||!/^solomap-[a-f0-9]{16}$/.test(process.argv[2])||process.argv[3]!=='app-server')process.exit(9);const rl=require('readline').createInterface({input:process.stdin});const send=m=>process.stdout.write(JSON.stringify(m)+'\\n');rl.on('line',line=>{const m=JSON.parse(line);if(m.method==='initialize'){if(m.params.capabilities!==null)process.exit(6);send({id:0,result:{}});}if(m.method==='thread/resume'){if(m.params.threadId!==${JSON.stringify(sessionId)}||${mode === 'auto' ? "m.params.sandbox!=='danger-full-access'||m.params.approvalPolicy!=='never'" : "m.params.sandbox!==undefined||m.params.approvalPolicy!==undefined"})process.exit(8);send({id:1,result:{thread:{id:m.params.threadId}}});}if(m.method==='turn/start'){if(m.params.input[0].text!=='任务原文'||!Array.isArray(m.params.input[0].text_elements))process.exit(7);require('fs').writeFileSync('correction.txt','交付');send({id:2,result:{turn:{id:'native-turn-one'}}});send({method:'item/agentMessage/delta',params:{threadId:${JSON.stringify(sessionId)},turnId:'native-turn-one',delta:'完整修正输出🌿'.repeat(20000)}});send({method:'turn/completed',params:{threadId:${JSON.stringify(sessionId)},turn:{id:'native-turn-one',status:'completed'}}});}});`;
+  const sourceContextCheck = `if(process.env.CODEX_HOME!==${JSON.stringify(home)}){process.stderr.write('source_codex_home_lost');process.exit(5);}if(!require('fs').readFileSync(require('path').join(process.env.CODEX_HOME,process.argv[2]+'.config.toml'),'utf8').includes('SoloMap managed database MCP begin')){process.stderr.write('source_codex_mcp_missing');process.exit(4);}`;
   fs.writeFileSync(cli, `#!/bin/bash\nexec ${shellQuote(process.execPath)} -e ${shellQuote(sourceContextCheck + source)} -- "$@"\n`, { mode: 0o755 });
   const launch = { schemaVersion: 1, agentCli: cli, selectedModel: 'original-model', taskPermissionMode: mode, continuation: true, direct: false };
   const f = await executionFixture('placeholder', { agentLaunch: launch, agentCli: cli, plannedNativeSessionId: sessionId, agentDatabaseConfigPath: path.join(cliRoot, 'config.toml'), bindingNonce: '1'.repeat(64) }, '', 'agent_review_revision');
@@ -556,38 +643,51 @@ main().catch(error=>{process.stderr.write(String(error));process.exitCode=1});`;
   } finally { await f.close(); }
 });
 
-test('the real shared runner preserves full capability evidence and never launches a CLI with no session-id support', async () => {
+test('the real shared runner does not put a capability subprocess in front of the formal Agent CLI', async () => {
   const f = await executionFixture('preparing', { interactiveSession: true });
   const cli = path.join(path.dirname(f.root), 'claude');
-  fs.writeFileSync(cli, `#!${process.execPath}\nif(process.argv.includes('--help'))process.stdout.write('old help evidence without the flag');else process.stdout.write('must-not-launch');`, { mode: 0o700 });
+  fs.writeFileSync(cli, `#!${process.execPath}\nif(process.argv.includes('--help')||process.argv.includes('--version')){process.stdout.write('unexpected-probe');process.exitCode=91;}else process.stdout.write('formal-agent-launch');`, { mode: 0o700 });
   try {
     const before = await f.call('read_run_state');
     await f.call('patch_run_state', { generation: before.generation, expectedRevision: before.revision, patch: { agentDatabaseConfigPath: path.join(path.dirname(f.root), '.claude.json'), agentLaunch: { schemaVersion: 1, agentCli: cli, selectedModel: 'test-model', taskPermissionMode: 'auto', continuation: false, direct: false } }, idempotencyKey: 'preflight-plan' });
-    const agent = f.startAgent(); assert.equal((await once(agent, 'exit'))[0], 126, f.stderr().toString());
-    assert.equal(f.stdout().length, 0);
-    const state = await f.call('read_run_state'); assert.equal(state.status.status, 'Failed'); assert.equal(state.status.failureCode, 'identity_capability_missing');
+    const agent = f.startAgent(); agent.stdin.end(); assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
+    assert.match(f.stdout().toString(), /formal-agent-launch/);
+    assert.doesNotMatch(f.stdout().toString(), /unexpected-probe/);
     const evidence = await f.call('read_run_log', { stream: 'preflight:identity-help:stdout' });
-    assert.equal(Buffer.from(evidence.bytes, 'base64').toString(), 'old help evidence without the flag');
+    assert.equal(Buffer.from(evidence.bytes, 'base64').length, 0);
   } finally { await f.close(); }
 });
 
-test('a Codex startup failure retries without the daemon while preserving the exact resume identity and all evidence', async () => {
+test('a Codex interactive launch uses one isolated native CLI and never starts a second attempt when it fails', async () => {
   const f = await executionFixture('preparing', { interactiveSession: true, plannedNativeSessionId: 'confirmed-native-session-123', bindingNonce: 'original-binding-nonce' });
   const cli = path.join(path.dirname(f.root), 'codex');
-  fs.writeFileSync(cli, `#!${process.execPath}\nprocess.stdout.write('attempt:'+JSON.stringify(process.argv.slice(2))+'\\n');if(!process.argv.includes('--no-daemon')){process.stderr.write('app server did not become ready\\n');process.exitCode=2;}else process.stdout.write('retry completed\\n');`, { mode: 0o700 });
+  fs.writeFileSync(cli, `#!${process.execPath}
+const net=require('net');
+const args=process.argv.slice(2);
+if(args[0]==='app-server'){
+  const endpoint=args.find(value=>value.startsWith('unix://'));
+  const server=net.createServer(socket=>socket.end());
+  server.listen(endpoint.slice('unix://'.length));
+  const stop=()=>server.close(()=>process.exit(0));
+  process.on('SIGTERM',stop);process.on('SIGINT',stop);
+}else{
+  process.stdout.write('attempt:'+JSON.stringify(args)+'\\n');
+  process.stderr.write('formal native CLI failed\\n');
+  process.exitCode=2;
+}`, { mode: 0o700 });
   try {
     const before = await f.call('read_run_state');
     await f.call('patch_run_state', { generation: before.generation, expectedRevision: before.revision, patch: { agentDatabaseConfigPath: path.join(path.dirname(f.root), 'config.toml'), agentLaunch: { schemaVersion: 1, agentCli: cli, selectedModel: 'test-model', taskPermissionMode: 'auto', continuation: true, direct: false } }, idempotencyKey: 'codex-launch' });
-    const agent = f.startAgent(); agent.stdin.end(); assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
+    const agent = f.startAgent(); agent.stdin.end(); assert.equal((await once(agent, 'exit'))[0], 2, f.stderr().toString());
     const attempts = f.stdout().toString().split(/\r?\n/).filter(line => line.startsWith('attempt:')).map(line => JSON.parse(line.slice(8)));
-    assert.equal(attempts.length, 2);
-    assert.deepEqual(attempts[0].slice(0, 3), ['--profile', 'solomap', 'resume']);
-    assert.deepEqual(attempts[1].slice(0, 4), ['--no-daemon', '--profile', 'solomap', 'resume']);
+    assert.equal(attempts.length, 1);
+    assert.deepEqual(attempts[0].slice(0, 4), ['--profile', 'solomap', '--no-daemon', 'resume']);
+    assert.ok(attempts.every(args => !args.includes('--remote')));
     assert.ok(attempts.every(args => args.includes('confirmed-native-session-123')));
     assert.ok(attempts.every(args => args.at(-1).includes('original-binding-nonce')));
     const log = await f.call('read_run_log', { stream: 'stdout' }); const text = Buffer.from(log.bytes, 'base64').toString();
-    assert.match(text, /app server did not become ready/); assert.match(text, /retry completed/);
-    assert.equal((await f.call('read_run_state')).status.checkpointOutcome, 'partial');
+    assert.doesNotMatch(text, /retry completed/);
+    assert.equal((await f.call('read_run_state')).status.checkpointOutcome, 'failed');
   } finally { await f.close(); }
 });
 

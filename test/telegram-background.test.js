@@ -368,8 +368,11 @@ let input='';process.stdin.on('data',bytes=>input+=bytes);process.stdin.on('end'
     fixture.updates.push(fixture.update(106, '帮我检查 Alpha 的发布流程'));
     await waitFor(() => fixture.sent.some(message => message.text === '已开始检查 Alpha 的发布流程。'), 'Telegram must receive the launch result', 12_000);
     assert.equal(launches.length, 1);
-    assert.deepEqual({ ...launches[0], launchIntentId: '<stable>' }, { command: 'solopreneur.internalStartConversation',
+    const { interactionBudget, ...launch } = launches[0];
+    assert.deepEqual({ ...launch, launchIntentId: '<stable>' }, { command: 'solopreneur.internalStartConversation',
       projectPath: fixture.projectRoot, mode: 'solo', message: '检查发布流程', launchIntentId: '<stable>' });
+    assert.equal(interactionBudget.schemaVersion, 1);
+    assert.equal(interactionBudget.interactionId, `conversation:${launch.launchIntentId.slice(4)}`);
     const report = { schemaVersion: 1, summary: '发布流程检查已完成，验证通过。', unmetRequirements: [], decisions: [], corrections: [],
       verification: ['隔离检查通过'], commits: [], experienceUsage: [], lessons: [] };
     await call('submit_run_report', { root: fixture.projectRoot, executionLogId: launched.status.executionLogId,

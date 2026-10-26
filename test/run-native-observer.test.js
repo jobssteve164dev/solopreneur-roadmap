@@ -3,6 +3,18 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+
+test('Codex observation reads each new native log range once and commits its cursor once per batch', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../src/runNativeObserver.ts'), 'utf8');
+  const start = source.indexOf("const stream = 'native:codex'");
+  const end = source.indexOf('\n  private async observeClaude', start);
+  const body = source.slice(start, end);
+  assert.match(body, /const frames: Array</);
+  assert.equal((body.match(/for await \(const frame of this\.rows/g) || []).length, 1,
+    'the same growing transcript range must not be fetched twice');
+  assert.equal((body.match(/codexNativeCursor:/g) || []).length, 1,
+    'cursor persistence must be batched instead of writing one database revision per JSONL row');
+});
 const crypto = require('node:crypto');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');

@@ -124,6 +124,8 @@ for (const nodeId of ['__solo__', 'step']) test(`the actual new ${nodeId} handle
   try {
     await host.run({ extensionPath: projectRoot }, ...(nodeId === '__solo__' ? ['新目标'] : ['step', '新目标']));
     assert.equal(inputs.length, 1); assert.equal(inputs[0].nativeSessionId, 'confirmed-previous-session');
+    assert.equal(inputs[0].metadata.preSessionGitBackup, true,
+      'every interactive task must preserve a complete rollback baseline before Agent CLI starts');
     assert.equal(fs.existsSync(path.join(project, '.solopreneur/step-sessions')), false);
   } finally { transport.sendRuntimeDataRequest = original; engine.close(); await ops.close(); store.close(); }
 });
@@ -279,7 +281,7 @@ for (const mode of ['solo', 'step']) test(`the final ${mode} conversation prompt
     const plan = await require('../out/autonomousRuntimeControl.js').sendRuntimeDataRequest(root, { operation: 'read_run_execution_plan', input: { root: project, executionLogId: 1 } });
     assert.doesNotMatch(plan.prompt, /\.solopreneur\/runtime\/task-checkpoint\.cjs|检查点命令已由插件生成/);
     assert.equal(plan.prompt.split('SoloMap 对话状态由 MCP 工具管理').length - 1, 1, 'the final database prompt must contain exactly one MCP checkpoint contract');
-    assert.match(plan.prompt, /solomap_conversation_status\(\{action:"start"\}\)/);
+    assert.match(plan.prompt, /solomap_conversation_status\(\{action:"start",turnId:"[^"]+",interactionId:"[^"]+"\}\)/);
     assert.doesNotMatch(plan.prompt, /SOLOMAP_TASK_COMMAND|taskCheckpointProcess\.js|taskReport\.js|validateTaskReport/);
     assert.ok(plan.prompt.includes('实现用户目标'));
     assert.equal(fs.existsSync(path.join(project, '.solopreneur/runtime/task-checkpoint.cjs')), false);
@@ -497,7 +499,7 @@ test('production polling resumes an undelivered task after its creating window a
   let ready; let created; let creates = 0; const commands = [];
   const createdGate = new Promise(resolve => { created = resolve; });
   let rejectFirstDelivery = true;
-  const terminal = { name: 'recovered original conversation', processId: new Promise(resolve => { ready = resolve; }), show() {}, sendText(text) { if (rejectFirstDelivery) { rejectFirstDelivery = false; throw new Error('terminal temporarily unavailable'); } commands.push(text); } };
+  const terminal = { name: 'recovered original conversation', processId: new Promise(resolve => { ready = resolve; }), show() {}, sendText(text) { if (rejectFirstDelivery) { rejectFirstDelivery = false; throw new Error('terminal temporarily unavailable'); } commands.push(text); }, dispose() {} };
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.poll = pollActiveConversations;
     const previousCall = autonomousRuntimeControl_1.sendRuntimeDataRequest;
@@ -529,7 +531,7 @@ test('production polling resumes an undelivered task after its creating window a
     assert.ok(commands[0].endsWith(`SOLOMAP_TERMINAL_DELIVERY_ID=${require('../out/agentCli.js').shellQuote(state.status.terminalDeliveryId)} ${prepared.finalCommand}`));
     assert.equal(state.taskId, prepared.taskId); assert.equal(state.runId, prepared.runId); assert.equal(state.turnId, prepared.turnId);
     assert.equal(state.status.selectedModel, 'original-model');
-    await extension.poll({}); assert.equal(creates, 1); assert.equal(commands.length, 1);
+    await extension.poll({}); assert.equal(creates, 2); assert.equal(commands.length, 1);
     const plan = await call({ operation: 'read_run_execution_plan', input: { projectId: prepared.projectId, executionLogId: 1 } });
     assert.ok(plan.prompt.includes(input.prompt));
     assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
@@ -843,7 +845,99 @@ test('production terminal delivery keeps waiting for real shell readiness beyond
   } finally { extension.restore(); await ops.close(); store.close(); }
 });
 
-test('a submitted terminal command that no runner claims releases its live delivery lease for automatic recovery', async t => {
+test('foreground continuation enters the owned runner input sequence without reading terminal processId', async () => {
+  let processReads = 0; const frames = [];
+  const terminal = {
+    name: 'foreground continuation',
+    get processId() { processReads++; return new Promise(() => {}); },
+    sendText() { assert.fail('foreground continuation must not use the shell terminal API'); }
+  };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.deliver = deliverAgentTerminalInput;
+    module.exports.bind = (terminal, write) => foregroundAgentTerminalSurfaces.set(terminal, { bridge: { isRunning: true }, writeInputFrame: async bytes => write(bytes) });
+  `);
+  extension.bind(terminal, bytes => frames.push(Buffer.from(bytes)));
+  assert.equal(await extension.deliver(terminal, '续聊原任务', 'codex'), true);
+  assert.equal(processReads, 0);
+  assert.equal(Buffer.concat(frames).toString(), '\x1b[200~续聊原任务\x1b[201~\r');
+});
+
+test('conversation launch success waits for a receipt but does not turn observer lag into a user-facing launch failure', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createInteractionBudget } = require('../out/interactionBudget.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-task-ingress-gate-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.awaitIngress = awaitAgentTaskIngress;');
+  try {
+    const budget = createInteractionBudget();
+    const run = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '任务', command: 'grok', userMessage: '目标',
+      metadata: { interactiveSession: true, sessionProvider: 'grok', interactionBudget: budget, interactionId: budget.interactionId }, idempotencyKey: 'ingress-gate-success' } });
+    const waiting = extension.awaitIngress((operation, input) => ops({ operation, input }), { root: project, executionLogId: 1 },
+      { generation: run.generation, turnId: run.turnId, interactionId: budget.interactionId, budget, initialState: run }, undefined, 10);
+    const opened = await ops({ operation: 'open_mcp_session', input: { projectId: run.projectId, openRequestId: 'ingress-gate-session', runIdentity: { executionLogId: 1, generation: run.generation, proof: run.proof } } });
+    await ops({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'start', turnId: run.turnId, interactionId: budget.interactionId } });
+    const accepted = await waiting;
+    assert.equal(accepted.status.taskIngressReceipt.interactionId, budget.interactionId);
+    assert.equal(accepted.status.taskIngressReceipt.authority, 'agent_acknowledged');
+
+    const lateBudget = createInteractionBudget({ wallMs: Date.now() - 10_001, bootId: 'older-boot', uptimeMs: 1, interactionId: 'late-ingress' });
+    const late = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 2, nodeId: '__solo__', runKind: 'solo', prompt: '任务', command: 'grok', userMessage: '目标',
+      metadata: { interactiveSession: true, sessionProvider: 'grok', interactionBudget: lateBudget, interactionId: lateBudget.interactionId }, idempotencyKey: 'ingress-gate-timeout' } });
+    const observationPending = await extension.awaitIngress((operation, input) => ops({ operation, input }), { root: project, executionLogId: 2 },
+      { generation: late.generation, turnId: late.turnId, interactionId: lateBudget.interactionId, budget: lateBudget, initialState: late }, undefined, 10);
+    assert.equal(observationPending.status.taskIngressVerdict, 'deadline_exceeded');
+    const failed = await ops({ operation: 'read_run_state', input: { root: project, executionLogId: 2 } });
+    assert.equal(failed.status.taskIngressVerdict, 'deadline_exceeded');
+    assert.equal(failed.status.deliveryLastError, 'agent_task_ingress_timeout');
+  } finally { await ops.close(); store.close(); }
+});
+
+test('task-ingress waiting follows the same delivery across the runner claim generation handoff', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createInteractionBudget } = require('../out/interactionBudget.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-task-ingress-claim-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.awaitIngress = awaitAgentTaskIngress;');
+  try {
+    const budget = createInteractionBudget(); const deliveryId = 'same-delivery-claim';
+    let run = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '任务', command: 'codex', userMessage: '目标',
+      deliveryOwner: { id: 'host', pid: process.pid, birth: '' }, metadata: { interactiveSession: true, sessionProvider: 'codex', interactionBudget: budget, interactionId: budget.interactionId }, idempotencyKey: 'ingress-claim-run' } });
+    run = await ops({ operation: 'patch_run_state', input: { root: project, executionLogId: 1, generation: run.generation, expectedRevision: run.revision,
+      patch: { terminalDeliveryId: deliveryId }, idempotencyKey: 'ingress-claim-delivery' } });
+    const waiting = extension.awaitIngress((operation, input) => ops({ operation, input }), { root: project, executionLogId: 1 },
+      { generation: run.generation, turnId: run.turnId, interactionId: budget.interactionId, budget, initialState: run, deliveryId }, undefined, 10);
+    const claimed = await ops({ operation: 'claim_run', input: { root: project, executionLogId: 1, expectedRevision: run.revision, terminalDeliveryId: deliveryId, idempotencyKey: 'ingress-claim' } });
+    const opened = await ops({ operation: 'open_mcp_session', input: { projectId: claimed.projectId, openRequestId: 'ingress-claim-session', runIdentity: { executionLogId: 1, generation: claimed.generation, proof: claimed.proof } } });
+    await ops({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'start', turnId: claimed.turnId, interactionId: budget.interactionId } });
+    const accepted = await waiting;
+    assert.equal(accepted.generation, claimed.generation);
+    assert.equal(accepted.status.terminalClaimDeliveryId, deliveryId);
+    assert.equal(accepted.status.taskIngressReceipt.interactionId, budget.interactionId);
+  } finally { await ops.close(); store.close(); }
+});
+
+test('task-ingress gate keeps the original deadline even when the observer request stalls', async () => {
+  const { createInteractionBudget } = require('../out/interactionBudget.js');
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.awaitIngress = awaitAgentTaskIngress;');
+  const budget = createInteractionBudget({
+    wallMs: Date.now() - 9_950,
+    bootId: require('fs').readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(),
+    uptimeMs: Math.round(require('os').uptime() * 1000) - 9_950,
+    interactionId: 'stalled-observer'
+  });
+  const started = Date.now();
+  await assert.rejects(extension.awaitIngress(() => new Promise(() => {}),
+    { root: '/workspace', executionLogId: 1 },
+    { generation: 1, turnId: 'turn-stalled', interactionId: budget.interactionId, budget }, undefined, 10),
+  /agent_task_ingress_timeout/);
+  assert.ok(Date.now() - started < 500, 'a blocked Runtime observation must not extend the user-facing ten-second gate');
+});
+
+test('a submitted terminal command that no runner claims records a version failure without killing the live task', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runner-claim-watchdog-'));
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
@@ -870,12 +964,14 @@ test('a submitted terminal command that no runner claims releases its live deliv
   for (let attempt = 0; attempt < 20; attempt++) {
     await new Promise(resolve => setImmediate(resolve));
     state = await native.ops({ operation: 'read_run_state', input: { root: project, executionLogId: 1 } });
-    if (!state.status.deliveryOwnerId) break;
+    if (state.status.deliveryLastError === 'runner_claim_timeout') break;
   }
   assert.equal(state.status.deliveryPending, true);
-  assert.equal(state.status.deliveryOwnerId, '', 'the live extension host must not retain a failed terminal delivery forever');
-  assert.equal(extension.targetCount(), 0, 'the disposed unclaimed terminal must not remain strongly referenced');
-  assert.equal((await native.ops({ operation: 'list_run_deliveries', input: { root: project } })).items.length, 1);
+  assert.ok(state.status.deliveryOwnerId, 'observability deadlines must not revoke ownership from a task that may still enter the CLI');
+  assert.equal(state.status.deliveryLastError, 'runner_claim_timeout');
+  assert.equal(extension.targetCount(), 1, 'the watchdog must not dispose or replace the only live task');
+  assert.equal((await native.ops({ operation: 'list_run_deliveries', input: { root: project } })).items.length, 0,
+    'the owned task must not re-enter the delivery queue and create a duplicate terminal');
   let stages = [];
   for (let attempt = 0; attempt < 20; attempt++) {
     const events = await native.ops({ operation: 'read_diagnostic_events', input: { kind: 'operation', limit: 100 } });
@@ -895,7 +991,7 @@ test('a submitted terminal command that no runner claims releases its live deliv
   ]) assert.ok(stages.some(actual => expected.every((value, index) => actual[index] === value)), `missing diagnostic stage ${expected.join(':')} in ${JSON.stringify(stages)}`);
 });
 
-test('terminal process readiness exhaustion retries with a fresh terminal and returns the run to the delivery queue', async t => {
+test('terminal process readiness exhaustion never creates a second terminal and returns the failed delivery to the queue', async t => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-terminal-readiness-recovery-'));
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -929,13 +1025,13 @@ test('terminal process readiness exhaustion retries with a fresh terminal and re
     if (!state.status.deliveryOwnerId) break;
     await new Promise(resolve => setTimeout(resolve, 5));
   }
-  assert.equal(terminals.length, 2);
-  assert.deepEqual(terminals.map(terminal => [terminal.sent, terminal.disposed]), [[0, 1], [0, 1]]);
-  assert.equal(extension.targetCount(), 0, 'both disposed readiness attempts must be released from the target map');
+  assert.equal(terminals.length, 1);
+  assert.deepEqual(terminals.map(terminal => [terminal.sent, terminal.disposed]), [[0, 1]]);
+  assert.equal(extension.targetCount(), 0, 'the single failed readiness attempt must be released from the target map');
   assert.equal(state.status.deliveryPending, true);
   assert.equal(state.status.deliveryOwnerId, '');
   assert.equal(state.status.deliveryLastError, 'terminal_process_timeout');
-  assert.equal(failFirstRelease, false, 'the initial lease release failure must be exercised');
+  assert.equal(failFirstRelease, false, 'the initial lease release failure must be retried without creating another terminal');
   assert.equal((await native.ops({ operation: 'list_run_deliveries', input: { root: project } })).items.length, 1);
 });
 
@@ -1047,7 +1143,7 @@ for (const kind of ['native', 'turn']) for (const unavailable of [false, true]) 
     module.exports.connect = (engine, project, root, prepare, deliver) => {
       syncEngine = engine; activeProjectRoot = project; sidebarProvider = null; extensionContextRef = {};
       getPersistedSettings = () => ({ globalDataPath: root, globalPrompt: '', taskPermissionMode: 'auto' });
-      agentCli_1.commandExists = () => true; createPreSessionGitCommit = async () => '';
+      agentCli_1.commandExists = () => true; createPreSessionGitCommit = async () => '1'.repeat(40);
       prepareOrdinaryConversation = prepare; deliverOrdinaryConversation = deliver;
     };
   `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
@@ -1146,6 +1242,7 @@ test('project action launch acknowledges only its request after delivery or prep
         sidebarProvider = null;
         revealAgentStartupTerminal = async () => { if (mode === 'terminal-failed') throw new Error('fixture_terminal_failed'); return undefined; };
         ensureActionProject = async () => '/isolated/project';
+        captureRegisteredConversationLaunchTarget = async (_context, workspaceRoot, snapshot) => ({ workspaceRoot, globalDataPath: snapshot.globalDataPath, settings: snapshot.settings, engine: { close() {} } });
         handleRunSoloConversation = async () => { if (mode === 'launch-failed') throw new Error('fixture_launch_failed'); return 42; };
       };
       module.exports.action = handleSharedWebviewAction;
@@ -1752,7 +1849,7 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
     });
   }
   const filename = path.join(projectRoot, relativePath);
-  const source = fs.readFileSync(filename, 'utf8') + `\n${exportPatch}`;
+  const source = fs.readFileSync(filename, 'utf8') + `\nif (typeof legacyConversationDeliveryHarnessForTests !== 'undefined') legacyConversationDeliveryHarnessForTests = true;\n${exportPatch}`;
   const exports = {};
   const module = { exports };
   const vscodeTestState = {
@@ -1894,7 +1991,7 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
       }
       if (id.startsWith('./')) {
         if (id === './processIdentity.js') return loadCompiledModule('out/processIdentity.js', '', requireOverrides);
-        if (['./agentRunPreparation', './runLifecycleClient', './runWorkspace', './telegramRuntimeConfig', './capabilityRegistry'].includes(id)) return require(path.join(projectRoot, 'out', `${id}.js`));
+        if (['./agentRunPreparation', './runLifecycleClient', './runWorkspace', './telegramRuntimeConfig', './capabilityRegistry', './interactionBudget', './providerTaskIngress', './foregroundAgentTerminal'].includes(id)) return require(path.join(projectRoot, 'out', `${id}.js`));
         if (id === './documentationManifest') {
           return require(path.join(projectRoot, 'out/documentationManifest.js'));
         }
@@ -2186,13 +2283,62 @@ test('native continuation keeps an independent project target while the visible 
   const handlerStart = source.indexOf('async function handleContinueNativeConversation(');
   const handlerBody = source.slice(handlerStart, source.indexOf('async function readAgentStatus(', handlerStart));
 
-  assert.match(actionBody, /captureRegisteredConversationLaunchTarget\(context, terminalProjectRoot\)/);
+  assert.match(actionBody, /captureRegisteredConversationLaunchSnapshot\(context, terminalProjectRoot\)/);
+  assert.match(actionBody, /captureRegisteredConversationLaunchTarget\(context, terminalProjectRoot, launchSnapshot\)/);
+  assert.ok(actionBody.indexOf('revealAgentStartupTerminal') < actionBody.indexOf('captureRegisteredConversationLaunchTarget'));
   assert.match(actionBody, /handleContinueNativeConversation\(context, nodeId, conversationId, launchTarget\)/);
   assert.match(actionBody, /finally \{ launchTarget\.engine\?\.close\(\); \}/);
   assert.match(handlerBody, /target\?: AgentLaunchTarget/);
   assert.match(handlerBody, /const projectSyncEngine = target\?\.engine \|\| syncEngine/);
   assert.match(handlerBody, /resolveConversationNodeIdForContinuation\(nodeId, conversationId, projectSyncEngine\)/);
   assert.match(handlerBody, /if \(!target && \(syncEngine !== projectSyncEngine \|\| activeProjectRoot !== workspaceRoot\)\) return;/);
+});
+
+test('reusable terminals require the complete live run target rather than a matching restored name', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const start = source.indexOf('async function findReusableAgentTerminal');
+  const body = source.slice(start, source.indexOf('\nfunction createAgentTerminal', start));
+  assert.match(body, /agentTerminalRunTargets\.get\(candidate\)/);
+  assert.match(body, /target\.globalDataPath === requestedDataRoot/);
+  assert.match(body, /target\.workspaceRoot/);
+  assert.match(body, /target\.executionLogId/);
+  assert.match(body, /isAgentTerminalRunTargetCurrent\(target/);
+});
+
+test('roadmap revision sender carries the live project that rendered the action', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/roadmapWebview.ts'), 'utf8');
+  const start = source.indexOf("command: 'conversation.runRoadmapRevision'");
+  const body = source.slice(start, start + 500);
+  assert.match(body, /projectPath:\s*activeProjectPath/);
+  assert.doesNotMatch(body, /currentProjectPath/);
+});
+
+test('interactive host continuation uses a lightweight foreground checkpoint before writing input', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const start = source.indexOf('async function registerInteractiveConversationTurn');
+  const body = source.slice(start, source.indexOf('\nasync function projectInteractiveConversationTurn', start));
+  assert.match(body, /foregroundStart:\s*true/);
+  assert.match(body, /interactionId:\s*interactionBudget\.interactionId/);
+  assert.doesNotMatch(body, /readAgentExecutionById|updateNode|refreshSidebarProjectCards/,
+    'roadmap projection I/O must not delay delivery into the already running Agent CLI');
+
+  const continuationStart = source.indexOf('async function handleContinueConversationTurn');
+  const continuationBody = source.slice(continuationStart, source.indexOf('\nasync function handleContinueNativeConversation', continuationStart));
+  const deliverIndex = continuationBody.indexOf('deliverAgentTerminalInput(');
+  const ingressIndex = continuationBody.indexOf('await awaitAgentTaskIngress(');
+  const projectionIndex = continuationBody.indexOf('projectInteractiveConversationTurn(');
+  assert.ok(deliverIndex >= 0 && ingressIndex > deliverIndex && projectionIndex > ingressIndex,
+    'roadmap projection may run only after the matching Agent task receipt');
+});
+
+test('the ten-second ingress verdict never releases or disposes the only submitted runner', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const start = source.indexOf('async function launchAgentConversationTerminal');
+  const body = source.slice(start, source.indexOf('\nfunction getAgentProcessCleanupKey', start));
+  assert.match(body, /let runnerSubmitted = false/);
+  assert.match(body, /runnerSubmitted = true/);
+  assert.match(body, /if \(runnerSubmitted && isTaskIngressDeadlineError\(errorCode\)\)[\s\S]*?throw error;[\s\S]*?release_run_delivery/,
+    'a missed SLO is an observed verdict, not permission to cancel the only task or amplify it with another attempt');
 });
 
 test('conversation actions never reselect an older project after showing their terminal', () => {
@@ -5472,6 +5618,37 @@ test('sidebar conversation result cards expose rollback actions for pre-session 
   assert.doesNotMatch(extensionSource, /\['clean', '-fd'\]/);
 });
 
+test('rollback restores a retained SoloMap snapshot without requiring it on the user branch', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-hidden-rollback-'));
+  const project = path.join(base, 'project'); const root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+  childProcess.execFileSync('git', ['init', '-q'], { cwd: project });
+  childProcess.execFileSync('git', ['config', 'user.name', 'Fixture'], { cwd: project });
+  childProcess.execFileSync('git', ['config', 'user.email', 'fixture@example.invalid'], { cwd: project });
+  fs.writeFileSync(path.join(project, 'work.txt'), 'committed');
+  childProcess.execFileSync('git', ['add', 'work.txt'], { cwd: project });
+  childProcess.execFileSync('git', ['commit', '-q', '-m', 'baseline'], { cwd: project });
+  const head = childProcess.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: project, encoding: 'utf8' }).trim();
+  fs.writeFileSync(path.join(project, 'work.txt'), 'state before Agent');
+  const backup = await require('../out/preSessionGit.js').createPreSessionGitCommit(project);
+  assert.notEqual(backup, head);
+  fs.writeFileSync(path.join(project, 'work.txt'), 'Agent changed this');
+  const errors = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.rollback = rollbackProjectToPreSessionGitHash;
+    module.exports.connect = (project, root, errors) => {
+      getProjects = () => [{ path: project }]; getPersistedSettings = () => ({ globalDataPath: root });
+      getSelectedProjectPath = () => project; syncEngine = null;
+      vscode.window.showWarningMessage = async () => '确认撤销'; vscode.window.showErrorMessage = message => errors.push(message);
+      vscode.window.showInformationMessage = () => {}; sendNodesToWebview = () => {}; refreshSidebarProjectCards = () => {};
+    };
+  `, { './rollbackSafety': { moveUntrackedFilesToRollbackSafety: () => '' } });
+  extension.connect(project, root, errors);
+  await extension.rollback({}, project, backup);
+  assert.deepEqual(errors, []);
+  assert.equal(fs.readFileSync(path.join(project, 'work.txt'), 'utf8'), 'state before Agent');
+  assert.equal(childProcess.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: project, encoding: 'utf8' }).trim(), head);
+});
+
 test('sidebar project continuation history binds step actions from the portfolio array', () => {
   const sidebarSource = fs.readFileSync(path.join(projectRoot, 'out/sidebarWebview.js'), 'utf8');
 
@@ -7885,7 +8062,8 @@ test('sidebar diagnostics split settings, overview, contribution, and Solo launc
     'database.overview.read', 'database.overview.runtime', 'database.overview.query', 'database.overview.delivery',
     'agentImpact.read', 'agentImpact.delivery',
     'conversation.runSolo.terminal', 'conversation.runSolo.project', 'conversation.runSolo.runtime', 'conversation.runSolo.resume',
-    'conversation.runSolo.session', 'conversation.runSolo.prompt', 'conversation.runSolo.prepare', 'conversation.runSolo.delivery'
+    'conversation.runSolo.session', 'conversation.runSolo.prompt', 'conversation.runSolo.prepare', 'conversation.runSolo.delivery',
+    'conversation.continue.rollbackSnapshot'
   ]) assert.match(extensionSource, new RegExp(`observeLocalDiagnosticStage\\('${stage.replaceAll('.', '\\.')}'`));
   assert.match(impactSource, /recordCurrentDiagnosticStage\(`agentImpact\.project\.\$\{index \+ 1\}\.query`, 'error'/);
   assert.match(impactSource, /slowestQuery\.durationMs >= 250/);
@@ -8239,7 +8417,12 @@ test('local-first loading paints and launches before optional or durable work', 
     roadmapWebviewSource.indexOf("if (btnToggleFeedback)", mainViewStart)
   );
   assert.match(mainViewBody, /soloPanelDirty \|\| !soloBody \|\| !soloBody\.innerHTML/);
-  assert.match(mainViewBody, /requestSoloConversationPage\(0\)/);
+  assert.match(mainViewBody, /requestMainViewData\(\)/);
+  const mainViewDataBody = roadmapWebviewSource.slice(
+    roadmapWebviewSource.indexOf('function requestMainViewData()'),
+    mainViewStart
+  );
+  assert.match(mainViewDataBody, /requestSoloConversationPage\(0\)/);
   const soloRenderBody = roadmapWebviewSource.slice(
     roadmapWebviewSource.indexOf('function renderSoloPanel(nodes'),
     roadmapWebviewSource.indexOf('function renderFlowPanel()')
@@ -8298,24 +8481,28 @@ test('local-first loading paints and launches before optional or durable work', 
     'flow.run',
     'conversation.continue',
     'conversation.retry',
-    'conversation.continueTurn',
     'project.continue'
   ]) {
     const start = dispatchBody.indexOf(`'${action}': async`);
     assert.notEqual(start, -1, `${action} handler missing`);
     const next = dispatchBody.indexOf('\\n    },', start);
     const actionBody = dispatchBody.slice(start, next === -1 ? undefined : next);
-    assert.ok(
-      actionBody.indexOf('revealAgentStartupTerminal(') < actionBody.indexOf('await ensureActionProject('),
-      `${action} must reveal a terminal before project/database preparation`
-    );
+    const revealIndex = actionBody.indexOf('revealAgentStartupTerminal(');
+    const captureIndex = Math.max(actionBody.indexOf('captureRegisteredConversationLaunchTarget('), actionBody.indexOf('captureConversationLaunchTarget('));
+    assert.ok(revealIndex >= 0 && captureIndex >= 0 && revealIndex < captureIndex,
+      `${action} must reveal a terminal before project/database preparation`);
   }
+  const continueTurnStart = dispatchBody.indexOf("'conversation.continueTurn': async");
+  const continueTurnEnd = dispatchBody.indexOf('\n    },', continueTurnStart);
+  const continueTurnBody = dispatchBody.slice(continueTurnStart, continueTurnEnd);
+  assert.match(continueTurnBody, /findReusableAgentTerminal/);
+  assert.match(continueTurnBody, /if \(!await findReusableAgentTerminal[\s\S]*?revealAgentStartupTerminal/);
   const projectContinueStart = dispatchBody.indexOf("'project.continue': async");
   const projectContinueEnd = dispatchBody.indexOf('\n    },', projectContinueStart);
   const projectContinueBody = dispatchBody.slice(projectContinueStart, projectContinueEnd);
   assert.match(
     projectContinueBody,
-    /handleRunAgent\(\s*context,\s*String\(request\.nodeId\),\s*'',\s*String\(request\.agentCli \|\| getPersistedSettings\(context\)\.cliPath \|\| ''\),[\s\S]*?registered\s*\)/,
+    /handleRunAgent\(\s*context,\s*String\(request\.nodeId\),\s*'',\s*String\(request\.agentCli \|\| launchTarget\.settings\?\.cliPath \|\| ''\),[\s\S]*?registered,[\s\S]*?launchTarget\s*\)/,
     'project card quick continue must explicitly use the persisted default Agent CLI'
   );
   assert.match(extensionSource, /function enqueueProjectActionLaunch/);
@@ -8325,8 +8512,8 @@ test('local-first loading paints and launches before optional or durable work', 
     extensionSource.indexOf('function revealAgentStartupTerminal'),
     extensionSource.indexOf('function launchAgentConversationTerminal')
   );
-  assert.match(revealBody, /makeAgentTerminalName\(workspaceRoot, label\)/);
-  assert.doesNotMatch(revealBody, /makeAgentTerminalName\(workspaceRoot, 'preparing'\)/);
+  assert.match(revealBody, /createAgentTerminal\(workspaceRoot, label, 0, undefined, true\)/);
+  assert.ok(revealBody.indexOf('terminal.show(false)') < revealBody.indexOf('await getOpenCodeTerminalEnvironment('));
   assert.match(dispatchBody, /'conversation\.runSolo': async[\s\S]*?revealAgentStartupTerminal\([\s\S]*?'solo'[\s\S]*?\);/);
   assert.match(dispatchBody, /'conversation\.runStep': async[\s\S]*?`step-\$\{String\(request\.nodeId \|\| 'conversation'\)\}`/);
 });
@@ -8791,7 +8978,7 @@ test('project card action launches release the next project after execution regi
   assert.deepEqual(events, ['first:start', 'first:registered', 'second:start', 'first:finished']);
 });
 
-test('failed project preparation never leaves an empty shell', async () => {
+test('failed project preparation disposes its already visible startup shell', async () => {
   for (const command of ['conversation.runSolo', 'conversation.runRoadmapRevision']) {
     const terminal = {
       name: `Project B · ${command} · 1 (solomap)`, processId: Promise.resolve(123),
@@ -8804,10 +8991,10 @@ test('failed project preparation never leaves an empty shell', async () => {
         extensionContextRef = { extensionPath: ${JSON.stringify(projectRoot)}, extensionUri: vscode.Uri.file(${JSON.stringify(projectRoot)}) };
         activeProjectRoot = project; sidebarProvider = null;
         getSelectedProjectPath = () => project;
-        getProjects = () => ${command === 'conversation.runRoadmapRevision' ? '[]' : '[{ path: project }]'};
+        getProjects = () => [{ path: project }];
         getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'codex', automationTasks: {} });
         getOpenCodeTerminalEnvironment = async () => ({});
-        ensureActionProject = async () => { throw new Error('project preparation failed'); };
+        captureRegisteredConversationLaunchTarget = async () => { throw new Error('project preparation failed'); };
         recordLocalDiagnosticError = () => {};
         vscode.window.createTerminal = () => { vscode.window.terminals.push(terminal); return terminal; };
       };
@@ -8816,16 +9003,16 @@ test('failed project preparation never leaves an empty shell', async () => {
 
     await assert.rejects(
       extension.action({}, { command, projectPath: '/fixture/project-b', userMessage: '继续真实任务', agentCli: 'codex' }, 'sidebar'),
-      command === 'conversation.runSolo' ? /project preparation failed/ : /could not prepare this project/
+      /project preparation failed/
     );
 
-    assert.equal(terminal.disposed || 0, command === 'conversation.runSolo' ? 1 : 0,
+    assert.equal(terminal.disposed || 0, 1,
       `${command} must not leave an unused terminal`);
     assert.equal(extension.reservations('/fixture/project-b'), 0, `${command} must release the reservation`);
   }
 });
 
-test('roadmap revision launches bind each concurrent project without changing the selected project or pre-opening shells', async () => {
+test('roadmap revision launches show each project terminal before concurrent project preparation', async () => {
   const projects = ['/fixture/project-a', '/fixture/project-b', '/fixture/project-c'];
   const enginePaths = [];
   class ProjectSyncEngine {
@@ -8883,13 +9070,14 @@ test('roadmap revision launches bind each concurrent project without changing th
 
   assert.equal(JSON.stringify(entered.slice().sort()), JSON.stringify(projects.slice().sort()), 'different projects must enter preparation concurrently');
   assert.equal(extension.selected(), projects[0], 'launching another project must not change the user selection');
-  assert.equal(extension.startupTerminalCount(), 0, 'a visible shell must not exist before the durable run is registered');
+  assert.equal(extension.startupTerminalCount(), projects.length, 'each user action must reveal its terminal before durable preparation completes');
 
   for (const projectPath of projects) releases.get(projectPath)();
   await Promise.all(launches);
   assert.equal(JSON.stringify(registered.slice().sort()), JSON.stringify(projects.slice().sort()));
   assert.equal(JSON.stringify(completed.slice().sort()), JSON.stringify(projects.slice().sort()));
   assert.equal(new Set(targets.map(target => target.launchIntentId)).size, 3);
+  assert.equal(extension.startupTerminalCount(), projects.length);
   assert.deepEqual(enginePaths.map(item => path.dirname(path.dirname(item.roadmapPath))).sort(), projects.slice().sort());
   assert.ok(targets.every(target => target.engine.closed), 'every project-local SyncEngine must close after launch registration');
   assert.equal(extension.selected(), projects[0]);
@@ -11477,7 +11665,7 @@ test('agent launch path uses one terminal-first startup component', async t => {
   const events = [];
   let resolveShell, resolveShown;
   const shown = new Promise(resolve => { resolveShown = resolve; });
-  const terminal = { name: 'Owned test terminal', processId: new Promise(resolve => { resolveShell = resolve; }), show(preserveFocus) { events.push(`show:${preserveFocus}`); resolveShown(); }, sendText(command) { events.push(command); } };
+  const terminal = { name: 'Owned test terminal', processId: new Promise(resolve => { resolveShell = resolve; }), show(preserveFocus) { events.push(`show:${preserveFocus}`); resolveShown(); }, sendText(command) { events.push(command); }, dispose() {} };
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.launch = launchAgentConversationTerminal;
     module.exports.connect = (terminal, events, project) => {
@@ -11503,7 +11691,6 @@ test('agent launch path uses one terminal-first startup component', async t => {
   assert.equal(events.length, 4);
   assert.match(events[2], /^SOLOMAP_DIAGNOSTIC_TRACE_ID=.+ SOLOMAP_DELIVERY_STARTED_AT=.+ SOLOMAP_TERMINAL_DELIVERY_ID=.+ fixture-command$/);
   assert.equal(events[3], 'refresh:__solo__', 'history must refresh after successful command delivery');
-  assert.equal(await extension.launch(input), terminal);
   assert.equal(events.filter(item => item === 'create').length, 1);
   assert.equal(events.filter(item => /fixture-command$/.test(item)).length, 1, 'concurrent and later retries must not submit a second command');
   assert.equal(fs.existsSync(path.join(project, '.solopreneur', 'agent-runs')), false);
@@ -11531,26 +11718,29 @@ test('terminal lookup rejects a colliding conversation id owned by another proje
   const projectA = '/workspace/project-a', projectB = '/workspace/project-b';
   const terminalA = { name: 'Project A terminal' }, terminalB = { name: 'Project B terminal' };
   const extension = loadCompiledModule('out/extension.js', `
-    module.exports.find = (project, id) => findActiveAgentTerminal(id, project);
+    module.exports.find = (project, id, root) => findActiveAgentTerminal(id, project, root);
     module.exports.remove = deleteAgentTerminalBinding;
     module.exports.connect = (projectA, projectB, terminalA, terminalB) => {
       activeProjectRoot = projectA;
-      setAgentTerminalBinding(projectA, 41, terminalA.name);
-      setAgentTerminalBinding(projectB, 41, terminalB.name);
-      setAgentTerminalBinding(projectB, 9, terminalB.name);
       vscode.window.terminals.push(terminalA, terminalB);
-      findAgentStatusForConversation = async (workspaceRoot, conversationId) => {
-        if (conversationId === 41) return { terminalName: workspaceRoot === projectA ? terminalA.name : terminalB.name, rootExecutionLogId: 41 };
-        return { rootExecutionLogId: 9 };
+      agentTerminalRunTargets.set(terminalA, { workspaceRoot: projectA, globalDataPath: '/data/a/.solomap-global', executionLogId: 41, runId: 'run-a', generation: 2, deliveryId: 'delivery-a' });
+      agentTerminalRunTargets.set(terminalB, { workspaceRoot: projectB, globalDataPath: '/data/b/.solomap-global', executionLogId: 41, runId: 'run-b', generation: 4, deliveryId: 'delivery-b' });
+      foregroundAgentTerminalSurfaces.set(terminalA, { bridge: { isRunning: true } });
+      foregroundAgentTerminalSurfaces.set(terminalB, { bridge: { isRunning: true } });
+      findAgentStatusForConversation = async (workspaceRoot, conversationId, dataRoot) => {
+        if (workspaceRoot === projectA && dataRoot === '/data/a/.solomap-global' && conversationId === 41) return { runId: 'run-a', generation: 2, rootExecutionLogId: 41, terminalDeliveryId: 'delivery-a' };
+        if (workspaceRoot === projectB && dataRoot === '/data/b/.solomap-global' && conversationId === 41) return { runId: 'run-b', generation: 4, rootExecutionLogId: 41, terminalDeliveryId: 'delivery-b' };
+        return null;
       };
     };
   `);
   extension.connect(projectA, projectB, terminalA, terminalB);
-  assert.equal(await extension.find(projectA, 41), terminalA);
-  assert.equal(await extension.find(projectB, 41), terminalB);
+  assert.equal(await extension.find(projectA, 41, '/data/a'), terminalA);
+  assert.equal(await extension.find(projectB, 41, '/data/b'), terminalB);
+  assert.equal(await extension.find(projectA, 41, '/data/b'), undefined, 'a terminal from another data root must not be controlled');
   extension.remove(projectA, 41);
-  assert.equal(await extension.find(projectB, 41), terminalB, 'removing project A must preserve project B same-numbered ownership');
-  assert.equal(await extension.find(projectA, 42), undefined, 'a foreign root-conversation mapping must not be used as a fallback');
+  assert.equal(await extension.find(projectB, 41, '/data/b'), terminalB, 'removing project A must preserve project B same-numbered ownership');
+  assert.equal(await extension.find(projectA, 42, '/data/a'), undefined, 'a foreign root-conversation mapping must not be used as a fallback');
 });
 
 test('a closed startup reservation cannot consume the next Agent launch command', () => {
@@ -12047,7 +12237,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.doesNotMatch(continuationPrompt, /SOLOMAP_TASK_COMMAND|completion\.json/, 'the shared preparation layer appends the single runnable checkpoint contract later');
   const compiledExtension = fs.readFileSync(path.join(projectRoot, 'out', 'extension.js'), 'utf8');
   assert.doesNotMatch(compiledExtension, /完成时运行 node \"\$SOLOMAP_TASK_COMMAND\" complete/);
-  assert.match(compiledExtension, /开始处理前仍调用 MCP 工具 solomap_conversation_status[\s\S]*?完成时调用同一工具的 complete 动作/);
+  assert.match(compiledExtension, /开始处理前调用 MCP 工具 solomap_conversation_status\(\{action:"start",turnId:"[^"]+",interactionId:"[^"]+"\}\)[\s\S]*?solomap_conversation_status\(\{action:"complete",turnId:"[^"]+",interactionId:"[^"]+"/);
   assert.doesNotMatch(compiledExtension, /无需再次调用 start/);
   const compiledTelegramBridge = fs.readFileSync(path.join(projectRoot, 'out', 'telegramExtensionBridge.js'), 'utf8');
   assert.match(compiledTelegramBridge, /solopreneur\.internalRefreshTimedAutomation/);
@@ -12258,14 +12448,14 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.ok(fs.existsSync(shellScript.runScriptPath));
   assert.ok(fs.existsSync(shellScript.promptFilePath));
   assert.ok(fs.existsSync(shellScript.commandFilePath));
-  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /codex' --profile solomap --no-alt-screen -C .*--dangerously-bypass-approvals-and-sandbox/);
+  assert.match(fs.readFileSync(shellScript.commandFilePath, 'utf8'), /codex' --profile solomap --no-daemon --no-alt-screen -C .*--dangerously-bypass-approvals-and-sandbox/);
   assert.match(fs.readFileSync(shellScript.promptFilePath, 'utf8'), /Ship the MVP/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /ls-files/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /check-ignore/);
   assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /status --short/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /script -q -f -e -c/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /tee .*output\.log/);
-  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /exec .*codex.*--no-alt-screen -C .*--dangerously-bypass-approvals-and-sandbox/);
+  assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /exec .*codex.*--no-daemon --no-alt-screen -C .*--dangerously-bypass-approvals-and-sandbox/);
   assert.match(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /FORCE_COLOR/);
   assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /timed out waiting for response|Error: timed out/);
   assert.doesNotMatch(fs.readFileSync(shellScript.runScriptPath, 'utf8'), /without project file changes or a completion decision/);
@@ -13376,7 +13566,7 @@ test('session capture writer never emits legacy guessed identities for new runs'
   assert.equal(fs.existsSync(sessionFilePath), false);
 });
 
-test('generated Codex launchers recover once without the daemon after its readiness socket is unavailable', () => {
+test('generated Codex launchers use one isolated native CLI attempt', () => {
   const extensionModule = loadCompiledModule(
     'out/extension.js',
     require('./fixtures/legacy-agent-shell-source.cjs') + '\n' +
@@ -13394,13 +13584,12 @@ test('generated Codex launchers recover once without the daemon after its readin
     "  printf '%s\\n' 'Error: authentication failed'",
     '  exit 1',
     'fi',
-    'if [[ " $* " == *" --no-daemon "* ]]; then',
-    "  printf '%s\\n' 'Codex session recovered'",
-    '  exit 0',
+    'if [[ " $* " != *" --no-daemon "* ]]; then',
+    "  printf '%s\\n' 'Unexpected shared Codex launch'",
+    '  exit 91',
     'fi',
-    "printf '%s\\n' 'Error: app server did not become ready on /tmp/app-server-control.sock'",
-    "printf '%s\\n' 'failed to connect to /tmp/app-server-control.sock: No such file or directory (os error 2)'",
-    'exit 1'
+    "printf '%s\\n' 'Codex isolated native launch'",
+    'exit 0'
   ].join('\n'), 'utf8');
   fs.chmodSync(fakeCodexPath, 0o755);
 
@@ -13409,7 +13598,7 @@ test('generated Codex launchers recover once without the daemon after its readin
     {
       runId: 92,
       nativeSessionId: '019ecd99-4325-7050-8e71-7def92359d30',
-      directCommand: `'${fakeCodexPath}' resume --no-alt-screen -C '${workspaceRoot}' 019ecd99-4325-7050-8e71-7def92359d30 'Continue'`,
+      directCommand: `'${fakeCodexPath}' --no-daemon resume --no-alt-screen -C '${workspaceRoot}' 019ecd99-4325-7050-8e71-7def92359d30 'Continue'`,
       runKind: 'solo_continue'
     }
   ];
@@ -13442,10 +13631,9 @@ test('generated Codex launchers recover once without the daemon after its readin
 
     childProcess.execFileSync('bash', [built.runScriptPath], { cwd: workspaceRoot, stdio: 'pipe' });
     const invocations = fs.readFileSync(capturedArgsPath, 'utf8').trim().split('\n').filter(Boolean).slice(before);
-    assert.equal(invocations.length, 2, `run ${input.runId} should retry exactly once`);
-    assert.doesNotMatch(invocations[0], /--no-daemon/);
-    assert.match(invocations[1], /--no-daemon/);
-    assert.match(fs.readFileSync(built.outputFilePath, 'utf8'), /Codex session recovered/);
+    assert.equal(invocations.length, 1, `run ${input.runId} should launch exactly once`);
+    assert.match(invocations[0], /--no-daemon/);
+    assert.match(fs.readFileSync(built.outputFilePath, 'utf8'), /Codex isolated native launch/);
   }
 
   const unrelatedRunDir = path.join(workspaceRoot, '.solopreneur', 'agent-runs', '__solo__', '93');
@@ -13479,7 +13667,7 @@ test('generated Codex launchers recover once without the daemon after its readin
   });
   const unrelatedInvocations = fs.readFileSync(capturedArgsPath, 'utf8').trim().split('\n').filter(Boolean).slice(beforeUnrelated);
   assert.equal(unrelatedInvocations.length, 1);
-  assert.doesNotMatch(unrelatedInvocations[0], /--no-daemon/);
+  assert.match(unrelatedInvocations[0], /--no-daemon/);
   assert.match(fs.readFileSync(unrelated.outputFilePath, 'utf8'), /authentication failed/);
 });
 
@@ -14178,7 +14366,7 @@ test('step conversations can start independently while dependencies or other run
       getPersistedSettings = () => ({ cliPath: 'claude', globalPrompt: '', globalDataPath: root, enabledEnhancements: {}, taskPermissionMode: 'auto' });
       ensureTaskRuntimeReady = async () => {}; autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
       agentCli_1.resolveAgentCli = value => value; agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
-      preSessionGit_1.createPreSessionGitCommit = async () => '';
+      preSessionGit_1.createPreSessionGitCommit = async () => '1'.repeat(40);
       recordLocalUsageEvent = async () => ({}); sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {};
       launchAgentConversationTerminal = async input => launches.push(input);
     };
@@ -14349,6 +14537,19 @@ test('active project settlement waits for its terminal sidebar snapshot before c
     assert.equal(settled, false, 'the task must not settle while the card still has an older snapshot');
   } finally { releaseRefresh(); await settlement; }
   assert.equal(settled, true);
+});
+
+test('settlement exposes the authoritative pre-session baseline to the rollback action', async t => {
+  const baseline = 'b'.repeat(40);
+  const fixture = await openSoloSettlementFixture(t, 'solomap-rollback-baseline-', '本轮已完成', { baseGitHash: baseline });
+  const host = loadSoloSettlementHost(fixture, null, require('../out/autonomousRuntimeControl.js'));
+  await host.settle(fixture.reference, undefined, fixture.root);
+  const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation, input) => fixture.ops({ operation, input }), fixture.root);
+  const journal = await client.readJournal(fixture.reference);
+  assert.match(journal.entry.output, new RegExp(`SoloMapPreGitHash: ${baseline}`));
+  const presented = require('../out/conversationPresentation.js').buildConversationPresentations(fixture.project, '__solo__', [journal.entry]);
+  assert.equal(presented[0].rollbackGitHash, baseline);
+  assert.equal(presented[0].capabilities.canRollback, true);
 });
 
 test('interactive start checkpoint opens a new tracked turn under the same terminal session', async t => {
@@ -15466,8 +15667,17 @@ async function finishControlledClaudeTurn(operations, project, executionLogId, t
 }
 
 async function prepareControlledClaudeRun(input, operation) {
+  ensureRollbackGitFixture(input.workspaceRoot);
   const home=path.join(input.globalDataPath,'acceptance-claude-home',String(input.executionLogId||input.launchIntentId));
   return require('../out/agentRunPreparation.js').prepareAgentRun({...input,metadata:{...input.metadata,nativeResumeProviderContext:input.metadata?.nativeResumeProviderContext||{claude:{claudeHome:home,configDirOverride:home,configPath:path.join(home,'.claude.json')}}}},operation);
+}
+
+function ensureRollbackGitFixture(project) {
+  const inside = childProcess.spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: project, encoding: 'utf8' });
+  if (inside.status === 0) return;
+  childProcess.execFileSync('git', ['init', '-q'], { cwd: project });
+  childProcess.execFileSync('git', ['-c', 'user.name=SoloMap Test', '-c', 'user.email=solomap@example.test',
+    'commit', '--allow-empty', '-qm', 'fixture rollback baseline'], { cwd: project });
 }
 
 for (const mode of ['native', 'message']) test(`the ${mode} Continue action adopts retained history before using the shared database runner`, async t => {
@@ -15494,7 +15704,7 @@ for (const mode of ['native', 'message']) test(`the ${mode} Continue action adop
     module.exports.connect=(engine,project,root,prepare,deliver,sessionId)=>{
       syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef={};
       getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto'});
-      agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';
+      agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'1'.repeat(40);
       prepareOrdinaryConversation=prepare;deliverOrdinaryConversation=deliver;
       findReusableContinuationTerminal=async()=>undefined;
       resolveNativeSessionIdForConversation=()=>sessionId;recoverCodexSessionIdentityForConversation=async()=>true;
@@ -15522,7 +15732,7 @@ test('the native Continue button resumes a database-bound conversation without o
       syncEngine = engine; activeProjectRoot = project; sidebarProvider = null; extensionContextRef = {};
       getPersistedSettings = () => ({ globalDataPath: root, globalPrompt: '', taskPermissionMode: 'auto' });
       agentCli_1.commandExists = () => true;
-      createPreSessionGitCommit = async () => '';
+      createPreSessionGitCommit = async () => '1'.repeat(40);
       prepareOrdinaryConversation = prepare; deliverOrdinaryConversation = deliver;
     };
   `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
@@ -15537,6 +15747,7 @@ test('the native Continue button resumes a database-bound conversation without o
   assert.notEqual(continuation.turnId, f.run.turnId);
   assert.equal(continuation.status.plannedNativeSessionId, f.run.status.plannedNativeSessionId);
   assert.equal(continuation.status.userMessage, '继续当前 Agent 对话');
+  assert.equal(continuation.status.agentLaunch.direct, false, 'Continue must submit a real resumed turn instead of only opening an idle TUI');
   assert.equal(delivered.length, 1); assert.match(delivered[0], /runAgentProcess\.js/);
   const original = await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 79 } });
   assert.equal(original.status.checkpointSummary, '已有完整结果');
@@ -15831,7 +16042,7 @@ test('continuation recovers a preparing Codex binding from its exact launch tran
     module.exports.connect = (engine, project, root, prepare, deliver) => {
       syncEngine = engine; activeProjectRoot = project; sidebarProvider = null; extensionContextRef = {};
       getPersistedSettings = () => ({ globalDataPath: root, globalPrompt: '', taskPermissionMode: 'auto' });
-      agentCli_1.commandExists = () => true; createPreSessionGitCommit = async () => '';
+      agentCli_1.commandExists = () => true; createPreSessionGitCommit = async () => '1'.repeat(40);
       prepareOrdinaryConversation = prepare; deliverOrdinaryConversation = deliver;
     };
   `, { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
@@ -16070,7 +16281,8 @@ test('a long-waiting interactive session can still register a new turn before de
   const oldTime = new Date(Date.now() - 10 * 60 * 1000).toISOString();
   await f.ops({ operation: 'patch_run_state', input: { root: f.project, executionLogId: 71, generation: current.generation, expectedRevision: current.revision, patch: { checkpointAt: oldTime, turnStartedAt: oldTime }, idempotencyKey: 'long-idle-session' } });
   const extension = loadCompiledModule('out/extension.js', 'module.exports.register = registerInteractiveConversationTurn;', { './autonomousRuntimeControl': require('../out/autonomousRuntimeControl.js') });
-  const registered = await extension.register(f.project, 71, '等待十分钟后继续', false, f.root, f.engine);
+  const baseline = 'a'.repeat(40);
+  const registered = await extension.register(f.project, 71, '等待十分钟后继续', false, f.root, f.engine, baseline);
   assert.ok(registered); assert.equal(registered.status, 'Running'); assert.equal(registered.executionLogId, 72);
   const second = await client.readJournal(f.reference);
   assert.equal(second.entry.status, 'Running'); assert.match(second.entry.output, /等待十分钟后继续/);
@@ -16081,6 +16293,7 @@ test('a long-waiting interactive session can still register a new turn before de
   assert.ok(currentRevision > priorRevision);
   const state = await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 71 } });
   assert.equal(state.status.status, 'Running'); assert.equal(state.status.journalExecutionLogId, 72); assert.equal(state.taskId, f.run.taskId);
+  assert.equal(state.status.baseGitHash, baseline, 'a reused terminal turn must retain its own pre-input rollback baseline');
   for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', dir)), false);
 });
 
@@ -16656,6 +16869,7 @@ test('a passing review cannot use a file created or changed after its sealed sou
 for (const permission of ['auto', 'never']) test(`first revise decision automatically returns actionable findings to the main Agent once (${permission})`, async t => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-review-revise-'));
   const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
+  ensureRollbackGitFixture(project);
   const cliDir = path.join(base, 'cli'); fs.mkdirSync(cliDir);
   const home = path.join(base, 'source-codex-home'); fs.mkdirSync(home);
   fs.writeFileSync(path.join(home, 'config.toml'), 'model = "original-provider-model"\n');
@@ -16665,8 +16879,8 @@ for (const permission of ['auto', 'never']) test(`first revise decision automati
   const correctionOutput = '已修正并验证完整结果🌿\n'.repeat(10000);
   fs.writeFileSync(mainCli, `#!${process.execPath}
 const fs=require('node:fs'),assert=require('node:assert/strict');
-assert.deepEqual(process.argv.slice(2,5),['--profile','solomap','app-server']);assert.equal(process.env.CODEX_HOME,${JSON.stringify(home)});
-assert.match(fs.readFileSync(${JSON.stringify(path.join(home, 'solomap.config.toml'))},'utf8'),/SoloMap managed database MCP begin/);
+assert.equal(process.argv[2],'--profile');assert.match(process.argv[3],/^solomap-[a-f0-9]{16}$/);assert.equal(process.argv[4],'app-server');assert.equal(process.env.CODEX_HOME,${JSON.stringify(home)});
+assert.match(fs.readFileSync(require('node:path').join(${JSON.stringify(home)},process.argv[3]+'.config.toml'),'utf8'),/SoloMap managed database MCP begin/);
 const send=m=>process.stdout.write(JSON.stringify(m)+'\\n');let resume;
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
  const m=JSON.parse(line);
@@ -17191,11 +17405,11 @@ test('stopping an Agent run records the user decision on the active conversation
       let connectedProject;module.exports.stop=stopAgentRun;module.exports.settle=processAgentStatusFile;
       module.exports.owned=id=>Boolean(getAgentTerminalBinding(connectedProject,id));
       module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
-      module.exports.connect=(engine,project,root,terminal)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
+      module.exports.connect=(engine,project,root,terminal,state)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
         getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
-        setAgentTerminalBinding(project,11,terminal.name);vscode.window.terminals.push(terminal);};
+        setAgentTerminalBinding(project,11,terminal.name);agentTerminalRunTargets.set(terminal,{workspaceRoot:project,globalDataPath:root,executionLogId:11,runId:state.runId,generation:state.generation});foregroundAgentTerminalSurfaces.set(terminal,{bridge:{isRunning:true}});vscode.window.terminals.push(terminal);};
     `, {'./db/syncEngine':require('../out/db/syncEngine.js'),'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js')});
-    extension.connect(engine,project,root,{name:'solomap owned stop test',dispose(){assert.equal(extension.owned(11),false,'terminal ownership must be cleared before dispose/close callback');assert.notEqual(wrapper.signalCode,null,'Runtime must stop the owned process before terminal disposal');disposed++;}});
+    extension.connect(engine,project,root,{name:'solomap owned stop test',dispose(){assert.equal(extension.owned(11),false,'terminal ownership must be cleared before dispose/close callback');assert.notEqual(wrapper.signalCode,null,'Runtime must stop the owned process before terminal disposal');disposed++;}},run);
     await extension.stop(nodeId,11);await ended;await extension.drain();assert.equal(disposed,1);assert.equal(wrapper.signalCode,'SIGTERM');assert.equal(extension.owned(11),false);
     await extension.settle(reference,undefined,root);await extension.drain();
     const journal = await native.ops({operation:'read_run_turn_journal',input:{root:project,executionLogId:11}});
@@ -17215,7 +17429,7 @@ test('stopping an Agent run records the user decision on the active conversation
   });
 });
 
-test('a closed interactive conversation cannot reuse its stale terminal when continuing', async t => {
+test('a name-only interactive terminal cannot be reused before or after the conversation closes', async t => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(),'solomap-stale-terminal-'));
   const project = path.join(base,'project'), other = path.join(base,'other-project');fs.mkdirSync(project);fs.mkdirSync(other);
   const root = path.join(base,'.solomap-global'), closes = [];
@@ -17248,8 +17462,8 @@ test('a closed interactive conversation cannot reuse its stale terminal when con
       setAgentTerminalBinding(project,336,terminal.name);vscode.window.terminals.push(terminal,foreignTerminal);};
   `, {'./db/syncEngine':require('../out/db/syncEngine.js'),'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js')});
   extension.connect(engine,project,root,terminal,foreignTerminal);
-  assert.equal(await extension.reuse(project,336),terminal);assert.equal(await extension.reuse(project,336,root),terminal);
-  assert.equal(await extension.reuse(other,336),foreignTerminal);assert.equal(await extension.reuse(other,336,root),foreignTerminal);
+  assert.equal(await extension.reuse(project,336),undefined);assert.equal(await extension.reuse(project,336,root),undefined);
+  assert.equal(await extension.reuse(other,336),undefined);assert.equal(await extension.reuse(other,336,root),undefined);
   const output = '对话完整原文保留，等待用户继续🌿\n'.repeat(10000);
   await native.ops({operation:'append_run_log',input:{projectId:run.projectId,executionLogId:336,generation:run.generation,stream:'stdout',sequence:0,offset:0,bytes:Buffer.from(output).toString('base64'),idempotencyKey:'stale-terminal-output'}});
   const checkpoint = async extra => {const head = await native.ops({operation:'read_run_checkpoint_state',input:{root:project,executionLogId:336}});return native.ops({operation:'checkpoint_run',input:{projectId:run.projectId,executionLogId:336,generation:head.generation,proof:head.proof,expectedRevision:head.revision,expectedTurnId:head.turnId,...extra}});};
@@ -17257,16 +17471,16 @@ test('a closed interactive conversation cannot reuse its stale terminal when con
   await extension.settle(reference,undefined,root);await extension.drain();const waiting = await read(project,336);
   assert.equal(waiting.status.status,'Waiting');assert.notEqual(waiting.status.interactiveSessionClosed,true);assert.equal(waiting.taskId,run.taskId);
   const waitingWal = fs.readFileSync(path.join(root,'solomap.db-wal'));
-  assert.equal(await extension.reuse(project,336),terminal);assert.equal(await extension.reuse(project,336,root),terminal);
+  assert.equal(await extension.reuse(project,336),undefined);assert.equal(await extension.reuse(project,336,root),undefined);
   assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),waitingWal);
   for(const close of closes.splice(0).reverse())await close();
   native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);assert.deepEqual(await read(project,336),waiting);
-  assert.equal(await extension.reuse(project,336),terminal);assert.equal(await extension.reuse(project,336,root),terminal);
+  assert.equal(await extension.reuse(project,336),undefined);assert.equal(await extension.reuse(project,336,root),undefined);
   await checkpoint({action:'session-close',exitCode:0,idempotencyKey:'stale-terminal-close'});const closed = await read(project,336);assert.equal(closed.status.interactiveSessionClosed,true);assert.equal(closed.taskId,run.taskId);
   assert.equal(extension.owned(336),true,'stale mapping is intentionally still present before close consumer');
   const closedWal = fs.readFileSync(path.join(root,'solomap.db-wal'));
   assert.equal(await extension.reuse(project,336),undefined);assert.equal(await extension.reuse(project,336,root),undefined);
-  assert.equal(await extension.reuse(other,336),foreignTerminal);assert.equal(await extension.reuse(other,336,root),foreignTerminal);
+  assert.equal(await extension.reuse(other,336),undefined);assert.equal(await extension.reuse(other,336,root),undefined);
   assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),closedWal);
   await extension.settle(reference,undefined,root);await extension.drain();const settled = await read(project,336);
   assert.equal(settled.status.status,'Processed');assert.equal(settled.status.interactiveSessionClosed,true);assert.equal(settled.taskId,run.taskId);
@@ -17276,7 +17490,7 @@ test('a closed interactive conversation cannot reuse its stale terminal when con
   for(const close of closes.splice(0).reverse())await close();
   native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await read(project,336),settled);assert.deepEqual(await native.ops({operation:'read_run_turn_journal',input:{root:project,executionLogId:336}}),journal);assert.deepEqual(await client.readSettlements(reference,await client.readStatus(reference)),settlements);assert.deepEqual(engine.getNodes(),originalNodes);
   const restartWal = fs.readFileSync(path.join(root,'solomap.db-wal'));
-  assert.equal(await extension.reuse(project,336),undefined);assert.equal(await extension.reuse(project,336,root),undefined);assert.equal(await extension.reuse(other,336),foreignTerminal);
+  assert.equal(await extension.reuse(project,336),undefined);assert.equal(await extension.reuse(project,336,root),undefined);assert.equal(await extension.reuse(other,336),undefined);
   await Promise.all([extension.settle(reference,undefined,root),extension.settle(reference,undefined,root)]);await extension.drain();assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),restartWal);
   assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,336),foreign);assert.equal(fs.readFileSync(csvPath,'utf8'),originalCsv);assert.equal(fs.readFileSync(otherCsvPath,'utf8'),otherCsv);assert.deepEqual(fs.readdirSync(path.join(project,'.solopreneur')).sort(),['project.json','roadmap.csv']);
 });
@@ -17317,7 +17531,7 @@ test('continuing a stopped interactive conversation opens a new terminal and set
     module.exports.owned=id=>{const b=getAgentTerminalBinding(connectedProject,id);return {name:b?.terminalName,root:b?.workspaceRoot};};
     module.exports.connect=(engine,project,root,stale,create,prepare,reportError)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
       getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
-      agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';getOpenCodeTerminalEnvironment=async()=>({});
+      agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'1'.repeat(40);getOpenCodeTerminalEnvironment=async()=>({});
       ensureActionProject=async(_context,requested)=>{if(requested!==project)throw new Error('unexpected selected project');return project;};
       prepareOrdinaryConversation=prepare;vscode.window.createTerminal=create;vscode.window.showErrorMessage=reportError;
       sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
@@ -17349,7 +17563,8 @@ test('continuing a stopped interactive conversation opens a new terminal and set
   assert.equal(launchReads.filter(request=>request.operation==='list_run_states').length,0,'continuation must not scan unrelated project runs');
   assert.deepEqual(errors,[]);assert.equal(staleShown,0);assert.equal(staleDisposed,1);assert.equal(created.length,1,'concurrent button actions reserve one fresh terminal');assert.equal(preparedRuns.length,1);
   const terminal = created[0].terminal, continuation = preparedRuns[0], newId = Number(continuation.status.rootExecutionLogId), nextReference = require('../out/runLifecycleClient.js').runStatusReference(project,newId);
-  assert.equal(created[0].options.cwd,project);assert.deepEqual(created[0].options.env,require('../out/desktopSessionEnvironment.js').desktopSessionEnvironment());assert.ok(terminal.shown>=1);assert.notEqual(terminal.name,stale.name);
+  assert.equal(continuation.status.preSessionGitBackup, true, 'a resumed CLI task must capture rollback state before the formal Agent starts');
+  assert.ok(created[0].options.pty,'formal delivery must use the direct foreground pseudoterminal');assert.ok(terminal.shown>=1);assert.notEqual(terminal.name,stale.name);
   assert.equal(extension.reservations(project),0,'actual delivery consumes the startup reservation rather than creating another terminal');assert.deepEqual({...extension.owned(newId)},{name:terminal.name,root:project});assert.deepEqual({...extension.owned(336)},{name:undefined,root:undefined});
   assert.equal(sent.length,1);assert.equal(sent[0].terminal,terminal);assert.match(sent[0].text,/SOLOMAP_TERMINAL_DELIVERY_ID=/);assert.ok(sent[0].text.endsWith(continuation.finalCommand));assert.match(continuation.finalCommand,/runAgentProcess\.js/);
   const states = await native.ops({operation:'list_run_states',input:{root:project,cursor:0,limit:10}});assert.equal(states.items.length,5);
@@ -17408,7 +17623,7 @@ test('continuing an earlier turn opens a new session terminal once for concurren
     module.exports.owned=id=>{const b=getAgentTerminalBinding(connectedProject,id);return {name:b?.terminalName,root:b?.workspaceRoot};};
     module.exports.connect=(engine,project,root,oldTerminal,create,prepare,reportError,recordRegistration)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
       getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
-      agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';getOpenCodeTerminalEnvironment=async()=>({});
+      agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'1'.repeat(40);getOpenCodeTerminalEnvironment=async()=>({});
       ensureActionProject=async(_context,requested)=>{if(requested!==project)throw new Error('unexpected selected project');return project;};
       const originalRegister=registerInteractiveConversationTurn;registerInteractiveConversationTurn=async(...args)=>{recordRegistration(args);return originalRegister(...args);};
       prepareOrdinaryConversation=prepare;vscode.window.showErrorMessage=reportError;
@@ -17443,7 +17658,7 @@ test('continuing an earlier turn opens a new session terminal once for concurren
   const click=()=>extension.action({}, {command:'conversation.continue',projectPath:project,nodeId:'__solo__',conversationId:earlierId},'sidebar',{postMessage(message){posted.push(message);return Promise.resolve(true);}});
   assert.deepEqual(await Promise.all([click(),click()]),[true,true]);assert.deepEqual(errors,[]);assert.equal(oldShown,0);assert.equal(oldDisposed,1);assert.equal(created.length,1);assert.equal(preparedRuns.length,1);assert.deepEqual(registrations,[],'continue from an earlier turn does not register input against the old terminal');
   const prepared = preparedRuns[0], newId = Number(prepared.status.rootExecutionLogId), terminal = created[0].terminal;
-  assert.equal(created[0].options.cwd,project);assert.deepEqual(created[0].options.env,require('../out/desktopSessionEnvironment.js').desktopSessionEnvironment());assert.notEqual(terminal.name,oldTerminal.name);assert.ok(terminal.shown>=1);assert.equal(extension.reservations(project),0);assert.deepEqual({...extension.owned(newId)},{name:terminal.name,root:project});assert.deepEqual({...extension.owned(336)},{name:undefined,root:undefined});
+  assert.ok(created[0].options.pty,'formal continuation must use the direct foreground pseudoterminal');assert.notEqual(terminal.name,oldTerminal.name);assert.ok(terminal.shown>=1);assert.equal(extension.reservations(project),0);assert.deepEqual({...extension.owned(newId)},{name:terminal.name,root:project});assert.deepEqual({...extension.owned(336)},{name:undefined,root:undefined});
   assert.equal(sent.length,1);assert.equal(sent[0].terminal,terminal);assert.match(sent[0].text,/SOLOMAP_TERMINAL_DELIVERY_ID=/);assert.ok(sent[0].text.endsWith(prepared.finalCommand));assert.match(prepared.finalCommand,/runAgentProcess\.js/);
   const delivered = await read(project,newId);assert.equal(delivered.taskId,run.taskId);assert.equal(delivered.conversationId,run.conversationId);assert.notEqual(delivered.turnId,parent.turnId);assert.equal(delivered.status.sourceParentRunId,parent.runId);assert.equal(delivered.status.sourceParentTurnId,parent.turnId);assert.equal(delivered.status.lineageRootExecutionLogId,336);assert.equal(delivered.status.plannedNativeSessionId,run.status.plannedNativeSessionId);assert.equal(delivered.status.terminalName,terminal.name);assert.ok(delivered.status.terminalDeliveryId);assert.ok(delivered.status.terminalCommandSubmittedAt);
   assert.equal((await operation('list_run_states',{root:project,cursor:0,limit:10})).items.length,5);assert.equal(posted.filter(m=>m.command==='conversationActionSettled'&&m.action==='continue'&&m.projectPath===project&&Number(m.conversationId)===earlierId).length,2);
@@ -17512,7 +17727,7 @@ test('native continuation stops old lineage processes before launching the same 
       module.exports.reservations=project=>reservedAgentTerminalsByProject.get(project)?.length||0;
       module.exports.connect=(engine,project,root,oldTerminal,startup,prepare)=>{syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
         getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
-        agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';getOpenCodeTerminalEnvironment=async()=>({});prepareOrdinaryConversation=prepare;
+        agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'1'.repeat(40);getOpenCodeTerminalEnvironment=async()=>({});prepareOrdinaryConversation=prepare;
         sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
         setAgentTerminalBinding(project,336,oldTerminal.name);
         vscode.window.terminals.push({name:oldTerminal.name,creationOptions:{cwd:project+'/foreign'},show(){throw new Error('must not reveal same-name foreign project');},dispose(){throw new Error('must not dispose same-name foreign project');}},
@@ -17602,7 +17817,7 @@ test('continuing a conversation never reuses a same-numbered terminal from anoth
     let connectedProjectA;module.exports.owned=id=>{const b=getAgentTerminalBinding(connectedProjectA,id);return {name:b?.terminalName,root:b?.workspaceRoot};};
     module.exports.connect=(engine,projectA,projectB,root,terminalA,terminalB,create,prepare,error)=>{connectedProjectA=projectA;syncEngine=engine;activeProjectRoot=projectB;sidebarProvider=null;extensionContextRef=null;
       getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
-      agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';getOpenCodeTerminalEnvironment=async()=>({});prepareOrdinaryConversation=prepare;vscode.window.showErrorMessage=error;
+      agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'1'.repeat(40);getOpenCodeTerminalEnvironment=async()=>({});prepareOrdinaryConversation=prepare;vscode.window.showErrorMessage=error;
       ensureActionProject=async(_context,requested)=>{if(requested!==projectB)throw new Error('wrong selected project');return projectB;};sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
       setAgentTerminalBinding(projectA,336,terminalA.name);vscode.window.terminals.push(terminalA,terminalB);
       vscode.window.createTerminal=options=>{const terminal=create(options);vscode.window.terminals.push(terminal);return terminal;};};
@@ -17625,10 +17840,10 @@ test('continuing a conversation never reuses a same-numbered terminal from anoth
   }
   const beforeA={state:await read(projectA,336),journal:await client.readJournal(ref(projectA,336)),binding:await client.readBinding(ref(projectA,336)),settlements:await client.readSettlements(ref(projectA,336),await client.readStatus(ref(projectA,336)))},beforeB={state:await read(projectB,336),journal:await client.readJournal(ref(projectB,336)),binding:await client.readBinding(ref(projectB,336)),settlements:await client.readSettlements(ref(projectB,336),await client.readStatus(ref(projectB,336)))},peer=await read(projectB,13);
   assert.equal(beforeA.state.status.status,'Waiting');assert.equal(beforeB.state.status.status,mode==='saved'?'Waiting':'Running');assert.equal(beforeA.settlements.length,1);assert.equal(beforeB.settlements.length,mode==='saved'?1:0);
-  assert.deepEqual({...extension.owned(336)},{name:terminalA.name,root:projectA});assert.equal(await extension.find(projectA,336),terminalA);assert.equal(await extension.find(projectB,336),terminalB);
+  assert.deepEqual({...extension.owned(336)},{name:terminalA.name,root:projectA});assert.equal(await extension.find(projectA,336),undefined);assert.equal(await extension.find(projectB,336),undefined);
   for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:projectA},{path:projectB}]);await engine.initAndSync();assert.deepEqual(await read(projectA,336),beforeA.state);assert.deepEqual(await read(projectB,336),beforeB.state);
   const click=()=>extension.action({}, {command:'conversation.continue',projectPath:projectB,nodeId:'__solo__',conversationId:336},'sidebar',{postMessage(message){posted.push(message);return Promise.resolve(true);}});
-  assert.deepEqual(await Promise.all([click(),click()]),[true,true]);assert.deepEqual(errors,[]);assert.equal(preparedRuns.length,1);assert.equal(created.length,1);assert.equal(aShown,0);assert.equal(aDisposed,0);assert.ok(bShown>=1);assert.equal(bDisposed,1);assert.notEqual(created[0].terminal,terminalA);assert.notEqual(created[0].terminal,terminalB);assert.equal(created[0].options.cwd,projectB);assert.equal(created[0].terminal.disposed,undefined);assert.ok(created[0].terminal.shown>=1);
+  assert.deepEqual(await Promise.all([click(),click()]),[true,true]);assert.deepEqual(errors,[]);assert.equal(preparedRuns.length,1);assert.equal(created.length,1);assert.equal(aShown,0);assert.equal(aDisposed,0);assert.ok(bShown>=1);assert.equal(bDisposed,1);assert.notEqual(created[0].terminal,terminalA);assert.notEqual(created[0].terminal,terminalB);assert.ok(created[0].options.pty,'cross-project continuation must use the direct foreground pseudoterminal');assert.equal(created[0].terminal.disposed,undefined);assert.ok(created[0].terminal.shown>=1);
   const prepared=preparedRuns[0],newId=Number(prepared.status.rootExecutionLogId),delivered=await read(projectB,newId);assert.equal(delivered.taskId,runs[1].taskId);assert.equal(delivered.conversationId,runs[1].conversationId);assert.notEqual(delivered.taskId,runs[0].taskId);assert.equal(delivered.status.sourceParentRunId,runs[1].runId);assert.equal(delivered.status.sourceParentTurnId,beforeB.state.turnId);assert.equal(delivered.status.plannedNativeSessionId,runs[1].status.plannedNativeSessionId);assert.ok(delivered.status.terminalDeliveryId);assert.ok(delivered.status.terminalCommandSubmittedAt);
   assert.equal(sent.filter(x=>x.text.includes('SOLOMAP_TERMINAL_DELIVERY_ID=')).length,1);assert.ok(sent.some(x=>x.text.endsWith(prepared.finalCommand)));assert.equal(posted.filter(x=>x.command==='conversationActionSettled'&&x.projectPath===projectB&&Number(x.conversationId)===336).length,2);
   await extension.settle(ref(projectB,336),undefined,root);await extension.drain();if(mode==='new-turn'){await extension.settle(ref(projectB,336),undefined,root);await extension.drain();}const closedB={state:await read(projectB,336),journal:await client.readJournal(ref(projectB,336)),binding:await client.readBinding(ref(projectB,336)),settlements:await client.readSettlements(ref(projectB,336),await client.readStatus(ref(projectB,336)))};
@@ -17641,7 +17856,7 @@ test('continuing a conversation never reuses a same-numbered terminal from anoth
   });
 });
 
-test('window reload keeps a running Agent conversation recoverable', async t => {
+test('window reload keeps a running Agent conversation recoverable without reclaiming its old terminal pipes', async t => {
   const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-window-reload-')),project=path.join(base,'project'),other=path.join(base,'other');fs.mkdirSync(project);fs.mkdirSync(other);
   const root=path.join(base,'.solomap-global'),closes=[],wrappers=[];
   let native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
@@ -17676,12 +17891,12 @@ test('window reload keeps a running Agent conversation recoverable', async t => 
   const before={state:await read(project,51),journal:await client.readJournal(reference),binding:await client.readBinding(reference),settlements:await client.readSettlements(reference,await client.readStatus(reference))},peer=await read(project,13),foreign=await read(other,51),ownedBefore={...window1.owned()};assert.deepEqual(ownedBefore,{names:1,roots:1,targets:1});
   const wal=fs.readFileSync(path.join(root,'solomap.db-wal'));assert.deepEqual(Array.from(await window1.emit(terminal)),[false]);assert.deepEqual({...window1.owned()},ownedBefore);assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),wal);assert.deepEqual(await read(project,51),before.state);assert.deepEqual(await client.readJournal(reference),before.journal);assert.deepEqual(await client.readBinding(reference),before.binding);assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,51),foreign);assert.ok(wrappers.every(child=>child.exitCode===null&&child.signalCode===null));
   engine.close();for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await operation('recover_run_executions',{});engine=new (require('../out/db/syncEngine.js').SyncEngine)(csvPath,path.join(project,'.solopreneur','project_journal.db'),projectRoot,root);await engine.initAndSync();assert.deepEqual(await read(project,51),before.state);assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,51),foreign);
-  const window2=loadWindow();window2.connect(engine,project,root,[terminal],()=>assert.fail('restored Running conversation must use its recorded terminal'));window2.subscribe({subscriptions:[]});assert.deepEqual({...window2.owned()},{names:0,roots:0,targets:0});assert.deepEqual(Array.from(await window2.emit(terminal)),[false]);assert.equal(await window2.find(project,51),terminal);assert.equal(await window2.find(project,51,root),terminal);assert.equal(await window2.find(other,51,root),undefined);
+  const window2=loadWindow();window2.connect(engine,project,root,[terminal],()=>assert.fail('state recovery must not create a terminal'));window2.subscribe({subscriptions:[]});assert.deepEqual({...window2.owned()},{names:0,roots:0,targets:0});assert.deepEqual(Array.from(await window2.emit(terminal)),[false]);assert.equal(await window2.find(project,51),undefined);assert.equal(await window2.find(project,51,root),undefined);assert.equal(await window2.find(other,51,root),undefined);
   const snapshot=await window2.snapshot({},project);assert.equal(snapshot.solo.length,1);assert.equal(snapshot.solo[0].id,51);assert.equal(snapshot.solo[0].status,'Running');assert.ok(snapshot.solo[0].output.includes('保留这段正在进行的对话'));assert.equal((await client.readLog(reference,'stdout')).toString(),firstOutput);assert.equal(commands.length,1);
   let nativeCheckpointSequence=0;
   const checkpoint=async(action,args)=>{if(action==='complete'){const values=Object.fromEntries(Array.from({length:args.length/2},(_,index)=>[String(args[index*2]).replace(/^--/,''),args[index*2+1]]));return completeNativeInteractiveTurn(operation,{root:project,executionLogId:51,summary:values.summary,sessionId:run.status.plannedNativeSessionId,idempotencyKey:`window-reload-native-complete:${++nativeCheckpointSequence}`});}const current=await operation('read_run_checkpoint_state',{root:project,executionLogId:51});await require('node:util').promisify(childProcess.execFile)(process.execPath,[path.join(projectRoot,'out/taskCheckpointProcess.js'),action,...args],{env:{...process.env,SOLOMAP_GLOBAL_DATA_PATH:root,SOLOMAP_PROJECT_ID:current.projectId,SOLOMAP_EXECUTION_LOG_ID:'51',SOLOMAP_RUN_GENERATION:String(current.generation),SOLOMAP_RUN_PROOF:current.proof,SOLOMAP_TASK_TURN_ID:current.turnId,CLAUDE_CODE_SESSION_ID:run.status.plannedNativeSessionId}});};
   await checkpoint('complete',['--outcome','partial','--summary','重载后保存的完整结果']);await window2.settle(reference,undefined,root);await window2.drain();const firstStatus=await client.readStatus(reference),firstJournal=await client.readJournal(reference,firstStatus),firstSettlements=await client.readSettlements(reference,firstStatus);assert.equal(firstStatus.status,'Waiting');assert.equal(firstStatus.checkpointSummary,'重载后保存的完整结果');assert.equal(firstSettlements.length,1);assert.equal((await client.readLog(reference,'stdout',firstStatus)).toString(),firstOutput);assert.equal((await client.getResumableSession(reference)).sessionId,run.status.plannedNativeSessionId);
-  await checkpoint('start',['--message','窗口重载后继续原任务，保留补充🌿']);const next=await read(project,51);assert.equal(next.taskId,run.taskId);assert.equal(next.runId,run.runId);assert.equal(next.conversationId,run.conversationId);assert.notEqual(next.turnId,before.state.turnId);assert.equal(next.status.status,'Running');assert.equal(next.status.userMessage,'窗口重载后继续原任务，保留补充🌿');assert.equal(next.status.interactiveSessionClosed,undefined);assert.equal(await window2.find(project,51,root),terminal);
+  await checkpoint('start',['--message','窗口重载后继续原任务，保留补充🌿']);const next=await read(project,51);assert.equal(next.taskId,run.taskId);assert.equal(next.runId,run.runId);assert.equal(next.conversationId,run.conversationId);assert.notEqual(next.turnId,before.state.turnId);assert.equal(next.status.status,'Running');assert.equal(next.status.userMessage,'窗口重载后继续原任务，保留补充🌿');assert.equal(next.status.interactiveSessionClosed,undefined);assert.equal(await window2.find(project,51,root),undefined);
   const secondOutput='窗口重载后新轮完整输出🌿\n'.repeat(10000);await operation('append_run_log',{projectId:run.projectId,executionLogId:51,generation:next.generation,stream:'stdout',sequence:1,offset:Buffer.byteLength(firstOutput),bytes:Buffer.from(secondOutput).toString('base64'),idempotencyKey:'reload-second-output'});await checkpoint('complete',['--outcome','partial','--summary','继续原任务后的结果']);await window2.settle(reference,undefined,root);await window2.drain();const finalStatus=await client.readStatus(reference),finalState=await read(project,51),finalJournal=await client.readJournal(reference),finalBinding=await client.readBinding(reference),finalSettlements=await client.readSettlements(reference,finalStatus);assert.equal(finalStatus.status,'Waiting');assert.equal(finalStatus.checkpointSummary,'继续原任务后的结果');assert.equal((await client.readLog(reference,'stdout',finalStatus)).toString(),secondOutput);assert.deepEqual(journalWithoutCurrentRunRevision(await client.readJournal(reference,firstStatus)),journalWithoutCurrentRunRevision(firstJournal));assert.deepEqual(await client.readSettlements(reference,firstStatus),firstSettlements);assert.equal(finalSettlements.length,1);assert.equal(commands.length,1);assert.ok(wrappers.every(child=>child.exitCode===null&&child.signalCode===null));
   for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await read(project,51),finalState);assert.deepEqual(await client.readJournal(reference),finalJournal);assert.deepEqual(await client.readBinding(reference),finalBinding);assert.deepEqual(await client.readSettlements(reference,await client.readStatus(reference)),finalSettlements);assert.deepEqual(journalWithoutCurrentRunRevision(await client.readJournal(reference,firstStatus)),journalWithoutCurrentRunRevision(firstJournal));assert.equal((await client.readLog(reference,'stdout',firstStatus)).toString(),firstOutput);assert.equal((await client.readLog(reference,'stdout',await client.readStatus(reference))).toString(),secondOutput);
   const walAfter=fs.readFileSync(path.join(root,'solomap.db-wal'));await Promise.all([window2.settle(reference,undefined,root),window2.settle(reference,undefined,root)]);await window2.drain();assert.deepEqual(fs.readFileSync(path.join(root,'solomap.db-wal')),walAfter);assert.deepEqual(await read(project,13),peer);assert.deepEqual(await read(other,51),foreign);assert.equal(fs.readFileSync(csvPath,'utf8'),csv);assert.equal(fs.readFileSync(otherCsv,'utf8'),csv);assert.deepEqual(engine.getNodes(),originalNodes);for(const workspace of [project,other])assert.deepEqual(fs.readdirSync(path.join(workspace,'.solopreneur')).sort(),['project.json','roadmap.csv']);
@@ -17691,6 +17906,7 @@ test('window reload keeps a running Agent conversation recoverable', async t => 
 test('closing an interactive terminal terminates its tracked Agent process before settling the session', async t => {
   for (const mode of ['waiting', 'running']) await t.test(mode, async t => {
     const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-close-process-')),project=path.join(base,'project'),other=path.join(base,'other');fs.mkdirSync(project);fs.mkdirSync(other);
+    ensureRollbackGitFixture(project);
     const root=path.join(base,'.solomap-global'),closes=[],processes=[];
     let native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
     const {once}=require('node:events'),live=child=>child.exitCode===null&&child.signalCode===null;
@@ -17825,7 +18041,7 @@ test('continuing a root conversation immediately after its continuation terminal
     let connectedProject;module.exports.reservations=project=>reservedAgentTerminalsByProject.get(project)?.length||0;module.exports.owned=id=>{const b=getAgentTerminalBinding(connectedProject,id);return {name:b?.terminalName,root:b?.workspaceRoot};};
     module.exports.connect=(engine,project,root,create,prepare,reportError)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
       getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
-      agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'';getOpenCodeTerminalEnvironment=async()=>({});
+      agentCli_1.commandExists=()=>true;createPreSessionGitCommit=async()=>'1'.repeat(40);getOpenCodeTerminalEnvironment=async()=>({});
       ensureActionProject=async(_context,requested)=>{if(requested!==project)throw new Error('unexpected selected project');return project;};prepareOrdinaryConversation=prepare;vscode.window.showErrorMessage=reportError;
       sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
       vscode.window.createTerminal=options=>{const terminal=create(options);vscode.window.terminals.push(terminal);return terminal;};vscode.window.onDidCloseTerminal=callback=>{closeCallback=callback;return {dispose(){}};};};
@@ -17944,8 +18160,8 @@ test('stopping a continuation records it without marking the task failed', async
       let connectedProject;module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;module.exports.stop=stopAgentRun;
       module.exports.owned=id=>Boolean(getAgentTerminalBinding(connectedProject,id));
       module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
-      module.exports.connect=(engine,project,root,terminal,error)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};ensureActionProject=async(_context,target)=>{if(target!==project)throw new Error('unexpected selected project');return project;};vscode.window.showErrorMessage=error;setAgentTerminalBinding(project,31,terminal.name);vscode.window.terminals.push(terminal);};
-    `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./solomapGlobal':require('../out/solomapGlobal.js'),'./projectGrowth':require('../out/projectGrowth.js')});extension.connect(engine,project,root,terminal,message=>errors.push(message));await extension.settle(ref(project,29),undefined,root);await extension.drain();
+      module.exports.connect=(engine,project,root,terminal,error,state)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});getProjects=()=>[{path:project}];sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};ensureActionProject=async(_context,target)=>{if(target!==project)throw new Error('unexpected selected project');return project;};vscode.window.showErrorMessage=error;setAgentTerminalBinding(project,31,terminal.name);agentTerminalRunTargets.set(terminal,{workspaceRoot:project,globalDataPath:root,executionLogId:31,runId:state.runId,generation:state.generation});foregroundAgentTerminalSurfaces.set(terminal,{bridge:{isRunning:true}});vscode.window.terminals.push(terminal);};
+    `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./solomapGlobal':require('../out/solomapGlobal.js'),'./projectGrowth':require('../out/projectGrowth.js')});extension.connect(engine,project,root,terminal,message=>errors.push(message),child);await extension.settle(ref(project,29),undefined,root);await extension.drain();
     const snapshot=async(workspace,id)=>{const reference=ref(workspace,id),state=await read(workspace,id),status=await client.readStatus(reference);return {state,journal:await client.readJournal(reference,status),settlements:await client.readSettlements(reference,status),binding:await client.readBinding(reference),report:await client.readReport(reference,status)};};const saved=new Map();for(const [workspace,id] of [[project,29],[project,31],[project,13],[other,31]])saved.set(`${workspace}:${id}`,await snapshot(workspace,id));assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(saved.get(`${project}:31`).state.status.interactiveSession,true);assert.equal((await client.getResumableSession(ref(project,31))).sessionId,prepared.status.plannedNativeSessionId);
     for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);await engine.initAndSync();assert.deepEqual(await snapshot(project,29),saved.get(`${project}:29`));for(const id of [29,31])assert.equal((await client.readLog(ref(project,id),'stdout')).toString('utf8'),outputs.get(id));const hash=bytes=>require('node:crypto').createHash('sha256').update(bytes).digest('hex'),walPath=path.join(root,'solomap.db-wal'),beforeWrong=hash(fs.readFileSync(walPath));await extension.stop('not-the-requested-node',31);assert.equal(hash(fs.readFileSync(walPath)),beforeWrong);assert.ok(writers.every(live));assert.equal(disposed,0);
     const ended=once(writers[0],'exit');assert.equal(await extension.action({}, {command:'conversation.stop',projectPath:project,nodeId,conversationId:31},'sidebar',{postMessage(){return Promise.resolve(true);}}),true);await ended;await extension.drain();assert.deepEqual(errors,[]);assert.equal(closingSeen,true);assert.equal(live(writers[0]),false);assert.equal(disposed,1);assert.equal(extension.owned(31),false);await extension.settle(ref(project,31),undefined,root);await extension.drain();const stopped=await snapshot(project,31);assert.equal(stopped.journal.entry.status,'Recorded','stopping continuation must record it without failing the original task');assert.match(stopped.journal.entry.output,/Continuation record state: Recorded/);assert.equal(stopped.state.status.stopReason,'用户已停止当前对话。');assert.match(stopped.journal.entry.output,/Interactive session state: Closed/);assert.doesNotMatch(stopped.journal.entry.output,/Failure category: (stopped_by_user|agent_exit_failed)/);assert.equal(stopped.settlements.length,2);for(const settlement of stopped.settlements){assert.equal(settlement.digest.status,'Recorded');assert.deepEqual(settlement.digest.failures,[]);}assert.deepEqual(stopped.settlements[1].digest,stopped.settlements[0].digest);assert.equal(stopped.state.status.stopRequested,true);assert.equal(stopped.state.status.interactiveSessionClosed,true);assert.equal(stopped.state.status.status,'Processed');assert.equal(stopped.state.taskId,prepared.taskId);assert.equal(stopped.state.taskId,child.taskId);assert.equal(stopped.state.turnId,saved.get(`${project}:31`).state.turnId);assert.equal(stopped.state.status.sourceParentRunId,prepared.runId);assert.equal(stopped.state.status.sourceParentTurnId,prepared.turnId);assert.equal(stopped.state.status.lineageRootExecutionLogId,29);assert.deepEqual(stopped.binding,saved.get(`${project}:31`).binding);for(const id of [29,31])assert.equal((await client.readLog(ref(project,id),'stdout')).toString('utf8'),outputs.get(id));for(const [workspace,id] of [[project,29],[project,13],[other,31]])assert.deepEqual(await snapshot(workspace,id),saved.get(`${workspace}:${id}`));assert.ok(writers.slice(1).every(live));assert.deepEqual(engine.getNodes(),originalNodes);
@@ -19339,7 +19555,7 @@ const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcon
     const saved = { cliPath: cli, globalDataPath: root, globalPrompt: 'Saved instruction.', language: 'en', reviewerCliPath: 'unchanged-reviewer', collaborationReviewMode: 'off', telegramEnabled: false, telegramBotToken: '', telegramChatId: '', agentModelPreferences: { claude: 'chosen-model' }, cognitiveEngineAgent: 'local_only', taskPermissionMode: 'auto', enabledEnhancements: {}, automationTasks: {}, proEntitlements: {} };
     const savedBefore = structuredClone(saved), messages = [], duplicateMessages = [], differentDraftMessages = [], commands = [], order = [], writes = [], children = [];
     let ready, terminalCount = 0, childResult;
-    const terminal = { show() {}, processId: new Promise(resolve => { ready = resolve; }), sendText(command) {
+    const terminal = { name: 'settings review terminal', show() {}, processId: new Promise(resolve => { ready = resolve; }), sendText(command) {
       commands.push(command); order.push('agent-command');
       const child = require('node:child_process').spawn('bash', ['-c', command], {
         cwd: workspace,
@@ -19355,7 +19571,7 @@ const {StdioClientTransport}=require(${JSON.stringify(require.resolve('@modelcon
 module.exports.review=handleReviewGlobalPrompt;
 module.exports.setup=(project, terminal, saved, order, counts)=>{
  activeProjectRoot=project;
- createAgentTerminal=()=>{counts.open();order.push('terminal');return terminal;};
+ vscode.window.createTerminal=options=>{terminal.name=options.name;terminal.creationOptions={};counts.open();order.push('terminal');return terminal;};
  agentCli_1.commandExists=()=>true;agentCli_1.ensureAgentTaskAutomation=()=>({ok:true});
  autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime=async()=>({started:false});
  getPersistedSettings=()=>{order.push('settings');const configuredPrompt=vscode.workspace.getConfiguration('solopreneur').get('globalPrompt');return {...saved,...(configuredPrompt===undefined?{}:{globalPrompt:configuredPrompt})};};
@@ -19425,7 +19641,7 @@ test('settings review reports terminal startup failures back to the requesting v
     'agentCli_1.resolveAgentCli = () => "test-cli";',
     'agentCli_1.commandExists = () => true;',
     'agentCli_1.ensureAgentTaskAutomation = () => ({ok:true});',
-    'createAgentTerminal = () => { throw new Error("terminal unavailable"); };'
+    'vscode.window.createTerminal = () => { throw new Error("terminal unavailable"); };'
   ].join('\n'));
   const messages = [];
   const context = { extensionPath: projectRoot, globalState: { get() { return {}; } } };
@@ -19757,7 +19973,7 @@ for (const scenario of ['__solo__', 'step', 'unavailable-cli', 'missing-node']) 
         sendNodesToWebview = () => {}; refreshSidebarProjectCards = () => {};
         solomapGlobal_1.ensureSolomapMemoryStore = () => {};
 
-        preSessionGit_1.createPreSessionGitCommit = async () => '';
+        preSessionGit_1.createPreSessionGitCommit = async () => '1'.repeat(40);
         launchAgentConversationTerminal = async input => { calls.push(input); };
       };
       module.exports.activeRoot = () => activeProjectRoot;
@@ -20195,7 +20411,7 @@ test('an actual scheduled prompt remains in project A when the user selects B du
       recordLocalUsageEvent = async () => ({}); postNodeConversations = () => {}; buildSoloConversationPrompt = () => '来源项目固定输入';
       ensureRoadmapValidationScript = () => {}; sendNodesToWebview = () => {}; refreshSidebarProjectCards = () => {};
       solomapGlobal_1.ensureSolomapMemoryStore = () => {};
-      preSessionGit_1.createPreSessionGitCommit = async () => '';
+      preSessionGit_1.createPreSessionGitCommit = async () => '1'.repeat(40);
       launchAgentConversationTerminal = async input => { launches.push(input); };
     };
   `);
@@ -20647,24 +20863,33 @@ for (const [changeRoot, transientFailure] of [[false, false], [true, false], [fa
       agentCli_1.resolveAgentCli = value => value; agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
       getPersistedSettings = () => readSettings(); getReviewLaunchSettings = () => ({ ...readSettings(), taskPermissionMode: 'auto' });
       updatePersistedSettings = async (_context, patch) => writeSettings(patch); broadcastSettings = async () => {};
-      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false }); createAgentTerminal = () => ({ show() {}, processId: Promise.resolve(991) });
-      terminalCompatibility_1.sendTextWhenTerminalReady = async (_terminal, command) => send(command);
+      autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false }); createAgentTerminal = () => ({ name: 'review fixture', creationOptions: {}, show() {}, dispose() {}, processId: Promise.resolve(991) });
+      terminalCompatibility_1.sendTextWhenTerminalReady = async (_terminal, command) => { void send(command); return true; };
     };
   `);
   extension.connect(root, project, call, () => saved, patch => { saved = { ...saved, ...patch }; }, async command => {
     assert.match(command, /runAgentProcess\.js/); assert.doesNotMatch(command, /maintenance\/runs|\.run\.sh/); launches.push(command);
     const id = Number(command.match(/--execution-log-id (\d+)/)?.[1]); assert.ok(id > 0);
+    const deliveryId = command.match(/SOLOMAP_TERMINAL_DELIVERY_ID='([^']+)'/)?.[1]; assert.match(deliveryId, /^[a-f0-9-]{36}$/);
     const plan = await ops({ operation: 'read_run_execution_plan', input: { root: project, executionLogId: id } });
     assert.match(plan.prompt, /完整全局默认提示词/);
     const batchId = plan.status.learningReviewBatchId; assert.ok(batchId);
     const batch = store.read(batchId), index = batch.projection;
     const result = { globalPrompt: '保留用户目标。', changes: [], lessons: [], processedSourceIds: index.sources.map(source => source.id), deferredSourceIds: [], unresolved: [], recovery: [] };
     if (changeRoot) { result.globalPrompt += '\n交付前核验真实结果。'; result.changes = [{ type: 'add', before: [], after: '交付前核验真实结果。', evidence: [index.sources.find(source => source.kind === 'memory').id], reason: '已记录的用户要求。' }]; }
-    let state = await ops({ operation: 'claim_run', input: { root: project, executionLogId: id, expectedRevision: plan.revision, agentPid: process.pid, processBirth: '', idempotencyKey: 'host-review-claim' } });
+    let state = await ops({ operation: 'claim_run', input: { root: project, executionLogId: id, expectedRevision: plan.revision, agentPid: process.pid, processBirth: '', terminalDeliveryId: deliveryId, idempotencyKey: 'host-review-claim' } });
     const proof = state.proof;
     const session = await ops({ operation: 'open_mcp_session', input: { projectId, runIdentity: { executionLogId: id, generation: state.generation, proof } } });
     await ops({ operation: 'write', sessionToken: session.sessionToken, input: { kind: 'review_batch', action: 'patch', scope: projectId, objectId: batchId, expectedRevision: batch.revision, idempotencyKey: 'host-agent-result', data: { proposal_content: JSON.stringify(result) } } });
-    state = await ops({ operation: 'checkpoint_run', input: { root: project, executionLogId: id, generation: state.generation, proof, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'complete', source: 'host', outcome: 'partial', summary: '完整提示词已提交。', exitCode: 0, idempotencyKey: 'host-review-exit' } });
+    for (;;) {
+      state = await ops({ operation: 'read_run_state', input: { root: project, executionLogId: id } });
+      try {
+        state = await ops({ operation: 'checkpoint_run', input: { root: project, executionLogId: id, generation: state.generation, proof, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'complete', source: 'host', outcome: 'partial', summary: '完整提示词已提交。', exitCode: 0, idempotencyKey: 'host-review-exit' } });
+        break;
+      } catch (error) {
+        if (error.message !== 'revision_conflict') throw error;
+      }
+    }
     if (state.status.hostOutputPending) await ops({ operation: 'finalize_run_output', input: { root: project, executionLogId: id, generation: state.generation, proof, expectedRevision: state.revision, expectedTurnId: state.turnId, exitCode: 0, source: 'host', idempotencyKey: 'host-review-output-final' } });
     if (changeRoot) saved = { ...saved, globalDataPath: path.join(base, 'selected', '.solomap-global') };
     return true;
@@ -20818,7 +21043,7 @@ for (const kind of ['step', 'solo', 'roadmap_revision']) test(`the actual automa
       agentCli_1.resolveAgentCli = value => value; agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
       recordLocalUsageEvent = async () => ({}); postNodeConversations = () => {}; ensureRoadmapValidationScript = () => {}; sendNodesToWebview = () => {}; refreshSidebarProjectCards = () => {};
       solomapGlobal_1.ensureSolomapMemoryStore = () => {};
-      preSessionGit_1.createPreSessionGitCommit = async () => ''; launchAgentConversationTerminal = async input => launches.push(input);
+      preSessionGit_1.createPreSessionGitCommit = async () => '1'.repeat(40); launchAgentConversationTerminal = async input => launches.push(input);
     };
   `, { './autonomousRuntimeControl': transport });
   extension.connect(call, roots[1], project, engine, launches);

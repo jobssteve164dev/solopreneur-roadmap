@@ -9,6 +9,7 @@ import type { RunState } from './runLifecycleTypes';
 import { assertClaudeTranscript, claudeTranscriptChunks, claudeTranscriptPaths } from './claudeSessionIdentity';
 import type { FileHandle } from 'fs/promises';
 import { claudeNativeEventPurpose, validateClaudeNativeEvent, ClaudeNativeEvent } from './claudeNativeEvent';
+import { taskIngressReceiptFields } from './providerTaskIngress';
 
 const observations = new WeakMap<UnifiedDataStore, Map<string, Promise<void>>>();
 interface ClaudeLineage {
@@ -113,8 +114,11 @@ export class RunNativeObserver {
       }
     }
     let cursor = Number(current().status.codexNativeCursor || 0);
+    const initialCursor = cursor;
     let lastStartedOffset = -1;
+    const frames: Array<{ row: any; offset: number; nextCursor: number }> = [];
     for await (const frame of this.rows(scope.projectId, executionLogId, cursor, logHead.totalBytes)) {
+      frames.push(frame);
       if (frame.row?.type === 'event_msg' && frame.row.payload?.type === 'task_started') lastStartedOffset = frame.offset;
     }
     let observation: Promise<{ workspaceSnapshot: Awaited<ReturnType<typeof snapshotWorkspace>>; gitEvidence: Awaited<ReturnType<typeof captureRunGitEvidence>>; observedAt: string }> | undefined;
@@ -124,11 +128,11 @@ export class RunNativeObserver {
       const gitEvidence = await captureRunGitEvidence(String(observed.status.workspaceRoot), String(observed.status.baseGitHash || ''), workspaceSnapshot);
       return { workspaceSnapshot, gitEvidence, observedAt };
     })();
-    for await (const frame of this.rows(scope.projectId, executionLogId, cursor, logHead.totalBytes)) {
+    for (const frame of frames) {
       if (frame.row) await this.observeRow(current, patch, frame.row, frame.offset, { lastStartedOffset, endOffset: frame.nextCursor, observedWorkspace });
       cursor = frame.nextCursor;
-      patch({ codexNativeCursor: cursor }, `cursor:${cursor}`);
     }
+    if (cursor !== initialCursor) patch({ codexNativeCursor: cursor }, `cursor:${cursor}`);
   }
 
   private async observeClaude(observed: RunState, identityOnly: boolean, exitCode?: number): Promise<void> {
@@ -389,7 +393,7 @@ export class RunNativeObserver {
     let offset = partial?.offset ?? cursor; let parts: Buffer[] = partial?.parts || []; let length = partial?.length || 0;
     cursor = partial?.cursor ?? cursor;
     while (offset < end) {
-      const page = this.store.readRunLog(projectId, { executionLogId, stream, offset, limit: Math.min(65536, end - offset) });
+      const page = this.store.readRunLog(projectId, { executionLogId, stream, offset, limit: Math.min(1_048_576, end - offset) });
       const bytes = Buffer.from(page.bytes, 'base64');
       if (!bytes.length) throw new Error('native_source_read_incomplete');
       offset += bytes.length; let start = 0; let newline = bytes.indexOf(10);
@@ -441,7 +445,18 @@ export class RunNativeObserver {
     const eventTimestamp = nativeTime(payload.started_at || row.timestamp);
     if (!Number.isFinite(eventTimestamp)) return;
     if (payload.type === 'task_started') {
-      if (state.status[native('TurnId')] === nativeTurnId) return;
+      const ingress = () => taskIngressReceiptFields(state.status, {
+        provider: String(state.status.sessionProvider || ''),
+        kind: state.status.sessionProvider === 'claude' ? 'claude_root_turn_start' : 'codex_task_started',
+        nativeTurnId,
+        sessionId: String(state.status.nativeSessionId || state.status.plannedNativeSessionId || ''),
+        providerStartedAt: new Date(eventTimestamp).toISOString()
+      });
+      if (state.status[native('TurnId')] === nativeTurnId) {
+        const receipt = ingress();
+        if (Object.keys(receipt).length) patch(receipt, `ingress:${key}`);
+        return;
+      }
       const previousStart = state.status[native('BoundTurnId')] === state.turnId ? state.status[native('StartedAt')] : state.status.turnStartedAt;
       if (eventTimestamp < Date.parse(String(previousStart || state.status.startedAt))) return;
       let beforeRecorded = Boolean(this.store.readRunDocument(state.projectId, executionLogId, workspaceDocumentPurpose(state.turnId, 'before')));
@@ -463,7 +478,7 @@ export class RunNativeObserver {
         if (document) this.store.link({ source: document.objectId, relation: 'source', target: state.turnId, expectedRevision: document.revision, idempotencyKey: `run:${state.runId}:${state.generation}:native-request-source:${key}` });
         patch({ [native('AwaitingRequest')]: !document }, `pending-request:${key}`);
       }
-      patch({ [native('TurnId')]: nativeTurnId, [native('BoundTurnId')]: state.turnId, [native('StartedAt')]: new Date(eventTimestamp).toISOString(), [native('StartOffset')]: sourceOffset, [native('WorkspaceBeforeRecorded')]: beforeRecorded, turnStartedAt: new Date(eventTimestamp).toISOString(), [native('TokenBaseline')]: state.status[native('TokenTotal')] || normalizeTokenUsage(null), [native('PendingRequest')]: '' }, `start:${key}`);
+      patch({ [native('TurnId')]: nativeTurnId, [native('BoundTurnId')]: state.turnId, [native('StartedAt')]: new Date(eventTimestamp).toISOString(), [native('StartOffset')]: sourceOffset, [native('WorkspaceBeforeRecorded')]: beforeRecorded, turnStartedAt: new Date(eventTimestamp).toISOString(), [native('TokenBaseline')]: state.status[native('TokenTotal')] || normalizeTokenUsage(null), [native('PendingRequest')]: '', ...ingress() }, `start:${key}`);
       return;
     }
     const completedTimestamp = nativeTime(row.timestamp || payload.completed_at);

@@ -222,11 +222,15 @@ for (const mode of ['legacy', 'harness']) {
     for (const targetMode of ['solo', 'step', 'flow']) {
       assert.equal(await f.ask({ project: 'Alpha', mode: targetMode, message: `执行 ${targetMode} 任务`,
         ...(targetMode === 'step' ? { stepId: 'S01' } : {}), idempotencyKey: `launch-${targetMode}` }), '任务已启动。');
-      assert.deepEqual({ ...f.launches.at(-1), launchIntentId: '<stable>' }, {
+      const { interactionBudget, ...launch } = f.launches.at(-1);
+      assert.deepEqual({ ...launch, launchIntentId: '<stable>' }, {
         command: 'solopreneur.internalStartConversation', projectPath: f.project, mode: targetMode,
         message: `执行 ${targetMode} 任务`, ...(targetMode === 'step' ? { stepId: 'S01' } : {}), launchIntentId: '<stable>'
       });
-      assert.match(f.launches.at(-1).launchIntentId, /^mcp:[a-f0-9-]{36}$/);
+      assert.match(launch.launchIntentId, /^mcp:[a-f0-9-]{36}$/);
+      assert.equal(interactionBudget.schemaVersion, 1);
+      assert.equal(interactionBudget.interactionId, `conversation:${launch.launchIntentId.slice(4)}`);
+      assert.ok(Number.isFinite(interactionBudget.acceptedWallMs));
     }
     assert.equal(f.launches.length, 3);
     if (mode === 'harness') {

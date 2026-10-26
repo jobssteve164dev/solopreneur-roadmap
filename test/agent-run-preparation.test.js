@@ -32,7 +32,15 @@ test('host preparation persists all task input and native identity without produ
     assert.equal(prepared.status.deliveryOwnerPid, process.pid);
     const deliveryRequest = await call('read_run_document', { projectId: prepared.projectId, executionLogId: 1, purpose: 'launch_request' });
     assert.ok(deliveryRequest, 'an unfinished preparation must recover all launch parameters after the creating window closes');
-    assert.deepEqual(JSON.parse(Buffer.from(deliveryRequest.bytes, 'base64')), input);
+    const persistedLaunchRequest = JSON.parse(Buffer.from(deliveryRequest.bytes, 'base64'));
+    const { interactionBudget, ...persistedInput } = persistedLaunchRequest;
+    assert.deepEqual(persistedInput, input);
+    assert.equal(interactionBudget.schemaVersion, 1);
+    assert.match(interactionBudget.interactionId, /^[0-9a-f-]{36}$/);
+    assert.equal(interactionBudget.elapsedFloorMs, 0);
+    assert.ok(Number.isFinite(interactionBudget.acceptedWallMs));
+    assert.ok(Number.isFinite(interactionBudget.acceptedUptimeMs));
+    assert.ok(interactionBudget.acceptedBootId);
     const { RunLifecycleClient, runStatusReference, parseRunDataReference } = require('../out/runLifecycleClient.js');
     const outputReference = parseRunDataReference(prepared.outputFilePath);
     assert.equal(outputReference.reference, runStatusReference(projectRoot, 1));
@@ -55,7 +63,7 @@ test('host preparation persists all task input and native identity without produ
     assert.match(plan.prompt, /实现或判断前.*solomap_context/);
     assert.match(plan.prompt, /任务收尾.*未来任务仍会复用/);
     assert.match(plan.prompt, new RegExp(`SoloMap-Task: task-${state.taskId}`));
-    assert.match(plan.prompt, /solomap_conversation_status\(\{action:"start"\}\)/);
+    assert.match(plan.prompt, /solomap_conversation_status\(\{action:"start",turnId:"[0-9a-f-]+",interactionId:"[0-9a-f-]+"\}\)/);
     assert.match(plan.prompt, /complete 动作/);
     assert.doesNotMatch(plan.prompt, /--report-json|taskCheckpointProcess\.js|taskReport\.js|validateTaskReport|SOLOMAP_TASK_COMMAND/);
     assert.doesNotMatch(plan.prompt, /agent-runs\/|\.solopreneur\/runtime/);
@@ -71,6 +79,35 @@ test('host preparation persists all task input and native identity without produ
     const resumePlan = await call('read_run_execution_plan', { root: projectRoot, executionLogId: 2 });
     assert.match(resumePlan.command, new RegExp(`--resume '${nativeSessionId}'`));
     assert.doesNotMatch(resumePlan.command.replace(shellQuote(projectRoot), '<workspace>'), /cat |prompt\.txt|agent-runs/);
+  } finally { await operations.close(); store.close(); }
+});
+
+test('interactive Codex preparation replaces a legacy direct resume command with one isolated native CLI launch', async () => {
+  const { prepareAgentRun } = require('../out/agentRunPreparation.js');
+  const base = fixtureRoot('solomap-codex-direct-retirement-');
+  const root = path.join(base, '.solomap-global');
+  const projectRoot = path.join(base, 'project');
+  fs.mkdirSync(projectRoot);
+  const store = new UnifiedDataStore(root);
+  const operations = createRuntimeDataOperations(store);
+  const call = (operation, input) => operations({ operation, input });
+  try {
+    const sessionId = '019ecd99-4325-7050-8e71-7def92359d30';
+    const prepared = await prepareAgentRun({
+      agentCli: 'codex', selectedModel: '', prompt: '继续原任务', workspaceRoot: projectRoot,
+      nodeId: '__solo__', executionLogId: 1, userMessage: '继续原任务', runKind: 'solo_continue',
+      globalDataPath: root, taskPermissionMode: 'auto', nativeSessionId: sessionId,
+      directExecutionCommand: `'codex' resume --no-alt-screen -C '${projectRoot}' '${sessionId}' 'Continue'`
+    }, call);
+    const plan = await call('read_run_execution_plan', { root: projectRoot, executionLogId: 1 });
+    const expectedProfile = require('../out/agentDatabaseConfig.js').codexDatabaseProfileName(root);
+    assert.equal(prepared.status.agentLaunch.direct, false);
+    assert.equal(prepared.status.agentLaunch.codexProfile, expectedProfile);
+    assert.equal(prepared.status.sessionMode, 'resume');
+    assert.match(plan.command, new RegExp(`--profile ${expectedProfile} --no-daemon resume`));
+    assert.doesNotMatch(plan.command, /--remote|SOLOMAP_CODEX_REMOTE/);
+    assert.match(plan.command, new RegExp(sessionId));
+    assert.doesNotMatch(plan.command, /'Continue'$/);
   } finally { await operations.close(); store.close(); }
 });
 
@@ -136,7 +173,7 @@ test('read-only review preparation retains full evidence and uses only the dedic
     assert.match(plan.prompt, /solomap_search/);
     assert.match(plan.prompt, /solomap_read/);
     assert.match(plan.prompt, /本轮对数据库记忆仅可检索和读取/);
-    assert.match(plan.prompt, /solomap_conversation_status\(\{action:"start"\}\)/);
+    assert.match(plan.prompt, /solomap_conversation_status\(\{action:"start",turnId:"[0-9a-f-]+",interactionId:"[0-9a-f-]+"\}\)/);
     assert.doesNotMatch(plan.prompt, /solomap_write|solomap_link|solomap_export|solomap_migration_start|solomap_recycling_preview|taskCheckpointProcess|--report-json/);
     assert.equal(plan.status.agentLaunch.readOnly, true);
     assert.equal(plan.status.interactiveSession, false);
@@ -161,7 +198,7 @@ test('Grok read-only review receives bounded memory and only the dedicated MCP c
     assert.match(plan.prompt, /solomap_experience 检索历史运行、失败或交接/);
     assert.match(plan.prompt, /solomap_search 定位候选、文档或其他数据库记录/);
     assert.match(plan.prompt, /定位对象后再按固定版本引用调用 solomap_read/);
-    assert.match(plan.prompt, /solomap_conversation_status\(\{action:"start"\}\)/);
+    assert.match(plan.prompt, /solomap_conversation_status\(\{action:"start",turnId:"[0-9a-f-]+",interactionId:"[0-9a-f-]+"\}\)/);
     assert.match(plan.command, /--allow 'MCPTool\(solomap_data__solomap_conversation_status\)'/);
     assert.doesNotMatch(plan.command, /--deny 'MCPTool'/);
     assert.doesNotMatch(plan.prompt, /solomap_write|solomap_link|solomap_export/);

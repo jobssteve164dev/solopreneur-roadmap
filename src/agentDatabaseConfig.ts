@@ -15,8 +15,82 @@ const start = '# SoloMap managed database MCP begin';
 const end = '# SoloMap managed database MCP end';
 export const codexDatabaseProfile = 'solomap';
 
-export function codexDatabaseProfilePath(codexHome = path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'))): string {
-  return path.join(codexHome, `${codexDatabaseProfile}.config.toml`);
+export function codexDatabaseProfileName(globalDataPath: string): string {
+  const root = normalizeGlobalDataPathForExtension(globalDataPath);
+  return `solomap-${crypto.createHash('sha256').update(root).digest('hex').slice(0, 16)}`;
+}
+
+export function codexDatabaseProfilePath(
+  codexHome = path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), '.codex')),
+  profile = codexDatabaseProfile
+): string {
+  if (profile !== codexDatabaseProfile && !/^solomap-[a-f0-9]{16}$/.test(profile)) throw new Error('codex_database_profile_invalid');
+  return path.join(codexHome, `${profile}.config.toml`);
+}
+
+function tomlKeyNames(key: { keys?: Array<{ type: string; name?: string; value?: string }> } | undefined): string[] {
+  return (key?.keys || []).map(value => String(value.type === 'TOMLBare' ? value.name : value.value));
+}
+
+/** Codex deliberately reads folder trust from its persisted base config, not -c/profile layers. */
+export function ensureCodexProjectTrusted(codexHome: string, workspaceRoot: string): string {
+  const home = path.resolve(codexHome || process.env.CODEX_HOME || path.join(os.homedir(), '.codex'));
+  let trustRoot = fs.realpathSync(path.resolve(workspaceRoot));
+  for (let current = trustRoot; ; current = path.dirname(current)) {
+    if (fs.existsSync(path.join(current, '.git'))) { trustRoot = current; break; }
+    const parent = path.dirname(current);
+    if (parent === current) break;
+  }
+  fs.mkdirSync(home, { recursive: true });
+  const configEntry = path.join(home, 'config.toml');
+  let file = configEntry;
+  if (fs.existsSync(configEntry)) {
+    const entry = fs.lstatSync(configEntry);
+    if (entry.isSymbolicLink()) file = fs.realpathSync(configEntry);
+    else if (!entry.isFile()) throw new Error('codex_base_config_invalid');
+  } else {
+    try { if (fs.lstatSync(configEntry).isSymbolicLink()) throw new Error('codex_base_config_invalid'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
+  if (fs.existsSync(file) && !fs.statSync(file).isFile()) throw new Error('codex_base_config_invalid');
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const original = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+    let parsed: any;
+    try { parsed = toml.parse(original); }
+    catch { throw new Error('codex_base_config_invalid'); }
+    if (parsed.projects?.[trustRoot]?.trust_level === 'trusted') return trustRoot;
+    const ast: any = parseTOML(original, { tomlVersion: '1.0.0' });
+    const body: any[] = ast.body?.[0]?.body || [];
+    const projectTable = body.find(node => node.type === 'TOMLTable' && JSON.stringify(tomlKeyNames(node.key)) === JSON.stringify(['projects', trustRoot]));
+    let next: string;
+    if (projectTable) {
+      const trust = (projectTable.body || []).find((node: any) => node.type === 'TOMLKeyValue' && JSON.stringify(tomlKeyNames(node.key)) === JSON.stringify(['trust_level']));
+      if (trust) next = original.slice(0, trust.value.range[0]) + '"trusted"' + original.slice(trust.value.range[1]);
+      else next = original.slice(0, projectTable.range[1]) + '\ntrust_level = "trusted"' + original.slice(projectTable.range[1]);
+    } else if (parsed.projects?.[trustRoot]) {
+      const projects = { ...parsed.projects, [trustRoot]: { ...parsed.projects[trustRoot], trust_level: 'trusted' } };
+      const inlineProjects = body.find(node => node.type === 'TOMLKeyValue' && JSON.stringify(tomlKeyNames(node.key)) === JSON.stringify(['projects']));
+      const projectsTable = body.find(node => node.type === 'TOMLTable' && JSON.stringify(tomlKeyNames(node.key)) === JSON.stringify(['projects']));
+      const inlineProject = projectsTable?.body?.find((node: any) => node.type === 'TOMLKeyValue' && JSON.stringify(tomlKeyNames(node.key)) === JSON.stringify([trustRoot]));
+      if (inlineProjects) next = original.slice(0, inlineProjects.value.range[0]) + toml.stringify.value(projects) + original.slice(inlineProjects.value.range[1]);
+      else if (inlineProject) next = original.slice(0, inlineProject.value.range[0]) + toml.stringify.value(projects[trustRoot]) + original.slice(inlineProject.value.range[1]);
+      else throw new Error('codex_project_trust_config_unsupported');
+    } else {
+      const separator = !original ? '' : original.endsWith('\n\n') ? '' : original.endsWith('\n') ? '\n' : '\n\n';
+      next = `${original}${separator}[projects.${JSON.stringify(trustRoot)}]\ntrust_level = "trusted"\n`;
+    }
+    try { toml.parse(next); }
+    catch { throw new Error('codex_project_trust_config_invalid'); }
+    const temporary = `${file}.${crypto.randomUUID()}.tmp`;
+    try {
+      fs.writeFileSync(temporary, next, { flag: 'wx', mode: fs.existsSync(file) ? fs.statSync(file).mode & 0o777 : 0o600 });
+      replaceRegularFileIfUnchanged(file, temporary, original);
+      return trustRoot;
+    } catch (error) {
+      if ((error as Error).message !== 'file_changed_during_write' || attempt === 4) throw error;
+    } finally { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
+  }
+  throw new Error('codex_project_trust_write_conflict');
 }
 
 export function retireManagedCodexBaseConfig(codexHome = path.resolve(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'))): boolean {
@@ -60,7 +134,8 @@ export function isAgentDatabaseConfigPath(provider: DatabaseAgentProvider, file:
   if (typeof file !== 'string' || !path.isAbsolute(file)) return false;
   if (provider === 'opencode') return /\.jsonc?$/.test(file);
   if (provider === 'claude' && path.basename(file) === '.config.json') return true;
-  if (provider === 'codex') return ['config.toml', `${codexDatabaseProfile}.config.toml`].includes(path.basename(file));
+  if (provider === 'codex') return ['config.toml', `${codexDatabaseProfile}.config.toml`].includes(path.basename(file))
+    || /^solomap-[a-f0-9]{16}\.config\.toml$/.test(path.basename(file));
   const basename = provider === 'grok' ? 'config.toml' : provider === 'claude' ? '.claude.json' : provider === 'copilot' ? 'mcp-config.json' : provider === 'antigravity' ? 'mcp_config.json' : 'mcp.json';
   return path.basename(file) === basename;
 }

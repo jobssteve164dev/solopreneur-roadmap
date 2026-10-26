@@ -22,6 +22,8 @@ import { persistTelegramRuntimeSecret } from './telegramRuntimeConfig';
 import { migrationRunKinds, soloConversationRunKinds } from './runLifecycleTypes';
 import { setIntelligenceTimeScheduleInDatabaseSync } from './intelligenceTimeSchedule';
 import { projectSignalProjects, readProjectSignals } from './projectSignalsRead';
+import { taskIngressReceiptFields } from './providerTaskIngress';
+import { createInteractionBudgetAt } from './interactionBudget';
 
 export interface RuntimeDataOperations {
   (request: RuntimeDataRequest): Promise<unknown>;
@@ -614,8 +616,11 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
           state = store.readRunState(project.projectId, Number(input.executionLogId));
           if (state.revision !== Number(checkpoint.expectedRevision)) throw new Error('revision_conflict');
         }
-        if (checkpoint.action === 'start') checkpoint.gitBaseline = await readWorkspaceGitHead(String(state.status.workspaceRoot));
-        if (['start', 'complete'].includes(String(checkpoint.action)) || (checkpoint.action === 'session-close' && (store.readMetadata(state.turnId).data.finished_at === null || state.status.nativeOutputPending === true))) {
+        if (checkpoint.action === 'start' && checkpoint.foregroundStart !== true) {
+          checkpoint.gitBaseline = String(state.status.baseGitHash || '') || await readWorkspaceGitHead(String(state.status.workspaceRoot));
+        }
+        if ((checkpoint.action === 'start' && checkpoint.foregroundStart !== true) || checkpoint.action === 'complete'
+          || (checkpoint.action === 'session-close' && (store.readMetadata(state.turnId).data.finished_at === null || state.status.nativeOutputPending === true))) {
           checkpoint.workspaceSnapshot = await snapshotWorkspace(String(state.status.workspaceRoot));
         }
         if (checkpoint.action !== 'start') checkpoint.gitEvidence = await captureRunGitEvidence(String(state.status.workspaceRoot), String(state.status.baseGitHash || ''), checkpoint.workspaceSnapshot as import('./runWorkspace').WorkspaceSnapshot | undefined);
@@ -662,6 +667,16 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
           await new RunNativeObserver(store).observe(state, true);
         } else await runs.recover();
         return { recovered: true };
+      }
+      case 'observe_run_task_ingress': {
+        const executionLogId = Number(input.executionLogId);
+        if (!Number.isSafeInteger(executionLogId) || executionLogId < 1) throw new Error('invalid_execution_log_id');
+        const project = await runProject(input);
+        const state = store.readRunCheckpointState(project.projectId, executionLogId);
+        if (state.generation !== Number(input.generation)) throw new Error('run_owner_conflict');
+        if (input.expectedTurnId && state.turnId !== String(input.expectedTurnId)) throw new Error('checkpoint_turn_conflict');
+        await new RunNativeObserver(store).observe(state);
+        return store.readRunState(project.projectId, executionLogId);
       }
       case 'write_project_growth': {
         const project = await store.registerProject({ root: String(input.root || '') });
@@ -805,7 +820,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         if (configuration !== undefined && !isAgentDatabaseConfigPath(provider as DatabaseAgentProvider, configuration)) throw new Error('invalid_agent_database_configuration');
         const project = await store.registerProject({ root: String(input.root || '') });
         const configPath = configureAgentDatabase({ provider: provider as DatabaseAgentProvider, configPath: configuration as string | undefined, command: input.command, globalDataPath: store.root });
-        if (provider === 'codex' && path.basename(configPath) === 'solomap.config.toml') retireManagedCodexBaseConfig(path.dirname(configPath));
+        if (provider === 'codex' && path.basename(configPath) !== 'config.toml') retireManagedCodexBaseConfig(path.dirname(configPath));
         return { ...project, configPath };
       }
       case 'import_memory': return migrations.enqueue(input);
@@ -960,7 +975,30 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       const bound = store.authorizedRunState(session.scope, session.runIdentity);
       const action = String(input.action || '');
       if (!['start', 'complete'].includes(action)) throw new Error('invalid_checkpoint_action');
-      if (action === 'start' && ['Running', 'Turn Started'].includes(String(bound.status.status)) && String(bound.status.checkpointEventId || '').endsWith(':start')) return bound;
+      if (bound.status.interactiveSession === true) {
+        if (String(input.turnId || '') !== bound.turnId) throw new Error('checkpoint_turn_conflict');
+        if (String(input.interactionId || '') !== String(bound.status.interactionId || '')) throw new Error('checkpoint_interaction_conflict');
+      }
+      const recordTaskIngress = (state: import('./runLifecycleTypes').RunState): import('./runLifecycleTypes').RunState => {
+        const observedAt = new Date().toISOString();
+        const patch = taskIngressReceiptFields(state.status, {
+          provider: String(state.status.sessionProvider || 'unknown'),
+          kind: 'mcp_task_start',
+          nativeTurnId: String(state.status.codexNativeTurnId || state.status.claudeNativeTurnId || state.turnId),
+          sessionId: String(state.status.nativeSessionId || state.status.plannedNativeSessionId || state.runId),
+          providerStartedAt: observedAt,
+          observedAt
+        });
+        if (!Object.keys(patch).length) return state;
+        return store.patchRunState(session.scope, {
+          executionLogId: session.runIdentity!.executionLogId,
+          generation: session.runIdentity!.generation,
+          expectedRevision: state.revision,
+          patch,
+          idempotencyKey: `run:${state.runId}:${state.generation}:task-ingress:${String(state.status.interactionId || state.turnId)}`
+        });
+      };
+      if (action === 'start' && ['Running', 'Turn Started'].includes(String(bound.status.status)) && String(bound.status.checkpointEventId || '').endsWith(':start')) return recordTaskIngress(bound);
       const payload = {
         action,
         ...(input.message === undefined ? {} : { message: String(input.message) }),
@@ -971,7 +1009,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       };
       const intentHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
       const sequenceKey = action === 'start' ? `:${bound.status.checkpointSequence}` : '';
-      return dispatch({ operation: 'checkpoint_run', input: {
+      const result = await dispatch({ operation: 'checkpoint_run', input: {
         projectId: session.scope,
         executionLogId: session.runIdentity.executionLogId,
         generation: session.runIdentity.generation,
@@ -980,7 +1018,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         expectedTurnId: bound.turnId,
         ...payload,
         idempotencyKey: `mcp-conversation:${bound.runId}:${bound.turnId}${sequenceKey}:${intentHash}`
-      } });
+      } }) as import('./runLifecycleTypes').RunState;
+      return action === 'start' ? recordTaskIngress(result) : result;
     }
     if (session.migrationKind) {
       if (!session.runIdentity) throw new Error('action_denied');
@@ -1073,11 +1112,13 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const parent = session.runIdentity ? store.authorizedRunState(session.scope, session.runIdentity).conversationId : undefined;
         const origin = tracking.origin(session.actorId, request.piToolFence?.operationId || session.intelligenceOperationId, parent);
         const reservation = tracking.reserve(session.scope, matches[0].projectId, origin, { ...input, mode, message, stepId, agentCli, model, idempotencyKey });
+        const interactionBudget = createInteractionBudgetAt(Number(reservation.launch.created_at), `conversation:${reservation.launch.ref}`);
         return { ...reservation, args: [JSON.stringify({
           projectPath, mode, message, ...(stepId ? { stepId } : {}),
           ...(agentCli ? { agentCli } : {}),
           ...(model ? { model } : {}),
-          launchIntentId: reservation.launch.launch_intent_id
+          launchIntentId: reservation.launch.launch_intent_id,
+          interactionBudget
         })] };
       };
       // Commit the launch reservation before the editor makes its own Runtime writes.
@@ -1095,7 +1136,10 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       try {
         const existing = tracking.describe(launch);
         const existingRun = existing.runId ? store.readRunIntent(String(launch.project_id), String(launch.launch_intent_id)) : null;
-        if (launch.acknowledged || (existingRun && (!existingRun.status.deliveryPending || existingRun.status.terminalCommandSubmittedAt))) {
+        const existingReceipt = existingRun?.status.taskIngressReceipt as { interactionId?: string } | undefined;
+        const existingVerdict = String(existingRun?.status.taskIngressVerdict || '');
+        if (launch.acknowledged || (existingRun && existingReceipt?.interactionId === existingRun.status.interactionId
+          && ['normal', 'degraded'].includes(existingVerdict))) {
           if (!launch.acknowledged) tracking.acknowledge(launch);
           return receipt();
         }

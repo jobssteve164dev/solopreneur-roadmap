@@ -9,6 +9,7 @@ export interface DatabaseAgentLaunch {
   continuation: boolean;
   direct: boolean;
   readOnly?: boolean;
+  codexProfile?: string;
 }
 
 export function buildDatabaseAgentCommand(launch: DatabaseAgentLaunch, runId: string, revision: number, workspaceRoot: string, interactive: boolean, sessionId = '', bindingNonce = '', claudeObserver = false): string {
@@ -23,7 +24,7 @@ export function buildDatabaseAgentCommand(launch: DatabaseAgentLaunch, runId: st
 function buildUnobservedDatabaseAgentCommand(launch: DatabaseAgentLaunch, runId: string, revision: number, workspaceRoot: string, interactive: boolean, sessionId = '', bindingNonce = ''): string {
   if (launch.schemaVersion !== 1 || !launch.agentCli || !/^[0-9a-f-]{36}$/.test(runId) || !Number.isInteger(revision) || revision < 1) throw new Error('run_agent_launch_invalid');
   if (launch.readOnly) {
-    const command = buildReadOnlyAgentCommandForPromptFile(launch.agentCli, '{{SOLOMAP_REVIEW_INPUT}}', workspaceRoot, launch.selectedModel);
+    const command = buildReadOnlyAgentCommandForPromptFile(launch.agentCli, '{{SOLOMAP_REVIEW_INPUT}}', workspaceRoot, launch.selectedModel, launch.codexProfile);
     if (!command) throw new Error('reviewer_read_only_mode_unsupported');
     return command;
   }
@@ -33,7 +34,7 @@ function buildUnobservedDatabaseAgentCommand(launch: DatabaseAgentLaunch, runId:
     ? `ELECTRON_RUN_AS_NODE=1 ${shellQuote(process.execPath)} ${shellQuote(path.join(__dirname, 'runCodexContinuation.js'))}`
     : buildAgentContinuationCommandForPromptFile(launch.agentCli, '', workspaceRoot, sessionId, launch.taskPermissionMode, launch.selectedModel, instruction);
   return launch.continuation
-    ? buildInteractiveAgentContinuationCommandForPromptFile(launch.agentCli, '', workspaceRoot, sessionId, launch.taskPermissionMode, launch.selectedModel, instruction)
-    : interactive ? buildInteractiveAgentCommandForPromptFile(launch.agentCli, '', workspaceRoot, launch.taskPermissionMode, launch.selectedModel, sessionId, bindingNonce, instruction)
-      : buildAgentCommandForPromptFile(launch.agentCli, '', workspaceRoot, launch.taskPermissionMode, launch.selectedModel, sessionId, instruction);
+    ? buildInteractiveAgentContinuationCommandForPromptFile(launch.agentCli, '', workspaceRoot, sessionId, launch.taskPermissionMode, launch.selectedModel, instruction, launch.codexProfile)
+    : interactive ? buildInteractiveAgentCommandForPromptFile(launch.agentCli, '', workspaceRoot, launch.taskPermissionMode, launch.selectedModel, sessionId, bindingNonce, instruction, launch.codexProfile)
+      : buildAgentCommandForPromptFile(launch.agentCli, '', workspaceRoot, launch.taskPermissionMode, launch.selectedModel, sessionId, instruction, launch.codexProfile);
 }

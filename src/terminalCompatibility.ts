@@ -24,11 +24,17 @@ function observe(options: TerminalDeliveryOptions, event: TerminalDeliveryObserv
   catch { /* Diagnostics cannot block terminal delivery. */ }
 }
 
+export function agentTerminalInputFrame(text: string, provider: string): Buffer {
+  // A bracketed paste is one editor insertion even when the request contains
+  // newlines. The final Enter is the only submit key for every supported TUI.
+  // Codex additionally requires this to clear raw-burst suppression.
+  void provider;
+  return Buffer.from(`\x1b[200~${text.replace(/\x1b/g, '\\u001b')}\x1b[201~\r`);
+}
+
 export function sendAgentTextWhenTerminalReady(terminal: Terminal, text: string, provider: string): Promise<boolean> {
-  // Codex buffers raw text bursts, including Enter. An explicit paste clears that
-  // suppression before the following submit key (Codex ChatComposer::handle_paste).
-  if (provider === 'codex') return sendTextWhenTerminalReady(terminal, `\x1b[200~${text.replace(/\x1b/g, '\\u001b')}\x1b[201~\r`, false);
-  return sendTextWhenTerminalReady(terminal, text);
+  const frame = agentTerminalInputFrame(text, provider).toString('utf8');
+  return sendTextWhenTerminalReady(terminal, frame, false);
 }
 
 async function waitForTerminalProcess(terminal: Terminal, options: TerminalDeliveryOptions): Promise<number | undefined> {

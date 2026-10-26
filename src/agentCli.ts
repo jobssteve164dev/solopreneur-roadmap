@@ -8,6 +8,12 @@ export function shellQuote(value: string): string {
 }
 
 const codexProfileArgs = '--profile solomap';
+const codexInteractiveTransportArgs = '--no-daemon';
+
+function codexProfileArguments(profile = 'solomap'): string {
+  if (profile !== 'solomap' && !/^solomap-[a-f0-9]{16}$/.test(profile)) throw new Error('codex_database_profile_invalid');
+  return `--profile ${profile}`;
+}
 
 export function normalizeTaskPermissionMode(value: unknown): string {
   return ['auto', 'always', 'never'].includes(String(value || '')) ? String(value) : 'auto';
@@ -466,7 +472,7 @@ export function buildAgentCommand(agentCli: string, agentPrompt: string, workspa
   return `${quotedCli} run --task ${quotedPrompt}`;
 }
 
-export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = '', newSessionId = '', promptInstruction = ''): string {
+export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = '', newSessionId = '', promptInstruction = '', codexProfile = 'solomap'): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const quotedPromptFile = shellQuote(promptFilePath);
@@ -478,8 +484,9 @@ export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath:
   const quotedPromptFileInstruction = shellQuote(promptFileInstruction);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    if (promptInstruction) return `${quotedCli} ${codexProfileArgs} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} ${quotedPromptFileInstruction}`;
-    return `cat ${quotedPromptFile} | ${quotedCli} ${codexProfileArgs} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} -`;
+    const profileArgs = codexProfileArguments(codexProfile);
+    if (promptInstruction) return `${quotedCli} ${profileArgs} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} ${quotedPromptFileInstruction}`;
+    return `cat ${quotedPromptFile} | ${quotedCli} ${profileArgs} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check${permissionSegment}${modelSegment} -`;
   }
   if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `${quotedCli} -p${permissionSegment}${modelSegment} --output-format text ${quotedPromptFileInstruction}`;
@@ -505,7 +512,7 @@ export function buildAgentCommandForPromptFile(agentCli: string, promptFilePath:
   return `${quotedCli} run --task ${quotedPromptFileInstruction}`;
 }
 
-export function buildInteractiveAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = '', newSessionId = '', bindingNonce = '', promptInstruction = ''): string {
+export function buildInteractiveAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = '', newSessionId = '', bindingNonce = '', promptInstruction = '', codexProfile = 'solomap'): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
@@ -517,7 +524,7 @@ export function buildInteractiveAgentCommandForPromptFile(agentCli: string, prom
   const quotedInstruction = shellQuote(promptFileInstruction);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} ${codexProfileArgs} --no-alt-screen -C ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} ${quotedInstruction}`;
+    return `${quotedCli} ${codexProfileArguments(codexProfile)} ${codexInteractiveTransportArgs} --no-alt-screen -C ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} ${quotedInstruction}`;
   }
   if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli}${permissionSegment}${modelSegment} ${quotedInstruction})`;
@@ -560,9 +567,9 @@ export function buildInteractiveCursorCommandForPromptFileWithSessionEnv(
   return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --resume "$${sessionEnvName}"${permissionSegment}${modelSegment} ${shellQuote(promptFileInstruction)})`;
 }
 
-export function buildInteractiveAgentContinuationCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, sessionId: string, taskPermissionMode = 'auto', selectedModel = '', promptInstruction = ''): string {
+export function buildInteractiveAgentContinuationCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, sessionId: string, taskPermissionMode = 'auto', selectedModel = '', promptInstruction = '', codexProfile = 'solomap'): string {
   if (!String(sessionId || '').trim()) {
-    return buildInteractiveAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, taskPermissionMode, selectedModel, '', '', promptInstruction);
+    return buildInteractiveAgentCommandForPromptFile(agentCli, promptFilePath, workspaceRoot, taskPermissionMode, selectedModel, '', '', promptInstruction, codexProfile);
   }
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
@@ -574,7 +581,7 @@ export function buildInteractiveAgentContinuationCommandForPromptFile(agentCli: 
   const quotedInstruction = shellQuote(promptFileInstruction);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} ${codexProfileArgs} resume --no-alt-screen -C ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} ${quotedSessionId} ${quotedInstruction}`;
+    return `${quotedCli} ${codexProfileArguments(codexProfile)} ${codexInteractiveTransportArgs} resume --no-alt-screen -C ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} ${quotedSessionId} ${quotedInstruction}`;
   }
   if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --resume ${quotedSessionId}${permissionSegment}${modelSegment} ${quotedInstruction})`;
@@ -597,7 +604,7 @@ export function buildInteractiveAgentContinuationCommandForPromptFile(agentCli: 
   return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} ${quotedSessionId} ${quotedInstruction})`;
 }
 
-export function buildReadOnlyAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, selectedModel = ''): string {
+export function buildReadOnlyAgentCommandForPromptFile(agentCli: string, promptFilePath: string, workspaceRoot: string, selectedModel = '', codexProfile = 'solomap'): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const quotedPromptFile = shellQuote(promptFilePath);
@@ -606,7 +613,7 @@ export function buildReadOnlyAgentCommandForPromptFile(agentCli: string, promptF
   const quotedInstruction = shellQuote(promptFileInstruction);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `cat ${quotedPromptFile} | ${quotedCli} ${codexProfileArgs} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --sandbox read-only --ask-for-approval never${modelSegment} -`;
+    return `cat ${quotedPromptFile} | ${quotedCli} ${codexProfileArguments(codexProfile)} exec --color always -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --sandbox read-only --ask-for-approval never${modelSegment} -`;
   }
   if (executableName === 'agy' || executableName === 'antigravity' || executableName === 'antigravity-cli') {
     return `cat ${quotedPromptFile} | ${quotedCli} --mode plan --sandbox --print-timeout 5m${modelSegment} --add-dir=${shellQuote(workspaceRoot)} --print`;

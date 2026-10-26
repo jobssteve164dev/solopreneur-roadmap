@@ -130,10 +130,11 @@ test('a slow shell records the readiness budget breach without dropping the even
 });
 
 test('Codex continuation uses one explicit paste followed by submit outside the paste', async () => {
-  const { sendAgentTextWhenTerminalReady } = require('../out/terminalCompatibility.js');
+  const { agentTerminalInputFrame, sendAgentTextWhenTerminalReady } = require('../out/terminalCompatibility.js');
   const delivered = []; const terminal = { processId: Promise.resolve(123), sendText: (text, addNewLine) => delivered.push({ text, addNewLine }) };
   assert.equal(await sendAgentTextWhenTerminalReady(terminal, '第一行\n第二行', 'codex'), true);
   assert.deepEqual(delivered, [{ text: '\x1b[200~第一行\n第二行\x1b[201~\r', addNewLine: false }]);
+  assert.equal(agentTerminalInputFrame('普通续聊\n下一行', 'claude').toString(), '\x1b[200~普通续聊\n下一行\x1b[201~\r');
 });
 
 test('all SoloMap-created command windows use the shared terminal readiness gate', () => {
@@ -144,13 +145,15 @@ test('all SoloMap-created command windows use the shared terminal readiness gate
   }
 });
 
-test('the SoloMap experience baseline requires terminal readiness and final script execution', () => {
+test('the SoloMap experience baseline requires direct runner delivery and Provider task ingress', () => {
   const baseline = fs.readFileSync(
     path.join(projectRoot, 'docs/ui/local-first-loading-interaction-baseline.zh.md'),
     'utf8'
   );
-  assert.match(baseline, /终端进程已就绪，正式命令已被接收并开始执行/);
-  assert.match(baseline, /不允许各入口直接调用 `sendText`/);
-  assert.match(baseline, /故意延迟终端 Shell 进程创建/);
-  assert.match(baseline, /最终运行脚本已经执行并产出状态文件/);
+  assert.match(baseline, /插件已取得与本次 interaction、run、generation 和 turn 精确绑定的 task-ingress 收据/);
+  assert.match(baseline, /`provider_native` 收据/);
+  assert.match(baseline, /`agent_acknowledged` 收据/);
+  assert.match(baseline, /`sendText\(\)`\/PTY write 返回或观察普通输出都不算完成/);
+  assert.match(baseline, /故意延迟或阻断普通终端 Shell\/PTY 进程创建/);
+  assert.match(baseline, /进程树和 terminal bridge 仅作诊断\/transport，永不结束计时/);
 });

@@ -113,6 +113,7 @@ async function continueReport(f, taskId, turnId, executionLogId) {
       getProjects: () => [{ path: f.project }], getPersistedSettings: () => ({ globalDataPath: f.root }),
       normalizeGlobalDataPathForExtension: root => root, isSoloMapLanguageZh: () => true,
       growthReports_js_1: require('../out/growthReports.js'), path,
+      interactionBudget_1: require('../out/interactionBudget.js'),
       panelMessages_1: require('../out/panelMessages.js'),
       vscode: { window: { showInputBox: async () => '继续完成日期选择' } },
       captureConversationLaunchTarget: (context, workspaceRoot, globalDataPath, settings) => capture.runInNewContext({ context, workspaceRoot, globalDataPath, settings,

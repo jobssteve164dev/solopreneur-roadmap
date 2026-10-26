@@ -7,6 +7,7 @@ import {
   recordLocalDiagnosticError,
   withLocalDiagnosticTrace
 } from './localDiagnostics';
+import { createInteractionBudget } from './interactionBudget';
 
 export interface TelegramSettings {
   telegramEnabled: boolean;
@@ -18,7 +19,7 @@ export interface TelegramHost {
   getSettings(): TelegramSettings;
   authorizeChat(username: string, chatId: string): Promise<boolean>;
   bindChat(chatId: string, acceptedOffset?: number): Promise<void>;
-  executeCommand(command: string, ...args: string[]): Promise<unknown>;
+  executeCommand(command: string, ...args: unknown[]): Promise<unknown>;
   offset?: number;
   saveOffset?(offset: number): void | Promise<void>;
   waitForReplies?: boolean;
@@ -451,6 +452,7 @@ export async function handleTelegramUpdate(context: TelegramHost, update: Telegr
  */
 async function dispatchTelegramCommand(context: TelegramHost, chatId: string, text: string, messageDate?: number, pollDurationMs = 0, update?: TelegramUpdate): Promise<void> {
   const lowercase = text.toLowerCase();
+  const interactionBudget = createInteractionBudget();
   if (!text.startsWith('/') && lowercase !== 'approve' && lowercase !== 'deny' && currentChatReply) {
     const reply = currentChatReply;
     const token = currentToken;
@@ -578,9 +580,11 @@ ${historyText}`;
       throw new Error('请输入要运行的环节ID，例如: /run 12');
     }
 
+    const projectInfo = await context.executeCommand('solopreneur.internalGetStatus') as any;
+    if (!projectInfo?.activeProject || !projectInfo.path) throw new Error('当前未选择可运行的本地项目。');
     const action = `run:${nodeId}`;
     await beginUpdateAction(context, update, action);
-    await context.executeCommand('solopreneur.internalRunAgent', nodeId);
+    await context.executeCommand('solopreneur.internalRunAgent', JSON.stringify({ nodeId, projectPath: String(projectInfo.path), interactionBudget }));
     await confirmUpdateAction(context, update, action);
     await sendUpdateReply(context, update, chatId, 'run-started', `⏳ <b>已启动本地 Agent 执行环节 ${nodeId}。</b>`, 'HTML');
     return;

@@ -44,6 +44,15 @@ async function roots(t) {
   return { base, project, a, b, engines, beforeClose, ownerA: await openAnalysisOwner(ownerContext, a, [{ path: project }]), ownerB: await openAnalysisOwner(ownerContext, b, [{ path: project }]) };
 }
 
+function ensureRollbackGitFixture(project) {
+  const childProcess = require('node:child_process');
+  childProcess.execFileSync('git', ['init', '--quiet', project]);
+  childProcess.execFileSync('git', ['-C', project, 'config', 'user.email', 'fixture@example.invalid']);
+  childProcess.execFileSync('git', ['-C', project, 'config', 'user.name', 'SoloMap Fixture']);
+  childProcess.execFileSync('git', ['-C', project, 'add', '-A']);
+  childProcess.execFileSync('git', ['-C', project, 'commit', '--quiet', '-m', 'fixture baseline']);
+}
+
 function engineHost(t, f, Engine = SyncEngine) {
   class OwnedEngine extends Engine { constructor(...args) { super(...args); f.engines.add(this); } }
   const scope = { fs, path, console, setTimeout: () => {}, syncEngine: null, activeProjectRoot: '', syncEngineReady: false,
@@ -210,6 +219,7 @@ function extensionHost(t, f, options = {}) {
     vm.runInContext(source, host);
   } finally { Module._load = originalLoad; }
   vm.runInContext(`
+    legacyConversationDeliveryHarnessForTests = ${options.productionTerminalContract === true ? 'false' : 'true'};
     getPersistedSettings = () => pendingPersistedSettings || settings;
     getProjects = () => [{ path: project, name: 'Project' }];
     getSelectedProjectPath = () => project;
@@ -653,7 +663,7 @@ test('saving a new root rebinds the already active action engine before any late
   assert.deepEqual(f.ownerB.store.readProjectJournal(f.ownerB.projectIds.get(f.project)).logs.map(log => log.output), ['after settings save']);
 });
 
-test('a live terminal continues only the selected root turn despite an equal-ID terminal mapping', async t => {
+test('a name-only terminal cannot receive a continuation and the new task keeps the selected root', async t => {
   const f = await roots(t), a = await nativeSource(f, f.a, f.ownerA, 'A'), b = await nativeSource(f, f.b, f.ownerB, 'B');
   const { RunLifecycleClient, runStatusReference } = require('../out/runLifecycleClient.js');
   for (const [label, owner, source] of [['A', f.ownerA, a], ['B', f.ownerB, b]]) {
@@ -668,17 +678,20 @@ test('a live terminal continues only the selected root turn despite an equal-ID 
       expectedRevision: state.revision, patch: { terminalName: `source-${label}` }, idempotencyKey: `terminal:${label}` } });
   }
   const beforeB = f.ownerB.store.readRunState(b.projectId, 1);
-  const { scope, vscode, deliveries, messages } = extensionHost(t, f), sentA = [], sentB = [];
+  const { scope, vscode, deliveries, messages } = extensionHost(t, f, { productionTerminalContract: true }), sentA = [], sentB = [];
   vscode.window.terminals.push({ name: 'source-A', processId: Promise.resolve(process.pid), show() {}, sendText: text => sentA.push(text) },
     { name: 'source-B', processId: Promise.resolve(process.pid), show() {}, sendText: text => sentB.push(text) });
   scope.mapTerminal(1, 'source-B'); await scope.bindEngine();
   vscode.window.showInputBox = async () => { scope.settings = { ...scope.settings, globalDataPath: f.b }; await scope.bindEngine(); return '继续来源 A'; };
   await scope.dispatchGrowth({ command: 'growth.reportAction', projectPath: f.project, taskId: `task-${a.taskId}`, executionLogId: 1,
     turnId: a.turnId, kind: 'continue', actionId: 'continue-live-source' });
-  assert.equal(deliveries.length, 0); assert.equal(sentA.length, 1, JSON.stringify(messages)); assert.deepEqual(sentB, []);
-  const afterA = f.ownerA.store.readRunState(a.projectId, 1);
+  assert.equal(deliveries.length, 1, JSON.stringify(messages)); assert.deepEqual(sentA, []); assert.deepEqual(sentB, []);
+  const afterA = f.ownerA.store.readRunState(a.projectId, 2);
   assert.notEqual(afterA.turnId, a.turnId); assert.equal(afterA.taskId, a.taskId); assert.equal(afterA.status.journalExecutionLogId, 2);
-  assert.match(sentA[0], /继续来源 A/); assert.ok(sentA[0].includes(afterA.turnId));
+  assert.equal(deliveries[0].globalDataPath, f.a); assert.equal(deliveries[0].conversationId, 2);
+  const launchRequest = f.ownerA.store.readRunDocument(a.projectId, 2, 'launch_request');
+  const launchPayload = Buffer.from(launchRequest.bytes, 'base64').toString('utf8');
+  assert.match(launchPayload, /继续来源 A/);
   assert.equal(f.ownerB.store.readRunState(b.projectId, 1).revision, beforeB.revision);
   assert.equal(f.ownerB.store.readProjectJournal(b.projectId).logs.length, 1);
   assert.equal(fs.existsSync(path.join(f.project, '.solopreneur/agent-runs')), false);
@@ -993,6 +1006,7 @@ for (const restored of [false, true]) test(`closing a terminal that executed its
   const { shellQuote } = require('../out/agentCli.js');
   const { RunLifecycleClient, runStatusReference } = require('../out/runLifecycleClient.js');
   const f = await roots(t);
+  ensureRollbackGitFixture(f.project);
   const cliDir = path.join(path.dirname(f.project), 'fake-cli'); fs.mkdirSync(cliDir);
   const previousClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
   process.env.CLAUDE_CONFIG_DIR = cliDir;
@@ -1068,7 +1082,8 @@ for (const entry of ['resume', 'prepare', 'review', 'review-revision']) test(`or
   const f = await roots(t), { prepareAgentRun } = require('../out/agentRunPreparation.js');
   const input = { agentCli: 'claude', selectedModel: 'original-model', prompt: '完整原始意图', workspaceRoot: f.project,
     nodeId: '__solo__', executionLogId: 0, userMessage: '原任务重试', runKind: 'solo', globalDataPath: f.b,
-    taskPermissionMode: 'auto', launchIntentId: `restored-ordinary-${entry}`, ...(entry === 'review' ? { readOnlyReview: true } : {}) };
+    taskPermissionMode: 'auto', launchIntentId: `restored-ordinary-${entry}`,
+    metadata: { reviewerCliPath: '', collaborationReviewMode: 'high_risk' }, ...(entry === 'review' ? { readOnlyReview: true } : {}) };
   const a = await prepareAgentRun(input, (operation, input) => f.ownerA.ops({ operation, input }));
   const b = await prepareAgentRun(input, (operation, input) => f.ownerB.ops({ operation, input }));
   const id = Number(a.status.rootExecutionLogId), original = f.ownerA.store.readRunDocument(a.projectId, id, 'launch_request');
@@ -1135,7 +1150,8 @@ for (const entry of ['resume', 'prepare', 'review', 'review-revision']) test(`or
   const f = await roots(t), { prepareAgentRun } = require('../out/agentRunPreparation.js');
   const input = { agentCli: 'claude', selectedModel: '', prompt: '完整已投递任务', workspaceRoot: f.project, nodeId: '__solo__',
     executionLogId: 0, userMessage: '重复同一意图', runKind: 'solo', globalDataPath: f.a, taskPermissionMode: 'auto',
-    launchIntentId: `claimed-ordinary-${entry}`, ...(entry === 'review' ? { readOnlyReview: true } : {}) };
+    launchIntentId: `claimed-ordinary-${entry}`, metadata: { reviewerCliPath: '', collaborationReviewMode: 'high_risk' },
+    ...(entry === 'review' ? { readOnlyReview: true } : {}) };
   const a = await prepareAgentRun(input, (operation, input) => f.ownerA.ops({ operation, input }));
   const id = Number(a.status.rootExecutionLogId);
   await f.ownerA.ops({ operation: 'claim_run', input: { projectId: a.projectId, executionLogId: id, expectedRevision: a.revision, idempotencyKey: `actual-claim-${entry}` } });
@@ -1162,7 +1178,8 @@ for (const completed of [false, true]) for (const changed of ['moved', 'replaced
   const input = { agentCli: 'codex', selectedModel: '', prompt: '完整已接受 Codex 任务🌿', workspaceRoot: f.project, nodeId: '__solo__',
     executionLogId: 0, userMessage: '重试原意图', runKind: 'solo', globalDataPath: f.b, taskPermissionMode: 'auto',
     launchIntentId: `accepted-codex-${completed}-${changed}`, nativeSessionId: sessionId, continuation: true,
-    metadata: { codexResumeTranscriptPath: transcript, nativeResumeProviderContext: { codex: { codexHome: home } } } };
+    metadata: { codexResumeTranscriptPath: transcript, nativeResumeProviderContext: { codex: { codexHome: home } },
+      reviewerCliPath: '', collaborationReviewMode: 'high_risk' } };
   const prepared = await prepareAgentRun(input, call), id = Number(prepared.status.rootExecutionLogId);
   await call('claim_run', { projectId: prepared.projectId, executionLogId: id, expectedRevision: prepared.revision, idempotencyKey: 'actual-codex-claim' });
   if (completed) {

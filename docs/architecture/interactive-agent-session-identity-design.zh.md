@@ -83,20 +83,22 @@ SoloMap 必须在首次交互开始时，将这一次运行与一个**唯一、�
 | GitHub Copilot CLI | `--session-id <uuid>` 创建或恢复精确会话；`/session` 可显示当前 ID | 是 | 调用方预分配 | 代码已接入；真实 CLI 门槛待环境具备后补齐 |
 | Grok Build | `--session-id <uuid>` 指定新会话；`--resume <id>` 恢复 | 是 | 调用方预分配 | 代码已接入；真实 CLI 门槛待环境具备后补齐 |
 | Cursor Agent | `agent create-chat` 创建空聊天并返回 ID；`--resume <chatId>` 恢复 | 是 | Provider 先创建，再恢复进入 TUI | 代码已接入；本机真实双轮被登录门槛阻塞 |
-| OpenCode | Server / SDK `session.create` 创建会话；`opencode attach ... --session <id>` 将 TUI 连接到指定会话 | 是 | Provider 先创建，再 attach TUI | 正式合同候选，首条提示投递需真实验收 |
+| OpenCode | Server / SDK `session.create` 创建会话；`opencode run --attach ... --session <id> --interactive <prompt>` 将首轮送入指定会话；`opencode attach ... --session <id>` 保留原生 TUI | 是 | Provider 先创建；首轮 `run` 后 `exec attach`，插件续轮与用户输入都复用该 attach TUI 的输入桥 | OpenCode 1.19.2 首轮和 attach 后真实续轮已验证；禁止使用存在 attach-ready 竞态的 TUI 控制接口投递插件提示 |
 | Antigravity CLI | Hook 事件包含 `conversationId`；状态栏输入也包含 `conversation_id`；`--conversation <id>` 恢复 | 是 | Provider 官方回调 | 正式合同候选，Hook 安装隔离需真实验收 |
 | Codex CLI | App Server `thread/start` 返回 thread ID；CLI TUI 可通过 `--remote` 连接 App Server，`resume --remote <端点> <id>` 进入指定 thread | 是，但 App Server / remote transport 仍为官方实验能力 | Provider 先创建，再由原生 TUI 远程恢复；真实组合失败时用精确兼容关联 | 本机 0.151.0 实验组合失败；精确 nonce 兼容已接入 |
 
 这里的“正式合同”只表示身份原语由 Provider 官方文档定义，不表示 SoloMap 实现已经通过真实 CLI 验收。每个 Provider 仍必须通过本文后续的并发和续聊验收，才能标记为生产可用。
 
-## 2026-09-02 落地与真实验收状态
+## 2026-09-02 历史落地与验收记录
+
+本节只保留当日版本证据，不代表 2026-10-25 的安装状态或当前发布结论。当前本机已可发现 Codex `0.163.0`、Claude Code `2.1.301`、Cursor Agent `2026.10.14-941492e`、GitHub Copilot CLI `1.0.98`、OpenCode `1.19.2`、Grok `1.0.52` 与 Antigravity CLI `1.4.0`；是否生产可用仍以新候选包逐 Provider 的 task-ingress、并发、续轮与真实宿主门禁为准。
 
 - 已落地统一 version 2 运行级绑定、revision compare-and-swap、`confirmed` 唯一可续聊、CLI 真实路径与版本复核，以及冲突/不可用后立即失效。
 - 环节级派生指针在跨 Extension Host 文件 lease 内重读、比较并原子替换；旧运行晚结束不能覆盖较新运行，读取时仍必须回查对应 confirmed revision。
 - 已落地 Claude Code、GitHub Copilot CLI、Grok Build 的调用方 UUID 路径和能力探测；Claude 首个检查点还会精确核对 `CLAUDE_CODE_SESSION_ID`。
 - 已落地 Cursor `create-chat -> planned -> --resume <chatId> -> 首个检查点 confirmed`。本机 Cursor `2026.08.25-3e8eec8` 已真实返回 chat ID `f47dbf32-13f4-48eb-a10f-e49bc9f61f78`，但进入原生 TUI 时因本机未登录而在首轮前终止；该对象明确归类为“已创建、未产生消息并保留”，不能算双轮通过。
-- 本机 Codex `0.151.0` 已真实执行 `app-server -> thread/start -> resume --remote <thread.id>`；TUI 返回 `thread/resume failed: no rollout found for thread id`，因此该版本不启用实验路径。当前生产路径只使用高熵 nonce、精确工作区、启动时间、首个 user 记录和唯一候选组成的兼容关联。
-- 本机 Antigravity CLI `1.1.22` 的项目级 `PreInvocation` Hook 模拟在模型调用前被账号地域资格拒绝，没有产生回调；OpenCode、Claude、Copilot 和 Grok CLI 当前未安装。因此这些 Provider 不伪造真实验收结论：没有通过本文门槛的首次绑定只能保持 `unavailable`。
+- 当时本机 Codex `0.151.0` 已真实执行 `app-server -> thread/start -> resume --remote <thread.id>`；TUI 返回 `thread/resume failed: no rollout found for thread id`，因此该版本未启用实验路径。当时生产路径只使用高熵 nonce、精确工作区、启动时间、首个 user 记录和唯一候选组成的兼容关联。
+- 当时本机 Antigravity CLI `1.1.22` 的项目级 `PreInvocation` Hook 模拟在模型调用前被账号地域资格拒绝，没有产生回调；当时 OpenCode、Claude、Copilot 和 Grok CLI 未安装。因此该次记录没有伪造真实验收结论；它不能替代当前版本重新验收。
 - 续聊本身也创建新的 version 2 运行级记录，先记录传入的精确恢复目标，再由本次原生 TUI 的首个检查点确认；不会因 direct command 重新落回旧格式捕获。
 
 ## 统一身份模型
@@ -123,7 +125,9 @@ type SessionIdentityContract =
 
 ### 运行级绑定记录
 
-每次用户发起交互对话，都先建立一个运行级记录；建议把它作为当前 `.solopreneur/agent-runs/<scope>/<runId>/session.json` 的下一版结构，而不是只写环节级索引：
+> 2026-10-25 现状更正：下列 version 2 结构仍是有效的逻辑模型，但当前生产权威已经是统一数据库中的 run/session binding、revision 和 evidence 行。`.solopreneur/agent-runs/.../session.json`、`.solopreneur/step-sessions/...` 与 `codex-home.txt` 只作为 legacy import/compatibility 来源；新运行不得再把它们写成权威事实源。`src/db/unifiedDataStore.ts` 的 `readRunBinding/writeRunBinding` 与 `session_bindings` 表才是当前代码事实。
+
+每次用户发起交互对话，都先在统一数据库建立一个运行级绑定；逻辑结构如下：
 
 ```ts
 interface SessionBindingRevision {
@@ -176,10 +180,10 @@ interface NativeSessionBinding {
 - `headRevision` 始终指向最后追加的 revision，不论其状态；所有 compare-and-swap 都以它作为单调比较基准。
 - `resumableRevision` 只有在它等于 `headRevision` 且该 revision 为 `confirmed` 时才有效。追加任何 `preparing`、`planned`、`conflict` 或 `unavailable` revision 时，必须在同一次原子写入中移除 `resumableRevision`，旧 confirmed 只保留审计价值，不能继续恢复。
 - 用户在 TUI 内切换或清空会话时追加新 revision，并通过 `supersedesRevision` 关联旧确认记录；历史 revision 不修改、不删除。
-- 整份 `session.json` 在运行级 lease 下以 compare-and-swap 检查预期 revision，再通过临时文件替换原子写入；并发更新失配进入 `identity_index_conflict`，不能后写覆盖。
-- Codex 的规范化绝对 `CODEX_HOME` 与 `thread.sessionId` 必须和对应 `thread.id` 写入同一个 revision。现有 `codex-home.txt` 只作为旧格式兼容输入；version 2 写入后即以 `session.json` 为权威，不能让 companion file 单独改变恢复目标。
-- App Server endpoint、PID 和一次性回调票据属于易失运行状态，可以写入同一 run 目录的 `runtime.json`；它们不得决定 session ID，重载时必须先用 session revision 校验 Provider 存储，再重建 endpoint。
-- 项目级 `.solopreneur/step-sessions/<nodeId>.json` 继续作为派生索引，并保存 `{ runId, revision, sessionId }` 指针；它不是本次运行的事实源。每次续聊都必须回读对应 `session.json`，确认 `headRevision === resumableRevision === revision` 且状态仍为 `confirmed`。因此即使两个文件之间发生崩溃，旧索引也只能造成入口暂时缺失，不能恢复旧会话。
+- 绑定在同一数据库事务中以 expected head revision 做 compare-and-swap；并发更新失配进入 `identity_index_conflict`，不能后写覆盖。
+- Codex 的规范化绝对 `CODEX_HOME` 与 `thread.sessionId` 必须和对应 `thread.id` 写入同一个数据库 revision。legacy `codex-home.txt/session.json` 只能由迁移器读取，不能单独改变当前恢复目标。
+- runner endpoint、PID/birth 和一次性回调票据属于易失运行状态，进入受 generation/delivery fencing 的控制记录；它们不得决定 Provider session ID。重载时必须先从数据库 revision 校验 Provider 存储，再重建或重连 endpoint。
+- legacy `.solopreneur/step-sessions/<nodeId>.json` 仅参与迁移。生产续聊从数据库会话/运行关联回读对应 binding，确认 head 与 resumable revision 一致且状态仍为 `confirmed`；旧文件不能覆盖数据库或让旧会话重新可续聊。
 
 ## 统一生命周期
 
@@ -204,7 +208,7 @@ confirmSessionIdentity
 
 具体顺序：
 
-1. 插件创建 `runId`、`bindingNonce` 和运行目录，原子写入 `preparing`。
+1. 插件创建 `runId`、`bindingNonce` 和数据库 run 记录，原子写入 `preparing`。
 2. 适配器按 Provider 能力准备 ID：预分配、调用创建接口，或创建本次运行专属的回调接收票据。
 3. 如果启动命令需要明确 ID，必须先原子写入 `planned`，再打开终端。
 4. CLI 接受官方指定 ID、Provider 创建结果通过读回验证，或回调/兼容证据唯一命中后，原子写入 `confirmed`。
@@ -222,17 +226,18 @@ confirmSessionIdentity
 
 | Provider 路径 | 可以把 `planned` 提升为 `confirmed` 的机器证据 |
 | --- | --- |
-| Claude Code caller-assigned | 能力探测确认 `--session-id`；CLI 未拒绝该参数；本次包装提示触发的首个 SoloMap 检查点可同时读回 `CLAUDE_CODE_SESSION_ID`，且与 planned UUID 完全一致 |
-| Copilot / Grok caller-assigned | 能力探测确认参数；CLI 未拒绝该参数；本次包装提示对应的首个 SoloMap 检查点已到达。Provider 提供 `/session` 或结构化事件时，再做精确 ID 交叉核验 |
-| Cursor provider-created | `create-chat` 返回单一 ID；`--resume <id>` 未被 CLI 拒绝；该 TUI 中本次包装提示对应的首个 SoloMap 检查点已到达 |
-| OpenCode provider-created | 创建响应和 `GET /session/:id` 一致；attach 就绪后，Server 上该 Session 出现本次首轮 message / status 事件 |
-| Antigravity provider-callback | `PreInvocation` Hook 通过本次运行票据、精确工作区和时间窗口回传单一 `conversationId` |
+| Claude Code caller-assigned | 能力探测确认 `--session-id`；observer plugin 的根 `turn.start` 回传同一 `CLAUDE_CODE_SESSION_ID/sessionId`、providerTurnId 与本次 user UUID，且与 planned UUID 完全一致 |
+| Copilot caller-assigned | 能力探测确认参数；同一 Session/root agent 在提交前 offset 后持久化匹配本次内容哈希的 `user.message`，随后出现同 `interactionId` 的 `assistant.turn_start`；user event 带 `turnId` 时两者还必须相等 |
+| Grok caller-assigned | 能力探测确认参数；绑定 Session 的持久原生事件出现本轮 `turn_started`，并继续进入 `waiting_for_model/loop_started` |
+| Cursor provider-created | `create-chat` 返回单一 ID；`--resume <id>` 后，全部 submit hooks 放行且绑定 transcript 在候选 generation/offset 后持久化本轮 user row |
+| OpenCode provider-created | 创建响应和 `GET /session/:id` 一致；首轮指定同一 ID 的 `run --attach --session --interactive`；插件续轮由已绑定 attach TUI 的输入桥提交。两者都要求提交前 message 基线之后出现新的 user message，其 text part 摘要等于本 attempt 写入内容摘要，随后同 Session 出现 `session.status=busy`；首轮完成后进程链 `exec attach --session <id>` 进入同一原生 TUI |
+| Antigravity provider-callback | pending attempt 建立后，首个同 conversationId、精确 workspace 与 transcriptPath 的 `PreInvocation`；`invocationNum` 只作诊断 |
 | Codex provider-created | 控制连接上的 `thread/start` 响应、TUI `resume --remote` 目标和该 `thread.id` 的首个 `turn/started` 事件三者一致，且没有另建 thread |
-| Codex compatibility | transcript 同时满足 nonce、精确工作区、启动时间、user 角色和唯一候选；零个或多个候选都不能确认 |
+| Codex compatibility | formal spawn 前 watcher 捕获 transcript create/append；先由 nonce、精确工作区、启动 fence、user 角色唯一绑定候选，再在同一 transcript 收到该轮 `task_started`；零个或多个候选都不能确认 |
 
-检查点只证明本次包装提示已经在该 TUI 中开始执行，不能单独生成或猜测 Provider ID。若 Provider 的官方参数语义与检查点冲突，以 Provider 的明确拒绝或官方事件为准，进入 `conflict`。
+Host 预登记、run `Running`、普通 checkpoint 和 Agent 自报都不能单独确认 Provider 身份。只有上表中由 CLI 生命周期产生、并与当前 run/attempt 精确绑定的机器事件可以把 planned 提升为 confirmed；若官方参数语义与机器事件冲突，以 Provider 明确拒绝或官方事件为准，进入 `conflict`。
 
-首轮由插件预登记，因此不会再发一次 `start`；首轮 `complete` 是该 TUI 的首个可验证检查点。后续轮次以 `start` 为首个检查点。两种事件都只能确认启动前已经写入的 planned ID，不能从检查点输出中抽取新 ID。
+首轮与后续轮都必须先建立唯一 pending attempt，再由 Provider task-ingress 事件确认；不得再以“首轮已预登记，所以等 complete”作为身份或启动证据。MCP `start/complete` 只补充业务 checkpoint，不能从其输出中抽取或猜测 Provider ID。
 
 ## 各 Provider 的首次绑定协议
 
@@ -262,7 +267,7 @@ confirmSessionIdentity
 1. 生成全新 UUID，并检查它没有出现在 SoloMap 本地绑定索引中。
 2. 先持久化 planned。
 3. 启动 copilot --session-id <uuid> -i <SoloMap 包装提示>。
-4. 交互会话建立后确认；/session 或退出信息只作为附加核验。
+4. 同一 Session/root agent 的持久事件满足本次 `user.message → assistant.turn_start` 强收据后确认；`userPromptSubmitted/userPromptTransformed` 只建立候选，不得提前确认。`/session` 或退出信息只作为附加核验。
 5. 后续继续使用同一个 --session-id <uuid>。
 ```
 
@@ -272,7 +277,7 @@ confirmSessionIdentity
 
 Grok Build 官方支持 `--session-id <UUID>` 创建指定会话和 `--resume <id>` 恢复。现有 SoloMap 已有预生成 ID 的基础，应把它纳入统一的 `planned -> confirmed` 生命周期，而不是保留成 Provider 特例。
 
-首次启动和恢复规则与 Claude Code 相同。原生 TUI 已有直接的官方参数，不引入其他交互协议。
+首次启动和恢复规则与 Claude Code 相同，但确认事件不是 `UserPromptSubmit`：它可能阻断提示。只有绑定 Session 的持久原生状态满足 `turn_started → waiting_for_model/loop_started` 后才确认；被 hook 阻断、直接处理或在入环前崩溃均不得确认。原生 TUI 已有直接的官方参数，不引入其他交互协议。
 
 ### Cursor Agent：先创建聊天，再进入原生 TUI
 
@@ -285,7 +290,7 @@ Cursor 当前官方参数文档提供 `agent create-chat`，用于创建空聊�
 2. 运行 agent create-chat，严格解析其成功输出中的单一 chat ID。
 3. 保存 planned，并把 Provider 创建响应作为证据。
 4. 启动 agent --resume <chatId> <现有原生交互参数与包装提示>。
-5. TUI 成功进入该聊天后确认。
+5. `beforeSubmitPrompt` 只保存候选 conversation/session/generation 与提交前 offset；全部 submit hooks 放行且绑定 transcript 在该 offset 后持久化本轮 user row，才确认。
 ```
 
 如果旧版 Cursor 不支持 `create-chat`：
@@ -294,9 +299,9 @@ Cursor 当前官方参数文档提供 `agent create-chat`，用于创建空聊�
 - 不得退回扫描最近 chat 或从混合终端文本中抽取任意 UUID。
 - 不得探测或启用 ACP 作为兼容路径。
 
-### OpenCode：Server 创建 Session，再 attach 指定 TUI
+### OpenCode：Server 创建 Session，指定 Session 投递，再 attach 原生 TUI
 
-OpenCode 官方 Server 和 SDK 都能创建 Session；官方 CLI 的 `attach` 可以连接到运行中的 Server，并通过 `--session <id>` 打开指定会话。这给出了明确的“Provider 创建 + 原生 TUI 连接”路径。
+OpenCode 官方 Server 和 SDK 都能创建 Session；官方 CLI 的 `run` 可以通过 `--attach`、`--session`、`--dir` 和 `--interactive` 把首轮正式任务送入指定会话，`attach` 则可以在该轮结束后通过相同 `--session <id>` 保留原生 TUI。插件后续轮和用户在终端内继续输入都复用这个现存 attach 进程，不再启动第二个 `run`，也不暂停、替换或并行争用该 Session 的 TUI。
 
 设计流程：
 
@@ -304,16 +309,20 @@ OpenCode 官方 Server 和 SDK 都能创建 Session；官方 CLI 的 `attach` �
 1. 启动只绑定 loopback 的、由本次运行或 SoloMap 管理的 opencode serve。
 2. 通过官方 POST /session 创建 Session，取得精确 ID。
 3. 通过 GET /session/:id 读回验证并保存 planned。
-4. 启动 opencode attach <server-url> --session <id> --dir <workspace>。
-5. 使用官方 TUI 控制接口投递 SoloMap 包装提示并提交，或证明当前版本支持等价的指定 Session 初始提示方式。
-6. TUI 与 Server 都确认同一 ID 后写入 confirmed。
+4. 启动 opencode run --attach <server-url> --session <id> --dir <workspace> --interactive <prompt>。
+5. 提交前记录该 Session 已有 message ID/Server event cursor 和本轮完整桥接字节的 SHA-256；Server 在 cursor 之后出现新的 user message，其 text part 摘要与本 attempt 完全相等，随后同一 Session 出现 `session.status=busy`，才写入 confirmed 和 task-start receipt。
+6. 本轮 `run` 正常结束后，同一受控进程链 `exec opencode attach <server-url> --session <id> --dir <workspace> --mini --no-replay`，让用户留在该原生 TUI；attach 不重建 Session，也不承担本轮 task-ingress 证明。
+7. 插件发起后续轮时，在同一 terminal binding 的输入队列中先原子建立 attempt、记录 message/event 基线与预期内容摘要，再把提示文本与 submit 作为一个不可拆分的输入帧写入已存活的 attach PTY。用户键盘输入和插件帧按同一 sequence 排序；只有基线后的新 user message 同时满足 message ID 未见、完整 text 摘要相等、Provider createdAt 不早于 accepted fence，随后出现同 Session busy，才可认领插件 attempt。摘要不匹配的并发直接输入只能建立独立候选或记录冲突，绝不能认领插件 attempt。
+8. 用户直接在 attach TUI 提交时没有插件预期摘要；adapter 从基线后的新 user message 建立 direct-input attempt，并以其 message ID 固定身份，再由随后同 Session busy 确认。插件 pending 存在时，任何不匹配 user message 均不得覆盖、完成或释放它。
 ```
 
-这里有一个必须在实现前通过真实 CLI 关闭的接口组合问题：官方分别定义了创建 Session、attach TUI、向 TUI 追加/提交提示，但文档本身不保证所有版本中“创建后立即 attach，再由控制接口提交首条包装提示”的时序完全一致。因此：
+2026-10-25 在隔离的临时 XDG/配置目录、loopback 临时端口和空工作区中对 OpenCode 1.19.2 做了真实 CLI 验证，结论如下：
 
-- 这条路径是正式 API 组成的设计候选，但不能仅凭静态文档宣布生产可用。
-- 实现必须等待 attach 就绪事件，确认 TUI 当前 Session 与创建结果一致，再提交首条提示。
-- 如果真实验收失败，保持原生 TUI 可用，但该版本不承诺自动续聊；不得改用 `session list` 取最新记录。
+- `POST /session` 创建的 ID 可由 `GET /session/:id` 精确读回；指定该 ID 的 `run --attach --session --dir --interactive` 在同一 Session 中产生 user、assistant 和 `busy → idle` 原生事件，进程成功退出，工作区没有产生文件。
+- 将上述 `run` 与 `exec attach --session <同一 ID>` 串联后，正式轮次完成，进程继续存活于同一 Session 的原生 TUI；服务端事件和读回消息都只属于预先创建的 ID。
+- 在该 attach TUI 已存活后，通过同一 PTY 输入桥写入第二条提示并提交，Server 在同一 Session 新增第二组 user/assistant message；第二条 user text 与桥写入内容逐字相等且 SHA-256 一致，attach 进程始终存活，没有启动第二个 `run`，工作区仍无文件。这关闭了插件续轮复用现存原生 CLI 的实现选择。
+- 反证探针中，先启动 `attach`、随后立即调用 `/tui/append-prompt` 与 `/tui/submit-prompt` 时，两次接口都在约 60ms 返回 `true`，但 attach 的订阅尚未就绪，6 秒内没有生成任何消息。这个返回值不是 attach-ready 或 task-ingress 证明。
+- 因此正式路径不得调用 TUI append/submit 接口投递插件提示，也不得用固定等待、终端回显或接口布尔值弥补竞态。若运行时能力探测不支持上述 `run` 参数组合，该 OpenCode 版本直接判为不支持，不能退回 `session list`、最新会话或无强收据的 attach 控制路径。
 
 这与 [OpenCode 深度适配设计](./opencode-deep-adapter-design.zh.md) 中无人值守结构化运行并不冲突：本文只规定用户主动发起的原生交互终端如何取得稳定身份。
 
@@ -328,7 +337,7 @@ Antigravity 官方 Hook 的公共输入包含 `conversationId`、`workspacePaths
 2. 使用增量、可审计、保留用户原配置的方式注册 SoloMap Hook。
 3. Hook 只在存在本次运行环境票据时上报 conversationId、workspacePaths 和 transcriptPath；普通 Antigravity 会话直接放行。
 4. 接收端同时校验票据、精确工作区、回调时间窗口和单一 conversationId。
-5. 唯一命中后写入 confirmed；后续用 --conversation <id> 恢复。
+5. pending attempt 建立后，首个同 conversationId、精确 workspace 与 transcriptPath 的 `PreInvocation` 唯一命中后写入 confirmed；`invocationNum` 只作诊断，不假设首轮或续轮为 0。后续用 --conversation <id> 恢复。
 ```
 
 配置约束：
@@ -473,7 +482,7 @@ A 只能确认 A，B 只能确认 B；C 不能被任一运行吸收。按工作�
 
 ### 阶段三：关闭官方接口组合风险
 
-- OpenCode：真实验证 `serve -> POST /session -> attach --session -> 投递首条包装提示 -> 多轮续聊`。
+- OpenCode：已在 1.19.2 真实验证 `serve -> POST/GET session -> 首轮 run --attach --session --interactive -> 同 Session 原生事件 -> exec attach -> 现存 attach PTY 输入续轮 -> 同 Session 新消息`；实现和版本验收必须保持这条无 TUI 控制竞态、无第二个续轮进程的链路，并覆盖内容摘要、message/event 基线和并发输入门禁。
 - Antigravity：验证 Hook 的作用域、并发、原配置保留和首次 `PreInvocation` 回调。
 - Codex：真实验证 `app-server -> thread/start -> resume --remote <id> -> 多轮 -> Server 重启后恢复`，并确认没有另建 thread。
 - 只有完整验收通过后，才把相应 Provider 标记为稳定续聊可用。

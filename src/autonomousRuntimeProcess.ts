@@ -17,7 +17,7 @@ import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig, refreshCogn
 import { EmbeddedPiAgentEngine } from './piAgentEngine';
 import { sendRuntimeControlCommand, startRuntimeControlServer } from './autonomousRuntimeControl';
 import { runtimeBuildId, runtimeReleaseVersion } from './runtimeBuildIdentity';
-import { classifyDiagnosticFailure, configureLocalDiagnosticPersistence, createLocalDiagnosticTrace, importLegacyLocalDiagnostics, recordLocalDiagnosticError } from './localDiagnostics';
+import { classifyDiagnosticFailure, configureLocalDiagnosticPersistence, createLocalDiagnosticTrace, importLegacyLocalDiagnostics, recordLocalDiagnosticError, sanitizeDiagnosticText } from './localDiagnostics';
 import { runPiMainPathRequestFile } from './piMainPathRuntime';
 import { startTelegramBackgroundRuntime } from './telegramRuntime';
 import { UnifiedDataStore } from './db/unifiedDataStore';
@@ -36,6 +36,7 @@ function argumentValue(name: string): string {
 }
 
 let closeFailedRuntimeInitialization: (() => Promise<void>) | undefined;
+let runtimeInitializationId = '';
 
 function intervalValue(): number {
   const parsed = Number(argumentValue('--interval-ms') || 30_000);
@@ -103,6 +104,7 @@ async function main(): Promise<void> {
   }
 
   const runtimeId = argumentValue('--runtime-id') || crypto.randomUUID();
+  runtimeInitializationId = runtimeId;
   const databaseRoot = normalizeGlobalDataPathForExtension(globalDataPath);
   const runtimeWasInitialized = process.argv.includes('--database-required')
     || (!argumentValue('--runtime-id') && runtimeRootRequiresExistingDatabase(databaseRoot));
@@ -388,9 +390,13 @@ async function main(): Promise<void> {
 
 void main().catch(async error => {
   const globalDataPath = argumentValue('--global-data-path');
-  if (globalDataPath) recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.initialize', classifyDiagnosticFailure(error));
+  const failureReason = sanitizeDiagnosticText(error);
+  const failureCode = /^[a-z0-9_]{1,80}$/i.test(failureReason) ? failureReason : classifyDiagnosticFailure(error);
+  if (globalDataPath) recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.initialize', failureCode);
   try { await closeFailedRuntimeInitialization?.(); }
   catch (cleanupError) { process.stderr.write(`SoloMap Runtime initialization cleanup: ${String(cleanupError)}\n`); }
+  const runtimeId = argumentValue('--runtime-id') || runtimeInitializationId;
+  if (globalDataPath && runtimeId) updateRuntimeState(globalDataPath, runtimeId, { status: 'failed', failureCode, failureReason });
   process.stderr.write(`SoloMap Runtime could not initialize autonomous execution: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 });

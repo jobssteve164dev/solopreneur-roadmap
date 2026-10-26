@@ -94,6 +94,8 @@ test('fallback runtime health requires a matching live control response', async 
   assert.equal(transitionalChecks, 2);
   fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'test', pid: process.pid, status: 'paused', heartbeatAt: new Date().toISOString() }));
   assert.deepEqual(await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), async () => ({ ok: true, runtimeId: 'test', status: 'paused' })), { healthy: true, reason: 'paused' });
+  fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'test', pid: process.pid, status: 'failed', heartbeatAt: new Date().toISOString(), failureCode: 'pi_release_build_conflict', failureReason: 'pi_release_build_conflict' }));
+  assert.deepEqual(await host.inspectAutonomousRuntimeHealth(globalRoot, process.pid, Date.now(), live), { healthy: false, reason: 'pi_release_build_conflict' });
 });
 
 test('a live runtime without control cannot be adopted or replaced', async t => {

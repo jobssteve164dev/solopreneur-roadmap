@@ -61,19 +61,27 @@ test('the final shared runner registers Windows wrapper and gated child identiti
   const registrations = [];
   let state = { projectId: 'project', runId: 'run', turnId: 'ab12cd34-1234-4123-8123-ab12cd34ef56', generation: 1, revision: 1, proof: 'fixture-proof',
     status: { baseGitHash: 'base', interactiveSession: true, status: 'Running' } };
-  const child = Object.assign(new EventEmitter(), { pid: 43, exitCode: null, signalCode: null, stdio: [null, new PassThrough(), new PassThrough(), new PassThrough()] });
-  child.stdout = child.stdio[1]; child.stderr = child.stdio[2];
+  const child = Object.assign(new EventEmitter(), { pid: 43, exitCode: null, signalCode: null, stdio: [new PassThrough(), new PassThrough(), new PassThrough(), new PassThrough()] });
+  child.stdin = child.stdio[0]; child.stdout = child.stdio[1]; child.stderr = child.stdio[2];
   child.kill = () => { child.exitCode = 143; setImmediate(() => child.emit('close', 143, null)); return true; };
   const w = windowsModules({
     process: { argv: ['node', 'runner', '--global-data-path', '/fixture/global', '--project-path', '/fixture/project', '--execution-log-id', '1'] },
     child: { spawn: () => child },
     modules: {
       './agentCli': { ...require('../out/agentCli.js'), getAgentProvider: () => 'fixture' },
+      './preSessionGit': {
+        createPreSessionGitCommit: async () => 'a'.repeat(40),
+        retainPreSessionGitCommit: async () => 'a'.repeat(40)
+      },
       './autonomousRuntimeControl': { ...require('../out/autonomousRuntimeControl.js'), sendRuntimeDataRequest: async (_root, request) => {
         const { operation, input } = request;
         if (operation === 'read_run_execution_plan') return { ...state, command: 'fixture command', prompt: '完整输入' };
         if (operation === 'claim_run') { registrations.push({ pid: input.agentPid, birth: input.processBirth }); return state; }
         if (operation === 'patch_run_state') {
+          if (!input.patch.agentChildPid) {
+            state = { ...state, revision: state.revision + 1, status: { ...state.status, ...input.patch } };
+            return state;
+          }
           registrations.push({ pid: input.patch.agentChildPid, birth: input.patch.processChildBirth });
           state = { ...state, status: { ...state.status, finishedAt: 'fixture-boundary' } };
           throw new Error('fixture stops before releasing the launch gate');

@@ -16,33 +16,28 @@ async function fixture(provider) {
   return { base, root, project, state, call, async close() { await operations.close(); store.close(); } };
 }
 
-test('Claude enables the whole-turn adapter only after observing supported native capabilities without invalidating older sessions', async () => {
+test('Claude launch never executes capability probes on the foreground task path', async () => {
   const { prepareNativeAgentLaunch } = require('../out/agentRunPreflight.js');
-  for (const version of ['2.1.289 (Claude Code)', '2.1.286 (Claude Code)']) {
-    const f = await fixture('claude');
-    try {
-      const prepared = await prepareNativeAgentLaunch({ state: f.state, workspaceRoot: f.project, operation: f.call, prepareDatabase: false,
-        execute: async command => ({ code: 0, stdout: Buffer.from(command.endsWith('--version') ? version : '--session-id --plugin-dir'), stderr: Buffer.alloc(0) }) });
-      assert.equal(prepared.status.claudeNativeObserverCapable, version.startsWith('2.1.289'));
-      assert.equal(prepared.status.claudeNativeContract, 'transcript-v1', 'a supported version does not prove the user allows the adapter to load');
-      assert.equal((await f.call('read_run_binding', { root: f.project, executionLogId: 1 })).revisions.at(-1).state, 'planned');
-    } finally { await f.close(); }
-  }
+  const f = await fixture('claude');
+  try {
+    const prepared = await prepareNativeAgentLaunch({ state: f.state, workspaceRoot: f.project, operation: f.call, prepareDatabase: false,
+      execute: async () => { assert.fail('foreground launch must not wait for --help or --version'); } });
+    assert.notEqual(prepared.status.claudeNativeObserverCapable, true);
+    assert.equal((await f.call('read_run_binding', { root: f.project, executionLogId: 1 })).revisions.at(-1).state, 'planned');
+  } finally { await f.close(); }
 });
 
-for (const provider of ['claude', 'copilot', 'grok']) test(`${provider} preserves required official session capability before launching`, async () => {
+for (const provider of ['claude', 'copilot', 'grok']) test(`${provider} launches with its planned session without a foreground capability subprocess`, async () => {
   const modulePath = path.resolve(__dirname, '../out/agentRunPreflight.js');
   assert.ok(fs.existsSync(modulePath), 'shared launch must retain the native session capability preflight');
   const { prepareNativeAgentLaunch } = require(modulePath);
   const f = await fixture(provider); const calls = [];
   try {
-    await assert.rejects(prepareNativeAgentLaunch({ state: f.state, workspaceRoot: f.project, operation: f.call, prepareDatabase: false, execute: async command => { calls.push(command); return { code: 0, stdout: Buffer.from('old CLI without the required flag'), stderr: Buffer.alloc(0) }; } }), error => error.exitCode === 126);
-    assert.equal(calls.length, 1); assert.match(calls[0], /--help/);
+    const prepared = await prepareNativeAgentLaunch({ state: f.state, workspaceRoot: f.project, operation: f.call, prepareDatabase: false, execute: async command => { calls.push(command); return { code: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) }; } });
+    assert.equal(calls.length, 0);
     const binding = await f.call('read_run_binding', { root: f.project, executionLogId: 1 });
-    assert.equal(binding.revisions.at(-1).state, 'unavailable');
-    assert.equal(binding.revisions.at(-1).errorCode, 'identity_capability_missing');
-    const state = await f.call('read_run_state', { projectId: f.state.projectId, executionLogId: 1 });
-    assert.equal(state.status.failureCode, 'identity_capability_missing');
+    assert.equal(binding.revisions.at(-1).state, 'planned');
+    assert.equal(prepared.status.failureCode, undefined);
     assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'agent-runs')), false);
   } finally { await f.close(); }
 });

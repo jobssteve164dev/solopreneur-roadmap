@@ -9,7 +9,7 @@ import { buildDatabaseAgentCommand, DatabaseAgentLaunch } from './agentDatabaseL
 import { prepareNativeAgentLaunch, CapturedAgentProcess } from './agentRunPreflight';
 import type { RunState } from './runLifecycleTypes';
 import { snapshotWorkspace, workspaceDocumentPurpose, workspaceChanges, readWorkspaceGitHead } from './runWorkspace';
-import { createPreSessionGitCommit } from './preSessionGit';
+import { createPreSessionGitCommit, retainPreSessionGitCommit } from './preSessionGit';
 import { buildReadOnlyAgentCommandForPromptFile } from './agentCli';
 import { getCodexSessionHome, NativeSessionBinding } from './sessionIdentity';
 import { readWindowsProcessBirthMarker } from './processIdentity.js';
@@ -42,12 +42,12 @@ async function main(): Promise<void> {
   const deliveryStartedAt = Number(process.env.SOLOMAP_DELIVERY_STARTED_AT || Date.now());
   let diagnosticSequence = 0;
   let diagnosticQueue = Promise.resolve();
-  const recordDeliveryStage = (scope: string, pid = process.pid): void => {
+  const recordDeliveryStage = (scope: string, pid = process.pid, status: 'start' | 'ok' | 'error' = 'ok'): void => {
     if (!diagnosticTraceId) return;
     const occurredAt = new Date().toISOString();
     diagnosticQueue = diagnosticQueue.then(() => sendRuntimeDataRequest(globalDataPath, { operation: 'append_diagnostic_event', input: {
         kind: 'operation', occurredAt, scope,
-        payload: { traceId: diagnosticTraceId, interactionId: diagnosticTraceId, status: 'ok', durationMs: 0,
+        payload: { traceId: diagnosticTraceId, interactionId: diagnosticTraceId, status, durationMs: 0,
           elapsedMs: Math.max(0, Date.now() - deliveryStartedAt), ...(Number.isInteger(pid) && pid > 0 ? { pid } : {}) },
         idempotencyKey: `runner-diagnostic:${diagnosticTraceId}:${process.pid}:${++diagnosticSequence}`
       } }).then(() => undefined)).catch(() => undefined);
@@ -237,7 +237,10 @@ async function main(): Promise<void> {
     if (!command.trim()) throw new Error('run_command_required');
     const heads = await Promise.all(streams.map(stream => request<{ nextSequence: number; totalBytes: number }>('read_run_log_head', { ...identity, stream })));
     await checkStopped();
-    const inner = terminal ? `if command -v script >/dev/null 2>&1; then exec script -q -f -e -c ${shellQuote(command)} /dev/null; else exec bash -c ${shellQuote(command)}; fi` : `exec bash -c ${shellQuote(command)}`;
+    const terminalColumns = Math.max(20, Math.min(1000, Math.floor(Number(process.env.SOLOMAP_TERMINAL_COLUMNS) || 120)));
+    const terminalRows = Math.max(5, Math.min(500, Math.floor(Number(process.env.SOLOMAP_TERMINAL_ROWS) || 30)));
+    const terminalCommand = `stty rows ${terminalRows} cols ${terminalColumns} 2>/dev/null || true; ${command}`;
+    const inner = terminal ? `if command -v script >/dev/null 2>&1; then exec script -q -f -e -c ${shellQuote(terminalCommand)} /dev/null; else exec bash -c ${shellQuote(terminalCommand)}; fi` : `exec bash -c ${shellQuote(command)}`;
     // The child cannot execute the Agent before its PID is durably registered.
     // If the wrapper dies before releasing fd 3, EOF exits this gate.
     const env: NodeJS.ProcessEnv = { ...process.env, ...(codexHome ? { CODEX_HOME: codexHome } : {}), SOLOMAP_TASK_COMMAND: path.join(__dirname, 'taskCheckpointProcess.js'), SOLOMAP_GLOBAL_DATA_PATH: globalDataPath, SOLOMAP_PROJECT_ID: plan.projectId, SOLOMAP_EXECUTION_LOG_ID: String(executionLogId), SOLOMAP_RUN_GENERATION: String(generation), SOLOMAP_RUN_PROOF: proof, SOLOMAP_RUN_KIND: String(plan.status.runKind || ''), SOLOMAP_TASK_TURN_ID: state.turnId };
@@ -247,10 +250,24 @@ async function main(): Promise<void> {
     env.ELECTRON_RUN_AS_NODE = '1';
     child = childProcess.spawn('bash', ['-c', `IFS= read -r solomap_launch_gate <&3 || exit 125; [ "$solomap_launch_gate" = launch ] || exit 125; exec 3<&-; ${inner}`], {
       cwd: executionRoot,
-      stdio: ['inherit', 'pipe', 'pipe', 'pipe'],
+      // The runner owns this pipe. Extension Host EOF must not become Agent
+      // EOF; only an explicit stop or the Agent itself may end the session.
+      stdio: [terminal ? 'pipe' : 'inherit', 'pipe', 'pipe', 'pipe'],
       env,
       detached: process.platform !== 'win32'
     });
+    const forwardInput = (bytes: Buffer) => {
+      if (!child?.stdin || child.stdin.destroyed || child.stdin.writableEnded) return;
+      try { child.stdin.write(bytes); } catch { /* The child exit path owns settlement. */ }
+    };
+    if (terminal) {
+      child.stdin!.on('error', () => {});
+      process.stdin.on('data', forwardInput);
+      child.once('close', () => {
+        process.stdin.removeListener('data', forwardInput);
+        process.stdin.pause();
+      });
+    }
     exited = once(child, 'close') as Promise<[number | null, NodeJS.Signals | null]>;
     // Observe spawn rejection immediately, including a missing shell.
     void exited.catch(() => undefined);
@@ -290,20 +307,6 @@ async function main(): Promise<void> {
     await checkStopped();
     return { code, stdout: Buffer.concat(collected[0]), stderr: Buffer.concat(collected[1]) };
   };
-  const startupFailed = async (offsets: number[]): Promise<boolean> => {
-    const patterns = [Buffer.from('app server did not become ready'), Buffer.from('app-server-control.sock: No such file or directory')];
-    const overlap = Math.max(...patterns.map(value => value.length)) - 1;
-    for (const [index, stream] of ['stdout', 'stderr'].entries()) {
-      let offset: number | null = offsets[index]; let carry = Buffer.alloc(0);
-      do {
-        const page: { bytes: string; nextOffset: number | null } = await request('read_run_log', { ...identity, stream, offset, limit: 65536 });
-        const bytes = Buffer.concat([carry, Buffer.from(page.bytes, 'base64')]);
-        if (patterns.some(pattern => bytes.includes(pattern))) return true;
-        carry = bytes.subarray(Math.max(0, bytes.length - overlap)); offset = page.nextOffset;
-      } while (offset !== null);
-    }
-    return false;
-  };
   const writeHostOutput = async (value: string): Promise<void> => {
     const bytes = Buffer.from(value);
     const head = await request<{ nextSequence: number; totalBytes: number }>('read_run_log_head', { ...identity, stream: 'stdout' });
@@ -323,33 +326,62 @@ async function main(): Promise<void> {
       claudeConfigDirOverride = context?.configDirOverride === null ? null : String(context?.configDirOverride || context?.claudeHome || '') || undefined;
       if (claudeConfigDirOverride && !path.isAbsolute(claudeConfigDirOverride)) throw new Error('identity_provider_context_invalid');
     }
-    if (!state.status.baseGitHash) {
-      const baseGitHash = (plan.status.runKind === 'agent_review_revision' || plan.status.preSessionGitBackup === true)
+    const rollbackRequired = interactive || plan.status.runKind === 'agent_review_revision' || plan.status.preSessionGitBackup === true;
+    if (rollbackRequired) recordDeliveryStage('terminal.delivery.rollback.snapshot', process.pid, 'start');
+    let baseGitHash = String(state.status.baseGitHash || '');
+    if (!baseGitHash) {
+      baseGitHash = rollbackRequired
         ? await createPreSessionGitCommit(projectRoot) || ''
         : await readWorkspaceGitHead(projectRoot);
+    } else if (rollbackRequired) {
+      baseGitHash = await retainPreSessionGitCommit(projectRoot, baseGitHash) || '';
+    }
+    if (rollbackRequired) recordDeliveryStage('terminal.delivery.rollback.snapshot', process.pid, baseGitHash ? 'ok' : 'error');
+    if (rollbackRequired && !baseGitHash) {
+      await diagnosticQueue;
+      throw new Error('pre_session_git_backup_failed');
+    }
+    if (baseGitHash !== String(state.status.baseGitHash || '')) {
       await patch({ baseGitHash });
     }
     const baselinePurpose = workspaceDocumentPurpose(state.turnId, 'before');
-    if (!await request('read_run_document', { ...identity, purpose: baselinePurpose })) {
-      const baseline = await snapshotWorkspace(projectRoot);
+    const persistBaseline = async () => {
+      const baselineExists = Boolean(await request('read_run_document', { ...identity, purpose: baselinePurpose }));
+      if (baselineExists) return;
+      const baselineCapture = snapshotWorkspace(projectRoot);
+      const baseline = await baselineCapture;
       await request('write_run_document', { ...identity, generation, turnId: state.turnId, purpose: baselinePurpose, bytes: Buffer.from(JSON.stringify(baseline)).toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: `run:${plan.runId}:${generation}:workspace:before:${state.turnId}` });
-    }
+    };
+    recordDeliveryStage('terminal.delivery.workspace.baseline', process.pid, 'start');
+    const baselinePersistence = persistBaseline().then(() => {
+      recordDeliveryStage('terminal.delivery.workspace.baseline');
+    }, async error => {
+      recordDeliveryStage('terminal.delivery.workspace.baseline', process.pid, 'error');
+      await diagnosticQueue;
+      throw error;
+    });
+    // The mandatory Git rollback snapshot above is already sealed before the
+    // Agent may start. Let the secondary file-metadata baseline overlap native
+    // CLI initialization so storage I/O cannot delay the user's conversation.
+    if (!interactive) await baselinePersistence;
     let command = plan.command;
     const launch = plan.status.agentLaunch as DatabaseAgentLaunch | undefined;
     if (launch?.readOnly) {
       const materialized = await request<{ path: string }>('materialize_run_prompt', { ...identity, generation, proof });
       temporaryInput = true;
-      command = buildReadOnlyAgentCommandForPromptFile(launch.agentCli, materialized.path, projectRoot, launch.selectedModel);
+      command = buildReadOnlyAgentCommandForPromptFile(launch.agentCli, materialized.path, projectRoot, launch.selectedModel, launch.codexProfile);
       if (!command) throw new Error('reviewer_read_only_mode_unsupported');
     } else if (launch) {
-      state = await prepareNativeAgentLaunch({ state, workspaceRoot: projectRoot, operation: request, execute: (command, stream) => execute(command, [`preflight:${stream}:stdout`, `preflight:${stream}:stderr`], false, false, true) });
+      state = await prepareNativeAgentLaunch({ state, workspaceRoot: projectRoot, globalDataPath, operation: request, execute: (command, stream) => execute(command, [`preflight:${stream}:stdout`, `preflight:${stream}:stderr`], false, false, true) });
       if (!launch.direct) {
         const sessionId = String(state.status.plannedNativeSessionId || '');
         command = buildDatabaseAgentCommand({ ...launch, continuation: launch.continuation || (getAgentProvider(launch.agentCli) === 'cursor' && Boolean(sessionId)) }, plan.runId, plan.revision, executionRoot, interactive, sessionId, String(state.status.bindingNonce || ''), state.status.claudeNativeObserverCapable === true);
       }
     }
-    const initialHeads = await Promise.all(['stdout', 'stderr'].map(stream => request<{ totalBytes: number }>('read_run_log_head', { ...identity, stream })));
-    const execution = await execute(command, ['stdout', 'stderr'], interactive, true, Boolean(launch?.readOnly));
+    const formalExecution = execute(command, ['stdout', 'stderr'], interactive, true, Boolean(launch?.readOnly));
+    void formalExecution.catch(() => undefined);
+    if (interactive) await baselinePersistence;
+    const execution = await formalExecution;
     let { code } = execution;
     if (maintenance && plan.status.maintenanceResultPath && !await captureMaintenanceResult() && code === 0) throw new Error('maintenance_result_missing');
     if (launch?.readOnly) {
@@ -369,15 +401,6 @@ async function main(): Promise<void> {
       if (result) {
         const document = await request<{ objectId: string; revision: number }>('write_run_document', { ...identity, generation, turnId: state.turnId, purpose: 'review_result', bytes: Buffer.from(JSON.stringify(result)).toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: `run:${plan.runId}:${generation}:review-result` });
         await patch({ reviewResultObjectId: document.objectId, reviewResultRevision: document.revision });
-      }
-    }
-    if (code !== 0 && interactive && launch && getAgentProvider(launch.agentCli) === 'codex' && await startupFailed(initialHeads.map(head => head.totalBytes))) {
-      const cli = shellQuote(launch.agentCli);
-      const fallback = command.startsWith(`${cli} resume `) ? `${cli} resume --no-daemon ${command.slice(`${cli} resume `.length)}`
-        : command.startsWith(`${cli} `) ? `${cli} --no-daemon ${command.slice(`${cli} `.length)}` : '';
-      if (fallback) {
-        await writeHostOutput('\n会话启动暂时不可用，正在自动重试。\n');
-        ({ code } = await execute(fallback, ['stdout', 'stderr'], true, true));
       }
     }
     state = await request<RunState>('read_run_state', identity);

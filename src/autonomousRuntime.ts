@@ -116,6 +116,8 @@ export interface RuntimeState {
   startedAt: string;
   heartbeatAt: string;
   databaseId?: string;
+  failureCode?: string;
+  failureReason?: string;
 }
 
 interface RuntimeLeaseOptions {

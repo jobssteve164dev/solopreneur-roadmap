@@ -28,24 +28,74 @@ test('a run-bound MCP checkpoint starts the prepared conversation in the existin
   try {
     const project = await f.call('register_project', { root: f.project });
     f.store.appendProjectJournal(project.projectId, 'prepared-card', { nodeId: '__solo__', timestamp: new Date().toISOString(), agentCli: 'codex', command: '', output: '完成用户目标', status: 'Preparing' }, 1);
-    const prepared = await f.call('prepare_run', { ...request(f.project), status: 'Preparing' });
+    const interactionBudget = require('../out/interactionBudget.js').createInteractionBudget({
+      wallMs: Date.now(), bootId: 'integration-boot', uptimeMs: 1000, interactionId: 'mcp-ingress-integration'
+    });
+    const prepared = await f.call('prepare_run', { ...request(f.project), status: 'Preparing', metadata: { interactionBudget, interactionId: interactionBudget.interactionId, sessionProvider: 'grok' } });
     const ready = await f.call('patch_run_inputs', { projectId: prepared.projectId, executionLogId: 1, generation: prepared.generation, expectedRevision: prepared.revision, prompt: '完整任务输入', command: 'codex', status: 'Running', idempotencyKey: 'mcp-ready' });
     assert.equal(f.store.readRunTurnJournal(prepared.projectId, 1).entry.status, 'Preparing');
     const opened = await f.operations({ operation: 'open_mcp_session', input: { projectId: prepared.projectId, openRequestId: 'mcp-conversation-start', runIdentity: { executionLogId: 1, generation: ready.generation, proof: prepared.proof } } });
-    const started = await f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'start' } });
+    const startIdentity = { turnId: ready.turnId, interactionId: interactionBudget.interactionId };
+    const started = await f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'start', ...startIdentity } });
     assert.equal(started.turnId, prepared.turnId, 'starting the initial conversation must not create another turn');
     assert.equal(started.status.status, 'Running');
     assert.equal(started.status.checkpointSequence, 1);
+    assert.equal(started.status.taskIngressReceipt.interactionId, interactionBudget.interactionId);
+    assert.equal(started.status.taskIngressReceipt.provider, 'grok');
+    assert.equal(started.status.taskIngressReceipt.kind, 'mcp_task_start');
+    assert.equal(started.status.taskIngressReceipt.authority, 'agent_acknowledged');
     assert.equal(f.store.readRunTurnJournal(prepared.projectId, 1).entry.status, 'Running');
-    const replay = await f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'start' } });
+    const replay = await f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'start', ...startIdentity } });
     assert.equal(replay.revision, started.revision);
     const report = { schemaVersion: 1, summary: '本轮结果', unmetRequirements: [], decisions: [], corrections: [], verification: [], commits: [], experienceUsage: [], lessons: [] };
-    const completed = await f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'complete', outcome: 'partial', summary: '本轮结果', report } });
+    const completed = await f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'complete', ...startIdentity, outcome: 'partial', summary: '本轮结果', report } });
     assert.equal(completed.status.status, 'In Progress');
     assert.equal(f.store.readRunTurnJournal(prepared.projectId, 1).entry.status, 'In Progress');
-    const completedReplay = await f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'complete', outcome: 'partial', summary: '本轮结果', report } });
+    const completedReplay = await f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'complete', ...startIdentity, outcome: 'partial', summary: '本轮结果', report } });
     assert.equal(completedReplay.revision, completed.revision);
     await f.operations({ operation: 'close_mcp_session', input: { sessionToken: opened.sessionToken } });
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('an Agent start acknowledgement preserves the CLI rollback snapshot instead of replacing it with HEAD', async () => {
+  const f = fixture();
+  const git = (...args) => require('node:child_process').execFileSync('git', ['-C', f.project, ...args], { encoding: 'utf8' }).trim();
+  try {
+    git('init', '-q'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
+    fs.writeFileSync(path.join(f.project, 'work.txt'), 'rollback snapshot'); git('add', 'work.txt'); git('commit', '-q', '-m', 'rollback snapshot');
+    const rollbackSnapshot = git('rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(f.project, 'work.txt'), 'later head'); git('add', 'work.txt'); git('commit', '-q', '-m', 'later head');
+    const currentHead = git('rev-parse', 'HEAD');
+    assert.notEqual(currentHead, rollbackSnapshot);
+
+    const run = await f.call('prepare_run', request(f.project));
+    const baseline = await f.call('patch_run_state', { projectId: run.projectId, executionLogId: 1, generation: run.generation,
+      expectedRevision: run.revision, patch: { baseGitHash: rollbackSnapshot }, idempotencyKey: 'retain-cli-rollback-baseline' });
+    const started = await f.call('checkpoint_run', { projectId: run.projectId, executionLogId: 1, generation: run.generation,
+      proof: run.proof, expectedRevision: baseline.revision, expectedTurnId: baseline.turnId, action: 'start',
+      message: 'Agent 已收到任务', idempotencyKey: 'agent-start-preserves-rollback' });
+
+    assert.equal(started.status.baseGitHash, rollbackSnapshot);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('a delayed MCP start cannot acknowledge a newer host turn or interaction', async () => {
+  const f = fixture();
+  try {
+    const { createInteractionBudget } = require('../out/interactionBudget.js');
+    const firstBudget = createInteractionBudget({ wallMs: Date.now(), bootId: 'integration-boot', uptimeMs: 1000, interactionId: 'first-interaction' });
+    const prepared = await f.call('prepare_run', { ...request(f.project), status: 'Preparing', metadata: { interactionBudget: firstBudget, interactionId: firstBudget.interactionId, sessionProvider: 'grok', interactiveSession: true } });
+    const ready = await f.call('patch_run_inputs', { projectId: prepared.projectId, executionLogId: 1, generation: prepared.generation, expectedRevision: prepared.revision, prompt: '完整任务输入', command: 'grok', status: 'Running', idempotencyKey: 'mcp-stale-ready' });
+    const opened = await f.operations({ operation: 'open_mcp_session', input: { projectId: prepared.projectId, openRequestId: 'mcp-stale-session', runIdentity: { executionLogId: 1, generation: ready.generation, proof: prepared.proof } } });
+    const first = await f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'start', turnId: ready.turnId, interactionId: firstBudget.interactionId } });
+    const completed = await f.call('checkpoint_run', { projectId: first.projectId, executionLogId: 1, generation: first.generation, proof: prepared.proof, expectedRevision: first.revision, expectedTurnId: first.turnId, action: 'complete', outcome: 'partial', summary: '第一轮完成', idempotencyKey: 'mcp-stale-complete' });
+    const secondBudget = createInteractionBudget({ wallMs: Date.now(), bootId: 'integration-boot', uptimeMs: 2000, interactionId: 'second-interaction' });
+    const accepted = f.store.patchRunState(completed.projectId, { executionLogId: 1, generation: completed.generation, expectedRevision: completed.revision, patch: { interactionBudget: secondBudget, interactionId: secondBudget.interactionId, taskIngressReceipt: null, taskIngressVerdict: '' }, idempotencyKey: 'mcp-stale-second-budget' });
+    const second = await f.call('checkpoint_run', { projectId: accepted.projectId, executionLogId: 1, generation: accepted.generation, proof: prepared.proof, expectedRevision: accepted.revision, expectedTurnId: accepted.turnId, action: 'start', message: '第二轮', foregroundStart: true, interactionId: secondBudget.interactionId, idempotencyKey: 'mcp-stale-second-start' });
+    await assert.rejects(f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'start', turnId: first.turnId, interactionId: firstBudget.interactionId } }), /checkpoint_turn_conflict/);
+    await assert.rejects(f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'complete', turnId: first.turnId, interactionId: firstBudget.interactionId, outcome: 'partial', summary: '迟到完成' } }), /checkpoint_turn_conflict/);
+    const unchanged = await f.call('read_run_state', { projectId: second.projectId, executionLogId: 1 });
+    assert.equal(unchanged.status.taskIngressReceipt, null);
   } finally { await f.operations.close(); f.store.close(); }
 });
 
