@@ -2,7 +2,7 @@
 
 > 建立时间：2026-10-25 UTC  
 > 主目标：所有由插件发起、用户可感知的对话，在用户动作被接受后 **10 秒内进入真实 Agent CLI 任务**；新对话和续聊均以 Provider 原生任务开始或与当前 run/turn/interaction 精确绑定的 Agent loop 收据为准。终端创建、`processId`、命令写入、runner spawn 均不算任务开始。  
-> 当前结论：**主线修复已通过最终源码、最终候选包和真实门禁，等待提交、推送与 CI 收口。** 任务前 Git 基线作为“可撤回”能力完整保留；0.0.625/r13 在隔离 code-server、两个 CPU 负载和真实 Codex CLI 下 7.569 秒进入 Provider task，MCP 往返、项目配置隔离、隐藏回滚 ref、HEAD/用户文件不变均通过。
+> 当前结论：**主线修复已提交、推送并发布为 0.0.625。** 任务前 Git 基线作为“可撤回”能力完整保留；0.0.625/r13 在隔离 code-server、两个 CPU 负载和真实 Codex CLI 下 7.569 秒进入 Provider task，MCP 往返、项目配置隔离、隐藏回滚 ref、HEAD/用户文件不变均通过。
 
 ## 1. 状态口径
 
@@ -44,7 +44,7 @@
 | 最终 r13 VSIX 结构审计 | 通过 | 6335 文件，11.48 MiB 压缩、38.78 MiB 解压。 |
 | 最终 r13 真实 Codex 门禁 | 通过 | 7.569 秒进入 Provider task；observer delay 3.173 秒；MCP 往返、两路 CPU burner、profile、Git ref、HEAD/工作树不变均通过。 |
 | Runtime 升级接管 | 通过 | 0.0.625 PID 3884064 接管 0.0.624 PID 3700738；新 endpoint 为 build `478320a9fe985551aca581ca52e368d93dae9420f8b0db21daab2546f94eeb17`，旧 PID 已退出，health 返回 `ok`。 |
-| Git commit / push / CI | 未完成 | 最终真实验收通过后执行。 |
+| Git commit / push / CI / publish | 通过 | 实现 `f4128e8`、自动发布 `13db58d`；CI `40272156144` 与 Publish `40272156120` 成功，Open VSX 可用性回读通过。Security `40272156101` 仍仅失败于本轮未修改的既有依赖告警。 |
 
 ## 4. 当前未闭合项
 
@@ -64,7 +64,7 @@
 4. MCP 完成、项目 profile、Git hidden ref、HEAD 与用户文件不变已在同一 gate 验证；正常续聊由历史真实 8.938 秒样本和最终代码回归共同覆盖。
 5. interaction 可直接给出 Provider start、observer delay、MCP、profile 和 Git 分段证据。
 6. 完整测试 2679 项已自然退出，2678 通过、0 失败、1 个环境条件跳过。
-7. 提交、推送 `main` 并检查 CI/发布链；任一步失败则恢复“进行中”。
+7. 已提交并推送 `main`；CI 与发布链成功，Security 的既有依赖告警单独记录，不冒充本次启动链回归。
 
 ## 6. 关联证据入口
 
