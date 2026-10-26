@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.0.627 - 2026-10-26
+
+### Fixed
+- close continuation and sidebar race regressions (116b0fd)
+- resolve dependency security advisories (d297b0d)
+
+### Docs
+- close conversation launch repair ledger (c20d8d3)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.626 - 2026-10-26
 
 ### Fixed
