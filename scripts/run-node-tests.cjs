@@ -39,21 +39,39 @@ for (const name of agentCliFixtureNames) {
 const testRunId = crypto.randomUUID();
 const inheritedOwners = String(process.env.SOLOMAP_TEST_RUN_OWNERS || '').split(',').filter(Boolean);
 const testRunOwners = [...inheritedOwners, testRunId].join(',');
-const child = childProcess.spawn(process.execPath, ['--test', ...process.argv.slice(2)], {
-  cwd: process.cwd(),
-  env: {
-    ...process.env,
-    PATH: `${agentCliFixtureRoot}${path.delimiter}${process.env.PATH || ''}`,
-    TMPDIR: ownedRoot,
-    TMP: ownedRoot,
-    TEMP: ownedRoot,
-    SOLOMAP_TEST_RUN_OWNERS: testRunOwners,
-    SOLOMAP_TEST_AGENT_CLI_FIXTURE_DIR: agentCliFixtureRoot
-  },
-  stdio: 'inherit',
-  detached: process.platform !== 'win32'
+const requestedTests = process.argv.slice(2).flatMap(file => {
+  const pattern = process.platform === 'win32' ? file.replaceAll(path.sep, '/') : file;
+  const matches = fs.globSync(pattern);
+  return matches.length > 0 ? matches : [file];
 });
+const capacityTests = requestedTests.filter(file => path.basename(file) === 'pi-capacity-budget.test.js');
+const regularTests = requestedTests.filter(file => path.basename(file) !== 'pi-capacity-budget.test.js');
+const testBatches = capacityTests.length > 0 && regularTests.length > 0
+  ? [regularTests, capacityTests]
+  : [requestedTests];
+let child;
 let requestedSignal;
+
+function startTestBatch() {
+  child = childProcess.spawn(process.execPath, ['--test', ...testBatches.shift()], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PATH: `${agentCliFixtureRoot}${path.delimiter}${process.env.PATH || ''}`,
+      TMPDIR: ownedRoot,
+      TMP: ownedRoot,
+      TEMP: ownedRoot,
+      SOLOMAP_TEST_RUN_OWNERS: testRunOwners,
+      SOLOMAP_TEST_AGENT_CLI_FIXTURE_DIR: agentCliFixtureRoot
+    },
+    stdio: 'inherit',
+    detached: process.platform !== 'win32'
+  });
+  child.once('error', error => {
+    console.error(error.message);
+  });
+  child.once('close', handleTestBatchClose);
+}
 
 function ownedProcessIds() {
   if (process.platform !== 'linux') return [];
@@ -112,11 +130,7 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   });
 }
 
-child.once('error', error => {
-  console.error(error.message);
-});
-
-child.once('close', (code, signal) => {
+function handleTestBatchClose(code, signal) {
   try {
     if (testProcessesAlive()) {
       stopTestProcessTree('SIGTERM');
@@ -124,6 +138,10 @@ child.once('close', (code, signal) => {
         stopTestProcessTree('SIGKILL');
         if (!waitForTestProcesses(500)) throw new Error('test_process_tree_cleanup_failed');
       }
+    }
+    if (!requestedSignal && code === 0 && !signal && testBatches.length > 0) {
+      startTestBatch();
+      return;
     }
     removeOwnedEntry(ownedRoot, ownedRoot);
   } catch (error) {
@@ -137,4 +155,6 @@ child.once('close', (code, signal) => {
     return;
   }
   process.exitCode = code ?? (signal ? 1 : 0);
-});
+}
+
+startTestBatch();
