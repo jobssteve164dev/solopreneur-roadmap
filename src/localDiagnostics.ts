@@ -77,6 +77,7 @@ const currentOperations = new Map<string, DiagnosticOperationEvent[]>();
 const databaseErrors = new Map<string, DiagnosticEntry[]>();
 const databaseOperations = new Map<string, DiagnosticOperationEvent[]>();
 const loadingRoots = new Map<string, Promise<void>>();
+const persistenceByTrace = new WeakMap<LocalDiagnosticTrace, LocalDiagnosticPersistence | null>();
 
 function diagnosticRoot(globalDataPath: string): string {
   return normalizeGlobalDataPathForExtension(globalDataPath);
@@ -129,8 +130,12 @@ export function configureLocalDiagnosticPersistence(value: LocalDiagnosticPersis
 function appendDiagnostic(globalDataPath: string, event: LocalDiagnosticEvent, target?: LocalDiagnosticPersistence | null): void {
   const resolvedTarget = target === null ? undefined : target || persistence;
   if (!resolvedTarget) return;
-  void Promise.resolve(resolvedTarget.append(diagnosticRoot(globalDataPath), event))
-    .catch(error => console.warn('SoloMap diagnostics could not be saved:', sanitizeDiagnosticText(error)));
+  try {
+    void Promise.resolve(resolvedTarget.append(diagnosticRoot(globalDataPath), event))
+      .catch(error => console.warn('SoloMap diagnostics could not be saved:', sanitizeDiagnosticText(error)));
+  } catch (error) {
+    console.warn('SoloMap diagnostics could not be saved:', sanitizeDiagnosticText(error));
+  }
 }
 
 function diagnosticDirectory(globalDataPath: string, date = new Date()): string {
@@ -264,6 +269,7 @@ export function createLocalDiagnosticTrace(globalDataPath: string, source: strin
       }, tracePersistence);
     }
   };
+  persistenceByTrace.set(trace, tracePersistence);
   trace.record(source, 'start');
   return trace;
 }
@@ -362,10 +368,11 @@ export function recordLocalDiagnosticError(globalDataPath: string, scope: string
   const fingerprint = crypto.createHash('sha256').update(`${normalizedScope}\n${message}`).digest('hex').slice(0, 12);
   const entry = { at: new Date().toISOString(), scope: normalizedScope, fingerprint, message };
   remember(currentErrors, globalDataPath, entry, MAX_ENTRIES);
+  const trace = activeTrace.getStore();
   appendDiagnostic(globalDataPath, {
     kind: 'error', occurredAt: entry.at, scope: normalizedScope, payload: { fingerprint, message },
     idempotencyKey: `diagnostic-error:${PROCESS_DIAGNOSTIC_ID}:${entry.at}:${fingerprint}`
-  });
+  }, trace ? persistenceByTrace.get(trace) : undefined);
 }
 
 export async function buildLocalDiagnosticSummary(

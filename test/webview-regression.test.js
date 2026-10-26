@@ -9735,7 +9735,14 @@ for (const scenario of ['logout', 'disable', 'late-source', 'reenter', 'unchange
         assert.ok(!messages.some(message => message.command === 'strategy.update'), 'stale facts cannot be sent for browser application');
       }
     }
-  } finally { finish(judgment); await extension.refresh(context); }
+  } finally {
+    finish(judgment);
+    await originalFlight;
+    await extension.refresh(context);
+    const pending = extension.wait();
+    if (pending) await pending;
+    panel.dispose();
+  }
 });
 
 test('strategy local content renders before a slow judgment and a failed unchanged reopen reuses it', async t => {
@@ -9889,8 +9896,9 @@ test('strategy cache connection failures reach the existing failure page and ret
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
   const diagnostics = require('../out/localDiagnostics.js');
+  const diagnosticRoots = [];
   diagnostics.configureLocalDiagnosticPersistence({ append: (dataRoot, event) => {
-    assert.equal(dataRoot, root);
+    diagnosticRoots.push(dataRoot);
     store.appendDiagnosticEvent(event);
   } });
   t.after(() => diagnostics.configureLocalDiagnosticPersistence(undefined));
@@ -9936,6 +9944,8 @@ test('strategy cache connection failures reach the existing failure page and ret
   assert.notEqual(complete.payload.traceId, failed.find(e => e.scope === 'strategy.load').payload.traceId);
   const successArtifact = path.join(base, 'restored.html'); fs.writeFileSync(successArtifact, panel.webview.html);
   for (const match of panel.webview.html.matchAll(/<script>([\s\S]*?)<\/script>/g)) assert.doesNotThrow(() => new vm.Script(match[1]));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual([...new Set(diagnosticRoots)], [root], 'a strategy diagnostic sink must only receive its owned data root');
   fs.writeFileSync(path.join(os.tmpdir(), 'solomap-462-analysis-cache-failure-render.json'), JSON.stringify({ artifact, successArtifact }));
 });
 

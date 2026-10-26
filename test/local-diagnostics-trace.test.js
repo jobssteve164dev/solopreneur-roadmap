@@ -45,13 +45,46 @@ test('a diagnostic trace keeps the data sink that owned it when later windows sw
   assert.deepEqual(second, []);
 });
 
-test('a trace created without a sink cannot leak late events into a later root sink', () => {
+test('an error recorded after an asynchronous trace boundary keeps the trace sink after another window replaces the global sink', async () => {
+  const diagnostics = require('../out/localDiagnostics.js');
+  const first = []; const second = [];
+  diagnostics.configureLocalDiagnosticPersistence({ append: (root, event) => first.push({ root, event }) });
+  const trace = diagnostics.createLocalDiagnosticTrace('/first-root', 'strategy.load');
+  diagnostics.configureLocalDiagnosticPersistence({ append: (root, event) => second.push({ root, event }) });
+  await diagnostics.withLocalDiagnosticTrace(trace, async () => {
+    await new Promise(resolve => setImmediate(resolve));
+    diagnostics.recordLocalDiagnosticError('/first-root', 'strategy.load', new Error('late_failure'));
+  });
+  diagnostics.configureLocalDiagnosticPersistence(undefined);
+  assert.equal(first.some(item => item.event.kind === 'error' && item.event.scope === 'strategy.load'), true);
+  assert.deepEqual(second, []);
+});
+
+test('a synchronous diagnostic persistence failure remains best effort', () => {
+  const diagnostics = require('../out/localDiagnostics.js');
+  const warnings = []; const warn = console.warn;
+  console.warn = (...values) => warnings.push(values.join(' '));
+  diagnostics.configureLocalDiagnosticPersistence({ append() { throw new Error('sink_closed'); } });
+  try {
+    assert.doesNotThrow(() => diagnostics.recordLocalDiagnosticError('/fixture', 'strategy.load', new Error('late_failure')));
+  } finally {
+    diagnostics.configureLocalDiagnosticPersistence(undefined);
+    console.warn = warn;
+  }
+  assert.ok(warnings.some(message => message.includes('sink_closed')));
+});
+
+test('a trace created without a sink cannot leak late events or errors into a later root sink', async () => {
   const diagnostics = require('../out/localDiagnostics.js');
   const second = [];
   diagnostics.configureLocalDiagnosticPersistence(undefined);
   const trace = diagnostics.createLocalDiagnosticTrace('/first-root', 'conversation.entry');
   diagnostics.configureLocalDiagnosticPersistence({ append: (root, event) => second.push({ root, event }) }, '/second-root');
-  trace.record('conversation.late', 'error', 1, new Error('late_failure'));
+  await diagnostics.withLocalDiagnosticTrace(trace, async () => {
+    await new Promise(resolve => setImmediate(resolve));
+    trace.record('conversation.late', 'error', 1, new Error('late_failure'));
+    diagnostics.recordLocalDiagnosticError('/first-root', 'conversation.late', new Error('late_failure'));
+  });
   diagnostics.configureLocalDiagnosticPersistence(undefined);
   assert.deepEqual(second, []);
 });
