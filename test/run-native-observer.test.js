@@ -19,6 +19,104 @@ const crypto = require('node:crypto');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
 const { snapshotWorkspace, workspaceDocumentPurpose } = require('../out/runWorkspace.js');
+const { createInteractionBudget } = require('../out/interactionBudget.js');
+
+test('a delayed Codex observation records authoritative task ingress after the host observation timeout', async () => {
+  const { RunNativeObserver } = require('../out/runNativeObserver.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-native-ingress-diagnostic-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const call = (operation, input) => ops({ operation, input });
+  try {
+    const interactionBudget = createInteractionBudget();
+    const run = await call('prepare_run', {
+      root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '真实任务', command: 'codex', userMessage: '真实任务',
+      metadata: { interactiveSession: true, sessionProvider: 'codex', interactionBudget, interactionId: interactionBudget.interactionId,
+        terminalDeliveryTraceId: '0123456789abcdef', deliveryLastError: 'agent_task_ingress_timeout' },
+      idempotencyKey: 'native-ingress-diagnostic-prepare'
+    });
+    const scope = { projectId: run.projectId, executionLogId: 1, generation: run.generation };
+    const observer = new RunNativeObserver(store);
+    const current = () => store.readRunCheckpointState(run.projectId, 1);
+    const patch = (fields, event) => { const latest = current(); return store.patchRunState(run.projectId, { ...scope, expectedRevision: latest.revision, patch: fields, idempotencyKey: `native-ingress-diagnostic:${event}:${latest.revision}` }); };
+    const timestamp = new Date(Math.max(interactionBudget.acceptedWallMs, Date.parse(run.status.startedAt)) + 25).toISOString();
+    await observer.observeRow(current, patch, { type: 'event_msg', timestamp, payload: { type: 'task_started', turn_id: 'native-ingress-turn', started_at: timestamp } }, 25);
+    const final = current();
+    assert.equal(final.status.taskIngressReceipt.authority, 'provider_native');
+    assert.equal(final.status.deliveryLastError, '');
+    const events = store.readDiagnosticEvents({ kind: 'operation', limit: 20 }).items;
+    const ingress = events.find(item => item.scope === 'terminal.delivery.task.ingress' && item.payload.status === 'ok');
+    assert.ok(ingress, 'the authoritative provider event must reconcile a delayed host observation');
+    assert.equal(ingress.payload.traceId, '0123456789abcdef');
+    assert.equal(ingress.payload.interactionId, interactionBudget.interactionId);
+    assert.equal(ingress.payload.authority, 'provider_native');
+    assert.equal(ingress.payload.reconciledObservationTimeout, true);
+    const source = fs.readFileSync(path.resolve(__dirname, '../src/extension.ts'), 'utf8');
+    assert.doesNotMatch(source, /trace\?\.record\('terminal\.delivery\.task\.ingress',/,
+      'host polling must be identified as observation rather than authoritative provider ingress');
+  } finally { await ops.close(); store.close(); }
+});
+
+test('session reentry records the first real native TUI request on the precreated turn without a synthetic prompt', async () => {
+  const { RunNativeObserver } = require('../out/runNativeObserver.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-native-reentry-request-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const call = (operation, input) => ops({ operation, input });
+  try {
+    const interactionBudget = createInteractionBudget();
+    const run = await call('prepare_run', {
+      root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '', command: 'codex resume session-1', userMessage: '',
+      status: 'Waiting', metadata: { interactiveSession: true, sessionProvider: 'codex', nativeSessionId: 'session-1', agentInputMode: 'session_reentry', nativeSessionReentryAwaitingRequest: true,
+        interactionBudget, interactionId: interactionBudget.interactionId },
+      idempotencyKey: 'native-reentry-prepare'
+    });
+    const scope = { projectId: run.projectId, executionLogId: 1, generation: run.generation };
+    const observer = new RunNativeObserver(store);
+    const current = () => store.readRunCheckpointState(run.projectId, 1);
+    const patch = (fields, event) => { const latest = current(); return store.patchRunState(run.projectId, { ...scope, expectedRevision: latest.revision, patch: fields, idempotencyKey: `native-reentry:${event}:${latest.revision}` }); };
+    const timestamp = new Date(Date.parse(run.status.startedAt) + 10).toISOString();
+    const request = '这是用户在重新进入原生会话后真正输入的要求';
+    await observer.observeRow(current, patch, { type: 'response_item', timestamp, payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: request }] } }, 100);
+    const accepted = current();
+    assert.equal(accepted.status.status, 'Running');
+    assert.notEqual(accepted.status.interactionId, run.status.interactionId, 'the real native submit starts its own task budget');
+    await observer.observeRow(current, patch, { type: 'event_msg', timestamp, payload: { type: 'task_started', turn_id: 'native-reentry-turn', started_at: timestamp } }, 101);
+    const started = current();
+    assert.equal(started.status.taskIngressReceipt.interactionId, started.status.interactionId);
+    await observer.observeRow(current, patch, { type: 'event_msg', timestamp, payload: { type: 'task_complete', turn_id: 'native-reentry-turn', started_at: timestamp, completed_at: timestamp, last_agent_message: '已按真实要求完成' } }, 102);
+    const final = current();
+    assert.equal(final.turnId, run.turnId, 'reentry must fill the precreated turn rather than creating another empty turn');
+    assert.equal(store.read(run.turnId).data.request_content, request);
+    assert.equal(final.status.userMessage, request);
+    assert.equal(final.status.nativeSessionReentryAwaitingRequest, false);
+    const journal = await call('read_run_turn_journal', { ...scope, turnId: run.turnId });
+    assert.match(journal.entry.output, new RegExp(request));
+    assert.doesNotMatch(journal.entry.output, /等待本轮用户消息/);
+  } finally { await ops.close(); store.close(); }
+});
+
+test('closing a resume-only session before user input does not create a failed task turn', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-native-reentry-close-'));
+  const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
+  const call = (operation, input) => ops({ operation, input });
+  try {
+    const run = await call('prepare_run', {
+      root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo_continue', prompt: '', command: 'codex resume session-1', userMessage: '', status: 'Waiting',
+      metadata: { interactiveSession: true, sessionProvider: 'codex', nativeSessionId: 'session-1', agentInputMode: 'session_reentry', nativeSessionReentryAwaitingRequest: true },
+      idempotencyKey: 'native-reentry-close-prepare'
+    });
+    const closed = await call('checkpoint_run', { projectId: run.projectId, executionLogId: 1, generation: run.generation, proof: run.proof,
+      expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'session-close', exitCode: 0, idempotencyKey: 'native-reentry-close' });
+    const turn = store.read(run.turnId);
+    assert.equal(closed.status.status, 'Session Closed');
+    assert.equal(closed.status.failureCode, undefined);
+    assert.equal(turn.data.outcome, 'partial');
+    assert.equal(turn.data.summary_content, '');
+    assert.ok(turn.data.finished_at);
+  } finally { await ops.close(); store.close(); }
+});
 
 test('the Runtime observes exact native identity and settles machine turns while the Agent stays alive without running checkpoint commands', async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-native-observer-'));

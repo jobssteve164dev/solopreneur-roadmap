@@ -92,6 +92,11 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
   let busy = false;
   let notice = '';
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const interactionEnvelope = () => {
+    const acceptedWallMs = Date.now();
+    const random = globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
+    return { interactionId: `ui:${acceptedWallMs.toString(36)}:${random}`, interactionAcceptedWallMs: acceptedWallMs };
+  };
   const visible = () => panel.style.display === 'block' || panel.style.display === 'flex';
   const button = (selector: string) => element(selector) as HTMLButtonElement;
   const error = element('[data-migration-error]');
@@ -107,8 +112,10 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     card!.setAttribute('aria-busy', 'true');
     card!.querySelectorAll('button').forEach(control => { control.disabled = true; });
     const working = command !== 'dataMigration.get';
+    const startsAgent = ['dataMigration.agent', 'dataMigration.delegate', 'dataMigration.recycle', 'dataMigration.retryRecycling'].includes(command);
     element('[data-migration-status]').textContent = text(working ? '正在处理…' : '正在读取进度…', working ? 'Working…' : 'Loading progress…');
-    vscode.postMessage({ command, requestId: latest, dataRoot, ...(savedProjectRoot === undefined ? {} : { projectRoot: savedProjectRoot }), ...input });
+    vscode.postMessage({ command, requestId: latest, dataRoot, ...(savedProjectRoot === undefined ? {} : { projectRoot: savedProjectRoot }),
+      ...(startsAgent ? interactionEnvelope() : {}), ...input });
   }
   function render(): void {
     element('#migration-card-title').textContent = text('旧数据整理', 'Old data cleanup');

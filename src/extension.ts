@@ -126,6 +126,7 @@ import {
   buildInteractiveCursorCommandForPromptFileWithSessionEnv,
   buildInteractiveAgentContinuationCommandForPromptFile,
   buildAgentCommandFromShellVar,
+  buildNativeContinueCommand,
   buildReadOnlyAgentCommandForPromptFile,
   buildSdkSentinelCommandLabel,
   commandExists,
@@ -200,7 +201,7 @@ import {
 } from './localDiagnostics';
 import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost';
 import { ensurePersistentRuntimeDatabaseAuthority } from './databaseAuthorityBootstrap';
-import { buildAgentDatabaseInstructions } from './agentDatabaseConfig';
+import { buildAgentDatabaseInstructions, codexDatabaseProfileName } from './agentDatabaseConfig';
 import { runtimeProjectMcpSource } from './runtimeDataOperations';
 import { readRuntimeState, refreshShadowRuntimeState, registerRuntimeDatabaseAuthority, runtimeDatabaseAuthorityRegistered } from './autonomousRuntime';
 import { sendRuntimeControlCommand, sendRuntimeDataRequest } from './autonomousRuntimeControl';
@@ -266,7 +267,7 @@ import {
 import { extractRunTokenUsage, normalizeTokenUsage } from './tokenUsage';
 import { agentTerminalInputFrame, sendTextWhenTerminalReady } from './terminalCompatibility';
 import { buildForegroundRunnerInvocation, ForegroundAgentTerminalBridge } from './foregroundAgentTerminal';
-import { advanceInteractionBudget, createInteractionBudget, currentInteractionBudget, runWithInteractionBudget, type InteractionBudget } from './interactionBudget';
+import { advanceInteractionBudget, createInteractionBudget, createInteractionBudgetAt, currentInteractionBudget, runWithInteractionBudget, type InteractionBudget } from './interactionBudget';
 import { taskIngressDeadlineFields } from './providerTaskIngress';
 import {
   appendSessionBindingRevision,
@@ -1019,6 +1020,10 @@ export async function activate(context: vscode.ExtensionContext) {
     const message = String(input.message || '').trim();
     const settings = getPersistedSettings(context);
     const globalDataPath = normalizeSolomapGlobalPath(projectPath, settings.globalDataPath);
+    const trace = createLocalDiagnosticTrace(globalDataPath, 'conversation.entry', {
+      interactionId: interactionBudget.interactionId, targetId: mode || 'conversation', budgetMs: 10_000
+    });
+    return withLocalDiagnosticTrace(trace, async () => {
     await refreshProjectRegistryForContext(context, globalDataPath);
     const project = getProjects(context).find(candidate => path.resolve(candidate.path) === projectPath);
     if (!project || !['step', 'solo', 'flow'].includes(mode) || !message || !String(input.launchIntentId || '')) throw new Error('invalid_conversation_request');
@@ -1044,6 +1049,7 @@ export async function activate(context: vscode.ExtensionContext) {
       }
       return { status: 'started', projectPath, mode };
     } finally { target.engine?.close(); }
+    });
     });
   }));
 
@@ -1490,6 +1496,21 @@ async function handleSharedWebviewAction(
       : payload;
     return responsePayload ? postWebviewMessage(target, responsePayload) : Promise.resolve(false);
   };
+  const dispatchWebviewInteraction = async <T>(source: string, action: () => Promise<T>): Promise<T> => {
+    const inheritedBudget = currentInteractionBudget();
+    const requestedInteractionId = /^[a-z0-9_.:-]{1,80}$/i.test(String(message.interactionId || '')) ? String(message.interactionId) : '';
+    const acceptedWallMs = Number(message.interactionAcceptedWallMs);
+    const generatedBudget = requestedInteractionId && Number.isFinite(acceptedWallMs)
+      ? createInteractionBudgetAt(acceptedWallMs, requestedInteractionId)
+      : createInteractionBudget();
+    const interactionBudget = inheritedBudget || { ...generatedBudget, ...(requestedInteractionId ? { interactionId: requestedInteractionId } : {}) };
+    const dispatch = () => runWithInteractionBudget(interactionBudget, action);
+    const inheritedTrace = getCurrentLocalDiagnosticTrace();
+    if (inheritedTrace) return await dispatch();
+    const trace = createLocalDiagnosticTrace(getPersistedSettings(context).globalDataPath,
+      source, { interactionId: interactionBudget.interactionId, targetId: surface, budgetMs: 10_000 });
+    return await withLocalDiagnosticTrace(trace, dispatch);
+  };
   if (message.command === 'databaseOverview.get') {
     const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
     try {
@@ -1516,7 +1537,7 @@ async function handleSharedWebviewAction(
   if (String(message.command || '').startsWith('dataMigration.')) {
     const language = getPersistedSettings(context).language;
     try {
-      const result = await handleMigrationSettingsAction(message, {
+      const handle = () => handleMigrationSettingsAction(message, {
         getRoot: () => normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath),
         getProjectRoot: () => getMigrationProjectRoot(context),
         ready: async root => { await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: root }); },
@@ -1532,6 +1553,10 @@ async function handleSharedWebviewAction(
         chooseRestorePath: async () => (await vscode.window.showSaveDialog({ title: language === 'en' ? 'Restore file to' : '选择文件恢复位置', saveLabel: language === 'en' ? 'Restore file' : '恢复文件' }))?.fsPath,
         launchAgent: (root, kind, targetId, projectRoot) => launchMigrationMaintenanceAgent(context, root, kind, targetId, projectRoot)
       });
+      const startsAgent = ['dataMigration.agent', 'dataMigration.delegate', 'dataMigration.recycle', 'dataMigration.retryRecycling'].includes(String(message.command));
+      const result = startsAgent
+        ? await dispatchWebviewInteraction(`${surface}.action.${String(message.command || 'unknown')}`, handle)
+        : await handle();
       const successMessage = result.cancelled ? undefined : result.agentStarted
         ? (language === 'en' ? 'Cleanup started in the background. You can keep using SoloMap.' : '已开始在后台整理，你可以继续使用 SoloMap。')
         : message.command === 'dataMigration.restore'
@@ -1559,7 +1584,7 @@ async function handleSharedWebviewAction(
     }
   };
   try {
-    return await runWithInteractionBudget(createInteractionBudget(), () => dispatchPluginAction(message, surface, {
+    const dispatch = () => dispatchPluginAction(message, surface, {
     'uiState.load': async (request) => {
       const scopeKey = String(request.scopeKey || 'global').slice(0, 1024);
       await respond({ command: 'uiStateLoaded', view: surface, scopeKey, loadRequestId: String(request.loadRequestId || ''), state: await readUiState(context, surface, scopeKey) });
@@ -2699,7 +2724,8 @@ async function handleSharedWebviewAction(
         await buildFeedbackUsageSummary(context)
       )));
     }
-    }));
+    });
+    return await dispatchWebviewInteraction(`${surface}.action.${String(message.command || 'unknown')}`, dispatch);
   } catch (error) {
     recordLocalDiagnosticError(
       getPersistedSettings(context).globalDataPath,
@@ -7610,7 +7636,7 @@ async function awaitAgentTaskIngress(
   }
   const started = Date.now();
   let generation = expected.generation;
-  trace?.record('terminal.delivery.task.ingress', 'start');
+  trace?.record('terminal.delivery.task.ingress.observation', 'start');
   const persistDeadline = async (initial: import('./runLifecycleTypes').RunState): Promise<import('./runLifecycleTypes').RunState> => {
     let current = initial;
     for (;;) {
@@ -7653,7 +7679,7 @@ async function awaitAgentTaskIngress(
     const currentBudget = advanceInteractionBudget(expected.budget);
     if (!currentBudget.clockTrusted || currentBudget.elapsedMs >= 10_000) {
       const error = new Error(currentBudget.clockTrusted ? 'agent_task_ingress_timeout' : 'agent_task_ingress_clock_untrusted');
-      trace?.record('terminal.delivery.task.ingress', 'error', Date.now() - started, error,
+      trace?.record('terminal.delivery.task.ingress.observation', 'error', Date.now() - started, error,
         { verdict: currentBudget.verdict, elapsedMs: currentBudget.elapsedMs });
       if (currentBudget.clockTrusted && lastState) return persistDeadline(lastState);
       throw error;
@@ -7680,7 +7706,7 @@ async function awaitAgentTaskIngress(
           continue;
         }
       }
-      trace?.record('terminal.delivery.task.ingress', 'error', Date.now() - started, error);
+      trace?.record('terminal.delivery.task.ingress.observation', 'error', Date.now() - started, error);
       if ((error as Error).message === 'agent_task_ingress_timeout' && lastState) return persistDeadline(lastState);
       throw error;
     }
@@ -7691,12 +7717,12 @@ async function awaitAgentTaskIngress(
     if (receipt?.interactionId === expected.interactionId) {
       const verdict = String(state.status.taskIngressVerdict || '');
       if (verdict === 'normal' || verdict === 'degraded') {
-        trace?.record('terminal.delivery.task.ingress', 'ok', Date.now() - started, undefined,
+        trace?.record('terminal.delivery.task.ingress.observation', 'ok', Date.now() - started, undefined,
           { verdict, elapsedMs: Number(state.status.taskIngressElapsedMs || 0) });
         return state;
       }
       const error = new Error(verdict === 'clock_untrusted' ? 'agent_task_ingress_clock_untrusted' : 'agent_task_ingress_timeout');
-      trace?.record('terminal.delivery.task.ingress', 'error', Date.now() - started, error,
+      trace?.record('terminal.delivery.task.ingress.observation', 'error', Date.now() - started, error,
         { verdict, elapsedMs: Number(state.status.taskIngressElapsedMs || 0) });
       throw error;
     }
@@ -7705,14 +7731,14 @@ async function awaitAgentTaskIngress(
       const code = String(deadline.taskIngressVerdict) === 'clock_untrusted'
         ? 'agent_task_ingress_clock_untrusted' : 'agent_task_ingress_timeout';
       const error = new Error(code);
-      trace?.record('terminal.delivery.task.ingress', 'error', Date.now() - started, error,
+      trace?.record('terminal.delivery.task.ingress.observation', 'error', Date.now() - started, error,
         { verdict: deadline.taskIngressVerdict, elapsedMs: Number(deadline.taskIngressElapsedMs || 0) });
       if (code === 'agent_task_ingress_timeout') return persistDeadline(state);
       throw error;
     }
     if (['Failed', 'Cancelled', 'Interrupted'].includes(String(state.status.status)) || state.status.interactiveSessionClosed === true) {
       const error = new Error(String(state.status.failureCode || 'agent_task_ingress_missing'));
-      trace?.record('terminal.delivery.task.ingress', 'error', Date.now() - started, error);
+      trace?.record('terminal.delivery.task.ingress.observation', 'error', Date.now() - started, error);
       throw error;
     }
     await new Promise(resolve => setTimeout(resolve, Math.max(10, pollMs)));
@@ -7754,7 +7780,10 @@ async function launchAgentConversationTerminal(input: {
     const owner = await getAgentRunDeliveryOwner();
     let state = input.initialState || await operation('read_run_state', identity) as import('./runLifecycleTypes').RunState;
     const deliveryGeneration = state.generation;
-    const trace = getCurrentLocalDiagnosticTrace() || createLocalDiagnosticTrace(globalDataPath, 'terminal.delivery', { targetId: state.runId, generation: state.generation });
+    const trace = getCurrentLocalDiagnosticTrace() || createLocalDiagnosticTrace(globalDataPath, 'terminal.delivery', {
+      interactionId: String(state.status.interactionId || (state.status.interactionBudget as { interactionId?: string } | undefined)?.interactionId || ''),
+      targetId: state.runId, generation: state.generation, budgetMs: 10_000
+    });
     const interactionBudget = state.status.interactionBudget as { acceptedWallMs?: number } | undefined;
     const deliveryStartedAt = Number(interactionBudget?.acceptedWallMs || Date.now());
     const record = async <T>(stage: string, action: () => Promise<T>): Promise<T> => {
@@ -7844,7 +7873,7 @@ async function launchAgentConversationTerminal(input: {
       recordedTerminal.show(false);
       trace.record('terminal.delivery.focus', 'ok', 0, undefined, selection);
       scheduleRunnerClaimWatchdog(recordedTerminal, recordedTarget, state.generation);
-      if (!legacyConversationDeliveryHarnessForTests) await awaitAgentTaskIngress(operation, identity, {
+      if (!legacyConversationDeliveryHarnessForTests && state.status.agentInputMode !== 'session_reentry') await awaitAgentTaskIngress(operation, identity, {
         generation: state.generation,
         turnId: state.turnId,
         interactionId: String(state.status.interactionId || (state.status.interactionBudget as { interactionId?: string } | undefined)?.interactionId || ''),
@@ -7949,6 +7978,7 @@ async function launchAgentConversationTerminal(input: {
           executionLogId: input.conversationId,
           deliveryId: target.deliveryId!,
           traceId: trace.id,
+          interactionId: trace.interactionId || trace.id,
           acceptedAtMs: deliveryStartedAt,
           terminalColumns: surface.dimensions?.columns,
           terminalRows: surface.dimensions?.rows,
@@ -7988,7 +8018,7 @@ async function launchAgentConversationTerminal(input: {
       scheduleRunnerClaimWatchdog(terminal, target, generation);
       if (extensionContextRef) ensureActiveConversationPoller(extensionContextRef);
       if (input.refreshNodeId) postNodeConversations(input.refreshNodeId, [], true, input.workspaceRoot);
-      if (!legacyConversationDeliveryHarnessForTests) await awaitAgentTaskIngress(operation, identity, {
+      if (!legacyConversationDeliveryHarnessForTests && state.status.agentInputMode !== 'session_reentry') await awaitAgentTaskIngress(operation, identity, {
         generation: state.generation,
         turnId: state.turnId,
         interactionId: String(state.status.interactionId || (state.status.interactionBudget as { interactionId?: string } | undefined)?.interactionId || ''),
@@ -9061,19 +9091,23 @@ async function handleContinueNativeConversation(context: vscode.ExtensionContext
     const transcriptPath = session.provider === 'codex' ? String(head.evidence?.transcriptPath || '') : '';
     if (session.provider === 'codex' && !transcriptPath) throw new Error('尚未确认这段 Codex 对话的原生记录，暂时无法接续。');
     const providerContext = [...binding!.revisions].reverse().find(revision => revision.providerContext)?.providerContext;
+    const selectedModel = String(source.status.selectedModel || '');
+    const directExecutionCommand = buildNativeContinueCommand(agentCli, session.sessionId, workspaceRoot,
+      settings.taskPermissionMode || 'auto', selectedModel, codexDatabaseProfileName(globalDataPath));
     const root = resolveContinuationRootConversationFromList(conversations, continuationId);
     const rootId = Number(root?.id || registered.status.lineageRootExecutionLogId || family?.[family.length - 1]?.status.rootExecutionLogId || registered.status.rootExecutionLogId);
     await observeLocalDiagnosticStage('conversation.continue.stop', () => closeConversationProcessesForContinuation(workspaceRoot, nodeId, conversations, rootId, session.sessionId, globalDataPath, family));
     const prepared = await observeLocalDiagnosticStage('conversation.continue.prepare', () => prepareOrdinaryConversation(context, {
-      agentCli, selectedModel: String(source.status.selectedModel || ''), prompt: '继续当前 Agent 对话',
-      globalPrompt: settings.globalPrompt, workspaceRoot, nodeId, executionLogId: 0, userMessage: '继续当前 Agent 对话',
+      agentCli, selectedModel, prompt: '',
+      globalPrompt: settings.globalPrompt, workspaceRoot, nodeId, executionLogId: 0, userMessage: '',
       runKind: nodeId === soloConversationId ? 'solo_continue' : 'step_continue', globalDataPath,
       taskPermissionMode: settings.taskPermissionMode || 'auto', nativeSessionId: session.sessionId, continuation: true,
+      directExecutionCommand,
       parentExecutionLogId: Number(source.status.rootExecutionLogId), expectedParentTurnId: String(source.status.turnId),
-      metadata: { lineageRootExecutionLogId: rootId, ...(transcriptPath ? { codexResumeTranscriptPath: transcriptPath } : {}),
+      metadata: { lineageRootExecutionLogId: rootId, agentInputMode: 'session_reentry', startWaiting: true, nativeSessionReentryAwaitingRequest: true, ...(transcriptPath ? { codexResumeTranscriptPath: transcriptPath } : {}),
         preSessionGitBackup: true,
         ...(providerContext ? { nativeResumeProviderContext: providerContext } : {}),
-        launchSummary: ['Agent continuation started.', buildContinuationMetadataBlock(rootId, session.sessionId), 'User supplement:\n继续当前 Agent 对话'].join('\n\n') }
+        launchSummary: ['Agent session reopened.', buildContinuationMetadataBlock(rootId, session.sessionId)].join('\n\n') }
     }, { ...settings, globalDataPath }));
     await observeLocalDiagnosticStage('conversation.continue.delivery', () => deliverOrdinaryConversation(context, prepared, settings));
     return;

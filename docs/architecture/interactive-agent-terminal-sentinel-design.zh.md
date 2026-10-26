@@ -56,20 +56,20 @@ delivery.claim
   → delivery.runner.start
   → delivery.runner.claim
   → Git/工作区基线与 Agent 数据库准备
-  → Provider preflight（部分 Provider；也会产生 agent.spawn/launch）
-  → 正式任务 agent.spawn（仍是 wrapper spawn）
+  → Provider preflight（部分 Provider；只产生 preflight.spawn/launch/first-output）
+  → 正式任务 agent.spawn（只标识 formal wrapper spawn）
   → 正式任务 agent.launch（仍是 wrapper gate release）
   → Provider adapter 从官方生命周期/持久机器状态确认 task ingress
   → Agent 实际调用 MCP conversation_status(start) 时幂等补记辅助 receipt
 ```
 
-现有数据库能保存 Codex/Claude native start 的 Provider 身份与原始时间，但 Host 也会在发送前 checkpoint start，prepare 更会提前把 run 投影成 Running；因此普通 `turnStartedAt`、`checkpointEventId=:start` 和 `Running` 不是 task-start 收据。MCP start 若命中 Host 已登记状态会直接返回，当前不会保存独立调用到达记录。修复必须复用 native 强信号，并为实际 MCP 调用增加专用 receipt，再把它们关联入口 `interactionId` 形成 `delivery.agent-cli.task-start/turn-start`；不能另造平行任务真相，也不能沿用混合语义字段。诊断事件当前不存在，不能在实现完成前画进“已落地”链路或用于验收。
+现有数据库能保存 Codex/Claude native start 的 Provider 身份与原始时间，但 Host 也会在发送前 checkpoint start，prepare 更会提前把 run 投影成 Running；因此普通 `turnStartedAt`、`checkpointEventId=:start` 和 `Running` 不是 task-start 收据。MCP start 若命中 Host 已登记状态会直接返回，当前不会保存独立调用到达记录。修复复用 native 强信号，并把入口创建的 `interactionId` 贯穿 Webview、Host、terminal delivery、runner 与 Provider 收据；诊断事件同时绑定创建 trace 时的数据根，避免切换项目后串写。仍不能另造平行任务真相，也不能沿用混合语义字段。
 
 - `process.wait` 只表示 VS Code PTY 已返回可用 Shell PID；终端对象已创建或已经显示不算就绪。
 - `focus` 必须选择本次请求对应的终端标签，不能用 `show(true)` 保留另一项目的活动终端。code-server 可能延迟创建未选中终端的 PTY，因此“面板已经打开”不能代替“目标终端已经选中”。
 - `command.send` 只表示正式命令已交给已就绪 Shell；它不等于 runner 已启动。
 - `runner.claim` 是 `runAgentProcess` 已启动并成功认领运行的权威信号。只有从这里开始，运行才不再属于“待投递”。
-- 当前 `agent.spawn` 实际表示某次 `execute()` 已创建 `script`/Shell 包装进程并持久化其 PID；当前 `agent.launch` 只表示该次执行的 fd 3 启动门已放行。preflight 与正式任务都复用 `execute()`，所以历史事件不但不是 task-start，也未必属于正式任务。
+- `agent.spawn` 只表示 formal `execute()` 已创建 `script`/Shell 包装进程并持久化其 PID；`agent.launch` 只表示 formal 执行的 fd 3 启动门已放行。preflight 虽复用 `execute()`，但必须显式传入 `executionKind=preflight` 并只写 `preflight.*`，不得污染 `agent.*`。两类事件都不是 task-start。
 - 新 CLI 的 `agent-cli.task-start` 与已有 CLI 的 `agent-cli.turn-start` 都必须来自下文 7 类 Provider adapter 的官方生命周期/持久机器状态；独立进程树只证明 formal CLI 身份，terminal bridge 只负责输入 transport，二者都永远不能生成 task receipt。Host 预登记 checkpoint 与 MCP 自报也不算主收据。Provider adapter 收据分别是对应入口 5/10 秒计时的唯一完成事件。
 - 阶段事件只保存 trace、阶段、耗时、受控进程字段、不可逆的项目/终端标识和分类错误，不保存用户输入、命令正文、路径或凭据。`focus` 同时记录请求项目、目标终端、原活动终端、是否要求选中以及终端归属是否匹配，使“显示了错误项目终端”和“正确终端 PTY 未启动”可以直接区分。
 
@@ -110,7 +110,7 @@ terminal binding、复用、关闭、续轮、cleanup、停止、恢复和 task-
 
 - 普通终端 Shell/PTY 只能是显示与原生输入输出表面，不能再充当 runner/Agent CLI 启动门。新任务必须通过不依赖普通 Shell `processId` 的受控进程路径启动；目标终端仍应立即显示，并在自身就绪后接入同一个 runner，而不是创建第二份任务。
 - 当前最小桥接实现使用 VS Code Custom Pseudoterminal：Extension 先以 `child_process.spawn(process.execPath, [runAgentProcess.js, ...])`、`shell=false` 和 `ELECTRON_RUN_AS_NODE=1` 直接启动唯一 runner；这一步不等待 `Pseudoterminal.open`、普通 Terminal `processId` 或焦点完成。Extension 与 runner 通过直接 stdin/stdout/stderr pipes 传输输入和显示输出；正式输出同时先写权威 run log。用户 trash/dispose 这个终端实例或点击显式“停止”才发起 stop；隐藏 panel 不停止任务。runner 退出则关闭该 surface。
-- 当前 Extension Host deactivate 只断开展示订阅，不主动 stop runner，runner 自己持有 Agent stdin，Host pipe EOF 不会被转译为 Agent EOF；但新宿主尚不能重新附着旧 pipes。后续耐久化目标是在 runner 内提供绑定完整 run/delivery 身份的本地 IPC endpoint（POSIX Unix socket、Windows named pipe）、attach nonce、带 sequence 的 input/output/resize/stop/attach 帧和持久 offset 补传。只有该 endpoint 经真实 reload 验收后，才能宣称 UI 已跨 Host 重连；在此之前 recovery 只能保证账本与任务不由显示层假终止，不能保证新 surface 复用旧显示流。
+- 当前 Extension Host deactivate 只断开交互展示订阅，不主动 stop runner；交互 runner 自己持有 Agent stdin，Host pipe EOF 不会被转译为 Agent EOF。非交互任务则遵守相反且明确的所有权：Agent fd 0 从启动起立即 EOF，不继承前台 bridge 的长寿命 socket。新宿主尚不能重新附着旧交互 pipes。后续耐久化目标是在 runner 内提供绑定完整 run/delivery 身份的本地 IPC endpoint（POSIX Unix socket、Windows named pipe）、attach nonce、带 sequence 的 input/output/resize/stop/attach 帧和持久 offset 补传。只有该 endpoint 经真实 reload 验收后，才能宣称 UI 已跨 Host 重连；在此之前 recovery 只能保证账本与任务不由显示层假终止，不能保证新 surface 复用旧显示流。
 - runner 内部可以继续用 `script` 为配置的 CLI 提供 TTY，但 `script` 是 runner 的唯一正式子树且不得充当 task-start 收据。正式执行和 `--help`、`--version`、`create-chat` preflight 必须传入明确 `executionKind=formal|preflight`；只有 formal 子树可产生 task ingress receipt。
 - 如果兼容路径仍需向普通 Shell 发送文本，该文本必须等待真实 PTY PID，且不得以超时后重建终端的方式恢复；但这段等待不能阻塞真实 Agent CLI 在 10 秒硬上限内进入本次任务。
 - 用户关闭或停止必须同时终止未完成的显示接入、runner 和 delivery lease；扩展宿主重载时，已启动 runner 依靠持久 run 身份恢复，不能因显示终端重建而重复启动 Agent。
@@ -135,7 +135,15 @@ Runtime 在治理型 MCP 调用到达的第一段轻量事务中先核对提示�
 
 接受对话的调用方必须等待与本次 interaction 匹配的收据后才能返回“已启动”。到 10 秒仍无收据时，调用方持久化 `deadline_exceeded` 或 `clock_untrusted` 并返回失败；门禁失败不杀死已经在运行的 Agent、不吞掉输入，也不启动第二份 CLI。10 秒后才发生的 acknowledgement 只保留诊断价值；只有带可信 Provider 原始时间、并证明任务实际在门禁前开始的原生事件，才可纠正观察器晚到造成的判定。
 
-Continue 和成长汇报继续先创建新 turn，再把多行提示与唯一提交键组成一个原子 PTY frame；写入 Promise 必须真实结算，broken pipe 直接失败。frame 写入不是收据，调用方仍等待同一 interaction 的新 task-ingress。Host reload 后只按名字发现的旧终端不能复用：数据根、规范化项目、execution、run、generation/delivery 与当前 Host live bridge 必须全部匹配，否则启动新的正式 resume runner，避免把输入送进其他项目或失去管道的旧 TUI。现阶段不宣称 UI 可以跨 Host 重新附着旧 pipes。
+页面动作、Extension Host、Pseudoterminal bridge、runner 与 Provider observer 必须携带同一 `interactionId`；`traceId` 只标识一次局部 trace，不能冒充用户 interaction。至少持久化 terminal claim/focus、runner spawn/claim、Agent spawn/first-output、Provider task-ingress 及其耗时，保证一次慢唤起可以直接定位到唯一阶段。宿主等待持久收据只记录为 `terminal.delivery.task.ingress.observation`；Provider 原生事件或严格绑定的 MCP start 才记录权威 `terminal.delivery.task.ingress`。如果 observation 先超时、后到 Provider 事件的原始开始时间仍小于 10 秒，权威事件必须用同一 trace 写 `ok` 并标记已调和观察超时，不能让“观察迟到”继续伪装成“任务未启动”。Provider receipt 与诊断事件即使分两步落库，也必须允许从已持久化 receipt 幂等补记诊断，不能因首次 append 失败永久丢失权威阶段。trace 在创建时绑定其 diagnostic sink；创建时没有 sink 也必须显式绑定为 no-sink，不能让另一个窗口或数据根后来配置的 sink 接管迟到事件。
+
+后台恢复属于低优先级修复面。某个 run revision 的恢复若失败，Runtime 把失败阶段、尝试次数、下次时间和对应 revision 持久化到同一 run，并按 30 秒起步、最长 5 分钟退避；若 observer 在失败前已推进同一 run/generation/turn，退避必须基于重读后的最新 revision 写入。相同 revision 的 5 秒 tick 与 Runtime 重启都不得重复扫描大 transcript、workspace 或 Git。外部 revision 变化立即让旧退避失效，确保新事实不会被旧失败延迟；实现不得依赖会泄漏或在进程重启后丢失的内存 Map。
+
+“Continue Turn”和成长汇报中携带用户新要求的“继续”先创建新 turn，再把多行提示与唯一提交键组成一个原子 PTY frame；写入 Promise 必须真实结算，broken pipe 直接失败。frame 写入不是收据，调用方仍等待同一 interaction 的新 task-ingress。
+
+对话卡片上的“续聊/继续”按钮是另一种动作：它只重新进入已确认的 Provider 原生 session，使用不含 `PROMPT` 位置参数的 resume 命令，不提交“继续当前 Agent 对话”、SoloMap wrapper 或任何其他合成消息，也不制造一个必然无法到来的新 task-ingress 等待。Host 可预建待填写的账本 turn，但必须显式标记为等待原生输入；用户在重入后真正提交新文本时，observer 把原文写回这个 turn，随后由 Provider 原生 start/complete 形成收据和结算，不能留下空 turn 或“等待本轮用户消息”合成正文。
+
+Host reload 后只按名字发现的旧终端不能复用：数据根、规范化项目、execution、run、generation/delivery 与当前 Host live bridge 必须全部匹配，否则启动新的正式 resume runner，避免把输入送进其他项目或失去管道的旧 TUI。现阶段不宣称 UI 可以跨 Host 重新附着旧 pipes。
 
 当前 OpenCode 仍使用标准受控 CLI runner 和 `agent_acknowledged` 收据。`opencode serve`、`run --attach`、`exec attach`、Server 事件订阅与跨 Host 可重附着属于后续原生 adapter 设计，尚未在本版实现或作为发布结论。其他非 Codex/Claude Provider 的 transcript/hook 原生事件接入同样是后续增强；本版不得把这些目标状态写成已落地事实。
 
@@ -167,7 +175,7 @@ solomap_conversation_status({action:"complete", message:"当前要求", outcome:
 
 其中 `complete` 的结果只允许：`partial`、`candidate_complete`、`blocked_user`、`blocked_external`、`failed`。`candidate_complete` 只提交路线图完成候选，不能绕过完成标准或副 Agent 复核。Agent 不能直接编辑状态文件、完成文件或 SQLite 账本。
 
-Codex 和 Claude 的 native observer 为同一账本提供独立恢复信号；Claude native hook 可调用扩展内 `taskCheckpointProcess.js` 传输 native event，但这不是面向 Agent 的项目脚本协议。用户点击“继续”时，Host 会先创建活动轮次；这只能表示输入已被插件接受，不表示 Agent 已接收。随后 native start 在当前 turn 写入 Provider-native 身份、原始时间和 `taskIngressReceipt`，或在上一 turn 已结束时补建新 turn；实际 MCP `start` 到达也会在幂等快路径之前补写同 interaction receipt。若只有 `complete` 到达，状态消费者不能覆盖上一条记录。`checkpointEventId` 继续保护账本顺序，但不得兼任 task-start 真收据；`Waiting` 必须先于对话历史刷新落盘。
+Codex 和 Claude 的 native observer 为同一账本提供独立恢复信号；Claude native hook 可调用扩展内 `taskCheckpointProcess.js` 传输 native event，但这不是面向 Agent 的项目脚本协议。用户通过 “Continue Turn” 明确提交新要求时，Host 会先创建活动轮次；这只能表示输入已被插件接受，不表示 Agent 已接收。对话卡片的 resume-only“续聊”则只预建 `Waiting` turn，直到 observer 看到真实原生 user message 才切换 `Running` 并建立该次提交的新 interaction。随后 native start 在当前 turn 写入 Provider-native 身份、原始时间和 `taskIngressReceipt`，或在上一 turn 已结束时补建新 turn；实际 MCP `start` 到达也会在幂等快路径之前补写同 interaction receipt。若只有 `complete` 到达，状态消费者不能覆盖上一条记录。`checkpointEventId` 继续保护账本顺序，但不得兼任 task-start 真收据；`Waiting` 必须先于对话历史刷新落盘。
 
 ## 核心决策
 

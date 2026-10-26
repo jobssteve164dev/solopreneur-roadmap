@@ -126,9 +126,10 @@ export function configureLocalDiagnosticPersistence(value: LocalDiagnosticPersis
   if (globalDataPath) void loadDatabaseDiagnostics(globalDataPath);
 }
 
-function appendDiagnostic(globalDataPath: string, event: LocalDiagnosticEvent): void {
-  if (!persistence) return;
-  void Promise.resolve(persistence.append(diagnosticRoot(globalDataPath), event))
+function appendDiagnostic(globalDataPath: string, event: LocalDiagnosticEvent, target?: LocalDiagnosticPersistence | null): void {
+  const resolvedTarget = target === null ? undefined : target || persistence;
+  if (!resolvedTarget) return;
+  void Promise.resolve(resolvedTarget.append(diagnosticRoot(globalDataPath), event))
     .catch(error => console.warn('SoloMap diagnostics could not be saved:', sanitizeDiagnosticText(error)));
 }
 
@@ -230,6 +231,9 @@ function readRecentOperationEvents(globalDataPath: string): DiagnosticOperationE
 export function createLocalDiagnosticTrace(globalDataPath: string, source: string, interaction: DiagnosticInteraction = {}): LocalDiagnosticTrace {
   const id = crypto.randomBytes(8).toString('hex');
   const started = performance.now();
+  // `null` is an explicit no-sink binding. Passing `undefined` here would let
+  // appendDiagnostic fall through to a persistence configured by a later task.
+  const tracePersistence = persistence || null;
   let sequence = 0;
   const token = (value: string | undefined) => value && /^[a-z0-9_.:-]{1,80}$/i.test(value) ? value : undefined;
   const metadata = {
@@ -257,7 +261,7 @@ export function createLocalDiagnosticTrace(globalDataPath: string, source: strin
         payload: { traceId: id, ...metadata, elapsedMs, ...(entry.budgetExceeded !== undefined ? { budgetExceeded: entry.budgetExceeded } : {}), status, durationMs: entry.durationMs, ...(entry.message ? { message: entry.message } : {}),
           ...details },
         idempotencyKey: `diagnostic-operation:${PROCESS_DIAGNOSTIC_ID}:${id}:${++sequence}`
-      });
+      }, tracePersistence);
     }
   };
   trace.record(source, 'start');

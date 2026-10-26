@@ -8,6 +8,7 @@ export interface ForegroundRunnerIdentity {
   executionLogId: number;
   deliveryId: string;
   traceId: string;
+  interactionId: string;
   acceptedAtMs: number;
   terminalColumns?: number;
   terminalRows?: number;
@@ -40,6 +41,7 @@ export function buildForegroundRunnerInvocation(identity: ForegroundRunnerIdenti
         ELECTRON_RUN_AS_NODE: '1',
         SOLOMAP_TERMINAL_DELIVERY_ID: identity.deliveryId,
         SOLOMAP_DIAGNOSTIC_TRACE_ID: identity.traceId,
+        SOLOMAP_INTERACTION_ID: identity.interactionId,
         SOLOMAP_DELIVERY_STARTED_AT: String(identity.acceptedAtMs),
         SOLOMAP_TERMINAL_COLUMNS: String(Math.max(20, Math.min(1000, Math.floor(Number(identity.terminalColumns) || 120)))),
         SOLOMAP_TERMINAL_ROWS: String(Math.max(5, Math.min(500, Math.floor(Number(identity.terminalRows) || 30))))

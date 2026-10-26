@@ -39,6 +39,8 @@ async function main(): Promise<void> {
   const executionLogId = Number(argument('--execution-log-id'));
   if (!globalDataPath || !projectRoot || !Number.isInteger(executionLogId) || executionLogId < 1) throw new Error('run_execution_arguments_required');
   const diagnosticTraceId = /^[a-f0-9]{16}$/i.test(String(process.env.SOLOMAP_DIAGNOSTIC_TRACE_ID || '')) ? String(process.env.SOLOMAP_DIAGNOSTIC_TRACE_ID) : '';
+  const diagnosticInteractionId = /^[a-z0-9_.:-]{1,80}$/i.test(String(process.env.SOLOMAP_INTERACTION_ID || ''))
+    ? String(process.env.SOLOMAP_INTERACTION_ID) : diagnosticTraceId;
   const deliveryStartedAt = Number(process.env.SOLOMAP_DELIVERY_STARTED_AT || Date.now());
   let diagnosticSequence = 0;
   let diagnosticQueue = Promise.resolve();
@@ -47,7 +49,7 @@ async function main(): Promise<void> {
     const occurredAt = new Date().toISOString();
     diagnosticQueue = diagnosticQueue.then(() => sendRuntimeDataRequest(globalDataPath, { operation: 'append_diagnostic_event', input: {
         kind: 'operation', occurredAt, scope,
-        payload: { traceId: diagnosticTraceId, interactionId: diagnosticTraceId, status, durationMs: 0,
+        payload: { traceId: diagnosticTraceId, interactionId: diagnosticInteractionId, status, durationMs: 0,
           elapsedMs: Math.max(0, Date.now() - deliveryStartedAt), ...(Number.isInteger(pid) && pid > 0 ? { pid } : {}) },
         idempotencyKey: `runner-diagnostic:${diagnosticTraceId}:${process.pid}:${++diagnosticSequence}`
       } }).then(() => undefined)).catch(() => undefined);
@@ -119,6 +121,9 @@ async function main(): Promise<void> {
     }
   };
   const interactive = Boolean(plan.status.interactiveSession);
+  const agentInputMode = String(plan.status.agentInputMode || (interactive ? 'prompt_turn' : 'closed'));
+  if (!['prompt_turn', 'session_reentry', 'closed'].includes(agentInputMode)
+    || interactive === (agentInputMode === 'closed')) throw new Error('agent_input_mode_invalid');
   const maintenance = maintenanceRunKinds.includes(String(plan.status.runKind));
   const executionRoot = maintenance ? String(plan.status.maintenanceWorkspaceRoot || projectRoot) : projectRoot;
   const captureMaintenanceResult = async (): Promise<boolean> => {
@@ -233,7 +238,7 @@ async function main(): Promise<void> {
     await terminationDecision;
     if (requestedSignal) throw Object.assign(new Error(`执行已停止：${requestedSignal}`), { exitCode: requestedSignal === 'SIGINT' ? 130 : 143 });
   };
-  const execute = async (command: string, streams: [string, string], terminal: boolean, visible: boolean, collect = false): Promise<CapturedAgentProcess> => {
+  const execute = async (command: string, streams: [string, string], terminal: boolean, visible: boolean, collect = false, executionKind: 'formal' | 'preflight' = 'formal'): Promise<CapturedAgentProcess> => {
     if (!command.trim()) throw new Error('run_command_required');
     const heads = await Promise.all(streams.map(stream => request<{ nextSequence: number; totalBytes: number }>('read_run_log_head', { ...identity, stream })));
     await checkStopped();
@@ -250,9 +255,9 @@ async function main(): Promise<void> {
     env.ELECTRON_RUN_AS_NODE = '1';
     child = childProcess.spawn('bash', ['-c', `IFS= read -r solomap_launch_gate <&3 || exit 125; [ "$solomap_launch_gate" = launch ] || exit 125; exec 3<&-; ${inner}`], {
       cwd: executionRoot,
-      // The runner owns this pipe. Extension Host EOF must not become Agent
-      // EOF; only an explicit stop or the Agent itself may end the session.
-      stdio: [terminal ? 'pipe' : 'inherit', 'pipe', 'pipe', 'pipe'],
+      // Interactive sessions own a writable terminal pipe. Noninteractive
+      // actions own no input and must observe EOF immediately.
+      stdio: [terminal ? 'pipe' : 'ignore', 'pipe', 'pipe', 'pipe'],
       env,
       detached: process.platform !== 'win32'
     });
@@ -272,13 +277,18 @@ async function main(): Promise<void> {
     // Observe spawn rejection immediately, including a missing shell.
     void exited.catch(() => undefined);
     if (!child.pid) await exited;
-    await patch({ agentChildPid: child.pid!, processChildBirth: processBirth(child.pid!) });
-    recordDeliveryStage('terminal.delivery.agent.spawn', child.pid!);
+    if (executionKind === 'formal') await patch({ agentChildPid: child.pid!, processChildBirth: processBirth(child.pid!) });
+    recordDeliveryStage(`terminal.delivery.${executionKind === 'formal' ? 'agent' : 'preflight'}.spawn`, child.pid!);
     await checkStopped();
     // Attach readers before releasing the gate. Node drains unread pipes when
     // a short-lived child exits, so asynchronous discovery must happen first.
     const collected: Buffer[][] = [[], []];
+    let firstOutputRecorded = false;
     const forward = (index: number, display: (bytes: Buffer) => Promise<void>) => async (bytes: Buffer) => {
+      if (!firstOutputRecorded && bytes.length) {
+        firstOutputRecorded = true;
+        recordDeliveryStage(`terminal.delivery.${executionKind === 'formal' ? 'agent' : 'preflight'}.first-output`, child!.pid!);
+      }
       if (collect) collected[index].push(bytes);
       if (visible) await display(bytes);
     };
@@ -299,7 +309,7 @@ async function main(): Promise<void> {
       await new Promise(resolve => setTimeout(resolve, 250));
     }
     (child.stdio[3] as NodeJS.WritableStream).end('launch\n');
-    recordDeliveryStage('terminal.delivery.agent.launch', child.pid!);
+    recordDeliveryStage(`terminal.delivery.${executionKind === 'formal' ? 'agent' : 'preflight'}.launch`, child.pid!);
     await diagnosticQueue;
     const result = await finished;
     const [exitCode, signal] = result[2] as [number | null, NodeJS.Signals | null];
@@ -372,13 +382,13 @@ async function main(): Promise<void> {
       command = buildReadOnlyAgentCommandForPromptFile(launch.agentCli, materialized.path, projectRoot, launch.selectedModel, launch.codexProfile);
       if (!command) throw new Error('reviewer_read_only_mode_unsupported');
     } else if (launch) {
-      state = await prepareNativeAgentLaunch({ state, workspaceRoot: projectRoot, globalDataPath, operation: request, execute: (command, stream) => execute(command, [`preflight:${stream}:stdout`, `preflight:${stream}:stderr`], false, false, true) });
+      state = await prepareNativeAgentLaunch({ state, workspaceRoot: projectRoot, globalDataPath, operation: request, execute: (command, stream) => execute(command, [`preflight:${stream}:stdout`, `preflight:${stream}:stderr`], false, false, true, 'preflight') });
       if (!launch.direct) {
         const sessionId = String(state.status.plannedNativeSessionId || '');
         command = buildDatabaseAgentCommand({ ...launch, continuation: launch.continuation || (getAgentProvider(launch.agentCli) === 'cursor' && Boolean(sessionId)) }, plan.runId, plan.revision, executionRoot, interactive, sessionId, String(state.status.bindingNonce || ''), state.status.claudeNativeObserverCapable === true);
       }
     }
-    const formalExecution = execute(command, ['stdout', 'stderr'], interactive, true, Boolean(launch?.readOnly));
+    const formalExecution = execute(command, ['stdout', 'stderr'], interactive, true, Boolean(launch?.readOnly), 'formal');
     void formalExecution.catch(() => undefined);
     if (interactive) await baselinePersistence;
     const execution = await formalExecution;
@@ -404,7 +414,7 @@ async function main(): Promise<void> {
       }
     }
     state = await request<RunState>('read_run_state', identity);
-    if (!state.status.finishedAt && ['Running', 'Waiting', 'Processed', 'Turn Started'].includes(String(state.status.status))) {
+    if (agentInputMode !== 'session_reentry' && !state.status.finishedAt && ['Running', 'Waiting', 'Processed', 'Turn Started'].includes(String(state.status.status))) {
       const stopSummary = continuationStopSummary(code);
       const settled = await checkpoint({ action: 'complete', requireDeliverable: !maintenance && !interactive && !launch?.readOnly && !['flow_planner', 'flow_verifier'].includes(String(plan.status.runKind)), outcome: stopSummary || code === 0 ? 'partial' : 'failed', exitCode: code, summary: stopSummary || (code === 0 ? '本轮执行已结束，完整输出已保存。' : `本轮执行退出，退出码 ${code}，完整输出已保存。`) });
       code = Number(settled.status.exitCode ?? code);
@@ -422,7 +432,7 @@ async function main(): Promise<void> {
     state = await request<RunState>('read_run_state', identity);
     const exitCode = Number((error as Error & { exitCode?: number }).exitCode || 1);
     const stopSummary = requestedSignal && [130, 143].includes(exitCode) ? continuationStopSummary(exitCode) : undefined;
-    if (state.generation === generation && !state.status.finishedAt && ['Preparing', 'Running', 'Waiting', 'Processed', 'Turn Started'].includes(String(state.status.status))) {
+    if (agentInputMode !== 'session_reentry' && state.generation === generation && !state.status.finishedAt && ['Preparing', 'Running', 'Waiting', 'Processed', 'Turn Started'].includes(String(state.status.status))) {
       await checkpoint({ action: 'complete', outcome: stopSummary ? 'partial' : 'failed', exitCode, summary: stopSummary || (error instanceof Error ? error.message : String(error)) });
     }
     if (!interactive && state.generation === generation) await finalizeOutput(exitCode);

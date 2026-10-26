@@ -114,3 +114,84 @@ test('recovery preserves a live interactive process when only its terminal host 
     store.close();
   }
 });
+
+test('recovery backs off an unchanged failed run and persists its exact failure stage', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-recovery-backoff-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); let recovery; let now = 1_000; let checks = 0;
+  try {
+    const identity = await store.registerProject({ root: project });
+    let run = store.prepareRun(identity.projectId, identity.locationId, {
+      root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'migration_apply', prompt: '恢复失败退避', command: 'not executed',
+      userMessage: '恢复失败退避', metadata: { interactiveSession: false }, idempotencyKey: 'recovery-backoff-run'
+    });
+    run = store.claimRun(run.projectId, { executionLogId: 1, expectedRevision: run.revision, agentPid: 1073741824,
+      processBirth: 'proc:gone', idempotencyKey: 'recovery-backoff-claim' });
+    const original = store.runProcessAlive.bind(store);
+    store.runProcessAlive = () => { checks++; throw new Error('fixture_process_probe_failed'); };
+    recovery = new RunRecovery(store, undefined, () => now);
+    await assert.rejects(recovery.recover(), /fixture_process_probe_failed/);
+    assert.equal(checks, 1);
+    await recovery.close();
+    recovery = new RunRecovery(store, undefined, () => now);
+    await recovery.recover();
+    assert.equal(checks, 1, 'the cooldown must survive a Runtime rebuild instead of living only in one process Map');
+    let deferred = store.readRunState(run.projectId, 1);
+    deferred = store.patchRunState(run.projectId, { executionLogId: 1, generation: deferred.generation, expectedRevision: deferred.revision,
+      patch: { externalRecoverySignal: 'changed' }, idempotencyKey: 'external-state-change' });
+    await assert.rejects(recovery.recover(), /fixture_process_probe_failed/);
+    assert.equal(checks, 2, 'an external revision change must bypass the stale cooldown immediately');
+    await recovery.recover();
+    assert.equal(checks, 2, 'the new failed revision receives its own persisted cooldown');
+    const failures = store.readDiagnosticEvents({ kind: 'error', limit: 20 }).items
+      .filter(event => event.scope === 'runtime.run-recovery');
+    assert.equal(failures.length, 2);
+    assert.equal(failures[0].payload.runId, run.runId);
+    assert.equal(failures[0].payload.stage, 'process-check');
+    assert.match(failures[0].payload.error, /fixture_process_probe_failed/);
+    now += 30_000;
+    await assert.rejects(recovery.recover(), /fixture_process_probe_failed/);
+    assert.equal(checks, 3, 'the unchanged run may be retried after its bounded cooldown');
+    for (const expectedDelayMs of [120_000, 240_000, 300_000, 300_000, 300_000]) {
+      const backedOff = store.readRunState(run.projectId, 1);
+      now = Number(backedOff.status.recoveryRetryAtMs);
+      await assert.rejects(recovery.recover(), /fixture_process_probe_failed/);
+      const retried = store.readRunState(run.projectId, 1);
+      assert.equal(Number(retried.status.recoveryRetryAtMs) - now, expectedDelayMs);
+    }
+    store.runProcessAlive = original;
+  } finally { if (recovery) await recovery.close(); store.close(); }
+});
+
+test('recovery persists backoff after its observer advances the same run before failing', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-recovery-progress-backoff-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const { RunNativeObserver } = require('../out/runNativeObserver.js');
+  const originalObserve = RunNativeObserver.prototype.observe;
+  let recovery;
+  try {
+    const identity = await store.registerProject({ root: project });
+    let run = store.prepareRun(identity.projectId, identity.locationId, {
+      root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '恢复观察', command: 'not executed', userMessage: '恢复观察',
+      metadata: { interactiveSession: true, sessionProvider: 'codex' }, idempotencyKey: 'recovery-progress-run'
+    });
+    run = store.claimRun(run.projectId, { executionLogId: 1, expectedRevision: run.revision, agentPid: 1073741824,
+      processBirth: 'proc:gone', idempotencyKey: 'recovery-progress-claim' });
+    RunNativeObserver.prototype.observe = async function(observed) {
+      const latest = store.readRunState(observed.projectId, 1);
+      store.patchRunState(observed.projectId, { executionLogId: 1, generation: latest.generation, expectedRevision: latest.revision,
+        patch: { codexNativeCursor: 42 }, idempotencyKey: 'observer-progress-before-failure' });
+      throw new Error('observer_failed_after_progress');
+    };
+    recovery = new RunRecovery(store, undefined, () => 5_000);
+    await assert.rejects(recovery.recover(), /observer_failed_after_progress/);
+    const failed = store.readRunState(run.projectId, 1);
+    assert.equal(failed.status.codexNativeCursor, 42);
+    assert.equal(failed.status.recoveryBackoffRevision, failed.revision);
+    assert.equal(failed.status.recoveryRetryAtMs, 35_000);
+  } finally {
+    RunNativeObserver.prototype.observe = originalObserve;
+    if (recovery) await recovery.close();
+    store.close();
+  }
+});

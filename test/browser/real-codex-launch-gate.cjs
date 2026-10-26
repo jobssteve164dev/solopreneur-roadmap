@@ -54,6 +54,19 @@ function runMetadata(databasePath, interactionId) {
   } finally { database.close(); }
 }
 
+function interactionTimeline(databasePath, interactionId) {
+  if (!fs.existsSync(databasePath)) return [];
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    return database.prepare(`
+      SELECT occurred_at, scope, payload_json
+      FROM diagnostic_events
+      WHERE payload_json LIKE ?
+      ORDER BY sequence
+    `).all(`%${interactionId}%`).map(row => ({ occurredAt: row.occurred_at, scope: row.scope, payload: JSON.parse(row.payload_json) }));
+  } finally { database.close(); }
+}
+
 test('packaged SoloMap enters a real Codex task within ten seconds under host load', async t => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-real-codex-gate-'));
   const extensions = path.join(base, 'extensions');
@@ -183,6 +196,13 @@ test('packaged SoloMap enters a real Codex task within ten seconds under host lo
       observerDelayMs: taskReceipt.observerDelayMs, checkpointSummary: completed.status.checkpointSummary }));
     assert.match(String(completed.status.checkpointSummary || ''), /REAL_CODEX_GATE_OK/);
     assert.doesNotMatch(String(completed.status.checkpointSummary || ''), /工具.*不可用|not a function|未挂载|unavailable/i);
+    const timeline = await waitFor(() => {
+      const events = interactionTimeline(databasePath, receipt.interactionId);
+      const scopes = new Set(events.map(event => event.scope));
+      return ['terminal.delivery.runner.spawn', 'terminal.delivery.agent.spawn', 'terminal.delivery.agent.first-output', 'terminal.delivery.task.ingress']
+        .every(scope => scopes.has(scope)) ? events : null;
+    }, 'the conversation launch did not persist a correlated end-to-end diagnostic timeline', 10_000, 100);
+    t.diagnostic(JSON.stringify({ interactionId: receipt.interactionId, timeline }));
 
     const profile = String(completed.status.agentLaunch?.codexProfile || '');
     assert.match(profile, /^solomap-[a-f0-9]{16}$/);

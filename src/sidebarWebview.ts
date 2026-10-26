@@ -4747,6 +4747,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
   <script>
     ${getSharedWebviewRuntimeScript()}
     const vscode = acquireVsCodeApi();
+    function conversationActionEnvelope() {
+      const interactionAcceptedWallMs = Date.now();
+      const random = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+      return { interactionId: 'ui:' + interactionAcceptedWallMs.toString(36) + ':' + random, interactionAcceptedWallMs };
+    }
     const automationSoundPageId = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
     const intelligenceMarkdownScriptUri = ${JSON.stringify(String(intelligenceMarkdownUri))};
     const {
@@ -7371,6 +7377,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       const extraRequest = String(agentTimePlannerInput ? agentTimePlannerInput.value : '').trim();
       vscode.postMessage({
         command: 'timePlan.generate',
+        ...conversationActionEnvelope(),
         projectPath,
         requirements: extraRequest,
         agentCli: getEffectiveSettingCliPath(),
@@ -9475,6 +9482,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         globalPromptReviewDraft = settingGlobalPrompt.value;
         vscode.postMessage({
           command: 'settings.reviewGlobalPrompt',
+          ...conversationActionEnvelope(),
           globalPrompt: settingGlobalPrompt.value.trim()
         });
       });
@@ -9559,7 +9567,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         cliTestBadge.style.display = 'block';
         cliTestBadge.className = 'cli-badge';
         cliTestBadge.textContent = t('upgradingAgentClis');
-        vscode.postMessage({ command: 'agent.upgradeAll' });
+        vscode.postMessage({ command: 'agent.upgradeAll', ...conversationActionEnvelope() });
       });
     }
 
@@ -10098,6 +10106,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (isSolo) {
             vscode.postMessage({
               command: 'conversation.continue',
+              ...conversationActionEnvelope(),
               projectPath,
               nodeId: '__solo__',
               conversationId
@@ -10105,6 +10114,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           } else {
             vscode.postMessage({
               command: 'conversation.continue',
+              ...conversationActionEnvelope(),
               projectPath,
               nodeId: targetNodeId,
               conversationId
@@ -10454,6 +10464,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             if (!projectPath || !userMessage.trim()) return;
             vscode.postMessage({
               command: 'conversation.runSolo',
+              ...conversationActionEnvelope(),
               projectPath,
               userMessage,
               agentCli: getSoloSelectValue(agentSelect),
@@ -10471,6 +10482,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             if (!projectPath || !userMessage.trim()) return;
             vscode.postMessage({
               command: 'flow.run',
+              ...conversationActionEnvelope(),
               projectPath,
               goal: userMessage,
               agentCli: getSoloSelectValue(agentSelect),
@@ -11052,6 +11064,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             if (nodeId) {
               vscode.postMessage({
                 command: 'project.continue',
+                ...conversationActionEnvelope(),
                 projectPath,
                 nodeId,
                 agentCli: getEffectiveSettingCliPath()
@@ -11737,6 +11750,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         : 'Recalibrate the remaining roadmap from the project\\'s current actual progress. Preserve completed facts and make the new next step reflect the most valuable current goal.');
       return {
         command: 'conversation.runRoadmapRevision',
+        ...conversationActionEnvelope(),
         projectPath,
         userMessage,
         agentCli,
@@ -11904,6 +11918,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           event.stopPropagation();
           vscode.postMessage({
             command: 'project.continue',
+            ...conversationActionEnvelope(),
             projectPath: button.getAttribute('data-continue-next-action-project-path'),
             nodeId: button.getAttribute('data-continue-next-action-node-id'),
             agentCli: getLoadedAgentCliPath()
@@ -12024,6 +12039,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
             command: 'conversation.runSolo',
+            ...conversationActionEnvelope(),
             launchActionId,
             projectPath,
             userMessage: buildDeliveryActionPrompt(project),
@@ -12047,6 +12063,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           projectConversationModes[projectPath] = 'solo';
           vscode.postMessage({
             command: 'conversation.runSolo',
+            ...conversationActionEnvelope(),
             launchActionId,
             projectPath,
             userMessage: buildSecurityActionPrompt(project),
@@ -12078,6 +12095,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
             command: 'conversation.runSolo',
+            ...conversationActionEnvelope(),
             launchActionId,
             projectPath,
             userMessage: buildPullRequestReviewPrompt(project, pullRequest),
@@ -12113,6 +12131,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
             command: 'conversation.runSolo',
+            ...conversationActionEnvelope(),
             launchActionId,
             projectPath,
             userMessage: buildFoundationActionPrompt(project),
@@ -12314,6 +12333,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
             command: 'conversation.runSolo',
+            ...conversationActionEnvelope(),
             launchActionId,
             projectPath,
             userMessage: buildIssueActionPrompt(project, issueDetails),
@@ -12446,6 +12466,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     function runNodeAgent(projectPath, nodeId, userMessage, agentCli, model, supplementFiles) {
       vscode.postMessage({
         command: 'conversation.runStep',
+        ...conversationActionEnvelope(),
         projectPath: projectPath,
         nodeId: nodeId,
         userMessage: userMessage || '',

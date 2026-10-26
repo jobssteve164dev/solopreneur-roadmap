@@ -9,7 +9,8 @@ import type { RunState } from './runLifecycleTypes';
 import { assertClaudeTranscript, claudeTranscriptChunks, claudeTranscriptPaths } from './claudeSessionIdentity';
 import type { FileHandle } from 'fs/promises';
 import { claudeNativeEventPurpose, validateClaudeNativeEvent, ClaudeNativeEvent } from './claudeNativeEvent';
-import { taskIngressReceiptFields } from './providerTaskIngress';
+import { taskIngressDiagnosticEvent, taskIngressReceiptFields } from './providerTaskIngress';
+import { createInteractionBudgetAt } from './interactionBudget';
 
 const observations = new WeakMap<UnifiedDataStore, Map<string, Promise<void>>>();
 interface ClaudeLineage {
@@ -422,15 +423,37 @@ export class RunNativeObserver {
       patch({ [native('TokenTotal')]: normalizeTokenUsage(payload.info.total_token_usage) }, `tokens:${sourceOffset}`);
       return;
     }
-    if (row.type === 'response_item' && payload?.type === 'message' && payload.role === 'user' && (this.store.readMetadata(state.turnId).data.finished_at !== null || state.status[native('AwaitingRequest')] === true)) {
+    const awaitingNativeRequest = state.status[native('AwaitingRequest')] === true;
+    const awaitingSessionReentryRequest = state.status.agentInputMode === 'session_reentry' && state.status.nativeSessionReentryAwaitingRequest === true;
+    if (row.type === 'response_item' && payload?.type === 'message' && payload.role === 'user' && (this.store.readMetadata(state.turnId).data.finished_at !== null || awaitingNativeRequest || awaitingSessionReentryRequest)) {
       const text = (Array.isArray(payload.content) ? payload.content : []).filter((item: any) => item?.type === 'input_text').map((item: any) => String(item.text || '')).join('\n');
       if (text) {
         const purpose = `native_user_${sourceOffset}`;
-        if (!this.store.readRunDocument(state.projectId, executionLogId, purpose)) this.store.writeRunDocument(state.projectId, { ...identity, ...(state.status[native('AwaitingRequest')] === true ? { turnId: state.turnId } : {}), purpose, bytes: Buffer.from(text).toString('base64'), mimeType: 'text/plain', expectedRevision: 0, idempotencyKey: `run:${state.runId}:${state.generation}:native-user:${sourceOffset}` });
-        if (state.status[native('AwaitingRequest')] === true && state.status[native('BoundTurnId')] === state.turnId) {
+        if (!this.store.readRunDocument(state.projectId, executionLogId, purpose)) this.store.writeRunDocument(state.projectId, { ...identity, ...((awaitingNativeRequest || awaitingSessionReentryRequest) ? { turnId: state.turnId } : {}), purpose, bytes: Buffer.from(text).toString('base64'), mimeType: 'text/plain', expectedRevision: 0, idempotencyKey: `run:${state.runId}:${state.generation}:native-user:${sourceOffset}` });
+        if (awaitingSessionReentryRequest || (awaitingNativeRequest && state.status[native('BoundTurnId')] === state.turnId)) {
+          const requestTimestamp = nativeTime(row.timestamp);
+          const interactionId = awaitingSessionReentryRequest
+            ? `native:${crypto.createHash('sha256').update(`${state.runId}:${state.generation}:${sourceOffset}`).digest('hex').slice(0, 24)}`
+            : String(state.status.interactionId || '');
           state = current();
           this.store.patchRunTurnRequest(state.projectId, { ...identity, expectedRevision: state.revision, turnId: state.turnId, message: text, idempotencyKey: `run:${state.runId}:${state.generation}:native-request:${sourceOffset}` });
-          patch({ [native('AwaitingRequest')]: false }, `request:${sourceOffset}`);
+          const interactionBudget = awaitingSessionReentryRequest && Number.isFinite(requestTimestamp)
+            ? createInteractionBudgetAt(requestTimestamp, interactionId) : state.status.interactionBudget;
+          state = patch({ [native('AwaitingRequest')]: false, nativeSessionReentryAwaitingRequest: false, status: 'Running',
+            ...(awaitingSessionReentryRequest ? { interactionId, interactionBudget, taskIngressReceipt: null, taskIngressElapsedMs: 0,
+              taskIngressVerdict: '', taskIngressObservedAt: '', taskIngressDeadlineExceededAt: '', deliveryLastError: '' } : {}) }, `request:${sourceOffset}`);
+          const startedAt = Date.parse(String(state.status[native('StartedAt')] || ''));
+          const nativeTurnId = String(state.status[native('TurnId')] || '');
+          if (awaitingSessionReentryRequest && nativeTurnId && Number.isFinite(startedAt) && startedAt >= requestTimestamp) {
+            const receipt = taskIngressReceiptFields(state.status, {
+              provider: String(state.status.sessionProvider || ''),
+              kind: state.status.sessionProvider === 'claude' ? 'claude_root_turn_start' : 'codex_task_started',
+              nativeTurnId,
+              sessionId: String(state.status.nativeSessionId || state.status.plannedNativeSessionId || ''),
+              providerStartedAt: new Date(startedAt).toISOString()
+            });
+            if (Object.keys(receipt).length) patch(receipt, `reentry-ingress:${sourceOffset}`);
+          }
         } else {
           const requestTimestamp = nativeTime(row.timestamp);
           patch({ [native('PendingRequest')]: purpose, [native('PendingRequestTimestamp')]: Number.isFinite(requestTimestamp) ? requestTimestamp : null }, `request:${sourceOffset}`);
@@ -452,9 +475,15 @@ export class RunNativeObserver {
         sessionId: String(state.status.nativeSessionId || state.status.plannedNativeSessionId || ''),
         providerStartedAt: new Date(eventTimestamp).toISOString()
       });
+      const ingressDiagnostic = (fields: Record<string, unknown>) => taskIngressDiagnosticEvent(state.status, fields,
+        `run:${state.runId}:${state.generation}:native-ingress-diagnostic:${key}`);
       if (state.status[native('TurnId')] === nativeTurnId) {
         const receipt = ingress();
-        if (Object.keys(receipt).length) patch(receipt, `ingress:${key}`);
+        const diagnostic = ingressDiagnostic(receipt);
+        if (Object.keys(receipt).length) {
+          patch(receipt, `ingress:${key}`);
+        }
+        if (diagnostic) this.store.appendDiagnosticEvent(diagnostic);
         return;
       }
       const previousStart = state.status[native('BoundTurnId')] === state.turnId ? state.status[native('StartedAt')] : state.status.turnStartedAt;
@@ -478,7 +507,10 @@ export class RunNativeObserver {
         if (document) this.store.link({ source: document.objectId, relation: 'source', target: state.turnId, expectedRevision: document.revision, idempotencyKey: `run:${state.runId}:${state.generation}:native-request-source:${key}` });
         patch({ [native('AwaitingRequest')]: !document }, `pending-request:${key}`);
       }
-      patch({ [native('TurnId')]: nativeTurnId, [native('BoundTurnId')]: state.turnId, [native('StartedAt')]: new Date(eventTimestamp).toISOString(), [native('StartOffset')]: sourceOffset, [native('WorkspaceBeforeRecorded')]: beforeRecorded, turnStartedAt: new Date(eventTimestamp).toISOString(), [native('TokenBaseline')]: state.status[native('TokenTotal')] || normalizeTokenUsage(null), [native('PendingRequest')]: '', ...ingress() }, `start:${key}`);
+      const receipt = ingress();
+      const diagnostic = ingressDiagnostic(receipt);
+      patch({ [native('TurnId')]: nativeTurnId, [native('BoundTurnId')]: state.turnId, [native('StartedAt')]: new Date(eventTimestamp).toISOString(), [native('StartOffset')]: sourceOffset, [native('WorkspaceBeforeRecorded')]: beforeRecorded, turnStartedAt: new Date(eventTimestamp).toISOString(), [native('TokenBaseline')]: state.status[native('TokenTotal')] || normalizeTokenUsage(null), [native('PendingRequest')]: '', ...receipt }, `start:${key}`);
+      if (diagnostic) this.store.appendDiagnosticEvent(diagnostic);
       return;
     }
     const completedTimestamp = nativeTime(row.timestamp || payload.completed_at);

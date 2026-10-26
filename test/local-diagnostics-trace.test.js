@@ -32,6 +32,30 @@ test('interaction diagnostics retain one monotonic timeline and a safe target ac
   assert.ok(entries.some(e => e.scope === 'strategy.local' && e.payload.budgetExceeded === true));
 });
 
+test('a diagnostic trace keeps the data sink that owned it when later windows switch roots', () => {
+  const diagnostics = require('../out/localDiagnostics.js');
+  const first = []; const second = [];
+  diagnostics.configureLocalDiagnosticPersistence({ append: (root, event) => first.push({ root, event }) });
+  const trace = diagnostics.createLocalDiagnosticTrace('/first-root', 'conversation.entry', { interactionId: 'interaction-owned-by-first-root' });
+  diagnostics.configureLocalDiagnosticPersistence({ append: (root, event) => second.push({ root, event }) });
+  trace.record('terminal.delivery.runner.spawn', 'ok');
+  diagnostics.configureLocalDiagnosticPersistence(undefined);
+  assert.deepEqual(first.map(item => item.event.scope), ['conversation.entry', 'terminal.delivery.runner.spawn']);
+  assert.equal(first.every(item => item.root.includes('first-root')), true);
+  assert.deepEqual(second, []);
+});
+
+test('a trace created without a sink cannot leak late events into a later root sink', () => {
+  const diagnostics = require('../out/localDiagnostics.js');
+  const second = [];
+  diagnostics.configureLocalDiagnosticPersistence(undefined);
+  const trace = diagnostics.createLocalDiagnosticTrace('/first-root', 'conversation.entry');
+  diagnostics.configureLocalDiagnosticPersistence({ append: (root, event) => second.push({ root, event }) }, '/second-root');
+  trace.record('conversation.late', 'error', 1, new Error('late_failure'));
+  diagnostics.configureLocalDiagnosticPersistence(undefined);
+  assert.deepEqual(second, []);
+});
+
 test('runtime handoff failures retain their diagnostic categories', () => {
   const diagnostics = require('../out/localDiagnostics.js');
   assert.equal(diagnostics.classifyDiagnosticFailure(new Error('different_runtime_build')), 'different_runtime_build');

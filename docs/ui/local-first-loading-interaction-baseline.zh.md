@@ -54,6 +54,20 @@ SoloMap 是本地数据优先的行动工具。用户已经保存在本地的数
 
 除对话发送采用“5 秒正常目标、10 秒发布硬上限”的双层判定外，其余数值都是上限，不是建议值。对话样本在 5 秒内属于正常，超过 5 秒但不超过 10 秒属于明确的体验退化并必须留下可定位记录，超过 10 秒则整版不得发布；执行方不得任选其中一个口径替代另一个。
 
+## 统一输入所有权
+
+任何入口在进入共享 runner 前必须先归类，不允许由终端是否已打开、CLI 是否会读 stdin 或某个页面的实现差异临时决定：
+
+| 模式 | 适用入口 | 对 Agent CLI 的输入合同 |
+| --- | --- | --- |
+| `prompt_turn` | 侧边栏、路线图大图的 Solo/环节主动发起，以及用户明确输入新要求的 Continue Turn | 只提交一次用户确认的完整提示；交互终端持有可写 stdin。 |
+| `session_reentry` | 对话卡片的“续聊/继续”按钮 | 只用 Provider 原生 session ID 重新进入会话；不构造、不存储为用户输入、不向 CLI 提交任何合成提示词。打开 TUI 本身不是新 task，因此不等待一个不存在的新 task-ingress。 |
+| `closed` | 设置页 CLI 更新、技能/MCP 安装卸载、迁移检查/执行、回收等非交互维护 | 子进程 fd 0 从启动起立即 EOF；不得继承 Extension Host、Pseudoterminal bridge 或其他长寿命 socket。 |
+
+三类入口共用同一个 prepare/delivery/runner 主路径和同一个持久化字段 `agentInputMode`。页面只表达用户动作，不得在各自 sender 里重新实现一套输入规则。
+
+同一次用户动作必须在 Webview 接受点击时创建 `interactionId + interactionAcceptedWallMs`，并从页面、宿主准备、终端 delivery、runner 到 Provider 首次输出/任务收据沿用该身份与起点；禁止等共享 handler 排到队首后重新起表。阶段记录必须写入当前动作创建时绑定的数据根，不能因另一窗口随后切换数据根而串写。后台恢复若在同一 run revision 上失败，必须持久化 `runId/generation/revision/stage/error/elapsed/retryDelay/attempts/retryAt` 并退避；禁止每 5 秒重复执行相同 transcript、workspace 或 Git IO 与前台对话争抢资源。Runtime 重启不得清空退避；外部 run revision 一旦变化则立即解除旧退避。
+
 ## 一、插件冷启动体验
 
 ### 用户目标
@@ -152,7 +166,7 @@ SoloMap 是本地数据优先的行动工具。用户已经保存在本地的数
 
 runner claim 后的 Git 基线、工作区 snapshot、Agent 数据库准备、Provider `--help`/`--version`、原生会话创建等 preflight 全部处于任务开始之前，必须计入同一预算。当前原生权威来源是 Codex `task_started` 与 Claude 根 `turn.start`；Cursor、Copilot、OpenCode、Grok 和 Antigravity 当前以同一 run proof、session binding、turn 和 interaction 精确核对的 `agent_acknowledged` 收据闭合。Host 预登记 checkpoint、prepare `Running`、普通 `turnStartedAt`、`checkpointEventId=:start`、模型普通文本或 Shell 自报均不算。后到的 `provider_native` 可升级同一 interaction 的 `agent_acknowledged` 收据，反向覆盖禁止；恢复轮询发现时间不能重置起点。
 
-10 秒时尚未观察到收据，只能先持久化“观察窗口未命中”的 `deadline_exceeded` 证据。若唯一正式 runner 已提交且仍受控，不能仅因 observer 迟到就向用户返回“暂时无法回答”、关闭任务或重复投递；后到收据必须使用 Provider 原始开始时间裁决并修正这条临时观察结果。只有 Provider 原始任务开始时间本身达到或超过 10 秒，才是版本硬门禁失败；时钟不可验证则记为 `clock_untrusted`，不得伪造达标。这样既不放宽 `<10s` 的发布标准，也不把观测链路延迟误报成真实任务启动失败。
+10 秒时尚未观察到收据，只能先持久化“观察窗口未命中”的 `deadline_exceeded` 证据，阶段名必须明确为 `task.ingress.observation`，不能伪装成 Provider 接单事实。若唯一正式 runner 已提交且仍受控，不能仅因 observer 迟到就向用户返回“暂时无法回答”、关闭任务或重复投递；后到收据必须使用 Provider 原始开始时间裁决，并以同一 trace 的权威 `task.ingress` 事件修正这条临时观察结果，同时标记是否调和过观察超时。只有 Provider 原始任务开始时间本身达到或超过 10 秒，才是版本硬门禁失败；时钟不可验证则记为 `clock_untrusted`，不得伪造达标。这样既不放宽 `<10s` 的发布标准，也不把观测链路延迟误报成真实任务启动失败。
 
 “已经显示一个准备终端”可以满足终端可见要求，但不能掩盖正式命令尚未发送。界面应区分：
 

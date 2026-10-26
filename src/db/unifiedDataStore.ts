@@ -5237,6 +5237,9 @@ export class UnifiedDataStore {
       let exitCode = input.exitCode;
       let unreportedClose = false;
       const sealingNativeOnClose = input.action === 'session-close' && metadata.nativeOutputPending === true;
+      const unusedSessionReentry = input.action === 'session-close' && row.status === 'Waiting'
+        && metadata.agentInputMode === 'session_reentry' && metadata.nativeSessionReentryAwaitingRequest === true
+        && !String(this.current(String(row.current_turn_id), false).data.request_content || '').trim();
       const finalizingNative = input.action === 'complete' && input.workspaceEvidenceSource === 'native' && metadata.nativeOutputPending === true && this.readMetadata(turnId).data.finished_at !== null;
       const acknowledgingInitialStart = input.action === 'start' && Number(row.checkpoint_sequence) === 0 && ['Preparing', 'Running'].includes(String(row.status)) && this.readMetadata(turnId).data.finished_at === null;
       const logOffsets = Object.fromEntries(['output', 'stdout', 'stderr'].map(stream => [stream, this.readRunLogHead(projectId, input.executionLogId, stream).totalBytes]));
@@ -5326,16 +5329,22 @@ export class UnifiedDataStore {
         finishedAt = now;
         const turn = this.current(turnId, false);
         if (turn.data.finished_at === null) {
-          unreportedClose = true;
-          if (['Preparing', 'Running', 'Turn Started'].includes(String(row.status))) status = 'Failed';
-          const summary = '会话已关闭，本轮尚未提交结果；已保留执行记录，可继续处理。';
-          this.write({ kind: 'turn', action: 'patch', scope: projectId, objectId: turnId, expectedRevision: turn.revision, idempotencyKey: `${input.idempotencyKey}:turn`, data: { outcome: 'failed', summary_content: summary, finished_at: now } });
-          const reportInput = { report: null, availability: 'missing', validationError: '' };
-          const existingReport = this.runReportHead(projectId, String(row.run_id), turnId);
-          const reportReceipt = existingReport
-            ? { objectId: existingReport.objectId, revision: existingReport.revision }
-            : this.recordMutation({ operation: 'checkpoint_report', projectId, runId: row.run_id, turnId, ...reportInput }, `${input.idempotencyKey}:report`, 'report', () => this.upsertRunReport(projectId, String(row.run_id), turnId, reportInput));
-          Object.assign(metadata, { failureCode: 'checkpoint_missing', failureReason: summary, checkpointOutcome: 'failed', checkpointSummary: summary, checkpointAt: new Date(now).toISOString(), taskReportObjectId: reportReceipt.objectId, taskReportRevision: reportReceipt.revision, taskReportStatus: 'missing', taskReportError: '' });
+          if (unusedSessionReentry) {
+            this.write({ kind: 'turn', action: 'patch', scope: projectId, objectId: turnId, expectedRevision: turn.revision,
+              idempotencyKey: `${input.idempotencyKey}:turn`, data: { outcome: 'partial', summary_content: '', finished_at: now } });
+            Object.assign(metadata, { nativeSessionReentryAwaitingRequest: false, sessionReentryClosedWithoutInput: true });
+          } else {
+            unreportedClose = true;
+            if (['Preparing', 'Running', 'Turn Started'].includes(String(row.status))) status = 'Failed';
+            const summary = '会话已关闭，本轮尚未提交结果；已保留执行记录，可继续处理。';
+            this.write({ kind: 'turn', action: 'patch', scope: projectId, objectId: turnId, expectedRevision: turn.revision, idempotencyKey: `${input.idempotencyKey}:turn`, data: { outcome: 'failed', summary_content: summary, finished_at: now } });
+            const reportInput = { report: null, availability: 'missing', validationError: '' };
+            const existingReport = this.runReportHead(projectId, String(row.run_id), turnId);
+            const reportReceipt = existingReport
+              ? { objectId: existingReport.objectId, revision: existingReport.revision }
+              : this.recordMutation({ operation: 'checkpoint_report', projectId, runId: row.run_id, turnId, ...reportInput }, `${input.idempotencyKey}:report`, 'report', () => this.upsertRunReport(projectId, String(row.run_id), turnId, reportInput));
+            Object.assign(metadata, { failureCode: 'checkpoint_missing', failureReason: summary, checkpointOutcome: 'failed', checkpointSummary: summary, checkpointAt: new Date(now).toISOString(), taskReportObjectId: reportReceipt.objectId, taskReportRevision: reportReceipt.revision, taskReportStatus: 'missing', taskReportError: '' });
+          }
         }
         metadata.nativeOutputPending = false;
         Object.assign(metadata, { interactiveSessionClosed: true, sessionExitCode: input.exitCode ?? 0, sessionClosePreviousStatus: row.status });
@@ -5467,7 +5476,7 @@ export class UnifiedDataStore {
       this.db.run('UPDATE objects SET revision=revision+1,updated_at=? WHERE id=?', [now, row.run_id]);
       this.saveRunControlRevision(String(row.run_id));
       const current = this.current(String(row.run_id), false);
-      if (input.action !== 'start' && !metadata.hostOutputPending && !metadata.nativeOutputPending) this.db.run("INSERT INTO run_consumer_sources VALUES(?,?,?,?,?,'queued')", [row.run_id, projectId, turnId, Number(row.checkpoint_sequence) + 1, current.revision]);
+      if (input.action !== 'start' && !unusedSessionReentry && !metadata.hostOutputPending && !metadata.nativeOutputPending) this.db.run("INSERT INTO run_consumer_sources VALUES(?,?,?,?,?,'queued')", [row.run_id, projectId, turnId, Number(row.checkpoint_sequence) + 1, current.revision]);
       return current;
     }, undefined, false);
     return { ...this.readRunState(projectId, input.executionLogId, receipt.revision), receipt };

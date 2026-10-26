@@ -134,6 +134,42 @@ test('the shared packaged runner commits complete output and host completion wit
   }
 });
 
+test('a noninteractive formal Agent receives immediate stdin EOF from the foreground bridge', async () => {
+  const source = "const fs=require('fs');const input=fs.readFileSync(0,'utf8');process.stdout.write(input===''?'stdin-eof':'unexpected-input:'+input);";
+  const f = await executionFixture(`${shellQuote(process.execPath)} -e ${shellQuote(source)}`, {
+    interactiveSession: false,
+    agentCli: 'fixture'
+  }, '', 'agent_cli_upgrade');
+  try {
+    const agent = f.startAgent();
+    const result = await Promise.race([
+      once(agent, 'exit').then(([code]) => ({ code })),
+      new Promise(resolve => setTimeout(() => resolve({ code: 'stdin-still-open' }), 1000))
+    ]);
+    assert.equal(result.code, 0, 'noninteractive Agent stdin must be closed instead of inheriting the long-lived bridge input');
+    assert.equal(f.stdout().toString(), 'stdin-eof');
+  } finally { await f.close(); }
+});
+
+for (const exitCode of [0, 7]) test(`a resume-only runner exit ${exitCode} closes without completing a synthetic empty turn`, async () => {
+  const f = await executionFixture(`${shellQuote(process.execPath)} -e ${shellQuote(`process.exit(${exitCode})`)}`, {
+    interactiveSession: true, agentInputMode: 'session_reentry', nativeSessionReentryAwaitingRequest: true,
+    agentCli: 'fixture', sessionProvider: 'fixture'
+  }, '', 'solo_continue', { prompt: '', userMessage: '', status: 'Waiting' });
+  try {
+    const agent = f.startAgent();
+    assert.equal((await once(agent, 'exit'))[0], exitCode, f.stderr().toString());
+    const state = await f.call('read_run_state');
+    const turn = await f.call('read', { ref: state.turnId });
+    assert.equal(state.status.status, 'Session Closed');
+    assert.equal(state.status.sessionReentryClosedWithoutInput, true);
+    assert.equal(state.status.failureCode, undefined);
+    assert.equal(turn.data.request_content, '');
+    assert.equal(turn.data.summary_content, '');
+    assert.equal(turn.data.outcome, 'partial');
+  } finally { await f.close(); }
+});
+
 test('the shared runner retries its initial claim after the terminal host advances the run revision', async () => {
   const f = await executionFixture(`env -u NO_COLOR ${shellQuote(process.execPath)} -e ${shellQuote("process.stdout.write('claimed after terminal delivery')")}`);
   const hook = path.join(path.dirname(f.root), 'advance-before-claim.cjs');
@@ -183,16 +219,44 @@ test('the shared runner records claim and Agent launch stages in the originating
     const stages = diagnostics.items
       .filter(event => event.payload.traceId === traceId)
       .map(event => [event.scope, event.payload.status]);
-    assert.deepEqual(stages, [
-      ['terminal.delivery.runner.start', 'ok'],
-      ['terminal.delivery.runner.claim', 'ok'],
-      ['terminal.delivery.rollback.snapshot', 'start'],
-      ['terminal.delivery.rollback.snapshot', 'ok'],
-      ['terminal.delivery.workspace.baseline', 'start'],
-      ['terminal.delivery.workspace.baseline', 'ok'],
-      ['terminal.delivery.agent.spawn', 'ok'],
-      ['terminal.delivery.agent.launch', 'ok']
-    ]);
+    const expected = [
+      ['terminal.delivery.runner.start', 'ok'], ['terminal.delivery.runner.claim', 'ok'],
+      ['terminal.delivery.rollback.snapshot', 'start'], ['terminal.delivery.rollback.snapshot', 'ok'],
+      ['terminal.delivery.workspace.baseline', 'start'], ['terminal.delivery.workspace.baseline', 'ok'],
+      ['terminal.delivery.agent.spawn', 'ok'], ['terminal.delivery.agent.launch', 'ok'],
+      ['terminal.delivery.agent.first-output', 'ok']
+    ];
+    assert.deepEqual(stages.slice(0, 5), expected.slice(0, 5));
+    for (const stage of expected.slice(5)) assert.equal(stages.filter(candidate => candidate[0] === stage[0] && candidate[1] === stage[1]).length, 1);
+    assert.ok(stages.findIndex(candidate => candidate[0] === 'terminal.delivery.workspace.baseline' && candidate[1] === 'ok') < stages.findIndex(candidate => candidate[0] === 'terminal.delivery.agent.launch'));
+    assert.ok(stages.findIndex(candidate => candidate[0] === 'terminal.delivery.agent.spawn') < stages.findIndex(candidate => candidate[0] === 'terminal.delivery.agent.launch'));
+  } finally { await f.close(); }
+});
+
+test('Cursor preflight subprocesses have separate trace stages and only the formal CLI emits Agent launch stages', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cursor-trace-cli-'));
+  const cli = path.join(base, 'cursor');
+  fs.writeFileSync(cli, `#!${process.execPath}\nconst args=process.argv.slice(2);if(args[0]==='create-chat'&&args[1]==='--help')process.stdout.write('create help');else if(args[0]==='--help')process.stdout.write('--resume');else if(args[0]==='create-chat')process.stdout.write('cursor-session-123');else process.stdout.write('formal cursor agent');`, { mode: 0o700 });
+  const f = await executionFixture('placeholder', {
+    interactiveSession: true, agentCli: cli, sessionProvider: 'cursor',
+    agentLaunch: { schemaVersion: 1, agentCli: cli, selectedModel: '', taskPermissionMode: 'auto', continuation: false, direct: false }
+  });
+  const traceId = 'fedcba9876543210';
+  try {
+    assert.equal(f.prepared.status.plannedNativeSessionId, undefined);
+    await f.call('write_run_binding', { generation: f.prepared.generation, expectedHeadRevision: 0, seed: {
+      runId: '1', provider: 'cursor', workspaceRoot: f.projectRoot, cliPath: cli, bindingNonce: '5'.repeat(64), method: 'provider_created', contract: 'official_stable'
+    }, idempotencyKey: 'cursor-trace-seed' });
+    const agent = f.startAgent({ SOLOMAP_DIAGNOSTIC_TRACE_ID: traceId, SOLOMAP_DELIVERY_STARTED_AT: String(Date.now()) });
+    agent.stdin.end();
+    assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
+    const diagnostics = await f.call('read_diagnostic_events', { kind: 'operation', limit: 100 });
+    const scopes = diagnostics.items.filter(event => event.payload.traceId === traceId).map(event => event.scope);
+    for (const suffix of ['spawn', 'launch', 'first-output']) {
+      assert.equal(scopes.filter(scope => scope === `terminal.delivery.preflight.${suffix}`).length, 3, `${suffix} must describe all three preflight subprocesses: ${JSON.stringify(scopes)}`);
+      assert.equal(scopes.filter(scope => scope === `terminal.delivery.agent.${suffix}`).length, 1, `${suffix} must describe only the formal Agent CLI`);
+      assert.ok(scopes.lastIndexOf(`terminal.delivery.preflight.${suffix}`) < scopes.indexOf(`terminal.delivery.agent.${suffix}`));
+    }
   } finally { await f.close(); }
 });
 
@@ -238,7 +302,7 @@ test('a migration run completes through the shared runner without a private resu
   } finally { await f.close(); }
 });
 
-async function executionFixture(command, metadata = {}, initialOutput = '', runKind = 'solo') {
+async function executionFixture(command, metadata = {}, initialOutput = '', runKind = 'solo', inputs = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "solomap-shared-runner-case-'🌿-"));
   const root = path.join(base, '.solomap-global');
   const projectRoot = path.join(base, 'project'); fs.mkdirSync(projectRoot);
@@ -246,7 +310,8 @@ async function executionFixture(command, metadata = {}, initialOutput = '', runK
   assert.equal(require('node:child_process').execFileSync('git', ['-C', projectRoot, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim(), projectRoot);
   const seed = new UnifiedDataStore(root);
   const project = await seed.registerProject({ root: projectRoot });
-  const prepared = seed.prepareRun(project.projectId, project.locationId, { root: projectRoot, executionLogId: 1, nodeId: '__solo__', runKind, prompt: '任务原文', command, userMessage: '用户目标', metadata, idempotencyKey: 'prepare' });
+  const prepared = seed.prepareRun(project.projectId, project.locationId, { root: projectRoot, executionLogId: 1, nodeId: '__solo__', runKind,
+    prompt: inputs.prompt ?? '任务原文', command, userMessage: inputs.userMessage ?? '用户目标', ...(inputs.status ? { status: inputs.status } : {}), metadata, idempotencyKey: 'prepare' });
   if (initialOutput) seed.appendRunLog(project.projectId, { executionLogId: 1, generation: prepared.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from(initialOutput).toString('base64'), idempotencyKey: 'existing-output' });
   seed.close();
   let runtime; let agent; const output = []; const errors = [];
@@ -722,14 +787,13 @@ test('Runtime restart preserves a live orphan and its database prompt, then sett
 });
 
 test('an active child survives database owner restart and commits queued bytes to the same run', async () => {
-  const source = "process.stdout.write('before restart\\n');process.stdin.once('data',()=>{process.stdout.write('after restart\\n');process.stdin.pause()})";
+  const source = "process.stdout.write('before restart\\n');setTimeout(()=>process.stdout.write('after restart\\n'),100)";
   const f = await executionFixture(`env -u NO_COLOR ${shellQuote(process.execPath)} -e ${shellQuote(source)}`);
   try {
     const agent = f.startAgent();
     while (!f.stdout().includes(Buffer.from('before restart\n'))) { assert.equal(agent.exitCode, null, f.stderr().toString()); await new Promise(resolve => setTimeout(resolve, 10)); }
     await f.stopRuntime();
     const finished = once(agent, 'exit');
-    agent.stdin.end('continue\n');
     await new Promise(resolve => setTimeout(resolve, 350));
     assert.equal(agent.exitCode, null, 'the runner waits for the same owner instead of losing accepted bytes');
     await f.startRuntime();
@@ -793,12 +857,12 @@ test('an orphaned live Agent prevents another wrapper from claiming the executio
 });
 
 test('closing the display pipe keeps the accepted Agent running and preserves its subsequent output', async () => {
-  const source = "process.stdout.write('ready\\n');process.stdin.once('data',()=>{process.stdout.write('after display closed\\n');process.stdin.pause()})";
+  const source = "process.stdout.write('ready\\n');setTimeout(()=>process.stdout.write('after display closed\\n'),100)";
   const f = await executionFixture(`env -u NO_COLOR ${shellQuote(process.execPath)} -e ${shellQuote(source)}`);
   try {
     const agent = f.startAgent(); const finished = once(agent, 'exit');
     while (!f.stdout().includes(Buffer.from('ready\n'))) { assert.equal(agent.exitCode, null, f.stderr().toString()); await new Promise(resolve => setTimeout(resolve, 10)); }
-    agent.stdout.destroy(); agent.stdin.end('continue\n');
+    agent.stdout.destroy();
     const [code] = await finished; assert.equal(code, 0, f.stderr().toString());
     const state = await f.call('read_run_state'); assert.equal(state.status.checkpointOutcome, 'partial');
     const log = await f.call('read_run_log', { stream: 'stdout' });

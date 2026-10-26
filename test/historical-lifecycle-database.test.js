@@ -13,6 +13,8 @@ const { prepareAgentRun } = require('../out/agentRunPreparation.js');
 const { isProcessOwnerAlive, readProcessBirthMarker } = require('../out/processIdentity.js');
 const { historicalRunOwnerStateStamp, refreshHistoricalRunMigrations } = require('../out/runtimeDatabaseBootstrap.js');
 
+assert.ok(process.env.SOLOMAP_TEST_RUN_OWNERS, 'run this file through scripts/run-node-tests.cjs so its temporary roots are reclaimed');
+
 async function startLegacyRunScript(t, scriptPath) {
   const readyPath = `${scriptPath}.ready`;
   fs.writeFileSync(scriptPath, '#!/bin/sh\nwhile :; do sleep 60 & child=$!; printf %s "$child" > "$SOLOMAP_TEST_READY"; wait "$child"; done\n');
@@ -21,11 +23,18 @@ async function startLegacyRunScript(t, scriptPath) {
   t.after(() => {
     try { process.kill(-child.pid, 'SIGKILL'); } catch {}
   });
-  for (let attempt = 0; attempt < 100 && (!isProcessOwnerAlive(child.pid, birth) || !fs.existsSync(readyPath)); attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+  let descendantPid = 0;
+  let descendantBirth = '';
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (fs.existsSync(readyPath)) {
+      descendantPid = Number(fs.readFileSync(readyPath, 'utf8'));
+      descendantBirth = readProcessBirthMarker(descendantPid);
+    }
+    if (isProcessOwnerAlive(child.pid, birth) && descendantBirth && isProcessOwnerAlive(descendantPid, descendantBirth)) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
   assert.ok(isProcessOwnerAlive(child.pid, birth), 'legacy wrapper must be running before the lifecycle assertion');
   assert.ok(fs.existsSync(readyPath), 'legacy wrapper must open its script before the lifecycle assertion');
-  const descendantPid = Number(fs.readFileSync(readyPath, 'utf8'));
-  const descendantBirth = readProcessBirthMarker(descendantPid);
   assert.ok(isProcessOwnerAlive(descendantPid, descendantBirth), 'legacy wrapper child must be running before the lifecycle assertion');
   return { child, birth, descendantPid, descendantBirth };
 }

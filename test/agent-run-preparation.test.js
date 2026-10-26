@@ -82,7 +82,7 @@ test('host preparation persists all task input and native identity without produ
   } finally { await operations.close(); store.close(); }
 });
 
-test('interactive Codex preparation replaces a legacy direct resume command with one isolated native CLI launch', async () => {
+test('interactive Codex preparation preserves a resume-only command without creating a synthetic prompt turn', async () => {
   const { prepareAgentRun } = require('../out/agentRunPreparation.js');
   const base = fixtureRoot('solomap-codex-direct-retirement-');
   const root = path.join(base, '.solomap-global');
@@ -93,22 +93,54 @@ test('interactive Codex preparation replaces a legacy direct resume command with
   const call = (operation, input) => operations({ operation, input });
   try {
     const sessionId = '019ecd99-4325-7050-8e71-7def92359d30';
+    const expectedProfile = require('../out/agentDatabaseConfig.js').codexDatabaseProfileName(root);
+    const resumeOnlyCommand = `'codex' --profile ${expectedProfile} --no-daemon resume --no-alt-screen -C '${projectRoot}' --dangerously-bypass-approvals-and-sandbox '${sessionId}'`;
     const prepared = await prepareAgentRun({
-      agentCli: 'codex', selectedModel: '', prompt: '继续原任务', workspaceRoot: projectRoot,
-      nodeId: '__solo__', executionLogId: 1, userMessage: '继续原任务', runKind: 'solo_continue',
+      agentCli: 'codex', selectedModel: '', prompt: '', workspaceRoot: projectRoot,
+      nodeId: '__solo__', executionLogId: 1, userMessage: '', runKind: 'solo_continue',
       globalDataPath: root, taskPermissionMode: 'auto', nativeSessionId: sessionId,
-      directExecutionCommand: `'codex' resume --no-alt-screen -C '${projectRoot}' '${sessionId}' 'Continue'`
+      directExecutionCommand: resumeOnlyCommand, metadata: { agentInputMode: 'session_reentry' }
     }, call);
     const plan = await call('read_run_execution_plan', { root: projectRoot, executionLogId: 1 });
-    const expectedProfile = require('../out/agentDatabaseConfig.js').codexDatabaseProfileName(root);
-    assert.equal(prepared.status.agentLaunch.direct, false);
+    assert.equal(prepared.status.agentLaunch.direct, true);
+    assert.equal(prepared.status.agentInputMode, 'session_reentry');
+    assert.equal(prepared.status.status, 'Waiting', 'reopening a session is not a running task until the user submits input');
     assert.equal(prepared.status.agentLaunch.codexProfile, expectedProfile);
     assert.equal(prepared.status.sessionMode, 'resume');
-    assert.match(plan.command, new RegExp(`--profile ${expectedProfile} --no-daemon resume`));
-    assert.doesNotMatch(plan.command, /--remote|SOLOMAP_CODEX_REMOTE/);
-    assert.match(plan.command, new RegExp(sessionId));
-    assert.doesNotMatch(plan.command, /'Continue'$/);
+    assert.equal(plan.command, resumeOnlyCommand);
+    assert.equal(plan.prompt, '', 'resume-only reentry must not persist a synthetic execution prompt');
+    assert.doesNotMatch(plan.command, /Read the complete SoloMap task prompt|Continue|继续当前 Agent 对话/);
   } finally { await operations.close(); store.close(); }
+});
+
+test('session reentry rejects any synthetic prompt or user message before creating a run', async () => {
+  const { prepareAgentRun } = require('../out/agentRunPreparation.js');
+  const base = fixtureRoot('solomap-codex-reentry-input-rejection-');
+  const root = path.join(base, '.solomap-global');
+  const projectRoot = path.join(base, 'project');
+  fs.mkdirSync(projectRoot);
+  const store = new UnifiedDataStore(root);
+  const operations = createRuntimeDataOperations(store);
+  const call = (operation, input) => operations({ operation, input });
+  const common = {
+    agentCli: 'codex', selectedModel: '', workspaceRoot: projectRoot, nodeId: '__solo__', executionLogId: 1,
+    runKind: 'solo_continue', globalDataPath: root, taskPermissionMode: 'auto', nativeSessionId: 'session-1',
+    directExecutionCommand: 'codex resume session-1', metadata: { agentInputMode: 'session_reentry' }
+  };
+  try {
+    await assert.rejects(prepareAgentRun({ ...common, prompt: '继续', userMessage: '' }, call), /agent_input_mode_invalid/);
+    await assert.rejects(prepareAgentRun({ ...common, prompt: '', userMessage: '继续' }, call), /agent_input_mode_invalid/);
+    await assert.rejects(call('read_run_state', { root: projectRoot, executionLogId: 1 }), /run_missing/);
+  } finally { await operations.close(); store.close(); }
+});
+
+test('sidebar, roadmap, resume, and settings entries share one input ownership policy', () => {
+  const { resolveAgentInputMode } = require('../out/taskCheckpoint.js');
+  for (const runKind of ['solo', 'step']) assert.equal(resolveAgentInputMode(runKind), 'prompt_turn');
+  for (const runKind of ['solo_continue', 'step_continue']) assert.equal(resolveAgentInputMode(runKind, true), 'session_reentry');
+  for (const runKind of ['agent_cli_upgrade', 'skill_install', 'skill_uninstall', 'mcp_install', 'mcp_uninstall', 'migration_review', 'migration_apply', 'recycling_apply']) {
+    assert.equal(resolveAgentInputMode(runKind), 'closed');
+  }
 });
 
 test('the production preparer reuses one formal Flow role across concurrent windows and delivery recovery', async () => {

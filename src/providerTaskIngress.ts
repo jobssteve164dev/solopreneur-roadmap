@@ -15,6 +15,45 @@ interface ExistingTaskIngressReceipt {
   authority?: 'provider_native' | 'agent_acknowledged';
 }
 
+interface TaskIngressReceipt extends ExistingTaskIngressReceipt {
+  observedAt?: string;
+  elapsedMs?: number;
+  verdict?: string;
+  observerDelayMs?: number;
+  reconciledObservationTimeout?: boolean;
+}
+
+export function taskIngressDiagnosticEvent(
+  status: Record<string, unknown>,
+  fields: Record<string, unknown>,
+  idempotencyKey: string
+): { kind: 'operation'; occurredAt: string; scope: string; payload: Record<string, unknown>; idempotencyKey: string } | undefined {
+  const receipt = (fields.taskIngressReceipt || status.taskIngressReceipt) as TaskIngressReceipt | undefined;
+  const traceId = String(status.terminalDeliveryTraceId || '');
+  if (!receipt?.interactionId || !/^[a-f0-9]{16}$/i.test(traceId)) return undefined;
+  const elapsedMs = Math.max(0, Number(receipt.elapsedMs || 0));
+  return {
+    kind: 'operation',
+    occurredAt: String(receipt.observedAt || new Date().toISOString()),
+    scope: 'terminal.delivery.task.ingress',
+    payload: {
+      traceId,
+      interactionId: receipt.interactionId,
+      status: 'ok',
+      durationMs: 0,
+      elapsedMs,
+      budgetExceeded: elapsedMs >= 10_000,
+      authority: receipt.authority || 'provider_native',
+      verdict: String(receipt.verdict || ''),
+      ...(Number.isFinite(receipt.observerDelayMs) ? { observerDelayMs: receipt.observerDelayMs } : {}),
+      ...(receipt.reconciledObservationTimeout === true
+        || ['agent_task_ingress_timeout', 'agent_task_ingress_clock_untrusted'].includes(String(status.deliveryLastError || ''))
+        ? { reconciledObservationTimeout: true } : {})
+    },
+    idempotencyKey
+  };
+}
+
 function ingressAuthority(evidence: ProviderTaskIngressEvidence): 'provider_native' | 'agent_acknowledged' {
   return evidence.authority || (evidence.kind === 'mcp_task_start' ? 'agent_acknowledged' : 'provider_native');
 }
@@ -75,6 +114,7 @@ export function taskIngressReceiptFields(
       elapsedMs: taskElapsedMs,
       verdict,
       clockTrusted: providerClockTrusted || advanced.clockTrusted,
+      ...(clearsObservationTimeout ? { reconciledObservationTimeout: true } : {}),
       ...(observerDelayMs === undefined ? {} : { observerDelayMs })
     },
     taskIngressElapsedMs: taskElapsedMs,

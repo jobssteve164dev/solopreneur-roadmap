@@ -2171,6 +2171,12 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
   <script>
     ${getSharedWebviewRuntimeScript()}
     const vscode = acquireVsCodeApi();
+    function conversationActionEnvelope() {
+      const interactionAcceptedWallMs = Date.now();
+      const random = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+      return { interactionId: 'ui:' + interactionAcceptedWallMs.toString(36) + ':' + random, interactionAcceptedWallMs };
+    }
     const automationSoundPageId = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
     const {
       escapeHtml,
@@ -4413,6 +4419,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             if (!conversationId) return;
             vscode.postMessage({
               command: 'conversation.retry',
+              ...conversationActionEnvelope(),
               projectPath: activeProjectPath,
               nodeId: node.id,
               conversationId
@@ -4434,6 +4441,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             event.stopPropagation();
             vscode.postMessage({
               command: 'conversation.continue',
+              ...conversationActionEnvelope(),
               projectPath: activeProjectPath,
               nodeId: item.getAttribute('data-continue-native-node-id') || node.id,
               conversationId: item.getAttribute('data-continue-native-conversation-id')
@@ -4553,6 +4561,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           if (!request) return;
           vscode.postMessage({
             command: 'conversation.runSolo',
+            ...conversationActionEnvelope(),
             projectPath: activeProjectPath,
             userMessage: request,
             agentCli: getSoloSelectValue(agentSelect),
@@ -4736,6 +4745,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           if (!goal) return;
           vscode.postMessage({
             command: 'flow.run',
+            ...conversationActionEnvelope(),
             projectPath: activeProjectPath,
             goal,
             agentCli: getSoloSelectValue(agentSelect),
@@ -4881,6 +4891,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           if (!request) return;
           vscode.postMessage({
             command: 'conversation.runRoadmapRevision',
+            ...conversationActionEnvelope(),
             projectPath: activeProjectPath,
             userMessage: request,
             agentCli: getSoloSelectValue(agentSelect),
@@ -5026,6 +5037,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           event.stopPropagation();
           vscode.postMessage({
             command: 'conversation.retry',
+            ...conversationActionEnvelope(),
             projectPath: activeProjectPath,
             nodeId,
             conversationId: item.getAttribute('data-retry-conversation-id')
@@ -5047,6 +5059,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           event.stopPropagation();
             vscode.postMessage({
               command: 'conversation.continue',
+              ...conversationActionEnvelope(),
               projectPath: activeProjectPath,
               nodeId: item.getAttribute('data-continue-native-node-id') || nodeId,
               conversationId: item.getAttribute('data-continue-native-conversation-id')
@@ -5476,6 +5489,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     function triggerRun(nodeId, userMessage, agentCli, model, supplementFiles) {
       vscode.postMessage({
         command: 'conversation.runStep',
+        ...conversationActionEnvelope(),
         projectPath: activeProjectPath,
         nodeId: nodeId,
         userMessage: userMessage || '',

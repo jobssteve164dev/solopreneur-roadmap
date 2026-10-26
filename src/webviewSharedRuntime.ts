@@ -20,6 +20,12 @@ function bootstrapSoloMapWebviewRuntime(): void {
     return String(status || '').replace(/[^a-zA-Z0-9]/g, '-');
   }
 
+  function interactionEnvelope(): Record<string, unknown> {
+    const acceptedWallMs = Date.now();
+    const random = root.crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
+    return { interactionId: `ui:${acceptedWallMs.toString(36)}:${random}`, interactionAcceptedWallMs: acceptedWallMs };
+  }
+
   function extractNativeSessionId(conversation: any): string {
     return conversation && typeof conversation === 'object'
       ? String(conversation.resumableNativeSessionId || '')
@@ -534,17 +540,17 @@ function bootstrapSoloMapWebviewRuntime(): void {
       if (selectedId === 'add-new-skill') {
         if (!value) return config.showMessage(config.t('skillInputRequired'), true);
         config.showMessage(config.t('installingSkillMessage'));
-        config.postMessage({ command: 'ability.installSkill', skillInput: value });
+        config.postMessage({ command: 'ability.installSkill', ...interactionEnvelope(), skillInput: value });
       } else if (selectedId === 'add-new-connector') {
         if (!value) return config.showMessage(config.t('mcpInputRequired'), true);
         config.showMessage(config.t('installingMcpMessage'));
-        config.postMessage({ command: 'ability.installMcp', mcpInput: value });
+        config.postMessage({ command: 'ability.installMcp', ...interactionEnvelope(), mcpInput: value });
       } else if (selectedId.startsWith('skill-')) {
         config.showMessage(config.t('upgradingAbilityMessage'));
-        config.postMessage({ command: 'ability.upgradeSkill', skillId: selectedId.substring(6) });
+        config.postMessage({ command: 'ability.upgradeSkill', ...interactionEnvelope(), skillId: selectedId.substring(6) });
       } else if (selectedId.startsWith('connector-')) {
         config.showMessage(config.t('upgradingAbilityMessage'));
-        config.postMessage({ command: 'ability.upgradeMcp', mcpId: selectedId.substring(10) });
+        config.postMessage({ command: 'ability.upgradeMcp', ...interactionEnvelope(), mcpId: selectedId.substring(10) });
       }
     }
 
@@ -560,7 +566,7 @@ function bootstrapSoloMapWebviewRuntime(): void {
       if (!action) return;
       const [prefix, messageKey, command, idKey] = action;
       config.showMessage(config.t(messageKey));
-      config.postMessage({ command, [idKey]: selectedId.substring(prefix.length) });
+      config.postMessage({ command, ...interactionEnvelope(), [idKey]: selectedId.substring(prefix.length) });
     }
 
     function toggle(): void {
@@ -586,6 +592,7 @@ function bootstrapSoloMapWebviewRuntime(): void {
   root.SoloMapWebview = Object.freeze({
     escapeHtml,
     statusClass,
+    interactionEnvelope,
     extractNativeSessionId,
     formatDurationMs,
     normalizeAgentOptionLabel,

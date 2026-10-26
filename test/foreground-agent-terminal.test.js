@@ -33,7 +33,7 @@ test('foreground runner invocation bypasses shell and carries one complete deliv
   const invocation = buildForegroundRunnerInvocation({
     extensionOutputRoot: '/extension/out', globalDataPath: '/data/.solomap-global',
     workspaceRoot: '/workspace/project', executionLogId: 17, deliveryId: 'delivery-17',
-    traceId: '0123456789abcdef', acceptedAtMs: 1700000000000,
+    traceId: '0123456789abcdef', interactionId: 'entry-01234567-89ab-cdef', acceptedAtMs: 1700000000000,
     terminalColumns: 132, terminalRows: 41,
     environment: { OPENCODE_CONFIG_DIR: '/isolated/opencode' }
   }, { ...process.env, ELECTRON_RUN_AS_NODE: undefined });
@@ -49,6 +49,7 @@ test('foreground runner invocation bypasses shell and carries one complete deliv
   assert.equal(invocation.options.env.ELECTRON_RUN_AS_NODE, '1');
   assert.equal(invocation.options.env.SOLOMAP_TERMINAL_DELIVERY_ID, 'delivery-17');
   assert.equal(invocation.options.env.SOLOMAP_DIAGNOSTIC_TRACE_ID, '0123456789abcdef');
+  assert.equal(invocation.options.env.SOLOMAP_INTERACTION_ID, 'entry-01234567-89ab-cdef');
   assert.equal(invocation.options.env.SOLOMAP_DELIVERY_STARTED_AT, '1700000000000');
   assert.equal(invocation.options.env.SOLOMAP_TERMINAL_COLUMNS, '132');
   assert.equal(invocation.options.env.SOLOMAP_TERMINAL_ROWS, '41');
@@ -128,6 +129,8 @@ test('the shared conversation delivery starts the runner through the foreground 
   assert.match(body, /ForegroundAgentTerminalBridge/);
   assert.match(body, /foregroundBridge\.start\(\)/);
   assert.match(body, /await awaitAgentTaskIngress/);
+  assert.match(body, /agentInputMode/);
+  assert.match(body, /session_reentry/);
   assert.match(body, /foreground_terminal_surface_unavailable/);
   assert.match(source, /let legacyConversationDeliveryHarnessForTests = false/);
   assert.doesNotMatch(body, /sendTextWhenTerminalReady/);
@@ -164,8 +167,8 @@ test('interactive runner starts the formal CLI before waiting for the full works
   assert.ok(baseline > formal, 'the full workspace baseline must not remain ahead of formal task ingress');
   assert.ok(source.indexOf('const baselinePersistence = persistBaseline()') < formal,
     'baseline capture must begin after the rollback snapshot and overlap native CLI initialization');
-  assert.match(source, /stdio:\s*\[terminal \? 'pipe' : 'inherit'/,
-    'the detached runner must own the Agent stdin instead of lending it the extension-host pipe');
+  assert.match(source, /stdio:\s*\[terminal \? 'pipe' : 'ignore'/,
+    'the runner must close stdin for every noninteractive Agent');
   assert.match(source, /process\.stdin\.on\('data', forwardInput\)/,
     'terminal input must be forwarded while keeping the child stdin open across host EOF');
   assert.match(source, /process\.stdin\.pause\(\)/,
@@ -207,7 +210,7 @@ test('the real direct bridge reaches an interactive child without a VS Code shel
     metadata: { interactiveSession: true }, idempotencyKey: 'direct-bridge-prepare'
   } });
   const invocation = buildForegroundRunnerInvocation({ extensionOutputRoot: path.resolve(__dirname, '../out'), globalDataPath, workspaceRoot,
-    executionLogId: 1, deliveryId: '', traceId: '0123456789abcdef', acceptedAtMs: Date.now(), terminalColumns: 120, terminalRows: 30,
+    executionLogId: 1, deliveryId: '', traceId: '0123456789abcdef', interactionId: 'direct-bridge-interaction', acceptedAtMs: Date.now(), terminalColumns: 120, terminalRows: 30,
     environment: require('./analysis-fixture.js').anonymousToolEnv() });
   bridge = new ForegroundAgentTerminalBridge(invocation);
   const output = [];

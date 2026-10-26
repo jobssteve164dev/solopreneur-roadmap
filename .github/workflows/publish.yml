@@ -79,6 +79,14 @@ jobs:
         if: steps.extension_changes.outputs.should_publish == 'true'
         run: npm ci
 
+      - name: Compile Extension
+        if: steps.extension_changes.outputs.should_publish == 'true'
+        run: npm run compile
+
+      - name: Run Full Extension Tests
+        if: steps.extension_changes.outputs.should_publish == 'true'
+        run: npm test
+
       - name: Validate Publishing Secrets
         if: steps.extension_changes.outputs.should_publish == 'true'
         run: |
@@ -130,18 +138,6 @@ jobs:
           git tag -f -a "$NEW_VERSION" -m "$NEW_VERSION"
           echo "RELEASE_NOTES_PATH=$NOTES_PATH" >> $GITHUB_ENV
 
-      - name: Push Version Changes and Tag
-        if: steps.extension_changes.outputs.should_publish == 'true'
-        run: |
-          # 将修改后的 package.json 推送回远程 main 分支
-          git push origin main
-          # 将自动生成的新版本 Tag 推送到远程仓库
-          git push --force origin ${{ env.NEW_VERSION }}
-
-      - name: Compile Extension
-        if: steps.extension_changes.outputs.should_publish == 'true'
-        run: npm run compile
-
       - name: Package Extension
         if: steps.extension_changes.outputs.should_publish == 'true'
         run: |
@@ -151,6 +147,13 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "VSIX_PATH=$VSIX_PATH" >> $GITHUB_ENV
           echo "VSIX package: $VSIX_PATH"
+
+      - name: Push Version Changes and Tag
+        if: steps.extension_changes.outputs.should_publish == 'true'
+        run: |
+          # 只有完整测试和最终 VSIX 构建都成功后，才推送版本提交与 Tag。
+          git push origin main
+          git push --force origin ${{ env.NEW_VERSION }}
 
       - name: Publish to Visual Studio Marketplace
         if: steps.extension_changes.outputs.should_publish == 'true'

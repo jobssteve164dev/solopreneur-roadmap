@@ -115,6 +115,27 @@ test('provider ingress verdict uses the native task start instead of delayed obs
   assert.equal(fields.taskIngressDeadlineExceededAt, '');
 });
 
+test('an authoritative ingress diagnostic can be backfilled from its persisted receipt after a diagnostic write failure', () => {
+  const { readInteractionClock } = require('../out/interactionBudget.js');
+  const { taskIngressDiagnosticEvent, taskIngressReceiptFields } = require('../out/providerTaskIngress.js');
+  const now = readInteractionClock();
+  const interactionBudget = createInteractionBudget({ ...now, interactionId: 'action-diagnostic-retry' });
+  const status = { interactionBudget, terminalDeliveryTraceId: '0123456789abcdef', deliveryLastError: 'agent_task_ingress_timeout' };
+  const fields = taskIngressReceiptFields(status, {
+    provider: 'codex', kind: 'codex_task_started', nativeTurnId: 'turn-retry', sessionId: 'session-retry',
+    providerStartedAt: new Date(now.wallMs).toISOString(), observedAt: new Date(now.wallMs + 12_000).toISOString()
+  });
+  const persisted = { ...status, ...fields };
+  const replayFields = taskIngressReceiptFields(persisted, {
+    provider: 'codex', kind: 'codex_task_started', nativeTurnId: 'turn-retry', sessionId: 'session-retry',
+    providerStartedAt: new Date(now.wallMs).toISOString(), observedAt: new Date(now.wallMs + 12_000).toISOString()
+  });
+  assert.deepEqual(replayFields, {});
+  const diagnostic = taskIngressDiagnosticEvent(persisted, replayFields, 'ingress-backfill');
+  assert.equal(diagnostic.payload.interactionId, 'action-diagnostic-retry');
+  assert.equal(diagnostic.payload.reconciledObservationTimeout, true);
+});
+
 test('a Provider task starting exactly at the ten-second boundary fails the release gate', () => {
   const { readInteractionClock } = require('../out/interactionBudget.js');
   const { taskIngressReceiptFields } = require('../out/providerTaskIngress.js');

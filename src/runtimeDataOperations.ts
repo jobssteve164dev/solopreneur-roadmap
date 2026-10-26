@@ -22,7 +22,7 @@ import { persistTelegramRuntimeSecret } from './telegramRuntimeConfig';
 import { migrationRunKinds, soloConversationRunKinds } from './runLifecycleTypes';
 import { setIntelligenceTimeScheduleInDatabaseSync } from './intelligenceTimeSchedule';
 import { projectSignalProjects, readProjectSignals } from './projectSignalsRead';
-import { taskIngressReceiptFields } from './providerTaskIngress';
+import { taskIngressDiagnosticEvent, taskIngressReceiptFields } from './providerTaskIngress';
 import { createInteractionBudgetAt } from './interactionBudget';
 
 export interface RuntimeDataOperations {
@@ -989,14 +989,21 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
           providerStartedAt: observedAt,
           observedAt
         });
-        if (!Object.keys(patch).length) return state;
-        return store.patchRunState(session.scope, {
+        const diagnostic = taskIngressDiagnosticEvent(state.status, patch,
+          `run:${state.runId}:${state.generation}:mcp-ingress-diagnostic:${String(state.status.interactionId || state.turnId)}`);
+        if (!Object.keys(patch).length) {
+          if (diagnostic) store.appendDiagnosticEvent(diagnostic);
+          return state;
+        }
+        const updated = store.patchRunState(session.scope, {
           executionLogId: session.runIdentity!.executionLogId,
           generation: session.runIdentity!.generation,
           expectedRevision: state.revision,
           patch,
           idempotencyKey: `run:${state.runId}:${state.generation}:task-ingress:${String(state.status.interactionId || state.turnId)}`
         });
+        if (diagnostic) store.appendDiagnosticEvent(diagnostic);
+        return updated;
       };
       if (action === 'start' && ['Running', 'Turn Started'].includes(String(bound.status.status)) && String(bound.status.checkpointEventId || '').endsWith(':start')) return recordTaskIngress(bound);
       const payload = {

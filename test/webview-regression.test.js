@@ -2723,6 +2723,8 @@ test('sidebar step picker switches the composer target and keeps the choice acro
   assert.equal(message.nodeId, '2');
   assert.equal(message.userMessage, 'Second draft');
   assert.deepEqual(Array.from(message.supplementFiles), []);
+  assert.match(message.interactionId, /^ui:[a-z0-9]+:[a-z0-9-]+$/i);
+  assert.ok(Number.isFinite(message.interactionAcceptedWallMs));
   project.nodes[0].status = 'Running';
   context.pickerTest.setup(project);
   assert.match(context.pickerTest.render(project, project.nodes), /data-next-node-id="2"/);
@@ -2829,6 +2831,18 @@ test('website-only changes do not trigger extension publishing', () => {
   assert.match(publishWorkflow, /id:\s*extension_changes/);
   assert.match(publishWorkflow, /should_publish=false/);
   assert.match(websiteWorkflow, /-\s*'website\/\*\*'/);
+});
+
+test('publishing verifies the full extension and builds the VSIX before pushing a release commit or tag', () => {
+  const workflow = fs.readFileSync(path.join(projectRoot, '.github', 'workflows', 'publish.yml'), 'utf8');
+  const testAt = workflow.indexOf('run: npm test');
+  const compileAt = workflow.indexOf('run: npm run compile');
+  const bumpAt = workflow.indexOf('- name: Bump Version');
+  const packageAt = workflow.indexOf('- name: Package Extension');
+  const pushAt = workflow.indexOf('- name: Push Version Changes and Tag');
+  for (const position of [testAt, compileAt, bumpAt, packageAt, pushAt]) assert.ok(position >= 0);
+  assert.ok(testAt < bumpAt && compileAt < bumpAt, 'no release mutation may precede validation');
+  assert.ok(packageAt < pushAt, 'the exact VSIX must exist before its version commit and tag are pushed');
 });
 
 test('marketplace description keeps English and Chinese content on separate pages', () => {
@@ -3058,8 +3072,14 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(script, /entitlement\.upgrade/);
   assert.doesNotMatch(script, /entitlement\.paste/);
   assert.match(html, /data-issue-panel/);
-  assert.match(script, /command: 'project\.continue',\s*projectPath,\s*nodeId,\s*agentCli: getEffectiveSettingCliPath\(\)/);
-  assert.match(script, /command: 'project\.continue',\s*projectPath: button\.getAttribute\('data-continue-next-action-project-path'\),\s*nodeId: button\.getAttribute\('data-continue-next-action-node-id'\),\s*agentCli: getLoadedAgentCliPath\(\)/);
+  assert.match(
+    script,
+    /command: 'project\.continue',\s*\.\.\.conversationActionEnvelope\(\),\s*projectPath,\s*nodeId,\s*agentCli: getEffectiveSettingCliPath\(\)/
+  );
+  assert.match(
+    script,
+    /command: 'project\.continue',\s*\.\.\.conversationActionEnvelope\(\),\s*projectPath: button\.getAttribute\('data-continue-next-action-project-path'\),\s*nodeId: button\.getAttribute\('data-continue-next-action-node-id'\),\s*agentCli: getLoadedAgentCliPath\(\)/
+  );
   assert.match(html, /data-toggle-issue-form/);
   assert.match(html, /id="btn-toggle-collaboration"[^>]*><span class="codicon codicon-live-share"/);
   assert.match(html, /id="btn-toggle-intelligence"[^>]*><span class="codicon codicon-sparkle"/);
@@ -8105,6 +8125,8 @@ test('security repair dispatches once while focused and defers the card refresh'
   assert.equal(launches.length, 1);
   assert.equal(launches[0].projectPath, project.path);
   assert.ok(launches[0].launchActionId);
+  assert.match(launches[0].interactionId, /^ui:[a-z0-9]+:[a-z0-9-]+$/i);
+  assert.ok(Number.isFinite(launches[0].interactionAcceptedWallMs));
   assert.equal(button.disabled, true);
   assert.equal(renders, initialRenders, 'a focused action must not rebuild its own card');
   fixture.context.document.activeElement = null;
@@ -12042,7 +12064,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   );
   assert.equal(
     extensionModule.__buildNativeContinueCommand('codex', '019dc472-6a80-7c70-99a4-b2593a641d11', '/workspace/app'),
-    "'codex' --profile solomap resume --include-non-interactive --all -C '/workspace/app' '019dc472-6a80-7c70-99a4-b2593a641d11'"
+    "'codex' --profile solomap --no-daemon resume --no-alt-screen -C '/workspace/app' --dangerously-bypass-approvals-and-sandbox '019dc472-6a80-7c70-99a4-b2593a641d11'"
   );
   assert.equal(
     extensionModule.__buildNativeContinueCommand('cursor-agent', '3350a3b7-7761-4ed5-9661-2e9c9de8f924', '/workspace/app'),
@@ -15746,8 +15768,12 @@ test('the native Continue button resumes a database-bound conversation without o
   assert.equal(continuation.taskId, f.run.taskId);
   assert.notEqual(continuation.turnId, f.run.turnId);
   assert.equal(continuation.status.plannedNativeSessionId, f.run.status.plannedNativeSessionId);
-  assert.equal(continuation.status.userMessage, '继续当前 Agent 对话');
-  assert.equal(continuation.status.agentLaunch.direct, false, 'Continue must submit a real resumed turn instead of only opening an idle TUI');
+  assert.equal(continuation.status.userMessage, '');
+  assert.equal(continuation.status.agentInputMode, 'session_reentry');
+  assert.equal(continuation.status.nativeSessionReentryAwaitingRequest, true);
+  assert.equal(continuation.status.agentLaunch.direct, true, 'Continue must only reopen the native session');
+  const plan = await f.ops({ operation: 'read_run_execution_plan', input: { root: f.project, executionLogId: Number(continuation.status.rootExecutionLogId) } });
+  assert.doesNotMatch(plan.command, /Read the complete SoloMap task prompt|继续当前 Agent 对话|User supplement/);
   assert.equal(delivered.length, 1); assert.match(delivered[0], /runAgentProcess\.js/);
   const original = await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 79 } });
   assert.equal(original.status.checkpointSummary, '已有完整结果');
@@ -18010,7 +18036,7 @@ test('closing a terminal after switching projects keeps the persisted conversati
   const rejected=await read(projectA,54);assert.equal(rejected.status.stopRequested,true);assert.equal(rejected.status.stopReason,'用户已关闭当前对话终端。');assert.equal(rejected.status.stopRequestIntent.executionLogId,54);assert.equal(rejected.status.stopRequestIntent.expectedTurnId,runA.turnId);assert.equal(rejected.status.lineageRootExecutionLogId,53);assert.equal(rejected.status.sourceParentRunId,parentA.runId);assert.equal(rejected.status.sourceParentTurnId,parentA.turnId);assert.notEqual(rejected.status.interactiveSessionClosed,true);assert.equal(rejected.status.checkpointSummary,savedA.state.status.checkpointSummary);assert.deepEqual(await snapshot(projectB,54),savedB);assert.deepEqual(await snapshot(projectB,88),savedParentB);
   for(const engine of engines.values())engine.close();for(const close of closes.splice(0).reverse())await close();native=await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:projectA},{path:projectB}]);
   assert.deepEqual(await read(projectA,54),rejected);assert.deepEqual(await client.readSettlements(ref(projectA,54),await client.readStatus(ref(projectA,54))),savedA.settlements);assert.deepEqual(await client.readBinding(ref(projectA,54)),savedA.binding);assert.deepEqual(await snapshot(projectA,53),savedParentA);assert.deepEqual(await snapshot(projectB,54),savedB);assert.deepEqual(await snapshot(projectB,88),savedParentB);
-  await assert.rejects(operation('recover_run_executions',{}),/run_process_identity_conflict/);assert.deepEqual(await read(projectA,54),rejected);assert.ok(writers.every(live));
+  await assert.rejects(operation('recover_run_executions',{}),/run_process_identity_conflict/);const backedOff=await read(projectA,54);assert.equal(backedOff.revision,rejected.revision+1);assert.equal(backedOff.status.recoveryBackoffRevision,backedOff.revision);assert.equal(backedOff.status.recoveryFailureStage,'stop');assert.equal(backedOff.status.recoveryRetryAttempts,1);assert.ok(backedOff.status.recoveryRetryAtMs>Date.now());assert.deepEqual({...backedOff,status:{...backedOff.status,recoveryBackoffRevision:undefined,recoveryFailureStage:undefined,recoveryRetryAtMs:undefined,recoveryRetryAttempts:undefined},revision:rejected.revision},{...rejected,status:{...rejected.status,recoveryBackoffRevision:undefined,recoveryFailureStage:undefined,recoveryRetryAtMs:undefined,recoveryRetryAttempts:undefined}});assert.ok(writers.every(live));
   const current=await client.readStatus(ref(projectA,54));await client.writeStatus(ref(projectA,54),{...current,agentPid:writers[0].pid,processBirth:getProcessBirthMarker(writers[0].pid)});
   const ended=once(writers[0],'exit');await operation('recover_run_executions',{});await ended;assert.equal((await read(projectA,54)).status.interactiveSessionClosed,true);assert.deepEqual(Array.from(await extension.emit(terminal)),[true]);await extension.drain();assert.equal(live(writers[0]),false);assert.equal(live(writers[1]),true);assert.equal(consumerEntries.length,1);assert.deepEqual({...extension.owned()},{names:0,roots:0,targets:0});
   const finalA=await snapshot(projectA,54);assert.equal(finalA.state.status.status,'Processed');assert.equal(finalA.state.status.interactiveSessionClosed,true);assert.equal(finalA.state.status.lineageRootExecutionLogId,53);assert.equal(finalA.state.status.sourceParentRunId,parentA.runId);assert.equal(finalA.state.status.sourceParentTurnId,parentA.turnId);assert.equal(finalA.state.taskId,runA.taskId);assert.equal(finalA.state.runId,runA.runId);assert.equal(finalA.state.turnId,runA.turnId);assert.equal(finalA.state.status.checkpointOutcome,'partial');assert.equal(finalA.state.status.checkpointSummary,savedA.state.status.checkpointSummary);assert.equal(finalA.settlements.length,2);assert.deepEqual(finalA.settlements[0],savedA.settlements[0]);assert.deepEqual(finalA.settlements[1].digest,savedA.settlements[0].digest);assert.deepEqual(finalA.binding,savedA.binding);assert.equal(finalA.journal.entry.status,savedA.journal.entry.status);assert.match(finalA.journal.entry.output,/Interactive session state: Closed/);
@@ -21085,4 +21111,56 @@ test('startup terminal is reused before VS Code publishes its terminals list', a
   const delivered = extension.create('/isolated/project', 'solo_continue', 42);
   assert.equal(delivered, startup, 'continued conversation must load in the terminal already opened for this action');
   assert.equal(created.length, 1);
+});
+test('every production conversation sender carries one click-origin interaction identity and timestamp into the shared host path', () => {
+  const roadmap = fs.readFileSync(path.resolve(__dirname, '../src/roadmapWebview.ts'), 'utf8');
+  const sidebar = fs.readFileSync(path.resolve(__dirname, '../src/sidebarWebview.ts'), 'utf8');
+  for (const [name, source] of [['roadmap', roadmap], ['sidebar', sidebar]]) {
+    assert.match(source, /function conversationActionEnvelope\(\)/, `${name} must create the interaction at the user action`);
+    for (const match of source.matchAll(/command: 'conversation\.(?:continue|retry|runSolo|runStep)'/g)) {
+      const objectTail = source.slice(match.index, source.indexOf('});', match.index) + 3);
+      assert.match(objectTail, /\.\.\.conversationActionEnvelope\(\)/, `${name} sender at ${match.index} must preserve click identity`);
+    }
+  }
+  for (const match of sidebar.matchAll(/command: 'project\.continue'/g)) {
+    const objectTail = sidebar.slice(match.index, sidebar.indexOf('});', match.index) + 3);
+    assert.match(objectTail, /\.\.\.conversationActionEnvelope\(\)/, `sidebar project continuation at ${match.index} must preserve click identity`);
+  }
+  const extension = fs.readFileSync(path.resolve(__dirname, '../src/extension.ts'), 'utf8');
+  assert.match(extension, /createInteractionBudgetAt\(acceptedWallMs, requestedInteractionId\)/,
+    'the host budget must begin at the webview click instead of when the shared handler eventually runs');
+});
+
+test('settings Agent maintenance senders and migration launches use the same click-origin interaction path', () => {
+  const sidebar = fs.readFileSync(path.resolve(__dirname, '../src/sidebarWebview.ts'), 'utf8');
+  const shared = fs.readFileSync(path.resolve(__dirname, '../src/webviewSharedRuntime.ts'), 'utf8');
+  const migration = fs.readFileSync(path.resolve(__dirname, '../src/migrationSettingsWebview.ts'), 'utf8');
+  const extension = fs.readFileSync(path.resolve(__dirname, '../src/extension.ts'), 'utf8');
+  assert.match(sidebar, /command: 'agent\.upgradeAll', \.\.\.conversationActionEnvelope\(\)/);
+  for (const command of ['ability.installSkill', 'ability.installMcp', 'ability.upgradeSkill', 'ability.upgradeMcp']) {
+    const at = shared.indexOf(`command: '${command}'`);
+    assert.ok(at >= 0, `${command} sender must exist`);
+    assert.match(shared.slice(at, at + 180), /\.\.\.interactionEnvelope\(\)/, `${command} must carry the click identity`);
+  }
+  assert.match(shared, /'ability\.uninstallSkill'/);
+  assert.match(shared, /'ability\.uninstallMcp'/);
+  assert.match(shared, /config\.postMessage\(\{ command, \.\.\.interactionEnvelope\(\), \[idKey\]:/,
+    'the shared uninstall sender must carry the click identity for both ability kinds');
+  assert.match(migration, /const startsAgent = \['dataMigration\.agent', 'dataMigration\.delegate', 'dataMigration\.recycle', 'dataMigration\.retryRecycling'\]\.includes\(command\)/);
+  assert.match(migration, /\.\.\.\(startsAgent \? interactionEnvelope\(\) : \{\}\)/);
+  assert.match(extension, /dispatchWebviewInteraction\(`\$\{surface\}\.action\.\$\{String\(message\.command/,
+    'migration actions must enter the same host budget and trace helper as ordinary plugin actions');
+});
+
+test('the rendered roadmap step entry posts the user click identity with the visible project', () => {
+  const html = require('../out/roadmapWebview.js').getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+  const fixture = runScriptWithMinimalDom(extractLastScript(html), [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]), `
+    globalThis.invokeRoadmapStep = (projectPath) => { activeProjectPath = projectPath; triggerRun('step-1', '真实用户目标', 'codex', 'model-a', []); };
+  `);
+  fixture.context.invokeRoadmapStep('/workspace/visible-roadmap');
+  const message = fixture.postedMessages.find(item => item.command === 'conversation.runStep');
+  assert.equal(message.projectPath, '/workspace/visible-roadmap');
+  assert.equal(message.userMessage, '真实用户目标');
+  assert.match(message.interactionId, /^ui:[a-z0-9]+:[a-z0-9-]+$/i);
+  assert.ok(Number.isFinite(message.interactionAcceptedWallMs));
 });

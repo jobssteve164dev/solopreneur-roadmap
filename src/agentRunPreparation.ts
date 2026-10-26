@@ -9,7 +9,7 @@ import { assertCodexResumeTranscript } from './codexSessionIdentity';
 import { buildDatabaseAgentCommand, DatabaseAgentLaunch } from './agentDatabaseLaunch';
 import { agentDatabaseConfigPath, buildAgentDatabaseInstructions, codexDatabaseProfileName } from './agentDatabaseConfig';
 import { buildTaskReportInstructions } from './taskReport';
-import { isInteractiveConversationRunKind } from './taskCheckpoint';
+import { isInteractiveConversationRunKind, resolveAgentInputMode } from './taskCheckpoint';
 import type { NativeSessionBinding, SessionIdentityContract, SessionIdentityMethod } from './sessionIdentity';
 import type { RunState } from './runLifecycleTypes';
 import type { FlowTrace } from './flowStore';
@@ -131,10 +131,10 @@ export async function resumePreparedAgentRun(state: RunState, operation: Operati
 export async function prepareAgentRun(input: AgentRunPreparationInput, operation?: Operation): Promise<RunState & { dataRoot: string; finalCommand: string; outputFilePath: string; changesFilePath: string; commandFilePath: string; promptFilePath: string; runScriptPath: string }> {
   const provider = getAgentProvider(input.agentCli);
   const interactive = isInteractiveConversationRunKind(input.runKind);
-  if (provider === 'codex' && interactive && input.directExecutionCommand) {
-    input = { ...input, continuation: input.continuation ?? Boolean(input.nativeSessionId?.trim()) };
-    delete input.directExecutionCommand;
-  }
+  const sessionReentry = input.metadata?.agentInputMode === 'session_reentry';
+  if (sessionReentry && (!interactive || !input.nativeSessionId?.trim() || !input.directExecutionCommand
+    || input.prompt.trim() || input.userMessage.trim())) throw new Error('agent_input_mode_invalid');
+  const agentInputMode = resolveAgentInputMode(input.runKind, sessionReentry);
   const interactionBudget = input.interactionBudget || currentInteractionBudget() || createInteractionBudget();
   input = { ...input, interactionBudget };
   if (input.globalPrompt === undefined && Object.prototype.hasOwnProperty.call(input, 'globalPrompt')) {
@@ -169,7 +169,7 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
   if (!state) {
     const plannedNativeSessionId = continuation ? input.nativeSessionId!.trim() : interactive && ['claude', 'copilot', 'grok'].includes(provider) ? crypto.randomUUID() : '';
     const metadata = {
-      ...(input.metadata || {}), interactionBudget, interactionId: interactionBudget.interactionId,
+      ...(input.metadata || {}), agentInputMode, interactionBudget, interactionId: interactionBudget.interactionId,
       launchIntentHash: intentHash, globalDataPath: input.globalDataPath, agentCli: input.agentCli, selectedModel: input.selectedModel,
       interactiveSession: interactive, sessionProvider: provider, sessionMode: continuation ? 'resume' : input.nativeSessionId ? 'fresh-with-reference' : 'fresh',
       bindingNonce: interactive ? crypto.randomBytes(32).toString('hex') : '', plannedNativeSessionId,
@@ -217,7 +217,7 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
     state = await call('read_run_state', scope) as RunState;
     state = await call('patch_run_state', { ...identity, expectedRevision: state.revision, patch: { sessionBindingHeadRevision: binding?.headRevision || 0, nativeSessionId: nativeSessionIdIsCurrent ? plannedSessionId : '', nativeSessionIdIsCurrent }, idempotencyKey: `${prepareKey}:identity-state:${state.revision}` }) as RunState;
     const command = input.directExecutionCommand || buildDatabaseAgentCommand(state.status.agentLaunch as DatabaseAgentLaunch, state.runId, state.revision + 1, String(state.status.maintenanceWorkspaceRoot || input.workspaceRoot), interactive, plannedSessionId, provider === 'codex' ? String(state.status.bindingNonce) : '');
-    const policyRef = state.status.globalPromptPolicyRef as { objectId: string; revision: number } | null;
+    const policyRef = sessionReentry ? null : state.status.globalPromptPolicyRef as { objectId: string; revision: number } | null;
     let policyInstructions = '';
     if (policyRef) {
       const policy = await call('read', { ref: policyRef.objectId, revision: policyRef.revision }) as { objectId: string; kind: string; projectId: string | null; revision: number; data: Record<string, unknown> };
@@ -237,14 +237,14 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
         preloadedMemoryContext = `SoloMap 数据库记忆上下文暂时不可用：${error instanceof Error ? error.message : String(error)}。不要改读旧记忆文件或建立平行存储；继续以当前用户要求和项目证据完成只读复核。`;
       }
     }
-    const databaseInstructions = hostLoadsReviewMemory
+    const databaseInstructions = sessionReentry ? '' : hostLoadsReviewMemory
       ? buildAgentDatabaseInstructions({ readOnly: true, contextProvided: true })
       : input.readOnlyReview || migrationRun
         ? hasDatabaseInstructions ? '' : buildAgentDatabaseInstructions({ readOnly: true })
         : hasDatabaseInstructions ? '' : buildAgentDatabaseInstructions({ migrationTools: soloConversationRunKinds.includes(input.runKind as typeof soloConversationRunKinds[number]) });
     const lifecycleInstructions = `SoloMap 对话状态由 MCP 工具管理：收到本提示后，在处理任务前先调用 solomap_conversation_status({action:"start",turnId:"${state.turnId}",interactionId:"${interactionBudget.interactionId}"})，确认当前对话已进入 Running。后续每收到一轮新的用户消息，也使用该轮提示给出的 turnId 与 interactionId 调用 start，并把该轮完整原始消息放入 message。每轮交付结果时调用 solomap_conversation_status({action:"complete",turnId:"${state.turnId}",interactionId:"${interactionBudget.interactionId}",outcome:"...",summary:"..."})，并提供可选 next 和 report。运行身份、版本和幂等性由插件绑定；不要运行检查点命令，也不要用通用写入工具修改对话账本。`;
-    const prompt = [input.prompt, lifecycleInstructions, ...(policyInstructions ? [policyInstructions] : []), ...(databaseInstructions ? [databaseInstructions] : []), ...(preloadedMemoryContext ? [preloadedMemoryContext] : []), ...(input.readOnlyReview ? [] : [reportInstructions(String(state.status.learningTaskId))])].join('\n\n');
-    state = await call('patch_run_inputs', { ...identity, expectedRevision: state.revision, prompt, command, status: input.metadata?.startWaiting === true ? 'Waiting' : 'Running', idempotencyKey: `${prepareKey}:ready:${state.revision}` }) as RunState;
+    const prompt = sessionReentry ? '' : [input.prompt, lifecycleInstructions, ...(policyInstructions ? [policyInstructions] : []), ...(databaseInstructions ? [databaseInstructions] : []), ...(preloadedMemoryContext ? [preloadedMemoryContext] : []), ...(input.readOnlyReview ? [] : [reportInstructions(String(state.status.learningTaskId))])].join('\n\n');
+    state = await call('patch_run_inputs', { ...identity, expectedRevision: state.revision, prompt, command, status: sessionReentry || input.metadata?.startWaiting === true ? 'Waiting' : 'Running', idempotencyKey: `${prepareKey}:ready:${state.revision}` }) as RunState;
   }
   } catch (error) {
     if ((input.flowRole || input.launchIntentId || input.launchSlotId) && ['revision_conflict', 'idempotency_conflict'].includes((error as Error).message)) return prepareAgentRun(input, call);

@@ -696,15 +696,16 @@ export function buildAgentCommandFromShellVar(agentCli: string, promptVarName: s
   return `${quotedCli} run --task ${promptExpression}`;
 }
 
-export function buildNativeContinueCommand(agentCli: string, sessionId: string, workspaceRoot: string): string {
+export function buildNativeContinueCommand(agentCli: string, sessionId: string, workspaceRoot: string, taskPermissionMode = 'auto', selectedModel = '', codexProfile = 'solomap'): string {
   const executableName = path.basename(agentCli).toLowerCase();
   const quotedCli = shellQuote(agentCli);
   const quotedSessionId = shellQuote(sessionId);
-  const permissionArgs = getTaskPermissionArgs(agentCli);
+  const permissionArgs = getTaskPermissionArgs(agentCli, taskPermissionMode);
   const permissionSegment = permissionArgs ? ` ${permissionArgs}` : '';
+  const modelSegment = getAgentModelFlag(agentCli, selectedModel);
 
   if (executableName === 'codex' || executableName === 'codex-cli') {
-    return `${quotedCli} ${codexProfileArgs} resume --include-non-interactive --all -C ${shellQuote(workspaceRoot)} ${quotedSessionId}`;
+    return `${quotedCli} ${codexProfileArguments(codexProfile)} ${codexInteractiveTransportArgs} resume --no-alt-screen -C ${shellQuote(workspaceRoot)}${permissionSegment}${modelSegment} ${quotedSessionId}`;
   }
   if (executableName === 'agent' || executableName === 'cursor' || executableName === 'cursor-cli' || executableName === 'cursor-agent') {
     return `(cd ${shellQuote(workspaceRoot)} && ${quotedCli} --resume ${quotedSessionId})`;
