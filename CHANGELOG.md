@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.625 - 2026-10-26
+
+### Fixed
+- guarantee responsive agent conversation launch (f4128e8)
+
+### Docs
+- require full implementation audit before changes (9b419a7)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.622 - 2026-10-25
 
 ### Fixed
