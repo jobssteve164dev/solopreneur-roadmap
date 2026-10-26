@@ -2,7 +2,7 @@
 
 > 建立时间：2026-10-25 UTC  
 > 主目标：所有由插件发起、用户可感知的对话，在用户动作被接受后 **10 秒内进入真实 Agent CLI 任务**；新对话和续聊均以 Provider 原生任务开始或与当前 run/turn/interaction 精确绑定的 Agent loop 收据为准。终端创建、`processId`、命令写入、runner spawn 均不算任务开始。  
-> 当前结论：0.0.625 的前台 Pseudoterminal bridge 在两个输入边界上引入了回归：非交互维护继承了长寿命 stdin socket；续聊按钮被改成了会向原生会话发送 SoloMap wrapper 的新 turn。当前候选已通过完整回归、真实 closed-stdin / resume-only 合同与打包 VSIX 的真实 Codex 压力门禁；发布流水线与最终推送完成后才能标记新版闭环。任务前 Git 基线作为“可撤回”能力继续完整保留。
+> 当前结论：0.0.625 的前台 Pseudoterminal bridge 在两个输入边界上引入了回归：非交互维护继承了长寿命 stdin socket；续聊按钮被改成了会向原生会话发送 SoloMap wrapper 的新 turn。0.0.626 已统一修复输入合同并发布：非交互维护使用 closed stdin，续聊按钮只做原生 session reentry，不提交任何提示词；完整回归、真实 closed-stdin / resume-only 合同、打包 VSIX 的真实 Codex 压力门禁、CI、发布流水线及三个发布面均已核验。任务前 Git 基线作为“可撤回”能力继续完整保留。
 
 ## 1. 状态口径
 
@@ -23,13 +23,13 @@
 | R-06 | task-ingress 超时处理会释放 delivery、关闭唯一 runner，或因 observer 迟到提前向用户报错，把“已启动但尚未观察”变成确定失败并可能制造重复任务。 | 旧 timeout 清理路径；r8—r11 的 Provider 时间与 observer 时间对照。 | deadline 先持久化观察证据，不释放 lease、不 dispose terminal、不创建第二个任务；仍受控的已提交 runner 不返回假失败；revision conflict 有限重读重试；后到 Provider 收据按原始时间裁决；runner-claim 观测失败最多重试三次，不再产生永久 endpoint 轮询。 | timeout retention、observer lag、观测器自然退出回归和 r13 真实门禁通过。 | 已验收 |
 | R-07 | Roadmap 发起入口误用未定义的 `currentProjectPath`，会在 Host 前抛 `ReferenceError`。 | `src/roadmapWebview.ts` 的 `conversation.runRoadmapRevision` sender。 | 改为当前页面真实变量 `activeProjectPath`。 | 定向回归、完整回归与 TypeScript 编译通过。 | 已验收 |
 | R-08 | CLI 预检在正式命令前启动额外 `--help` / `--version` 子进程，用户任务被能力探测阻塞。 | `prepareNativeAgentLaunch` 的旧 Provider 分支。 | 移除每任务 capability subprocess；使用既有确定性 invocation，失败由唯一正式启动返回。 | “formal Agent 前无 capability subprocess”、完整回归和真实 r13 gate 通过。 | 已验收 |
-| R-09 | 同一 native log 的观测、入口阶段和错误信息不足，过去只能反复猜测。 | 旧日志不能将 UI 动作、delivery、runner、Provider turn 串到同一 ID。终态压力回归还发现：trace 创建时若尚无 persistence，原实现用 `undefined` 表示“无 sink”，迟到记录时却会被默认参数重新解释为“使用当前 sink”，从而串写到后来打开的数据根。 | 对话阶段诊断统一记录 interaction、run/generation、turn、终端身份、Provider receipt、observer delay 与 deadline verdict；审计文档写明成功口径和不允许的伪成功。trace 创建时同时绑定当时的 sink；当时没有 sink 时使用显式 no-sink，而不是可被后来全局配置接管的 `undefined`。 | r13 gate 从同一 run 直接读出 Provider task 7.569 秒、observer delay 3.173 秒、MCP 完成、profile 与 Git ref；诊断 13/13、跨根迟到事件 RED→GREEN 与完整回归通过，故障点可分段定位且迟到事件不串项目。 | 已验收 |
+| R-09 | 同一 native log 的观测、入口阶段和错误信息不足，过去只能反复猜测。 | 旧日志不能将 UI 动作、delivery、runner、Provider turn 串到同一 ID。终态压力回归还发现：trace 创建时若尚无 persistence，原实现用 `undefined` 表示“无 sink”，迟到记录时却会被默认参数重新解释为“使用当前 sink”；AsyncLocalStorage 内迟到的 error 又会读取新的全局 sink，从而串写到后来打开的数据根。 | 对话阶段诊断统一记录 interaction、run/generation、turn、终端身份、Provider receipt、observer delay 与 deadline verdict；审计文档写明成功口径和不允许的伪成功。每条 trace 创建时即绑定当时的 persistence 或显式 no-sink，普通 trace event 与异步 error 都沿同一 sink；同步或异步持久化失败只记录脱敏 warning，不反向打断用户主路径。 | r13 gate 从同一 run 直接读出 Provider task 7.569 秒、observer delay 3.173 秒、MCP 完成、profile 与 Git ref；异步边界、跨根 sink 替换、no-sink 和同步 sink 抛错均完成 RED→GREEN，策略页竞态场景连续 5 轮通过，最终全量 0 失败，独立终审 C0/I0/M0 Ready。 | 已验收 |
 | R-10 | Git 快照曾被误列为 10 秒主因；真实分段证明主要等待来自 Codex 工具链冷启动，以及旧 Runtime/历史 transcript 扫描对 CPU 的争用，而不是回滚快照。 | r6 快照约 152 ms、总 task start 13.398 s；旧 Runtime 持续约 70%–77% CPU。停止旧 Runtime 后样本降到 8.525 秒，但旧版本会自动重启；最终 r13 为 7.569 秒。 | 保留 Git 硬门；workspace 元数据 baseline 与 CLI 初始化并行；优化 observer/transcript locator；完成 Runtime 正式版本接管。独立 app-server 失败实验已移除，保持原生 Codex CLI 对话和工具调用链。 | r13 在两个 CPU burner 下通过；Git/MCP/profile/HEAD 不变同时验证。 | 已验收 |
 | R-11 | 所有项目共用 `CODEX_HOME/solomap.config.toml`，最后一次写入会把 `solomap_data` 指向另一个项目/临时数据根，导致当前 Agent 的 MCP 对话启动或 checkpoint 卡住/失败。 | 正式共享 profile 曾指向已失效 temp root；该状态不需要版本更新即可由另一个项目/测试覆盖，符合“突然今天才坏”的现象。 | profile 改为按 global data root 哈希派生 `solomap-<16hex>`，并贯穿新任务、续聊、preflight、runner 与 Runtime 数据操作。 | 配置、preflight、runner、数据库与最终真实 profile `solomap-f410ff7b22798794` 验证通过。 | 已验收 |
 | R-12 | 设置页非交互维护命令卡在 `Reading additional input from stdin...`。0.0.625 将 runner 放入前台 bridge 后，`runAgentProcess` 仍对非交互子进程使用 `inherit`，导致 Codex 继承不会 EOF 的 bridge socket。 | 现场 `agent_cli_upgrade` 的 runner/Codex fd 0 同指向一个长寿命 socket，22 分 31 秒后才进入 MCP start；命令输出首行即为读取 stdin。 | 持久化统一 `agentInputMode`；所有设置维护是 `closed`，runner 对非交互正式 Agent 使用 `stdio: ignore`，启动即 EOF。 | 最终真实 Codex 输入合同通过：非交互任务 1.903 秒进入 turn 并自然完成；runner EOF、设置维护入口分类与共享 runner 回归通过。 | 已验收 |
 | R-13 | 续聊按钮会把“继续当前 Agent 对话”与 SoloMap wrapper 当成新用户回合发给原生会话。回归来自 0.0.625：宿主移除 resume-only direct command，preparer 又主动删除 Codex direct command。 | 现场 Codex argv 在 session ID 后明确带有 `Read the complete SoloMap task prompt...`；代码与 0.0.614 对比证明旧路径只有 `resume <sessionId>`。 | 续聊按钮改为 `session_reentry`，恢复 Provider 原生无 PROMPT resume，Codex 继续使用按 data root 隔离的 profile；输入准备层拒绝任何非空 prompt/userMessage，最终执行计划中的 prompt 也保持为空。预建 turn 为 `Waiting`，真实原生输入到达后才回填原文、切换 `Running` 并创建该次提交的新 interaction；无输入关闭由 runner 直接走 `session-close`，正常或异常退出都不制造空完成轮次。用户明确输入的 Continue Turn 仍使用 `prompt_turn`。 | 最终真实 Codex resume-only TUI 54 ms 可见，启动前后 transcript 用户消息数不变；命令和执行计划都不含 wrapper/合成提示。真实 runner 0/7 退出、原生回填和侧边栏/大图 sender 回归通过。 | 已验收 |
 | R-14 | 页面各自生成消息、后台恢复反复失败以及预检进程混入 formal trace，使同一故障既可能丢失点击起点，也可能被后台 I/O 和伪 `agent.*` 事件掩盖。 | 生产 sender 原先没有点击时 interaction 身份；恢复退避只在内存，Runtime 重启后会重新打重 I/O；preflight 复用 formal `execute()` 记录。 | 主动对话、全部 `project.continue`、Flow、路线图修订、时间计划、全局指令复盘、CLI 更新、Skill/MCP 安装升级卸载和迁移维护入口都在点击时生成 interaction；Host 的统一 helper 只继承不重置，迁移不再绕过。恢复退避按 run revision 持久化，30 秒指数退避至 5 分钟，observer 自身推进 revision 后失败会基于最新同一 run/turn 写入退避。preflight 与 formal 使用不同事件命名。 | 实际渲染 sender、设置维护 sender、迁移宿主入口、跨 Runtime 退避、observer 自推进失败、revision 解锁、退避封顶、Cursor 预检与 formal 事件数量回归全部通过；独立终审 C0/I0 Ready。 | 已验收 |
-| R-15 | 发布流程先 push/tag 再测试和打包，候选失败时会留下不可发布却已公开的版本。 | `.github/workflows/publish.yml` 的旧顺序。 | 发布前先 compile、全量测试和最终 VSIX 打包审计；只有全部成功才 push 版本提交与 tag。依赖安全审计继续由独立 Security workflow 治理，不把既有依赖告警混入本次发布顺序修复。 | workflow 顺序回归与最终 YAML 解析通过；待本轮推送后的远端 workflow 结果。 | 已改待总验 |
+| R-15 | 发布流程先 push/tag 再测试和打包，候选失败时会留下不可发布却已公开的版本。 | `.github/workflows/publish.yml` 的旧顺序。前两次候选分别在环境夹具和诊断竞态上失败，但都停在版本提升之前，没有生成坏版本或标签。 | 发布前先安装根目录与 website 依赖，再 compile、全量测试和最终 VSIX 打包审计；只有全部成功才 push 版本提交与 tag。依赖安全审计继续由独立 Security workflow 治理，不把既有依赖告警混入本次发布顺序修复。 | Publish `40331655070` 按顺序完成全量测试、打包、版本提交/tag、两个市场、GitHub Release 与 Open VSX 可用性校验；`v0.0.626` 已发布，证明失败候选不会越过发布门禁。 | 已验收 |
 
 ## 3. 本轮已经执行的验证
 
@@ -42,17 +42,18 @@
 | runner 启动顺序定向测试 | 通过 | Git 快照成功后才允许正式 CLI；次级 workspace 元数据基线开始于 CLI 前、与原生初始化重叠，不再把这项辅助 I/O 串行压在用户任务前；无额外 capability subprocess。 |
 | Webview/续聊关键回归 | 通过 | 覆盖 Roadmap projectPath、轻量续聊、超时保留、完整终端身份、续聊前置 Git、新 Solo/Step 前置 Git。 |
 | 最终候选真实输入合同 | 通过 | 非交互 Codex 1.903 秒进入 turn；resume-only TUI 54 ms 可见；没有提交合成提示词，transcript 用户消息数不变。 |
-| 最终候选 VSIX 结构审计 | 通过 | 6335 文件，11.48 MiB 压缩、38.80 MiB 解压；SHA-256 `b8c22d01e4b2fca7e390020c1897e1493fb9058d89e7e854b6659f9cb04b5262`。 |
+| 最终候选 VSIX 结构审计 | 通过 | 6335 文件，11.48 MiB 压缩、38.80 MiB 解压；SHA-256 `6c13c1a25736df68704b24fdcadd59521c93fb72f9f51122eba524535f764f2d`。 |
 | 最终候选真实 Codex 压力门禁 | 通过 | 两个 CPU burner 下 7.447 秒进入 Provider task；Agent launch 2.254 秒、首输出 2.866 秒；MCP 完成、按根 profile、Git hidden ref、HEAD 与脏工作树保持均通过。observer delay 8.285 秒被独立记录并由权威原生收据调和。 |
 | 上一候选 VSIX 的 Codex 新对话 | 7.862 秒 | 已进入真实 native turn；这是最新两项补丁之前的候选数据，不能替代最终验收。 |
 | 上一候选 VSIX 的 Codex 续聊 | 8.938 秒 | 同一 native session 的新 native turn；同上，不作为最终发布结论。 |
 | r6 VSIX + 隔离 code-server + 两个 CPU 负载 | 失败：13.398 秒 | interaction `4d06fd66-f6d5-42a7-aff1-9cb069976f48`；Git 快照约 152 ms，Provider 原生 `task_started` 超过 10 秒硬门。HEAD 与用户 index 保持不变，隐藏回滚 ref 可解析。 |
-| 完整 `npm test` | 2697 项，2696 通过、0 失败、1 跳过 | 最终代码 707.380 秒自然退出；跳过项为既有环境能力条件。期间发现并修复只等待 PID 文件存在、未等待内容和子进程 birth 的测试夹具竞态，以及 no-sink trace 被后来数据根接管的迟到诊断竞态；历史目标用例连续 10/10、跨根序列连续 5/5 通过。 |
+| 完整 `npm test` | 2700 项，2699 通过、0 失败、1 跳过 | 最终代码 709.446 秒自然退出；跳过项为既有环境能力条件。期间发现并修复只等待 PID 文件存在、未等待内容和子进程 birth 的测试夹具竞态，以及 trace error/no-sink 被后来数据根接管的迟到诊断竞态；策略页目标序列连续 5/5 轮通过。 |
 | 临时夹具物理清理 | 通过 | 四批遗留物精确清单共清理 398 个根、2225 个普通文件/链接、3038 个目录，释放对象分配空间口径合计 1,146,474,496 bytes；进程引用均为 0。后续测试与真实门禁全部通过 owned-TMPDIR 包装器自动回收；最终临时 VSIX 也按精确路径 unlink/rmdir。反向扫描只保留两个正式 Telegram 协调根，共享 Agent/Codex 配置未触碰。 |
 | 上一发布版 r13 VSIX 结构审计 | 通过 | 6335 文件，11.48 MiB 压缩、38.78 MiB 解压。 |
 | 上一发布版 r13 真实 Codex 门禁 | 通过 | 7.569 秒进入 Provider task；observer delay 3.173 秒；MCP 往返、两路 CPU burner、profile、Git ref、HEAD/工作树不变均通过。 |
 | Runtime 升级接管 | 通过 | 0.0.625 PID 3884064 接管 0.0.624 PID 3700738；新 endpoint 为 build `478320a9fe985551aca581ca52e368d93dae9420f8b0db21daab2546f94eeb17`，旧 PID 已退出，health 返回 `ok`。 |
-| 上一发布版 Git commit / push / CI / publish | 通过 | 0.0.625 实现 `f4128e8`、自动发布 `13db58d`；CI `40272156144` 与 Publish `40272156120` 成功，Open VSX 可用性回读通过。Security `40272156101` 仍仅失败于本轮未修改的既有依赖告警。当前候选尚待推送后的新流水线。 |
+| 上一发布版 Git commit / push / CI / publish | 通过 | 0.0.625 实现 `f4128e8`、自动发布 `13db58d`；CI `40272156144` 与 Publish `40272156120` 成功，Open VSX 可用性回读通过。Security `40272156101` 仍仅失败于该版既有依赖告警。 |
+| 0.0.626 Git / CI / publish / 市场 | 通过 | 输入合同 `5472788`、夹具隔离 `059d3ee`、发布环境 `ed2cefe`、诊断竞态 `124b421`、自动发布 `e777574` 已推送。CI `40331654992`、Publish `40331655070` 成功；GitHub Release 与 tag 为 `v0.0.626`，Open VSX API 返回 `0.0.626`，Visual Studio Marketplace 精确包端点返回 200 且包内版本为 `0.0.626`。Security `40331655114` 仍失败于独立依赖告警：root 4 项、website 3 项。 |
 
 ## 4. 当前未闭合项
 
@@ -64,15 +65,15 @@
 | O-04 | Telegram、scheduled/effect 等入口已通过完整契约回归，但本轮没有可用外部 Telegram 账号做同等级真实 Provider 门禁。 | 不把本地契约测试表述为外部账号实测；这些入口继续复用同一持久 run/interaction/runner 主路径和 10 秒 verdict。 |
 | O-05 | 每个唯一工作树基线都必须被 Git 对象和受控 ref 保留，才能保证历史对话可撤回；这会随真正不同的任务基线增长。 | 本版先用确定性提交消除“相同 HEAD + 相同工作树”的重复增长。不得在没有逐 run 引用审计和用户明确清理授权时自动删除 ref；后续容量治理必须以 durable run/conversation 引用为保留根，先观测数量、字节和增长速率，再只回收已明确退休且无引用的基线。 |
 
-## 5. 接下来的强制验收顺序
+## 5. 已完成的强制验收顺序
 
 1. 当前候选 VSIX 已从最终源码生成并通过包结构审计。
 2. 两个 CPU 负载下真实 Solo 新对话已于 7.447 秒进入 Codex task。
 3. MCP 完成、项目 profile、Git hidden ref、HEAD 与用户文件不变已在同一 gate 验证；resume-only 另由真实输入合同证明没有提交合成提示词。
 4. interaction 可直接给出 Provider start、observer delay、MCP、profile 和 Git 分段证据。
-5. 完整测试 2697 项已自然退出，2696 通过、0 失败、1 个环境条件跳过。
+5. 完整测试 2700 项已自然退出，2699 通过、0 失败、1 个环境条件跳过。
 6. 临时测试与诊断对象已物理清理，反向扫描只保留两个正式 Telegram 协调根。
-7. 当前剩余门禁是提交并推送 `main`，等待新版 CI 与发布链自然结束；Security 的既有依赖告警继续单独记录，不冒充本次启动链回归。
+7. 代码与修复提交已推送 `main`；CI、Publish、GitHub Release、Open VSX 与 Visual Studio Marketplace 精确版本均已核验。Security 的独立依赖告警继续如实记录，不冒充通过，也不与本次输入合同/启动链修复混改。
 
 ## 6. 关联证据入口
 
