@@ -335,7 +335,8 @@ export class RunNativeObserver {
       if (text && typeof row.uuid === 'string' && (machine || Number.isFinite(time) && time >= Date.parse(String(state.status.claudeNativeStartedAt || state.status.turnStartedAt || state.status.startedAt)))) {
         const timestamp = machine?.startedAt || row.timestamp;
         await this.observeRow(current, patch, { type: 'response_item', timestamp, payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } }, frame.offset);
-        await this.observeRow(current, patch, { type: 'event_msg', timestamp, payload: { type: 'task_started', turn_id: row.uuid, started_at: nativeTime(timestamp) } }, frame.offset);
+        await this.observeRow(current, patch, { type: 'event_msg', timestamp, payload: { type: 'task_started', turn_id: row.uuid, started_at: nativeTime(timestamp) } }, frame.offset,
+          { stream, lastStartedOffset, endOffset: frame.nextCursor, observedWorkspace });
         lineage.clear(); lineage.add(row.uuid);
       } else if (follows(row, lineage) && (machine || Number.isFinite(time) && time >= Date.parse(String(state.status.claudeNativeStartedAt || '')))) {
         // Auxiliary ancestors and tool results remain reachable without becoming user turns.
@@ -468,6 +469,15 @@ export class RunNativeObserver {
     const eventTimestamp = nativeTime(payload.started_at || row.timestamp);
     if (!Number.isFinite(eventTimestamp)) return;
     if (payload.type === 'task_started') {
+      const eventStream = source?.stream || (state.status.sessionProvider === 'claude' ? 'native:claude' : 'native:codex');
+      const withinAcceptedStopBoundary = source
+        && eventStream === state.status.stopNativeStream
+        && Number.isSafeInteger(source.endOffset)
+        && Number.isSafeInteger(state.status.stopNativeLogBoundary)
+        && source.endOffset <= Number(state.status.stopNativeLogBoundary);
+      // Only source bytes captured before the stop request may change turn
+      // topology. Wall-clock timestamps cannot establish this causal order.
+      if (state.status.stopRequested === true && !withinAcceptedStopBoundary) return;
       const ingress = () => taskIngressReceiptFields(state.status, {
         provider: String(state.status.sessionProvider || ''),
         kind: state.status.sessionProvider === 'claude' ? 'claude_root_turn_start' : 'codex_task_started',
@@ -503,7 +513,7 @@ export class RunNativeObserver {
         const gitBaseline = String(state.status.workspaceAfterGitHash || state.status.baseGitHash || '');
         const latest = current();
         if (latest.turnId !== state.turnId) throw new Error('checkpoint_turn_conflict');
-        state = this.store.checkpointRun(state.projectId, { ...identity, proof: latest.proof!, expectedRevision: latest.revision, expectedTurnId: latest.turnId, action: 'start', message, workspaceSnapshot, gitBaseline, nativeStartedAt: eventTimestamp, workspaceEvidenceSource: 'native', idempotencyKey: `run:${state.runId}:${state.generation}:native-start:${key}` });
+        state = this.store.checkpointRun(state.projectId, { ...identity, proof: latest.proof!, expectedRevision: latest.revision, expectedTurnId: latest.turnId, action: 'start', message, workspaceSnapshot, gitBaseline, nativeStartedAt: eventTimestamp, ...(source ? { nativeLogRange: { stream: eventStream, start: sourceOffset, end: source.endOffset } } : {}), workspaceEvidenceSource: 'native', idempotencyKey: `run:${state.runId}:${state.generation}:native-start:${key}` });
         if (document) this.store.link({ source: document.objectId, relation: 'source', target: state.turnId, expectedRevision: document.revision, idempotencyKey: `run:${state.runId}:${state.generation}:native-request-source:${key}` });
         patch({ [native('AwaitingRequest')]: !document }, `pending-request:${key}`);
       }

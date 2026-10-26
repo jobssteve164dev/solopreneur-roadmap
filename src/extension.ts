@@ -266,7 +266,7 @@ import {
 } from './continuation';
 import { extractRunTokenUsage, normalizeTokenUsage } from './tokenUsage';
 import { agentTerminalInputFrame, sendTextWhenTerminalReady } from './terminalCompatibility';
-import { buildForegroundRunnerInvocation, ForegroundAgentTerminalBridge } from './foregroundAgentTerminal';
+import { buildForegroundRunnerInvocation, ForegroundAgentTerminalBridge, settleForegroundTerminalExit, type ForegroundTerminalInputMode } from './foregroundAgentTerminal';
 import { advanceInteractionBudget, createInteractionBudget, createInteractionBudgetAt, currentInteractionBudget, runWithInteractionBudget, type InteractionBudget } from './interactionBudget';
 import { taskIngressDeadlineFields } from './providerTaskIngress';
 import {
@@ -652,6 +652,7 @@ const agentTerminalRunTargets = new Map<vscode.Terminal, AgentTerminalRunTarget>
 interface ForegroundAgentTerminalSurface {
   pty: vscode.Pseudoterminal;
   attach(bridge: ForegroundAgentTerminalBridge): void;
+  setInputMode(inputMode: ForegroundTerminalInputMode): void;
   writeInputFrame(bytes: Buffer): Promise<void>;
   detachForHostReload(): void;
   stop(): void;
@@ -2581,12 +2582,13 @@ async function handleSharedWebviewAction(
     'issue.getDetails': async (request) => {
       const projectPath = String(request.projectPath || '');
       const issueNumber = Number(request.issueNumber || 0);
+      const requestId = String(request.requestId || '');
       const signalDataPath = getPersistedSettings(context).globalDataPath;
       const cached = await readCachedIssueDetails(projectPath, issueNumber, signalDataPath);
       if (cached) {
-        await respond({ command: 'issueDetailsLoaded', projectPath, issueNumber, ...cached });
+        await respond({ command: 'issueDetailsLoaded', projectPath, issueNumber, requestId, ...cached });
       }
-      await respond({ command: 'issueDetailsLoaded', projectPath, issueNumber, ...await readProjectIssueDetails(projectPath, issueNumber, signalDataPath) });
+      await respond({ command: 'issueDetailsLoaded', projectPath, issueNumber, requestId, ...await readProjectIssueDetails(projectPath, issueNumber, signalDataPath) });
     },
     'issue.create': async (request) => {
       const projectPath = String(request.projectPath || '');
@@ -7389,7 +7391,8 @@ function createAgentTerminal(
   label: string,
   conversationId = 0,
   env?: Record<string, string>,
-  foreground = false
+  foreground = false,
+  inputMode: ForegroundTerminalInputMode = 'prompt_turn'
 ): vscode.Terminal {
   const terminalEnvironment = withDesktopSessionEnvironment(env);
   const reservedTerminals = reservedAgentTerminalsByProject.get(workspaceRoot);
@@ -7415,9 +7418,10 @@ function createAgentTerminal(
     if (conversationId) {
       setAgentTerminalBinding(workspaceRoot, conversationId, reservedTerminal.name);
     }
+    foregroundAgentTerminalSurfaces.get(reservedTerminal)?.setInputMode(inputMode);
     return reservedTerminal;
   }
-  if (foreground) return createForegroundAgentTerminal(workspaceRoot, label, conversationId);
+  if (foreground) return createForegroundAgentTerminal(workspaceRoot, label, conversationId, inputMode);
   const terminalName = makeAgentTerminalName(workspaceRoot, label);
   activeAgentTerminalName = terminalName;
   if (conversationId) {
@@ -7438,7 +7442,7 @@ function createAgentTerminal(
   });
 }
 
-function createForegroundAgentTerminalSurface(): ForegroundAgentTerminalSurface {
+function createForegroundAgentTerminalSurface(initialInputMode: ForegroundTerminalInputMode = 'prompt_turn'): ForegroundAgentTerminalSurface {
   const writeListeners = new Set<(value: string) => unknown>();
   const closeListeners = new Set<(value: number | void) => unknown>();
   const event = <T>(listeners: Set<(value: T) => unknown>): vscode.Event<T> => ((listener: (value: T) => unknown, thisArgs?: unknown, disposables?: vscode.Disposable[]) => {
@@ -7458,6 +7462,8 @@ function createForegroundAgentTerminalSurface(): ForegroundAgentTerminalSurface 
   let detached = false;
   let detachOutput: (() => void) | undefined;
   let detachExit: (() => void) | undefined;
+  let inputMode = initialInputMode;
+  let acceptingInput = true;
   const pendingInput: Buffer[] = [];
   const surface: ForegroundAgentTerminalSurface = {
     pty: {
@@ -7481,10 +7487,12 @@ function createForegroundAgentTerminalSurface(): ForegroundAgentTerminalSurface 
         else surface.bridge?.stop('SIGTERM');
       },
       handleInput: data => {
-        surface.writeInputFrame(Buffer.from(data));
+        if (!acceptingInput) return;
+        void surface.writeInputFrame(Buffer.from(data)).catch(() => undefined);
       },
       setDimensions: dimensions => { surface.dimensions = dimensions; }
     },
+    setInputMode: nextInputMode => { inputMode = nextInputMode; },
     attach: bridge => {
       if (surface.bridge && surface.bridge !== bridge) throw new Error('foreground_terminal_already_bound');
       surface.bridge = bridge;
@@ -7495,9 +7503,11 @@ function createForegroundAgentTerminalSurface(): ForegroundAgentTerminalSurface 
         });
       }
       if (!detachExit) detachExit = bridge.onExit(code => {
+        acceptingInput = false;
         const remaining = decoder.end();
         if (remaining) fire(writeListeners, remaining);
-        fire(closeListeners, Number.isInteger(code) ? Number(code) : undefined as void);
+        settleForegroundTerminalExit(inputMode, Number.isInteger(code) ? Number(code) : undefined,
+          value => fire(writeListeners, value), value => fire(closeListeners, value as number | void));
       });
       for (const bytes of pendingInput.splice(0)) void bridge.writeInputFrame(bytes).catch(() => undefined);
     },
@@ -7528,12 +7538,13 @@ function bridgeDetach(bridge?: ForegroundAgentTerminalBridge): void {
 function createForegroundAgentTerminal(
   workspaceRoot: string,
   label: string,
-  conversationId = 0
+  conversationId = 0,
+  inputMode: ForegroundTerminalInputMode = 'prompt_turn'
 ): vscode.Terminal {
   const terminalName = makeAgentTerminalName(workspaceRoot, label);
   activeAgentTerminalName = terminalName;
   if (conversationId) setAgentTerminalBinding(workspaceRoot, conversationId, terminalName);
-  const surface = createForegroundAgentTerminalSurface();
+  const surface = createForegroundAgentTerminalSurface(inputMode);
   const terminal = vscode.window.createTerminal({
     name: terminalName,
     iconPath: extensionContextRef
@@ -7942,7 +7953,8 @@ async function launchAgentConversationTerminal(input: {
     for (let attempt = 1; attempt <= 1; attempt++) {
       const terminal = recordedTerminal
         ? recordedTerminal
-        : createAgentTerminal(input.workspaceRoot, input.label, input.conversationId, terminalEnvironment, true);
+        : createAgentTerminal(input.workspaceRoot, input.label, input.conversationId, terminalEnvironment, true,
+          String(state.status.agentInputMode || (state.status.interactiveSession ? 'prompt_turn' : 'closed')) as ForegroundTerminalInputMode);
       terminalForPersistence = terminal;
       const target: AgentTerminalRunTarget = { workspaceRoot: input.workspaceRoot, globalDataPath, executionLogId: input.conversationId,
         runId: state.runId, generation, deliveryId: crypto.randomUUID() };

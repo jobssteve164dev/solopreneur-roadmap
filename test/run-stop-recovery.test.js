@@ -6,8 +6,58 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { RunStop } = require('../out/runStop.js');
+const { RunStop, captureNativeStopBoundary } = require('../out/runStop.js');
 const { RunRecovery } = require('../out/runRecovery.js');
+
+test('stop capture converts a native transcript file head into the run-log boundary', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-stop-native-boundary-'));
+  const transcript = path.join(base, 'native.jsonl');
+  fs.writeFileSync(transcript, Buffer.alloc(321));
+  const store = { readRunBinding: () => ({
+    provider: 'codex', workspaceRoot: '/workspace', headRevision: 1, resumableRevision: 1,
+    revisions: [{ revision: 1, state: 'confirmed', sessionId: 'session-1', evidence: { transcriptPath: transcript } }]
+  }) };
+  assert.deepEqual(captureNativeStopBoundary(store, {
+    projectId: 'project', status: { executionLogId: 1, sessionProvider: 'codex', workspaceRoot: '/workspace', nativeSessionId: 'session-1', sessionBindingHeadRevision: 1, codexNativeSourceOffset: 100 }
+  }), { nativeStopStream: 'native:codex', nativeStopLogBoundary: 221 });
+});
+
+test('stop capture rejects a transcript boundary without a confirmed current binding', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-stop-untrusted-boundary-'));
+  const transcript = path.join(base, 'native.jsonl');
+  fs.writeFileSync(transcript, Buffer.alloc(321));
+  const state = { projectId: 'project', status: { executionLogId: 1, sessionProvider: 'codex', workspaceRoot: '/workspace', nativeSessionId: 'session-1', sessionBindingHeadRevision: 1 } };
+  const valid = { provider: 'codex', workspaceRoot: '/workspace', headRevision: 1, resumableRevision: 1,
+    revisions: [{ revision: 1, state: 'confirmed', sessionId: 'session-1', evidence: { transcriptPath: transcript } }] };
+  for (const binding of [
+    { ...valid, provider: 'claude' },
+    { ...valid, workspaceRoot: '/other' },
+    { ...valid, resumableRevision: undefined },
+    { ...valid, revisions: [{ ...valid.revisions[0], state: 'planned' }] },
+    { ...valid, revisions: [{ ...valid.revisions[0], sessionId: 'other-session' }] }
+  ]) assert.equal(captureNativeStopBoundary({ readRunBinding: () => binding }, state), undefined);
+});
+
+test('requestRunStop ignores caller-spoofed native boundary fields', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-stop-spoofed-boundary-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root);
+  try {
+    const identity = await store.registerProject({ root: project });
+    const run = store.prepareRun(identity.projectId, identity.locationId, {
+      root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '目标', command: 'codex', userMessage: '目标',
+      metadata: { interactiveSession: true, sessionProvider: 'codex' }, idempotencyKey: 'spoofed-boundary-run'
+    });
+    const stopped = store.requestRunStop(run.projectId, {
+      executionLogId: 1, generation: run.generation, expectedRevision: run.revision, expectedTurnId: run.turnId,
+      reason: '停止', idempotencyKey: 'spoofed-boundary-stop', nativeStopStream: 'native:codex', nativeStopLogBoundary: Number.MAX_SAFE_INTEGER
+    });
+    assert.equal(stopped.status.stopNativeStream, undefined);
+    assert.equal(stopped.status.stopNativeLogBoundary, undefined);
+    assert.equal(stopped.status.stopRequestIntent.nativeStopStream, undefined);
+    assert.equal(stopped.status.stopRequestIntent.nativeStopLogBoundary, undefined);
+  } finally { store.close(); }
+});
 
 test('recovery preserves an accepted ordinary stop after a refused strict continuation stop', async () => {
   const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-stop-intent-recovery-'));
@@ -80,6 +130,116 @@ test('recovery consumes a late stop request for an already finished non-interact
     assert.equal(settled.status.status, 'Session Closed');
     assert.equal(store.recoverableRunStates().items.length, 0, 'a settled run must not be recovered every five seconds forever');
   } finally { if (recovery) await recovery.close(); store.close(); }
+});
+
+test('recovery closes a stopped interactive run after observing a native start that happened before the stop request', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-stopped-native-start-recovery-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); let recovery;
+  try {
+    const identity = await store.registerProject({ root: project });
+    const run = store.prepareRun(identity.projectId, identity.locationId, {
+      root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '原始目标', command: 'codex', userMessage: '原始目标',
+      metadata: { interactiveSession: true, sessionProvider: 'codex' }, idempotencyKey: 'stopped-native-start-run'
+    });
+    const completed = store.checkpointRun(run.projectId, {
+      executionLogId: 1, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId,
+      action: 'complete', outcome: 'partial', summary: '原轮已经完成', exitCode: 0, idempotencyKey: 'stopped-native-start-complete'
+    });
+    const stopped = store.requestRunStop(run.projectId, {
+      executionLogId: 1, generation: completed.generation, expectedRevision: completed.revision, expectedTurnId: completed.turnId,
+      reason: '正在原会话中继续处理。', outcome: 'partial', idempotencyKey: 'stopped-native-start-stop'
+    }, { nativeStopStream: 'native:codex', nativeStopLogBoundary: 200 });
+    store.appendRunLog(run.projectId, { executionLogId: 1, generation: stopped.generation, stream: 'native:codex', sequence: 0, offset: 0,
+      bytes: Buffer.alloc(200, 32).toString('base64'), idempotencyKey: 'stopped-native-source' });
+    const nativeStartedAt = stopped.status.stopRequestedAt;
+    const { RunNativeObserver } = require('../out/runNativeObserver.js');
+    const observer = new RunNativeObserver(store);
+    const current = () => store.readRunCheckpointState(run.projectId, 1);
+    const patch = (fields, event) => {
+      const latest = current();
+      return store.patchRunState(run.projectId, {
+        executionLogId: 1, generation: latest.generation, expectedRevision: latest.revision, patch: fields,
+        idempotencyKey: `stopped-native-start:${event}:${latest.revision}`
+      });
+    };
+    await observer.observeRow(current, patch, {
+      type: 'event_msg', timestamp: nativeStartedAt,
+      payload: { type: 'task_started', turn_id: 'native-before-stop', started_at: nativeStartedAt }
+    }, 0, { stream: 'native:codex', lastStartedOffset: 0, endOffset: 100, observedWorkspace: async () => { throw new Error('not used'); } });
+    const observed = current();
+    assert.notEqual(observed.turnId, stopped.turnId, 'the authoritative native turn must remain in history');
+    assert.equal(observed.status.stopRequested, true);
+    recovery = new RunRecovery(store); await recovery.recover();
+    const closed = current();
+    assert.equal(closed.status.interactiveSessionClosed, true);
+    assert.equal(closed.status.status, 'In Progress', 'a partial interactive result remains resumable after its terminal session closes');
+    assert.equal(closed.status.sessionClosePreviousStatus, 'In Progress');
+    assert.equal(store.recoverableRunStates().items.length, 0, 'the accepted stop must not retry forever');
+  } finally { if (recovery) await recovery.close(); store.close(); }
+});
+
+test('an accepted stop keeps its original intent when the same key is retried with changed input', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-stop-intent-replay-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); let stops;
+  try {
+    const identity = await store.registerProject({ root: project });
+    const run = store.prepareRun(identity.projectId, identity.locationId, {
+      root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '目标', command: 'codex', userMessage: '目标',
+      metadata: { interactiveSession: true, sessionProvider: 'codex' }, idempotencyKey: 'stop-intent-run'
+    });
+    store.requestRunStop(run.projectId, {
+      executionLogId: 1, generation: run.generation, expectedRevision: run.revision, expectedTurnId: run.turnId,
+      reason: '保留部分结果', outcome: 'partial', idempotencyKey: 'same-stop-key'
+    });
+    const { RunStop } = require('../out/runStop.js');
+    stops = new RunStop(store);
+    const current = store.readRunCheckpointState(run.projectId, 1);
+    const closed = await stops.stop(run.projectId, {
+      executionLogId: 1, generation: current.generation, expectedRevision: current.revision, expectedTurnId: current.turnId,
+      reason: '试图改变已接受语义', idempotencyKey: 'same-stop-key'
+    });
+    assert.equal(closed.status.stopReason, '保留部分结果');
+    assert.equal(closed.status.checkpointOutcome, 'partial');
+    assert.equal(closed.status.status, 'In Progress');
+  } finally { if (stops) await stops.close(); store.close(); }
+});
+
+test('a native start beyond the captured stop boundary cannot open another turn', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-native-start-stop-boundary-'));
+  const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root);
+  try {
+    const identity = await store.registerProject({ root: project });
+    const run = store.prepareRun(identity.projectId, identity.locationId, {
+      root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '目标', command: 'codex', userMessage: '目标',
+      metadata: { interactiveSession: true, sessionProvider: 'codex' }, idempotencyKey: 'stop-boundary-run'
+    });
+    const completed = store.checkpointRun(run.projectId, {
+      executionLogId: 1, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId,
+      action: 'complete', outcome: 'partial', summary: '完成', exitCode: 0, idempotencyKey: 'stop-boundary-complete'
+    });
+    const stopped = store.requestRunStop(run.projectId, {
+      executionLogId: 1, generation: completed.generation, expectedRevision: completed.revision, expectedTurnId: completed.turnId,
+      reason: '停止', idempotencyKey: 'stop-boundary-stop'
+    }, { nativeStopStream: 'native:codex', nativeStopLogBoundary: 100 });
+    store.appendRunLog(run.projectId, { executionLogId: 1, generation: stopped.generation, stream: 'native:codex', sequence: 0, offset: 0,
+      bytes: Buffer.alloc(101, 32).toString('base64'), idempotencyKey: 'stop-boundary-source' });
+    const { RunNativeObserver } = require('../out/runNativeObserver.js');
+    const observer = new RunNativeObserver(store);
+    const current = () => store.readRunCheckpointState(run.projectId, 1);
+    const patch = (fields, event) => {
+      const latest = current();
+      return store.patchRunState(run.projectId, { executionLogId: 1, generation: latest.generation, expectedRevision: latest.revision,
+        patch: fields, idempotencyKey: `stop-boundary:${event}:${latest.revision}` });
+    };
+    await observer.observeRow(current, patch, {
+      type: 'event_msg', timestamp: stopped.status.stopRequestedAt,
+      payload: { type: 'task_started', turn_id: 'native-at-stop', started_at: stopped.status.stopRequestedAt }
+    }, 100, { stream: 'native:codex', lastStartedOffset: 100, endOffset: 101, observedWorkspace: async () => { throw new Error('not used'); } });
+    assert.equal(current().turnId, stopped.turnId);
+  } finally { store.close(); }
 });
 
 test('recovery preserves a live interactive process when only its terminal host disappears', async () => {

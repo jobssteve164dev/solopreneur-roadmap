@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as path from 'path';
 import { execFile } from 'child_process';
 import { UnifiedDataStore } from './db/unifiedDataStore';
 import { snapshotWorkspace, captureRunGitEvidence } from './runWorkspace';
@@ -7,6 +8,29 @@ import { readWindowsProcessBirthMarkerAsync } from './processIdentity.js';
 import { RunNativeObserver } from './runNativeObserver';
 
 interface TrackedProcess { pid: number; birth: string }
+
+export function captureNativeStopBoundary(store: UnifiedDataStore, state: RunState): { nativeStopStream: 'native:codex' | 'native:claude'; nativeStopLogBoundary: number } | undefined {
+  const provider = String(state.status.sessionProvider || '');
+  if (!['codex', 'claude'].includes(provider)) return undefined;
+  try {
+    const binding = store.readRunBinding(state.projectId, Number(state.status.executionLogId));
+    if (!binding || binding.provider !== provider
+      || path.resolve(binding.workspaceRoot) !== path.resolve(String(state.status.workspaceRoot || ''))
+      || binding.resumableRevision !== binding.headRevision
+      || Number(state.status.sessionBindingHeadRevision) !== binding.headRevision) return undefined;
+    const head = binding.revisions[binding.headRevision - 1];
+    if (!head || head.revision !== binding.headRevision || head.state !== 'confirmed' || !head.sessionId
+      || head.sessionId !== state.status.nativeSessionId) return undefined;
+    const transcriptPath = String(head.evidence?.transcriptPath || '');
+    if (!transcriptPath) return undefined;
+    const stat = fs.statSync(transcriptPath);
+    if (!stat.isFile() || !Number.isSafeInteger(stat.size)) return undefined;
+    const sourceSize = stat.size;
+    const sourceOffset = provider === 'codex' ? Number(state.status.codexNativeSourceOffset || 0) : 0;
+    if (!Number.isSafeInteger(sourceOffset) || sourceOffset < 0 || sourceSize < sourceOffset) return undefined;
+    return { nativeStopStream: provider === 'codex' ? 'native:codex' : 'native:claude', nativeStopLogBoundary: sourceSize - sourceOffset };
+  } catch { return undefined; }
+}
 
 async function alive(target: TrackedProcess, requireVerifiedIdentity = false): Promise<boolean> {
   if (!target.pid) return false;
@@ -39,11 +63,20 @@ export class RunStop {
 
   public stop(projectId: string, input: Parameters<UnifiedDataStore['requestRunStop']>[1]): Promise<RunState> {
     if (this.interrupted) return Promise.reject(new Error('run_stop_interrupted'));
-    const accepted = this.store.requestRunStop(projectId, input);
-    const key = `${accepted.runId}:${accepted.generation}:${accepted.receipt!.requestId}`;
+    const current = this.store.readRunCheckpointState(projectId, input.executionLogId);
+    const persistedIntent = current.status.stopRequestIntent;
+    const replayingAcceptedStop = current.generation === input.generation
+      && current.status.stopRequested === true
+      && current.status.stopRequestKey === input.idempotencyKey
+      && persistedIntent && typeof persistedIntent === 'object';
+    const accepted = replayingAcceptedStop ? current : this.store.requestRunStop(projectId, input, captureNativeStopBoundary(this.store, current));
+    const acceptedInput = replayingAcceptedStop
+      ? { ...(persistedIntent as Parameters<UnifiedDataStore['requestRunStop']>[1]), expectedRevision: current.revision }
+      : input;
+    const key = `${accepted.runId}:${accepted.generation}:${input.idempotencyKey}`;
     const pending = this.pending.get(key);
     if (pending) return pending;
-    const stopping = this.finish(projectId, input, accepted);
+    const stopping = this.finish(projectId, acceptedInput, accepted);
     this.pending.set(key, stopping);
     void stopping.then(() => this.pending.delete(key), () => this.pending.delete(key));
     return stopping;
@@ -54,7 +87,6 @@ export class RunStop {
       if (this.interrupted) throw new Error('run_stop_interrupted');
       const state = this.store.readRunCheckpointState(projectId, input.executionLogId);
       if (state.generation !== accepted.generation) throw new Error('run_owner_conflict');
-      if (state.turnId !== accepted.turnId) throw new Error('checkpoint_turn_conflict');
       return state;
     };
     let state = current();

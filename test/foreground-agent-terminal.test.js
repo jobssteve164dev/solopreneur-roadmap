@@ -6,7 +6,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const test = require('node:test');
 
-const { ForegroundAgentTerminalBridge, buildForegroundRunnerInvocation } = require('../out/foregroundAgentTerminal.js');
+const { ForegroundAgentTerminalBridge, buildForegroundRunnerInvocation, settleForegroundTerminalExit } = require('../out/foregroundAgentTerminal.js');
 
 function fakeChild(pid = 4321) {
   const child = new EventEmitter();
@@ -110,6 +110,20 @@ test('a stale child cannot consume frames after its bridge generation exits', as
   assert.deepEqual(child.stdin.writes, []);
 });
 
+test('a completed noninteractive runner keeps its terminal available while interactive sessions still close', () => {
+  const retainedWrites = []; const retainedCloses = [];
+  const retained = settleForegroundTerminalExit('closed', 0, value => retainedWrites.push(value), value => retainedCloses.push(value));
+  assert.equal(retained, 'retained');
+  assert.deepEqual(retainedCloses, []);
+  assert.match(retainedWrites.join(''), /任务已结束/);
+
+  const interactiveWrites = []; const interactiveCloses = [];
+  const closed = settleForegroundTerminalExit('prompt_turn', 0, value => interactiveWrites.push(value), value => interactiveCloses.push(value));
+  assert.equal(closed, 'closed');
+  assert.deepEqual(interactiveWrites, []);
+  assert.deepEqual(interactiveCloses, [0]);
+});
+
 test('a broken runner input is reported to the continuation caller', async () => {
   const child = fakeChild();
   child.stdin.write = (_bytes, callback) => { callback(new Error('broken pipe')); return false; };
@@ -145,6 +159,17 @@ test('a terminal is reusable only while this Extension Host owns its live foregr
   const body = source.slice(start, end);
   assert.match(body, /foregroundAgentTerminalSurfaces\.get\(mappedTerminal\)\?\.bridge\?\.isRunning/);
   assert.match(body, /foregroundAgentTerminalSurfaces\.get\(candidate\)\?\.bridge\?\.isRunning/);
+});
+
+test('a retained foreground terminal stops forwarding input after its runner exits', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../src/extension.ts'), 'utf8');
+  const start = source.indexOf('function createForegroundAgentTerminalSurface');
+  const end = source.indexOf('\nfunction bridgeDetach', start);
+  assert.ok(start >= 0 && end > start);
+  const body = source.slice(start, end);
+  assert.match(body, /if \(!acceptingInput\) return/);
+  assert.match(body, /writeInputFrame\(Buffer\.from\(data\)\)\.catch\(\(\) => undefined\)/);
+  assert.match(body, /bridge\.onExit\(code => \{\s*acceptingInput = false/);
 });
 
 test('foreground continuation and legacy cleanup never wait indefinitely for a terminal processId', () => {

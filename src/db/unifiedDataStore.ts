@@ -5246,7 +5246,12 @@ export class UnifiedDataStore {
       if (input.action === 'start') {
         if (metadata.hostOutputPending === true || metadata.nativeOutputPending === true) throw new Error('run_output_pending');
         if (metadata.interactiveSessionClosed === true) throw new Error('session_already_closed');
-        if (metadata.stopRequested === true) throw new Error('run_stop_requested');
+        const historicalNativeStart = input.workspaceEvidenceSource === 'native'
+          && input.nativeLogRange?.stream === metadata.stopNativeStream
+          && Number.isSafeInteger(input.nativeLogRange?.end)
+          && Number.isSafeInteger(metadata.stopNativeLogBoundary)
+          && input.nativeLogRange!.end <= Number(metadata.stopNativeLogBoundary);
+        if (metadata.stopRequested === true && !historicalNativeStart) throw new Error('run_stop_requested');
         if (input.exitCode !== undefined) throw new Error('invalid_checkpoint_exit_code');
         status = 'Running';
         this.db.run('UPDATE run_control SET recovery_needed=1 WHERE run_id=?', [row.run_id]);
@@ -6584,17 +6589,24 @@ export class UnifiedDataStore {
     const state = this.readRunState(projectId, input.executionLogId, receipt.revision);
     return { ...state, receipt, proof: this.runProof(state.runId, state.generation) };
   }
-  public requestRunStop(projectId: string, input: { executionLogId: number; generation: number; expectedRevision: number; expectedTurnId: string; reason: string; idempotencyKey: string; requireVerifiedIdentity?: boolean; outcome?: 'partial' }): RunState {
+  public requestRunStop(projectId: string, input: { executionLogId: number; generation: number; expectedRevision: number; expectedTurnId: string; reason: string; idempotencyKey: string; requireVerifiedIdentity?: boolean; outcome?: 'partial' }, trustedBoundary?: { nativeStopStream: 'native:codex' | 'native:claude'; nativeStopLogBoundary: number }): RunState {
     if (!input.expectedTurnId || !String(input.reason || '').trim()) throw new Error('invalid_run_stop');
+    if (trustedBoundary && (!['native:codex', 'native:claude'].includes(trustedBoundary.nativeStopStream)
+      || !Number.isSafeInteger(trustedBoundary.nativeStopLogBoundary) || trustedBoundary.nativeStopLogBoundary < 0)) throw new Error('invalid_run_stop_boundary');
     const initial = this.runControl(projectId, input.executionLogId);
     if (initial.generation !== input.generation) throw new Error('run_owner_conflict');
-    const { expectedRevision: _expectedRevision, ...intent } = input;
-    const receipt = this.recordMutation({ operation: 'request_run_stop', projectId, input: intent }, input.idempotencyKey, 'stop', () => {
+    const intent = {
+      executionLogId: input.executionLogId, generation: input.generation, expectedTurnId: input.expectedTurnId,
+      reason: input.reason, idempotencyKey: input.idempotencyKey,
+      ...(input.requireVerifiedIdentity ? { requireVerifiedIdentity: true } : {}),
+      ...(input.outcome ? { outcome: input.outcome } : {})
+    };
+    const receipt = this.recordMutation({ operation: 'request_run_stop', projectId, input: intent, ...(trustedBoundary ? { trustedBoundary } : {}) }, input.idempotencyKey, 'stop', () => {
       const row = this.runControl(projectId, input.executionLogId);
       if (row.revision !== input.expectedRevision) throw new Error('revision_conflict');
       if (row.current_turn_id !== input.expectedTurnId) throw new Error('checkpoint_turn_conflict');
       const metadata = JSON.parse(this.content(String(row.metadata_content_id)).toString('utf8'));
-      this.db.run('UPDATE run_control SET metadata_content_id=?,delivery_pending=0,recovery_needed=1 WHERE run_id=?', [this.putContent(canonical({ ...metadata, stopRequested: true, stopReason: input.reason, stopRequestKey: input.idempotencyKey, stopRequestedAt: new Date().toISOString(), stopRequestIntent: intent, ...(input.requireVerifiedIdentity ? { stopRequireVerifiedIdentity: true } : {}) }), 'application/json'), row.run_id]);
+      this.db.run('UPDATE run_control SET metadata_content_id=?,delivery_pending=0,recovery_needed=1 WHERE run_id=?', [this.putContent(canonical({ ...metadata, stopRequested: true, stopReason: input.reason, stopRequestKey: input.idempotencyKey, stopRequestedAt: new Date().toISOString(), stopRequestIntent: intent, ...(trustedBoundary ? { stopNativeStream: trustedBoundary.nativeStopStream, stopNativeLogBoundary: trustedBoundary.nativeStopLogBoundary } : {}), ...(input.requireVerifiedIdentity ? { stopRequireVerifiedIdentity: true } : {}) }), 'application/json'), row.run_id]);
       this.db.run('UPDATE objects SET revision=revision+1,updated_at=? WHERE id=?', [Date.now(), row.run_id]);
       this.saveRunControlRevision(String(row.run_id));
       return this.current(String(row.run_id), false);

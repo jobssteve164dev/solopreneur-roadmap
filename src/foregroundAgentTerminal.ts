@@ -56,6 +56,22 @@ type OutputConsumer = (bytes: Buffer) => void;
 
 const MAX_DETACHED_OUTPUT_BYTES = 4 * 1024 * 1024;
 
+export type ForegroundTerminalInputMode = 'prompt_turn' | 'session_reentry' | 'closed';
+
+export function settleForegroundTerminalExit(
+  inputMode: ForegroundTerminalInputMode,
+  exitCode: number | undefined,
+  write: (value: string) => void,
+  close: (value: number | undefined) => void
+): 'retained' | 'closed' {
+  if (inputMode === 'closed') {
+    write('\r\nSoloMap: 任务已结束，可关闭此终端。\r\n');
+    return 'retained';
+  }
+  close(exitCode);
+  return 'closed';
+}
+
 export class ForegroundAgentTerminalBridge {
   private child?: SpawnedRunner;
   private consumer?: OutputConsumer;

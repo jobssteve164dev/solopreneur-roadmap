@@ -4916,6 +4916,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const sidebarConversationLogSnapshots = {};
     const sidebarConversationLogRequests = {};
     const sidebarStepConversations = {};
+    const sidebarStepConversationProjects = {};
     const sidebarProjectConversations = {};
     const sidebarRoadmapRevisionConversations = {};
     const sidebarFlowConversations = {};
@@ -4926,6 +4927,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const sidebarConversationRefreshTtlMs = 30000;
     let expandedIssueNumber = 0;
     let issueDetails = null;
+    let issueDetailsRequestId = '';
     let issuePanelExpanded = false;
     let deliveryActionPanelExpanded = false;
     let issueFormOpen = false;
@@ -5097,11 +5099,17 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       vscode.postMessage({ command: 'uiState.load', scopeKey: scope, loadRequestId });
     }
 
-    for (const eventName of ['input', 'change', 'click']) document.addEventListener(eventName, event => {
+    for (const eventName of ['input', 'change']) document.addEventListener(eventName, event => {
       if (event && event.target && event.target.closest && event.target.closest('#feedback-panel')) return;
-      if (eventName === 'click') setTimeout(saveSidebarInteractionState, 0);
-      else saveSidebarInteractionState();
+      saveSidebarInteractionState();
     });
+    document.addEventListener('click', event => {
+      if (event && event.target && event.target.closest && event.target.closest('#feedback-panel')) return;
+      // Capture every click, including controls that stop propagation. The
+      // microtask runs after the target handler mutates state but before any
+      // queued extension response can restore an older snapshot.
+      Promise.resolve().then(saveSidebarInteractionState);
+    }, true);
 
     function conversationsSignature(conversations) {
       return JSON.stringify(Array.isArray(conversations) ? conversations : []);
@@ -6923,6 +6931,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       quickIssueDraftTitle = '';
       expandedIssueNumber = 0;
       issueDetails = null;
+      issueDetailsRequestId = '';
       issuePanelExpanded = false;
       deliveryActionPanelExpanded = false;
       issueFormOpen = false;
@@ -9335,23 +9344,19 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
           if (sameConversations(sidebarSoloConversations, message.conversations || [])) return;
           sidebarSoloConversations = sidebarSoloConversationsByProject[message.projectPath];
-          pruneSidebarConversationExpansionState([
-            ...sidebarSoloConversations,
-            ...(sidebarProjectConversations[message.projectPath] || [])
-          ]);
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
         case 'sidebarStepConversationLoaded': {
           if (message.projectPath !== currentProjects.selectedProjectPath) return;
           const key = stepConversationKey(message.projectPath, message.nodeId);
+          sidebarStepConversationProjects[key] = message.projectPath;
           if (sameConversations(sidebarStepConversations[key], message.conversations || [])) {
             sidebarStepConversationRequested[key] = true;
             return;
           }
           sidebarStepConversations[key] = message.conversations || [];
           sidebarStepConversationRequested[key] = true;
-          pruneSidebarConversationExpansionState(message.conversations || []);
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
         }
@@ -9368,10 +9373,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }
           sidebarProjectConversations[message.projectPath] = message.conversations || [];
           sidebarProjectConversationRequested[message.projectPath] = true;
-          pruneSidebarConversationExpansionState([
-            ...sidebarSoloConversations,
-            ...(sidebarProjectConversations[message.projectPath] || [])
-          ]);
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
@@ -9392,10 +9393,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             return;
           }
           sidebarSoloConversations = sidebarSoloConversationsByProject[message.projectPath];
+          // Only this complete project snapshot owns deletion. Partial source
+          // responses cannot prove that another source's conversation vanished.
           pruneSidebarConversationExpansionState([
             ...sidebarSoloConversations,
             ...sidebarProjectConversations[message.projectPath],
-            ...sidebarFlowConversations[message.projectPath]
+            ...sidebarFlowConversations[message.projectPath],
+            ...sidebarRoadmapRevisionConversations[message.projectPath],
+            ...Object.entries(sidebarStepConversations)
+              .filter(([key]) => sidebarStepConversationProjects[key] === message.projectPath)
+              .flatMap(([, conversations]) => conversations)
           ]);
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
@@ -9414,7 +9421,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         }
 
         case 'issueDetailsLoaded':
-          if (message.projectPath !== currentProjects.selectedProjectPath) return;
+          if (message.projectPath !== currentProjects.selectedProjectPath
+            || Number(message.issueNumber || 0) !== expandedIssueNumber
+            || !message.requestId || message.requestId !== issueDetailsRequestId) return;
           issueDetails = message.ok ? { issue: message.issue, comments: message.comments || [], stale: !!message.stale } : { error: message.message || '' };
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
@@ -9442,6 +9451,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             issueDraftPriority = '';
             expandedIssueNumber = 0;
             issueDetails = null;
+            issueDetailsRequestId = '';
           }
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath, message.projectPath);
           break;
@@ -12224,6 +12234,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (!issuePanelExpanded) {
             expandedIssueNumber = 0;
             issueDetails = null;
+            issueDetailsRequestId = '';
           }
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
@@ -12293,16 +12304,19 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (expandedIssueNumber === issueNumber && issueDetails) {
             expandedIssueNumber = 0;
             issueDetails = null;
+            issueDetailsRequestId = '';
             renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
             return;
           }
           expandedIssueNumber = issueNumber;
           issueDetails = null;
+          issueDetailsRequestId = 'issue-details:' + Date.now() + ':' + Math.random().toString(36).slice(2);
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
           vscode.postMessage({
             command: 'issue.getDetails',
             projectPath: button.getAttribute('data-project-path') || currentProjects.selectedProjectPath,
-            issueNumber
+            issueNumber,
+            requestId: issueDetailsRequestId
           });
         });
       });

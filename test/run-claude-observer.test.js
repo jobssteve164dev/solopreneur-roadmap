@@ -377,6 +377,29 @@ test('Claude machine start immediately opens the next running turn before its re
   } finally { await f.ops.close(); f.store.close(); }
 });
 
+test('Claude accepts a pre-stop transcript turn only when its byte range is inside the trusted stop boundary', async () => {
+  const f = await fixture();
+  try {
+    const reply = { ...f.row, type: 'assistant', uuid: 'stop-first-reply', parentUuid: f.row.uuid,
+      message: { role: 'assistant', id: 'stop-first', content: [{ type: 'text', text: '第一轮结果' }] } };
+    fs.writeFileSync(f.transcript, [f.row, reply, duration(reply)].map(JSON.stringify).join('\n') + '\n');
+    const { RunNativeObserver } = require('../out/runNativeObserver.js');
+    const observer = new RunNativeObserver(f.store);
+    await observer.observe(f.store.readRunCheckpointState(f.run.projectId, 1));
+    const first = f.store.readRunCheckpointState(f.run.projectId, 1);
+    assert.notEqual(f.store.readMetadata(first.turnId).data.finished_at, null);
+    const nextUser = { ...f.row, uuid: 'stop-next-user', timestamp: new Date().toISOString(), message: { role: 'user', content: '停止前已经提交的第二轮' } };
+    fs.appendFileSync(f.transcript, JSON.stringify(nextUser) + '\n');
+    const stopped = f.store.requestRunStop(f.run.projectId, {
+      ...f.scope, expectedRevision: first.revision, expectedTurnId: first.turnId, reason: '关闭当前终端', idempotencyKey: 'claude-stop-boundary'
+    }, { nativeStopStream: 'native:claude', nativeStopLogBoundary: fs.statSync(f.transcript).size });
+    await observer.observe(stopped);
+    const observed = f.store.readRunCheckpointState(f.run.projectId, 1);
+    assert.notEqual(observed.turnId, first.turnId, 'the already-submitted native turn must not be lost behind the accepted stop');
+    assert.equal(f.store.read(observed.turnId).data.request_content, '停止前已经提交的第二轮');
+  } finally { await f.ops.close(); f.store.close(); }
+});
+
 test('a late Claude completion cannot be accepted as the next native turn after cold recovery', async () => {
   const f = await fixture(); let store = f.store; let ops = f.ops;
   try {

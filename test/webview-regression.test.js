@@ -2493,6 +2493,7 @@ function createElement(id) {
 function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
   const elements = Object.fromEntries(ids.map((id) => [id, createElement(id)]));
   const postedMessages = [];
+  const documentListeners = new Map();
   if (elements['migration-settings-card']) {
     const children = new Map();
     elements['migration-settings-card'].querySelector = selector => {
@@ -2615,7 +2616,11 @@ function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
       querySelectorAll() {
         return [];
       },
-      addEventListener() {}
+      addEventListener(type, listener) {
+        const listeners = documentListeners.get(type) || [];
+        listeners.push(listener);
+        documentListeners.set(type, listeners);
+      }
     },
     window: {
       addEventListener(type, listener) {
@@ -2646,6 +2651,9 @@ function runScriptWithMinimalDom(script, ids, scriptSuffix = '') {
         }
         : message;
       context.__messageListener({ data });
+    },
+    dispatchDocumentEvent(type, event) {
+      for (const listener of documentListeners.get(type) || []) listener(event);
     }
   };
 }
@@ -19114,6 +19122,112 @@ test('sidebar ignores an older UI load response for the same project', () => {
   assert.equal(context.__sidebarDraft(), 'newest');
   dispatchMessage({ command: 'uiStateLoaded', view: 'sidebar', scopeKey: '/project', loadRequestId: reads[0].loadRequestId, state: { 'interaction.issueDraftTitle': 'stale' } });
   assert.equal(context.__sidebarDraft(), 'newest');
+});
+
+test('sidebar records an expand click before an already queued UI-state response can overwrite it', async () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { context, postedMessages, dispatchMessage, dispatchDocumentEvent } = runScriptWithMinimalDom(extractLastScript(html), ids, `
+    globalThis.__prepareSidebarExpandRace = (scope) => { currentProjects.selectedProjectPath = scope; loadSidebarUiState(scope); };
+    globalThis.__setSidebarExpanded = (id) => { sidebarExpandedConversations[id] = true; };
+    globalThis.__isSidebarExpanded = (id) => sidebarExpandedConversations[id] === true;
+  `);
+  context.__prepareSidebarExpandRace('/project');
+  const read = postedMessages.find(message => message.command === 'uiState.load' && message.scopeKey === '/project');
+  context.__setSidebarExpanded('42');
+  dispatchDocumentEvent('click', { target: { closest: () => null } });
+  await Promise.resolve();
+  dispatchMessage({
+    command: 'uiStateLoaded', view: 'sidebar', scopeKey: '/project', loadRequestId: read.loadRequestId,
+    state: { 'interaction.sidebarExpandedConversations.42': false }
+  });
+  assert.equal(context.__isSidebarExpanded('42'), true, 'the local click has L0 priority over the older response');
+});
+
+test('sidebar partial conversation responses cannot prune expansion owned by another conversation source', () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { context, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), ids, `
+    globalThis.__prepareSidebarPartialRefresh = () => {
+      currentProjects.selectedProjectPath = '/project';
+      sidebarProjectConversations['/project'] = [{ id: 42, nodeId: 'step-a', status: 'Completed' }];
+      sidebarExpandedConversations['42'] = true;
+    };
+    globalThis.__isSidebarExpanded = (id) => sidebarExpandedConversations[id] === true;
+  `);
+  context.__prepareSidebarPartialRefresh();
+  dispatchMessage({
+    command: 'sidebarStepConversationLoaded', projectPath: '/project', nodeId: 'step-b',
+    conversations: [{ id: 99, nodeId: 'step-b', status: 'Completed' }]
+  });
+  assert.equal(context.__isSidebarExpanded('42'), true, 'a partial step response cannot erase the project conversation expansion');
+});
+
+test('sidebar full conversation refresh preserves expansion for revision and separately loaded step cards', () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { context, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), ids, `
+    globalThis.__prepareSidebarSourceRefresh = () => {
+      currentProjects.selectedProjectPath = '/project';
+      currentNodes = [{ id: 'step-old' }];
+      sidebarRoadmapRevisionConversations['/project'] = [{ id: 77, nodeId: '__roadmap_revision__', status: 'Completed' }];
+      const stepKey = stepConversationKey('/project', 'step-old');
+      sidebarStepConversations[stepKey] = [{ id: 88, nodeId: 'step-old', status: 'Completed' }];
+      sidebarStepConversationProjects[stepKey] = '/project';
+      sidebarExpandedConversations['77'] = true;
+      sidebarExpandedConversations['88'] = true;
+    };
+    globalThis.__isSidebarExpanded = (id) => sidebarExpandedConversations[id] === true;
+  `);
+  context.__prepareSidebarSourceRefresh();
+  dispatchMessage({
+    command: 'sidebarProjectConversationSnapshotLoaded', projectPath: '/project', projectGeneration: 0,
+    soloConversations: [], projectConversations: [], flowConversations: [],
+    revisionConversations: [{ id: 77, nodeId: '__roadmap_revision__', status: 'Completed' }]
+  });
+  assert.equal(context.__isSidebarExpanded('77'), true, 'the complete snapshot includes revision conversations');
+  assert.equal(context.__isSidebarExpanded('88'), true, 'a project snapshot cannot erase a separately loaded step card');
+});
+
+test('sidebar pruning cannot retain a stale expansion because another project reused its numeric id', () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { context, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), ids, `
+    globalThis.__prepareCrossProjectExpansion = () => {
+      currentProjects.selectedProjectPath = '/project';
+      currentNodes = [{ id: 'current-step' }];
+      const stepKey = stepConversationKey('/other', 'other-step');
+      sidebarStepConversations[stepKey] = [{ id: 99, nodeId: 'other-step', status: 'Completed' }];
+      sidebarStepConversationProjects[stepKey] = '/other';
+      sidebarExpandedConversations['99'] = true;
+    };
+    globalThis.__isSidebarExpanded = (id) => sidebarExpandedConversations[id] === true;
+  `);
+  context.__prepareCrossProjectExpansion();
+  dispatchMessage({
+    command: 'sidebarProjectConversationSnapshotLoaded', projectPath: '/project', projectGeneration: 0,
+    soloConversations: [], projectConversations: [], flowConversations: [], revisionConversations: []
+  });
+  assert.equal(context.__isSidebarExpanded('99'), false);
+});
+
+test('sidebar ignores issue detail responses that no longer belong to the expanded request', () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { context, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), ids, `
+    globalThis.__prepareIssueRequest = (number, requestId) => {
+      currentProjects.selectedProjectPath = '/project';
+      expandedIssueNumber = number;
+      issueDetailsRequestId = requestId;
+      issueDetails = null;
+    };
+    globalThis.__issueTitle = () => issueDetails && issueDetails.issue && issueDetails.issue.title;
+  `);
+  context.__prepareIssueRequest(22, 'new-request');
+  dispatchMessage({ command: 'issueDetailsLoaded', projectPath: '/project', issueNumber: 11, requestId: 'old-request', ok: true, issue: { title: 'stale' } });
+  assert.equal(context.__issueTitle(), null);
+  dispatchMessage({ command: 'issueDetailsLoaded', projectPath: '/project', issueNumber: 22, requestId: 'new-request', ok: true, issue: { title: 'current' } });
+  assert.equal(context.__issueTitle(), 'current');
 });
 
 test('two extension windows persist independent draft, expanded and selected UI fields', async t => {
