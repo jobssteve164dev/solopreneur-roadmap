@@ -2843,6 +2843,7 @@ test('publishing verifies the full extension and builds the VSIX before pushing 
   for (const position of [testAt, compileAt, bumpAt, packageAt, pushAt]) assert.ok(position >= 0);
   assert.ok(testAt < bumpAt && compileAt < bumpAt, 'no release mutation may precede validation');
   assert.ok(packageAt < pushAt, 'the exact VSIX must exist before its version commit and tag are pushed');
+  assert.match(workflow, /timeout-minutes:\s*90/, 'a leaked test handle cannot hold the release runner indefinitely');
 });
 
 test('marketplace description keeps English and Chinese content on separate pages', () => {

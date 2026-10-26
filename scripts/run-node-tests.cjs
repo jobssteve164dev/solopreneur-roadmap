@@ -17,12 +17,39 @@ function removeOwnedEntry(root, target) {
 }
 
 const ownedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-node-tests-'));
+const agentCliFixtureRoot = path.join(ownedRoot, 'agent-cli-bin');
+fs.mkdirSync(agentCliFixtureRoot);
+const agentCliFixtureNames = [
+  'agy', 'antigravity', 'antigravity-cli',
+  'codex', 'codex-cli',
+  'claude', 'claude-code', 'claude-code-cli',
+  'copilot', 'copilot-cli',
+  'cursor-agent', 'agent', 'cursor-cli',
+  'opencode', 'open-code', 'open-code-cli',
+  'grok'
+];
+for (const name of agentCliFixtureNames) {
+  const windows = process.platform === 'win32';
+  const target = path.join(agentCliFixtureRoot, windows ? `${name}.cmd` : name);
+  const source = windows
+    ? '@echo off\r\necho SoloMap test Agent CLI fixture\r\nexit /b 0\r\n'
+    : '#!/bin/sh\nprintf "%s\\n" "SoloMap test Agent CLI fixture"\nexit 0\n';
+  fs.writeFileSync(target, source, { encoding: 'utf8', mode: 0o755 });
+}
 const testRunId = crypto.randomUUID();
 const inheritedOwners = String(process.env.SOLOMAP_TEST_RUN_OWNERS || '').split(',').filter(Boolean);
 const testRunOwners = [...inheritedOwners, testRunId].join(',');
 const child = childProcess.spawn(process.execPath, ['--test', ...process.argv.slice(2)], {
   cwd: process.cwd(),
-  env: { ...process.env, TMPDIR: ownedRoot, TMP: ownedRoot, TEMP: ownedRoot, SOLOMAP_TEST_RUN_OWNERS: testRunOwners },
+  env: {
+    ...process.env,
+    PATH: `${agentCliFixtureRoot}${path.delimiter}${process.env.PATH || ''}`,
+    TMPDIR: ownedRoot,
+    TMP: ownedRoot,
+    TEMP: ownedRoot,
+    SOLOMAP_TEST_RUN_OWNERS: testRunOwners,
+    SOLOMAP_TEST_AGENT_CLI_FIXTURE_DIR: agentCliFixtureRoot
+  },
   stdio: 'inherit',
   detached: process.platform !== 'win32'
 });

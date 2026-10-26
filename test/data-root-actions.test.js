@@ -188,8 +188,13 @@ function extensionHost(t, f, options = {}) {
   const extension = path.resolve(__dirname, '../out/extension.js');
   const source = fs.readFileSync(process.env.SOLOMAP_TEST_EXTENSION_FILE || extension, 'utf8'), localRequire = Module.createRequire(extension);
   const messages = [], deliveries = [], failures = [], dataRequests = [], globalStateValues = options.globalStateValues || new Map();
+  const agentCli = localRequire('./agentCli');
   const transport = localRequire('./autonomousRuntimeControl');
-  const hostRequire = id => id === './agentCli' ? { ...localRequire(id), ensureAgentTaskAutomation: () => ({ ok: true }) } : id === './autonomousRuntimeControl' ? { ...transport, sendRuntimeDataRequest: async (root, request) => {
+  const hostRequire = id => id === './agentCli' ? {
+    ...agentCli,
+    commandExists: () => true,
+    ensureAgentTaskAutomation: () => ({ ok: true })
+  } : id === './autonomousRuntimeControl' ? { ...transport, sendRuntimeDataRequest: async (root, request) => {
     dataRequests.push({ root, operation: request.operation, input: request.input });
     if (scope.requestHook) await scope.requestHook(root, request);
     if (scope.requestHandler && !['read_host_settings', 'patch_host_settings'].includes(request.operation)) return scope.requestHandler(root, request);
