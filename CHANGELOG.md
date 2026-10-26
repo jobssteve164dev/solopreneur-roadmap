@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.0.626 - 2026-10-26
+
+### Fixed
+- bind diagnostic errors to their trace sink (124b421)
+- unify Agent conversation input contracts (5472788)
+
+### Docs
+- record conversation launch release evidence (03ff9ea)
+
+### Tests
+- close release environment gaps (ed2cefe)
+- isolate Agent CLI fixtures in release checks (059d3ee)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.625 - 2026-10-26
 
 ### Fixed
