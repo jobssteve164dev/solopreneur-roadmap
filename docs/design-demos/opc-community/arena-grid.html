@@ -1,0 +1,1000 @@
+<!--
+  ASSUMPTIONS
+  - This is direction B of an already-requested three-direction exploration: a restrained, content-first OPC community.
+  - All project prompts and reusable capabilities below are explicitly labeled as examples; they do not represent real people, adoption, activity, or community statistics.
+  - Navigation and actions are concept links within this static HTML. The installation action points to the page section rather than an unverified store URL.
+  - The real SoloMap logo is referenced from ../../../resources/logo.svg and is not redrawn or recolored.
+  REASONING
+  - The page begins with the user's action and immediately reveals the help stream, so the community feels useful before it explains itself.
+  - Fine rules, systematic typography, square corners, and a dense editorial grid keep the platform visually secondary to the work being shared.
+  - The signature structure is a continuous “stuck point → contribution → local next step → verified result” line, translating SoloMap's route motif into a community flow without imitating another brand.
+  - Brand purple/cyan only mark movement and focus; the main field stays paper-white and ink-black for a calm, credible knowledge-community tone.
+-->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>SoloMap OPC 数字社区</title>
+  <style>
+    :root {
+      --paper: #f4f1ea;
+      --paper-strong: #fbfaf6;
+      --ink: #11100e;
+      --muted: #64615b;
+      --line: #c9c5bc;
+      --line-strong: #8e8a82;
+      --purple: #7a4dff;
+      --cyan: #45dde9;
+      --green: #a5d66d;
+      --red: #c92f38;
+      --sans: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", Arial, Helvetica, sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      --max: 1400px;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; background: var(--paper); }
+    body {
+      margin: 0;
+      min-width: 320px;
+      overflow-x: hidden;
+      color: var(--ink);
+      background:
+        linear-gradient(90deg, transparent calc(100% - 1px), rgba(17,16,14,.035) 0) 0 0 / 80px 100%,
+        var(--paper);
+      font-family: var(--sans);
+      font-size: 16px;
+      line-height: 1.65;
+      text-rendering: optimizeLegibility;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: inherit; text-decoration: none; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    :focus-visible { outline: 3px solid var(--cyan); outline-offset: 3px; }
+    .shell { width: min(100% - 40px, var(--max)); margin-inline: auto; }
+    .topbar {
+      position: relative;
+      z-index: 3;
+      display: grid;
+      grid-template-columns: 250px 1fr auto;
+      align-items: center;
+      min-height: 72px;
+      border-bottom: 1px solid var(--ink);
+      background: rgba(244, 241, 234, .96);
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 11px;
+      width: fit-content;
+      min-height: 44px;
+      font-weight: 720;
+      letter-spacing: -.02em;
+    }
+    .brand img { display: block; width: 34px; height: 34px; background: #050507; }
+    .brand small {
+      display: block;
+      margin-top: -5px;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 400;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    .nav { display: flex; justify-content: center; gap: clamp(8px, 2vw, 30px); }
+    .nav a,
+    .install-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      padding: 0 8px;
+      font-size: 14px;
+      font-weight: 560;
+      white-space: nowrap;
+      transition: color .16s ease, background-color .16s ease;
+    }
+    .nav a:hover { color: var(--purple); }
+    .install-link {
+      border: 1px solid var(--ink);
+      padding-inline: 16px;
+      background: var(--ink);
+      color: var(--paper-strong);
+    }
+    .install-link:hover { background: var(--purple); border-color: var(--purple); }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 2.15fr) minmax(280px, .85fr);
+      min-height: 430px;
+      border-bottom: 1px solid var(--ink);
+    }
+    .hero-main {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      min-width: 0;
+      padding: 42px 48px 38px 0;
+      border-right: 1px solid var(--ink);
+    }
+    .kicker,
+    .section-code,
+    .item-type,
+    .filter-title,
+    .meta-label {
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.35;
+      letter-spacing: .07em;
+      text-transform: uppercase;
+    }
+    .kicker {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--muted);
+    }
+    .kicker::before {
+      width: 8px;
+      height: 8px;
+      background: var(--purple);
+      content: "";
+    }
+    h1 {
+      max-width: 920px;
+      margin: 30px 0 22px;
+      font-size: clamp(48px, 5.9vw, 84px);
+      font-weight: 520;
+      line-height: .98;
+      letter-spacing: -.065em;
+      text-wrap: balance;
+    }
+    .hero-line { display: block; }
+    .hero-lead {
+      max-width: 720px;
+      margin: 0;
+      color: #34312d;
+      font-size: 18px;
+      line-height: 1.7;
+      text-wrap: pretty;
+    }
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 34px;
+    }
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      min-height: 48px;
+      padding: 0 17px;
+      border: 1px solid var(--ink);
+      font-size: 14px;
+      font-weight: 650;
+      transition: background-color .16s ease, color .16s ease, border-color .16s ease;
+    }
+    .button.primary {
+      min-width: 220px;
+      background: var(--ink);
+      color: var(--paper-strong);
+    }
+    .button.primary:hover { border-color: var(--purple); background: var(--purple); }
+    .button.secondary:hover { background: var(--paper-strong); color: var(--purple); }
+    .arrow { font-family: var(--mono); font-weight: 400; }
+    .hero-aside {
+      display: grid;
+      grid-template-rows: 1fr auto;
+      padding: 42px 0 38px 32px;
+    }
+    .aside-note {
+      align-self: start;
+      max-width: 330px;
+      margin: 0;
+      font-size: 21px;
+      line-height: 1.46;
+      letter-spacing: -.02em;
+      text-wrap: pretty;
+    }
+    .boundary {
+      display: grid;
+      gap: 12px;
+      padding-top: 28px;
+      border-top: 1px solid var(--line-strong);
+    }
+    .boundary-row {
+      display: grid;
+      grid-template-columns: 64px 1fr;
+      gap: 16px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .boundary-row strong {
+      color: var(--ink);
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: .05em;
+    }
+    .stream-head {
+      display: grid;
+      grid-template-columns: 210px 1fr auto;
+      align-items: end;
+      min-height: 126px;
+      padding: 28px 0 22px;
+      border-bottom: 1px solid var(--ink);
+    }
+    .stream-head h2,
+    .section-title {
+      margin: 0;
+      font-size: clamp(29px, 3vw, 42px);
+      font-weight: 520;
+      line-height: 1.12;
+      letter-spacing: -.045em;
+      text-wrap: balance;
+    }
+    .stream-note {
+      max-width: 360px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.55;
+      text-align: right;
+    }
+    .stream-layout {
+      display: grid;
+      grid-template-columns: 210px minmax(0, 1fr);
+      border-bottom: 1px solid var(--ink);
+    }
+    .filters {
+      padding: 24px 24px 48px 0;
+      border-right: 1px solid var(--ink);
+    }
+    .filter-title {
+      margin: 0 0 14px;
+      color: var(--muted);
+    }
+    .filter-list {
+      display: grid;
+      gap: 2px;
+      margin-bottom: 28px;
+    }
+    .filter-list a {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 44px;
+      border-bottom: 1px solid var(--line);
+      font-size: 14px;
+    }
+    .filter-list a::after {
+      color: var(--line-strong);
+      content: "＋";
+    }
+    .filter-list a:first-child {
+      color: var(--purple);
+      font-weight: 650;
+    }
+    .filter-list a:first-child::after {
+      color: var(--purple);
+      content: "—";
+    }
+    .filter-list a:hover {
+      padding-left: 5px;
+      color: var(--purple);
+    }
+    .filter-copy {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
+      text-wrap: pretty;
+    }
+    .content-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .content-item {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      min-height: 330px;
+      padding: 24px 24px 22px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      background: rgba(244, 241, 234, .72);
+      transition: background-color .18s ease, color .18s ease;
+    }
+    .content-item:nth-child(3n) { border-right: 0; }
+    .content-item:nth-last-child(-n + 3) { border-bottom: 0; }
+    .content-item:hover { background: var(--paper-strong); }
+    .content-item:focus-within { z-index: 1; box-shadow: inset 0 0 0 2px var(--cyan); }
+    .item-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 44px;
+    }
+    .item-type { color: var(--purple); font-weight: 650; }
+    .item-type.capability { color: #426719; }
+    .item-domain {
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .content-item h3 {
+      margin: 0 0 18px;
+      font-size: clamp(21px, 1.8vw, 29px);
+      font-weight: 540;
+      line-height: 1.25;
+      letter-spacing: -.035em;
+      text-wrap: balance;
+    }
+    .content-item p {
+      margin: 0;
+      color: #4b4842;
+      font-size: 14px;
+      line-height: 1.65;
+      text-wrap: pretty;
+    }
+    .item-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: auto;
+      padding-top: 30px;
+    }
+    .item-need {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 2px 7px;
+      border: 1px solid var(--line-strong);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.25;
+    }
+    .item-open {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 44px;
+      min-height: 44px;
+      border-bottom: 1px solid var(--ink);
+      font-family: var(--mono);
+      font-size: 18px;
+    }
+    .content-item:hover .item-open {
+      border-color: var(--purple);
+      color: var(--purple);
+    }
+    .loop {
+      padding-block: 72px 84px;
+      border-bottom: 1px solid var(--ink);
+    }
+    .section-intro {
+      display: grid;
+      grid-template-columns: 210px minmax(0, 1fr) 330px;
+      gap: 0;
+      align-items: start;
+      margin-bottom: 46px;
+    }
+    .section-intro .section-title {
+      max-width: 640px;
+    }
+    .section-intro p {
+      margin: 5px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.65;
+      text-wrap: pretty;
+    }
+    .route {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      border-top: 1px solid var(--ink);
+      border-bottom: 1px solid var(--ink);
+    }
+    .route::before {
+      position: absolute;
+      z-index: 0;
+      top: 42px;
+      left: 11%;
+      right: 11%;
+      height: 2px;
+      background: linear-gradient(90deg, var(--purple), var(--cyan), var(--ink));
+      content: "";
+    }
+    .route-step {
+      position: relative;
+      z-index: 1;
+      min-height: 250px;
+      padding: 25px 24px 30px;
+      border-right: 1px solid var(--line-strong);
+      background: var(--paper);
+    }
+    .route-step:last-child {
+      border-right: 0;
+    }
+    .route-number {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      margin: 0 0 38px;
+      border: 1px solid var(--ink);
+      background: var(--paper-strong);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .route-step:first-child .route-number {
+      border-color: var(--purple);
+      background: var(--purple);
+      color: white;
+    }
+    .route-step:last-child .route-number {
+      background: var(--ink);
+      color: white;
+    }
+    .route-step h3 {
+      margin: 0 0 12px;
+      font-size: 22px;
+      font-weight: 560;
+      letter-spacing: -.025em;
+    }
+    .route-step p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
+      text-wrap: pretty;
+    }
+    .route-result {
+      display: grid;
+      grid-template-columns: 210px 1fr;
+      padding-top: 18px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .route-result strong {
+      color: var(--ink);
+      font-weight: 600;
+    }
+    .install {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(360px, .75fr);
+      min-height: 420px;
+      border-bottom: 1px solid var(--ink);
+    }
+    .install-copy {
+      padding: 70px 48px 70px 0;
+      border-right: 1px solid var(--ink);
+    }
+    .install-copy h2 {
+      max-width: 760px;
+      margin: 22px 0 24px;
+      font-size: clamp(44px, 5.5vw, 76px);
+      font-weight: 510;
+      line-height: 1;
+      letter-spacing: -.06em;
+      text-wrap: balance;
+    }
+    .install-copy > p {
+      max-width: 650px;
+      margin: 0;
+      color: #45413c;
+      font-size: 17px;
+      text-wrap: pretty;
+    }
+    .install-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 32px;
+    }
+    .install-panel {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 70px 0 70px 32px;
+    }
+    .install-signature {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+    }
+    .install-signature img {
+      width: 78px;
+      height: 78px;
+      background: #050507;
+    }
+    .install-signature strong {
+      display: block;
+      font-size: 24px;
+      letter-spacing: -.03em;
+    }
+    .install-signature span {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .local-list {
+      margin: 36px 0 0;
+      padding: 0;
+      list-style: none;
+      border-top: 1px solid var(--line-strong);
+    }
+    .local-list li {
+      display: grid;
+      grid-template-columns: 28px 1fr;
+      gap: 10px;
+      padding: 13px 0;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .local-list b {
+      color: var(--ink);
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 500;
+    }
+    .footer {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      min-height: 110px;
+      gap: 20px;
+    }
+    .footer p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .footer-links {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 6px 22px;
+    }
+    .footer-links a {
+      display: inline-flex;
+      align-items: center;
+      min-height: 44px;
+      border-bottom: 1px solid transparent;
+      font-size: 13px;
+    }
+    .footer-links a:hover {
+      border-color: var(--purple);
+      color: var(--purple);
+    }
+    @media (max-width: 1040px) {
+      .topbar {
+        grid-template-columns: 210px 1fr auto;
+      }
+      .nav a:nth-last-child(-n + 2) {
+        display: none;
+      }
+      .content-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .content-item:nth-child(3n) {
+        border-right: 1px solid var(--line);
+      }
+      .content-item:nth-child(2n) {
+        border-right: 0;
+      }
+      .content-item:nth-last-child(-n + 3) {
+        border-bottom: 1px solid var(--line);
+      }
+      .content-item:nth-last-child(-n + 2) {
+        border-bottom: 0;
+      }
+      .section-intro {
+        grid-template-columns: 170px 1fr;
+      }
+      .section-intro p {
+        grid-column: 2;
+        max-width: 560px;
+        margin-top: 18px;
+      }
+      .route-result {
+        grid-template-columns: 170px 1fr;
+      }
+    }
+    @media (max-width: 760px) {
+      body {
+        background: var(--paper);
+      }
+      .shell {
+        width: min(100% - 28px, var(--max));
+      }
+      .topbar {
+        grid-template-columns: 1fr auto;
+        min-height: 68px;
+      }
+      .brand small {
+        display: none;
+      }
+      .nav { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; border-top: 1px solid var(--ink); }
+      .nav a, .nav a:nth-last-child(-n + 2) { display: flex; padding: 0 4px; border-right: 1px solid var(--line-strong); font-size: 12px; }
+      .nav a:last-child { border-right: 0; }
+      .install-link {
+        padding-inline: 12px;
+      }
+      .hero {
+        display: block;
+        min-height: 0;
+      }
+      .hero-main {
+        padding: 34px 0 36px;
+        border-right: 0;
+      }
+      h1 {
+        margin-top: 34px;
+        font-size: clamp(41px, 11.8vw, 48px);
+        line-height: 1.01;
+      }
+      .hero-lead {
+        font-size: 16px;
+      }
+      .hero-actions {
+        display: grid;
+      }
+      .button,
+      .button.primary {
+        width: 100%;
+      }
+      .hero-aside {
+        padding: 32px 0 36px;
+        border-top: 1px solid var(--line-strong);
+      }
+      .aside-note {
+        font-size: 19px;
+      }
+      .boundary {
+        margin-top: 38px;
+      }
+      .stream-head {
+        display: block;
+        padding-block: 30px 24px;
+      }
+      .stream-head h2 {
+        margin-top: 15px;
+      }
+      .stream-note {
+        max-width: none;
+        margin-top: 16px;
+        text-align: left;
+      }
+      .stream-layout {
+        display: block;
+      }
+      .filters {
+        padding: 18px 0 22px;
+        border-right: 0;
+        border-bottom: 1px solid var(--ink);
+      }
+      .filter-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        overflow-x: visible;
+        margin: 0;
+        padding-bottom: 4px;
+      }
+      .filter-list a {
+        flex: 1 1 calc(50% - 8px);
+        min-height: 44px;
+        padding: 0 12px;
+        border: 1px solid var(--line-strong);
+      }
+      .filter-list a::after {
+        display: none;
+      }
+      .filter-copy {
+        margin-top: 14px;
+      }
+      .content-grid {
+        display: block;
+      }
+      .content-item,
+      .content-item:nth-child(2n),
+      .content-item:nth-child(3n),
+      .content-item:nth-last-child(-n + 2),
+      .content-item:nth-last-child(-n + 3) {
+        min-height: 300px;
+        padding: 23px 0 20px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line-strong);
+      }
+      .content-item:last-child {
+        border-bottom: 0;
+      }
+      .loop {
+        padding-block: 56px 62px;
+      }
+      .section-intro {
+        display: block;
+        margin-bottom: 30px;
+      }
+      .section-intro .section-title {
+        margin-top: 14px;
+      }
+      .section-intro p {
+        margin-top: 16px;
+      }
+      .route {
+        display: block;
+        border-bottom: 0;
+      }
+      .route::before {
+        top: 38px;
+        right: auto;
+        bottom: 38px;
+        left: 16px;
+        width: 2px;
+        height: auto;
+        background: linear-gradient(180deg, var(--purple), var(--cyan), var(--ink));
+      }
+      .route-step {
+        min-height: 0;
+        padding: 20px 0 26px 56px;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .route-number {
+        position: absolute;
+        top: 19px;
+        left: 0;
+        margin: 0;
+      }
+      .route-result {
+        display: block;
+        padding-top: 20px;
+      }
+      .route-result strong {
+        display: block;
+        margin-top: 8px;
+      }
+      .install {
+        display: block;
+        min-height: 0;
+      }
+      .install-copy {
+        padding: 56px 0 42px;
+        border-right: 0;
+        border-bottom: 1px solid var(--ink);
+      }
+      .install-copy h2 {
+        font-size: clamp(43px, 14vw, 60px);
+      }
+      .install-copy > p {
+        font-size: 16px;
+      }
+      .install-panel {
+        padding: 36px 0 48px;
+      }
+      .footer {
+        display: block;
+        padding: 28px 0 34px;
+      }
+      .footer-links {
+        justify-content: flex-start;
+        margin-top: 12px;
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+      *,
+      *::before,
+      *::after {
+        transition-duration: .01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar shell">
+    <a class="brand" href="#top" aria-label="SoloMap OPC 数字社区首页">
+      <img src="../../../resources/logo.svg" width="1024" height="1024" alt="SoloMap">
+      <span>SoloMap<small>OPC Commons</small></span>
+    </a>
+    <nav class="nav" aria-label="主要导航">
+      <a href="#help">正在求助</a>
+      <a href="#loop">共创空间</a>
+      <a href="#help">能力库</a>
+      <a href="#loop">OPC 实战</a>
+    </nav>
+    <a class="install-link" href="#install">安装 SoloMap</a>
+  </header>
+  <main id="top">
+    <section class="hero shell" aria-labelledby="hero-title">
+      <div class="hero-main">
+        <div>
+          <div class="kicker">给正在推进真实项目的人</div>
+          <h1 id="hero-title"><span class="hero-line">一个人做公司，</span><span class="hero-line">不必一个人解决</span><span class="hero-line">所有问题。</span></h1>
+          <p class="hero-lead">项目留在本地。只把当前需要帮助的问题带到社区，找到愿意一起拆开它的人，再把可执行的下一步带回自己的路线图。</p>
+        </div>
+        <div class="hero-actions" aria-label="社区主要操作">
+          <a class="button primary" href="#install" aria-label="安装 SoloMap 后发布一个项目卡点">发布一个项目卡点 <span class="arrow">↗</span></a>
+          <a class="button secondary" href="#help">看看谁需要帮助 <span class="arrow">↓</span></a>
+        </div>
+      </div>
+      <aside class="hero-aside" aria-label="社区边界">
+        <p class="aside-note">不是泛创业论坛。这里讨论的是今天阻碍项目前进的那一个具体问题。</p>
+        <div class="boundary">
+          <div class="boundary-row"><strong>公开</strong><span>目标、卡点与需要的帮助</span></div>
+          <div class="boundary-row"><strong>留在本地</strong><span>文件、Agent、终端与完整路线图</span></div>
+        </div>
+      </aside>
+    </section>
+    <section id="help" class="shell" aria-labelledby="stream-title">
+      <header class="stream-head">
+        <div class="section-code">01 / Open work</div>
+        <h2 id="stream-title">问题与能力，放在同一张工作台上</h2>
+        <p class="stream-note">只展示发布者主动公开的目标、卡点与需要的帮助。</p>
+      </header>
+      <div class="stream-layout">
+        <aside class="filters" aria-label="内容筛选">
+          <p class="filter-title">浏览</p>
+          <nav class="filter-list" aria-label="内容类型">
+            <a href="#help">全部内容</a>
+            <a href="#help">产品判断</a>
+            <a href="#help">测试反馈</a>
+            <a href="#help">发布与分发</a>
+            <a href="#help">Agent 工作流</a>
+          </nav>
+          <p class="filter-copy">按你能解决的问题浏览，而不是按热度排行。每条内容都应通向一个可以完成的动作。</p>
+        </aside>
+        <div class="content-grid">
+          <article class="content-item">
+            <div class="item-top">
+              <span class="item-type">正在求助</span>
+              <span class="item-domain">产品表达</span>
+            </div>
+            <h3>发布页信息很全，但第一屏还没说清用户为什么今天就要开始用。</h3>
+            <p>我需要的不是重写整页，而是请做过早期产品发布的人看一遍首屏：承诺是否具体，行动理由是否成立。</p>
+            <div class="item-foot">
+              <span class="item-need">需要：产品定位反馈</span>
+              <a class="item-open" href="#loop" aria-label="查看这条项目求助">↗</a>
+            </div>
+          </article>
+          <article class="content-item">
+            <div class="item-top">
+              <span class="item-type capability">可复用能力</span>
+              <span class="item-domain">路线图</span>
+            </div>
+            <h3>路线图开局模板</h3>
+            <p>把模糊想法收敛成可推进的阶段、边界与完成证据，适合刚准备让 Agent 参与的新项目。</p>
+            <div class="item-foot">
+              <span class="item-need">带回本地：创建第一版路线图</span>
+              <a class="item-open" href="#loop" aria-label="查看这项可复用能力">↗</a>
+            </div>
+          </article>
+          <article class="content-item">
+            <div class="item-top">
+              <span class="item-type">正在求助</span>
+              <span class="item-domain">早期反馈</span>
+            </div>
+            <h3>功能已经跑通，第一次使用的人却可能在两分钟内找不到下一步。</h3>
+            <p>希望有人只拿到安装包和一句目标，记录第一次停顿、误解和放弃点，不需要迁就开发者已经熟悉的路径。</p>
+            <div class="item-foot">
+              <span class="item-need">需要：陌生用户走查</span>
+              <a class="item-open" href="#loop" aria-label="查看这条项目求助">↗</a>
+            </div>
+          </article>
+          <article class="content-item">
+            <div class="item-top">
+              <span class="item-type capability">可复用能力</span>
+              <span class="item-domain">Agent 协作</span>
+            </div>
+            <h3>Agent 交接清单</h3>
+            <p>在任务暂停、换 Agent 或跨会话继续时，保留目标、已确认事实、未闭合风险和下一步。</p>
+            <div class="item-foot">
+              <span class="item-need">带回本地：减少重复解释</span>
+              <a class="item-open" href="#loop" aria-label="查看这项可复用能力">↗</a>
+            </div>
+          </article>
+          <article class="content-item">
+            <div class="item-top">
+              <span class="item-type">正在求助</span>
+              <span class="item-domain">发布准备</span>
+            </div>
+            <h3>订阅已经上线，但留存计划像待办清单，缺少真正值得验证的优先级。</h3>
+            <p>想请有订阅产品经验的人删掉不必要动作，只留下下一轮最值得验证的一个假设与观察方法。</p>
+            <div class="item-foot">
+              <span class="item-need">需要：会员产品经验</span>
+              <a class="item-open" href="#loop" aria-label="查看这条项目求助">↗</a>
+            </div>
+          </article>
+          <article class="content-item">
+            <div class="item-top">
+              <span class="item-type capability">可复用能力</span>
+              <span class="item-domain">质量验证</span>
+            </div>
+            <h3>小范围发布检查</h3>
+            <p>在公开发布前确认核心承诺、首次使用路径、反馈入口与可回退边界，不用“大而全”替代关键验证。</p>
+            <div class="item-foot">
+              <span class="item-need">带回本地：生成发布前检查</span>
+              <a class="item-open" href="#loop" aria-label="查看这项可复用能力">↗</a>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+    <section id="loop" class="loop shell" aria-labelledby="loop-title">
+      <header class="section-intro">
+        <div class="section-code">02 / The return path</div>
+        <h2 id="loop-title" class="section-title">公开的问题，必须回到本地形成结果</h2>
+        <p>共创不是聊天终点。有效输入会被整理成下一步，回到你掌握的项目事实里，再由真实验证决定它是否成立。</p>
+      </header>
+      <div class="route" aria-label="卡点到本地结果的闭环">
+        <article class="route-step">
+          <div class="route-number">01</div>
+          <h3>带出卡点</h3>
+          <p>只公开当前目标、阻碍和需要的帮助；不上传完整项目，也不暴露不必要的内部信息。</p>
+        </article>
+        <article class="route-step">
+          <div class="route-number">02</div>
+          <h3>形成贡献</h3>
+          <p>围绕一个问题给出评审、测试、方法或可复用能力，让贡献有明确边界和可执行形式。</p>
+        </article>
+        <article class="route-step">
+          <div class="route-number">03</div>
+          <h3>带回本地</h3>
+          <p>由项目拥有者选择采用什么，并把它变成路线图中的下一步、验证项或本地能力。</p>
+        </article>
+        <article class="route-step">
+          <div class="route-number">04</div>
+          <h3>得到结果</h3>
+          <p>通过真实使用、测试或发布确认变化是否有效；结果属于项目，不属于信息流。</p>
+        </article>
+      </div>
+      <div class="route-result">
+        <span class="section-code">闭环标准</span>
+        <strong>不是“收到很多建议”，而是项目因此向前走了一步。</strong>
+      </div>
+    </section>
+    <section id="install" class="install shell" aria-labelledby="install-title">
+      <div class="install-copy">
+        <div class="section-code">03 / Local first</div>
+        <h2 id="install-title">社区连接外部，<br>SoloMap 守住项目本身。</h2>
+        <p>路线图、项目事实、Agent 执行和验证结果继续由本地插件掌握。你决定公开什么，也决定哪些贡献值得带回来。</p>
+        <div class="install-actions">
+          <a class="button primary" href="https://marketplace.visualstudio.com/items?itemName=SZLK.solopreneur-roadmap" rel="noopener noreferrer">安装 SoloMap <span class="arrow">↗</span></a>
+          <a class="button secondary" href="#loop">先了解工作方式 <span class="arrow">↑</span></a>
+        </div>
+      </div>
+      <aside class="install-panel" aria-label="本地优先承诺">
+        <div class="install-signature">
+          <img src="../../../resources/logo.svg" width="1024" height="1024" alt="SoloMap">
+          <div>
+            <strong>SoloMap</strong>
+            <span>local-first project roadmap</span>
+          </div>
+        </div>
+        <ol class="local-list">
+          <li><b>01</b><span>项目文件与完整路线图留在你的工作环境</span></li>
+          <li><b>02</b><span>只有你主动选择的脱敏问题进入社区</span></li>
+          <li><b>03</b><span>社区贡献由你决定是否写回项目下一步</span></li>
+        </ol>
+      </aside>
+    </section>
+  </main>
+  <footer class="footer shell">
+    <p>SoloMap OPC 数字社区 · 让真实项目通过具体贡献继续推进</p>
+    <nav class="footer-links" aria-label="页脚导航">
+      <a href="#help">正在求助</a>
+      <a href="#loop">贡献如何回到项目</a>
+      <a href="#install">安装 SoloMap</a>
+    </nav>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,1000 @@
+<!--
+  ASSUMPTIONS
+  - 本文件是 SoloMap OPC 数字社区三方向初稿中的 C 版，用于验证品牌与首页信息架构，不代表已上线功能。
+  - 页面里的项目求助均为“概念求助”，只模拟脱敏后的问题表达，不对应真人、真实项目或真实社区数据。
+  - 页面里的能力条目用于说明内容类型，不声称已有采用量、评价或成功案例。
+  - 使用仓库真实 Logo：../../../resources/logo.svg；无外部字体、脚本或图片依赖，可通过 file:// 离线打开。
+
+  REASONING
+  - 视觉方向以“公共文化行动板”为核心：强识别大字、公共告示层级、连续编号、粗规则线与模块化色块。
+  - 红色负责发出行动，青色负责连接贡献，纸白负责阅读，黑色负责立场与边界；不使用圆角 SaaS 卡片。
+  - Logo 的 S 形路线被转译为“卡点 → 贡献 → 带回本地 → 可验证结果”的纵向公共路径。
+  - 首页首先帮助独立开发者行动，而不是解释系统：发布卡点、回应具体求助、带走能力、回本地推进。
+-->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="SoloMap OPC 数字社区：把一个具体卡点带来，把一次有效贡献带回项目。">
+  <title>SoloMap OPC 社区｜公共文化行动板</title>
+  <style>
+    :root {
+      --paper: #f6f0e8; --ink: #11100e; --red: #c92f38;
+      --cyan: #45dde9; --purple: #7a4dff; --line: 2px;
+      --gutter: clamp(18px, 3vw, 48px);
+      --display: "Arial Black", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --body: Arial, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth; background: var(--ink);
+    }
+
+    body {
+      margin: 0; min-width: 320px; overflow-x: hidden;
+      color: var(--ink); background: var(--paper); font-family: var(--body);
+      font-size: 16px; line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: inherit; }
+
+    a:focus-visible {
+      position: relative; z-index: 20;
+      outline: 4px solid var(--paper); outline-offset: -7px;
+      box-shadow: inset 0 0 0 7px var(--ink);
+    }
+
+    .skip-link {
+      position: fixed; top: 0; left: 0; z-index: 100;
+      min-height: 44px; padding: 12px 18px;
+      color: var(--paper); background: var(--ink);
+      transform: translateY(-110%);
+    }
+
+    .skip-link:focus { transform: translateY(0); }
+
+    .site-header {
+      position: relative; z-index: 10; display: grid;
+      grid-template-columns: minmax(210px, 1fr) 2fr auto;
+      min-height: 82px; border-bottom: var(--line) solid var(--ink); background: var(--paper);
+    }
+
+    .brand {
+      display: flex; align-items: center; gap: 12px;
+      min-height: 82px; padding: 12px var(--gutter);
+      border-right: var(--line) solid var(--ink); text-decoration: none;
+    }
+
+    .brand img {
+      width: 48px; height: 48px; flex: 0 0 auto;
+    }
+
+    .brand-copy { line-height: 1; }
+
+    .brand-name {
+      display: block; font-family: var(--display); font-size: 22px;
+      font-weight: 900; letter-spacing: -0.04em;
+    }
+
+    .brand-edition {
+      display: block; margin-top: 5px; font-family: var(--mono);
+      font-size: 12px; letter-spacing: 0.05em; text-transform: uppercase;
+    }
+
+    .main-nav {
+      display: flex; align-items: stretch; justify-content: flex-end;
+    }
+
+    .main-nav a,
+    .install-link {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-height: 44px;
+      padding: 0 clamp(13px, 1.35vw, 24px);
+      border-left: var(--line) solid var(--ink);
+      font-family: var(--mono); font-size: 12px; font-weight: 700;
+      letter-spacing: 0.05em; text-align: center; text-decoration: none; text-transform: uppercase;
+      transition: color 140ms ease, background 140ms ease;
+    }
+
+    .main-nav a:first-child { border-left: 0; }
+    .main-nav a:hover { color: var(--paper); background: var(--ink); }
+
+    .install-link {
+      min-width: 176px; color: var(--ink); background: var(--cyan);
+    }
+
+    .install-link:hover { color: var(--paper); background: var(--red); }
+
+    main { overflow: hidden; }
+
+    .hero {
+      display: grid; grid-template-columns: minmax(0, 3fr) minmax(310px, 1fr);
+      border-bottom: var(--line) solid var(--ink);
+    }
+
+    .hero-statement {
+      display: grid; grid-template-rows: auto 1fr auto;
+      min-height: 690px; border-right: var(--line) solid var(--ink); background: var(--paper);
+    }
+
+    .eyebrow-row {
+      display: flex; justify-content: space-between; gap: 20px;
+      padding: 18px var(--gutter);
+      border-bottom: var(--line) solid var(--ink);
+      font-family: var(--mono); font-size: 12px; font-weight: 700;
+      letter-spacing: 0.08em; text-transform: uppercase;
+    }
+
+    .hero h1 {
+      align-self: center; max-width: 1050px; margin: 0;
+      padding: clamp(34px, 5vw, 78px) var(--gutter);
+      font-family: var(--display); font-size: clamp(66px, 8.8vw, 138px); font-weight: 900;
+      letter-spacing: -0.085em; line-height: 0.87; text-wrap: balance;
+    }
+
+    .hero h1 .strike {
+      position: relative; display: inline-block;
+      color: var(--paper); isolation: isolate;
+    }
+
+    .hero h1 .strike::before {
+      position: absolute;
+      inset: 2% -0.09em -1% -0.05em;
+      z-index: -1;
+      background: var(--red);
+      content: "";
+    }
+
+    .hero-note {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border-top: var(--line) solid var(--ink);
+    }
+
+    .hero-note p {
+      margin: 0;
+      padding: 22px var(--gutter);
+      font-size: clamp(16px, 1.25vw, 20px);
+      font-weight: 700;
+      text-wrap: pretty;
+    }
+
+    .hero-note p + p { border-left: var(--line) solid var(--ink); }
+
+    .hero-actions {
+      display: grid;
+      grid-template-rows: 1.3fr 1fr auto;
+      background: var(--red);
+    }
+
+    .action-block {
+      position: relative;
+      display: flex;
+      min-height: 240px;
+      padding: 30px;
+      flex-direction: column;
+      justify-content: space-between;
+      border-bottom: var(--line) solid var(--ink);
+      text-decoration: none;
+      transition: color 150ms ease, background 150ms ease;
+    }
+
+    .action-block .index,
+    .poster-label {
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .action-block strong {
+      max-width: 330px;
+      font-family: var(--display);
+      font-size: clamp(38px, 3.7vw, 58px);
+      font-weight: 900;
+      letter-spacing: -0.055em;
+      line-height: 0.96;
+    }
+
+    .action-block .arrow {
+      align-self: flex-end;
+      font-size: 42px;
+      line-height: 1;
+    }
+
+    .action-block.primary { color: var(--paper); background: var(--red); }
+    .action-block.secondary { background: var(--cyan); }
+    .action-block:hover { color: var(--paper); background: var(--ink); }
+
+    .boundary-note {
+      min-height: 92px;
+      padding: 20px 30px;
+      color: var(--paper);
+      background: var(--ink);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .boundary-note span {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--cyan);
+      font-family: var(--mono);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+    }
+
+    .section-heading {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(250px, 31%);
+      border-bottom: var(--line) solid var(--ink);
+    }
+
+    .section-heading h2 {
+      margin: 0;
+      padding: clamp(30px, 4vw, 58px) var(--gutter);
+      font-family: var(--display);
+      font-size: clamp(50px, 7.2vw, 108px);
+      font-weight: 900;
+      letter-spacing: -0.075em;
+      line-height: 0.9;
+    }
+
+    .section-intro {
+      display: flex;
+      padding: 24px clamp(20px, 2.5vw, 38px);
+      flex-direction: column;
+      justify-content: space-between;
+      border-left: var(--line) solid var(--ink);
+      color: var(--paper);
+      background: var(--ink);
+    }
+
+    .section-intro p {
+      max-width: 360px;
+      margin: 28px 0 0;
+      font-size: 16px;
+      font-weight: 700;
+      text-wrap: pretty;
+    }
+
+    .notice-list { border-bottom: var(--line) solid var(--ink); }
+
+    .notice {
+      display: grid;
+      grid-template-columns: 120px minmax(0, 1.45fr) minmax(260px, 0.7fr) 118px;
+      min-height: 228px;
+      border-bottom: var(--line) solid var(--ink);
+      background: var(--paper);
+    }
+
+    .notice:last-child { border-bottom: 0; }
+
+    .notice > * {
+      min-width: 0;
+      padding: 24px;
+      border-right: var(--line) solid var(--ink);
+    }
+
+    .notice > *:last-child { border-right: 0; }
+
+    .notice-number {
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      font-family: var(--display);
+      font-size: 56px;
+      font-weight: 900;
+      letter-spacing: -0.06em;
+      line-height: 0.9;
+    }
+
+    .notice-main {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .notice-main h3 {
+      max-width: 820px;
+      margin: 18px 0 30px;
+      font-family: var(--display);
+      font-size: clamp(29px, 3vw, 48px);
+      font-weight: 900;
+      letter-spacing: -0.045em;
+      line-height: 1.02;
+      text-wrap: pretty;
+    }
+
+    .notice-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .notice-tags span {
+      padding: 5px 8px;
+      border: 1px solid currentColor;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    .notice-need {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      background: var(--cyan);
+    }
+
+    .notice:nth-child(2) .notice-need { color: var(--paper); background: var(--red); }
+    .notice:nth-child(3) .notice-need { color: var(--paper); background: var(--ink); }
+
+    .notice-need strong {
+      display: block;
+      margin-top: 24px;
+      font-size: 18px;
+      line-height: 1.25;
+      text-wrap: pretty;
+    }
+
+    .notice-link {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 44px;
+      padding: 14px;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-align: center;
+      text-decoration: none;
+      text-transform: uppercase;
+      transition: color 140ms ease, background 140ms ease;
+    }
+
+    .notice-link:hover { color: var(--paper); background: var(--ink); }
+
+    .loop {
+      color: var(--paper);
+      background: var(--ink);
+      border-bottom: var(--line) solid var(--ink);
+    }
+
+    .loop .section-heading { border-color: var(--paper); }
+    .loop .section-intro { color: var(--ink); background: var(--cyan); border-color: var(--paper); }
+
+    .loop-track {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+    }
+
+    .loop-track::before {
+      position: absolute;
+      top: 84px;
+      left: 8%;
+      right: 8%;
+      height: 8px;
+      background: linear-gradient(90deg, var(--red) 0 25%, var(--cyan) 25% 50%, var(--paper) 50% 75%, var(--purple) 75% 100%);
+      content: "";
+    }
+
+    .loop-step {
+      position: relative;
+      z-index: 1;
+      min-height: 360px;
+      padding: 42px 30px 34px;
+      border-right: var(--line) solid var(--paper);
+    }
+
+    .loop-step:last-child { border-right: 0; }
+
+    .step-node {
+      display: grid;
+      width: 90px;
+      height: 90px;
+      place-items: center;
+      border: 8px solid var(--paper);
+      border-radius: 50%;
+      color: var(--ink);
+      background: var(--red);
+      font-family: var(--display);
+      font-size: 25px;
+      font-weight: 900;
+    }
+
+    .loop-step:nth-child(2) .step-node { background: var(--cyan); }
+    .loop-step:nth-child(3) .step-node { background: var(--paper); }
+    .loop-step:nth-child(4) .step-node { color: var(--paper); background: var(--purple); }
+
+    .loop-step h3 {
+      margin: 54px 0 16px;
+      font-family: var(--display);
+      font-size: clamp(28px, 2.7vw, 42px);
+      font-weight: 900;
+      letter-spacing: -0.045em;
+      line-height: 0.98;
+    }
+
+    .loop-step p {
+      max-width: 280px;
+      margin: 0;
+      color: #dcd5cc;
+      font-size: 15px;
+      text-wrap: pretty;
+    }
+
+    .capabilities { background: var(--paper); }
+
+    .capability-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      border-bottom: var(--line) solid var(--ink);
+    }
+
+    .capability {
+      display: flex;
+      min-height: 350px;
+      padding: 28px;
+      flex-direction: column;
+      justify-content: space-between;
+      border-right: var(--line) solid var(--ink);
+    }
+
+    .capability:last-child { border-right: 0; }
+
+    .capability-type {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .capability h3 {
+      max-width: 370px;
+      margin: 56px 0 20px;
+      font-family: var(--display);
+      font-size: clamp(36px, 3.8vw, 56px);
+      font-weight: 900;
+      letter-spacing: -0.055em;
+      line-height: 0.96;
+    }
+
+    .capability p {
+      max-width: 370px;
+      margin: 0;
+      font-size: 15px;
+      font-weight: 700;
+      text-wrap: pretty;
+    }
+
+    .capability:nth-child(1) { box-shadow: inset 0 14px 0 var(--red); }
+    .capability:nth-child(2) { box-shadow: inset 0 14px 0 var(--cyan); }
+    .capability:nth-child(3) { box-shadow: inset 0 14px 0 var(--purple); }
+
+    .publish-board {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(430px, 0.8fr);
+      border-bottom: var(--line) solid var(--ink);
+      color: var(--paper);
+      background: var(--ink);
+    }
+
+    .publish-title {
+      display: flex;
+      min-height: 390px;
+      padding: clamp(34px, 5vw, 72px) var(--gutter);
+      flex-direction: column;
+      justify-content: space-between;
+      border-right: var(--line) solid var(--paper);
+    }
+
+    .publish-title h2 {
+      max-width: 820px;
+      margin: 30px 0 0;
+      font-family: var(--display);
+      font-size: clamp(48px, 6.8vw, 98px);
+      font-weight: 900;
+      letter-spacing: -0.07em;
+      line-height: 0.9;
+      text-wrap: balance;
+    }
+
+    .publish-prompts {
+      display: grid;
+      grid-template-rows: repeat(3, 1fr) auto;
+      color: var(--ink);
+      background: var(--paper);
+    }
+
+    .publish-prompt {
+      display: grid;
+      grid-template-columns: 68px 1fr;
+      align-items: center;
+      min-height: 112px;
+      border-bottom: var(--line) solid var(--ink);
+    }
+
+    .publish-prompt b {
+      display: grid;
+      align-self: stretch;
+      place-items: center;
+      border-right: var(--line) solid var(--ink);
+      font-family: var(--display);
+      font-size: 24px;
+    }
+
+    .publish-prompt span {
+      padding: 20px 24px;
+      font-size: clamp(18px, 1.5vw, 22px);
+      font-weight: 800;
+      text-wrap: pretty;
+    }
+
+    .publish-signal {
+      min-height: 82px;
+      padding: 22px 24px;
+      background: var(--cyan);
+      font-family: var(--mono);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    .local-first {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(360px, 0.8fr);
+      color: var(--paper);
+      background: var(--red);
+    }
+
+    .local-copy {
+      padding: clamp(42px, 6vw, 90px) var(--gutter);
+      border-right: var(--line) solid var(--ink);
+    }
+
+    .local-copy h2 {
+      max-width: 850px;
+      margin: 26px 0 34px;
+      font-family: var(--display);
+      font-size: clamp(54px, 7.8vw, 116px);
+      font-weight: 900;
+      letter-spacing: -0.078em;
+      line-height: 0.88;
+      text-wrap: balance;
+    }
+
+    .local-copy p {
+      max-width: 730px;
+      margin: 0;
+      font-size: clamp(17px, 1.5vw, 22px);
+      font-weight: 700;
+      text-wrap: pretty;
+    }
+
+    .local-action {
+      display: grid;
+      grid-template-rows: 1fr auto;
+      color: var(--ink);
+      background: var(--cyan);
+    }
+
+    .install-poster {
+      display: flex;
+      min-height: 390px;
+      padding: clamp(28px, 4vw, 54px);
+      flex-direction: column;
+      justify-content: space-between;
+      text-decoration: none;
+      transition: color 150ms ease, background 150ms ease;
+    }
+
+    .install-poster:hover { color: var(--paper); background: var(--ink); }
+
+    .install-poster strong {
+      max-width: 430px;
+      font-family: var(--display);
+      font-size: clamp(44px, 5vw, 76px);
+      font-weight: 900;
+      letter-spacing: -0.06em;
+      line-height: 0.93;
+    }
+
+    .install-poster .arrow { align-self: flex-end; font-size: 54px; }
+
+    .install-detail {
+      padding: 20px clamp(28px, 4vw, 54px);
+      border-top: var(--line) solid var(--ink);
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+
+    footer {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      min-height: 110px;
+      color: var(--paper);
+      background: var(--ink);
+    }
+
+    .footer-brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 22px var(--gutter);
+      font-family: var(--display);
+      font-size: 26px;
+      font-weight: 900;
+      letter-spacing: -0.04em;
+    }
+
+    .footer-brand img { width: 54px; height: 54px; }
+
+    .footer-note {
+      display: flex;
+      max-width: 470px;
+      align-items: center;
+      padding: 22px var(--gutter);
+      border-left: var(--line) solid var(--paper);
+      font-size: 14px;
+      font-weight: 700;
+      text-wrap: pretty;
+    }
+
+    @media (max-width: 1050px) {
+      .site-header { grid-template-columns: 1fr auto; }
+      .main-nav { grid-column: 1 / -1; border-top: var(--line) solid var(--ink); }
+      .main-nav a { flex: 1; border-left: var(--line) solid var(--ink); }
+      .main-nav a:first-child { border-left: 0; }
+      .install-link { grid-column: 2; grid-row: 1; min-width: 188px; }
+      .hero { grid-template-columns: 1fr; }
+      .hero-statement { min-height: 620px; border-right: 0; }
+      .hero-actions { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr auto; }
+      .action-block.primary { border-right: var(--line) solid var(--ink); }
+      .boundary-note { grid-column: 1 / -1; }
+      .notice { grid-template-columns: 94px minmax(0, 1fr) minmax(220px, 0.72fr); }
+      .notice-link { grid-column: 1 / -1; border-top: var(--line) solid var(--ink); }
+      .notice > .notice-need { border-right: 0; }
+      .local-first { grid-template-columns: 1fr; }
+      .local-copy { border-right: 0; border-bottom: var(--line) solid var(--ink); }
+      .publish-board { grid-template-columns: 1fr; }
+      .publish-title { border-right: 0; border-bottom: var(--line) solid var(--paper); }
+    }
+
+    @media (max-width: 720px) {
+      :root { --line: 2px; --gutter: 20px; }
+      body { font-size: 15px; }
+      .site-header { display: block; }
+      .brand { min-height: 72px; border-right: 0; }
+      .brand img { width: 44px; height: 44px; }
+      .install-link { width: 100%; min-height: 52px; border: 0; border-top: var(--line) solid var(--ink); }
+      .main-nav {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+      }
+      .main-nav a {
+        min-height: 50px;
+        padding: 8px;
+        border-bottom: var(--line) solid var(--ink);
+      }
+      .main-nav a:nth-child(odd) { border-left: 0; }
+      .main-nav a:nth-last-child(-n+2) { border-bottom: 0; }
+      .hero { display: flex; flex-direction: column; }
+      .hero-actions { order: -1; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; }
+      .action-block { min-height: 112px; padding: 18px 20px; }
+      .action-block strong { font-size: 25px; line-height: .95; }
+      .action-block .arrow { font-size: 28px; }
+      .boundary-note { grid-column: 1 / -1; min-height: 78px; padding: 16px 20px; }
+      .hero-statement { min-height: auto; }
+      .eyebrow-row { gap: 10px; }
+      .eyebrow-row span:last-child { text-align: right; }
+      .hero h1 {
+        padding-top: 44px;
+        padding-bottom: 48px;
+        font-size: clamp(43px, 12vw, 58px);
+        letter-spacing: -0.06em;
+      }
+      .hero-note { grid-template-columns: 1fr; }
+      .hero-note p + p { border-top: var(--line) solid var(--ink); border-left: 0; }
+      .action-block.primary { border-right: var(--line) solid var(--ink); }
+      .section-heading { grid-template-columns: 1fr; }
+      .section-heading h2 { font-size: clamp(48px, 15vw, 68px); }
+      .section-intro { min-height: 180px; border-top: var(--line) solid var(--ink); border-left: 0; }
+      .notice { display: grid; grid-template-columns: 70px minmax(0, 1fr); }
+      .notice > * { padding: 20px; }
+      .notice-number { font-size: 42px; }
+      .notice-main { border-right: 0; }
+      .notice-main h3 { margin-top: 14px; font-size: 29px; }
+      .notice-need { grid-column: 1 / -1; min-height: 158px; border-top: var(--line) solid var(--ink); border-right: 0; }
+      .notice-link { grid-column: 1 / -1; min-height: 54px; }
+      .loop-track { grid-template-columns: 1fr; }
+      .loop-track::before {
+        top: 45px;
+        bottom: 45px;
+        left: 49px;
+        right: auto;
+        width: 8px;
+        height: auto;
+        background: linear-gradient(180deg, var(--red) 0 25%, var(--cyan) 25% 50%, var(--paper) 50% 75%, var(--purple) 75% 100%);
+      }
+      .loop-step {
+        display: grid;
+        grid-template-columns: 90px 1fr;
+        min-height: 220px;
+        padding: 28px 20px;
+        border-right: 0;
+        border-bottom: var(--line) solid var(--paper);
+        column-gap: 22px;
+      }
+      .loop-step:last-child { border-bottom: 0; }
+      .step-node { grid-row: 1 / 3; }
+      .loop-step h3 { margin: 6px 0 14px; font-size: 31px; }
+      .loop-step p { font-size: 14px; }
+      .capability-grid { grid-template-columns: 1fr; }
+      .capability {
+        min-height: 280px;
+        padding: 26px 20px;
+        border-right: 0;
+        border-bottom: var(--line) solid var(--ink);
+      }
+      .capability:last-child { border-bottom: 0; }
+      .capability h3 { margin: 42px 0 18px; font-size: 43px; }
+      .publish-title { min-height: 330px; }
+      .publish-title h2 { font-size: clamp(48px, 15vw, 66px); }
+      .publish-prompt { grid-template-columns: 58px 1fr; }
+      .publish-prompt span { padding: 18px; font-size: 18px; }
+      .local-first { display: block; }
+      .local-copy { padding-top: 52px; padding-bottom: 52px; }
+      .local-copy h2 { font-size: clamp(53px, 17vw, 72px); }
+      .install-poster { min-height: 310px; }
+      footer { grid-template-columns: 1fr; }
+      .footer-note { max-width: none; border-top: var(--line) solid var(--paper); border-left: 0; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { transition: none !important; }
+    }
+  </style></head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+
+  <header class="site-header">
+    <a class="brand" href="#top" aria-label="SoloMap OPC 社区首页">
+      <img src="../../../resources/logo.svg" width="1024" height="1024" alt="SoloMap">
+      <span class="brand-copy">
+        <span class="brand-name">SoloMap</span>
+        <span class="brand-edition">OPC Community</span>
+      </span>
+    </a>
+    <nav class="main-nav" aria-label="主导航">
+      <a href="#asks">正在求助</a>
+      <a href="#loop">共创空间</a>
+      <a href="#capabilities">能力库</a>
+      <a href="#asks">OPC 实战</a>
+    </nav>
+    <a class="install-link" href="#install">安装 SoloMap&nbsp; ↘</a>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="top" aria-labelledby="hero-title">
+      <div class="hero-statement">
+        <div class="eyebrow-row">
+          <span>OPC 公共行动板</span>
+          <span>项目推进，不是信息流</span>
+        </div>
+        <h1 id="hero-title">一个人做公司，<br>不必<span class="strike">一个人</span><br>解决所有问题。</h1>
+        <div class="hero-note">
+          <p>项目留在本地。你只把当前需要帮助的问题带到社区。</p>
+          <p>回应一个具体卡点，让贡献真正回到下一步。</p>
+        </div>
+      </div>
+
+      <div class="hero-actions" aria-label="开始行动">
+        <a class="action-block primary" href="#publish">
+          <span class="index">Action / 01</span>
+          <strong>发布一个<br>项目卡点</strong>
+          <span class="arrow" aria-hidden="true">↘</span>
+        </a>
+        <a class="action-block secondary" href="#asks">
+          <span class="index">Action / 02</span>
+          <strong>看看谁<br>需要帮助</strong>
+          <span class="arrow" aria-hidden="true">↓</span>
+        </a>
+        <div class="boundary-note">
+          <span>边界明确</span>
+          社区只接收你主动公开的脱敏问题，不接管本地文件、Agent 或路线图。
+        </div>
+      </div>
+    </section>
+
+    <section id="asks" aria-labelledby="asks-title">
+      <header class="section-heading">
+        <h2 id="asks-title">正在发生的<br>项目卡点</h2>
+        <div class="section-intro">
+          <span class="poster-label">公共告示 / Open Calls</span>
+          <p>不是泛泛聊创业。每张告示都说清正在推进什么、卡在哪里、需要哪一种贡献。</p>
+        </div>
+      </header>
+
+      <div class="notice-list">
+        <article class="notice">
+          <div class="notice-number">01</div>
+          <div class="notice-main">
+            <div>
+              <span class="poster-label">正在求助 · 产品判断</span>
+              <h3>发布页信息很全，但第一屏还没说清用户为什么今天就要开始用。</h3>
+            </div>
+            <div class="notice-tags" aria-label="求助标签">
+              <span>发布前校对</span><span>产品表达</span><span>可公开页面</span>
+            </div>
+          </div>
+          <div class="notice-need">
+            <span class="poster-label">需要的帮助</span>
+            <strong>请做过早期产品发布的人看一遍首屏：承诺是否具体，行动理由是否成立。</strong>
+          </div>
+          <a class="notice-link" href="#publish" aria-label="回应项目求助 01">我能帮 →</a>
+        </article>
+
+        <article class="notice">
+          <div class="notice-number">02</div>
+          <div class="notice-main">
+            <div>
+              <span class="poster-label">正在求助 · 流程验证</span>
+              <h3>功能已经跑通，第一次使用的人却可能在两分钟内找不到下一步。</h3>
+            </div>
+            <div class="notice-tags" aria-label="求助标签">
+              <span>内测准备</span><span>首次体验</span><span>使用反馈</span>
+            </div>
+          </div>
+          <div class="notice-need">
+            <span class="poster-label">需要的帮助</span>
+            <strong>只拿到安装包和一句目标，记录第一次停顿、误解和放弃点。</strong>
+          </div>
+          <a class="notice-link" href="#publish" aria-label="回应项目求助 02">加入共创 →</a>
+        </article>
+
+        <article class="notice">
+          <div class="notice-number">03</div>
+          <div class="notice-main">
+            <div>
+              <span class="poster-label">正在求助 · 分发行动</span>
+              <h3>订阅已经上线，但留存计划像待办清单，缺少真正值得验证的优先级。</h3>
+            </div>
+            <div class="notice-tags" aria-label="求助标签">
+              <span>上线后验证</span><span>会员产品</span><span>优先级</span>
+            </div>
+          </div>
+          <div class="notice-need">
+            <span class="poster-label">需要的帮助</span>
+            <strong>删掉不必要动作，只留下下一轮最值得验证的一个假设与观察方法。</strong>
+          </div>
+          <a class="notice-link" href="#publish" aria-label="回应项目求助 03">一起拆题 →</a>
+        </article>
+      </div>
+    </section>
+
+    <section class="loop" id="loop" aria-labelledby="loop-title">
+      <header class="section-heading">
+        <h2 id="loop-title">贡献不是回复。<br>它要回到项目。</h2>
+        <div class="section-intro">
+          <span class="poster-label">从问题到结果 / 4 Stops</span>
+          <p>一次有效共创的终点，不是讨论结束，而是本地项目出现了能验证的新进展。</p>
+        </div>
+      </header>
+
+      <div class="loop-track" aria-label="卡点到结果的四步闭环">
+        <article class="loop-step">
+          <div class="step-node">01</div>
+          <h3>带来<br>一个卡点</h3>
+          <p>只公开解决当前问题所需的最少背景，项目事实继续留在本地。</p>
+        </article>
+        <article class="loop-step">
+          <div class="step-node">02</div>
+          <h3>形成<br>具体贡献</h3>
+          <p>围绕清楚的目标，给出反馈、测试、经验、模板或一次共同拆解。</p>
+        </article>
+        <article class="loop-step">
+          <div class="step-node">03</div>
+          <h3>带回<br>本地项目</h3>
+          <p>由你选择哪些输入进入路线图、下一步或验证计划，社区不替你做决定。</p>
+        </article>
+        <article class="loop-step">
+          <div class="step-node">04</div>
+          <h3>得到<br>可验证结果</h3>
+          <p>用真实行动确认贡献是否有效；有效的方法才值得继续复用。</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="capabilities" id="capabilities" aria-labelledby="capabilities-title">
+      <header class="section-heading">
+        <h2 id="capabilities-title">被项目用过的<br>能力，继续流动</h2>
+        <div class="section-intro">
+          <span class="poster-label">能力库 / Reusable Works</span>
+          <p>不收藏空洞的方法论。带走能直接用于下一次推进的框架、工作流与清单。</p>
+        </div>
+      </header>
+
+      <div class="capability-grid">
+        <article class="capability">
+          <span class="capability-type"><span>框架 / 01</span><span>带回本地使用</span></span>
+          <div>
+            <h3>路线图<br>开局模板</h3>
+            <p>把模糊想法收敛成可推进的阶段、边界与完成证据。</p>
+          </div>
+        </article>
+        <article class="capability">
+          <span class="capability-type"><span>工作流 / 02</span><span>带回本地使用</span></span>
+          <div>
+            <h3>Agent<br>交接清单</h3>
+            <p>保留目标、已确认事实、未闭合风险和下一步。</p>
+          </div>
+        </article>
+        <article class="capability">
+          <span class="capability-type"><span>清单 / 03</span><span>带回本地使用</span></span>
+          <div>
+            <h3>小范围<br>发布检查</h3>
+            <p>确认核心承诺、首次使用路径、反馈入口与可回退边界。</p>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="publish-board" id="publish" aria-labelledby="publish-title">
+      <div class="publish-title">
+        <span class="poster-label">发布或回应 / 从具体问题开始</span>
+        <h2 id="publish-title">让别人一眼看懂，<br>从哪里接手。</h2>
+      </div>
+      <div class="publish-prompts" aria-label="发布项目卡点前需要写清的三件事">
+        <div class="publish-prompt"><b>01</b><span>你正在推进什么结果？</span></div>
+        <div class="publish-prompt"><b>02</b><span>现在具体卡在哪里？</span></div>
+        <div class="publish-prompt"><b>03</b><span>你希望别人贡献什么？</span></div>
+        <div class="publish-signal">只公开解决当前问题所需的最少背景。其余项目事实，继续留在本地。</div>
+      </div>
+    </section>
+
+    <section class="local-first" id="install" aria-labelledby="local-title">
+      <div class="local-copy">
+        <span class="poster-label">Local First / You Decide</span>
+        <h2 id="local-title">公开问题。<br>保留项目。</h2>
+        <p>SoloMap 在本地保存项目事实、路线图、Agent 执行与验证结果。社区连接外部贡献，但决定权始终在你手里。</p>
+      </div>
+      <div class="local-action">
+        <a class="install-poster" href="https://marketplace.visualstudio.com/items?itemName=SZLK.solopreneur-roadmap" rel="noopener noreferrer">
+          <span class="poster-label">从自己的项目开始</span>
+          <strong>安装<br>SoloMap</strong>
+          <span class="arrow" aria-hidden="true">↘</span>
+        </a>
+        <div class="install-detail">VS Code 扩展 · 本地优先 · 先推进，再公开</div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    <div class="footer-brand">
+      <img src="../../../resources/logo.svg" width="1024" height="1024" alt="">
+      <span>SoloMap / OPC Community</span>
+    </div>
+    <div class="footer-note">项目拥有者决定公开什么；本地文件、Agent 与完整路线图不会进入社区。</div>
+  </footer>
+
+</body>
+</html>

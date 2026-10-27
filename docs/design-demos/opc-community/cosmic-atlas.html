@@ -1,0 +1,484 @@
+<!doctype html>
+<!--
+  ASSUMPTIONS
+  - 这是 SoloMap OPC 数字社区首页的 A 方向概念稿，页面中的项目问题均为脱敏概念文案，不代表真实用户、真人身份或社区统计。
+  - 页面只表达用户主动公开的“当前卡点”；项目文件、路线图、Agent 执行与验证结果继续留在本地。
+  - 导航与社区动作在本概念稿中使用页内锚点，安装入口指向 SoloMap 的正式 VS Code Marketplace 页面。
+  DESIGN REASONING
+  - 视觉母题来自真实 Logo 的 S 形路线与两端节点：项目卡点是待定位的星体，贡献是轨迹，验证后的结果沿路径回到本地项目。
+  - “复古未来”采用纸白天文图录、纯黑标尺与钴蓝大字，而非均匀深蓝背景和紫青霓虹；品牌紫青只用于真实 Logo 与少量关键路径。
+  - 首屏左侧先讲清楚社区价值与边界，右侧用可扫读的项目星图展示“真实问题正在发出信号”；下方再进入求助、闭环、能力与安装。
+  - 摄影不是信息必需，因此不使用装饰图片；SoloMap 真实 Logo 直接引用仓库 resources/logo.svg，不重画、不改色。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>SoloMap OPC 社区 · 项目星图</title>
+  <style>
+:root { --paper: #f6f0e8; --paper-deep: #e9e0d1; --ink: #11100e; --ink-soft: #4f4a43; --cobalt: #1847b8; --cobalt-dark: #0d2c78; --purple: #7a4dff; --cyan: #45dde9; --red: #c92f38; --green: #a5d66d; --line: rgba(17, 16, 14, 0.26); --line-light: rgba(246, 240, 232, 0.28); --font-display: Georgia, "Noto Serif SC", "Songti SC", serif; --font-body: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif; --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace; --shell: min(1280px, calc(100vw - 56px)); }
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 88px; overflow-x: hidden; }
+body { margin: 0; min-width: 320px; overflow-x: hidden; background: radial-gradient(circle at 12% 4%, rgba(122, 77, 255, 0.06), transparent 24rem), linear-gradient(rgba(17, 16, 14, 0.027) 1px, transparent 1px), linear-gradient(90deg, rgba(17, 16, 14, 0.027) 1px, transparent 1px), var(--paper); background-size: auto, 24px 24px, 24px 24px, auto; color: var(--ink); font-family: var(--font-body); font-size: 17px; line-height: 1.75; line-break: strict; overflow-wrap: break-word; font-synthesis: none; text-rendering: optimizeLegibility; }
+a { color: inherit; text-decoration: none; }
+button, a, summary { -webkit-tap-highlight-color: transparent; }
+a:focus-visible, summary:focus-visible { outline: 3px solid var(--cyan); outline-offset: 4px; }
+h1, h2, h3, p { margin-top: 0; }
+h1, h2, h3 { text-wrap: balance; }
+p { text-wrap: pretty; }
+.skip-link { position: fixed; z-index: 50; top: 12px; left: 12px; padding: 10px 16px; background: var(--ink); color: var(--paper); transform: translateY(-180%); transition: transform 180ms ease; }
+.skip-link:focus { transform: translateY(0); }
+.shell { width: var(--shell); margin-inline: auto; }
+.eyebrow, .section-index, .map-code, .signal-code, .meta, .capability-kind, .footer-meta { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums slashed-zero; letter-spacing: 0.11em; line-height: 1.45; text-transform: uppercase; }
+.site-header { position: relative; z-index: 10; border-bottom: 1px solid var(--ink); background: color-mix(in srgb, var(--paper) 94%, transparent); backdrop-filter: blur(14px); }
+.nav { min-height: 76px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 30px; }
+.brand { min-height: 52px; display: inline-flex; align-items: center; gap: 12px; font-family: var(--font-display); font-size: 21px; font-weight: 700; letter-spacing: -0.02em; }
+.brand-mark { width: 42px; height: 42px; display: block; background: #050507; }
+.brand small { display: block; margin-top: -4px; color: var(--ink-soft); font-family: var(--font-mono); font-size: 12px; font-weight: 400; letter-spacing: 0.12em; text-transform: uppercase; }
+.nav-links { display: flex; justify-content: center; flex-wrap: wrap; gap: 2px 20px; }
+.nav-links a, .nav-install { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 650; }
+.nav-links a { min-width: 44px; border-bottom: 2px solid transparent; transition: color 160ms ease, border-color 160ms ease; }
+.nav-links a:hover { color: var(--cobalt); border-color: currentColor; }
+.nav-install { min-width: 144px; padding: 0 18px; background: var(--ink); color: var(--paper); transition: background 160ms ease, color 160ms ease; }
+.nav-install:hover { background: var(--cobalt); color: #fff; }
+.hero { min-height: calc(100vh - 76px); padding: 48px 0 52px; display: grid; grid-template-columns: minmax(0, 0.88fr) minmax(540px, 1.12fr); gap: clamp(34px, 5vw, 78px); align-items: center; }
+.hero-copy { position: relative; z-index: 2; }
+.hero .eyebrow { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; color: var(--cobalt); font-weight: 700; }
+.hero .eyebrow::before { width: 36px; height: 1px; background: currentColor; content: ""; }
+.hero h1 { max-width: 690px; margin-bottom: 28px; font-family: var(--font-display); font-size: clamp(48px, 5.1vw, 78px); line-height: 1.08; letter-spacing: -0.025em; font-weight: 700; }
+.hero h1 .accent { color: var(--cobalt); font-weight: 400; }
+.hero-lead { max-width: 31em; margin-bottom: 30px; color: #2f2b27; font-family: var(--font-display); font-size: 20px; line-height: 1.75; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.button { min-height: 50px; display: inline-flex; align-items: center; justify-content: center; gap: 14px; padding: 10px 20px; border: 1px solid var(--ink); font-size: 15px; font-weight: 750; line-height: 1.2; transition: transform 160ms ease, background 160ms ease, color 160ms ease; }
+.button::after { content: "↗"; font-family: var(--font-mono); font-size: 16px; }
+.button-primary { background: var(--cobalt); border-color: var(--cobalt); color: #fff; }
+.button-secondary { background: transparent; }
+.button:hover { transform: translate(-2px, -2px); box-shadow: 4px 4px 0 var(--ink); }
+.button-primary:hover { background: var(--ink); border-color: var(--ink); }
+.boundary-note { max-width: 560px; margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--line); display: grid; grid-template-columns: auto 1fr; gap: 12px; color: var(--ink-soft); font-size: 14px; line-height: 1.65; }
+.boundary-note strong { color: var(--ink); font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }
+.atlas { position: relative; min-width: 0; aspect-ratio: 1.03; border: 1px solid var(--ink); background: radial-gradient(circle, rgba(17, 16, 14, 0.22) 1px, transparent 1.5px) 0 0 / 22px 22px, var(--paper); isolation: isolate; }
+.atlas::before, .atlas::after { position: absolute; z-index: -1; border: 1px solid rgba(17, 16, 14, 0.23); border-radius: 50%; content: ""; pointer-events: none; }
+.atlas::before { width: 72%; aspect-ratio: 1; top: 15%; left: 14%; }
+.atlas::after { width: 46%; aspect-ratio: 1; top: 28%; left: 27%; }
+.atlas-head { position: absolute; z-index: 3; inset: 0 0 auto 0; min-height: 52px; padding: 10px 14px; border-bottom: 1px solid var(--ink); background: var(--paper); display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.atlas-title { font-family: var(--font-display); font-size: 18px; font-weight: 700; }
+.map-code { color: var(--ink-soft); }
+.orbit-map { position: absolute; inset: 52px 0 58px; width: 100%; height: calc(100% - 110px); overflow: visible; }
+.orbit-map path { fill: none; vector-effect: non-scaling-stroke; }
+.route-main { stroke: var(--cobalt); stroke-width: 3; }
+.route-secondary { stroke: var(--ink); stroke-width: 1; stroke-dasharray: 5 7; opacity: 0.46; }
+.route-return { stroke: var(--purple); stroke-width: 2; stroke-dasharray: 2 6; }
+.map-node { position: absolute; z-index: 4; min-height: 46px; max-width: 205px; display: flex; align-items: center; gap: 9px; padding: 7px 10px 7px 7px; border: 1px solid var(--ink); background: var(--paper); font-size: 13px; font-weight: 700; line-height: 1.35; box-shadow: 3px 3px 0 rgba(17, 16, 14, 0.86); transition: transform 160ms ease, background 160ms ease, color 160ms ease; }
+.map-node::before { width: 26px; height: 26px; flex: 0 0 auto; border: 7px solid var(--cobalt); border-radius: 50%; background: var(--paper); content: ""; }
+.map-node:hover { background: var(--ink); color: var(--paper); transform: translate(-2px, -2px); }
+.map-node:hover::before { background: var(--paper); border-color: var(--cyan); }
+.node-a { top: 18%; left: 6%; }
+.node-b { top: 31%; right: 5%; }
+.node-c { right: 20%; bottom: 10%; }
+.node-d { left: 9%; bottom: 14%; }
+.node-skill { top: 54%; left: 38%; border-color: var(--cobalt); color: var(--cobalt-dark); box-shadow: 3px 3px 0 var(--cobalt); }
+.node-skill::before { border-color: var(--purple); background: var(--cyan); }
+.atlas-legend { position: absolute; inset: auto 0 0 0; min-height: 58px; padding: 10px 14px; border-top: 1px solid var(--ink); background: var(--paper); display: flex; align-items: center; justify-content: space-between; gap: 14px; color: var(--ink-soft); font-size: 12px; line-height: 1.45; }
+.legend-items { display: flex; flex-wrap: wrap; gap: 14px; }
+.legend-items span { display: inline-flex; align-items: center; gap: 6px; }
+.legend-dot { width: 12px; height: 12px; border: 3px solid var(--cobalt); border-radius: 50%; display: inline-block; }
+.legend-dot.skill { border-color: var(--purple); background: var(--cyan); }
+.section { padding: 116px 0; border-top: 1px solid var(--ink); }
+.section-heading { display: grid; grid-template-columns: minmax(120px, 0.26fr) minmax(0, 1fr); gap: 34px; align-items: start; margin-bottom: 58px; }
+.section-index { padding-top: 12px; color: var(--cobalt); font-weight: 700; }
+.section-heading h2 { max-width: 850px; margin-bottom: 16px; font-family: var(--font-display); font-size: clamp(38px, 4.4vw, 64px); font-weight: 500; line-height: 1.12; letter-spacing: -0.02em; }
+.section-heading p { max-width: 650px; margin-bottom: 0; color: var(--ink-soft); font-size: 17px; }
+.signals { border-bottom: 1px solid var(--ink); }
+.signal { border-top: 1px solid var(--ink); background: color-mix(in srgb, var(--paper) 94%, white); }
+.signal summary { min-height: 92px; padding: 20px 8px; display: grid; grid-template-columns: 120px minmax(0, 1fr) minmax(210px, 0.36fr) 48px; gap: 22px; align-items: center; cursor: pointer; list-style: none; transition: background 160ms ease, color 160ms ease; }
+.signal summary::-webkit-details-marker { display: none; }
+.signal summary:hover { background: var(--cobalt); color: #fff; }
+.signal summary:hover .meta, .signal summary:hover .signal-code { color: #fff; }
+.signal-code { color: var(--cobalt); font-weight: 700; }
+.signal-title { font-family: var(--font-display); font-size: clamp(21px, 2vw, 29px); font-weight: 700; line-height: 1.38; }
+.meta { color: var(--ink-soft); letter-spacing: 0.04em; text-transform: none; }
+.signal-toggle { width: 44px; height: 44px; display: grid; place-items: center; border: 1px solid currentColor; font-family: var(--font-mono); font-size: 22px; line-height: 1; }
+.signal-toggle::before { content: "+"; }
+.signal[open] .signal-toggle::before { content: "−"; }
+.signal-detail { padding: 0 80px 30px 142px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 0.34fr); gap: 50px; }
+.signal-detail p { max-width: 54em; margin-bottom: 0; font-size: 16px; }
+.signal-ask { padding-left: 18px; border-left: 3px solid var(--cobalt); color: var(--cobalt-dark); font-weight: 700; }
+.signal-action { min-height: 44px; align-self: end; display: inline-flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--ink); font-weight: 750; }
+.signal-action::after { content: "→"; font-family: var(--font-mono); font-size: 20px; }
+.signal-action:hover { color: var(--cobalt); border-color: currentColor; }
+.loop-section { position: relative; overflow: hidden; background: var(--ink); color: var(--paper); border-top: 0; }
+.loop-section::before { position: absolute; width: 540px; height: 540px; right: -220px; top: -250px; border: 1px solid var(--line-light); border-radius: 50%; box-shadow: 0 0 0 82px rgba(246, 240, 232, 0.025), 0 0 0 164px rgba(246, 240, 232, 0.018); content: ""; }
+.loop-section .section-index { color: var(--cyan); }
+.loop-section .section-heading p { color: rgba(246, 240, 232, 0.72); }
+.loop-path { position: relative; display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--paper); }
+.loop-path::before { position: absolute; z-index: 0; top: 54px; left: 10%; right: 10%; height: 2px; background: linear-gradient(90deg, var(--cyan), var(--purple), var(--green)); content: ""; }
+.loop-step { position: relative; z-index: 1; min-height: 320px; padding: 28px 24px 24px; border-right: 1px solid var(--line-light); display: flex; flex-direction: column; }
+.loop-step:last-child { border-right: 0; }
+.step-node { width: 52px; height: 52px; margin-bottom: 44px; display: grid; place-items: center; border: 2px solid var(--cyan); border-radius: 50%; background: var(--ink); color: var(--cyan); font-family: var(--font-mono); font-size: 13px; font-weight: 700; }
+.loop-step:nth-child(2) .step-node { border-color: #8e7aff; color: #b7a9ff; }
+.loop-step:nth-child(3) .step-node { border-color: var(--purple); color: #baabff; }
+.loop-step:nth-child(4) .step-node { border-color: var(--green); color: var(--green); }
+.loop-step h3 { margin-bottom: 12px; font-family: var(--font-display); font-size: 25px; font-weight: 700; line-height: 1.35; }
+.loop-step p { margin-bottom: 0; color: rgba(246, 240, 232, 0.72); font-size: 15px; line-height: 1.75; }
+.loop-step strong { display: block; margin-top: auto; padding-top: 24px; color: var(--green); font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.07em; text-transform: uppercase; }
+.privacy-band { margin-top: 28px; padding: 24px 0 0; border-top: 1px solid var(--line-light); display: grid; grid-template-columns: 0.8fr 1.2fr; gap: 50px; align-items: start; }
+.privacy-band h3 { margin-bottom: 0; font-family: var(--font-display); font-size: 29px; line-height: 1.35; }
+.privacy-band ul { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+.privacy-band li { padding-top: 10px; border-top: 3px solid var(--paper); color: rgba(246, 240, 232, 0.78); font-size: 14px; }
+.capability-layout { display: grid; grid-template-columns: 0.72fr 1.28fr; gap: clamp(42px, 7vw, 100px); align-items: start; }
+.capability-intro { position: sticky; top: 112px; }
+.capability-intro blockquote { margin: 0 0 30px; padding: 0; font-family: var(--font-display); font-size: clamp(27px, 3vw, 43px); font-weight: 500; line-height: 1.38; }
+.capability-intro p { max-width: 31em; color: var(--ink-soft); font-size: 16px; }
+.catalog { border-top: 1px solid var(--ink); }
+.capability { min-height: 174px; padding: 26px 0; border-bottom: 1px solid var(--ink); display: grid; grid-template-columns: 74px minmax(0, 1fr) 48px; gap: 20px; align-items: start; transition: color 160ms ease, padding 160ms ease; }
+.capability:hover { color: var(--cobalt); padding-left: 14px; padding-right: 14px; }
+.capability-kind { color: var(--cobalt); font-weight: 700; }
+.capability h3 { margin-bottom: 10px; font-family: var(--font-display); font-size: 28px; line-height: 1.32; }
+.capability p { max-width: 40em; margin-bottom: 14px; color: var(--ink-soft); font-size: 15px; line-height: 1.7; }
+.capability-meta { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.035em; }
+.capability-arrow { width: 44px; height: 44px; display: grid; place-items: center; border: 1px solid currentColor; font-family: var(--font-mono); font-size: 18px; }
+.install-section { padding: 0; border-top: 1px solid var(--ink); background: var(--cobalt); color: #fff; }
+.install-grid { min-height: 570px; display: grid; grid-template-columns: 0.92fr 1.08fr; }
+.install-brand { padding: 70px clamp(30px, 5vw, 74px) 70px 0; border-right: 1px solid rgba(255, 255, 255, 0.52); display: flex; flex-direction: column; justify-content: space-between; }
+.install-logo-wrap { display: flex; align-items: center; gap: 18px; }
+.install-logo-wrap img { width: 76px; height: 76px; background: #050507; }
+.install-logo-wrap span { font-family: var(--font-display); font-size: 28px; font-weight: 700; }
+.install-brand p { max-width: 24em; margin-bottom: 0; color: rgba(255, 255, 255, 0.8); font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.06em; line-height: 1.7; text-transform: uppercase; }
+.install-content { padding: 70px 0 70px clamp(34px, 6vw, 88px); display: flex; flex-direction: column; justify-content: center; }
+.install-content .eyebrow { margin-bottom: 24px; color: var(--cyan); }
+.install-content h2 { max-width: 760px; margin-bottom: 22px; font-family: var(--font-display); font-size: clamp(42px, 5.1vw, 72px); font-weight: 500; line-height: 1.12; letter-spacing: -0.02em; }
+.install-content > p { max-width: 44em; margin-bottom: 32px; color: rgba(255, 255, 255, 0.82); font-size: 17px; }
+.install-content .button { border-color: #fff; background: #fff; color: var(--cobalt-dark); }
+.install-content .button:hover { background: var(--ink); border-color: var(--ink); color: #fff; box-shadow: 4px 4px 0 var(--cyan); }
+.install-note { margin-top: 22px; display: flex; gap: 14px; color: rgba(255, 255, 255, 0.76); font-family: var(--font-mono); font-size: 12px; line-height: 1.6; }
+.install-note::before { width: 10px; height: 10px; margin-top: 5px; flex: 0 0 auto; border-radius: 50%; background: var(--green); content: ""; }
+.site-footer { background: var(--ink); color: var(--paper); }
+.footer-grid { min-height: 170px; padding: 38px 0; display: grid; grid-template-columns: 1fr auto; gap: 40px; align-items: end; }
+.footer-brand { margin-bottom: 12px; font-family: var(--font-display); font-size: 30px; font-weight: 700; }
+.footer-grid p { max-width: 43em; margin-bottom: 0; color: rgba(246, 240, 232, 0.68); font-size: 14px; }
+.footer-meta { color: rgba(246, 240, 232, 0.54); text-align: right; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; }
+*, *::before, *::after { transition-duration: 0.01ms !important; }
+}
+@media (max-width: 1080px) { :root { --shell: min(100% - 40px, 920px); }
+.nav { grid-template-columns: auto 1fr; padding-block: 8px; }
+.nav-links { grid-column: 1 / -1; order: 3; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; border-top: 1px solid var(--line); }
+.nav-install { justify-self: end; }
+.hero { min-height: auto; grid-template-columns: 1fr; padding-top: 72px; }
+.hero-copy { max-width: 760px; }
+.atlas { width: min(100%, 760px); justify-self: center; }
+.loop-path { grid-template-columns: repeat(2, 1fr); }
+.loop-path::before { display: none; }
+.loop-step:nth-child(2) { border-right: 0; }
+.loop-step:nth-child(-n + 2) { border-bottom: 1px solid var(--line-light); }
+.privacy-band, .capability-layout { grid-template-columns: 1fr; }
+.privacy-band ul { grid-template-columns: repeat(3, 1fr); }
+.capability-intro { position: static; }
+.install-grid { grid-template-columns: 0.74fr 1.26fr; }
+}
+@media (max-width: 700px) { :root { --shell: calc(100% - 28px); }
+body { font-size: 16px; line-height: 1.75; background-size: auto, 20px 20px, 20px 20px, auto; }
+.site-header { position: static; }
+.nav { min-height: 72px; gap: 10px; }
+.brand { font-size: 18px; }
+.brand small { display: none; }
+.brand-mark { width: 38px; height: 38px; }
+.nav-install { min-width: 0; padding-inline: 12px; font-size: 13px; }
+.hero { padding: 54px 0 62px; gap: 48px; }
+.hero .eyebrow { margin-bottom: 20px; }
+.hero h1 { font-size: clamp(42px, 12.2vw, 58px); line-height: 1.12; }
+.hero-lead { font-size: 18px; }
+.actions { display: grid; }
+.button { width: 100%; min-height: 52px; }
+.boundary-note { grid-template-columns: 1fr; gap: 4px; }
+.atlas { aspect-ratio: auto; min-height: 590px; }
+.atlas-head { align-items: flex-start; }
+.atlas-title { font-size: 16px; }
+.map-code { max-width: 110px; text-align: right; }
+.orbit-map { inset: 52px 0 66px; width: 100%; }
+.map-node { width: 150px; max-width: 154px; min-height: 50px; padding-right: 8px; font-size: 12px; }
+.map-node::before { width: 22px; height: 22px; border-width: 6px; }
+.node-a { top: 18%; left: 5%; }
+.node-b { top: 34%; right: 4%; }
+.node-c { right: 4%; bottom: 8%; }
+.node-d { left: 4%; bottom: 20%; }
+.node-skill { top: 53%; left: 27%; }
+.atlas-legend { min-height: 66px; align-items: flex-start; }
+.atlas-legend > span:last-child { display: none; }
+.section { padding: 82px 0; }
+.section-heading { grid-template-columns: 1fr; gap: 12px; margin-bottom: 40px; }
+.section-index { padding-top: 0; }
+.section-heading h2 { font-size: clamp(36px, 10.3vw, 48px); }
+.signal summary { min-height: 0; padding: 22px 0; grid-template-columns: 1fr 44px; gap: 10px 16px; }
+.signal-code, .signal-title, .meta { grid-column: 1; }
+.signal-code { grid-row: 1; }
+.signal-title { grid-row: 2; }
+.meta { grid-row: 3; }
+.signal-toggle { grid-column: 2; grid-row: 1 / span 3; align-self: center; }
+.signal-detail { padding: 0 0 26px; grid-template-columns: 1fr; gap: 22px; }
+.loop-path { grid-template-columns: 1fr; }
+.loop-step { min-height: 250px; border-right: 0; border-bottom: 1px solid var(--line-light); }
+.loop-step:last-child { border-bottom: 0; }
+.step-node { margin-bottom: 28px; }
+.privacy-band { gap: 30px; }
+.privacy-band ul { grid-template-columns: 1fr; gap: 16px; }
+.capability-layout { gap: 40px; }
+.capability { grid-template-columns: 48px minmax(0, 1fr); gap: 14px; }
+.capability-arrow { grid-column: 2; }
+.install-grid { min-height: 0; grid-template-columns: 1fr; }
+.install-brand { min-height: 190px; padding: 40px 0; border-right: 0; border-bottom: 1px solid rgba(255, 255, 255, 0.52); }
+.install-logo-wrap img { width: 64px; height: 64px; }
+.install-content { padding: 58px 0 68px; }
+.install-content h2 { font-size: clamp(40px, 11vw, 52px); }
+.footer-grid { grid-template-columns: 1fr; align-items: start; }
+.footer-meta { text-align: left; }
+}
+</style>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <header class="site-header">
+    <nav class="nav shell" aria-label="主要导航">
+      <a class="brand" href="#top" aria-label="SoloMap OPC 社区首页">
+        <img class="brand-mark" src="../../../resources/logo.svg" width="1024" height="1024" alt="SoloMap">
+        <span>SoloMap<small>OPC project atlas</small></span>
+      </a>
+      <div class="nav-links">
+        <a href="#signals">正在求助</a>
+        <a href="#co-create">共创空间</a>
+        <a href="#capabilities">能力库</a>
+        <a href="#practice">OPC 实战</a>
+      </div>
+      <a class="nav-install" href="#local">安装 SoloMap</a>
+    </nav>
+  </header>
+  <main id="main">
+    <section class="hero shell" id="top">
+      <div class="hero-copy">
+        <div class="eyebrow">开放项目星图 · 001</div>
+        <h1>一个人做公司，<br><span class="accent">不必一个人</span><br>解决所有问题。</h1>
+        <p class="hero-lead">项目留在本地。只把眼前需要帮助的问题带到这里，让懂它的人贡献一段真正能推进项目的输入。</p>
+        <div class="actions">
+          <a class="button button-primary" href="#signals">发布一个项目卡点</a>
+          <a class="button button-secondary" href="#signals">看看谁需要帮助</a>
+        </div>
+        <div class="boundary-note">
+          <strong>边界清楚</strong>
+          <span>你选择公开什么，社区就只看到什么。仓库、路线图、Agent 和验证记录仍由本地 SoloMap 掌握。</span>
+        </div>
+      </div>
+      <figure class="atlas" aria-labelledby="atlas-title">
+        <figcaption class="atlas-head">
+          <span class="atlas-title" id="atlas-title">正在发出信号的项目</span>
+          <span class="map-code">LOCAL / PUBLIC EDGE</span>
+        </figcaption>
+        <svg class="orbit-map" viewBox="0 0 680 560" role="img" aria-label="项目问题与能力沿贡献路径连接并回到本地">
+          <path class="route-secondary" d="M86 116 C210 26 458 50 590 172 C678 254 598 454 406 502 C224 548 66 410 92 262 C110 166 210 108 308 130"></path>
+          <path class="route-main" d="M92 146 C220 78 316 132 334 226 C354 332 496 306 550 220"></path>
+          <path class="route-main" d="M550 220 C596 326 520 446 400 452 C286 458 232 390 170 426"></path>
+          <path class="route-return" d="M170 426 C256 340 278 302 336 276 C404 246 466 292 510 384"></path>
+          <circle cx="92" cy="146" r="8" fill="#1847b8"></circle>
+          <circle cx="550" cy="220" r="8" fill="#1847b8"></circle>
+          <circle cx="400" cy="452" r="8" fill="#1847b8"></circle>
+          <circle cx="170" cy="426" r="8" fill="#1847b8"></circle>
+          <circle cx="336" cy="276" r="10" fill="#45dde9" stroke="#7a4dff" stroke-width="5"></circle>
+        </svg>
+        <a class="map-node node-a" href="#signal-positioning">定价页还没说清“为什么是现在”</a>
+        <a class="map-node node-b" href="#signal-onboarding">首用流程需要一次陌生人测试</a>
+        <a class="map-node node-c" href="#signal-retention">留存计划需要更少、更准的动作</a>
+        <a class="map-node node-d" href="#capabilities">小范围发布检查</a>
+        <a class="map-node node-skill" href="#capabilities">可复用能力</a>
+        <div class="atlas-legend">
+          <div class="legend-items">
+            <span><i class="legend-dot" aria-hidden="true"></i> 项目卡点</span>
+            <span><i class="legend-dot skill" aria-hidden="true"></i> 可带回能力</span>
+          </div>
+          <span>路径终点：本地可验证结果</span>
+        </div>
+      </figure>
+    </section>
+    <section class="section" id="signals">
+      <div class="shell">
+        <header class="section-heading">
+          <div class="section-index">01 / 项目信号</div>
+          <div>
+            <h2>接住一条正在发出的求助信号。</h2>
+            <p>每条求助都围绕一个具体项目、一处当前卡点和一份明确需要。没有泛泛社交，也没有用热度替代问题本身。</p>
+          </div>
+        </header>
+        <div class="signals">
+          <details class="signal" id="signal-positioning" open>
+            <summary>
+              <span class="signal-code">信号 / 表达</span>
+              <span class="signal-title">发布页信息很全，但第一屏还没说清用户为什么今天就要开始用。</span>
+              <span class="meta">阶段：发布前校对<br>需要：产品定位反馈</span>
+              <span class="signal-toggle" aria-hidden="true"></span>
+            </summary>
+            <div class="signal-detail">
+              <div>
+                <p class="signal-ask">我需要的不是重写整页，而是请做过早期产品发布的人看一遍首屏：承诺是否具体，行动理由是否成立。</p>
+                <p>公开范围仅包含即将发布的落地页文案和本轮判断标准；项目路线图与内部材料不公开。</p>
+              </div>
+              <a class="signal-action" href="#co-create">我能帮这个问题</a>
+            </div>
+          </details>
+          <details class="signal" id="signal-onboarding">
+            <summary>
+              <span class="signal-code">信号 / 体验</span>
+              <span class="signal-title">功能已经跑通，第一次使用的人却可能在两分钟内找不到下一步。</span>
+              <span class="meta">阶段：内测准备<br>需要：陌生用户走查</span>
+              <span class="signal-toggle" aria-hidden="true"></span>
+            </summary>
+            <div class="signal-detail">
+              <div>
+                <p class="signal-ask">希望有人只拿到安装包和一句目标，记录第一次停顿、误解和放弃点，不需要迁就开发者已经熟悉的路径。</p>
+                <p>共创空间只保留走查任务、必要截图和结论；不会开放仓库、终端或本地 Agent。</p>
+              </div>
+              <a class="signal-action" href="#co-create">加入一次走查</a>
+            </div>
+          </details>
+          <details class="signal" id="signal-retention">
+            <summary>
+              <span class="signal-code">信号 / 留存</span>
+              <span class="signal-title">订阅已经上线，但留存计划像待办清单，缺少真正值得验证的优先级。</span>
+              <span class="meta">阶段：上线后验证<br>需要：会员产品经验</span>
+              <span class="signal-toggle" aria-hidden="true"></span>
+            </summary>
+            <div class="signal-detail">
+              <div>
+                <p class="signal-ask">想请有订阅产品经验的人删掉不必要动作，只留下下一轮最值得验证的一个假设与观察方法。</p>
+                <p>讨论使用脱敏后的行为描述，不上传订阅者身份、支付信息或完整经营数据。</p>
+              </div>
+              <a class="signal-action" href="#co-create">贡献一次取舍</a>
+            </div>
+          </details>
+        </div>
+      </div>
+    </section>
+    <section class="section loop-section" id="co-create">
+      <div class="shell">
+        <header class="section-heading">
+          <div class="section-index">02 / 共创闭环</div>
+          <div>
+            <h2>一段外部贡献，最终要回到项目里变成结果。</h2>
+            <p>共创不是另开一套工作台。它只围绕当前问题短暂发生，结论由项目发起者带回本地，继续推进和验证。</p>
+          </div>
+        </header>
+        <div class="loop-path" id="practice">
+          <article class="loop-step">
+            <span class="step-node">01</span>
+            <h3>带来一个卡点</h3>
+            <p>说清项目目标、眼前问题、已经试过什么，以及这一次真正需要哪种帮助。</p>
+            <strong>公开最小必要范围</strong>
+          </article>
+          <article class="loop-step">
+            <span class="step-node">02</span>
+            <h3>形成一段贡献</h3>
+            <p>围绕问题提供走查、判断、样例或经验，不把讨论扩张成无边界的咨询。</p>
+            <strong>只解决当前问题</strong>
+          </article>
+          <article class="loop-step">
+            <span class="step-node">03</span>
+            <h3>带回本地推进</h3>
+            <p>发起者决定采用什么，并在 SoloMap 中转化为下一步、修改或待验证结果。</p>
+            <strong>项目控制权仍在本地</strong>
+          </article>
+          <article class="loop-step">
+            <span class="step-node">04</span>
+            <h3>得到可验证结果</h3>
+            <p>真实项目验证后，再决定这段经验是否适合沉淀为其他人也能带走的能力。</p>
+            <strong>结果，而不是热度</strong>
+          </article>
+        </div>
+        <div class="privacy-band">
+          <h3>社区连接外部，<br>本地继续掌握项目。</h3>
+          <ul>
+            <li>社区看不到你的完整仓库和路线图。</li>
+            <li>Agent、文件和终端不交给公共空间控制。</li>
+            <li>是否公开、采用与沉淀，始终由你决定。</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+    <section class="section" id="capabilities">
+      <div class="shell">
+        <header class="section-heading">
+          <div class="section-index">03 / 能力坐标</div>
+          <div>
+            <h2>把经得起项目检验的方法，留成下一次可走的路径。</h2>
+            <p>能力库不是资料堆积。模板、工作流和检查清单只有能被带回项目、用来完成动作时才有价值。</p>
+          </div>
+        </header>
+        <div class="capability-layout">
+          <aside class="capability-intro">
+            <blockquote>不是收藏更多答案，<br>而是少走一段已经走过的弯路。</blockquote>
+            <p>浏览一项能力时，你先看到它适合解决什么、如何带回本地，以及采用后应当验证什么。</p>
+            <a class="button button-secondary" href="#local">从自己的项目开始</a>
+          </aside>
+          <div class="catalog" aria-label="可复用能力">
+            <a class="capability" href="#local">
+              <span class="capability-kind">MAP</span>
+              <span>
+                <h3>路线图开局模板</h3>
+                <p>把模糊想法收敛成可推进的阶段、边界与完成证据，适合刚准备让 Agent 参与的新项目。</p>
+                <span class="capability-meta">带回本地：创建第一版项目路线图</span>
+              </span>
+              <span class="capability-arrow" aria-hidden="true">↗</span>
+            </a>
+            <a class="capability" href="#local">
+              <span class="capability-kind">FLOW</span>
+              <span>
+                <h3>Agent 交接清单</h3>
+                <p>在任务暂停、换 Agent 或跨会话继续时，保留目标、已确认事实、未闭合风险和下一步。</p>
+                <span class="capability-meta">带回本地：减少重复解释与方向漂移</span>
+              </span>
+              <span class="capability-arrow" aria-hidden="true">↗</span>
+            </a>
+            <a class="capability" href="#local">
+              <span class="capability-kind">CHECK</span>
+              <span>
+                <h3>小范围发布检查</h3>
+                <p>在公开发布前确认核心承诺、首次使用路径、反馈入口与可回退边界，不用“大而全”替代关键验证。</p>
+                <span class="capability-meta">带回本地：生成发布前的聚焦检查</span>
+              </span>
+              <span class="capability-arrow" aria-hidden="true">↗</span>
+            </a>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section class="install-section" id="local">
+      <div class="install-grid shell">
+        <div class="install-brand">
+          <div class="install-logo-wrap">
+            <img src="../../../resources/logo.svg" width="1024" height="1024" alt="SoloMap 标志">
+            <span>SoloMap</span>
+          </div>
+          <p>Local project facts<br>Open contribution edge<br>Verified next move</p>
+        </div>
+        <div class="install-content">
+          <div class="eyebrow">回到你的项目</div>
+          <h2>先在本地把项目推进起来。</h2>
+          <p>安装 SoloMap，在 VS Code 里登记项目、建立路线图、让 Agent 执行并保留验证结果。需要外部输入时，再选择一个卡点带到社区。</p>
+          <div class="actions">
+            <a class="button" href="https://marketplace.visualstudio.com/items?itemName=SZLK.solopreneur-roadmap" rel="noopener noreferrer">安装 VS Code 扩展</a>
+            <a class="button" href="https://solomap.app/zh/docs/getting-started" rel="noopener noreferrer">查看快速上手</a>
+          </div>
+          <div class="install-note">安装后，项目、路线图与 Agent 执行继续保存在你的本地环境。</div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <footer class="site-footer">
+    <div class="footer-grid shell">
+      <div>
+        <div class="footer-brand">让项目发出信号，让贡献回到结果。</div>
+        <p>项目事实留在本地；公共空间只承接你主动带来的当前问题，让外部贡献回到可验证结果。</p>
+      </div>
+      <div class="footer-meta">SOLOMAP.APP<br>OPEN PROJECT CONSTELLATION</div>
+    </div>
+  </footer>
+</body>
+</html>
