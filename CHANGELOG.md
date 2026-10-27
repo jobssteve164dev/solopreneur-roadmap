@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.629 - 2026-10-27
+
+### Fixed
+- stabilize conversation terminal lifecycle (2231f87)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.628 - 2026-10-27
 
 ### Fixed
