@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.628 - 2026-10-27
+
+### Fixed
+- restore direct agent terminals after host reload (5d55dbb)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.627 - 2026-10-26
 
 ### Fixed
