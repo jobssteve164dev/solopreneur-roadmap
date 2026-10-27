@@ -8,6 +8,11 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const projectRoot = path.resolve(__dirname, '..');
+const currentProcessBirth = (() => {
+  if (process.platform === 'win32') return require('../out/processIdentity.js').readWindowsProcessBirthMarker(process.pid);
+  const stat = fs.readFileSync(`/proc/${process.pid}/stat`, 'utf8');
+  return `proc:${stat.slice(stat.lastIndexOf(') ') + 2).trim().split(/\s+/)[19]}`;
+})();
 
 test('terminal delivery survives its own runner claim while recording submission', async t => {
   for (const mode of ['same-delivery', 'different-delivery', 'different-turn']) await t.test(mode, async t => {
@@ -82,6 +87,155 @@ test('only a restored visible terminal reclaims its interactive run owner', asyn
   assert.equal(claims[0].reference, 'visible');
   assert.equal(claims[0].owner.pid, process.pid);
   assert.match(claims[0].owner.birth, /^(proc|ps):/);
+});
+
+test('a refreshed Extension Host recreates a missing terminal on the same authenticated runner', async t => {
+  const { ForegroundTerminalReconnectServer } = require('../out/foregroundTerminalReconnect.js');
+  const input = [];
+  const endpointServer = new ForegroundTerminalReconnectServer({
+    runId: 'reconnect-run', generation: 4, deliveryId: 'reconnect-delivery', nonce: 'a'.repeat(64)
+  }, bytes => input.push(bytes.toString('utf8')), { initialOffset: 6 });
+  const endpoint = await endpointServer.start();
+  t.after(async () => endpointServer.close());
+  let created;
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.reconcile = reconcileRestoredAgentTerminalOwners;
+    module.exports.setCreateTerminal = create => { vscode.window.createTerminal = options => {
+      const terminal = create(options); vscode.window.terminals.push(terminal); return terminal;
+    }; };
+  `);
+  extension.setCreateTerminal(options => {
+    created = { name: options.name, creationOptions: options, show() {}, dispose() {} };
+    return created;
+  });
+  const status = {
+    workspaceRoot: '/project-reconnect', rootExecutionLogId: 41, executionLogId: 41,
+    interactiveSession: true, interactiveSessionClosed: false, deliveryPending: false,
+    terminalName: 'SoloMap: restored', terminalDeliveryId: 'reconnect-delivery', agentPid: process.pid, processBirth: currentProcessBirth,
+    agentInputMode: 'prompt_turn', terminalReconnect: endpoint, deliveryOwnerId: 'old-owner'
+  };
+  const client = {
+    dataRoot: '/data/reconnect',
+    claimTerminalOwner: async () => status,
+    readLogTailInfo: async () => ({ bytes: Buffer.from('replay'), totalBytes: 6 })
+  };
+  await extension.reconcile(client, [{ reference: 'reconnect-reference', runId: endpoint.runId, generation: endpoint.generation, status }]);
+  assert.equal(created.name, 'SoloMap: restored');
+  const rendered = [];
+  created.creationOptions.pty.onDidWrite(value => rendered.push(value));
+  created.creationOptions.pty.open();
+  assert.equal(rendered.join(''), 'replay');
+  created.creationOptions.pty.handleInput('after-refresh\n');
+  while (!input.length) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.deepEqual(input, ['after-refresh\n']);
+});
+
+test('one host refresh restores every reconnectable terminal across open projects', async t => {
+  const { ForegroundTerminalReconnectServer } = require('../out/foregroundTerminalReconnect.js');
+  const servers = [], records = [];
+  for (let index = 1; index <= 3; index += 1) {
+    const identity = { runId: `multi-run-${index}`, generation: index, deliveryId: `multi-delivery-${index}`, nonce: String(index).repeat(64) };
+    const server = new ForegroundTerminalReconnectServer(identity, () => undefined, { initialOffset: index });
+    servers.push(server);
+    const endpoint = await server.start();
+    records.push({ reference: `multi-reference-${index}`, runId: identity.runId, generation: identity.generation, status: {
+      workspaceRoot: `/project-${index}`, rootExecutionLogId: 100 + index, executionLogId: 100 + index,
+      interactiveSession: true, interactiveSessionClosed: false, deliveryPending: false,
+      terminalName: `SoloMap: project-${index}`, terminalDeliveryId: identity.deliveryId,
+      agentPid: process.pid, processBirth: currentProcessBirth, agentInputMode: 'prompt_turn', terminalReconnect: endpoint, deliveryOwnerId: 'old-owner'
+    } });
+  }
+  t.after(async () => Promise.all(servers.map(server => server.close())));
+  const created = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.reconcile = reconcileRestoredAgentTerminalOwners;
+    module.exports.setCreateTerminal = create => { vscode.window.createTerminal = create; };
+  `);
+  extension.setCreateTerminal(options => {
+    const terminal = { name: options.name, creationOptions: options, show() {}, dispose() {} };
+    created.push(terminal); return terminal;
+  });
+  const client = {
+    dataRoot: '/data/multi-reconnect',
+    claimTerminalOwner: async (_reference, status) => status,
+    readLogTailInfo: async reference => {
+      const index = Number(reference.slice(-1)); return { bytes: Buffer.from(String(index)), totalBytes: index };
+    }
+  };
+  await extension.reconcile(client, records);
+  assert.deepEqual(created.map(terminal => terminal.name), [
+    'SoloMap: project-1', 'SoloMap: project-2', 'SoloMap: project-3'
+  ]);
+});
+
+test('terminal reconnect rejects an endpoint from another run generation', async t => {
+  const { ForegroundTerminalReconnectServer } = require('../out/foregroundTerminalReconnect.js');
+  const server = new ForegroundTerminalReconnectServer({
+    runId: 'stale-run', generation: 1, deliveryId: 'identity-delivery', nonce: '9'.repeat(64)
+  }, async () => undefined);
+  const endpoint = await server.start();
+  t.after(async () => server.close());
+  let created = 0, claimed = 0;
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.reconcile = reconcileRestoredAgentTerminalOwners;
+    module.exports.setCreateTerminal = create => { vscode.window.createTerminal = create; };
+  `);
+  extension.setCreateTerminal(() => { created += 1; return { name: 'unexpected', dispose() {} }; });
+  const status = {
+    workspaceRoot: '/project-identity', rootExecutionLogId: 71, executionLogId: 71,
+    interactiveSession: true, interactiveSessionClosed: false, deliveryPending: false,
+    terminalName: 'SoloMap: identity', terminalDeliveryId: endpoint.deliveryId,
+    agentPid: process.pid, processBirth: currentProcessBirth, agentInputMode: 'prompt_turn', terminalReconnect: endpoint, deliveryOwnerId: 'old-owner'
+  };
+  await extension.reconcile({
+    dataRoot: '/data/identity',
+    claimTerminalOwner: async () => { claimed += 1; return status; },
+    readLogTailInfo: async () => ({ bytes: Buffer.alloc(0), totalBytes: 0 })
+  }, [{ reference: 'identity-reference', runId: 'authoritative-run', generation: 2, status }]);
+  assert.equal(claimed, 0);
+  assert.equal(created, 0);
+});
+
+test('a transient reconnect socket loss reuses the existing terminal surface on the next poll', async t => {
+  const { ForegroundTerminalReconnectClient, ForegroundTerminalReconnectServer } = require('../out/foregroundTerminalReconnect.js');
+  const input = [];
+  const identity = { runId: 'retry-run', generation: 3, deliveryId: 'retry-delivery', nonce: '7'.repeat(64) };
+  const server = new ForegroundTerminalReconnectServer(identity, async bytes => { input.push(bytes.toString('utf8')); });
+  const endpoint = await server.start();
+  t.after(async () => server.close());
+  const created = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.reconcile = reconcileRestoredAgentTerminalOwners;
+    module.exports.setCreateTerminal = create => { vscode.window.createTerminal = options => {
+      const terminal = create(options); vscode.window.terminals.push(terminal); return terminal;
+    }; };
+  `);
+  extension.setCreateTerminal(options => {
+    const terminal = { name: options.name, creationOptions: options, show() {}, dispose() {} };
+    created.push(terminal); return terminal;
+  });
+  const status = {
+    workspaceRoot: '/project-retry', rootExecutionLogId: 81, executionLogId: 81,
+    interactiveSession: true, interactiveSessionClosed: false, deliveryPending: false,
+    terminalName: 'SoloMap: retry', terminalDeliveryId: identity.deliveryId,
+    agentPid: process.pid, processBirth: currentProcessBirth, agentInputMode: 'prompt_turn', terminalReconnect: endpoint, deliveryOwnerId: 'old-owner'
+  };
+  const record = { reference: 'retry-reference', runId: identity.runId, generation: identity.generation, status };
+  const client = {
+    dataRoot: '/data/retry', claimTerminalOwner: async () => status,
+    readLogTailInfo: async () => ({ bytes: Buffer.alloc(0), totalBytes: 0 })
+  };
+  await extension.reconcile(client, [record]);
+  assert.equal(created.length, 1);
+  const replacement = new ForegroundTerminalReconnectClient(endpoint, 0);
+  await replacement.connect();
+  replacement.disconnect();
+  await new Promise(resolve => setTimeout(resolve, 25));
+  await extension.reconcile(client, [record]);
+  assert.equal(created.length, 1, 'retry must replace the dead bridge without adding a duplicate terminal');
+  created[0].creationOptions.pty.handleInput('after-transient-loss\n');
+  while (!input.length) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.deepEqual(input, ['after-transient-loss\n']);
 });
 const sharedHostDefaultRoot = path.join(os.tmpdir(), `solomap-host-default-${process.pid}`);
 test.after(() => {

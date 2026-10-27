@@ -6,7 +6,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const test = require('node:test');
 
-const { ForegroundAgentTerminalBridge, buildForegroundRunnerInvocation, settleForegroundTerminalExit } = require('../out/foregroundAgentTerminal.js');
+const { ForegroundAgentTerminalBridge, ReconnectedForegroundAgentTerminalBridge, buildForegroundRunnerInvocation, settleForegroundTerminalExit } = require('../out/foregroundAgentTerminal.js');
 
 function fakeChild(pid = 4321) {
   const child = new EventEmitter();
@@ -194,7 +194,7 @@ test('interactive runner starts the formal CLI before waiting for the full works
     'baseline capture must begin after the rollback snapshot and overlap native CLI initialization');
   assert.match(source, /stdio:\s*\[terminal \? 'pipe' : 'ignore'/,
     'the runner must close stdin for every noninteractive Agent');
-  assert.match(source, /process\.stdin\.on\('data', forwardInput\)/,
+  assert.match(source, /process\.stdin\.on\('data', forwardProcessInput\)/,
     'terminal input must be forwarded while keeping the child stdin open across host EOF');
   assert.match(source, /process\.stdin\.pause\(\)/,
     'the runner must release its own input handle after the Agent exits');
@@ -231,7 +231,7 @@ test('the real direct bridge reaches an interactive child without a VS Code shel
   });
   await operations({ operation: 'prepare_run', input: {
     root: workspaceRoot, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: 'direct bridge', userMessage: 'direct bridge',
-    command: "printf 'provider-ready:'; stty size; while :; do sleep 1; done",
+    command: "printf 'provider-ready:'; stty size; while IFS= read -r line; do printf 'echo:%s\\n' \"$line\"; done",
     metadata: { interactiveSession: true }, idempotencyKey: 'direct-bridge-prepare'
   } });
   const invocation = buildForegroundRunnerInvocation({ extensionOutputRoot: path.resolve(__dirname, '../out'), globalDataPath, workspaceRoot,
@@ -248,4 +248,25 @@ test('the real direct bridge reaches an interactive child without a VS Code shel
   }
   assert.ok(Date.now() - startedAt <= 10_000);
   assert.match(Buffer.concat(output).toString('utf8'), /provider-ready:30 120/);
+  let state;
+  while (!(state?.status?.terminalReconnect)) {
+    assert.ok(Date.now() - startedAt <= 10_000, 'runner did not publish its reconnect endpoint');
+    state = await operations({ operation: 'read_run_state', input: { root: workspaceRoot, executionLogId: 1 } });
+    if (!state.status.terminalReconnect) await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  const head = await operations({ operation: 'read_run_log_head', input: { root: workspaceRoot, executionLogId: 1, stream: 'output' } });
+  const log = await operations({ operation: 'read_run_log', input: { root: workspaceRoot, executionLogId: 1, stream: 'output', offset: 0, limit: Math.max(1, head.totalBytes) } });
+  const runnerPid = bridge.pid;
+  bridge.detachForHostReload();
+  const restored = new ReconnectedForegroundAgentTerminalBridge(state.status.terminalReconnect, Buffer.from(log.bytes, 'base64'), head.totalBytes);
+  const restoredOutput = [];
+  restored.attachOutput(bytes => restoredOutput.push(bytes));
+  await restored.connect();
+  await restored.writeInputFrame(Buffer.from('after-refresh\n'));
+  while (!Buffer.concat(restoredOutput).includes(Buffer.from('echo:after-refresh'))) {
+    assert.ok(Date.now() - startedAt <= 10_000, Buffer.concat(restoredOutput).toString('utf8'));
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(restored.pid, runnerPid, 'refresh must reconnect to the same runner process');
+  restored.detachForHostReload();
 });

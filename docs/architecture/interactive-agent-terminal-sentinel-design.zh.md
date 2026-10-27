@@ -110,7 +110,7 @@ terminal binding、复用、关闭、续轮、cleanup、停止、恢复和 task-
 
 - 普通终端 Shell/PTY 只能是显示与原生输入输出表面，不能再充当 runner/Agent CLI 启动门。新任务必须通过不依赖普通 Shell `processId` 的受控进程路径启动；目标终端仍应立即显示，并在自身就绪后接入同一个 runner，而不是创建第二份任务。
 - 当前最小桥接实现使用 VS Code Custom Pseudoterminal：Extension 先以 `child_process.spawn(process.execPath, [runAgentProcess.js, ...])`、`shell=false` 和 `ELECTRON_RUN_AS_NODE=1` 直接启动唯一 runner；这一步不等待 `Pseudoterminal.open`、普通 Terminal `processId` 或焦点完成。Extension 与 runner 通过直接 stdin/stdout/stderr pipes 传输输入和显示输出；正式输出同时先写权威 run log。用户 trash/dispose 这个终端实例或点击显式“停止”才发起 stop；隐藏 panel 不停止任务。runner 退出则关闭该 surface。
-- 当前 Extension Host deactivate 只断开交互展示订阅，不主动 stop runner；交互 runner 自己持有 Agent stdin，Host pipe EOF 不会被转译为 Agent EOF。非交互任务则遵守相反且明确的所有权：Agent fd 0 从启动起立即 EOF，不继承前台 bridge 的长寿命 socket。新宿主尚不能重新附着旧交互 pipes。后续耐久化目标是在 runner 内提供绑定完整 run/delivery 身份的本地 IPC endpoint（POSIX Unix socket、Windows named pipe）、attach nonce、带 sequence 的 input/output/resize/stop/attach 帧和持久 offset 补传。只有该 endpoint 经真实 reload 验收后，才能宣称 UI 已跨 Host 重连；在此之前 recovery 只能保证账本与任务不由显示层假终止，不能保证新 surface 复用旧显示流。
+- Extension Host deactivate 只断开交互展示订阅，不主动 stop runner；交互 runner 自己持有 Agent stdin，Host pipe EOF 不会被转译为 Agent EOF。非交互任务遵守相反且明确的所有权：Agent fd 0 从启动起立即 EOF，不创建重连 listener。每个新交互 runner 在 `127.0.0.1` 随机端口提供本机 IPC，端点同时绑定 run、generation、delivery、runner PID/birth 和 256-bit attach nonce；任何字段缺失或不符都在输入抵达 Agent 前拒绝。新 Host 先通过数据库 owner CAS 取得显示所有权，再回放权威 `output` 日志最近 1 MiB，并从持久 offset 接入 runner 的 4 MiB 有界实时缓冲；attached/replay/ready 严格有序，回放缺口会重新读取数据库而不是静默丢字节。输入只有在 Agent stdin 写回调成功后才 ACK，同一 request ID 在 runner 生命周期内有界去重；异常断线立即取消 live 状态，下一轮恢复复用原 terminal surface。未认证连接还有 1 MiB 单帧上限、5 秒认证时限和连接数上限。重连只重建 terminal surface，不 spawn runner、不 resume Provider、不提交提示词。旧版本已经启动且没有端点的 runner 不做有损热迁移，保持运行并在下一次正常原生续聊后进入新协议。
 - runner 内部可以继续用 `script` 为配置的 CLI 提供 TTY，但 `script` 是 runner 的唯一正式子树且不得充当 task-start 收据。正式执行和 `--help`、`--version`、`create-chat` preflight 必须传入明确 `executionKind=formal|preflight`；只有 formal 子树可产生 task ingress receipt。
 - 如果兼容路径仍需向普通 Shell 发送文本，该文本必须等待真实 PTY PID，且不得以超时后重建终端的方式恢复；但这段等待不能阻塞真实 Agent CLI 在 10 秒硬上限内进入本次任务。
 - 用户关闭或停止必须同时终止未完成的显示接入、runner 和 delivery lease；扩展宿主重载时，已启动 runner 依靠持久 run 身份恢复，不能因显示终端重建而重复启动 Agent。
@@ -143,11 +143,11 @@ Runtime 在治理型 MCP 调用到达的第一段轻量事务中先核对提示�
 
 对话卡片上的“续聊/继续”按钮是另一种动作：它只重新进入已确认的 Provider 原生 session，使用不含 `PROMPT` 位置参数的 resume 命令，不提交“继续当前 Agent 对话”、SoloMap wrapper 或任何其他合成消息，也不制造一个必然无法到来的新 task-ingress 等待。Host 可预建待填写的账本 turn，但必须显式标记为等待原生输入；用户在重入后真正提交新文本时，observer 把原文写回这个 turn，随后由 Provider 原生 start/complete 形成收据和结算，不能留下空 turn 或“等待本轮用户消息”合成正文。
 
-Host reload 后只按名字发现的旧终端不能复用：数据根、规范化项目、execution、run、generation/delivery 与当前 Host live bridge 必须全部匹配，否则启动新的正式 resume runner，避免把输入送进其他项目或失去管道的旧 TUI。现阶段不宣称 UI 可以跨 Host 重新附着旧 pipes。
+Host reload 后不能按名字复用旧终端：恢复必须同时核对数据根、规范化项目、execution、run、generation、delivery、runner PID/birth、loopback endpoint 和 nonce，并先完成 owner 接管。验证通过后，新 surface 连接同一 runner；验证失败只记录 `terminal.reconnect.claim/connect` 故障并等待下一次恢复，不启动第二个 Agent。没有重连端点的历史 runner 不冒充可恢复，也不自动停止或重启。
 
 当前 OpenCode 仍使用标准受控 CLI runner 和 `agent_acknowledged` 收据。`opencode serve`、`run --attach`、`exec attach`、Server 事件订阅与跨 Host 可重附着属于后续原生 adapter 设计，尚未在本版实现或作为发布结论。其他非 Codex/Claude Provider 的 transcript/hook 原生事件接入同样是后续增强；本版不得把这些目标状态写成已落地事实。
 
-测试必须至少覆盖：无收据到 10 秒时调用失败并持久化门禁结果；MCP 收据与 interaction/run 身份不匹配时不能通过；后到原生收据可升级、反向不能降级；spawn、普通输出和 PTY write 不能通过；续轮 broken pipe 失败；多行输入只有一个提交键；Codex daemon 错误也只启动一份正式 CLI；Host reload 不复用无 live bridge 的同名终端。真实 Provider 账号验收只能报告实际可用并完成测试的 Provider，不能用 mock 或另一家 Provider 外推。
+测试必须至少覆盖：无收据到 10 秒时调用失败并持久化门禁结果；MCP 收据与 interaction/run 身份不匹配时不能通过；后到原生收据可升级、反向不能降级；spawn、普通输出和 PTY write 不能通过；续轮 broken pipe 失败；多行输入只有一个提交键；Codex daemon 错误也只启动一份正式 CLI；Host reload 不复用无 live bridge 的同名终端；重连前后 runner PID 不变、输入可用、脱离期间输出只回放一次、错误 nonce 被拒绝、有界缓冲缺口可检测。真实 Provider 账号验收只能报告实际可用并完成测试的 Provider，不能用 mock 或另一家 Provider 外推。
 
 计时测试还必须覆盖 Extension Host reload、Runtime restart、同 boot 续计、跨 boot 恢复、wall clock 前跳/回拨。`elapsedFloorMs` 只增不减，同 boot 不以新进程时钟重置；无法验证时钟连续性时失败关闭，正常 Agent 任务本身仍继续运行。
 

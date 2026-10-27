@@ -369,14 +369,14 @@ export class RunLifecycleClient {
     return result;
   }
 
-  public async listRecoverableStatuses(): Promise<Array<{ reference: string; status: StatusSnapshot }>> {
-    const result: Array<{ reference: string; status: StatusSnapshot }> = [];
+  public async listRecoverableStatuses(): Promise<Array<{ reference: string; runId: string; generation: number; status: StatusSnapshot }>> {
+    const result: Array<{ reference: string; runId: string; generation: number; status: StatusSnapshot }> = [];
     let cursor: number | null = 0;
     do {
       const page = await this.operation('list_recoverable_run_states', { cursor }) as { items: RunState[]; nextCursor: number | null };
       for (const state of page.items) {
         const reference = runStatusReference(String(state.status.workspaceRoot), Number(state.status.rootExecutionLogId));
-        result.push({ reference, status: this.status(reference, state) });
+        result.push({ reference, runId: state.runId, generation: state.generation, status: this.status(reference, state) });
       }
       cursor = page.nextCursor;
     } while (cursor !== null);

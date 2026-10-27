@@ -1,5 +1,6 @@
 import * as childProcess from 'child_process';
 import * as path from 'path';
+import { ForegroundTerminalReconnectClient, type ForegroundTerminalReconnectEndpoint } from './foregroundTerminalReconnect';
 
 export interface ForegroundRunnerIdentity {
   extensionOutputRoot: string;
@@ -58,6 +59,16 @@ const MAX_DETACHED_OUTPUT_BYTES = 4 * 1024 * 1024;
 
 export type ForegroundTerminalInputMode = 'prompt_turn' | 'session_reentry' | 'closed';
 
+export interface ForegroundAgentTerminalTransport {
+  attachOutput(consumer: OutputConsumer): () => void;
+  writeInputFrame(bytes: Buffer): Promise<void>;
+  detachForHostReload(): void;
+  onExit(consumer: (exitCode?: number) => void): () => void;
+  stop(signal?: NodeJS.Signals): boolean | void;
+  readonly pid?: number;
+  readonly isRunning: boolean;
+}
+
 export function settleForegroundTerminalExit(
   inputMode: ForegroundTerminalInputMode,
   exitCode: number | undefined,
@@ -72,7 +83,7 @@ export function settleForegroundTerminalExit(
   return 'closed';
 }
 
-export class ForegroundAgentTerminalBridge {
+export class ForegroundAgentTerminalBridge implements ForegroundAgentTerminalTransport {
   private child?: SpawnedRunner;
   private consumer?: OutputConsumer;
   private bufferedOutput: Buffer[] = [];
@@ -166,5 +177,63 @@ export class ForegroundAgentTerminalBridge {
         reject(error);
       }
     });
+  }
+}
+
+export class ReconnectedForegroundAgentTerminalBridge implements ForegroundAgentTerminalTransport {
+  private readonly client: ForegroundTerminalReconnectClient;
+  private consumer?: OutputConsumer;
+  private bufferedOutput: Buffer[];
+  private running = false;
+  private exited = false;
+  private bufferedOutputBytes = 0;
+  private readonly exitConsumers = new Set<(exitCode?: number) => void>();
+
+  constructor(private readonly endpoint: ForegroundTerminalReconnectEndpoint, replay: Buffer, sinceOffset: number) {
+    this.bufferedOutput = replay.length ? [Buffer.from(replay)] : [];
+    this.bufferedOutputBytes = replay.length;
+    this.client = new ForegroundTerminalReconnectClient(endpoint, sinceOffset);
+    this.client.onOutput(bytes => this.forwardOutput(bytes));
+    this.client.onExit(code => {
+      if (this.exited) return;
+      this.exited = true;
+      this.running = false;
+      for (const consumer of this.exitConsumers) consumer(code);
+    });
+    this.client.onDisconnect(() => { this.running = false; });
+  }
+
+  async connect(): Promise<void> {
+    await this.client.connect();
+    this.running = !this.exited && this.client.isConnected;
+  }
+
+  attachOutput(consumer: OutputConsumer): () => void {
+    this.consumer = consumer;
+    const buffered = this.bufferedOutput; this.bufferedOutput = []; this.bufferedOutputBytes = 0;
+    for (const bytes of buffered) consumer(bytes);
+    return () => { if (this.consumer === consumer) this.consumer = undefined; };
+  }
+
+  writeInputFrame(bytes: Buffer): Promise<void> { return this.client.writeInput(bytes); }
+  detachForHostReload(): void { this.consumer = undefined; this.client.disconnect(); this.running = false; }
+  onExit(consumer: (exitCode?: number) => void): () => void { this.exitConsumers.add(consumer); return () => this.exitConsumers.delete(consumer); }
+  stop(signal: NodeJS.Signals = 'SIGTERM'): void { void this.client.stop(signal); }
+  get pid(): number { return this.endpoint.runnerPid; }
+  get isRunning(): boolean { return this.running; }
+
+  private forwardOutput(bytes: Buffer): void {
+    if (this.consumer) this.consumer(bytes);
+    else {
+      const copy = Buffer.from(bytes);
+      this.bufferedOutput.push(copy); this.bufferedOutputBytes += copy.length;
+      while (this.bufferedOutputBytes > MAX_DETACHED_OUTPUT_BYTES && this.bufferedOutput.length > 1) {
+        this.bufferedOutputBytes -= this.bufferedOutput.shift()!.length;
+      }
+      if (this.bufferedOutputBytes > MAX_DETACHED_OUTPUT_BYTES && this.bufferedOutput.length === 1) {
+        this.bufferedOutput[0] = this.bufferedOutput[0].subarray(this.bufferedOutputBytes - MAX_DETACHED_OUTPUT_BYTES);
+        this.bufferedOutputBytes = this.bufferedOutput[0].length;
+      }
+    }
   }
 }

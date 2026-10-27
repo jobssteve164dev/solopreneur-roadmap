@@ -3,6 +3,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { once } from 'events';
+import type { Writable } from 'stream';
 import { isRuntimeDataTransportError, sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { shellQuote, getAgentProvider } from './agentCli';
 import { buildDatabaseAgentCommand, DatabaseAgentLaunch } from './agentDatabaseLaunch';
@@ -16,6 +17,7 @@ import { readWindowsProcessBirthMarker } from './processIdentity.js';
 import { maintenanceRunKinds } from './runLifecycleTypes';
 import { captureMaintenanceRunResult, maintenanceResultSignature } from './maintenanceRunResult';
 import { captureRunLog } from './runLogBatching';
+import { ForegroundTerminalReconnectServer } from './foregroundTerminalReconnect';
 
 function argument(name: string): string {
   const index = process.argv.indexOf(name);
@@ -132,6 +134,12 @@ async function main(): Promise<void> {
   let codexHome = '';
   let claudeConfigDirOverride: string | null | undefined;
   let child: childProcess.ChildProcess | undefined;
+  let reconnectServer: ForegroundTerminalReconnectServer | undefined;
+  let reconnectOutputOffset = 0;
+  let agentInputTarget: Writable | undefined;
+  let agentInputClosed = false;
+  const pendingReconnectInput: Array<{ bytes: Buffer; resolve(): void; reject(error: Error): void }> = [];
+  let agentInputQueue = Promise.resolve();
   let exited: Promise<[number | null, NodeJS.Signals | null]> | undefined;
   let captures: Promise<void>[] = [];
   let temporaryInput = false;
@@ -148,6 +156,21 @@ async function main(): Promise<void> {
     try { if (process.platform === 'win32') child.kill(signal); else process.kill(-child.pid, signal); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
   };
+  const writeAgentInput = (target: Writable, bytes: Buffer): Promise<void> => new Promise((resolve, reject) => {
+    if (target.destroyed || target.writableEnded) { reject(new Error('foreground_runner_input_closed')); return; }
+    try { target.write(bytes, error => error ? reject(error) : resolve()); }
+    catch (error) { reject(error instanceof Error ? error : new Error(String(error))); }
+  });
+  const forwardAgentInput = (bytes: Buffer): Promise<void> => {
+    const accepted = agentInputQueue.then(() => {
+      if (agentInputTarget) return writeAgentInput(agentInputTarget, bytes);
+      if (agentInputClosed) throw new Error('foreground_runner_input_closed');
+      return new Promise<void>((resolve, reject) => pendingReconnectInput.push({ bytes: Buffer.from(bytes), resolve, reject }));
+    });
+    agentInputQueue = accepted.catch(() => undefined);
+    return accepted;
+  };
+  const forwardProcessInput = (bytes: Buffer): void => { void forwardAgentInput(bytes).catch(() => undefined); };
   const onTerminate = () => {
     terminationDecision = (async () => {
       try {
@@ -226,7 +249,13 @@ async function main(): Promise<void> {
     let sequence = head.nextSequence;
     let offset = head.totalBytes;
     await captureRunLog(stream, {
-      forward,
+      forward: async bytes => {
+        if (reconnectServer && (name === 'stdout' || name === 'stderr')) {
+          reconnectOutputOffset += bytes.length;
+          reconnectServer.publish(bytes, reconnectOutputOffset);
+        }
+        await forward(bytes);
+      },
       append: async bytes => {
         await request('append_run_log', { ...identity, generation, stream: name, sequence, offset, bytes: bytes.toString('base64'), idempotencyKey: `run:${plan.runId}:${generation}:${name}:${sequence}` });
         sequence++;
@@ -261,15 +290,18 @@ async function main(): Promise<void> {
       env,
       detached: process.platform !== 'win32'
     });
-    const forwardInput = (bytes: Buffer) => {
-      if (!child?.stdin || child.stdin.destroyed || child.stdin.writableEnded) return;
-      try { child.stdin.write(bytes); } catch { /* The child exit path owns settlement. */ }
-    };
     if (terminal) {
       child.stdin!.on('error', () => {});
-      process.stdin.on('data', forwardInput);
+      agentInputTarget = child.stdin!;
+      process.stdin.on('data', forwardProcessInput);
+      for (const pending of pendingReconnectInput.splice(0)) {
+        void writeAgentInput(agentInputTarget, pending.bytes).then(pending.resolve, pending.reject);
+      }
       child.once('close', () => {
-        process.stdin.removeListener('data', forwardInput);
+        agentInputClosed = true;
+        agentInputTarget = undefined;
+        for (const pending of pendingReconnectInput.splice(0)) pending.reject(new Error('foreground_runner_input_closed'));
+        process.stdin.removeListener('data', forwardProcessInput);
         process.stdin.pause();
       });
     }
@@ -321,9 +353,22 @@ async function main(): Promise<void> {
     const bytes = Buffer.from(value);
     const head = await request<{ nextSequence: number; totalBytes: number }>('read_run_log_head', { ...identity, stream: 'stdout' });
     await request('append_run_log', { ...identity, generation, stream: 'stdout', sequence: head.nextSequence, offset: head.totalBytes, bytes: bytes.toString('base64'), idempotencyKey: `run:${plan.runId}:${generation}:stdout:${head.nextSequence}` });
+    if (reconnectServer) { reconnectOutputOffset += bytes.length; reconnectServer.publish(bytes, reconnectOutputOffset); }
     await stdoutDisplay(bytes);
   };
   try {
+    if (interactive) {
+      reconnectOutputOffset = (await request<{ totalBytes: number }>('read_run_log_head', { ...identity, stream: 'output' })).totalBytes;
+      reconnectServer = new ForegroundTerminalReconnectServer({
+        runId: plan.runId,
+        generation,
+        deliveryId: String(state.status.terminalDeliveryId || process.env.SOLOMAP_TERMINAL_DELIVERY_ID || ''),
+        nonce: crypto.randomBytes(32).toString('hex')
+      }, forwardAgentInput, { initialOffset: reconnectOutputOffset, onStop: signal => process.kill(process.pid, signal) });
+      const terminalReconnect = await reconnectServer.start();
+      await patch({ terminalReconnect });
+      recordDeliveryStage('terminal.delivery.reconnect.listen');
+    }
     if (maintenance && plan.status.maintenanceResultPath) {
       await patch({ maintenanceResultGeneration: generation, maintenanceResultBaseline: maintenanceResultSignature(String(plan.status.maintenanceResultPath)) });
     }
@@ -446,6 +491,7 @@ async function main(): Promise<void> {
     if (temporaryInput) await request('release_run_prompt', { ...identity, generation, proof });
     displayErrors.forEach((listener, output) => output.removeListener('error', listener));
     await Promise.all(displayFiles.map(async file => { await (await file)?.close(); }));
+    await reconnectServer?.close(Number.isInteger(process.exitCode) ? Number(process.exitCode) : undefined);
   }
 }
 

@@ -221,13 +221,14 @@ test('the shared runner records claim and Agent launch stages in the originating
       .map(event => [event.scope, event.payload.status]);
     const expected = [
       ['terminal.delivery.runner.start', 'ok'], ['terminal.delivery.runner.claim', 'ok'],
+      ['terminal.delivery.reconnect.listen', 'ok'],
       ['terminal.delivery.rollback.snapshot', 'start'], ['terminal.delivery.rollback.snapshot', 'ok'],
       ['terminal.delivery.workspace.baseline', 'start'], ['terminal.delivery.workspace.baseline', 'ok'],
       ['terminal.delivery.agent.spawn', 'ok'], ['terminal.delivery.agent.launch', 'ok'],
       ['terminal.delivery.agent.first-output', 'ok']
     ];
-    assert.deepEqual(stages.slice(0, 5), expected.slice(0, 5));
-    for (const stage of expected.slice(5)) assert.equal(stages.filter(candidate => candidate[0] === stage[0] && candidate[1] === stage[1]).length, 1);
+    assert.deepEqual(stages.slice(0, 6), expected.slice(0, 6));
+    for (const stage of expected.slice(6)) assert.equal(stages.filter(candidate => candidate[0] === stage[0] && candidate[1] === stage[1]).length, 1);
     assert.ok(stages.findIndex(candidate => candidate[0] === 'terminal.delivery.workspace.baseline' && candidate[1] === 'ok') < stages.findIndex(candidate => candidate[0] === 'terminal.delivery.agent.launch'));
     assert.ok(stages.findIndex(candidate => candidate[0] === 'terminal.delivery.agent.spawn') < stages.findIndex(candidate => candidate[0] === 'terminal.delivery.agent.launch'));
   } finally { await f.close(); }

@@ -428,7 +428,8 @@ Evidence gap：没有 Terminal/Pty Host trace，不能从现有数据证明延�
 
 ### 13.3 当前明确边界
 
-- 当前 bridge 是 Extension Host 与 runner 的直接管道。Host reload 不会主动杀 runner，权威日志仍落库，但新 Host 尚不能把新的 terminal surface 重新附着到旧管道；新动作通过新的正式 resume runner 继续，不会对同名旧终端使用 `processId`/`sendText()` 降级。不能宣称跨 Host UI 重连已经完成。
+- 0.0.627 基线上的修复把显示所有权从 Extension Host 直接管道扩展为 runner 内的认证 loopback 重连端点。Host reload 后由现有 5 秒恢复轮询接管 owner，先从数据库回放最近 1 MiB 权威输出，再按 offset 接入同一 runner 的有界实时流；不会启动新的 Agent，也不会走 `processId`/`sendText()` 或原生 resume。端点同时校验 run/generation/delivery/PID/nonce，跨项目同名终端不能认领。非交互任务不创建端点。
+- 修复之前已经启动的交互 runner 没有端点，不能在不替换进程的前提下热补。实现明确保持这些任务运行，不自动停止、不补发提示词；它们在下一次用户正常续聊创建新 runner 后自然使用新协议。跨 Host 恢复结论只适用于安装该修复后创建的交互会话。
 - Runtime scheduler 能优先准入尚未开始的操作，不能抢占已经进入同步 SQLite 的大事务。最终 r13 在本机隔离宿主和两个 CPU 负载下通过 Codex 新对话门禁；这证明本次候选和该压力模型达标，不能外推成所有数据库规模、硬件和 Provider 账号上的绝对实时保证。
 - `taskIngressReceipt` 的 `provider_native` 强收据当前由 Codex/Claude observer 提供；其他已支持 CLI 当前依赖绑定本次任务的 `agent_acknowledged` 收据。逐 Provider 官方事件适配属于后续增强，不能把本轮 Codex 数字外推为其真实账号验收结果；OpenCode serve/attach 也没有冒充本版已实现能力。
 - 原生 TUI 内由用户直接键入的消息尚没有由插件创建的可信 `acceptedAt/interactionId`，因此不纳入“插件动作接收后 10 秒”计时承诺；插件 UI 发起的首轮、继续、路线图调整、步骤和受治理远程入口都必须使用同一门禁。该边界不能用 bridge 的原始按键或 Enter 推断消除。

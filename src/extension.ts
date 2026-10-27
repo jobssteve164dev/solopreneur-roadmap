@@ -266,7 +266,8 @@ import {
 } from './continuation';
 import { extractRunTokenUsage, normalizeTokenUsage } from './tokenUsage';
 import { agentTerminalInputFrame, sendTextWhenTerminalReady } from './terminalCompatibility';
-import { buildForegroundRunnerInvocation, ForegroundAgentTerminalBridge, settleForegroundTerminalExit, type ForegroundTerminalInputMode } from './foregroundAgentTerminal';
+import { buildForegroundRunnerInvocation, ForegroundAgentTerminalBridge, ReconnectedForegroundAgentTerminalBridge, settleForegroundTerminalExit, type ForegroundAgentTerminalTransport, type ForegroundTerminalInputMode } from './foregroundAgentTerminal';
+import type { ForegroundTerminalReconnectEndpoint } from './foregroundTerminalReconnect';
 import { advanceInteractionBudget, createInteractionBudget, createInteractionBudgetAt, currentInteractionBudget, runWithInteractionBudget, type InteractionBudget } from './interactionBudget';
 import { taskIngressDeadlineFields } from './providerTaskIngress';
 import {
@@ -651,12 +652,12 @@ interface AgentTerminalRunTarget { workspaceRoot: string; globalDataPath: string
 const agentTerminalRunTargets = new Map<vscode.Terminal, AgentTerminalRunTarget>();
 interface ForegroundAgentTerminalSurface {
   pty: vscode.Pseudoterminal;
-  attach(bridge: ForegroundAgentTerminalBridge): void;
+  attach(bridge: ForegroundAgentTerminalTransport): void;
   setInputMode(inputMode: ForegroundTerminalInputMode): void;
   writeInputFrame(bytes: Buffer): Promise<void>;
   detachForHostReload(): void;
   stop(): void;
-  bridge?: ForegroundAgentTerminalBridge;
+  bridge?: ForegroundAgentTerminalTransport;
   dimensions?: vscode.TerminalDimensions;
 }
 const foregroundAgentTerminalSurfaces = new Map<vscode.Terminal, ForegroundAgentTerminalSurface>();
@@ -7494,7 +7495,12 @@ function createForegroundAgentTerminalSurface(initialInputMode: ForegroundTermin
     },
     setInputMode: nextInputMode => { inputMode = nextInputMode; },
     attach: bridge => {
-      if (surface.bridge && surface.bridge !== bridge) throw new Error('foreground_terminal_already_bound');
+      if (surface.bridge && surface.bridge !== bridge) {
+        if (surface.bridge.isRunning) throw new Error('foreground_terminal_already_bound');
+        detachOutput?.(); detachOutput = undefined;
+        detachExit?.(); detachExit = undefined;
+        surface.bridge.detachForHostReload();
+      }
       surface.bridge = bridge;
       if (opened && !detachOutput) {
         detachOutput = bridge.attachOutput(bytes => {
@@ -7531,7 +7537,7 @@ function createForegroundAgentTerminalSurface(initialInputMode: ForegroundTermin
   return surface;
 }
 
-function bridgeDetach(bridge?: ForegroundAgentTerminalBridge): void {
+function bridgeDetach(bridge?: ForegroundAgentTerminalTransport): void {
   bridge?.detachForHostReload();
 }
 
@@ -7557,6 +7563,20 @@ function createForegroundAgentTerminal(
     foregroundAgentTerminalSurfaces.set(terminal, surface);
   }
   return terminal;
+}
+
+function createRestoredForegroundAgentTerminal(terminalName: string, inputMode: ForegroundTerminalInputMode): { terminal: vscode.Terminal; surface: ForegroundAgentTerminalSurface } {
+  const surface = createForegroundAgentTerminalSurface(inputMode);
+  const terminal = vscode.window.createTerminal({
+    name: terminalName,
+    iconPath: extensionContextRef
+      ? vscode.Uri.joinPath(extensionContextRef.extensionUri, 'resources', 'logo.png')
+      : new vscode.ThemeIcon('symbol-string'),
+    color: new vscode.ThemeColor('terminal.ansiCyan'),
+    pty: surface.pty
+  });
+  foregroundAgentTerminalSurfaces.set(terminal, surface);
+  return { terminal, surface };
 }
 
 async function deliverAgentTerminalInput(terminal: vscode.Terminal, text: string, provider: string): Promise<boolean> {
@@ -11741,30 +11761,125 @@ async function pollActiveConversations(context: vscode.ExtensionContext): Promis
 
 async function reconcileRestoredAgentTerminalOwners(
   client: RunLifecycleClient,
-  records: Array<{ reference: string; status: Record<string, any> }>
+  records: Array<{ reference: string; runId?: string; generation?: number; status: Record<string, any> }>
 ): Promise<void> {
-  const terminalsByName = new Map(vscode.window.terminals.map(terminal => [terminal.name, terminal]));
   let owner: Awaited<ReturnType<typeof getAgentRunDeliveryOwner>> | undefined;
   for (const record of records) {
-    const status = record.status;
+    let status = record.status;
     const terminalName = String(status.terminalName || '');
     const terminalDeliveryId = String(status.terminalDeliveryId || '');
-    const terminal = terminalsByName.get(terminalName);
-    const terminalCwd = terminal && typeof terminal.creationOptions === 'object' && 'cwd' in terminal.creationOptions
-      ? typeof terminal.creationOptions.cwd === 'string' ? terminal.creationOptions.cwd : terminal.creationOptions.cwd?.fsPath
-      : '';
     const workspaceRoot = String(status.workspaceRoot || '');
-    const terminalBelongsToRun = Boolean(terminal && workspaceRoot && (terminalCwd
-      ? path.resolve(terminalCwd) === path.resolve(workspaceRoot)
-      : activeProjectRoot && path.resolve(activeProjectRoot) === path.resolve(workspaceRoot)));
     if (status.interactiveSession !== true || status.interactiveSessionClosed === true || status.deliveryPending === true
-      || !terminalName || !terminalDeliveryId || !terminalBelongsToRun) continue;
-    owner ||= await getAgentRunDeliveryOwner();
-    if (status.deliveryOwnerId === owner.id && Number(status.deliveryOwnerPid) === owner.pid && String(status.deliveryOwnerBirth || '') === owner.birth) continue;
+      || !terminalName || !terminalDeliveryId || !workspaceRoot) continue;
+    const endpoint = status.terminalReconnect as ForegroundTerminalReconnectEndpoint | undefined;
+    const reconnectable = endpoint?.protocol === 1 && endpoint.host === '127.0.0.1'
+      && Number.isInteger(endpoint.port) && endpoint.port > 0 && endpoint.port <= 65535
+      && endpoint.deliveryId === terminalDeliveryId && endpoint.runId === record.runId
+      && endpoint.generation === record.generation
+      && typeof endpoint.nonce === 'string' && endpoint.nonce.length >= 32
+      && Number(endpoint.runnerPid) === Number(status.agentPid)
+      && typeof status.processBirth === 'string' && status.processBirth.length > 0
+      && readProcessBirthMarker(Number(endpoint.runnerPid)) === status.processBirth;
+    const matchingTerminal = vscode.window.terminals.find(terminal => {
+      const target = agentTerminalRunTargets.get(terminal);
+      return terminal.name === terminalName && Boolean(target) && target!.globalDataPath === client.dataRoot
+        && target!.workspaceRoot === workspaceRoot && target!.runId === endpoint?.runId
+        && target!.generation === endpoint?.generation && target!.deliveryId === terminalDeliveryId;
+    });
+    if (matchingTerminal && foregroundAgentTerminalSurfaces.get(matchingTerminal)?.bridge?.isRunning) continue;
+
+    if (!reconnectable) {
+      // Runners created before the reconnect protocol remain untouched. They
+      // are upgraded naturally on the next native continuation. Preserve the
+      // old visible-terminal owner claim for pre-protocol shell terminals.
+      const terminal = vscode.window.terminals.find(candidate => candidate.name === terminalName);
+      const terminalCwd = terminal && typeof terminal.creationOptions === 'object' && 'cwd' in terminal.creationOptions
+        ? typeof terminal.creationOptions.cwd === 'string' ? terminal.creationOptions.cwd : terminal.creationOptions.cwd?.fsPath
+        : '';
+      if (terminal && terminalCwd && path.resolve(terminalCwd) === path.resolve(workspaceRoot)) {
+        owner ||= await getAgentRunDeliveryOwner();
+        try { await client.claimTerminalOwner(record.reference, status, owner); }
+        catch (error) {
+          if (!['revision_conflict', 'run_owner_conflict', 'run_delivery_owner_alive', 'run_delivery_identity_changed', 'run_owner_missing', 'run_terminal_not_recoverable'].includes((error as Error).message)) throw error;
+        }
+      }
+      continue;
+    }
+    let reconnectTrace: ReturnType<typeof createLocalDiagnosticTrace> | undefined;
     try {
-      await client.claimTerminalOwner(record.reference, status, owner);
+    owner ||= await getAgentRunDeliveryOwner();
+    reconnectTrace = createLocalDiagnosticTrace(client.dataRoot!, 'terminal.reconnect', {
+      interactionId: String(status.interactionId || ''), targetId: endpoint!.runId, generation: endpoint!.generation
+    });
+    const alreadyOwned = status.deliveryOwnerId === owner.id && Number(status.deliveryOwnerPid) === owner.pid
+      && String(status.deliveryOwnerBirth || '') === owner.birth;
+    if (!alreadyOwned) {
+      reconnectTrace.record('terminal.reconnect.claim', 'start', 0, undefined, { pid: endpoint!.runnerPid });
+      let claimError: unknown;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try { status = await client.claimTerminalOwner(record.reference, status, owner); claimError = undefined; break; }
+        catch (error) {
+          claimError = error;
+          if ((error as Error).message !== 'revision_conflict' || attempt > 0) break;
+          const latest = await client.readStatus(record.reference);
+          if (!latest || String(latest.terminalDeliveryId || '') !== terminalDeliveryId) break;
+          status = latest;
+        }
+      }
+      if (claimError) {
+        reconnectTrace.record('terminal.reconnect.claim', 'error', 0, claimError, { pid: endpoint!.runnerPid });
+        reconnectTrace.record('terminal.reconnect', 'error', 0, claimError, { pid: endpoint!.runnerPid });
+        if (!['revision_conflict', 'run_owner_conflict', 'run_delivery_owner_alive', 'run_delivery_identity_changed', 'run_owner_missing', 'run_terminal_not_recoverable'].includes((claimError as Error).message)) throw claimError;
+        continue;
+      }
+      reconnectTrace.record('terminal.reconnect.claim', 'ok', 0, undefined, { pid: endpoint!.runnerPid });
+    }
+    let bridge: ReconnectedForegroundAgentTerminalBridge | undefined;
+    let replayedBytes = 0;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const replay = await client.readLogTailInfo(record.reference, 'output', 1024 * 1024);
+      replayedBytes = replay.bytes.length;
+      bridge = new ReconnectedForegroundAgentTerminalBridge(endpoint!, replay.bytes, replay.totalBytes);
+      reconnectTrace.record('terminal.reconnect.connect', 'start', 0, undefined,
+        { pid: endpoint!.runnerPid, stdoutBytes: replayedBytes });
+      try {
+        await bridge.connect();
+        reconnectTrace.record('terminal.reconnect.connect', 'ok', 0, undefined,
+          { pid: endpoint!.runnerPid, stdoutBytes: replayedBytes });
+        break;
+      }
+      catch (error) {
+        bridge.detachForHostReload(); bridge = undefined;
+        reconnectTrace.record('terminal.reconnect.connect', 'error', 0, error,
+          { pid: endpoint!.runnerPid, stdoutBytes: replayedBytes });
+        if (!(error instanceof Error) || !error.message.startsWith('terminal_reconnect_resync_required:') || attempt > 0) {
+          reconnectTrace.record('terminal.reconnect', 'error', 0, error, { pid: endpoint!.runnerPid });
+          break;
+        }
+      }
+    }
+    if (!bridge?.isRunning) continue;
+    const inputMode = String(status.agentInputMode || 'prompt_turn') as ForegroundTerminalInputMode;
+    const existingSurface = matchingTerminal ? foregroundAgentTerminalSurfaces.get(matchingTerminal) : undefined;
+    const restored = matchingTerminal && existingSurface
+      ? { terminal: matchingTerminal, surface: existingSurface }
+      : createRestoredForegroundAgentTerminal(terminalName, inputMode);
+    restored.surface.setInputMode(inputMode);
+    restored.surface.attach(bridge);
+    agentTerminalRunTargets.set(restored.terminal, {
+      workspaceRoot, globalDataPath: client.dataRoot!, executionLogId: Number(status.rootExecutionLogId),
+      runId: endpoint!.runId, generation: endpoint!.generation, deliveryId: terminalDeliveryId
+    });
+    for (const id of new Set([Number(status.rootExecutionLogId), Number(status.executionLogId)])) {
+      if (id > 0) setAgentTerminalBinding(workspaceRoot, id, terminalName);
+    }
+    reconnectTrace.record('terminal.reconnect.ready', 'ok', 0, undefined,
+      { pid: endpoint!.runnerPid, stdoutBytes: replayedBytes });
+    reconnectTrace.record('terminal.reconnect', 'ok', 0, undefined,
+      { pid: endpoint!.runnerPid, stdoutBytes: replayedBytes });
     } catch (error) {
-      if (!['revision_conflict', 'run_owner_conflict', 'run_delivery_owner_alive', 'run_delivery_identity_changed', 'run_owner_missing', 'run_terminal_not_recoverable'].includes((error as Error).message)) throw error;
+      reconnectTrace?.record('terminal.reconnect', 'error', 0, error, { pid: endpoint!.runnerPid });
+      console.error('SoloMap could not reconnect an Agent terminal:', endpoint!.runId, error);
     }
   }
 }
