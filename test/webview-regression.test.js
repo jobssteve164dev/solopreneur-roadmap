@@ -237,6 +237,45 @@ test('a transient reconnect socket loss reuses the existing terminal surface on 
   while (!input.length) await new Promise(resolve => setTimeout(resolve, 5));
   assert.deepEqual(input, ['after-transient-loss\n']);
 });
+
+test('runner claim generation does not make recovery create a second terminal for the same live surface', async t => {
+  const { ForegroundTerminalReconnectServer } = require('../out/foregroundTerminalReconnect.js');
+  const identity = { runId: 'claimed-run', generation: 2, deliveryId: 'claimed-delivery', nonce: '8'.repeat(64) };
+  const server = new ForegroundTerminalReconnectServer(identity, async () => undefined);
+  const endpoint = await server.start();
+  t.after(async () => server.close());
+  let created = 0;
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.reconcile = reconcileRestoredAgentTerminalOwners;
+    module.exports.seed = (terminal, target) => {
+      vscode.window.terminals.push(terminal);
+      agentTerminalRunTargets.set(terminal, target);
+      foregroundAgentTerminalSurfaces.set(terminal, { bridge: { isRunning: true } });
+    };
+    module.exports.setCreateTerminal = create => { vscode.window.createTerminal = create; };
+  `);
+  const terminal = { name: 'SoloMap: claimed', show() {}, dispose() {} };
+  extension.seed(terminal, {
+    workspaceRoot: '/project-claimed', globalDataPath: '/data/claimed', executionLogId: 91,
+    runId: identity.runId, generation: 1, deliveryId: identity.deliveryId
+  });
+  extension.setCreateTerminal(() => {
+    created += 1;
+    return { name: 'SoloMap: duplicate', show() {}, dispose() {} };
+  });
+  const status = {
+    workspaceRoot: '/project-claimed', rootExecutionLogId: 91, executionLogId: 91,
+    interactiveSession: true, interactiveSessionClosed: false, deliveryPending: false,
+    terminalName: terminal.name, terminalDeliveryId: identity.deliveryId, terminalClaimDeliveryId: identity.deliveryId,
+    agentPid: process.pid, processBirth: currentProcessBirth, agentInputMode: 'prompt_turn', terminalReconnect: endpoint,
+    deliveryOwnerId: 'old-owner'
+  };
+  await extension.reconcile({
+    dataRoot: '/data/claimed', claimTerminalOwner: async () => status,
+    readLogTailInfo: async () => ({ bytes: Buffer.alloc(0), totalBytes: 0 })
+  }, [{ reference: 'claimed-reference', runId: identity.runId, generation: identity.generation, status }]);
+  assert.equal(created, 0, 'the runner claim generation is the same live delivery, not a missing terminal');
+});
 const sharedHostDefaultRoot = path.join(os.tmpdir(), `solomap-host-default-${process.pid}`);
 test.after(() => {
   if (!fs.existsSync(sharedHostDefaultRoot)) return;
@@ -2531,6 +2570,24 @@ test('command-palette conversation launch keeps the project captured across term
   const terminalIndex = body.indexOf('revealAgentStartupTerminal(');
   assert.ok(workspaceIndex > 0 && workspaceIndex < terminalIndex && captureIndex > terminalIndex);
   assert.match(body, /handleRunAgent\([^;]+launchTarget/s);
+});
+
+test('internal conversation launch skips registry IO for an already registered project and shows the terminal before target preparation', () => {
+  const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
+  const start = source.indexOf("registerCommand('solopreneur.internalStartConversation'");
+  const body = source.slice(start, source.indexOf("registerCommand('solopreneur.internalRefreshTimedAutomation'", start));
+  const initialCapture = body.indexOf('captureRegisteredConversationLaunchSnapshot(');
+  const fallbackRefresh = body.indexOf('refreshProjectRegistryForContext(');
+  const fallbackCapture = body.indexOf('captureRegisteredConversationLaunchSnapshot(', initialCapture + 1);
+  const terminal = body.indexOf('revealAgentStartupTerminal(');
+  const target = body.indexOf('const target = await captureTarget()', terminal);
+  assert.ok(initialCapture > 0 && initialCapture < fallbackRefresh,
+    'an already registered project must not wait for registry IO');
+  assert.ok(fallbackRefresh < fallbackCapture,
+    'registry recovery must retry the same registered-project snapshot');
+  assert.ok(terminal > fallbackCapture && terminal < target,
+    'the user-visible terminal must precede runtime and project target preparation');
+  assert.match(body, /if \(!launchSnapshot\) \{[\s\S]*?refreshProjectRegistryForContext/);
 });
 
 test('captured project launches never read later settings or refresh another selected roadmap', () => {
@@ -8705,7 +8762,9 @@ test('local-first loading paints and launches before optional or durable work', 
     extensionSource.indexOf('function launchAgentConversationTerminal')
   );
   assert.match(revealBody, /createAgentTerminal\(workspaceRoot, label, 0, undefined, true\)/);
-  assert.ok(revealBody.indexOf('terminal.show(false)') < revealBody.indexOf('await getOpenCodeTerminalEnvironment('));
+  assert.match(revealBody, /terminal\.show\(false\)/);
+  assert.doesNotMatch(revealBody, /getOpenCodeTerminalEnvironment\(/,
+    'the visible startup surface must not repeat formal runner environment preparation');
   assert.match(dispatchBody, /'conversation\.runSolo': async[\s\S]*?revealAgentStartupTerminal\([\s\S]*?'solo'[\s\S]*?\);/);
   assert.match(dispatchBody, /'conversation\.runStep': async[\s\S]*?`step-\$\{String\(request\.nodeId \|\| 'conversation'\)\}`/);
 });
@@ -19246,6 +19305,36 @@ test('roadmap UI persistence debounces each field independently', async () => {
   assert.deepEqual(patches.map(message => message.key).sort(), ['draft', 'expanded']);
 });
 
+test('the host commits a sidebar UI-state batch in one runtime mutation', async () => {
+  const requests = [];
+  const transport = { sendRuntimeDataRequest: async (_root, request) => {
+    requests.push(request);
+    if (request.operation === 'read_ui_state') return { items: [] };
+    if (request.operation === 'patch_ui_state') return { items: request.input.patches.map((patch, index) => ({ ...patch, revision: index + 1 })) };
+    throw new Error(`unexpected operation: ${request.operation}`);
+  } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.handle = handleSharedWebviewAction;
+    module.exports.connect = root => { getPersistedSettings = () => ({ globalDataPath: root }); };
+  `, {
+    './autonomousRuntimeControl': transport,
+    './autonomousRuntimeHost': { ensureHealthyAutonomousRuntime: async () => ({ started: false }) }
+  });
+  extension.connect('/data/sidebar-batch');
+  const messages = [];
+  await extension.handle({ extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => {} } }, {
+    command: 'uiState.patch', scopeKey: '/project', requestId: 'sidebar-batch', patches: [
+      { key: 'interaction.projectSoloDrafts.%2Fproject', value: '独立对话草稿' },
+      { key: 'interaction.projectContinueDrafts.%2Fproject', value: '续聊草稿' },
+      { key: 'interaction.sidebarExpandedConversations.42', value: true }
+    ]
+  }, 'sidebar', { postMessage: async message => { messages.push(message); return true; } });
+  const writes = requests.filter(request => request.operation === 'patch_ui_state');
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].input.patches.length, 3);
+  assert.equal(messages.some(message => message.command === 'uiStatePatched' && message.requestId === 'sidebar-batch'), true);
+});
+
 test('roadmap ignores an older UI load response for the same project', () => {
   const html = require('../out/roadmapWebview.js').getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
   const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
@@ -19276,6 +19365,49 @@ test('sidebar ignores an older UI load response for the same project', () => {
   assert.equal(context.__sidebarDraft(), 'newest');
   dispatchMessage({ command: 'uiStateLoaded', view: 'sidebar', scopeKey: '/project', loadRequestId: reads[0].loadRequestId, state: { 'interaction.issueDraftTitle': 'stale' } });
   assert.equal(context.__sidebarDraft(), 'newest');
+});
+
+test('sidebar persists one interaction snapshot as one batched UI-state message', async () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { context, postedMessages } = runScriptWithMinimalDom(extractLastScript(html), ids, `
+    globalThis.__saveInteractionSnapshot = scope => {
+      currentProjects.selectedProjectPath = scope;
+      projectSoloDrafts[scope] = '保留独立对话草稿';
+      projectContinueDrafts[scope] = '保留续聊草稿';
+      sidebarExpandedConversations['42'] = true;
+      saveSidebarInteractionState();
+    };
+  `);
+  context.__saveInteractionSnapshot('/project');
+  await new Promise(resolve => setTimeout(resolve, 160));
+  const writes = postedMessages.filter(message => message.command === 'uiState.patch' && message.scopeKey === '/project');
+  assert.equal(writes.length, 1, 'one local snapshot must not fan out into hundreds of runtime requests');
+  assert.ok(Array.isArray(writes[0].patches));
+  assert.ok(writes[0].patches.length > 1);
+  assert.ok(writes[0].patches.some(patch => patch.key === 'interaction.sidebarExpandedConversations.42' && patch.value === true));
+});
+
+test('sidebar UI-state batches use distinct idempotency keys across project scopes', async () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { context, postedMessages } = runScriptWithMinimalDom(extractLastScript(html), ids, `
+    globalThis.__saveScopedSnapshots = () => {
+      currentProjects.selectedProjectPath = '/project-a';
+      projectSoloDrafts['/project-a'] = 'A';
+      saveSidebarInteractionState();
+      currentProjects.selectedProjectPath = '/project-b';
+      projectSoloDrafts['/project-b'] = 'B';
+      saveSidebarInteractionState();
+    };
+  `);
+  context.__saveScopedSnapshots();
+  await new Promise(resolve => setTimeout(resolve, 160));
+  const writes = postedMessages.filter(message => message.command === 'uiState.patch'
+    && ['/project-a', '/project-b'].includes(message.scopeKey));
+  assert.equal(writes.length, 2);
+  assert.equal(new Set(writes.map(message => message.requestId)).size, 2,
+    'two scoped mutations must never share one database idempotency key');
 });
 
 test('sidebar records an expand click before an already queued UI-state response can overwrite it', async () => {
@@ -21406,6 +21538,31 @@ test('startup terminal is reused before VS Code publishes its terminals list', a
   const startup = await extension.reveal({}, '/isolated/project', 'continue', 'codex');
   const delivered = extension.create('/isolated/project', 'solo_continue', 42);
   assert.equal(delivered, startup, 'continued conversation must load in the terminal already opened for this action');
+  assert.equal(created.length, 1);
+});
+
+test('startup terminal reveal never waits for Agent CLI environment IO before returning the visible surface', async () => {
+  const created = [];
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.reveal = revealAgentStartupTerminal;
+    module.exports.create = createAgentTerminal;
+    module.exports.connect = factory => {
+      getPersistedSettings = () => ({cliPath:'codex'});
+      getOpenCodeTerminalEnvironment = () => new Promise(() => {});
+      vscode.window.createTerminal = factory;
+    };
+  `);
+  extension.connect(options => {
+    const terminal = {name:options.name, show(){}, sendText(){}, exitStatus:undefined};
+    created.push(terminal); return terminal;
+  });
+  const revealed = await Promise.race([
+    extension.reveal({}, '/isolated/immediate-project', 'solo', 'codex'),
+    new Promise(resolve => setTimeout(() => resolve('timed-out'), 25))
+  ]);
+  assert.notEqual(revealed, 'timed-out', 'visible terminal creation must not queue behind CLI environment IO');
+  assert.equal(extension.create('/isolated/immediate-project', 'solo', 42, { FIXTURE: 'formal-runner-env' }), revealed,
+    'the formal runner must reuse the environment-independent Custom PTY surface');
   assert.equal(created.length, 1);
 });
 test('every production conversation sender carries one click-origin interaction identity and timestamp into the shared host path', () => {

@@ -434,6 +434,15 @@ Evidence gap：没有 Terminal/Pty Host trace，不能从现有数据证明延�
 - `taskIngressReceipt` 的 `provider_native` 强收据当前由 Codex/Claude observer 提供；其他已支持 CLI 当前依赖绑定本次任务的 `agent_acknowledged` 收据。逐 Provider 官方事件适配属于后续增强，不能把本轮 Codex 数字外推为其真实账号验收结果；OpenCode serve/attach 也没有冒充本版已实现能力。
 - 原生 TUI 内由用户直接键入的消息尚没有由插件创建的可信 `acceptedAt/interactionId`，因此不纳入“插件动作接收后 10 秒”计时承诺；插件 UI 发起的首轮、继续、路线图调整、步骤和受治理远程入口都必须使用同一门禁。该边界不能用 bridge 的原始按键或 Enter 推断消除。
 
+### 13.4 0.0.628 现场回归复审（2026-10-27）
+
+- **Observed in logs:** interaction `ui:mvq0tj4k:0e53e572-4ade-48c2-b22d-e3530d89d0c6` 只有一次侧边栏 `conversation.runSolo`。01:42:49.763 已创建首个 terminal surface；正式 runner 只有 PID 526656、run `ee475a65-0228-4b1a-9e05-8b000266b425`。01:43:09.119 恢复轮询为同一 run/PID 再执行 `terminal.reconnect` 并创建第二个 surface，因此不是重复点击或重复 Agent task。
+- **Observed in code:** 正常 delivery 在 runner claim 前登记 generation 1；claim 将权威 run generation 前进为 2，通用 `isAgentTerminalRunTargetCurrent` 明确认可同 delivery 的这次前进。0.0.628 新增恢复分支却要求 target generation 与 endpoint generation 字面相等，造成同一 live surface 被误判缺失。这是 0.0.628 引入的恢复链路回归。
+- **Observed in logs/code:** 该动作前后存在 226 个侧边栏 `uiState.patch` start；前端把一次完整交互状态快照拆成逐叶消息，Host 再为每个叶片串行执行一次全量 `read_ui_state` 和一次 `patch_ui_state`。Provider 原生 task ingress 最终为 24.084 秒。请求风暴与实测慢阶段一致；它是已确认的前台资源竞争设计缺陷，但不能把数据库大小单独写成根因。
+- **Observed in code:** runner exit 回调对 `prompt_turn` 和 `session_reentry` 调用 PTY close；自动消失来自插件，不是 Coder 限制。
+- **修复契约:** 恢复匹配统一使用正常 delivery 当前性；同一交互快照单次批量持久化；runner 退出保留所有对话终端。已注册项目先使用同步快照，terminal surface 立即展示且不重复等待 CLI 环境解析；正式 runner 仍按固定快照完成完整环境准备并接管同一 surface。
+- **真实候选验证:** 最终候选 VSIX 在隔离 code-server、真实 Chromium、真实 Codex 和两个 CPU burner 下，Provider 原生 task ingress 为 9.083 秒；同一动作只记录 1 次终端打开、0 次关闭，任务完成后仍保留 1 个终端。候选包审计为 6339 files、11.51 MiB compressed、38.91 MiB uncompressed。完整仓库回归与发布流程仍以最终提交后的门禁结果为准。
+
 ## 14. 主要证据索引
 
 - Webview 发送与即时清空：`src/sidebarWebview.ts:10088`、`src/sidebarWebview.ts:10442`、`src/sidebarWebview.ts:12446`。

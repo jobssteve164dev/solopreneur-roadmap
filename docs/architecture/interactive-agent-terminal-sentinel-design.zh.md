@@ -109,7 +109,8 @@ terminal binding、复用、关闭、续轮、cleanup、停止、恢复和 task-
 恢复规则：
 
 - 普通终端 Shell/PTY 只能是显示与原生输入输出表面，不能再充当 runner/Agent CLI 启动门。新任务必须通过不依赖普通 Shell `processId` 的受控进程路径启动；目标终端仍应立即显示，并在自身就绪后接入同一个 runner，而不是创建第二份任务。
-- 当前最小桥接实现使用 VS Code Custom Pseudoterminal：Extension 先以 `child_process.spawn(process.execPath, [runAgentProcess.js, ...])`、`shell=false` 和 `ELECTRON_RUN_AS_NODE=1` 直接启动唯一 runner；这一步不等待 `Pseudoterminal.open`、普通 Terminal `processId` 或焦点完成。Extension 与 runner 通过直接 stdin/stdout/stderr pipes 传输输入和显示输出；正式输出同时先写权威 run log。用户 trash/dispose 这个终端实例或点击显式“停止”才发起 stop；隐藏 panel 不停止任务。runner 退出则关闭该 surface。
+- 当前最小桥接实现使用 VS Code Custom Pseudoterminal：Extension 先以 `child_process.spawn(process.execPath, [runAgentProcess.js, ...])`、`shell=false` 和 `ELECTRON_RUN_AS_NODE=1` 直接启动唯一 runner；这一步不等待 `Pseudoterminal.open`、普通 Terminal `processId` 或焦点完成。Extension 与 runner 通过直接 stdin/stdout/stderr pipes 传输输入和显示输出；正式输出同时先写权威 run log。用户 trash/dispose 这个终端实例或点击显式“停止”才发起 stop；隐藏 panel 不停止任务。runner 退出只结束本轮并写入结束提示，不关闭 terminal surface；surface 由用户明确关闭。
+- 已注册项目的前台入口先从宿主现有注册快照同步固定项目与设置；只有快照确实缺失时才刷新注册表。Custom PTY 的创建、展示和启动预留不等待重复的 Agent CLI 环境解析，正式 runner 仍在唯一启动路径中按同一快照解析完整环境并接管已展示 surface。
 - Extension Host deactivate 只断开交互展示订阅，不主动 stop runner；交互 runner 自己持有 Agent stdin，Host pipe EOF 不会被转译为 Agent EOF。非交互任务遵守相反且明确的所有权：Agent fd 0 从启动起立即 EOF，不创建重连 listener。每个新交互 runner 在 `127.0.0.1` 随机端口提供本机 IPC，端点同时绑定 run、generation、delivery、runner PID/birth 和 256-bit attach nonce；任何字段缺失或不符都在输入抵达 Agent 前拒绝。新 Host 先通过数据库 owner CAS 取得显示所有权，再回放权威 `output` 日志最近 1 MiB，并从持久 offset 接入 runner 的 4 MiB 有界实时缓冲；attached/replay/ready 严格有序，回放缺口会重新读取数据库而不是静默丢字节。输入只有在 Agent stdin 写回调成功后才 ACK，同一 request ID 在 runner 生命周期内有界去重；异常断线立即取消 live 状态，下一轮恢复复用原 terminal surface。未认证连接还有 1 MiB 单帧上限、5 秒认证时限和连接数上限。重连只重建 terminal surface，不 spawn runner、不 resume Provider、不提交提示词。旧版本已经启动且没有端点的 runner 不做有损热迁移，保持运行并在下一次正常原生续聊后进入新协议。
 - runner 内部可以继续用 `script` 为配置的 CLI 提供 TTY，但 `script` 是 runner 的唯一正式子树且不得充当 task-start 收据。正式执行和 `--help`、`--version`、`create-chat` preflight 必须传入明确 `executionKind=formal|preflight`；只有 formal 子树可产生 task ingress receipt。
 - 如果兼容路径仍需向普通 Shell 发送文本，该文本必须等待真实 PTY PID，且不得以超时后重建终端的方式恢复；但这段等待不能阻塞真实 Agent CLI 在 10 秒硬上限内进入本次任务。
@@ -401,6 +402,7 @@ Codex 根 Agent 与子 Agent 可能都触发生命周期 Hook。SoloMap 必须�
 - 等待审批或回答：显示“需要你确认”，主动作是“打开终端”。
 - 当前轮完成且终端仍在：显示“等待你继续”，主动作是“打开终端”。
 - 终端关闭且 Session 可恢复：显示“继续”。
+- Agent 进程自然退出只结束本轮，不关闭 PTY surface；终端保留最终输出和结束提示，只有用户明确关闭终端才销毁该 surface。
 - 关闭对话终端视图：只隐藏界面，不停止活动轮次，也不关闭可恢复 Session。
 - 用户点击“停止”：向当前 Session 发送取消；收到 `cancelled` 后把当前轮记为已停止。
 - Adapter 进程在执行中异常退出：当前轮记为异常中断，保留 Session 身份用于恢复。

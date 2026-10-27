@@ -300,6 +300,7 @@ projectPath + projectGeneration + interactionId
 - 前台与后台共享 Runtime、数据库、锁、事件循环或进程资源时，必须存在可验证的优先调度、时间片让行、独立队列或资源隔离；只有异步调用、`setImmediate` 或不同业务函数不算隔离。
 - 前台完成时限必须在后台满载场景下成立。空闲环境达标、并发时退化为几十秒，按架构不合规处理，不能归因于“本地机器忙”。
 - 权威日志和状态持久化仍需保证完整，但不能反向阻塞下一次用户控制动作；持久化吞吐、批量大小和背压必须服从对话控制面的优先级。
+- 同一次前端交互产生的草稿、展开态、选择态等 UI 状态变更必须按作用域合并为一次数据库 mutation；禁止把一个快照拆成逐叶读取、逐叶写入的请求风暴，与用户对话争抢 Runtime 和 SQLite。
 - 5 秒仍是正常体验目标；10 秒是不可越过的发布红线。所有插件可触发的对话入口都必须在真实 code-server / VS Code 宿主和后台负载存在时，从用户动作或自动触发被接收开始计时，以同 interaction 的 `provider_native` 或 `agent_acknowledged` task-ingress 收据为终点。进程树和 terminal bridge 仅作诊断/transport，永不结束计时。任一入口在 10 秒门禁触发前仍无收据，整版不得发布。
 - 验收不得只覆盖共享 helper。Solo、步骤对话、路线图调整、Flow 各角色、续聊、Continue Turn、项目成长汇报继续、原生 Agent 终端直接输入、重试、时间计划、项目卡片动作、内部/远程发起、定时自动化、自动 effect、自动复核、全局提示词复盘及维护类 Agent 入口都必须有真实入口收据；同一底层调用不免除入口自身的准备与清理验收。自动复核只能接受已具备且真实验证只读命令的 reviewer：当前为 Codex、Antigravity、Cursor、Claude 与 Grok；Copilot/OpenCode 在补齐只读合同前必须于设置保存与动作接受前拒绝，不能创建一个注定在 runner 中失败的对话。
 - 自动 effect 从持久父 `eligibleAt/budgetOriginAt` 开始计时，并在 claim 时固定完整启动配置；retry 与 custom prompt 使用确定性子 interaction、独立启动，但都继承父预算起点。claim 后重读当前设置、reclaim 重置时钟或让前一个派生动作阻塞后一个，均判失败。
@@ -366,8 +367,11 @@ projectPath + projectGeneration + interactionId
 
 - 点击续聊、重试或发送后，原按钮必须立即进入明确的进行中状态，并阻止同一次动作重复提交。
 - 终端创建和可见反馈先于项目初始化、数据库准备、Git 备份与 Prompt 组装。
+- 已注册项目不得在前台入口重复等待完整项目注册表刷新；启动 terminal surface 不得等待正式 runner 随后仍会完成的 CLI 环境解析。两者只允许在快照缺失或正式启动阶段执行，不能成为可见反馈的前置门闩。
 - 对话动作开始后的历史更新由宿主在写入本地运行记录后主动推送；前端不得同时猜测时机并再次拉取旧历史。
 - 动作准备失败时，按钮恢复可操作，输入和附件保持，错误指向本次动作。
+- 同一 run 的恢复匹配必须复用正常 delivery 的身份判定，包括 runner claim 造成的合法 generation 前进；恢复轮询不得因要求 generation 字面相等而为仍然存活的 surface 创建第二个终端。
+- Agent runner 自然结束后，集成终端保持可见并展示结束提示，直到用户明确关闭；进程退出不等于用户要求关闭终端。
 
 ### 8. 权威日志与可选显示解耦
 

@@ -1022,35 +1022,51 @@ export async function activate(context: vscode.ExtensionContext) {
     const message = String(input.message || '').trim();
     const settings = getPersistedSettings(context);
     const globalDataPath = normalizeSolomapGlobalPath(projectPath, settings.globalDataPath);
+    if (!['step', 'solo', 'flow'].includes(mode) || !message || !String(input.launchIntentId || '')) throw new Error('invalid_conversation_request');
+    if (mode === 'step' && !String(input.stepId || '').trim()) throw new Error('step_id_required');
     const trace = createLocalDiagnosticTrace(globalDataPath, 'conversation.entry', {
       interactionId: interactionBudget.interactionId, targetId: mode || 'conversation', budgetMs: 10_000
     });
     return withLocalDiagnosticTrace(trace, async () => {
-    await refreshProjectRegistryForContext(context, globalDataPath);
-    const project = getProjects(context).find(candidate => path.resolve(candidate.path) === projectPath);
-    if (!project || !['step', 'solo', 'flow'].includes(mode) || !message || !String(input.launchIntentId || '')) throw new Error('invalid_conversation_request');
-    if (mode === 'step' && !String(input.stepId || '').trim()) throw new Error('step_id_required');
-    const target = await captureConversationLaunchTarget(context, projectPath, globalDataPath, settings);
-    target.launchIntentId = String(input.launchIntentId);
-    try {
+    let launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, projectPath);
+    if (!launchSnapshot) {
+      await refreshProjectRegistryForContext(context, globalDataPath);
+      launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, projectPath);
+    }
+    if (!launchSnapshot) throw new Error('invalid_conversation_request');
+    const captureTarget = async () => {
+      const target = await captureRegisteredConversationLaunchTarget(context, projectPath, launchSnapshot);
+      if (!target) throw new Error('invalid_conversation_request');
+      target.launchIntentId = String(input.launchIntentId);
+      return target;
+    };
+    const launchSettings = launchSnapshot.settings;
       if (mode === 'step') {
         let registered = false;
-        const startupTerminal = await revealAgentStartupTerminal(context, projectPath, `step-${String(input.stepId)}`, String(input.agentCli || ''), String(input.model || ''), settings);
+        const startupTerminal = await revealAgentStartupTerminal(context, projectPath, `step-${String(input.stepId)}`, String(input.agentCli || ''), String(input.model || ''), launchSettings);
         try {
-          await handleRunAgent(context, String(input.stepId), message, String(input.agentCli || ''), String(input.model || ''), [], true, () => { registered = true; }, target);
-          if (!registered) throw new Error('conversation_not_started');
+          const target = await captureTarget();
+          try {
+            await handleRunAgent(context, String(input.stepId), message, String(input.agentCli || ''), String(input.model || ''), [], true, () => { registered = true; }, target);
+            if (!registered) throw new Error('conversation_not_started');
+          } finally { target.engine?.close(); }
         } finally { if (!registered) discardReservedAgentStartupTerminal(projectPath, startupTerminal); }
       } else if (mode === 'solo') {
-        const startupTerminal = await revealAgentStartupTerminal(context, projectPath, 'solo', String(input.agentCli || ''), String(input.model || ''), settings);
+        const startupTerminal = await revealAgentStartupTerminal(context, projectPath, 'solo', String(input.agentCli || ''), String(input.model || ''), launchSettings);
         try {
-          const executionLogId = await handleRunSoloConversation(context, message, String(input.agentCli || ''), String(input.model || ''), [], '', true, target);
-          if (!executionLogId) throw new Error('conversation_not_started');
+          const target = await captureTarget();
+          try {
+            const executionLogId = await handleRunSoloConversation(context, message, String(input.agentCli || ''), String(input.model || ''), [], '', true, target);
+            if (!executionLogId) throw new Error('conversation_not_started');
+          } finally { target.engine?.close(); }
         } finally { discardReservedAgentStartupTerminal(projectPath, startupTerminal); }
-      } else if (!await handleRunFlow(context, message, String(input.agentCli || ''), String(input.model || ''), [], target)) {
-        throw new Error('conversation_not_started');
+      } else {
+        const target = await captureTarget();
+        try {
+          if (!await handleRunFlow(context, message, String(input.agentCli || ''), String(input.model || ''), [], target)) throw new Error('conversation_not_started');
+        } finally { target.engine?.close(); }
       }
       return { status: 'started', projectPath, mode };
-    } finally { target.engine?.close(); }
     });
     });
   }));
@@ -1593,13 +1609,17 @@ async function handleSharedWebviewAction(
     },
     'uiState.patch': async (request) => {
       const scopeKey = String(request.scopeKey || 'global').slice(0, 1024);
-      const key = String(request.key || '').slice(0, 1024);
-      if (!key || request.value === undefined) throw new Error('invalid_ui_state_patch');
+      const requestedPatches: Array<{ key?: unknown; value?: unknown }> = Array.isArray(request.patches)
+        ? request.patches as Array<{ key?: unknown; value?: unknown }>
+        : [{ key: request.key, value: request.value }];
+      if (requestedPatches.length < 1 || requestedPatches.length > 4096) throw new Error('invalid_ui_state_patch');
+      const patches = requestedPatches.map(patch => ({ key: String(patch?.key || '').slice(0, 1024), value: patch?.value }));
+      if (patches.some(patch => !patch.key || patch.value === undefined)) throw new Error('invalid_ui_state_patch');
       const dataRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
       const writeKey = `${dataRoot}\n${surface}\n${scopeKey}`;
       const previous = uiStateWrites.get(writeKey);
       const write = (previous ? previous.catch(() => ({})) : Promise.resolve({})).then(() =>
-        patchUiState(context, surface, scopeKey, key, request.value, String(request.requestId || `ui-state:${crypto.randomUUID()}`)));
+        patchUiStateBatch(context, surface, scopeKey, patches, String(request.requestId || `ui-state:${crypto.randomUUID()}`)));
       uiStateWrites.set(writeKey, write);
       try { await write; }
       finally { if (uiStateWrites.get(writeKey) === write) uiStateWrites.delete(writeKey); }
@@ -2871,18 +2891,24 @@ async function readUiState(context: vscode.ExtensionContext, view: string, scope
 }
 
 async function patchUiState(context: vscode.ExtensionContext, view: string, scopeKey: string, key: string, value: unknown, idempotencyKey = `ui-state:${crypto.randomUUID()}`): Promise<Record<string, unknown>> {
+  return patchUiStateBatch(context, view, scopeKey, [{ key, value }], idempotencyKey);
+}
+
+async function patchUiStateBatch(context: vscode.ExtensionContext, view: string, scopeKey: string, patches: Array<{ key: string; value: unknown }>, idempotencyKey = `ui-state:${crypto.randomUUID()}`): Promise<Record<string, unknown>> {
   const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
   const cacheKey = `${root}\n${view}\n${scopeKey}`;
   await readUiState(context, view, scopeKey);
   const revisions = uiStateRevisionsByRoot.get(cacheKey) || new Map<string, number>();
   try {
-    const result = await sendRuntimeDataRequest<{ items: Array<{ key: string; revision: number; value: unknown }> }>(root, { operation: 'patch_ui_state', input: { view, scopeKey, patches: [{ key, expectedRevision: revisions.get(key) || 0, value }], idempotencyKey } });
+    const result = await sendRuntimeDataRequest<{ items: Array<{ key: string; revision: number; value: unknown }> }>(root, { operation: 'patch_ui_state', input: {
+      view, scopeKey, patches: patches.map(({ key, value }) => ({ key, expectedRevision: revisions.get(key) || 0, value })), idempotencyKey
+    } });
     uiStateRevisionsByRoot.set(cacheKey, new Map(result.items.map(item => [item.key, item.revision])));
     return Object.fromEntries(result.items.map(item => [item.key, item.value]));
   } catch (error) {
     if ((error as Error).message !== 'revision_conflict') throw error;
     await readUiState(context, view, scopeKey);
-    return patchUiState(context, view, scopeKey, key, value, idempotencyKey);
+    return patchUiStateBatch(context, view, scopeKey, patches, idempotencyKey);
   }
 }
 
@@ -7408,7 +7434,7 @@ function createAgentTerminal(
     }
   }
   const currentReservations = reservedAgentTerminalsByProject.get(workspaceRoot);
-  const reservedIndex = currentReservations?.findIndex((entry) => entry.environmentSignature === environmentSignature) ?? -1;
+  const reservedIndex = currentReservations?.findIndex((entry) => !entry.environmentSignature || entry.environmentSignature === environmentSignature) ?? -1;
   const reserved = reservedIndex >= 0 ? currentReservations?.splice(reservedIndex, 1)[0] : undefined;
   if (reserved) {
     if (!currentReservations?.length) {
@@ -7590,7 +7616,7 @@ async function deliverAgentTerminalInput(terminal: vscode.Terminal, text: string
 
 const reservedAgentTerminalsByProject = new Map<string, Array<{
   terminal: vscode.Terminal;
-  environmentSignature: string;
+  environmentSignature?: string;
 }>>();
 
 function discardReservedAgentStartupTerminal(workspaceRoot: string, terminal?: vscode.Terminal): boolean {
@@ -7622,17 +7648,8 @@ async function revealAgentStartupTerminal(
   try {
     terminal.show(false);
     recordCurrentDiagnosticStage('terminal.startup.focus', 'ok', 0, undefined, selection);
-    const terminalEnvironment = await getOpenCodeTerminalEnvironment(
-      context,
-      agentCli || settingsSnapshot?.cliPath || getPersistedSettings(context).cliPath,
-      model,
-      settingsSnapshot
-    );
     const reservations = reservedAgentTerminalsByProject.get(workspaceRoot) || [];
-    reservations.push({
-      terminal,
-      environmentSignature: JSON.stringify(withDesktopSessionEnvironment(terminalEnvironment))
-    });
+    reservations.push({ terminal });
     reservedAgentTerminalsByProject.set(workspaceRoot, reservations);
   } catch (error) {
     recordCurrentDiagnosticStage('terminal.startup.focus', 'error', 0, error, selection);
@@ -11784,7 +11801,9 @@ async function reconcileRestoredAgentTerminalOwners(
       const target = agentTerminalRunTargets.get(terminal);
       return terminal.name === terminalName && Boolean(target) && target!.globalDataPath === client.dataRoot
         && target!.workspaceRoot === workspaceRoot && target!.runId === endpoint?.runId
-        && target!.generation === endpoint?.generation && target!.deliveryId === terminalDeliveryId;
+        && Boolean(endpoint) && isAgentTerminalRunTargetCurrent(target!, {
+          runId: endpoint!.runId, generation: endpoint!.generation, status
+        });
     });
     if (matchingTerminal && foregroundAgentTerminalSurfaces.get(matchingTerminal)?.bridge?.isRunning) continue;
 

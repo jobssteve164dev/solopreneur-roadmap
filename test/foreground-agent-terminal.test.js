@@ -110,18 +110,14 @@ test('a stale child cannot consume frames after its bridge generation exits', as
   assert.deepEqual(child.stdin.writes, []);
 });
 
-test('a completed noninteractive runner keeps its terminal available while interactive sessions still close', () => {
-  const retainedWrites = []; const retainedCloses = [];
-  const retained = settleForegroundTerminalExit('closed', 0, value => retainedWrites.push(value), value => retainedCloses.push(value));
-  assert.equal(retained, 'retained');
-  assert.deepEqual(retainedCloses, []);
-  assert.match(retainedWrites.join(''), /任务已结束/);
-
-  const interactiveWrites = []; const interactiveCloses = [];
-  const closed = settleForegroundTerminalExit('prompt_turn', 0, value => interactiveWrites.push(value), value => interactiveCloses.push(value));
-  assert.equal(closed, 'closed');
-  assert.deepEqual(interactiveWrites, []);
-  assert.deepEqual(interactiveCloses, [0]);
+test('completed Agent runners keep every conversation terminal available until the user closes it', () => {
+  for (const inputMode of ['closed', 'prompt_turn', 'session_reentry']) {
+    const writes = []; const closes = [];
+    const result = settleForegroundTerminalExit(inputMode, 0, value => writes.push(value), value => closes.push(value));
+    assert.equal(result, 'retained', `${inputMode} must retain the terminal`);
+    assert.deepEqual(closes, [], `${inputMode} must not close the PTY`);
+    assert.match(writes.join(''), /任务已结束/);
+  }
 });
 
 test('a broken runner input is reported to the continuation caller', async () => {

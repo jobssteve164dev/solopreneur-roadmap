@@ -70,17 +70,13 @@ export interface ForegroundAgentTerminalTransport {
 }
 
 export function settleForegroundTerminalExit(
-  inputMode: ForegroundTerminalInputMode,
-  exitCode: number | undefined,
+  _inputMode: ForegroundTerminalInputMode,
+  _exitCode: number | undefined,
   write: (value: string) => void,
-  close: (value: number | undefined) => void
+  _close: (value: number | undefined) => void
 ): 'retained' | 'closed' {
-  if (inputMode === 'closed') {
-    write('\r\nSoloMap: 任务已结束，可关闭此终端。\r\n');
-    return 'retained';
-  }
-  close(exitCode);
-  return 'closed';
+  write('\r\nSoloMap: 任务已结束，可关闭此终端。\r\n');
+  return 'retained';
 }
 
 export class ForegroundAgentTerminalBridge implements ForegroundAgentTerminalTransport {

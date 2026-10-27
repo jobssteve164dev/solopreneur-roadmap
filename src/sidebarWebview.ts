@@ -5023,6 +5023,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let projectCardKeyboardInteractionActive = false;
     let pendingAsyncPortfolioRender = null;
     const uiStateSaveTimers = new Map();
+    const uiStateBatchSaveTimers = new Map();
+    const pendingSidebarUiStateBatches = new Map();
     const uiStateLoadRevisions = new Map();
     const uiStateLoadRequestIds = new Map();
     const uiStateLeafEditRevisions = new Map();
@@ -5039,6 +5041,29 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       uiStateSaveTimers.set(timerKey, setTimeout(() => {
         uiStateSaveTimers.delete(timerKey);
         vscode.postMessage({ command: 'uiState.patch', scopeKey, key, value, requestId: 'sidebar-ui-' + Date.now() + '-' + key });
+      }, 120));
+    }
+
+    function saveSidebarUiStateBatch(patches, scopeKey = currentProjects.selectedProjectPath || 'global') {
+      if (!patches.length) return;
+      const pending = pendingSidebarUiStateBatches.get(scopeKey) || new Map();
+      patches.forEach(({ key, value }) => {
+        uiStateEditRevision += 1;
+        uiStateLeafEditRevisions.set(scopeKey + '\\n' + key, uiStateEditRevision);
+        pending.set(key, value);
+      });
+      pendingSidebarUiStateBatches.set(scopeKey, pending);
+      clearTimeout(uiStateBatchSaveTimers.get(scopeKey));
+      uiStateBatchSaveTimers.set(scopeKey, setTimeout(() => {
+        uiStateBatchSaveTimers.delete(scopeKey);
+        const current = pendingSidebarUiStateBatches.get(scopeKey);
+        if (current !== pending) return;
+        pendingSidebarUiStateBatches.delete(scopeKey);
+        vscode.postMessage({
+          command: 'uiState.patch', scopeKey,
+          patches: [...pending].map(([key, value]) => ({ key, value })),
+          requestId: 'sidebar-ui-batch-' + conversationActionEnvelope().interactionId
+        });
       }, 120));
     }
 
@@ -5083,11 +5108,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     function saveSidebarInteractionState() {
       const next = flattenSidebarInteraction(currentSidebarInteractionState());
       const keys = new Set([...lastSidebarInteractionFlat.keys(), ...next.keys()]);
+      const patches = [];
       keys.forEach(key => {
         const value = next.has(key) ? next.get(key) : null;
-        if (JSON.stringify(value) !== JSON.stringify(lastSidebarInteractionFlat.get(key))) saveSidebarUiState('interaction.' + key, value);
+        if (JSON.stringify(value) !== JSON.stringify(lastSidebarInteractionFlat.get(key))) patches.push({ key: 'interaction.' + key, value });
       });
       lastSidebarInteractionFlat = next;
+      saveSidebarUiStateBatch(patches);
     }
 
     function loadSidebarUiState(scopeKey) {

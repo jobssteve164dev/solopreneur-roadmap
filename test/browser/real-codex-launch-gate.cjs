@@ -109,10 +109,25 @@ test('packaged SoloMap enters a real Codex task within ten seconds under host lo
   const driverSource = `
     const vscode = require('vscode'), crypto = require('node:crypto'), fs = require('node:fs'), os = require('node:os');
     const receiptPath = ${JSON.stringify(receiptPath)}, workspace = ${JSON.stringify(workspace)};
-    const save = value => fs.writeFileSync(receiptPath, JSON.stringify(value));
+    const terminalEvents = { opened: [], closed: [] };
+    let receipt = { state: 'activating' };
+    const isSoloMapTerminal = terminal => terminal.name.includes('(solomap)');
+    const soloMapTerminals = () => vscode.window.terminals.filter(isSoloMapTerminal).map(terminal => terminal.name);
+    const save = value => {
+      receipt = { ...receipt, ...value, terminals: soloMapTerminals(), terminalEvents };
+      fs.writeFileSync(receiptPath, JSON.stringify(receipt));
+    };
     exports.activate = async () => {
       let interactionId = '';
       let acceptedWallMs = 0;
+      vscode.window.onDidOpenTerminal(terminal => {
+        if (isSoloMapTerminal(terminal)) terminalEvents.opened.push(terminal.name);
+        save({});
+      });
+      vscode.window.onDidCloseTerminal(terminal => {
+        if (isSoloMapTerminal(terminal)) terminalEvents.closed.push(terminal.name);
+        save({});
+      });
       save({ state: 'activating' });
       try {
         const extension = vscode.extensions.getExtension('szlk.solopreneur-roadmap');
@@ -203,6 +218,11 @@ test('packaged SoloMap enters a real Codex task within ten seconds under host lo
         .every(scope => scopes.has(scope)) ? events : null;
     }, 'the conversation launch did not persist a correlated end-to-end diagnostic timeline', 10_000, 100);
     t.diagnostic(JSON.stringify({ interactionId: receipt.interactionId, timeline }));
+    await new Promise(resolve => setTimeout(resolve, 1_000));
+    const terminalReceipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
+    assert.equal(terminalReceipt.terminals.length, 1, `one accepted conversation must keep exactly one terminal: ${JSON.stringify(terminalReceipt)}`);
+    assert.equal(terminalReceipt.terminalEvents.opened.length, 1, `recovery must not create a second terminal: ${JSON.stringify(terminalReceipt)}`);
+    assert.deepEqual(terminalReceipt.terminalEvents.closed, [], `runner exit must not close the terminal: ${JSON.stringify(terminalReceipt)}`);
 
     const profile = String(completed.status.agentLaunch?.codexProfile || '');
     assert.match(profile, /^solomap-[a-f0-9]{16}$/);
@@ -220,7 +240,8 @@ test('packaged SoloMap enters a real Codex task within ten seconds under host lo
     assert.equal(finalReceipt.state, 'started', finalReceipt.error || 'conversation command did not settle successfully');
     t.diagnostic(JSON.stringify({ interactionId: receipt.interactionId, taskIngressElapsedMs: taskReceipt.elapsedMs,
       observerDelayMs: taskReceipt.observerDelayMs, profile, baseGitHash: completed.status.baseGitHash,
-      productionMcpRoundTrip: true, cpuBurners: burners.length }));
+      productionMcpRoundTrip: true, cpuBurners: burners.length, retainedTerminals: terminalReceipt.terminals.length,
+      openedTerminals: terminalReceipt.terminalEvents.opened.length, closedTerminals: terminalReceipt.terminalEvents.closed.length }));
   } finally {
     if (browser) browser.kill('SIGTERM');
     for (const burner of burners) burner.kill('SIGTERM');
