@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.0.630 - 2026-10-28
+
+### Fixed
+- bound growth history and make UI actions durable (cb67c03)
+
+### Docs
+- define Project Atlas design system (84bdb9a)
+- add OPC community design directions (31f8785)
+- record conversation terminal release (ff695be)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.629 - 2026-10-27
 
 ### Fixed
