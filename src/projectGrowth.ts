@@ -1614,6 +1614,7 @@ function emptyProjectGrowthViewModel(): ProjectGrowthViewModel {
 }
 
 function calculateGrowthTotals(data: GrowthSnapshotData): ProjectGrowthTotals {
+  if (data.summary) return { ...data.summary };
   return {
     files: data.nodes.filter((node) => node.kind === 'file' && !node.excluded).length,
     modules: data.nodes.filter((node) => node.kind === 'module').length,
@@ -1936,6 +1937,9 @@ export function buildProjectGrowthDiff(previous: GrowthSnapshotData | null, curr
   if (!previous || !current) {
     return null;
   }
+  const hasTopology = (data: GrowthSnapshotData) => data.topologyAvailable
+    ?? Boolean(data.nodes.length || data.edges.length || data.signals.length || data.labels.length || !data.summary);
+  if (!hasTopology(previous) || !hasTopology(current)) return null;
   const previousFiles = new Map(previous.nodes.filter((node) => node.kind === 'file' && !node.excluded).map((node) => [node.path, node]));
   const currentFiles = new Map(current.nodes.filter((node) => node.kind === 'file' && !node.excluded).map((node) => [node.path, node]));
   const previousModules = new Set(previous.nodes.filter((node) => node.kind === 'module').map((node) => node.nodeId));

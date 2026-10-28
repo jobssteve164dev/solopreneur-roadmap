@@ -51,7 +51,7 @@ test('a coarse run-directory projection preserves an existing complete index wit
   assert.throws(() => f.store.importHistoricalRunIndex(f.registered.projectId, { ...record, nodeId: 'foreign-node' }, [], [], { identity: `agent-runs:${f.project}`, key: 'foreign-node/7', hash: 'foreign-proof' }, 10), /historical_run_identity_ambiguous/);
 }));
 
-test('a selected historical growth graph remains complete beyond the recent fifty snapshots', () => fixture(async f => {
+test('a selected historical growth snapshot remains available as lightweight totals beyond the recent fifty snapshots', () => fixture(async f => {
   let first;
   for (let index = 0; index < 52; index++) {
     const id = `old-${index}`;
@@ -71,10 +71,11 @@ test('a selected historical growth graph remains complete beyond the recent fift
   const selected = await f.call('read_project_growth', { root: f.project, snapshotId: first });
   assert.equal(selected.history.length, 1);
   assert.equal(selected.latest.snapshot.gitHead, 'commit-0');
-  assert.equal(selected.latest.nodes[0].bytes, 17);
-  assert.equal(selected.latest.edges[0].evidence, 'complete relationship');
-  assert.equal(selected.latest.signals[0].value, 'full signal');
-  assert.equal(selected.latest.labels[0].label, 'full label');
+  assert.deepEqual(selected.latest.summary, { files: 0, modules: 0, capabilities: 0, packages: 0, loc: 0, signals: 1 });
+  assert.deepEqual(selected.latest.nodes, []);
+  assert.deepEqual(selected.latest.edges, []);
+  assert.deepEqual(selected.latest.signals, []);
+  assert.deepEqual(selected.latest.labels, []);
   const other = path.join(f.base, 'other'); fs.mkdirSync(other);
   await f.call('register_project', { root: other });
   await assert.rejects(f.call('read_project_growth', { root: other, snapshotId: first }), /growth_snapshot_missing/);

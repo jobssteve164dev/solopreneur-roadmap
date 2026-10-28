@@ -1450,6 +1450,102 @@ test('project action launch acknowledges only its request after delivery or prep
   });
 });
 
+test('retried Solo launch actions share one in-flight launch and one durable intent', async () => {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.configure = (record, wait) => {
+      getProjects = () => [{ path: '/isolated/project' }];
+      getPersistedSettings = () => ({ globalDataPath: '/isolated/.solomap-global' });
+      sidebarProvider = null;
+      revealAgentStartupTerminal = async () => undefined;
+      captureRegisteredConversationLaunchTarget = async (_context, workspaceRoot, snapshot) => ({ workspaceRoot, globalDataPath: snapshot.globalDataPath, settings: snapshot.settings, engine: { close() {} } });
+      handleRunSoloConversation = async (_context, _message, _agent, _model, _files, _occurrence, _interactive, target) => { record(target.launchIntentId); await wait(); return 42; };
+    };
+    module.exports.action = handleSharedWebviewAction;
+  `);
+  const intents = [];
+  let release;
+  extension.configure(value => intents.push(value), () => new Promise(resolve => { release = resolve; }));
+  const request = { command: 'conversation.runSolo', projectPath: '/isolated/project', userMessage: '处理当前问题', launchActionId: 'durable-action' };
+  const messages = [];
+  const webview = { postMessage: message => { messages.push(message); return Promise.resolve(true); } };
+  const first = extension.action({}, request, 'sidebar', webview);
+  const second = extension.action({}, request, 'sidebar', webview);
+  while (!release) await new Promise(resolve => setTimeout(resolve, 1));
+
+  assert.equal(intents.length, 1);
+  assert.match(intents[0], /^ui-action:[a-f0-9]{64}$/);
+  release();
+  await Promise.all([first, second]);
+  assert.equal(messages.filter(message => message.command === 'conversationActionSettled').length, 2);
+});
+
+test('the same Solo launch action id rejects different in-flight input', async () => {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.configure = wait => {
+      getProjects = () => [{ path: '/isolated/project' }];
+      getPersistedSettings = () => ({ globalDataPath: '/isolated/.solomap-global' });
+      sidebarProvider = null;
+      revealAgentStartupTerminal = async () => undefined;
+      captureRegisteredConversationLaunchTarget = async (_context, workspaceRoot, snapshot) => ({ workspaceRoot, globalDataPath: snapshot.globalDataPath, settings: snapshot.settings, engine: { close() {} } });
+      handleRunSoloConversation = async () => { await wait(); return 42; };
+    };
+    module.exports.action = handleSharedWebviewAction;
+  `);
+  let release;
+  extension.configure(() => new Promise(resolve => { release = resolve; }));
+  const messages = [];
+  const webview = { postMessage: message => { messages.push(message); return Promise.resolve(true); } };
+  const first = extension.action({}, { command: 'conversation.runSolo', projectPath: '/isolated/project', userMessage: 'first', launchActionId: 'same-action' }, 'sidebar', webview);
+  while (!release) await new Promise(resolve => setTimeout(resolve, 1));
+  await assert.rejects(
+    extension.action({}, { command: 'conversation.runSolo', projectPath: '/isolated/project', userMessage: 'changed', launchActionId: 'same-action' }, 'sidebar', webview),
+    /conversation_launch_action_conflict/
+  );
+  assert.ok(messages.some(message => message.command === 'conversationActionSettled' && message.launchActionId === 'same-action'));
+  release();
+  await first;
+});
+
+test('attachment save failure settles the exact paste request for both webviews', async t => {
+  for (const surface of ['sidebar', 'roadmap']) await t.test(surface, async () => {
+    const actualAttachments = require('../out/attachments.js');
+    const extension = loadCompiledModule('out/extension.js', `
+      module.exports.configure = () => {
+        getProjects = () => [{ path: '/isolated/project' }];
+        getPersistedSettings = () => ({ globalDataPath: '/isolated/.solomap-global' });
+        sidebarProvider = null;
+      };
+      module.exports.action = handleSharedWebviewAction;
+    `, { './attachments': { ...actualAttachments, savePastedImageAttachmentsAsync: async () => { throw new Error('fixture_attachment_failure'); } } });
+    extension.configure();
+    const messages = [];
+    const request = { command: 'attachment.save', projectPath: '/isolated/project', targetId: 'solo:/isolated/project', nodeId: '__solo__', requestId: 'paste-failed', attachmentEpoch: 3, attachments: [{ dataUrl: 'data:image/png;base64,AA==' }] };
+    assert.equal(await extension.action({}, request, surface, { postMessage: message => { messages.push(message); return Promise.resolve(true); } }), true);
+    assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
+      command: 'pastedAttachmentsFailed',
+      ...(surface === 'sidebar' ? { targetId: 'solo:/isolated/project' } : { nodeId: '__solo__' }),
+      requestId: 'paste-failed',
+      attachmentEpoch: 3,
+      message: 'fixture_attachment_failure'
+    }]);
+  });
+});
+
+test('a restarted host rejects a persisted Solo action with changed input', async () => {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.configure = state => {
+      ensureHealthyAutonomousRuntime = async () => {};
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = async () => state;
+    };
+    module.exports.resume = resumeOrdinaryConversation;
+  `);
+  extension.configure({ status: { rootExecutionLogId: 42, deliveryPending: false, uiLaunchActionHash: 'original-hash' } });
+  await assert.rejects(
+    extension.resume({}, '/isolated/project', 'ui-action:persisted', '/isolated/.solomap-global', {}, false, 'changed-hash'),
+    /execution_identity_conflict/
+  );
+});
+
 test('a cached sidebar snapshot is refreshed from the global journal after plugin restart', async () => {
   const cache = require('../out/sidebarSnapshotCache.js');
   const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '', { './sidebarSnapshotCache': cache });
@@ -1908,6 +2004,67 @@ test('shared connector settings do not offer uninstall for a built-in MCP servic
   chooseValue('add-new-skill');
   assert.equal(elements.urlHelp.textContent, 'abilityFailedHelp');
   assert.equal(elements.installButton.getAttribute('disabled'), '', 'a failed persisted operation must allow retry');
+});
+
+test('pasted image delivery retries the same request until the host acknowledges it', async () => {
+  const { getSharedWebviewRuntimeScript } = require(path.join(projectRoot, 'out/webviewSharedRuntime.js'));
+  const timers = [];
+  const sandbox = {
+    globalThis: {
+      setTimeout(callback) { const timer = { callback, active: true, unref() { this.unrefed = true; } }; timers.push(timer); return timer; },
+      clearTimeout(timer) { timer.active = false; }
+    },
+    FileReader: class FileReader {
+      readAsDataURL() { this.result = 'data:image/png;base64,aGVsbG8='; this.onload(); }
+    }
+  };
+  vm.runInNewContext(getSharedWebviewRuntimeScript(), sandbox);
+  const input = {
+    attributes: {}, listeners: {},
+    getAttribute(name) { return this.attributes[name] || ''; },
+    setAttribute(name, value) { this.attributes[name] = value; },
+    addEventListener(name, listener) { this.listeners[name] = listener; }
+  };
+  const posted = [];
+  sandbox.globalThis.SoloMapWebview.bindPastedImageAttachments(
+    input,
+    message => posted.push(message),
+    () => ({ command: 'attachment.save', targetId: 'solo:/workspace/app', attachmentEpoch: 0 })
+  );
+  await input.listeners.paste({
+    clipboardData: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => ({ name: 'screen.png', type: 'image/png' }) }] },
+    preventDefault() {}
+  });
+
+  assert.equal(posted.length, 1);
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].unrefed, true);
+  timers[0].callback();
+  assert.equal(posted.length, 2);
+  assert.deepEqual(posted[1], posted[0]);
+  sandbox.globalThis.SoloMapWebview.acknowledgePastedImageAttachments(posted[0].requestId);
+  assert.equal(timers.at(-1).active, false);
+});
+
+test('conversation launch delivery retries the same durable action until the host settles it', () => {
+  const { getSharedWebviewRuntimeScript } = require(path.join(projectRoot, 'out/webviewSharedRuntime.js'));
+  const timers = [];
+  const sandbox = { globalThis: {
+    setTimeout(callback) { const timer = { callback, active: true, unref() { this.unrefed = true; } }; timers.push(timer); return timer; },
+    clearTimeout(timer) { timer.active = false; }
+  } };
+  vm.runInNewContext(getSharedWebviewRuntimeScript(), sandbox);
+  const posted = [];
+  const message = { command: 'conversation.runSolo', launchActionId: 'launch-1', userMessage: '继续处理' };
+
+  sandbox.globalThis.SoloMapWebview.postAcknowledgedMessage(value => posted.push(value), message, message.launchActionId, 5_000);
+  assert.equal(posted.length, 1);
+  assert.equal(timers[0].unrefed, true);
+  timers[0].callback();
+  assert.equal(posted.length, 2);
+  assert.deepEqual(posted[1], posted[0]);
+  sandbox.globalThis.SoloMapWebview.acknowledgeMessage(message.launchActionId);
+  assert.equal(timers.at(-1).active, false);
 });
 
 test('ability action labels are restored after language localization in both webviews', () => {
@@ -6390,7 +6547,7 @@ test('sidebar keeps solo composer active and renders pasted attachments while th
 
   context.window.__pasteAnotherSoloImage();
   context.window.__sendSoloComposer();
-  assert.ok(postedMessages.some(message => message.command === 'conversation.runSolo'));
+  assert.equal(postedMessages.some(message => message.command === 'conversation.runSolo'), false, 'send must wait until the pasted image is saved');
   context.window.__releasePasteReader();
   await new Promise(resolve => setImmediate(resolve));
   const lateSaveMessage = postedMessages.filter(message => message.command === 'attachment.save').at(-1);
@@ -6401,7 +6558,12 @@ test('sidebar keeps solo composer active and renders pasted attachments while th
     attachmentEpoch: lateSaveMessage.attachmentEpoch,
     files: ['.solopreneur/attachments/solo-workspace-app/late-screenshot.png']
   });
-  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /late-screenshot\.png/, 'an attachment reply from before send must not repopulate the composer');
+  assert.match(elements['portfolio-list'].innerHTML, /late-screenshot\.png/);
+  context.window.__sendSoloComposer();
+  const launch = postedMessages.filter(message => message.command === 'conversation.runSolo').at(-1);
+  assert.ok(launch);
+  assert.deepEqual(Array.from(launch.supplementFiles), ['.solopreneur/attachments/solo-workspace-app/screenshot.png', '.solopreneur/attachments/solo-workspace-app/late-screenshot.png']);
+  dispatchMessage({ command: 'conversationActionSettled', action: 'runSolo', projectPath: '/workspace/app', launchActionId: launch.launchActionId });
 });
 
 test('daily review delegates its user action to the durable Runtime decision', () => {
@@ -11826,7 +11988,18 @@ test('foreign sidebar failures cannot clear the selected project attachment stat
   const source = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
   const start = source.indexOf("case 'sidebarActionFailed':");
   const body = source.slice(start, source.indexOf("case 'roadmapRevisionLaunchRegistered':", start));
-  assert.ok(body.indexOf("message.projectPath !== currentProjects.selectedProjectPath") < body.indexOf('Object.keys(pendingPastedAttachments)'));
+  assert.doesNotMatch(body, /pendingPastedAttachments|acknowledgePastedImageAttachments/);
+});
+
+test('both webviews settle only the failed pasted-image request', () => {
+  for (const relative of ['src/sidebarWebview.ts', 'src/roadmapWebview.ts']) {
+    const source = fs.readFileSync(path.join(projectRoot, relative), 'utf8');
+    const start = source.indexOf("case 'pastedAttachmentsFailed':");
+    assert.ok(start >= 0, relative);
+    const body = source.slice(start, source.indexOf('\n        case ', start + 1));
+    assert.match(body, /acknowledgePastedImageAttachments\(message\.requestId\)/, relative);
+    assert.match(body, /delete\(String\(message\.requestId \|\| ''\)\)/, relative);
+  }
 });
 
 test('sidebar conversation controls are scoped to one history tree', () => {

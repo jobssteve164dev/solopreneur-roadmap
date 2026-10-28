@@ -9017,6 +9017,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             pendingProjectSelectionPath = '';
             pendingProjectSelectionInteractionId = '';
             coreConversationProjects.clear();
+            for (const action of pendingSidebarAgentActions.values()) SoloMapWebview.acknowledgeMessage(action.id);
             pendingSidebarAgentActions.clear();
             pendingConversationContinuations.clear();
             for (const timer of uiStateSaveTimers.values()) clearTimeout(timer);
@@ -9266,7 +9267,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }
           if (message.projectPath && message.projectPath !== currentProjects.selectedProjectPath) break;
           settingsSavePending = false;
-          Object.keys(pendingPastedAttachments).forEach(key => pendingPastedAttachments[key].clear());
           deliveryActionMessage = message.message || '';
           if (collaborationPanel && collaborationPanel.style.display === 'block') {
             collaborationError = message.message || t('collaborationCreateFailed');
@@ -9289,6 +9289,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'conversationActionSettled':
+          if (message.launchActionId) SoloMapWebview.acknowledgeMessage(message.launchActionId);
           if (message.action === 'continue') {
             const conversationId = String(message.conversationId || '');
             if (!pendingConversationContinuations.delete(conversationContinuationKey(message.projectPath, conversationId))) break;
@@ -9349,6 +9350,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'pastedAttachmentsSaved':
+          SoloMapWebview.acknowledgePastedImageAttachments(message.requestId);
           if (Number(message.attachmentEpoch || 0) !== Number(pastedAttachmentEpochs[message.targetId] || 0)) break;
           if (message.targetId && pendingPastedAttachments[message.targetId]) {
             pendingPastedAttachments[message.targetId].delete(String(message.requestId || ''));
@@ -9364,6 +9366,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             projectContinueFiles[message.targetId] = mergeAttachmentFiles(projectContinueFiles[message.targetId] || [], message.files || []);
             renderPortfolioAfterAttachmentUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           }
+          break;
+
+        case 'pastedAttachmentsFailed':
+          SoloMapWebview.acknowledgePastedImageAttachments(message.requestId);
+          if (Number(message.attachmentEpoch || 0) !== Number(pastedAttachmentEpochs[message.targetId] || 0)) break;
+          if (message.targetId && pendingPastedAttachments[message.targetId]) {
+            pendingPastedAttachments[message.targetId].delete(String(message.requestId || ''));
+          }
+          deliveryActionMessage = message.message || '';
+          renderPortfolioAfterAttachmentUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
         case 'sidebarSoloConversationLoaded':
@@ -9766,10 +9778,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     function clearSubmittedAttachments(targetId) {
+      if (pendingPastedAttachments[targetId] && pendingPastedAttachments[targetId].size > 0) return false;
       pastedAttachmentEpochs[targetId] = Number(pastedAttachmentEpochs[targetId] || 0) + 1;
       if (pendingPastedAttachments[targetId]) pendingPastedAttachments[targetId].clear();
       if (String(targetId).startsWith('solo:')) projectSoloFiles[targetId] = [];
       else projectContinueFiles[targetId] = [];
+      return true;
     }
 
     function extractPreGitHash(conversation) {
@@ -10349,6 +10363,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       const flowUnlocked = hasFlowPro(currentSettings || {});
       const targetId = activeMode === 'solo' ? soloTargetId : activeMode === 'flow' ? ('flow:' + projectPath) : (node ? node.id : '');
       const composerDisabled = activeMode === 'continue' && (!node || node.status === 'Completed');
+      const sendDisabled = composerDisabled || Boolean(pendingPastedAttachments[targetId]?.size);
       const files = activeMode === 'solo' ? (projectSoloFiles[soloTargetId] || []) : (projectContinueFiles[targetId] || []);
       const draft = activeMode === 'solo'
         ? (projectSoloDrafts[projectPath] || '')
@@ -10390,7 +10405,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           <div class="portfolio-compose-row">
             <button class="portfolio-compose-tool" data-project-attach-files data-project-path="\${escapeHtml(projectPath)}" data-conversation-target-id="\${escapeHtml(targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" title="\${escapeHtml(t('soloAttach'))}"><span class="codicon codicon-attach"></span></button>
             <textarea class="portfolio-compose-input" data-project-conversation-input data-conversation-target-id="\${escapeHtml(activeMode === 'flow' ? ('flow:' + projectPath) : targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" data-project-path="\${escapeHtml(projectPath)}" placeholder="\${escapeHtml(activeMode === 'solo' ? t('soloPlaceholder') : activeMode === 'flow' ? t('flowPlaceholder') : t('continuePlaceholder'))}" \${composerDisabled ? 'disabled' : ''}>\${escapeHtml(draft)}</textarea>
-            <button class="portfolio-compose-send" data-project-continue-send data-next-node-id="\${escapeHtml(node?.id || '')}" data-project-path="\${escapeHtml(projectPath)}" data-conversation-target-id="\${escapeHtml(activeMode === 'flow' ? ('flow:' + projectPath) : targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" \${composerDisabled ? 'disabled' : ''}>
+            <button class="portfolio-compose-send" data-project-continue-send data-next-node-id="\${escapeHtml(node?.id || '')}" data-project-path="\${escapeHtml(projectPath)}" data-conversation-target-id="\${escapeHtml(activeMode === 'flow' ? ('flow:' + projectPath) : targetId)}" data-conversation-mode="\${escapeHtml(activeMode)}" \${sendDisabled ? 'disabled' : ''}>
               <span class="codicon codicon-send"></span><span>\${escapeHtml(t('continueSend'))}</span>
             </button>
           </div>
@@ -10497,17 +10512,20 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           const projectPath = sendButton.getAttribute('data-project-path') || currentProjects.selectedProjectPath;
           const targetId = sendButton.getAttribute('data-conversation-target-id') || '';
           const userMessage = input ? input.value : '';
+          if (pendingPastedAttachments[targetId] && pendingPastedAttachments[targetId].size > 0) return;
           if (mode === 'solo') {
             if (!projectPath || !userMessage.trim()) return;
-            vscode.postMessage({
+            const launchActionId = 'launch-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+            SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
               command: 'conversation.runSolo',
               ...conversationActionEnvelope(),
+              launchActionId,
               projectPath,
               userMessage,
               agentCli: getSoloSelectValue(agentSelect),
               model: getSoloSelectValue(modelSelect),
               supplementFiles: projectSoloFiles[targetId] || []
-            });
+            }, launchActionId);
             if (input) input.value = '';
             projectSoloDrafts[projectPath] = '';
             saveSidebarUiState('soloDraft', '', projectPath);
@@ -12074,7 +12092,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           projectConversationModes[projectPath] = 'solo';
           deliveryActionMessage = t('deliveryActionStarted');
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          vscode.postMessage({
+          SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
             command: 'conversation.runSolo',
             ...conversationActionEnvelope(),
             launchActionId,
@@ -12083,7 +12101,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             agentCli,
             model,
             supplementFiles: []
-          });
+          }, launchActionId);
         });
       });
       portfolioList.querySelectorAll('[data-agent-fix-security-project-path]').forEach(button => {
@@ -12098,7 +12116,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           const agentCli = projectConversationAgentSelections[targetId] || getEffectiveSettingCliPath() || 'agy';
           const model = getTargetModelValue(targetId, agentCli);
           projectConversationModes[projectPath] = 'solo';
-          vscode.postMessage({
+          SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
             command: 'conversation.runSolo',
             ...conversationActionEnvelope(),
             launchActionId,
@@ -12107,7 +12125,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             agentCli,
             model,
             supplementFiles: []
-          });
+          }, launchActionId);
           deliveryActionMessage = t('deliveryActionStarted');
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
@@ -12130,7 +12148,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           projectConversationModes[projectPath] = 'solo';
           deliveryActionMessage = t('pullRequestActionStarted');
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          vscode.postMessage({
+          SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
             command: 'conversation.runSolo',
             ...conversationActionEnvelope(),
             launchActionId,
@@ -12139,7 +12157,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             agentCli,
             model,
             supplementFiles: []
-          });
+          }, launchActionId);
         });
       });
       portfolioList.querySelectorAll('[data-close-pr]').forEach(button => {
@@ -12166,7 +12184,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           projectConversationModes[projectPath] = 'solo';
           deliveryActionMessage = t('deliveryActionStarted');
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          vscode.postMessage({
+          SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
             command: 'conversation.runSolo',
             ...conversationActionEnvelope(),
             launchActionId,
@@ -12175,7 +12193,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             agentCli,
             model,
             supplementFiles: []
-          });
+          }, launchActionId);
         });
       });
       portfolioList.querySelectorAll('[data-toggle-pin-project-path]').forEach(button => {
@@ -12372,7 +12390,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           projectConversationModes[projectPath] = 'solo';
           issueActionMessage = t('issueAgentStarted');
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          vscode.postMessage({
+          SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
             command: 'conversation.runSolo',
             ...conversationActionEnvelope(),
             launchActionId,
@@ -12381,7 +12399,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             agentCli,
             model,
             supplementFiles: []
-          });
+          }, launchActionId);
         });
       });
       bindProjectContinueComposer(portfolioList);

@@ -3816,7 +3816,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           else renderRoadmap(currentNodes);
           break;
         }
+        case 'conversationActionSettled':
+          if (message.launchActionId) SoloMapWebview.acknowledgeMessage(message.launchActionId);
+          break;
         case 'supplementFilesSelected':
+          if (message.requestId) SoloMapWebview.acknowledgePastedImageAttachments(message.requestId);
           if (message.requestId && Number(message.attachmentEpoch || 0) !== Number(pastedAttachmentEpochs[message.nodeId] || 0)) break;
           if (message.nodeId && pendingPastedAttachments[message.nodeId]) {
             pendingPastedAttachments[message.nodeId].delete(String(message.requestId || ''));
@@ -3850,6 +3854,17 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
               input.value = revisionDraft;
             }
           }
+          break;
+        case 'pastedAttachmentsFailed':
+          SoloMapWebview.acknowledgePastedImageAttachments(message.requestId);
+          if (Number(message.attachmentEpoch || 0) !== Number(pastedAttachmentEpochs[message.nodeId] || 0)) break;
+          if (message.nodeId && pendingPastedAttachments[message.nodeId]) {
+            pendingPastedAttachments[message.nodeId].delete(String(message.requestId || ''));
+          }
+          if (message.nodeId === soloConversationId) renderSoloPanel(currentNodes);
+          else if (message.nodeId === roadmapRevisionId) renderRoadmapRevisionPanel(currentNodes);
+          else if (message.nodeId === flowTargetId) renderFlowPanel();
+          else renderRoadmap(currentNodes);
           break;
         case 'cliTestResult':
           cliTestBadge.style.display = 'block';
@@ -4270,6 +4285,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         const conversations = nodeConversations[node.id] || [];
         const supplementFiles = nodeSupplementFiles[node.id] || [];
         const conversationDisabled = '';
+        const conversationSendDisabled = pendingPastedAttachments[node.id]?.size ? 'disabled' : '';
         const selectedAgentCli = nodeAgentSelections[node.id] || node.agentCli || currentCliPath || 'agy';
         const promptHtml = expanded ? \`
           <div class="node-expanded-body">
@@ -4284,7 +4300,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
                   <span class="codicon codicon-attach"></span>
                 </button>
                 <input type="text" class="conversation-input" data-conversation-input-id="\${escapeHtml(node.id)}" placeholder="\${t('conversationPlaceholder')}" value="\${escapeHtml(conversationDrafts[node.id] || '')}" \${conversationDisabled}>
-                <button class="btn-send-conversation" data-send-node-id="\${escapeHtml(node.id)}" title="\${t('send')}" \${conversationDisabled}>
+                <button class="btn-send-conversation" data-send-node-id="\${escapeHtml(node.id)}" title="\${t('send')}" \${conversationSendDisabled}>
                   <span class="codicon codicon-send"></span>
                 </button>
               </div>
@@ -4332,6 +4348,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         if (sendButton) {
           sendButton.addEventListener('click', (event) => {
             event.stopPropagation();
+            if (pendingPastedAttachments[node.id] && pendingPastedAttachments[node.id].size > 0) return;
             const input = row.querySelector('[data-conversation-input-id="' + cssEscape(node.id) + '"]');
             const agentSelect = row.querySelector('[data-agent-select-id="' + cssEscape(node.id) + '"]');
             const modelSelect = row.querySelector('[data-model-select-id="' + cssEscape(node.id) + '"]');
@@ -4501,6 +4518,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       const conversationPaging = nodeConversationPaging[soloConversationId] || { page: -1, hasMore: false, loading: false, initialized: false };
       const supplementFiles = nodeSupplementFiles[soloConversationId] || [];
       const disabled = '';
+      const sendDisabled = pendingPastedAttachments[soloConversationId]?.size ? 'disabled' : '';
       const selectedAgentCli = soloAgentSelection || currentCliPath || 'agy';
       soloPanel.classList.toggle('active', soloExpanded);
       btnToggleSolo.classList.toggle('active', soloExpanded);
@@ -4515,7 +4533,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
               <span class="codicon codicon-attach"></span>
             </button>
             <input type="text" class="conversation-input" data-solo-input placeholder="\${escapeHtml(t('soloPlaceholder'))}" value="\${escapeHtml(soloDraft)}" \${disabled}>
-            <button class="btn-send-conversation" data-send-solo title="\${escapeHtml(t('sendSolo'))}" \${disabled}>
+            <button class="btn-send-conversation" data-send-solo title="\${escapeHtml(t('sendSolo'))}" \${sendDisabled}>
               <span class="codicon codicon-send"></span>
             </button>
           </div>
@@ -4554,20 +4572,23 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       }
       if (sendButton) {
         sendButton.addEventListener('click', () => {
+          if (pendingPastedAttachments[soloConversationId] && pendingPastedAttachments[soloConversationId].size > 0) return;
           const input = soloBody.querySelector('[data-solo-input]');
           const agentSelect = soloBody.querySelector('[data-solo-agent]');
           const modelSelect = soloBody.querySelector('[data-solo-model]');
           const request = input ? input.value.trim() : '';
           if (!request) return;
-          vscode.postMessage({
+          const launchActionId = 'launch-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+          SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
             command: 'conversation.runSolo',
             ...conversationActionEnvelope(),
+            launchActionId,
             projectPath: activeProjectPath,
             userMessage: request,
             agentCli: getSoloSelectValue(agentSelect),
             model: getSoloSelectValue(modelSelect),
             supplementFiles: nodeSupplementFiles[soloConversationId] || []
-          });
+          }, launchActionId);
           input.value = '';
           soloDraft = '';
           saveRoadmapUiState('soloDraft', '');
@@ -4645,6 +4666,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         return;
       }
       const selectedAgentCli = flowAgentSelection || currentCliPath || 'agy';
+      const flowSendDisabled = pendingPastedAttachments[flowTargetId]?.size ? 'disabled' : '';
       const latestLoops = Array.isArray(flow?.loops) ? flow.loops.slice().sort((a, b) => Number(a.index || 0) - Number(b.index || 0)) : [];
       
       // Helper function to render touched files in the panel
@@ -4673,7 +4695,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
               <span class="codicon codicon-attach"></span>
             </button>
             <input type="text" class="conversation-input" data-flow-goal-input value="\${escapeHtml(flowDraft)}" placeholder="\${escapeHtml(t('flowPlaceholder'))}">
-            <button class="btn-send-conversation" data-send-flow title="\${escapeHtml(t('flowStart'))}">
+            <button class="btn-send-conversation" data-send-flow title="\${escapeHtml(t('flowStart'))}" \${flowSendDisabled}>
               <span class="codicon codicon-send"></span>
             </button>
           </div>
@@ -4738,6 +4760,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       }
       if (sendButton) {
         sendButton.addEventListener('click', () => {
+          if (pendingPastedAttachments[flowTargetId] && pendingPastedAttachments[flowTargetId].size > 0) return;
           const input = flowBody.querySelector('[data-flow-goal-input]');
           const agentSelect = flowBody.querySelector('[data-flow-agent]');
           const modelSelect = flowBody.querySelector('[data-flow-model]');
@@ -4847,6 +4870,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       }
       const conversations = nodeConversations[roadmapRevisionId] || [];
       const disabled = '';
+      const sendDisabled = pendingPastedAttachments[roadmapRevisionId]?.size ? 'disabled' : '';
       roadmapRevisionPanel.classList.toggle('open', roadmapRevisionExpanded);
       btnToggleRoadmapRevision.classList.toggle('active', roadmapRevisionExpanded);
       if (!roadmapRevisionExpanded) {
@@ -4860,7 +4884,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
               <span class="codicon codicon-attach"></span>
             </button>
             <input type="text" class="conversation-input" data-roadmap-revision-input placeholder="\${escapeHtml(t('reviseRoadmapPlaceholder'))}" value="\${escapeHtml(roadmapRevisionDraft)}" \${disabled}>
-            <button class="btn-send-conversation" data-send-roadmap-revision title="\${escapeHtml(t('sendRevision'))}" \${disabled}>
+            <button class="btn-send-conversation" data-send-roadmap-revision title="\${escapeHtml(t('sendRevision'))}" \${sendDisabled}>
               <span class="codicon codicon-send"></span>
             </button>
           </div>
@@ -4884,6 +4908,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       const sendButton = roadmapRevisionBody.querySelector('[data-send-roadmap-revision]');
       if (sendButton) {
         sendButton.addEventListener('click', () => {
+          if (pendingPastedAttachments[roadmapRevisionId] && pendingPastedAttachments[roadmapRevisionId].size > 0) return;
           const input = roadmapRevisionBody.querySelector('[data-roadmap-revision-input]');
           const agentSelect = roadmapRevisionBody.querySelector('[data-roadmap-revision-agent]');
           const modelSelect = roadmapRevisionBody.querySelector('[data-roadmap-revision-model]');
@@ -5396,9 +5421,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     }
 
     function clearSubmittedAttachments(nodeId) {
+      if (pendingPastedAttachments[nodeId] && pendingPastedAttachments[nodeId].size > 0) return false;
       pastedAttachmentEpochs[nodeId] = Number(pastedAttachmentEpochs[nodeId] || 0) + 1;
       if (pendingPastedAttachments[nodeId]) pendingPastedAttachments[nodeId].clear();
       nodeSupplementFiles[nodeId] = [];
+      return true;
     }
 
     function renderSupplementFiles(nodeId, files) {

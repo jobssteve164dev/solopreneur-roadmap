@@ -1373,6 +1373,7 @@ async function ensureTaskRuntimeReady(context: vscode.ExtensionContext): Promise
 }
 
 const projectActionLaunchQueues = new Map<string, Promise<void>>();
+const activeConversationLaunchActions = new Map<string, { inputHash: string; promise: Promise<void> }>();
 
 async function enqueueProjectActionLaunch<T>(
   projectKeyOrAction: string | ((registered: () => void) => Promise<T>),
@@ -1655,28 +1656,56 @@ async function handleSharedWebviewAction(
     },
     'conversation.runSolo': async (request) => {
       const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
-      const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
-      if (!launchSnapshot) return;
-      let startupTerminal: vscode.Terminal | undefined;
-      try {
-        startupTerminal = await observeLocalDiagnosticStage('conversation.runSolo.terminal', () => revealAgentStartupTerminal(context, workspaceRoot, 'solo', String(request.agentCli || ''), String(request.model || ''), launchSnapshot.settings));
-        const launchTarget = await observeLocalDiagnosticStage('conversation.runSolo.project', () => captureRegisteredConversationLaunchTarget(context, workspaceRoot, launchSnapshot));
-        if (!launchTarget) return;
+      const launchActionId = String(request.launchActionId || '');
+      const launchActionKey = launchActionId ? `${workspaceRoot}\0${launchActionId}` : '';
+      const launchInputHash = crypto.createHash('sha256').update(JSON.stringify({
+        workspaceRoot,
+        userMessage: String(request.userMessage || ''),
+        agentCli: String(request.agentCli || ''),
+        model: String(request.model || ''),
+        supplementFiles: normalizeSupplementFiles(request.supplementFiles)
+      })).digest('hex');
+      const execute = async () => {
+        const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
+        if (!launchSnapshot) return;
+        let startupTerminal: vscode.Terminal | undefined;
         try {
-          await handleRunSoloConversation(
-            context,
-            String(request.userMessage || ''),
-            String(request.agentCli || ''),
-            String(request.model || ''),
-            normalizeSupplementFiles(request.supplementFiles),
-            '',
-            true,
-            launchTarget
-          );
-        } finally { launchTarget.engine?.close(); }
+          startupTerminal = await observeLocalDiagnosticStage('conversation.runSolo.terminal', () => revealAgentStartupTerminal(context, workspaceRoot, 'solo', String(request.agentCli || ''), String(request.model || ''), launchSnapshot.settings));
+          const launchTarget = await observeLocalDiagnosticStage('conversation.runSolo.project', () => captureRegisteredConversationLaunchTarget(context, workspaceRoot, launchSnapshot));
+          if (!launchTarget) return;
+          if (launchActionId) {
+            launchTarget.launchIntentId = `ui-action:${crypto.createHash('sha256').update(launchActionKey).digest('hex')}`;
+            launchTarget.launchActionInputHash = launchInputHash;
+          }
+          try {
+            await handleRunSoloConversation(
+              context,
+              String(request.userMessage || ''),
+              String(request.agentCli || ''),
+              String(request.model || ''),
+              normalizeSupplementFiles(request.supplementFiles),
+              '',
+              true,
+              launchTarget
+            );
+          } finally { launchTarget.engine?.close(); }
+        } finally {
+          discardReservedAgentStartupTerminal(workspaceRoot, startupTerminal);
+        }
+      };
+      try {
+        let activeAction = launchActionKey ? activeConversationLaunchActions.get(launchActionKey) : undefined;
+        if (activeAction && activeAction.inputHash !== launchInputHash) throw new Error('conversation_launch_action_conflict');
+        if (!activeAction) {
+          const created = execute().finally(() => {
+            if (launchActionKey && activeConversationLaunchActions.get(launchActionKey)?.promise === created) activeConversationLaunchActions.delete(launchActionKey);
+          });
+          activeAction = { inputHash: launchInputHash, promise: created };
+          if (launchActionKey) activeConversationLaunchActions.set(launchActionKey, activeAction);
+        }
+        await activeAction.promise;
       } finally {
-        discardReservedAgentStartupTerminal(workspaceRoot, startupTerminal);
-        if (request.launchActionId) await respond({ command: 'conversationActionSettled', action: 'runSolo', projectPath: workspaceRoot, launchActionId: request.launchActionId });
+        if (launchActionId) await respond({ command: 'conversationActionSettled', action: 'runSolo', projectPath: workspaceRoot, launchActionId });
       }
     },
     'timePlan.generate': async (request) => {
@@ -2179,28 +2208,21 @@ async function handleSharedWebviewAction(
     },
     'attachment.save': async (request) => {
       const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
-      if (!projectPath || !getProjects(context).some((project) => project.path === projectPath)) {
-        vscode.window.showErrorMessage('Choose a project folder before attaching images.');
-        return;
-      }
-      const scope = String(request.scope || request.targetId || request.nodeId || 'conversation');
-      const files = await savePastedImageAttachmentsAsync(projectPath, scope, request.attachments || [], getPersistedSettings(context).globalDataPath);
-      if (surface === 'sidebar') {
-        await respond({
-          command: 'pastedAttachmentsSaved',
-          targetId: request.targetId || '',
-          requestId: String(request.requestId || ''),
-          attachmentEpoch: Number(request.attachmentEpoch || 0),
-          files
-        });
-      } else {
-        await respond({
-          command: 'supplementFilesSelected',
-          nodeId: request.nodeId || '',
-          requestId: String(request.requestId || ''),
-          attachmentEpoch: Number(request.attachmentEpoch || 0),
-          files
-        });
+      const requestId = String(request.requestId || '');
+      const attachmentEpoch = Number(request.attachmentEpoch || 0);
+      try {
+        if (!projectPath || !getProjects(context).some((project) => project.path === projectPath)) throw new Error('Choose a project folder before attaching images.');
+        const scope = String(request.scope || request.targetId || request.nodeId || 'conversation');
+        const files = await savePastedImageAttachmentsAsync(projectPath, scope, request.attachments || [], getPersistedSettings(context).globalDataPath, requestId);
+        if (surface === 'sidebar') {
+          await respond({ command: 'pastedAttachmentsSaved', targetId: request.targetId || '', requestId, attachmentEpoch, files });
+        } else {
+          await respond({ command: 'supplementFilesSelected', nodeId: request.nodeId || '', requestId, attachmentEpoch, files });
+        }
+      } catch (error) {
+        const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : String(error);
+        vscode.window.showErrorMessage(`Unable to add pasted image: ${message}`);
+        await respond({ command: 'pastedAttachmentsFailed', ...(surface === 'sidebar' ? { targetId: request.targetId || '' } : { nodeId: request.nodeId || '' }), requestId, attachmentEpoch, message });
       }
     },
     'agentModels.get': async (request) => {
@@ -9213,7 +9235,7 @@ async function stopAgentRun(nodeId: string, conversationId: number, workspaceRoo
   await processRegisteredStatusFile(extensionContextRef, resolved.reference, true);
 }
 
-interface AgentLaunchTarget { workspaceRoot: string; engine?: SyncEngine; launchIntentId?: string; globalDataPath?: string; settings?: SolopreneurSettings; runtimeReady?: boolean }
+interface AgentLaunchTarget { workspaceRoot: string; engine?: SyncEngine; launchIntentId?: string; launchActionInputHash?: string; globalDataPath?: string; settings?: SolopreneurSettings; runtimeReady?: boolean }
 
 async function captureConversationLaunchTarget(context: vscode.ExtensionContext, workspaceRoot: string, globalDataPath: string, settings: SolopreneurSettings): Promise<AgentLaunchTarget> {
   await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
@@ -9222,13 +9244,14 @@ async function captureConversationLaunchTarget(context: vscode.ExtensionContext,
   return { workspaceRoot, globalDataPath, engine, settings: { ...settings, globalDataPath }, launchIntentId: `user-action:${crypto.randomUUID()}`, runtimeReady: true };
 }
 
-async function resumeOrdinaryConversation(context: vscode.ExtensionContext, workspaceRoot: string, launchIntentId?: string, dataRoot = '', settings?: SolopreneurSettings, runtimeReady = false): Promise<number | null> {
+async function resumeOrdinaryConversation(context: vscode.ExtensionContext, workspaceRoot: string, launchIntentId?: string, dataRoot = '', settings?: SolopreneurSettings, runtimeReady = false, launchActionInputHash = ''): Promise<number | null> {
   if (!launchIntentId) return null;
   const globalDataPath = normalizeGlobalDataPathForExtension(dataRoot || getPersistedSettings(context).globalDataPath || '');
   if (!runtimeReady) await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath });
   const operation = (name: string, input: Record<string, unknown>) => sendRuntimeDataRequest(globalDataPath, { operation: name, input });
   const existing = await operation('read_run_intent', { root: workspaceRoot, launchIntentId }) as import('./runLifecycleTypes').RunState | null;
   if (!existing) return null;
+  if (launchActionInputHash && existing.status.uiLaunchActionHash !== launchActionInputHash) throw new Error('execution_identity_conflict');
   if (!existing.status.deliveryPending) return Number(existing.status.rootExecutionLogId);
   return deliverOrdinaryConversation(context, await resumePreparedAgentRun(existing, operation, globalDataPath), settings);
 }
@@ -9254,6 +9277,7 @@ async function recordUndeliverableAgentRun(context: vscode.ExtensionContext, inp
   failureReason: string;
   globalDataPath?: string;
   launchIntentId?: string;
+  launchActionInputHash?: string;
   parentExecutionLogId?: number;
   expectedParentTurnId?: string;
   flowRole?: AgentRunPreparationInput['flowRole'];
@@ -9267,6 +9291,7 @@ async function recordUndeliverableAgentRun(context: vscode.ExtensionContext, inp
     ...(input.expectedParentTurnId ? { expectedParentTurnId: input.expectedParentTurnId } : {}),
     ...(input.flowRole ? { flowRole: input.flowRole } : { launchIntentId: input.launchIntentId || `launch-failure:${crypto.randomUUID()}` }),
     metadata: { startWaiting: true, failureCode: input.failureCode, failureReason: input.failureReason,
+      ...(input.launchActionInputHash ? { uiLaunchActionHash: input.launchActionInputHash } : {}),
       launchSummary: `${input.userMessage}\n\nFailure category: ${input.failureCode}\n\nFailure reason:\n${input.failureReason}` }
   });
   const executionLogId = Number(prepared.status.rootExecutionLogId);
@@ -9403,7 +9428,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     return 0;
   }
   const resumed = await observeLocalDiagnosticStage('conversation.runSolo.resume', () =>
-    resumeOrdinaryConversation(context, workspaceRoot, target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), target?.globalDataPath, target?.settings, true)
+    resumeOrdinaryConversation(context, workspaceRoot, target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), target?.globalDataPath, target?.settings, true, target?.launchActionInputHash)
   );
   if (resumed !== null) return resumed;
   const request = userMessage.trim();
@@ -9430,7 +9455,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
     const failureReason = `Agent CLI not found. Tried: ${candidates}.`;
     await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId: soloConversationId, runKind: interactiveConversation ? 'solo' : 'solo_background',
       agentCli: requestedAgentCli || agentCli, selectedModel, userMessage: request, failureCode: 'cli_not_found', failureReason,
-      globalDataPath, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined) });
+      globalDataPath, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), launchActionInputHash: target?.launchActionInputHash });
     postNodeConversations(soloConversationId, [], true, workspaceRoot);
     vscode.window.showErrorMessage(`${failureReason} Set SoloMap CLI Command or Path to an installed executable such as agy or codex.`);
     return 0;
@@ -9439,7 +9464,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   if (!automation.ok) {
     await recordUndeliverableAgentRun(context, { workspaceRoot, nodeId: soloConversationId, runKind: interactiveConversation ? 'solo' : 'solo_background',
       agentCli, selectedModel, userMessage: request, failureCode: 'agent_automation_not_ready', failureReason: automation.message,
-      globalDataPath, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined) });
+      globalDataPath, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), launchActionInputHash: target?.launchActionInputHash });
     postNodeConversations(soloConversationId, [], true, workspaceRoot);
     vscode.window.showErrorMessage(automation.message);
     return 0;
@@ -9466,7 +9491,7 @@ async function handleRunSoloConversation(context: vscode.ExtensionContext, userM
   const conversationPrompt = await observeLocalDiagnosticStage('conversation.runSolo.prompt', () =>
     buildSoloConversationPrompt(request, workspaceRoot, settings.globalPrompt, attachedFiles, globalDataPath, settings.enabledEnhancements, interactiveConversation)
   );
-  const prepared = await observeLocalDiagnosticStage('conversation.runSolo.prepare', () => prepareOrdinaryConversation(context, { agentCli, selectedModel, prompt: conversationPrompt, globalPrompt: settings.globalPrompt, workspaceRoot, nodeId: soloConversationId, executionLogId: 0, userMessage: request, runKind: interactiveConversation ? 'solo' : 'solo_background', globalDataPath, taskPermissionMode: settings.taskPermissionMode || 'auto', nativeSessionId, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), metadata: { launchSummary: buildLaunchSummary(), captureRoadmapBackup: true, preSessionGitBackup: true, ...runMetadata } }, settings, true));
+  const prepared = await observeLocalDiagnosticStage('conversation.runSolo.prepare', () => prepareOrdinaryConversation(context, { agentCli, selectedModel, prompt: conversationPrompt, globalPrompt: settings.globalPrompt, workspaceRoot, nodeId: soloConversationId, executionLogId: 0, userMessage: request, runKind: interactiveConversation ? 'solo' : 'solo_background', globalDataPath, taskPermissionMode: settings.taskPermissionMode || 'auto', nativeSessionId, launchIntentId: target?.launchIntentId || (occurrenceId ? `scheduled:${occurrenceId}` : undefined), metadata: { launchSummary: buildLaunchSummary(), captureRoadmapBackup: true, preSessionGitBackup: true, ...(target?.launchActionInputHash ? { uiLaunchActionHash: target.launchActionInputHash } : {}), ...runMetadata } }, settings, true));
   postNodeConversations(soloConversationId, [], true, workspaceRoot);
   return observeLocalDiagnosticStage('conversation.runSolo.delivery', () => deliverOrdinaryConversation(context, prepared, settings));
 }

@@ -779,7 +779,7 @@ test('capability uninstall validates the exact target receipt before committing 
 
 test('pasted internal images use database assets with complete pageable bytes and no project attachment writer', async t => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-internal-asset-'));
-  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'), otherProject = path.join(base, 'other-project'); fs.mkdirSync(project); fs.mkdirSync(otherProject);
   const store = new UnifiedDataStore(root), operations = createRuntimeDataOperations(store);
   const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
   transport.sendRuntimeDataRequest = (resolved, request) => { assert.equal(resolved, root); return operations(request); };
@@ -787,12 +787,17 @@ test('pasted internal images use database assets with complete pageable bytes an
     transport.sendRuntimeDataRequest = previous; await operations.close(); store.close();
     fs.unlinkSync(path.join(root, 'solomap.db')); fs.rmdirSync(root);
     fs.unlinkSync(path.join(project, '.solopreneur', 'project.json')); fs.rmdirSync(path.join(project, '.solopreneur'));
-    fs.rmdirSync(project); fs.rmdirSync(base);
+    fs.unlinkSync(path.join(otherProject, '.solopreneur', 'project.json')); fs.rmdirSync(path.join(otherProject, '.solopreneur'));
+    fs.rmdirSync(project); fs.rmdirSync(otherProject); fs.rmdirSync(base);
   });
   const attachments = require('../out/attachments.js');
   const bytes = Buffer.from('完整内部图片🌿'.repeat(30000));
-  const [ref] = await attachments.savePastedImageAttachmentsAsync(project, 'solo', [{ mimeType: 'image/png', dataUrl: `data:image/png;base64,${bytes.toString('base64')}` }], root);
+  const payload = [{ mimeType: 'image/png', dataUrl: `data:image/png;base64,${bytes.toString('base64')}` }];
+  const [ref] = await attachments.savePastedImageAttachmentsAsync(project, 'solo', payload, root, 'paste-first-project');
+  const [otherRef] = await attachments.savePastedImageAttachmentsAsync(otherProject, 'solo', payload, root, 'paste-second-project');
   assert.match(ref, /^solomap:\/\/asset\/[a-f0-9-]{36}$/);
+  assert.match(otherRef, /^solomap:\/\/asset\/[a-f0-9-]{36}$/);
+  assert.notEqual(otherRef, ref);
   assert.deepEqual(attachments.filterProjectRelativeFiles(project, [ref]), [ref]);
   assert.equal(fs.existsSync(path.join(project, '.solopreneur', 'attachments')), false);
   const assetId = ref.split('/').pop();

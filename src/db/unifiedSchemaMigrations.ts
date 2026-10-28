@@ -8,7 +8,8 @@ export const runtimeEntityDefinitions: typeof entityDefinitions = {
   conversation: { ...entityDefinitions.conversation, project: false },
   message: { ...entityDefinitions.message, project: false },
   evidence: { ...entityDefinitions.evidence, project: false },
-  runtime_instance: { ...entityDefinitions.runtime_instance, columns: entityDefinitions.runtime_instance.columns.replace('process_started_at INTEGER NOT NULL', "process_started_at INTEGER NOT NULL, process_birth TEXT NOT NULL DEFAULT ''") }
+  runtime_instance: { ...entityDefinitions.runtime_instance, columns: entityDefinitions.runtime_instance.columns.replace('process_started_at INTEGER NOT NULL', "process_started_at INTEGER NOT NULL, process_birth TEXT NOT NULL DEFAULT ''") },
+  growth_snapshot: { ...entityDefinitions.growth_snapshot, columns: entityDefinitions.growth_snapshot.columns + ", summary_json TEXT NOT NULL DEFAULT '{}', semantic_hash TEXT NOT NULL DEFAULT ''" }
 };
 
 function nullableConversationTable(kind: 'conversation' | 'message' | 'evidence'): string {
@@ -804,4 +805,48 @@ CREATE TABLE mcp_conversation_dispatches(
  id TEXT PRIMARY KEY,ref TEXT NOT NULL REFERENCES mcp_conversation_launches(ref) ON DELETE CASCADE,
  owner_pid INTEGER NOT NULL,owner_birth TEXT NOT NULL);
 CREATE INDEX mcp_conversation_dispatches_ref ON mcp_conversation_dispatches(ref);
+` }, { version: 54, sql: `
+ALTER TABLE growth_snapshots ADD COLUMN summary_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE growth_snapshots ADD COLUMN semantic_hash TEXT NOT NULL DEFAULT '';
+CREATE TABLE growth_live_snapshots(
+ project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+ snapshot_id TEXT NOT NULL UNIQUE REFERENCES growth_snapshots(id) ON DELETE CASCADE,
+ slot INTEGER NOT NULL CHECK(slot IN (0,1)),
+ PRIMARY KEY(project_id,snapshot_id),UNIQUE(project_id,slot));
+CREATE TABLE growth_live_items(
+ project_id TEXT NOT NULL,snapshot_id TEXT NOT NULL,item_id TEXT NOT NULL,parent_id TEXT,kind TEXT NOT NULL,
+ relative_path TEXT,label TEXT NOT NULL,metrics_json TEXT NOT NULL,production_files INTEGER,test_files INTEGER,test_cases INTEGER,bytes INTEGER,
+ PRIMARY KEY(project_id,snapshot_id,item_id),
+ FOREIGN KEY(project_id,snapshot_id) REFERENCES growth_live_snapshots(project_id,snapshot_id) ON DELETE CASCADE,
+ FOREIGN KEY(project_id,snapshot_id,parent_id) REFERENCES growth_live_items(project_id,snapshot_id,item_id) DEFERRABLE INITIALLY DEFERRED);
+CREATE INDEX growth_live_items_parent ON growth_live_items(project_id,snapshot_id,parent_id);
+CREATE TABLE growth_live_edges(
+ project_id TEXT NOT NULL,snapshot_id TEXT NOT NULL,source_item_id TEXT NOT NULL,target_item_id TEXT NOT NULL,kind TEXT NOT NULL,
+ weight REAL,evidence TEXT NOT NULL DEFAULT '',PRIMARY KEY(project_id,snapshot_id,source_item_id,target_item_id,kind),
+ FOREIGN KEY(project_id,snapshot_id) REFERENCES growth_live_snapshots(project_id,snapshot_id) ON DELETE CASCADE,
+ FOREIGN KEY(project_id,snapshot_id,source_item_id) REFERENCES growth_live_items(project_id,snapshot_id,item_id),
+ FOREIGN KEY(project_id,snapshot_id,target_item_id) REFERENCES growth_live_items(project_id,snapshot_id,item_id));
+CREATE TABLE growth_live_signals(
+ project_id TEXT NOT NULL,snapshot_id TEXT NOT NULL,signal_key TEXT NOT NULL,item_id TEXT NOT NULL,type TEXT NOT NULL,level TEXT NOT NULL,
+ value TEXT,source TEXT NOT NULL DEFAULT '',source_ref TEXT NOT NULL DEFAULT '',created_at INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(project_id,snapshot_id,signal_key),
+ FOREIGN KEY(project_id,snapshot_id) REFERENCES growth_live_snapshots(project_id,snapshot_id) ON DELETE CASCADE,
+ FOREIGN KEY(project_id,snapshot_id,item_id) REFERENCES growth_live_items(project_id,snapshot_id,item_id));
+CREATE TABLE growth_live_module_labels(
+ project_id TEXT NOT NULL,snapshot_id TEXT NOT NULL,node_id TEXT NOT NULL,label TEXT NOT NULL,role TEXT NOT NULL,source TEXT NOT NULL,
+ confidence REAL NOT NULL,updated_at INTEGER NOT NULL,PRIMARY KEY(project_id,snapshot_id,node_id),
+ FOREIGN KEY(project_id,snapshot_id) REFERENCES growth_live_snapshots(project_id,snapshot_id) ON DELETE CASCADE,
+ FOREIGN KEY(project_id,snapshot_id,node_id) REFERENCES growth_live_items(project_id,snapshot_id,item_id));
+CREATE TRIGGER growth_live_item_semantic_insert AFTER INSERT ON growth_live_items BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=NEW.snapshot_id; END;
+CREATE TRIGGER growth_live_item_semantic_update AFTER UPDATE ON growth_live_items BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id IN (OLD.snapshot_id,NEW.snapshot_id); END;
+CREATE TRIGGER growth_live_item_semantic_delete AFTER DELETE ON growth_live_items BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=OLD.snapshot_id; END;
+CREATE TRIGGER growth_live_edge_semantic_insert AFTER INSERT ON growth_live_edges BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=NEW.snapshot_id; END;
+CREATE TRIGGER growth_live_edge_semantic_update AFTER UPDATE ON growth_live_edges BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id IN (OLD.snapshot_id,NEW.snapshot_id); END;
+CREATE TRIGGER growth_live_edge_semantic_delete AFTER DELETE ON growth_live_edges BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=OLD.snapshot_id; END;
+CREATE TRIGGER growth_live_signal_semantic_insert AFTER INSERT ON growth_live_signals BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=NEW.snapshot_id; END;
+CREATE TRIGGER growth_live_signal_semantic_update AFTER UPDATE ON growth_live_signals BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id IN (OLD.snapshot_id,NEW.snapshot_id); END;
+CREATE TRIGGER growth_live_signal_semantic_delete AFTER DELETE ON growth_live_signals BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=OLD.snapshot_id; END;
+CREATE TRIGGER growth_live_label_semantic_insert AFTER INSERT ON growth_live_module_labels BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=NEW.snapshot_id; END;
+CREATE TRIGGER growth_live_label_semantic_update AFTER UPDATE ON growth_live_module_labels BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id IN (OLD.snapshot_id,NEW.snapshot_id); END;
+CREATE TRIGGER growth_live_label_semantic_delete AFTER DELETE ON growth_live_module_labels BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=OLD.snapshot_id; END;
 ` }];

@@ -60,13 +60,16 @@ export async function savePastedImageAttachmentsAsync(
   projectRoot: string,
   scope: string,
   attachments: PastedImageAttachment[],
-  globalDataPath = ''
+  globalDataPath = '',
+  requestId = ''
 ): Promise<string[]> {
   if (!projectRoot || !Array.isArray(attachments) || attachments.length === 0) {
     return [];
   }
 
   const safeScope = sanitizeAttachmentScope(scope);
+  const projectKey = crypto.createHash('sha256').update(path.resolve(projectRoot)).digest('hex');
+  const deliveryKey = String(requestId || safeScope);
   const dataRoot = normalizeGlobalDataPathForExtension(globalDataPath, projectRoot);
   const files = await Promise.all(attachments.slice(0, 10).map(async (attachment, index) => {
     const dataUrl = String(attachment?.dataUrl || '');
@@ -80,7 +83,7 @@ export async function savePastedImageAttachmentsAsync(
     const fileName = `${safeScope}-${index + 1}.${extension}`;
     const saved = await sendRuntimeDataRequest<{ ref: string }>(dataRoot, { operation: 'write_internal_attachment', input: {
       root: projectRoot, name: fileName, bytes, mimeType,
-      idempotencyKey: `internal-attachment:${safeScope}:${index}:${hash}`
+      idempotencyKey: `internal-attachment:${projectKey}:${deliveryKey}:${index}:${hash}`
     } });
     return saved.ref;
   }));

@@ -291,6 +291,44 @@ function growthPayloadHash(data: GrowthSnapshotData): string {
   const labels = ordered(data.labels.map(({ snapshotId: _snapshotId, updatedAt: _updatedAt, ...label }) => label));
   return digest(canonical({ snapshot, nodes, edges, signals, labels }));
 }
+function growthSnapshotSummary(data: GrowthSnapshotData): NonNullable<GrowthSnapshotData['summary']> {
+  return {
+    files: data.nodes.filter(node => node.kind === 'file' && !node.excluded).length,
+    modules: data.nodes.filter(node => node.kind === 'module').length,
+    capabilities: data.nodes.filter(node => node.kind === 'capability').length,
+    packages: data.nodes.filter(node => node.kind === 'package').length,
+    loc: data.nodes.filter(node => node.kind === 'file' && !node.excluded).reduce((sum, node) => sum + node.loc, 0),
+    signals: data.signals.length
+  };
+}
+function sqliteBinaryTextCompare(left: string, right: string): number {
+  return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'));
+}
+function growthCleanupSemanticHash(data: GrowthSnapshotData): string {
+  const hash = crypto.createHash('sha256');
+  hash.update('growth-snapshot-cleanup-semantic-v1\0');
+  const header = canonical({ projectPath: data.snapshot.projectPath, gitHead: data.snapshot.gitHead || '', status: data.snapshot.status, error: data.snapshot.error || '' });
+  hash.update(`snapshot\0${Buffer.byteLength(header, 'utf8')}:`);
+  hash.update(header);
+  const section = (name: string, items: unknown[]) => {
+    hash.update(`${name}\0`);
+    for (const item of items) {
+      const value = canonical(item);
+      hash.update(`${Buffer.byteLength(value, 'utf8')}:`);
+      hash.update(value);
+    }
+    hash.update(`\0${items.length};`);
+  };
+  section('nodes', data.nodes.map(({ snapshotId: _snapshotId, ...node }) => node).sort((left, right) => sqliteBinaryTextCompare(left.nodeId, right.nodeId)));
+  section('edges', data.edges.map(edge => ({ sourceId: edge.sourceId, targetId: edge.targetId, kind: edge.kind, weight: edge.weight, evidence: edge.evidence || '' }))
+    .sort((left, right) => sqliteBinaryTextCompare(left.sourceId, right.sourceId) || sqliteBinaryTextCompare(left.targetId, right.targetId) || sqliteBinaryTextCompare(left.kind, right.kind)));
+  section('signals', data.signals.map(signal => ({ nodeId: signal.nodeId, type: signal.type, level: signal.level, value: signal.value || '', source: signal.source, sourceRef: signal.sourceRef }))
+    .sort((left, right) => sqliteBinaryTextCompare(left.nodeId, right.nodeId) || sqliteBinaryTextCompare(left.type, right.type) || sqliteBinaryTextCompare(left.level, right.level)
+      || sqliteBinaryTextCompare(left.value, right.value) || sqliteBinaryTextCompare(left.source, right.source) || sqliteBinaryTextCompare(left.sourceRef, right.sourceRef)));
+  section('labels', data.labels.map(label => ({ nodeId: label.nodeId, label: label.label, role: label.role, source: label.source, confidence: label.confidence }))
+    .sort((left, right) => sqliteBinaryTextCompare(left.nodeId, right.nodeId)));
+  return hash.digest('hex');
+}
 function digestFile(file: string): { sha256: string; bytes: number } {
   const hash = crypto.createHash('sha256'), buffer = Buffer.allocUnsafe(8 * 1024 * 1024);
   const descriptor = fs.openSync(file, 'r'); let bytes = 0;
@@ -6974,11 +7012,13 @@ export class UnifiedDataStore {
       const replay = this.rows('SELECT id FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, idempotencyKey]).length > 0;
       const receipt = this.write({
         kind: 'growth_snapshot', action: 'create', scope: projectId, idempotencyKey,
-        data: { git_head: snapshot.gitHead || null, reason: snapshot.scanReason, status: snapshot.status, duration_ms: snapshot.durationMs, created_at: Date.parse(snapshot.createdAt), project_path: snapshot.projectPath, error: snapshot.error || '', payload_hash: growthPayloadHash(data) }
+        data: { git_head: snapshot.gitHead || null, reason: snapshot.scanReason, status: snapshot.status, duration_ms: snapshot.durationMs, created_at: Date.parse(snapshot.createdAt), project_path: snapshot.projectPath, error: snapshot.error || '', payload_hash: growthPayloadHash(data), summary_json: growthSnapshotSummary(data), semantic_hash: growthCleanupSemanticHash(data) }
       });
       if (replay) return receipt;
       const storedSnapshotId = receipt.objectId;
-      this.db.run('DELETE FROM growth_items WHERE snapshot_id=?', [storedSnapshotId]);
+      this.db.run('DELETE FROM growth_live_snapshots WHERE project_id=? AND slot=1', [projectId]);
+      this.db.run('UPDATE growth_live_snapshots SET slot=1 WHERE project_id=? AND slot=0', [projectId]);
+      this.db.run('INSERT INTO growth_live_snapshots(project_id,snapshot_id,slot) VALUES(?,?,0)', [projectId, storedSnapshotId]);
       try {
         const children = new Map<string, typeof data.nodes>();
         const ordered = data.nodes.filter(node => !node.parentId);
@@ -6994,18 +7034,15 @@ export class UnifiedDataStore {
         }
         if (ordered.length !== data.nodes.length) throw new Error('growth_parent_cycle');
         for (const node of ordered) {
-          this.db.run('INSERT INTO growth_items VALUES(?,?,?,?,?,?,?,?,?,?,?)', [storedSnapshotId, node.nodeId, node.parentId || null, node.kind, node.path, node.label, canonical({ ...node, snapshotId: storedSnapshotId }), node.fileCount - node.testFileCount, node.testFileCount, null, node.bytes]);
+          this.db.run('INSERT INTO growth_live_items VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', [projectId, storedSnapshotId, node.nodeId, node.parentId || null, node.kind, node.path, node.label, canonical({ ...node, snapshotId: storedSnapshotId }), node.fileCount - node.testFileCount, node.testFileCount, null, node.bytes]);
         }
       }
       catch (error) { throw new Error(`growth_items_write:${String(error)}`); }
-      this.db.run('DELETE FROM growth_edges WHERE snapshot_id=?', [storedSnapshotId]);
-      try { for (const edge of data.edges) this.db.run('INSERT INTO growth_edges(snapshot_id,source_item_id,target_item_id,kind,weight,evidence_id,evidence) VALUES(?,?,?,?,?,NULL,?)', [storedSnapshotId, edge.sourceId, edge.targetId, edge.kind, edge.weight, edge.evidence || '']); }
+      try { for (const edge of data.edges) this.db.run('INSERT INTO growth_live_edges VALUES(?,?,?,?,?,?,?)', [projectId, storedSnapshotId, edge.sourceId, edge.targetId, edge.kind, edge.weight, edge.evidence || '']); }
       catch (error) { throw new Error(`growth_edges_write:${String(error)}`); }
-      this.db.run('DELETE FROM growth_signals WHERE snapshot_id=?', [storedSnapshotId]);
-      try { data.signals.forEach((signal, index) => this.db.run('INSERT INTO growth_signals(snapshot_id,signal_key,item_id,type,level,value,evidence_id,source,source_ref,created_at) VALUES(?,?,?,?,?,?,NULL,?,?,?)', [storedSnapshotId, `${signal.nodeId}:${signal.type}:${index}`, signal.nodeId, signal.type, signal.level, signal.value, signal.source, signal.sourceRef, Date.parse(signal.createdAt)])); }
+      try { data.signals.forEach((signal, index) => this.db.run('INSERT INTO growth_live_signals VALUES(?,?,?,?,?,?,?,?,?,?)', [projectId, storedSnapshotId, `${signal.nodeId}:${signal.type}:${index}`, signal.nodeId, signal.type, signal.level, signal.value, signal.source, signal.sourceRef, Date.parse(signal.createdAt)])); }
       catch (error) { throw new Error(`growth_signals_write:${String(error)}`); }
-      this.db.run('DELETE FROM growth_module_labels WHERE snapshot_id=?', [storedSnapshotId]);
-      try { for (const label of data.labels) this.db.run('INSERT INTO growth_module_labels VALUES(?,?,?,?,?,?,?)', [storedSnapshotId, label.nodeId, label.label, label.role, label.source, label.confidence, Date.parse(label.updatedAt)]); }
+      try { for (const label of data.labels) this.db.run('INSERT INTO growth_live_module_labels VALUES(?,?,?,?,?,?,?,?)', [projectId, storedSnapshotId, label.nodeId, label.label, label.role, label.source, label.confidence, Date.parse(label.updatedAt)]); }
       catch (error) { throw new Error(`growth_labels_write:${String(error)}`); }
       return receipt;
     });
@@ -7064,15 +7101,45 @@ export class UnifiedDataStore {
       ? this.rows('SELECT g.id FROM growth_snapshots g JOIN objects o ON o.id=g.id WHERE g.project_id=? ORDER BY o.rowid DESC LIMIT ?', [projectId, Math.max(1, Math.min(50, historyLimit))]).map(row => String(row.id))
       : this.rows('SELECT id FROM growth_snapshots WHERE project_id=? AND id=?', [projectId, snapshotId]).map(row => String(row.id));
     if (snapshotId !== undefined && !ids.length) throw new Error('growth_snapshot_missing');
+    const topologySnapshotIds = new Set(this.rows(`SELECT g.id FROM growth_snapshots g JOIN objects o ON o.id=g.id
+      WHERE g.project_id=? ORDER BY o.rowid DESC LIMIT 2`, [projectId]).map(row => String(row.id)));
     const read = (id: string): GrowthSnapshotData => {
       const row = this.rows('SELECT * FROM growth_snapshots WHERE id=? AND project_id=?', [id, projectId])[0];
       if (!row) throw new Error('growth_snapshot_missing');
       const snapshot: GrowthSnapshotRecord = { id, createdAt: new Date(Number(row.created_at)).toISOString(), projectPath: String(row.project_path), gitHead: String(row.git_head || ''), scanReason: String(row.reason), status: String(row.status), durationMs: Number(row.duration_ms || 0), error: String(row.error || '') };
-      const nodes = this.rows('SELECT metrics_json FROM growth_items WHERE snapshot_id=? ORDER BY rowid', [id]).map(item => JSON.parse(String(item.metrics_json)));
-      const edges = this.rows('SELECT source_item_id,target_item_id,kind,weight,evidence FROM growth_edges WHERE snapshot_id=? ORDER BY rowid', [id]).map(edge => ({ snapshotId: id, sourceId: String(edge.source_item_id), targetId: String(edge.target_item_id), kind: String(edge.kind), weight: Number(edge.weight || 0), evidence: String(edge.evidence || '') }));
-      const signals = this.rows('SELECT item_id,type,level,value,source,source_ref,created_at FROM growth_signals WHERE snapshot_id=? ORDER BY rowid', [id]).map(signal => ({ snapshotId: id, nodeId: String(signal.item_id), type: String(signal.type), level: String(signal.level), value: String(signal.value || ''), source: String(signal.source), sourceRef: String(signal.source_ref), createdAt: new Date(Number(signal.created_at)).toISOString() }));
-      const labels = this.rows('SELECT node_id,label,role,source,confidence,updated_at FROM growth_module_labels WHERE snapshot_id=? ORDER BY rowid', [id]).map(label => ({ snapshotId: id, nodeId: String(label.node_id), label: String(label.label), role: String(label.role), source: String(label.source), confidence: Number(label.confidence), updatedAt: new Date(Number(label.updated_at)).toISOString() }));
-      return { snapshot, nodes, edges, signals, labels } as GrowthSnapshotData;
+      const includeTopology = topologySnapshotIds.has(id);
+      const live = includeTopology && Boolean(this.rows('SELECT 1 FROM growth_live_snapshots WHERE project_id=? AND snapshot_id=?', [projectId, id])[0]);
+      const nodes = includeTopology ? this.rows(live
+        ? 'SELECT metrics_json FROM growth_live_items WHERE project_id=? AND snapshot_id=? ORDER BY rowid'
+        : 'SELECT metrics_json FROM growth_items WHERE snapshot_id=? ORDER BY rowid', live ? [projectId, id] : [id]).map(item => JSON.parse(String(item.metrics_json))) : [];
+      const edges = includeTopology ? this.rows(live
+        ? 'SELECT source_item_id,target_item_id,kind,weight,evidence FROM growth_live_edges WHERE project_id=? AND snapshot_id=? ORDER BY rowid'
+        : 'SELECT source_item_id,target_item_id,kind,weight,evidence FROM growth_edges WHERE snapshot_id=? ORDER BY rowid', live ? [projectId, id] : [id]).map(edge => ({ snapshotId: id, sourceId: String(edge.source_item_id), targetId: String(edge.target_item_id), kind: String(edge.kind), weight: Number(edge.weight || 0), evidence: String(edge.evidence || '') })) : [];
+      const signals = includeTopology ? this.rows(live
+        ? 'SELECT item_id,type,level,value,source,source_ref,created_at FROM growth_live_signals WHERE project_id=? AND snapshot_id=? ORDER BY rowid'
+        : 'SELECT item_id,type,level,value,source,source_ref,created_at FROM growth_signals WHERE snapshot_id=? ORDER BY rowid', live ? [projectId, id] : [id]).map(signal => ({ snapshotId: id, nodeId: String(signal.item_id), type: String(signal.type), level: String(signal.level), value: String(signal.value || ''), source: String(signal.source), sourceRef: String(signal.source_ref), createdAt: new Date(Number(signal.created_at)).toISOString() })) : [];
+      const labels = includeTopology ? this.rows(live
+        ? 'SELECT node_id,label,role,source,confidence,updated_at FROM growth_live_module_labels WHERE project_id=? AND snapshot_id=? ORDER BY rowid'
+        : 'SELECT node_id,label,role,source,confidence,updated_at FROM growth_module_labels WHERE snapshot_id=? ORDER BY rowid', live ? [projectId, id] : [id]).map(label => ({ snapshotId: id, nodeId: String(label.node_id), label: String(label.label), role: String(label.role), source: String(label.source), confidence: Number(label.confidence), updatedAt: new Date(Number(label.updated_at)).toISOString() })) : [];
+      let summary: GrowthSnapshotData['summary'];
+      try {
+        const parsed = JSON.parse(String(row.summary_json || '{}'));
+        if (parsed && ['files', 'modules', 'capabilities', 'packages', 'loc', 'signals'].every(key => Number.isFinite(parsed[key]) && parsed[key] >= 0)) summary = parsed;
+      } catch { /* Older rows without a summary remain readable from their complete detail records. */ }
+      if (!summary && !includeTopology) {
+        const totals = this.rows(`SELECT
+          SUM(CASE WHEN kind='file' AND COALESCE(json_extract(metrics_json,'$.excluded'),0)=0 THEN 1 ELSE 0 END) AS files,
+          SUM(CASE WHEN kind='module' THEN 1 ELSE 0 END) AS modules,
+          SUM(CASE WHEN kind='capability' THEN 1 ELSE 0 END) AS capabilities,
+          SUM(CASE WHEN kind='package' THEN 1 ELSE 0 END) AS packages,
+          SUM(CASE WHEN kind='file' AND COALESCE(json_extract(metrics_json,'$.excluded'),0)=0 THEN COALESCE(json_extract(metrics_json,'$.loc'),0) ELSE 0 END) AS loc
+          FROM growth_items WHERE snapshot_id=?`, [id])[0] || {};
+        const signalCount = this.rows('SELECT COUNT(*) AS count FROM growth_signals WHERE snapshot_id=?', [id])[0];
+        summary = { files: Number(totals.files || 0), modules: Number(totals.modules || 0), capabilities: Number(totals.capabilities || 0), packages: Number(totals.packages || 0), loc: Number(totals.loc || 0), signals: Number(signalCount?.count || 0) };
+      }
+      const data = { snapshot, nodes, edges, signals, labels, ...(summary ? { summary } : {}), topologyAvailable: includeTopology && (live || Boolean(nodes.length || edges.length || signals.length || labels.length)) } as GrowthSnapshotData;
+      if (!data.summary && (nodes.length || signals.length)) data.summary = growthSnapshotSummary(data);
+      return data;
     };
     const history = ids.map(read);
     return { latest: history[0] || null, history };
@@ -7094,33 +7161,43 @@ export class UnifiedDataStore {
     hash.update(`\0${count};`);
   }
   private computeGrowthSnapshotCleanupFingerprint(projectId: string, snapshotId: string): string {
-    const row = this.rows(`SELECT project_path,git_head,status,error FROM growth_snapshots
+    const row = this.rows(`SELECT project_path,git_head,status,error,payload_hash,summary_json,semantic_hash FROM growth_snapshots
       WHERE id=? AND project_id=?`, [snapshotId, projectId])[0];
     if (!row) throw new Error('growth_snapshot_missing');
+    const live = Boolean(this.rows('SELECT 1 FROM growth_live_snapshots WHERE project_id=? AND snapshot_id=?', [projectId, snapshotId])[0]);
+    const storedSemanticHash = String(row.semantic_hash || '');
+    if (!live && /^[a-f0-9]{64}$/.test(storedSemanticHash)) {
+      return storedSemanticHash;
+    }
     const hash = crypto.createHash('sha256');
     hash.update('growth-snapshot-cleanup-semantic-v1\0');
     const header = canonical({ projectPath: String(row.project_path), gitHead: String(row.git_head || ''), status: String(row.status), error: String(row.error || '') });
     hash.update(`snapshot\0${Buffer.byteLength(header, 'utf8')}:`);
     hash.update(header);
-    this.hashGrowthSnapshotCleanupRows(hash, 'nodes', `SELECT metrics_json FROM growth_items
-      WHERE snapshot_id=? ORDER BY item_id`, [snapshotId], item => {
+    const values: SqlValue[] = live ? [projectId, snapshotId] : [snapshotId];
+    this.hashGrowthSnapshotCleanupRows(hash, 'nodes', live ? `SELECT metrics_json FROM growth_live_items
+      WHERE project_id=? AND snapshot_id=? ORDER BY item_id` : `SELECT metrics_json FROM growth_items
+      WHERE snapshot_id=? ORDER BY item_id`, values, item => {
       const value = JSON.parse(String(item.metrics_json));
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('growth_snapshot_node_invalid');
       const { snapshotId: _snapshotId, ...node } = value as Record<string, unknown>;
       return node;
     });
-    this.hashGrowthSnapshotCleanupRows(hash, 'edges', `SELECT source_item_id,target_item_id,kind,weight,evidence FROM growth_edges
-      WHERE snapshot_id=? ORDER BY source_item_id,target_item_id,kind`, [snapshotId], edge => ({
+    this.hashGrowthSnapshotCleanupRows(hash, 'edges', live ? `SELECT source_item_id,target_item_id,kind,weight,evidence FROM growth_live_edges
+      WHERE project_id=? AND snapshot_id=? ORDER BY source_item_id,target_item_id,kind` : `SELECT source_item_id,target_item_id,kind,weight,evidence FROM growth_edges
+      WHERE snapshot_id=? ORDER BY source_item_id,target_item_id,kind`, values, edge => ({
       sourceId: String(edge.source_item_id), targetId: String(edge.target_item_id), kind: String(edge.kind),
       weight: Number(edge.weight || 0), evidence: String(edge.evidence || '')
     }));
-    this.hashGrowthSnapshotCleanupRows(hash, 'signals', `SELECT item_id,type,level,value,source,source_ref FROM growth_signals
-      WHERE snapshot_id=? ORDER BY item_id,type,level,value,source,source_ref`, [snapshotId], signal => ({
+    this.hashGrowthSnapshotCleanupRows(hash, 'signals', live ? `SELECT item_id,type,level,value,source,source_ref FROM growth_live_signals
+      WHERE project_id=? AND snapshot_id=? ORDER BY item_id,type,level,value,source,source_ref` : `SELECT item_id,type,level,value,source,source_ref FROM growth_signals
+      WHERE snapshot_id=? ORDER BY item_id,type,level,value,source,source_ref`, values, signal => ({
       nodeId: String(signal.item_id), type: String(signal.type), level: String(signal.level), value: String(signal.value || ''),
       source: String(signal.source), sourceRef: String(signal.source_ref)
     }));
-    this.hashGrowthSnapshotCleanupRows(hash, 'labels', `SELECT node_id,label,role,source,confidence FROM growth_module_labels
-      WHERE snapshot_id=? ORDER BY node_id`, [snapshotId], label => ({
+    this.hashGrowthSnapshotCleanupRows(hash, 'labels', live ? `SELECT node_id,label,role,source,confidence FROM growth_live_module_labels
+      WHERE project_id=? AND snapshot_id=? ORDER BY node_id` : `SELECT node_id,label,role,source,confidence FROM growth_module_labels
+      WHERE snapshot_id=? ORDER BY node_id`, values, label => ({
       nodeId: String(label.node_id), label: String(label.label), role: String(label.role), source: String(label.source), confidence: Number(label.confidence)
     }));
     return hash.digest('hex');
@@ -7205,6 +7282,7 @@ export class UnifiedDataStore {
     const candidateIds = candidateSnapshots.map(item => item.snapshotId);
     this.resetGrowthSnapshotCleanupScope('growth_cleanup_scope', 'snapshot_id', candidateIds);
     const count = (table: string, column = 'snapshot_id'): number => Number(this.rows(`SELECT COUNT(*) AS count FROM ${quoteSqlIdentifier(table)} WHERE ${quoteSqlIdentifier(column)} IN (SELECT snapshot_id FROM growth_cleanup_scope)`)[0].count);
+    const detailCount = (legacyTable: string, liveTable: string): number => count(legacyTable) + count(liveTable);
     const snapshotRecords = this.rows(`SELECT id,project_id,git_head,reason,status,duration_ms,created_at,project_path,error,payload_hash FROM growth_snapshots
       WHERE id IN (SELECT snapshot_id FROM growth_cleanup_scope) ORDER BY id`).map(row => ({ id: String(row.id), projectId: String(row.project_id),
         gitHead: row.git_head === null ? null : String(row.git_head), reason: String(row.reason), status: String(row.status), durationMs: row.duration_ms === null ? null : Number(row.duration_ms),
@@ -7271,10 +7349,10 @@ export class UnifiedDataStore {
       candidateSnapshots,
       records: {
         growthSnapshots: { count: candidateIds.length, ids: candidateIds, records: snapshotRecords },
-        growthItems: { count: count('growth_items'), snapshotIds: candidateIds },
-        growthEdges: { count: count('growth_edges'), snapshotIds: candidateIds },
-        growthSignals: { count: count('growth_signals'), snapshotIds: candidateIds },
-        growthModuleLabels: { count: count('growth_module_labels'), snapshotIds: candidateIds },
+        growthItems: { count: detailCount('growth_items', 'growth_live_items'), snapshotIds: candidateIds },
+        growthEdges: { count: detailCount('growth_edges', 'growth_live_edges'), snapshotIds: candidateIds },
+        growthSignals: { count: detailCount('growth_signals', 'growth_live_signals'), snapshotIds: candidateIds },
+        growthModuleLabels: { count: detailCount('growth_module_labels', 'growth_live_module_labels'), snapshotIds: candidateIds },
         objects: { count: count('objects', 'id'), ids: candidateIds, records: objectRecords },
         objectSearch: { count: objectSearchRowids.length, rowids: objectSearchRowids },
         objectRevisions: { count: objectRevisions.length, keys: objectRevisions },
@@ -7427,6 +7505,8 @@ export class UnifiedDataStore {
     const count = (table: string, column: string, scope: string, scopeColumn: string): number => Number(this.rows(
       `SELECT COUNT(*) AS count FROM ${quoteSqlIdentifier(table)} WHERE ${quoteSqlIdentifier(column)} IN (SELECT ${quoteSqlIdentifier(scopeColumn)} FROM ${quoteSqlIdentifier(scope)})`
     )[0].count);
+    const detailCount = (legacyTable: string, liveTable: string): number => count(legacyTable, 'snapshot_id', 'growth_cleanup_batch_scope', 'snapshot_id')
+      + count(liveTable, 'snapshot_id', 'growth_cleanup_batch_scope', 'snapshot_id');
     const objectSearchRowids = this.rows(`SELECT rowid FROM object_search WHERE rowid IN
       (SELECT o.rowid FROM objects o JOIN growth_cleanup_batch_scope s ON s.snapshot_id=o.id) ORDER BY rowid`).map(row => Number(row.rowid));
     return {
@@ -7436,10 +7516,10 @@ export class UnifiedDataStore {
       outboxIds,
       expected: {
         growthSnapshots: count('growth_snapshots', 'id', 'growth_cleanup_batch_scope', 'snapshot_id'),
-        growthItems: count('growth_items', 'snapshot_id', 'growth_cleanup_batch_scope', 'snapshot_id'),
-        growthEdges: count('growth_edges', 'snapshot_id', 'growth_cleanup_batch_scope', 'snapshot_id'),
-        growthSignals: count('growth_signals', 'snapshot_id', 'growth_cleanup_batch_scope', 'snapshot_id'),
-        growthModuleLabels: count('growth_module_labels', 'snapshot_id', 'growth_cleanup_batch_scope', 'snapshot_id'),
+        growthItems: detailCount('growth_items', 'growth_live_items'),
+        growthEdges: detailCount('growth_edges', 'growth_live_edges'),
+        growthSignals: detailCount('growth_signals', 'growth_live_signals'),
+        growthModuleLabels: detailCount('growth_module_labels', 'growth_live_module_labels'),
         objects: count('objects', 'id', 'growth_cleanup_batch_scope', 'snapshot_id'),
         objectSearch: objectSearchRowids.length,
         objectRevisions: count('object_revisions', 'object_id', 'growth_cleanup_batch_scope', 'snapshot_id'),
@@ -7681,6 +7761,10 @@ export class UnifiedDataStore {
           this.resetGrowthSnapshotCleanupScope('growth_cleanup_batch_outbox_scope', 'outbox_id', outboxIds);
           const deleted = this.validateGrowthSnapshotCleanupBatchRecords(batchPlan, plan.manifest);
           this.db.run('DELETE FROM outbox WHERE id IN (SELECT outbox_id FROM growth_cleanup_batch_outbox_scope)');
+          this.db.run('DELETE FROM growth_live_edges WHERE snapshot_id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope)');
+          this.db.run('DELETE FROM growth_live_signals WHERE snapshot_id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope)');
+          this.db.run('DELETE FROM growth_live_module_labels WHERE snapshot_id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope)');
+          this.db.run('DELETE FROM growth_live_items WHERE snapshot_id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope)');
           this.db.run('DELETE FROM growth_edges WHERE snapshot_id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope)');
           this.db.run('DELETE FROM growth_signals WHERE snapshot_id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope)');
           this.db.run('DELETE FROM growth_module_labels WHERE snapshot_id IN (SELECT snapshot_id FROM growth_cleanup_batch_scope)');

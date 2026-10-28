@@ -143,12 +143,23 @@ export interface GrowthModuleLabelRecord {
   updatedAt: string;
 }
 
+export interface GrowthSnapshotSummary {
+  files: number;
+  modules: number;
+  capabilities: number;
+  packages: number;
+  loc: number;
+  signals: number;
+}
+
 export interface GrowthSnapshotData {
   snapshot: GrowthSnapshotRecord;
   nodes: GrowthNodeRecord[];
   edges: GrowthEdgeRecord[];
   signals: GrowthSignalRecord[];
   labels: GrowthModuleLabelRecord[];
+  summary?: GrowthSnapshotSummary;
+  topologyAvailable?: boolean;
 }
 
 export interface ProjectState {

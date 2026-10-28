@@ -123,11 +123,98 @@ test('unchanged growth retries write one snapshot and return only a lightweight 
     assert.deepEqual(second, { accepted: true, snapshotId: first.snapshotId, unchanged: true });
     assert.equal(Object.hasOwn(first, 'latest'), false);
     assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_snapshots WHERE project_id=?', [f.project.projectId])[0].count, 1);
-    assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_items WHERE snapshot_id=?', [first.snapshotId])[0].count, 1);
-    assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_signals WHERE snapshot_id=?', [first.snapshotId])[0].count, 1);
-    assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_module_labels WHERE snapshot_id=?', [first.snapshotId])[0].count, 1);
+    assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_live_items WHERE snapshot_id=?', [first.snapshotId])[0].count, 1);
+    assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_live_signals WHERE snapshot_id=?', [first.snapshotId])[0].count, 1);
+    assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_live_module_labels WHERE snapshot_id=?', [first.snapshotId])[0].count, 1);
     const plan = f.store.rows('EXPLAIN QUERY PLAN SELECT id,payload_hash FROM growth_snapshots WHERE project_id=? ORDER BY rowid DESC LIMIT 1', [f.project.projectId]);
     assert.match(plan.map(row => String(row.detail)).join('\n'), /growth_snapshots_scope/);
+  } finally { f.close(); }
+});
+
+test('growth history keeps lightweight totals while bounding full topology to the latest two snapshots', async () => {
+  const f = await fixture();
+  try {
+    const storedIds = [];
+    for (let index = 0; index < 3; index++) {
+      const data = growthSnapshot(f.projectRoot, `snapshot-${index}`, `2026-10-16T14:0${index}:00.000Z`);
+      data.nodes.push({
+        snapshotId: data.snapshot.id,
+        nodeId: 'file:src/index.ts',
+        parentId: 'directory:.',
+        kind: 'file',
+        path: 'src/index.ts',
+        label: `index-${index}.ts`,
+        language: 'TypeScript',
+        bytes: 100 + index,
+        loc: 10 + index,
+        fileCount: 1,
+        testFileCount: 0,
+        generated: false,
+        excluded: false,
+        primaryRole: 'source',
+        confidence: 1
+      });
+      storedIds.push(f.store.writeProjectGrowth(f.project.projectId, data, `bounded-growth-${index}`).objectId);
+    }
+
+    assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_live_snapshots WHERE project_id=?', [f.project.projectId])[0].count, 2);
+    assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_live_items WHERE project_id=?', [f.project.projectId])[0].count, 4);
+    assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_items WHERE snapshot_id IN (?,?,?)', storedIds)[0].count, 0);
+
+    const stored = f.store.readProjectGrowth(f.project.projectId, 12);
+    assert.deepEqual(stored.history.map(item => item.snapshot.id), [...storedIds].reverse());
+    assert.equal(stored.history[0].nodes.length, 2);
+    assert.equal(stored.history[1].nodes.length, 2);
+    assert.equal(stored.history[2].nodes.length, 0);
+    assert.deepEqual(stored.history[2].summary, { files: 1, modules: 0, capabilities: 0, packages: 0, loc: 10, signals: 1 });
+  } finally { f.close(); }
+});
+
+test('upgraded legacy growth history exposes only the latest two topologies and synthesizes older totals', async () => {
+  const f = await fixture();
+  try {
+    const storedIds = [];
+    for (let index = 0; index < 3; index++) {
+      const data = growthSnapshot(f.projectRoot, `legacy-snapshot-${index}`, `2026-10-16T15:0${index}:00.000Z`);
+      data.nodes.push({
+        snapshotId: data.snapshot.id,
+        nodeId: 'file:src/legacy.ts',
+        parentId: 'directory:.',
+        kind: 'file',
+        path: 'src/legacy.ts',
+        label: `legacy-${index}.ts`,
+        language: 'TypeScript',
+        bytes: 100 + index,
+        loc: 20 + index,
+        fileCount: 1,
+        testFileCount: 0,
+        generated: false,
+        excluded: false,
+        primaryRole: 'source',
+        confidence: 1
+      });
+      const snapshotId = f.store.writeProjectGrowth(f.project.projectId, data, `legacy-growth-${index}`).objectId;
+      storedIds.push(snapshotId);
+      f.store.db.run(`INSERT INTO growth_items
+        SELECT snapshot_id,item_id,parent_id,kind,relative_path,label,metrics_json,production_files,test_files,test_cases,bytes
+        FROM growth_live_items WHERE snapshot_id=?`, [snapshotId]);
+      f.store.db.run(`INSERT INTO growth_edges(snapshot_id,source_item_id,target_item_id,kind,weight,evidence_id,evidence)
+        SELECT snapshot_id,source_item_id,target_item_id,kind,weight,NULL,evidence FROM growth_live_edges WHERE snapshot_id=?`, [snapshotId]);
+      f.store.db.run(`INSERT INTO growth_signals(snapshot_id,signal_key,item_id,type,level,value,evidence_id,source,source_ref,created_at)
+        SELECT snapshot_id,signal_key,item_id,type,level,value,NULL,source,source_ref,created_at FROM growth_live_signals WHERE snapshot_id=?`, [snapshotId]);
+      f.store.db.run(`INSERT INTO growth_module_labels(snapshot_id,node_id,label,role,source,confidence,updated_at)
+        SELECT snapshot_id,node_id,label,role,source,confidence,updated_at FROM growth_live_module_labels WHERE snapshot_id=?`, [snapshotId]);
+      f.store.db.run('DELETE FROM growth_live_snapshots WHERE snapshot_id=?', [snapshotId]);
+      f.store.db.run("UPDATE growth_snapshots SET summary_json='{}',semantic_hash='' WHERE id=?", [snapshotId]);
+    }
+
+    const stored = f.store.readProjectGrowth(f.project.projectId, 12);
+    assert.deepEqual(stored.history.map(item => item.snapshot.id), [...storedIds].reverse());
+    assert.equal(stored.history[0].nodes.length, 2);
+    assert.equal(stored.history[1].nodes.length, 2);
+    assert.equal(stored.history[2].nodes.length, 0);
+    assert.equal(stored.history[2].topologyAvailable, false);
+    assert.deepEqual(stored.history[2].summary, { files: 1, modules: 0, capabilities: 0, packages: 0, loc: 20, signals: 1 });
   } finally { f.close(); }
 });
 

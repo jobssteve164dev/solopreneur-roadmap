@@ -539,3 +539,31 @@ test('project growth webview uses locale labels for roadmap and history metadata
   assert.match(enHtml, /Reason: <strong>View Refresh<\/strong>/);
   assert.match(enHtml, /modules are outside the current key collaboration chain/);
 });
+
+test('summary-only growth history never invents structural additions or removals', () => {
+  const { buildProjectGrowthDiff } = require(path.join(projectRoot, 'out', 'projectGrowth.js'));
+  const snapshot = (id, nodes, summary) => ({
+    snapshot: {
+      id,
+      createdAt: '2026-10-28T00:00:00.000Z',
+      projectPath: '/workspace/app',
+      gitHead: '',
+      scanReason: 'manual',
+      status: 'completed',
+      durationMs: 1,
+      error: ''
+    },
+    nodes,
+    edges: [],
+    signals: [],
+    labels: [],
+    summary
+  });
+  const previous = snapshot('previous', [], { files: 9, modules: 2, capabilities: 1, packages: 3, loc: 900, signals: 4 });
+  const current = snapshot('current', [{
+    snapshotId: 'current', nodeId: 'file:src/app.ts', parentId: '', kind: 'file', path: 'src/app.ts', label: 'app.ts',
+    fileCount: 1, testFileCount: 0, loc: 10, bytes: 100, excluded: false
+  }], { files: 10, modules: 2, capabilities: 1, packages: 3, loc: 910, signals: 4 });
+
+  assert.equal(buildProjectGrowthDiff(previous, current), null);
+});

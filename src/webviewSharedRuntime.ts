@@ -6,6 +6,9 @@
  */
 function bootstrapSoloMapWebviewRuntime(): void {
   const root = globalThis as any;
+  const pendingPastedImageDeliveries = new Map<string, { message: any; postMessage: (message: any) => void; timer?: any }>();
+  const pendingAcknowledgedMessages = new Map<string, { message: any; postMessage: (message: any) => void; delayMs: number; timer?: any }>();
+  const pastedImageRetryDelayMs = 2_000;
 
   function escapeHtml(value: unknown): string {
     return String(value == null ? '' : value)
@@ -209,6 +212,55 @@ function bootstrapSoloMapWebviewRuntime(): void {
     });
   }
 
+  function schedulePastedImageDelivery(requestId: string): void {
+    const pending = pendingPastedImageDeliveries.get(requestId);
+    if (!pending) return;
+    pending.timer = root.setTimeout(() => {
+      const current = pendingPastedImageDeliveries.get(requestId);
+      if (!current) return;
+      current.postMessage(current.message);
+      schedulePastedImageDelivery(requestId);
+    }, pastedImageRetryDelayMs);
+    if (pending.timer && typeof pending.timer.unref === 'function') pending.timer.unref();
+  }
+
+  function acknowledgePastedImageAttachments(requestId: unknown): void {
+    const normalized = String(requestId || '');
+    const pending = pendingPastedImageDeliveries.get(normalized);
+    if (!pending) return;
+    if (pending.timer != null) root.clearTimeout(pending.timer);
+    pendingPastedImageDeliveries.delete(normalized);
+  }
+
+  function scheduleAcknowledgedMessage(id: string): void {
+    const pending = pendingAcknowledgedMessages.get(id);
+    if (!pending) return;
+    pending.timer = root.setTimeout(() => {
+      const current = pendingAcknowledgedMessages.get(id);
+      if (!current) return;
+      current.postMessage(current.message);
+      scheduleAcknowledgedMessage(id);
+    }, pending.delayMs);
+    if (pending.timer && typeof pending.timer.unref === 'function') pending.timer.unref();
+  }
+
+  function postAcknowledgedMessage(postMessage: (message: any) => void, message: any, id: unknown, delayMs = 5_000): void {
+    const normalized = String(id || '');
+    if (!normalized) throw new Error('acknowledged_message_id_required');
+    acknowledgeMessage(normalized);
+    pendingAcknowledgedMessages.set(normalized, { message, postMessage, delayMs: Math.max(500, Number(delayMs) || 5_000) });
+    postMessage(message);
+    scheduleAcknowledgedMessage(normalized);
+  }
+
+  function acknowledgeMessage(id: unknown): void {
+    const normalized = String(id || '');
+    const pending = pendingAcknowledgedMessages.get(normalized);
+    if (!pending) return;
+    if (pending.timer != null) root.clearTimeout(pending.timer);
+    pendingAcknowledgedMessages.delete(normalized);
+  }
+
   function bindPastedImageAttachments(
     input: Element | null,
     postMessage: (message: any) => void,
@@ -231,7 +283,10 @@ function bootstrapSoloMapWebviewRuntime(): void {
       if (onStateChange) onStateChange({ phase: 'started', requestId, count: files.length });
       const attachments = (await Promise.all(files.map(readClipboardImage))).filter(Boolean);
       if (attachments.length) {
-        postMessage({ ...message, attachments, requestId });
+        const delivery = { message: { ...message, attachments, requestId }, postMessage };
+        pendingPastedImageDeliveries.set(requestId, delivery);
+        postMessage(delivery.message);
+        schedulePastedImageDelivery(requestId);
       } else if (onStateChange) {
         onStateChange({ phase: 'failed', requestId, count: files.length });
       }
@@ -608,6 +663,9 @@ function bootstrapSoloMapWebviewRuntime(): void {
     bindSoloSelects,
     readClipboardImage,
     bindPastedImageAttachments,
+    acknowledgePastedImageAttachments,
+    postAcknowledgedMessage,
+    acknowledgeMessage,
     createModelController,
     getEffectiveSettingCliPath,
     applySettingCliPath,

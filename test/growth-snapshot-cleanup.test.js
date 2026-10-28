@@ -66,10 +66,10 @@ test('cleanup preview freezes an immutable exact A-A-B-A-A segment manifest', as
   assert.deepEqual(manifest.candidateSnapshots.map(item => item.snapshotId), [ids[0], ids[3]]);
   assert.deepEqual(manifest.candidateSnapshots.map(item => item.retainedSnapshotId), [ids[1], ids[4]]);
   assert.equal(preview.manifest.records.growthSnapshots.count, 2);
-  assert.equal(preview.manifest.records.growthItems.count, 4);
-  assert.equal(preview.manifest.records.growthEdges.count, 2);
-  assert.equal(preview.manifest.records.growthSignals.count, 2);
-  assert.equal(preview.manifest.records.growthModuleLabels.count, 2);
+  assert.equal(preview.manifest.records.growthItems.count, 2);
+  assert.equal(preview.manifest.records.growthEdges.count, 1);
+  assert.equal(preview.manifest.records.growthSignals.count, 1);
+  assert.equal(preview.manifest.records.growthModuleLabels.count, 1);
   assert.equal(preview.manifest.records.objects.count, 2);
   assert.equal(preview.manifest.records.objectSearch.count, 2);
   assert.equal(manifest.records.objectSearch.rowids.length, 2);
@@ -132,7 +132,7 @@ test('confirmed cleanup applies in idempotent batches and preserves A-B-A with v
   assert.equal(applied.planHash, preview.planHash);
   assert.equal(applied.batches.length, 2);
   assert.deepEqual(applied.deleted, {
-    growthSnapshots: 2, growthItems: 4, growthEdges: 2, growthSignals: 2, growthModuleLabels: 2,
+    growthSnapshots: 2, growthItems: 2, growthEdges: 1, growthSignals: 1, growthModuleLabels: 1,
     objects: 2, objectSearch: 2, objectRevisions: 2, events: 2, outbox: 0, requests: 2,
     contentChunks: 0, databaseStorageCleanupCandidates: 0, contents: 0
   });
@@ -234,8 +234,8 @@ test('cleanup derives a semantic index when legacy payload hashes differ for equ
   assert.notEqual(manifest.candidateSnapshots[0].semanticFingerprint, '1'.repeat(64));
   assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_snapshot_semantic_index')[0].count, 2);
 
-  const stored = JSON.parse(f.store.rows('SELECT metrics_json FROM growth_items WHERE snapshot_id=? ORDER BY item_id LIMIT 1', [ids[0]])[0].metrics_json);
-  f.store.db.run('UPDATE growth_items SET metrics_json=? WHERE snapshot_id=? AND item_id=?',
+  const stored = JSON.parse(f.store.rows('SELECT metrics_json FROM growth_live_items WHERE snapshot_id=? ORDER BY item_id LIMIT 1', [ids[0]])[0].metrics_json);
+  f.store.db.run('UPDATE growth_live_items SET metrics_json=? WHERE snapshot_id=? AND item_id=?',
     [JSON.stringify({ ...stored, label: 'changed' }), ids[0], stored.nodeId]);
   assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_snapshot_semantic_index WHERE snapshot_id=?', [ids[0]])[0].count, 0);
 
