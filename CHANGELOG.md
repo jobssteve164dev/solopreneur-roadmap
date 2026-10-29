@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.631 - 2026-10-29
+
+### Fixed
+- safely reclaim legacy growth topology (e3629e5)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.630 - 2026-10-28
 
 ### Fixed
