@@ -694,6 +694,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         const project = await store.registerProject({ root: String(input.root || '') });
         return store.readProjectGrowth(project.projectId, Number(input.historyLimit || 12), input.snapshotId === undefined ? undefined : String(input.snapshotId));
       }
+      case 'preview_growth_snapshot_detail_cleanup': return store.previewGrowthSnapshotDetailCleanup(input as unknown as Parameters<UnifiedDataStore['previewGrowthSnapshotDetailCleanup']>[0]);
+      case 'apply_growth_snapshot_detail_cleanup': return store.applyGrowthSnapshotDetailCleanup(input as unknown as Parameters<UnifiedDataStore['applyGrowthSnapshotDetailCleanup']>[0]);
       case 'preview_growth_snapshot_cleanup': return store.summarizeGrowthSnapshotCleanupPlan(store.previewGrowthSnapshotCleanup(input as unknown as Parameters<UnifiedDataStore['previewGrowthSnapshotCleanup']>[0]));
       case 'read_growth_snapshot_cleanup_plan': return store.summarizeGrowthSnapshotCleanupPlan(store.readGrowthSnapshotCleanupPlan(String(input.planId || '')));
       case 'read_growth_snapshot_cleanup_manifest_page': return store.readGrowthSnapshotCleanupManifestPage(input as unknown as Parameters<UnifiedDataStore['readGrowthSnapshotCleanupManifestPage']>[0]);

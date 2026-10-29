@@ -849,4 +849,15 @@ CREATE TRIGGER growth_live_signal_semantic_delete AFTER DELETE ON growth_live_si
 CREATE TRIGGER growth_live_label_semantic_insert AFTER INSERT ON growth_live_module_labels BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=NEW.snapshot_id; END;
 CREATE TRIGGER growth_live_label_semantic_update AFTER UPDATE ON growth_live_module_labels BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id IN (OLD.snapshot_id,NEW.snapshot_id); END;
 CREATE TRIGGER growth_live_label_semantic_delete AFTER DELETE ON growth_live_module_labels BEGIN DELETE FROM growth_snapshot_semantic_index WHERE snapshot_id=OLD.snapshot_id; END;
+` }, { version: 55, sql: `
+CREATE TABLE growth_detail_cleanup_plans(
+ plan_id TEXT PRIMARY KEY,idempotency_key TEXT NOT NULL UNIQUE,manifest_json TEXT NOT NULL,manifest_hash TEXT NOT NULL DEFAULT '',
+ status TEXT NOT NULL CHECK(status IN ('preparing','prepared','applying','applied','invalidated')),
+ invalidation_reason TEXT,result_content_id TEXT REFERENCES contents(id),created_at INTEGER NOT NULL,applied_at INTEGER);
+CREATE TABLE growth_detail_cleanup_batches(
+ plan_id TEXT NOT NULL REFERENCES growth_detail_cleanup_plans(plan_id) ON DELETE CASCADE,batch_index INTEGER NOT NULL,
+ snapshot_ids_json TEXT NOT NULL,expected_json TEXT,status TEXT NOT NULL CHECK(status IN ('preparing','prepared','applied')),
+ receipt_json TEXT,created_at INTEGER NOT NULL,applied_at INTEGER,PRIMARY KEY(plan_id,batch_index));
+CREATE INDEX growth_detail_cleanup_plan_status ON growth_detail_cleanup_plans(status,created_at);
+CREATE INDEX content_ref_growth_detail_cleanup_plans_result ON growth_detail_cleanup_plans(result_content_id);
 ` }];

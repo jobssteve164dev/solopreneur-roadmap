@@ -42,9 +42,178 @@ async function writeHistory(f, states) {
   return ids;
 }
 
+async function writeLegacyHistory(f, states) {
+  const ids = [];
+  for (const [index, state] of states.entries()) {
+    const id = `${state.toLowerCase()}-legacy-${index + 1}`;
+    const snapshotId = f.store.writeProjectGrowth(f.projectId, snapshot(f.projectRoot, id, state, index), `legacy-growth-${index + 1}`).objectId;
+    ids.push(snapshotId);
+    f.store.db.run(`INSERT INTO growth_items(snapshot_id,item_id,parent_id,kind,relative_path,label,metrics_json,production_files,test_files,test_cases,bytes)
+      SELECT snapshot_id,item_id,parent_id,kind,relative_path,label,metrics_json,production_files,test_files,test_cases,bytes
+      FROM growth_live_items WHERE project_id=? AND snapshot_id=?`, [f.projectId, snapshotId]);
+    f.store.db.run(`INSERT INTO growth_edges(snapshot_id,source_item_id,target_item_id,kind,weight,evidence_id,evidence)
+      SELECT snapshot_id,source_item_id,target_item_id,kind,weight,NULL,evidence
+      FROM growth_live_edges WHERE project_id=? AND snapshot_id=?`, [f.projectId, snapshotId]);
+    f.store.db.run(`INSERT INTO growth_signals(snapshot_id,signal_key,item_id,type,level,value,evidence_id,source,source_ref,created_at)
+      SELECT snapshot_id,signal_key,item_id,type,level,value,NULL,source,source_ref,created_at
+      FROM growth_live_signals WHERE project_id=? AND snapshot_id=?`, [f.projectId, snapshotId]);
+    f.store.db.run(`INSERT INTO growth_module_labels(snapshot_id,node_id,label,role,source,confidence,updated_at)
+      SELECT snapshot_id,node_id,label,role,source,confidence,updated_at
+      FROM growth_live_module_labels WHERE project_id=? AND snapshot_id=?`, [f.projectId, snapshotId]);
+    f.store.db.run('DELETE FROM growth_live_snapshots WHERE project_id=? AND snapshot_id=?', [f.projectId, snapshotId]);
+    f.store.db.run("UPDATE growth_snapshots SET summary_json='{}',semantic_hash='' WHERE id=?", [snapshotId]);
+  }
+  return ids;
+}
+
+async function previewDetailCleanup(f, input) {
+  let result;
+  do result = await f.call('preview_growth_snapshot_detail_cleanup', input);
+  while (result.status === 'preparing');
+  return result;
+}
+
+async function finishDetailCleanup(f, input, firstResult) {
+  let result = firstResult;
+  while (result.status === 'applying') result = await f.call('apply_growth_snapshot_detail_cleanup', input);
+  return result;
+}
+
 function fullManifest(f, preview) {
   return f.store.readGrowthSnapshotCleanupPlan(preview.planId).manifest;
 }
+
+test('detail cleanup preserves every snapshot summary and only removes topology older than the latest two', async t => {
+  const f = await fixture(t);
+  const ids = await writeLegacyHistory(f, ['A', 'B', 'C', 'D']);
+  const snapshotRecords = Number(f.store.rows('SELECT COUNT(*) AS count FROM growth_snapshots')[0].count);
+  const objectRecords = Number(f.store.rows("SELECT COUNT(*) AS count FROM objects WHERE kind='growth_snapshot'")[0].count);
+
+  const preview = await previewDetailCleanup(f, { idempotencyKey: 'preview-detail-cleanup', batchSize: 1 });
+
+  assert.equal(preview.snapshotCount, 4);
+  assert.equal(preview.candidateSnapshots.count, 2);
+  assert.equal(preview.retainedTopologies.count, 2);
+  assert.deepEqual(preview.records, { growthItems: 4, growthEdges: 2, growthSignals: 2, growthModuleLabels: 2 });
+  assert.match(preview.planId, /^[a-f0-9-]{36}$/);
+  assert.match(preview.planHash, /^[a-f0-9]{64}$/);
+  assert.match(preview.candidateSnapshots.hash, /^[a-f0-9]{64}$/);
+
+  const input = {
+    planId: preview.planId,
+    planHash: preview.planHash,
+    confirmation: `确认删除增长快照清单 ${preview.candidateSnapshots.hash}`,
+    idempotencyKey: 'apply-detail-cleanup',
+    expectedRecords: preview.records,
+    batchSize: 1
+  };
+  const firstBatch = await f.call('apply_growth_snapshot_detail_cleanup', input);
+  assert.equal(firstBatch.status, 'applying', 'one Runtime request may apply at most one durable batch');
+  const applied = await finishDetailCleanup(f, input, firstBatch);
+
+  assert.equal(applied.status, 'applied');
+  assert.deepEqual(applied.deleted, preview.records);
+  assert.equal(Number(f.store.rows('SELECT COUNT(*) AS count FROM growth_snapshots')[0].count), snapshotRecords);
+  assert.equal(Number(f.store.rows("SELECT COUNT(*) AS count FROM objects WHERE kind='growth_snapshot'")[0].count), objectRecords);
+  assert.equal(Number(f.store.rows('SELECT COUNT(*) AS count FROM growth_items WHERE snapshot_id IN (?,?)', ids.slice(0, 2))[0].count), 0);
+  assert.equal(Number(f.store.rows('SELECT COUNT(*) AS count FROM growth_items WHERE snapshot_id IN (?,?)', ids.slice(2))[0].count), 4);
+  for (const id of ids.slice(0, 2)) {
+    const header = f.store.rows('SELECT summary_json,semantic_hash FROM growth_snapshots WHERE id=?', [id])[0];
+    assert.deepEqual(JSON.parse(String(header.summary_json)), { files: 1, modules: 0, capabilities: 0, packages: 0, loc: 2, signals: 1 });
+    assert.match(String(header.semantic_hash), /^[a-f0-9]{64}$/);
+  }
+  const history = (await f.call('read_project_growth', { root: f.projectRoot, historyLimit: 50 })).history;
+  assert.deepEqual(history.map(item => item.snapshot.id), [...ids].reverse());
+  assert.deepEqual(history.map(item => item.topologyAvailable), [true, true, false, false]);
+  assert.deepEqual(history.map(item => item.summary.files), [1, 1, 1, 1]);
+  assert.deepEqual(f.store.rows('PRAGMA foreign_key_check'), []);
+  assert.deepEqual(await f.call('apply_growth_snapshot_detail_cleanup', input), applied);
+  await assert.rejects(f.call('apply_growth_snapshot_detail_cleanup', { ...input, batchSize: 2 }), /idempotency_conflict/);
+});
+
+test('detail cleanup finalizes only while holding the write lock over its zero-residue checks', async t => {
+  const f = await fixture(t);
+  const ids = await writeLegacyHistory(f, ['A', 'B', 'C']);
+  const preview = await previewDetailCleanup(f, { idempotencyKey: 'preview-detail-finalize-lock', batchSize: 1 });
+  const input = {
+    planId: preview.planId,
+    planHash: preview.planHash,
+    confirmation: `确认删除增长快照清单 ${preview.candidateSnapshots.hash}`,
+    idempotencyKey: 'apply-detail-finalize-lock',
+    expectedRecords: preview.records,
+    batchSize: 1
+  };
+  const external = UnifiedDataStore.open(f.root, f.store.databaseId);
+  t.after(() => external.close());
+  const originalTransaction = f.store.transaction.bind(f.store);
+  let transactionCount = 0;
+  f.store.transaction = operation => {
+    transactionCount++;
+    if (transactionCount === 3) {
+      external.db.run(`INSERT INTO growth_items(snapshot_id,item_id,parent_id,kind,relative_path,label,metrics_json,production_files,test_files,test_cases,bytes)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)`, [ids[0], 'late:file', null, 'file', 'late.js', 'late.js', '{}', 1, 0, 0, 1]);
+    }
+    return originalTransaction(operation);
+  };
+  t.after(() => { f.store.transaction = originalTransaction; });
+
+  await assert.rejects(f.call('apply_growth_snapshot_detail_cleanup', input), /growth_detail_cleanup_plan_invalidated/);
+  assert.equal(Number(f.store.rows('SELECT COUNT(*) AS count FROM growth_items WHERE snapshot_id=?', [ids[0]])[0].count), 1);
+  assert.equal(f.store.rows('SELECT status FROM growth_detail_cleanup_plans WHERE plan_id=?', [preview.planId])[0].status, 'invalidated');
+});
+
+test('detail cleanup permanently invalidates a plan when finalization finds nonzero candidate residue', async t => {
+  const f = await fixture(t);
+  const ids = await writeLegacyHistory(f, ['A', 'B', 'C']);
+  const preview = await previewDetailCleanup(f, { idempotencyKey: 'preview-detail-finalize-residue', batchSize: 1 });
+  const input = {
+    planId: preview.planId,
+    planHash: preview.planHash,
+    confirmation: `确认删除增长快照清单 ${preview.candidateSnapshots.hash}`,
+    idempotencyKey: 'apply-detail-finalize-residue',
+    expectedRecords: preview.records,
+    batchSize: 1
+  };
+  const external = UnifiedDataStore.open(f.root, f.store.databaseId);
+  t.after(() => external.close());
+  const originalRows = f.store.rows.bind(f.store);
+  let dataVersionReads = 0;
+  f.store.rows = (sql, values) => {
+    if (sql === 'PRAGMA data_version' && ++dataVersionReads === 3) {
+      external.db.run(`INSERT INTO growth_items(snapshot_id,item_id,parent_id,kind,relative_path,label,metrics_json,production_files,test_files,test_cases,bytes)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)`, [ids[0], 'residue:file', null, 'file', 'residue.js', 'residue.js', '{}', 1, 0, 0, 1]);
+    }
+    return originalRows(sql, values);
+  };
+  t.after(() => { f.store.rows = originalRows; });
+
+  await assert.rejects(f.call('apply_growth_snapshot_detail_cleanup', input), /growth_detail_cleanup_plan_invalidated/);
+  assert.equal(f.store.rows('SELECT status FROM growth_detail_cleanup_plans WHERE plan_id=?', [preview.planId])[0].status, 'invalidated');
+});
+
+test('detail cleanup freezes its boundary and stops a resumed plan after snapshot drift', async t => {
+  const f = await fixture(t);
+  const ids = await writeLegacyHistory(f, ['A', 'B', 'C', 'D']);
+  const preview = await previewDetailCleanup(f, { idempotencyKey: 'preview-detail-resume', batchSize: 1 });
+  const input = {
+    planId: preview.planId,
+    planHash: preview.planHash,
+    confirmation: `确认删除增长快照清单 ${preview.candidateSnapshots.hash}`,
+    idempotencyKey: 'apply-detail-resume',
+    expectedRecords: preview.records,
+    batchSize: 1
+  };
+  const firstBatch = await f.call('apply_growth_snapshot_detail_cleanup', input);
+  assert.equal(firstBatch.status, 'applying');
+  assert.equal(Number(f.store.rows('SELECT COUNT(*) AS count FROM growth_items WHERE snapshot_id=?', [ids[0]])[0].count), 0);
+  assert.equal(Number(f.store.rows('SELECT COUNT(*) AS count FROM growth_items WHERE snapshot_id=?', [ids[1]])[0].count), 2);
+
+  f.store.writeProjectGrowth(f.projectId, snapshot(f.projectRoot, 'e-live-5', 'E', 5), 'growth-after-interruption');
+  await assert.rejects(f.call('apply_growth_snapshot_detail_cleanup', input), /growth_detail_cleanup_plan_invalidated/);
+  assert.equal(Number(f.store.rows('SELECT COUNT(*) AS count FROM growth_items WHERE snapshot_id=?', [ids[1]])[0].count), 2);
+  assert.equal(f.store.rows('SELECT status FROM growth_detail_cleanup_plans WHERE plan_id=?', [preview.planId])[0].status, 'invalidated');
+  await assert.rejects(f.call('preview_growth_snapshot_detail_cleanup', { idempotencyKey: 'preview-detail-resume', batchSize: 1 }), /growth_detail_cleanup_plan_invalidated/);
+});
 
 test('cleanup preview freezes an immutable exact A-A-B-A-A segment manifest', async t => {
   const f = await fixture(t);

@@ -327,7 +327,7 @@ test('failed attempts are bounded, task-backed references persist, and repeated 
   t.diagnostic(`2000 history associations: table+index growth=${associationGrowth} bytes, database+WAL growth=${growth} bytes; recent-query index used; 10 unchanged queries wrote 0 rows; failed-attempt retention=20; active dispatches=0`);
 });
 
-test('schema 52 upgrades in place and reopening schema 54 preserves identities and source rows', () => {
+test('schema 52 upgrades in place and reopening schema 55 preserves identities and source rows', () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-conversation-tracking-upgrade-'));
   try {
     const root = path.join(base, '.solomap-global'); fs.mkdirSync(root);
@@ -346,7 +346,7 @@ test('schema 52 upgrades in place and reopening schema 54 preserves identities a
     for (let i = 0; i < 2; i++) {
       const store = new UnifiedDataStore(root);
       try {
-        assert.equal(store.rows('SELECT MAX(version) AS version FROM schema_migrations')[0].version, 54);
+        assert.equal(store.rows('SELECT MAX(version) AS version FROM schema_migrations')[0].version, 55);
         assert.equal(store.rows("SELECT value FROM database_meta WHERE key='database_id'")[0].value, 'preserved-tracking-identity');
         assert.equal(store.rows("SELECT source_generation FROM pi_legacy_conversation_operations WHERE operation_id='old-operation'")[0].source_generation, 0);
         assert.equal(store.rows('PRAGMA integrity_check')[0].integrity_check, 'ok');

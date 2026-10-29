@@ -24,6 +24,8 @@ test('runtime operation priorities keep task launch state ahead of logs and deri
   assert.equal(runtimeOperationPriority('claim_run_effect'), 1, 'background effect claims must not impersonate foreground run delivery');
   assert.equal(runtimeOperationPriority('append_run_log'), 2);
   assert.equal(runtimeOperationPriority('write_project_growth'), 2);
+  assert.equal(runtimeOperationPriority('preview_growth_snapshot_detail_cleanup'), 2);
+  assert.equal(runtimeOperationPriority('apply_growth_snapshot_detail_cleanup'), 2);
   assert.equal(runtimeOperationPriority('read'), 1);
 });
 

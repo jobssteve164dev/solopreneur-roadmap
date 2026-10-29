@@ -171,6 +171,39 @@ export interface GrowthSnapshotCleanupPlan {
   invalidationReason?: string;
   manifest: GrowthSnapshotCleanupManifest;
 }
+interface GrowthSnapshotDetailCleanupCounts {
+  growthItems: number;
+  growthEdges: number;
+  growthSignals: number;
+  growthModuleLabels: number;
+}
+interface GrowthSnapshotDetailCleanupTarget { snapshotId: string; projectId: string; objectRowid: number }
+interface GrowthSnapshotDetailCleanupManifest {
+  schemaVersion: 1;
+  title: '旧增长快照明细清单';
+  databaseId: string;
+  snapshotCount: number;
+  candidateSnapshots: GrowthSnapshotDetailCleanupTarget[];
+  retainedTopologies: GrowthSnapshotDetailCleanupTarget[];
+  candidateHash: string;
+  retainedHash: string;
+  snapshotBoundaryHash: string;
+  records: GrowthSnapshotDetailCleanupCounts;
+  batchHash: string;
+}
+interface GrowthSnapshotDetailCleanupPreview {
+  schemaVersion: 1;
+  title: '旧增长快照明细清单';
+  status: 'preparing' | 'prepared';
+  databaseId: string;
+  snapshotCount: number;
+  candidateSnapshots: { count: number; hash: string };
+  retainedTopologies: { count: number; hash: string };
+  snapshotBoundaryHash: string;
+  records: GrowthSnapshotDetailCleanupCounts;
+  planId: string;
+  planHash: string;
+}
 export type GrowthSnapshotCleanupManifestSection = 'retainedSnapshots' | 'candidateSnapshots' | 'growthSnapshots' | 'growthItemsSnapshotIds'
   | 'growthEdgesSnapshotIds' | 'growthSignalsSnapshotIds' | 'growthModuleLabelsSnapshotIds' | 'objects' | 'objectSearch'
   | 'objectRevisions' | 'events' | 'outbox' | 'requests' | 'contentCandidates' | 'contentDeletable' | 'contentRetainedShared'
@@ -7143,6 +7176,254 @@ export class UnifiedDataStore {
     };
     const history = ids.map(read);
     return { latest: history[0] || null, history };
+  }
+  private growthSnapshotDetailCleanupBoundary(): { candidates: GrowthSnapshotDetailCleanupTarget[]; retained: GrowthSnapshotDetailCleanupTarget[]; all: GrowthSnapshotDetailCleanupTarget[] } {
+    const all = this.rows(`SELECT g.id,g.project_id,o.rowid AS object_rowid FROM growth_snapshots g
+      JOIN objects o ON o.id=g.id ORDER BY g.project_id,o.rowid`).map(row => ({
+      snapshotId: String(row.id), projectId: String(row.project_id), objectRowid: Number(row.object_rowid)
+    }));
+    const candidates: typeof all = [], retained: typeof all = [];
+    for (let offset = 0; offset < all.length;) {
+      let end = offset + 1;
+      while (end < all.length && all[end].projectId === all[offset].projectId) end++;
+      candidates.push(...all.slice(offset, Math.max(offset, end - 2)));
+      retained.push(...all.slice(Math.max(offset, end - 2), end));
+      offset = end;
+    }
+    return { candidates, retained, all };
+  }
+  private growthSnapshotDetailCounts(snapshotIds: string[]): GrowthSnapshotDetailCleanupCounts {
+    this.resetGrowthSnapshotCleanupScope('growth_detail_cleanup_scope', 'snapshot_id', snapshotIds);
+    const count = (table: string): number => Number(this.rows(`SELECT COUNT(*) AS count FROM ${quoteSqlIdentifier(table)}
+      WHERE snapshot_id IN (SELECT snapshot_id FROM growth_detail_cleanup_scope)`)[0].count);
+    return { growthItems: count('growth_items'), growthEdges: count('growth_edges'), growthSignals: count('growth_signals'), growthModuleLabels: count('growth_module_labels') };
+  }
+  private growthSnapshotDetailSummary(snapshotId: string): NonNullable<GrowthSnapshotData['summary']> {
+    const totals = this.rows(`SELECT
+      SUM(CASE WHEN kind='file' AND COALESCE(json_extract(metrics_json,'$.excluded'),0)=0 THEN 1 ELSE 0 END) AS files,
+      SUM(CASE WHEN kind='module' THEN 1 ELSE 0 END) AS modules,
+      SUM(CASE WHEN kind='capability' THEN 1 ELSE 0 END) AS capabilities,
+      SUM(CASE WHEN kind='package' THEN 1 ELSE 0 END) AS packages,
+      SUM(CASE WHEN kind='file' AND COALESCE(json_extract(metrics_json,'$.excluded'),0)=0 THEN COALESCE(json_extract(metrics_json,'$.loc'),0) ELSE 0 END) AS loc
+      FROM growth_items WHERE snapshot_id=?`, [snapshotId])[0] || {};
+    const signalCount = this.rows('SELECT COUNT(*) AS count FROM growth_signals WHERE snapshot_id=?', [snapshotId])[0];
+    return { files: Number(totals.files || 0), modules: Number(totals.modules || 0), capabilities: Number(totals.capabilities || 0), packages: Number(totals.packages || 0), loc: Number(totals.loc || 0), signals: Number(signalCount?.count || 0) };
+  }
+  private growthSnapshotDetailBoundaryHashes(boundary = this.growthSnapshotDetailCleanupBoundary()): { candidateHash: string; retainedHash: string; snapshotBoundaryHash: string } {
+    const tuples = (items: GrowthSnapshotDetailCleanupTarget[]) => items.map(item => [item.snapshotId, item.projectId, item.objectRowid]);
+    return { candidateHash: digest(canonical(tuples(boundary.candidates))), retainedHash: digest(canonical(tuples(boundary.retained))), snapshotBoundaryHash: digest(canonical(tuples(boundary.all))) };
+  }
+  private readGrowthSnapshotDetailCleanupPlan(planId: string): { status: string; manifest: GrowthSnapshotDetailCleanupManifest; planHash: string; resultContentId: string } {
+    const row = this.rows('SELECT status,manifest_json,manifest_hash,result_content_id FROM growth_detail_cleanup_plans WHERE plan_id=?', [planId])[0];
+    if (!row) throw new Error('growth_detail_cleanup_plan_missing');
+    const manifest = JSON.parse(String(row.manifest_json)) as GrowthSnapshotDetailCleanupManifest;
+    const planHash = String(row.manifest_hash || '');
+    if (row.status !== 'preparing' && (!planHash || digest(canonical(manifest)) !== planHash)) throw new Error('growth_detail_cleanup_plan_corrupt');
+    return { status: String(row.status), manifest, planHash, resultContentId: String(row.result_content_id || '') };
+  }
+  private summarizeGrowthSnapshotDetailCleanupPlan(planId: string): GrowthSnapshotDetailCleanupPreview {
+    const plan = this.readGrowthSnapshotDetailCleanupPlan(planId), manifest = plan.manifest;
+    if (plan.status === 'preparing') throw new Error('growth_detail_cleanup_preview_pending');
+    if (plan.status === 'invalidated') throw new Error('growth_detail_cleanup_plan_invalidated');
+    return { schemaVersion: 1, title: manifest.title, status: 'prepared', databaseId: manifest.databaseId, snapshotCount: manifest.snapshotCount,
+      candidateSnapshots: { count: manifest.candidateSnapshots.length, hash: manifest.candidateHash },
+      retainedTopologies: { count: manifest.retainedTopologies.length, hash: manifest.retainedHash },
+      snapshotBoundaryHash: manifest.snapshotBoundaryHash, records: manifest.records, planId, planHash: plan.planHash };
+  }
+  private invalidateGrowthSnapshotDetailCleanupPlan(planId: string, reason: string): void {
+    this.transaction(() => this.db.run("UPDATE growth_detail_cleanup_plans SET status='invalidated',invalidation_reason=? WHERE plan_id=? AND status IN ('preparing','prepared','applying')", [reason, planId]));
+  }
+  private validateGrowthSnapshotDetailCleanupBoundary(manifest: GrowthSnapshotDetailCleanupManifest): void {
+    const boundary = this.growthSnapshotDetailCleanupBoundary(), hashes = this.growthSnapshotDetailBoundaryHashes(boundary);
+    if (this.databaseId !== manifest.databaseId || boundary.all.length !== manifest.snapshotCount
+      || hashes.snapshotBoundaryHash !== manifest.snapshotBoundaryHash || hashes.candidateHash !== manifest.candidateHash || hashes.retainedHash !== manifest.retainedHash) {
+      throw new Error('growth_detail_cleanup_boundary_drift');
+    }
+  }
+  public async previewGrowthSnapshotDetailCleanup(input: { idempotencyKey: string; batchSize?: number }): Promise<GrowthSnapshotDetailCleanupPreview> {
+    if (!input.idempotencyKey?.trim()) throw new Error('idempotency_key_required');
+    const batchSize = input.batchSize ?? 25;
+    if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 100) throw new Error('growth_detail_cleanup_batch_size_invalid');
+    const existing = this.rows('SELECT plan_id,status FROM growth_detail_cleanup_plans WHERE idempotency_key=?', [input.idempotencyKey])[0];
+    if (existing && existing.status !== 'preparing') return this.summarizeGrowthSnapshotDetailCleanupPlan(String(existing.plan_id));
+    let planId = existing ? String(existing.plan_id) : '', observedDataVersion = Number(this.rows('PRAGMA data_version')[0].data_version);
+    if (!planId) {
+      planId = crypto.randomUUID();
+      this.transaction(() => {
+        const boundary = this.growthSnapshotDetailCleanupBoundary(), hashes = this.growthSnapshotDetailBoundaryHashes(boundary);
+        const manifest = { schemaVersion: 1 as const, title: '旧增长快照明细清单' as const, databaseId: this.databaseId,
+          snapshotCount: boundary.all.length, candidateSnapshots: boundary.candidates, retainedTopologies: boundary.retained,
+          ...hashes, records: { growthItems: 0, growthEdges: 0, growthSignals: 0, growthModuleLabels: 0 }, batchHash: '' };
+        this.db.run("INSERT INTO growth_detail_cleanup_plans(plan_id,idempotency_key,manifest_json,status,created_at) VALUES(?,?,?,'preparing',?)",
+          [planId, input.idempotencyKey, canonical(manifest), Date.now()]);
+        for (let offset = 0, batchIndex = 0; offset < boundary.candidates.length; offset += batchSize, batchIndex++) {
+          const ids = boundary.candidates.slice(offset, offset + batchSize).map(item => item.snapshotId);
+          this.db.run("INSERT INTO growth_detail_cleanup_batches(plan_id,batch_index,snapshot_ids_json,status,created_at) VALUES(?,?,?,'preparing',?)",
+            [planId, batchIndex, canonical(ids), Date.now()]);
+        }
+      });
+      observedDataVersion = Number(this.rows('PRAGMA data_version')[0].data_version);
+    }
+    const batchRows = this.rows('SELECT batch_index,snapshot_ids_json,expected_json,status FROM growth_detail_cleanup_batches WHERE plan_id=? ORDER BY batch_index', [planId]);
+    const pendingBatch = batchRows.find(row => row.status === 'preparing');
+    if (pendingBatch) {
+      const snapshotIds = JSON.parse(String(pendingBatch.snapshot_ids_json)) as string[];
+      const expected = this.growthSnapshotDetailCounts(snapshotIds);
+      this.transaction(() => {
+        if (Number(this.rows('PRAGMA data_version')[0].data_version) !== observedDataVersion) throw new Error('growth_detail_cleanup_preview_source_changed');
+        this.db.run("UPDATE growth_detail_cleanup_batches SET expected_json=?,status='prepared' WHERE plan_id=? AND batch_index=? AND status='preparing'",
+          [canonical(expected), planId, pendingBatch.batch_index]);
+        if (this.db.getRowsModified() !== 1) throw new Error('growth_detail_cleanup_batch_conflict');
+      });
+      const plan = this.readGrowthSnapshotDetailCleanupPlan(planId), manifest = plan.manifest;
+      return { schemaVersion: 1, title: manifest.title, status: 'preparing', databaseId: manifest.databaseId, snapshotCount: manifest.snapshotCount,
+        candidateSnapshots: { count: manifest.candidateSnapshots.length, hash: manifest.candidateHash },
+        retainedTopologies: { count: manifest.retainedTopologies.length, hash: manifest.retainedHash }, snapshotBoundaryHash: manifest.snapshotBoundaryHash,
+        records: manifest.records, planId, planHash: '' };
+    }
+    const preparedBatches: Array<{ batchIndex: number; snapshotIds: string[]; expected: GrowthSnapshotDetailCleanupCounts }> = [];
+    for (const row of batchRows) {
+      const snapshotIds = JSON.parse(String(row.snapshot_ids_json)) as string[];
+      const expected = JSON.parse(String(row.expected_json)) as GrowthSnapshotDetailCleanupCounts;
+      preparedBatches.push({ batchIndex: Number(row.batch_index), snapshotIds, expected });
+    }
+    try {
+      return this.transaction(() => {
+        if (Number(this.rows('PRAGMA data_version')[0].data_version) !== observedDataVersion) throw new Error('growth_detail_cleanup_preview_source_changed');
+        const plan = this.readGrowthSnapshotDetailCleanupPlan(planId);
+        this.validateGrowthSnapshotDetailCleanupBoundary(plan.manifest);
+        const records = preparedBatches.reduce<GrowthSnapshotDetailCleanupCounts>((totals, batch) => {
+          for (const key of ['growthItems', 'growthEdges', 'growthSignals', 'growthModuleLabels'] as const) totals[key] += batch.expected[key];
+          return totals;
+        }, { growthItems: 0, growthEdges: 0, growthSignals: 0, growthModuleLabels: 0 });
+        const manifest = { ...plan.manifest, records, batchHash: digest(canonical(preparedBatches)) };
+        const planHash = digest(canonical(manifest));
+        this.db.run("UPDATE growth_detail_cleanup_plans SET manifest_json=?,manifest_hash=?,status='prepared' WHERE plan_id=? AND status='preparing'",
+          [canonical(manifest), planHash, planId]);
+        if (this.db.getRowsModified() !== 1) throw new Error('growth_detail_cleanup_plan_state_conflict');
+        return this.summarizeGrowthSnapshotDetailCleanupPlan(planId);
+      });
+    } catch (error) {
+      this.invalidateGrowthSnapshotDetailCleanupPlan(planId, error instanceof Error ? error.message : String(error));
+      throw new Error('growth_detail_cleanup_plan_invalidated');
+    }
+  }
+  public async applyGrowthSnapshotDetailCleanup(input: { planId: string; planHash: string; confirmation: string; idempotencyKey: string; expectedRecords: GrowthSnapshotDetailCleanupCounts; batchSize?: number }): Promise<Record<string, unknown>> {
+    if (!input.idempotencyKey?.trim()) throw new Error('idempotency_key_required');
+    const expectedKeys: Array<keyof GrowthSnapshotDetailCleanupCounts> = ['growthItems', 'growthEdges', 'growthSignals', 'growthModuleLabels'];
+    if (!input.expectedRecords || expectedKeys.some(key => !Number.isSafeInteger(input.expectedRecords[key]) || input.expectedRecords[key] < 0)) throw new Error('growth_detail_cleanup_expected_records_invalid');
+    const intent = { operation: 'apply_growth_snapshot_detail_cleanup', ...input };
+    const inputHash = digest(canonical(intent));
+    let request = this.rows('SELECT * FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, input.idempotencyKey])[0];
+    if (request && String(request.input_hash) !== inputHash) throw new Error('idempotency_conflict');
+    let plan = this.readGrowthSnapshotDetailCleanupPlan(input.planId);
+    if (plan.status === 'applied' && plan.resultContentId) return JSON.parse(this.content(plan.resultContentId).toString('utf8'));
+    if (!['prepared', 'applying'].includes(plan.status) || plan.planHash !== input.planHash || canonical(plan.manifest.records) !== canonical(input.expectedRecords)) throw new Error('growth_detail_cleanup_plan_invalidated');
+    if (input.confirmation !== `确认删除增长快照清单 ${plan.manifest.candidateHash}`) throw new Error('growth_detail_cleanup_confirmation_required');
+    if (request?.status === 'committed' && request.result_content_id) return JSON.parse(this.content(String(request.result_content_id)).toString('utf8'));
+    try {
+      this.transaction(() => {
+        this.validateGrowthSnapshotDetailCleanupBoundary(plan.manifest);
+        if (!request) this.db.run('INSERT INTO requests(actor_id,idempotency_key,id,input_hash,status) VALUES(?,?,?,?,?)',
+          [this.actorId, input.idempotencyKey, crypto.randomUUID(), inputHash, 'pending']);
+        this.db.run("UPDATE growth_detail_cleanup_plans SET status='applying' WHERE plan_id=? AND status IN ('prepared','applying')", [input.planId]);
+      });
+    } catch (error) {
+      this.invalidateGrowthSnapshotDetailCleanupPlan(input.planId, error instanceof Error ? error.message : String(error));
+      throw new Error('growth_detail_cleanup_plan_invalidated');
+    }
+    const appliedNow: GrowthSnapshotDetailCleanupCounts = { growthItems: 0, growthEdges: 0, growthSignals: 0, growthModuleLabels: 0 };
+    const batchReceipts: Array<{ batchIndex: number; snapshotIds: string[]; deleted: GrowthSnapshotDetailCleanupCounts }> = [];
+    const batchRows = this.rows('SELECT * FROM growth_detail_cleanup_batches WHERE plan_id=? ORDER BY batch_index', [input.planId]);
+    for (const row of batchRows) if (row.status === 'applied' && row.receipt_json) batchReceipts.push(JSON.parse(String(row.receipt_json)));
+    const row = batchRows.find(item => item.status !== 'applied');
+    if (row) {
+      const snapshotIds = JSON.parse(String(row.snapshot_ids_json)) as string[];
+      const expected = JSON.parse(String(row.expected_json)) as GrowthSnapshotDetailCleanupCounts;
+      const targets = plan.manifest.candidateSnapshots.filter(item => snapshotIds.includes(item.snapshotId));
+      const observedDataVersion = Number(this.rows('PRAGMA data_version')[0].data_version);
+      const prepared = targets.map(item => {
+        if (this.rows('SELECT 1 FROM growth_live_snapshots WHERE project_id=? AND snapshot_id=?', [item.projectId, item.snapshotId]).length) throw new Error('growth_detail_cleanup_retained_topology_conflict');
+        const header = this.rows('SELECT 1 FROM growth_snapshots WHERE id=? AND project_id=?', [item.snapshotId, item.projectId])[0];
+        if (!header) throw new Error('growth_detail_cleanup_snapshot_missing');
+        return { ...item, summary: this.growthSnapshotDetailSummary(item.snapshotId), semanticHash: this.computeGrowthSnapshotCleanupFingerprint(item.projectId, item.snapshotId) };
+      });
+      try {
+        const receipt = this.transaction(() => {
+          if (Number(this.rows('PRAGMA data_version')[0].data_version) !== observedDataVersion) throw new Error('growth_detail_cleanup_record_drift');
+          this.validateGrowthSnapshotDetailCleanupBoundary(plan.manifest);
+          if (canonical(this.growthSnapshotDetailCounts(snapshotIds)) !== canonical(expected)) throw new Error('growth_detail_cleanup_record_drift');
+          for (const item of prepared) {
+            this.db.run('UPDATE growth_snapshots SET summary_json=?,semantic_hash=? WHERE id=? AND project_id=?', [canonical(item.summary), item.semanticHash, item.snapshotId, item.projectId]);
+            if (this.db.getRowsModified() !== 1) throw new Error('growth_detail_cleanup_snapshot_drift');
+            this.db.run('DELETE FROM growth_edges WHERE snapshot_id=?', [item.snapshotId]);
+            this.db.run('DELETE FROM growth_signals WHERE snapshot_id=?', [item.snapshotId]);
+            this.db.run('DELETE FROM growth_module_labels WHERE snapshot_id=?', [item.snapshotId]);
+            this.db.run('DELETE FROM growth_items WHERE snapshot_id=?', [item.snapshotId]);
+            this.db.run(`INSERT OR REPLACE INTO growth_snapshot_semantic_index(snapshot_id,semantic_fingerprint,format_version,indexed_at)
+              VALUES(?,?,1,?)`, [item.snapshotId, item.semanticHash, Date.now()]);
+          }
+          const value = { batchIndex: Number(row.batch_index), snapshotIds, deleted: expected };
+          this.db.run("UPDATE growth_detail_cleanup_batches SET status='applied',receipt_json=?,applied_at=? WHERE plan_id=? AND batch_index=? AND status='prepared'",
+            [canonical(value), Date.now(), input.planId, row.batch_index]);
+          if (this.db.getRowsModified() !== 1) throw new Error('growth_detail_cleanup_batch_conflict');
+          return value;
+        });
+        batchReceipts.push(receipt);
+        for (const key of expectedKeys) appliedNow[key] += expected[key];
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        if (/growth_detail_cleanup_(?:boundary|record|snapshot|retained_topology)_/.test(reason)) {
+          this.invalidateGrowthSnapshotDetailCleanupPlan(input.planId, reason);
+          throw new Error('growth_detail_cleanup_plan_invalidated');
+        }
+        throw error;
+      }
+      const remainingBatches = Number(this.rows("SELECT COUNT(*) AS count FROM growth_detail_cleanup_batches WHERE plan_id=? AND status<>'applied'", [input.planId])[0].count);
+      if (remainingBatches > 0) {
+        const deletedSoFar = batchReceipts.reduce<GrowthSnapshotDetailCleanupCounts>((totals, batch) => {
+          for (const key of expectedKeys) totals[key] += batch.deleted[key];
+          return totals;
+        }, { growthItems: 0, growthEdges: 0, growthSignals: 0, growthModuleLabels: 0 });
+        return { status: 'applying', planId: input.planId, planHash: input.planHash, completedBatches: batchReceipts.length,
+          totalBatches: batchRows.length, deletedSoFar };
+      }
+    }
+    const finalDataVersion = Number(this.rows('PRAGMA data_version')[0].data_version);
+    try {
+      return this.transaction(() => {
+        if (Number(this.rows('PRAGMA data_version')[0].data_version) !== finalDataVersion) throw new Error('growth_detail_cleanup_record_drift');
+        this.validateGrowthSnapshotDetailCleanupBoundary(plan.manifest);
+        const remaining = this.growthSnapshotDetailCounts(plan.manifest.candidateSnapshots.map(item => item.snapshotId));
+        if (expectedKeys.some(key => remaining[key] !== 0)) throw new Error('growth_detail_cleanup_incomplete');
+        const violations: Record<string, SqlValue>[] = [];
+        for (const table of ['growth_items', 'growth_edges', 'growth_signals', 'growth_module_labels', 'growth_snapshot_semantic_index']) {
+          violations.push(...this.rows(`PRAGMA foreign_key_check(${quoteSqlIdentifier(table)})`));
+        }
+        if (violations.length) throw new Error('growth_detail_cleanup_foreign_key_violation');
+        const persistedBatches = this.rows('SELECT batch_index,snapshot_ids_json,expected_json FROM growth_detail_cleanup_batches WHERE plan_id=? AND status=? ORDER BY batch_index', [input.planId, 'applied'])
+          .map(row => ({ batchIndex: Number(row.batch_index), snapshotIds: JSON.parse(String(row.snapshot_ids_json)), expected: JSON.parse(String(row.expected_json)) }));
+        if (persistedBatches.length !== batchReceipts.length || digest(canonical(persistedBatches)) !== plan.manifest.batchHash) throw new Error('growth_detail_cleanup_batch_drift');
+        for (const projectId of new Set(plan.manifest.candidateSnapshots.map(item => item.projectId))) this.bumpReportSourceRevision(projectId);
+        const value = { status: 'applied', planId: input.planId, planHash: input.planHash, candidateHash: plan.manifest.candidateHash, retainedHash: plan.manifest.retainedHash,
+          snapshotCount: plan.manifest.snapshotCount, deleted: input.expectedRecords, appliedNow, batches: batchReceipts.length, foreignKeyViolations: 0 };
+        const resultContentId = this.putContent(canonical(value), 'application/json');
+        const sequence = Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS value FROM events')[0].value);
+        this.db.run("UPDATE growth_detail_cleanup_plans SET status='applied',result_content_id=?,applied_at=? WHERE plan_id=? AND status='applying'", [resultContentId, Date.now(), input.planId]);
+        if (this.db.getRowsModified() !== 1) throw new Error('growth_detail_cleanup_plan_state_conflict');
+        this.db.run("UPDATE requests SET status='committed',result_content_id=?,committed_sequence=? WHERE actor_id=? AND idempotency_key=? AND status='pending'",
+          [resultContentId, sequence, this.actorId, input.idempotencyKey]);
+        if (this.db.getRowsModified() !== 1) throw new Error('growth_detail_cleanup_request_state_conflict');
+        return value;
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (reason === 'growth_detail_cleanup_incomplete' || /growth_detail_cleanup_(?:boundary|record|foreign_key|batch)_/.test(reason)) {
+        this.invalidateGrowthSnapshotDetailCleanupPlan(input.planId, reason);
+        throw new Error('growth_detail_cleanup_plan_invalidated');
+      }
+      throw error;
+    }
   }
   private hashGrowthSnapshotCleanupRows(hash: crypto.Hash, section: string, sql: string, values: SqlValue[],
       project: (row: Record<string, SqlValue>) => unknown): void {
