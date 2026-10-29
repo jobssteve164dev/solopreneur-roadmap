@@ -1522,13 +1522,52 @@ test('attachment save failure settles the exact paste request for both webviews'
     const request = { command: 'attachment.save', projectPath: '/isolated/project', targetId: 'solo:/isolated/project', nodeId: '__solo__', requestId: 'paste-failed', attachmentEpoch: 3, attachments: [{ dataUrl: 'data:image/png;base64,AA==' }] };
     assert.equal(await extension.action({}, request, surface, { postMessage: message => { messages.push(message); return Promise.resolve(true); } }), true);
     assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
+      command: 'pastedAttachmentsAccepted',
+      ...(surface === 'sidebar' ? { targetId: 'solo:/isolated/project' } : { nodeId: '__solo__' }),
+      projectPath: '/isolated/project',
+      requestId: 'paste-failed',
+      attachmentEpoch: 3
+    }, {
       command: 'pastedAttachmentsFailed',
       ...(surface === 'sidebar' ? { targetId: 'solo:/isolated/project' } : { nodeId: '__solo__' }),
+      projectPath: '/isolated/project',
       requestId: 'paste-failed',
       attachmentEpoch: 3,
-      message: 'fixture_attachment_failure'
+      message: '截图添加失败，请重新粘贴。'
     }]);
   });
+});
+
+test('retried pasted-image requests are accepted immediately and share one host save', async () => {
+  const actualAttachments = require('../out/attachments.js');
+  const calls = [];
+  let release;
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.configure = () => {
+      getProjects = () => [{ path: '/isolated/project' }];
+      getPersistedSettings = () => ({ globalDataPath: '/isolated/.solomap-global' });
+      sidebarProvider = null;
+    };
+    module.exports.action = handleSharedWebviewAction;
+  `, { './attachments': { ...actualAttachments, savePastedImageAttachmentsAsync: async (...args) => { calls.push(args); await new Promise(resolve => { release = resolve; }); return ['solomap://asset/saved-once']; } } });
+  extension.configure();
+  const messages = [];
+  const webview = { postMessage: message => { messages.push(message); return Promise.resolve(true); } };
+  const request = { command: 'attachment.save', projectPath: '/isolated/project', targetId: 'solo:/isolated/project', requestId: 'paste-single-flight', attachmentEpoch: 4, attachments: [{ dataUrl: 'data:image/png;base64,AA==' }] };
+
+  const first = extension.action({}, request, 'sidebar', webview);
+  while (!release) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(messages.filter(message => message.command === 'pastedAttachmentsAccepted').length, 1);
+  assert.equal(messages.some(message => message.command === 'pastedAttachmentsSaved'), false);
+  const second = extension.action({}, request, 'sidebar', webview);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 1, 'a retry must not start another attachment write');
+  assert.equal(messages.filter(message => message.command === 'pastedAttachmentsAccepted').length, 2);
+
+  release();
+  await Promise.all([first, second]);
+  assert.equal(calls.length, 1);
+  assert.equal(messages.filter(message => message.command === 'pastedAttachmentsSaved').length, 2, 'each live caller receives the same completion');
 });
 
 test('a restarted host rejects a persisted Solo action with changed input', async () => {
@@ -2006,12 +2045,12 @@ test('shared connector settings do not offer uninstall for a built-in MCP servic
   assert.equal(elements.installButton.getAttribute('disabled'), '', 'a failed persisted operation must allow retry');
 });
 
-test('pasted image delivery retries the same request until the host acknowledges it', async () => {
+test('pasted image delivery is visible immediately and slows recovery retries after host acceptance', async () => {
   const { getSharedWebviewRuntimeScript } = require(path.join(projectRoot, 'out/webviewSharedRuntime.js'));
   const timers = [];
   const sandbox = {
     globalThis: {
-      setTimeout(callback) { const timer = { callback, active: true, unref() { this.unrefed = true; } }; timers.push(timer); return timer; },
+      setTimeout(callback, delay) { const timer = { callback, delay, active: true, unref() { this.unrefed = true; } }; timers.push(timer); return timer; },
       clearTimeout(timer) { timer.active = false; }
     },
     FileReader: class FileReader {
@@ -2026,24 +2065,108 @@ test('pasted image delivery retries the same request until the host acknowledges
     addEventListener(name, listener) { this.listeners[name] = listener; }
   };
   const posted = [];
+  const states = [];
   sandbox.globalThis.SoloMapWebview.bindPastedImageAttachments(
     input,
     message => posted.push(message),
-    () => ({ command: 'attachment.save', targetId: 'solo:/workspace/app', attachmentEpoch: 0 })
+    () => ({ command: 'attachment.save', targetId: 'solo:/workspace/app', attachmentEpoch: 0 }),
+    state => states.push(state)
   );
   await input.listeners.paste({
     clipboardData: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => ({ name: 'screen.png', type: 'image/png' }) }] },
     preventDefault() {}
   });
 
+  assert.deepEqual(JSON.parse(JSON.stringify(states[0])), {
+    phase: 'started',
+    requestId: posted[0].requestId,
+    count: 1,
+    names: ['screen.png']
+  });
   assert.equal(posted.length, 1);
   assert.equal(timers.length, 1);
+  assert.equal(timers[0].delay, 2_000);
   assert.equal(timers[0].unrefed, true);
-  timers[0].callback();
-  assert.equal(posted.length, 2);
-  assert.deepEqual(posted[1], posted[0]);
+  sandbox.globalThis.SoloMapWebview.acceptPastedImageAttachments(posted[0].requestId);
+  assert.equal(timers[0].active, false);
+  assert.equal(timers.at(-1).delay, 15_000);
+  timers.at(-1).callback();
+  assert.equal(posted.length, 2, 'accepted work is retried only as recovery for a lost completion');
+  assert.deepEqual(posted.at(-1), posted[0]);
   sandbox.globalThis.SoloMapWebview.acknowledgePastedImageAttachments(posted[0].requestId);
   assert.equal(timers.at(-1).active, false);
+});
+
+test('pasted image delivery keeps multi-image batches whole and ignores non-images', async () => {
+  const { getSharedWebviewRuntimeScript } = require(path.join(projectRoot, 'out/webviewSharedRuntime.js'));
+  const sandbox = {
+    globalThis: { setTimeout: () => ({ unref() {} }), clearTimeout() {} },
+    FileReader: class FileReader {
+      readAsDataURL(file) {
+        if (file.fail) return this.onerror();
+        this.result = `data:${file.type};base64,aGVsbG8=`;
+        this.onload();
+      }
+    }
+  };
+  vm.runInNewContext(getSharedWebviewRuntimeScript(), sandbox);
+  const input = {
+    attributes: {}, listeners: {},
+    getAttribute(name) { return this.attributes[name] || ''; },
+    setAttribute(name, value) { this.attributes[name] = value; },
+    addEventListener(name, listener) { this.listeners[name] = listener; }
+  };
+  const posted = [];
+  const states = [];
+  sandbox.globalThis.SoloMapWebview.bindPastedImageAttachments(
+    input,
+    message => posted.push(message),
+    () => ({ command: 'attachment.save' }),
+    state => states.push(state)
+  );
+  let prevented = false;
+  await input.listeners.paste({
+    clipboardData: { items: [
+      { kind: 'string', type: 'text/plain' },
+      { kind: 'file', type: 'image/png', getAsFile: () => ({ name: 'one.png', type: 'image/png' }) },
+      { kind: 'file', type: 'image/jpeg', getAsFile: () => ({ name: 'two.jpg', type: 'image/jpeg' }) }
+    ] },
+    preventDefault() { prevented = true; }
+  });
+  assert.equal(prevented, true);
+  assert.equal(posted.length, 1);
+  assert.deepEqual(Array.from(posted[0].attachments, item => item.name), ['one.png', 'two.jpg']);
+  assert.equal(states[0].count, 2);
+
+  prevented = false;
+  await input.listeners.paste({
+    clipboardData: { items: [{ kind: 'string', type: 'text/plain' }] },
+    preventDefault() { prevented = true; }
+  });
+  assert.equal(prevented, false, 'ordinary text paste remains native');
+  assert.equal(posted.length, 1);
+
+  await input.listeners.paste({
+    clipboardData: { items: [
+      { kind: 'file', type: 'image/png', getAsFile: () => ({ name: 'good.png', type: 'image/png' }) },
+      { kind: 'file', type: 'image/png', getAsFile: () => ({ name: 'broken.png', type: 'image/png', fail: true }) }
+    ] },
+    preventDefault() {}
+  });
+  assert.equal(posted.length, 1, 'a partially read batch must not silently drop an image');
+  assert.equal(states.at(-1).phase, 'failed');
+  assert.equal(states.at(-1).count, 2);
+
+  await input.listeners.paste({
+    clipboardData: { items: Array.from({ length: 11 }, (_, index) => ({
+      kind: 'file', type: 'image/png', getAsFile: () => ({ name: `${index + 1}.png`, type: 'image/png' })
+    })) },
+    preventDefault() {}
+  });
+  assert.equal(posted.length, 1, 'an oversized batch must not be silently truncated');
+  assert.equal(states.at(-1).phase, 'failed');
+  assert.equal(states.at(-1).reason, 'too_many');
+  assert.equal(states.at(-1).count, 11);
 });
 
 test('conversation launch delivery retries the same durable action until the host settles it', () => {
@@ -2659,7 +2782,8 @@ test('roadmap revision sender carries the live project that rendered the action'
   const source = fs.readFileSync(path.join(projectRoot, 'src/roadmapWebview.ts'), 'utf8');
   const start = source.indexOf("command: 'conversation.runRoadmapRevision'");
   const body = source.slice(start, start + 500);
-  assert.match(body, /projectPath:\s*activeProjectPath/);
+  assert.match(source.slice(start - 800, start), /const actionProjectPath = activeProjectPath/);
+  assert.match(body, /projectPath:\s*actionProjectPath/);
   assert.doesNotMatch(body, /currentProjectPath/);
 });
 
@@ -3370,6 +3494,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(script, /bindSoloSelect/);
   assert.match(script, /bindPastedImageAttachments/);
   assert.match(script, /attachment\.save/);
+  assert.match(script, /title="\$\{escapeHtml\(String\(file\)\.startsWith\('solomap:\/\/asset\/'\) \? t\('screenshotLabel'\) : file\)\}"/);
   assert.match(script, /checkDependencies/);
   assert.match(script, /feedback\.open/);
   assert.match(html, /id="btn-toggle-focus-timer"/);
@@ -5380,9 +5505,11 @@ test('full roadmap webview runtime script parses and opens settings panel', asyn
   assert.match(html, /data-solo-select/);
   assert.match(script, /renderSoloSelect/);
   assert.match(script, /bindPastedImageAttachments/);
-  assert.match(script, /addingScreenshot/);
+  assert.match(script, /screenshotAdded/);
+  assert.doesNotMatch(script, /addingScreenshot/);
   assert.match(script, /phase === 'started'/);
   assert.match(script, /attachment\.save/);
+  assert.match(script, /title="\$\{escapeHtml\(String\(file\)\.startsWith\('solomap:\/\/asset\/'\) \? t\('screenshotLabel'\) : file\)\}"/);
   assert.match(script, /conversation-log-pre/);
   assert.ok(script.includes("querySelectorAll('[data-conversation-id] .conversation-row')"));
   assert.match(script, /hasActiveConversationDescendant/);
@@ -5665,7 +5792,8 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.match(script, /data-attach-roadmap-revision/);
   assert.match(script, /data-roadmap-revision-model/);
   assert.match(script, /roadmapRevisionDraft/);
-  assert.match(script, /model:\s*getSoloSelectValue\(modelSelect\)/);
+  assert.match(script, /const model = getSoloSelectValue\(modelSelect\)/);
+  assert.match(script, /agentCli,\s*model,\s*supplementFiles/);
   assert.match(script, /conversation\.runSolo/);
   assert.match(script, /conversation\.linkToStep/);
   assert.match(script, /soloTitle:\s*'Free Work'|soloTitle:\s*'自由研讨'/);
@@ -5673,7 +5801,7 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.match(script, /renderSoloPanel/);
   assert.match(script, /data-attach-solo/);
   assert.match(script, /renderSupplementFiles\(soloConversationId/);
-  assert.match(script, /supplementFiles: nodeSupplementFiles\[soloConversationId\]/);
+  assert.match(script, /supplementFiles: getProjectSupplementFiles\(actionProjectPath, soloConversationId\)/);
   assert.match(script, /data-link-solo-id/);
   assert.match(script, /completionCriteria/);
   assert.match(script, /renderCompletionCriteria/);
@@ -6426,6 +6554,21 @@ test('sidebar keeps solo composer active and renders pasted attachments while th
         reader.result = 'data:image/png;base64,bGF0ZQ==';
         reader.onload();
       };
+      window.__failPasteReader = () => {
+        const reader = window.__pendingPasteReaders.shift();
+        reader.onerror();
+      };
+      window.__pasteQueueState = () => ({
+        pending: pendingPastedAttachments[sidebarAttachmentKey('solo:' + projectPath, projectPath)]?.size || 0,
+        queued: Boolean(queuedPastedAttachmentActions[sidebarAttachmentKey('solo:' + projectPath, projectPath)]),
+        error: pastedAttachmentErrors[sidebarAttachmentKey('solo:' + projectPath, projectPath)] || '',
+        html: portfolioList.innerHTML
+      });
+      window.__clearPersistedContinueDraft = () => {
+        projectContinueDrafts['1'] = 'original-message';
+        projectContinueDrafts[getProjectContinueDraftKey(projectPath)] = 'original-message';
+        clearSubmittedSidebarDraft('continue', projectPath, '1', 'original-message');
+      };
       window.__sendSoloComposer = () => {
         const sendInput = document.createElement('send-input');
         sendInput.value = '发送当前消息';
@@ -6459,7 +6602,9 @@ test('sidebar keeps solo composer active and renders pasted attachments while th
         continueButtonActive: /portfolio-mode-btn active" data-project-conversation-mode="continue"[^>]*aria-pressed="true"/.test(continueMode),
         flowButtonActive: /portfolio-mode-btn active" data-project-conversation-mode="flow"[^>]*aria-pressed="true"/.test(flowMode),
         flowButtonEnabled: !/data-project-conversation-mode="flow"[^>]*disabled/.test(flowMode),
-        pastedImagePendingRendered: /正在添加截图/.test(portfolioList.innerHTML)
+        pastedImageAcceptedRendered: /截图已添加/.test(portfolioList.innerHTML),
+        pastedImageSpinnerHidden: !/正在添加截图/.test(portfolioList.innerHTML),
+        pastedImageDoesNotDisableSend: !/data-project-continue-send[^>]*disabled/.test(portfolioList.innerHTML)
       };
     })();
   `;
@@ -6530,7 +6675,9 @@ test('sidebar keeps solo composer active and renders pasted attachments while th
   assert.equal(result.continueButtonActive, true);
   assert.equal(result.flowButtonActive, true);
   assert.equal(result.flowButtonEnabled, true);
-  assert.equal(result.pastedImagePendingRendered, true);
+  assert.equal(result.pastedImageAcceptedRendered, true);
+  assert.equal(result.pastedImageSpinnerHidden, true);
+  assert.equal(result.pastedImageDoesNotDisableSend, true);
 
   await new Promise(resolve => setImmediate(resolve));
   const saveMessage = postedMessages.find(message => message.command === 'attachment.save');
@@ -6544,10 +6691,15 @@ test('sidebar keeps solo composer active and renders pasted attachments while th
   });
   assert.match(elements['portfolio-list'].innerHTML, /screenshot\.png/);
   assert.doesNotMatch(elements['portfolio-list'].innerHTML, /正在添加截图/);
+  await new Promise(resolve => setTimeout(resolve, 160));
+  assert.ok(postedMessages.some(message => message.command === 'uiState.patch'
+    && Array.isArray(message.patches)
+    && message.patches.some(patch => String(patch.key).includes('projectSoloFiles'))), 'saved attachments must be persisted after the async completion');
 
   context.window.__pasteAnotherSoloImage();
   context.window.__sendSoloComposer();
   assert.equal(postedMessages.some(message => message.command === 'conversation.runSolo'), false, 'send must wait until the pasted image is saved');
+  assert.match(elements['portfolio-list'].innerHTML, /图片保存后自动发送/);
   context.window.__releasePasteReader();
   await new Promise(resolve => setImmediate(resolve));
   const lateSaveMessage = postedMessages.filter(message => message.command === 'attachment.save').at(-1);
@@ -6558,12 +6710,33 @@ test('sidebar keeps solo composer active and renders pasted attachments while th
     attachmentEpoch: lateSaveMessage.attachmentEpoch,
     files: ['.solopreneur/attachments/solo-workspace-app/late-screenshot.png']
   });
-  assert.match(elements['portfolio-list'].innerHTML, /late-screenshot\.png/);
-  context.window.__sendSoloComposer();
+  await new Promise(resolve => setImmediate(resolve));
   const launch = postedMessages.filter(message => message.command === 'conversation.runSolo').at(-1);
   assert.ok(launch);
   assert.deepEqual(Array.from(launch.supplementFiles), ['.solopreneur/attachments/solo-workspace-app/screenshot.png', '.solopreneur/attachments/solo-workspace-app/late-screenshot.png']);
+  assert.doesNotMatch(elements['portfolio-list'].innerHTML, /图片保存后自动发送/);
   dispatchMessage({ command: 'conversationActionSettled', action: 'runSolo', projectPath: '/workspace/app', launchActionId: launch.launchActionId });
+
+  const launchCount = postedMessages.filter(message => message.command === 'conversation.runSolo').length;
+  context.window.__pasteAnotherSoloImage();
+  context.window.__sendSoloComposer();
+  assert.equal(context.window.__pasteQueueState().queued, true);
+  context.window.__failPasteReader();
+  await new Promise(resolve => setImmediate(resolve));
+  const failedState = context.window.__pasteQueueState();
+  assert.equal(failedState.pending, 0);
+  assert.equal(failedState.queued, false, 'a local clipboard read failure must release the queued Send action');
+  assert.match(failedState.error, /截图读取失败/);
+  assert.match(failedState.html, /截图读取失败/);
+  assert.equal(postedMessages.filter(message => message.command === 'conversation.runSolo').length, launchCount, 'a failed image batch must not send without the requested attachment');
+
+  context.window.__clearPersistedContinueDraft();
+  await new Promise(resolve => setTimeout(resolve, 160));
+  const persistedClearPatches = postedMessages
+    .filter(message => message.command === 'uiState.patch')
+    .flatMap(message => message.patches || [{ key: message.key, value: message.value }]);
+  assert.ok(persistedClearPatches.some(patch => patch.key === 'interaction.projectContinueDrafts.1' && patch.value === ''));
+  assert.ok(persistedClearPatches.some(patch => String(patch.key).includes('interaction.projectContinueDrafts.continue%3A%2Fworkspace%2Fapp') && patch.value === ''));
 });
 
 test('daily review delegates its user action to the durable Runtime decision', () => {
@@ -11913,9 +12086,11 @@ test('roadmap conversation entrypoints carry the visible project identity to the
     assert.ok(calls.length > 0, `missing ${command} action`);
     for (const call of calls) {
       const payload = source.slice(call.index, source.indexOf('});', call.index) + 3);
-      assert.match(payload, /projectPath:\s*activeProjectPath/, `${command} must not fall back to whichever project the host last activated`);
+      assert.match(payload, /projectPath(?:\s*:\s*(?:activeProjectPath|actionProjectPath)(?=\s*[,}])|\s*,)/, `${command} must carry the visible or click-captured project`);
     }
   }
+  assert.match(source, /function triggerRun\([^)]*projectPath = activeProjectPath\)/);
+  assert.match(source, /triggerRun\([^\n]+actionProjectPath\)/);
 });
 
 test('sidebar step launch binds the clicked project before posting to the host', () => {
@@ -19506,6 +19681,74 @@ test('the host commits a sidebar UI-state batch in one runtime mutation', async 
   assert.equal(writes.length, 1);
   assert.equal(writes[0].input.patches.length, 3);
   assert.equal(messages.some(message => message.command === 'uiStatePatched' && message.requestId === 'sidebar-batch'), true);
+});
+
+test('the host keeps one UI-state write in flight and persists only the newest queued value', async () => {
+  const writes = [];
+  let releaseFirst;
+  const firstBlocked = new Promise(resolve => { releaseFirst = resolve; });
+  const transport = { sendRuntimeDataRequest: async (_root, request) => {
+    if (request.operation === 'read_ui_state') return { items: [] };
+    if (request.operation !== 'patch_ui_state') throw new Error(`unexpected operation: ${request.operation}`);
+    writes.push(request);
+    if (writes.length === 1) await firstBlocked;
+    return { items: request.input.patches.map((patch, index) => ({ ...patch, revision: index + 1 })) };
+  } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.handle = handleSharedWebviewAction;
+    module.exports.connect = root => { getPersistedSettings = () => ({ globalDataPath: root }); };
+  `, {
+    './autonomousRuntimeControl': transport,
+    './autonomousRuntimeHost': { ensureHealthyAutonomousRuntime: async () => ({ started: false }) }
+  });
+  extension.connect('/data/sidebar-latest-write');
+  const messages = [];
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => {} } };
+  const webview = { postMessage: async message => { messages.push(message); return true; } };
+  const patch = (requestId, value) => extension.handle(context, {
+    command: 'uiState.patch', scopeKey: '/project', requestId,
+    key: 'interaction.projectSoloDrafts.%2Fproject', value
+  }, 'sidebar', webview);
+
+  const first = patch('draft-1', '第一版');
+  while (writes.length < 1) await new Promise(resolve => setImmediate(resolve));
+  const second = patch('draft-2', '第二版');
+  const third = patch('draft-3', '最终版');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(writes.length, 1, 'new edits wait behind the single active write');
+  releaseFirst();
+  await Promise.all([first, second, third]);
+
+  assert.equal(writes.length, 2, 'queued edits collapse into one follow-up mutation');
+  assert.equal(writes[1].input.patches[0].value, '最终版');
+  assert.deepEqual(messages.filter(message => message.command === 'uiStatePatched').map(message => message.requestId).sort(), ['draft-1', 'draft-2', 'draft-3']);
+});
+
+test('the host restarts UI-state draining when a new edit arrives between waiter resolution and cleanup', async () => {
+  const writes = [];
+  const transport = { sendRuntimeDataRequest: async (_root, request) => {
+    if (request.operation === 'read_ui_state') return { items: [] };
+    if (request.operation !== 'patch_ui_state') throw new Error(`unexpected operation: ${request.operation}`);
+    writes.push(request);
+    return { items: request.input.patches.map((patch, index) => ({ ...patch, revision: index + 1 })) };
+  } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.enqueue = enqueueUiStatePatches;
+    module.exports.connect = root => { getPersistedSettings = () => ({ globalDataPath: root }); };
+  `, {
+    './autonomousRuntimeControl': transport,
+    './autonomousRuntimeHost': { ensureHealthyAutonomousRuntime: async () => ({ started: false }) }
+  });
+  extension.connect('/data/sidebar-microtask-write');
+  const context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => {} } };
+  const patch = value => extension.enqueue(context, 'sidebar', '/project', [
+    { key: 'interaction.projectSoloDrafts.%2Fproject', value }
+  ]);
+
+  await patch('第一版');
+  await patch('第二版');
+  assert.equal(writes.length, 2);
+  assert.equal(writes[1].input.patches[0].value, '第二版');
 });
 
 test('roadmap ignores an older UI load response for the same project', () => {

@@ -329,7 +329,15 @@ let persistedSettingsWriteQueue: Promise<void> = Promise.resolve();
 const databaseSettingsByRoot = new Map<string, Partial<SolopreneurSettings>>();
 const databaseSettingRevisionsByRoot = new Map<string, Map<string, number>>();
 const uiStateRevisionsByRoot = new Map<string, Map<string, number>>();
-const uiStateWrites = new Map<string, Promise<Record<string, unknown>>>();
+const uiStateWrites = new Map<string, Promise<void>>();
+interface UiStateWriteWaiter { resolve: () => void; reject: (error: unknown) => void }
+interface UiStateWriteQueue {
+  pending: Map<string, unknown>;
+  waiters: UiStateWriteWaiter[];
+  running: boolean;
+}
+const uiStateWriteQueues = new Map<string, UiStateWriteQueue>();
+const activePastedAttachmentSaves = new Map<string, { inputHash: string; promise: Promise<string[]>; cleanup?: NodeJS.Timeout }>();
 const projectAutonomyByRoot = new Map<string, Map<string, { enabled: boolean; toolNetworkDisabled: boolean; epoch: number }>>();
 let persistedGlobalDataPathWrite: { root: string; observedDifferentRoot: boolean } | undefined;
 const nativeConfigurationProjectionValues = new Map<string, string>();
@@ -1616,14 +1624,7 @@ async function handleSharedWebviewAction(
       if (requestedPatches.length < 1 || requestedPatches.length > 4096) throw new Error('invalid_ui_state_patch');
       const patches = requestedPatches.map(patch => ({ key: String(patch?.key || '').slice(0, 1024), value: patch?.value }));
       if (patches.some(patch => !patch.key || patch.value === undefined)) throw new Error('invalid_ui_state_patch');
-      const dataRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
-      const writeKey = `${dataRoot}\n${surface}\n${scopeKey}`;
-      const previous = uiStateWrites.get(writeKey);
-      const write = (previous ? previous.catch(() => ({})) : Promise.resolve({})).then(() =>
-        patchUiStateBatch(context, surface, scopeKey, patches, String(request.requestId || `ui-state:${crypto.randomUUID()}`)));
-      uiStateWrites.set(writeKey, write);
-      try { await write; }
-      finally { if (uiStateWrites.get(writeKey) === write) uiStateWrites.delete(writeKey); }
+      await enqueueUiStatePatches(context, surface, scopeKey, patches);
       await respond({ command: 'uiStatePatched', view: surface, scopeKey, requestId: String(request.requestId || '') });
     },
     'conversation.runStep': async (request) => {
@@ -2210,19 +2211,44 @@ async function handleSharedWebviewAction(
       const projectPath = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
       const requestId = String(request.requestId || '');
       const attachmentEpoch = Number(request.attachmentEpoch || 0);
+      const responseTarget = surface === 'sidebar' ? { targetId: request.targetId || '' } : { nodeId: request.nodeId || '' };
       try {
         if (!projectPath || !getProjects(context).some((project) => project.path === projectPath)) throw new Error('Choose a project folder before attaching images.');
+        if (!requestId) throw new Error('pasted_attachment_request_id_required');
+        if (!Array.isArray(request.attachments) || request.attachments.length === 0 || request.attachments.length > 10) throw new Error('pasted_attachment_batch_size_invalid');
         const scope = String(request.scope || request.targetId || request.nodeId || 'conversation');
-        const files = await savePastedImageAttachmentsAsync(projectPath, scope, request.attachments || [], getPersistedSettings(context).globalDataPath, requestId);
+        const dataRoot = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+        const saveKey = `${dataRoot}\0${path.resolve(projectPath)}\0${requestId}`;
+        const inputHash = crypto.createHash('sha256').update(JSON.stringify({ scope, attachments: request.attachments || [] })).digest('hex');
+        let activeSave = activePastedAttachmentSaves.get(saveKey);
+        if (activeSave && activeSave.inputHash !== inputHash) throw new Error('pasted_attachment_request_conflict');
+        if (!activeSave) {
+          const promise = savePastedImageAttachmentsAsync(projectPath, scope, request.attachments || [], dataRoot, requestId);
+          activeSave = { inputHash, promise };
+          activePastedAttachmentSaves.set(saveKey, activeSave);
+          void promise.finally(() => {
+            const current = activePastedAttachmentSaves.get(saveKey);
+            if (!current || current.promise !== promise) return;
+            current.cleanup = setTimeout(() => {
+              if (activePastedAttachmentSaves.get(saveKey)?.promise === promise) activePastedAttachmentSaves.delete(saveKey);
+            }, 30_000);
+            current.cleanup.unref?.();
+          }).catch(() => {});
+        }
+        await respond({ command: 'pastedAttachmentsAccepted', ...responseTarget, projectPath, requestId, attachmentEpoch });
+        const files = await activeSave.promise;
         if (surface === 'sidebar') {
-          await respond({ command: 'pastedAttachmentsSaved', targetId: request.targetId || '', requestId, attachmentEpoch, files });
+          await respond({ command: 'pastedAttachmentsSaved', targetId: request.targetId || '', projectPath, requestId, attachmentEpoch, files });
         } else {
-          await respond({ command: 'supplementFilesSelected', nodeId: request.nodeId || '', requestId, attachmentEpoch, files });
+          await respond({ command: 'supplementFilesSelected', nodeId: request.nodeId || '', projectPath, requestId, attachmentEpoch, files });
         }
       } catch (error) {
-        const message = error && typeof error === 'object' && 'message' in error ? String(error.message) : String(error);
-        vscode.window.showErrorMessage(`Unable to add pasted image: ${message}`);
-        await respond({ command: 'pastedAttachmentsFailed', ...(surface === 'sidebar' ? { targetId: request.targetId || '' } : { nodeId: request.nodeId || '' }), requestId, attachmentEpoch, message });
+        recordLocalDiagnosticError(getPersistedSettings(context).globalDataPath, 'attachment.paste.save', error);
+        const message = getPersistedSettings(context).language === 'en'
+          ? 'The screenshot could not be added. Paste it again.'
+          : '截图添加失败，请重新粘贴。';
+        vscode.window.showErrorMessage(message);
+        await respond({ command: 'pastedAttachmentsFailed', ...responseTarget, projectPath, requestId, attachmentEpoch, message });
       }
     },
     'agentModels.get': async (request) => {
@@ -2914,6 +2940,51 @@ async function readUiState(context: vscode.ExtensionContext, view: string, scope
 
 async function patchUiState(context: vscode.ExtensionContext, view: string, scopeKey: string, key: string, value: unknown, idempotencyKey = `ui-state:${crypto.randomUUID()}`): Promise<Record<string, unknown>> {
   return patchUiStateBatch(context, view, scopeKey, [{ key, value }], idempotencyKey);
+}
+
+function enqueueUiStatePatches(
+  context: vscode.ExtensionContext,
+  view: string,
+  scopeKey: string,
+  patches: Array<{ key: string; value: unknown }>
+): Promise<void> {
+  const root = normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+  const queueKey = `${root}\n${view}\n${scopeKey}`;
+  let queue = uiStateWriteQueues.get(queueKey);
+  if (!queue) {
+    queue = { pending: new Map(), waiters: [], running: false };
+    uiStateWriteQueues.set(queueKey, queue);
+  }
+  for (const patch of patches) queue.pending.set(patch.key, patch.value);
+  const completion = new Promise<void>((resolve, reject) => queue!.waiters.push({ resolve, reject }));
+  const startDrain = () => {
+    if (queue!.running) return;
+    queue.running = true;
+    const drain = (async () => {
+      while (queue!.pending.size > 0) {
+        const batch = [...queue!.pending].map(([key, value]) => ({ key, value }));
+        const waiters = queue!.waiters.splice(0);
+        queue!.pending.clear();
+        try {
+          await patchUiStateBatch(context, view, scopeKey, batch, `ui-state:${crypto.randomUUID()}`);
+          waiters.forEach(waiter => waiter.resolve());
+        } catch (error) {
+          waiters.forEach(waiter => waiter.reject(error));
+        }
+      }
+    })().finally(() => {
+      queue!.running = false;
+      if (uiStateWrites.get(queueKey) === drain) uiStateWrites.delete(queueKey);
+      if (queue!.pending.size > 0) {
+        startDrain();
+      } else if (uiStateWriteQueues.get(queueKey) === queue) {
+        uiStateWriteQueues.delete(queueKey);
+      }
+    });
+    uiStateWrites.set(queueKey, drain);
+  };
+  startDrain();
+  return completion;
 }
 
 async function patchUiStateBatch(context: vscode.ExtensionContext, view: string, scopeKey: string, patches: Array<{ key: string; value: unknown }>, idempotencyKey = `ui-state:${crypto.randomUUID()}`): Promise<Record<string, unknown>> {

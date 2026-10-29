@@ -5008,7 +5008,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const projectSoloFiles = {};
     const projectSoloDrafts = {};
     const pendingPastedAttachments = {};
+    const queuedPastedAttachmentActions = {};
     const pastedAttachmentEpochs = {};
+    const pastedAttachmentErrors = {};
     const projectRefreshPaths = new Set();
     const pendingConversationContinuations = new Set();
     const conversationContinuationKey = (projectPath, conversationId) => JSON.stringify([String(projectPath || ''), String(conversationId || '')]);
@@ -6205,7 +6207,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         soloPlaceholder: '说说你现在想处理的问题...',
         soloSend: '发送',
         soloAttach: '添加补充文件',
-        addingScreenshot: '正在添加截图…',
+        screenshotAdded: '截图已添加',
+        screenshotLabel: '截图',
+        screenshotSendQueued: '图片保存后自动发送',
+        screenshotReadFailed: '截图读取失败，请重新粘贴。',
+        screenshotTooMany: '每次最多粘贴 10 张截图，请分次添加。',
         soloHistory: '最近一次 Solo 对话',
         noSoloConversations: '还没有 Solo 对话。',
         continueHistory: '最近一次推进',
@@ -6710,7 +6716,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         soloPlaceholder: 'Describe what you want to handle...',
         soloSend: 'Send',
         soloAttach: 'Attach files',
-        addingScreenshot: 'Adding screenshot…',
+        screenshotAdded: 'Screenshot added',
+        screenshotLabel: 'Screenshot',
+        screenshotSendQueued: 'Sending after the image is saved',
+        screenshotReadFailed: 'The screenshot could not be read. Paste it again.',
+        screenshotTooMany: 'Paste up to 10 screenshots at a time.',
         soloHistory: 'Latest Solo conversation',
         noSoloConversations: 'No Solo conversations yet.',
         continueHistory: 'Latest run',
@@ -9349,33 +9359,48 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }
           break;
 
+        case 'pastedAttachmentsAccepted':
+          SoloMapWebview.acceptPastedImageAttachments(message.requestId);
+          break;
+
         case 'pastedAttachmentsSaved':
           SoloMapWebview.acknowledgePastedImageAttachments(message.requestId);
-          if (Number(message.attachmentEpoch || 0) !== Number(pastedAttachmentEpochs[message.targetId] || 0)) break;
-          if (message.targetId && pendingPastedAttachments[message.targetId]) {
-            pendingPastedAttachments[message.targetId].delete(String(message.requestId || ''));
+          const savedProjectPath = String(message.projectPath || currentProjects.selectedProjectPath || '');
+          const savedAttachmentKey = sidebarAttachmentKey(message.targetId, savedProjectPath);
+          if (Number(message.attachmentEpoch || 0) !== Number(pastedAttachmentEpochs[savedAttachmentKey] || 0)) break;
+          if (message.targetId && pendingPastedAttachments[savedAttachmentKey]) {
+            pendingPastedAttachments[savedAttachmentKey].delete(String(message.requestId || ''));
           }
-          if (message.targetId && String(message.targetId).startsWith('solo:')) {
-            projectSoloFiles[message.targetId] = mergeAttachmentFiles(projectSoloFiles[message.targetId] || [], message.files || []);
-            renderPortfolioAfterAttachmentUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          } else if (message.targetId) {
+          delete pastedAttachmentErrors[savedAttachmentKey];
+          if (savedProjectPath === currentProjects.selectedProjectPath && message.targetId && !String(message.targetId).startsWith('solo:')) {
             const input = portfolioList.querySelector('[data-project-conversation-input]');
             if (input?.getAttribute('data-conversation-target-id') === String(message.targetId)) {
               projectContinueDrafts[message.targetId] = input.value;
             }
-            projectContinueFiles[message.targetId] = mergeAttachmentFiles(projectContinueFiles[message.targetId] || [], message.files || []);
+          }
+          setSidebarProjectFiles(savedProjectPath, message.targetId, mergeAttachmentFiles(
+            getSidebarProjectFiles(savedProjectPath, message.targetId),
+            message.files || []
+          ));
+          saveSidebarProjectFiles(savedProjectPath, message.targetId);
+          if (savedProjectPath === currentProjects.selectedProjectPath) saveSidebarInteractionState();
+          if (!flushQueuedPastedAttachmentAction(message.targetId, savedProjectPath) && savedProjectPath === currentProjects.selectedProjectPath) {
             renderPortfolioAfterAttachmentUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           }
           break;
 
         case 'pastedAttachmentsFailed':
           SoloMapWebview.acknowledgePastedImageAttachments(message.requestId);
-          if (Number(message.attachmentEpoch || 0) !== Number(pastedAttachmentEpochs[message.targetId] || 0)) break;
-          if (message.targetId && pendingPastedAttachments[message.targetId]) {
-            pendingPastedAttachments[message.targetId].delete(String(message.requestId || ''));
+          const failedProjectPath = String(message.projectPath || currentProjects.selectedProjectPath || '');
+          const failedAttachmentKey = sidebarAttachmentKey(message.targetId, failedProjectPath);
+          if (Number(message.attachmentEpoch || 0) !== Number(pastedAttachmentEpochs[failedAttachmentKey] || 0)) break;
+          if (message.targetId && pendingPastedAttachments[failedAttachmentKey]) {
+            pendingPastedAttachments[failedAttachmentKey].delete(String(message.requestId || ''));
           }
+          delete queuedPastedAttachmentActions[failedAttachmentKey];
+          pastedAttachmentErrors[failedAttachmentKey] = message.message || t('screenshotReadFailed');
           deliveryActionMessage = message.message || '';
-          renderPortfolioAfterAttachmentUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          if (failedProjectPath === currentProjects.selectedProjectPath) renderPortfolioAfterAttachmentUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
           break;
 
         case 'sidebarSoloConversationLoaded':
@@ -9743,27 +9768,91 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       }
     }
 
+    function sidebarAttachmentKey(targetId, projectPath = activeProjectPath || currentProjects.selectedProjectPath) {
+      return String(projectPath || 'global') + '\\n' + String(targetId || '');
+    }
+
+    function getSidebarProjectFiles(projectPath, targetId) {
+      const active = projectPath === (activeProjectPath || currentProjects.selectedProjectPath);
+      const state = active ? null : (sidebarProjectInteractionStates.get(projectPath) || {});
+      if (String(targetId).startsWith('solo:')) return active
+        ? (projectSoloFiles[targetId] || [])
+        : (state.projectSoloFiles?.[targetId] || []);
+      return active ? (projectContinueFiles[targetId] || []) : (state.projectContinueFiles?.[targetId] || []);
+    }
+
+    function setSidebarProjectFiles(projectPath, targetId, files) {
+      const active = projectPath === (activeProjectPath || currentProjects.selectedProjectPath);
+      const solo = String(targetId).startsWith('solo:');
+      if (active) {
+        if (solo) projectSoloFiles[targetId] = files;
+        else projectContinueFiles[targetId] = files;
+        return;
+      }
+      const remembered = sidebarProjectInteractionStates.get(projectPath) || {};
+      const field = solo ? 'projectSoloFiles' : 'projectContinueFiles';
+      sidebarProjectInteractionStates.set(projectPath, {
+        ...remembered,
+        [field]: { ...(remembered[field] || {}), [targetId]: files }
+      });
+    }
+
+    function saveSidebarProjectFiles(projectPath, targetId) {
+      const collection = String(targetId).startsWith('solo:') ? 'projectSoloFiles' : 'projectContinueFiles';
+      const encodedTargetId = encodeURIComponent(targetId).replace(/\\./g, '%2E');
+      saveSidebarUiStateBatch([{
+        key: 'interaction.' + collection + '.' + encodedTargetId,
+        value: getSidebarProjectFiles(projectPath, targetId)
+      }], projectPath || 'global');
+    }
+
     function bindPastedImageAttachments(input, targetId, getProjectPath, scope) {
+      const projectPath = typeof getProjectPath === 'function' ? getProjectPath() : currentProjects.selectedProjectPath;
+      const attachmentKey = sidebarAttachmentKey(targetId, projectPath);
       SoloMapWebview.bindPastedImageAttachments(
         input,
         message => vscode.postMessage(message),
         () => ({
           command: 'attachment.save',
-          projectPath: typeof getProjectPath === 'function' ? getProjectPath() : currentProjects.selectedProjectPath,
+          projectPath,
           targetId,
           scope: scope || targetId || 'conversation',
-          attachmentEpoch: Number(pastedAttachmentEpochs[targetId] || 0),
+          attachmentEpoch: Number(pastedAttachmentEpochs[attachmentKey] || 0),
         }),
         state => {
-          if (!pendingPastedAttachments[targetId]) pendingPastedAttachments[targetId] = new Set();
+          if (!pendingPastedAttachments[attachmentKey]) pendingPastedAttachments[attachmentKey] = new Map();
           if (state.phase === 'started') {
-            pendingPastedAttachments[targetId].add(state.requestId);
+            delete pastedAttachmentErrors[attachmentKey];
+            pendingPastedAttachments[attachmentKey].set(state.requestId, { count: state.count, names: state.names || [] });
           } else {
-            pendingPastedAttachments[targetId].delete(state.requestId);
+            pendingPastedAttachments[attachmentKey].delete(state.requestId);
+            delete queuedPastedAttachmentActions[attachmentKey];
+            pastedAttachmentErrors[attachmentKey] = t(state.reason === 'too_many' ? 'screenshotTooMany' : 'screenshotReadFailed');
           }
-          renderPortfolioAfterAttachmentUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          if (projectPath === currentProjects.selectedProjectPath) renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         }
       );
+    }
+
+    function queuePastedAttachmentAction(targetId, action, projectPath = currentProjects.selectedProjectPath) {
+      const attachmentKey = sidebarAttachmentKey(targetId, projectPath);
+      if (!pendingPastedAttachments[attachmentKey]?.size) {
+        action();
+        return false;
+      }
+      if (!queuedPastedAttachmentActions[attachmentKey]) queuedPastedAttachmentActions[attachmentKey] = action;
+      renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+      return true;
+    }
+
+    function flushQueuedPastedAttachmentAction(targetId, projectPath = currentProjects.selectedProjectPath) {
+      const attachmentKey = sidebarAttachmentKey(targetId, projectPath);
+      if (!targetId || pendingPastedAttachments[attachmentKey]?.size || !queuedPastedAttachmentActions[attachmentKey]) return false;
+      const action = queuedPastedAttachmentActions[attachmentKey];
+      delete queuedPastedAttachmentActions[attachmentKey];
+      delete pastedAttachmentErrors[attachmentKey];
+      action();
+      return true;
     }
 
     function mergeAttachmentFiles(existing, incoming) {
@@ -9777,12 +9866,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         });
     }
 
-    function clearSubmittedAttachments(targetId) {
-      if (pendingPastedAttachments[targetId] && pendingPastedAttachments[targetId].size > 0) return false;
-      pastedAttachmentEpochs[targetId] = Number(pastedAttachmentEpochs[targetId] || 0) + 1;
-      if (pendingPastedAttachments[targetId]) pendingPastedAttachments[targetId].clear();
-      if (String(targetId).startsWith('solo:')) projectSoloFiles[targetId] = [];
-      else projectContinueFiles[targetId] = [];
+    function clearSubmittedAttachments(targetId, projectPath = currentProjects.selectedProjectPath) {
+      const attachmentKey = sidebarAttachmentKey(targetId, projectPath);
+      if (pendingPastedAttachments[attachmentKey] && pendingPastedAttachments[attachmentKey].size > 0) return false;
+      delete queuedPastedAttachmentActions[attachmentKey];
+      delete pastedAttachmentErrors[attachmentKey];
+      pastedAttachmentEpochs[attachmentKey] = Number(pastedAttachmentEpochs[attachmentKey] || 0) + 1;
+      if (pendingPastedAttachments[attachmentKey]) pendingPastedAttachments[attachmentKey].clear();
+      setSidebarProjectFiles(projectPath, targetId, []);
+      saveSidebarProjectFiles(projectPath, targetId);
       return true;
     }
 
@@ -10363,7 +10455,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       const flowUnlocked = hasFlowPro(currentSettings || {});
       const targetId = activeMode === 'solo' ? soloTargetId : activeMode === 'flow' ? ('flow:' + projectPath) : (node ? node.id : '');
       const composerDisabled = activeMode === 'continue' && (!node || node.status === 'Completed');
-      const sendDisabled = composerDisabled || Boolean(pendingPastedAttachments[targetId]?.size);
+      const sendDisabled = composerDisabled || Boolean(queuedPastedAttachmentActions[sidebarAttachmentKey(targetId, projectPath)]);
       const files = activeMode === 'solo' ? (projectSoloFiles[soloTargetId] || []) : (projectContinueFiles[targetId] || []);
       const draft = activeMode === 'solo'
         ? (projectSoloDrafts[projectPath] || '')
@@ -10409,7 +10501,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
               <span class="codicon codicon-send"></span><span>\${escapeHtml(t('continueSend'))}</span>
             </button>
           </div>
-          \${renderProjectConversationFiles(targetId, files)}
+          \${renderProjectConversationFiles(targetId, files, projectPath)}
           \${activeMode === 'solo' ? \`<div class="sidebar-solo-history" data-sidebar-solo-history>\${renderSidebarSoloHistoryContent()}</div>\` : ''}
           \${activeMode === 'continue' && node ? \`<div class="sidebar-solo-history" data-sidebar-step-history>\${renderSidebarStepHistoryContent(projectPath, node)}</div>\` : ''}
           \`}
@@ -10417,20 +10509,67 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       \`;
     }
 
-    function renderProjectConversationFiles(targetId, files) {
-      const pending = pendingPastedAttachments[targetId] && pendingPastedAttachments[targetId].size > 0;
-      if ((!files || files.length === 0) && !pending) return '';
+    function renderProjectConversationFiles(targetId, files, projectPath = currentProjects.selectedProjectPath) {
+      const attachmentKey = sidebarAttachmentKey(targetId, projectPath);
+      const pending = pendingPastedAttachments[attachmentKey] ? [...pendingPastedAttachments[attachmentKey].values()] : [];
+      if ((!files || files.length === 0) && pending.length === 0 && !queuedPastedAttachmentActions[attachmentKey] && !pastedAttachmentErrors[attachmentKey]) return '';
       return \`
         <div class="sidebar-solo-attachments">
           \${(files || []).map((file, index) => \`
-            <span class="sidebar-solo-file" title="\${escapeHtml(file)}">
-              <span class="sidebar-solo-file-name">\${escapeHtml(file)}</span>
+            <span class="sidebar-solo-file" title="\${escapeHtml(String(file).startsWith('solomap://asset/') ? t('screenshotLabel') : file)}">
+              <span class="sidebar-solo-file-name">\${escapeHtml(String(file).startsWith('solomap://asset/') ? t('screenshotLabel') : file)}</span>
               <button class="sidebar-solo-file-remove" data-remove-project-file="\${escapeHtml(targetId)}::\${index}" title="Remove">&times;</button>
             </span>
           \`).join('')}
-          \${pending ? \`<span class="sidebar-solo-file"><span class="codicon codicon-loading loading-spin"></span><span class="sidebar-solo-file-name">\${escapeHtml(t('addingScreenshot'))}</span></span>\` : ''}
+          \${pending.map(item => \`<span class="sidebar-solo-file"><span class="codicon codicon-check"></span><span class="sidebar-solo-file-name">\${escapeHtml(item.count > 1 ? (currentLanguage === 'zh' ? item.count + ' 张截图已添加' : item.count + ' screenshots added') : t('screenshotAdded'))}</span></span>\`).join('')}
+          \${queuedPastedAttachmentActions[attachmentKey] ? \`<span class="sidebar-solo-file"><span class="codicon codicon-clock"></span><span class="sidebar-solo-file-name">\${escapeHtml(t('screenshotSendQueued'))}</span></span>\` : ''}
+          \${pastedAttachmentErrors[attachmentKey] ? \`<span class="sidebar-solo-file"><span class="codicon codicon-warning"></span><span class="sidebar-solo-file-name">\${escapeHtml(pastedAttachmentErrors[attachmentKey])}</span></span>\` : ''}
         </div>
       \`;
+    }
+
+    function clearSubmittedSidebarDraft(mode, projectPath, targetId, submittedDraft) {
+      const currentInput = portfolioList.querySelector('[data-project-conversation-input]');
+      const renderedTargetId = currentInput?.getAttribute('data-conversation-target-id') || '';
+      const renderedProjectPath = currentInput?.getAttribute('data-project-path') || '';
+      const active = projectPath === (activeProjectPath || currentProjects.selectedProjectPath);
+      const remembered = active ? null : (sidebarProjectInteractionStates.get(projectPath) || {});
+      const soloDrafts = active ? projectSoloDrafts : (remembered.projectSoloDrafts || {});
+      const continueDrafts = active ? projectContinueDrafts : (remembered.projectContinueDrafts || {});
+      const currentDraft = renderedTargetId === targetId && renderedProjectPath === projectPath
+        ? currentInput.value
+        : mode === 'solo'
+          ? (soloDrafts[projectPath] || '')
+          : (continueDrafts[targetId] ?? (mode === 'continue' ? continueDrafts[getProjectContinueDraftKey(projectPath)] : '') ?? '');
+      if (String(currentDraft) !== String(submittedDraft)) return false;
+      if (mode === 'solo') {
+        soloDrafts[projectPath] = '';
+        saveSidebarUiState('soloDraft', '', projectPath);
+        saveSidebarUiStateBatch([{
+          key: 'interaction.projectSoloDrafts.' + encodeURIComponent(projectPath).replace(/\\./g, '%2E'), value: ''
+        }], projectPath);
+      } else if (mode === 'flow') {
+        continueDrafts[targetId] = '';
+        saveSidebarUiState('flowDraft', '', projectPath);
+        saveSidebarUiStateBatch([{
+          key: 'interaction.projectContinueDrafts.' + encodeURIComponent(targetId).replace(/\\./g, '%2E'), value: ''
+        }], projectPath);
+      } else {
+        continueDrafts[targetId] = '';
+        const fallbackKey = getProjectContinueDraftKey(projectPath);
+        continueDrafts[fallbackKey] = '';
+        saveSidebarUiState('continueDraft', '', projectPath);
+        saveSidebarUiStateBatch([targetId, fallbackKey].map(key => ({
+          key: 'interaction.projectContinueDrafts.' + encodeURIComponent(key).replace(/\\./g, '%2E'), value: ''
+        })), projectPath);
+      }
+      if (!active) sidebarProjectInteractionStates.set(projectPath, {
+        ...remembered,
+        projectSoloDrafts: { ...soloDrafts },
+        projectContinueDrafts: { ...continueDrafts }
+      });
+      if (renderedTargetId === targetId && renderedProjectPath === projectPath) currentInput.value = '';
+      return true;
     }
 
     function bindProjectContinueComposer(container) {
@@ -10512,53 +10651,57 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           const projectPath = sendButton.getAttribute('data-project-path') || currentProjects.selectedProjectPath;
           const targetId = sendButton.getAttribute('data-conversation-target-id') || '';
           const userMessage = input ? input.value : '';
-          if (pendingPastedAttachments[targetId] && pendingPastedAttachments[targetId].size > 0) return;
-          if (mode === 'solo') {
-            if (!projectPath || !userMessage.trim()) return;
-            const launchActionId = 'launch-' + Date.now() + '-' + Math.random().toString(36).slice(2);
-            SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
-              command: 'conversation.runSolo',
-              ...conversationActionEnvelope(),
-              launchActionId,
-              projectPath,
-              userMessage,
-              agentCli: getSoloSelectValue(agentSelect),
-              model: getSoloSelectValue(modelSelect),
-              supplementFiles: projectSoloFiles[targetId] || []
-            }, launchActionId);
-            if (input) input.value = '';
-            projectSoloDrafts[projectPath] = '';
-            saveSidebarUiState('soloDraft', '', projectPath);
-            clearSubmittedAttachments(targetId);
-            renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
-            return;
-          }
-          if (mode === 'flow') {
-            if (!projectPath || !userMessage.trim()) return;
-            vscode.postMessage({
-              command: 'flow.run',
-              ...conversationActionEnvelope(),
-              projectPath,
-              goal: userMessage,
-              agentCli: getSoloSelectValue(agentSelect),
-              model: getSoloSelectValue(modelSelect),
-              supplementFiles: projectContinueFiles['flow:' + projectPath] || []
-            });
-            if (input) input.value = '';
-            projectContinueDrafts['flow:' + projectPath] = '';
-            saveSidebarUiState('flowDraft', '', projectPath);
-            clearSubmittedAttachments('flow:' + projectPath);
-            renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
-            return;
-          }
+          const selectedAgentCli = getSoloSelectValue(agentSelect);
+          const selectedModel = getSoloSelectValue(modelSelect);
           const nodeId = sendButton.getAttribute('data-next-node-id');
-        runNodeAgent(projectPath, nodeId, userMessage, getSoloSelectValue(agentSelect), getSoloSelectValue(modelSelect), projectContinueFiles[nodeId] || []);
-        if (input) input.value = '';
-        projectContinueDrafts[nodeId] = '';
-        projectContinueDrafts[getProjectContinueDraftKey(projectPath)] = '';
-        saveSidebarUiState('continueDraft', '', projectPath);
-        clearSubmittedAttachments(nodeId);
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          let queuedForAttachment = false;
+          const renderAfterSend = () => {
+            if (projectPath !== currentProjects.selectedProjectPath) return;
+            if (queuedForAttachment) renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+            else renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+          };
+          const send = () => {
+            if (mode === 'solo') {
+              if (!projectPath || !userMessage.trim()) return;
+              const launchActionId = 'launch-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+              SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
+                command: 'conversation.runSolo',
+                ...conversationActionEnvelope(),
+                launchActionId,
+                projectPath,
+                userMessage,
+                agentCli: selectedAgentCli,
+                model: selectedModel,
+                supplementFiles: getSidebarProjectFiles(projectPath, targetId)
+              }, launchActionId);
+              clearSubmittedSidebarDraft(mode, projectPath, targetId, userMessage);
+              clearSubmittedAttachments(targetId, projectPath);
+              renderAfterSend();
+              return;
+            }
+            if (mode === 'flow') {
+              if (!projectPath || !userMessage.trim()) return;
+              vscode.postMessage({
+                command: 'flow.run',
+                ...conversationActionEnvelope(),
+                projectPath,
+                goal: userMessage,
+                agentCli: selectedAgentCli,
+                model: selectedModel,
+                supplementFiles: getSidebarProjectFiles(projectPath, targetId)
+              });
+              clearSubmittedSidebarDraft(mode, projectPath, targetId, userMessage);
+              clearSubmittedAttachments(targetId, projectPath);
+              renderAfterSend();
+              return;
+            }
+            runNodeAgent(projectPath, nodeId, userMessage, selectedAgentCli, selectedModel, getSidebarProjectFiles(projectPath, targetId));
+            clearSubmittedSidebarDraft(mode, projectPath, targetId, userMessage);
+            clearSubmittedAttachments(targetId, projectPath);
+            renderAfterSend();
+          };
+          if (!userMessage.trim()) return;
+          queuedForAttachment = queuePastedAttachmentAction(targetId, send, projectPath);
         });
       });
       container.querySelectorAll('[data-project-conversation-input], [data-project-continue-agent]').forEach(item => {

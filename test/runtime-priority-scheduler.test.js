@@ -21,6 +21,7 @@ test('runtime operation priorities keep task launch state ahead of logs and deri
   assert.equal(runtimeOperationPriority('observe_run_task_ingress'), 0);
   assert.equal(runtimeOperationPriority('record_claude_native_event'), 0);
   assert.equal(runtimeOperationPriority('prepare_agent_database'), 0);
+  assert.equal(runtimeOperationPriority('write_internal_attachment'), 0, 'a pasted screenshot is foreground user input');
   assert.equal(runtimeOperationPriority('claim_run_effect'), 1, 'background effect claims must not impersonate foreground run delivery');
   assert.equal(runtimeOperationPriority('append_run_log'), 2);
   assert.equal(runtimeOperationPriority('write_project_growth'), 2);

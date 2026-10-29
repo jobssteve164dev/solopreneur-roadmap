@@ -2323,7 +2323,9 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     const nodeConversationPaging = {};
     const nodeSupplementFiles = {};
     const pendingPastedAttachments = {};
+    const queuedPastedAttachmentActions = {};
     const pastedAttachmentEpochs = {};
+    const pastedAttachmentErrors = {};
     const conversationDrafts = {};
     let conversationChildrenMap = {};
     const conversationLogScrollPositions = {};
@@ -2614,7 +2616,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         agentSelector: '选择 Agent',
         attachFiles: '选择补充文件',
         attachedFiles: '补充文件',
-        addingScreenshot: '正在添加截图…',
+        screenshotAdded: '截图已添加',
+        screenshotLabel: '截图',
+        screenshotSendQueued: '图片保存后自动发送',
+        screenshotReadFailed: '截图读取失败，请重新粘贴。',
+        screenshotTooMany: '每次最多粘贴 10 张截图，请分次添加。',
         removeAttachment: '移除',
         send: '发送',
         retry: '重试',
@@ -2834,7 +2840,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         agentSelector: 'Choose Agent',
         attachFiles: 'Attach files',
         attachedFiles: 'Attached files',
-        addingScreenshot: 'Adding screenshot…',
+        screenshotAdded: 'Screenshot added',
+        screenshotLabel: 'Screenshot',
+        screenshotSendQueued: 'Sending after the image is saved',
+        screenshotReadFailed: 'The screenshot could not be read. Paste it again.',
+        screenshotTooMany: 'Paste up to 10 screenshots at a time.',
         removeAttachment: 'Remove',
         send: 'Send',
         retry: 'Retry',
@@ -3819,51 +3829,66 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         case 'conversationActionSettled':
           if (message.launchActionId) SoloMapWebview.acknowledgeMessage(message.launchActionId);
           break;
+        case 'pastedAttachmentsAccepted':
+          SoloMapWebview.acceptPastedImageAttachments(message.requestId);
+          break;
         case 'supplementFilesSelected':
           if (message.requestId) SoloMapWebview.acknowledgePastedImageAttachments(message.requestId);
-          if (message.requestId && Number(message.attachmentEpoch || 0) !== Number(pastedAttachmentEpochs[message.nodeId] || 0)) break;
-          if (message.nodeId && pendingPastedAttachments[message.nodeId]) {
-            pendingPastedAttachments[message.nodeId].delete(String(message.requestId || ''));
+          const savedProjectPath = String(message.projectPath || activeProjectPath || '');
+          const savedAttachmentKey = pastedAttachmentKey(message.nodeId, savedProjectPath);
+          if (message.requestId && Number(message.attachmentEpoch || 0) !== Number(pastedAttachmentEpochs[savedAttachmentKey] || 0)) break;
+          if (message.nodeId && pendingPastedAttachments[savedAttachmentKey]) {
+            pendingPastedAttachments[savedAttachmentKey].delete(String(message.requestId || ''));
           }
-          const selectedSoloDraft = message.nodeId === soloConversationId
+          delete pastedAttachmentErrors[savedAttachmentKey];
+          const selectedSoloDraft = savedProjectPath === activeProjectPath && message.nodeId === soloConversationId
             ? (soloBody.querySelector('[data-solo-input]')?.value || '')
             : '';
-          const revisionDraft = message.nodeId === roadmapRevisionId
+          const revisionDraft = savedProjectPath === activeProjectPath && message.nodeId === roadmapRevisionId
             ? (roadmapRevisionBody.querySelector('[data-roadmap-revision-input]')?.value || '')
             : '';
-          if (message.nodeId && message.nodeId !== soloConversationId && message.nodeId !== roadmapRevisionId) {
+          if (savedProjectPath === activeProjectPath && message.nodeId && message.nodeId !== soloConversationId && message.nodeId !== roadmapRevisionId) {
             const input = canvas.querySelector('[data-conversation-input-id="' + cssEscape(message.nodeId) + '"]');
             conversationDrafts[message.nodeId] = input ? input.value : (conversationDrafts[message.nodeId] || '');
           }
-          nodeSupplementFiles[message.nodeId] = mergeSupplementFiles(
-            nodeSupplementFiles[message.nodeId] || [],
+          setProjectSupplementFiles(savedProjectPath, message.nodeId, mergeSupplementFiles(
+            getProjectSupplementFiles(savedProjectPath, message.nodeId),
             message.files || []
-          );
-          renderRoadmap(currentNodes);
-          if (message.nodeId === soloConversationId) {
+          ));
+          saveProjectSupplementFiles(savedProjectPath, message.nodeId);
+          if (savedProjectPath === activeProjectPath) saveRoadmapInteractionState();
+          if (savedProjectPath === activeProjectPath) renderRoadmap(currentNodes);
+          if (savedProjectPath === activeProjectPath && message.nodeId === soloConversationId) {
             renderSoloPanel(currentNodes);
             const input = soloBody.querySelector('[data-solo-input]');
             if (input) {
               input.value = selectedSoloDraft;
             }
           }
-          if (message.nodeId === roadmapRevisionId) {
+          if (savedProjectPath === activeProjectPath && message.nodeId === roadmapRevisionId) {
             renderRoadmapRevisionPanel(currentNodes);
             const input = roadmapRevisionBody.querySelector('[data-roadmap-revision-input]');
             if (input) {
               input.value = revisionDraft;
             }
           }
+          if (savedProjectPath === activeProjectPath && message.nodeId === 'flow') renderFlowPanel();
+          flushQueuedPastedAttachmentAction(message.nodeId, savedProjectPath);
           break;
         case 'pastedAttachmentsFailed':
           SoloMapWebview.acknowledgePastedImageAttachments(message.requestId);
-          if (Number(message.attachmentEpoch || 0) !== Number(pastedAttachmentEpochs[message.nodeId] || 0)) break;
-          if (message.nodeId && pendingPastedAttachments[message.nodeId]) {
-            pendingPastedAttachments[message.nodeId].delete(String(message.requestId || ''));
+          const failedProjectPath = String(message.projectPath || activeProjectPath || '');
+          const failedAttachmentKey = pastedAttachmentKey(message.nodeId, failedProjectPath);
+          if (Number(message.attachmentEpoch || 0) !== Number(pastedAttachmentEpochs[failedAttachmentKey] || 0)) break;
+          if (message.nodeId && pendingPastedAttachments[failedAttachmentKey]) {
+            pendingPastedAttachments[failedAttachmentKey].delete(String(message.requestId || ''));
           }
+          delete queuedPastedAttachmentActions[failedAttachmentKey];
+          pastedAttachmentErrors[failedAttachmentKey] = String(message.message || t('screenshotReadFailed'));
+          if (failedProjectPath !== activeProjectPath) break;
           if (message.nodeId === soloConversationId) renderSoloPanel(currentNodes);
           else if (message.nodeId === roadmapRevisionId) renderRoadmapRevisionPanel(currentNodes);
-          else if (message.nodeId === flowTargetId) renderFlowPanel();
+          else if (message.nodeId === 'flow') renderFlowPanel();
           else renderRoadmap(currentNodes);
           break;
         case 'cliTestResult':
@@ -4285,7 +4310,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         const conversations = nodeConversations[node.id] || [];
         const supplementFiles = nodeSupplementFiles[node.id] || [];
         const conversationDisabled = '';
-        const conversationSendDisabled = pendingPastedAttachments[node.id]?.size ? 'disabled' : '';
+        const conversationSendDisabled = queuedPastedAttachmentActions[pastedAttachmentKey(node.id)] ? 'disabled' : '';
         const selectedAgentCli = nodeAgentSelections[node.id] || node.agentCli || currentCliPath || 'agy';
         const promptHtml = expanded ? \`
           <div class="node-expanded-body">
@@ -4348,16 +4373,22 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         if (sendButton) {
           sendButton.addEventListener('click', (event) => {
             event.stopPropagation();
-            if (pendingPastedAttachments[node.id] && pendingPastedAttachments[node.id].size > 0) return;
             const input = row.querySelector('[data-conversation-input-id="' + cssEscape(node.id) + '"]');
             const agentSelect = row.querySelector('[data-agent-select-id="' + cssEscape(node.id) + '"]');
             const modelSelect = row.querySelector('[data-model-select-id="' + cssEscape(node.id) + '"]');
-            triggerRun(node.id, input ? input.value : '', getSoloSelectValue(agentSelect), getSoloSelectValue(modelSelect), nodeSupplementFiles[node.id] || []);
-            if (input) input.value = '';
-            conversationDrafts[node.id] = '';
-            clearSubmittedAttachments(node.id);
-            saveRoadmapInteractionState();
-            renderRoadmap(currentNodes);
+            const request = input ? input.value : '';
+            const agentCli = getSoloSelectValue(agentSelect);
+            const model = getSoloSelectValue(modelSelect);
+            const actionProjectPath = activeProjectPath;
+            queuePastedAttachmentAction(node.id, () => {
+              triggerRun(node.id, request, agentCli, model, getProjectSupplementFiles(actionProjectPath, node.id), actionProjectPath);
+              clearProjectDraft(actionProjectPath, node.id, request);
+              clearSubmittedAttachments(node.id, actionProjectPath);
+              if (actionProjectPath === activeProjectPath) {
+                saveRoadmapInteractionState();
+                renderRoadmap(currentNodes);
+              }
+            }, () => { if (actionProjectPath === activeProjectPath) renderRoadmap(currentNodes); }, actionProjectPath);
           });
         }
         row.querySelectorAll('[data-conversation-input-id]').forEach(input => {
@@ -4518,7 +4549,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       const conversationPaging = nodeConversationPaging[soloConversationId] || { page: -1, hasMore: false, loading: false, initialized: false };
       const supplementFiles = nodeSupplementFiles[soloConversationId] || [];
       const disabled = '';
-      const sendDisabled = pendingPastedAttachments[soloConversationId]?.size ? 'disabled' : '';
+      const sendDisabled = queuedPastedAttachmentActions[pastedAttachmentKey(soloConversationId)] ? 'disabled' : '';
       const selectedAgentCli = soloAgentSelection || currentCliPath || 'agy';
       soloPanel.classList.toggle('active', soloExpanded);
       btnToggleSolo.classList.toggle('active', soloExpanded);
@@ -4572,28 +4603,31 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       }
       if (sendButton) {
         sendButton.addEventListener('click', () => {
-          if (pendingPastedAttachments[soloConversationId] && pendingPastedAttachments[soloConversationId].size > 0) return;
           const input = soloBody.querySelector('[data-solo-input]');
           const agentSelect = soloBody.querySelector('[data-solo-agent]');
           const modelSelect = soloBody.querySelector('[data-solo-model]');
-          const request = input ? input.value.trim() : '';
+          const submittedDraft = input ? input.value : '';
+          const request = submittedDraft.trim();
           if (!request) return;
-          const launchActionId = 'launch-' + Date.now() + '-' + Math.random().toString(36).slice(2);
-          SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
-            command: 'conversation.runSolo',
-            ...conversationActionEnvelope(),
-            launchActionId,
-            projectPath: activeProjectPath,
-            userMessage: request,
-            agentCli: getSoloSelectValue(agentSelect),
-            model: getSoloSelectValue(modelSelect),
-            supplementFiles: nodeSupplementFiles[soloConversationId] || []
-          }, launchActionId);
-          input.value = '';
-          soloDraft = '';
-          saveRoadmapUiState('soloDraft', '');
-          clearSubmittedAttachments(soloConversationId);
-          renderSoloPanel(currentNodes);
+          const agentCli = getSoloSelectValue(agentSelect);
+          const model = getSoloSelectValue(modelSelect);
+          const actionProjectPath = activeProjectPath;
+          queuePastedAttachmentAction(soloConversationId, () => {
+            const launchActionId = 'launch-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+            SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
+              command: 'conversation.runSolo',
+              ...conversationActionEnvelope(),
+              launchActionId,
+              projectPath: actionProjectPath,
+              userMessage: request,
+              agentCli,
+              model,
+              supplementFiles: getProjectSupplementFiles(actionProjectPath, soloConversationId)
+            }, launchActionId);
+            clearProjectDraft(actionProjectPath, soloConversationId, submittedDraft);
+            clearSubmittedAttachments(soloConversationId, actionProjectPath);
+            if (actionProjectPath === activeProjectPath) renderSoloPanel(currentNodes, false);
+          }, () => { if (actionProjectPath === activeProjectPath) renderSoloPanel(currentNodes); }, actionProjectPath);
         });
       }
       soloBody.querySelectorAll('[data-remove-supplement-file]').forEach(item => {
@@ -4666,7 +4700,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
         return;
       }
       const selectedAgentCli = flowAgentSelection || currentCliPath || 'agy';
-      const flowSendDisabled = pendingPastedAttachments[flowTargetId]?.size ? 'disabled' : '';
+      const flowSendDisabled = queuedPastedAttachmentActions[pastedAttachmentKey(flowTargetId)] ? 'disabled' : '';
       const latestLoops = Array.isArray(flow?.loops) ? flow.loops.slice().sort((a, b) => Number(a.index || 0) - Number(b.index || 0)) : [];
       
       // Helper function to render touched files in the panel
@@ -4760,26 +4794,32 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       }
       if (sendButton) {
         sendButton.addEventListener('click', () => {
-          if (pendingPastedAttachments[flowTargetId] && pendingPastedAttachments[flowTargetId].size > 0) return;
           const input = flowBody.querySelector('[data-flow-goal-input]');
           const agentSelect = flowBody.querySelector('[data-flow-agent]');
           const modelSelect = flowBody.querySelector('[data-flow-model]');
-          const goal = input ? input.value.trim() : '';
+          const submittedDraft = input ? input.value : '';
+          const goal = submittedDraft.trim();
           if (!goal) return;
-          vscode.postMessage({
-            command: 'flow.run',
-            ...conversationActionEnvelope(),
-            projectPath: activeProjectPath,
-            goal,
-            agentCli: getSoloSelectValue(agentSelect),
-            model: getSoloSelectValue(modelSelect),
-            supplementFiles: nodeSupplementFiles[flowTargetId] || []
-          });
-          if (input) input.value = '';
-          flowDraft = '';
-          clearSubmittedAttachments(flowTargetId);
-          renderFlowPanel();
-          saveRoadmapInteractionState();
+          const agentCli = getSoloSelectValue(agentSelect);
+          const model = getSoloSelectValue(modelSelect);
+          const actionProjectPath = activeProjectPath;
+          queuePastedAttachmentAction(flowTargetId, () => {
+            vscode.postMessage({
+              command: 'flow.run',
+              ...conversationActionEnvelope(),
+              projectPath: actionProjectPath,
+              goal,
+              agentCli,
+              model,
+              supplementFiles: getProjectSupplementFiles(actionProjectPath, flowTargetId)
+            });
+            clearProjectDraft(actionProjectPath, flowTargetId, submittedDraft);
+            clearSubmittedAttachments(flowTargetId, actionProjectPath);
+            if (actionProjectPath === activeProjectPath) {
+              renderFlowPanel();
+              saveRoadmapInteractionState();
+            }
+          }, () => { if (actionProjectPath === activeProjectPath) renderFlowPanel(); }, actionProjectPath);
         });
       }
       flowBody.querySelectorAll('[data-remove-supplement-file]').forEach(item => {
@@ -4870,7 +4910,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       }
       const conversations = nodeConversations[roadmapRevisionId] || [];
       const disabled = '';
-      const sendDisabled = pendingPastedAttachments[roadmapRevisionId]?.size ? 'disabled' : '';
+      const sendDisabled = queuedPastedAttachmentActions[pastedAttachmentKey(roadmapRevisionId)] ? 'disabled' : '';
       roadmapRevisionPanel.classList.toggle('open', roadmapRevisionExpanded);
       btnToggleRoadmapRevision.classList.toggle('active', roadmapRevisionExpanded);
       if (!roadmapRevisionExpanded) {
@@ -4908,26 +4948,32 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       const sendButton = roadmapRevisionBody.querySelector('[data-send-roadmap-revision]');
       if (sendButton) {
         sendButton.addEventListener('click', () => {
-          if (pendingPastedAttachments[roadmapRevisionId] && pendingPastedAttachments[roadmapRevisionId].size > 0) return;
           const input = roadmapRevisionBody.querySelector('[data-roadmap-revision-input]');
           const agentSelect = roadmapRevisionBody.querySelector('[data-roadmap-revision-agent]');
           const modelSelect = roadmapRevisionBody.querySelector('[data-roadmap-revision-model]');
-          const request = input ? input.value.trim() : '';
+          const submittedDraft = input ? input.value : '';
+          const request = submittedDraft.trim();
           if (!request) return;
-          vscode.postMessage({
-            command: 'conversation.runRoadmapRevision',
-            ...conversationActionEnvelope(),
-            projectPath: activeProjectPath,
-            userMessage: request,
-            agentCli: getSoloSelectValue(agentSelect),
-            model: getSoloSelectValue(modelSelect),
-            supplementFiles: nodeSupplementFiles[roadmapRevisionId] || []
-          });
-          input.value = '';
-          roadmapRevisionDraft = '';
-          clearSubmittedAttachments(roadmapRevisionId);
-          renderRoadmapRevisionPanel(currentNodes);
-          saveRoadmapInteractionState();
+          const agentCli = getSoloSelectValue(agentSelect);
+          const model = getSoloSelectValue(modelSelect);
+          const actionProjectPath = activeProjectPath;
+          queuePastedAttachmentAction(roadmapRevisionId, () => {
+            vscode.postMessage({
+              command: 'conversation.runRoadmapRevision',
+              ...conversationActionEnvelope(),
+              projectPath: actionProjectPath,
+              userMessage: request,
+              agentCli,
+              model,
+              supplementFiles: getProjectSupplementFiles(actionProjectPath, roadmapRevisionId)
+            });
+            clearProjectDraft(actionProjectPath, roadmapRevisionId, submittedDraft);
+            clearSubmittedAttachments(roadmapRevisionId, actionProjectPath);
+            if (actionProjectPath === activeProjectPath) {
+              renderRoadmapRevisionPanel(currentNodes);
+              saveRoadmapInteractionState();
+            }
+          }, () => { if (actionProjectPath === activeProjectPath) renderRoadmapRevisionPanel(currentNodes); }, actionProjectPath);
         });
       }
       const revisionInput = roadmapRevisionBody.querySelector('[data-roadmap-revision-input]');
@@ -5395,49 +5441,147 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           if (seen.has(file)) return false;
           seen.add(file);
           return true;
-        })
-        .slice(0, 10);
+        });
+    }
+
+    function pastedAttachmentKey(nodeId, projectPath = activeProjectPath) {
+      return String(projectPath || 'global') + '\\n' + String(nodeId || '');
+    }
+
+    function getProjectSupplementFiles(projectPath, nodeId) {
+      if (projectPath === activeProjectPath) return nodeSupplementFiles[nodeId] || [];
+      return projectInteractionStates.get(projectPath)?.nodeSupplementFiles?.[nodeId] || [];
+    }
+
+    function setProjectSupplementFiles(projectPath, nodeId, files) {
+      if (projectPath === activeProjectPath) {
+        nodeSupplementFiles[nodeId] = files;
+        return;
+      }
+      const remembered = projectInteractionStates.get(projectPath) || {};
+      projectInteractionStates.set(projectPath, {
+        ...remembered,
+        nodeSupplementFiles: { ...(remembered.nodeSupplementFiles || {}), [nodeId]: files }
+      });
+    }
+
+    function saveProjectSupplementFiles(projectPath, nodeId) {
+      const encodedNodeId = encodeURIComponent(nodeId).replace(/\\./g, '%2E');
+      saveRoadmapUiState('interaction.nodeSupplementFiles.' + encodedNodeId, getProjectSupplementFiles(projectPath, nodeId), projectPath || 'global');
+    }
+
+    function clearProjectDraft(projectPath, nodeId, submittedDraft) {
+      const active = projectPath === activeProjectPath;
+      const remembered = active ? null : (projectInteractionStates.get(projectPath) || {});
+      let currentInput = null;
+      let currentDraft = '';
+      if (active) {
+        if (nodeId === soloConversationId) currentInput = soloBody.querySelector('[data-solo-input]');
+        else if (nodeId === roadmapRevisionId) currentInput = roadmapRevisionBody.querySelector('[data-roadmap-revision-input]');
+        else if (nodeId === 'flow') currentInput = flowBody.querySelector('[data-flow-goal-input]');
+        else currentInput = canvas.querySelector('[data-conversation-input-id="' + cssEscape(nodeId) + '"]');
+      }
+      if (nodeId === soloConversationId) currentDraft = active ? (currentInput?.value ?? soloDraft) : (remembered.soloDraft || '');
+      else if (nodeId === roadmapRevisionId) currentDraft = active ? (currentInput?.value ?? roadmapRevisionDraft) : (remembered.roadmapRevisionDraft || '');
+      else if (nodeId === 'flow') currentDraft = active ? (currentInput?.value ?? flowDraft) : (remembered.flowDraft || '');
+      else currentDraft = active ? (currentInput?.value ?? conversationDrafts[nodeId] ?? '') : (remembered.conversationDrafts?.[nodeId] || '');
+      if (String(currentDraft) !== String(submittedDraft)) return false;
+      if (currentInput) currentInput.value = '';
+      if (nodeId === soloConversationId) {
+        if (active) soloDraft = '';
+        else projectInteractionStates.set(projectPath, { ...remembered, soloDraft: '' });
+        saveRoadmapUiState('interaction.soloDraft', '', projectPath || 'global');
+        saveRoadmapUiState('soloDraft', '', projectPath || 'global');
+      } else if (nodeId === roadmapRevisionId) {
+        if (active) roadmapRevisionDraft = '';
+        else projectInteractionStates.set(projectPath, { ...remembered, roadmapRevisionDraft: '' });
+        saveRoadmapUiState('interaction.roadmapRevisionDraft', '', projectPath || 'global');
+      } else if (nodeId === 'flow') {
+        if (active) flowDraft = '';
+        else projectInteractionStates.set(projectPath, { ...remembered, flowDraft: '' });
+        saveRoadmapUiState('interaction.flowDraft', '', projectPath || 'global');
+      } else {
+        if (active) conversationDrafts[nodeId] = '';
+        else projectInteractionStates.set(projectPath, {
+          ...remembered,
+          conversationDrafts: { ...(remembered.conversationDrafts || {}), [nodeId]: '' }
+        });
+        const encodedNodeId = encodeURIComponent(nodeId).replace(/\\./g, '%2E');
+        saveRoadmapUiState('interaction.conversationDrafts.' + encodedNodeId, '', projectPath || 'global');
+      }
+      return true;
     }
 
     function bindPastedImageAttachments(input, nodeId, afterPaste) {
+      const projectPath = activeProjectPath;
+      const attachmentKey = pastedAttachmentKey(nodeId, projectPath);
       SoloMapWebview.bindPastedImageAttachments(
         input,
         message => vscode.postMessage(message),
         () => ({
           command: 'attachment.save',
+          projectPath,
           nodeId,
-          attachmentEpoch: Number(pastedAttachmentEpochs[nodeId] || 0),
+          attachmentEpoch: Number(pastedAttachmentEpochs[attachmentKey] || 0),
         }),
         state => {
-          if (!pendingPastedAttachments[nodeId]) pendingPastedAttachments[nodeId] = new Set();
+          if (!pendingPastedAttachments[attachmentKey]) pendingPastedAttachments[attachmentKey] = new Map();
           if (state.phase === 'started') {
-            pendingPastedAttachments[nodeId].add(state.requestId);
+            delete pastedAttachmentErrors[attachmentKey];
+            pendingPastedAttachments[attachmentKey].set(state.requestId, { count: state.count, names: state.names || [] });
           } else {
-            pendingPastedAttachments[nodeId].delete(state.requestId);
+            pendingPastedAttachments[attachmentKey].delete(state.requestId);
+            delete queuedPastedAttachmentActions[attachmentKey];
+            pastedAttachmentErrors[attachmentKey] = t(state.reason === 'too_many' ? 'screenshotTooMany' : 'screenshotReadFailed');
           }
-          if (afterPaste) afterPaste();
+          if (projectPath === activeProjectPath && afterPaste) afterPaste();
         }
       );
     }
 
-    function clearSubmittedAttachments(nodeId) {
-      if (pendingPastedAttachments[nodeId] && pendingPastedAttachments[nodeId].size > 0) return false;
-      pastedAttachmentEpochs[nodeId] = Number(pastedAttachmentEpochs[nodeId] || 0) + 1;
-      if (pendingPastedAttachments[nodeId]) pendingPastedAttachments[nodeId].clear();
-      nodeSupplementFiles[nodeId] = [];
+    function queuePastedAttachmentAction(nodeId, action, afterQueue, projectPath = activeProjectPath) {
+      const attachmentKey = pastedAttachmentKey(nodeId, projectPath);
+      if (!pendingPastedAttachments[attachmentKey]?.size) {
+        action();
+        return false;
+      }
+      if (!queuedPastedAttachmentActions[attachmentKey]) queuedPastedAttachmentActions[attachmentKey] = action;
+      if (afterQueue) afterQueue();
+      return true;
+    }
+
+    function flushQueuedPastedAttachmentAction(nodeId, projectPath = activeProjectPath) {
+      const attachmentKey = pastedAttachmentKey(nodeId, projectPath);
+      if (!nodeId || pendingPastedAttachments[attachmentKey]?.size || !queuedPastedAttachmentActions[attachmentKey]) return false;
+      const action = queuedPastedAttachmentActions[attachmentKey];
+      delete queuedPastedAttachmentActions[attachmentKey];
+      action();
+      return true;
+    }
+
+    function clearSubmittedAttachments(nodeId, projectPath = activeProjectPath) {
+      const attachmentKey = pastedAttachmentKey(nodeId, projectPath);
+      if (pendingPastedAttachments[attachmentKey] && pendingPastedAttachments[attachmentKey].size > 0) return false;
+      delete queuedPastedAttachmentActions[attachmentKey];
+      delete pastedAttachmentErrors[attachmentKey];
+      pastedAttachmentEpochs[attachmentKey] = Number(pastedAttachmentEpochs[attachmentKey] || 0) + 1;
+      if (pendingPastedAttachments[attachmentKey]) pendingPastedAttachments[attachmentKey].clear();
+      setProjectSupplementFiles(projectPath, nodeId, []);
+      saveProjectSupplementFiles(projectPath, nodeId);
       return true;
     }
 
     function renderSupplementFiles(nodeId, files) {
-      const pending = pendingPastedAttachments[nodeId] && pendingPastedAttachments[nodeId].size > 0;
-      if ((!files || files.length === 0) && !pending) {
+      const attachmentKey = pastedAttachmentKey(nodeId);
+      const pending = pendingPastedAttachments[attachmentKey] ? [...pendingPastedAttachments[attachmentKey].values()] : [];
+      if ((!files || files.length === 0) && pending.length === 0 && !queuedPastedAttachmentActions[attachmentKey] && !pastedAttachmentErrors[attachmentKey]) {
         return '';
       }
       return \`
         <div class="conversation-attachments" aria-label="\${escapeHtml(t('attachedFiles'))}">
           \${(files || []).map(file => \`
-            <span class="conversation-attachment-chip" title="\${escapeHtml(file)}">
-              <span>\${escapeHtml(file)}</span>
+            <span class="conversation-attachment-chip" title="\${escapeHtml(String(file).startsWith('solomap://asset/') ? t('screenshotLabel') : file)}">
+              <span>\${escapeHtml(String(file).startsWith('solomap://asset/') ? t('screenshotLabel') : file)}</span>
               <button
                 class="conversation-attachment-remove"
                 data-remove-supplement-file="\${escapeHtml(file)}"
@@ -5447,7 +5591,9 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
               </button>
             </span>
           \`).join('')}
-          \${pending ? \`<span class="conversation-attachment-chip"><span class="codicon codicon-loading loading-spin"></span><span>\${escapeHtml(t('addingScreenshot'))}</span></span>\` : ''}
+          \${pending.map(item => \`<span class="conversation-attachment-chip"><span class="codicon codicon-check"></span><span>\${escapeHtml(item.count > 1 ? (currentLanguage === 'zh' ? item.count + ' 张截图已添加' : item.count + ' screenshots added') : t('screenshotAdded'))}</span></span>\`).join('')}
+          \${queuedPastedAttachmentActions[attachmentKey] ? \`<span class="conversation-attachment-chip"><span class="codicon codicon-clock"></span><span>\${escapeHtml(t('screenshotSendQueued'))}</span></span>\` : ''}
+          \${pastedAttachmentErrors[attachmentKey] ? \`<span class="conversation-attachment-chip"><span class="codicon codicon-warning"></span><span>\${escapeHtml(pastedAttachmentErrors[attachmentKey])}</span></span>\` : ''}
         </div>
       \`;
     }
@@ -5513,11 +5659,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       return String(value).replace(/"/g, '\\"');
     }
 
-    function triggerRun(nodeId, userMessage, agentCli, model, supplementFiles) {
+    function triggerRun(nodeId, userMessage, agentCli, model, supplementFiles, projectPath = activeProjectPath) {
       vscode.postMessage({
         command: 'conversation.runStep',
         ...conversationActionEnvelope(),
-        projectPath: activeProjectPath,
+        projectPath,
         nodeId: nodeId,
         userMessage: userMessage || '',
         agentCli: agentCli || '',

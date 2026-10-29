@@ -6,9 +6,10 @@
  */
 function bootstrapSoloMapWebviewRuntime(): void {
   const root = globalThis as any;
-  const pendingPastedImageDeliveries = new Map<string, { message: any; postMessage: (message: any) => void; timer?: any }>();
+  const pendingPastedImageDeliveries = new Map<string, { message: any; postMessage: (message: any) => void; accepted: boolean; timer?: any }>();
   const pendingAcknowledgedMessages = new Map<string, { message: any; postMessage: (message: any) => void; delayMs: number; timer?: any }>();
   const pastedImageRetryDelayMs = 2_000;
+  const pastedImageRecoveryDelayMs = 15_000;
 
   function escapeHtml(value: unknown): string {
     return String(value == null ? '' : value)
@@ -220,8 +221,17 @@ function bootstrapSoloMapWebviewRuntime(): void {
       if (!current) return;
       current.postMessage(current.message);
       schedulePastedImageDelivery(requestId);
-    }, pastedImageRetryDelayMs);
+    }, pending.accepted ? pastedImageRecoveryDelayMs : pastedImageRetryDelayMs);
     if (pending.timer && typeof pending.timer.unref === 'function') pending.timer.unref();
+  }
+
+  function acceptPastedImageAttachments(requestId: unknown): void {
+    const normalized = String(requestId || '');
+    const pending = pendingPastedImageDeliveries.get(normalized);
+    if (!pending || pending.accepted) return;
+    if (pending.timer != null) root.clearTimeout(pending.timer);
+    pending.accepted = true;
+    schedulePastedImageDelivery(normalized);
   }
 
   function acknowledgePastedImageAttachments(requestId: unknown): void {
@@ -265,7 +275,7 @@ function bootstrapSoloMapWebviewRuntime(): void {
     input: Element | null,
     postMessage: (message: any) => void,
     buildMessage: () => any,
-    onStateChange?: (state: { phase: 'started' | 'failed'; requestId: string; count: number }) => void
+    onStateChange?: (state: { phase: 'started' | 'failed'; requestId: string; count: number; names: string[]; reason?: 'read_failed' | 'too_many' }) => void
   ): void {
     if (!input || input.getAttribute('data-paste-image-bound') === 'true') return;
     input.setAttribute('data-paste-image-bound', 'true');
@@ -279,16 +289,21 @@ function bootstrapSoloMapWebviewRuntime(): void {
       if (!files.length) return;
       event.preventDefault();
       const requestId = 'paste-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+      const names = files.map((file, index) => String(file.name || `screenshot-${index + 1}`));
+      if (files.length > 10) {
+        if (onStateChange) onStateChange({ phase: 'failed', requestId, count: files.length, names, reason: 'too_many' });
+        return;
+      }
       const message = buildMessage();
-      if (onStateChange) onStateChange({ phase: 'started', requestId, count: files.length });
+      if (onStateChange) onStateChange({ phase: 'started', requestId, count: files.length, names });
       const attachments = (await Promise.all(files.map(readClipboardImage))).filter(Boolean);
-      if (attachments.length) {
-        const delivery = { message: { ...message, attachments, requestId }, postMessage };
+      if (attachments.length === files.length) {
+        const delivery = { message: { ...message, attachments, requestId }, postMessage, accepted: false };
         pendingPastedImageDeliveries.set(requestId, delivery);
         postMessage(delivery.message);
         schedulePastedImageDelivery(requestId);
       } else if (onStateChange) {
-        onStateChange({ phase: 'failed', requestId, count: files.length });
+        onStateChange({ phase: 'failed', requestId, count: files.length, names, reason: 'read_failed' });
       }
     });
   }
@@ -663,6 +678,7 @@ function bootstrapSoloMapWebviewRuntime(): void {
     bindSoloSelects,
     readClipboardImage,
     bindPastedImageAttachments,
+    acceptPastedImageAttachments,
     acknowledgePastedImageAttachments,
     postAcknowledgedMessage,
     acknowledgeMessage,

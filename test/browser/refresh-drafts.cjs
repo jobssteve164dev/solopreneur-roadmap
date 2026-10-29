@@ -88,6 +88,27 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
 
         const activeComposer = page.locator('[data-project-conversation-input][data-project-path="/fixture/a"]');
         await activeComposer.focus();
+        const pasteFeedback = await activeComposer.evaluate(el => {
+          const file = new File([new Uint8Array([1, 2, 3])], 'screen.png', { type: 'image/png' });
+          const event = new Event('paste', { bubbles: true, cancelable: true });
+          Object.defineProperty(event, 'clipboardData', { value: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }] } });
+          el.dispatchEvent(event);
+          const composer = document.querySelector('[data-project-continue-composer]');
+          return {
+            text: composer?.innerText || '',
+            focused: document.activeElement === composer?.querySelector('[data-project-conversation-input]'),
+            sendDisabled: composer?.querySelector('[data-project-continue-send]')?.disabled
+          };
+        });
+        check(pasteFeedback.text.includes('截图已添加'), 'sidebar paste shows immediate local acceptance while the composer remains focused');
+        check(!pasteFeedback.text.includes('正在添加截图'), 'sidebar paste never exposes an indefinite loading state');
+        check(pasteFeedback.focused && !pasteFeedback.sendDisabled, 'sidebar paste preserves focus and keeps Send available');
+        await page.waitForFunction(() => window.messages.some(message => message.command === 'attachment.save'));
+        const sidebarAttachmentSave = await page.evaluate(() => window.messages.filter(message => message.command === 'attachment.save').at(-1));
+        await send({ command: 'pastedAttachmentsAccepted', targetId: sidebarAttachmentSave.targetId, projectPath: sidebarAttachmentSave.projectPath, requestId: sidebarAttachmentSave.requestId, attachmentEpoch: sidebarAttachmentSave.attachmentEpoch });
+        await send({ command: 'pastedAttachmentsSaved', targetId: sidebarAttachmentSave.targetId, projectPath: sidebarAttachmentSave.projectPath, requestId: sidebarAttachmentSave.requestId, attachmentEpoch: sidebarAttachmentSave.attachmentEpoch, files: ['solomap://asset/11111111-1111-4111-8111-111111111111'] });
+        check((await page.locator('[data-project-continue-composer]').innerText()).includes('截图'), 'sidebar renders the saved internal attachment with a user-facing label');
+        check(!(await page.locator('[data-project-continue-composer]').innerText()).includes('solomap://asset'), 'sidebar hides internal attachment identifiers');
         const globalLoadRequestId = await uiStateLoadRequestId('global');
         await page.evaluate((loadRequestId) => {
           window.dispatchEvent(new MessageEvent('message', { data: { command: 'uiStateLoaded', view: 'sidebar', scopeKey: 'global', loadRequestId, state: { portfolioFilter: 'all' } } }));
@@ -210,12 +231,59 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
         await page.locator('#btn-toggle-solo').click();
         const composer = page.locator('[data-solo-input]');
         await composer.fill('Keep composing');
+        const pasteFeedback = await composer.evaluate(el => {
+          const file = new File([new Uint8Array([1, 2, 3])], 'screen.png', { type: 'image/png' });
+          const event = new Event('paste', { bubbles: true, cancelable: true });
+          Object.defineProperty(event, 'clipboardData', { value: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }] } });
+          el.dispatchEvent(event);
+          const panel = document.querySelector('#solo-body .conversation-composer');
+          return {
+            text: panel?.innerText || '',
+            focused: document.activeElement === panel?.querySelector('[data-solo-input]'),
+            sendDisabled: panel?.querySelector('[data-send-solo]')?.disabled
+          };
+        });
+        check(pasteFeedback.text.includes('截图已添加'), 'roadmap paste shows immediate local acceptance while the composer remains focused');
+        check(!pasteFeedback.text.includes('正在添加截图'), 'roadmap paste never exposes an indefinite loading state');
+        check(pasteFeedback.focused && !pasteFeedback.sendDisabled, 'roadmap paste preserves focus and keeps Send available');
+        await page.waitForFunction(() => window.messages.some(message => message.command === 'attachment.save' && message.nodeId === '__solo__'));
+        const roadmapAttachmentSave = await page.evaluate(() => window.messages.filter(message => message.command === 'attachment.save' && message.nodeId === '__solo__').at(-1));
+        await send({ command: 'pastedAttachmentsAccepted', nodeId: roadmapAttachmentSave.nodeId, projectPath: roadmapAttachmentSave.projectPath, requestId: roadmapAttachmentSave.requestId, attachmentEpoch: roadmapAttachmentSave.attachmentEpoch });
+        await send({ command: 'supplementFilesSelected', nodeId: roadmapAttachmentSave.nodeId, projectPath: roadmapAttachmentSave.projectPath, requestId: roadmapAttachmentSave.requestId, attachmentEpoch: roadmapAttachmentSave.attachmentEpoch, files: ['solomap://asset/22222222-2222-4222-8222-222222222222'] });
+        check((await page.locator('#solo-body').innerText()).includes('截图'), 'roadmap renders the saved internal attachment with a user-facing label');
+        check(!(await page.locator('#solo-body').innerText()).includes('solomap://asset'), 'roadmap hides internal attachment identifiers');
+        await page.locator('[data-send-solo]').click();
+        check(await page.locator('[data-solo-input]').inputValue() === '', 'roadmap immediate send clears the submitted draft');
+        await page.locator('[data-solo-input]').fill('Keep composing');
         await composer.evaluate(el => { window.originalComposer = el; el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true })); });
         await send({ command: 'nodeConversationsLoaded', projectPath: project.path, nodeId: '__solo__', conversations: [] });
         check(await composer.evaluate(el => el === window.originalComposer && document.activeElement === el), 'roadmap history refresh preserves composing DOM');
         await composer.evaluate(el => el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })));
+        const attachmentSaveCount = await page.evaluate(() => window.messages.filter(message => message.command === 'attachment.save' && message.nodeId === '__solo__').length);
+        await composer.evaluate(el => {
+          const file = new File([new Uint8Array([4, 5, 6])], 'second.png', { type: 'image/png' });
+          const event = new Event('paste', { bubbles: true, cancelable: true });
+          Object.defineProperty(event, 'clipboardData', { value: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }] } });
+          el.dispatchEvent(event);
+        });
+        await page.waitForFunction(count => window.messages.filter(message => message.command === 'attachment.save' && message.nodeId === '__solo__').length > count, attachmentSaveCount);
+        const runCountBeforeQueuedSend = await page.evaluate(() => window.messages.filter(message => message.command === 'conversation.runSolo').length);
         await page.locator('[data-send-solo]').click({ delay: 80 });
-        check(await page.evaluate(() => window.messages.some(m => m.command === 'conversation.runSolo' && m.userMessage === 'Keep composing')), 'first send click survives deferred history refresh');
+        check(await page.evaluate(count => window.messages.filter(message => message.command === 'conversation.runSolo').length === count, runCountBeforeQueuedSend), 'roadmap send waits for the accepted image without losing the click');
+        check((await page.locator('#solo-body').innerText()).includes('图片保存后自动发送'), 'roadmap clearly explains that the queued send will continue automatically');
+        await page.locator('[data-solo-input]').fill('New draft after click');
+        const queuedRoadmapAttachment = await page.evaluate(() => window.messages.filter(message => message.command === 'attachment.save' && message.nodeId === '__solo__').at(-1));
+        await projects('/fixture/b');
+        await send({ command: 'pastedAttachmentsAccepted', nodeId: queuedRoadmapAttachment.nodeId, projectPath: queuedRoadmapAttachment.projectPath, requestId: queuedRoadmapAttachment.requestId, attachmentEpoch: queuedRoadmapAttachment.attachmentEpoch });
+        await send({ command: 'supplementFilesSelected', nodeId: queuedRoadmapAttachment.nodeId, projectPath: queuedRoadmapAttachment.projectPath, requestId: queuedRoadmapAttachment.requestId, attachmentEpoch: queuedRoadmapAttachment.attachmentEpoch, files: ['solomap://asset/33333333-3333-4333-8333-333333333333'] });
+        await page.waitForFunction(count => window.messages.filter(message => message.command === 'conversation.runSolo').length === count + 1, runCountBeforeQueuedSend);
+        const queuedRun = await page.evaluate(() => window.messages.filter(message => message.command === 'conversation.runSolo').at(-1));
+        check(queuedRun.userMessage === 'Keep composing', 'roadmap automatic send keeps the original user message');
+        check(queuedRun.projectPath === project.path, 'roadmap automatic send remains bound to the project where the user clicked Send');
+        check(queuedRun.supplementFiles.length === 1, 'roadmap automatic send includes the saved screenshot exactly once');
+        await projects(project.path);
+        check(!(await page.locator('#solo-body').innerText()).includes('图片保存后自动发送'), 'roadmap clears the queued status after the automatic send');
+        check(await page.locator('[data-solo-input]').inputValue() === 'New draft after click', 'roadmap automatic send preserves text entered after the user clicked Send');
         await page.locator('[data-solo-input]').fill('Keep composing');
         await projects('/fixture/b');
         await page.locator('#btn-toggle-solo').click();

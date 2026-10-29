@@ -8,7 +8,7 @@ interface ScheduledWork<T> {
 }
 
 export function runtimeOperationPriority(operation: string): RuntimePriority {
-  if (/^(?:start_conversation|query_conversation|prepare_(?:run|flow)|read_run_(?:execution_plan|state|checkpoint_state|launch_permission|binding|intent)|claim_run(?:_delivery)?|patch_run(?:_state|_inputs|_turn_request)?|checkpoint_run|checkpoint_current_run|stop_run|release_run_delivery|write_run_binding|materialize_run_prompt|finalize_run_output|observe_run_task_ingress|record_claude_native_(?:ready|append|event)|prepare_agent_database)$/.test(operation)) return 0;
+  if (/^(?:start_conversation|query_conversation|prepare_(?:run|flow)|read_run_(?:execution_plan|state|checkpoint_state|launch_permission|binding|intent)|claim_run(?:_delivery)?|patch_run(?:_state|_inputs|_turn_request)?|checkpoint_run|checkpoint_current_run|stop_run|release_run_delivery|write_run_binding|write_internal_attachment|materialize_run_prompt|finalize_run_output|observe_run_task_ingress|record_claude_native_(?:ready|append|event)|prepare_agent_database)$/.test(operation)) return 0;
   if (/^(?:append_(?:run_log|diagnostic_event)|write_project_growth|refresh_project_growth|(?:preview|apply)_growth_snapshot_detail_cleanup|upsert_project_run_index|write_documentation|capture_)/.test(operation)) return 2;
   return 1;
 }
