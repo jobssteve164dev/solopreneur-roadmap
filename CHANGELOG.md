@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.632 - 2026-10-29
+
+### Fixed
+- make pasted attachments locally responsive (b0f2262)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.631 - 2026-10-29
 
 ### Fixed
