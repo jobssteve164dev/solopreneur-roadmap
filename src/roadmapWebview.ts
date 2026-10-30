@@ -3826,6 +3826,9 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           else renderRoadmap(currentNodes);
           break;
         }
+        case 'conversationActionAccepted':
+          if (message.launchActionId) SoloMapWebview.acknowledgeMessage(message.launchActionId);
+          break;
         case 'conversationActionSettled':
           if (message.launchActionId) SoloMapWebview.acknowledgeMessage(message.launchActionId);
           break;

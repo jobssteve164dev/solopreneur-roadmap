@@ -545,8 +545,52 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         throw error;
       }
     };
+    const pendingUiStatePatches = new Map<string, {
+      latest: any;
+      patches: Map<string, unknown>;
+      requestIds: string[];
+    }>();
+    let uiStatePatchFlushTimer: ReturnType<typeof setTimeout> | undefined;
+    const queueUiStatePatch = (data: any): void => {
+      const requested = Array.isArray(data?.patches) ? data.patches : [{ key: data?.key, value: data?.value }];
+      if (requested.length < 1 || requested.length > 4096
+        || requested.some((patch: any) => !String(patch?.key || '') || patch?.value === undefined)) {
+        void handleMessage(data).catch(() => undefined);
+        return;
+      }
+      const scopeKey = String(data.scopeKey || 'global').slice(0, 1024);
+      const pending = pendingUiStatePatches.get(scopeKey) || { latest: data, patches: new Map<string, unknown>(), requestIds: [] };
+      pending.latest = data;
+      for (const patch of requested) pending.patches.set(String(patch.key).slice(0, 1024), patch.value);
+      const requestId = String(data.requestId || '');
+      if (requestId) pending.requestIds.push(requestId);
+      pendingUiStatePatches.set(scopeKey, pending);
+      if (uiStatePatchFlushTimer) return;
+      uiStatePatchFlushTimer = setTimeout(() => {
+        uiStatePatchFlushTimer = undefined;
+        const batches = [...pendingUiStatePatches.entries()];
+        pendingUiStatePatches.clear();
+        void (async () => {
+          for (const [scope, batch] of batches) {
+            const patches = [...batch.patches].map(([key, value]) => ({ key, value }));
+            for (let offset = 0; offset < patches.length; offset += 4096) {
+              const isFinalChunk = offset + 4096 >= patches.length;
+              await handleMessage({
+                ...batch.latest,
+                command: 'uiState.patch',
+                scopeKey: scope,
+                patches: patches.slice(offset, offset + 4096),
+                requestIds: isFinalChunk ? batch.requestIds : [],
+                requestId: isFinalChunk ? (batch.requestIds.at(-1) || String(batch.latest.requestId || '')) : ''
+              });
+            }
+          }
+        })().catch(() => undefined);
+      }, 25);
+    };
     webviewView.webview.onDidReceiveMessage((data) => {
       const command = String(data?.command || '');
+      if (command === 'uiState.patch') return queueUiStatePatch(data);
       if (!/^(?:getNodes|getSettings|getProjects|bootstrap\.get|settings\.get|databaseOverview\.get|agentImpact\.get|checkDependencies|conversation\.runSolo|conversation\.continue|project\.select|showStrategyPyramid|showFullRoadmap)$/.test(command)) return handleMessage(data).catch(() => undefined);
       const trace = createLocalDiagnosticTrace(getDiagnosticDataPath(this._getSettings), `sidebar.action.${command}`, { interactionId: data.interactionId, targetId: 'sidebar' });
       if (command === 'showStrategyPyramid') {

@@ -89,6 +89,99 @@ test('only a restored visible terminal reclaims its interactive run owner', asyn
   assert.match(claims[0].owner.birth, /^(proc|ps):/);
 });
 
+test('a startup terminal retries the same surface once when the first reveal is not observable', async () => {
+  let terminal;
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.configure = value => {
+      createAgentTerminal = () => value;
+      vscode.window.activeTerminal = { name: 'existing terminal' };
+    };
+    module.exports.setActive = value => { vscode.window.activeTerminal = value; };
+    module.exports.reveal = revealAgentStartupTerminal;
+  `);
+  let shows = 0;
+  terminal = {
+    name: 'Agent Console · target', creationOptions: {},
+    show() {
+      shows += 1;
+      if (shows === 2) extension.setActive(terminal);
+    },
+    dispose() {}
+  };
+  extension.configure(terminal);
+
+  const revealed = await extension.reveal({}, '/isolated/project', 'solo');
+  await new Promise(resolve => setTimeout(resolve, 120));
+
+  assert.equal(revealed, terminal);
+  assert.equal(shows, 2, 'a dropped first reveal must retry the same terminal, not create another one');
+});
+
+test('a startup terminal keeps one visibility observer and delivery does not steal focus after it was presented', async () => {
+  let terminal;
+  const extension = loadCompiledModule('out/extension.js', `
+    const visibilityRecords = [];
+    module.exports.configure = value => {
+      createAgentTerminal = () => value;
+      vscode.window.activeTerminal = { name: 'existing terminal' };
+    };
+    module.exports.setActive = value => { vscode.window.activeTerminal = value; };
+    module.exports.reveal = revealAgentStartupTerminal;
+    module.exports.deliverFocus = value => presentAgentTerminalForDelivery('/isolated/project', value,
+      (status, error, selection) => visibilityRecords.push({ status, error: error && String(error.message || error), selection }));
+    module.exports.records = () => visibilityRecords;
+  `);
+  let shows = 0;
+  terminal = {
+    name: 'Agent Console · shared', creationOptions: {},
+    show() {
+      shows += 1;
+      if (shows === 1) extension.setActive(terminal);
+    },
+    dispose() {}
+  };
+  extension.configure(terminal);
+
+  await extension.reveal({}, '/isolated/project', 'solo');
+  await extension.reveal({}, '/isolated/project', 'solo');
+  extension.setActive({ name: 'editor regained focus' });
+  extension.deliverFocus(terminal);
+  await new Promise(resolve => setTimeout(resolve, 120));
+
+  assert.equal(shows, 1, 'one early presentation must be shared and consumed by delivery without stealing focus later');
+  assert.equal(extension.records().length, 0, 'delivery must not claim a focus result when it intentionally preserves user focus');
+});
+
+test('terminal delivery never starts a second reveal cycle after the bounded startup reveal times out', async () => {
+  let terminal;
+  const extension = loadCompiledModule('out/extension.js', `
+    const visibilityRecords = [];
+    module.exports.configure = value => {
+      createAgentTerminal = () => value;
+      vscode.window.activeTerminal = { name: 'existing terminal' };
+    };
+    module.exports.reveal = revealAgentStartupTerminal;
+    module.exports.deliverFocus = value => presentAgentTerminalForDelivery('/isolated/project', value,
+      (status, error) => visibilityRecords.push({ status, error: error && String(error.message || error) }));
+    module.exports.records = () => visibilityRecords;
+  `);
+  let shows = 0;
+  terminal = {
+    name: 'Agent Console · timeout', creationOptions: {},
+    show() { shows += 1; },
+    dispose() {}
+  };
+  extension.configure(terminal);
+
+  await extension.reveal({}, '/isolated/project', 'solo');
+  await new Promise(resolve => setTimeout(resolve, 800));
+  extension.deliverFocus(terminal);
+  await new Promise(resolve => setTimeout(resolve, 120));
+
+  assert.equal(shows, 2, 'one action gets only its initial show and one observed retry even when visibility cannot be confirmed');
+  assert.equal(extension.records().length, 0, 'late delivery must preserve focus instead of starting another reveal cycle');
+});
+
 test('a refreshed Extension Host recreates a missing terminal on the same authenticated runner', async t => {
   const { ForegroundTerminalReconnectServer } = require('../out/foregroundTerminalReconnect.js');
   const input = [];
@@ -1426,7 +1519,7 @@ test('new Solo launch opens its terminal while a full history refresh is pending
   } finally { await server.close(); await ops.close(); store.close(); }
 });
 
-test('project action launch acknowledges only its request after delivery or preparation failure', async t => {
+test('project action launch accepts and settles only its request after delivery or preparation failure', async t => {
   for (const mode of ['delivered', 'terminal-failed', 'launch-failed']) await t.test(mode, async () => {
     const extension = loadCompiledModule('out/extension.js', `
       module.exports.configure = mode => {
@@ -1446,7 +1539,10 @@ test('project action launch acknowledges only its request after delivery or prep
       'sidebar', { postMessage: message => { messages.push(message); return Promise.resolve(true); } });
     if (mode === 'delivered') await action;
     else await assert.rejects(action, /fixture_(terminal|launch)_failed/);
-    assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{ command: 'conversationActionSettled', action: 'runSolo', projectPath: '/isolated/project', launchActionId: 'only-this-action' }]);
+    assert.deepEqual(JSON.parse(JSON.stringify(messages)), [
+      { command: 'conversationActionAccepted', action: 'runSolo', projectPath: '/isolated/project', launchActionId: 'only-this-action' },
+      { command: 'conversationActionSettled', action: 'runSolo', projectPath: '/isolated/project', launchActionId: 'only-this-action' }
+    ]);
   });
 });
 
@@ -1477,6 +1573,59 @@ test('retried Solo launch actions share one in-flight launch and one durable int
   release();
   await Promise.all([first, second]);
   assert.equal(messages.filter(message => message.command === 'conversationActionSettled').length, 2);
+});
+
+test('a settled Solo launch retry reuses the completed action without reopening a terminal', async () => {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.configure = record => {
+      getProjects = () => [{ path: '/isolated/project' }];
+      getPersistedSettings = () => ({ globalDataPath: '/isolated/.solomap-global' });
+      sidebarProvider = null;
+      revealAgentStartupTerminal = async () => { record.terminals += 1; return undefined; };
+      captureRegisteredConversationLaunchTarget = async (_context, workspaceRoot, snapshot) => ({ workspaceRoot, globalDataPath: snapshot.globalDataPath, settings: snapshot.settings, engine: { close() {} } });
+      handleRunSoloConversation = async () => { record.launches += 1; return 42; };
+    };
+    module.exports.action = handleSharedWebviewAction;
+  `);
+  const record = { terminals: 0, launches: 0 };
+  extension.configure(record);
+  const messages = [];
+  const request = { command: 'conversation.runSolo', projectPath: '/isolated/project', userMessage: '处理当前问题', launchActionId: 'completed-action' };
+  const webview = { postMessage: message => { messages.push(message); return Promise.resolve(true); } };
+
+  await extension.action({}, request, 'sidebar', webview);
+  await extension.action({}, request, 'sidebar', webview);
+
+  assert.equal(record.launches, 1, 'the completed durable action must not execute twice');
+  assert.equal(record.terminals, 1, 'a late transport retry must not create a disposable terminal');
+  assert.equal(messages.filter(message => message.command === 'conversationActionSettled').length, 2);
+});
+
+test('Solo launch acknowledges transport receipt before its task finishes', async () => {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.configure = wait => {
+      getProjects = () => [{ path: '/isolated/project' }];
+      getPersistedSettings = () => ({ globalDataPath: '/isolated/.solomap-global' });
+      sidebarProvider = null;
+      revealAgentStartupTerminal = async () => undefined;
+      captureRegisteredConversationLaunchTarget = async (_context, workspaceRoot, snapshot) => ({ workspaceRoot, globalDataPath: snapshot.globalDataPath, settings: snapshot.settings, engine: { close() {} } });
+      handleRunSoloConversation = async () => { await wait(); return 42; };
+    };
+    module.exports.action = handleSharedWebviewAction;
+  `);
+  let release;
+  extension.configure(() => new Promise(resolve => { release = resolve; }));
+  const messages = [];
+  const request = { command: 'conversation.runSolo', projectPath: '/isolated/project', userMessage: '处理当前问题', launchActionId: 'accepted-action' };
+  const action = extension.action({}, request, 'sidebar', { postMessage: message => { messages.push(message); return Promise.resolve(true); } });
+  while (!release) await new Promise(resolve => setImmediate(resolve));
+
+  assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{
+    command: 'conversationActionAccepted', action: 'runSolo', projectPath: '/isolated/project', launchActionId: 'accepted-action'
+  }]);
+  release();
+  await action;
+  assert.equal(messages.filter(message => message.command === 'conversationActionSettled').length, 1);
 });
 
 test('the same Solo launch action id rejects different in-flight input', async () => {
@@ -2188,6 +2337,23 @@ test('conversation launch delivery retries the same durable action until the hos
   assert.deepEqual(posted[1], posted[0]);
   sandbox.globalThis.SoloMapWebview.acknowledgeMessage(message.launchActionId);
   assert.equal(timers.at(-1).active, false);
+});
+
+test('sidebar stops launch transport retries when the host accepts the action', async () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  const { context, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), ids, `
+    globalThis.__launchPosts = [];
+    SoloMapWebview.postAcknowledgedMessage(value => globalThis.__launchPosts.push(value),
+      { command: 'conversation.runSolo', launchActionId: 'launch-accepted' }, 'launch-accepted', 500);
+  `);
+
+  dispatchMessage({ command: 'conversationActionAccepted', action: 'runSolo', projectPath: '/project', launchActionId: 'launch-accepted' });
+  await new Promise(resolve => setTimeout(resolve, 550));
+  const delivered = context.__launchPosts.length;
+  dispatchMessage({ command: 'conversationActionSettled', action: 'runSolo', projectPath: '/project', launchActionId: 'launch-accepted' });
+
+  assert.equal(delivered, 1, 'the accepted action must not be delivered again while the task is still running');
 });
 
 test('ability action labels are restored after language localization in both webviews', () => {
@@ -4807,6 +4973,80 @@ test('sidebar resolve survives persisted state and startup data failures', async
   } finally {
     console.error = originalConsoleError;
   }
+});
+
+test('sidebar prioritizes a conversation launch over a flood of queued UI-state patches', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const dispatched = [];
+  let messageListener;
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ globalDataPath: '/fixture/.solomap-global' }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects: [{ path: '/fixture/project' }], selectedProjectPath: '/fixture/project' }),
+      dispatchSharedAction: async message => { dispatched.push(message); return true; }
+    }
+  );
+  provider.resolveWebviewView({ webview: {
+    options: {}, html: '', asWebviewUri: uri => String(uri.fsPath || uri),
+    postMessage: () => Promise.resolve(true),
+    onDidReceiveMessage: listener => { messageListener = listener; }
+  } }, {}, {});
+
+  for (let index = 0; index < 100; index += 1) {
+    void messageListener({
+      command: 'uiState.patch', scopeKey: '/fixture/project', requestId: `state-${index}`,
+      key: 'interaction.projectSoloDrafts.%2Ffixture%2Fproject', value: `draft-${index}`
+    });
+  }
+  await messageListener({
+    command: 'conversation.runSolo', projectPath: '/fixture/project', launchActionId: 'foreground-launch', userMessage: '继续完成'
+  });
+  await new Promise(resolve => setTimeout(resolve, 50));
+
+  assert.equal(dispatched[0].command, 'conversation.runSolo', 'foreground launch must not wait behind state persistence');
+  const stateWrites = dispatched.filter(message => message.command === 'uiState.patch');
+  assert.equal(stateWrites.length, 1, 'queued state messages must collapse before entering the shared data plane');
+  assert.equal(stateWrites[0].patches[0].value, 'draft-99');
+  assert.equal(stateWrites[0].requestIds.length, 100);
+});
+
+test('sidebar splits more than 4096 distinct queued UI-state patches without losing their acknowledgements', async () => {
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
+  const dispatched = [];
+  let messageListener;
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ globalDataPath: '/fixture/.solomap-global' }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects: [{ path: '/fixture/project' }], selectedProjectPath: '/fixture/project' }),
+      dispatchSharedAction: async message => { dispatched.push(message); return true; }
+    }
+  );
+  provider.resolveWebviewView({ webview: {
+    options: {}, html: '', asWebviewUri: uri => String(uri.fsPath || uri),
+    postMessage: () => Promise.resolve(true),
+    onDidReceiveMessage: listener => { messageListener = listener; }
+  } }, {}, {});
+
+  for (let index = 0; index < 4097; index += 1) {
+    void messageListener({
+      command: 'uiState.patch', scopeKey: '/fixture/project', requestId: `state-${index}`,
+      key: `interaction.fixture.${index}`, value: index
+    });
+  }
+  await new Promise(resolve => setTimeout(resolve, 100));
+
+  const writes = dispatched.filter(message => message.command === 'uiState.patch');
+  assert.equal(writes.length, 2);
+  assert.equal(writes.every(message => message.patches.length <= 4096), true);
+  assert.equal(writes.reduce((total, message) => total + message.patches.length, 0), 4097);
+  assert.deepEqual(writes.flatMap(message => message.requestIds || []), Array.from({ length: 4097 }, (_, index) => `state-${index}`));
+  assert.equal(writes[0].requestIds.length, 0, 'acknowledgements belong to the final ordered chunk only');
 });
 
 test('sidebar discards stale account reads and refreshes them after changing the default Agent', async () => {
@@ -9096,8 +9336,13 @@ test('local-first loading paints and launches before optional or durable work', 
     extensionSource.indexOf('function revealAgentStartupTerminal'),
     extensionSource.indexOf('function launchAgentConversationTerminal')
   );
+  const presentTerminalBody = extensionSource.slice(
+    extensionSource.indexOf('function presentAgentTerminal('),
+    extensionSource.indexOf('function presentAgentTerminalForDelivery')
+  );
   assert.match(revealBody, /createAgentTerminal\(workspaceRoot, label, 0, undefined, true\)/);
-  assert.match(revealBody, /terminal\.show\(false\)/);
+  assert.match(revealBody, /presentAgentTerminal\(workspaceRoot, terminal/);
+  assert.match(presentTerminalBody, /terminal\.show\(false\)/);
   assert.doesNotMatch(revealBody, /getOpenCodeTerminalEnvironment\(/,
     'the visible startup surface must not repeat formal runner environment preparation');
   assert.match(dispatchBody, /'conversation\.runSolo': async[\s\S]*?revealAgentStartupTerminal\([\s\S]*?'solo'[\s\S]*?\);/);
@@ -19681,6 +19926,35 @@ test('the host commits a sidebar UI-state batch in one runtime mutation', async 
   assert.equal(writes.length, 1);
   assert.equal(writes[0].input.patches.length, 3);
   assert.equal(messages.some(message => message.command === 'uiStatePatched' && message.requestId === 'sidebar-batch'), true);
+});
+
+test('background UI-state patches do not create one persistent interaction trace per message', async t => {
+  const diagnostics = require('../out/localDiagnostics.js');
+  const events = [];
+  diagnostics.configureLocalDiagnosticPersistence({ append: async (_root, event) => { events.push(event); } });
+  t.after(() => diagnostics.configureLocalDiagnosticPersistence(undefined));
+  const transport = { sendRuntimeDataRequest: async (_root, request) => {
+    if (request.operation === 'read_ui_state') return { items: [] };
+    if (request.operation === 'patch_ui_state') return { items: request.input.patches.map((patch, index) => ({ ...patch, revision: index + 1 })) };
+    throw new Error(`unexpected operation: ${request.operation}`);
+  } };
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.handle = handleSharedWebviewAction;
+    module.exports.connect = root => { getPersistedSettings = () => ({ globalDataPath: root }); };
+  `, {
+    './autonomousRuntimeControl': transport,
+    './autonomousRuntimeHost': { ensureHealthyAutonomousRuntime: async () => ({ started: false }) },
+    './localDiagnostics': diagnostics
+  });
+  extension.connect('/data/sidebar-background-trace');
+  await extension.handle({ extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => {} } }, {
+    command: 'uiState.patch', scopeKey: '/project', requestId: 'background-state',
+    key: 'interaction.projectSoloDrafts.%2Fproject', value: '保留草稿'
+  }, 'sidebar', { postMessage: async () => true });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(events.filter(event => event.kind === 'operation' && event.scope === 'sidebar.action.uiState.patch').length, 0,
+    'background persistence must not flood the foreground diagnostic data plane');
 });
 
 test('the host keeps one UI-state write in flight and persists only the newest queued value', async () => {

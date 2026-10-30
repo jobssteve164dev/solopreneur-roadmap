@@ -925,6 +925,7 @@ export async function activate(context: vscode.ExtensionContext) {
   }));
   if (typeof vscode.window.onDidCloseTerminal === 'function') {
     context.subscriptions.push(vscode.window.onDidCloseTerminal((terminal) => {
+      cancelAgentTerminalVisibilityMonitor(terminal);
       const surface = foregroundAgentTerminalSurfaces.get(terminal);
       foregroundAgentTerminalSurfaces.delete(terminal);
       if (surface && terminal.exitStatus?.reason !== vscode.TerminalExitReason.Shutdown && !extensionHostDeactivating) surface.stop();
@@ -1381,7 +1382,28 @@ async function ensureTaskRuntimeReady(context: vscode.ExtensionContext): Promise
 }
 
 const projectActionLaunchQueues = new Map<string, Promise<void>>();
-const activeConversationLaunchActions = new Map<string, { inputHash: string; promise: Promise<void> }>();
+interface ConversationLaunchAction {
+  inputHash: string;
+  promise: Promise<void>;
+  settledAt?: number;
+}
+const activeConversationLaunchActions = new Map<string, ConversationLaunchAction>();
+const completedConversationLaunchActionRetentionMs = 10 * 60 * 1000;
+const maxRememberedConversationLaunchActions = 256;
+
+function pruneConversationLaunchActions(now = Date.now()): void {
+  for (const [key, action] of activeConversationLaunchActions) {
+    if (action.settledAt && now - action.settledAt >= completedConversationLaunchActionRetentionMs) {
+      activeConversationLaunchActions.delete(key);
+    }
+  }
+  if (activeConversationLaunchActions.size <= maxRememberedConversationLaunchActions) return;
+  for (const [key, action] of activeConversationLaunchActions) {
+    if (!action.settledAt) continue;
+    activeConversationLaunchActions.delete(key);
+    if (activeConversationLaunchActions.size <= maxRememberedConversationLaunchActions) break;
+  }
+}
 
 async function enqueueProjectActionLaunch<T>(
   projectKeyOrAction: string | ((registered: () => void) => Promise<T>),
@@ -1625,7 +1647,11 @@ async function handleSharedWebviewAction(
       const patches = requestedPatches.map(patch => ({ key: String(patch?.key || '').slice(0, 1024), value: patch?.value }));
       if (patches.some(patch => !patch.key || patch.value === undefined)) throw new Error('invalid_ui_state_patch');
       await enqueueUiStatePatches(context, surface, scopeKey, patches);
-      await respond({ command: 'uiStatePatched', view: surface, scopeKey, requestId: String(request.requestId || '') });
+      const requestIds = Array.isArray(request.requestIds)
+        ? [...new Set(request.requestIds.map((value: unknown) => String(value || '')).filter(Boolean))]
+        : [String(request.requestId || '')].filter(Boolean);
+      if (!requestIds.length) await respond({ command: 'uiStatePatched', view: surface, scopeKey, requestId: '' });
+      else for (const requestId of requestIds) await respond({ command: 'uiStatePatched', view: surface, scopeKey, requestId });
     },
     'conversation.runStep': async (request) => {
       const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
@@ -1695,15 +1721,26 @@ async function handleSharedWebviewAction(
         }
       };
       try {
+        pruneConversationLaunchActions();
         let activeAction = launchActionKey ? activeConversationLaunchActions.get(launchActionKey) : undefined;
         if (activeAction && activeAction.inputHash !== launchInputHash) throw new Error('conversation_launch_action_conflict');
         if (!activeAction) {
-          const created = execute().finally(() => {
-            if (launchActionKey && activeConversationLaunchActions.get(launchActionKey)?.promise === created) activeConversationLaunchActions.delete(launchActionKey);
-          });
+          const created = execute();
           activeAction = { inputHash: launchInputHash, promise: created };
-          if (launchActionKey) activeConversationLaunchActions.set(launchActionKey, activeAction);
+          if (launchActionKey) {
+            activeConversationLaunchActions.set(launchActionKey, activeAction);
+            void created.then(() => {
+              const remembered = activeConversationLaunchActions.get(launchActionKey);
+              if (remembered?.promise === created) remembered.settledAt = Date.now();
+              pruneConversationLaunchActions();
+            }, () => {
+              const remembered = activeConversationLaunchActions.get(launchActionKey);
+              if (remembered?.promise === created) remembered.settledAt = Date.now();
+              pruneConversationLaunchActions();
+            });
+          }
         }
+        if (launchActionId) await respond({ command: 'conversationActionAccepted', action: 'runSolo', projectPath: workspaceRoot, launchActionId });
         await activeAction.promise;
       } finally {
         if (launchActionId) await respond({ command: 'conversationActionSettled', action: 'runSolo', projectPath: workspaceRoot, launchActionId });
@@ -2796,6 +2833,7 @@ async function handleSharedWebviewAction(
       )));
     }
     });
+    if (message.command === 'uiState.patch') return await dispatch();
     return await dispatchWebviewInteraction(`${surface}.action.${String(message.command || 'unknown')}`, dispatch);
   } catch (error) {
     recordLocalDiagnosticError(
@@ -7711,6 +7749,18 @@ const reservedAgentTerminalsByProject = new Map<string, Array<{
   terminal: vscode.Terminal;
   environmentSignature?: string;
 }>>();
+type AgentTerminalVisibilityRecorder = (
+  status: 'start' | 'ok' | 'error',
+  error?: unknown,
+  selection?: Record<string, unknown>
+) => void;
+const agentTerminalVisibilityMonitors = new Map<vscode.Terminal, () => void>();
+const agentStartupTerminalPresentations = new WeakSet<vscode.Terminal>();
+
+function cancelAgentTerminalVisibilityMonitor(terminal: vscode.Terminal): void {
+  agentTerminalVisibilityMonitors.get(terminal)?.();
+  agentStartupTerminalPresentations.delete(terminal);
+}
 
 function discardReservedAgentStartupTerminal(workspaceRoot: string, terminal?: vscode.Terminal): boolean {
   if (!workspaceRoot || !terminal) return false;
@@ -7719,8 +7769,80 @@ function discardReservedAgentStartupTerminal(workspaceRoot: string, terminal?: v
   const remaining = reservations.filter((entry) => entry.terminal !== terminal);
   if (remaining.length > 0) reservedAgentTerminalsByProject.set(workspaceRoot, remaining);
   else reservedAgentTerminalsByProject.delete(workspaceRoot);
+  cancelAgentTerminalVisibilityMonitor(terminal);
   terminal.dispose();
   return true;
+}
+
+function presentAgentTerminal(
+  workspaceRoot: string,
+  terminal: vscode.Terminal,
+  record: AgentTerminalVisibilityRecorder
+): boolean {
+  if (agentTerminalVisibilityMonitors.has(terminal)) return false;
+  let settled = false;
+  let retryTimer: NodeJS.Timeout | undefined;
+  let deadlineTimer: NodeJS.Timeout | undefined;
+  let activeTerminalSubscription: vscode.Disposable | undefined;
+  const selection = () => terminalSelectionDiagnostics(workspaceRoot, terminal, workspaceRoot);
+  let cancel = () => {};
+  const cleanup = () => {
+    if (retryTimer) clearTimeout(retryTimer);
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    activeTerminalSubscription?.dispose();
+    if (agentTerminalVisibilityMonitors.get(terminal) === cancel) agentTerminalVisibilityMonitors.delete(terminal);
+  };
+  const finish = (error?: unknown) => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    record(error ? 'error' : 'ok', error, selection());
+  };
+  const confirm = () => {
+    if (vscode.window.activeTerminal !== terminal) return false;
+    finish();
+    return true;
+  };
+  if (typeof vscode.window.onDidChangeActiveTerminal === 'function') {
+    activeTerminalSubscription = vscode.window.onDidChangeActiveTerminal(() => { confirm(); });
+  }
+  cancel = () => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+  };
+  agentTerminalVisibilityMonitors.set(terminal, cancel);
+  record('start', undefined, selection());
+  try {
+    terminal.show(false);
+    if (!confirm()) {
+      retryTimer = setTimeout(() => {
+        if (confirm()) return;
+        try {
+          terminal.show(false);
+          confirm();
+        } catch (error) {
+          finish(error);
+        }
+      }, 75);
+      deadlineTimer = setTimeout(() => {
+        if (!confirm()) finish(new Error('terminal_visibility_unconfirmed'));
+      }, 750);
+    }
+  } catch (error) {
+    finish(error);
+    throw error;
+  }
+  return true;
+}
+
+function presentAgentTerminalForDelivery(
+  workspaceRoot: string,
+  terminal: vscode.Terminal,
+  record: AgentTerminalVisibilityRecorder
+): boolean {
+  if (agentStartupTerminalPresentations.delete(terminal)) return false;
+  return presentAgentTerminal(workspaceRoot, terminal, record);
 }
 
 async function revealAgentStartupTerminal(
@@ -7736,16 +7858,19 @@ async function revealAgentStartupTerminal(
   }
   const terminal = createAgentTerminal(workspaceRoot, label, 0, undefined, true);
   activeAgentTerminalName = terminal.name;
-  const selection = terminalSelectionDiagnostics(workspaceRoot, terminal, workspaceRoot);
-  recordCurrentDiagnosticStage('terminal.startup.focus', 'start', 0, undefined, selection);
+  const presentationAlreadyRegistered = agentStartupTerminalPresentations.has(terminal);
+  agentStartupTerminalPresentations.add(terminal);
   try {
-    terminal.show(false);
-    recordCurrentDiagnosticStage('terminal.startup.focus', 'ok', 0, undefined, selection);
+    if (!presentationAlreadyRegistered) {
+      presentAgentTerminal(workspaceRoot, terminal, (status, error, selection) => {
+        recordCurrentDiagnosticStage('terminal.startup.focus', status, 0, error, selection);
+      });
+    }
     const reservations = reservedAgentTerminalsByProject.get(workspaceRoot) || [];
     reservations.push({ terminal });
     reservedAgentTerminalsByProject.set(workspaceRoot, reservations);
   } catch (error) {
-    recordCurrentDiagnosticStage('terminal.startup.focus', 'error', 0, error, selection);
+    agentStartupTerminalPresentations.delete(terminal);
     foregroundAgentTerminalSurfaces.delete(terminal);
     terminal.dispose();
     throw error;
@@ -7932,6 +8057,11 @@ async function launchAgentConversationTerminal(input: {
       try { const result = await action(); trace.record(stage, 'ok', performance.now() - started); return result; }
       catch (error) { trace.record(stage, 'error', performance.now() - started, error); throw error; }
     };
+    const presentForDelivery = (terminal: vscode.Terminal) => presentAgentTerminalForDelivery(
+      input.workspaceRoot,
+      terminal,
+      (status, error, selection) => trace.record('terminal.delivery.focus', status, 0, error, selection)
+    );
     const scheduleDeliveryReleaseRetry = (errorCode: string, terminal?: vscode.Terminal, deliveryId = '') => {
       const releaseKey = `release:${key}:${deliveryGeneration}:${deliveryId || 'unbound'}`;
       if (agentTerminalDeliveryWatchdogs.has(releaseKey)) return;
@@ -8009,10 +8139,7 @@ async function launchAgentConversationTerminal(input: {
     const recordedTarget: AgentTerminalRunTarget = { workspaceRoot: input.workspaceRoot, globalDataPath, executionLogId: input.conversationId, runId: state.runId, generation: state.generation, deliveryId: recordedTerminal ? String(state.status.terminalDeliveryId || '') : crypto.randomUUID() };
     if (recordedTerminal && state.status.terminalCommandSubmittedAt) {
       agentTerminalRunTargets.set(recordedTerminal, recordedTarget);
-      const selection = terminalSelectionDiagnostics(input.workspaceRoot, recordedTerminal);
-      trace.record('terminal.delivery.focus', 'start', 0, undefined, selection);
-      recordedTerminal.show(false);
-      trace.record('terminal.delivery.focus', 'ok', 0, undefined, selection);
+      presentForDelivery(recordedTerminal);
       scheduleRunnerClaimWatchdog(recordedTerminal, recordedTarget, state.generation);
       if (!legacyConversationDeliveryHarnessForTests && state.status.agentInputMode !== 'session_reentry') await awaitAgentTaskIngress(operation, identity, {
         generation: state.generation,
@@ -8090,15 +8217,7 @@ async function launchAgentConversationTerminal(input: {
         runId: state.runId, generation, deliveryId: crypto.randomUUID() };
       lastDeliveryId = target.deliveryId || '';
       agentTerminalRunTargets.set(terminal, target);
-      const selection = terminalSelectionDiagnostics(input.workspaceRoot, terminal);
-      trace.record('terminal.delivery.focus', 'start', 0, undefined, selection);
-      try {
-        terminal.show(false);
-        trace.record('terminal.delivery.focus', 'ok', 0, undefined, selection);
-      } catch (error) {
-        trace.record('terminal.delivery.focus', 'error', 0, error, selection);
-        throw error;
-      }
+      presentForDelivery(terminal);
       await record('terminal.delivery.identity.persist', () => persist({ terminalName: terminal.name, terminalDeliveryId: target.deliveryId,
         terminalDeliveryTraceId: trace.id, terminalDeliveryStartedAt: new Date(deliveryStartedAt).toISOString(), terminalDeliveryAttempt: attempt }));
       const readinessTimeoutMs = input.terminalReadyTimeoutMs === undefined
@@ -12058,6 +12177,8 @@ function setupFileSentinelWatcher(_workspaceRoot: string): void {
  */
 export async function deactivate() {
   extensionHostDeactivating = true;
+  for (const cancel of agentTerminalVisibilityMonitors.values()) cancel();
+  agentTerminalVisibilityMonitors.clear();
   for (const surface of foregroundAgentTerminalSurfaces.values()) surface.detachForHostReload();
   foregroundAgentTerminalSurfaces.clear();
   automationUiClosing = true;

@@ -9298,6 +9298,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }
           break;
 
+        case 'conversationActionAccepted':
+          if (message.launchActionId) SoloMapWebview.acknowledgeMessage(message.launchActionId);
+          break;
+
         case 'conversationActionSettled':
           if (message.launchActionId) SoloMapWebview.acknowledgeMessage(message.launchActionId);
           if (message.action === 'continue') {
