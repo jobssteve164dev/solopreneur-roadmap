@@ -4,7 +4,8 @@ import * as net from 'net';
 import * as path from 'path';
 
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
-import { RuntimePriorityScheduler, runtimeOperationPriority } from './runtimePriorityScheduler';
+import { RuntimeExecutionScheduler } from './runtimePriorityScheduler';
+import { runtimeOperationDefinition } from './runtimeOperationRegistry';
 
 export type RuntimeControlCommand = 'health' | 'refresh' | 'pause' | 'resume' | 'drain' | 'stop';
 
@@ -66,6 +67,7 @@ interface RuntimeControlServerOptions {
   buildId?: string;
   releaseVersion?: string;
   owner?: string;
+  enforceOperationRegistry?: boolean;
   onCommand(command: RuntimeControlCommand, replacement?: { buildId: string; releaseVersion: string }): RuntimeControlResponse | Pick<RuntimeControlResponse, 'status'> | Promise<RuntimeControlResponse | Pick<RuntimeControlResponse, 'status'>>;
   onData?(request: RuntimeDataRequest): unknown | Promise<unknown>;
 }
@@ -148,10 +150,13 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
   const filePath = endpointPath(options.globalDataPath);
   const busyFilePath = path.join(path.dirname(filePath), 'control.busy.json');
   const connections = new Set<net.Socket>();
-  const busy = new Set<net.Socket>();
+  const busy = new Map<net.Socket, number>();
   let internalBusy = 0;
+  let acceptedWork = 0;
+  const acceptedWorkWaiters = new Set<() => void>();
+  let closing = false;
   let endpoint: RuntimeControlEndpoint;
-  const dataScheduler = new RuntimePriorityScheduler();
+  const dataScheduler = new RuntimeExecutionScheduler();
   const acquireBusyLease = () => {
     if (busy.size === 0 && internalBusy === 0) writeBusyLease(busyFilePath, {
       schemaVersion: 1,
@@ -167,44 +172,79 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
       try { clearOwnedBusyLease(busyFilePath, options.runtimeId); } catch { /* bounded stale marker */ }
     }
   };
+  const beginSocketWork = (socket: net.Socket) => {
+    acquireBusyLease();
+    busy.set(socket, (busy.get(socket) || 0) + 1);
+    acceptedWork += 1;
+  };
+  const finishSocketWork = (socket: net.Socket) => {
+    const remaining = (busy.get(socket) || 1) - 1;
+    if (remaining > 0) busy.set(socket, remaining);
+    else busy.delete(socket);
+    acceptedWork = Math.max(0, acceptedWork - 1);
+    if (acceptedWork === 0) {
+      for (const resolve of acceptedWorkWaiters) resolve();
+      acceptedWorkWaiters.clear();
+    }
+    clearIdleBusyLease();
+    if (closing && !busy.has(socket)) setImmediate(() => {
+      if (!busy.has(socket)) socket.destroySoon();
+    });
+  };
   const server = net.createServer((socket) => {
     connections.add(socket);
-    socket.once('close', () => { connections.delete(socket); });
+    socket.once('close', () => { connections.delete(socket); clearIdleBusyLease(); });
     socket.on('error', () => {});
     socket.setTimeout(5_000, () => socket.destroy());
     socket.setEncoding('utf8');
     let request = '';
-    let handled = false;
-    let authenticatedPrefix = false;
-    socket.on('data', async (chunk) => {
-      if (handled) return;
+    let authenticated = false;
+    socket.on('data', (chunk) => {
       request += chunk;
-      if (!authenticatedPrefix && request.length > 65536) {
+      if (!authenticated && request.length > 65_536) {
         const prefix = /^\s*\{\s*"token"\s*:\s*"([^"\\]*)"/.exec(request.slice(0, 4096));
         const provided = Buffer.from(prefix?.[1] || '');
         const expected = Buffer.from(token);
-        if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) { socket.destroy(); return; }
-        authenticatedPrefix = true;
+        if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+          socket.destroy();
+          return;
+        }
+        authenticated = true;
         socket.setTimeout(0);
       }
-      const frameEnd = request.indexOf('\n');
-      if (frameEnd < 0) return;
-      handled = true;
-      try {
-        const parsed = JSON.parse(request.slice(0, frameEnd)) as { token?: string; command?: RuntimeControlCommand | 'data'; expectedRuntimeId?: string; replacementBuildId?: string; replacementVersion?: string; request?: RuntimeDataRequest };
+      if (request.length > 16 * 1024 * 1024) { socket.destroy(); return; }
+      for (;;) {
+        const frameEnd = request.indexOf('\n');
+        if (frameEnd < 0) return;
+        const frame = request.slice(0, frameEnd);
+        request = request.slice(frameEnd + 1);
+        void (async () => {
+          let requestId = '';
+          let persistent = false;
+          const respond = (payload: Record<string, unknown>) => {
+            const framed = JSON.stringify({ ...payload, ...(requestId ? { requestId } : {}) }) + '\n';
+            if (persistent && !socket.destroyed) socket.write(framed);
+            else socket.end(framed);
+          };
+          try {
+        const parsed = JSON.parse(frame) as { token?: string; command?: RuntimeControlCommand | 'data'; expectedRuntimeId?: string; replacementBuildId?: string; replacementVersion?: string; requestId?: string; request?: RuntimeDataRequest };
+        requestId = String(parsed.requestId || '');
+        persistent = parsed.command === 'data' && Boolean(requestId);
         const providedToken = Buffer.from(String(parsed.token || ''));
         const expectedToken = Buffer.from(token);
         if (providedToken.length !== expectedToken.length || !crypto.timingSafeEqual(providedToken, expectedToken)) {
-          socket.end(JSON.stringify({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'Runtime control authentication failed.' }) + '\n');
+          respond({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'Runtime control authentication failed.' });
           return;
         }
+        authenticated = true;
+        if (persistent) socket.setTimeout(0);
         const command = parsed.command;
         if (!command || !['health', 'refresh', 'pause', 'resume', 'drain', 'stop', 'data'].includes(command)) {
-          socket.end(JSON.stringify({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'Unknown Runtime control command.' }) + '\n');
+          respond({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'Unknown Runtime control command.' });
           return;
         }
         if (parsed.expectedRuntimeId && parsed.expectedRuntimeId !== options.runtimeId) {
-          socket.end(JSON.stringify({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'different_runtime' }) + '\n');
+          respond({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'different_runtime' });
           return;
         }
         if (command === 'drain' && options.buildId) {
@@ -216,7 +256,7 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
             else if (comparison === 0 && parsed.replacementBuildId !== options.buildId) replacementError = 'runtime_same_version_build_conflict';
           }
           if (replacementError) {
-            socket.end(JSON.stringify({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: replacementError }) + '\n');
+            respond({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: replacementError });
             return;
           }
         }
@@ -224,32 +264,37 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
           if (!options.onData || !parsed.request) throw new Error('Runtime data service is unavailable.');
           // Accepted work must finish even when a backup or export outlives a control timeout.
           socket.setTimeout(0);
-          acquireBusyLease();
-          busy.add(socket);
+          beginSocketWork(socket);
           let result: unknown;
-          try { result = await dataScheduler.submit(runtimeOperationPriority(parsed.request.operation), () => Promise.resolve(options.onData!(parsed.request!))); }
+          try {
+            const domain = options.enforceOperationRegistry
+              ? runtimeOperationDefinition(parsed.request.operation).domain
+              : (() => { try { return runtimeOperationDefinition(parsed.request!.operation).domain; } catch { return 'background-query' as const; } })();
+            result = await dataScheduler.submit(domain, () => Promise.resolve(options.onData!(parsed.request!)));
+          }
           finally {
-            busy.delete(socket);
             // Clearing a completed-work marker must not replace the operation's
             // result or root error. A failed unlink remains bounded by the
             // host-side lease age and cannot impersonate another Runtime.
-            clearIdleBusyLease();
+            finishSocketWork(socket);
           }
-          socket.end(JSON.stringify({ ok: true, runtimeId: options.runtimeId, result }) + '\n');
+          respond({ ok: true, runtimeId: options.runtimeId, result });
           return;
         }
         const replacement = command === 'drain' && parsed.replacementBuildId && parsed.replacementVersion
           ? { buildId: parsed.replacementBuildId, releaseVersion: parsed.replacementVersion }
           : undefined;
         const result = await options.onCommand(command, replacement);
-        socket.end(JSON.stringify({ ok: true, runtimeId: options.runtimeId, ...result, entryPath: options.entryPath, buildId: options.buildId, releaseVersion: options.releaseVersion, owner: options.owner }) + '\n');
+        respond({ ok: true, runtimeId: options.runtimeId, ...result, entryPath: options.entryPath, buildId: options.buildId, releaseVersion: options.releaseVersion, owner: options.owner });
       } catch (error) {
-        socket.end(JSON.stringify({
+        respond({
           ok: false,
           runtimeId: options.runtimeId,
           status: 'failed',
           error: error instanceof Error ? error.message : String(error)
-        }) + '\n');
+        });
+      }
+        })();
       }
     });
   });
@@ -290,11 +335,13 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
       };
     },
     close: async () => {
+      closing = true;
       const closePromise = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
       const forceCloseTimer = setTimeout(() => connections.forEach(socket => { if (!busy.has(socket)) socket.destroy(); }), 100);
       forceCloseTimer.unref();
       await closePromise;
       clearTimeout(forceCloseTimer);
+      if (acceptedWork > 0) await new Promise<void>(resolve => acceptedWorkWaiters.add(resolve));
       try {
         const current = JSON.parse(fs.readFileSync(filePath, 'utf8')) as RuntimeControlEndpoint;
         if (current.runtimeId === options.runtimeId) fs.unlinkSync(filePath);
@@ -305,45 +352,171 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
   };
 }
 
-export async function sendRuntimeDataRequest<T>(globalDataPath: string, request: RuntimeDataRequest): Promise<T> {
-  const send = (endpoint: RuntimeControlEndpoint): Promise<T> => new Promise((resolve, reject) => {
-    const socket = net.createConnection({ host: '127.0.0.1', port: endpoint.port });
-    let response = '';
-    let connected = false;
-    socket.setEncoding('utf8');
-    socket.once('connect', () => {
-      connected = true;
-      socket.write(JSON.stringify({ token: endpoint.token, command: 'data', expectedRuntimeId: endpoint.runtimeId, request }) + '\n');
+interface RuntimeDataResponse {
+  requestId?: string;
+  ok: boolean;
+  runtimeId: string;
+  result?: unknown;
+  error?: string;
+}
+
+type RuntimeDataTransportError = Error & {
+  runtimeDataPreconnect?: boolean;
+  runtimeDataPrewrite?: boolean;
+  runtimeDataAmbiguous?: boolean;
+};
+
+function taggedRuntimeDataError(message: string, tag: keyof Pick<RuntimeDataTransportError, 'runtimeDataPrewrite' | 'runtimeDataAmbiguous'>): RuntimeDataTransportError {
+  return Object.assign(new Error(message), { [tag]: true });
+}
+
+class RuntimeDataConnection {
+  private readonly socket: net.Socket;
+  private readonly ready: Promise<void>;
+  private responseBuffer = '';
+  private connected = false;
+  private settled = false;
+  private activeRequests = 0;
+  private readonly pending = new Map<string, { resolve(value: unknown): void; reject(error: unknown): void }>();
+
+  constructor(
+    readonly endpoint: RuntimeControlEndpoint,
+    private readonly onClosed: (connection: RuntimeDataConnection) => void
+  ) {
+    this.socket = net.createConnection({ host: endpoint.host, port: endpoint.port });
+    this.socket.setEncoding('utf8');
+    this.socket.unref();
+    this.ready = new Promise<void>((resolve, reject) => {
+      this.socket.once('connect', () => { this.connected = true; resolve(); });
+      this.socket.once('error', error => {
+        if (!this.connected) Object.assign(error, { runtimeDataPreconnect: true });
+        reject(error);
+        this.fail(error);
+      });
     });
-    socket.on('data', chunk => { response += chunk; });
-    socket.once('error', error => {
-      if (!connected) Object.assign(error, { runtimeDataPreconnect: true });
-      reject(error);
+    this.socket.on('data', chunk => this.receive(String(chunk)));
+    this.socket.once('end', () => {
+      // Runtime versions before the multiplexed protocol closed a one-shot
+      // socket after a complete JSON response without a trailing newline.
+      // Consume that final frame so a rolling handover remains compatible.
+      if (this.responseBuffer.trim()) this.receive('\n');
+      this.fail(taggedRuntimeDataError('runtime_data_response_incomplete', 'runtimeDataAmbiguous'));
     });
-    socket.once('end', () => {
-      try {
-        let parsed: { ok: boolean; runtimeId: string; result: T; error?: string };
+    this.socket.once('close', () => this.fail(taggedRuntimeDataError('runtime_data_response_incomplete', 'runtimeDataAmbiguous')));
+  }
+
+  private receive(chunk: string): void {
+    this.responseBuffer += chunk;
+    for (;;) {
+      const frameEnd = this.responseBuffer.indexOf('\n');
+      if (frameEnd < 0) return;
+      const frame = this.responseBuffer.slice(0, frameEnd);
+      this.responseBuffer = this.responseBuffer.slice(frameEnd + 1);
+      let response: RuntimeDataResponse;
+      try { response = JSON.parse(frame) as RuntimeDataResponse; }
+      catch { this.fail(taggedRuntimeDataError('runtime_data_response_incomplete', 'runtimeDataAmbiguous')); return; }
+      let requestId = String(response.requestId || '');
+      // A pre-multiplex Runtime has no requestId because it accepts exactly
+      // one request per connection. Rolling upgrades may briefly connect to
+      // that owner, so the sole in-flight request remains unambiguous.
+      if (!requestId && this.pending.size === 1) requestId = this.pending.keys().next().value as string;
+      const pending = this.pending.get(requestId);
+      if (!pending) continue;
+      this.pending.delete(requestId);
+      if (!response.ok || response.runtimeId !== this.endpoint.runtimeId) pending.reject(new Error(response.error || 'different_runtime'));
+      else pending.resolve(response.result);
+    }
+  }
+
+  private fail(error: unknown): void {
+    if (this.settled) return;
+    this.settled = true;
+    for (const request of this.pending.values()) request.reject(error);
+    this.pending.clear();
+    this.onClosed(this);
+  }
+
+  async request<T>(request: RuntimeDataRequest): Promise<T> {
+    this.activeRequests += 1;
+    this.socket.ref();
+    try {
+      await this.ready;
+      if (this.settled || this.socket.destroyed) throw taggedRuntimeDataError('runtime_data_response_incomplete', 'runtimeDataPrewrite');
+      const requestId = crypto.randomUUID();
+      return await new Promise<T>((resolve, reject) => {
+        this.pending.set(requestId, { resolve: value => resolve(value as T), reject });
+        const frame = JSON.stringify({
+          token: this.endpoint.token,
+          command: 'data',
+          expectedRuntimeId: this.endpoint.runtimeId,
+          requestId,
+          request
+        }) + '\n';
         try {
-          if (!response.trim()) throw new Error('runtime_data_response_incomplete');
-          parsed = JSON.parse(response) as typeof parsed;
+          this.socket.write(frame, error => {
+            if (!error) return;
+            this.pending.delete(requestId);
+            reject(Object.assign(error, { runtimeDataAmbiguous: true }));
+          });
         } catch (error) {
-          if (error instanceof Error && error.message === 'runtime_data_response_incomplete') throw error;
-          throw new Error('runtime_data_response_incomplete');
+          this.pending.delete(requestId);
+          reject(error instanceof Error ? Object.assign(error, { runtimeDataAmbiguous: true }) : error);
         }
-        if (!parsed.ok || parsed.runtimeId !== endpoint.runtimeId) throw new Error(parsed.error || 'different_runtime');
-        resolve(parsed.result);
-      } catch (error) { reject(error); }
+      });
+    } finally {
+      this.activeRequests -= 1;
+      if (this.activeRequests === 0) this.socket.unref();
+    }
+  }
+}
+
+function runtimeDataRequestReplaySafe(request: RuntimeDataRequest): boolean {
+  try {
+    const replay = runtimeOperationDefinition(request.operation).replay;
+    if (replay === 'safe') return true;
+    if (replay === 'never') return false;
+    if (replay === 'open-request-id') {
+      const input = request.input as Record<string, unknown>;
+      return typeof input.openRequestId === 'string' && input.openRequestId.length > 0;
+    }
+  } catch {
+    // Unknown fixture and future operations are writes unless they declare an idempotency contract.
+  }
+  const input = request.input as Record<string, unknown>;
+  return typeof input.idempotencyKey === 'string' && input.idempotencyKey.length > 0;
+}
+
+const runtimeDataConnections = new Map<string, Promise<RuntimeDataConnection>>();
+
+async function runtimeDataConnection(globalDataPath: string): Promise<RuntimeDataConnection> {
+  const root = normalizeGlobalDataPathForExtension(globalDataPath);
+  let connection = runtimeDataConnections.get(root);
+  if (!connection) {
+    connection = readReadyEndpoint(root).then(endpoint => {
+      const value = new RuntimeDataConnection(endpoint, _closed => {
+        if (runtimeDataConnections.get(root) === connection) runtimeDataConnections.delete(root);
+      });
+      return value;
+    }).catch(error => {
+      if (runtimeDataConnections.get(root) === connection) runtimeDataConnections.delete(root);
+      throw error;
     });
-  });
-  let endpoint = await readReadyEndpoint(globalDataPath);
+    runtimeDataConnections.set(root, connection);
+  }
+  return connection;
+}
+
+export async function sendRuntimeDataRequest<T>(globalDataPath: string, request: RuntimeDataRequest): Promise<T> {
   const reconnectDeadline = Date.now() + 3_000;
   for (;;) {
     try {
-      return await send(endpoint);
+      return await (await runtimeDataConnection(globalDataPath)).request<T>(request);
     } catch (error) {
-      if (!(error instanceof Error) || !(error as Error & { runtimeDataPreconnect?: boolean }).runtimeDataPreconnect || Date.now() >= reconnectDeadline) throw error;
+      if (!(error instanceof Error)) throw error;
+      const transport = error as RuntimeDataTransportError;
+      const retryable = transport.runtimeDataPreconnect || transport.runtimeDataPrewrite || (transport.runtimeDataAmbiguous && runtimeDataRequestReplaySafe(request));
+      if (!retryable || Date.now() >= reconnectDeadline) throw error;
       await new Promise(resolve => setTimeout(resolve, 25));
-      endpoint = await readReadyEndpoint(globalDataPath, Math.max(25, reconnectDeadline - Date.now()));
     }
   }
 }

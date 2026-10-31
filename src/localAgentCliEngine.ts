@@ -3,6 +3,7 @@ import { performance } from 'node:perf_hooks';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { BroadcastChannel } from 'node:worker_threads';
 
 import { getAgentCliFamily, resolveAgentCliWithinFamily } from './agentCli';
 import { CognitiveShadowEngine, CognitiveShadowInput, CognitiveShadowProposal } from './autonomousRuntime';
@@ -22,6 +23,52 @@ export interface CognitiveCliInvocation {
 }
 
 export type CognitiveCliRunner = (invocation: CognitiveCliInvocation) => Promise<string>;
+
+const cognitiveInvocationRegistryKey = Symbol.for('solomap.activeCognitiveCliInvocations');
+const cognitiveShutdownEvent = 'solomap-runtime-cognitive-shutdown';
+const cognitiveShutdownChannel = new BroadcastChannel('solomap-runtime-cognitive-lifecycle');
+cognitiveShutdownChannel.unref();
+const cognitiveInvocationGlobal = globalThis as Record<PropertyKey, unknown>;
+const activeCognitiveCliInvocations = (cognitiveInvocationGlobal[cognitiveInvocationRegistryKey] as Set<() => void> | undefined)
+  || new Set<() => void>();
+const activeCognitiveCliPids = new Set<number>();
+let cognitiveShutdownRequested = false;
+cognitiveInvocationGlobal[cognitiveInvocationRegistryKey] = activeCognitiveCliInvocations;
+cognitiveShutdownChannel.onmessage = event => {
+  const message = (event as { data?: unknown }).data as { type?: string; pid?: number } | undefined;
+  if (message?.type === 'active' && Number.isSafeInteger(message.pid)) activeCognitiveCliPids.add(message.pid!);
+  if (message?.type === 'inactive' && Number.isSafeInteger(message.pid)) activeCognitiveCliPids.delete(message.pid!);
+  if (message?.type === 'shutdown') {
+    cognitiveShutdownRequested = true;
+    cancelActiveCognitiveCliInvocations();
+    terminateActiveCognitiveCliProcesses();
+  }
+};
+
+function terminateActiveCognitiveCliProcesses(): void {
+  for (const pid of [...activeCognitiveCliPids]) {
+    try { process.kill(pid, 'SIGTERM'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+    const force = setTimeout(() => {
+      try { process.kill(pid, 'SIGKILL'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+    }, 2_000);
+    force.unref();
+  }
+}
+
+export function cancelActiveCognitiveCliInvocations(): void {
+  for (const cancel of [...activeCognitiveCliInvocations]) cancel();
+}
+
+export function activeCognitiveCliInvocationCount(): number {
+  return activeCognitiveCliInvocations.size;
+}
+
+export function signalCognitiveCliShutdown(): void {
+  cognitiveShutdownRequested = true;
+  (process.emit as unknown as (event: string) => boolean)(cognitiveShutdownEvent);
+  terminateActiveCognitiveCliProcesses();
+  cognitiveShutdownChannel.postMessage({ type: 'shutdown' });
+}
 
 function modelArgs(model: string): string[] {
   return model && model !== 'auto' ? ['--model', model] : [];
@@ -73,6 +120,7 @@ export function cognitiveCliEnvironment(): NodeJS.ProcessEnv {
 
 export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, registerCancel: (cancel?: () => void) => void): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (cognitiveShutdownRequested) { reject(new Error('Local Agent CLI cognitive call was cancelled.')); return; }
     const started = performance.now();
     recordCurrentDiagnosticStage('model.cli.spawn', 'start');
     let schemaDirectory: string | undefined;
@@ -98,6 +146,10 @@ export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, re
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe']
     }); } catch (error) { retireSchema(); throw error; } })();
+    if (child.pid) {
+      activeCognitiveCliPids.add(child.pid);
+      cognitiveShutdownChannel.postMessage({ type: 'active', pid: child.pid });
+    }
     let stdout = '';
     let stderr = '';
     let stderrTail = '';
@@ -108,11 +160,18 @@ export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, re
     let settled = false;
     let terminationError: Error | undefined;
     let forceKillTimer: NodeJS.Timeout | undefined;
+    let cancelInvocation: () => void = () => {};
     const finish = (callback: () => void) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
+      if (child.pid) {
+        activeCognitiveCliPids.delete(child.pid);
+        cognitiveShutdownChannel.postMessage({ type: 'inactive', pid: child.pid });
+      }
+      activeCognitiveCliInvocations.delete(cancelInvocation);
+      process.off(cognitiveShutdownEvent, cancelInvocation);
       registerCancel(undefined);
       try { retireSchema(); } catch (error) { reject(error); return; }
       callback();
@@ -126,7 +185,10 @@ export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, re
       }, 2_000);
       forceKillTimer.unref();
     };
-    registerCancel(() => terminate(new Error('Local Agent CLI cognitive call was cancelled.')));
+    cancelInvocation = () => terminate(new Error('Local Agent CLI cognitive call was cancelled.'));
+    activeCognitiveCliInvocations.add(cancelInvocation);
+    process.on(cognitiveShutdownEvent, cancelInvocation);
+    registerCancel(cancelInvocation);
     const timer = setTimeout(() => {
       recordCurrentDiagnosticStage('model.cli.timeout', 'error', performance.now() - started, new Error('timeout'), { pid: child.pid, timeoutMs });
       terminate(new Error('Local Agent CLI cognitive call timed out.'));

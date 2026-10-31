@@ -4967,7 +4967,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       else setTimeout(report, 0);
     }
     const ignoredTodayDecisionIds = new Set();
-    let dailyReviewPollTimer = null;
     let currentFeedbackType = 'not_working';
     let intelligenceConversations = [];
     let intelligenceConversation = null;
@@ -9390,7 +9389,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
         case 'dailyReviewLoaded':
           currentDailyReview = message.review || null;
-          startDailyReviewPolling();
           if (currentDailyReview && currentDailyReview.feedbackOutcome === 'ignored' && currentDailyReview.decisionId) {
             ignoredTodayDecisionIds.add(String(currentDailyReview.decisionId));
           }
@@ -9938,13 +9936,29 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     function clearSubmittedAttachments(targetId, projectPath = currentProjects.selectedProjectPath) {
       const attachmentKey = sidebarAttachmentKey(targetId, projectPath);
       if (pendingPastedAttachments[attachmentKey] && pendingPastedAttachments[attachmentKey].size > 0) return false;
+      const hadAttachments = getSidebarProjectFiles(projectPath, targetId).length > 0
+        || Boolean(queuedPastedAttachmentActions[attachmentKey])
+        || Boolean(pastedAttachmentErrors[attachmentKey]);
       delete queuedPastedAttachmentActions[attachmentKey];
       delete pastedAttachmentErrors[attachmentKey];
       pastedAttachmentEpochs[attachmentKey] = Number(pastedAttachmentEpochs[attachmentKey] || 0) + 1;
       if (pendingPastedAttachments[attachmentKey]) pendingPastedAttachments[attachmentKey].clear();
       setSidebarProjectFiles(projectPath, targetId, []);
       saveSidebarProjectFiles(projectPath, targetId);
-      return true;
+      return hadAttachments;
+    }
+
+    function refreshSubmittedAttachments(panel, projectPath) {
+      const attachments = panel?.querySelector('.sidebar-solo-attachments');
+      if (attachments) {
+        attachments.replaceChildren();
+        return;
+      }
+      Promise.resolve().then(() => {
+        if (projectPath === currentProjects.selectedProjectPath) {
+          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath, true);
+        }
+      });
     }
 
     function extractPreGitHash(conversation) {
@@ -10723,12 +10737,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           const selectedAgentCli = getSoloSelectValue(agentSelect);
           const selectedModel = getSoloSelectValue(modelSelect);
           const nodeId = sendButton.getAttribute('data-next-node-id');
-          let queuedForAttachment = false;
-          const renderAfterSend = () => {
-            if (projectPath !== currentProjects.selectedProjectPath) return;
-            if (queuedForAttachment) renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
-            else renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
-          };
           const send = () => {
             if (mode === 'solo') {
               if (!projectPath || !userMessage.trim()) return;
@@ -10744,8 +10752,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
                 supplementFiles: getSidebarProjectFiles(projectPath, targetId)
               }, launchActionId);
               clearSubmittedSidebarDraft(mode, projectPath, targetId, userMessage);
-              clearSubmittedAttachments(targetId, projectPath);
-              renderAfterSend();
+              if (clearSubmittedAttachments(targetId, projectPath)) {
+                refreshSubmittedAttachments(panel, projectPath);
+              }
               return;
             }
             if (mode === 'flow') {
@@ -10760,17 +10769,19 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
                 supplementFiles: getSidebarProjectFiles(projectPath, targetId)
               });
               clearSubmittedSidebarDraft(mode, projectPath, targetId, userMessage);
-              clearSubmittedAttachments(targetId, projectPath);
-              renderAfterSend();
+              if (clearSubmittedAttachments(targetId, projectPath)) {
+                refreshSubmittedAttachments(panel, projectPath);
+              }
               return;
             }
             runNodeAgent(projectPath, nodeId, userMessage, selectedAgentCli, selectedModel, getSidebarProjectFiles(projectPath, targetId));
             clearSubmittedSidebarDraft(mode, projectPath, targetId, userMessage);
-            clearSubmittedAttachments(targetId, projectPath);
-            renderAfterSend();
+            if (clearSubmittedAttachments(targetId, projectPath)) {
+              refreshSubmittedAttachments(panel, projectPath);
+            }
           };
           if (!userMessage.trim()) return;
-          queuedForAttachment = queuePastedAttachmentAction(targetId, send, projectPath);
+          queuePastedAttachmentAction(targetId, send, projectPath);
         });
       });
       container.querySelectorAll('[data-project-conversation-input], [data-project-continue-agent]').forEach(item => {
@@ -11072,20 +11083,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         ).slice(0, 3);
       }
 
-      function startDailyReviewPolling() {
-        if (dailyReviewPollTimer) {
-          clearTimeout(dailyReviewPollTimer);
-          dailyReviewPollTimer = null;
-        }
-        const isRunning = currentDailyReview && currentDailyReview.status === 'running';
-        const isRuntimeDriven = !currentDailyReview || currentDailyReview.source === 'runtime_shadow';
-        if (!isRunning && !isRuntimeDriven) return;
-        dailyReviewPollTimer = setTimeout(() => {
-          vscode.postMessage({ command: 'getDailyReview' });
-        }, isRunning ? 2500 : 30000);
-        if (dailyReviewPollTimer && typeof dailyReviewPollTimer.unref === 'function') dailyReviewPollTimer.unref();
-      }
-
       function renderDailyReview(review) {
         if (!review) return '';
         if (review.decisionId && ignoredTodayDecisionIds.has(String(review.decisionId))) return '';
@@ -11307,7 +11304,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             };
             renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);
             vscode.postMessage({ command: 'runDailyReview' });
-            startDailyReviewPolling();
           });
         }
         globalFocusPanel.querySelectorAll('[data-global-focus-project]').forEach(item => {

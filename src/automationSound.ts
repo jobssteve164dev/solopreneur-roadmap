@@ -1,4 +1,5 @@
 import type * as vscode from 'vscode';
+import { postWebviewMessage } from './panelMessages';
 
 const readyViews = new WeakMap<vscode.Webview, string>();
 const pending = new Map<string, { view: vscode.Webview; id: string; pageId: string; resolve: (played: boolean) => void }>();
@@ -36,7 +37,7 @@ export async function deliverAutomationSound(view: vscode.Webview, id: string, t
   const pageId = readyViews.get(view)!;
   const acknowledgement = new Promise<boolean>(resolve => pending.set(token, { view, id, pageId, resolve }));
   try {
-    if (!await view.postMessage({ command: 'automationPlaySound', pageId, deliveryId: id, token })) {
+    if (!await postWebviewMessage(view, { command: 'automationPlaySound', pageId, deliveryId: id, token })) {
       pending.delete(token); return false;
     }
     posted();

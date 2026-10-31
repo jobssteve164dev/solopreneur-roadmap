@@ -89,6 +89,15 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
     }
     return store.registerProject({ root: String(input.root || '') });
   };
+  const readProject = async (input: Record<string, unknown>): Promise<{ projectId: string } | null> => {
+    if (input.projectId) {
+      const projectId = String(input.projectId);
+      if (store.readMetadata(projectId).kind !== 'project') throw new Error('project_scope_required');
+      return { projectId };
+    }
+    const projectId = store.lookupProjectForRead(String(input.root || ''));
+    return projectId ? { projectId } : null;
+  };
   const withRoadmapBackup = async (input: Record<string, unknown>): Promise<Record<string, unknown>> => {
     if ((input.metadata as Record<string, unknown> | undefined)?.captureRoadmapBackup !== true) return input;
     try {
@@ -182,13 +191,19 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       case 'register_telegram_editor_endpoint': return registerTelegramEditorEndpoint(String(input.globalDataPath || store.root), input as Parameters<typeof registerTelegramEditorEndpoint>[1]);
       case 'install_runtime_secret': persistTelegramRuntimeSecret(store.root, String(input.secretRef || ''), String(input.value || '')); return { installed: true };
       case 'accept_roadmap_csv': return store.acceptRoadmapCsv(input as unknown as Parameters<UnifiedDataStore['acceptRoadmapCsv']>[0]);
-      case 'read_roadmap': return store.readRoadmap(input as unknown as Parameters<UnifiedDataStore['readRoadmap']>[0]);
+      case 'read_roadmap': {
+        const project = await readProject(input);
+        if (!project) throw new Error('roadmap_import_required');
+        return store.readRoadmapByProject(project.projectId);
+      }
       case 'read_today_roadmaps': {
         if (!Array.isArray(input.roots) || input.roots.some(root => typeof root !== 'string' || !path.isAbsolute(root))) throw new Error('invalid_today_roadmap_query');
         const items = await Promise.all(input.roots.map(async rawRoot => {
           const root = String(rawRoot);
           try {
-            const snapshot = await store.readRoadmap({ root });
+            const project = await readProject({ root });
+            if (!project) return { root, nodes: [] };
+            const snapshot = store.readRoadmapByProject(project.projectId);
             return { root, nodes: snapshot.nodes };
           } catch (error) {
             const code = (error as NodeJS.ErrnoException)?.code;
@@ -260,7 +275,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return store.writeInternalAttachment(project.projectId, input as unknown as Parameters<UnifiedDataStore['writeInternalAttachment']>[1]);
       }
       case 'read_internal_attachment': {
-        const project = await runProject(input);
+        const project = await readProject(input);
+        if (!project) throw new Error('project_scope_required');
         return store.readInternalAttachment(project.projectId, input as unknown as Parameters<UnifiedDataStore['readInternalAttachment']>[1]);
       }
       case 'initialize_project_registry': return store.initializeProjectRegistry(input as Parameters<UnifiedDataStore['initializeProjectRegistry']>[0]);
@@ -307,8 +323,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
       case 'heartbeat_runtime_instance': return store.heartbeatRuntimeInstance(input as unknown as Parameters<UnifiedDataStore['heartbeatRuntimeInstance']>[0]);
       case 'read_learning_overview': return store.readLearningOverview();
       case 'read_rsi_cycles': {
-        const project = await runProject(input);
-        return store.readRsiCycles(project.projectId, input);
+        const project = await readProject(input);
+        return project ? store.readRsiCycles(project.projectId, input) : [];
       }
       case 'record_run_verification': {
         const project = await runProject(input);
@@ -319,8 +335,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return store.syncExternalMemory(project.projectId, input as unknown as Parameters<UnifiedDataStore['syncExternalMemory']>[1]);
       }
       case 'read_external_memory_targets': {
-        const project = await runProject(input);
-        return store.readExternalMemoryTargets(project.projectId);
+        const project = await readProject(input);
+        return project ? store.readExternalMemoryTargets(project.projectId) : [];
       }
       case 'revoke_external_memory_target': {
         const project = await runProject(input);
@@ -356,7 +372,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return store.prepareFlowRole(project.projectId, project.locationId, input as unknown as Parameters<UnifiedDataStore['prepareFlowRole']>[2]);
       }
       case 'read_run_intent': {
-        const project = await runProject(input);
+        const project = await readProject(input);
+        if (!project) return null;
         return store.readRunIntent(project.projectId, String(input.launchIntentId || ''));
       }
       case 'prepare_run_intent': {
@@ -366,7 +383,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return store.prepareRunIntent(project.projectId, project.locationId, prepared as unknown as Parameters<UnifiedDataStore['prepareRunIntent']>[2]);
       }
       case 'read_run_slot': {
-        const project = await runProject(input);
+        const project = await readProject(input);
+        if (!project) return null;
         return store.readRunSlot(project.projectId, String(input.launchSlotId || ''), input.launchSlotScope === 'global' ? 'global' : 'project');
       }
       case 'prepare_run_slot': {
@@ -381,35 +399,43 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return store.prepareRun(project.projectId, project.locationId, await withRoadmapBackup(input) as unknown as Parameters<UnifiedDataStore['prepareRun']>[2]);
       }
       case 'read_run_state': {
-        const project = await runProject(input);
+        const project = await readProject(input);
+        if (!project) throw new Error('run_missing');
         return store.readRunState(project.projectId, Number(input.executionLogId), input.revision === undefined ? undefined : Number(input.revision));
       }
       case 'read_run_execution_plan': {
-        const project = await runProject(input);
+        const project = await readProject(input);
+        if (!project) throw new Error('project_scope_required');
         return store.readRunExecutionPlan(project.projectId, Number(input.executionLogId));
       }
       case 'read_run_launch_permission': {
-        const project = await runProject(input);
+        const project = await readProject(input);
+        if (!project) throw new Error('project_scope_required');
         return store.readRunLaunchPermission(project.projectId, input as unknown as Parameters<UnifiedDataStore['readRunLaunchPermission']>[1]);
       }
       case 'read_run_checkpoint_state': {
-        const project = await runProject(input);
+        const project = await readProject(input);
+        if (!project) throw new Error('project_scope_required');
         return store.readRunCheckpointState(project.projectId, Number(input.executionLogId));
       }
       case 'read_run_turn_journal': {
-        const project = await runProject(input);
+        const project = await readProject(input);
+        if (!project) throw new Error('project_scope_required');
         return store.readRunTurnJournal(project.projectId, Number(input.executionLogId), input.turnId === undefined ? undefined : String(input.turnId));
       }
       case 'resolve_run_conversation': {
-        const project = await runProject(input);
+        const project = await readProject(input);
+        if (!project) return null;
         return store.resolveRunConversation(project.projectId, Number(input.executionLogId));
       }
       case 'list_conversation_run_states': {
-        const project = await runProject(input);
+        const project = await readProject(input);
+        if (!project) return { items: [] };
         return store.listConversationRunStates(project.projectId, Number(input.executionLogId));
       }
       case 'resolve_run_conversation_turn': {
-        const project = await runProject(input);
+        const project = await readProject(input);
+        if (!project) return null;
         return store.resolveRunConversationTurn(project.projectId, Number(input.executionLogId));
       }
       case 'patch_run_inputs': {
@@ -451,20 +477,20 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return store.commitRunSettlement(project.projectId, input as unknown as Parameters<UnifiedDataStore['commitRunSettlement']>[1]);
       }
       case 'read_run_settlements': {
-        const project = await runProject(input);
-        return store.readRunSettlements(project.projectId, input);
+        const project = await readProject(input);
+        return project ? store.readRunSettlements(project.projectId, input) : { items: [], nextCursor: null };
       }
       case 'query_run_digests': {
-        const project = await runProject(input);
-        return store.queryRunDigests(project.projectId, input as unknown as Parameters<UnifiedDataStore['queryRunDigests']>[1]);
+        const project = await readProject(input);
+        return project ? store.queryRunDigests(project.projectId, input as unknown as Parameters<UnifiedDataStore['queryRunDigests']>[1]) : { items: [], nextCursor: null };
       }
       case 'read_run_digests': {
-        const project = await runProject(input);
-        return store.readRunDigests(project.projectId, input);
+        const project = await readProject(input);
+        return project ? store.readRunDigests(project.projectId, input) : [];
       }
       case 'read_run_index_health': {
-        const project = await runProject(input);
-        return store.readRunIndexHealth(project.projectId);
+        const project = await readProject(input);
+        return project ? store.readRunIndexHealth(project.projectId) : null;
       }
       case 'backfill_run_indexes': {
         const project = await runProject(input);
@@ -483,12 +509,12 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return store.finishRunEffect(project.projectId, input as unknown as Parameters<UnifiedDataStore['finishRunEffect']>[1]);
       }
       case 'read_step_memory_state': {
-        const project = await runProject(input);
-        return store.readStepMemoryState(project.projectId);
+        const project = await readProject(input);
+        return project ? store.readStepMemoryState(project.projectId) : null;
       }
       case 'read_step_memory': {
-        const project = await runProject(input);
-        return store.readStepMemory(project.projectId, String(input.nodeId || ''), { ...(input.revision === undefined ? {} : { revision: Number(input.revision) }), includeEntries: input.includeEntries !== false });
+        const project = await readProject(input);
+        return project ? store.readStepMemory(project.projectId, String(input.nodeId || ''), { ...(input.revision === undefined ? {} : { revision: Number(input.revision) }), includeEntries: input.includeEntries !== false }) : null;
       }
       case 'read_notification': return store.readNotification(String(input.intentId || ''));
       case 'enqueue_notification': return store.enqueueNotification(input as unknown as Parameters<UnifiedDataStore['enqueueNotification']>[0]);
@@ -517,20 +543,20 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return store.writeStepMemory(project.projectId, input as unknown as Parameters<UnifiedDataStore['writeStepMemory']>[1]);
       }
       case 'read_flow_trace': {
-        const project = await runProject(input);
-        return store.readFlowTrace(project.projectId, String(input.flowId), input.revision === undefined ? undefined : Number(input.revision));
+        const project = await readProject(input);
+        return project ? store.readFlowTrace(project.projectId, String(input.flowId), input.revision === undefined ? undefined : Number(input.revision)) : null;
       }
       case 'write_flow_trace': {
         const project = await runProject(input);
         return store.writeFlowTrace(project.projectId, input as unknown as Parameters<UnifiedDataStore['writeFlowTrace']>[1]);
       }
       case 'list_flow_traces': {
-        const project = await runProject(input);
-        return store.listFlowTraces(project.projectId, input);
+        const project = await readProject(input);
+        return project ? store.listFlowTraces(project.projectId, input) : [];
       }
       case 'read_documentation_manifest': {
-        const project = await runProject(input);
-        return store.readDocumentationManifest(project.projectId);
+        const project = await readProject(input);
+        return project ? store.readDocumentationManifest(project.projectId) : { schemaVersion: 1, updatedAt: '', documents: [], pendingReview: [] };
       }
       case 'sync_documentation_manifest': {
         const project = await runProject(input);
@@ -553,12 +579,13 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return store.writeRunBinding(project.projectId, input as unknown as Parameters<UnifiedDataStore['writeRunBinding']>[1]);
       }
       case 'read_run_binding': {
-        const project = await runProject(input);
+        const project = await readProject(input);
+        if (!project) throw new Error('project_scope_required');
         return store.readRunBinding(project.projectId, Number(input.executionLogId), input.revision === undefined ? undefined : Number(input.revision));
       }
       case 'read_recent_run_session': {
-        const project = await runProject(input);
-        return store.readRecentRunSession(project.projectId, String(input.nodeId || ''), String(input.provider || ''));
+        const project = await readProject(input);
+        return project ? store.readRecentRunSession(project.projectId, String(input.nodeId || ''), String(input.provider || '')) : null;
       }
       case 'submit_run_report': {
         const project = await store.registerProject({ root: String(input.root || '') });
@@ -642,11 +669,13 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return store.appendRunLog(project.projectId, input as unknown as Parameters<UnifiedDataStore['appendRunLog']>[1]);
       }
       case 'read_run_log': {
-        const project = await runProject(input);
+        const project = await readProject(input);
+        if (!project) throw new Error('project_scope_required');
         return store.readRunLog(project.projectId, input as unknown as Parameters<UnifiedDataStore['readRunLog']>[1]);
       }
       case 'read_run_log_head': {
-        const project = await runProject(input);
+        const project = await readProject(input);
+        if (!project) throw new Error('project_scope_required');
         return store.readRunLogHead(project.projectId, Number(input.executionLogId), String(input.stream || ''));
       }
       case 'write_run_document': {
@@ -654,7 +683,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return store.writeRunDocument(project.projectId, input as unknown as Parameters<UnifiedDataStore['writeRunDocument']>[1]);
       }
       case 'read_run_document': {
-        const project = await runProject(input);
+        const project = await readProject(input);
+        if (!project) throw new Error('project_scope_required');
         return store.readRunDocument(project.projectId, Number(input.executionLogId), String(input.purpose || ''), input.revision === undefined ? undefined : Number(input.revision), input.tailBytes === undefined ? undefined : Number(input.tailBytes));
       }
       case 'recover_run_executions': {
@@ -691,7 +721,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return store.commitProjectGrowthRefresh(project.projectId, input as unknown as Parameters<UnifiedDataStore['commitProjectGrowthRefresh']>[1]);
       }
       case 'read_project_growth': {
-        const project = await store.registerProject({ root: String(input.root || '') });
+        const project = await readProject(input);
+        if (!project) return { latest: null, history: [] };
         return store.readProjectGrowth(project.projectId, Number(input.historyLimit || 12), input.snapshotId === undefined ? undefined : String(input.snapshotId));
       }
       case 'preview_growth_snapshot_detail_cleanup': return store.previewGrowthSnapshotDetailCleanup(input as unknown as Parameters<UnifiedDataStore['previewGrowthSnapshotDetailCleanup']>[0]);
@@ -715,7 +746,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return store.linkProjectJournal(project.projectId, Number(input.executionLogId), String(input.nodeId || ''), String(input.linkedAt || ''));
       }
       case 'read_project_journal': {
-        const project = await store.registerProject({ root: String(input.root || '') });
+        const project = await readProject(input);
+        if (!project) return { logs: [], nextCursor: null, revision: 0 };
         return store.readProjectJournal(project.projectId, input as any);
       }
       case 'upsert_project_run_index': {
@@ -723,27 +755,30 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         store.upsertProjectRunIndex(project.projectId, input.record as any, input.files as any, input.signals as any); return { written: true };
       }
       case 'read_project_run_indexes': {
-        const project = await store.registerProject({ root: String(input.root || '') }); return store.readProjectRunIndexes(project.projectId, input as any);
+        const project = await readProject(input); return project ? store.readProjectRunIndexes(project.projectId, input as any) : [];
       }
       case 'read_project_investment_runs': {
-        const projectId = await store.resolveProjectForRead(String(input.root || ''));
+        const projectId = store.lookupProjectForRead(String(input.root || ''));
         return projectId ? store.readProjectInvestmentRuns(projectId) : [];
       }
       case 'read_project_impact_runs': {
-        const project = await store.registerProject({ root: String(input.root || '') }); return store.readProjectImpactRuns(project.projectId);
+        const project = await readProject(input); return project ? store.readProjectImpactRuns(project.projectId) : [];
       }
       case 'read_project_reusable_source_count': {
-        const project = await store.registerProject({ root: String(input.root || '') }); return store.readProjectReusableSourceCount(project.projectId);
+        const project = await readProject(input); return project ? store.readProjectReusableSourceCount(project.projectId) : 0;
       }
       case 'read_project_analysis_source': {
-        const project = await store.registerProject({ root: String(input.root || '') }); return store.readProjectAnalysisSource(project.projectId);
+        const project = await readProject(input); return project ? store.readProjectAnalysisSource(project.projectId) : null;
       }
       case 'read_analysis_state':
       case 'write_analysis_state': {
+        if (request.operation === 'read_analysis_state') {
+          const project = input.root === undefined ? null : (await readProject(input))?.projectId;
+          if (input.root !== undefined && !project) return { objectId: null, revision: 0, value: null };
+          return store.readAnalysisState(project || null, String(input.namespace || ''), String(input.key || ''));
+        }
         const project = input.root === undefined ? null : (await store.registerProject({ root: String(input.root) })).projectId;
-        return request.operation === 'read_analysis_state'
-          ? store.readAnalysisState(project, String(input.namespace || ''), String(input.key || ''))
-          : store.writeAnalysisState(project, input as unknown as Parameters<UnifiedDataStore['writeAnalysisState']>[1]);
+        return store.writeAnalysisState(project, input as unknown as Parameters<UnifiedDataStore['writeAnalysisState']>[1]);
       }
       case 'reserve_sidebar_core_refresh': return store.reserveSidebarCoreRefresh(String(input.requestId || ''));
       case 'commit_sidebar_core_refresh': return store.commitSidebarCoreRefresh(input as unknown as Parameters<UnifiedDataStore['commitSidebarCoreRefresh']>[0]);
@@ -759,13 +794,13 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         if (!Array.isArray(input.roots) || input.roots.some(root => typeof root !== 'string')) throw new Error('strategy_source_roots_required');
         const projectIds: string[] = [];
         for (const root of input.roots) {
-          const projectId = await store.resolveProjectForRead(root);
+          const projectId = store.lookupProjectForRead(root);
           if (projectId) projectIds.push(projectId);
         }
         return { revision: store.readStrategySourceRevision(projectIds), projectIds };
       }
       case 'read_strategy_state': {
-        const project = input.root === undefined ? null : await store.resolveProjectForRead(String(input.root));
+        const project = input.root === undefined ? null : store.lookupProjectForRead(String(input.root));
         return input.root !== undefined && !project ? { objectId: null, revision: 0, value: null } : store.readStrategyState(project);
       }
       case 'write_strategy_state': {
@@ -781,14 +816,15 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return { written: true };
       }
       case 'read_run_artifact': {
-        const project = await store.registerProject({ root: String(input.root || '') });
+        const project = await readProject(input);
+        if (!project) throw new Error('project_scope_required');
         return input.offset !== undefined || input.limit !== undefined
           ? store.readRunArtifactPage(project.projectId, Number(input.executionLogId || 0), String(input.relativePath || ''), input.offset === undefined ? 0 : Number(input.offset), input.limit === undefined ? 65536 : Number(input.limit))
           : store.readRunArtifact(project.projectId, Number(input.executionLogId || 0), String(input.relativePath || ''));
       }
       case 'read_growth_report_projection': {
-        const project = await store.registerProject({ root: String(input.root || '') });
-        return store.readGrowthReportProjection(project.projectId, String(input.prefix || ''));
+        const project = await readProject(input);
+        return project ? store.readGrowthReportProjection(project.projectId, String(input.prefix || '')) : [];
       }
       case 'read_registered_report_sources': {
         const project = await store.registerProject({ root: String(input.root || '') });
@@ -796,17 +832,20 @@ export function createRuntimeDataOperations(store: UnifiedDataStore): RuntimeDat
         return store.readRegisteredReportSources(project.projectId, input);
       }
       case 'read_report_versions': {
-        const project = await store.registerProject({ root: String(input.root || '') });
-        return store.readReportVersions(project.projectId, input.refs as Array<{ objectId: string; revision: number }>);
+        const project = await readProject(input);
+        return project ? store.readReportVersions(project.projectId, input.refs as Array<{ objectId: string; revision: number }>) : [];
       }
       case 'read_report_source_revision': {
-        const project = await store.registerProject({ root: String(input.root || '') });
-        return { revision: store.reportSourceRevision(project.projectId) };
+        const project = await readProject(input);
+        return { revision: project ? store.reportSourceRevision(project.projectId) : 0 };
       }
       case 'read_github_facts':
       case 'write_github_facts': {
+        if (request.operation === 'read_github_facts') {
+          const project = await readProject(input);
+          return project ? store.readGithubFacts(project.projectId, String(input.repository || '')) : null;
+        }
         const project = await store.registerProject({ root: String(input.root || '') });
-        if (request.operation === 'read_github_facts') return store.readGithubFacts(project.projectId, String(input.repository || ''));
         store.writeGithubFacts(project.projectId, input as unknown as Parameters<UnifiedDataStore['writeGithubFacts']>[1]);
         return { written: true };
       }

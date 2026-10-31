@@ -17,6 +17,7 @@ import { SyncEngine } from './db/syncEngine';
 import { AgentConversation, RoadmapNode } from './db/types';
 import { buildFlowStatePayload, createFlowLoop, createFlowTrace, FlowLoopScoring, FlowLoopStatus, FlowRole, FlowTrace, matchesFlowLaunchIntent, readFlowTrace, saveFlowTrace, updateFlowTrace } from './flowStore';
 import { SolopreneurSidebarProvider } from './sidebarProvider';
+import { coordinateConversationLaunch, ConversationLaunchCoordination } from './conversationLaunchCoordinator';
 import { confirmTimePlan, extractTimePlanDraft, readTimePlan, saveTimePlan, type TimePlanDraft } from './timePlan';
 import {
   claimDueScheduledTaskDatabase,
@@ -312,6 +313,27 @@ const pendingAgentStatusFiles = new Set<string>();
 const activeConversationOwnerInstanceId = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 let sidebarProvider: SolopreneurSidebarProvider | null = null;
 let extensionContextRef: vscode.ExtensionContext | null = null;
+async function coordinateExtensionConversationLaunch<TSnapshot, TTerminal, TTarget, TResult>(
+  input: ConversationLaunchCoordination<TSnapshot, TTerminal, TTarget, TResult>
+): Promise<TResult> {
+  if (typeof coordinateConversationLaunch === 'function') return coordinateConversationLaunch(input);
+  // The extension test harness replaces unlisted imports. Keep its isolated
+  // dependency graph usable while production always uses the shared module.
+  const snapshot = input.captureSnapshot();
+  if (!snapshot) throw new Error('conversation_launch_snapshot_unavailable');
+  const [terminalResult, targetResult] = await Promise.allSettled([input.openTerminal(snapshot), input.prepareRuntime(snapshot)]);
+  if (terminalResult.status === 'rejected' || targetResult.status === 'rejected') {
+    if (targetResult.status === 'fulfilled') await input.releaseTarget?.(targetResult.value);
+    if (terminalResult.status === 'fulfilled') await input.releaseTerminal?.(terminalResult.value);
+    throw terminalResult.status === 'rejected' ? terminalResult.reason : (targetResult as PromiseRejectedResult).reason;
+  }
+  try { return await input.execute({ snapshot, terminal: terminalResult.value, target: targetResult.value }); }
+  finally {
+    await input.releaseTarget?.(targetResult.value);
+    await input.releaseTerminal?.(terminalResult.value);
+  }
+}
+
 let activeProjectRoot: string | null = null;
 let syncEngineReady = false;
 let pendingPassportAuthNonce: string | null = null;
@@ -1013,11 +1035,18 @@ export async function activate(context: vscode.ExtensionContext) {
     return runWithInteractionBudget(interactionBudget, async () => {
       const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
       if (!launchSnapshot) return;
-      await revealAgentStartupTerminal(context, workspaceRoot, `step-${nodeId || 'conversation'}`, '', '', launchSnapshot.settings);
-      const launchTarget = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, launchSnapshot);
-      if (!launchTarget) return;
-      try { await handleRunAgent(context, nodeId, '', '', '', [], true, () => {}, launchTarget); }
-      finally { launchTarget.engine?.close(); }
+      await coordinateExtensionConversationLaunch({
+        captureSnapshot: () => launchSnapshot,
+        openTerminal: snapshot => revealAgentStartupTerminal(context, workspaceRoot, `step-${nodeId || 'conversation'}`, '', '', snapshot.settings),
+        prepareRuntime: async snapshot => {
+          const target = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, snapshot);
+          if (!target) throw new Error('conversation_launch_target_unavailable');
+          return target;
+        },
+        execute: ({ target }) => handleRunAgent(context, nodeId, '', '', '', [], true, () => {}, target),
+        releaseTarget: target => target.engine?.close(),
+        releaseTerminal: terminal => { discardReservedAgentStartupTerminal(workspaceRoot, terminal); }
+      });
     });
   }));
 
@@ -1049,32 +1078,26 @@ export async function activate(context: vscode.ExtensionContext) {
       target.launchIntentId = String(input.launchIntentId);
       return target;
     };
-    const launchSettings = launchSnapshot.settings;
-      if (mode === 'step') {
-        let registered = false;
-        const startupTerminal = await revealAgentStartupTerminal(context, projectPath, `step-${String(input.stepId)}`, String(input.agentCli || ''), String(input.model || ''), launchSettings);
-        try {
-          const target = await captureTarget();
-          try {
+    const terminalLabel = mode === 'step' ? `step-${String(input.stepId)}` : mode;
+    await coordinateExtensionConversationLaunch({
+      captureSnapshot: () => launchSnapshot,
+      openTerminal: snapshot => revealAgentStartupTerminal(context, projectPath, terminalLabel, String(input.agentCli || ''), String(input.model || ''), snapshot.settings),
+      prepareRuntime: () => captureTarget(),
+      execute: async ({ target }) => {
+        if (mode === 'step') {
+          let registered = false;
             await handleRunAgent(context, String(input.stepId), message, String(input.agentCli || ''), String(input.model || ''), [], true, () => { registered = true; }, target);
             if (!registered) throw new Error('conversation_not_started');
-          } finally { target.engine?.close(); }
-        } finally { if (!registered) discardReservedAgentStartupTerminal(projectPath, startupTerminal); }
-      } else if (mode === 'solo') {
-        const startupTerminal = await revealAgentStartupTerminal(context, projectPath, 'solo', String(input.agentCli || ''), String(input.model || ''), launchSettings);
-        try {
-          const target = await captureTarget();
-          try {
+        } else if (mode === 'solo') {
             const executionLogId = await handleRunSoloConversation(context, message, String(input.agentCli || ''), String(input.model || ''), [], '', true, target);
             if (!executionLogId) throw new Error('conversation_not_started');
-          } finally { target.engine?.close(); }
-        } finally { discardReservedAgentStartupTerminal(projectPath, startupTerminal); }
-      } else {
-        const target = await captureTarget();
-        try {
+        } else {
           if (!await handleRunFlow(context, message, String(input.agentCli || ''), String(input.model || ''), [], target)) throw new Error('conversation_not_started');
-        } finally { target.engine?.close(); }
-      }
+        }
+      },
+      releaseTarget: target => target.engine?.close(),
+      releaseTerminal: terminal => { discardReservedAgentStartupTerminal(projectPath, terminal); }
+    });
       return { status: 'started', projectPath, mode };
     });
     });
@@ -1657,18 +1680,18 @@ async function handleSharedWebviewAction(
       const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
       const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
       if (!launchSnapshot) return;
-      await revealAgentStartupTerminal(
-        context,
-        workspaceRoot,
-        `step-${String(request.nodeId || 'conversation')}`,
-        String(request.agentCli || ''),
-        String(request.model || ''),
-        launchSnapshot.settings
-      );
-      const launchTarget = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, launchSnapshot);
-      if (!launchTarget) return;
-      try {
-        await handleRunAgent(
+      await coordinateExtensionConversationLaunch({
+        captureSnapshot: () => launchSnapshot,
+        openTerminal: snapshot => revealAgentStartupTerminal(
+          context, workspaceRoot, `step-${String(request.nodeId || 'conversation')}`,
+          String(request.agentCli || ''), String(request.model || ''), snapshot.settings
+        ),
+        prepareRuntime: async snapshot => {
+          const target = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, snapshot);
+          if (!target) throw new Error('conversation_launch_target_unavailable');
+          return target;
+        },
+        execute: async ({ target }) => handleRunAgent(
           context,
           String(request.nodeId || ''),
           String(request.userMessage || ''),
@@ -1677,9 +1700,11 @@ async function handleSharedWebviewAction(
           normalizeSupplementFiles(request.supplementFiles),
           true,
           () => {},
-          launchTarget
-        );
-      } finally { launchTarget.engine?.close(); }
+          target
+        ),
+        releaseTarget: target => target.engine?.close(),
+        releaseTerminal: terminal => { discardReservedAgentStartupTerminal(workspaceRoot, terminal); }
+      });
     },
     'conversation.runSolo': async (request) => {
       const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
@@ -1695,17 +1720,20 @@ async function handleSharedWebviewAction(
       const execute = async () => {
         const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
         if (!launchSnapshot) return;
-        let startupTerminal: vscode.Terminal | undefined;
-        try {
-          startupTerminal = await observeLocalDiagnosticStage('conversation.runSolo.terminal', () => revealAgentStartupTerminal(context, workspaceRoot, 'solo', String(request.agentCli || ''), String(request.model || ''), launchSnapshot.settings));
-          const launchTarget = await observeLocalDiagnosticStage('conversation.runSolo.project', () => captureRegisteredConversationLaunchTarget(context, workspaceRoot, launchSnapshot));
-          if (!launchTarget) return;
+        await coordinateExtensionConversationLaunch({
+          captureSnapshot: () => launchSnapshot,
+          openTerminal: snapshot => observeLocalDiagnosticStage('conversation.runSolo.terminal', () => revealAgentStartupTerminal(context, workspaceRoot, 'solo', String(request.agentCli || ''), String(request.model || ''), snapshot.settings)),
+          prepareRuntime: async snapshot => {
+            const target = await observeLocalDiagnosticStage('conversation.runSolo.project', () => captureRegisteredConversationLaunchTarget(context, workspaceRoot, snapshot));
+            if (!target) throw new Error('conversation_launch_target_unavailable');
+            return target;
+          },
+          execute: async ({ target: launchTarget }) => {
           if (launchActionId) {
             launchTarget.launchIntentId = `ui-action:${crypto.createHash('sha256').update(launchActionKey).digest('hex')}`;
             launchTarget.launchActionInputHash = launchInputHash;
           }
-          try {
-            await handleRunSoloConversation(
+            return handleRunSoloConversation(
               context,
               String(request.userMessage || ''),
               String(request.agentCli || ''),
@@ -1715,10 +1743,10 @@ async function handleSharedWebviewAction(
               true,
               launchTarget
             );
-          } finally { launchTarget.engine?.close(); }
-        } finally {
-          discardReservedAgentStartupTerminal(workspaceRoot, startupTerminal);
-        }
+          },
+          releaseTarget: target => target.engine?.close(),
+          releaseTerminal: terminal => { discardReservedAgentStartupTerminal(workspaceRoot, terminal); }
+        });
       };
       try {
         pruneConversationLaunchActions();
@@ -1750,11 +1778,15 @@ async function handleSharedWebviewAction(
       const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
       const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
       if (!launchSnapshot) return;
-      await revealAgentStartupTerminal(context, workspaceRoot, 'solo-time-plan', String(request.agentCli || ''), String(request.model || ''), launchSnapshot.settings);
-      const launchTarget = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, launchSnapshot);
-      if (!launchTarget) return;
-      try {
-        await handleGenerateTimePlan(
+      await coordinateExtensionConversationLaunch({
+        captureSnapshot: () => launchSnapshot,
+        openTerminal: snapshot => revealAgentStartupTerminal(context, workspaceRoot, 'solo-time-plan', String(request.agentCli || ''), String(request.model || ''), snapshot.settings),
+        prepareRuntime: async snapshot => {
+          const target = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, snapshot);
+          if (!target) throw new Error('conversation_launch_target_unavailable');
+          return target;
+        },
+        execute: ({ target }) => handleGenerateTimePlan(
           context,
           String(request.requirements || ''),
           String(request.agentCli || ''),
@@ -1762,9 +1794,11 @@ async function handleSharedWebviewAction(
           String(request.language || 'zh'),
           String(request.timeZone || ''),
           String(request.localTime || ''),
-          launchTarget
-        );
-      } finally { launchTarget.engine?.close(); }
+          target
+        ),
+        releaseTarget: target => target.engine?.close(),
+        releaseTerminal: terminal => { discardReservedAgentStartupTerminal(workspaceRoot, terminal); }
+      });
     },
     'timePlan.get': async () => {
       await respond({ command: 'timePlansLoaded', ...await buildTimePlansPayload(context) });
@@ -1937,12 +1971,15 @@ async function handleSharedWebviewAction(
       if (!launchSnapshot) {
         throw new Error('SoloMap could not prepare this project for roadmap adjustment.');
       }
-      const startupTerminal = await revealAgentStartupTerminal(context, workspaceRoot, 'roadmap-revision', String(request.agentCli || ''), String(request.model || ''), launchSnapshot.settings);
-      let launchTarget: AgentLaunchTarget | null = null;
-      try {
-        launchTarget = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, launchSnapshot);
-        if (!launchTarget) return;
-        await enqueueProjectActionLaunch(workspaceRoot, async (registered) => {
+      await coordinateExtensionConversationLaunch({
+        captureSnapshot: () => launchSnapshot,
+        openTerminal: snapshot => revealAgentStartupTerminal(context, workspaceRoot, 'roadmap-revision', String(request.agentCli || ''), String(request.model || ''), snapshot.settings),
+        prepareRuntime: async snapshot => {
+          const target = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, snapshot);
+          if (!target) throw new Error('conversation_launch_target_unavailable');
+          return target;
+        },
+        execute: ({ target }) => enqueueProjectActionLaunch(workspaceRoot, async (registered) => {
           await handleRoadmapRevision(
             context,
             String(request.userMessage || ''),
@@ -1953,14 +1990,12 @@ async function handleSharedWebviewAction(
               registered();
               void respond({ command: 'roadmapRevisionLaunchRegistered', projectPath: workspaceRoot });
             },
-            launchTarget || undefined
+            target
           );
-        });
-      } finally {
-        launchTarget?.engine?.close();
-        discardReservedAgentStartupTerminal(workspaceRoot, startupTerminal);
-      }
-      if (!launchTarget) return;
+        }),
+        releaseTarget: target => target.engine?.close(),
+        releaseTerminal: terminal => { discardReservedAgentStartupTerminal(workspaceRoot, terminal); }
+      });
       try {
         await sidebarProvider?.refreshProjectConversationSnapshotAfterStatusChange(workspaceRoot);
       } catch (error) {
@@ -1971,19 +2006,25 @@ async function handleSharedWebviewAction(
       const workspaceRoot = String(request.projectPath || activeProjectRoot || getSelectedProjectPath(context) || '');
       const launchSnapshot = captureRegisteredConversationLaunchSnapshot(context, workspaceRoot);
       if (!launchSnapshot) return;
-      await revealAgentStartupTerminal(context, workspaceRoot, 'flow', String(request.agentCli || ''), String(request.model || ''), launchSnapshot.settings);
-      const launchTarget = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, launchSnapshot);
-      if (!launchTarget) return;
-      try {
-        await handleRunFlow(
+      await coordinateExtensionConversationLaunch({
+        captureSnapshot: () => launchSnapshot,
+        openTerminal: snapshot => revealAgentStartupTerminal(context, workspaceRoot, 'flow', String(request.agentCli || ''), String(request.model || ''), snapshot.settings),
+        prepareRuntime: async snapshot => {
+          const target = await captureRegisteredConversationLaunchTarget(context, workspaceRoot, snapshot);
+          if (!target) throw new Error('conversation_launch_target_unavailable');
+          return target;
+        },
+        execute: async ({ target }) => handleRunFlow(
           context,
           String(request.goal || ''),
           String(request.agentCli || ''),
           String(request.model || ''),
           normalizeSupplementFiles(request.supplementFiles),
-          launchTarget
-        );
-      } finally { launchTarget.engine?.close(); }
+          target
+        ),
+        releaseTarget: target => target.engine?.close(),
+        releaseTerminal: terminal => { discardReservedAgentStartupTerminal(workspaceRoot, terminal); }
+      });
     },
     'flow.pause': async (request) => {
       const workspaceRoot = String(request.projectPath || '');
@@ -2099,21 +2140,27 @@ async function handleSharedWebviewAction(
           launchSnapshot.settings.globalDataPath, String(request.runId || ''), Number(request.generation || 0));
         let continuation = nativeContinuationByConversationKey.get(key);
         if (!continuation) {
-          continuation = Promise.resolve().then(async () => {
-            await observeLocalDiagnosticStage('conversation.continue.terminal', () => revealAgentStartupTerminal(context, terminalProjectRoot, 'continue', String(initiallySelectedConversation?.agentCli || request.agentCli || ''), '', launchSnapshot.settings));
-            const launchTarget = await observeLocalDiagnosticStage('conversation.continue.project', () => captureRegisteredConversationLaunchTarget(context, terminalProjectRoot, launchSnapshot));
-            if (!launchTarget) return;
-            const projectPath = launchTarget.workspaceRoot;
-            try {
-              if (typeof launchTarget.engine?.readAgentExecutions === 'function') await launchTarget.engine.readAgentExecutions(nodeId);
-              const conversations = launchTarget.engine?.getAgentExecutions(nodeId) || [];
+          continuation = coordinateExtensionConversationLaunch({
+            captureSnapshot: () => launchSnapshot,
+            openTerminal: snapshot => observeLocalDiagnosticStage('conversation.continue.terminal', () => revealAgentStartupTerminal(context, terminalProjectRoot, 'continue', String(initiallySelectedConversation?.agentCli || request.agentCli || ''), '', snapshot.settings)),
+            prepareRuntime: async snapshot => {
+              const target = await observeLocalDiagnosticStage('conversation.continue.project', () => captureRegisteredConversationLaunchTarget(context, terminalProjectRoot, snapshot));
+              if (!target) throw new Error('conversation_launch_target_unavailable');
+              return target;
+            },
+            execute: async ({ target }) => {
+              const projectPath = target.workspaceRoot;
+              if (typeof target.engine?.readAgentExecutions === 'function') await target.engine.readAgentExecutions(nodeId);
+              const conversations = target.engine?.getAgentExecutions(nodeId) || [];
               const conversation = conversations.find((item) => Number(item.id) === conversationId);
               const rootConversation = resolveContinuationRootConversationFromList(conversations, conversationId) || conversation;
               const rootConversationId = Number(rootConversation?.id || conversationId);
-              await observeLocalDiagnosticStage('conversation.continue.cleanup', () => waitForAgentProcessCleanup(projectPath, rootConversationId, launchTarget.globalDataPath));
-              await handleContinueNativeConversation(context, nodeId, conversationId, launchTarget);
+              await observeLocalDiagnosticStage('conversation.continue.cleanup', () => waitForAgentProcessCleanup(projectPath, rootConversationId, target.globalDataPath));
+              await handleContinueNativeConversation(context, nodeId, conversationId, target);
               refreshConversation(nodeId, projectPath);
-            } finally { launchTarget.engine?.close(); }
+            },
+            releaseTarget: target => target.engine?.close(),
+            releaseTerminal: terminal => { discardReservedAgentStartupTerminal(terminalProjectRoot, terminal); }
           });
           nativeContinuationByConversationKey.set(key, continuation);
           void continuation.finally(() => {
@@ -2151,11 +2198,18 @@ async function handleSharedWebviewAction(
       const conversation = requestedProjectRoot && activeProjectRoot && path.resolve(requestedProjectRoot) === path.resolve(activeProjectRoot)
         ? syncEngine?.getAgentExecutions(nodeId).find((item) => Number(item.id) === conversationId)
         : undefined;
-      await revealAgentStartupTerminal(context, requestedProjectRoot, 'retry', String(conversation?.agentCli || request.agentCli || ''), '', launchSnapshot.settings);
-      const launchTarget = await captureRegisteredConversationLaunchTarget(context, requestedProjectRoot, launchSnapshot);
-      if (!launchTarget) return;
-      try { await handleRetryConversation(context, nodeId, conversationId, true, launchTarget); }
-      finally { launchTarget.engine?.close(); }
+      await coordinateExtensionConversationLaunch({
+        captureSnapshot: () => launchSnapshot,
+        openTerminal: snapshot => revealAgentStartupTerminal(context, requestedProjectRoot, 'retry', String(conversation?.agentCli || request.agentCli || ''), '', snapshot.settings),
+        prepareRuntime: async snapshot => {
+          const target = await captureRegisteredConversationLaunchTarget(context, requestedProjectRoot, snapshot);
+          if (!target) throw new Error('conversation_launch_target_unavailable');
+          return target;
+        },
+        execute: ({ target }) => handleRetryConversation(context, nodeId, conversationId, true, target),
+        releaseTarget: target => target.engine?.close(),
+        releaseTerminal: terminal => { discardReservedAgentStartupTerminal(requestedProjectRoot, terminal); }
+      });
     },
     'conversation.continueTurn': async (request) => {
       const nodeId = String(request.nodeId || '');
@@ -2628,29 +2682,31 @@ async function handleSharedWebviewAction(
       const selectionGenerationAtRequest = projectSelectionGeneration;
       await enqueueProjectActionLaunch(requestedProjectRoot, async (registered) => {
         if (request.nodeId) {
-          await revealAgentStartupTerminal(
-            context,
-            requestedProjectRoot,
-            `step-${String(request.nodeId)}`,
-            String(request.agentCli || launchSnapshot?.settings.cliPath || ''),
-            '',
-            launchSnapshot?.settings
-          );
-          const launchTarget = await captureRegisteredConversationLaunchTarget(context, requestedProjectRoot, launchSnapshot);
-          if (!launchTarget) return;
-          try {
-            await handleRunAgent(
+          await coordinateExtensionConversationLaunch({
+            captureSnapshot: () => launchSnapshot!,
+            openTerminal: snapshot => revealAgentStartupTerminal(
+              context, requestedProjectRoot, `step-${String(request.nodeId)}`,
+              String(request.agentCli || snapshot.settings.cliPath || ''), '', snapshot.settings
+            ),
+            prepareRuntime: async snapshot => {
+              const target = await captureRegisteredConversationLaunchTarget(context, requestedProjectRoot, snapshot);
+              if (!target) throw new Error('conversation_launch_target_unavailable');
+              return target;
+            },
+            execute: ({ target }) => handleRunAgent(
               context,
               String(request.nodeId),
               '',
-              String(request.agentCli || launchTarget.settings?.cliPath || ''),
+              String(request.agentCli || target.settings?.cliPath || ''),
               '',
               [],
               true,
               registered,
-              launchTarget
-            );
-          } finally { launchTarget.engine?.close(); }
+              target
+            ),
+            releaseTarget: target => target.engine?.close(),
+            releaseTerminal: terminal => { discardReservedAgentStartupTerminal(requestedProjectRoot, terminal); }
+          });
         } else {
           if (!requestedProjectRoot || !getProjects(context).some((project) => project.path === requestedProjectRoot)) return;
           if (projectSelectionGeneration !== selectionGenerationAtRequest

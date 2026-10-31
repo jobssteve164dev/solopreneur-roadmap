@@ -547,7 +547,10 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
     this.agentCli = options.runner ? options.agentCli : resolveAgentCliWithinFamily(options.agentCli, options.agentCli);
     this.model = String(options.model || 'auto');
     this.workingDirectory = options.workingDirectory;
-    this.runner = options.runner || ((invocation: CognitiveCliInvocation) => runCognitiveCliInvocation(invocation, cancel => { this.cancelInvocation = cancel; }));
+    this.runner = options.runner || ((invocation: CognitiveCliInvocation) => runCognitiveCliInvocation(invocation, cancel => {
+      this.cancelInvocation = cancel;
+      if (cancel && this.cancelled) cancel();
+    }));
     this.id = `pi-agent:agent-cli:${getAgentCliFamily(this.agentCli)}:${this.model}:${String(options.configRevision || 'unversioned')}`;
   }
 
@@ -685,7 +688,6 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
       return { operationId: terminal.operationId, status: terminal.status, tipId: terminal.tipId, ...(finalAssistant ? { finalAssistant } : {}) };
     } finally {
       this.activeAgent = undefined;
-      this.cancelInvocation = undefined;
       await harness.close(pi.agent.TODO_CONTEXT);
     }
   }
@@ -899,7 +901,6 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
       return messageText(response);
     } finally {
       this.activeAgent = undefined;
-      this.cancelInvocation = undefined;
     }
   }
 
@@ -957,7 +958,6 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
       return proposal;
     } finally {
       this.activeAgent = undefined;
-      this.cancelInvocation = undefined;
     }
   }
 
@@ -1036,7 +1036,6 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
       throw new Error('Pi Agent model pipe did not return a valid JSON strategy pyramid judgment.');
     } finally {
       this.activeAgent = undefined;
-      this.cancelInvocation = undefined;
     }
   }
 
@@ -1110,13 +1109,15 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
       throw new Error('Pi Agent model pipe did not return a valid JSON delivery proposal.');
     } finally {
       this.activeAgent = undefined;
-      this.cancelInvocation = undefined;
     }
   }
 
   public cancel(): void {
     this.cancelled = true;
-    this.activeAgent?.abort();
+    // Terminate the blocking external model invocation before aborting the
+    // harness. Harness abort callbacks can synchronously settle the prompt
+    // and clear cancelInvocation, leaving the CLI child alive indefinitely.
     this.cancelInvocation?.();
+    this.activeAgent?.abort();
   }
 }

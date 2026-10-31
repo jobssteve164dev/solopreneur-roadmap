@@ -477,6 +477,15 @@ export class UnifiedDataStore {
     }
     return store;
   }
+  public static openReadOnly(root: string, expectedDatabaseId?: string): UnifiedDataStore {
+    if (!fs.existsSync(path.join(root, 'solomap.db'))) throw new Error('database_restore_required');
+    const store = new UnifiedDataStore(root, 'read-only-runtime', { readOnly: true });
+    if (expectedDatabaseId && store.rows("SELECT value FROM database_meta WHERE key='database_id'")[0]?.value !== expectedDatabaseId) {
+      store.close();
+      throw new Error('database_identity_mismatch');
+    }
+    return store;
+  }
   private readonly db: DiskDatabase;
   private readonly columns = new Map<string, Set<string>>();
   private readonly deviceId: string;
@@ -485,12 +494,35 @@ export class UnifiedDataStore {
   private transactionDepth = 0;
   private get actorId(): string { return this.actorContext.getStore() || this.ownerActorId; }
   public readonly filePath: string;
-  constructor(public readonly root: string, actorId = 'local-runtime') {
+  constructor(public readonly root: string, actorId = 'local-runtime', options: { readOnly?: boolean } = {}) {
     this.ownerActorId = actorId;
     this.filePath = path.join(root, 'solomap.db');
     const existed = fs.existsSync(this.filePath);
-    this.db = new DiskDatabase(this.filePath);
+    this.db = new DiskDatabase(this.filePath, options.readOnly ? { readOnly: true } : {});
     try {
+      if (options.readOnly) {
+        if (!existed) throw new Error('database_restore_required');
+        const migrationsExist = this.rows("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'").length;
+        if (!migrationsExist) throw new Error('unrecognized_database');
+        if (this.rows('SELECT checksum FROM schema_migrations WHERE version=1')[0]?.checksum !== digest(unifiedSchemaSql())) {
+          throw new Error('schema_checksum_mismatch');
+        }
+        const versions = this.rows('SELECT version,checksum FROM schema_migrations ORDER BY version');
+        if (versions.some(row => Number(row.version) !== 1 && !unifiedSchemaMigrations.some(migration => migration.version === row.version))) {
+          throw new Error('unsupported_schema_version');
+        }
+        for (const migration of unifiedSchemaMigrations) {
+          const applied = versions.find(row => row.version === migration.version);
+          if (!applied) throw new Error('database_migration_required');
+          if (applied.checksum !== digest(migration.sql)) throw new Error('schema_checksum_mismatch');
+        }
+        for (const definition of Object.values(entityDefinitions)) {
+          this.columns.set(definition.table, new Set(this.rows(`PRAGMA table_info(${definition.table})`).map(row => String(row.name)).filter(name => !['id', 'object_kind', 'project_id'].includes(name))));
+        }
+        const environment = canonical({ schemaVersion: 1, platform: process.platform, hostname: os.hostname(), user: os.userInfo().username });
+        this.deviceId = String(this.rows('SELECT id FROM devices WHERE environment=?', [environment])[0]?.id || '');
+        return;
+      }
       if (!existed) fs.chmodSync(this.filePath, 0o600);
       const sql = unifiedSchemaSql();
       const migrationsExist = this.rows("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'").length;
@@ -3885,7 +3917,7 @@ export class UnifiedDataStore {
     return this.registerProject({ root: input.root }).then(({ projectId }) => this.readRoadmapByProject(projectId));
   }
 
-  private readRoadmapByProject(projectId: string): RoadmapSnapshot {
+  public readRoadmapByProject(projectId: string): RoadmapSnapshot {
     const binding = this.roadmapBinding(projectId);
     if (!binding || !binding.accepted_content_id) throw new Error('roadmap_import_required');
     const rows = this.rows("SELECT r.id,r.local_node_id,r.title,r.description,r.stage,r.order_key,r.status,r.agent_cli,r.agent_prompt_content_id,r.completed_at,f.dependencies_text,f.created_at_text,f.completed_at_text FROM roadmap_nodes r JOIN objects o ON o.id=r.id LEFT JOIN roadmap_node_fields f ON f.node_id=r.id WHERE r.project_id=? AND o.archived_at IS NULL ORDER BY r.order_key,r.local_node_id", [projectId]);
@@ -4098,6 +4130,24 @@ export class UnifiedDataStore {
       return locations.length ? String(locations[0].project_id) : null;
     }
     return (await this.registerProject({ root })).projectId;
+  }
+
+  public lookupProjectForRead(root: string): string | null {
+    if (!root) throw new Error('project_root_required');
+    const logicalRoot = path.resolve(root);
+    let physicalRoot: string | undefined;
+    try {
+      if (!fs.statSync(root).isDirectory()) throw new Error('project_root_required');
+      physicalRoot = fs.realpathSync(root);
+    }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    const matches = this.registeredProjectLocationsForRead().filter(location => {
+      const candidate = path.resolve(location.root);
+      return candidate === logicalRoot || (physicalRoot !== undefined && candidate === physicalRoot);
+    });
+    const projectIds = [...new Set(matches.map(location => location.projectId))];
+    if (projectIds.length > 1) throw new Error('project_registry_alias_conflict');
+    return projectIds[0] || null;
   }
 
   public async registerProject(input: { root: string; name?: string }): Promise<{ projectId: string; locationId: string; identityPath: string }> {

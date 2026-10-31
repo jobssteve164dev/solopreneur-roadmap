@@ -142,10 +142,14 @@ test('a noninteractive formal Agent receives immediate stdin EOF from the foregr
   }, '', 'agent_cli_upgrade');
   try {
     const agent = f.startAgent();
+    let timeout;
     const result = await Promise.race([
       once(agent, 'exit').then(([code]) => ({ code })),
-      new Promise(resolve => setTimeout(() => resolve({ code: 'stdin-still-open' }), 1000))
-    ]);
+      // The assertion is about EOF after the formal process starts. Runtime
+      // preparation can exceed one second under a parallel test load without
+      // changing fd 0 semantics, while an inherited stdin would never exit.
+      new Promise(resolve => { timeout = setTimeout(() => resolve({ code: 'stdin-still-open' }), 5000); })
+    ]).finally(() => clearTimeout(timeout));
     assert.equal(result.code, 0, 'noninteractive Agent stdin must be closed instead of inheriting the long-lived bridge input');
     assert.equal(f.stdout().toString(), 'stdin-eof');
   } finally { await f.close(); }

@@ -360,24 +360,29 @@ test('an established MCP source retries the request that races a Runtime handove
     socket.setEncoding('utf8');
     socket.on('data', chunk => {
       body += chunk;
-      const newline = body.indexOf('\n');
-      if (newline < 0) return;
-      const request = JSON.parse(body.slice(0, newline)).request;
-      if (request.operation === 'open_mcp_session') {
-        opens += 1;
-        openInputs.push(request.input);
-        socket.end(JSON.stringify({ ok: true, runtimeId: 'fixture-runtime', result: {
-          actorId: 'fixture-actor', proof: 'fixture-proof', sessionToken: `fixture-session-${opens}`, runKind: 'solo', migrationKind: null
-        } }));
-      } else if (request.operation === 'search') {
-        searches += 1;
-        if (searches <= 2) {
-          initialSearches.push(socket);
-          if (initialSearches.length === 2) for (const pending of initialSearches) pending.end(JSON.stringify({ ok: false, runtimeId: 'fixture-runtime', error: 'different_runtime' }));
-        } else socket.end(JSON.stringify({ ok: true, runtimeId: 'fixture-runtime', result: { items: [], cursor: null } }));
-      } else {
-        closedSessions.push(request.input.sessionToken);
-        socket.end(JSON.stringify({ ok: true, runtimeId: 'fixture-runtime', result: { closed: true } }));
+      for (;;) {
+        const newline = body.indexOf('\n');
+        if (newline < 0) return;
+        const frame = JSON.parse(body.slice(0, newline));
+        body = body.slice(newline + 1);
+        const request = frame.request;
+        const respond = payload => socket.write(JSON.stringify({ ...payload, requestId: frame.requestId }) + '\n');
+        if (request.operation === 'open_mcp_session') {
+          opens += 1;
+          openInputs.push(request.input);
+          respond({ ok: true, runtimeId: 'fixture-runtime', result: {
+            actorId: 'fixture-actor', proof: 'fixture-proof', sessionToken: `fixture-session-${opens}`, runKind: 'solo', migrationKind: null
+          } });
+        } else if (request.operation === 'search') {
+          searches += 1;
+          if (searches <= 2) {
+            initialSearches.push({ respond });
+            if (initialSearches.length === 2) for (const pending of initialSearches) pending.respond({ ok: false, runtimeId: 'fixture-runtime', error: 'different_runtime' });
+          } else respond({ ok: true, runtimeId: 'fixture-runtime', result: { items: [], cursor: null } });
+        } else {
+          closedSessions.push(request.input.sessionToken);
+          socket.end(JSON.stringify({ ok: true, runtimeId: 'fixture-runtime', requestId: frame.requestId, result: { closed: true } }) + '\n');
+        }
       }
     });
   });

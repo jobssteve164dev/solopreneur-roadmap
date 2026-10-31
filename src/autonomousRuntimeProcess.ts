@@ -29,6 +29,9 @@ import { importLegacyRuntimeState } from './runtimeStateMigration';
 import { readRuntimePauseState, writeRuntimePauseState } from './runtimePauseState';
 import { reapFinishedLegacyRunProcesses } from './legacyRunProcessRecovery';
 import { IntelligenceRuntime } from './intelligenceRuntime';
+import { RuntimeDataExecutionDomains } from './runtimeDataExecutionDomains';
+import { activeCognitiveCliInvocationCount, cancelActiveCognitiveCliInvocations, signalCognitiveCliShutdown } from './localAgentCliEngine';
+import { terminateRuntimeOwnedChildProcesses } from './runtimeChildProcessSupervisor';
 
 function argumentValue(name: string): string {
   const index = process.argv.indexOf(name);
@@ -181,16 +184,21 @@ async function main(): Promise<void> {
   let timer: NodeJS.Timeout | undefined;
   let activeEngine: EmbeddedPiAgentEngine | undefined;
   let controlServer: { beginBusy(): () => void; close(): Promise<void> } | undefined;
+  let dataExecutionDomains: RuntimeDataExecutionDomains | undefined;
   let telegram = initializationTelegram = startTelegramBackgroundRuntime(globalDataPath, dataOperations);
   let shutdownPromise: Promise<void> | undefined;
   let upgradeReplacement: { buildId: string; releaseVersion: string } | undefined;
   if (paused) { updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' }); await heartbeatRuntime('paused'); }
   const stop = (exitCode = 0, reason = 'lease_lost'): Promise<void> => {
     if (exitCode !== 0) process.exitCode = exitCode;
+    if (reason !== 'upgrade_drain') {
+      signalCognitiveCliShutdown();
+      cancelActiveCognitiveCliInvocations();
+    }
     if (shutdownPromise) return shutdownPromise;
     stopping = true;
-    createLocalDiagnosticTrace(globalDataPath, `runtime.shutdown.${reason}`, { targetId: runtimeId })
-      .record(`runtime.shutdown.${reason}`, exitCode ? 'error' : 'ok', 0, undefined, { pid: process.pid, exitCode });
+    const shutdownTrace = createLocalDiagnosticTrace(globalDataPath, `runtime.shutdown.${reason}`, { targetId: runtimeId });
+    shutdownTrace.record(`runtime.shutdown.${reason}`, exitCode ? 'error' : 'ok', 0, undefined, { pid: process.pid, exitCode });
     shutdownPromise = (async () => {
       let shutdownError: unknown;
       const attempt = async (action: () => unknown | Promise<unknown>): Promise<void> => {
@@ -200,10 +208,17 @@ async function main(): Promise<void> {
       if (timer) clearInterval(timer);
       const telegramClosed = telegram?.close(reason === 'upgrade_drain' ? 'drain' : 'handoff');
       activeEngine?.cancel();
+      shutdownTrace.record('runtime.shutdown.cognitive-invocations', 'ok', activeCognitiveCliInvocationCount());
       dataOperations.interruptMigrations();
       dataOperations.interruptRuns();
-      await attempt(() => controlServer?.close());
+      // Leaf runtimes must release their MCP sessions, inbox claims, and
+      // accepted work while the shared data plane is still available.
+      // Closing RPC first creates a circular shutdown dependency once data
+      // connections are persistent.
       await attempt(() => telegramClosed);
+      await attempt(() => controlServer?.close());
+      await attempt(() => dataExecutionDomains?.close());
+      if (reason !== 'upgrade_drain') terminateRuntimeOwnedChildProcesses();
       await attempt(() => startupMigration);
       await attempt(() => storageMaintenance);
       await attempt(() => heartbeatRuntime('stopped'));
@@ -224,14 +239,21 @@ async function main(): Promise<void> {
     return shutdownPromise;
   };
   closeFailedRuntimeInitialization = async () => { await stop(1, 'initialization_failed').catch(() => undefined); };
-  try { controlServer = await startRuntimeControlServer({
+  try {
+    dataExecutionDomains = await RuntimeDataExecutionDomains.start({
+      root: databaseRoot,
+      databaseId: dataStore.databaseId,
+      writer: request => dataOperations(request)
+    });
+    controlServer = await startRuntimeControlServer({
     globalDataPath,
     runtimeId,
     entryPath: path.resolve(process.argv[1]),
     buildId: runtimeBuild,
     releaseVersion,
     owner: argumentValue('--runtime-owner') === 'service' ? 'service' : 'fallback',
-    onData: dataOperations,
+    enforceOperationRegistry: true,
+    onData: request => dataExecutionDomains!.dispatch(request),
     async onCommand(command, replacement) {
       if (command === 'pause' || command === 'drain') {
         paused = true;
@@ -263,7 +285,8 @@ async function main(): Promise<void> {
       }
       return { status: paused ? 'paused' : 'running' };
     }
-  }); } catch (error) {
+    });
+  } catch (error) {
     rejectStorageMaintenanceBarrier(error);
     await stop(1, 'control_start_failed').catch(() => undefined);
     throw error;
