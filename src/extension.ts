@@ -1807,53 +1807,29 @@ async function handleSharedWebviewAction(
       await respond({ command: 'collaborationRoomsLoaded', rooms: await readCollaborationRooms(context) });
     },
     'collaboration.joinLobby': async (request) => {
+      const interactionId = String(request.interactionId || '');
+      const respondLobby = (payload: Record<string, unknown>) => respond({ ...payload, ...(interactionId ? { interactionId } : {}) });
       const diagnosticDataPath = getPersistedSettings(context).globalDataPath;
       let cached = await readPassportGrant(context);
       if (!cached) {
         recordLocalDiagnosticError(diagnosticDataPath, 'collaboration.lobby.login', 'missing_account_grant');
         const cleared = await clearStoredProAccess(context, { requireMissingCredential: true });
-        await respond({ command: cleared ? 'collaborationLobbyLoginRequired' : 'collaborationLobbyJoinFailed', error: cleared ? undefined : 'account_changed' });
+        await respondLobby({ command: cleared ? 'collaborationLobbyLoginRequired' : 'collaborationLobbyJoinFailed', error: cleared ? undefined : 'account_changed' });
         return;
       }
       if (!buildProAccountStatus(cached).authenticated) {
         const cleared = await clearStoredProAccess(context, { expectedGrant: cached.grant });
-        await respond({ command: cleared ? 'collaborationLobbyLoginRequired' : 'collaborationLobbyJoinFailed', error: cleared ? undefined : 'account_changed' });
+        await respondLobby({ command: cleared ? 'collaborationLobbyLoginRequired' : 'collaborationLobbyJoinFailed', error: cleared ? undefined : 'account_changed' });
         return;
       }
-      let verified = await verifyPassportGrant(cached.grant);
-      if (!await isCurrentPassportGrant(context, cached.grant)) {
-        cached = await readPassportGrant(context);
-        if (!cached) {
-          await respond({ command: 'collaborationLobbyLoginRequired' });
-          return;
-        }
-        verified = await verifyPassportGrant(cached.grant);
-        if (!await isCurrentPassportGrant(context, cached.grant)) {
-          await respond({ command: 'collaborationLobbyJoinFailed', error: 'account_changed' });
-          return;
-        }
-      }
-      if (!buildProAccountStatus(verified).authenticated && !isPassportVerificationUnavailable(verified)) {
-        recordLocalDiagnosticError(diagnosticDataPath, 'collaboration.lobby.login', String(verified.reason || 'account_grant_rejected'));
-        const cleared = await clearStoredProAccess(context, { expectedGrant: cached.grant });
-        await respond({ command: cleared ? 'collaborationLobbyLoginRequired' : 'collaborationLobbyJoinFailed', error: cleared ? undefined : 'account_changed' });
-        return;
-      }
-      if (!isPassportVerificationUnavailable(verified)) {
-        const written = await writePassportGrant(context, verified, verified.grant || cached.grant, { expectedGrant: cached.grant });
-        if (!written) {
-          await respond({ command: 'collaborationLobbyJoinFailed', error: 'account_changed' });
-          return;
-        }
-      }
-      const sessionGrant = verified.grant || cached.grant;
+      const sessionGrant = cached.grant;
       const result = await createCollaborationLobbySession(String(request.nickname || ''), sessionGrant, fetch, event => {
         const detail = `${event.outcome}:${event.status || 0}:${event.durationMs}:${event.error}`;
         recordLocalDiagnosticError(diagnosticDataPath, `collaboration.lobby.${event.stage}`, detail);
         console.warn(`SoloMap collaboration lobby ${event.outcome} at ${event.stage}: ${detail}`);
       });
       if (!await isCurrentPassportGrant(context, sessionGrant)) {
-        await respond({ command: 'collaborationLobbyJoinFailed', error: 'account_changed' });
+        await respondLobby({ command: 'collaborationLobbyJoinFailed', error: 'account_changed' });
         return;
       }
       if (!result.ok) {
@@ -1862,13 +1838,13 @@ async function handleSharedWebviewAction(
         if (result.error === 'login_required') {
           loginCleared = await clearStoredProAccess(context, { expectedGrant: sessionGrant });
         }
-        await respond({
+        await respondLobby({
           command: result.error === 'login_required' && loginCleared ? 'collaborationLobbyLoginRequired' : 'collaborationLobbyJoinFailed',
           error: loginCleared ? String(result.error || 'lobby_join_failed') : 'account_changed'
         });
         return;
       }
-      await respond({
+      await respondLobby({
         command: 'collaborationLobbyJoined',
         ...result,
         nickname: String(request.nickname || '').trim().slice(0, 40),

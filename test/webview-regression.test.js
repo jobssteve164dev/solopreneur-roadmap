@@ -14860,6 +14860,60 @@ test('agent impact button reads committed contribution from the configured data 
   assert.deepEqual(response.status.impact.byAgent.map(agent => agent.agent), ['codex']);
 });
 
+test('joining the public lobby uses the valid cached account grant without a second remote verification', async () => {
+  const collaborationRooms = require('../out/collaborationRooms.js');
+  let sessionRequests = 0;
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.handle = handleSharedWebviewAction;
+    module.exports.configureLobbyTest = () => {
+      getProjects = () => [];
+      getPersistedSettings = () => ({ globalDataPath: '', language: 'zh' });
+      readPassportGrant = async () => ({
+        grant: 'cached-signed-grant', email: 'builder@example.com', userId: 'builder-1',
+        entitlements: [], expiresAt: '2999-01-01T00:00:00.000Z', checkedAt: '2026-01-01T00:00:00.000Z'
+      });
+      isCurrentPassportGrant = async () => true;
+      verifyPassportGrant = async () => new Promise(() => {});
+    };
+  `, {
+    './collaborationRooms': {
+      ...collaborationRooms,
+      createCollaborationLobbySession: async (nickname, grant) => {
+        sessionRequests += 1;
+        assert.equal(nickname, 'Builder');
+        assert.equal(grant, 'cached-signed-grant');
+        return { ok: true, ticket: 'ticket', memberId: 'member', sessionStartedAt: 1000, sessionEndsAt: 2000 };
+      }
+    }
+  });
+  extension.configureLobbyTest();
+  const messages = [];
+  const completed = extension.handle({
+    extensionPath: projectRoot,
+    globalState: { get() { return undefined; } },
+    secrets: { get() { return Promise.resolve(undefined); } }
+  }, {
+    command: 'collaboration.joinLobby', nickname: 'Builder', projectPath: '/project', interactionId: 'collaboration-lobby-test'
+  }, 'roadmap', { postMessage: async message => { messages.push(message); return true; } });
+
+  const outcome = await Promise.race([
+    completed.then(() => 'completed'),
+    new Promise(resolve => setTimeout(() => resolve('timed_out'), 100))
+  ]);
+  assert.equal(outcome, 'completed');
+  assert.equal(sessionRequests, 1);
+  assert.equal(messages.at(-1).command, 'collaborationLobbyJoined');
+  assert.equal(messages.at(-1).interactionId, 'collaboration-lobby-test');
+});
+
+test('the sidebar enforces one five-second budget from lobby click through socket open', () => {
+  const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
+  assert.match(html, /const collaborationLobbyJoinBudgetMs = 5_000/);
+  assert.match(html, /collaborationLobbyJoinTimer = setTimeout/);
+  assert.match(html, /collaborationLobbyJoinAttemptId/);
+  assert.match(html, /socket\.addEventListener\('open',[\s\S]*clearCollaborationLobbyJoinTimer/);
+});
+
 for (const surface of ['sidebar']) test(`${surface} contribution failure restores refresh and stale responses cannot replace current numbers`, () => {
   const html = surface === 'roadmap'
     ? require('../out/roadmapWebview.js').getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) })

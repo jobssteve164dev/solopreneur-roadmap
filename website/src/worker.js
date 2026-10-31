@@ -1126,6 +1126,21 @@ async function resolveCollaborationAccountCreator(request, env) {
   return { subjectId: `account:${stableId}`, tier: verified.allowed ? "pro" : "account" };
 }
 
+async function resolveCollaborationLobbyAccountCreator(request, env) {
+  const session = await readSession(request, env);
+  if (session && (session.id || session.email)) {
+    const stableId = base64UrlEncode(await sha256(String(session.id || session.email)));
+    return { subjectId: `account:${stableId}`, tier: "account" };
+  }
+  const authorization = String(request.headers.get("authorization") || "");
+  const grant = authorization.replace(/^Bearer\s+/i, "");
+  if (!grant || grant === authorization) return null;
+  const verified = await verifySignedGrant(env, grant);
+  if (!verified.authenticated || (!verified.userId && !verified.email)) return null;
+  const stableId = base64UrlEncode(await sha256(String(verified.userId || verified.email)));
+  return { subjectId: `account:${stableId}`, tier: "account" };
+}
+
 async function handleSoloMapAccountStart(request, env) {
   const url = new URL(request.url);
   const callback = String(url.searchParams.get("callback") || "");
@@ -6831,7 +6846,7 @@ export default {
     }
 
     if (url.pathname === "/api/collaboration/lobby/session" && (request.method === "POST" || request.method === "OPTIONS")) {
-      const creator = request.method === "POST" ? await resolveCollaborationAccountCreator(request, env) : null;
+      const creator = request.method === "POST" ? await resolveCollaborationLobbyAccountCreator(request, env) : null;
       return handleCollaborationLobbySession(request, env, creator);
     }
 

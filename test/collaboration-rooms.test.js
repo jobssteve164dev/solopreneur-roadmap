@@ -298,6 +298,15 @@ test('public lobby deadline covers a stalled response body before retrying', asy
   ]);
 });
 
+test('public lobby session creation leaves WebSocket time inside the five-second join budget', async () => {
+  const startedAt = Date.now();
+  const result = await createCollaborationLobbySession('Builder', 'account-grant', async () => new Promise(() => {}));
+  const elapsedMs = Date.now() - startedAt;
+  assert.deepEqual(result, { ok: false, error: 'collaboration_request_timeout' });
+  assert.ok(elapsedMs >= 3900, `the session deadline fired too early at ${elapsedMs}ms`);
+  assert.ok(elapsedMs < 4800, `the session deadline exceeded its WebSocket reserve at ${elapsedMs}ms`);
+});
+
 test('public lobby retries a transient 5xx and records the terminal 5xx failure', async () => {
   const diagnostics = [];
   let calls = 0;

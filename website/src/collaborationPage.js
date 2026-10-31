@@ -199,6 +199,7 @@ export function buildCollaborationLobbyPage(locale = "en", options = {}) {
     pageTitle: "共创大厅 · SoloMap",
     title: "共创大厅",
     lead: "和此刻在线的 SoloMap 用户自由交流。大厅每 6 小时开启新一轮。",
+    waiting: "等待加入",
     connecting: "正在进入大厅",
     connected: "已连接",
     offline: "连接已断开",
@@ -214,11 +215,18 @@ export function buildCollaborationLobbyPage(locale = "en", options = {}) {
     privacy: "大厅消息公开可见，并会每 6 小时永久清空。",
     rateLimited: "发言太快，请稍后再继续。",
     unavailable: "暂时无法进入大厅，请稍后重试。",
+    nameLabel: "昵称",
+    namePlaceholder: "其他参与者会看到这个昵称",
+    join: "进入大厅",
+    joining: "正在进入…",
+    nicknameRequired: "请先设置昵称。",
+    nicknameTaken: "这个昵称已被使用，请换一个。",
     joinRoom: "加入临时共创"
   } : {
     pageTitle: "Co-create lobby · SoloMap",
     title: "Co-create lobby",
     lead: "Talk freely with SoloMap users who are online now. A new lobby session starts every 6 hours.",
+    waiting: "Waiting to join",
     connecting: "Entering lobby",
     connected: "Connected",
     offline: "Disconnected",
@@ -234,6 +242,12 @@ export function buildCollaborationLobbyPage(locale = "en", options = {}) {
     privacy: "Lobby messages are public and permanently cleared every 6 hours.",
     rateLimited: "You are posting too quickly. Continue in a moment.",
     unavailable: "The lobby is unavailable right now. Try again shortly.",
+    nameLabel: "Nickname",
+    namePlaceholder: "Other participants will see this nickname",
+    join: "Enter lobby",
+    joining: "Entering…",
+    nicknameRequired: "Set a nickname first.",
+    nicknameTaken: "That nickname is already in use. Choose another.",
     joinRoom: "Join a private room"
   };
 
@@ -246,7 +260,7 @@ export function buildCollaborationLobbyPage(locale = "en", options = {}) {
   <title>${escapeHtml(copy.pageTitle)}</title>
   ${siteStyles}${workbenchStyles}
   <style>
-    .lobby-main{min-width:0;padding:40px 0 56px 40px}.lobby-head{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;margin-bottom:24px}.lobby-head h1{margin:0 0 8px;font-size:clamp(30px,3vw,38px);line-height:1.12}.lobby-head p{margin:0;color:var(--muted);line-height:1.6}.lobby-head-actions{display:flex;align-items:center;gap:12px;flex:none}.lobby-head-actions .button{min-height:44px;white-space:nowrap}.lobby-status{flex:none;display:flex;align-items:center;gap:8px;min-height:44px;color:var(--muted);font-size:13px}.lobby-status-dot{width:9px;height:9px;border-radius:50%;background:#7a7672}.lobby-status-dot.online{background:var(--accent);box-shadow:0 0 0 4px rgba(0,240,255,.1)}.lobby-status-dot.error{background:#ff6b78}.lobby-shell{min-height:620px;border:1px solid var(--border);border-radius:16px;background:var(--glass-bg);overflow:hidden;display:flex;flex-direction:column}.lobby-messages{flex:1;min-height:360px;max-height:620px;overflow:auto;padding:24px;display:flex;flex-direction:column;gap:12px}.lobby-empty{margin:auto;max-width:520px;text-align:center;color:var(--muted);line-height:1.65}.lobby-message{max-width:min(680px,88%);padding:12px 14px;border:1px solid var(--border);border-radius:14px 14px 14px 4px;background:rgba(255,255,255,.035);align-self:flex-start}.lobby-message.mine{align-self:flex-end;border-radius:14px 14px 4px 14px;background:rgba(0,240,255,.08);border-color:rgba(0,240,255,.25)}.lobby-message-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:6px}.lobby-message-author{font-size:12px;font-weight:800;color:var(--accent)}.lobby-message-time{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}.lobby-message-text{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55}.lobby-composer{padding:16px 20px 20px;border-top:1px solid var(--border);background:rgba(0,0,0,.12)}.lobby-composer label{display:block;margin-bottom:8px;font-size:13px;font-weight:750}.lobby-compose-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end}.lobby-input{width:100%;min-height:52px;padding:11px 13px;color:var(--fg);background:rgba(0,0,0,.24);border:1px solid var(--border);border-radius:10px;outline:none;resize:none;font:inherit}.lobby-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(0,240,255,.1)}.lobby-foot{display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px;padding:0 20px 16px;color:var(--muted);font-size:12px}.lobby-foot button{border:0;background:none;color:var(--accent);padding:0;text-decoration:underline;cursor:pointer}.lobby-foot button[hidden]{display:none}.lobby-error{color:#ff8c96}.lobby-composer button:disabled,.lobby-input:disabled{cursor:not-allowed;opacity:.5}@media(max-width:960px){.lobby-main{padding:30px 0 48px}}@media(max-width:680px){.lobby-head{display:block;margin-bottom:18px}.lobby-head-actions{margin-top:16px;align-items:stretch;flex-direction:column}.lobby-head-actions .button{width:100%;text-align:center}.lobby-status{min-height:32px}.lobby-shell{min-height:560px}.lobby-messages{padding:16px}.lobby-message{max-width:94%}.lobby-composer{padding:12px}.lobby-compose-row{grid-template-columns:1fr}.lobby-compose-row button{width:100%}}
+    .lobby-main{min-width:0;padding:40px 0 56px 40px}.lobby-head{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;margin-bottom:24px}.lobby-head h1{margin:0 0 8px;font-size:clamp(30px,3vw,38px);line-height:1.12}.lobby-head p{margin:0;color:var(--muted);line-height:1.6}.lobby-head-actions{display:flex;align-items:center;gap:12px;flex:none}.lobby-head-actions .button{min-height:44px;white-space:nowrap}.lobby-status{flex:none;display:flex;align-items:center;gap:8px;min-height:44px;color:var(--muted);font-size:13px}.lobby-status-dot{width:9px;height:9px;border-radius:50%;background:#7a7672}.lobby-status-dot.online{background:var(--accent);box-shadow:0 0 0 4px rgba(0,240,255,.1)}.lobby-status-dot.error{background:#ff6b78}.lobby-shell{min-height:620px;border:1px solid var(--border);border-radius:16px;background:var(--glass-bg);overflow:hidden;display:flex;flex-direction:column}.lobby-join{width:min(480px,calc(100% - 32px));margin:auto;padding:28px;border:1px solid var(--border);border-radius:14px;background:rgba(255,255,255,.035)}.lobby-join label{display:block;margin-bottom:8px;font-size:13px;font-weight:750}.lobby-join-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px}.lobby-join-row .button{min-height:52px}.lobby-join-error{min-height:20px;margin:8px 0 0;color:#ff8c96;font-size:13px}.lobby-chat{flex:1;min-height:0;display:flex;flex-direction:column}.lobby-chat[hidden],.lobby-join[hidden]{display:none}.lobby-messages{flex:1;min-height:360px;max-height:620px;overflow:auto;padding:24px;display:flex;flex-direction:column;gap:12px}.lobby-empty{margin:auto;max-width:520px;text-align:center;color:var(--muted);line-height:1.65}.lobby-message{max-width:min(680px,88%);padding:12px 14px;border:1px solid var(--border);border-radius:14px 14px 14px 4px;background:rgba(255,255,255,.035);align-self:flex-start}.lobby-message.mine{align-self:flex-end;border-radius:14px 14px 4px 14px;background:rgba(0,240,255,.08);border-color:rgba(0,240,255,.25)}.lobby-message-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:6px}.lobby-message-author{font-size:12px;font-weight:800;color:var(--accent)}.lobby-message-time{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums}.lobby-message-text{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55}.lobby-composer{padding:16px 20px 20px;border-top:1px solid var(--border);background:rgba(0,0,0,.12)}.lobby-composer label{display:block;margin-bottom:8px;font-size:13px;font-weight:750}.lobby-compose-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end}.lobby-input{width:100%;min-height:52px;padding:11px 13px;color:var(--fg);background:rgba(0,0,0,.24);border:1px solid var(--border);border-radius:10px;outline:none;resize:none;font:inherit}.lobby-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(0,240,255,.1)}.lobby-input[aria-invalid="true"]{border-color:#ff6b78}.lobby-foot{display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px;padding:0 20px 16px;color:var(--muted);font-size:12px}.lobby-foot button{border:0;background:none;color:var(--accent);padding:0;text-decoration:underline;cursor:pointer}.lobby-foot button[hidden]{display:none}.lobby-error{color:#ff8c96}.lobby-composer button:disabled,.lobby-input:disabled{cursor:not-allowed;opacity:.5}@media(max-width:960px){.lobby-main{padding:30px 0 48px}}@media(max-width:680px){.lobby-head{display:block;margin-bottom:18px}.lobby-head-actions{margin-top:16px;align-items:stretch;flex-direction:column}.lobby-head-actions .button{width:100%;text-align:center}.lobby-status{min-height:32px}.lobby-shell{min-height:560px}.lobby-join-row{grid-template-columns:1fr}.lobby-join-row .button{width:100%}.lobby-messages{padding:16px}.lobby-message{max-width:94%}.lobby-composer{padding:12px}.lobby-compose-row{grid-template-columns:1fr}.lobby-compose-row button{width:100%}}
   </style>
 </head>
 <body>
@@ -254,20 +268,30 @@ export function buildCollaborationLobbyPage(locale = "en", options = {}) {
   <div class="desk shell">
     ${sidebarHtml}
     <main class="lobby-main">
-      <header class="lobby-head"><div><h1>${escapeHtml(copy.title)}</h1><p>${escapeHtml(copy.lead)}</p></div><div class="lobby-head-actions"><div class="lobby-status" role="status" aria-live="polite"><span class="lobby-status-dot" id="status-dot"></span><span id="status-text">${escapeHtml(copy.connecting)}</span></div><a class="button secondary" href="${zh ? "/zh" : ""}/workbench/collaboration?view=rooms">${escapeHtml(copy.joinRoom)}</a></div></header>
+      <header class="lobby-head"><div><h1>${escapeHtml(copy.title)}</h1><p>${escapeHtml(copy.lead)}</p></div><div class="lobby-head-actions"><div class="lobby-status" role="status" aria-live="polite"><span class="lobby-status-dot" id="status-dot"></span><span id="status-text">${escapeHtml(copy.waiting)}</span></div><a class="button secondary" href="${zh ? "/zh" : ""}/workbench/collaboration?view=rooms">${escapeHtml(copy.joinRoom)}</a></div></header>
       <section class="lobby-shell" aria-label="${escapeHtml(copy.title)}">
-        <div class="lobby-messages" id="messages" role="log" aria-live="polite" aria-relevant="additions"><div class="lobby-empty" id="empty">${escapeHtml(copy.empty)}</div></div>
-        <form class="lobby-composer" id="composer"><label for="message-input">${escapeHtml(copy.messageLabel)}</label><div class="lobby-compose-row"><textarea class="lobby-input" id="message-input" maxlength="1000" rows="2" placeholder="${escapeHtml(copy.messagePlaceholder)}" disabled></textarea><button class="button primary" id="send-button" type="submit" disabled>${escapeHtml(copy.send)}</button></div></form>
-        <footer class="lobby-foot"><span id="presence">0 ${escapeHtml(copy.participants)}</span><span id="countdown"></span><span>${escapeHtml(copy.privacy)}</span><span class="lobby-error" id="error" role="alert"></span><button id="reconnect" type="button" hidden>${escapeHtml(copy.retry)}</button></footer>
+        <form class="lobby-join" id="lobby-join-form"><label for="lobby-nickname">${escapeHtml(copy.nameLabel)}</label><div class="lobby-join-row"><input class="lobby-input" id="lobby-nickname" maxlength="40" autocomplete="nickname" value="${escapeHtml(displayName)}" placeholder="${escapeHtml(copy.namePlaceholder)}" aria-describedby="lobby-join-error"><button class="button primary" id="lobby-join" type="submit">${escapeHtml(copy.join)}</button></div><p class="lobby-join-error" id="lobby-join-error" role="alert"></p></form>
+        <div class="lobby-chat" id="lobby-chat" hidden>
+          <div class="lobby-messages" id="messages" role="log" aria-live="polite" aria-relevant="additions"><div class="lobby-empty" id="empty">${escapeHtml(copy.empty)}</div></div>
+          <form class="lobby-composer" id="composer"><label for="message-input">${escapeHtml(copy.messageLabel)}</label><div class="lobby-compose-row"><textarea class="lobby-input" id="message-input" maxlength="1000" rows="2" placeholder="${escapeHtml(copy.messagePlaceholder)}" disabled></textarea><button class="button primary" id="send-button" type="submit" disabled>${escapeHtml(copy.send)}</button></div></form>
+          <footer class="lobby-foot"><span id="presence">0 ${escapeHtml(copy.participants)}</span><span id="countdown"></span><span>${escapeHtml(copy.privacy)}</span><span class="lobby-error" id="error" role="alert"></span><button id="reconnect" type="button" hidden>${escapeHtml(copy.retry)}</button></footer>
+        </div>
       </section>
     </main>
   </div>
   ${footerHtml}
   <script>
   (() => {
+    const LOBBY_JOIN_BUDGET_MS = 5000;
+    const LOBBY_SESSION_BUDGET_MS = 4000;
     const copy = ${inlineJson(copy)};
-    const nickname = ${inlineJson(displayName)};
+    const accountNickname = ${inlineJson(displayName)};
     const state = { socket: null, memberId: "", expiresAt: 0, messages: new Map(), ended: false };
+    const joinForm = document.getElementById("lobby-join-form");
+    const nicknameInput = document.getElementById("lobby-nickname");
+    const joinButton = document.getElementById("lobby-join");
+    const joinError = document.getElementById("lobby-join-error");
+    const chat = document.getElementById("lobby-chat");
     const messagesElement = document.getElementById("messages");
     const emptyElement = document.getElementById("empty");
     const messageInput = document.getElementById("message-input");
@@ -278,6 +302,7 @@ export function buildCollaborationLobbyPage(locale = "en", options = {}) {
     const countdown = document.getElementById("countdown");
     const errorElement = document.getElementById("error");
     const reconnect = document.getElementById("reconnect");
+    let joinDeadlineTimer = 0;
 
     function randomId(bytes) { const value = new Uint8Array(bytes); crypto.getRandomValues(value); let binary = ""; for (const byte of value) binary += String.fromCharCode(byte); return btoa(binary).replace(/[+]/g, "-").replace(/[/]/g, "_").replace(/=+$/g, ""); }
     function setStatus(kind, label) { statusDot.className = "lobby-status-dot" + (kind ? " " + kind : ""); statusText.textContent = label; }
@@ -286,11 +311,109 @@ export function buildCollaborationLobbyPage(locale = "en", options = {}) {
     function renderMessages() { const ordered = [...state.messages.values()].sort((left, right) => Number(left.sequence || left.createdAt) - Number(right.sequence || right.createdAt)); messagesElement.replaceChildren(); if (!ordered.length) { messagesElement.append(emptyElement); return; } for (const message of ordered) { const article = document.createElement("article"); article.className = "lobby-message" + (message.authorId === state.memberId ? " mine" : ""); const head = document.createElement("div"); head.className = "lobby-message-head"; const author = document.createElement("span"); author.className = "lobby-message-author"; author.textContent = message.authorName; const time = document.createElement("span"); time.className = "lobby-message-time"; time.textContent = new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); const text = document.createElement("div"); text.className = "lobby-message-text"; text.textContent = message.text; head.append(author, time); article.append(head, text); messagesElement.append(article); } messagesElement.scrollTop = messagesElement.scrollHeight; }
     function acceptMessage(message) { if (!message || message.type !== "message" || state.messages.has(message.id)) return; const text = String(message.text || "").trim().slice(0, 1000); const authorName = String(message.authorName || "").trim().slice(0, 40); if (!text || !authorName) return; state.messages.set(String(message.id), { ...message, text, authorName, createdAt: Number(message.createdAt || Date.now()) }); }
     function closeSocket() { const socket = state.socket; state.socket = null; if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "Closed locally"); }
-    async function enterLobby() { closeSocket(); state.ended = false; state.messages.clear(); renderMessages(); errorElement.textContent = ""; reconnect.hidden = true; messageInput.disabled = true; sendButton.disabled = true; setStatus("", copy.connecting); try { const response = await fetch("/api/collaboration/lobby/session", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ nickname }) }); const session = await response.json(); if (!response.ok || !session.ok) throw new Error(String(session.error || "lobby_unavailable")); state.memberId = String(session.memberId || ""); state.expiresAt = Number(session.sessionEndsAt || 0); updateCountdown(); const protocol = location.protocol === "https:" ? "wss:" : "ws:"; const socket = new WebSocket(protocol + "//" + location.host + "/api/collaboration/lobby/socket?ticket=" + encodeURIComponent(String(session.ticket || ""))); state.socket = socket; socket.addEventListener("open", () => { if (state.socket !== socket) return; setStatus("online", copy.connected); messageInput.disabled = false; sendButton.disabled = false; messageInput.focus(); }); socket.addEventListener("message", event => { if (state.socket !== socket) return; let message; try { message = JSON.parse(event.data); } catch { return; } if (message.type === "history") { state.expiresAt = Number(message.expiresAt || state.expiresAt); for (const item of message.messages || []) acceptMessage(item); renderMessages(); updateCountdown(); return; } if (message.type === "presence") { presence.textContent = String(message.count || 0) + " " + copy.participants; return; } if (message.type === "error") { errorElement.textContent = message.error === "message_rate_limited" ? copy.rateLimited : copy.unavailable; return; } acceptMessage(message); renderMessages(); }); socket.addEventListener("close", event => { if (state.socket !== socket) return; state.socket = null; messageInput.disabled = true; sendButton.disabled = true; if (event.code === 4001) { state.ended = true; setStatus("error", copy.ended); countdown.textContent = copy.ended; reconnect.textContent = copy.next; } else { setStatus("error", copy.offline); reconnect.textContent = copy.retry; } reconnect.hidden = false; }); socket.addEventListener("error", () => { if (state.socket !== socket) return; setStatus("error", copy.offline); errorElement.textContent = copy.unavailable; }); } catch { setStatus("error", copy.offline); errorElement.textContent = copy.unavailable; reconnect.textContent = copy.retry; reconnect.hidden = false; } }
+    function finishJoinAttempt() { if (joinDeadlineTimer) clearTimeout(joinDeadlineTimer); joinDeadlineTimer = 0; joinButton.disabled = false; joinButton.textContent = copy.join; }
+    function showJoinFailure(code) {
+      setStatus("error", copy.offline);
+      if (code === "nickname_taken") {
+        chat.hidden = true;
+        joinForm.hidden = false;
+        joinError.textContent = copy.nicknameTaken;
+        nicknameInput.setAttribute("aria-invalid", "true");
+        nicknameInput.focus();
+        return;
+      }
+      if (joinForm.hidden) {
+        errorElement.textContent = copy.unavailable;
+        reconnect.textContent = copy.retry;
+        reconnect.hidden = false;
+      } else {
+        joinError.textContent = copy.unavailable;
+        nicknameInput.focus();
+      }
+    }
+    async function enterLobby(event) {
+      if (event) event.preventDefault();
+      const deadlineAt = Date.now() + LOBBY_JOIN_BUDGET_MS;
+      const nickname = String(nicknameInput.value || accountNickname).normalize("NFKC").trim().replace(/\\s+/gu, " ").slice(0, 40);
+      joinError.textContent = "";
+      nicknameInput.removeAttribute("aria-invalid");
+      if (!nickname) {
+        joinError.textContent = copy.nicknameRequired;
+        nicknameInput.setAttribute("aria-invalid", "true");
+        nicknameInput.focus();
+        return;
+      }
+      nicknameInput.value = nickname;
+      joinButton.disabled = true;
+      joinButton.textContent = copy.joining;
+      closeSocket();
+      state.ended = false;
+      state.messages.clear();
+      renderMessages();
+      errorElement.textContent = "";
+      reconnect.hidden = true;
+      messageInput.disabled = true;
+      sendButton.disabled = true;
+      setStatus("", copy.connecting);
+      let waitingForSocket = false;
+      try {
+        const controller = new AbortController();
+        const requestTimer = setTimeout(() => controller.abort(), Math.max(1, Math.min(LOBBY_SESSION_BUDGET_MS, deadlineAt - Date.now())));
+        let response;
+        let session;
+        try {
+          response = await fetch("/api/collaboration/lobby/session", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ nickname }),
+            signal: controller.signal
+          });
+          session = await response.json();
+        } finally {
+          clearTimeout(requestTimer);
+        }
+        if (!response.ok || !session.ok) throw new Error(String(session.error || "lobby_unavailable"));
+        state.memberId = String(session.memberId || "");
+        state.expiresAt = Number(session.sessionEndsAt || 0);
+        updateCountdown();
+        const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+        const socket = new WebSocket(protocol + "//" + location.host + "/api/collaboration/lobby/socket?ticket=" + encodeURIComponent(String(session.ticket || "")));
+        state.socket = socket;
+        waitingForSocket = true;
+        let opened = false;
+        joinDeadlineTimer = setTimeout(() => {
+          if (state.socket !== socket || opened) return;
+          state.socket = null;
+          if (socket.readyState < WebSocket.CLOSING) socket.close(1000, "Lobby join timed out");
+          finishJoinAttempt();
+          showJoinFailure("lobby_join_timeout");
+        }, Math.max(1, deadlineAt - Date.now()));
+        socket.addEventListener("open", () => {
+          if (state.socket !== socket) return;
+          opened = true;
+          finishJoinAttempt();
+          joinForm.hidden = true;
+          chat.hidden = false;
+          setStatus("online", copy.connected);
+          messageInput.disabled = false;
+          sendButton.disabled = false;
+          messageInput.focus();
+        });
+        socket.addEventListener("message", event => { if (state.socket !== socket) return; let message; try { message = JSON.parse(event.data); } catch { return; } if (message.type === "history") { state.expiresAt = Number(message.expiresAt || state.expiresAt); for (const item of message.messages || []) acceptMessage(item); renderMessages(); updateCountdown(); return; } if (message.type === "presence") { presence.textContent = String(message.count || 0) + " " + copy.participants; return; } if (message.type === "error") { errorElement.textContent = message.error === "message_rate_limited" ? copy.rateLimited : copy.unavailable; return; } acceptMessage(message); renderMessages(); });
+        socket.addEventListener("close", event => { if (state.socket !== socket) return; state.socket = null; messageInput.disabled = true; sendButton.disabled = true; if (!opened) { finishJoinAttempt(); showJoinFailure("lobby_unavailable"); return; } if (event.code === 4001) { state.ended = true; setStatus("error", copy.ended); countdown.textContent = copy.ended; reconnect.textContent = copy.next; } else { setStatus("error", copy.offline); reconnect.textContent = copy.retry; } reconnect.hidden = false; });
+        socket.addEventListener("error", () => { if (state.socket !== socket) return; if (!opened) { state.socket = null; if (socket.readyState < WebSocket.CLOSING) socket.close(1000, "Lobby join failed"); finishJoinAttempt(); showJoinFailure("lobby_unavailable"); return; } setStatus("error", copy.offline); errorElement.textContent = copy.unavailable; });
+      } catch (error) {
+        const code = error instanceof Error ? error.message : "lobby_unavailable";
+        showJoinFailure(code);
+      } finally {
+        if (!waitingForSocket) finishJoinAttempt();
+      }
+    }
     document.getElementById("composer").addEventListener("submit", event => { event.preventDefault(); const text = messageInput.value.trim(); if (!text || !state.socket || state.socket.readyState !== WebSocket.OPEN) return; state.socket.send(JSON.stringify({ type: "message", id: randomId(16), text: text.slice(0, 1000) })); messageInput.value = ""; messageInput.focus(); });
+    joinForm.addEventListener("submit", enterLobby);
     reconnect.addEventListener("click", enterLobby);
     setInterval(updateCountdown, 30000);
-    enterLobby();
+    nicknameInput.focus();
   })();
   </script>
 </body>

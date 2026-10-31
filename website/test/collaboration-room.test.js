@@ -27,6 +27,8 @@ function createDurableState(getWebSockets = () => []) {
             values.set(key, value);
           }
         },
+        async delete(key) { values.delete(key); },
+        async transaction(callback) { return callback(this); },
         async setAlarm(value) { values.set("alarm", value); },
         async deleteAll() { values.clear(); }
       },
@@ -119,6 +121,88 @@ test("the public lobby rejects signed-out users and issues six-hour tickets to a
   assert.equal(ticket.nickname, "Solo Builder");
   assert.equal(ticket.memberId, result.memberId);
   assert.equal(await collaborationRelayInternals.verifyLobbyTicket(env, `${result.ticket.slice(0, -1)}x`), null);
+});
+
+test("the public lobby rejects a nickname already used by another signed-in member", async () => {
+  const env = createProtectedEnv();
+  const join = (subjectId, nickname) => handleCollaborationLobbySession(new Request("https://solomap.app/api/collaboration/lobby/session", {
+    method: "POST",
+    headers: { "content-type": "application/json", "cf-connecting-ip": `203.0.113.${subjectId.endsWith("a") ? "21" : "22"}` },
+    body: JSON.stringify({ nickname })
+  }), env, { subjectId, tier: "account" });
+
+  const first = await join("account:a", "Solo Builder");
+  assert.equal(first.status, 200);
+  const duplicate = await join("account:b", "  solo   builder  ");
+  assert.equal(duplicate.status, 409);
+  assert.equal((await duplicate.json()).error, "nickname_taken");
+  const sameMember = await join("account:a", "solo builder");
+  assert.equal(sameMember.status, 200);
+
+  const unicodeFirst = await join("account:c", "Straße");
+  assert.equal(unicodeFirst.status, 200);
+  const unicodeDuplicate = await join("account:d", "STRASSE");
+  assert.equal(unicodeDuplicate.status, 409);
+  assert.equal((await unicodeDuplicate.json()).error, "nickname_taken");
+  const capitalSharpSDuplicate = await join("account:d", "STRAẞE");
+  assert.equal(capitalSharpSDuplicate.status, 409);
+  assert.equal((await capitalSharpSDuplicate.json()).error, "nickname_taken");
+  const greekFirst = await join("account:e", "ΟΣ");
+  assert.equal(greekFirst.status, 200);
+  const greekDuplicate = await join("account:f", "οσ");
+  assert.equal(greekDuplicate.status, 409);
+  assert.equal((await greekDuplicate.json()).error, "nickname_taken");
+  const unaccented = await join("account:g", "Jose");
+  assert.equal(unaccented.status, 200);
+  const accented = await join("account:h", "José");
+  assert.equal(accented.status, 200);
+});
+
+test("lobby nickname reservations survive Durable Object reconstruction", async () => {
+  const storage = createDurableState();
+  const { sessionStartedAt, sessionEndsAt } = collaborationRelayInternals.currentLobbySession();
+  const reserve = (lobby, memberId, nickname) => lobby.fetch(new Request("https://collaboration-lobby.internal/nickname", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ memberId, nickname, sessionStartedAt, sessionEndsAt })
+  }));
+
+  const firstInstance = new CollaborationLobby(storage.state);
+  assert.equal((await reserve(firstInstance, "a".repeat(32), "ΟΣ")).status, 200);
+  const reconstructedInstance = new CollaborationLobby(storage.state);
+  const duplicate = await reserve(reconstructedInstance, "b".repeat(32), "οσ");
+  assert.equal(duplicate.status, 409);
+  assert.equal((await duplicate.json()).error, "nickname_taken");
+});
+
+test("a signed-in lobby session does not wait for a live Passport entitlement lookup", async () => {
+  const env = { ...createProtectedEnv(), SOLOMAP_PASSPORT_VERIFY_URL: "https://passport.invalid/verify" };
+  const sessionCookie = await createSessionCookie(
+    new Request("https://solomap.app/zh/workbench"),
+    env,
+    { id: "lobby-user", email: "lobby@example.com", name: "Builder" }
+  );
+  const originalFetch = globalThis.fetch;
+  let upstreamCalls = 0;
+  globalThis.fetch = async () => {
+    upstreamCalls += 1;
+    throw new Error("live Passport lookup must not run on the lobby join path");
+  };
+  try {
+    const response = await worker.fetch(new Request("https://solomap.app/api/collaboration/lobby/session", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie: sessionCookie.split(";")[0]
+      },
+      body: JSON.stringify({ nickname: "Fast Builder" })
+    }), env, { waitUntil() {} });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).ok, true);
+    assert.equal(upstreamCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("lobby messages are bounded per account and the six-hour alarm clears all retained data", async () => {
@@ -414,7 +498,16 @@ test("the signed-in workbench co-create space keeps the lobby and private rooms 
   assert.match(html, /每 6 小时永久清空/);
   assert.doesNotMatch(html, /<aside class="recent"/);
   assert.doesNotMatch(html, /workspace-nav|workspace-account|SoloMap · 个人工作台/);
-  assert.match(html, /const nickname = "独立开发者"/);
+  assert.match(html, /id="lobby-nickname"/);
+  assert.match(html, /id="lobby-join"/);
+  assert.match(html, /value="独立开发者"/);
+  assert.match(html, /const accountNickname = "独立开发者"/);
+  assert.match(html, /id="status-text">等待加入<\/span>/);
+  assert.match(html, /replace\(\/\\s\+\/gu, " "\)/);
+  assert.match(html, /const LOBBY_JOIN_BUDGET_MS = 5000/);
+  assert.match(html, /new AbortController\(\)/);
+  assert.match(html, /joinForm\.hidden = false/);
+  assert.doesNotMatch(html, /enterLobby\(\);\s*\}\)\(\);/);
   assert.match(html, /\/api\/collaboration\/lobby\/session/);
   assert.match(html, /\/api\/collaboration\/lobby\/socket/);
   assert.match(html, /href="\/zh\/workbench\/collaboration\?view=rooms">加入临时共创<\/a>/);
@@ -454,6 +547,73 @@ test("the signed-in workbench co-create space keeps the lobby and private rooms 
   assert.equal(lobbySessionResponse.status, 200);
   assert.equal(lobbySession.sessionEndsAt - lobbySession.sessionStartedAt, 6 * 60 * 60 * 1000);
   assert.equal(env.COLLABORATION_ROOMS.allocations, 0);
+});
+
+test("the lobby join deadline also covers a stalled session response body", async () => {
+  const html = buildCollaborationLobbyPage("zh", { displayName: "测试用户" });
+  const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].at(-1)[1];
+  const ids = [
+    "lobby-join-form", "lobby-nickname", "lobby-join", "lobby-join-error", "lobby-chat", "messages", "empty",
+    "message-input", "send-button", "status-dot", "status-text", "presence", "countdown", "error", "reconnect", "composer"
+  ];
+  const elements = Object.fromEntries(ids.map((id) => [id, {
+    id,
+    value: id === "lobby-nickname" ? "测试用户" : "",
+    hidden: id === "lobby-chat",
+    disabled: false,
+    textContent: "",
+    listeners: {},
+    classList: { add() {}, remove() {} },
+    addEventListener(type, listener) { this.listeners[type] = listener; },
+    setAttribute(name, value) { this[name] = String(value); },
+    removeAttribute(name) { delete this[name]; },
+    replaceChildren() {},
+    append() {},
+    focus() { this.focused = true; }
+  }]));
+  const timers = [];
+  let socketCreations = 0;
+  let markBodyStarted;
+  const bodyStarted = new Promise((resolve) => { markBodyStarted = resolve; });
+  const context = {
+    AbortController,
+    Date,
+    Map,
+    URL,
+    crypto: globalThis.crypto,
+    document: {
+      getElementById(id) { return elements[id]; },
+      createElement() { return { className: "", textContent: "", append() {} }; }
+    },
+    location: { protocol: "https:", host: "solomap.app" },
+    setInterval() { return 0; },
+    setTimeout(callback, delay) { const timer = { callback, delay, cancelled: false }; timers.push(timer); return timers.length; },
+    clearTimeout(id) { if (timers[id - 1]) timers[id - 1].cancelled = true; },
+    fetch(_url, init) {
+      return Promise.resolve({
+        ok: true,
+        json() {
+          markBodyStarted();
+          return new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+        }
+      });
+    },
+    WebSocket: class {
+      static OPEN = 1;
+      static CLOSING = 2;
+      constructor() { socketCreations += 1; }
+    }
+  };
+  vm.runInNewContext(script, context);
+  const joining = elements["lobby-join-form"].listeners.submit({ preventDefault() {} });
+  await bodyStarted;
+  const bodyDeadline = timers.find((timer) => timer.delay === 4000);
+  assert.ok(bodyDeadline, "session headers and body must share the four-second sub-budget");
+  bodyDeadline.callback();
+  await joining;
+  assert.equal(socketCreations, 0);
+  assert.match(elements["lobby-join-error"].textContent, /暂时无法进入大厅/);
+  assert.equal(elements["lobby-join"].disabled, false);
 });
 
 test("room creation validates credentials before allocating a Durable Object", async () => {

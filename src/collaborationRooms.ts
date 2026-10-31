@@ -87,6 +87,7 @@ export type CollaborationDiagnosticSink = (event: CollaborationDiagnosticEvent) 
 
 const collaborationInviteCodePrefix = 'SM1.';
 const collaborationCreateDeadlineMs = 15_000;
+const collaborationLobbyJoinDeadlineMs = 4_000;
 
 function diagnosticErrorCode(error: unknown): string {
   if (error instanceof Error && error.message === 'collaboration_request_timeout') return error.message;
@@ -406,12 +407,12 @@ export async function createCollaborationLobbySession(
   passportGrant: string,
   fetcher: typeof fetch = fetch,
   diagnosticSink?: CollaborationDiagnosticSink,
-  sessionDeadlineMs = collaborationCreateDeadlineMs
+  sessionDeadlineMs = collaborationLobbyJoinDeadlineMs
 ): Promise<CollaborationLobbySession> {
   const normalizedNickname = String(nickname || '').trim().replace(/\s+/g, ' ').slice(0, 40);
   if (!normalizedNickname) return { ok: false, error: 'nickname_required' };
   if (!passportGrant) return { ok: false, error: 'login_required' };
-  const normalizedDeadlineMs = Math.max(1, Number(sessionDeadlineMs) || collaborationCreateDeadlineMs);
+  const normalizedDeadlineMs = Math.max(1, Number(sessionDeadlineMs) || collaborationLobbyJoinDeadlineMs);
   const deadlineAt = Date.now() + normalizedDeadlineMs;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const startedAt = Date.now();

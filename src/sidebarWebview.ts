@@ -4891,6 +4891,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let collaborationOnlineCount = 0;
     let collaborationConnectionState = 'idle';
     let collaborationError = '';
+    let collaborationErrorCode = '';
+    const collaborationLobbyJoinBudgetMs = 5_000;
+    let collaborationLobbyJoinAttemptId = '';
+    let collaborationLobbyJoinTimer = 0;
     let collaborationNotice = '';
     let collaborationPendingCopyRoomId = '';
     let collaborationPendingRoom = null;
@@ -5309,7 +5313,16 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (!deferRender) renderCollaborationPanel();
     }
 
-    function collaborationDisconnect() {
+    function clearCollaborationLobbyJoinTimer() {
+      if (collaborationLobbyJoinTimer) clearTimeout(collaborationLobbyJoinTimer);
+      collaborationLobbyJoinTimer = 0;
+    }
+
+    function collaborationDisconnect(preserveLobbyJoinDeadline = false) {
+      if (!preserveLobbyJoinDeadline) {
+        clearCollaborationLobbyJoinTimer();
+        collaborationLobbyJoinAttemptId = '';
+      }
       const socket = collaborationSocket;
       collaborationSocket = null;
       collaborationCryptoKey = null;
@@ -5383,7 +5396,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     function collaborationConnectLobby(session) {
-      collaborationDisconnect();
+      collaborationDisconnect(true);
       collaborationActiveRoom = {
         isLobby: true,
         roomId: 'public-lobby-' + String(session.sessionStartedAt || ''),
@@ -5404,6 +5417,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       collaborationSocket = socket;
       socket.addEventListener('open', () => {
         if (collaborationSocket !== socket) return;
+        clearCollaborationLobbyJoinTimer();
+        collaborationLobbyJoinAttemptId = '';
         collaborationConnectionState = 'connected';
         renderCollaborationPanel();
       });
@@ -5423,7 +5438,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           return;
         }
         if (message.type === 'error') {
-          collaborationError = message.error === 'message_rate_limited' ? t('collaborationLobbyRateLimited') : t('collaborationCreateFailed');
+          collaborationError = message.error === 'message_rate_limited' ? t('collaborationLobbyRateLimited') : t('collaborationLobbyJoinFailed');
           renderCollaborationPanel();
           return;
         }
@@ -5431,14 +5446,18 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       });
       socket.addEventListener('close', event => {
         if (collaborationSocket !== socket) return;
+        clearCollaborationLobbyJoinTimer();
+        collaborationLobbyJoinAttemptId = '';
         collaborationSocket = null;
         collaborationConnectionState = event.code === 4001 ? 'expired' : 'offline';
         renderCollaborationPanel();
       });
       socket.addEventListener('error', () => {
         if (collaborationSocket !== socket) return;
+        clearCollaborationLobbyJoinTimer();
+        collaborationLobbyJoinAttemptId = '';
         collaborationConnectionState = 'offline';
-        collaborationError = t('collaborationCreateFailed');
+        collaborationError = t('collaborationLobbyJoinFailed');
         renderCollaborationPanel();
       });
     }
@@ -5454,11 +5473,30 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (typeof vscode.setState === 'function') vscode.setState({ ...(vscode.getState() || {}), collaborationNickname });
       collaborationConnectionState = 'joining';
       collaborationError = '';
+      collaborationErrorCode = '';
+      clearCollaborationLobbyJoinTimer();
+      const interactionId = 'collaboration-lobby-' + collaborationRandomId(12);
+      collaborationLobbyJoinAttemptId = interactionId;
+      collaborationLobbyJoinTimer = setTimeout(() => {
+        if (collaborationLobbyJoinAttemptId !== interactionId) return;
+        collaborationLobbyJoinAttemptId = '';
+        collaborationLobbyJoinTimer = 0;
+        const socket = collaborationSocket;
+        collaborationSocket = null;
+        if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, 'Lobby join timed out');
+        collaborationActiveRoom = null;
+        collaborationConnectionState = 'idle';
+        collaborationErrorCode = 'lobby_join_timeout';
+        collaborationError = t('collaborationLobbyJoinFailed');
+        renderCollaborationPanel();
+      }, collaborationLobbyJoinBudgetMs);
       renderCollaborationPanel();
       vscode.postMessage({
         command: 'collaboration.joinLobby',
         nickname: collaborationNickname,
-        projectPath: currentProjects.selectedProjectPath || ''
+        projectPath: currentProjects.selectedProjectPath || '',
+        interactionId,
+        interactionAcceptedWallMs: Date.now()
       });
     }
 
@@ -5634,6 +5672,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           ? '<button type="button" class="collaboration-primary" data-collaboration-lobby' + (collaborationBusy ? ' disabled' : '') + '>' + escapeHtml(collaborationConnectionState === 'joining' ? t('collaborationJoining') : t('collaborationLobbyJoin')) + '</button>'
           : '<button type="button" class="collaboration-primary" data-open-account-settings>' + escapeHtml(t('collaborationOpenAccountSettings')) + '</button>';
         collaborationContent.innerHTML = '<div class="collaboration-start"><div class="collaboration-lobby-card"><span class="collaboration-lobby-copy"><span class="collaboration-lobby-title">' + escapeHtml(t('collaborationLobbyTitle')) + '</span><span class="collaboration-lobby-detail">' + escapeHtml(lobbyAuthenticated ? t('collaborationLobbyDetail') : t('collaborationLobbySignedOut')) + '</span></span>' + lobbyAction + '</div><p class="collaboration-intro">' + escapeHtml(t('collaborationIntro')) + '</p><div class="collaboration-create-row"><label class="collaboration-create-label" for="collaboration-nickname">' + escapeHtml(t('collaborationNameLabel')) + '</label><div class="collaboration-create-controls"><input id="collaboration-nickname" type="text" class="settings-input" maxlength="40" data-collaboration-nickname placeholder="' + escapeHtml(t('collaborationNamePlaceholder')) + '" value="' + escapeHtml(collaborationNickname) + '"><button type="button" class="collaboration-primary" data-collaboration-create' + (collaborationBusy ? ' disabled' : '') + '><span class="codicon codicon-live-share"></span><span>' + escapeHtml(collaborationConnectionState === 'creating' ? t('collaborationCreating') : t('collaborationCreate')) + '</span></button></div><div class="collaboration-quota-note">' + escapeHtml(collaborationQuotaLabel(collaborationExpectedTier())) + '</div></div><div class="collaboration-join-row"><label class="collaboration-create-label" for="collaboration-invite-code">' + escapeHtml(t('collaborationInviteCodeLabel')) + '</label><div class="collaboration-join-controls"><input id="collaboration-invite-code" type="text" class="settings-input" data-collaboration-invite-code autocomplete="off" spellcheck="false" placeholder="' + escapeHtml(t('collaborationInviteCodePlaceholder')) + '"><button type="button" class="collaboration-secondary" data-collaboration-join' + (collaborationBusy ? ' disabled' : '') + '>' + escapeHtml(collaborationConnectionState === 'joining' ? t('collaborationJoining') : t('collaborationJoin')) + '</button></div></div>' + (collaborationError ? '<div class="collaboration-error" role="alert">' + escapeHtml(collaborationError) + '</div>' : '') + '</div><div class="collaboration-room-list"><div class="collaboration-room-list-title">' + escapeHtml(t('collaborationRooms')) + '</div>' + roomRows + '</div>';
+        const nicknameField = collaborationContent.querySelector('[data-collaboration-nickname]');
+        const nicknameError = collaborationContent.querySelector('.collaboration-error');
+        if (nicknameField && nicknameError && collaborationErrorCode === 'nickname_taken') {
+          nicknameError.id = 'collaboration-nickname-error';
+          nicknameField.setAttribute('aria-invalid', 'true');
+          nicknameField.setAttribute('aria-describedby', nicknameError.id);
+        }
         const lobbyButton = collaborationContent.querySelector('[data-collaboration-lobby]');
         if (lobbyButton) lobbyButton.addEventListener('click', joinCollaborationLobby);
         const accountSettingsButton = collaborationContent.querySelector('[data-open-account-settings]');
@@ -6131,6 +6176,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         collaborationLobbyEndingSoon: '本轮即将结束，消息将在本轮结束时永久清空',
         collaborationLobbyNext: '进入新一轮',
         collaborationLobbyRateLimited: '发言太快，请稍后再继续。',
+        collaborationLobbyJoinFailed: '暂时无法进入大厅，请重试。',
+        collaborationNicknameTaken: '这个昵称已被使用，请换一个。',
         collaborationIntro: '为当前项目发起一个会自动结束的加密房间。有价值的想法可以再带回项目。',
         collaborationNameLabel: '我的昵称',
         collaborationNamePlaceholder: '参与者会看到这个昵称',
@@ -6640,6 +6687,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         collaborationLobbyEndingSoon: 'This session is ending soon. Messages will be permanently cleared when it ends.',
         collaborationLobbyNext: 'Enter new session',
         collaborationLobbyRateLimited: 'You are posting too quickly. Continue in a moment.',
+        collaborationLobbyJoinFailed: 'The lobby is unavailable right now. Try again.',
+        collaborationNicknameTaken: 'That nickname is already in use. Choose another.',
         collaborationIntro: 'Start an encrypted room that ends automatically. Useful ideas can move back into the project.',
         collaborationNameLabel: 'Your name',
         collaborationNamePlaceholder: 'Other participants will see this name',
@@ -9200,20 +9249,36 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         }
 
         case 'collaborationLobbyJoined':
+          if (String(message.interactionId || '') !== collaborationLobbyJoinAttemptId) break;
           collaborationConnectionState = 'idle';
+          collaborationErrorCode = '';
           collaborationConnectLobby(message);
           break;
 
         case 'collaborationLobbyLoginRequired':
+          if (String(message.interactionId || '') !== collaborationLobbyJoinAttemptId) break;
+          clearCollaborationLobbyJoinTimer();
+          collaborationLobbyJoinAttemptId = '';
           collaborationConnectionState = 'idle';
+          collaborationErrorCode = 'login_required';
           collaborationError = t('collaborationLobbySignedOut');
           renderCollaborationPanel();
           break;
 
         case 'collaborationLobbyJoinFailed':
+          if (String(message.interactionId || '') !== collaborationLobbyJoinAttemptId) break;
+          clearCollaborationLobbyJoinTimer();
+          collaborationLobbyJoinAttemptId = '';
           collaborationConnectionState = 'idle';
-          collaborationError = message.error === 'lobby_join_limited' ? t('collaborationRateLimited') : t('collaborationCreateFailed');
+          collaborationErrorCode = String(message.error || '');
+          collaborationError = message.error === 'nickname_taken'
+            ? t('collaborationNicknameTaken')
+            : message.error === 'lobby_join_limited' ? t('collaborationRateLimited') : t('collaborationLobbyJoinFailed');
           renderCollaborationPanel();
+          if (message.error === 'nickname_taken') {
+            const nicknameInput = collaborationContent.querySelector('[data-collaboration-nickname]');
+            if (nicknameInput) nicknameInput.focus();
+          }
           break;
 
         case 'collaborationRoomCreateFailed':

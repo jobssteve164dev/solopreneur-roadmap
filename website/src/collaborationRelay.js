@@ -1,3 +1,5 @@
+import { caseFold } from "unicode-case-folding";
+
 const ROOM_ID_PATTERN = /^[A-Za-z0-9_-]{20,64}$/;
 const RELAY_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32,128}$/;
 const MESSAGE_ID_PATTERN = /^[A-Za-z0-9_-]{16,80}$/;
@@ -31,6 +33,19 @@ const LOBBY_MAX_MESSAGE_CHARACTERS = 1000;
 const LOBBY_MESSAGE_RATE_WINDOW_MS = 60 * 1000;
 const LOBBY_MAX_MESSAGES_PER_WINDOW = 6;
 const LOBBY_MAX_MESSAGES_PER_SESSION = 60;
+const LOBBY_NICKNAME_RESERVATION_MS = LOBBY_TICKET_LIFETIME_MS;
+
+function normalizeLobbyNickname(value) {
+  return String(value || "").normalize("NFKC").trim().replace(/\s+/gu, " ").slice(0, 40);
+}
+
+function lobbyNicknameKey(value) {
+  return caseFold(normalizeLobbyNickname(value)).normalize("NFKC");
+}
+
+function lobbyNicknameKeysEqual(left, right) {
+  return Boolean(left && right) && String(left) === String(right);
+}
 
 function jsonResponse(payload, status = 200, headers = {}) {
   return new Response(JSON.stringify(payload), {
@@ -367,12 +382,27 @@ export async function handleCollaborationLobbySession(request, env, accountCreat
     const code = error instanceof Error ? error.message : "invalid_json";
     return jsonResponse({ ok: false, error: code }, code === "request_too_large" ? 413 : 400, collaborationCorsHeaders());
   }
-  const nickname = String(body.nickname || "").trim().replace(/\s+/g, " ").slice(0, 40);
+  const nickname = normalizeLobbyNickname(body.nickname);
   if (!nickname) return jsonResponse({ ok: false, error: "nickname_required" }, 400, collaborationCorsHeaders());
 
   const now = Date.now();
   const { sessionStartedAt, sessionEndsAt } = currentLobbySession(now);
   const memberId = (await hashRelayToken(`${accountCreator.subjectId}:${sessionStartedAt}`)).slice(0, 43);
+  const lobbyStub = env.COLLABORATION_LOBBY.get(env.COLLABORATION_LOBBY.idFromName(String(sessionStartedAt)));
+  let nicknameReservation;
+  try {
+    nicknameReservation = await lobbyStub.fetch("https://collaboration-lobby.internal/nickname", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ memberId, nickname, sessionStartedAt, sessionEndsAt })
+    });
+  } catch {
+    return jsonResponse({ ok: false, error: "collaboration_unavailable" }, 503, collaborationCorsHeaders());
+  }
+  if (!nicknameReservation.ok) {
+    const result = await nicknameReservation.json().catch(() => ({ ok: false, error: "collaboration_unavailable" }));
+    return jsonResponse(result, nicknameReservation.status, collaborationCorsHeaders());
+  }
   const ticket = await signLobbyTicket(String(env.SOLOMAP_PASSPORT_PRODUCT_SECRET), {
     purpose: "solomap_collaboration_lobby",
     memberId,
@@ -685,26 +715,79 @@ export class CollaborationLobby {
   }
 
   async fetch(request) {
+    const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/nickname") return this.reserveNickname(request);
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return jsonResponse({ ok: false, error: "websocket_required" }, 426);
     }
     return this.connect(request);
   }
 
+  async reserveNickname(request) {
+    let body;
+    try {
+      body = await parseBoundedJson(request);
+    } catch {
+      return jsonResponse({ ok: false, error: "invalid_lobby_identity" }, 400);
+    }
+    const now = Date.now();
+    const memberId = String(body.memberId || "");
+    const nickname = normalizeLobbyNickname(body.nickname);
+    const nicknameKey = lobbyNicknameKey(nickname);
+    const sessionStartedAt = Number(body.sessionStartedAt || 0);
+    const sessionEndsAt = Number(body.sessionEndsAt || 0);
+    if (!/^[A-Za-z0-9_-]{32,64}$/.test(memberId) || !nicknameKey
+      || sessionEndsAt <= now || sessionStartedAt !== Math.floor(now / LOBBY_SESSION_MS) * LOBBY_SESSION_MS
+      || sessionEndsAt !== sessionStartedAt + LOBBY_SESSION_MS) {
+      return jsonResponse({ ok: false, error: "invalid_lobby_identity" }, 403);
+    }
+    const activeConflict = this.state.getWebSockets().some((socket) => {
+      const attachment = typeof socket.deserializeAttachment === "function" ? socket.deserializeAttachment() || {} : {};
+      return String(attachment.memberId || "") !== memberId && lobbyNicknameKeysEqual(lobbyNicknameKey(attachment.nickname), nicknameKey);
+    });
+    if (activeConflict) return jsonResponse({ ok: false, error: "nickname_taken" }, 409);
+    const reserved = await this.state.storage.transaction(async (transaction) => {
+      const stored = await transaction.get("nicknameReservations");
+      const reservations = (Array.isArray(stored) ? stored : []).filter((item) => Number(item?.expiresAt || 0) > now);
+      const conflict = reservations.some((item) => lobbyNicknameKeysEqual(item.nicknameKey, nicknameKey) && item.memberId !== memberId);
+      if (conflict) return false;
+      const next = reservations.filter((item) => !lobbyNicknameKeysEqual(item.nicknameKey, nicknameKey));
+      next.push({ nicknameKey, memberId, expiresAt: Math.min(sessionEndsAt, now + LOBBY_NICKNAME_RESERVATION_MS) });
+      await transaction.put("nicknameReservations", next);
+      return true;
+    });
+    if (!reserved) return jsonResponse({ ok: false, error: "nickname_taken" }, 409);
+    return jsonResponse({ ok: true });
+  }
+
   async connect(request) {
     const now = Date.now();
     const memberId = String(request.headers.get("x-solomap-member-id") || "");
-    const nickname = decodeURIComponent(String(request.headers.get("x-solomap-nickname") || ""));
+    const nickname = normalizeLobbyNickname(decodeURIComponent(String(request.headers.get("x-solomap-nickname") || "")));
+    const nicknameKey = lobbyNicknameKey(nickname);
     const sessionStartedAt = Number(request.headers.get("x-solomap-session-start") || 0);
     const sessionEndsAt = Number(request.headers.get("x-solomap-session-end") || 0);
-    if (!/^[A-Za-z0-9_-]{32,64}$/.test(memberId) || !nickname || nickname.length > 40) {
+    if (!/^[A-Za-z0-9_-]{32,64}$/.test(memberId) || !nicknameKey || nickname.length > 40) {
       return jsonResponse({ ok: false, error: "invalid_lobby_identity" }, 403);
     }
     if (sessionEndsAt <= now || sessionStartedAt !== Math.floor(now / LOBBY_SESSION_MS) * LOBBY_SESSION_MS || sessionEndsAt !== sessionStartedAt + LOBBY_SESSION_MS) {
       return jsonResponse({ ok: false, error: "lobby_session_ended" }, 410);
     }
+    const reservationAvailable = await this.state.storage.transaction(async (transaction) => {
+      const stored = await transaction.get("nicknameReservations");
+      const reservations = (Array.isArray(stored) ? stored : []).filter((item) => Number(item?.expiresAt || 0) > now);
+      if (reservations.some((item) => lobbyNicknameKeysEqual(item.nicknameKey, nicknameKey) && item.memberId !== memberId)) return false;
+      await transaction.put("nicknameReservations", reservations);
+      return true;
+    });
+    if (!reservationAvailable) return jsonResponse({ ok: false, error: "nickname_taken" }, 409);
     const sockets = this.state.getWebSockets();
     if (sockets.length >= LOBBY_MAX_CONNECTIONS) return jsonResponse({ ok: false, error: "lobby_full" }, 429);
+    const nicknameConflict = sockets.some((socket) => {
+      const attachment = typeof socket.deserializeAttachment === "function" ? socket.deserializeAttachment() || {} : {};
+      return String(attachment.memberId || "") !== memberId && lobbyNicknameKeysEqual(lobbyNicknameKey(attachment.nickname), nicknameKey);
+    });
+    if (nicknameConflict) return jsonResponse({ ok: false, error: "nickname_taken" }, 409);
     const sameMemberConnections = sockets.filter((socket) => {
       const attachment = typeof socket.deserializeAttachment === "function" ? socket.deserializeAttachment() || {} : {};
       return attachment.memberId === memberId;
@@ -718,6 +801,13 @@ export class CollaborationLobby {
     const server = pair[1];
     this.state.acceptWebSocket(server);
     if (typeof server.serializeAttachment === "function") server.serializeAttachment({ memberId, nickname });
+    await this.state.storage.transaction(async (transaction) => {
+      const stored = await transaction.get("nicknameReservations");
+      const reservations = (Array.isArray(stored) ? stored : [])
+        .filter((item) => Number(item?.expiresAt || 0) > now
+          && !(lobbyNicknameKeysEqual(item.nicknameKey, nicknameKey) && item.memberId === memberId));
+      await transaction.put("nicknameReservations", reservations);
+    });
     const storedSession = await this.readSessionWithLegacyExtension(now);
     if (!storedSession) {
       await this.state.storage.put({
