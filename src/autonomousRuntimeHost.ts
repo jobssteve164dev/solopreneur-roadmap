@@ -268,36 +268,81 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
   const current = readRuntimeState(globalDataPath);
   const isProcessAlive = options.isProcessAlive || defaultIsProcessAlive;
   const isOwnerAlive = options.isProcessOwnerAlive || (options.isProcessAlive ? ((pid: number) => options.isProcessAlive!(pid)) : processOwnerAlive);
+  const convergeAfterOwnerChange = async (previous: RuntimeState, reason: string): Promise<{ started: boolean; pid: number; runtimeId: string } | null> => {
+    const unchangedOwnerDeadline = Date.now() + 2_000;
+    const replacementReadinessDeadline = Date.now() + 30_000;
+    let replacementObserved = false;
+    for (;;) {
+      const latest = readRuntimeState(globalDataPath);
+      const latestAlive = Boolean(latest && isOwnerAlive(latest.pid, latest.processBirth || ''));
+      if (latest && latestAlive) {
+        const sameOwner = latest.runtimeId === previous.runtimeId && latest.pid === previous.pid
+          && (latest.processBirth || '') === (previous.processBirth || '');
+        if (!sameOwner) {
+          replacementObserved = true;
+          const replacementHealth = await inspectAutonomousRuntimeHealth(globalDataPath, latest.pid, Date.now(), options.sendHealth, entryPath, buildId);
+          if (replacementHealth.healthy) return { started: false, pid: latest.pid, runtimeId: latest.runtimeId };
+          if (replacementHealth.reason === 'different_runtime_build'
+            && isStrictlyNewerRuntimeRelease(replacementHealth.releaseVersion, releaseVersion)) {
+            return { started: false, pid: latest.pid, runtimeId: latest.runtimeId };
+          }
+          if (!['control_unavailable', 'stale_heartbeat', 'different_process', 'different_runtime'].includes(replacementHealth.reason)) {
+            throw new Error(replacementHealth.reason);
+          }
+        }
+      }
+      if (!isOwnerAlive(previous.pid, previous.processBirth || '') && !latestAlive) return null;
+      if (Date.now() >= (replacementObserved ? replacementReadinessDeadline : unchangedOwnerDeadline)) throw new Error(reason);
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+  };
+  ownerRecovery: {
   if (current && isOwnerAlive(current.pid, current.processBirth || '')) {
     let health = await inspectAutonomousRuntimeHealth(globalDataPath, current.pid, Date.now(), options.sendHealth, entryPath, buildId);
     if (health.healthy) return { started: false, pid: current.pid, runtimeId: current.runtimeId };
+    if (health.reason === 'different_process' || health.reason === 'different_runtime') {
+      const replacement = await convergeAfterOwnerChange(current, health.reason);
+      if (replacement) return replacement;
+      break ownerRecovery;
+    }
     if (health.reason === 'control_unavailable' || health.reason === 'stale_heartbeat') {
       await new Promise(resolve => setTimeout(resolve, 250));
       health = await inspectAutonomousRuntimeHealth(globalDataPath, current.pid, Date.now(), options.sendHealth, entryPath, buildId);
       if (health.healthy) return { started: false, pid: current.pid, runtimeId: current.runtimeId };
+      if (health.reason === 'different_process' || health.reason === 'different_runtime') {
+        const replacement = await convergeAfterOwnerChange(current, health.reason);
+        if (replacement) return replacement;
+        break ownerRecovery;
+      }
       const verify = options.verifyRuntimeProcess || verifiedRuntimeProcess;
-      if (!['control_unavailable', 'stale_heartbeat'].includes(health.reason) || !verify(current.pid, current.runtimeId, globalDataPath)) throw new Error(health.reason);
-      const latest = readRuntimeState(globalDataPath) as (RuntimeState & { entryPath?: string; buildId?: string; releaseVersion?: string }) | null;
-      const heartbeatAge = latest ? Date.now() - Date.parse(latest.heartbeatAt) : Infinity;
-      const matchingBuild = latest?.entryPath === entryPath && latest?.buildId === buildId;
-      const newerBuild = isStrictlyNewerRuntimeRelease(latest?.releaseVersion, releaseVersion);
-      if (latest?.runtimeId === current.runtimeId && latest.pid === current.pid
-        && ['running', 'paused'].includes(latest.status) && heartbeatAge >= -5_000 && heartbeatAge <= 90_000
-        && (matchingBuild || newerBuild)) {
-        return { started: false, pid: current.pid, runtimeId: current.runtimeId };
+      if (!['control_unavailable', 'stale_heartbeat'].includes(health.reason)) throw new Error(health.reason);
+      if (!verify(current.pid, current.runtimeId, globalDataPath)) {
+        const replacement = await convergeAfterOwnerChange(current, health.reason);
+        if (replacement) return replacement;
+        break ownerRecovery;
+      } else {
+        const latest = readRuntimeState(globalDataPath) as (RuntimeState & { entryPath?: string; buildId?: string; releaseVersion?: string }) | null;
+        const heartbeatAge = latest ? Date.now() - Date.parse(latest.heartbeatAt) : Infinity;
+        const matchingBuild = latest?.entryPath === entryPath && latest?.buildId === buildId;
+        const newerBuild = isStrictlyNewerRuntimeRelease(latest?.releaseVersion, releaseVersion);
+        if (latest?.runtimeId === current.runtimeId && latest.pid === current.pid
+          && ['running', 'paused'].includes(latest.status) && heartbeatAge >= -5_000 && heartbeatAge <= 90_000
+          && (matchingBuild || newerBuild)) {
+          return { started: false, pid: current.pid, runtimeId: current.runtimeId };
+        }
+        // A packaged Runtime can be temporarily unable to answer health while a
+        // synchronous SQLite request owns its event loop. Preserve the exact
+        // release (including a same-version replacement build) or a strictly
+        // newer release while its accepted-work lease is
+        // bounded; an expired lease still follows stale-owner recovery below.
+        if (releaseVersion && runtimeHasActiveDataLease(globalDataPath, current.runtimeId, entryPath, buildId, releaseVersion, true)) {
+          return { started: false, pid: current.pid, runtimeId: current.runtimeId };
+        }
+        recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.recovery',
+          `pid=${current.pid} reason=${health.reason} heartbeatAgeMs=${heartbeatAge}`);
+        await (options.terminateProcess || terminateVerifiedRuntimeProcess)(current.pid);
+        if (isOwnerAlive(current.pid, current.processBirth || '')) throw new Error('runtime_termination_failed');
       }
-      // A packaged Runtime can be temporarily unable to answer health while a
-      // synchronous SQLite request owns its event loop. Preserve the exact
-      // release (including a same-version replacement build) or a strictly
-      // newer release while its accepted-work lease is
-      // bounded; an expired lease still follows stale-owner recovery below.
-      if (releaseVersion && runtimeHasActiveDataLease(globalDataPath, current.runtimeId, entryPath, buildId, releaseVersion, true)) {
-        return { started: false, pid: current.pid, runtimeId: current.runtimeId };
-      }
-      recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.recovery',
-        `pid=${current.pid} reason=${health.reason} heartbeatAgeMs=${heartbeatAge}`);
-      await (options.terminateProcess || terminateVerifiedRuntimeProcess)(current.pid);
-      if (isOwnerAlive(current.pid, current.processBirth || '')) throw new Error('runtime_termination_failed');
     } else {
       if (health.reason !== 'different_runtime_build') throw new Error(health.reason);
       if (isStrictlyNewerRuntimeRelease(health.releaseVersion, releaseVersion)) {
@@ -313,6 +358,7 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
         await new Promise(resolve => setTimeout(resolve, 50));
       }
     }
+  }
   }
   const result = ensureAutonomousRuntime(options);
   await waitForAutonomousRuntimeHealth(globalDataPath, 30_000, options.sendHealth, entryPath, buildId, undefined, result.runtimeId, result.pid, false, undefined, true);

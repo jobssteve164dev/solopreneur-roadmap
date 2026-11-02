@@ -117,6 +117,147 @@ test('a live runtime without control cannot be adopted or replaced', async t => 
   assert.equal(JSON.parse(fs.readFileSync(statePath, 'utf8')).runtimeId, 'legacy');
 });
 
+test('a Runtime that exits during health verification is replaced instead of surfacing control_unavailable', async t => {
+  const host = require('../out/autonomousRuntimeHost.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-health-exit-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const runtimeRoot = path.join(globalRoot, 'runtime');
+  const statePath = path.join(runtimeRoot, 'control.json');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'cutover-owner', pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
+  let oldOwnerAlive = true;
+  let spawnedChild;
+  t.after(() => {
+    if (spawnedChild) spawnedChild.kill('SIGKILL');
+    if (fs.existsSync(statePath)) fs.unlinkSync(statePath);
+    fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root);
+  });
+  const result = await host.ensureHealthyAutonomousRuntime({
+    extensionPath: '/opt/solomap-new', globalDataPath: globalRoot, buildId: 'new',
+    isProcessOwnerAlive: pid => pid === process.pid ? oldOwnerAlive : true,
+    sendHealth: async () => {
+      const state = require('../out/autonomousRuntime.js').readRuntimeState(globalRoot);
+      if (state.runtimeId === 'cutover-owner') throw new Error('control endpoint closed during cutover');
+      return { ok: true, runtimeId: state.runtimeId, status: state.status, entryPath: '/opt/solomap-new/out/autonomousRuntimeProcess.js', buildId: 'new' };
+    },
+    verifyRuntimeProcess() { oldOwnerAlive = false; return false; },
+    spawnProcess() {
+      spawnedChild = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      return { pid: spawnedChild.pid, unref() {} };
+    }
+  });
+  assert.equal(result.started, true);
+  assert.equal(result.pid, spawnedChild.pid);
+});
+
+test('health recovery adopts a replacement owner that claims during the probe', async t => {
+  const host = require('../out/autonomousRuntimeHost.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-health-claim-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const runtimeRoot = path.join(globalRoot, 'runtime');
+  const statePath = path.join(runtimeRoot, 'control.json');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  const writeState = runtimeId => fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId, pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
+  writeState('old-owner');
+  t.after(() => { fs.unlinkSync(statePath); fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root); });
+  let probes = 0;
+  let spawned = false;
+  const result = await host.ensureHealthyAutonomousRuntime({
+    extensionPath: '/opt/solomap-new', globalDataPath: globalRoot, buildId: 'new',
+    isProcessOwnerAlive: () => true,
+    sendHealth: async () => {
+      probes += 1;
+      if (probes === 1) writeState('new-owner');
+      return { ok: true, runtimeId: 'new-owner', status: 'running', entryPath: '/opt/solomap-new/out/autonomousRuntimeProcess.js', buildId: 'new' };
+    },
+    spawnProcess: () => { spawned = true; throw new Error('must not spawn'); }
+  });
+  assert.deepEqual(result, { started: false, pid: process.pid, runtimeId: 'new-owner' });
+  assert.equal(spawned, false);
+});
+
+test('health recovery preserves a strictly newer replacement owner during cutover', async t => {
+  const host = require('../out/autonomousRuntimeHost.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-health-newer-claim-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const runtimeRoot = path.join(globalRoot, 'runtime');
+  const statePath = path.join(runtimeRoot, 'control.json');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  const writeState = runtimeId => fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId, pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
+  writeState('old-owner');
+  t.after(() => { fs.unlinkSync(statePath); fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root); });
+  let probes = 0;
+  const result = await host.ensureHealthyAutonomousRuntime({
+    extensionPath: '/opt/solomap-old', globalDataPath: globalRoot, buildId: 'old-build', releaseVersion: '0.0.639',
+    isProcessOwnerAlive: () => true,
+    sendHealth: async () => {
+      probes += 1;
+      if (probes === 1) writeState('newer-owner');
+      return { ok: true, runtimeId: 'newer-owner', status: 'running', entryPath: '/opt/solomap-new/out/autonomousRuntimeProcess.js', buildId: 'new-build', releaseVersion: '0.0.640' };
+    },
+    spawnProcess: () => { throw new Error('must not spawn'); }
+  });
+  assert.deepEqual(result, { started: false, pid: process.pid, runtimeId: 'newer-owner' });
+});
+
+test('a missing owner file never permits replacement while the original identity is still alive', async t => {
+  const host = require('../out/autonomousRuntimeHost.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-health-missing-state-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const runtimeRoot = path.join(globalRoot, 'runtime');
+  const statePath = path.join(runtimeRoot, 'control.json');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'old-owner', pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
+  t.after(() => { if (fs.existsSync(statePath)) fs.unlinkSync(statePath); fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root); });
+  let spawned = false;
+  await assert.rejects(host.ensureHealthyAutonomousRuntime({
+    extensionPath: '/opt/solomap-new', globalDataPath: globalRoot, buildId: 'new',
+    isProcessOwnerAlive: () => true,
+    sendHealth: async () => { throw new Error('control unavailable'); },
+    verifyRuntimeProcess() { fs.unlinkSync(statePath); return false; },
+    spawnProcess: () => { spawned = true; throw new Error('must not spawn'); }
+  }), /control_unavailable/);
+  assert.equal(spawned, false);
+});
+
+test('a dead old owner with no live claimant falls through to atomic replacement startup', async t => {
+  const host = require('../out/autonomousRuntimeHost.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-health-vacated-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  const runtimeRoot = path.join(globalRoot, 'runtime');
+  const statePath = path.join(runtimeRoot, 'control.json');
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'old-owner', pid: process.pid, status: 'running', heartbeatAt: new Date().toISOString() }));
+  let spawnedChild;
+  let livenessChecks = 0;
+  t.after(() => {
+    if (spawnedChild) spawnedChild.kill('SIGKILL');
+    if (fs.existsSync(statePath)) fs.unlinkSync(statePath);
+    fs.rmdirSync(runtimeRoot); fs.rmdirSync(globalRoot); fs.rmdirSync(root);
+  });
+  const result = await host.ensureHealthyAutonomousRuntime({
+    extensionPath: '/opt/solomap-new', globalDataPath: globalRoot, buildId: 'new',
+    isProcessOwnerAlive: pid => {
+      livenessChecks += 1;
+      if (livenessChecks === 1) {
+        fs.writeFileSync(statePath, JSON.stringify({ schemaVersion: 1, runtimeId: 'abandoned-claim', pid: process.pid + 100000, status: 'running', heartbeatAt: new Date().toISOString() }));
+        return true;
+      }
+      return pid !== process.pid && pid !== process.pid + 100000;
+    },
+    sendHealth: async () => {
+      const state = require('../out/autonomousRuntime.js').readRuntimeState(globalRoot);
+      return { ok: true, runtimeId: state.runtimeId, status: state.status, entryPath: '/opt/solomap-new/out/autonomousRuntimeProcess.js', buildId: 'new' };
+    },
+    spawnProcess() {
+      spawnedChild = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      return { pid: spawnedChild.pid, unref() {} };
+    }
+  });
+  assert.equal(result.started, true);
+  assert.equal(result.pid, spawnedChild.pid);
+});
+
 test('a verified SoloMap runtime without control is terminated before fallback recovery', async t => {
   const host = require('../out/autonomousRuntimeHost.js');
   const runtime = require('../out/autonomousRuntime.js');

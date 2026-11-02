@@ -48,6 +48,79 @@ test('the Node test runner expands a literal glob and runs the capacity test aft
   }
 });
 
+test('the Node test runner isolates test files so each Runtime fixture keeps its startup budget', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-test-runner-concurrency-'));
+  const eventsPath = path.join(base, 'events.jsonl');
+  try {
+    for (let index = 0; index < 6; index++) {
+      fs.writeFileSync(path.join(base, `bounded-${index}.test.js`), `const fs=require('node:fs'),test=require('node:test');test('bounded ${index}',async()=>{fs.appendFileSync(process.env.SOLOMAP_TEST_CONCURRENCY_EVENTS,JSON.stringify({kind:'start',pid:process.pid})+'\\n');await new Promise(resolve=>setTimeout(resolve,300));fs.appendFileSync(process.env.SOLOMAP_TEST_CONCURRENCY_EVENTS,JSON.stringify({kind:'end',pid:process.pid})+'\\n');});\n`);
+    }
+    const env = { ...process.env, SOLOMAP_TEST_CONCURRENCY_EVENTS: eventsPath };
+    delete env.NODE_TEST_CONTEXT;
+    const result = childProcess.spawnSync(process.execPath, [
+      path.join(__dirname, '../scripts/run-node-tests.cjs'),
+      path.join(base, '*.test.js')
+    ], { cwd: path.join(__dirname, '..'), env, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    let active = 0;
+    let peak = 0;
+    for (const event of fs.readFileSync(eventsPath, 'utf8').trim().split('\n').map(line => JSON.parse(line))) {
+      active += event.kind === 'start' ? 1 : -1;
+      peak = Math.max(peak, active);
+    }
+    assert.equal(active, 0);
+    assert.equal(peak, 1, `expected isolated test files, observed ${peak} concurrent files`);
+  } finally {
+    for (const name of fs.readdirSync(base)) fs.unlinkSync(path.join(base, name));
+    fs.rmdirSync(base);
+  }
+});
+
+test('the Node test runner recycles its coordinator after a bounded file batch', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-test-runner-file-batches-'));
+  const parentsPath = path.join(base, 'parents.txt');
+  try {
+    for (let index = 0; index < 2; index++) {
+      fs.writeFileSync(path.join(base, `batch-${String(index).padStart(2, '0')}.test.js`), `const fs=require('node:fs'),test=require('node:test');test('batch ${index}',()=>fs.appendFileSync(process.env.SOLOMAP_TEST_BATCH_PARENTS,String(process.ppid)+'\\n'));\n`);
+    }
+    const env = { ...process.env, SOLOMAP_TEST_BATCH_PARENTS: parentsPath };
+    delete env.NODE_TEST_CONTEXT;
+    const result = childProcess.spawnSync(process.execPath, [
+      path.join(__dirname, '../scripts/run-node-tests.cjs'),
+      path.join(base, '*.test.js')
+    ], { cwd: path.join(__dirname, '..'), env, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const coordinators = new Set(fs.readFileSync(parentsPath, 'utf8').trim().split('\n'));
+    assert.ok(coordinators.size >= 2, `expected coordinator recycling, observed ${coordinators.size} coordinator`);
+  } finally {
+    for (const name of fs.readdirSync(base)) fs.unlinkSync(path.join(base, name));
+    fs.rmdirSync(base);
+  }
+});
+
+test('the Node test runner closes test-owned child processes before a file coordinator exits', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-test-runner-child-cleanup-'));
+  const nestedTest = path.join(base, 'owned-child.test.js');
+  const childPidPath = path.join(base, 'owned-child.pid');
+  try {
+    fs.writeFileSync(nestedTest, `const cp=require('node:child_process'),fs=require('node:fs'),net=require('node:net'),test=require('node:test');test('owned process timer and socket',()=>{setInterval(()=>{},1000);const child=cp.spawn(process.execPath,['-e','process.on("SIGTERM",()=>{});setInterval(()=>{},1000)'],{detached:true,stdio:'ignore',env:{PATH:process.env.PATH}});fs.writeFileSync(process.env.SOLOMAP_TEST_CHILD_PID,String(child.pid));child.unref();const server=net.createServer(()=>{});server.listen(0,'127.0.0.1',()=>net.createConnection(server.address().port,'127.0.0.1'));});\n`);
+    const env = { ...process.env, SOLOMAP_TEST_CHILD_PID: childPidPath };
+    delete env.NODE_TEST_CONTEXT;
+    const result = childProcess.spawnSync(process.execPath, [path.join(__dirname, '../scripts/run-node-tests.cjs'), nestedTest], {
+      cwd: path.join(__dirname, '..'),
+      env,
+      encoding: 'utf8',
+      timeout: 1500
+    });
+    assert.equal(result.status, 0, result.error?.message || result.stderr || result.stdout);
+    const childPid = Number(fs.readFileSync(childPidPath, 'utf8'));
+    assert.throws(() => process.kill(childPid, 0), 'the SIGTERM-resistant detached child must be gone before the runner exits');
+  } finally {
+    for (const name of fs.readdirSync(base)) fs.unlinkSync(path.join(base, name));
+    fs.rmdirSync(base);
+  }
+});
+
 test('the Node test runner stops after a regular batch failure and propagates either batch failure', () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-test-runner-failures-'));
   const capacityResultPath = path.join(base, 'capacity-ran.txt');
@@ -85,7 +158,7 @@ test('the Node test runner removes its owned temporary root for every handled in
       const suffix = signal.toLowerCase();
       const nestedTest = path.join(base, `interrupted-${suffix}.test.cjs`);
       const resultPath = path.join(base, `interrupted-${suffix}-root.txt`);
-      fs.writeFileSync(nestedTest, `const childProcess=require('node:child_process'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),test=require('node:test');test('fixture',async()=>{const child=childProcess.spawn(process.execPath,['-e',"const fs=require('node:fs'),path=require('node:path'),root=process.argv[1];setInterval(()=>{fs.mkdirSync(root,{recursive:true});fs.writeFileSync(path.join(root,'survived.txt'),'alive');},20);",os.tmpdir()],{stdio:'ignore',detached:process.platform!=='win32'});fs.writeFileSync(path.join(os.tmpdir(),'fixture.txt'),'owned');fs.writeFileSync(process.env.SOLOMAP_TEST_ROOT_RESULT,JSON.stringify({root:os.tmpdir(),workerPid:process.pid,childPid:child.pid}));await new Promise(resolve=>setTimeout(resolve,60000));});\n`);
+      fs.writeFileSync(nestedTest, `const childProcess=require('node:child_process'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),test=require('node:test');test('fixture',async()=>{const child=childProcess.spawn(process.execPath,['-e',"const fs=require('node:fs'),path=require('node:path'),root=process.argv[1];setInterval(()=>{fs.mkdirSync(root,{recursive:true});fs.writeFileSync(path.join(root,'survived.txt'),'alive');},20);",os.tmpdir()],{stdio:'ignore',detached:process.platform!=='win32',env:{PATH:process.env.PATH}});child.unref();fs.writeFileSync(path.join(os.tmpdir(),'fixture.txt'),'owned');fs.writeFileSync(process.env.SOLOMAP_TEST_ROOT_RESULT,JSON.stringify({root:os.tmpdir(),workerPid:process.pid,childPid:child.pid}));await new Promise(resolve=>setTimeout(resolve,60000));});\n`);
       const env = { ...process.env, SOLOMAP_TEST_ROOT_RESULT: resultPath };
       delete env.NODE_TEST_CONTEXT;
       const runner = childProcess.spawn(process.execPath, [path.join(__dirname, '../scripts/run-node-tests.cjs'), nestedTest], {

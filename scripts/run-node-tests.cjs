@@ -30,6 +30,9 @@ const inheritedOwners = String(process.env.SOLOMAP_TEST_RUN_OWNERS || '').split(
 const testRunOwners = [...inheritedOwners, testRunId].join(',');
 const requestedArguments = process.argv.slice(2);
 const nodeTestOptions = requestedArguments.filter(argument => argument.startsWith('--'));
+const effectiveNodeTestOptions = nodeTestOptions.some(argument => argument.startsWith('--test-concurrency='))
+  ? nodeTestOptions
+  : ['--test-concurrency=1', ...nodeTestOptions];
 const requestedTests = requestedArguments.filter(argument => !argument.startsWith('--')).flatMap(file => {
   const pattern = process.platform === 'win32' ? file.replaceAll(path.sep, '/') : file;
   const matches = fs.globSync(pattern);
@@ -37,14 +40,18 @@ const requestedTests = requestedArguments.filter(argument => !argument.startsWit
 });
 const capacityTests = requestedTests.filter(file => path.basename(file) === 'pi-capacity-budget.test.js');
 const regularTests = requestedTests.filter(file => path.basename(file) !== 'pi-capacity-budget.test.js');
-const testBatches = capacityTests.length > 0 && regularTests.length > 0
-  ? [regularTests, capacityTests]
-  : [requestedTests];
+const testBatches = [];
+const regularFileBatchSize = 1;
+const processFixtureCleanup = path.join(__dirname, 'test-process-fixture-cleanup.cjs');
+for (let index = 0; index < regularTests.length; index += regularFileBatchSize) {
+  testBatches.push(regularTests.slice(index, index + regularFileBatchSize));
+}
+if (capacityTests.length > 0) testBatches.push(capacityTests);
 let child;
 let requestedSignal;
 
 function startTestBatch() {
-  child = childProcess.spawn(process.execPath, ['--test', ...nodeTestOptions, ...testBatches.shift()], {
+  child = childProcess.spawn(process.execPath, ['--require', processFixtureCleanup, '--test', ...effectiveNodeTestOptions, ...testBatches.shift()], {
     cwd: process.cwd(),
     env: {
       ...process.env,
@@ -64,7 +71,15 @@ function startTestBatch() {
   child.once('close', handleTestBatchClose);
 }
 
-function ownedProcessIds() {
+function linuxProcessBirth(pid) {
+  if (process.platform !== 'linux') return '';
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return stat.slice(stat.lastIndexOf(') ') + 2).trim().split(/\s+/)[19] || '';
+  } catch { return ''; }
+}
+
+function ownedProcesses() {
   if (process.platform !== 'linux') return [];
   const owned = [];
   for (const name of fs.readdirSync('/proc')) {
@@ -72,7 +87,9 @@ function ownedProcessIds() {
     try {
       const entries = fs.readFileSync(`/proc/${name}/environ`).toString().split('\0');
       const owners = entries.find(entry => entry.startsWith('SOLOMAP_TEST_RUN_OWNERS='))?.slice('SOLOMAP_TEST_RUN_OWNERS='.length).split(',') || [];
-      if (owners.includes(testRunId)) owned.push(Number(name));
+      const pid = Number(name);
+      const birth = linuxProcessBirth(pid);
+      if (owners.includes(testRunId) && birth) owned.push({ pid, birth });
     } catch {
       // Processes can exit while /proc is being scanned.
     }
@@ -87,7 +104,7 @@ function processGroupAlive() {
 }
 
 function testProcessesAlive() {
-  return processGroupAlive() || ownedProcessIds().length > 0;
+  return processGroupAlive() || ownedProcesses().length > 0;
 }
 
 function waitForTestProcesses(timeoutMs) {
@@ -105,11 +122,12 @@ function stopTestProcessTree(signal) {
     return;
   }
   const forwardedSignal = signal === 'SIGHUP' ? 'SIGTERM' : signal;
-  const owned = ownedProcessIds();
+  const owned = ownedProcesses();
   try { process.kill(-child.pid, forwardedSignal); }
   catch (error) { if (error.code !== 'ESRCH') throw error; }
-  for (const pid of owned) {
-    try { process.kill(pid, forwardedSignal); }
+  for (const processIdentity of owned) {
+    if (linuxProcessBirth(processIdentity.pid) !== processIdentity.birth) continue;
+    try { process.kill(processIdentity.pid, forwardedSignal); }
     catch (error) { if (error.code !== 'ESRCH') throw error; }
   }
 }

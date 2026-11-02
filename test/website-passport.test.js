@@ -1,7 +1,12 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const { getGlobalDispatcher } = require('../website/node_modules/undici');
 
 const projectRootUrl = new URL('../', `file://${__dirname}/`);
+
+test.after(async () => {
+  await getGlobalDispatcher().destroy();
+});
 
 async function loadWebsiteWorker() {
   return import(new URL('website/src/worker.js', projectRootUrl));

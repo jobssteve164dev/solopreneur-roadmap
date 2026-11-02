@@ -32,7 +32,7 @@ test.after(() => {
   cleanupExact(testSecretStore);
 });
 
-async function waitFor(check, message, timeout = 7000) {
+async function waitFor(check, message, timeout = 15000) {
   const until = Date.now() + timeout;
   while (Date.now() < until) {
     if (await check()) return;
@@ -478,7 +478,12 @@ test('a superseded editor root sync cannot copy newer Telegram settings into the
   const { createTelegramBackgroundConnection } = require('../out/telegramBackgroundConnection.js');
   const { refreshTelegramRuntimeConfig } = require('../out/telegramRuntimeConfig.js');
   await oldRoot.start(); await newRoot.start();
-  const before = await refreshTelegramRuntimeConfig(oldRoot.globalRoot);
+  let before;
+  try { before = await refreshTelegramRuntimeConfig(oldRoot.globalRoot); }
+  catch (error) {
+    error.message += `; oldExited=${oldRoot.childExited()}; oldStderr=${oldRoot.childStderr()}; newExited=${newRoot.childExited()}; newStderr=${newRoot.childStderr()}`;
+    throw error;
+  }
   let releaseOldSettings;
   const oldSettingsRequested = new Promise(resolve => { releaseOldSettings = resolve; });
   let markOldSettingsRequested;
