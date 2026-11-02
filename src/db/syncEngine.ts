@@ -152,14 +152,16 @@ export class SyncEngine {
       if (this.closed) return;
       const indexes: RunIndexEntry[] = [];
       const indexIds = new Set<number>();
-      for (let position = 0; !this.closed; position += 200) {
-        const page = await sendRuntimeDataRequest<RunIndexEntry[]>(this.globalDataPath, { operation: 'read_project_run_indexes', input: { root: this.projectRoot, limit: 200, offset: position } });
+      let beforeExecutionLogId = 0;
+      for (; !this.closed;) {
+        const page = await sendRuntimeDataRequest<RunIndexEntry[]>(this.globalDataPath, { operation: 'read_project_run_indexes', input: { root: this.projectRoot, limit: 200, ...(beforeExecutionLogId ? { beforeExecutionLogId } : {}) } });
         const newEntries = page.filter(index => !indexIds.has(index.executionLogId));
         newEntries.forEach(index => indexIds.add(index.executionLogId));
         indexes.push(...newEntries);
         // During an extension upgrade the old owner can still return its
         // unpaginated response. Accept it once instead of querying it forever.
         if (page.length !== 200 || !newEntries.length) break;
+        beforeExecutionLogId = Math.min(...page.map(index => index.executionLogId));
         await new Promise<void>(resolve => setImmediate(resolve));
       }
       if (this.closed) return;

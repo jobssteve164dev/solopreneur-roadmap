@@ -32,7 +32,7 @@ const dataRoot=path.join(base,'.solomap-global');
  fs.writeFileSync(path.join(artifacts,'growth.html'),html);
  const compiled=fs.readFileSync(path.join(root,'out/extension.js'),'utf8');
  const captureStart=compiled.indexOf('async function captureConversationLaunchTarget(');
- const captureEnd=compiled.indexOf('async function resumeOrdinaryConversation(',captureStart);
+ const captureEnd=compiled.indexOf('async function prepareOrdinaryConversation(',captureStart);
  assert.ok(captureStart>0 && captureEnd>captureStart);
  const captureTarget=new vm.Script(compiled.slice(captureStart,captureEnd)+'\ncaptureConversationLaunchTarget(context,workspaceRoot,globalDataPath,settings)');
  const start=compiled.indexOf("case 'growth.reports':");
@@ -41,6 +41,8 @@ const dataRoot=path.join(base,'.solomap-global');
  const hostPanel={webview:{postMessage:message=>settled.push(message)}};
  const continueAction=message=>handler.runInNewContext({message,context:{extensionPath:root},path,
   activeProjectGrowthPanel:hostPanel,activeProjectGrowthPath:project,projectGrowthLoadSequence:1,growthReportActions:new Set(),
+  panelMessages_1:{postWebviewContainerMessage:(panel,value)=>panel.webview.postMessage(value)},
+  interactionBudget_1:require(path.join(root,'out/interactionBudget.js')),
   getProjects:()=>[{path:project}],getPersistedSettings:()=>({globalDataPath:dataRoot}),normalizeGlobalDataPathForExtension:value=>value,isSoloMapLanguageZh:()=>true,
   growthReports_js_1:require(path.join(root,'out/growthReports.js')),vscode:{window:{showInputBox:async()=> '继续确认导出日期'}},
   captureConversationLaunchTarget:(context,workspaceRoot,globalDataPath,settings)=>captureTarget.runInNewContext({context,workspaceRoot,globalDataPath,settings,path,
@@ -50,7 +52,7 @@ const dataRoot=path.join(base,'.solomap-global');
  try {
  const errors=[],actions=[];
  const openPage=async()=>{
- const page=await browser.newPage();page.on('pageerror',e=>errors.push(e.message));
+ const page=await browser.newPage();page.on('pageerror',e=>errors.push(e.stack||e.message));
  await page.route('http://solomap.test/**',async route=>{
   const file=decodeURIComponent(new URL(route.request().url()).pathname);
   assert.ok(file===path.join(root,'resources/logo_with_text.svg') || file.startsWith(path.join(root,'node_modules/@vscode/codicons/dist/')));
@@ -77,7 +79,8 @@ const dataRoot=path.join(base,'.solomap-global');
  if(width===390||width===1440){await page.locator('#growth-reports').scrollIntoViewIfNeeded();await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));await page.screenshot({path:path.join(artifacts,`reports-${width}.png`),animations:'disabled'});await page.locator('.module-matrix').scrollIntoViewIfNeeded();await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));await page.screenshot({path:path.join(artifacts,`modules-${width}.png`),animations:'disabled'});}
  }
  await page.getByRole('button',{name:'继续处理',exact:true}).click();
- await page.waitForFunction(()=>!document.querySelector('.report-actions button:disabled'));
+ try { await page.waitForFunction(()=>!document.querySelector('.report-actions button:disabled'),undefined,{timeout:5000}); }
+ catch(error){throw new Error(`growth report action did not settle: ${JSON.stringify({actions:settled.length?actions:actions.slice(-3),settled,launches,runtimeRoots,errors})}`,{cause:error});}
  const continued=actions.filter(m=>m.command==='growth.reportAction');
  check(continued.length===1 && continued[0].kind==='continue' && continued[0].taskId===task.taskId && continued[0].executionLogId===1 && continued[0].turnId===turns.turns[0].turnId, 'continue must target the latest original turn');
  check(launches.length===1 && launches[0][1]==='__solo__' && launches[0][2]===1 && launches[0][3].includes('继续确认导出日期') && launches[0][6]===true,'the real native action must preserve the execution and roadmap state');
@@ -127,7 +130,7 @@ const dataRoot=path.join(base,'.solomap-global');
  check(store.readReportVersions(projectId,[original])[0].report.summary===legacySummary,'archived pinned history must retain the full original summary');
  await remainingPage.setViewportSize({width:390,height:900});await remainingPage.locator('#growth-reports').scrollIntoViewIfNeeded();await remainingPage.screenshot({path:path.join(artifacts,'reports-archive-390.png'),animations:'disabled'});
  check(!errors.length,`script errors ${errors}`);check(actions.every(m=>['growth.reports','growth.reportTurns','growth.reportAction'].includes(m.command)),`unexpected effects ${actions.map(m=>m.command)}`);
- fs.writeFileSync(path.join(artifacts,'ui-result.json'),JSON.stringify({failures,errors,requests:actions.map(m=>m.command),nativeTurnId:turns.turns[0].turnId,continuation:{nodeId:launches[0]?.[1],executionLogId:launches[0]?.[2],preserveRoadmapState:launches[0]?.[6]},archival:{replacementContinuation:launches.length===3,remainingEarlierTurn:true,pinnedOriginalReadable:true,changeNotificationsTested:true},notifications,externalAgentLaunched:false},null,2));console.log({artifacts,failures});assert.equal(failures.length,0);
+ fs.writeFileSync(path.join(artifacts,'ui-result.json'),JSON.stringify({failures,errors,settled,requests:actions.map(m=>m.command),nativeTurnId:turns.turns[0].turnId,continuation:{nodeId:launches[0]?.[1],executionLogId:launches[0]?.[2],preserveRoadmapState:launches[0]?.[6]},archival:{replacementContinuation:launches.length===3,remainingEarlierTurn:true,pinnedOriginalReadable:true,changeNotificationsTested:true},notifications,externalAgentLaunched:false},null,2));console.log({artifacts,failures,settled});assert.equal(failures.length,0);
  } finally { await browser.close(); }
  } finally { for(const close of closers.reverse())await close(); }
 })().catch(e=>{console.error(e);process.exitCode=1});

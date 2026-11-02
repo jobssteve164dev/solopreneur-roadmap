@@ -30,6 +30,7 @@ function editor(deliveryPending, failure = false) {
       assert.equal(value, state); return { dataRoot: '/isolated/global', finalCommand: 'existing-durable-runner' };
     } },
     runLifecycleClient_1: { runStatusReference: () => 'solomap://run/1' },
+    coordinatePreparedConversationDelivery: async input => input.deliver(await input.prepare()),
     launchAgentConversationTerminal: async input => { deliveries.push(input); }
   });
   return { deliveries, run: () => run({}, 'original goal', '', '', [], {

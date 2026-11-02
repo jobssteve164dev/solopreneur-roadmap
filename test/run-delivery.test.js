@@ -29,6 +29,25 @@ test('continuation reads only its durable conversation family without decoding u
   } finally { await ops.close(); store.close(); }
 });
 
+test('continuation drains a conversation family through bounded keyset pages', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-continuation-pages-'));
+  const root = path.join(base, 'global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root), ops = createRuntimeDataOperations(store);
+  const call = (operation, input) => ops({ operation, input });
+  try {
+    let parent = await call('prepare_run', { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo',
+      prompt: 'initial', command: '', userMessage: 'initial', idempotencyKey: 'paged-family:1' });
+    for (let id = 2; id <= 202; id += 1) parent = await call('prepare_run', { root: project, executionLogId: id,
+      nodeId: '__solo__', runKind: 'solo_continue', prompt: `continue ${id}`, command: '', userMessage: `continue ${id}`,
+      parentExecutionLogId: parent.status.rootExecutionLogId, expectedParentTurnId: parent.turnId, idempotencyKey: `paged-family:${id}` });
+    const first = await call('list_conversation_run_states', { root: project, executionLogId: 1, limit: 200 });
+    assert.equal(first.items.length, 200); assert.equal(first.nextCursor, 3);
+    const second = await call('list_conversation_run_states', { root: project, executionLogId: 1, cursor: first.nextCursor, limit: 200 });
+    assert.deepEqual(second.items.map(state => Number(state.status.rootExecutionLogId)), [2, 1]);
+    assert.equal(second.nextCursor, null);
+  } finally { await ops.close(); store.close(); }
+});
+
 test('delivery polling lists only recoverable queued tasks and keeps active creators and stopped tasks untouched', async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-delivery-poll-'));
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);

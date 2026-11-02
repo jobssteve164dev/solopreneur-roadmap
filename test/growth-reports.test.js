@@ -55,6 +55,17 @@ async function openImportedReportFixture(t, fixture) {
   return { globalDataPath, refresh };
 }
 
+async function writeGrowthSnapshotOffline(globalDataPath, project, snapshot, idempotencyKey) {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const store = new UnifiedDataStore(globalDataPath);
+  try {
+    const registered = await store.registerProject({ root: project });
+    store.writeProjectGrowth(registered.projectId, snapshot, idempotencyKey);
+  } finally {
+    store.close();
+  }
+}
+
 function fixture() {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), 'growth-reports-'));
   const runDir = path.join(project, '.solopreneur/agent-runs/__solo__/1');
@@ -137,20 +148,23 @@ test('static test references cannot establish feature acceptance', () => {
 
 test('coverage source identity detects same-size edits, including reopened cached views', async (t) => {
   const { captureCoverageVersion, coverageVersionState } = require('../out/projectCoverage.js');
+  const { refreshProjectGrowthSnapshot } = require('../out/projectGrowth.js');
   const f = fixture(); fs.mkdirSync(path.join(f.project, 'src'));
   const globalDataPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'growth-coverage-global-')), '.solomap-global');
   const runtime = launchRuntime(globalDataPath); await readyRuntime(runtime, globalDataPath); t.after(() => stopRuntime(runtime, globalDataPath));
   fs.writeFileSync(path.join(f.project, 'src/a.js'), 'one');
+  fs.writeFileSync(path.join(f.project, '.solopreneur/roadmap.csv'), 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n');
   const sourceVersion = captureCoverageVersion(f.project);
-  assert.equal(coverageVersionState(f.project, { sourceVersion }), 'current');
+  assert.equal(coverageVersionState(f.project, { sourceVersion, currentSourceVersion: sourceVersion }), 'current');
   const coverageFile = path.join(f.project, '.solopreneur/coverage/project-growth-coverage.json');
   fs.mkdirSync(path.dirname(coverageFile), { recursive: true });
   fs.writeFileSync(coverageFile, JSON.stringify({ version: 1, provider: 'c8-istanbul', files: [], sourceVersion }));
   const { getProjectGrowthView } = require('../out/projectGrowth.js');
-  await getProjectGrowthView(f.project, path.resolve(__dirname, '..'), { refreshIfMissing: false, globalDataPath });
   fs.writeFileSync(path.join(f.project, 'src/a.js'), 'two');
-  assert.equal(coverageVersionState(f.project, { sourceVersion }), 'stale');
+  const editedVersion = captureCoverageVersion(f.project);
+  assert.equal(coverageVersionState(f.project, { sourceVersion, currentSourceVersion: editedVersion }), 'stale');
   assert.equal(coverageVersionState(f.project, {}), 'unknown');
+  await refreshProjectGrowthSnapshot(f.project, path.resolve(__dirname, '..'), { globalDataPath, scanReason: 'coverage-version-test' });
   const reopened = await getProjectGrowthView(f.project, path.resolve(__dirname, '..'), { refreshIfMissing: false, globalDataPath });
   assert.equal(reopened.coverage.versionState, 'stale');
 });
@@ -225,17 +239,21 @@ test('non-code reports paginate and module changes do not silently reassign hist
   f.report(1, { summary: '首轮', outputs: ['src/a.js'], unmetRequirements: ['待验收'] });
   const extension = path.resolve(__dirname, '..');
   const globalDataPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'growth-reports-global-')), '.solomap-global');
-  const runtime = launchRuntime(globalDataPath); await readyRuntime(runtime, globalDataPath); t.after(() => stopRuntime(runtime, globalDataPath));
+  let runtime = launchRuntime(globalDataPath); await readyRuntime(runtime, globalDataPath); t.after(() => stopRuntime(runtime, globalDataPath));
   await importReportFixture(globalDataPath, f.project);
   const snapshot = { snapshot: { id: 'mapping', projectPath: f.project, createdAt: new Date().toISOString(), gitHead: '', scanReason: 'test', status: 'completed', durationMs: 1, error: '' },
     nodes: [{ nodeId: 'file:src/a.js', kind: 'file', path: 'src/a.js', label: 'a', parentId: '', primaryRole: 'feature', fileCount: 1, testFileCount: 0, bytes: 1 }, { nodeId: 'module:a', kind: 'module', path: 'src', label: '模块 A', parentId: '', primaryRole: 'feature', fileCount: 1, testFileCount: 0, bytes: 1 }, { nodeId: 'capability:a', kind: 'capability', path: '', label: '导出', parentId: '', primaryRole: 'feature', fileCount: 0, testFileCount: 0, bytes: 0 }],
     edges: [{ sourceId: 'module:a', targetId: 'file:src/a.js', kind: 'contains', weight: 1, evidence: 'module-scan' }, { sourceId: 'module:a', targetId: 'capability:a', kind: 'implements', weight: 1, evidence: 'run_index:nodeId' }], signals: [], labels: [] };
-  await sendRuntimeDataRequest(globalDataPath, { operation: 'write_project_growth', input: { root: f.project, data: snapshot, idempotencyKey: 'mapping-a' } });
+  await stopRuntime(runtime, globalDataPath);
+  await writeGrowthSnapshotOffline(globalDataPath, f.project, snapshot, 'mapping-a');
+  runtime = launchRuntime(globalDataPath); await readyRuntime(runtime, globalDataPath);
   assert.equal((await queryGrowthReports(f.project, extension, { moduleId: 'module:a' }, globalDataPath)).tasks.length, 1);
   assert.equal((await queryGrowthReports(f.project, extension, { capabilityId: 'capability:a' }, globalDataPath)).tasks.length, 1);
   snapshot.snapshot.id = 'mapping-b'; snapshot.snapshot.createdAt = new Date(Date.now() + 1).toISOString();
   snapshot.nodes[1].nodeId = 'module:b'; snapshot.edges[0].sourceId = 'module:b'; snapshot.edges[1].sourceId = 'module:b';
-  await sendRuntimeDataRequest(globalDataPath, { operation: 'write_project_growth', input: { root: f.project, data: snapshot, idempotencyKey: 'mapping-b' } });
+  await stopRuntime(runtime, globalDataPath);
+  await writeGrowthSnapshotOffline(globalDataPath, f.project, snapshot, 'mapping-b');
+  runtime = launchRuntime(globalDataPath); await readyRuntime(runtime, globalDataPath);
   assert.equal((await queryGrowthReports(f.project, extension, { moduleId: 'module:b' }, globalDataPath)).tasks.length, 0);
   for (let id = 2; id <= 23; id++) {
     const runDir = path.join(f.project, '.solopreneur/agent-runs/__solo__', String(id)); fs.mkdirSync(runDir, { recursive: true });

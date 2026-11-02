@@ -3,7 +3,7 @@ import { isRuntimeDataTransportError } from './autonomousRuntimeControl';
 export interface DatabaseOverview {
   databaseBytes: number;
   freePageBytes: number;
-  contents: { records: number };
+  contents: { records: number | null; exact?: boolean };
   lastMaintenance: { finishedAt: number | string | null; status: string } | null;
 }
 
@@ -48,7 +48,9 @@ export function formatDatabaseOverview(overview: DatabaseOverview, language: str
       : (language === 'zh' ? '运行正常' : 'Healthy');
   return {
     databaseSize: bytes(overview.databaseBytes),
-    contentCount: Math.max(0, Number(overview.contents?.records) || 0).toLocaleString(locale),
+    contentCount: overview.contents?.records === null || overview.contents?.exact === false
+      ? (language === 'zh' ? '计算中…' : 'Calculating…')
+      : Math.max(0, Number(overview.contents?.records) || 0).toLocaleString(locale),
     reusableSpace: bytes(overview.freePageBytes),
     status
   };

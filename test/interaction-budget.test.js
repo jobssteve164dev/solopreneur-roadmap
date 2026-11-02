@@ -76,14 +76,14 @@ test('a native Provider receipt replaces an Agent acknowledgement but can never 
   }), {});
 });
 
-test('a missing receipt becomes a persisted deadline failure at ten seconds', () => {
+test('a missing receipt becomes an observation SLO record without converting delivery into failure', () => {
   const { taskIngressDeadlineFields } = require('../out/providerTaskIngress.js');
   const interactionBudget = createInteractionBudget({ wallMs: 1_000, bootId: 'boot-a', uptimeMs: 20_000, interactionId: 'action-no-receipt' });
   assert.deepEqual(taskIngressDeadlineFields({ interactionBudget }, { wallMs: 10_999, bootId: 'boot-a', uptimeMs: 29_999 }), {});
   const failed = taskIngressDeadlineFields({ interactionBudget }, { wallMs: 11_000, bootId: 'boot-a', uptimeMs: 30_000 });
   assert.equal(failed.taskIngressVerdict, 'deadline_exceeded');
   assert.equal(failed.taskIngressElapsedMs, 10_000);
-  assert.equal(failed.deliveryLastError, 'agent_task_ingress_timeout');
+  assert.equal(failed.deliveryLastError, undefined);
 });
 
 test('provider ingress verdict uses the native task start instead of delayed observer polling', () => {
@@ -136,7 +136,7 @@ test('an authoritative ingress diagnostic can be backfilled from its persisted r
   assert.equal(diagnostic.payload.reconciledObservationTimeout, true);
 });
 
-test('a Provider task starting exactly at the ten-second boundary fails the release gate', () => {
+test('a Provider task starting exactly at the ten-second boundary records an ingress SLO miss', () => {
   const { readInteractionClock } = require('../out/interactionBudget.js');
   const { taskIngressReceiptFields } = require('../out/providerTaskIngress.js');
   const now = readInteractionClock();

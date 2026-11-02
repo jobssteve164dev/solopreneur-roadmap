@@ -100,9 +100,13 @@ test('same-numbered conversations keep pending and settled state isolated by pro
     const card = projectPath => page.locator(`[data-select-project-path="${projectPath}"]`);
     const pending = projectPath => card(projectPath).locator('[data-continue-id="42"]').evaluate(element => element.classList.contains('is-pending'));
     await card(projects[0].path).locator('[data-continue-id="42"]').click();
-    assert.deepEqual(await page.evaluate(() => window.messages.filter(message => message.command === 'conversation.continue').at(-1)), {
-      command: 'conversation.continue', projectPath: projects[0].path, nodeId: '__solo__', conversationId: '42'
-    });
+    const continuation = await page.evaluate(() => window.messages.filter(message => message.command === 'conversation.continue').at(-1));
+    assert.equal(continuation.command, 'conversation.continue');
+    assert.equal(continuation.projectPath, projects[0].path);
+    assert.equal(continuation.nodeId, '__solo__');
+    assert.equal(continuation.conversationId, '42');
+    assert.match(continuation.interactionId, /^ui:/);
+    assert.ok(continuation.interactionWallMs > 0);
     assert.equal(await pending(projects[0].path), true);
     await deliver({ command: 'projectSelectionChanged', projectRoot: projects[1].path, generation: 1 });
     await deliver(snapshot(projects[1].path));

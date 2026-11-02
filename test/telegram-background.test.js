@@ -217,7 +217,7 @@ test('standalone runtime receives, queries projects and replies without an edito
   assert.match(firstChatPrompt, /SYSTEM:[\s\S]*"currentSteps":\[\{"title":"Ship Alpha","status":"Pending"\}\]/);
   assert.doesNotMatch(firstChatPrompt, /USER:[^]*"selectedProject":"Alpha"/);
   assert.ok(polls.length > 0);
-  const conversations = await control.sendRuntimeDataRequest(globalRoot, { operation: 'list_intelligence_conversations', input: {} });
+  const conversations = (await control.sendRuntimeDataRequest(globalRoot, { operation: 'list_intelligence_conversations', input: {} })).items;
   assert.equal(conversations.length, 1);
   assert.equal(fs.existsSync(path.join(globalRoot, 'intelligence-conversations')), false, 'new background history must not create JSON files');
   await control.sendRuntimeControlCommand(globalRoot, 'pause');
@@ -228,7 +228,7 @@ test('standalone runtime receives, queries projects and replies without an edito
   await start();
   updates.push(update(102, '继续刚才的问题'));
   await waitFor(() => sent.length > beforeRestart && sent.at(-1).text === 'Alpha 的下一步是 Ship Alpha。', 'Restart must resume TG conversation');
-  assert.equal((await control.sendRuntimeDataRequest(globalRoot, { operation: 'list_intelligence_conversations', input: {} })).length, 1);
+  assert.equal((await control.sendRuntimeDataRequest(globalRoot, { operation: 'list_intelligence_conversations', input: {} })).items.length, 1);
   const { conversation } = await control.sendRuntimeDataRequest(globalRoot, { operation: 'read_intelligence_conversation', input: { id: conversations[0].id } });
   assert.equal(conversation.messages.length, 4, 'Acknowledged messages must not be replayed after restart');
   assert.equal(fs.statSync(configPath).mode & 0o777, 0o600);
@@ -314,8 +314,8 @@ const fs=require('fs'),counter=${JSON.stringify(fixture.modelInput)};let input='
   try {
     assert.equal(verified.rows("SELECT COUNT(*) AS count FROM pi_conversation_operations WHERE status='settled'")[0].count, 1);
     assert.equal(verified.rows('SELECT COUNT(*) AS count FROM pi_tool_invocations')[0].count, 1);
-    assert.equal(verified.rows("SELECT COUNT(*) AS count FROM pi_tool_invocations WHERE status='admitted'")[0].count, 1,
-      'a failed tool call stays incomplete rather than manufacturing a successful mutation');
+    assert.equal(verified.rows("SELECT COUNT(*) AS count FROM pi_tool_invocations WHERE status='completed'")[0].count, 1,
+      'a failed tool call is durably completed with its error receipt and must not rerun its mutation');
     assert.equal(verified.readHostSettings({ namespace: 'extension', ownerScope: 'global' }).items.some(item => item.key === 'automationTasks'), false);
     assert.equal(verified.rows('SELECT COUNT(*) AS count FROM scheduled_occurrences')[0].count, 0,
       'recovery must not create the rejected schedule');
@@ -342,12 +342,15 @@ let input='';process.stdin.on('data',bytes=>input+=bytes);process.stdin.on('end'
   if(!input.includes('你是 SoloMap 的智能内核')){console.log('background cycle');return;}
   if(input.lastIndexOf('TOOLRESULT:')>input.lastIndexOf('USER:')){
     const result=JSON.parse(input.slice(input.lastIndexOf('TOOLRESULT:')+11).trim().split('\\n')[0]);
-    if(result.isError){console.log('任务未启动。');return;}
+    if(result.isError){console.log(JSON.stringify({kind:'final',call:null,content:'任务未启动。'}));return;}
     const envelope=JSON.parse(result.content[0].text);
     const value=envelope.structuredContent||JSON.parse(envelope.content.find(item=>item.type==='text').text);
-    console.log(result.toolName==='solomap_get_conversation'?'查询结果：'+value.latest[0].result.summary:'已开始检查 Alpha 的发布流程。');
-  }else console.log(JSON.stringify({toolCall:input.slice(input.lastIndexOf('USER:')).includes('刚才那个任务怎么样了')?
-    {name:'solomap_get_conversation',arguments:{}}:{name:'solomap_start_conversation',arguments:{project:'Alpha',mode:'solo',message:'检查发布流程',idempotencyKey:'telegram-solo-launch'}}}));
+    console.log(JSON.stringify({kind:'final',call:null,content:result.toolName==='solomap_get_conversation'?'查询结果：'+value.latest[0].result.summary:'已开始检查 Alpha 的发布流程。'}));
+  }else {
+    const call=input.slice(input.lastIndexOf('USER:')).includes('刚才那个任务怎么样了')?
+      {name:'solomap_get_conversation',arguments:{}}:{name:'solomap_start_conversation',arguments:{project:'Alpha',mode:'solo',message:'检查发布流程',idempotencyKey:'telegram-solo-launch'}};
+    console.log(JSON.stringify({kind:'tool_call',call:{name:call.name,argumentsJson:JSON.stringify(call.arguments)},content:null}));
+  }
 });
 `, { mode: 0o700 });
   await fixture.start();
@@ -638,7 +641,7 @@ test('quickly disabling and re-enabling invalidates pending replies while preser
   fixture.updates.push(fixture.update(401, '新的消息'));
   await waitFor(() => fixture.sent.some(m => m.text === '迟到的回复'), 'New messages after re-enable must still receive replies');
   assert.equal(fixture.sent.filter(m => m.text === '迟到的回复').length, 1, 'Revoked and newly accepted requests must not both reply');
-  const conversations = await control.sendRuntimeDataRequest(fixture.globalRoot, { operation: 'list_intelligence_conversations', input: {} });
+  const conversations = (await control.sendRuntimeDataRequest(fixture.globalRoot, { operation: 'list_intelligence_conversations', input: {} })).items;
   assert.deepEqual(conversations.map(value => value.id), [previous.id], 'Enable changes must preserve established chat identity');
   await fixture.stop();
 });
@@ -772,7 +775,7 @@ let input='';process.stdin.on('data', bytes => input += bytes);process.stdin.on(
   await waitFor(() => f.sent.some(message => message.text.includes(name) && message.text.includes('路线图')), 'status must read the database rename without waiting ten minutes for another decision cycle');
   f.updates.push(f.update(20002, '当前项目下一步是什么？'));
   await waitFor(() => f.sent.some(message => message.text === name + ' 的下一步是 Ship Alpha。'), 'the actual intelligence MCP tool must see the committed project metadata');
-  const conversations = await control.sendRuntimeDataRequest(f.globalRoot, { operation: 'list_intelligence_conversations', input: {} });
+  const conversations = (await control.sendRuntimeDataRequest(f.globalRoot, { operation: 'list_intelligence_conversations', input: {} })).items;
   assert.equal(conversations.length, 1);
   assert.equal(fs.existsSync(path.join(f.globalRoot, 'projects.json')), false);
   assert.deepEqual(fs.readFileSync(path.join(isolation, 'projects.json')), original);

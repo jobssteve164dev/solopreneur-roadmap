@@ -9,6 +9,7 @@ const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
 const { RunLifecycleClient, readConversationLogSnapshot, runStatusReference } = require('../out/runLifecycleClient.js');
 const { captureMaintenanceRunResult } = require('../out/maintenanceRunResult.js');
+const { readCompleteRunDocument } = require('../out/runDocumentClient.js');
 
 function fixture() {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-run-lifecycle-'));
@@ -21,6 +22,13 @@ function fixture() {
 }
 function request(project, executionLogId = 1) {
   return { root: project, executionLogId, nodeId: '__solo__', runKind: 'solo', prompt: '完整任务输入\n原始证据', command: 'codex', userMessage: '完成用户目标', status: 'Running', idempotencyKey: `prepare:${project}:${executionLogId}` };
+}
+function storedDocumentPage(stored, input = {}) {
+  if (!stored) return null;
+  const complete = Buffer.from(stored.bytes, 'base64');
+  const offset = Number(input.offset || 0), limit = Number(input.limit || 65536);
+  return { ...stored, byteOffset: offset, totalBytes: complete.length,
+    bytes: complete.subarray(offset, Math.min(complete.length, offset + limit)).toString('base64') };
 }
 
 test('a run-bound MCP checkpoint starts the prepared conversation in the existing ledger row', async () => {
@@ -202,7 +210,8 @@ test('dead maintenance owner recovery retains its full receipt before settling a
     fs.writeFileSync(resultPath, bytes);
     await new (require('../out/runRecovery.js').RunRecovery)(f.store).recover();
     const purpose = `maintenance_result_${claimed.generation}`;
-    const receipt = await f.call('read_run_document', { root: f.project, executionLogId: 1, purpose });
+    const receipt = await readCompleteRunDocument((operation, input) => f.call(operation, input),
+      { root: f.project, executionLogId: 1, purpose });
     assert.ok(receipt, 'recovery must capture the completed external result before marking the interrupted process');
     assert.deepEqual(Buffer.from(receipt.bytes, 'base64'), bytes);
     assert.equal(fs.existsSync(resultPath), false, 'recovery must remove the exact receipt after database readback');
@@ -224,7 +233,7 @@ test('maintenance result cleanup refuses a same-byte physical replacement at the
     status: { runKind: 'skill_install', executionLogId: 1, maintenanceResultPath: file, maintenanceResultGeneration: 1, maintenanceResultBaseline: null } };
   let stored = null;
   const operation = async (name, input) => {
-    if (name === 'read_run_document') return stored;
+    if (name === 'read_run_document') return storedDocumentPage(stored, input);
     stored = { bytes: input.bytes, hash: require('node:crypto').createHash('sha256').update(Buffer.from(input.bytes, 'base64')).digest('hex'), totalBytes: bytes.length };
     return { objectId: 'receipt', revision: 1 };
   };
@@ -253,7 +262,7 @@ test('maintenance result cleanup retains mismatched evidence and non-result sibl
       status: { runKind: 'skill_install', executionLogId: 1, maintenanceResultPath: file, maintenanceResultGeneration: 1, maintenanceResultBaseline: null } };
     let stored = null;
     const operation = async (name, input) => {
-      if (name === 'read_run_document') return stored;
+      if (name === 'read_run_document') return storedDocumentPage(stored, input);
       const storedBytes = scenario === 'mismatch' ? Buffer.from('different').toString('base64') : input.bytes;
       stored = { bytes: storedBytes, hash: require('node:crypto').createHash('sha256').update(Buffer.from(storedBytes, 'base64')).digest('hex'), totalBytes: Buffer.from(storedBytes, 'base64').length };
       return { objectId: 'receipt', revision: 1 };
@@ -277,7 +286,7 @@ test('maintenance result cleanup rejects a symlinked temporary parent without de
     status: { runKind: 'skill_install', executionLogId: 1, maintenanceResultPath: file, maintenanceResultGeneration: 1, maintenanceResultBaseline: null } };
   let stored = null;
   const operation = async (name, input) => {
-    if (name === 'read_run_document') return stored;
+    if (name === 'read_run_document') return storedDocumentPage(stored, input);
     stored = { bytes: input.bytes, hash: require('node:crypto').createHash('sha256').update(bytes).digest('hex'), totalBytes: bytes.length };
     return { objectId: 'receipt', revision: 1 };
   };
@@ -292,7 +301,8 @@ test('maintenance result cleanup retains an unbound same-byte source when its da
   const state = { projectId: 'project', runId: 'run', turnId: 'turn', generation: 1, revision: 1,
     status: { runKind: 'skill_install', executionLogId: 1, maintenanceResultPath: file, maintenanceResultGeneration: 1, maintenanceResultBaseline: null } };
   const stored = { bytes: bytes.toString('base64'), hash: require('node:crypto').createHash('sha256').update(bytes).digest('hex'), totalBytes: bytes.length };
-  assert.equal(await captureMaintenanceRunResult(root, state, async name => name === 'read_run_document' ? stored : assert.fail('must not rewrite existing document')), true);
+  assert.equal(await captureMaintenanceRunResult(root, state, async (name, input) => name === 'read_run_document'
+    ? storedDocumentPage(stored, input) : assert.fail('must not rewrite existing document')), true);
   assert.deepEqual(fs.readFileSync(file), bytes, 'a cross-call inode without persisted identity cannot be deleted');
 });
 
@@ -304,7 +314,7 @@ test('maintenance result cleanup stays successful on an unsupported secure-path 
     status: { runKind: 'skill_install', executionLogId: 1, maintenanceResultPath: file, maintenanceResultGeneration: 1, maintenanceResultBaseline: null } };
   let stored = null;
   const operation = async (name, input) => {
-    if (name === 'read_run_document') return stored;
+    if (name === 'read_run_document') return storedDocumentPage(stored, input);
     stored = { bytes: input.bytes, hash: require('node:crypto').createHash('sha256').update(bytes).digest('hex'), totalBytes: bytes.length };
     return { objectId: 'receipt', revision: 1 };
   };

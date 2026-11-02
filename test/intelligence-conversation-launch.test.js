@@ -54,6 +54,7 @@ process.stdin.on('end', () => {
     return envelope.structuredContent || JSON.parse(envelope.content.find(item => item.type === 'text').text);
   };
   const request = JSON.parse(fs.readFileSync(${JSON.stringify(requestFile)}, 'utf8'));
+  if (request.directReply) return console.log(request.directReply);
   if (request.signalQuery) {
     const results = input.slice(input.lastIndexOf('USER:')).split('TOOLRESULT:').slice(1)
       .map(text => JSON.parse(text.trim().split('\\n')[0]));
@@ -105,7 +106,8 @@ process.stdin.on('end', () => {
     owner.store.recordPiCompatibilityDrain({ runtimeId: 'previous-runtime', releaseVersion: '0.0.605', buildId: 'previous-build',
       replacementVersion: '0.0.606', replacementBuildId: 'launch-build' });
   }
-  const runtime = new IntelligenceRuntime(root, owner.store, owner.ops, 'launch-runtime', mode === 'harness' ? '0.0.606' : '0.0.605', 'launch-build');
+  const { LocalIntelligencePersistence } = require('../out/intelligencePersistence.js');
+  const runtime = await IntelligenceRuntime.create(root, new LocalIntelligencePersistence(owner.store), owner.ops, 'launch-runtime', mode === 'harness' ? '0.0.606' : '0.0.605', 'launch-build');
   owner.ops.setIntelligenceRuntime(runtime);
   assert.equal(runtime.mode().mode, mode);
   const store = new IntelligenceConversationStore(root, async (messages, context) => {
@@ -115,7 +117,7 @@ process.stdin.on('end', () => {
     }, await runtimeProjectMcpSource(root, project, context.operationId));
     try { return await new EmbeddedPiAgentEngine({ agentCli: cli, workingDirectory: root }).chat(messages, { selectedProject: 'Alpha', projects: ['Alpha'] }, mcp.client, context); }
     finally { await mcp.close(); }
-  }, (_root, request) => owner.ops(request), true);
+  }, (_root, request) => request.operation === 'read_intelligence_execution_mode' ? Promise.resolve(runtime.mode()) : owner.ops(request), true);
   let ids = {};
   const reply = createTelegramIntelligenceReply(() => store, () => ids, async next => { ids = next; }, () => 0);
   const launches = [];
@@ -127,7 +129,7 @@ process.stdin.on('end', () => {
     await onLaunch?.({ ...owner, root, runtime, payload });
     return { status: 'started', projectPath: payload.projectPath, mode: payload.mode };
   });
-  return { ...owner, database: owner.store, root, project, otherProject, launches, store,
+  return { ...owner, database: owner.store, root, project, otherProject, launches, store, runtime, requestFile,
     async ask(input, chatId = crypto.randomUUID(), toolName = 'solomap_start_conversation') {
       fs.writeFileSync(requestFile, JSON.stringify(input.maintenance || input.signalQuery ? input : { name: toolName, arguments: input }));
       const answer = await reply(chatId, input.signalQuery ? 'Action没有数据吗' : '请开始这项任务');
@@ -137,6 +139,36 @@ process.stdin.on('end', () => {
     disconnect() { bridge.dispose(); bridge = undefined; }
   };
 }
+
+test('duplicate Harness delivery shares one operation before asynchronous preparation completes', async t => {
+  const f = await fixture(t, 'harness');
+  fs.writeFileSync(f.requestFile, JSON.stringify({ directReply: '同一操作只执行一次。' }));
+  const originalWait = f.runtime.waitUntilRunnable.bind(f.runtime);
+  let release;
+  const preparationGate = new Promise(resolve => { release = resolve; });
+  f.runtime.waitUntilRunnable = async operation => {
+    await preparationGate;
+    return originalWait(operation);
+  };
+  const input = {
+    text: '处理这一条重复投递。',
+    conversationId: 'd7b235c8-ae36-42f9-af28-a080ddc1c93e',
+    operationId: '288c9aed-e43c-4fef-8278-776dfadd7f96',
+    requestId: 'telegram-update-duplicate',
+    source: 'telegram'
+  };
+  const first = f.runtime.send(input);
+  const duplicate = f.runtime.send(input);
+  await new Promise(resolve => setImmediate(resolve));
+  release();
+  const [firstConversation, duplicateConversation] = await Promise.all([first, duplicate]);
+  assert.deepEqual(duplicateConversation, firstConversation);
+  assert.deepEqual(firstConversation.messages, [
+    { role: 'user', content: '处理这一条重复投递。' },
+    { role: 'assistant', content: '同一操作只执行一次。' }
+  ]);
+  assert.equal(f.database.rows("SELECT COUNT(*) AS count FROM pi_conversation_operations WHERE operation_id='288c9aed-e43c-4fef-8278-776dfadd7f96'")[0].count, 1);
+});
 
 for (const mode of ['legacy', 'harness']) {
   test(`${mode} Telegram executes a project query after a model preamble and reads every page before replying`, async t => {

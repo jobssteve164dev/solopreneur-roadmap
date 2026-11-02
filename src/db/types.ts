@@ -80,7 +80,7 @@ export interface RunIndexEntry extends RunIndexRecord {
   signals: RunIndexSignal[];
 }
 
-export type RunImpactRecord = Pick<RunIndexRecord, 'runKind' | 'agentCli' | 'status' | 'startedAt' | 'finishedAt' | 'durationMs' | 'inputTokens' | 'cachedInputTokens' | 'outputTokens' | 'reasoningOutputTokens' | 'totalTokens'> & {
+export type RunImpactRecord = Pick<RunIndexRecord, 'executionLogId' | 'runKind' | 'agentCli' | 'status' | 'startedAt' | 'finishedAt' | 'durationMs' | 'inputTokens' | 'cachedInputTokens' | 'outputTokens' | 'reasoningOutputTokens' | 'totalTokens'> & {
   files: Pick<RunIndexFile, 'filePath' | 'role'>[];
 };
 
@@ -160,6 +160,21 @@ export interface GrowthSnapshotData {
   labels: GrowthModuleLabelRecord[];
   summary?: GrowthSnapshotSummary;
   topologyAvailable?: boolean;
+  detailToken?: string;
+  detailOffset?: number;
+  nextDetailOffset?: number | null;
+}
+
+export type GrowthSnapshotStageSection = 'nodes' | 'edges' | 'signals' | 'labels';
+
+export interface GrowthSnapshotStageManifest {
+  stageId: string;
+  snapshot: GrowthSnapshotRecord;
+  payloadHash: string;
+  summary: GrowthSnapshotSummary;
+  semanticHash: string;
+  counts: Record<GrowthSnapshotStageSection, number>;
+  sourceVersion: { gitHead: string; contentHash: string };
 }
 
 export interface ProjectState {

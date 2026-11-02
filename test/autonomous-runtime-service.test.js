@@ -196,15 +196,17 @@ test('a fresh packaged Runtime stays owned while a long database request blocks 
   terminated = false;
   fs.writeFileSync(busyPath, JSON.stringify(busyLease));
   fs.writeFileSync(statePath, JSON.stringify({ ...endpoint, buildId: 'previous-build' }));
-  await assert.rejects(host.ensureHealthyAutonomousRuntime({
+  fs.writeFileSync(busyPath, JSON.stringify({ ...busyLease, buildId: 'previous-build' }));
+  const sameReleaseResult = await host.ensureHealthyAutonomousRuntime({
     extensionPath: '/opt/solomap', globalDataPath: globalRoot, buildId: 'packaged-build', releaseVersion: '0.0.526',
     isProcessAlive: () => true,
     sendHealth: async () => { throw new Error('control endpoint busy'); },
     verifyRuntimeProcess: () => true,
     terminateProcess: async () => { terminated = true; },
     spawnProcess: () => { spawned = true; throw new Error('must not spawn'); }
-  }), /runtime_termination_failed/);
-  assert.equal(terminated, true);
+  });
+  assert.deepEqual(sameReleaseResult, { started: false, pid: process.pid, runtimeId: 'busy' });
+  assert.equal(terminated, false);
   assert.equal(spawned, false);
 });
 
@@ -336,7 +338,7 @@ test('a healthy older build drains before the new fallback runtime takes its lea
     sendHealth: async () => {
       const state = runtime.readRuntimeState(globalRoot);
       return { ok: true, runtimeId: state.runtimeId, status: state.status, buildId: state.runtimeId === 'old' ? 'old' : 'new',
-        entryPath: state.runtimeId === 'old' ? '/opt/old/out/autonomousRuntimeProcess.js' : newPath };
+        releaseVersion: '0.0.514', entryPath: state.runtimeId === 'old' ? '/opt/old/out/autonomousRuntimeProcess.js' : newPath };
     },
     async sendControl(command, runtimeId, replacementBuildId, replacementVersion) {
       assert.equal(command, 'drain');
@@ -360,7 +362,7 @@ test('a healthy older build drains before the new fallback runtime takes its lea
   assert.equal(runtime.readRuntimeState(globalRoot).runtimeId, result.runtimeId);
 });
 
-test('a verified older Runtime is terminated when acknowledged drain cannot finish', async t => {
+test('an acknowledged upgrade drain waits past its old deadline without killing accepted work', async t => {
   const host = require('../out/autonomousRuntimeHost.js');
   const runtime = require('../out/autonomousRuntime.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-drain-stuck-'));
@@ -376,12 +378,15 @@ test('a verified older Runtime is terminated when acknowledged drain cannot fini
       const state = runtime.readRuntimeState(globalRoot);
       return { ok: true, runtimeId: state.runtimeId, status: state.status, entryPath: state.runtimeId === 'old' ? '/opt/solomap-old/out/autonomousRuntimeProcess.js' : '/opt/solomap-new/out/autonomousRuntimeProcess.js', buildId: state.runtimeId === 'old' ? 'old' : 'new' };
     },
-    async sendControl(command, runtimeId) { assert.equal(command, 'drain'); assert.equal(runtimeId, 'old'); drained++; },
+    async sendControl(command, runtimeId) {
+      assert.equal(command, 'drain'); assert.equal(runtimeId, 'old'); drained++;
+      setTimeout(() => { oldAlive = false; }, 25);
+    },
     verifyRuntimeProcess: (pid, runtimeId) => pid === process.pid && runtimeId === 'old',
     async terminateProcess(pid) { terminated = pid; oldAlive = false; },
     spawnProcess() { spawnedChild = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); return { pid: spawnedChild.pid, unref() {} }; }
   });
-  assert.equal(drained, 1); assert.equal(terminated, process.pid); assert.equal(result.started, true);
+  assert.equal(drained, 1); assert.equal(terminated, 0); assert.equal(result.started, true);
 });
 
 test('a drained packaged Runtime remains verifiable after its control endpoint closes', async t => {
@@ -418,6 +423,7 @@ test('a drained packaged Runtime remains verifiable after its control endpoint c
     async sendControl(command, runtimeId) {
       assert.equal(command, 'drain'); assert.equal(runtimeId, 'old');
       fs.unlinkSync(statePath);
+      setTimeout(() => oldChild.kill('SIGTERM'), 20);
     },
     spawnProcess() {
       replacement = childProcess.spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
@@ -1261,6 +1267,61 @@ test('failed service upgrade restores and restarts the previous definition', asy
       if (fs.existsSync(directoryPath)) fs.rmdirSync(directoryPath);
     }
   }
+});
+
+test('a post-v56 service failure rolls forward to the current fallback instead of starting a schema-incompatible old service', async t => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-rollforward-schema-'));
+  const homeDir = path.join(root, 'home');
+  const globalRoot = path.join(root, '.solomap-global');
+  fs.mkdirSync(homeDir);
+  const store = new UnifiedDataStore(globalRoot); store.close();
+  const options = { platform: 'linux', homeDir, extensionPath: '/opt/solomap-current', globalDataPath: globalRoot, execPath: '/usr/bin/code' };
+  const plan = service.buildRuntimeServicePlan(options);
+  fs.mkdirSync(path.dirname(plan.definitionPath), { recursive: true });
+  fs.writeFileSync(plan.definitionPath, 'old schema-incompatible service');
+  const registryPath = path.join(homeDir, '.config', 'solomap', 'runtime-service.json');
+  t.after(() => {
+    for (const file of [plan.definitionPath, registryPath, path.join(globalRoot, 'solomap.db'), path.join(globalRoot, 'solomap.db-wal'), path.join(globalRoot, 'solomap.db-shm')]) if (fs.existsSync(file)) fs.unlinkSync(file);
+    for (const directory of [path.dirname(plan.definitionPath), path.join(homeDir, '.config', 'systemd'), path.dirname(registryPath), path.join(homeDir, '.config'), homeDir, globalRoot, root]) {
+      if (fs.existsSync(directory)) fs.rmdirSync(directory);
+    }
+  });
+  let recovered = 0;
+  const commands = [];
+  await assert.rejects(service.ensureAutonomousRuntimeService({ ...options,
+    async runCommand(command, args) { commands.push([command, args]); },
+    async waitForHealth() { throw new Error('candidate service failed after migration'); },
+    async recoverCurrentRuntime() { recovered += 1; }
+  }), /runtime_service_rollforward_fallback/);
+  assert.equal(recovered, 1);
+  assert.equal(commands.filter(([command, args]) => command === plan.installCommand[0] && JSON.stringify(args) === JSON.stringify(plan.installCommand[1])).length, 1,
+    'the old service must not be started after the schema cutover');
+  assert.equal(fs.readFileSync(plan.definitionPath, 'utf8'), plan.definition);
+});
+
+test('an unreadable schema probe fails closed and never authorizes an old service rollback', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-rollforward-unknown-schema-'));
+  const homeDir = path.join(root, 'home');
+  const globalRoot = path.join(root, '.solomap-global');
+  fs.mkdirSync(homeDir); fs.mkdirSync(globalRoot);
+  fs.writeFileSync(path.join(globalRoot, 'solomap.db'), 'not a sqlite database');
+  const options = { platform: 'linux', homeDir, extensionPath: '/opt/solomap-current', globalDataPath: globalRoot, execPath: '/usr/bin/code' };
+  const plan = service.buildRuntimeServicePlan(options);
+  fs.mkdirSync(path.dirname(plan.definitionPath), { recursive: true });
+  fs.writeFileSync(plan.definitionPath, 'old service');
+  const registryPath = path.join(homeDir, '.config', 'solomap', 'runtime-service.json');
+  t.after(() => {
+    for (const file of [plan.definitionPath, registryPath, path.join(globalRoot, 'solomap.db')]) if (fs.existsSync(file)) fs.unlinkSync(file);
+    for (const directory of [path.dirname(plan.definitionPath), path.join(homeDir, '.config', 'systemd'), path.dirname(registryPath), path.join(homeDir, '.config'), homeDir, globalRoot, root]) if (fs.existsSync(directory)) fs.rmdirSync(directory);
+  });
+  let recovered = 0;
+  await assert.rejects(service.ensureAutonomousRuntimeService({ ...options,
+    async runCommand() {}, async waitForHealth() { throw new Error('candidate failed'); },
+    async recoverCurrentRuntime() { recovered += 1; }
+  }), /runtime_service_rollforward_fallback/);
+  assert.equal(recovered, 1);
+  assert.equal(fs.readFileSync(plan.definitionPath, 'utf8'), plan.definition);
 });
 
 test('rollback accepts the restored old service through the real health contract', async t => {

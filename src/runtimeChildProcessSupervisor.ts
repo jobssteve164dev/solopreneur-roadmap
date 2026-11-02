@@ -3,18 +3,24 @@ import * as fs from 'node:fs';
 
 function directChildProcessIds(parentPid: number): number[] {
   if (process.platform === 'linux') {
-    const children: number[] = [];
-    for (const name of fs.readdirSync('/proc')) {
-      if (!/^\d+$/.test(name)) continue;
-      try {
-        const stat = fs.readFileSync(`/proc/${name}/stat`, 'utf8');
-        const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-        if (Number(fields[1]) === parentPid) children.push(Number(name));
-      } catch {
-        // A child can exit while the process table is being read.
-      }
+    try {
+      return fs.readFileSync(`/proc/${parentPid}/task/${parentPid}/children`, 'utf8')
+        .split(/\s+/)
+        .filter(value => /^\d+$/.test(value))
+        .map(Number)
+        .filter(pid => {
+          try {
+            const status = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
+            const tgid = Number(status.match(/^Tgid:\s+(\d+)$/m)?.[1] || 0);
+            return tgid === pid;
+          } catch {
+            return false;
+          }
+        });
+    } catch {
+      // The process or a child can exit while the process table is read.
+      return [];
     }
-    return children;
   }
   try {
     if (process.platform === 'win32') {

@@ -58,6 +58,18 @@ test('database overview keeps stable placeholders and exposes only a read-only r
     status: '运行正常 · 最近维护 2026/10/15'
   });
   assert.equal(overview.formatDatabaseOverview({
+    databaseBytes: 12 * 1024 * 1024 * 1024,
+    freePageBytes: 0,
+    contents: { records: null, exact: false },
+    lastMaintenance: null
+  }, 'zh').contentCount, '计算中…');
+  assert.equal(overview.formatDatabaseOverview({
+    databaseBytes: 12 * 1024 * 1024 * 1024,
+    freePageBytes: 0,
+    contents: { records: null, exact: false },
+    lastMaintenance: null
+  }, 'en').contentCount, 'Calculating…');
+  assert.equal(overview.formatDatabaseOverview({
     databaseBytes: 1,
     freePageBytes: 0,
     contents: { records: 1 },

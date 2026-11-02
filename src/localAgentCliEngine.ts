@@ -32,7 +32,9 @@ const cognitiveInvocationGlobal = globalThis as Record<PropertyKey, unknown>;
 const activeCognitiveCliInvocations = (cognitiveInvocationGlobal[cognitiveInvocationRegistryKey] as Set<() => void> | undefined)
   || new Set<() => void>();
 const activeCognitiveCliPids = new Set<number>();
+let cognitiveCliProcessObserver: ((event: { active: boolean; pid: number; processStartIdentity?: string }) => void) | undefined;
 let cognitiveShutdownRequested = false;
+let cognitiveTempArtifactsReclaimed = false;
 cognitiveInvocationGlobal[cognitiveInvocationRegistryKey] = activeCognitiveCliInvocations;
 cognitiveShutdownChannel.onmessage = event => {
   const message = (event as { data?: unknown }).data as { type?: string; pid?: number } | undefined;
@@ -53,6 +55,58 @@ function terminateActiveCognitiveCliProcesses(): void {
     }, 2_000);
     force.unref();
   }
+}
+
+function cognitiveCliProcessStartIdentity(pid: number): string | undefined {
+  if (process.platform !== 'linux') return undefined;
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    return String(fields[19] || '');
+  } catch { return undefined; }
+}
+
+function processExists(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; }
+  catch { return false; }
+}
+
+export async function reclaimStaleCognitiveCliArtifacts(): Promise<void> {
+  let entries: fs.Dirent[];
+  try { entries = await fs.promises.readdir(os.tmpdir(), { withFileTypes: true }); }
+  catch { return; }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const match = /^solomap-cognitive-(output|schema)-(\d+)-([^-]+)-/.exec(entry.name);
+    const legacy = /^solomap-cognitive-(output|schema)-[^/]+$/.exec(entry.name);
+    if (!match && !legacy) continue;
+    const ownerPid = match ? Number(match[2]) : 0;
+    const ownerBirth = match?.[3];
+    if (ownerPid && processExists(ownerPid)
+      && (!ownerBirth || ownerBirth === 'portable' || cognitiveCliProcessStartIdentity(ownerPid) === ownerBirth)) continue;
+    const root = path.join(os.tmpdir(), entry.name);
+    if (!ownerPid) {
+      try { if (Date.now() - (await fs.promises.stat(root)).mtimeMs < 6 * 60 * 60 * 1_000) continue; }
+      catch { continue; }
+    }
+    const expected = (match?.[1] || legacy?.[1]) === 'output' ? 'stdout.log' : 'judgment.json';
+    let children: string[];
+    try { children = await fs.promises.readdir(root); }
+    catch { continue; }
+    if (children.some(child => child !== expected)) continue;
+    try {
+      const file = path.join(root, expected);
+      await fs.promises.unlink(file).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; });
+      await fs.promises.rmdir(root);
+    } catch {
+      // A concurrently starting owner or cleanup attempt may have changed it.
+    }
+  }
+}
+
+export function observeCognitiveCliProcesses(observer?: (event: { active: boolean; pid: number; processStartIdentity?: string }) => void): void {
+  cognitiveCliProcessObserver = observer;
 }
 
 export function cancelActiveCognitiveCliInvocations(): void {
@@ -120,6 +174,10 @@ export function cognitiveCliEnvironment(): NodeJS.ProcessEnv {
 
 export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, registerCancel: (cancel?: () => void) => void): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (!cognitiveTempArtifactsReclaimed) {
+      cognitiveTempArtifactsReclaimed = true;
+      void reclaimStaleCognitiveCliArtifacts();
+    }
     if (cognitiveShutdownRequested) { reject(new Error('Local Agent CLI cognitive call was cancelled.')); return; }
     const started = performance.now();
     recordCurrentDiagnosticStage('model.cli.spawn', 'start');
@@ -133,11 +191,27 @@ export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, re
     };
     try {
       if (invocation.outputSchema && getAgentCliFamily(invocation.command) === 'codex') {
-        schemaDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cognitive-schema-'));
+        const ownerBirth = cognitiveCliProcessStartIdentity(process.pid) || 'portable';
+        schemaDirectory = fs.mkdtempSync(path.join(os.tmpdir(), `solomap-cognitive-schema-${process.pid}-${ownerBirth}-`));
         schemaFile = path.join(schemaDirectory, 'judgment.json');
         fs.writeFileSync(schemaFile, JSON.stringify(invocation.outputSchema), { mode: 0o600, flag: 'wx' });
         args.push('--output-schema', schemaFile);
       }
+    } catch (error) { retireSchema(); reject(error); return; }
+    let outputDirectory = '';
+    let outputFile = '';
+    let outputDescriptor: number | undefined;
+    const retireOutput = () => {
+      if (outputDescriptor !== undefined) { fs.closeSync(outputDescriptor); outputDescriptor = undefined; }
+      if (outputFile && fs.existsSync(outputFile)) fs.unlinkSync(outputFile);
+      if (outputDirectory && fs.existsSync(outputDirectory)) fs.rmdirSync(outputDirectory);
+      outputFile = ''; outputDirectory = '';
+    };
+    try {
+      const ownerBirth = cognitiveCliProcessStartIdentity(process.pid) || 'portable';
+      outputDirectory = fs.mkdtempSync(path.join(os.tmpdir(), `solomap-cognitive-output-${process.pid}-${ownerBirth}-`));
+      outputFile = path.join(outputDirectory, 'stdout.log');
+      outputDescriptor = fs.openSync(outputFile, 'wx+', 0o600);
     } catch (error) { retireSchema(); reject(error); return; }
     const child = (() => { try { return childProcess.spawn(invocation.command, args, {
       cwd: invocation.cwd,
@@ -145,12 +219,72 @@ export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, re
       shell: false,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe']
-    }); } catch (error) { retireSchema(); throw error; } })();
+    }); } catch (error) { retireSchema(); retireOutput(); throw error; } })();
+    const outputCapacity = 8 * 1024 * 1024;
+    let outputPosition = 0;
+    let outputLength = 0;
+    const writeOutput = async (buffer: Buffer, offset: number, length: number, position: number): Promise<void> => {
+      let completed = 0;
+      while (completed < length) {
+        const written = await new Promise<number>((resolve, reject) => {
+          if (outputDescriptor === undefined) { reject(new Error('cognitive_output_spool_closed')); return; }
+          fs.write(outputDescriptor, buffer, offset + completed, length - completed, position + completed,
+            (error, bytesWritten) => error ? reject(error) : resolve(bytesWritten));
+        });
+        if (written <= 0) throw new Error('cognitive_output_short_write');
+        completed += written;
+      }
+    };
+    const truncateOutput = (length: number): Promise<void> => new Promise((resolve, reject) => {
+      if (outputDescriptor === undefined) { reject(new Error('cognitive_output_spool_closed')); return; }
+      fs.ftruncate(outputDescriptor, length, error => error ? reject(error) : resolve());
+    });
+    const readOutput = async (buffer: Buffer, offset: number, length: number, position: number): Promise<void> => {
+      let completed = 0;
+      while (completed < length) {
+        const read = await new Promise<number>((resolve, reject) => {
+          if (outputDescriptor === undefined) { reject(new Error('cognitive_output_spool_closed')); return; }
+          fs.read(outputDescriptor, buffer, offset + completed, length - completed, position + completed,
+            (error, bytesRead) => error ? reject(error) : resolve(bytesRead));
+        });
+        if (read <= 0) throw new Error('cognitive_output_short_read');
+        completed += read;
+      }
+    };
+    const spoolOutput = async (source: Buffer): Promise<void> => {
+      if (outputDescriptor === undefined) throw new Error('cognitive_output_spool_closed');
+      const bytes = source.length > outputCapacity ? source.subarray(source.length - outputCapacity) : source;
+      if (source.length >= outputCapacity) {
+        await writeOutput(bytes, 0, bytes.length, 0);
+        await truncateOutput(outputCapacity);
+        outputPosition = 0;
+        outputLength = outputCapacity;
+        return;
+      }
+      const first = Math.min(bytes.length, outputCapacity - outputPosition);
+      await writeOutput(bytes, 0, first, outputPosition);
+      if (first < bytes.length) await writeOutput(bytes, first, bytes.length - first, 0);
+      outputPosition = (outputPosition + bytes.length) % outputCapacity;
+      outputLength = Math.min(outputCapacity, outputLength + bytes.length);
+    };
+    const materializeOutput = async (): Promise<string> => {
+      if (outputDescriptor === undefined || outputLength === 0) return '';
+      const bytes = Buffer.allocUnsafe(outputLength);
+      if (outputLength < outputCapacity || outputPosition === 0) {
+        await readOutput(bytes, 0, outputLength, 0);
+      } else {
+        const tail = outputCapacity - outputPosition;
+        await readOutput(bytes, 0, tail, outputPosition);
+        await readOutput(bytes, tail, outputPosition, 0);
+      }
+      return bytes.toString('utf8').trim();
+    };
+    let spoolTail = Promise.resolve();
     if (child.pid) {
       activeCognitiveCliPids.add(child.pid);
+      cognitiveCliProcessObserver?.({ active: true, pid: child.pid, processStartIdentity: cognitiveCliProcessStartIdentity(child.pid) });
       cognitiveShutdownChannel.postMessage({ type: 'active', pid: child.pid });
     }
-    let stdout = '';
     let stderr = '';
     let stderrTail = '';
     let stderrTruncated = false;
@@ -168,12 +302,14 @@ export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, re
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (child.pid) {
         activeCognitiveCliPids.delete(child.pid);
+        cognitiveCliProcessObserver?.({ active: false, pid: child.pid });
         cognitiveShutdownChannel.postMessage({ type: 'inactive', pid: child.pid });
       }
       activeCognitiveCliInvocations.delete(cancelInvocation);
       process.off(cognitiveShutdownEvent, cancelInvocation);
       registerCancel(undefined);
       try { retireSchema(); } catch (error) { reject(error); return; }
+      try { retireOutput(); } catch (error) { reject(error); return; }
       callback();
     };
     const terminate = (error: Error) => {
@@ -193,17 +329,15 @@ export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, re
       recordCurrentDiagnosticStage('model.cli.timeout', 'error', performance.now() - started, new Error('timeout'), { pid: child.pid, timeoutMs });
       terminate(new Error('Local Agent CLI cognitive call timed out.'));
     }, timeoutMs);
-    child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', chunk => {
-      const text = String(chunk);
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
       if (stdoutBytes === 0) recordCurrentDiagnosticStage('model.cli.first_output', 'ok', performance.now() - started, undefined, { pid: child.pid });
-      stdoutBytes += Buffer.byteLength(text);
-      if (invocation.maxOutputCharacters !== undefined && stdout.length + text.length > invocation.maxOutputCharacters) {
-        terminate(new Error(`Local Agent CLI exceeded its ${invocation.maxOutputCharacters}-character output budget.`));
-        return;
-      }
-      stdout += text;
+      stdoutBytes += bytes.length;
+      child.stdout.pause();
+      spoolTail = spoolTail.then(() => spoolOutput(Buffer.from(bytes))).catch(error => {
+        terminate(error instanceof Error ? error : new Error(String(error)));
+      }).finally(() => { if (!settled) child.stdout.resume(); });
     });
     child.stderr.on('data', chunk => {
       const text = String(chunk);
@@ -219,16 +353,24 @@ export function runCognitiveCliInvocation(invocation: CognitiveCliInvocation, re
       } else stderrTail = (stderrTail + text).slice(-4_096);
     });
     child.once('error', error => { recordCurrentDiagnosticStage('model.cli.spawn', 'error', performance.now() - started, error); finish(() => reject(error)); });
-    child.once('close', (code, signal) => {
+    child.once('close', async (code, signal) => {
+      await spoolTail;
       recordCurrentDiagnosticStage('model.cli.exit', code === 0 && !terminationError ? 'ok' : 'error', performance.now() - started, terminationError || (code === 0 ? undefined : new Error(`process exited (${code})`)), { pid: child.pid, exitCode: code, signal, stdoutBytes, stderrBytes });
       const diagnosticStderr = stderrTruncated
         ? `${stderr}\n...[stderr truncated; ${stderrBytes} bytes total]...\n${stderrTail}`
         : stderr;
+      let output = '';
+      try {
+          output = await materializeOutput();
+          if (invocation.maxOutputCharacters !== undefined && output.length > invocation.maxOutputCharacters) {
+            terminationError = new Error(`Local Agent CLI exceeded its ${invocation.maxOutputCharacters}-character output budget.`);
+          }
+      } catch (error) { terminationError ||= error instanceof Error ? error : new Error(String(error)); }
       finish(() => terminationError
-      ? reject(terminationError)
-      : code === 0
-        ? resolve(stdout.trim())
-        : reject(new Error(`Local Agent CLI cognitive call failed (${code ?? 'unknown'}): ${diagnosticStderr.trim()}`)));
+          ? reject(terminationError)
+          : code === 0
+            ? resolve(output)
+            : reject(new Error(`Local Agent CLI cognitive call failed (${code ?? 'unknown'}): ${diagnosticStderr.trim()}`)));
     });
     child.stdin.end(invocation.stdin);
   });

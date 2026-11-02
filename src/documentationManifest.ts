@@ -36,6 +36,26 @@ export interface DocumentationManifest {
   lastAudit?: DocumentationManifestAudit;
 }
 
+export function mergeDocumentationManifestsForPersistence(
+  current: DocumentationManifest,
+  incoming: DocumentationManifest,
+  replaceCurrent = false
+): DocumentationManifest {
+  if (!incoming || !Array.isArray(incoming.documents) || !Array.isArray(incoming.pendingReview)) {
+    throw new Error('invalid_documentation_manifest');
+  }
+  const documents = new Map((replaceCurrent ? [] : current.documents).map(document => [document.path, document]));
+  for (const document of incoming.documents) {
+    const previous = documents.get(document.path);
+    if (!previous || Date.parse(document.lastTouchedAt || incoming.updatedAt) >= Date.parse(previous.lastTouchedAt || current.updatedAt)) {
+      documents.set(document.path, document);
+    }
+  }
+  const reviews = new Map([...(replaceCurrent ? [] : current.pendingReview), ...incoming.pendingReview]
+    .map(review => [`${review.path}\n${review.reason}`, review]));
+  return { ...incoming, documents: [...documents.values()], pendingReview: [...reviews.values()] };
+}
+
 export interface DocumentationAuditOptions {
   nodeId?: string;
   runKind?: string;
@@ -103,7 +123,7 @@ export function refreshDocumentationManifest(workspaceRoot: string, existing: Do
 
 export function buildDocumentationPromptContext(workspaceRoot: string, source: DocumentationManifest): string {
   if (!source || !Array.isArray(source.documents) || !Array.isArray(source.pendingReview)) throw new Error('documentation_source_required');
-  const manifest = { ...source, documents: mergeDocuments(source.documents, scanProjectDocuments(workspaceRoot, source.updatedAt), source.updatedAt) };
+  const manifest = source;
   const documents = manifest.documents
     .filter((document) => document.status === 'active')
     .slice(0, 20)
@@ -135,8 +155,13 @@ export function buildDocumentationAudit(workspaceRoot: string, manifest: Documen
     options.changedFilesSummary || '',
     options.touchedFilesSummary || ''
   ].join('\n')).filter((relativePath) => isDocumentationPath(relativePath));
-  const scannedTouchedDocuments = scanProjectDocuments(workspaceRoot, finishedAt)
-    .filter((document) => touchedDocuments.includes(document.path));
+  const scannedTouchedDocuments = touchedDocuments.flatMap((relativePath) => {
+    const absolutePath = path.join(workspaceRoot, relativePath);
+    try {
+      const info = fs.lstatSync(absolutePath);
+      return info.isFile() && !info.isSymbolicLink() ? [buildDocumentEntry(workspaceRoot, relativePath, finishedAt)] : [];
+    } catch { return []; }
+  });
   const nextDocuments = mergeDocuments(manifest.documents, scannedTouchedDocuments, finishedAt);
   const newReviews = buildPendingReviewsForTouchedDocuments(workspaceRoot, touchedDocuments, finishedAt);
   const pendingReview = dedupePendingReviews([...(manifest.pendingReview || []), ...newReviews]);
@@ -286,9 +311,10 @@ function buildPendingReviewsForTouchedDocuments(workspaceRoot: string, touchedDo
   const reviews: DocumentationManifestPendingReview[] = [];
   for (const relativePath of touchedDocuments) {
     const absolutePath = path.join(workspaceRoot, relativePath);
-    if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile()) {
-      continue;
-    }
+    try {
+      const info = fs.lstatSync(absolutePath);
+      if (!info.isFile() || info.isSymbolicLink()) continue;
+    } catch { continue; }
     const basename = path.basename(relativePath).toLowerCase();
     if (lowSignalDocumentNames.has(basename)) {
       reviews.push({

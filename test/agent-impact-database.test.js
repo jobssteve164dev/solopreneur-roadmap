@@ -41,7 +41,12 @@ async function fixture(action) {
 }
 
 test('agent contribution uses committed native runs, tokens and all changed files', () => fixture(async ({ workspace, project, store, record, read }) => {
-  fs.writeFileSync(path.join(workspace, '.solopreneur', 'roadmap.csv'), 'id,status\n1,Completed\n2,Pending\n');
+  fs.writeFileSync(path.join(workspace, '.solopreneur', 'roadmap.csv'), [
+    'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
+    '1,Completed work,,,,,,Completed,,',
+    '2,Pending work,,,,,,Pending,,'
+  ].join('\n') + '\n');
+  await store.acceptRoadmapCsv({ root: workspace });
   store.upsertProjectRunIndex(project, { ...record(1, 180000), totalTokens: 12345 }, [{ filePath: 'src/view.ts', role: 'changed' }, { filePath: 'docs/result.md', role: 'touched' }]);
   store.upsertProjectRunIndex(project, { ...record(2, 60000), agentCli: 'claude', status: 'Failed', totalTokens: 0 }, [{ filePath: 'src/view.ts', role: 'changed' }, { filePath: 'src/api.ts', role: 'changed' }]);
   store.upsertProjectRunIndex(project, { ...record(3), runKind: 'skill_install', totalTokens: 999999 });
@@ -52,6 +57,13 @@ test('agent contribution uses committed native runs, tokens and all changed file
   assert.equal(result.changedFiles, 3); assert.equal(result.projectProgressPercent, 50);
   assert.deepEqual(result.byAgent.map(agent => [agent.agent, agent.runs, agent.minutes, agent.changedFiles]), [['codex', 1, 3, 2], ['claude', 1, 1, 2]]);
 }));
+
+test('agent contribution aggregation is one Runtime projection without caller-side project file scans', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'agentImpact.ts'), 'utf8');
+  const databaseReader = source.slice(source.indexOf('export async function buildAgentImpactSummaryFromDatabase'));
+  assert.match(databaseReader, /operation:\s*'read_agent_impact_summary'/);
+  assert.doesNotMatch(databaseReader, /readFileSync|readProjectRoadmapNodes|read_project_impact_runs/);
+});
 
 test('empty native contribution ignores old digests and missing tokens never read an old output path', () => fixture(async ({ workspace, project, store, record, read }) => {
   const digestDir = path.join(workspace, '.solopreneur', 'run-digests'); fs.mkdirSync(digestDir);
@@ -82,7 +94,14 @@ test('contribution projection includes every session and file without unrelated 
   for (let id = 1; id <= 503; id++) store.upsertProjectRunIndex(project, { ...record(id), outputTail: 'private full output '.repeat(100) }, [{ filePath: 'changed.js', role: 'changed' }, { filePath: 'private-evidence', role: 'evidence' }], [{ type: 'verification', value: 'private check body' }]);
   const otherRoot = path.join(path.dirname(workspace), 'other'); fs.mkdirSync(otherRoot);
   const other = (await store.registerProject({ root: otherRoot })).projectId; store.upsertProjectRunIndex(other, record(1));
-  const result = await ops({ operation: 'read_project_impact_runs', input: { root: workspace } });
+  const result = [];
+  let beforeExecutionLogId = 0;
+  for (;;) {
+    const page = await ops({ operation: 'read_project_impact_runs', input: { root: workspace, limit: 200, ...(beforeExecutionLogId ? { beforeExecutionLogId } : {}) } });
+    result.push(...page);
+    if (page.length < 200) break;
+    beforeExecutionLogId = Math.min(...page.map(run => run.executionLogId));
+  }
   assert.equal(result.length, 503);
   assert.equal(result.reduce((sum, run) => sum + run.totalTokens, 0), 503 * 17);
   assert.ok(result.every(run => run.files.length === 1 && run.files[0].filePath === 'changed.js'));
@@ -148,7 +167,7 @@ test('storage maintenance classifies retained run data and removes previously im
   assert.equal(Number(store.rows("SELECT COUNT(*) AS count FROM migration_items WHERE source_kind='unclassified'")[0].count), sourceUnclassified, 'a storage read must not classify or rewrite migration sources');
   assert.equal(before.runArtifacts.byKind.unclassified.records, 604); assert.equal(before.runArtifacts.pendingByproductRecords, 604);
   assert.equal(before.migrationSources.byKind.byproduct.records, 602); assert.equal(before.migrationSources.pendingByproductRecords, 602);
-  const cleaned = await ops({ operation: 'maintain_database_storage', input: { compact: true } });
+  const cleaned = await ops({ operation: 'maintain_database_storage', input: { compact: false } });
   assert.equal(cleaned.deletedArtifacts, 603); assert.equal(cleaned.deletedSources, 602); assert.equal(cleaned.deletedContents, 1);
   assert.ok(cleaned.reclaimedStoredBytes >= byproduct.length); assert.equal(cleaned.pendingByproductRecords, 0);
   assert.equal(Buffer.from(store.readRunArtifact(project, 44, promptPath).bytes, 'base64').toString(), prompt.toString());
@@ -160,7 +179,7 @@ test('storage maintenance classifies retained run data and removes previously im
   assert.equal(after.migrationSources.byKind.prompt.records, 1); assert.equal(after.migrationSources.pendingByproductRecords, 0);
   assert.equal(after.lastMaintenance.deletedArtifacts, 603); assert.equal(after.lastMaintenance.deletedSources, 602);
   assert.equal(after.lastMaintenance.status, 'completed'); assert.equal(after.lastMaintenance.error, '');
-  assert.ok(after.databaseBytes < before.databaseBytes);
+  assert.equal(cleaned.compacted, false, 'online cleanup must not obtain an exclusive VACUUM on the interactive Runtime');
   const repeated = await ops({ operation: 'maintain_database_storage', input: { compact: false } });
   assert.equal(repeated.deletedArtifacts, 0); assert.equal(repeated.deletedSources, 0); assert.equal(repeated.deletedContents, 0);
 }));
@@ -200,99 +219,12 @@ test('database compaction reserves space for both the vacuum image and WAL commi
   }
 }));
 
-test('compact-only storage operation releases free pages without running general cleanup', () => fixture(async ({ workspace, store, ops }) => {
-  const crypto = require('node:crypto');
-  const staleRoot = path.join(path.dirname(workspace), 'solomap-old-init-CompactOnly');
-  fs.mkdirSync(staleRoot);
-  const stale = await store.registerProject({ root: staleRoot });
-  cleanupExact(staleRoot);
-  const contentId = store.putContent(Buffer.alloc(2 * 1024 * 1024, 7), 'application/octet-stream', 'binary');
-  store.db.run('DELETE FROM content_chunks WHERE content_id=?', [contentId]);
-  store.db.run('DELETE FROM contents WHERE id=?', [contentId]);
-  const artifactBytes = Buffer.from('compact-only must preserve a pending artifact');
-  const artifactContentId = store.putContent(artifactBytes, 'application/octet-stream', 'binary');
-  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at,artifact_kind) VALUES(?,?,?,?,?,?,?,?)', [
-    stale.projectId, 44, '__solo__/44/evidence/pending.tmp', artifactContentId, crypto.createHash('sha256').update(artifactBytes).digest('hex'), 'application/octet-stream', Date.now(), 'byproduct'
-  ]);
-  const sourceIdentity = `agent-runs:${workspace}`, sourceKey = '__solo__/45/evidence/pending.tmp';
-  const sourceBytes = Buffer.from('compact-only must preserve a pending migration source');
-  store.captureMigrationSource({ identity: sourceIdentity, key: sourceKey, hash: crypto.createHash('sha256').update(sourceBytes).digest('hex') }, sourceBytes, { mimeType: 'application/octet-stream', encoding: 'binary' });
-  const candidateBytes = Buffer.from('compact-only must preserve a queued content candidate');
-  const candidateContentId = store.putContent(candidateBytes, 'application/octet-stream', 'binary');
-  store.db.run('INSERT INTO database_storage_cleanup_candidates SELECT id,stored_byte_length FROM contents WHERE id=?', [candidateContentId]);
-  const before = store.databaseStorageFileSizes().databaseBytes;
-
-  const compacted = await ops({ operation: 'compact_database_storage', input: {} });
-
-  assert.equal(compacted.compacted, true);
-  assert.equal(compacted.integrity, 'ok');
-  assert.ok(compacted.afterBytes < before);
-  assert.equal(compacted.deletedArtifacts, 0);
-  assert.equal(compacted.deletedSources, 0);
-  assert.equal(compacted.deletedContents, 0);
-  assert.equal(compacted.retiredTestProjects, 0);
-  assert.equal(store.rows('SELECT status FROM project_locations WHERE project_id=?', [stale.projectId])[0].status, 'active');
-  assert.equal(store.rows('SELECT hidden FROM projects WHERE id=?', [stale.projectId])[0].hidden, 0);
-  assert.equal(store.rows('SELECT 1 FROM project_run_artifacts WHERE content_id=?', [artifactContentId]).length, 1);
-  assert.equal(store.rows('SELECT 1 FROM migration_items WHERE source_identity=? AND source_key=?', [sourceIdentity, sourceKey]).length, 1);
-  assert.equal(store.rows('SELECT 1 FROM database_storage_cleanup_candidates WHERE content_id=?', [candidateContentId]).length, 1);
-  assert.deepEqual(store.content(artifactContentId), artifactBytes);
-  assert.deepEqual(store.content(candidateContentId), candidateBytes);
-  assert.deepEqual(store.rows('SELECT status,error,deleted_artifacts,deleted_sources,deleted_contents,reclaimed_stored_bytes,compacted,integrity FROM database_storage_maintenance').map(row => ({ ...row })), [{
-    status: 'completed', error: '', deleted_artifacts: 0, deleted_sources: 0, deleted_contents: 0,
-    reclaimed_stored_bytes: 0, compacted: 1, integrity: 'ok'
-  }]);
-}));
-
-test('compact-only storage operation waits for startup readiness', () => fixture(async ({ store, ops }) => {
-  let release;
-  ops.setStorageMaintenanceBarrier(new Promise(resolve => { release = resolve; }));
-  const compacting = ops({ operation: 'compact_database_storage', input: {} });
-  await new Promise(resolve => setImmediate(resolve));
+test('interactive Runtime maintenance rejects exclusive compaction without touching the Write Actor', () => fixture(async ({ store, ops }) => {
+  await assert.rejects(
+    ops({ operation: 'maintain_database_storage', input: { compact: true } }),
+    /runtime_online_compaction_retired/
+  );
   assert.equal(store.rows('SELECT COUNT(*) AS count FROM database_storage_maintenance')[0].count, 0);
-  release();
-  assert.equal((await compacting).integrity, 'ok');
-  assert.equal(store.rows("SELECT COUNT(*) AS count FROM database_storage_maintenance WHERE status='completed' AND compacted=1")[0].count, 1);
-}));
-
-test('compact-only and general storage maintenance never overlap', () => fixture(async ({ store, ops }) => {
-  const originalBegin = store.beginDatabaseStorageMaintenance.bind(store);
-  const originalSettle = store.settleDatabaseStorageMaintenance.bind(store);
-  const originalCleanup = store.cleanupDatabaseStorageBatch.bind(store);
-  let active = 0, maximumActive = 0, cleanupCalls = 0;
-  store.beginDatabaseStorageMaintenance = (...args) => {
-    const id = originalBegin(...args); active++; maximumActive = Math.max(maximumActive, active); return id;
-  };
-  store.settleDatabaseStorageMaintenance = (...args) => { const value = originalSettle(...args); active--; return value; };
-  store.cleanupDatabaseStorageBatch = (...args) => ++cleanupCalls === 1
-    ? { scanned: 0, deletedArtifacts: 0, deletedSources: 0, deletedContents: 0, reclaimedStoredBytes: 0, pending: true }
-    : originalCleanup(...args);
-  try {
-    await Promise.all([
-      ops({ operation: 'maintain_database_storage', input: { compact: false } }),
-      ops({ operation: 'compact_database_storage', input: {} })
-    ]);
-  } finally {
-    store.beginDatabaseStorageMaintenance = originalBegin;
-    store.settleDatabaseStorageMaintenance = originalSettle;
-    store.cleanupDatabaseStorageBatch = originalCleanup;
-  }
-  assert.equal(maximumActive, 1);
-  assert.deepEqual(store.rows('SELECT status,compacted FROM database_storage_maintenance ORDER BY rowid').map(row => ({ ...row })), [
-    { status: 'completed', compacted: 0 }, { status: 'completed', compacted: 1 }
-  ]);
-}));
-
-test('compact-only storage failure is rejected and records an exact failed receipt', () => fixture(async ({ store, ops }) => {
-  const originalCompact = store.compactDatabaseStorage;
-  store.compactDatabaseStorage = () => { throw new Error('forced_compaction_failure'); };
-  try {
-    await assert.rejects(ops({ operation: 'compact_database_storage', input: {} }), /forced_compaction_failure/);
-  } finally { store.compactDatabaseStorage = originalCompact; }
-  assert.deepEqual(store.rows('SELECT status,error,deleted_artifacts,deleted_sources,deleted_contents,reclaimed_stored_bytes,compacted,integrity FROM database_storage_maintenance').map(row => ({ ...row })), [{
-    status: 'failed', error: 'Error: forced_compaction_failure', deleted_artifacts: 0, deleted_sources: 0, deleted_contents: 0,
-    reclaimed_stored_bytes: 0, compacted: 0, integrity: 'not_checked'
-  }]);
 }));
 
 test('storage maintenance retires empty vanished SoloMap test projects before future startup discovery', () => fixture(async ({ workspace, store, ops }) => {

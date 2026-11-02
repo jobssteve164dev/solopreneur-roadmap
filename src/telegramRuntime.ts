@@ -11,7 +11,6 @@ import { readCognitiveRuntimeConfig, refreshCognitiveRuntimeConfig } from './cog
 import { EmbeddedPiAgentEngine } from './piAgentEngine';
 import { readProjectRegistry, refreshProjectRegistry } from './projectRegistry';
 import { createTelegramIntelligenceReply } from './telegramIntelligenceChat';
-import { executeTelegramExtensionCommand } from './telegramExtensionBridge';
 import { persistTelegramRuntimeConfig, queueTelegramBackgroundNotification, readTelegramRuntimeConfig, refreshTelegramRuntimeConfig } from './telegramRuntimeConfig';
 import { callTelegramApi, drainTelegramReplies, handleTelegramUpdate, startTelegramRemoteService, suspendTelegramRemotePolling, TelegramHost, TelegramUpdate, stopTelegramRemoteService } from './telegramService';
 import { classifyDiagnosticFailure, observeLocalDiagnosticStage, recordLocalDiagnosticError } from './localDiagnostics';
@@ -28,9 +27,11 @@ interface TelegramRuntimeState {
 
 export function startTelegramBackgroundRuntime(globalDataPath: string, operation?: RuntimeDataOperations): { close(mode?: 'handoff' | 'drain'): Promise<void> } {
   const call = (name: string, input: Record<string, unknown>) => operation ? operation({ operation: name, input }) : sendRuntimeDataRequest(globalDataPath, { operation: name, input });
+  const executeEditorCommand = (command: string, args: string[]) => call('execute_telegram_editor_command', { command, args });
   let state: TelegramRuntimeState = { offset: 0, bindingGeneration: 0, conversationIds: {} };
   let signature = '';
   let synchronizing = false;
+  const synchronizationWaiters = new Set<() => void>();
   let serviceGeneration = 0;
   let closed = false;
   let channelLease: TelegramChannelLease | null = null;
@@ -47,7 +48,7 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
     if (!scheduledAutomationWakePending || (!force && Date.now() < nextScheduledAutomationWakeAt)) return;
     nextScheduledAutomationWakeAt = Date.now() + 30_000;
     try {
-      const refreshed = await executeTelegramExtensionCommand(globalDataPath, 'solopreneur.internalRefreshTimedAutomation', []);
+      const refreshed = await executeEditorCommand('solopreneur.internalRefreshTimedAutomation', []);
       if (refreshed === true) scheduledAutomationWakePending = false;
     } catch {
       // The durable ledger remains pending until an editor endpoint is available.
@@ -294,7 +295,7 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
           return { telegramEnabled: current.enabled, telegramBotToken: current.botToken, telegramChatId: current.chatId };
         },
         async authorizeChat(username: string, chatId: string) {
-          return await executeTelegramExtensionCommand(globalDataPath, 'authorizeChat', [username, chatId, String(config.bindingGeneration)]) === true;
+          return await executeEditorCommand('authorizeChat', [username, chatId, String(config.bindingGeneration)]) === true;
         },
         async bindChat(chatId: string, acceptedOffset = 0) {
           if (readTelegramRuntimeConfig(globalDataPath).bindingGeneration !== config.bindingGeneration) throw new Error('Telegram 绑定请求已失效。');
@@ -302,12 +303,12 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
           // cannot restart at the old offset and execute this update again.
           state.offset = Math.max(state.offset, acceptedOffset);
           await saveOffset();
-          await executeTelegramExtensionCommand(globalDataPath, 'bindChat', [chatId, String(config.bindingGeneration)]);
+          await executeEditorCommand('bindChat', [chatId, String(config.bindingGeneration)]);
           await persistTelegramRuntimeConfig(globalDataPath, { chatId }, operation);
         },
         async executeCommand(command: string, ...args: string[]) {
-          if (command !== 'solopreneur.internalGetStatus') return executeTelegramExtensionCommand(globalDataPath, command, args);
-          try { return await executeTelegramExtensionCommand(globalDataPath, command, args); }
+          if (command !== 'solopreneur.internalGetStatus') return executeEditorCommand(command, args);
+          try { return await executeEditorCommand(command, args); }
           catch {
             await refreshProjectRegistry(globalDataPath, undefined, call);
             const project = selectedProject();
@@ -377,7 +378,11 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
         .catch(error => recordLocalDiagnosticError(globalDataPath, 'telegram.replay', classifyDiagnosticFailure(error)));
       signature = nextSignature;
     } catch (error) { recordLocalDiagnosticError(globalDataPath, 'telegram.runtime', classifyDiagnosticFailure(error)); }
-    finally { synchronizing = false; }
+    finally {
+      synchronizing = false;
+      for (const resolve of synchronizationWaiters) resolve();
+      synchronizationWaiters.clear();
+    }
   }
   void synchronize();
   const timer = setInterval(() => {
@@ -389,6 +394,11 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
     closed = true;
     handoffPending = true;
     clearInterval(timer);
+    stopTelegramRemoteService();
+    activeHost = undefined;
+    if (synchronizing) await new Promise<void>(resolve => synchronizationWaiters.add(resolve));
+    // An already-running synchronizer may have crossed its last closed check
+    // before shutdown began. Revoke any service it published before draining.
     stopTelegramRemoteService();
     activeHost = undefined;
     if (mode === 'handoff') engines.forEach(engine => engine.cancel());

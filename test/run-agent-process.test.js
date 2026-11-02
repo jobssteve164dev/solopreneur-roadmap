@@ -8,6 +8,7 @@ const { once } = require('node:events');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { sendRuntimeDataRequest, sendRuntimeControlCommand } = require('../out/autonomousRuntimeControl.js');
 const { shellQuote } = require('../out/agentCli.js');
+const { readCompleteRunDocument } = require('../out/runDocumentClient.js');
 
 test('interactive runner captures a retained rollback baseline before the formal Agent executes', async () => {
   const source = "const fs=require('fs');const path=require('path');const refs=path.join(process.cwd(),'.git','refs','solomap','backups');if(!fs.existsSync(refs)||!fs.readdirSync(refs).length)process.exit(19);fs.writeFileSync('agent-result.txt','started after backup');";
@@ -34,7 +35,31 @@ test('interactive runner captures a retained rollback baseline before the formal
   } finally { await f.close(); }
 });
 
-test('interactive runner does not start the formal Agent when rollback capture fails', async () => {
+test('interactive rollback capture completes beyond the former grace window before the formal Agent executes', async () => {
+  const f = await executionFixture(`${shellQuote(process.execPath)} -e ${shellQuote("require('fs').writeFileSync('started-after-slow-backup.txt','started')")}`, {
+    interactiveSession: true,
+    preSessionGitBackup: true,
+    agentCli: 'fixture'
+  });
+  const git = (...args) => require('node:child_process').execFileSync('git', ['-C', f.projectRoot, ...args], { encoding: 'utf8' }).trim();
+  const hook = path.join(path.dirname(f.root), 'delay-rollback-capture.cjs');
+  fs.writeFileSync(hook, `const api=require(${JSON.stringify(path.resolve(__dirname, '../out/autonomousRuntimeControl.js'))});const original=api.sendRuntimeDataRequest;api.sendRuntimeDataRequest=async function(root,request){if(request.operation==='capture_pre_session_git_snapshot')await new Promise(resolve=>setTimeout(resolve,900));return original(root,request);};`);
+  try {
+    git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
+    fs.writeFileSync(path.join(f.projectRoot, 'slow.txt'), 'before'); git('add', '-A'); git('commit', '-m', 'baseline');
+    const originalHead = git('rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(f.projectRoot, 'slow.txt'), 'dirty after 900ms');
+    const agent = f.startAgent({ NODE_OPTIONS: `--require=${hook}` });
+    assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
+    const state = await f.call('read_run_state');
+    assert.match(String(state.status.baseGitHash || ''), /^[a-f0-9]{40}$/);
+    assert.notEqual(state.status.baseGitHash, originalHead);
+    assert.equal(git('show', `${state.status.baseGitHash}:slow.txt`), 'dirty after 900ms');
+    assert.equal(fs.readFileSync(path.join(f.projectRoot, 'started-after-slow-backup.txt'), 'utf8'), 'started');
+  } finally { await f.close(); }
+});
+
+test('interactive runner keeps optional rollback capture out of the caller process environment', async () => {
   const f = await executionFixture(`${shellQuote(process.execPath)} -e ${shellQuote("require('fs').writeFileSync('must-not-start.txt','started')")}`, {
     interactiveSession: true,
     preSessionGitBackup: true,
@@ -45,14 +70,15 @@ test('interactive runner does not start the formal Agent when rollback capture f
   fs.writeFileSync(wrapper, '#!/bin/sh\nif [ "$1" = "add" ]; then echo forced-backup-failure >&2; exit 71; fi\nexec /usr/bin/git "$@"\n', { mode: 0o755 });
   try {
     const agent = f.startAgent({ PATH: `${bin}:${process.env.PATH || ''}` });
-    assert.notEqual((await once(agent, 'exit'))[0], 0);
-    assert.equal(fs.existsSync(path.join(f.projectRoot, 'must-not-start.txt')), false,
-      'rollback capture is a launch prerequisite, not optional post-launch evidence');
-    assert.match(f.stderr().toString(), /pre_session_git_backup_failed/);
+    assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
+    assert.equal(fs.readFileSync(path.join(f.projectRoot, 'must-not-start.txt'), 'utf8'), 'started',
+      'an auxiliary rollback safeguard must never block the conversation result');
+    assert.match(String((await f.call('read_run_state')).status.baseGitHash || ''), /^[a-f0-9]{40}$/,
+      'the isolated Git Worker may still provide rollback without coupling launch to the caller PATH');
   } finally { await f.close(); }
 });
 
-test('interactive runner revalidates an existing rollback hash before starting the formal Agent', async () => {
+test('interactive runner ignores an invalid existing rollback hash and still starts the formal Agent', async () => {
   const f = await executionFixture(`${shellQuote(process.execPath)} -e ${shellQuote("require('fs').writeFileSync('must-not-start-existing.txt','started')")}`, {
     interactiveSession: true,
     preSessionGitBackup: true,
@@ -61,9 +87,9 @@ test('interactive runner revalidates an existing rollback hash before starting t
   });
   try {
     const agent = f.startAgent();
-    assert.notEqual((await once(agent, 'exit'))[0], 0);
-    assert.equal(fs.existsSync(path.join(f.projectRoot, 'must-not-start-existing.txt')), false);
-    assert.match(f.stderr().toString(), /pre_session_git_backup_failed/);
+    assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
+    assert.equal(fs.readFileSync(path.join(f.projectRoot, 'must-not-start-existing.txt'), 'utf8'), 'started');
+    assert.equal(String((await f.call('read_run_state')).status.baseGitHash || ''), '');
   } finally { await f.close(); }
 });
 
@@ -280,14 +306,14 @@ for (const exitCode of [0, 7]) test(`maintenance execution captures its full res
     const [code] = await once(agent, 'exit'); assert.equal(code, exitCode, f.stderr().toString());
     const final = await f.call('read_run_state');
     const purpose = `maintenance_result_${final.generation}`;
-    const recorded = await f.call('read_run_document', { purpose });
+    const recorded = await readCompleteRunDocument((operation, input) => f.call(operation, input), { purpose });
     assert.ok(recorded, 'the shared host must capture the exact receipt before settling the run');
     assert.deepEqual(Buffer.from(recorded.bytes, 'base64'), resultBytes);
     assert.equal(fs.existsSync(resultPath), false, 'the exact temporary receipt must be removed after database readback');
     assert.equal(fs.existsSync(directory), false, 'the operation directory must be removed once it is empty');
     assert.equal(f.stdout().toString(), output);
     await f.stopRuntime(); await f.startRuntime();
-    assert.deepEqual(await f.call('read_run_document', { purpose }), recorded);
+    assert.deepEqual(await readCompleteRunDocument((operation, input) => f.call(operation, input), { purpose }), recorded);
     assert.equal((await f.call('read_run_state')).status.exitCode, exitCode);
     assert.deepEqual(fs.readdirSync(path.join(f.projectRoot, '.solopreneur')), ['project.json']);
   } finally { await f.close(); }
@@ -704,12 +730,24 @@ main().catch(error=>{process.stderr.write(String(error));process.exitCode=1});`;
     await sendRuntimeDataRequest(f.root, { operation: 'prepare_agent_database', input: { root: f.projectRoot, provider: 'claude', configPath, command: process.execPath } });
     const agent = f.startAgent({ SOLOMAP_TEST_MCP_CONFIG: configPath });
     assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
-    assert.equal(f.stdout().toString(), expected);
-    assert.equal(fs.existsSync(path.join(f.root, 'tmp', 'run-inputs')), false);
-    const stateAfter = await f.call('read_run_state'); assert.equal(stateAfter.status.checkpointOutcome, 'partial');
     const parts = []; let offset = 0;
     do { const page = await f.call('read_run_log', { stream: 'stdout', offset, limit: 8192 }); parts.push(Buffer.from(page.bytes,'base64')); offset = page.nextOffset; } while(offset!==null);
-    assert.equal(Buffer.concat(parts).toString(), expected);
+    const persisted = Buffer.concat(parts).toString();
+    const displayed = f.stdout().toString();
+    const fingerprint = value => require('node:crypto').createHash('sha256').update(value).digest('hex');
+    const firstDifference = value => {
+      let index = 0; while (index < value.length && value[index] === expected[index]) index++;
+      return { index, actual: [...value.slice(Math.max(0, index - 4), index + 4)].map(character => character.codePointAt(0).toString(16)),
+        expected: [...expected.slice(Math.max(0, index - 4), index + 4)].map(character => character.codePointAt(0).toString(16)) };
+    };
+    assert.equal(persisted, expected, JSON.stringify({ stream: 'persisted', ...firstDifference(persisted), actualSha256: fingerprint(persisted), expectedSha256: fingerprint(expected) }));
+    assert.equal(displayed, expected, JSON.stringify({ stream: 'displayed', ...firstDifference(displayed),
+      actualCharacters: displayed.length, expectedCharacters: expected.length,
+      actualBytes: Buffer.byteLength(displayed), expectedBytes: Buffer.byteLength(expected),
+      actualSha256: fingerprint(displayed), expectedSha256: fingerprint(expected)
+    }));
+    assert.equal(fs.existsSync(path.join(f.root, 'tmp', 'run-inputs')), false);
+    const stateAfter = await f.call('read_run_state'); assert.equal(stateAfter.status.checkpointOutcome, 'partial');
   } finally { await f.close(); }
 });
 

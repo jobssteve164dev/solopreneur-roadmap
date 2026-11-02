@@ -114,7 +114,7 @@ export interface RunSettlementInput extends RunConsumerLease {
   idempotencyKey: string;
 }
 
-export type RunEffectKind = 'roadmap' | 'review' | 'revision' | 'refresh' | 'telegram' | 'automation' | 'flow';
+export type RunEffectKind = 'roadmap' | 'review' | 'revision' | 'refresh' | 'telegram' | 'automation' | 'flow' | 'documentation';
 
 export interface RunEffectReference {
   effectId: string;

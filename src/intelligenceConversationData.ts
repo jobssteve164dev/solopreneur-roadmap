@@ -30,8 +30,18 @@ export async function readIntelligenceConversation(store: UnifiedDataStore, id: 
   return store.readIntelligenceConversation(id);
 }
 
-export async function listIntelligenceConversations(store: UnifiedDataStore): Promise<ReturnType<UnifiedDataStore['listIntelligenceConversations']>> {
-  const known = new Map(store.listIntelligenceConversations().map(value => [value.id, value]));
+function readAllConversationHeaders(store: UnifiedDataStore): Array<Pick<IntelligenceConversation, 'id' | 'title' | 'updatedAt'>> {
+  const values: Array<Pick<IntelligenceConversation, 'id' | 'title' | 'updatedAt'>> = [];
+  let cursor: string | null = null;
+  do {
+    const page = store.listIntelligenceConversations({ limit: 200, ...(cursor ? { cursor } : {}) });
+    values.push(...page.items); cursor = page.nextCursor;
+  } while (cursor);
+  return values;
+}
+
+export async function listIntelligenceConversations(store: UnifiedDataStore): Promise<Array<Pick<IntelligenceConversation, 'id' | 'title' | 'updatedAt'>>> {
+  const known = new Map(readAllConversationHeaders(store).map(value => [value.id, value]));
   const directory = path.join(store.root, 'intelligence-conversations');
   let names: string[];
   try { names = await fs.promises.readdir(directory); }
@@ -45,7 +55,7 @@ export async function listIntelligenceConversations(store: UnifiedDataStore): Pr
     } catch { /* The background importer retains and reports unreadable history. */ }
   }
   // A write that committed while reading retained sources has precedence over old headers.
-  for (const value of store.listIntelligenceConversations()) known.set(value.id, value);
+  for (const value of readAllConversationHeaders(store)) known.set(value.id, value);
   return [...known.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 

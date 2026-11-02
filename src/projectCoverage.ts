@@ -34,9 +34,10 @@ export interface ProjectCoverageSnapshot {
   files: ProjectFileCoverage[];
   error: string;
   sourceVersion?: { gitHead: string; contentHash: string };
+  currentSourceVersion?: { gitHead: string; contentHash: string };
 }
 
-export function captureCoverageVersion(projectPath: string): { gitHead: string; contentHash: string } {
+export function captureProjectContentHash(projectPath: string): string {
   const digest = crypto.createHash('sha256');
   const walk = (dir: string) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -49,14 +50,19 @@ export function captureCoverageVersion(projectPath: string): { gitHead: string; 
     }
   };
   walk(projectPath);
-  let gitHead = '';
-  try { gitHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: projectPath, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { /* Non-Git projects still have a content identity. */ }
-  return { gitHead, contentHash: digest.digest('hex') };
+  return digest.digest('hex');
 }
 
-export function coverageVersionState(projectPath: string, snapshot: Pick<ProjectCoverageSnapshot, 'sourceVersion'>): 'current' | 'stale' | 'unknown' {
-  if (!snapshot.sourceVersion?.contentHash) return 'unknown';
-  try { return captureCoverageVersion(projectPath).contentHash === snapshot.sourceVersion.contentHash ? 'current' : 'stale'; } catch { return 'unknown'; }
+export function captureCoverageVersion(projectPath: string): { gitHead: string; contentHash: string } {
+  const contentHash = captureProjectContentHash(projectPath);
+  let gitHead = '';
+  try { gitHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: projectPath, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { /* Non-Git projects still have a content identity. */ }
+  return { gitHead, contentHash };
+}
+
+export function coverageVersionState(_projectPath: string, snapshot: Pick<ProjectCoverageSnapshot, 'sourceVersion' | 'currentSourceVersion'>): 'current' | 'stale' | 'unknown' {
+  if (!snapshot.sourceVersion?.contentHash || !snapshot.currentSourceVersion?.contentHash) return 'unknown';
+  return snapshot.currentSourceVersion.contentHash === snapshot.sourceVersion.contentHash ? 'current' : 'stale';
 }
 
 const coverageRuns = new Map<string, Promise<ProjectCoverageSnapshot>>();
@@ -103,12 +109,21 @@ function isCoverageSnapshot(value: unknown): value is ProjectCoverageSnapshot {
 }
 
 export async function loadProjectCoverageSnapshot(projectPath: string, globalDataPath = ''): Promise<ProjectCoverageSnapshot | null> {
+  const currentSourceVersion = async (): Promise<{ gitHead: string; contentHash: string } | null> => {
+    const source = await sendRuntimeDataRequest<AnalysisState<{ gitHead: string; contentHash: string }>>(coverageDataRoot(projectPath, globalDataPath), {
+      operation: 'read_analysis_state', input: { root: projectPath, namespace: 'growth-source', key: 'current' }
+    }).catch(() => null);
+    return source?.value?.contentHash ? source.value : null;
+  };
   try {
     const state = await sendRuntimeDataRequest<AnalysisState<ProjectCoverageSnapshot>>(coverageDataRoot(projectPath, globalDataPath), {
       operation: 'read_analysis_state',
       input: { root: projectPath, namespace: 'coverage', key: 'project-growth' }
     });
-    if (isCoverageSnapshot(state.value)) return state.value;
+    if (isCoverageSnapshot(state.value)) {
+      const source = await currentSourceVersion();
+      return { ...state.value, ...(source ? { currentSourceVersion: source } : {}) };
+    }
   } catch {
     // The read-only legacy fallback below keeps an already captured result visible
     // while startup migration is still being scheduled.
@@ -118,7 +133,9 @@ export async function loadProjectCoverageSnapshot(projectPath: string, globalDat
     const info = fs.lstatSync(legacy);
     if (!info.isFile() || info.isSymbolicLink() || fs.realpathSync(legacy) !== legacy) return null;
     const value = JSON.parse(fs.readFileSync(legacy, 'utf8'));
-    return isCoverageSnapshot(value) ? value : null;
+    if (!isCoverageSnapshot(value)) return null;
+    const source = await currentSourceVersion();
+    return { ...value, ...(source ? { currentSourceVersion: source } : {}) };
   } catch { return null; }
 }
 
@@ -183,46 +200,16 @@ function readTestScript(projectPath: string): string {
   }
 }
 
-async function writeCoverageSnapshot(projectPath: string, globalDataPath: string, snapshot: ProjectCoverageSnapshot): Promise<void> {
-  const root = coverageDataRoot(projectPath, globalDataPath);
-  const idempotencyKey = `coverage:${crypto.randomUUID()}`;
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const current = await sendRuntimeDataRequest<AnalysisState<ProjectCoverageSnapshot>>(root, {
-      operation: 'read_analysis_state',
-      input: { root: projectPath, namespace: 'coverage', key: 'project-growth' }
-    });
-    try {
-      await sendRuntimeDataRequest(root, {
-        operation: 'write_analysis_state',
-        input: {
-          root: projectPath,
-          namespace: 'coverage',
-          key: 'project-growth',
-          expectedRevision: current.revision,
-          value: snapshot,
-          idempotencyKey: `${idempotencyKey}:${attempt}`
-        }
-      });
-      return;
-    } catch (error) {
-      if (!/revision_conflict/.test(String(error)) || attempt === 3) throw error;
-    }
-  }
-}
-
-async function preservePreviousCoverageFailure(
-  projectPath: string,
-  globalDataPath: string,
+function preservePreviousCoverageFailure(
   previous: ProjectCoverageSnapshot | null,
   attemptedAt: string,
   startedAt: number,
   error: string
-): Promise<ProjectCoverageSnapshot> {
+): ProjectCoverageSnapshot {
   if (!previous) {
     const unavailable = emptyCoverageSnapshot('unavailable', error);
     unavailable.lastAttemptAt = attemptedAt;
     unavailable.durationMs = Date.now() - startedAt;
-    await writeCoverageSnapshot(projectPath, globalDataPath, unavailable);
     return unavailable;
   }
   const staleSnapshot: ProjectCoverageSnapshot = {
@@ -233,27 +220,25 @@ async function preservePreviousCoverageFailure(
     testPassed: false,
     error
   };
-  await writeCoverageSnapshot(projectPath, globalDataPath, staleSnapshot);
   return staleSnapshot;
 }
 
-async function executeCoverageRun(projectPath: string, extensionPath: string, globalDataPath: string): Promise<ProjectCoverageSnapshot> {
+export async function computeProjectCoverageSnapshot(projectPath: string, extensionPath: string, previous: ProjectCoverageSnapshot | null, gitHead = ''): Promise<ProjectCoverageSnapshot> {
   const startedAt = Date.now();
   const attemptedAt = new Date().toISOString();
-  const previous = await loadProjectCoverageSnapshot(projectPath, globalDataPath);
-  const sourceVersion = captureCoverageVersion(projectPath);
+  const sourceVersion = { gitHead, contentHash: captureProjectContentHash(projectPath) };
   const testScript = readTestScript(projectPath);
   if (!testScript) {
-    return preservePreviousCoverageFailure(projectPath, globalDataPath, previous, attemptedAt, startedAt, '项目没有可运行的 npm test 脚本。');
+    return preservePreviousCoverageFailure(previous, attemptedAt, startedAt, '项目没有可运行的 npm test 脚本。');
   }
   const coverageNodeExecutable = await resolveCoverageNodeExecutable();
   if (!coverageNodeExecutable) {
-    return preservePreviousCoverageFailure(projectPath, globalDataPath, previous, attemptedAt, startedAt, '运行验证分析需要 Node.js 20.19 或更高版本。');
+    return preservePreviousCoverageFailure(previous, attemptedAt, startedAt, '运行验证分析需要 Node.js 20.19 或更高版本。');
   }
 
   const c8Cli = path.join(extensionPath, 'node_modules', 'c8', 'bin', 'c8.js');
   if (!fs.existsSync(c8Cli)) {
-    return preservePreviousCoverageFailure(projectPath, globalDataPath, previous, attemptedAt, startedAt, 'SoloMap 覆盖分析组件未安装完整。');
+    return preservePreviousCoverageFailure(previous, attemptedAt, startedAt, 'SoloMap 覆盖分析组件未安装完整。');
   }
   const reportDir = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-coverage-report-'));
   const reportPath = path.join(reportDir, 'coverage-final.json');
@@ -301,16 +286,16 @@ async function executeCoverageRun(projectPath: string, extensionPath: string, gl
   } finally {
     removeOwnedCoverageReportDirectory(reportDir);
   }
-  if (!snapshot) return preservePreviousCoverageFailure(projectPath, globalDataPath, previous, attemptedAt, startedAt, reportError);
-  await writeCoverageSnapshot(projectPath, globalDataPath, snapshot);
-  return snapshot;
+  return snapshot || preservePreviousCoverageFailure(previous, attemptedAt, startedAt, reportError);
 }
 
 export function runProjectCoverageAnalysis(projectPath: string, extensionPath: string, globalDataPath = ''): Promise<ProjectCoverageSnapshot> {
   const runKey = `${coverageDataRoot(projectPath, globalDataPath)}\n${path.resolve(projectPath)}`;
   const activeRun = coverageRuns.get(runKey);
   if (activeRun) return activeRun;
-  const run = executeCoverageRun(projectPath, extensionPath, globalDataPath)
+  const run = sendRuntimeDataRequest<ProjectCoverageSnapshot>(coverageDataRoot(projectPath, globalDataPath), {
+    operation: 'run_project_coverage_analysis', input: { root: projectPath, extensionPath }
+  })
     .finally(() => coverageRuns.delete(runKey));
   coverageRuns.set(runKey, run);
   return run;

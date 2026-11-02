@@ -96,6 +96,79 @@ test('settlement follow-up actions are committed atomically, recover after resta
   } finally { await f.close(); }
 });
 
+test('schema 70 preserves queued, claimed and completed run effects during its populated table rebuild', async () => {
+  const f = await fixture();
+  let storeOpen = true;
+  let rawDatabase;
+  try {
+    const lease = await f.call('claim_run_consumer', { ...f.scope, owner: f.owner });
+    await f.call('commit_run_settlement', { ...result(f, lease), effects: [
+      { kind: 'roadmap', payload: { state: 'queued' } },
+      { kind: 'review', payload: { state: 'claimed' } },
+      { kind: 'telegram', payload: { state: 'done' } }
+    ] });
+    const effects = (await f.call('list_run_effects', { projectId: f.run.projectId })).items;
+    const claimed = await f.call('claim_run_effect', {
+      projectId: f.run.projectId, effectId: effects.find(effect => effect.kind === 'review').effectId, owner: f.owner
+    });
+    const completed = await f.call('claim_run_effect', {
+      projectId: f.run.projectId, effectId: effects.find(effect => effect.kind === 'telegram').effectId, owner: f.owner
+    });
+    await f.call('finish_run_effect', {
+      projectId: f.run.projectId, effectId: completed.effectId, token: completed.token, result: 'done'
+    });
+    const expected = f.store.rows(`SELECT id,project_id,run_id,turn_id,checkpoint_sequence,execution_log_id,source_revision,kind,
+      payload_content_id,state,owner_id,pid,birth,token,error,completed_at FROM run_effects ORDER BY kind`);
+    assert.equal(expected.find(effect => effect.kind === 'roadmap').state, 'queued');
+    assert.equal(expected.find(effect => effect.kind === 'review').token, claimed.token);
+    assert.equal(expected.find(effect => effect.kind === 'telegram').state, 'done');
+
+    await f.ops.close();
+    f.store.close();
+    storeOpen = false;
+    const { DatabaseSync } = require('node:sqlite');
+    rawDatabase = new DatabaseSync(path.join(f.root, 'solomap.db'));
+    rawDatabase.exec(`PRAGMA foreign_keys=OFF;
+      BEGIN IMMEDIATE;
+      DROP INDEX run_effects_pending;
+      DROP INDEX content_ref_run_effects_payload_content_id;
+      ALTER TABLE run_effects RENAME TO run_effects_after_v70;
+      CREATE TABLE run_effects(
+       id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),run_id TEXT NOT NULL REFERENCES runs(id),
+       turn_id TEXT NOT NULL REFERENCES turns(id),checkpoint_sequence INTEGER NOT NULL,execution_log_id INTEGER NOT NULL,source_revision INTEGER NOT NULL,
+       kind TEXT NOT NULL CHECK(kind IN ('roadmap','review','revision','refresh','telegram','automation','flow')),
+       payload_content_id TEXT NOT NULL REFERENCES contents(id),state TEXT NOT NULL CHECK(state IN ('queued','claimed','done')),
+       owner_id TEXT NOT NULL DEFAULT '',pid INTEGER NOT NULL DEFAULT 0,birth TEXT NOT NULL DEFAULT '',token TEXT NOT NULL DEFAULT '',
+       error TEXT NOT NULL DEFAULT '',completed_at INTEGER,
+       UNIQUE(run_id,turn_id,checkpoint_sequence,kind),
+       FOREIGN KEY(run_id,project_id) REFERENCES runs(id,project_id),FOREIGN KEY(turn_id,project_id) REFERENCES turns(id,project_id),
+       FOREIGN KEY(run_id,turn_id,checkpoint_sequence) REFERENCES run_settlements(run_id,turn_id,checkpoint_sequence));
+      INSERT INTO run_effects SELECT * FROM run_effects_after_v70;
+      DROP TABLE run_effects_after_v70;
+      CREATE INDEX run_effects_pending ON run_effects(state,project_id);
+      CREATE INDEX content_ref_run_effects_payload_content_id ON run_effects(payload_content_id);
+      DROP INDEX runs_conversation_history;
+      DELETE FROM schema_migrations WHERE version IN (70,71);
+      COMMIT;
+      PRAGMA foreign_keys=ON;`);
+    rawDatabase.close();
+    rawDatabase = undefined;
+
+    f.store = new UnifiedDataStore(f.root);
+    f.ops = createRuntimeDataOperations(f.store);
+    f.call = (operation, input) => f.ops({ operation, input });
+    storeOpen = true;
+    assert.deepEqual(f.store.rows(`SELECT id,project_id,run_id,turn_id,checkpoint_sequence,execution_log_id,source_revision,kind,
+      payload_content_id,state,owner_id,pid,birth,token,error,completed_at FROM run_effects ORDER BY kind`), expected);
+    assert.equal(f.store.rows('SELECT MAX(version) AS version FROM schema_migrations')[0].version, 72);
+    assert.equal(f.store.rows('PRAGMA integrity_check')[0].integrity_check, 'ok');
+    assert.deepEqual(f.store.rows('PRAGMA foreign_key_check'), []);
+  } finally {
+    if (rawDatabase) rawDatabase.close();
+    if (storeOpen) await f.close();
+  }
+});
+
 test('invalid follow-up actions roll back the entire settlement and leave its source recoverable', async () => {
   const f = await fixture();
   try {

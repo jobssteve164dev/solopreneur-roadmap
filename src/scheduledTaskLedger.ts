@@ -56,8 +56,20 @@ export async function syncScheduledTaskDatabase(workspaceRoot: string, globalDat
 }
 
 export async function readScheduledTaskDatabase(workspaceRoot: string, globalDataPath: string, operation?: ScheduleOperation): Promise<ScheduledTaskLedger> {
-  const result = await databaseOperation(workspaceRoot, globalDataPath, operation)('read_schedule_ledger', {}) as { tasks: ScheduledTaskOccurrence[]; failures: Array<ScheduledTaskOccurrence & { failedAt?: string }> };
-  return { schemaVersion: 1, updatedAt: new Date().toISOString(), tasks: result.tasks.map(item => ({ ...item, schemaVersion: 1, dueAt: String(item.dueAt), status: item.status === 'running' ? 'running' : 'pending' })), failures: result.failures.map(item => ({ ...item, schemaVersion: 1, dueAt: String(item.dueAt), status: item.status === 'running' ? 'running' : 'pending', failedAt: item.failedAt || new Date().toISOString() })) };
+  const call = databaseOperation(workspaceRoot, globalDataPath, operation);
+  const tasks: ScheduledTaskOccurrence[] = [], failures: Array<ScheduledTaskOccurrence & { failedAt?: string }> = [];
+  let cursor: string | null = null;
+  do {
+    const page = await call('read_schedule_ledger', { limit: 200, ...(cursor ? { cursor } : {}) }) as { tasks: ScheduledTaskOccurrence[]; failures: Array<ScheduledTaskOccurrence & { failedAt?: string }>; nextCursor?: string | null };
+    tasks.push(...page.tasks); failures.push(...page.failures); cursor = page.nextCursor || null;
+  } while (cursor);
+  return { schemaVersion: 1, updatedAt: new Date().toISOString(), tasks: tasks.map(item => ({ ...item, schemaVersion: 1, dueAt: String(item.dueAt), status: item.status === 'running' ? 'running' : 'pending' })), failures: failures.map(item => ({ ...item, schemaVersion: 1, dueAt: String(item.dueAt), status: item.status === 'running' ? 'running' : 'pending', failedAt: item.failedAt || new Date().toISOString() })) };
+}
+
+export async function readScheduledTasksById(workspaceRoot: string, globalDataPath: string, taskIds: string[], operation?: ScheduleOperation): Promise<ScheduledTaskOccurrence[]> {
+  if (!taskIds.length) return [];
+  const result = await databaseOperation(workspaceRoot, globalDataPath, operation)('read_schedule_ledger', { taskIds }) as { tasks: ScheduledTaskOccurrence[] };
+  return result.tasks;
 }
 
 export async function claimDueScheduledTaskDatabase(workspaceRoot: string, globalDataPath: string, ownerInstanceId: string, now = new Date(), operation?: ScheduleOperation): Promise<ScheduledTaskOccurrence[]> {

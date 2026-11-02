@@ -3,6 +3,7 @@ const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const { claimRuntimeLease } = require('../out/autonomousRuntime.js');
 const { runtimeBuildId } = require('../out/runtimeBuildIdentity.js');
+const { registerTelegramEditorEndpoint } = require('../out/telegramExtensionBridge.js');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -13,7 +14,9 @@ async function openAnalysisOwner(t, root, projects) {
   claimRuntimeLease(root, { runtimeId, pid: process.pid });
   const entryPath = path.resolve(__dirname, '../out/autonomousRuntimeProcess.js');
   const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId, entryPath, buildId: runtimeBuildId(path.resolve(__dirname, '..')),
-    onCommand: () => ({ status: 'running' }), onData: ops });
+    onCommand: () => ({ status: 'running' }), onData: request => request.operation === 'register_telegram_editor_endpoint'
+      ? registerTelegramEditorEndpoint(root, request.input)
+      : ops(request) });
   t.after(async () => {
     await server.close(); await ops.close(); store.close();
     const file = path.join(root, 'runtime', 'state.json');

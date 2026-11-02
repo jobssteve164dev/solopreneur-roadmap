@@ -18,6 +18,28 @@ const currentProcessBirth = (() => {
   return `proc:${stat.slice(stat.lastIndexOf(') ') + 2).trim().split(/\s+/)[19]}`;
 })();
 
+async function openRuntimeDomainsOwner(t, root, initialize = () => undefined) {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { RuntimeDataExecutionDomains } = require('../out/runtimeDataExecutionDomains.js');
+  const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
+  const store = new UnifiedDataStore(root);
+  const initialized = await initialize(store);
+  const databaseId = store.databaseId;
+  store.close();
+  const domains = await RuntimeDataExecutionDomains.start({ root, databaseId });
+  const server = await startRuntimeControlServer({
+    globalDataPath: root,
+    runtimeId: `webview-runtime-domains-${crypto.randomUUID()}`,
+    onCommand: () => ({ status: 'running' }),
+    onData: request => domains.dispatch(request)
+  });
+  t.after(async () => {
+    await server.close();
+    await domains.close();
+  });
+  return { domains, initialized };
+}
+
 test('terminal delivery survives its own runner claim while recording submission', async t => {
   for (const mode of ['same-delivery', 'different-delivery', 'different-turn']) await t.test(mode, async t => {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-delivery-claim-race-'));
@@ -64,7 +86,8 @@ test('terminal delivery survives its own runner claim while recording submission
     assert.equal(raced, true); assert.equal(created, 1); assert.equal(sent, 1, 'claim retry must never resend the command');
     const delivered = await call('read_run_state', identity);
     assert.equal(delivered.generation, run.generation + 1);
-    assert.equal(Boolean(delivered.status.terminalCommandSubmittedAt), mode === 'same-delivery');
+    assert.equal(Boolean(delivered.status.terminalCommandSubmittedAt), true,
+      'the runner claim, not the racing host acknowledgement, owns submission evidence');
     assert.equal(delivered.taskId, parent.taskId); assert.equal(delivered.conversationId, parent.conversationId);
     assert.deepEqual(await call('read_run_state', { ...identity, executionLogId: 1 }), parentBefore);
     const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)(call, root);
@@ -401,7 +424,7 @@ for (const nodeId of ['__solo__', 'step']) test(`the actual new ${nodeId} handle
   const host = loadCompiledModule('out/extension.js', `
     module.exports.run = ${nodeId === '__solo__' ? 'handleRunSoloConversation' : 'handleRunAgent'};
     module.exports.connect = (project, root, engine, inputs) => {
-      activeProjectRoot = project; syncEngine = engine; ensureTaskRuntimeReady = async () => {}; resumeOrdinaryConversation = async () => null;
+      activeProjectRoot = project; syncEngine = engine; ensureTaskRuntimeReady = async () => {};
       getPersistedSettings = () => ({ cliPath: 'claude', globalDataPath: root, taskPermissionMode: 'auto' });
       agentCli_1.resolveAgentCli = () => 'claude'; agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
       continuation_1.getStoredAgentSession = () => { throw new Error('retired_step_session_read'); };
@@ -895,7 +918,10 @@ test('production settlement cannot turn an agent-reported passing phrase into an
   const report = { schemaVersion: 1, summary: '已完成实际交付', unmetRequirements: [], decisions: [], corrections: [], verification: [], commits: [], experienceUsage: [{ experienceId: lesson.objectId, experienceRevision: lesson.revision, action: '先运行真实回归', result: '测试通过', verdict: 'effective', evidence: ['Tests: 5 passed'] }], lessons: [] };
   await ops({ operation: 'checkpoint_run', input: { root: project, executionLogId: 1, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial', summary: '已提交完整结果', report, idempotencyKey: 'production-rsi-result' } });
   const extension = loadCompiledModule('out/extension.js', `
-    module.exports.settle = processAgentStatusFile;
+    module.exports.settle = async (...args) => {
+      await processAgentStatusFile(...args);
+      await drainAgentSettlementWork();
+    };
     module.exports.recordAcceptedReviewVerification = recordAcceptedReviewVerification;
     module.exports.connect = (call, root, project, engine) => {
       autonomousRuntimeControl_1.sendRuntimeDataRequest = (_root, request) => call(request);
@@ -1152,7 +1178,7 @@ test('foreground continuation enters the owned runner input sequence without rea
   assert.equal(Buffer.concat(frames).toString(), '\x1b[200~续聊原任务\x1b[201~\r');
 });
 
-test('conversation launch success waits for a receipt but does not turn observer lag into a user-facing launch failure', async () => {
+test('Provider ingress observation converges after the launch SLA without converting latency into delivery failure', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
   const { createInteractionBudget } = require('../out/interactionBudget.js');
@@ -1175,12 +1201,15 @@ test('conversation launch success waits for a receipt but does not turn observer
     const lateBudget = createInteractionBudget({ wallMs: Date.now() - 10_001, bootId: 'older-boot', uptimeMs: 1, interactionId: 'late-ingress' });
     const late = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 2, nodeId: '__solo__', runKind: 'solo', prompt: '任务', command: 'grok', userMessage: '目标',
       metadata: { interactiveSession: true, sessionProvider: 'grok', interactionBudget: lateBudget, interactionId: lateBudget.interactionId }, idempotencyKey: 'ingress-gate-timeout' } });
-    const observationPending = await extension.awaitIngress((operation, input) => ops({ operation, input }), { root: project, executionLogId: 2 },
+    const observation = extension.awaitIngress((operation, input) => ops({ operation, input }), { root: project, executionLogId: 2 },
       { generation: late.generation, turnId: late.turnId, interactionId: lateBudget.interactionId, budget: lateBudget, initialState: late }, undefined, 10);
+    const lateSession = await ops({ operation: 'open_mcp_session', input: { projectId: late.projectId, openRequestId: 'late-ingress-session', runIdentity: { executionLogId: 2, generation: late.generation, proof: late.proof } } });
+    await ops({ operation: 'checkpoint_current_run', sessionToken: lateSession.sessionToken, input: { action: 'start', turnId: late.turnId, interactionId: lateBudget.interactionId } });
+    const observationPending = await observation;
     assert.equal(observationPending.status.taskIngressVerdict, 'deadline_exceeded');
-    const failed = await ops({ operation: 'read_run_state', input: { root: project, executionLogId: 2 } });
-    assert.equal(failed.status.taskIngressVerdict, 'deadline_exceeded');
-    assert.equal(failed.status.deliveryLastError, 'agent_task_ingress_timeout');
+    const observed = await ops({ operation: 'read_run_state', input: { root: project, executionLogId: 2 } });
+    assert.equal(observed.status.taskIngressVerdict, 'deadline_exceeded');
+    assert.notEqual(observed.status.deliveryLastError, 'agent_task_ingress_timeout');
   } finally { await ops.close(); store.close(); }
 });
 
@@ -1210,9 +1239,9 @@ test('task-ingress waiting follows the same delivery across the runner claim gen
   } finally { await ops.close(); store.close(); }
 });
 
-test('task-ingress gate keeps the original deadline even when the observer request stalls', async () => {
+test('conversation launch schedules a stalled Provider observer without waiting on it', async () => {
   const { createInteractionBudget } = require('../out/interactionBudget.js');
-  const extension = loadCompiledModule('out/extension.js', 'module.exports.awaitIngress = awaitAgentTaskIngress;');
+  const extension = loadCompiledModule('out/extension.js', 'module.exports.scheduleIngress = scheduleAgentTaskIngressObservation;');
   const budget = createInteractionBudget({
     wallMs: Date.now() - 9_950,
     bootId: require('fs').readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(),
@@ -1220,11 +1249,10 @@ test('task-ingress gate keeps the original deadline even when the observer reque
     interactionId: 'stalled-observer'
   });
   const started = Date.now();
-  await assert.rejects(extension.awaitIngress(() => new Promise(() => {}),
+  extension.scheduleIngress(() => new Promise(() => {}),
     { root: '/workspace', executionLogId: 1 },
-    { generation: 1, turnId: 'turn-stalled', interactionId: budget.interactionId, budget }, undefined, 10),
-  /agent_task_ingress_timeout/);
-  assert.ok(Date.now() - started < 500, 'a blocked Runtime observation must not extend the user-facing ten-second gate');
+    { generation: 1, turnId: 'turn-stalled', interactionId: budget.interactionId, budget }, undefined, 10);
+  assert.ok(Date.now() - started < 100, 'a blocked Runtime observation must be detached from the user-facing launch path');
 });
 
 test('a submitted terminal command that no runner claims records a version failure without killing the live task', async t => {
@@ -1270,8 +1298,7 @@ test('a submitted terminal command that no runner claims records a version failu
     await new Promise(resolve => setImmediate(resolve));
   }
   for (const expected of [
-    ['terminal.delivery.claim', 'ok'],
-    ['terminal.delivery.identity.persist', 'ok'],
+    ['terminal.delivery.begin', 'ok'],
     ['terminal.delivery.process.wait', 'ok'],
     ['terminal.delivery.command.send', 'ok'],
     ['terminal.delivery.submission.persist', 'ok'],
@@ -1487,7 +1514,7 @@ test('new Solo launch opens its terminal while a full history refresh is pending
   const calls = []; const commands = []; let historyRequests = 0;
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
   const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'no-history-owner', onCommand: () => ({ status: 'running' }), onData: async request => {
-    const result = await ops(request); if (request.operation === 'prepare_run_intent') calls.push('committed'); return result;
+    const result = await ops(request); if (request.operation === 'prepare_agent_launch') calls.push('committed'); return result;
   } });
   const terminal = { name: 'solo', processId: Promise.resolve(process.pid), show() {}, sendText(text) { commands.push(text); } };
   const extension = loadCompiledModule('out/extension.js', `
@@ -1531,7 +1558,7 @@ test('project action launch accepts and settles only its request after delivery 
         revealAgentStartupTerminal = async () => { if (mode === 'terminal-failed') throw new Error('fixture_terminal_failed'); return undefined; };
         ensureActionProject = async () => '/isolated/project';
         captureRegisteredConversationLaunchTarget = async (_context, workspaceRoot, snapshot) => ({ workspaceRoot, globalDataPath: snapshot.globalDataPath, settings: snapshot.settings, engine: { close() {} } });
-        handleRunSoloConversation = async () => { if (mode === 'launch-failed') throw new Error('fixture_launch_failed'); return 42; };
+        handleRunSoloConversation = async (...args) => { if (mode === 'launch-failed') throw new Error('fixture_launch_failed'); await args[9]?.(); return 42; };
       };
       module.exports.action = handleSharedWebviewAction;
     `);
@@ -1541,10 +1568,12 @@ test('project action launch accepts and settles only its request after delivery 
       'sidebar', { postMessage: message => { messages.push(message); return Promise.resolve(true); } });
     if (mode === 'delivered') await action;
     else await assert.rejects(action, /fixture_(terminal|launch)_failed/);
-    assert.deepEqual(JSON.parse(JSON.stringify(businessMessages(messages))), [
+    const expected = [
       { command: 'conversationActionAccepted', action: 'runSolo', projectPath: '/isolated/project', launchActionId: 'only-this-action' },
+      ...(mode === 'delivered' ? [{ command: 'conversationActionDurable', action: 'runSolo', projectPath: '/isolated/project', launchActionId: 'only-this-action' }] : []),
       { command: 'conversationActionSettled', action: 'runSolo', projectPath: '/isolated/project', launchActionId: 'only-this-action' }
-    ]);
+    ];
+    assert.deepEqual(JSON.parse(JSON.stringify(businessMessages(messages))), expected);
   });
 });
 
@@ -1603,7 +1632,7 @@ test('a settled Solo launch retry reuses the completed action without reopening 
   assert.equal(messages.filter(message => message.command === 'conversationActionSettled').length, 2);
 });
 
-test('Solo launch acknowledges transport receipt before its task finishes', async () => {
+test('Solo launch distinguishes transport receipt from durable preparation before its task finishes', async () => {
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.configure = wait => {
       getProjects = () => [{ path: '/isolated/project' }];
@@ -1611,7 +1640,7 @@ test('Solo launch acknowledges transport receipt before its task finishes', asyn
       sidebarProvider = null;
       revealAgentStartupTerminal = async () => undefined;
       captureRegisteredConversationLaunchTarget = async (_context, workspaceRoot, snapshot) => ({ workspaceRoot, globalDataPath: snapshot.globalDataPath, settings: snapshot.settings, engine: { close() {} } });
-      handleRunSoloConversation = async () => { await wait(); return 42; };
+      handleRunSoloConversation = async (...args) => { await args[9]?.(); await wait(); return 42; };
     };
     module.exports.action = handleSharedWebviewAction;
   `);
@@ -1622,9 +1651,10 @@ test('Solo launch acknowledges transport receipt before its task finishes', asyn
   const action = extension.action({}, request, 'sidebar', { postMessage: message => { messages.push(message); return Promise.resolve(true); } });
   while (!release) await new Promise(resolve => setImmediate(resolve));
 
-  assert.deepEqual(JSON.parse(JSON.stringify(businessMessages(messages))), [{
-    command: 'conversationActionAccepted', action: 'runSolo', projectPath: '/isolated/project', launchActionId: 'accepted-action'
-  }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(businessMessages(messages))), [
+    { command: 'conversationActionAccepted', action: 'runSolo', projectPath: '/isolated/project', launchActionId: 'accepted-action' },
+    { command: 'conversationActionDurable', action: 'runSolo', projectPath: '/isolated/project', launchActionId: 'accepted-action' }
+  ]);
   release();
   await action;
   assert.equal(messages.filter(message => message.command === 'conversationActionSettled').length, 1);
@@ -1721,19 +1751,32 @@ test('retried pasted-image requests are accepted immediately and share one host 
   assert.equal(messages.filter(message => message.command === 'pastedAttachmentsSaved').length, 2, 'each live caller receives the same completion');
 });
 
-test('a restarted host rejects a persisted Solo action with changed input', async () => {
+test('a restarted host delegates persisted Solo action validation to one Runtime launch command', async () => {
+  const requests = [];
   const extension = loadCompiledModule('out/extension.js', `
-    module.exports.configure = state => {
+    module.exports.configure = requests => {
       ensureHealthyAutonomousRuntime = async () => {};
-      autonomousRuntimeControl_1.sendRuntimeDataRequest = async () => state;
+      getAgentRunDeliveryOwner = async () => ({ id: 'host-owner', pid: 1, birth: 'host-birth' });
+      autonomousRuntimeControl_1.sendRuntimeDataRequest = async (_root, request) => {
+        requests.push(request);
+        throw new Error('execution_identity_conflict');
+      };
     };
-    module.exports.resume = resumeOrdinaryConversation;
+    module.exports.prepare = prepareOrdinaryConversation;
   `);
-  extension.configure({ status: { rootExecutionLogId: 42, deliveryPending: false, uiLaunchActionHash: 'original-hash' } });
+  extension.configure(requests);
   await assert.rejects(
-    extension.resume({}, '/isolated/project', 'ui-action:persisted', '/isolated/.solomap-global', {}, false, 'changed-hash'),
+    extension.prepare({}, {
+      workspaceRoot: '/isolated/project', globalDataPath: '/isolated/.solomap-global', launchIntentId: 'ui-action:persisted',
+      agentCli: 'claude', selectedModel: '', prompt: 'changed input', userMessage: 'changed input', nodeId: '__solo__',
+      executionLogId: 0, runKind: 'solo', taskPermissionMode: 'auto', metadata: { uiLaunchActionHash: 'changed-hash' }
+    }, {}, true),
     /execution_identity_conflict/
   );
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].operation, 'prepare_agent_launch');
+  assert.equal(requests[0].input.launchIntentId, 'ui-action:persisted');
+  assert.equal(requests[0].input.metadata.uiLaunchActionHash, 'changed-hash');
 });
 
 test('a cached sidebar snapshot is refreshed from the global journal after plugin restart', async () => {
@@ -2344,7 +2387,7 @@ test('conversation launch delivery retries the same durable action until the hos
   assert.equal(timers.at(-1).active, false);
 });
 
-test('sidebar stops launch transport retries when the host accepts the action', async () => {
+test('sidebar keeps launch transport retries through receipt and stops only after durable preparation', async () => {
   const html = require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot));
   const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
   const { context, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), ids, `
@@ -2355,10 +2398,43 @@ test('sidebar stops launch transport retries when the host accepts the action', 
 
   dispatchMessage({ command: 'conversationActionAccepted', action: 'runSolo', projectPath: '/project', launchActionId: 'launch-accepted' });
   await new Promise(resolve => setTimeout(resolve, 550));
-  const delivered = context.__launchPosts.length;
+  const acceptedDeliveries = context.__launchPosts.length;
+  assert.ok(acceptedDeliveries > 1, 'transport receipt must not clear the retry before durable preparation');
+  dispatchMessage({ command: 'conversationActionDurable', action: 'runSolo', projectPath: '/project', launchActionId: 'launch-accepted' });
+  await new Promise(resolve => setTimeout(resolve, 550));
+  const durableDeliveries = context.__launchPosts.length;
   dispatchMessage({ command: 'conversationActionSettled', action: 'runSolo', projectPath: '/project', launchActionId: 'launch-accepted' });
 
-  assert.equal(delivered, 1, 'the accepted action must not be delivered again while the task is still running');
+  assert.equal(durableDeliveries, acceptedDeliveries, 'durable preparation must stop further transport retries');
+});
+
+test('sidebar and roadmap preserve every submitted draft until the host confirms Runtime durability', () => {
+  for (const target of ['sidebar', 'roadmap']) {
+    const html = target === 'sidebar'
+      ? require('../out/sidebarWebview.js').getSidebarWebviewHtml(createWebviewStub(), createUri(projectRoot))
+      : require('../out/roadmapWebview.js').getWebviewHtml(createWebviewStub(), { extensionPath: projectRoot, extensionUri: createUri(projectRoot) });
+    const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+    const clearFunction = target === 'sidebar' ? 'clearSubmittedSidebarDraft' : 'clearProjectDraft';
+    const { context, dispatchMessage } = runScriptWithMinimalDom(extractLastScript(html), ids, `
+      globalThis.__durableDraftClears = [];
+      ${clearFunction} = (...args) => globalThis.__durableDraftClears.push(args);
+      globalThis.__seedDurableDraft = (id, targetId) => pendingConversationDraftClears.set(id, {
+        mode: targetId, projectPath: '/submitted/project', targetId, draft: '用户尚未得到持久化确认的输入', files: []
+      });
+      globalThis.__hasDurableDraft = id => pendingConversationDraftClears.has(id);
+    `);
+    for (const targetId of ['step', '__solo__', '__flow__', '__roadmap_revision__']) {
+      const actionId = `${target}-${targetId}`;
+      context.__seedDurableDraft(actionId, targetId);
+      dispatchMessage({ command: 'conversationActionAccepted', launchActionId: actionId, projectPath: '/submitted/project' });
+      assert.equal(context.__hasDurableDraft(actionId), true, `${actionId} must survive Host receipt`);
+      assert.equal(context.__durableDraftClears.length, 0, `${actionId} must remain visible before durability`);
+      dispatchMessage({ command: 'conversationActionDurable', launchActionId: actionId, projectPath: '/submitted/project' });
+      assert.equal(context.__hasDurableDraft(actionId), false, `${actionId} must retire after durable preparation`);
+      assert.equal(context.__durableDraftClears.length, 1, `${actionId} must clear exactly once`);
+      context.__durableDraftClears.length = 0;
+    }
+  }
 });
 
 test('ability action labels are restored after language localization in both webviews', () => {
@@ -2419,29 +2495,17 @@ function isolatedCapabilityRuntime(root) {
 }
 
 function makeSidebarSnapshotCacheStub(options = {}) {
-  const actual = require('../out/sidebarSnapshotCache.js');
   const conversations = new Map();
   const coreReadRoots = [];
   const conversationReadRoots = [];
   const conversationWriteRoots = [];
-  let core = null;
-  let generation = 0;
   const signature = options.buildConversationDatabaseSignature || (async (_globalDataPath, projectPath) => `fixture:${projectPath}`);
   return {
-    buildSidebarProjectSignature: actual.buildSidebarProjectSignature,
     buildConversationDatabaseSignature: signature,
-    async readSidebarCoreSnapshot(globalDataPath) {
+    async readSidebarCoreProjections(globalDataPath) {
       coreReadRoots.push(globalDataPath);
-      return options.readSidebarCoreSnapshot ? options.readSidebarCoreSnapshot(globalDataPath) : core;
-    },
-    async reserveSidebarPortfolioSnapshot() {
-      generation += 1;
-      return { requestId: `fixture-${generation}`, generation };
-    },
-    async commitSidebarPortfolioSnapshot(_globalDataPath, reservation, projectSignature, portfolio) {
-      if (reservation.generation !== generation) return false;
-      core = { version: 3, projectSignature, portfolio: structuredClone(portfolio) };
-      return true;
+      if (options.readSidebarCoreProjections) return options.readSidebarCoreProjections(globalDataPath);
+      return [];
     },
     async readCachedConversationSnapshot(globalDataPath, projectPath) {
       conversationReadRoots.push(globalDataPath);
@@ -2455,12 +2519,10 @@ function makeSidebarSnapshotCacheStub(options = {}) {
       conversations.set(projectPath, structuredClone(snapshot));
     },
     __setConversation(projectPath, snapshot) { conversations.set(projectPath, structuredClone(snapshot)); },
-    __setCore(snapshot) { core = structuredClone(snapshot); },
     __getCoreReadRoots() { return [...coreReadRoots]; },
     __getConversationReadRoots() { return [...conversationReadRoots]; },
     __getConversationWriteRoots() { return [...conversationWriteRoots]; },
-    __getConversation(projectPath) { return conversations.has(projectPath) ? structuredClone(conversations.get(projectPath)) : null; },
-    __getCore() { return core ? structuredClone(core) : null; }
+    __getConversation(projectPath) { return conversations.has(projectPath) ? structuredClone(conversations.get(projectPath)) : null; }
   };
 }
 
@@ -2635,7 +2697,7 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
       }
       if (id.startsWith('./')) {
         if (id === './processIdentity.js') return loadCompiledModule('out/processIdentity.js', '', requireOverrides);
-        if (['./agentRunPreparation', './runLifecycleClient', './runWorkspace', './telegramRuntimeConfig', './capabilityRegistry', './interactionBudget', './providerTaskIngress', './foregroundAgentTerminal'].includes(id)) return require(path.join(projectRoot, 'out', `${id}.js`));
+        if (['./agentRunPreparation', './runLifecycleClient', './runWorkspace', './runDocumentClient', './telegramRuntimeConfig', './capabilityRegistry', './interactionBudget', './providerTaskIngress', './foregroundAgentTerminal', './projectGrowth'].includes(id)) return require(path.join(projectRoot, 'out', `${id}.js`));
         if (id === './documentationManifest') {
           return require(path.join(projectRoot, 'out/documentationManifest.js'));
         }
@@ -2770,9 +2832,6 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
         }
         if (id === './sidebarProjectLoader') {
           return require(path.join(projectRoot, 'out/sidebarProjectLoader.js'));
-        }
-        if (id === './sidebarCoreProjection') {
-          return require(path.join(projectRoot, 'out/sidebarCoreProjection.js'));
         }
         if (id === './sidebarSnapshotCache') {
           return require(path.join(projectRoot, 'out/sidebarSnapshotCache.js'));
@@ -2974,20 +3033,19 @@ test('interactive host continuation uses a lightweight foreground checkpoint bef
   const continuationStart = source.indexOf('async function handleContinueConversationTurn');
   const continuationBody = source.slice(continuationStart, source.indexOf('\nasync function handleContinueNativeConversation', continuationStart));
   const deliverIndex = continuationBody.indexOf('deliverAgentTerminalInput(');
-  const ingressIndex = continuationBody.indexOf('await awaitAgentTaskIngress(');
+  const ingressIndex = continuationBody.indexOf('scheduleAgentTaskIngressObservation(');
   const projectionIndex = continuationBody.indexOf('projectInteractiveConversationTurn(');
   assert.ok(deliverIndex >= 0 && ingressIndex > deliverIndex && projectionIndex > ingressIndex,
-    'roadmap projection may run only after the matching Agent task receipt');
+    'Provider observation must start after delivery while roadmap projection proceeds without waiting for external startup');
 });
 
-test('the ten-second ingress verdict never releases or disposes the only submitted runner', () => {
+test('Provider ingress observation is detached after submitting the only runner', () => {
   const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
   const start = source.indexOf('async function launchAgentConversationTerminal');
   const body = source.slice(start, source.indexOf('\nfunction getAgentProcessCleanupKey', start));
-  assert.match(body, /let runnerSubmitted = false/);
-  assert.match(body, /runnerSubmitted = true/);
-  assert.match(body, /if \(runnerSubmitted && isTaskIngressDeadlineError\(errorCode\)\)[\s\S]*?throw error;[\s\S]*?release_run_delivery/,
-    'a missed SLO is an observed verdict, not permission to cancel the only task or amplify it with another attempt');
+  assert.match(body, /scheduleAgentTaskIngressObservation/);
+  assert.doesNotMatch(body, /if \(runnerSubmitted && isTaskIngressDeadlineError/,
+    'an observation SLO must not enter delivery failure handling at all');
 });
 
 test('conversation actions never reselect an older project after showing their terminal', () => {
@@ -3004,15 +3062,18 @@ test('conversation actions never reselect an older project after showing their t
   assert.match(source, /captureRegisteredConversationLaunchTarget/);
 });
 
-test('message continuation resolves cleanup and terminal reuse from its captured project target', () => {
+test('message continuation resolves cleanup and terminal reuse from its immutable launch snapshot and target', () => {
   const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
   const start = source.indexOf("'conversation.continueTurn': async");
   const body = source.slice(start, source.indexOf("\n    'conversation.linkToStep'", start));
-  const captureIndex = body.indexOf('captureRegisteredConversationLaunchTarget(context, requestedProjectRoot)');
+  const snapshotIndex = body.indexOf('captureRegisteredConversationLaunchSnapshot(context, requestedProjectRoot)');
+  const coordinatorIndex = body.indexOf('coordinateExtensionConversationLaunch({');
+  const captureIndex = body.indexOf('captureRegisteredConversationLaunchTarget(context, requestedProjectRoot, snapshot)');
   const cleanupIndex = body.indexOf('waitForAgentProcessCleanup(');
   const reuseIndex = body.indexOf('findReusableAgentTerminal(');
-  assert.ok(captureIndex > 0 && captureIndex < cleanupIndex && captureIndex < reuseIndex,
-    'cleanup identity and reusable terminal lookup must come from the immutable launch target');
+  assert.ok(snapshotIndex > 0 && snapshotIndex < coordinatorIndex && reuseIndex > coordinatorIndex && captureIndex > coordinatorIndex && captureIndex < cleanupIndex,
+    'terminal reuse and cleanup must remain scoped to one immutable launch snapshot while terminal and Runtime preparation run concurrently');
+  assert.match(body, /findReusableAgentTerminal\(requestedProjectRoot, conversationId, snapshot\.settings\.globalDataPath\)/);
   assert.match(body, /resolveContinuationRootConversationFromList\(conversations, conversationId\)/);
   assert.doesNotMatch(body, /resolveContinuationRootConversation\(nodeId, conversationId\)/);
 });
@@ -3029,23 +3090,29 @@ test('command-palette conversation launch keeps the project captured across term
   assert.match(body, /execute: \(\{ target \}\) => handleRunAgent\([^;]+target\)/s);
 });
 
-test('internal conversation launch skips registry IO and prepares terminal and target through the parallel coordinator', () => {
+test('cold internal conversation launch opens its terminal while Runtime and registry readiness converge in parallel', () => {
   const source = fs.readFileSync(path.join(projectRoot, 'src/extension.ts'), 'utf8');
   const start = source.indexOf("registerCommand('solopreneur.internalStartConversation'");
   const body = source.slice(start, source.indexOf("registerCommand('solopreneur.internalRefreshTimedAutomation'", start));
-  const initialCapture = body.indexOf('captureRegisteredConversationLaunchSnapshot(');
-  const fallbackRefresh = body.indexOf('refreshProjectRegistryForContext(');
-  const fallbackCapture = body.indexOf('captureRegisteredConversationLaunchSnapshot(', initialCapture + 1);
+  const initialCapture = body.indexOf('captureConversationLaunchSnapshot(');
+  const captureTargetStart = body.indexOf('const captureTarget = async ');
+  const captureTargetEnd = body.indexOf('const terminalLabel', captureTargetStart);
+  const preparation = body.slice(captureTargetStart, captureTargetEnd);
   const coordinator = body.indexOf('coordinateExtensionConversationLaunch({');
   const terminal = body.indexOf('openTerminal: snapshot => revealAgentStartupTerminal(', coordinator);
-  const target = body.indexOf('prepareRuntime: () => captureTarget()', coordinator);
-  assert.ok(initialCapture > 0 && initialCapture < fallbackRefresh,
-    'an already registered project must not wait for registry IO');
-  assert.ok(fallbackRefresh < fallbackCapture,
-    'registry recovery must retry the same registered-project snapshot');
-  assert.ok(coordinator > fallbackCapture && terminal > coordinator && target > terminal,
-    'terminal startup and target preparation must be submitted to the same parallel launch coordinator');
-  assert.match(body, /if \(!launchSnapshot\) \{[\s\S]*?refreshProjectRegistryForContext/);
+  const target = body.indexOf('prepareRuntime: snapshot => captureTarget(snapshot)', coordinator);
+  const readiness = preparation.indexOf('ensureHealthyAutonomousRuntime(');
+  const registry = preparation.indexOf('refreshProjectRegistryForContext(', readiness);
+  const registered = preparation.indexOf('captureRegisteredConversationLaunchSnapshot(', registry);
+  assert.ok(initialCapture > 0 && initialCapture < captureTargetStart && captureTargetEnd < coordinator,
+    'the explicit request must freeze its project and settings before asynchronous startup');
+  assert.ok(terminal > coordinator && target > terminal,
+    'terminal startup and cold Runtime preparation must be submitted to the same parallel launch coordinator');
+  assert.ok(readiness > 0 && registry > readiness && registered > registry,
+    'Runtime readiness and registry validation must stay inside the preparation branch instead of blocking terminal startup');
+  assert.equal(body.slice(initialCapture, captureTargetStart).includes('refreshProjectRegistryForContext(')
+    || body.slice(captureTargetEnd, coordinator).includes('refreshProjectRegistryForContext('), false,
+    'cold registry IO must never run before the parallel launch coordinator');
 });
 
 test('captured project launches never read later settings or refresh another selected roadmap', () => {
@@ -3780,6 +3847,8 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(script, /collaborationLobbyDetail: '登录用户自由加入 · 每 6 小时清空'/);
   assert.match(script, /collaborationLobbySignedOut: '登录后即可进入，未登录用户不能查看或发言。'/);
   assert.match(script, /collaborationLobbyPrivacy: '公开大厅 · 消息服务端可见 · 每 6 小时永久清空 · 参与者不能控制 Agent'/);
+  assert.match(script, /collaborationNicknameTaken: '这个昵称已被使用，请换一个。'/);
+  assert.match(script, /message\.error === 'nickname_taken'/);
   assert.match(script, /collaborationLobbyDetail: 'Open to signed-in users · cleared every 6 hours'/);
   assert.match(script, /collaborationLobbyPrivacy: 'Public lobby · server-visible messages · permanently cleared every 6 hours · participants cannot control the Agent'/);
   assert.match(script, /collaborationActiveRoom\.isLobby/);
@@ -3790,7 +3859,7 @@ test('sidebar webview runtime script parses and opens settings panel', async () 
   assert.match(script, /collaborationToAgent: '带回自由研讨'/);
   assert.match(script, /collaborationSaveIdea: '快速新建笔记'/);
   assert.match(script, /command: 'issue\.create',[\s\S]*category: 'quick-note',[\s\S]*sourceMessageId: messageId/);
-  assert.match(extensionSource, /'issue\.create':[\s\S]*createProjectIssue\([\s\S]*sourceMessageId: String\(request\.sourceMessageId \|\| ''\)/);
+  assert.match(extensionSource, /'issue\.create':[\s\S]*operation: 'create_project_issue'[\s\S]*sourceMessageId: String\(request\.sourceMessageId \|\| ''\)/);
   assert.doesNotMatch(script, /command: 'collaboration\.saveIdea'/);
 
   const { elements, postedMessages, dispatchMessage, context } = runScriptWithMinimalDom(script, [
@@ -6052,7 +6121,7 @@ test('full roadmap webview exposes node conversation history and project setting
   assert.match(script, /renderSoloPanel/);
   assert.match(script, /data-attach-solo/);
   assert.match(script, /renderSupplementFiles\(soloConversationId/);
-  assert.match(script, /supplementFiles: getProjectSupplementFiles\(actionProjectPath, soloConversationId\)/);
+  assert.match(script, /supplementFiles: submittedFiles/);
   assert.match(script, /data-link-solo-id/);
   assert.match(script, /completionCriteria/);
   assert.match(script, /renderCompletionCriteria/);
@@ -6380,6 +6449,7 @@ test('rollback action is rendered for every completed conversation mode with a p
 
 test('sidebar conversation result cards expose rollback actions for pre-session git hashes', () => {
   const sidebarSource = fs.readFileSync(path.join(projectRoot, 'out/sidebarWebview.js'), 'utf8');
+  const runtimeOperationsSource = fs.readFileSync(path.join(projectRoot, 'src/runtimeDataOperations.ts'), 'utf8');
   const extensionSource = [
     fs.readFileSync(path.join(projectRoot, 'out/extension.js'), 'utf8'),
     fs.readFileSync(path.join(projectRoot, 'out/roadmapWebview.js'), 'utf8'),
@@ -6396,12 +6466,13 @@ test('sidebar conversation result cards expose rollback actions for pre-session 
   assert.match(extensionSource, /data-rollback-hash/);
   assert.match(extensionSource, /rollbackConfirm/);
   assert.match(extensionSource, /window\.confirm\(t\('rollbackConfirm'\)\)/);
-  assert.match(extensionSource, /\['restore', '--source', verifiedHash, '--staged', '--worktree', '--', '\.'\]/);
+  assert.match(extensionSource, /operation: 'execute_project_git_rollback'/);
+  assert.match(runtimeOperationsSource, /executeExternal\('git', \['restore', '--source', inspected\.verifiedHash, '--staged', '--worktree', '--', '\.'\]/);
   assert.doesNotMatch(extensionSource, /\['reset', '--hard'/);
   assert.doesNotMatch(extensionSource, /\['clean', '-fd'\]/);
 });
 
-test('rollback restores a retained SoloMap snapshot without requiring it on the user branch', async () => {
+test('rollback restores a retained SoloMap snapshot without requiring it on the user branch', async t => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-hidden-rollback-'));
   const project = path.join(base, 'project'); const root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
   childProcess.execFileSync('git', ['init', '-q'], { cwd: project });
@@ -6415,6 +6486,7 @@ test('rollback restores a retained SoloMap snapshot without requiring it on the 
   const backup = await require('../out/preSessionGit.js').createPreSessionGitCommit(project);
   assert.notEqual(backup, head);
   fs.writeFileSync(path.join(project, 'work.txt'), 'Agent changed this');
+  await openRuntimeDomainsOwner(t, root);
   const errors = [];
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.rollback = rollbackProjectToPreSessionGitHash;
@@ -7071,7 +7143,7 @@ test('project registry settings override every stale portfolio card before a pro
   );
 });
 
-test('sidebar discards a progressive portfolio scan when project settings change before the bottom card is reached', async () => {
+test('sidebar discards an obsolete projection read when project settings change before it settles', async () => {
   const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
   const { buildProjectPortfolioSummary } = require('../out/projectPortfolio.js');
   let projects = [
@@ -7079,7 +7151,6 @@ test('sidebar discards a progressive portfolio scan when project settings change
     { name: 'Bottom old', path: '/workspace/bottom', priority: 'P2' }
   ];
   const postedMessages = [];
-  let scanCompleted = false;
   let projectionCalls = 0;
   let resolveFirstProjection;
   const firstProjectionStarted = new Promise(resolve => { resolveFirstProjection = resolve; });
@@ -7092,15 +7163,12 @@ test('sidebar discards a progressive portfolio scan when project settings change
       getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
       updateSettings: async () => {},
       getProjects: () => ({ projects, selectedProjectPath: '/workspace/top' }),
-      buildCoreProjection: async requestedProjects => {
+      readCoreProjections: async () => {
         projectionCalls += 1;
         if (projectionCalls === 1) {
           await firstProjectionStarted;
         }
-        return {
-          portfolio: requestedProjects.map(project => buildProjectPortfolioSummary(project, { coreOnly: true })),
-          workerThreadId: 1
-        };
+        return projects.map(project => buildProjectPortfolioSummary(project, { coreOnly: true }));
       }
     }
   );
@@ -7113,9 +7181,11 @@ test('sidebar discards a progressive portfolio scan when project settings change
     }
   };
   provider._projectLoader.scheduleExternalSignals = () => {};
-  provider._projectLoader.schedulePortfolioEnrichment = () => {
-    scanCompleted = true;
-    resolveCompleted();
+  const originalPostMessage = provider._view.webview.postMessage;
+  provider._view.webview.postMessage = message => {
+    const result = originalPostMessage(message);
+    if (message.projects?.updatedProjectPaths?.includes('/workspace/bottom')) resolveCompleted();
+    return result;
   };
 
   provider.sendProjects();
@@ -7138,7 +7208,6 @@ test('sidebar discards a progressive portfolio scan when project settings change
   clearTimeout(timeout);
 
   assert.equal(projectionCalls, 2);
-  assert.equal(scanCompleted, true);
   const bottomUpdates = postedMessages.filter((message) => message.projects?.updatedProjectPaths?.includes('/workspace/bottom'));
   assert.equal(bottomUpdates.length, 1);
   assert.equal(bottomUpdates[0].projects.projects[1].name, 'Bottom renamed');
@@ -7292,7 +7361,7 @@ test('sidebar local project refresh batches core cards before scheduling enrichm
     async () => {},
     async () => {}
   );
-  let portfolioEnrichments = 0;
+  let projectionReads = 0;
   let externalLoads = 0;
   let resolvePortfolioBatch;
   const portfolioBatchDone = new Promise((resolve) => { resolvePortfolioBatch = resolve; });
@@ -7316,19 +7385,18 @@ test('sidebar local project refresh batches core cards before scheduling enrichm
   }];
   provider._activeDataRoot = '/workspace/.solomap-global';
   provider._projectLoader.cancelExternalLoads = () => { externalLoads += 1; };
-  provider._projectLoader.scheduleAll = () => {
-    throw new Error('local refresh must not restart external loads');
-  };
-  provider._projectLoader.schedulePortfolioEnrichment = () => {
-    portfolioEnrichments += 1;
+  provider._readCoreProjections = async (_root, paths) => {
+    projectionReads += 1;
+    assert.equal(JSON.stringify(paths), JSON.stringify(['/workspace/app']));
     resolvePortfolioBatch();
+    return [{ name: 'app', path: '/workspace/app', pinnedAt: '2026-01-01T00:00:00.000Z', recommendedNodeTitle: 'Fresh app' }];
   };
 
   provider.sendLocalProjects('/workspace/app');
   provider.sendLocalProjects('/workspace/app');
   await Promise.race([portfolioBatchDone, new Promise((resolve) => setTimeout(resolve, 200))]);
 
-  assert.equal(portfolioEnrichments, 1);
+  assert.equal(projectionReads, 1);
   assert.equal(externalLoads, 0);
   assert.equal(postedMessages.length, 1);
   assert.equal(postedMessages[0].command, 'projectsLoaded');
@@ -7357,13 +7425,16 @@ test('automatic project status refresh stays scoped while keeping the external s
   provider._latestPortfolio = projects;
   provider._activeDataRoot = '/workspace/.solomap-global';
   let cancellations = 0;
-  let resolveEnrichment;
-  const enrichment = new Promise(resolve => { resolveEnrichment = resolve; });
+  let resolveProjection;
+  const projection = new Promise(resolve => { resolveProjection = resolve; });
   provider._projectLoader.cancelExternalLoads = () => { cancellations += 1; };
-  provider._projectLoader.schedulePortfolioEnrichment = () => resolveEnrichment();
+  provider._readCoreProjections = async () => {
+    resolveProjection();
+    return projects;
+  };
 
   provider.sendLocalProjects('/workspace/other');
-  await Promise.race([enrichment, new Promise(resolve => setTimeout(resolve, 200))]);
+  await Promise.race([projection, new Promise(resolve => setTimeout(resolve, 200))]);
 
   assert.equal(cancellations, 0);
 });
@@ -7407,8 +7478,7 @@ test('sidebar completes local core cards before starting automatic external refr
   } } };
   provider._projectLoader.cancelExternalLoads = () => {};
   provider._projectLoader.scheduleExternalSignals = () => events.push('external');
-  provider._projectLoader.schedulePortfolioEnrichment = () => {};
-  provider._projectLoader.scheduleAll = () => events.push('external');
+  provider._readCoreProjections = async () => projects.map(project => ({ name: project.name, path: project.path }));
   provider.sendDailyReview = () => {};
 
   await provider.sendProjects();
@@ -7420,20 +7490,16 @@ test('sidebar completes local core cards before starting automatic external refr
   assert.ok(events.includes('core:/workspace/app,/workspace/other'));
 });
 
-test('sidebar restores the persisted local core snapshot without delaying background refreshes', async () => {
+test('sidebar restores the durable core projection without delaying background refreshes', async () => {
   const snapshotCache = makeSidebarSnapshotCacheStub();
   const projects = [
     { name: 'app', path: '/workspace/app' },
     { name: 'other', path: '/workspace/other' }
   ];
-  snapshotCache.__setCore({
-    version: 3,
-    projectSignature: snapshotCache.buildSidebarProjectSignature(projects),
-    portfolio: [
-      { name: 'app', path: '/workspace/app', recommendedNodeTitle: 'Cached app' },
-      { name: 'other', path: '/workspace/other', recommendedNodeTitle: 'Cached other' }
-    ]
-  });
+  const projection = [
+    { name: 'app', path: '/workspace/app', recommendedNodeTitle: 'Projected app' },
+    { name: 'other', path: '/workspace/other', recommendedNodeTitle: 'Projected other' }
+  ];
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
     '',
@@ -7447,7 +7513,8 @@ test('sidebar restores the persisted local core snapshot without delaying backgr
       getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '/data' }),
       updateSettings: async () => {},
       getProjects: () => ({ projects, selectedProjectPath: '/workspace/app' }),
-      getProjectConversationSnapshot: async () => ({ solo: [], project: [], flow: [], revision: [] })
+      getProjectConversationSnapshot: async () => ({ solo: [], project: [], flow: [], revision: [] }),
+      readCoreProjections: async () => structuredClone(projection)
     }
   );
   provider._view = { webview: { postMessage(message) {
@@ -7455,18 +7522,16 @@ test('sidebar restores the persisted local core snapshot without delaying backgr
     return Promise.resolve(true);
   } } };
   provider.sendDailyReview = () => {};
-  provider._projectLoader.scheduleAll = () => events.push('external');
   provider._projectLoader.scheduleExternalSignals = () => events.push('external-early');
-  provider._projectLoader.schedulePortfolioEnrichment = () => {};
 
   await provider.sendProjects();
-  for (let attempt = 0; attempt < 50 && !events.includes('portfolio:Cached app'); attempt++) {
+  for (let attempt = 0; attempt < 50 && !events.includes('portfolio:Projected app'); attempt++) {
     await new Promise(resolve => setTimeout(resolve, 10));
   }
 
-  assert.deepEqual(snapshotCache.__getCoreReadRoots(), ['/data/.solomap-global']);
+  assert.deepEqual(snapshotCache.__getCoreReadRoots(), []);
   assert.equal(events[0], 'portfolio:core');
-  assert.equal(events.includes('portfolio:Cached app'), true);
+  assert.equal(events.includes('portfolio:Projected app'), true);
   assert.equal(events.includes('external-early'), true);
 });
 
@@ -7597,13 +7662,11 @@ test('sidebar keeps a GitHub signal that arrives during a batched local refresh'
       getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
       updateSettings: async () => {},
       getProjects: () => ({ projects, selectedProjectPath: '/workspace/app' }),
-      buildCoreProjection: async requestedProjects => {
+      readCoreProjections: async () => {
         markProjectionStarted();
         await projectionGate;
-        return {
-          portfolio: requestedProjects.map(project => ({ ...project, ...unavailableSignals })),
-          workerThreadId: 1
-        };
+        resolvePortfolioBatch();
+        return projects.map(project => ({ ...project, ...unavailableSignals }));
       }
     }
   );
@@ -7616,11 +7679,6 @@ test('sidebar keeps a GitHub signal that arrives during a batched local refresh'
       }
     }
   };
-  provider._projectLoader.scheduleAll = () => {
-    throw new Error('a local refresh must not start external loads');
-  };
-  provider._projectLoader.schedulePortfolioEnrichment = () => { resolvePortfolioBatch(); };
-
   provider.sendLocalProjects('/workspace/app');
   provider.sendLocalProjects('/workspace/other');
   await projectionStarted;
@@ -7712,14 +7770,15 @@ test('sidebar local refresh isolates GitHub signals after the data root changes'
     path: '/workspace/app',
     issues: { available: true, repo: 'SZLK/root-a', open: 3 }
   }];
-  provider._projectLoader.scheduleAll = () => {
-    throw new Error('a local refresh must not start external loads');
+  provider._readCoreProjections = async () => {
+    resolvePortfolioBatch();
+    return [{ name: 'app', path: '/workspace/app', issues: { available: false, repo: '', open: 0 } }];
   };
-  provider._projectLoader.schedulePortfolioEnrichment = () => { resolvePortfolioBatch(); };
 
   globalDataPath = '/data-b';
   provider.sendLocalProjects('/workspace/app');
   await Promise.race([portfolioBatchDone, new Promise((resolve) => setTimeout(resolve, 500))]);
+  await new Promise(resolve => setImmediate(resolve));
 
   assert.equal(provider._activeDataRoot, '/data-b/.solomap-global');
   assert.equal(provider._latestPortfolio[0].issues.available, false);
@@ -7756,7 +7815,6 @@ test('a scoped card refresh cannot cancel the pending all-project external refre
     assert.deepEqual(scheduledProjects.map(project => project.path), projects.map(project => project.path));
     resolveExternal();
   };
-  provider._projectLoader.schedulePortfolioEnrichment = () => {};
 
   void provider.sendProjects();
   scopedRefreshQueued = true;
@@ -7769,12 +7827,10 @@ test('a scoped card refresh cannot cancel the pending all-project external refre
   assert.equal(scopedRefreshQueued, true);
 });
 
-test('sidebar discards a stale core snapshot after its immediate placeholder when the data root changes in flight', async () => {
-  let resolveSnapshot;
-  const snapshotRead = new Promise((resolve) => { resolveSnapshot = resolve; });
-  const snapshotCache = makeSidebarSnapshotCacheStub({
-    readSidebarCoreSnapshot: () => snapshotRead
-  });
+test('sidebar discards a stale durable projection after its immediate placeholder when the data root changes in flight', async () => {
+  let resolveProjection;
+  const projectionRead = new Promise((resolve) => { resolveProjection = resolve; });
+  const snapshotCache = makeSidebarSnapshotCacheStub();
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
     '',
@@ -7789,7 +7845,8 @@ test('sidebar discards a stale core snapshot after its immediate placeholder whe
     {
       getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath }),
       updateSettings: async () => {},
-      getProjects: () => ({ projects, selectedProjectPath: '/workspace/app' })
+      getProjects: () => ({ projects, selectedProjectPath: '/workspace/app' }),
+      readCoreProjections: () => projectionRead
     }
   );
   provider._view = { webview: { postMessage: (message) => { postedMessages.push(message); return Promise.resolve(true); } } };
@@ -7797,10 +7854,7 @@ test('sidebar discards a stale core snapshot after its immediate placeholder whe
 
   const pending = provider.sendProjects();
   globalDataPath = '/data-b';
-  resolveSnapshot({
-    projectSignature: 'stale-root-a',
-    portfolio: [{ name: 'app', path: '/workspace/app', issues: { available: true, repo: 'SZLK/root-a', open: 4 } }]
-  });
+  resolveProjection([{ name: 'app', path: '/workspace/app', issues: { available: true, repo: 'SZLK/root-a', open: 4 } }]);
   await pending;
 
   assert.equal(postedMessages.length, 1, 'local placeholders paint before durable cache IO');
@@ -7809,14 +7863,8 @@ test('sidebar discards a stale core snapshot after its immediate placeholder whe
   assert.equal(provider._latestPortfolio.length, 1);
 });
 
-test('sidebar local refresh starts without reading the removed core snapshot cache', async () => {
-  let snapshotReads = 0;
-  const snapshotCache = makeSidebarSnapshotCacheStub({
-    readSidebarCoreSnapshot: () => {
-      snapshotReads += 1;
-      return new Promise(() => {});
-    }
-  });
+test('sidebar local refresh starts through the durable projection path only', async () => {
+  const snapshotCache = makeSidebarSnapshotCacheStub();
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
     '',
@@ -7825,7 +7873,7 @@ test('sidebar local refresh starts without reading the removed core snapshot cac
   const projects = [{ name: 'app', path: '/workspace/app' }];
   let globalDataPath = '/data-a';
   const postedMessages = [];
-  let enrichmentCount = 0;
+  let projectionCount = 0;
   const provider = new SolopreneurSidebarProvider(
     createUri(projectRoot),
     { getNodes: () => [] },
@@ -7837,16 +7885,100 @@ test('sidebar local refresh starts without reading the removed core snapshot cac
   );
   provider._view = { webview: { postMessage: (message) => { postedMessages.push(message); return Promise.resolve(true); } } };
   provider._activeDataRoot = '/data-a/.solomap-global';
-  provider._projectLoader.schedulePortfolioEnrichment = () => { enrichmentCount += 1; };
+  provider._readCoreProjections = async () => {
+    projectionCount += 1;
+    return [{ name: 'app', path: '/workspace/app' }];
+  };
 
   provider.sendLocalProjects('/workspace/app');
-  for (let attempt = 0; attempt < 50 && enrichmentCount === 0; attempt++) {
+  for (let attempt = 0; attempt < 50 && projectionCount === 0; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 10));
   }
 
   assert.equal(postedMessages.some(message => message.command === 'projectsLoaded'), true);
-  assert.equal(snapshotReads, 0);
-  assert.equal(enrichmentCount, 1);
+  assert.deepEqual(snapshotCache.__getCoreReadRoots(), []);
+  assert.equal(projectionCount, 1);
+});
+
+test('an open sidebar refreshes committed projects and resets its subscription epoch after Runtime restarts', async () => {
+  const projectionWaits = [];
+  const projectionReleases = [];
+  const runtimeControl = {
+    sendRuntimeDataRequest: async (root, request) => {
+      projectionWaits.push({ root, request });
+      return new Promise(resolve => { projectionReleases.push(resolve); });
+    }
+  };
+  const { SolopreneurSidebarProvider } = loadCompiledModule(
+    'out/sidebarProvider.js',
+    '',
+    { './autonomousRuntimeControl': runtimeControl }
+  );
+  const projects = [
+    { name: 'app', path: '/workspace/app' },
+    { name: 'other', path: '/workspace/other' }
+  ];
+  const projectionReads = [];
+  let disposed;
+  const provider = new SolopreneurSidebarProvider(
+    createUri(projectRoot),
+    { getNodes: () => [] },
+    {
+      getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '/data' }),
+      updateSettings: async () => {},
+      getProjects: () => ({ projects, selectedProjectPath: '/workspace/app' }),
+      readCoreProjections: async (_root, paths) => {
+        projectionReads.push(paths);
+        return projects.filter(project => paths.includes(project.path)).map(project => ({ ...project, recommendedNodeTitle: 'Fresh projection' }));
+      }
+    }
+  );
+  provider.sendDailyReview = () => {};
+  provider.resolveWebviewView({
+    onDidDispose(listener) { disposed = listener; },
+    webview: {
+      options: {}, html: '', asWebviewUri: uri => String(uri.fsPath || uri),
+      postMessage: () => Promise.resolve(true),
+      onDidReceiveMessage() {}
+    }
+  }, {}, {});
+
+  await Promise.race([
+    new Promise(resolve => {
+      const poll = () => projectionWaits.length ? resolve() : setTimeout(poll, 5);
+      poll();
+    }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('sidebar never subscribed to projection commits')), 200))
+  ]);
+  assert.equal(projectionWaits[0].root, '/data/.solomap-global');
+  assert.equal(JSON.stringify(projectionWaits[0].request), JSON.stringify({
+    operation: 'wait_sidebar_core_projection_revision',
+    input: { afterRevision: 0 }
+  }));
+  projectionReleases[0]({ revision: 999, projectPaths: ['/workspace/other'] });
+  await Promise.race([
+    new Promise(resolve => {
+      const poll = () => projectionReads.length && projectionWaits.length >= 2 ? resolve() : setTimeout(poll, 5);
+      poll();
+    }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('projection commit never refreshed the open sidebar')), 300))
+  ]);
+
+  assert.equal(JSON.stringify(projectionReads), JSON.stringify([['/workspace/other']]));
+  assert.equal(projectionWaits[1].request.input.afterRevision, 999);
+
+  projectionReleases[1]({ revision: 0, projectPaths: [] });
+  await Promise.race([
+    new Promise(resolve => {
+      const poll = () => projectionReads.length >= 2 && projectionWaits.length >= 3 ? resolve() : setTimeout(poll, 5);
+      poll();
+    }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Runtime restart never reset the sidebar projection epoch')), 300))
+  ]);
+
+  assert.equal(JSON.stringify(projectionReads), JSON.stringify([['/workspace/other'], []]));
+  assert.equal(projectionWaits[2].request.input.afterRevision, 0);
+  disposed();
 });
 
 test('sidebar shared action rejects every project response after its data root changes', async () => {
@@ -7979,7 +8111,7 @@ test('sidebar conversation reads share the canonical data root across registered
   assert.deepEqual(signatureRoots, ['/workspace/.solomap-global', '/workspace/.solomap-global']);
 });
 
-test('sidebar core snapshot restarts when a new project roadmap appears during collection', async (t) => {
+test('sidebar core follows database projection invalidation instead of rescanning a new roadmap file', async (t) => {
   const snapshotCache = makeSidebarSnapshotCacheStub();
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
@@ -8033,16 +8165,19 @@ test('sidebar core snapshot restarts when a new project roadmap appears during c
       getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath }),
       updateSettings: async () => {},
       getProjects: () => ({ projects, selectedProjectPath: projectPath }),
-      buildCoreProjection: async requestedProjects => {
+      readCoreProjections: async () => {
         projectionCalls += 1;
+        const projectedRoadmapExists = roadmapCreated;
         if (projectionCalls === 1) {
           markFirstProjectionStarted();
           await firstProjectionGate;
         }
-        return {
-          portfolio: requestedProjects.map(project => buildProjectPortfolioSummary(project, { coreOnly: true })),
-          workerThreadId: 1
-        };
+        return projects.map(project => buildProjectPortfolioSummary(project, {
+          coreOnly: true,
+          roadmapNodesByProjectPath: new Map([[project.path, projectedRoadmapExists && project.path === projectPath
+            ? [{ id: '1', title: '生成初始路线图', stage: '', status: 'Pending' }]
+            : []]])
+        }));
       }
     }
   );
@@ -8052,12 +8187,12 @@ test('sidebar core snapshot restarts when a new project roadmap appears during c
   provider._view = {
     webview: {
       postMessage(message) {
+        if (message.projects?.updatedProjectPaths?.includes(projectPath)) resolveComplete();
         return Promise.resolve(true);
       }
     }
   };
   provider._projectLoader.scheduleExternalSignals = () => {};
-  provider._projectLoader.schedulePortfolioEnrichment = () => resolveComplete();
 
   provider.sendProjects();
   await firstProjectionStarted;
@@ -8072,12 +8207,14 @@ test('sidebar core snapshot restarts when a new project roadmap appears during c
   resolveFirstProjection();
   await Promise.race([completed, new Promise((resolve) => setTimeout(resolve, 500))]);
 
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  const cached = snapshotCache.__getCore();
   assert.equal(roadmapCreated, true);
-  assert.equal(projectionCalls, 2);
-  assert.equal(cached.portfolio.find((project) => project.path === projectPath).totalNodes, 1);
-  assert.equal(cached.portfolio.find((project) => project.path === projectPath).globalNextAction, '生成初始路线图');
+  assert.equal(projectionCalls, 1, 'a filesystem change alone cannot restart the database projection read');
+  assert.equal(provider._latestPortfolio.find((project) => project.path === projectPath).totalNodes, 0);
+  provider.sendLocalProjects(projectPath);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(projectionCalls, 2, 'the database invalidation event schedules one fresh projection read');
+  assert.equal(provider._latestPortfolio.find((project) => project.path === projectPath).totalNodes, 1);
+  assert.equal(provider._latestPortfolio.find((project) => project.path === projectPath).globalNextAction, '生成初始路线图');
 });
 
 test('sidebar conversation snapshots share one in-flight database read and only the latest request commits', async () => {
@@ -8770,12 +8907,14 @@ test('run index maintenance backfills formal historical digests and reports heal
   }), 'utf8');
 
   const globalRoot = path.join(projectRootA, '.solomap-global');
-  const native = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, [{ path: projectRootA }]);
-  const projectId = native.projectIds.get(projectRootA);
   const bytes = fs.readFileSync(path.join(digestRoot, 'digest-backfill.json'));
-  const source = { identity: `run-digests:${projectId}`, key: 'digest-backfill.json', hash: require('node:crypto').createHash('sha256').update(bytes).digest('hex') };
-  native.store.captureMigrationSource(source, bytes);
-  native.store.importRunDigestSource(projectId, { source, bytes });
+  const { domains, initialized: projectId } = await openRuntimeDomainsOwner(t, globalRoot, async store => {
+    const registeredProjectId = (await store.registerProject({ root: projectRootA })).projectId;
+    const source = { identity: `run-digests:${registeredProjectId}`, key: 'digest-backfill.json', hash: require('node:crypto').createHash('sha256').update(bytes).digest('hex') };
+    store.captureMigrationSource(source, bytes);
+    store.importRunDigestSource(registeredProjectId, { source, bytes });
+    return registeredProjectId;
+  });
   const before = await maintenance.getRunIndexHealth(projectRootA, projectRoot, globalRoot);
   assert.equal(before.digestCount, 1);
   assert.equal(before.indexedCount, 0);
@@ -8788,7 +8927,7 @@ test('run index maintenance backfills formal historical digests and reports heal
   assert.equal(after.missingDigestCount, 0);
   assert.equal(after.ok, true);
 
-  const entries = native.store.readProjectRunIndexes(projectId);
+  const entries = await domains.dispatch({ operation: 'read_project_run_indexes', input: { root: projectRootA } });
   assert.equal(entries.length, 1);
   assert.equal(entries[0].executionLogId, 31);
   assert.equal(entries[0].runKind, 'solo');
@@ -8943,13 +9082,11 @@ test('sidebar diagnostics split settings, overview, contribution, and Solo launc
     'settings.database', 'settings.host.read', 'settings.host.bootstrap', 'settings.policy.read', 'settings.policy.bootstrap', 'settings.snapshot', 'settings.delivery',
     'database.overview.read', 'database.overview.runtime', 'database.overview.query', 'database.overview.delivery',
     'agentImpact.read', 'agentImpact.delivery',
-    'conversation.runSolo.terminal', 'conversation.runSolo.project', 'conversation.runSolo.runtime', 'conversation.runSolo.resume',
+    'conversation.runSolo.terminal', 'conversation.runSolo.project', 'conversation.runSolo.runtime',
     'conversation.runSolo.session', 'conversation.runSolo.prompt', 'conversation.runSolo.prepare', 'conversation.runSolo.delivery',
     'conversation.continue.rollbackSnapshot'
   ]) assert.match(extensionSource, new RegExp(`observeLocalDiagnosticStage\\('${stage.replaceAll('.', '\\.')}'`));
-  assert.match(impactSource, /recordCurrentDiagnosticStage\(`agentImpact\.project\.\$\{index \+ 1\}\.query`, 'error'/);
-  assert.match(impactSource, /slowestQuery\.durationMs >= 250/);
-  assert.match(impactSource, /recordCurrentDiagnosticStage\(`agentImpact\.project\.\$\{slowestQuery\.index\}\.query`, 'ok'/);
+  assert.doesNotMatch(impactSource, /agentImpact\.project\./, 'the contribution read must remain one Runtime aggregate instead of serial per-project queries');
   assert.match(impactSource, /observeLocalDiagnosticStage\('agentImpact\.aggregate'/);
   for (const command of ['databaseOverview.get', 'agentImpact.get', 'conversation.runSolo']) assert.ok(providerSource.includes(command.replaceAll('.', '\\.')));
 
@@ -9270,7 +9407,8 @@ test('local-first loading paints and launches before optional or durable work', 
     sidebarProviderSource.indexOf('private scheduleCorePortfolio'),
     sidebarProviderSource.indexOf('public async sendSoloConversationHistory')
   );
-  assert.match(coreBatchBody, /this\._buildCoreProjection\(requestedProjects\)/);
+  assert.match(coreBatchBody, /this\._readCoreProjections\(globalDataPath, options\.projectPaths \|\| \[\]\)/);
+  assert.doesNotMatch(coreBatchBody, /buildSidebarProjectSignature|readProjectRoadmapNodes/);
   assert.doesNotMatch(coreBatchBody, /setTimeout\(\(\) => loadNext\(index \+ 1\), 0\)/,
     'core portfolio projection must leave the Extension Host instead of yielding between serial project reads');
   assert.doesNotMatch(coreBatchBody, /buildProjectPortfolioSummaries\(projects/);
@@ -9380,8 +9518,9 @@ test('local-first loading paints and launches before optional or durable work', 
   const continueTurnStart = dispatchBody.indexOf("'conversation.continueTurn': async");
   const continueTurnEnd = dispatchBody.indexOf('\n    },', continueTurnStart);
   const continueTurnBody = dispatchBody.slice(continueTurnStart, continueTurnEnd);
+  assert.match(continueTurnBody, /coordinateExtensionConversationLaunch\(\{/);
   assert.match(continueTurnBody, /findReusableAgentTerminal/);
-  assert.match(continueTurnBody, /if \(!await findReusableAgentTerminal[\s\S]*?revealAgentStartupTerminal/);
+  assert.match(continueTurnBody, /openTerminal: async snapshot[\s\S]*?findReusableAgentTerminal[\s\S]*?revealAgentStartupTerminal/);
   const projectContinueStart = dispatchBody.indexOf("'project.continue': async");
   const projectContinueEnd = dispatchBody.indexOf('\n    },', projectContinueStart);
   const projectContinueBody = dispatchBody.slice(projectContinueStart, projectContinueEnd);
@@ -9410,11 +9549,11 @@ test('local-first loading paints and launches before optional or durable work', 
   assert.match(dispatchBody, /'conversation\.runStep': async[\s\S]*?`step-\$\{String\(request\.nodeId \|\| 'conversation'\)\}`/);
 });
 
-test('sidebar paints the selected local project before snapshot reservation completes', async () => {
-  let resolveReservation;
-  const reservation = new Promise(resolve => { resolveReservation = resolve; });
+test('sidebar paints the selected local project before its durable projection settles', async () => {
+  let resolveProjection;
+  let requestedProjectionPaths;
+  const projection = new Promise(resolve => { resolveProjection = resolve; });
   const snapshotCache = makeSidebarSnapshotCacheStub();
-  snapshotCache.reserveSidebarPortfolioSnapshot = () => reservation;
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
     '',
@@ -9430,23 +9569,27 @@ test('sidebar paints the selected local project before snapshot reservation comp
       getProjects: () => ({
         projects: [{ name: 'App', path: '/fixture/app' }],
         selectedProjectPath: '/fixture/app'
-      })
+      }),
+      readCoreProjections: (_globalDataPath, projectPaths) => {
+        requestedProjectionPaths = projectPaths;
+        return projection;
+      }
     }
   );
   provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
   provider._projectLoader.scheduleExternalSignals = () => {};
-  provider._projectLoader.schedulePortfolioEnrichment = () => {};
   provider.sendDailyReview = () => {};
 
   await provider.sendProjects();
   await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(posted.some(message => message.command === 'projectsLoaded' && message.projects.portfolio[0]?.path === '/fixture/app'), true);
+  assert.deepEqual(Array.from(requestedProjectionPaths), ['/fixture/app'], 'cold open must invalidate the selected filesystem-backed projection without scanning all projects');
 
-  resolveReservation({ requestId: 'fixture', generation: 0 });
-  for (let attempt = 0; attempt < 50 && !snapshotCache.__getCore(); attempt++) {
+  resolveProjection([{ name: 'App', path: '/fixture/app', recommendedNodeTitle: 'Projected action' }]);
+  for (let attempt = 0; attempt < 50 && !posted.some(message => message.projects?.portfolio?.[0]?.recommendedNodeTitle === 'Projected action'); attempt++) {
     await new Promise(resolve => setTimeout(resolve, 10));
   }
-  assert.equal(snapshotCache.__getCore()?.portfolio[0]?.path, '/fixture/app');
+  assert.equal(posted.some(message => message.projects?.portfolio?.[0]?.recommendedNodeTitle === 'Projected action'), true);
 });
 
 test('sidebar local cards and external signals start before the conversation cache returns', async () => {
@@ -9470,13 +9613,13 @@ test('sidebar local cards and external signals start before the conversation cac
       getProjects: () => ({
         projects: [{ name: 'App', path: '/fixture/app' }],
         selectedProjectPath: '/fixture/app'
-      })
+      }),
+      readCoreProjections: async () => [{ name: 'App', path: '/fixture/app' }]
     }
   );
   provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
   let externalStarts = 0;
   provider._projectLoader.scheduleExternalSignals = () => { externalStarts += 1; };
-  provider._projectLoader.schedulePortfolioEnrichment = () => {};
   provider.sendDailyReview = () => {};
 
   const load = provider.sendProjects();
@@ -9506,7 +9649,8 @@ test('sidebar applies cached Issues and Actions after the first local card', asy
       getProjects: () => ({
         projects: [{ name: 'App', path: '/fixture/app' }],
         selectedProjectPath: '/fixture/app'
-      })
+      }),
+      readCoreProjections: async () => [{ name: 'App', path: '/fixture/app' }]
     }
   );
   provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
@@ -9524,7 +9668,6 @@ test('sidebar applies cached Issues and Actions after the first local card', asy
     if (issues) posted.push(issues);
     if (delivery) posted.push(delivery);
   };
-  provider._projectLoader.schedulePortfolioEnrichment = () => {};
   provider.sendDailyReview = () => {};
 
   await provider.sendProjects();
@@ -9538,18 +9681,8 @@ test('sidebar applies cached Issues and Actions after the first local card', asy
   assert.equal(provider._latestPortfolio[0]?.delivery?.latestWorkflowStatus, 'completed');
 });
 
-test('sidebar never restores external signals from an old repository snapshot', async () => {
+test('sidebar durable core projection never restores external repository signals', async () => {
   const snapshotCache = makeSidebarSnapshotCacheStub();
-  snapshotCache.__setCore({
-    version: 3,
-    projectSignature: '/fixture/app',
-    portfolio: [{
-      name: 'App',
-      path: '/fixture/app',
-      issues: { available: true, stale: true, repo: 'owner/old', open: 9 },
-      delivery: { available: true, stale: true, repo: 'owner/old', latestWorkflowStatus: 'failure' }
-    }]
-  });
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
     '',
@@ -9562,12 +9695,12 @@ test('sidebar never restores external signals from an old repository snapshot', 
     {
       getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '/fixture/global' }),
       updateSettings: async () => {},
-      getProjects: () => ({ projects: [{ name: 'App', path: '/fixture/app' }], selectedProjectPath: '/fixture/app' })
+      getProjects: () => ({ projects: [{ name: 'App', path: '/fixture/app' }], selectedProjectPath: '/fixture/app' }),
+      readCoreProjections: async () => [{ name: 'App', path: '/fixture/app', recommendedNodeTitle: 'Current next action' }]
     }
   );
   provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
   provider._projectLoader.scheduleExternalSignals = () => {};
-  provider._projectLoader.schedulePortfolioEnrichment = () => {};
   provider.sendDailyReview = () => {};
 
   await provider.sendProjects();
@@ -9656,12 +9789,12 @@ test('sidebar keeps local cards when the database snapshot read fails', async ()
       getProjects: () => ({
         projects: [{ name: 'App', path: '/fixture/app' }],
         selectedProjectPath: '/fixture/app'
-      })
+      }),
+      readCoreProjections: async () => [{ name: 'App', path: '/fixture/app' }]
     }
   );
   provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
   provider._projectLoader.scheduleExternalSignals = () => {};
-  provider._projectLoader.schedulePortfolioEnrichment = () => {};
   provider.sendDailyReview = () => {};
 
   await provider.sendProjects();
@@ -9672,13 +9805,13 @@ test('sidebar keeps local cards when the database snapshot read fails', async ()
   assert.equal(portfolios.some(portfolio => portfolio.length === 0), false);
 });
 
-test('sidebar keeps current local data ahead of a stale database snapshot', async () => {
+test('sidebar projection ignores the retired stale core snapshot cache', async () => {
   const snapshotCache = makeSidebarSnapshotCacheStub();
-  snapshotCache.__setCore({
-    version: 3,
-    projectSignature: 'older-signature',
-    portfolio: [{ name: 'App', path: '/fixture/app', recommendedNodeTitle: 'Cached next action' }]
-  });
+  let legacyReads = 0;
+  snapshotCache.readSidebarCoreSnapshot = async () => {
+    legacyReads += 1;
+    return { portfolio: [{ name: 'App', path: '/fixture/app', recommendedNodeTitle: 'Cached next action' }] };
+  };
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
     '',
@@ -9691,12 +9824,12 @@ test('sidebar keeps current local data ahead of a stale database snapshot', asyn
     {
       getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '' }),
       updateSettings: async () => {},
-      getProjects: () => ({ projects: [{ name: 'App', path: '/fixture/app' }], selectedProjectPath: '/fixture/app' })
+      getProjects: () => ({ projects: [{ name: 'App', path: '/fixture/app' }], selectedProjectPath: '/fixture/app' }),
+      readCoreProjections: async () => [{ name: 'App', path: '/fixture/app', recommendedNodeTitle: 'Current next action' }]
     }
   );
   provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
   provider._projectLoader.scheduleExternalSignals = () => {};
-  provider._projectLoader.schedulePortfolioEnrichment = () => {};
   provider.sendDailyReview = () => {};
 
   await provider.sendProjects();
@@ -9705,7 +9838,8 @@ test('sidebar keeps current local data ahead of a stale database snapshot', asyn
   const portfolios = posted.filter(message => message.command === 'projectsLoaded').map(message => message.projects?.portfolio || []);
   assert.equal(portfolios.some(portfolio => portfolio[0]?.recommendedNodeTitle === 'Cached next action'), false);
   assert.equal(portfolios.some(portfolio => portfolio[0]?.path === '/fixture/app'), true);
-  assert.deepEqual(snapshotCache.__getCoreReadRoots(), ['/fixture/.solomap-global']);
+  assert.equal(legacyReads, 0);
+  assert.deepEqual(snapshotCache.__getCoreReadRoots(), []);
 });
 
 test('an older sidebar cache read cannot repaint the previous project after a newer cold-start request', async () => {
@@ -9731,7 +9865,6 @@ test('an older sidebar cache read cannot repaint the previous project after a ne
   );
   provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
   provider._projectLoader.scheduleExternalSignals = () => {};
-  provider._projectLoader.schedulePortfolioEnrichment = () => {};
   provider.sendDailyReview = () => {};
 
   const older = provider.sendProjects();
@@ -9793,22 +9926,10 @@ test('conversation delivery treats a disposed roadmap webview as a best-effort p
   );
 });
 
-test('sidebar does not commit a superseded core snapshot when its reservation arrives late', async () => {
-  let resolveFirstReservation;
-  const firstReservation = new Promise(resolve => { resolveFirstReservation = resolve; });
+test('sidebar does not publish a superseded durable projection when its read completes late', async () => {
   const snapshotCache = makeSidebarSnapshotCacheStub();
-  let reservationCount = 0;
-  const commits = [];
-  snapshotCache.reserveSidebarPortfolioSnapshot = () => {
-    reservationCount += 1;
-    return reservationCount === 1
-      ? firstReservation
-      : Promise.resolve({ requestId: 'second', generation: 2 });
-  };
-  snapshotCache.commitSidebarPortfolioSnapshot = async (_globalDataPath, _reservation, projectSignature, portfolio) => {
-    commits.push({ projectSignature, portfolio: structuredClone(portfolio) });
-    return true;
-  };
+  const projectionReads = [];
+  const posted = [];
   const { SolopreneurSidebarProvider } = loadCompiledModule(
     'out/sidebarProvider.js',
     '',
@@ -9824,29 +9945,33 @@ test('sidebar does not commit a superseded core snapshot when its reservation ar
     {
       getSettings: () => ({ cliPath: 'codex', language: 'zh', globalDataPath: '/fixture/global' }),
       updateSettings: async () => {},
-      getProjects: () => projectState
+      getProjects: () => projectState,
+      readCoreProjections: () => new Promise(resolve => projectionReads.push(resolve))
     }
   );
-  provider._view = { webview: { postMessage() { return Promise.resolve(true); } } };
+  provider._view = { webview: { postMessage(message) { posted.push(message); return Promise.resolve(true); } } };
   provider._projectLoader.scheduleExternalSignals = () => {};
-  provider._projectLoader.schedulePortfolioEnrichment = () => {};
   provider.sendDailyReview = () => {};
 
   await provider.sendProjects();
-  await new Promise(resolve => setTimeout(resolve, 10));
+  for (let attempt = 0; attempt < 50 && projectionReads.length < 1; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
   projectState = {
     projects: [{ name: 'Project B', path: '/fixture/b' }],
     selectedProjectPath: '/fixture/b'
   };
   await provider.sendProjects();
-  for (let attempt = 0; attempt < 50 && commits.length === 0; attempt++) {
+  for (let attempt = 0; attempt < 50 && projectionReads.length < 2; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+  projectionReads[1]([{ name: 'Project B', path: '/fixture/b', recommendedNodeTitle: 'Current B' }]);
+  for (let attempt = 0; attempt < 50 && !posted.some(message => message.projects?.portfolio?.[0]?.recommendedNodeTitle === 'Current B'); attempt++) {
     await new Promise(resolve => setTimeout(resolve, 10));
   }
-  assert.deepEqual(commits.map(commit => commit.portfolio[0]?.path), ['/fixture/b']);
 
-  resolveFirstReservation({ requestId: 'first', generation: 1 });
+  projectionReads[0]([{ name: 'Project A', path: '/fixture/a', recommendedNodeTitle: 'Late A' }]);
   await new Promise(resolve => setTimeout(resolve, 20));
-  assert.deepEqual(commits.map(commit => commit.portfolio[0]?.path), ['/fixture/b']);
+  const loads = posted.filter(message => message.command === 'projectsLoaded');
+  const currentB = loads.findIndex(message => message.projects?.portfolio?.[0]?.recommendedNodeTitle === 'Current B');
+  assert.ok(currentB >= 0);
+  assert.equal(loads.slice(currentB + 1).some(message => message.projects?.portfolio?.[0]?.recommendedNodeTitle === 'Late A'), false);
 });
 
 test('project card action launches release the next project after execution registration', async () => {
@@ -10766,6 +10891,7 @@ test('strategy cache connection failures reach the existing failure page and ret
   const diagnostics = require('../out/localDiagnostics.js');
   const diagnosticRoots = [];
   diagnostics.configureLocalDiagnosticPersistence({ append: (dataRoot, event) => {
+    if (path.resolve(dataRoot) !== path.resolve(root)) return;
     diagnosticRoots.push(dataRoot);
     store.appendDiagnosticEvent(event);
   } });
@@ -12401,13 +12527,13 @@ test('roadmap conversation entrypoints carry the visible project identity to the
       assert.match(payload, /projectPath(?:\s*:\s*(?:activeProjectPath|actionProjectPath)(?=\s*[,}])|\s*,)/, `${command} must carry the visible or click-captured project`);
     }
   }
-  assert.match(source, /function triggerRun\([^)]*projectPath = activeProjectPath\)/);
-  assert.match(source, /triggerRun\([^\n]+actionProjectPath\)/);
+  assert.match(source, /function triggerRun\([^)]*projectPath = activeProjectPath(?:, [^)]+)?\)/);
+  assert.match(source, /triggerRun\([^\n]+actionProjectPath(?:, [^)]+)?\)/);
 });
 
 test('sidebar step launch binds the clicked project before posting to the host', () => {
   const source = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
-  assert.match(source, /function runNodeAgent\(projectPath, nodeId, userMessage, agentCli, model, supplementFiles\)/);
+  assert.match(source, /function runNodeAgent\(projectPath, nodeId, userMessage, agentCli, model, supplementFiles(?:, [^)]+)?\)/);
   const start = source.indexOf('function runNodeAgent(');
   const body = source.slice(start, source.indexOf('\n    vscode.postMessage', start + 30));
   assert.match(body, /projectPath:\s*projectPath/);
@@ -12432,7 +12558,7 @@ test('captured Flow settings and native cleanup stay on the launch target', () =
   assert.match(flowBody, /settings\?: SolopreneurSettings/);
   assert.match(flowBody, /const settings = input\.settings \|\| getPersistedSettings\(context\)/);
   const runFlowBody = source.slice(source.indexOf('async function handleRunFlow('), source.indexOf('async function linkSoloConversationToNode(', source.indexOf('async function handleRunFlow(')));
-  assert.match(runFlowBody, /\n\s+settings\s*\n\s*\}\);/);
+  assert.match(runFlowBody, /settings,\s*\n\s+prewarmTerminal: target \? false : undefined,\s*\n\s+onPrepared/);
 });
 
 test('terminal delivery resolves OpenCode credentials from the captured launch settings', () => {
@@ -12560,7 +12686,7 @@ test('roadmap and sidebar keep one shared application action boundary', () => {
   assert.doesNotMatch(roadmapSource, /command: 'ability\.installSkill'/);
 });
 
-test('sidebar provider delegates view, daily review, and global store responsibilities', () => {
+test('sidebar provider delegates view and daily review while keeping global store work off the view path', () => {
   const providerSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarProvider.ts'), 'utf8');
   const webviewSource = fs.readFileSync(path.join(projectRoot, 'src/sidebarWebview.ts'), 'utf8');
   const dailyReviewSource = fs.readFileSync(path.join(projectRoot, 'src/dailyReview.ts'), 'utf8');
@@ -12568,7 +12694,8 @@ test('sidebar provider delegates view, daily review, and global store responsibi
 
   assert.match(providerSource, /getSidebarWebviewHtml/);
   assert.match(providerSource, /startDailyReviewAgent/);
-  assert.match(providerSource, /ensureGlobalEngineeringStore/);
+  assert.match(providerSource, /createGlobalEngineeringSnapshotPlaceholder/);
+  assert.doesNotMatch(providerSource, /ensureGlobalEngineeringStore/);
   assert.doesNotMatch(providerSource, /<style>|<script>/);
   assert.doesNotMatch(providerSource, /function buildDailyReviewPrompt/);
   assert.doesNotMatch(providerSource, /function ensureGlobalEngineeringStore/);
@@ -15095,7 +15222,7 @@ test('agent impact discards late snapshots after a newer read or data-root chang
       let release; let ready; const gate = new Promise(resolve => { release = resolve; }); const started = new Promise(resolve => { ready = resolve; }); let delayed = false;
       transport.sendRuntimeDataRequest = async (...args) => {
         const result = await original(...args);
-        if (args[1].operation === 'read_project_impact_runs' && !delayed) { delayed = true; ready(); await gate; }
+        if (args[1].operation === 'read_agent_impact_summary' && !delayed) { delayed = true; ready(); await gate; }
         return result;
       };
       const old = extension.handle({ extensionPath: projectRoot }, { command: 'agentImpact.get', requestId: 'old' }, 'roadmap', view);
@@ -15136,6 +15263,7 @@ test('agent impact summary counts committed SoloMap contribution by agent', asyn
 
   const globalRoot = path.join(tempRoot, '.solomap-global');
   const native = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, [{ name: 'Impact Project', path: tempRoot }]);
+  await native.ops({ operation: 'accept_roadmap_csv', input: { root: tempRoot } });
   const imported = await native.ops({ operation: 'import_project_data', input: { collection: 'agent-runs', sourceRoot: runsRoot, projectRoot: tempRoot, idempotencyKey: 'impact-original-raw-history' } });
   await native.ops.waitForMigrations(); assert.equal(native.store.readMigrationJob(imported.jobId).status, 'completed');
   const summary = await buildAgentImpactSummaryFromDatabase(
@@ -15341,7 +15469,6 @@ test('step conversations can start independently while dependencies or other run
       getPersistedSettings = () => ({ cliPath: 'claude', globalPrompt: '', globalDataPath: root, enabledEnhancements: {}, taskPermissionMode: 'auto' });
       ensureTaskRuntimeReady = async () => {}; autonomousRuntimeHost_1.ensureHealthyAutonomousRuntime = async () => ({ started: false });
       agentCli_1.resolveAgentCli = value => value; agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
-      preSessionGit_1.createPreSessionGitCommit = async () => '1'.repeat(40);
       recordLocalUsageEvent = async () => ({}); sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {};
       launchAgentConversationTerminal = async input => launches.push(input);
     };
@@ -15462,6 +15589,7 @@ test('queued historical live side effects become inert when an upgrade resumes s
 function loadSoloSettlementHost(fixture, sidebar, transport, withContext = false) {
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.settle = processAgentStatusFile;
+    module.exports.drain = drainAgentSettlementWork;
     module.exports.connect = (engine, project, root, sidebar, withContext) => {
       syncEngine = engine; activeProjectRoot = project; sidebarProvider = sidebar; extensionContextRef = withContext ? { extensionPath: ${JSON.stringify(projectRoot)} } : null;
       getPersistedSettings = () => ({ globalDataPath: root, automationTasks: {} });
@@ -17175,7 +17303,9 @@ test('a confirmed Codex conversation remains resumable after the CLI is upgraded
 test('a damaged version 2 binding never falls back to a stale native session ID', async t => {
   const f = await openProviderCheckpointFixture(t, 'claude', 841);
   await f.checkpoint('complete', { outcome: 'partial', summary: '已有完整结果不因身份损坏丢失' }, f.run.status.plannedNativeSessionId);
-  await loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js')).settle(f.reference, undefined, f.root);
+  const settlementHost = loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js'));
+  await settlementHost.settle(f.reference, undefined, f.root);
+  await settlementHost.drain();
   const source = await f.ops({ operation: 'read_run_state', input: { root: f.project, executionLogId: 841 } });
   const binding = await f.ops({ operation: 'read_run_binding', input: { projectId: source.projectId, executionLogId: 841 } });
   const journal = await f.ops({ operation: 'read_run_turn_journal', input: { root: f.project, executionLogId: 841 } });
@@ -17500,7 +17630,10 @@ for (const historical of [false, true]) test(`completed step starts read-only Ag
   const output = '完整结果🌿\n'.repeat(10000);
   const commands = [], terminal = { name: 'actual review terminal', processId: Promise.resolve(process.pid), show() {}, sendText(command) { commands.push(command); } };
   const extension = loadCompiledModule('out/extension.js', `
-    module.exports.settle = processAgentStatusFile;
+    module.exports.settle = async (...args) => {
+      await processAgentStatusFile(...args);
+      await drainAgentSettlementWork();
+    };
     module.exports.connect = (engine, project, root, terminal) => {
       syncEngine = engine; activeProjectRoot = project; extensionContextRef = null;
       getPersistedSettings = () => ({ globalDataPath: root, automationTasks: {} });
@@ -17530,7 +17663,10 @@ for (const historical of [false, true]) test(`completed step starts read-only Ag
   await extension.settle(reference, undefined, root);
   assert.equal(commands.length, 1); assert.deepEqual(fs.readFileSync(path.join(root, 'solomap.db-wal')), wal);
   assert.deepEqual(await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: 12 } }), journal);
-  const request = await native.ops({ operation: 'read_run_document', input: { projectId: review.projectId, executionLogId: id, purpose: 'launch_request', revision: 1 } });
+  const request = await require('../out/runDocumentClient.js').readCompleteRunDocument(
+    (operation, input) => native.ops({ operation, input }),
+    { projectId: review.projectId, executionLogId: id, purpose: 'launch_request', revision: 1 }
+  );
   const manifest = JSON.parse(Buffer.from(request.bytes, 'base64').toString('utf8')).reviewEvidence;
   const criteria = manifest.completionCriteria.length ? manifest.completionCriteria : [manifest.taskGoal];
   const result = { status: 'pass', summary: '复核通过，可以完成环节。', findings: [], nextAction: '', goalSatisfied: true, evidenceSufficient: true, criteria: criteria.map(criterion => ({ criterion, status: 'pass', evidence: ['output:main'], reason: '完整交付结果已独立检查' })) };
@@ -17727,7 +17863,10 @@ test('passing Agent review completes the deferred roadmap step', async t => {
   await native.ops({ operation: 'checkpoint_run', input: { projectId: run.projectId, executionLogId: 12, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'candidate_complete', summary: '实现已完成', idempotencyKey: 'review-pass-candidate' } });
   const commands = [], terminal = { name: 'actual review terminal', processId: Promise.resolve(process.pid), show() {}, sendText(command) { commands.push(command); } };
   const extension = loadCompiledModule('out/extension.js', `
-    module.exports.settle = processAgentStatusFile;
+    module.exports.settle = async (...args) => {
+      await processAgentStatusFile(...args);
+      await drainAgentSettlementWork();
+    };
     module.exports.connect = (engine, project, root, terminal) => {
       syncEngine = engine; activeProjectRoot = project; extensionContextRef = null;
       getPersistedSettings = () => ({ globalDataPath: root, automationTasks: {} });
@@ -17757,7 +17896,10 @@ test('passing Agent review completes the deferred roadmap step', async t => {
   await extension.settle(reference, undefined, root);
   assert.equal(commands.length, 1); assert.deepEqual(fs.readFileSync(path.join(root, 'solomap.db-wal')), wal);
   assert.deepEqual(await native.ops({ operation: 'read_run_turn_journal', input: { root: project, executionLogId: 12 } }), journal);
-  const request = await native.ops({ operation: 'read_run_document', input: { projectId: review.projectId, executionLogId: id, purpose: 'launch_request', revision: 1 } });
+  const request = await require('../out/runDocumentClient.js').readCompleteRunDocument(
+    (operation, input) => native.ops({ operation, input }),
+    { projectId: review.projectId, executionLogId: id, purpose: 'launch_request', revision: 1 }
+  );
   const manifest = JSON.parse(Buffer.from(request.bytes, 'base64').toString('utf8')).reviewEvidence;
   const criteria = manifest.completionCriteria.length ? manifest.completionCriteria : [manifest.taskGoal];
   const result = { status: 'pass', summary: '复核通过，可以完成环节。', findings: [], nextAction: '', goalSatisfied: true, evidenceSufficient: true, criteria: criteria.map(criterion => ({ criterion, status: 'pass', evidence: ['output:main'], reason: '完整交付结果已独立检查' })) };
@@ -17951,7 +18093,10 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
   assert.equal(engine.getNodes().find(node => node.id === '2').status, 'In Progress');
   const secondId = Number(second.status.rootExecutionLogId), secondPlan = await native.ops({ operation: 'read_run_execution_plan', input: { root: project, executionLogId: secondId } });
   assert.ok(secondPlan.prompt.includes(correctionOutput)); assert.equal(secondPlan.prompt.split(correctionOutput).length - 1, 1);
-  const request = await native.ops({ operation: 'read_run_document', input: { root: project, executionLogId: secondId, purpose: 'launch_request', revision: 1 } });
+  const request = await require('../out/runDocumentClient.js').readCompleteRunDocument(
+    (operation, input) => native.ops({ operation, input }),
+    { root: project, executionLogId: secondId, purpose: 'launch_request', revision: 1 }
+  );
   const manifest = JSON.parse(Buffer.from(request.bytes, 'base64').toString('utf8')).reviewEvidence;
   fs.writeFileSync(response, JSON.stringify({ status: 'pass', summary: '修正后复核通过', findings: [], nextAction: '', goalSatisfied: true, evidenceSufficient: true, criteria: manifest.completionCriteria.map(criterion => ({ criterion, status: 'pass', evidence: ['output:main'], reason: '实际修正结果已检查' })) }));
   const beforeReview = await require('../out/runWorkspace.js').snapshotWorkspace(project); await execute(commands[2]);
@@ -18001,8 +18146,10 @@ for (const dataRootMode of ['stable', 'switched', 'interactive']) test(`manual c
   }};
   const extension = loadCompiledModule('out/extension.js', `
     let selectedRoot;
-    module.exports.complete = completeNodeManually; module.exports.settle = processAgentStatusFile;
-    module.exports.drain = async () => { do { await new Promise(resolve=>setTimeout(resolve,0)); } while(processingAgentStatusFiles.size || pendingAgentStatusFiles.size); };
+    module.exports.complete = completeNodeManually;
+    module.exports.settle = async (...args) => { await processAgentStatusFile(...args); await drainAgentSettlementWork(); };
+    module.exports.drain = drainAgentSettlementWork;
+    module.exports.releaseManualHost = () => { extensionContextRef = null; };
     module.exports.selectRoot = root => {selectedRoot=root;};
     module.exports.connect = (engine,project,root) => {
       selectedRoot=root;syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
@@ -18012,6 +18159,7 @@ for (const dataRootMode of ['stable', 'switched', 'interactive']) test(`manual c
   `, {'./autonomousRuntimeControl':transport,'./db/syncEngine':require('../out/db/syncEngine.js')});
   extension.connect(engine,project,root);
   await extension.complete('2');
+  extension.releaseManualHost();
   const completed = {...engine.getNodes().find(node=>node.id==='2')};assert.equal(completed.status,'Completed');assert.ok(completed.completedAt);
   const accepted = await read(native,project,12), acceptedPeer = await read(native,project,14);
   assert.equal(accepted.status.userConfirmedCompletion,true,'the user choice is saved in the original data root');assert.ok(accepted.status.userConfirmedCompletionAt);
@@ -18065,11 +18213,12 @@ test('manual completion is not overwritten when an in-flight Agent run refreshes
   const peer = await read(project,13), foreign = await read(other,12);
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.complete=completeNodeManually;module.exports.settle=processAgentStatusFile;
-    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.drain=drainAgentSettlementWork;
+    module.exports.releaseManualHost=()=>{extensionContextRef=null;};
     module.exports.connect=(engine,project,root)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
       getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};};
   `, {'./db/syncEngine':require('../out/db/syncEngine.js'),'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js')});
-  extension.connect(engine,project,root);await extension.complete('2');
+  extension.connect(engine,project,root);await extension.complete('2');extension.releaseManualHost();
   const completed = {...engine.getNodes().find(node=>node.id==='2')};assert.equal(completed.status,'Completed');assert.ok(completed.completedAt);
   const confirmed = await read(project,12);assert.equal(confirmed.status.userConfirmedCompletion,true);
   const before = await require('../out/runWorkspace.js').snapshotWorkspace(project);
@@ -18156,7 +18305,7 @@ for (const resultMode of ['valid', 'invalid', 'stopped']) test(`roadmap revision
   assert.match((await client.readData(status.changesFilePath,status)).toString('utf8'),/M \.solopreneur\/roadmap\.csv/);
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.settle=processAgentStatusFile;
-    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.drain=drainAgentSettlementWork;
     module.exports.connect=(engine,project,root)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
       getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};};
   `, {'./db/syncEngine':require('../out/db/syncEngine.js'),'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js')});
@@ -18217,7 +18366,7 @@ test('Solo completion stays project-scoped and preserves the existing roadmap', 
   const status = await client.readStatus(reference);assert.equal((await client.readData(backup,status)).toString('utf8'),originalCsv);assert.match((await client.readData(status.changesFilePath,status)).toString('utf8'),/M \.solopreneur\/roadmap\.csv/);
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.settle=processAgentStatusFile;
-    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.drain=drainAgentSettlementWork;
     module.exports.connect=(engine,project,root)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
       getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};};
   `, {'./db/syncEngine':require('../out/db/syncEngine.js'),'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js')});
@@ -18278,7 +18427,7 @@ test('continuation runs are recorded without task status judgment while preservi
     const status = await client.readStatus(reference);assert.match((await client.readData(status.changesFilePath,status)).toString('utf8'),/M src\/extension\.ts/);
     const extension = loadCompiledModule('out/extension.js', `
       module.exports.settle=processAgentStatusFile;
-      module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.drain=drainAgentSettlementWork;
       module.exports.connect=(engine,project,root)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
         getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};};
     `, {'./db/syncEngine':require('../out/db/syncEngine.js'),'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js')});
@@ -18383,7 +18532,7 @@ test('stopping an Agent run records the user decision on the active conversation
     const extension = loadCompiledModule('out/extension.js', `
       let connectedProject;module.exports.stop=stopAgentRun;module.exports.settle=processAgentStatusFile;
       module.exports.owned=id=>Boolean(getAgentTerminalBinding(connectedProject,id));
-      module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.drain=drainAgentSettlementWork;
       module.exports.connect=(engine,project,root,terminal,state)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
         getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
         setAgentTerminalBinding(project,11,terminal.name);agentTerminalRunTargets.set(terminal,{workspaceRoot:project,globalDataPath:root,executionLogId:11,runId:state.runId,generation:state.generation});foregroundAgentTerminalSurfaces.set(terminal,{bridge:{isRunning:true}});vscode.window.terminals.push(terminal);};
@@ -18435,7 +18584,7 @@ test('a name-only interactive terminal cannot be reused before or after the conv
   const extension = loadCompiledModule('out/extension.js', `
     let connectedProject;module.exports.reuse=findReusableAgentTerminal;module.exports.settle=processAgentStatusFile;
     module.exports.owned=id=>Boolean(getAgentTerminalBinding(connectedProject,id));
-    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.drain=drainAgentSettlementWork;
     module.exports.connect=(engine,project,root,terminal,foreignTerminal)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};
       getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
       setAgentTerminalBinding(project,336,terminal.name);vscode.window.terminals.push(terminal,foreignTerminal);};
@@ -18505,7 +18654,7 @@ test('continuing a stopped interactive conversation opens a new terminal and set
   const stale = {name:'solomap stopped terminal',creationOptions:{cwd:project,env:{SOLOMAP_GLOBAL_DATA_PATH:root}},show(){staleShown++;},dispose(){staleDisposed++;}};
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;
-    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.drain=drainAgentSettlementWork;
     let connectedProject;module.exports.reservations=project=>reservedAgentTerminalsByProject.get(project)?.length||0;
     module.exports.owned=id=>{const b=getAgentTerminalBinding(connectedProject,id);return {name:b?.terminalName,root:b?.workspaceRoot};};
     module.exports.connect=(engine,project,root,stale,create,prepare,reportError)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
@@ -18597,7 +18746,7 @@ test('continuing an earlier turn opens a new session terminal once for concurren
   const oldTerminal = {name:'solomap open root terminal',creationOptions:{cwd:project,env:{SOLOMAP_GLOBAL_DATA_PATH:root}},show(){oldShown++;},dispose(){oldDisposed++;}};
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;
-    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.drain=drainAgentSettlementWork;
     let connectedProject;module.exports.reservations=project=>reservedAgentTerminalsByProject.get(project)?.length||0;
     module.exports.owned=id=>{const b=getAgentTerminalBinding(connectedProject,id);return {name:b?.terminalName,root:b?.workspaceRoot};};
     module.exports.connect=(engine,project,root,oldTerminal,create,prepare,reportError,recordRegistration)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
@@ -18702,7 +18851,7 @@ test('native continuation stops old lineage processes before launching the same 
     const startup={name:'old window',show(){},sendText(text){if(mode!=='unverified'&&text.includes('SOLOMAP_TERMINAL_DELIVERY_ID=')){assert.equal(live(wrappers[0]),false,'root writer exits before the resume command');assert.equal(live(wrappers[1]),false,'latest writer exits before the resume command');assert.equal(live(wrappers[2]),true);assert.equal(live(wrappers[3]),true);assert.equal(oldDisposed,1);assert.equal(startupDisposed,0);}sent.push(text);},dispose(){startupDisposed++;}};
     const extension=loadCompiledModule('out/extension.js', `
       module.exports.resume=handleContinueNativeConversation;module.exports.reveal=revealAgentStartupTerminal;module.exports.settle=processAgentStatusFile;
-      module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.drain=drainAgentSettlementWork;
       module.exports.reservations=project=>reservedAgentTerminalsByProject.get(project)?.length||0;
       module.exports.connect=(engine,project,root,oldTerminal,startup,prepare)=>{syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
         getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
@@ -18792,7 +18941,7 @@ test('continuing a conversation never reuses a same-numbered terminal from anoth
   const extension=loadCompiledModule('out/extension.js',`
     module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;module.exports.find=findReusableAgentTerminal;
     module.exports.select=(engine,project)=>{syncEngine=engine;activeProjectRoot=project;};
-    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.drain=drainAgentSettlementWork;
     let connectedProjectA;module.exports.owned=id=>{const b=getAgentTerminalBinding(connectedProjectA,id);return {name:b?.terminalName,root:b?.workspaceRoot};};
     module.exports.connect=(engine,projectA,projectB,root,terminalA,terminalB,create,prepare,error)=>{connectedProjectA=projectA;syncEngine=engine;activeProjectRoot=projectB;sidebarProvider=null;extensionContextRef=null;
       getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
@@ -18857,7 +19006,7 @@ test('window reload keeps a running Agent conversation recoverable without recla
     module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};
     module.exports.closed=handleAgentTerminalClosed;module.exports.launch=launchAgentConversationTerminal;module.exports.find=findReusableAgentTerminal;module.exports.snapshot=getProjectConversationSnapshotForProject;module.exports.settle=processAgentStatusFile;
     module.exports.owned=()=>({names:agentTerminalBindings.size,roots:agentTerminalBindings.size,targets:agentTerminalRunTargets.size});
-    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.drain=drainAgentSettlementWork;
     module.exports.connect=(engine,project,root,terminals,factory)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef=null;sidebarProvider=null;getProjects=()=>[{path:project}];
       getPersistedSettings=()=>({globalDataPath:root,automationTasks:{},collaborationReviewMode:'off'});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
       vscode.window.terminals.push(...terminals);vscode.window.createTerminal=factory;vscode.window.onDidCloseTerminal=callback=>{closeCallback=callback;return {dispose(){}};};};
@@ -18907,7 +19056,7 @@ test('closing an interactive terminal terminates its tracked Agent process befor
       module.exports.subscribe=context=>{${registration}};
       module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};
       module.exports.launch=launchAgentConversationTerminal;module.exports.settle=processAgentStatusFile;
-      module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.drain=drainAgentSettlementWork;
       module.exports.owned=()=>({names:agentTerminalBindings.size,roots:agentTerminalBindings.size,targets:agentTerminalRunTargets.size});
       module.exports.connect=(engine,project,root,create,observe)=>{syncEngine=engine;activeProjectRoot=project;extensionContextRef=null;sidebarProvider=null;
         getPersistedSettings=()=>({globalDataPath:root,automationTasks:{},collaborationReviewMode:'off'});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
@@ -18959,7 +19108,7 @@ test('closing a terminal after switching projects keeps the persisted conversati
     module.exports.subscribe=context=>{${registration}};
     module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};
     module.exports.launch=launchAgentConversationTerminal;module.exports.settle=processAgentStatusFile;
-    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.drain=drainAgentSettlementWork;
     module.exports.owned=()=>({names:agentTerminalBindings.size,roots:agentTerminalBindings.size,targets:agentTerminalRunTargets.size});
     module.exports.enableBackground=()=>{extensionContextRef={extensionPath:${JSON.stringify(projectRoot)},extensionUri:{fsPath:${JSON.stringify(projectRoot)}}};};
     module.exports.switch=(engine,workspace)=>{syncEngine=engine;activeProjectRoot=workspace;};
@@ -19016,7 +19165,7 @@ test('continuing a root conversation immediately after its continuation terminal
     handleAgentTerminalClosed=(...args)=>{const promise=originalClosed(...args);closedPromises.push(promise);return promise;};
     module.exports.subscribe=context=>{${registration}};module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};
     module.exports.launch=launchAgentConversationTerminal;module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;
-    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.drain=drainAgentSettlementWork;
     let connectedProject;module.exports.reservations=project=>reservedAgentTerminalsByProject.get(project)?.length||0;module.exports.owned=id=>{const b=getAgentTerminalBinding(connectedProject,id);return {name:b?.terminalName,root:b?.workspaceRoot};};
     module.exports.connect=(engine,project,root,create,prepare,reportError)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
       getPersistedSettings=()=>({globalDataPath:root,globalPrompt:'',taskPermissionMode:'auto',collaborationReviewMode:'off',automationTasks:{}});
@@ -19060,7 +19209,7 @@ test('a delayed terminal close preserves a checkpoint arriving during process cl
     const originalClosed=handleAgentTerminalClosed,closedPromises=[];let closeCallback;
     handleAgentTerminalClosed=(...args)=>{const promise=originalClosed(...args);closedPromises.push(promise);return promise;};
     module.exports.subscribe=context=>{${registration}};module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};module.exports.launch=launchAgentConversationTerminal;module.exports.settle=processAgentStatusFile;
-    module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};module.exports.owned=()=>({names:agentTerminalBindings.size,roots:agentTerminalBindings.size,targets:agentTerminalRunTargets.size});
+    module.exports.drain=drainAgentSettlementWork;module.exports.owned=()=>({names:agentTerminalBindings.size,roots:agentTerminalBindings.size,targets:agentTerminalRunTargets.size});
     module.exports.connect=(engine,project,root,create,observe)=>{syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;
       getPersistedSettings=()=>({globalDataPath:root,automationTasks:{},collaborationReviewMode:'off'});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};
       vscode.window.createTerminal=create;vscode.window.onDidCloseTerminal=callback=>{closeCallback=callback;return {dispose(){}};};const originalConsumer=processRegisteredStatusFile;processRegisteredStatusFile=async(...args)=>{await observe(args);return originalConsumer(...args);};};
@@ -19138,7 +19287,7 @@ test('stopping a continuation records it without marking the task failed', async
     let disposed=0;const errors=[],terminal={name:'solomap owned continuation',dispose(){assert.equal(extension.owned(31),false,'ownership clears before terminal disposal');assert.equal(live(writers[0]),false,'owned writer must exit before terminal disposal');disposed++;}},extension=loadCompiledModule('out/extension.js',`
       let connectedProject;module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;module.exports.stop=stopAgentRun;
       module.exports.owned=id=>Boolean(getAgentTerminalBinding(connectedProject,id));
-      module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.drain=drainAgentSettlementWork;
       module.exports.connect=(engine,project,root,terminal,error,state)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef={extensionPath:${JSON.stringify(projectRoot)}};getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});getProjects=()=>[{path:project}];sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};ensureActionProject=async(_context,target)=>{if(target!==project)throw new Error('unexpected selected project');return project;};vscode.window.showErrorMessage=error;setAgentTerminalBinding(project,31,terminal.name);agentTerminalRunTargets.set(terminal,{workspaceRoot:project,globalDataPath:root,executionLogId:31,runId:state.runId,generation:state.generation});foregroundAgentTerminalSurfaces.set(terminal,{bridge:{isRunning:true}});vscode.window.terminals.push(terminal);};
     `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./solomapGlobal':require('../out/solomapGlobal.js'),'./projectGrowth':require('../out/projectGrowth.js')});extension.connect(engine,project,root,terminal,message=>errors.push(message),child);await extension.settle(ref(project,29),undefined,root);await extension.drain();
     const snapshot=async(workspace,id)=>{const reference=ref(workspace,id),state=await read(workspace,id),status=await client.readStatus(reference);return {state,journal:await client.readJournal(reference,status),settlements:await client.readSettlements(reference,status),binding:await client.readBinding(reference),report:await client.readReport(reference,status)};};const saved=new Map();for(const [workspace,id] of [[project,29],[project,31],[project,13],[other,31]])saved.set(`${workspace}:${id}`,await snapshot(workspace,id));assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(saved.get(`${project}:31`).state.status.interactiveSession,true);assert.equal((await client.getResumableSession(ref(project,31))).sessionId,prepared.status.plannedNativeSessionId);
@@ -19165,7 +19314,7 @@ test('closing a continuation terminal records the conversation as stopped', asyn
       module.exports.subscribe=context=>{${registration}};module.exports.emit=async terminal=>{closeCallback(terminal);return Promise.all(closedPromises.splice(0));};module.exports.closed=originalClosed;module.exports.launch=launchAgentConversationTerminal;module.exports.target=terminal=>agentTerminalRunTargets.get(terminal);module.exports.targetCount=()=>agentTerminalRunTargets.size;module.exports.shutdownReason=vscode.TerminalExitReason.Shutdown;
       let connectedProject;module.exports.action=handleSharedWebviewAction;module.exports.settle=processAgentStatusFile;module.exports.stop=stopAgentRun;
       module.exports.owned=id=>Boolean(getAgentTerminalBinding(connectedProject,id));
-      module.exports.drain=async()=>{do{await new Promise(resolve=>setTimeout(resolve,0));}while(processingAgentStatusFiles.size||pendingAgentStatusFiles.size);};
+    module.exports.drain=drainAgentSettlementWork;
       module.exports.connect=(engine,project,root,terminal,error,observe)=>{connectedProject=project;syncEngine=engine;activeProjectRoot=project;sidebarProvider=null;extensionContextRef=null;getPersistedSettings=()=>({globalDataPath:root,automationTasks:{}});sendNodesToWebview=()=>{};postNodeConversations=()=>{};refreshSidebarProjectCards=()=>{};ensureActionProject=async(_context,target)=>{if(target!==project)throw new Error('unexpected selected project');return project;};vscode.window.showErrorMessage=error;vscode.window.createTerminal=options=>{terminal.name=options.name;vscode.window.terminals.push(terminal);return terminal;};vscode.window.onDidCloseTerminal=callback=>{closeCallback=callback;return {dispose(){}};};const originalConsumer=processRegisteredStatusFile;processRegisteredStatusFile=async(...args)=>{await observe(args);return originalConsumer(...args);};};
     `,{'./autonomousRuntimeControl':require('../out/autonomousRuntimeControl.js'),'./db/syncEngine':require('../out/db/syncEngine.js'),'./solomapGlobal':require('../out/solomapGlobal.js'),'./projectGrowth':require('../out/projectGrowth.js'),'./terminalCompatibility':require('../out/terminalCompatibility.js')});extension.connect(engine,project,root,terminal,message=>errors.push(message),async args=>{assert.equal(live(writers[0]),false,'writer must exit before closure consumer');assert.equal(args[1],ref(project,31));assert.equal(args[4],root);consumerEntries.push(args);});extension.subscribe({subscriptions:[]});assert.equal(await extension.launch({workspaceRoot:project,label:kind,conversationId:31,nodeId,statusFilePath:ref(project,31),runKind:kind,globalDataPath:root,command:child.finalCommand,agentCli:'claude'}),terminal);const delivered=await read(project,31);await operation('claim_run',{root:project,executionLogId:31,expectedRevision:delivered.revision,agentPid:writers[0].pid,processBirth:getProcessBirthMarker(writers[0].pid),terminalDeliveryId:delivered.status.terminalDeliveryId,idempotencyKey:'close-continuation-controlled-writer-claim'});assert.equal(sent.filter(text=>text.includes('SOLOMAP_TERMINAL_DELIVERY_ID=')).length,1);assert.ok(sent.some(text=>text.endsWith(child.finalCommand)));assert.equal(extension.targetCount(),1);await extension.settle(ref(project,29),undefined,root);await extension.drain();
     const snapshot=async(workspace,id)=>{const reference=ref(workspace,id),state=await read(workspace,id),status=await client.readStatus(reference);return {state,journal:await client.readJournal(reference,status),settlements:await client.readSettlements(reference,status),binding:await client.readBinding(reference),report:await client.readReport(reference,status)};};const saved=new Map();for(const [workspace,id] of [[project,29],[project,31],[project,13],[other,31]])saved.set(`${workspace}:${id}`,await snapshot(workspace,id));assert.deepEqual(engine.getNodes(),originalNodes);assert.equal(saved.get(`${project}:31`).state.status.interactiveSession,true);assert.equal((await client.getResumableSession(ref(project,31))).sessionId,prepared.status.plannedNativeSessionId);
@@ -20587,7 +20736,7 @@ test('Verifier successful close auto-attributes roadmap step status to Completed
     assert.deepEqual(await snapshotRun(reference), accepted); assert.deepEqual(await current(), acceptedFlow);
     const extension = loadCompiledModule('out/extension.js', `
       module.exports.settle = processAgentStatusFile;
-      module.exports.drain = async () => { do { await new Promise(resolve => setTimeout(resolve, 0)); } while (processingAgentStatusFiles.size || pendingAgentStatusFiles.size); };
+      module.exports.drain = drainAgentSettlementWork;
       module.exports.connect = (engine, project, root, background) => { syncEngine = engine; activeProjectRoot = project; extensionContextRef = background ? { extensionPath: path.resolve(__dirname, '..') } : null; getPersistedSettings = () => ({ globalDataPath: root }); sendNodesToWebview = () => {}; postNodeConversations = () => {}; refreshSidebarProjectCards = () => {}; };
     `, { './autonomousRuntimeControl': transport, './db/syncEngine': require('../out/db/syncEngine.js'), './flowStore': require('../out/flowStore.js'), './solomapGlobal': require('../out/solomapGlobal.js') });
     extension.connect(mode === 'background' ? foreignEngine : engine, mode === 'background' ? other : project, root, mode === 'background');
@@ -20668,7 +20817,7 @@ test('Flow role output validation error triggers self-correction loop', async t 
     const terminals = [], commands = [], context = { extensionPath: projectRoot, globalState: { get: (_key, fallback) => fallback, update: async () => {} } };
     const extension = loadCompiledModule('out/extension.js', `
       module.exports.launch = startFlowRoleRun; module.exports.settle = processAgentStatusFile;
-      module.exports.drain = async () => { do { await new Promise(resolve => setTimeout(resolve, 0)); } while (processingAgentStatusFiles.size || pendingAgentStatusFiles.size); };
+      module.exports.drain = drainAgentSettlementWork;
       module.exports.connect = (engine, project, root, context, terminals, commands) => {
         syncEngine = engine; activeProjectRoot = project; extensionContextRef = context;
         getPersistedSettings = () => ({ globalDataPath: root, cliPath: 'claude', taskPermissionMode: 'auto', enabledEnhancements: {} });
@@ -21219,6 +21368,7 @@ for (const scenario of ['__solo__', 'step', 'unavailable-cli', 'missing-node']) 
   transport.sendRuntimeDataRequest = (_root, request) => ops(request);
   const engine = new SyncEngine(path.join(active, '.solopreneur', 'roadmap.csv'), path.join(active, '.solopreneur', 'project_journal.db'), projectRoot, root);
   const calls = [];
+  let acceptedWrapper;
   const connect = () => {
     const extension = loadCompiledModule('out/extension.js', `
       module.exports.runAutomatic = runAutomationTasksAfterRun;
@@ -21238,7 +21388,6 @@ for (const scenario of ['__solo__', 'step', 'unavailable-cli', 'missing-node']) 
         sendNodesToWebview = () => {}; refreshSidebarProjectCards = () => {};
         solomapGlobal_1.ensureSolomapMemoryStore = () => {};
 
-        preSessionGit_1.createPreSessionGitCommit = async () => '1'.repeat(40);
         launchAgentConversationTerminal = async input => { calls.push(input); };
       };
       module.exports.activeRoot = () => activeProjectRoot;
@@ -21270,7 +21419,11 @@ for (const scenario of ['__solo__', 'step', 'unavailable-cli', 'missing-node']) 
     const first = (await ops({ operation: 'list_run_states', input: { root: project } })).items[0]; assert.ok(first);
     assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')).sort(), ['project.json', 'roadmap.csv']);
     if (nodeId === '__solo__') assert.equal(fs.readFileSync(path.join(project, '.solopreneur', 'roadmap.csv'), 'utf8'), originalRoadmap);
-    await ops({ operation: 'claim_run', input: { projectId: first.projectId, executionLogId: first.status.rootExecutionLogId, expectedRevision: first.revision, agentPid: process.pid, idempotencyKey: 'automatic-accepted-wrapper' } });
+    acceptedWrapper = childProcess.spawn(process.execPath, ['-e', "process.on('SIGTERM',()=>process.exit(0));process.stdout.write('ready');setInterval(()=>{},1000)"], { cwd: project, stdio: 'pipe' });
+    await require('node:events').once(acceptedWrapper.stdout, 'data');
+    acceptedWrapper.stdout.resume();
+    acceptedWrapper.stderr.resume();
+    await ops({ operation: 'claim_run', input: { projectId: first.projectId, executionLogId: first.status.rootExecutionLogId, expectedRevision: first.revision, agentPid: acceptedWrapper.pid, processBirth: getProcessBirthMarker(acceptedWrapper.pid), idempotencyKey: 'automatic-accepted-wrapper' } });
     if (nodeId === 'step') fs.writeFileSync(path.join(project, '.solopreneur', 'roadmap.csv'), originalRoadmap.replace(',Pending,', ',Completed,'));
     extension = connect(); extension.failCli(); await extension.runAutomatic({}, 'completed', input);
     assert.equal(calls.length, 1, 'replayed effect after window restart must not launch an accepted run again');
@@ -21279,7 +21432,15 @@ for (const scenario of ['__solo__', 'step', 'unavailable-cli', 'missing-node']) 
     if (nodeId === 'step') assert.equal(new (require('../out/db/csvStore.js').CsvStore)(path.join(project, '.solopreneur', 'roadmap.csv')).readNodes()[0].status, 'Completed', 'replaying an accepted effect cannot put a user-completed step back into Running');
     assert.equal(extension.activeRoot(), active, 'a background launch must not change the user project selection');
     assert.equal((await ops({ operation: 'list_run_states', input: { root: active } })).items.length, 0);
-  } finally { transport.sendRuntimeDataRequest = previous; engine.close(); await ops.close(); store.close(); }
+  } finally {
+    transport.sendRuntimeDataRequest = previous;
+    if (acceptedWrapper && acceptedWrapper.exitCode === null) {
+      const exited = require('node:events').once(acceptedWrapper, 'exit');
+      acceptedWrapper.kill('SIGTERM');
+      await exited;
+    }
+    engine.close(); await ops.close(); store.close();
+  }
 });
 
 for (const editedLater of [false, true]) test(`formal roadmap recovery ${editedLater ? 'preserves a newer user edit' : 'restores the original bytes without a backup file'}`, async () => {
@@ -21676,7 +21837,6 @@ test('an actual scheduled prompt remains in project A when the user selects B du
       recordLocalUsageEvent = async () => ({}); postNodeConversations = () => {}; buildSoloConversationPrompt = () => '来源项目固定输入';
       ensureRoadmapValidationScript = () => {}; sendNodesToWebview = () => {}; refreshSidebarProjectCards = () => {};
       solomapGlobal_1.ensureSolomapMemoryStore = () => {};
-      preSessionGit_1.createPreSessionGitCommit = async () => '1'.repeat(40);
       launchAgentConversationTerminal = async input => { launches.push(input); };
     };
   `);
@@ -22308,7 +22468,7 @@ for (const kind of ['step', 'solo', 'roadmap_revision']) test(`the actual automa
       agentCli_1.resolveAgentCli = value => value; agentCli_1.commandExists = () => true; agentCli_1.ensureAgentTaskAutomation = () => ({ ok: true });
       recordLocalUsageEvent = async () => ({}); postNodeConversations = () => {}; ensureRoadmapValidationScript = () => {}; sendNodesToWebview = () => {}; refreshSidebarProjectCards = () => {};
       solomapGlobal_1.ensureSolomapMemoryStore = () => {};
-      preSessionGit_1.createPreSessionGitCommit = async () => '1'.repeat(40); launchAgentConversationTerminal = async input => launches.push(input);
+      launchAgentConversationTerminal = async input => launches.push(input);
     };
   `, { './autonomousRuntimeControl': transport });
   extension.connect(call, roots[1], project, engine, launches);

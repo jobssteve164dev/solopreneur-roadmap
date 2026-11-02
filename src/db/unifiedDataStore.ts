@@ -21,7 +21,7 @@ import {
   StagedIntelligenceContextCheckpoint,
   validIntelligenceContextCheckpoint
 } from '../intelligenceContextCheckpoint';
-import type { GrowthSnapshotData, GrowthSnapshotRecord } from './types';
+import type { GrowthSnapshotData, GrowthSnapshotRecord, GrowthSnapshotStageManifest, GrowthSnapshotStageSection } from './types';
 import type { AgentConversation, RoadmapNode, RunIndexEntry, RunIndexFile, RunIndexRecord, RunIndexSignal, RunImpactRecord } from './types';
 import type { PrepareRunInput, RunState, RunCheckpointInput, RunOutputFinalizationInput, RunLogInput, RunConsumerInput, RunConsumerLease, RunSettlementInput, RunEffect, RunEffectReference } from '../runLifecycleTypes';
 import { createSessionBindingValue, appendSessionBindingValue, confirmSessionBindingValue, assertVersion2Binding, getResumableSessionValue } from '../sessionIdentity';
@@ -30,13 +30,14 @@ import { replaceRegularFileIfUnchanged } from '../safeFileReplace';
 import type { NativeSessionBinding, SessionBindingSeed, SessionBindingRevisionInput } from '../sessionIdentity';
 import { normalizeProjectsForStorage, projectName, ProjectRegistryFile, ProjectRegistryPatch, ProjectRegistrySnapshot, ProjectRegistryBootstrap } from '../projectRegistry';
 import { workspaceChanges, workspaceDocumentPurpose, WorkspaceSnapshot, gitEvidenceDocumentPurpose, RunGitEvidence } from '../runWorkspace';
-import type { DocumentationManifest } from '../documentationManifest';
+import { mergeDocumentationManifestsForPersistence, type DocumentationManifest, type DocumentationManifestDocument } from '../documentationManifest';
+import type { ProjectInvestmentStats } from '../projectAnalytics';
 import type { FlowTrace } from '../flowStore';
 import { parseStepMemorySource } from '../stepMemorySource.js';
 import { digestToRunIndex, executionQueryTokens, parseRunDigestSource, RunDigestReference } from '../runDigestData.js';
 import type { RunDigest, ExecutionExperienceQuery } from '../runDigest';
 import type {
-  PiBranchScan, PiCommitResult, PiEntry, PiEntryScan, PiEntryStructure, PiListElement, PiListReadOptions,
+  PiBranchScan, PiCommitContext, PiCommitResult, PiEntry, PiEntryScan, PiEntryStructure, PiListElement, PiListReadOptions,
   PiSessionStats, PiSessionStorage, PiStoredValue, PiUsage, PiUsageRow, PiUsageScan, PiValue, PiValueList, PiWrite
 } from '../piSessionStorage';
 import type { LearningOverview } from '../learningLedger';
@@ -90,6 +91,7 @@ export interface MigrationJob {
 export interface RecyclingItem {
   itemId: string; planId: string; identity: string; key: string; hash: string; path: string;
   restorePath?: string | null;
+  restoredHash?: string | null;
   bytes: number; status: 'prepared' | 'approved' | 'moving' | 'held' | 'trashed' | 'restoring' | 'restored' | 'changed'; error: string | null;
 }
 
@@ -122,12 +124,53 @@ export interface WriteReceipt {
   status: 'committed';
   pendingEffects: string[];
 }
+export interface SidebarCoreProjectionInput {
+  projectId: string;
+  sourceRevision: number;
+  project: { name: string; path: string; type?: string; priority?: string; pinnedAt?: string };
+  nodes: Array<{ id: string; title: string; stage: string; status: string; agentCli?: string; dependencies?: string }>;
+  investmentStats: ProjectInvestmentStats;
+  learningOverview: LearningOverview;
+  reusableSourceCount: number;
+  documentationManifest: DocumentationManifest;
+  recentActivityAt: string;
+}
+export interface SidebarCoreProjectionTarget { projectId: string; sourceRevision: number }
+export interface SidebarCoreProjectionRecord {
+  projectId: string;
+  sourceRevision: number;
+  projectionRevision: number;
+  summary: unknown;
+}
+
+export interface MaintenanceCompute {
+  digestFile(file: string): Promise<{ sha256: string; bytes: number }>;
+  canonicalize(value: unknown): Promise<string>;
+  inspectBackup(file: string): Promise<{ databaseId: string; sha256: string; bytes: number }>;
+  restoreBackup(input: { source: string; destinationRoot: string; databaseId: string; sha256: string; bytes: number }): Promise<{ destination: string; databaseId: string; sha256: string; bytes: number }>;
+  prepareProjectImport(source: string): Promise<PreparedProjectImport>;
+  stageProjectExport(root: string): Promise<StagedProjectExport>;
+  verifyProjectExportContent(contentId: string, sha256: string, bytes: number): Promise<void>;
+  cleanupProjectExportStage(stageDirectory: string): Promise<void>;
+  validateProjectImport(tables: string[]): Promise<void>;
+  stageFileExport?(input: { outboxId: string; contentId?: string; ref?: string; revision?: number; format?: 'json' | 'md' | 'text'; agentProjection?: boolean }): Promise<{ path: string; sha256: string; bytes: number }>;
+  restoreRecyclingFile?(input: { itemId: string; destination: string; expectedHash: string; sourcePath?: string; symbolicLink?: boolean; alreadyRestored?: boolean }): Promise<{ path: string; receiptPath: string; sha256: string; bytes: number; sourceDevice?: number; sourceInode?: number }>;
+  cleanupRecyclingRestore?(input: { itemId: string; destination: string; receiptPath: string; heldPath?: string; symbolicLink?: boolean; expectedHash?: string; sourceDevice?: number; sourceInode?: number }): Promise<void>;
+}
 export interface PiExecutionOwner { ownerId: string; generation: number }
 export interface PiConversationAcceptance {
   schemaVersion: 1; conversationId: string; operationId: string; requestKey: string; prompt: string;
   attachments: unknown[]; baselineRevision: number; source: string; sourceGeneration: number; projectScope: string;
   systemPrompt: string; projectContext: unknown; model: { provider: string; modelId: string }; tools: unknown[];
   executionProfile: string; options: Record<string, unknown>; commitGuard?: IntelligenceCommitGuard;
+}
+export interface PiConversationIngressInput {
+  conversationId: string; operationId: string; requestKey: string; text: string; source: string;
+  sourceGeneration: number; requireExisting: boolean; commitGuard?: IntelligenceCommitGuard;
+}
+export interface PiConversationIngress extends PiConversationIngressInput {
+  status: 'admitted' | 'materialized' | 'cancelled'; baselineRevision: number; ownerGeneration: number;
+  createdAt: number; updatedAt: number; retryCount: number; retryAt: number; lastError?: string;
 }
 export interface PiConversationOperation {
   operationId: string; conversationId: string; sessionId: string; lane: string; status: string;
@@ -275,11 +318,45 @@ export interface RoadmapSnapshot {
 }
 
 type PortableCell = string | number | null | { bytes: string } | { integer: string };
-interface PortableProjectArchive {
+export interface PortableProjectArchive {
   schemaVersion: 1;
   projectId: string;
   sourceSchemaVersion: number;
   tables: Array<{ name: string; rows: Array<Record<string, PortableCell>> }>;
+}
+export interface PreparedProjectImport {
+  archive: PortableProjectArchive;
+  sourceHash: string;
+  tables: Array<[string, Record<string, SqlValue>[]]>;
+  decodedContents: Array<[string, Uint8Array]>;
+  roadmapBytes: Uint8Array;
+}
+export interface PreparedProjectExport {
+  projectId: string;
+  envelope: Uint8Array;
+  tableCount: number;
+  content: PreparedStoredContent;
+}
+export interface StagedProjectExport {
+  projectId: string;
+  path: string;
+  sha256: string;
+  bytes: number;
+  tableCount: number;
+  contentManifestPath: string;
+  manifestSha256: string;
+  stageDirectory: string;
+}
+
+export interface PreparedStoredContent {
+  sha256: string;
+  mimeType: string;
+  encoding: string;
+  byteLength: number;
+  storedByteLength: number;
+  data: Uint8Array;
+  chunkIndexJson: string | null;
+  chunks: Array<{ ordinal: number; data: Uint8Array }>;
 }
 
 function quoteSqlIdentifier(value: string): string {
@@ -308,12 +385,42 @@ function canonical(value: unknown): string {
   if (encoded === undefined) throw new Error('invalid_data: undefined is not a persisted value');
   return encoded;
 }
+function documentationManifestComparable(manifest: DocumentationManifest): string {
+  return canonical({
+    schemaVersion: manifest.schemaVersion,
+    documents: manifest.documents,
+    pendingReview: manifest.pendingReview,
+    lastAudit: manifest.lastAudit || null
+  });
+}
 function sameUnorderedRecords(left: unknown[], right: unknown[]): boolean {
   if (left.length !== right.length) return false;
   const normalize = (items: unknown[]) => items.map(item => canonical(item)).sort();
   return canonical(normalize(left)) === canonical(normalize(right));
 }
 function digest(data: Uint8Array | string): string { return crypto.createHash('sha256').update(data).digest('hex'); }
+export function prepareContentForStorage(data: Uint8Array, mimeType: string, encoding: string): PreparedStoredContent {
+  const bytes = Buffer.from(data.buffer as ArrayBuffer, data.byteOffset, data.byteLength);
+  const sha256 = digest(bytes);
+  if (bytes.length > 65536) {
+    const index: ContentChunk[] = [], chunks: PreparedStoredContent['chunks'] = [];
+    let storedOffset = 0, ordinal = 0;
+    for (let offset = 0; offset < bytes.length; offset += 65536, ordinal++) {
+      const part = bytes.subarray(offset, offset + 65536);
+      const compressed = gzipSync(part, { level: 1 });
+      const stored = compressed.length < part.length * 0.9 ? compressed : part;
+      index.push({ offset, byteLength: part.length, storedOffset, storedByteLength: stored.length, sha256: digest(part), compressed: stored === compressed });
+      chunks.push({ ordinal, data: Buffer.from(stored) });
+      storedOffset += stored.length;
+    }
+    return { sha256, mimeType, encoding: `chunked:${encoding}`, byteLength: bytes.length, storedByteLength: storedOffset,
+      data: Buffer.alloc(0), chunkIndexJson: canonical(index), chunks };
+  }
+  const compressed = bytes.length >= 16384 ? gzipSync(bytes, { level: 1 }) : bytes;
+  const stored = compressed.length < bytes.length * 0.9 ? compressed : bytes;
+  return { sha256, mimeType, encoding: stored === bytes ? encoding : `gzip:${encoding}`, byteLength: bytes.length,
+    storedByteLength: stored.length, data: Buffer.from(stored), chunkIndexJson: null, chunks: [] };
+}
 function growthPayloadHash(data: GrowthSnapshotData): string {
   const { id: _id, createdAt: _createdAt, durationMs: _durationMs, scanReason: _scanReason, ...snapshot } = data.snapshot;
   const ordered = (items: Record<string, unknown>[]) => items.map(item => ({ item, key: canonical(item) }))
@@ -361,6 +468,16 @@ function growthCleanupSemanticHash(data: GrowthSnapshotData): string {
   section('labels', data.labels.map(label => ({ nodeId: label.nodeId, label: label.label, role: label.role, source: label.source, confidence: label.confidence }))
     .sort((left, right) => sqliteBinaryTextCompare(left.nodeId, right.nodeId)));
   return hash.digest('hex');
+}
+export function describeGrowthSnapshotStage(data: GrowthSnapshotData, sourceVersion: { gitHead: string; contentHash: string }): Omit<GrowthSnapshotStageManifest, 'stageId'> {
+  return {
+    snapshot: data.snapshot,
+    payloadHash: growthPayloadHash(data),
+    summary: growthSnapshotSummary(data),
+    semanticHash: growthCleanupSemanticHash(data),
+    counts: { nodes: data.nodes.length, edges: data.edges.length, signals: data.signals.length, labels: data.labels.length },
+    sourceVersion
+  };
 }
 function digestFile(file: string): { sha256: string; bytes: number } {
   const hash = crypto.createHash('sha256'), buffer = Buffer.allocUnsafe(8 * 1024 * 1024);
@@ -461,12 +578,55 @@ export class UnifiedDataStore {
   private readonly projectRegistrations = new Map<string, Promise<{ projectId: string; locationId: string; identityPath: string }>>();
   private readonly backupFlights = new Map<string, { inputHash: string; promise: Promise<{ destination: string; databaseId: string; sha256: string; bytes: number }> }>();
   private readonly backupDestinationTails = new Map<string, Promise<void>>();
+  private maintenanceCompute?: MaintenanceCompute;
   private contentReferenceColumnsCache?: Array<{ table: string; column: string }>;
   private projectReferenceColumnsCache?: Array<{ table: string; column: string }>;
   private projectObjectReferenceColumnsCache?: Array<{ table: string; column: string }>;
   private storageCleanupProtectedContents?: Set<string>;
+  private generationSearchObjectIds: Set<string> | undefined;
   public get databaseId(): string {
     return String(this.rows("SELECT value FROM database_meta WHERE key='database_id'")[0].value);
+  }
+  public readRuntimeWriterBarrier(): { databaseId: string; committedSequence: number } {
+    return { databaseId: this.databaseId, committedSequence: Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS value FROM events')[0].value) };
+  }
+  public writeRuntimeGateProbe(probeId: string): { databaseId: string; probeId: string; committedAt: number } {
+    if (!/^[a-f0-9-]{36}$/.test(probeId)) throw new Error('runtime_gate_probe_invalid');
+    return this.transaction(() => {
+      const committedAt = Date.now();
+      this.db.run("INSERT INTO database_meta(key,value) VALUES('runtime_gate_probe',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [JSON.stringify({ probeId, committedAt })]);
+      return { databaseId: this.databaseId, probeId, committedAt };
+    });
+  }
+  public databaseGenerationCaptureActive(): boolean { return this.generationSearchObjectIds !== undefined; }
+  public beginDatabaseGenerationCapture(): void {
+    if (this.generationSearchObjectIds) throw new Error('database_generation_capture_active');
+    this.db.checkpointForGeneration();
+    this.db.startChangesetCapture();
+    this.generationSearchObjectIds = new Set();
+  }
+  public rotateDatabaseGenerationCapture(): { changeset: Uint8Array; searchObjectIds: string[] } {
+    if (!this.generationSearchObjectIds) throw new Error('database_generation_capture_inactive');
+    const searchObjectIds = [...this.generationSearchObjectIds];
+    this.generationSearchObjectIds.clear();
+    return { changeset: this.db.rotateChangesetCapture(), searchObjectIds };
+  }
+  public stopDatabaseGenerationCapture(): { changeset: Uint8Array; searchObjectIds: string[] } {
+    if (!this.generationSearchObjectIds) throw new Error('database_generation_capture_inactive');
+    const searchObjectIds = [...this.generationSearchObjectIds];
+    this.generationSearchObjectIds = undefined;
+    return { changeset: this.db.stopChangesetCapture(), searchObjectIds };
+  }
+  public applyDatabaseGenerationChangeset(changeset: Uint8Array, searchObjectIds: string[] = [], previousLiveSequence?: number, currentLiveSequence?: number): void {
+    this.db.applyChangeset(changeset, previousLiveSequence, currentLiveSequence);
+    for (const objectId of [...new Set(searchObjectIds)]) {
+      try { this.indexSearchObject(this.read(objectId)); } catch (error) { if (!(error instanceof Error) || !/not found|object_missing/i.test(error.message)) throw error; }
+    }
+  }
+  public verifyDatabaseGeneration(): { databaseId: string; integrity: string } {
+    const integrity = String(this.db.exec('PRAGMA integrity_check')[0]?.values?.[0]?.[0] || 'invalid');
+    if (integrity !== 'ok' || this.rows('PRAGMA foreign_key_check').length) throw new Error('database_generation_invalid');
+    return { databaseId: this.databaseId, integrity };
   }
   public static open(root: string, expectedDatabaseId?: string): UnifiedDataStore {
     if (!fs.existsSync(path.join(root, 'solomap.db'))) throw new Error('database_restore_required');
@@ -571,6 +731,18 @@ export class UnifiedDataStore {
       catch (error) { console.warn('SoloMap planner statistics maintenance failed:', error); }
     } catch (error) { this.db.close(); throw error; }
   }
+  public setMaintenanceCompute(compute: MaintenanceCompute): void {
+    this.maintenanceCompute = compute;
+  }
+  private async maintenanceDigestFile(file: string): Promise<{ sha256: string; bytes: number }> {
+    return this.maintenanceCompute ? this.maintenanceCompute.digestFile(file) : digestFile(file);
+  }
+  public async digestMaintenanceFile(file: string): Promise<{ sha256: string; bytes: number }> {
+    return this.maintenanceDigestFile(file);
+  }
+  private async maintenanceCanonicalize(value: unknown): Promise<string> {
+    return this.maintenanceCompute ? this.maintenanceCompute.canonicalize(value) : canonical(value);
+  }
   public withActor<T>(actorId: string, action: () => T): T {
     if (!this.rows('SELECT id FROM actors WHERE id=?', [actorId]).length) throw new Error('actor_missing');
     return this.actorContext.run(actorId, action);
@@ -586,17 +758,16 @@ export class UnifiedDataStore {
     };
     const now = Date.now();
     return this.transaction(() => {
-      const existing = this.rows('SELECT build_id FROM pi_compatible_releases WHERE release_version=?', [version])[0];
-      if (existing && existing.build_id !== build) throw new Error('pi_release_build_conflict');
       this.db.run(`INSERT INTO pi_compatible_releases(release_version,build_id,first_seen_at,last_seen_at) VALUES(?,?,?,?)
-        ON CONFLICT(release_version) DO UPDATE SET last_seen_at=excluded.last_seen_at`, [version, build, now, now]);
+        ON CONFLICT(release_version,build_id) DO UPDATE SET last_seen_at=excluded.last_seen_at`, [version, build, now, now]);
       const observedRuntime = this.rows('SELECT release_version,build_id FROM pi_compatibility_runtime_observations WHERE runtime_id=?', [runtime])[0];
       if (observedRuntime && (observedRuntime.release_version !== version || observedRuntime.build_id !== build)) throw new Error('pi_runtime_release_conflict');
       this.db.run(`INSERT INTO pi_compatibility_runtime_observations VALUES(?,?,?,?,?)
         ON CONFLICT(runtime_id) DO UPDATE SET last_seen_at=excluded.last_seen_at`, [runtime, version, build, now, now]);
       const handoff = this.rows(`SELECT predecessor_release,predecessor_build_id,predecessor_runtime_id,drained_at
         FROM pi_release_drains WHERE replacement_release=? AND replacement_build_id=?`, [version, build])[0];
-      if (handoff && atLeast(version, String(handoff.predecessor_release)) && version !== String(handoff.predecessor_release)) {
+      if (handoff && atLeast(version, String(handoff.predecessor_release))
+        && (version !== String(handoff.predecessor_release) || build !== String(handoff.predecessor_build_id))) {
         const proof = canonical({ schemaVersion: 1, predecessorRelease: handoff.predecessor_release,
           predecessorBuildId: handoff.predecessor_build_id, predecessorRuntimeId: handoff.predecessor_runtime_id,
           replacementRelease: version, replacementBuildId: build, runtimeId: runtime, drainedAt: Number(handoff.drained_at) });
@@ -620,16 +791,16 @@ export class UnifiedDataStore {
     if (!runtimeId || !predecessorBuild || !replacementBuild || !/^\d+\.\d+\.\d+(?:[-+].*)?$/.test(predecessor)
       || !/^\d+\.\d+\.\d+(?:[-+].*)?$/.test(replacement)) throw new Error('invalid_pi_rollout_evidence');
     if (predecessor === replacement) {
-      if (predecessorBuild !== replacementBuild) throw new Error('invalid_pi_rollout_evidence');
-      return false;
+      if (predecessorBuild === replacementBuild) return false;
+    } else {
+      const parts = (value: string) => value.split(/[.+-]/, 3).map(part => Number(part) || 0);
+      const left = parts(replacement), right = parts(predecessor);
+      const later = left[0] !== right[0] ? left[0] > right[0] : left[1] !== right[1] ? left[1] > right[1] : left[2] > right[2];
+      if (!later) throw new Error('invalid_pi_rollout_evidence');
     }
-    const parts = (value: string) => value.split(/[.+-]/, 3).map(part => Number(part) || 0);
-    const left = parts(replacement), right = parts(predecessor);
-    const later = left[0] !== right[0] ? left[0] > right[0] : left[1] !== right[1] ? left[1] > right[1] : left[2] > right[2];
-    if (!later) throw new Error('invalid_pi_rollout_evidence');
     this.transaction(() => {
-      const previous = this.rows('SELECT build_id FROM pi_compatible_releases WHERE release_version=?', [predecessor])[0];
-      if (!previous || previous.build_id !== predecessorBuild) throw new Error('pi_rollout_predecessor_unobserved');
+      const previous = this.rows('SELECT build_id FROM pi_compatible_releases WHERE release_version=? AND build_id=?', [predecessor, predecessorBuild])[0];
+      if (!previous) throw new Error('pi_rollout_predecessor_unobserved');
       const runtime = this.rows('SELECT release_version,build_id FROM pi_compatibility_runtime_observations WHERE runtime_id=?', [runtimeId])[0];
       if (!runtime || runtime.release_version !== predecessor || runtime.build_id !== predecessorBuild) throw new Error('pi_rollout_predecessor_runtime_unobserved');
       const running = this.rows("SELECT operation_id,owner_pid,owner_birth,side_effects_started FROM pi_legacy_conversation_operations WHERE status='running'");
@@ -738,11 +909,20 @@ export class UnifiedDataStore {
     return this.transaction(() => {
       const current = this.rows('SELECT owner_id,generation FROM pi_execution_owner WHERE id=1')[0];
       if (current && current.owner_id === ownerId) return { ownerId, generation: Number(current.generation) };
+      const liveDispatch = this.rows('SELECT owner_pid,owner_birth FROM mcp_conversation_dispatches').some(row =>
+        isProcessOwnerAlive(Number(row.owner_pid), String(row.owner_birth)));
+      if (liveDispatch) throw new Error('pi_owner_handoff_busy');
       const generation = Number(current?.generation || 0) + 1;
       this.db.run(`INSERT INTO pi_execution_owner(id,owner_id,generation,claimed_at) VALUES(1,?,?,?)
         ON CONFLICT(id) DO UPDATE SET owner_id=excluded.owner_id,generation=excluded.generation,claimed_at=excluded.claimed_at`, [ownerId, generation, Date.now()]);
       return { ownerId, generation };
     });
+  }
+
+  public currentPiExecutionOwner(): PiExecutionOwner {
+    const current = this.rows('SELECT owner_id,generation FROM pi_execution_owner WHERE id=1')[0];
+    if (!current) throw new Error('pi_owner_unavailable');
+    return { ownerId: String(current.owner_id), generation: Number(current.generation) };
   }
 
   private assertPiExecutionOwner(owner: PiExecutionOwner): void {
@@ -775,6 +955,109 @@ export class UnifiedDataStore {
     this.db.run('UPDATE pi_sessions SET next_seq=?,message_count=? WHERE session_id=?', [branchSeq + 1, messages.length, sessionId]);
   }
 
+  public admitPiConversationIngress(input: PiConversationIngressInput, owner: PiExecutionOwner): PiConversationIngress {
+    if (!input || !/^[a-f0-9-]{36}$/i.test(input.conversationId) || !input.operationId || !input.requestKey
+      || !String(input.text || '').trim() || !input.source || !Number.isInteger(input.sourceGeneration) || input.sourceGeneration < 0) {
+      throw new Error('invalid_pi_conversation_ingress');
+    }
+    const normalized: PiConversationIngressInput = {
+      conversationId: input.conversationId, operationId: input.operationId, requestKey: input.requestKey,
+      text: input.text.trim(), source: input.source, sourceGeneration: input.sourceGeneration,
+      requireExisting: input.requireExisting === true,
+      ...(input.commitGuard ? { commitGuard: input.commitGuard } : {})
+    };
+    const serialized = canonical(normalized), requestHash = digest(serialized);
+    return this.transaction(() => {
+      this.assertPiExecutionOwner(owner);
+      const byRequest = this.rows('SELECT operation_id,request_hash FROM pi_conversation_ingress WHERE request_key=?', [normalized.requestKey])[0];
+      if (byRequest) {
+        if (String(byRequest.request_hash) !== requestHash || String(byRequest.operation_id) !== normalized.operationId) throw new Error('idempotency_conflict');
+        return this.readPiConversationIngress(normalized.operationId)!;
+      }
+      if (this.rows('SELECT 1 FROM pi_conversation_ingress WHERE operation_id=?', [normalized.operationId]).length) throw new Error('idempotency_conflict');
+      const current = this.readCompleteIntelligenceConversation(normalized.conversationId);
+      if (normalized.requireExisting && !current) throw new Error('Intelligence conversation was not found.');
+      const now = Date.now();
+      this.db.run(`INSERT INTO pi_conversation_ingress(operation_id,conversation_id,request_key,request_content_id,request_hash,baseline_revision,owner_generation,status,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,'admitted',?,?)`, [normalized.operationId, normalized.conversationId, normalized.requestKey,
+        this.putContent(serialized, 'application/json'), requestHash, current?.revision || 0, owner.generation, now, now]);
+      return this.readPiConversationIngress(normalized.operationId)!;
+    });
+  }
+
+  public readPiConversationIngress(operationId: string): PiConversationIngress | null {
+    const row = this.rows('SELECT * FROM pi_conversation_ingress WHERE operation_id=?', [operationId])[0];
+    if (!row) return null;
+    const input = JSON.parse(this.content(String(row.request_content_id)).toString('utf8')) as PiConversationIngressInput;
+    return { ...input, status: String(row.status) as PiConversationIngress['status'], baselineRevision: Number(row.baseline_revision),
+      ownerGeneration: Number(row.owner_generation), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at),
+      retryCount: Number(row.retry_count || 0), retryAt: Number(row.retry_at || 0),
+      ...(row.last_error_content_id ? { lastError: String(JSON.parse(this.content(String(row.last_error_content_id)).toString('utf8')).message || '') } : {}) };
+  }
+
+  public listRecoverablePiConversationIngresses(conversationId?: string): PiConversationIngress[] {
+    const sql = conversationId
+      ? "SELECT operation_id FROM pi_conversation_ingress WHERE status='admitted' AND conversation_id=? ORDER BY rowid"
+      : `SELECT current.operation_id FROM pi_conversation_ingress current
+         WHERE current.status='admitted' AND current.retry_at<=?
+           AND NOT EXISTS(SELECT 1 FROM pi_conversation_ingress earlier
+             WHERE earlier.conversation_id=current.conversation_id AND earlier.status='admitted' AND earlier.rowid<current.rowid)
+         ORDER BY current.rowid`;
+    return this.rows(sql, conversationId ? [conversationId] : [Date.now()])
+      .map(row => this.readPiConversationIngress(String(row.operation_id))!);
+  }
+
+  public nextPiConversationIngressRetryAt(): number {
+    const row = this.rows(`SELECT MIN(current.retry_at) AS value FROM pi_conversation_ingress current
+      WHERE current.status='admitted'
+        AND NOT EXISTS(SELECT 1 FROM pi_conversation_ingress earlier
+          WHERE earlier.conversation_id=current.conversation_id AND earlier.status='admitted' AND earlier.rowid<current.rowid)`)[0];
+    return row?.value === null || row?.value === undefined ? -1 : Number(row.value);
+  }
+
+  public recordPiConversationIngressFailure(operationId: string, owner: PiExecutionOwner, error: unknown): { retryAt: number; retryCount: number } {
+    return this.transaction(() => {
+      this.assertPiExecutionOwner(owner);
+      const row = this.rows("SELECT status,retry_count FROM pi_conversation_ingress WHERE operation_id=?", [operationId])[0];
+      if (!row) throw new Error('pi_ingress_not_found');
+      if (row.status !== 'admitted') return { retryAt: 0, retryCount: Number(row.retry_count || 0) };
+      const retryCount = Number(row.retry_count || 0) + 1;
+      const retryAt = Date.now() + Math.min(30_000, 1_000 * 2 ** Math.min(5, retryCount - 1));
+      const message = String(error instanceof Error ? error.message : error).slice(0, 4_096);
+      const contentId = this.putContent(canonical({ message, retryCount, retryAt }), 'application/json');
+      this.db.run(`UPDATE pi_conversation_ingress SET last_error_content_id=?,retry_count=?,retry_at=?,owner_generation=?,updated_at=?
+        WHERE operation_id=? AND status='admitted'`, [contentId, retryCount, retryAt, owner.generation, Date.now(), operationId]);
+      return { retryAt, retryCount };
+    });
+  }
+
+  public materializePiConversationIngress(operationId: string, acceptance: PiConversationAcceptance, owner: PiExecutionOwner): PiConversationOperation {
+    return this.transaction(() => {
+      this.assertPiExecutionOwner(owner);
+      const row = this.rows('SELECT rowid,* FROM pi_conversation_ingress WHERE operation_id=?', [operationId])[0];
+      if (!row) throw new Error('pi_ingress_not_found');
+      const ingress = this.readPiConversationIngress(operationId)!;
+      if (row.status === 'cancelled') throw new Error('intelligence_operation_aborted');
+      if (row.status === 'materialized') {
+        const existing = this.readPiConversationOperation(operationId);
+        if (!existing) throw new Error('pi_ingress_materialization_missing');
+        return existing;
+      }
+      if (this.rows("SELECT 1 FROM pi_conversation_ingress WHERE conversation_id=? AND status='admitted' AND rowid<? LIMIT 1", [ingress.conversationId, row.rowid])[0]) {
+        throw new Error('pi_ingress_predecessor_pending');
+      }
+      if (acceptance.operationId !== ingress.operationId || acceptance.conversationId !== ingress.conversationId
+        || acceptance.requestKey !== ingress.requestKey || acceptance.prompt !== ingress.text
+        || acceptance.source !== ingress.source || acceptance.sourceGeneration !== ingress.sourceGeneration
+        || canonical(acceptance.commitGuard || null) !== canonical(ingress.commitGuard || null)) throw new Error('pi_ingress_materialization_conflict');
+      const frozen = { ...acceptance, baselineRevision: ingress.baselineRevision };
+      const operation = this.admitPiConversationOperation(frozen, owner);
+      this.db.run("UPDATE pi_conversation_ingress SET status='materialized',last_error_content_id=NULL,retry_at=0,owner_generation=?,updated_at=? WHERE operation_id=? AND status='admitted'",
+        [owner.generation, Date.now(), operationId]);
+      return operation;
+    });
+  }
+
   public admitPiConversationOperation(acceptance: PiConversationAcceptance, owner: PiExecutionOwner): PiConversationOperation {
     if (!acceptance || acceptance.schemaVersion !== 1 || !acceptance.operationId || !acceptance.requestKey || !acceptance.prompt.trim()
       || !/^[a-f0-9-]{36}$/i.test(acceptance.conversationId) || !Number.isInteger(acceptance.baselineRevision) || acceptance.baselineRevision < 0
@@ -788,7 +1071,7 @@ export class UnifiedDataStore {
         return this.readPiConversationOperation(String(byRequest.operation_id))!;
       }
       if (this.rows('SELECT 1 FROM pi_conversation_operations WHERE operation_id=?', [acceptance.operationId]).length) throw new Error('idempotency_conflict');
-      const current = this.readIntelligenceConversation(acceptance.conversationId);
+      const current = this.readCompleteIntelligenceConversation(acceptance.conversationId);
       if ((current?.revision || 0) !== acceptance.baselineRevision) throw new Error('revision_conflict');
       let binding = this.rows('SELECT * FROM pi_conversation_bindings WHERE conversation_id=?', [acceptance.conversationId])[0];
       if (!binding) {
@@ -838,7 +1121,7 @@ export class UnifiedDataStore {
 
   public admitPiToolInvocation(operationId: string, owner: PiExecutionOwner, input: {
     invocationId: string; toolName: string; arguments: Record<string, unknown>; replay: 'safe' | 'never';
-  }): { operationId: string; invocationId: string; admitted: true } {
+  }): { operationId: string; invocationId: string; admitted: true; completed: boolean; result?: unknown } {
     if (!input.invocationId || !input.toolName || !['safe', 'never'].includes(input.replay)) throw new Error('invalid_pi_tool_invocation');
     return this.transaction(() => {
       this.assertPiExecutionOwner(owner);
@@ -849,16 +1132,23 @@ export class UnifiedDataStore {
       const existing = this.rows('SELECT tool_name,arguments_hash,replay FROM pi_tool_invocations WHERE operation_id=? AND invocation_id=?', [operationId, input.invocationId])[0];
       if (existing) {
         if (existing.tool_name !== input.toolName || existing.arguments_hash !== argumentsHash || existing.replay !== input.replay) throw new Error('idempotency_conflict');
-        const stored = this.rows('SELECT owner_generation,status FROM pi_tool_invocations WHERE operation_id=? AND invocation_id=?', [operationId, input.invocationId])[0];
+        const stored = this.rows('SELECT owner_generation,status,result_content_id FROM pi_tool_invocations WHERE operation_id=? AND invocation_id=?', [operationId, input.invocationId])[0];
+        if (stored.status === 'completed') {
+          if (!stored.result_content_id) throw new Error('pi_tool_result_missing');
+          return { operationId, invocationId: input.invocationId, admitted: true, completed: true,
+            result: JSON.parse(this.content(String(stored.result_content_id)).toString('utf8')) };
+        }
         if (Number(stored.owner_generation) !== owner.generation) {
-          if (input.replay !== 'safe' || stored.status !== 'admitted') throw new Error('pi_tool_replay_forbidden');
+          if (input.replay !== 'safe') throw new Error('pi_tool_replay_forbidden');
           this.db.run('UPDATE pi_tool_invocations SET owner_generation=?,updated_at=? WHERE operation_id=? AND invocation_id=?', [owner.generation, Date.now(), operationId, input.invocationId]);
         }
-        return { operationId, invocationId: input.invocationId, admitted: true };
+        return { operationId, invocationId: input.invocationId, admitted: true, completed: false };
       }
       const now = Date.now();
-      this.db.run("INSERT INTO pi_tool_invocations VALUES(?,?,?,?,?,?,'admitted',?,?)", [operationId, input.invocationId, input.toolName, argumentsHash, input.replay, owner.generation, now, now]);
-      return { operationId, invocationId: input.invocationId, admitted: true };
+      this.db.run(`INSERT INTO pi_tool_invocations(
+        operation_id,invocation_id,tool_name,arguments_hash,replay,owner_generation,status,created_at,updated_at,result_content_id)
+        VALUES(?,?,?,?,?,?,'admitted',?,?,NULL)`, [operationId, input.invocationId, input.toolName, argumentsHash, input.replay, owner.generation, now, now]);
+      return { operationId, invocationId: input.invocationId, admitted: true, completed: false };
     });
   }
 
@@ -871,21 +1161,17 @@ export class UnifiedDataStore {
       || row.tool_status !== 'admitted' || Number(row.owner_generation) !== owner.generation) throw new Error('pi_tool_invocation_fenced');
   }
 
-  /** Holds SQLite's writer lock from fence validation through the business mutation and revalidates before commit. */
-  public async withPiToolInvocationFence<T>(operationId: string, invocationId: string, owner: PiExecutionOwner, action: () => Promise<T>): Promise<T> {
-    if (this.transactionDepth) throw new Error('pi_tool_transaction_nested');
-    this.db.run('BEGIN IMMEDIATE');
-    this.transactionDepth++;
-    try {
-      this.assertPiToolInvocationActive(operationId, invocationId, owner);
-      const result = await action();
-      this.assertPiToolInvocationActive(operationId, invocationId, owner);
-      this.db.run('COMMIT');
-      return result;
-    } catch (error) {
-      try { this.db.run('ROLLBACK'); } catch { /* Preserve the fence or business error. */ }
-      throw error;
-    } finally { this.transactionDepth--; }
+  /**
+   * Guards asynchronous or file-backed tool work without holding SQLite's write
+   * transaction across an await. The operation must use its own short,
+   * idempotent commits; only purely database-synchronous mutations may use the
+   * transactional fence above.
+   */
+  public async withPiToolInvocationGuard<T>(operationId: string, invocationId: string, owner: PiExecutionOwner, action: () => Promise<T>): Promise<T> {
+    this.assertPiToolInvocationActive(operationId, invocationId, owner);
+    const result = await action();
+    this.assertPiToolInvocationActive(operationId, invocationId, owner);
+    return result;
   }
 
   /** Synchronous variant for composite mutations that must never yield while the writer transaction is open. */
@@ -905,16 +1191,39 @@ export class UnifiedDataStore {
     } finally { this.transactionDepth--; }
   }
 
-  public completePiToolInvocation(operationId: string, invocationId: string, owner: PiExecutionOwner): void {
+  public completePiToolInvocation(operationId: string, invocationId: string, owner: PiExecutionOwner, result: unknown): void {
     this.transaction(() => {
+      this.assertPiExecutionOwner(owner);
+      const serialized = canonical(result);
+      const current = this.rows('SELECT status,owner_generation,result_content_id FROM pi_tool_invocations WHERE operation_id=? AND invocation_id=?', [operationId, invocationId])[0];
+      if (current?.status === 'completed' && Number(current.owner_generation) === owner.generation) {
+        if (!current.result_content_id || this.content(String(current.result_content_id)).toString('utf8') !== serialized) throw new Error('idempotency_conflict');
+        return;
+      }
       this.assertPiToolInvocationActive(operationId, invocationId, owner);
-      this.db.run("UPDATE pi_tool_invocations SET status='completed',updated_at=? WHERE operation_id=? AND invocation_id=?", [Date.now(), operationId, invocationId]);
+      const resultContentId = this.putContent(serialized, 'application/json');
+      this.db.run("UPDATE pi_tool_invocations SET status='completed',result_content_id=?,updated_at=? WHERE operation_id=? AND invocation_id=?",
+        [resultContentId, Date.now(), operationId, invocationId]);
     });
   }
 
   public requestPiConversationCancellation(input: { operationId?: string; source?: string; sourceGeneration?: number }, owner: PiExecutionOwner): string[] {
     return this.transaction(() => {
       this.assertPiExecutionOwner(owner);
+      const cancelled = new Set<string>();
+      const ingressClauses = ["status IN ('admitted','cancelled')"], ingressValues: SqlValue[] = [];
+      if (input.operationId) { ingressClauses.push('operation_id=?'); ingressValues.push(input.operationId); }
+      const ingresses = this.rows(`SELECT operation_id,request_content_id FROM pi_conversation_ingress WHERE ${ingressClauses.join(' AND ')}`, ingressValues)
+        .filter(row => {
+          if (!input.source) return true;
+          const request = JSON.parse(this.content(String(row.request_content_id)).toString('utf8')) as PiConversationIngressInput;
+          return request.source === input.source && (input.sourceGeneration === undefined || request.sourceGeneration === input.sourceGeneration);
+        });
+      for (const row of ingresses) {
+        this.db.run("UPDATE pi_conversation_ingress SET status='cancelled',owner_generation=?,updated_at=? WHERE operation_id=? AND status='admitted'",
+          [owner.generation, Date.now(), row.operation_id]);
+        cancelled.add(String(row.operation_id));
+      }
       const clauses = ["status IN ('queued','accepted','running')"], values: SqlValue[] = [];
       if (input.operationId) { clauses.push('operation_id=?'); values.push(input.operationId); }
       if (input.source) { clauses.push('acceptance_content_id IN (SELECT id FROM contents)'); }
@@ -924,9 +1233,12 @@ export class UnifiedDataStore {
           const acceptance = JSON.parse(this.content(String(row.acceptance_content_id)).toString('utf8')) as PiConversationAcceptance;
           return acceptance.source === input.source && (input.sourceGeneration === undefined || acceptance.sourceGeneration === input.sourceGeneration);
         });
-      for (const row of rows) this.db.run(`UPDATE pi_conversation_operations SET
-        status=CASE WHEN status='queued' THEN 'aborted' ELSE status END,cancel_requested=1,updated_at=? WHERE operation_id=?`, [Date.now(), row.operation_id]);
-      return rows.map(row => String(row.operation_id));
+      for (const row of rows) {
+        this.db.run(`UPDATE pi_conversation_operations SET
+          status=CASE WHEN status='queued' THEN 'aborted' ELSE status END,cancel_requested=1,updated_at=? WHERE operation_id=?`, [Date.now(), row.operation_id]);
+        cancelled.add(String(row.operation_id));
+      }
+      return [...cancelled];
     });
   }
 
@@ -952,8 +1264,8 @@ export class UnifiedDataStore {
     for (const row of conversations) this.promoteNextPiConversationOperation(String(row.conversation_id), owner);
   }
 
-  public listRecoverablePiConversationOperations(): PiConversationOperation[] {
-    return this.rows("SELECT operation_id FROM pi_conversation_operations WHERE status IN ('accepted','running','completed') ORDER BY created_at,operation_id")
+  public listRecoverablePiConversationOperations(conversationId?: string): PiConversationOperation[] {
+    return this.rows(`SELECT operation_id FROM pi_conversation_operations WHERE status IN ('accepted','running','completed')${conversationId ? ' AND conversation_id=?' : ''} ORDER BY created_at,operation_id`, conversationId ? [conversationId] : [])
       .map(row => this.readPiConversationOperation(String(row.operation_id))!);
   }
 
@@ -1035,7 +1347,7 @@ export class UnifiedDataStore {
       const durableAnswer = typeof content === 'string' ? content : Array.isArray(content)
         ? content.filter((part): part is { type: string; text: string } => Boolean(part && typeof part === 'object' && (part as any).type === 'text')).map(part => String(part.text || '')).join('\n') : '';
       if (entry.message?.role !== 'assistant' || entry.message.stopReason === 'pending' || durableAnswer.trim() !== answer) throw new Error('pi_terminal_answer_mismatch');
-      const current = this.readIntelligenceConversation(operation.conversationId);
+      const current = this.readCompleteIntelligenceConversation(operation.conversationId);
       if ((current?.revision || 0) !== operation.baselineRevision) throw new Error('revision_conflict');
       const now = new Date().toISOString();
       const conversation: IntelligenceConversation = {
@@ -1132,6 +1444,8 @@ export class UnifiedDataStore {
         const batch = pruneIds.slice(offset, offset + 250), placeholders = batch.map(() => '?').join(',');
         prunedToolInvocations += Number(this.rows(`SELECT COUNT(*) AS count FROM pi_tool_invocations WHERE operation_id IN (${placeholders})`, batch)[0].count);
         this.db.run(`DELETE FROM pi_tool_invocations WHERE operation_id IN (${placeholders})`, batch);
+        this.db.run(`DELETE FROM pi_session_commits WHERE operation_id IN (${placeholders})`, batch);
+        this.db.run(`DELETE FROM pi_conversation_ingress WHERE operation_id IN (${placeholders})`, batch);
         this.db.run(`DELETE FROM pi_values WHERE session_id=? AND namespace='pi.result' AND key IN (${placeholders})`, [sessionId, ...batch]);
       }
       this.db.run(`INSERT INTO pi_retention_runs VALUES(?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET
@@ -1144,7 +1458,7 @@ export class UnifiedDataStore {
   }
 
   /** Pi core private durable state. Runtime remains the only database owner. */
-  public createPiSessionStorage(sessionId: string, owner?: PiExecutionOwner): PiSessionStorage {
+  public createPiSessionStorage(sessionId: string, owner?: PiExecutionOwner, defaultOperationId?: string): PiSessionStorage {
     if (!sessionId) throw new Error('pi_session_id_required');
     const emptyUsage = (): PiUsage => ({
       input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
@@ -1225,8 +1539,21 @@ export class UnifiedDataStore {
         ...(metadataRow.parent_session_id === null ? {} : { parentSessionId: String(metadataRow.parent_session_id) }),
         ...(metadataRow.legacy_parent_session_path === null ? {} : { legacyParentSessionPath: String(metadataRow.legacy_parent_session_path) })
       },
-      commit: async (writes: PiWrite[]): Promise<PiCommitResult> => this.transaction(() => {
+      commit: async (writes: PiWrite[], context?: PiCommitContext): Promise<PiCommitResult> => this.transaction(() => {
         assertWritable();
+        const operationId = String(context?.operationId || defaultOperationId || '');
+        if (operationId && !this.rows('SELECT 1 FROM pi_conversation_operations WHERE operation_id=? AND session_id=?', [operationId, sessionId])[0]) {
+          throw new Error('pi_commit_operation_session_mismatch');
+        }
+        const requestHash = digest(canonical(writes));
+        const commitId = String(context?.commitId || (operationId ? digest(canonical({ operationId, requestHash })) : ''));
+        if (commitId) {
+          const receipt = this.rows('SELECT request_hash,result_content_id FROM pi_session_commits WHERE session_id=? AND commit_id=?', [sessionId, commitId])[0];
+          if (receipt) {
+            if (String(receipt.request_hash) !== requestHash) throw new Error('idempotency_conflict');
+            return JSON.parse(this.content(String(receipt.result_content_id)).toString('utf8')) as PiCommitResult;
+          }
+        }
         const current = session();
         const firstSeq = Number(current.next_seq);
         const timestamp = Date.now();
@@ -1237,7 +1564,7 @@ export class UnifiedDataStore {
         for (const [index, write] of writes.entries()) {
           if (write.kind === 'entry' || write.kind === 'usage') {
             const id = write.kind === 'entry' ? write.entry.id : write.row.id;
-            if (knownIds.has(id) || introduced.has(id)) throw new Error('pi_storage_duplicate_id');
+            if (knownIds.has(id) || introduced.has(id)) throw new Error(`pi_storage_duplicate_id:${knownIds.has(id) ? 'committed' : 'batch'}:${id}`);
             introduced.add(id);
           }
           if (write.kind === 'entry' && write.entry.parentId !== null && !knownEntries.has(write.entry.parentId)) throw new Error('pi_storage_missing_parent');
@@ -1269,7 +1596,11 @@ export class UnifiedDataStore {
           }
         }
         this.db.run('UPDATE pi_sessions SET next_seq=?,message_count=?,usage_json=? WHERE session_id=?', [firstSeq + writes.length, messageCount, canonical(aggregate), sessionId]);
-        return { firstSeq, seqs, timestamp, stats: { messageCount, usage: aggregate } };
+        const result: PiCommitResult = { firstSeq, seqs, timestamp, stats: { messageCount, usage: aggregate }, ...(commitId ? { commitId } : {}) };
+        if (commitId) this.db.run(`INSERT INTO pi_session_commits(
+          session_id,commit_id,request_hash,result_content_id,created_at,operation_id,acknowledged) VALUES(?,?,?,?,?,?,0)`,
+          [sessionId, commitId, requestHash, this.putContent(canonical(result), 'application/json'), timestamp, operationId || null]);
+        return result;
       }),
       getEntries: async (ids: string[]): Promise<Map<string, PiEntry>> => {
         assertOpen();
@@ -1338,6 +1669,15 @@ export class UnifiedDataStore {
       getStats: async (): Promise<PiSessionStats> => { assertOpen(); return stats(); },
       close: async (): Promise<void> => { closed = true; }
     };
+  }
+  public acknowledgePiSessionCommit(sessionId: string, operationId: string, commitId: string, owner: PiExecutionOwner): void {
+    this.transaction(() => {
+      this.assertPiExecutionOwner(owner);
+      const receipt = this.rows('SELECT operation_id FROM pi_session_commits WHERE session_id=? AND commit_id=?', [sessionId, commitId])[0];
+      if (!receipt) throw new Error('pi_commit_receipt_missing');
+      if (String(receipt.operation_id || '') !== operationId) throw new Error('pi_commit_operation_mismatch');
+      this.db.run('UPDATE pi_session_commits SET acknowledged=1 WHERE session_id=? AND commit_id=?', [sessionId, commitId]);
+    });
   }
   public enqueueMemoryMigration(args: Record<string, unknown>, idempotencyKey: string): MigrationJob {
     if (!idempotencyKey || typeof args.sourceRoot !== 'string' || !args.sourceRoot) throw new Error('invalid_migration_request');
@@ -1631,7 +1971,7 @@ export class UnifiedDataStore {
     return row ? this.projectRecyclingItem(row) : null;
   }
   private projectRecyclingItem(row: Record<string, SqlValue>): RecyclingItem {
-    return { itemId: String(row.id), planId: String(row.plan_id), identity: String(row.source_identity), key: String(row.source_key), hash: String(row.source_hash), path: String(row.authorized_path ?? row.original_path), restorePath: row.restore_path === null ? null : String(row.restore_path), bytes: Number(row.byte_count), status: row.status as RecyclingItem['status'], error: row.error === null ? null : String(row.error) };
+    return { itemId: String(row.id), planId: String(row.plan_id), identity: String(row.source_identity), key: String(row.source_key), hash: String(row.source_hash), path: String(row.authorized_path ?? row.original_path), restorePath: row.restore_path === null ? null : String(row.restore_path), restoredHash: row.restored_hash === null ? null : String(row.restored_hash), bytes: Number(row.byte_count), status: row.status as RecyclingItem['status'], error: row.error === null ? null : String(row.error) };
   }
   public createRecyclingPlan(files: Array<Omit<RecyclingItem, 'itemId' | 'planId' | 'status' | 'error'>>): { planId: string | null; files: RecyclingItem[] } {
     return this.transaction(() => {
@@ -1667,6 +2007,44 @@ export class UnifiedDataStore {
     const bytes = this.content(String(item.source_content_id));
     if (digest(bytes) !== item.source_hash) throw new Error('recycling_snapshot_corrupt');
     return { bytes, hash: String(item.source_hash) };
+  }
+  public recyclingSnapshotMetadata(itemId: string): { hash: string; bytes: number } {
+    const item = this.rows('SELECT r.source_hash,c.sha256,c.byte_length FROM migration_recycling r JOIN contents c ON c.id=r.source_content_id WHERE r.id=?', [itemId])[0];
+    if (!item) throw new Error('recycling_item_missing');
+    if (item.sha256 !== item.source_hash) throw new Error('recycling_snapshot_corrupt');
+    return { hash: String(item.source_hash), bytes: Number(item.byte_length) };
+  }
+  public restoreRecyclingFileInMaintenance(input: { itemId: string; destination: string; expectedHash: string; sourcePath?: string; symbolicLink?: boolean; alreadyRestored?: boolean }): Promise<{ path: string; receiptPath: string; sha256: string; bytes: number; sourceDevice?: number; sourceInode?: number }> | null {
+    return this.maintenanceCompute?.restoreRecyclingFile?.(input) || null;
+  }
+  public cleanupRecyclingRestoreInMaintenance(input: { itemId: string; destination: string; receiptPath: string; heldPath?: string; symbolicLink?: boolean; expectedHash?: string; sourceDevice?: number; sourceInode?: number }): Promise<void> | null {
+    return this.maintenanceCompute?.cleanupRecyclingRestore?.(input) || null;
+  }
+  public commitMaintenanceRecyclingRestore(itemId: string, input: { destination: string; receiptPath: string; heldPath?: string; restoredHash: string; sourceDevice?: number; sourceInode?: number }): void {
+    this.transaction(() => {
+      this.db.run("UPDATE migration_recycling SET status='restoring',restored_hash=?,error=NULL,updated_at=? WHERE id=?", [input.restoredHash, Date.now(), itemId]);
+      if (this.db.getRowsModified() !== 1) throw new Error('recycling_item_missing');
+      this.db.run(`INSERT INTO maintenance_recycling_restore_cleanup
+        (item_id,destination,receipt_path,held_path,restored_hash,source_device,source_inode,created_at) VALUES(?,?,?,?,?,?,?,?)
+        ON CONFLICT(item_id) DO UPDATE SET destination=excluded.destination,receipt_path=excluded.receipt_path,held_path=excluded.held_path,
+          restored_hash=excluded.restored_hash,source_device=excluded.source_device,source_inode=excluded.source_inode,created_at=excluded.created_at`,
+      [itemId, input.destination, input.receiptPath, input.heldPath || null, input.restoredHash,
+        input.sourceDevice === undefined ? null : String(input.sourceDevice), input.sourceInode === undefined ? null : String(input.sourceInode), Date.now()]);
+    });
+  }
+  public maintenanceRecyclingRestoreCleanup(itemId: string): { destination: string; receiptPath: string; heldPath?: string; restoredHash: string; sourceDevice?: number; sourceInode?: number } | null {
+    const row = this.rows('SELECT * FROM maintenance_recycling_restore_cleanup WHERE item_id=?', [itemId])[0];
+    return row ? { destination: String(row.destination), receiptPath: String(row.receipt_path),
+      ...(row.held_path === null ? {} : { heldPath: String(row.held_path) }), restoredHash: String(row.restored_hash),
+      ...(row.source_device === null ? {} : { sourceDevice: Number(row.source_device), sourceInode: Number(row.source_inode) }) } : null;
+  }
+  public settleMaintenanceRecyclingRestoreCleanup(itemId: string): void {
+    this.transaction(() => {
+      this.db.run("UPDATE migration_recycling SET status='restored',error=NULL,updated_at=? WHERE id=? AND status IN ('restoring','restored')", [Date.now(), itemId]);
+      if (this.db.getRowsModified() !== 1) throw new Error('recycling_state_invalid');
+      this.db.run('DELETE FROM maintenance_recycling_restore_cleanup WHERE item_id=?', [itemId]);
+      if (this.db.getRowsModified() !== 1) throw new Error('recycling_cleanup_receipt_missing');
+    });
   }
   public approveRecyclingFiles(files: Array<{ itemId: string; expectedPath: string; path: string }>): void {
     this.transaction(() => {
@@ -1860,6 +2238,19 @@ export class UnifiedDataStore {
       throw error;
     } finally { this.transactionDepth--; }
   }
+  public async runAtomicCommand<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.transactionDepth) throw new Error('atomic_command_nested');
+    this.db.run('BEGIN IMMEDIATE');
+    this.transactionDepth++;
+    try {
+      const result = await operation();
+      this.db.run('COMMIT');
+      return result;
+    } catch (error) {
+      try { this.db.run('ROLLBACK'); } catch { /* Preserve the command's root error. */ }
+      throw error;
+    } finally { this.transactionDepth--; }
+  }
   private readTransaction<T>(operation: () => T): T {
     if (this.transactionDepth) return operation();
     this.db.run('BEGIN');
@@ -1925,6 +2316,101 @@ export class UnifiedDataStore {
       return id;
     }
     this.db.run('INSERT INTO contents VALUES(?,?,?,?,?,?,?,NULL)', [id, hash, mimeType, storedEncoding, bytes.length, storedLength, stored]);
+    return id;
+  }
+  private async putPreparedContent(prepared: PreparedStoredContent, stagingKey: string): Promise<string> {
+    if (!/^[a-f0-9]{64}$/.test(prepared.sha256) || !prepared.mimeType || !prepared.encoding
+      || !Number.isSafeInteger(prepared.byteLength) || prepared.byteLength < 0
+      || !Number.isSafeInteger(prepared.storedByteLength) || prepared.storedByteLength < 0
+      || !(prepared.data instanceof Uint8Array) || !Array.isArray(prepared.chunks)) throw new Error('prepared_content_invalid');
+    const baseEncoding = prepared.encoding.replace(/^(?:gzip|chunked):/, '');
+    const existing = this.rows('SELECT id FROM contents WHERE sha256=? AND mime_type=? AND encoding IN (?,?,?)', [prepared.sha256, prepared.mimeType, baseEncoding, `gzip:${baseEncoding}`, `chunked:${baseEncoding}`])[0];
+    if (existing) {
+      this.assertContentIntegrity(String(existing.id));
+      return String(existing.id);
+    }
+    const id = stablePortableUuid(`prepared-content:${stagingKey}:${prepared.sha256}:${prepared.mimeType}:${baseEncoding}`);
+    const current = this.rows('SELECT sha256,mime_type FROM contents WHERE id=?', [id])[0];
+    if (current && (String(current.sha256) !== prepared.sha256 || String(current.mime_type) !== prepared.mimeType)) throw new Error('prepared_content_collision');
+    this.transaction(() => {
+      this.db.run('DELETE FROM content_chunks WHERE content_id=?', [id]);
+      if (current) this.db.run('UPDATE contents SET encoding=?,byte_length=?,stored_byte_length=0,data=?,chunk_index_json=NULL WHERE id=?', [`staging:${baseEncoding}`, prepared.byteLength, Buffer.alloc(0), id]);
+      else this.db.run('INSERT INTO contents VALUES(?,?,?,?,?,?,?,NULL)', [id, prepared.sha256, prepared.mimeType, `staging:${baseEncoding}`, prepared.byteLength, 0, Buffer.alloc(0)]);
+    });
+    if (prepared.encoding.startsWith('chunked:')) {
+      let index: ContentChunk[];
+      try { index = JSON.parse(String(prepared.chunkIndexJson)); } catch { throw new Error('prepared_content_invalid'); }
+      if (!index.length || index.length !== prepared.chunks.length || prepared.data.byteLength !== 0) throw new Error('prepared_content_invalid');
+      for (let offset = 0; offset < prepared.chunks.length; offset += 16) {
+        this.transaction(() => {
+          for (const chunk of prepared.chunks.slice(offset, offset + 16)) {
+            if (!Number.isSafeInteger(chunk.ordinal) || chunk.ordinal < 0 || !(chunk.data instanceof Uint8Array)) throw new Error('prepared_content_invalid');
+            this.db.run('INSERT INTO content_chunks VALUES(?,?,?) ON CONFLICT(content_id,ordinal) DO UPDATE SET data=excluded.data', [id, chunk.ordinal, chunk.data]);
+          }
+        });
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      const stored = this.rows('SELECT COUNT(*) AS count,COALESCE(SUM(length(data)),0) AS bytes FROM content_chunks WHERE content_id=?', [id])[0];
+      if (Number(stored.count) !== prepared.chunks.length || Number(stored.bytes) !== prepared.storedByteLength) throw new Error('prepared_content_invalid');
+    } else if (prepared.chunks.length || prepared.chunkIndexJson !== null || prepared.data.byteLength !== prepared.storedByteLength) {
+      throw new Error('prepared_content_invalid');
+    }
+    this.transaction(() => {
+      this.db.run('UPDATE contents SET encoding=?,byte_length=?,stored_byte_length=?,data=?,chunk_index_json=? WHERE id=?', [prepared.encoding, prepared.byteLength,
+        prepared.storedByteLength, prepared.data, prepared.chunkIndexJson, id]);
+      this.db.run('DELETE FROM database_storage_cleanup_candidates WHERE content_id=?', [id]);
+    });
+    return id;
+  }
+  private async putStagedProjectExportContent(staged: StagedProjectExport, stagingKey: string): Promise<string> {
+    const stagingRoot = path.join(this.root, '.solomap-maintenance-staging');
+    const stagedPath = path.resolve(staged.path), manifestPath = path.resolve(staged.contentManifestPath), stageDirectory = path.resolve(staged.stageDirectory);
+    if (path.dirname(stageDirectory) !== stagingRoot || path.dirname(stagedPath) !== stageDirectory || path.basename(stagedPath) !== 'archive.stage'
+      || !/^[a-f0-9]{64}$/.test(staged.sha256) || !Number.isSafeInteger(staged.bytes) || staged.bytes < 0
+      || path.dirname(path.dirname(manifestPath)) !== stageDirectory || path.basename(manifestPath) !== 'manifest.json') throw new Error('project_export_staging_invalid');
+    const stat = fs.lstatSync(stagedPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== staged.bytes) throw new Error('project_export_staging_invalid');
+    const manifestStat = fs.lstatSync(manifestPath);
+    if (!manifestStat.isFile() || manifestStat.isSymbolicLink()) throw new Error('project_export_staging_invalid');
+    const manifestBytes = await fs.promises.readFile(manifestPath);
+    if (!/^[a-f0-9]{64}$/.test(staged.manifestSha256) || digest(manifestBytes) !== staged.manifestSha256) throw new Error('project_export_staging_invalid');
+    const manifest = JSON.parse(manifestBytes.toString('utf8')) as Omit<PreparedStoredContent, 'data' | 'chunks'> & { data: string; chunks: Array<{ ordinal: number; file: string; bytes: number; sha256: string }> };
+    if (manifest.sha256 !== staged.sha256 || manifest.mimeType !== 'application/vnd.solomap.project+json'
+      || manifest.byteLength !== staged.bytes || !Array.isArray(manifest.chunks)) throw new Error('project_export_staging_invalid');
+    const existing = this.rows("SELECT id FROM contents WHERE sha256=? AND mime_type=? AND encoding IN ('binary','gzip:binary','chunked:binary')", [staged.sha256, 'application/vnd.solomap.project+json'])[0];
+    if (existing) {
+      await this.maintenanceCompute!.verifyProjectExportContent(String(existing.id), staged.sha256, staged.bytes);
+      return String(existing.id);
+    }
+    const id = stablePortableUuid(`staged-project-export:${stagingKey}:${staged.sha256}`);
+    const current = this.rows('SELECT sha256,mime_type FROM contents WHERE id=?', [id])[0];
+    if (current && (String(current.sha256) !== staged.sha256 || String(current.mime_type) !== 'application/vnd.solomap.project+json')) throw new Error('prepared_content_collision');
+    this.transaction(() => {
+      this.db.run('DELETE FROM content_chunks WHERE content_id=?', [id]);
+      if (current) this.db.run("UPDATE contents SET encoding='staging:binary',byte_length=?,stored_byte_length=0,data=?,chunk_index_json=NULL WHERE id=?", [manifest.byteLength, Buffer.alloc(0), id]);
+      else this.db.run("INSERT INTO contents VALUES(?,?,?,'staging:binary',?,0,?,NULL)", [id, staged.sha256, manifest.mimeType, manifest.byteLength, Buffer.alloc(0)]);
+    });
+    for (let offset = 0; offset < manifest.chunks.length; offset += 16) {
+      const batch = await Promise.all(manifest.chunks.slice(offset, offset + 16).map(async (chunk, index) => {
+        const file = path.resolve(chunk.file);
+        if (chunk.ordinal !== offset + index || path.dirname(file) !== path.dirname(manifestPath) || !Number.isSafeInteger(chunk.bytes) || chunk.bytes < 1 || chunk.bytes > 65536 || !/^[a-f0-9]{64}$/.test(chunk.sha256)) throw new Error('project_export_staging_invalid');
+        const chunkStat = fs.lstatSync(file);
+        if (!chunkStat.isFile() || chunkStat.isSymbolicLink() || chunkStat.size !== chunk.bytes) throw new Error('project_export_staging_invalid');
+        const data = await fs.promises.readFile(file);
+        if (digest(data) !== chunk.sha256) throw new Error('project_export_staging_invalid');
+        return { ordinal: chunk.ordinal, data };
+      }));
+      this.transaction(() => { for (const chunk of batch) this.db.run('INSERT INTO content_chunks VALUES(?,?,?)', [id, chunk.ordinal, chunk.data]); });
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+    const inline = Buffer.from(String(manifest.data || ''), 'base64');
+    if (manifest.encoding.startsWith('chunked:') ? inline.length !== 0 || !manifest.chunks.length : manifest.chunks.length !== 0 || inline.length !== manifest.storedByteLength) throw new Error('project_export_staging_invalid');
+    if (manifest.chunks.reduce((sum, chunk) => sum + chunk.bytes, 0) !== manifest.storedByteLength) throw new Error('project_export_staging_invalid');
+    this.transaction(() => {
+      this.db.run('UPDATE contents SET encoding=?,byte_length=?,stored_byte_length=?,data=?,chunk_index_json=? WHERE id=?', [manifest.encoding, manifest.byteLength, manifest.storedByteLength, inline, manifest.chunkIndexJson, id]);
+      this.db.run('DELETE FROM database_storage_cleanup_candidates WHERE content_id=?', [id]);
+    });
+    await this.maintenanceCompute!.verifyProjectExportContent(id, staged.sha256, staged.bytes);
     return id;
   }
   private assertContentIntegrity(id: string): void {
@@ -2251,13 +2737,15 @@ export class UnifiedDataStore {
       return this.capabilityOperation(this.rows('SELECT * FROM capability_operations WHERE id=?', [input.operationId])[0]);
     });
   }
-  public readCapabilityOperations(input: { activeOnly?: boolean; operationId?: string; recentLimit?: number } = {}): CapabilityOperation[] {
+  public readCapabilityOperations(input: { activeOnly?: boolean; terminalOnly?: boolean; operationId?: string; recentLimit?: number; afterOrdinal?: number; limit?: number } = {}): CapabilityOperation[] {
     if (input.operationId) return this.rows('SELECT * FROM capability_operations WHERE id=?', [input.operationId]).map(row => this.capabilityOperation(row));
-    if (input.activeOnly) return this.rows("SELECT * FROM capability_operations WHERE status IN ('pending','running') ORDER BY ordinal").map(row => this.capabilityOperation(row));
-    const limit = input.recentLimit === undefined ? 0 : Math.max(1, Math.min(500, Number(input.recentLimit || 100)));
-    if (!limit) return this.rows('SELECT * FROM capability_operations ORDER BY ordinal').map(row => this.capabilityOperation(row));
-    const active = this.rows("SELECT * FROM capability_operations WHERE status IN ('pending','running') ORDER BY ordinal");
-    const recent = this.rows("SELECT * FROM capability_operations WHERE status NOT IN ('pending','running') ORDER BY ordinal DESC LIMIT ?", [limit]).reverse();
+    const pageLimit = Math.max(1, Math.min(500, Number(input.limit || 100)));
+    const afterOrdinal = Math.max(0, Number(input.afterOrdinal || 0));
+    if (input.activeOnly) return this.rows("SELECT * FROM capability_operations WHERE status IN ('pending','running') AND ordinal>? ORDER BY ordinal LIMIT ?", [afterOrdinal, pageLimit]).map(row => this.capabilityOperation(row));
+    const recentLimit = Math.max(1, Math.min(500, Number(input.recentLimit || 100)));
+    if (input.terminalOnly) return this.rows("SELECT * FROM capability_operations WHERE status NOT IN ('pending','running') ORDER BY ordinal DESC LIMIT ?", [recentLimit]).reverse().map(row => this.capabilityOperation(row));
+    const active = this.rows("SELECT * FROM capability_operations WHERE status IN ('pending','running') AND ordinal>? ORDER BY ordinal LIMIT ?", [afterOrdinal, pageLimit]);
+    const recent = this.rows("SELECT * FROM capability_operations WHERE status NOT IN ('pending','running') ORDER BY ordinal DESC LIMIT ?", [recentLimit]).reverse();
     return [...active, ...recent].sort((left, right) => Number(left.ordinal) - Number(right.ordinal)).map(row => this.capabilityOperation(row));
   }
   public readCapabilityOperationRunState(input: { operationId: string }): { attached: boolean; terminal: boolean; status: string; exitCode: number | null } {
@@ -2320,7 +2808,7 @@ export class UnifiedDataStore {
   }
   public readCapabilityRegistry(input: { kind: string; knownSequence?: number; knownEpoch?: string }): { kind: string; sourceSequence: number; readEpoch: string; legacySkillsPending?: true; entries?: Array<{ objectId: string; revision: number; entry: Record<string, unknown> }>; unchanged?: true } {
     if (!['skill', 'mcp', 'enhancement'].includes(input.kind)) throw new Error('capability_kind_invalid');
-    return this.transaction(() => {
+    return this.readTransaction(() => {
       const sourceSequence = Number(this.rows('SELECT COALESCE(MAX(e.sequence),0) AS value FROM capability_registry c JOIN events e ON e.subject_id=c.integration_id WHERE c.kind=?', [input.kind])[0].value);
       if (input.kind === 'skill' && this.capabilityLegacySkillsPending === undefined) {
         // Presence is only a migration barrier. Live choices still come solely
@@ -2703,6 +3191,7 @@ export class UnifiedDataStore {
     const hostReview = object.kind === 'review_batch' && this.rows('SELECT 1 FROM learning_review_controls WHERE batch_id=?', [object.objectId]).length > 0;
     const data = hostReview ? agentReadableObject({ ...object, projection: { ...object.projection, hostReview: true } }).data : object.data;
     this.db.run('INSERT OR REPLACE INTO object_search(rowid,terms) VALUES(?,?)', [rowid, indexTokens(canonical(data))]);
+    this.generationSearchObjectIds?.add(object.objectId);
   }
   private recordMutation(input: unknown, idempotencyKey: string, reason: string, mutation: () => DataObject, enqueue?: (eventId: string, object: DataObject) => void, updateSearch = true, importedSource?: ImportedSource): WriteReceipt {
     if (!idempotencyKey.trim()) throw new Error('idempotency_key_required');
@@ -3439,11 +3928,19 @@ export class UnifiedDataStore {
 
   public appendDiagnosticEvent(input: { kind: 'error' | 'operation'; occurredAt: string; scope: string; payload: Record<string, unknown>; idempotencyKey: string }): Record<string, unknown> {
     if (!['error', 'operation'].includes(input.kind) || !input.occurredAt || !input.scope || !input.payload || typeof input.payload !== 'object' || !input.idempotencyKey) throw new Error('invalid_diagnostic_event');
-    const receipt = this.recordMutation(input, input.idempotencyKey, 'diagnostic_event', () => {
-      this.db.run('INSERT INTO diagnostic_events(kind,occurred_at,scope,payload_json) VALUES(?,?,?,?)', [input.kind, input.occurredAt, input.scope, canonical(input.payload)]);
-      return this.createNotificationEvidence('diagnostic_event', { kind: input.kind, occurredAt: input.occurredAt, scope: input.scope, payload: input.payload });
+    return this.transaction(() => {
+      const payloadJson = canonical(input.payload);
+      const existing = this.rows('SELECT kind,occurred_at,scope,payload_json FROM diagnostic_events WHERE idempotency_key=?', [input.idempotencyKey])[0];
+      if (existing) {
+        if (existing.kind !== input.kind || existing.occurred_at !== input.occurredAt || existing.scope !== input.scope || existing.payload_json !== payloadJson) {
+          throw new Error('idempotency_conflict');
+        }
+      } else {
+        this.db.run('INSERT INTO diagnostic_events(kind,occurred_at,scope,payload_json,idempotency_key) VALUES(?,?,?,?,?)',
+          [input.kind, input.occurredAt, input.scope, payloadJson, input.idempotencyKey]);
+      }
+      return { kind: input.kind, occurredAt: input.occurredAt, scope: input.scope, payload: input.payload, idempotencyKey: input.idempotencyKey };
     });
-    return JSON.parse(String(this.read(receipt.objectId, receipt.revision).data.content));
   }
 
   public readDiagnosticEvents(input: { kind?: 'error' | 'operation'; limit?: number } = {}): { items: Record<string, unknown>[] } {
@@ -3590,10 +4087,28 @@ export class UnifiedDataStore {
     });
   }
 
-  public readScheduleLedger(): { tasks: Array<Record<string, unknown>>; failures: Array<Record<string, unknown>> } {
-    const rows = this.rows("SELECT x.*,b.external_id FROM scheduled_occurrences x JOIN schedule_bindings b ON b.schedule_id=x.schedule_id WHERE x.status IN ('pending','running','failed') ORDER BY x.due_at,x.id");
+  public readScheduleLedger(input: { cursor?: string; limit?: number; taskIds?: string[] } = {}): { tasks: Array<Record<string, unknown>>; failures: Array<Record<string, unknown>>; nextCursor: string | null } {
+    const limit = input.taskIds ? input.taskIds.length : Number(input.limit || 100);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200 || input.taskIds && (input.taskIds.some(id => typeof id !== 'string' || !id) || new Set(input.taskIds).size !== input.taskIds.length)) throw new Error('invalid_schedule_ledger_page');
+    let afterDueAt = -1, afterId = '';
+    if (input.cursor) {
+      try {
+        const cursor = JSON.parse(Buffer.from(input.cursor, 'base64url').toString('utf8')) as { dueAt?: unknown; id?: unknown };
+        afterDueAt = Number(cursor.dueAt); afterId = String(cursor.id || '');
+        if (!Number.isFinite(afterDueAt) || !afterId) throw new Error('invalid');
+      } catch { throw new Error('invalid_schedule_ledger_cursor'); }
+    }
+    const taskIds = input.taskIds || [];
+    const rows = this.rows(`SELECT x.*,b.external_id FROM scheduled_occurrences x JOIN schedule_bindings b ON b.schedule_id=x.schedule_id
+      WHERE ${taskIds.length
+        ? `x.status IN ('pending','running') AND b.external_id IN (${taskIds.map(() => '?').join(',')}) AND x.id=(SELECT current.id FROM scheduled_occurrences current WHERE current.schedule_id=x.schedule_id AND current.status IN ('pending','running') ORDER BY current.due_at,current.id LIMIT 1)`
+        : "x.status IN ('pending','running','failed') AND (x.due_at>? OR (x.due_at=? AND x.id>?))"}
+      ORDER BY x.due_at,x.id LIMIT ?`, taskIds.length ? [...taskIds, limit + 1] : [afterDueAt, afterDueAt, afterId, limit + 1]);
+    const page = rows.slice(0, limit);
     const project = (row: Record<string, SqlValue>) => ({ occurrenceId: String(row.id), taskId: String(row.external_id), dueAt: new Date(Number(row.due_at)).toISOString(), status: String(row.status), attempts: Number(row.attempts), generation: Number(row.generation), task: JSON.parse(this.content(String(row.payload_content_id)).toString('utf8')) });
-    return { tasks: rows.filter(row => row.status !== 'failed').map(project), failures: rows.filter(row => row.status === 'failed').map(project) };
+    const last = page[page.length - 1];
+    return { tasks: page.filter(row => row.status !== 'failed').map(project), failures: page.filter(row => row.status === 'failed').map(project),
+      nextCursor: rows.length > limit && last ? Buffer.from(canonical({ dueAt: Number(last.due_at), id: String(last.id) })).toString('base64url') : null };
   }
 
   public restoreLegacyScheduledOccurrences(input: { records: Array<{ scheduleId: string; occurrenceKey: string; dueAt: number; attempts: number; state: 'pending' | 'failed'; task: Record<string, unknown> }>; idempotencyKey: string }): void {
@@ -4187,6 +4702,7 @@ export class UnifiedDataStore {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`project_identity_invalid: ${error instanceof Error ? error.message : String(error)}`);
     }
+    if (identityId && this.rows('SELECT 1 FROM project_import_staging WHERE project_id=?', [identityId]).length) throw new Error('project_import_in_progress');
     const location = this.rows("SELECT * FROM project_locations WHERE device_id=? AND root_path=? AND status='active'", [this.deviceId, root])[0];
     if (identityId && location && identityId !== location.project_id) throw new Error('project_identity_conflict');
     const projectId = identityId || (location ? String(location.project_id) : crypto.randomUUID());
@@ -4302,7 +4818,7 @@ export class UnifiedDataStore {
   private staleSolomapTestProjectRegistrations(): Array<{ projectId: string; root: string }> {
     const projectReferences = this.projectReferenceColumnsCache ||= this.rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
       .flatMap(row => this.rows(`PRAGMA foreign_key_list(${quoteSqlIdentifier(String(row.name))})`)
-        .filter(foreignKey => foreignKey.table === 'projects' && foreignKey.to === 'id' && !['projects', 'project_locations'].includes(String(row.name)))
+        .filter(foreignKey => foreignKey.table === 'projects' && foreignKey.to === 'id' && !['projects', 'project_locations', 'sidebar_core_projection_state'].includes(String(row.name)))
         .map(foreignKey => ({ table: String(row.name), column: String(foreignKey.from) })));
     const objectReferences = this.projectObjectReferenceColumnsCache ||= this.rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
       .flatMap(row => this.rows(`PRAGMA foreign_key_list(${quoteSqlIdentifier(String(row.name))})`)
@@ -4996,7 +5512,7 @@ export class UnifiedDataStore {
     } catch { return false; }
   }
   public readLearningOverview(): LearningOverview {
-    return this.transaction(() => {
+    return this.readTransaction(() => {
       const overview: LearningOverview = { eventCount: 0, candidateCount: 0, candidateDecisionCount: 0, skippedCandidateDecisionCount: 0, approvedCount: 0, promotedCount: 0, projectSignals: [] };
       const projects = new Map(this.rows(`SELECT p.id,p.name,(SELECT root_path FROM project_locations l WHERE l.project_id=p.id AND l.device_id=? AND l.status='active' ORDER BY root_path LIMIT 1) AS root FROM projects p`, [this.deviceId]).map(row => [String(row.id), row]));
       const signals = new Map<string, LearningOverview['projectSignals'][number]>();
@@ -5143,12 +5659,18 @@ export class UnifiedDataStore {
     if (!row) return null;
     return { state: this.readRunState(projectId, Number(row.execution_log_id)), turnId: String(row.turn_id) };
   }
-  public listConversationRunStates(projectId: string, executionLogId: number): { items: RunState[] } {
+  public listConversationRunStates(projectId: string, executionLogId: number, input: { cursor?: number; limit?: number } = {}): { items: RunState[]; nextCursor: number | null } {
     const source = this.resolveRunConversation(projectId, executionLogId);
-    if (!source) return { items: [] };
+    if (!source) return { items: [], nextCursor: null };
+    const limit = Math.max(1, Math.min(200, Number(input.limit || 200)));
+    const cursor = input.cursor === undefined ? null : Number(input.cursor);
+    if (cursor !== null && (!Number.isInteger(cursor) || cursor < 1)) throw new Error('invalid_conversation_cursor');
     const rows = this.rows(`SELECT c.execution_log_id FROM run_control c JOIN runs r ON r.id=c.run_id
-      WHERE c.project_id=? AND r.conversation_id=? ORDER BY c.execution_log_id DESC`, [projectId, source.state.conversationId]);
-    return { items: rows.map(row => this.readRunState(projectId, Number(row.execution_log_id))) };
+      WHERE c.project_id=? AND r.conversation_id=?${cursor === null ? '' : ' AND c.execution_log_id<?'}
+      ORDER BY c.execution_log_id DESC LIMIT ?`, [projectId, source.state.conversationId, ...(cursor === null ? [] : [cursor]), limit + 1]);
+    const page = rows.slice(0, limit);
+    return { items: page.map(row => this.readRunState(projectId, Number(row.execution_log_id))),
+      nextCursor: rows.length > limit ? Number(page.at(-1)?.execution_log_id || 0) : null };
   }
   public resolveRunConversationTurn(projectId: string, executionLogId: number): { state: RunState; turnId: string } | null {
     if (!Number.isInteger(executionLogId) || executionLogId < 1) throw new Error('invalid_execution_log_id');
@@ -5889,7 +6411,7 @@ export class UnifiedDataStore {
       const effectKinds = new Set<string>();
       const tracked = this.rows("SELECT 1 FROM mcp_conversation_launches l JOIN run_launch_intents i ON i.project_id=l.project_id AND i.launch_intent_id=l.launch_intent_id WHERE i.run_id=? AND l.source='telegram'", [row.run_id]).length > 0;
       for (const effect of input.effects || []) {
-        if (!effect || !['roadmap', 'review', 'revision', 'refresh', 'telegram', 'automation', 'flow'].includes(effect.kind) || !effect.payload || typeof effect.payload !== 'object' || Array.isArray(effect.payload) || effectKinds.has(effect.kind)) throw new Error('invalid_run_effect');
+        if (!effect || !['roadmap', 'review', 'revision', 'refresh', 'telegram', 'automation', 'flow', 'documentation'].includes(effect.kind) || !effect.payload || typeof effect.payload !== 'object' || Array.isArray(effect.payload) || effectKinds.has(effect.kind)) throw new Error('invalid_run_effect');
         effectKinds.add(effect.kind);
         if (tracked && effect.kind === 'telegram') continue;
         if (previousTurn && effect.kind !== 'refresh') continue;
@@ -5996,30 +6518,51 @@ export class UnifiedDataStore {
     const missing = Number(summary.missing || 0);
     return { digestCount: Number(summary.digests), indexedCount: Number(this.rows('SELECT COUNT(*) AS count FROM project_run_indexes WHERE project_id=?', [projectId])[0].count), missingDigestCount: missing, backfilledCount: 0, ok: missing === 0, error: '' };
   }
+  public prepareRunIndexBackfill(projectId: string, limit = 1): Array<{
+    objectId: string;
+    executionLogId: number;
+    record: RunIndexRecord;
+    files: RunIndexFile[];
+    signals: RunIndexSignal[];
+    tokenSource: { key: string; hash: string } | null;
+  }> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 20) throw new Error('invalid_backfill_limit');
+    const missing = this.rows(`SELECT d.* FROM run_digests d JOIN run_digest_sources c ON c.object_id=d.object_id AND c.project_id=d.project_id
+      LEFT JOIN project_run_indexes i ON i.project_id=d.project_id AND i.execution_log_id=d.execution_log_id
+      LEFT JOIN run_digest_index_sources p ON p.project_id=d.project_id AND p.execution_log_id=d.execution_log_id
+      WHERE d.project_id=? AND (i.execution_log_id IS NULL OR (p.object_id IS NOT NULL AND p.object_id<>d.object_id) OR (p.object_id IS NULL AND EXISTS(SELECT 1 FROM run_index_import_sources h WHERE h.project_id=d.project_id AND h.execution_log_id=d.execution_log_id AND h.priority=10)))
+        AND d.rowid=(SELECT MAX(n.rowid) FROM run_digests n JOIN run_digest_sources nc ON nc.object_id=n.object_id AND nc.project_id=n.project_id WHERE n.project_id=d.project_id AND n.execution_log_id=d.execution_log_id)
+      ORDER BY d.rowid DESC LIMIT ?`, [projectId, limit]);
+    return missing.map(row => {
+      const executionLogId = Number(row.execution_log_id);
+      const index = digestToRunIndex(this.runDigestReference(row).digest);
+      const tokenSource = this.enrichRunIndexFromArchivedOutput(projectId, index.record);
+      return { objectId: String(row.object_id), executionLogId, record: index.record, files: index.files, signals: index.signals, tokenSource };
+    });
+  }
+  public commitPreparedRunIndexBackfill(projectId: string, prepared: ReturnType<UnifiedDataStore['prepareRunIndexBackfill']>[number]): boolean {
+    return this.transaction(() => {
+      const latest = this.rows('SELECT d.object_id FROM run_digests d JOIN run_digest_sources c ON c.object_id=d.object_id WHERE d.project_id=? AND d.execution_log_id=? ORDER BY d.rowid DESC LIMIT 1', [projectId, prepared.executionLogId])[0];
+      if (!latest || latest.object_id !== prepared.objectId) return false;
+      this.upsertProjectRunIndex(projectId, prepared.record, prepared.files, prepared.signals);
+      this.db.run('DELETE FROM run_index_import_sources WHERE project_id=? AND execution_log_id=?', [projectId, prepared.executionLogId]);
+      if (prepared.tokenSource) this.db.run('INSERT INTO run_index_import_sources VALUES(?,?,?,?,?,?,10)', [projectId, prepared.executionLogId, `archived-run-output:${projectId}`, prepared.tokenSource.key, prepared.tokenSource.hash, digest(canonical([prepared.record, prepared.files, prepared.signals]))]);
+      this.db.run('INSERT INTO run_digest_index_sources VALUES(?,?,?) ON CONFLICT(project_id,execution_log_id) DO UPDATE SET object_id=excluded.object_id', [projectId, prepared.executionLogId, prepared.objectId]);
+      return true;
+    });
+  }
   public backfillRunIndexes(projectId: string, limit?: number): ReturnType<UnifiedDataStore['readRunIndexHealth']> {
     if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) throw new Error('invalid_backfill_limit');
-    return this.transaction(() => {
-      const missing = this.rows(`SELECT d.* FROM run_digests d JOIN run_digest_sources c ON c.object_id=d.object_id AND c.project_id=d.project_id
-        LEFT JOIN project_run_indexes i ON i.project_id=d.project_id AND i.execution_log_id=d.execution_log_id
-        LEFT JOIN run_digest_index_sources p ON p.project_id=d.project_id AND p.execution_log_id=d.execution_log_id
-        WHERE d.project_id=? AND (i.execution_log_id IS NULL OR (p.object_id IS NOT NULL AND p.object_id<>d.object_id) OR (p.object_id IS NULL AND EXISTS(SELECT 1 FROM run_index_import_sources h WHERE h.project_id=d.project_id AND h.execution_log_id=d.execution_log_id AND h.priority=10)))
-          AND d.rowid=(SELECT MAX(n.rowid) FROM run_digests n JOIN run_digest_sources nc ON nc.object_id=n.object_id AND nc.project_id=n.project_id WHERE n.project_id=d.project_id AND n.execution_log_id=d.execution_log_id)
-        ORDER BY d.rowid DESC ${limit === undefined ? '' : 'LIMIT ?'}`, limit === undefined ? [projectId] : [projectId, limit]);
-      const inserted = new Set<number>();
-      for (const row of missing) {
-        const executionLogId = Number(row.execution_log_id); if (inserted.has(executionLogId)) continue;
-        const latest = this.rows('SELECT d.object_id FROM run_digests d JOIN run_digest_sources c ON c.object_id=d.object_id WHERE d.project_id=? AND d.execution_log_id=? ORDER BY d.rowid DESC LIMIT 1', [projectId, executionLogId])[0];
-        if (latest.object_id !== row.object_id) continue;
-        const index = digestToRunIndex(this.runDigestReference(row).digest);
-        const tokenSource = this.enrichRunIndexFromArchivedOutput(projectId, index.record);
-        this.upsertProjectRunIndex(projectId, index.record, index.files, index.signals);
-        this.db.run('DELETE FROM run_index_import_sources WHERE project_id=? AND execution_log_id=?', [projectId, executionLogId]);
-        if (tokenSource) this.db.run('INSERT INTO run_index_import_sources VALUES(?,?,?,?,?,?,10)', [projectId, executionLogId, `archived-run-output:${projectId}`, tokenSource.key, tokenSource.hash, digest(canonical([index.record, index.files, index.signals]))]);
-        this.db.run('INSERT INTO run_digest_index_sources VALUES(?,?,?) ON CONFLICT(project_id,execution_log_id) DO UPDATE SET object_id=excluded.object_id', [projectId, executionLogId, row.object_id]);
-        inserted.add(executionLogId);
-      }
-      return { ...this.readRunIndexHealth(projectId), backfilledCount: inserted.size };
-    });
+    let backfilledCount = 0;
+    let remaining = limit ?? Number.MAX_SAFE_INTEGER;
+    while (remaining > 0) {
+      const prepared = this.prepareRunIndexBackfill(projectId, Math.min(20, remaining));
+      if (!prepared.length) break;
+      for (const item of prepared) if (this.commitPreparedRunIndexBackfill(projectId, item)) backfilledCount += 1;
+      remaining -= prepared.length;
+      if (prepared.length < Math.min(20, remaining + prepared.length)) break;
+    }
+    return { ...this.readRunIndexHealth(projectId), backfilledCount };
   }
   private runEffectReference(row: Record<string, SqlValue>): RunEffectReference {
     return { effectId: String(row.id), projectId: String(row.project_id), runId: String(row.run_id), turnId: String(row.turn_id), executionLogId: Number(row.execution_log_id), sourceRevision: Number(row.source_revision), checkpointSequence: Number(row.checkpoint_sequence), kind: row.kind as RunEffect['kind'], error: String(row.error), ...(row.state === 'claimed' ? { token: String(row.token) } : {}) };
@@ -6498,6 +7041,91 @@ export class UnifiedDataStore {
       return this.readDocumentationManifest(projectId);
     });
   }
+  public commitDocumentationManifestEvidence(projectId: string, input: {
+    manifest: DocumentationManifest;
+    expectedHead: string;
+    idempotencyKey: string;
+  }): DocumentationManifest {
+    return this.transaction(() => {
+      const current = this.readDocumentationManifest(projectId);
+      if (documentationManifestComparable(current) !== input.expectedHead) throw new Error('documentation_manifest_conflict');
+      const receipt = this.write({ kind: 'evidence', action: 'create', scope: projectId, data: {
+        run_id: null, type: 'documentation_manifest', source_actor_id: this.actorId,
+        content: canonical(input.manifest), observed_at: Date.now(), source_revision: -1
+      }, idempotencyKey: input.idempotencyKey });
+      const evidence = this.rows('SELECT content_id FROM evidence WHERE id=?', [receipt.objectId])[0];
+      if (!evidence?.content_id) throw new Error('documentation_manifest_evidence_missing');
+      const complete = input.manifest.documents.length === 0;
+      this.db.run(`INSERT INTO documentation_projection_state(project_id,source_object_id,manifest_content_id,idempotency_key,cursor,document_count,phase,status,updated_at)
+        VALUES(?,?,?,?,0,?,'binding',?,?) ON CONFLICT(project_id) DO UPDATE SET source_object_id=excluded.source_object_id,
+        manifest_content_id=excluded.manifest_content_id,idempotency_key=excluded.idempotency_key,cursor=0,
+        document_count=excluded.document_count,phase='binding',status=excluded.status,updated_at=excluded.updated_at`,
+      [projectId, receipt.objectId, evidence.content_id, input.idempotencyKey, input.manifest.documents.length, complete ? 'complete' : 'pending', Date.now()]);
+      return this.readDocumentationManifest(projectId);
+    });
+  }
+  public pendingDocumentationProjectionProjectIds(limit = 32): string[] {
+    return this.rows("SELECT project_id FROM documentation_projection_state WHERE status='pending' ORDER BY updated_at,project_id LIMIT ?",
+      [Math.max(1, Math.min(128, Math.trunc(limit)))]).map(row => String(row.project_id));
+  }
+  public readDocumentationProjectionItem(projectId: string): {
+    sourceObjectId: string;
+    idempotencyKey: string;
+    cursor: number;
+    documentCount: number;
+    phase: 'binding' | 'document';
+    document: DocumentationManifestDocument;
+  } | null {
+    const state = this.rows("SELECT * FROM documentation_projection_state WHERE project_id=? AND status='pending'", [projectId])[0];
+    if (!state) return null;
+    const manifest = JSON.parse(this.content(String(state.manifest_content_id)).toString('utf8')) as DocumentationManifest;
+    const cursor = Number(state.cursor), documentCount = Number(state.document_count);
+    if (!Array.isArray(manifest.documents) || manifest.documents.length !== documentCount || !manifest.documents[cursor]) {
+      throw new Error('documentation_projection_state_invalid');
+    }
+    const phase = String(state.phase);
+    if (phase !== 'binding' && phase !== 'document') throw new Error('documentation_projection_state_invalid');
+    return { sourceObjectId: String(state.source_object_id), idempotencyKey: String(state.idempotency_key),
+      cursor, documentCount, phase, document: manifest.documents[cursor] };
+  }
+  public commitDocumentationProjectionBinding(projectId: string, input: {
+    sourceObjectId: string;
+    cursor: number;
+    document: DocumentationManifestDocument;
+  }): { bindingId: string } {
+    return this.transaction(() => {
+      this.assertDocumentationProjectionCursor(projectId, input.sourceObjectId, input.cursor, 'binding');
+      const bindingId = this.ensureDocumentationFileBinding(projectId, input.document, `documentation-projection:${input.sourceObjectId}`);
+      this.db.run("UPDATE documentation_projection_state SET phase='document',updated_at=? WHERE project_id=? AND source_object_id=? AND cursor=? AND phase='binding'",
+        [Date.now(), projectId, input.sourceObjectId, input.cursor]);
+      if (this.db.getRowsModified() !== 1) throw new Error('documentation_projection_cursor_conflict');
+      return { bindingId };
+    });
+  }
+  public commitDocumentationProjectionDocument(projectId: string, input: {
+    sourceObjectId: string;
+    cursor: number;
+    document: DocumentationManifestDocument;
+  }): { complete: boolean; cursor: number } {
+    return this.transaction(() => {
+      const state = this.assertDocumentationProjectionCursor(projectId, input.sourceObjectId, input.cursor, 'document');
+      const binding = this.rows("SELECT id FROM file_bindings WHERE project_id=? AND role='documentation' AND relative_path=?", [projectId, input.document.path])[0];
+      if (!binding) throw new Error('documentation_projection_binding_missing');
+      this.writeDocumentationDocument(projectId, String(binding.id), input.document, `documentation-projection:${input.sourceObjectId}`);
+      const cursor = input.cursor + 1, complete = cursor === Number(state.document_count);
+      this.db.run("UPDATE documentation_projection_state SET cursor=?,phase='binding',status=?,updated_at=? WHERE project_id=? AND source_object_id=? AND cursor=? AND phase='document'",
+        [cursor, complete ? 'complete' : 'pending', Date.now(), projectId, input.sourceObjectId, input.cursor]);
+      if (this.db.getRowsModified() !== 1) throw new Error('documentation_projection_cursor_conflict');
+      return { complete, cursor };
+    });
+  }
+  private assertDocumentationProjectionCursor(projectId: string, sourceObjectId: string, cursor: number, phase: 'binding' | 'document'): Record<string, SqlValue> {
+    const state = this.rows('SELECT * FROM documentation_projection_state WHERE project_id=?', [projectId])[0];
+    if (!state || state.source_object_id !== sourceObjectId || Number(state.cursor) !== cursor || state.phase !== phase || state.status !== 'pending') {
+      throw new Error('documentation_projection_cursor_conflict');
+    }
+    return state;
+  }
   public importDocumentationManifest(projectId: string, input: { manifest: DocumentationManifest; source: ImportedSource }): { unchanged: boolean } {
     return this.transaction(() => {
       const state = this.migrationSourceState(input.source.identity, input.source.key);
@@ -6533,23 +7161,34 @@ export class UnifiedDataStore {
   private writeDocumentationManifest(projectId: string, manifest: DocumentationManifest, runId: string | null, sourceRevision: number, idempotencyKey: string, replaceCurrent = false): void {
     if (!manifest || !Array.isArray(manifest.documents) || !Array.isArray(manifest.pendingReview)) throw new Error('invalid_documentation_manifest');
     const current = this.readDocumentationManifest(projectId);
-    const documents = new Map((replaceCurrent ? [] : current.documents).map(document => [document.path, document]));
-    for (const document of manifest.documents) {
-      const previous = documents.get(document.path);
-      if (!previous || Date.parse(document.lastTouchedAt || manifest.updatedAt) >= Date.parse(previous.lastTouchedAt || current.updatedAt)) documents.set(document.path, document);
-    }
-    const reviews = new Map([...(replaceCurrent ? [] : current.pendingReview), ...manifest.pendingReview].map(review => [`${review.path}\n${review.reason}`, review]));
-    manifest = { ...manifest, documents: [...documents.values()], pendingReview: [...reviews.values()] };
-    for (let index = 0; index < manifest.documents.length; index++) {
-      const value = manifest.documents[index];
-      if (!value.path || path.isAbsolute(value.path) || value.path.split(/[\\/]/).includes('..')) throw new Error('invalid_documentation_path');
-      const existingBinding = this.rows("SELECT id FROM file_bindings WHERE project_id=? AND role='documentation' AND relative_path=?", [projectId, value.path])[0];
-      const bindingId = existingBinding ? String(existingBinding.id) : this.write({ kind: 'file_binding', action: 'create', scope: projectId, data: { role: 'documentation', relative_path: value.path }, idempotencyKey: `${idempotencyKey}:binding:${index}` }).objectId;
-      const existing = this.rows('SELECT id FROM documents WHERE project_id=? AND file_binding_id=?', [projectId, bindingId])[0];
-      const data = { file_binding_id: bindingId, role: value.role, status: value.status, solves: value.solves || '', last_reviewed_at: Number.isFinite(Date.parse(value.lastReviewedAt || '')) ? Date.parse(value.lastReviewedAt!) : null };
-      this.write({ kind: 'document', action: existing ? 'patch' : 'create', scope: projectId, ...(existing ? { objectId: String(existing.id), expectedRevision: this.readMetadata(String(existing.id)).revision } : {}), data, idempotencyKey: `${idempotencyKey}:document:${index}` });
-    }
+    manifest = mergeDocumentationManifestsForPersistence(current, manifest, replaceCurrent);
+    for (const value of manifest.documents) this.writeDocumentationManifestDocument(projectId, value, idempotencyKey);
     this.write({ kind: 'evidence', action: 'create', scope: projectId, data: { run_id: runId, type: 'documentation_manifest', source_actor_id: this.actorId, content: canonical(manifest), observed_at: Date.now(), source_revision: sourceRevision }, idempotencyKey });
+  }
+  private writeDocumentationManifestDocument(projectId: string, value: DocumentationManifestDocument, idempotencyKey: string): void {
+    const bindingId = this.ensureDocumentationFileBinding(projectId, value, idempotencyKey);
+    this.writeDocumentationDocument(projectId, bindingId, value, idempotencyKey);
+  }
+  private ensureDocumentationFileBinding(projectId: string, value: DocumentationManifestDocument, idempotencyKey: string): string {
+    if (!value.path || path.isAbsolute(value.path) || value.path.split(/[\\/]/).includes('..')) throw new Error('invalid_documentation_path');
+    const pathKey = digest(value.path);
+    const existingBinding = this.rows("SELECT id FROM file_bindings WHERE project_id=? AND role='documentation' AND relative_path=?", [projectId, value.path])[0];
+    return existingBinding ? String(existingBinding.id) : this.write({ kind: 'file_binding', action: 'create', scope: projectId,
+      data: { role: 'documentation', relative_path: value.path }, idempotencyKey: `${idempotencyKey}:binding:${pathKey}` }).objectId;
+  }
+  private writeDocumentationDocument(projectId: string, bindingId: string, value: DocumentationManifestDocument, idempotencyKey: string): void {
+    const existing = this.rows('SELECT id FROM documents WHERE project_id=? AND file_binding_id=?', [projectId, bindingId])[0];
+    const data = { file_binding_id: bindingId, role: value.role, status: value.status, solves: value.solves || '',
+      last_reviewed_at: Number.isFinite(Date.parse(value.lastReviewedAt || '')) ? Date.parse(value.lastReviewedAt!) : null };
+    if (existing) {
+      const current = this.rows('SELECT role,status,solves,last_reviewed_at FROM documents WHERE id=?', [existing.id])[0];
+      if (current && current.role === data.role && current.status === data.status && String(current.solves || '') === data.solves
+        && (current.last_reviewed_at === null ? null : Number(current.last_reviewed_at)) === data.last_reviewed_at) return;
+    }
+    const versionKey = digest(canonical([value.path, data]));
+    this.write({ kind: 'document', action: existing ? 'patch' : 'create', scope: projectId,
+      ...(existing ? { objectId: String(existing.id), expectedRevision: this.readMetadata(String(existing.id)).revision } : {}),
+      data, idempotencyKey: `${idempotencyKey}:document:${versionKey}` });
   }
   public patchRunState(projectId: string, input: { executionLogId: number; generation: number; expectedRevision: number; patch: Record<string, unknown>; idempotencyKey: string }): RunState {
     const initial = this.runControl(projectId, input.executionLogId);
@@ -6634,6 +7273,29 @@ export class UnifiedDataStore {
     }, undefined, false);
     return { ...this.readRunState(projectId, input.executionLogId, receipt.revision), receipt };
   }
+  public beginRunDelivery(projectId: string, input: { executionLogId: number; generation: number; expectedRevision: number;
+    owner: { id: string; pid: number; birth: string }; terminalName: string; terminalDeliveryId: string;
+    terminalDeliveryTraceId: string; terminalDeliveryStartedAt: string; terminalDeliveryAttempt: number; idempotencyKey: string }): RunState {
+    if (!input.terminalName || !input.terminalDeliveryId || !input.terminalDeliveryTraceId
+      || !Number.isFinite(Date.parse(input.terminalDeliveryStartedAt))
+      || !Number.isInteger(input.terminalDeliveryAttempt) || input.terminalDeliveryAttempt < 1) throw new Error('run_terminal_identity_required');
+    return this.transaction(() => {
+      const claimed = this.claimRunDelivery(projectId, {
+        executionLogId: input.executionLogId, generation: input.generation, expectedRevision: input.expectedRevision,
+        owner: input.owner, idempotencyKey: `${input.idempotencyKey}:lease`
+      });
+      return this.patchRunState(projectId, {
+        executionLogId: input.executionLogId, generation: input.generation, expectedRevision: claimed.revision,
+        patch: {
+          terminalName: input.terminalName, terminalDeliveryId: input.terminalDeliveryId,
+          terminalDeliveryTraceId: input.terminalDeliveryTraceId,
+          terminalDeliveryStartedAt: input.terminalDeliveryStartedAt,
+          terminalDeliveryAttempt: input.terminalDeliveryAttempt
+        },
+        idempotencyKey: `${input.idempotencyKey}:terminal`
+      });
+    });
+  }
   public claimRunTerminalOwner(projectId: string, input: { executionLogId: number; generation: number; expectedRevision: number; terminalName: string; terminalDeliveryId: string; owner: { id: string; pid: number; birth: string }; idempotencyKey: string }): RunState {
     if (!input.owner?.id || !Number.isInteger(input.owner.pid) || input.owner.pid < 1 || typeof input.owner.birth !== 'string') throw new Error('invalid_run_delivery_owner');
     if (!input.terminalName || !input.terminalDeliveryId) throw new Error('run_terminal_identity_required');
@@ -6701,6 +7363,11 @@ export class UnifiedDataStore {
       this.db.run('UPDATE run_control SET generation=generation+1,recovery_needed=1,delivery_pending=0 WHERE run_id=?', [row.run_id]);
       this.db.run('UPDATE run_control SET child_pid=NULL,child_birth=NULL WHERE run_id=?', [row.run_id]);
       metadata.terminalClaimDeliveryId = input.terminalDeliveryId || '';
+      if (input.terminalDeliveryId) {
+        metadata.terminalCommandSubmittedAt ||= new Date().toISOString();
+        metadata.foregroundRunnerSpawnedAt ||= metadata.terminalCommandSubmittedAt;
+        metadata.foregroundRunnerPid = input.agentPid || 0;
+      }
       this.db.run('UPDATE run_control SET metadata_content_id=? WHERE run_id=?', [this.putContent(canonical(metadata), 'application/json'), row.run_id]);
       if (input.agentPid !== undefined) this.db.run('UPDATE run_control SET process_pid=?,process_birth=? WHERE run_id=?', [input.agentPid, input.processBirth || '', row.run_id]);
       this.db.run('UPDATE objects SET revision=revision+1,updated_at=? WHERE id=?', [Date.now(), row.run_id]);
@@ -7071,7 +7738,7 @@ export class UnifiedDataStore {
     });
     return receipt;
   }
-  public readRunDocument(projectId: string, executionLogId: number, purpose: string, revision?: number, tailBytes?: number): { objectId: string; revision: number; bytes: string; hash: string; mimeType: string; byteOffset: number; totalBytes: number } | null {
+  public readRunDocument(projectId: string, executionLogId: number, purpose: string, revision?: number, tailBytes?: number, offset?: number, limit?: number): { objectId: string; revision: number; bytes: string; hash: string; mimeType: string; byteOffset: number; totalBytes: number } | null {
     const run = this.runControl(projectId, executionLogId);
     const row = this.rows('SELECT object_id FROM run_documents WHERE run_id=? AND purpose=?', [run.run_id, purpose])[0];
     if (!row) return null;
@@ -7080,8 +7747,12 @@ export class UnifiedDataStore {
     const content = this.rows('SELECT sha256,mime_type,byte_length,stored_byte_length,encoding,chunk_index_json FROM contents WHERE id=?', [contentId])[0];
     const totalBytes = Number(content.byte_length);
     if (tailBytes !== undefined && (!Number.isInteger(tailBytes) || tailBytes < 1 || tailBytes > 1048576)) throw new Error('invalid_run_document_tail');
-    const byteOffset = tailBytes === undefined ? 0 : Math.max(0, totalBytes - tailBytes);
-    const bytes = tailBytes === undefined ? this.content(contentId) : this.contentRange(contentId, content, byteOffset, totalBytes);
+    if (tailBytes !== undefined && (offset !== undefined || limit !== undefined)) throw new Error('invalid_run_document_page');
+    if (offset !== undefined && (!Number.isInteger(offset) || offset < 0 || offset > totalBytes)
+      || limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > 1048576)) throw new Error('invalid_run_document_page');
+    const byteOffset = tailBytes === undefined ? offset || 0 : Math.max(0, totalBytes - tailBytes);
+    const end = tailBytes === undefined ? (limit === undefined ? totalBytes : Math.min(totalBytes, byteOffset + limit)) : totalBytes;
+    const bytes = byteOffset === 0 && end === totalBytes ? this.content(contentId) : this.contentRange(contentId, content, byteOffset, end);
     return { objectId: object.objectId, revision: object.revision, bytes: bytes.toString('base64'), hash: String(content.sha256), mimeType: String(content.mime_type), byteOffset, totalBytes };
   }
   public writeProjectGrowth(projectId: string, data: GrowthSnapshotData, idempotencyKey: string): WriteReceipt {
@@ -7179,7 +7850,132 @@ export class UnifiedDataStore {
       return finish({ accepted: true, snapshotId: receipt.objectId, unchanged: false });
     });
   }
-  public readProjectGrowth(projectId: string, historyLimit = 12, snapshotId?: string): { latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] } {
+  private ensureProjectGrowthStageTables(): void {
+    this.db.run(`CREATE TEMP TABLE IF NOT EXISTS runtime_growth_refresh_stages(
+      stage_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,request_id TEXT NOT NULL,generation INTEGER NOT NULL,manifest_json TEXT NOT NULL)`);
+    this.db.run(`CREATE TEMP TABLE IF NOT EXISTS runtime_growth_refresh_stage_items(
+      stage_id TEXT NOT NULL,section TEXT NOT NULL,ordinal INTEGER NOT NULL,payload_json TEXT NOT NULL,
+      PRIMARY KEY(stage_id,section,ordinal))`);
+  }
+  public beginProjectGrowthRefreshStage(projectId: string, input: { requestId: string; generation: number; manifest: GrowthSnapshotStageManifest }): void {
+    if (!input.requestId.trim() || !Number.isInteger(input.generation) || input.generation < 1
+      || !/^[a-f0-9-]{36}$/.test(input.manifest.stageId) || input.manifest.snapshot.projectPath === '') throw new Error('invalid_growth_refresh_stage');
+    this.ensureProjectGrowthStageTables();
+    this.transaction(() => {
+      this.db.run('DELETE FROM runtime_growth_refresh_stage_items WHERE stage_id=?', [input.manifest.stageId]);
+      this.db.run('DELETE FROM runtime_growth_refresh_stages WHERE stage_id=?', [input.manifest.stageId]);
+      this.db.run('INSERT INTO runtime_growth_refresh_stages VALUES(?,?,?,?,?)', [input.manifest.stageId, projectId, input.requestId, input.generation, canonical(input.manifest)]);
+    });
+  }
+  public appendProjectGrowthRefreshStage(stageId: string, section: GrowthSnapshotStageSection, offset: number, items: unknown[]): void {
+    if (!/^[a-f0-9-]{36}$/.test(stageId) || !['nodes', 'edges', 'signals', 'labels'].includes(section)
+      || !Number.isInteger(offset) || offset < 0 || !Array.isArray(items) || items.length < 1 || items.length > 200) throw new Error('invalid_growth_refresh_stage_page');
+    this.ensureProjectGrowthStageTables();
+    if (!this.rows('SELECT 1 FROM runtime_growth_refresh_stages WHERE stage_id=?', [stageId])[0]) throw new Error('growth_refresh_stage_missing');
+    this.transaction(() => items.forEach((item, index) => {
+      this.db.run('INSERT INTO runtime_growth_refresh_stage_items VALUES(?,?,?,?)', [stageId, section, offset + index, canonical(item)]);
+    }));
+  }
+  public discardProjectGrowthRefreshStage(stageId: string): void {
+    this.ensureProjectGrowthStageTables();
+    this.transaction(() => {
+      this.db.run('DELETE FROM runtime_growth_refresh_stage_items WHERE stage_id=?', [stageId]);
+      this.db.run('DELETE FROM runtime_growth_refresh_stages WHERE stage_id=?', [stageId]);
+    });
+  }
+  public commitProjectGrowthRefreshStage(projectId: string, stageId: string): { accepted: boolean; snapshotId: string | null; unchanged: boolean } {
+    this.ensureProjectGrowthStageTables();
+    const staged = this.rows('SELECT * FROM runtime_growth_refresh_stages WHERE stage_id=? AND project_id=?', [stageId, projectId])[0];
+    if (!staged) throw new Error('growth_refresh_stage_missing');
+    const manifest = JSON.parse(String(staged.manifest_json)) as GrowthSnapshotStageManifest;
+    if (manifest.stageId !== stageId || !/^[a-f0-9]{64}$/.test(manifest.payloadHash) || !/^[a-f0-9]{64}$/.test(manifest.semanticHash)
+      || !/^[a-f0-9]{64}$/.test(manifest.sourceVersion.contentHash)) throw new Error('growth_refresh_stage_invalid');
+    for (const section of ['nodes', 'edges', 'signals', 'labels'] as GrowthSnapshotStageSection[]) {
+      const count = Number(this.rows('SELECT COUNT(*) AS count FROM runtime_growth_refresh_stage_items WHERE stage_id=? AND section=?', [stageId, section])[0].count);
+      if (count !== manifest.counts[section]) throw new Error(`growth_refresh_stage_incomplete:${section}`);
+      if (count) {
+        const range = this.rows('SELECT MIN(ordinal) AS minimum,MAX(ordinal) AS maximum FROM runtime_growth_refresh_stage_items WHERE stage_id=? AND section=?', [stageId, section])[0];
+        if (Number(range.minimum) !== 0 || Number(range.maximum) !== count - 1) throw new Error(`growth_refresh_stage_order_invalid:${section}`);
+      }
+    }
+    const missingParent = this.rows(`SELECT 1 FROM runtime_growth_refresh_stage_items child
+      LEFT JOIN runtime_growth_refresh_stage_items parent ON parent.stage_id=child.stage_id AND parent.section='nodes'
+        AND json_extract(parent.payload_json,'$.nodeId')=json_extract(child.payload_json,'$.parentId')
+      WHERE child.stage_id=? AND child.section='nodes' AND COALESCE(json_extract(child.payload_json,'$.parentId'),'')<>'' AND parent.ordinal IS NULL LIMIT 1`, [stageId])[0];
+    if (missingParent) throw new Error('growth_parent_missing');
+    const reachable = Number(this.rows(`WITH RECURSIVE tree(node_id) AS (
+      SELECT json_extract(payload_json,'$.nodeId') FROM runtime_growth_refresh_stage_items
+       WHERE stage_id=? AND section='nodes' AND COALESCE(json_extract(payload_json,'$.parentId'),'')=''
+      UNION
+      SELECT json_extract(child.payload_json,'$.nodeId') FROM runtime_growth_refresh_stage_items child JOIN tree parent
+       ON json_extract(child.payload_json,'$.parentId')=parent.node_id WHERE child.stage_id=? AND child.section='nodes')
+      SELECT COUNT(*) AS count FROM tree`, [stageId, stageId])[0].count);
+    if (reachable !== manifest.counts.nodes) throw new Error('growth_parent_cycle');
+    for (const section of ['edges', 'signals', 'labels'] as const) {
+      const sourceFields = section === 'edges' ? ['sourceId', 'targetId'] : [section === 'signals' ? 'nodeId' : 'nodeId'];
+      for (const field of sourceFields) {
+        if (this.rows(`SELECT 1 FROM runtime_growth_refresh_stage_items item LEFT JOIN runtime_growth_refresh_stage_items node
+          ON node.stage_id=item.stage_id AND node.section='nodes' AND json_extract(node.payload_json,'$.nodeId')=json_extract(item.payload_json,?)
+          WHERE item.stage_id=? AND item.section=? AND node.ordinal IS NULL LIMIT 1`, [`$.${field}`, stageId, section])[0]) throw new Error(`growth_${section}_node_missing`);
+      }
+    }
+    return this.transaction(() => {
+      const requestId = String(staged.request_id), generation = Number(staged.generation);
+      const requestKey = `growth-refresh-result:${projectId}:${requestId}`;
+      const inputHash = digest(canonical({ projectId, requestId, generation }));
+      const previous = this.rows('SELECT input_hash,result_content_id,status FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, requestKey])[0];
+      if (previous) {
+        if (previous.input_hash !== inputHash) throw new Error('idempotency_conflict');
+        if (previous.status !== 'committed' || !previous.result_content_id) throw new Error('growth_refresh_commit_pending');
+        return JSON.parse(this.content(String(previous.result_content_id)).toString('utf8'));
+      }
+      this.db.run('INSERT INTO requests(actor_id,idempotency_key,id,input_hash,status) VALUES(?,?,?,?,?)', [this.actorId, requestKey, crypto.randomUUID(), inputHash, 'pending']);
+      const finish = (result: { accepted: boolean; snapshotId: string | null; unchanged: boolean }) => {
+        const sequence = Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS value FROM events')[0].value);
+        this.db.run("UPDATE requests SET status='committed',result_content_id=?,committed_sequence=? WHERE actor_id=? AND idempotency_key=?", [this.putContent(canonical(result), 'application/json'), sequence, this.actorId, requestKey]);
+        return result;
+      };
+      const reservation = this.readAnalysisState(projectId, 'growth-refresh', 'current');
+      const reserved = reservation.value as { requestId?: string } | null;
+      const latest = this.rows('SELECT id,payload_hash FROM growth_snapshots WHERE project_id=? ORDER BY rowid DESC LIMIT 1', [projectId])[0];
+      if (reservation.revision !== generation || reserved?.requestId !== requestId) return finish({ accepted: false, snapshotId: latest ? String(latest.id) : null, unchanged: false });
+      if (latest && String(latest.payload_hash || '') === manifest.payloadHash) return finish({ accepted: true, snapshotId: String(latest.id), unchanged: true });
+      const snapshot = manifest.snapshot;
+      const receipt = this.write({ kind: 'growth_snapshot', action: 'create', scope: projectId, idempotencyKey: `growth-refresh:${requestId}`,
+        data: { git_head: snapshot.gitHead || null, reason: snapshot.scanReason, status: snapshot.status, duration_ms: snapshot.durationMs,
+          created_at: Date.parse(snapshot.createdAt), project_path: snapshot.projectPath, error: snapshot.error || '', payload_hash: manifest.payloadHash,
+          summary_json: manifest.summary, semantic_hash: manifest.semanticHash } });
+      const storedSnapshotId = receipt.objectId;
+      this.db.run('DELETE FROM growth_live_snapshots WHERE project_id=? AND slot=1', [projectId]);
+      this.db.run('UPDATE growth_live_snapshots SET slot=1 WHERE project_id=? AND slot=0', [projectId]);
+      this.db.run('INSERT INTO growth_live_snapshots(project_id,snapshot_id,slot) VALUES(?,?,0)', [projectId, storedSnapshotId]);
+      this.db.run(`INSERT INTO growth_live_items
+        SELECT ?,?,json_extract(payload_json,'$.nodeId'),NULLIF(json_extract(payload_json,'$.parentId'),''),json_extract(payload_json,'$.kind'),
+          json_extract(payload_json,'$.path'),json_extract(payload_json,'$.label'),json_set(payload_json,'$.snapshotId',?),
+          COALESCE(json_extract(payload_json,'$.fileCount'),0)-COALESCE(json_extract(payload_json,'$.testFileCount'),0),
+          COALESCE(json_extract(payload_json,'$.testFileCount'),0),NULL,COALESCE(json_extract(payload_json,'$.bytes'),0)
+        FROM runtime_growth_refresh_stage_items WHERE stage_id=? AND section='nodes' ORDER BY ordinal`, [projectId, storedSnapshotId, storedSnapshotId, stageId]);
+      this.db.run(`INSERT INTO growth_live_edges
+        SELECT ?,?,json_extract(payload_json,'$.sourceId'),json_extract(payload_json,'$.targetId'),json_extract(payload_json,'$.kind'),
+          COALESCE(json_extract(payload_json,'$.weight'),0),COALESCE(json_extract(payload_json,'$.evidence'),'')
+        FROM runtime_growth_refresh_stage_items WHERE stage_id=? AND section='edges' ORDER BY ordinal`, [projectId, storedSnapshotId, stageId]);
+      this.db.run(`INSERT INTO growth_live_signals
+        SELECT ?,?,json_extract(payload_json,'$.nodeId')||':'||json_extract(payload_json,'$.type')||':'||ordinal,
+          json_extract(payload_json,'$.nodeId'),json_extract(payload_json,'$.type'),json_extract(payload_json,'$.level'),
+          COALESCE(json_extract(payload_json,'$.value'),''),COALESCE(json_extract(payload_json,'$.source'),''),
+          COALESCE(json_extract(payload_json,'$.sourceRef'),''),COALESCE(unixepoch(json_extract(payload_json,'$.createdAt'))*1000,0)
+        FROM runtime_growth_refresh_stage_items WHERE stage_id=? AND section='signals' ORDER BY ordinal`, [projectId, storedSnapshotId, stageId]);
+      this.db.run(`INSERT INTO growth_live_module_labels
+        SELECT ?,?,json_extract(payload_json,'$.nodeId'),json_extract(payload_json,'$.label'),json_extract(payload_json,'$.role'),
+          json_extract(payload_json,'$.source'),COALESCE(json_extract(payload_json,'$.confidence'),0),COALESCE(unixepoch(json_extract(payload_json,'$.updatedAt'))*1000,0)
+        FROM runtime_growth_refresh_stage_items WHERE stage_id=? AND section='labels' ORDER BY ordinal`, [projectId, storedSnapshotId, stageId]);
+      const sourceState = this.readAnalysisState(projectId, 'growth-source', 'current');
+      this.writeAnalysisState(projectId, { namespace: 'growth-source', key: 'current', expectedRevision: sourceState.revision,
+        value: manifest.sourceVersion, idempotencyKey: `growth-source:${requestId}` });
+      return finish({ accepted: true, snapshotId: storedSnapshotId, unchanged: false });
+    });
+  }
+  public readProjectGrowth(projectId: string, historyLimit = 12, snapshotId?: string, detailOffset = 0, detailLimit = 200, expectedDetailToken?: string): { latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] } {
     const ids = snapshotId === undefined
       ? this.rows('SELECT g.id FROM growth_snapshots g JOIN objects o ON o.id=g.id WHERE g.project_id=? ORDER BY o.rowid DESC LIMIT ?', [projectId, Math.max(1, Math.min(50, historyLimit))]).map(row => String(row.id))
       : this.rows('SELECT id FROM growth_snapshots WHERE project_id=? AND id=?', [projectId, snapshotId]).map(row => String(row.id));
@@ -7190,20 +7986,35 @@ export class UnifiedDataStore {
       const row = this.rows('SELECT * FROM growth_snapshots WHERE id=? AND project_id=?', [id, projectId])[0];
       if (!row) throw new Error('growth_snapshot_missing');
       const snapshot: GrowthSnapshotRecord = { id, createdAt: new Date(Number(row.created_at)).toISOString(), projectPath: String(row.project_path), gitHead: String(row.git_head || ''), scanReason: String(row.reason), status: String(row.status), durationMs: Number(row.duration_ms || 0), error: String(row.error || '') };
-      const includeTopology = topologySnapshotIds.has(id);
+      const includeTopology = snapshotId !== undefined || topologySnapshotIds.has(id);
       const live = includeTopology && Boolean(this.rows('SELECT 1 FROM growth_live_snapshots WHERE project_id=? AND snapshot_id=?', [projectId, id])[0]);
-      const nodes = includeTopology ? this.rows(live
+      const detailTables = live
+        ? ['growth_live_items', 'growth_live_edges', 'growth_live_signals', 'growth_live_module_labels']
+        : ['growth_items', 'growth_edges', 'growth_signals', 'growth_module_labels'];
+      const detailCounts = includeTopology ? detailTables.map(table => Number(this.rows(
+        `SELECT COUNT(*) AS count FROM ${quoteSqlIdentifier(table)} WHERE ${live ? 'project_id=? AND ' : ''}snapshot_id=?`,
+        live ? [projectId, id] : [id]
+      )[0].count)) : [0, 0, 0, 0];
+      const detailToken = digest(canonical({ id, semanticHash: String(row.semantic_hash || ''), live, detailCounts }));
+      if (expectedDetailToken !== undefined && detailToken !== expectedDetailToken) throw new Error('growth_detail_snapshot_changed');
+      const page = (sql: string, values: SqlValue[]) => this.rows(`${sql} LIMIT ? OFFSET ?`, [...values, detailLimit + 1, detailOffset]);
+      const nodeRows = includeTopology ? page(live
         ? 'SELECT metrics_json FROM growth_live_items WHERE project_id=? AND snapshot_id=? ORDER BY rowid'
-        : 'SELECT metrics_json FROM growth_items WHERE snapshot_id=? ORDER BY rowid', live ? [projectId, id] : [id]).map(item => JSON.parse(String(item.metrics_json))) : [];
-      const edges = includeTopology ? this.rows(live
+        : 'SELECT metrics_json FROM growth_items WHERE snapshot_id=? ORDER BY rowid', live ? [projectId, id] : [id]) : [];
+      const edgeRows = includeTopology ? page(live
         ? 'SELECT source_item_id,target_item_id,kind,weight,evidence FROM growth_live_edges WHERE project_id=? AND snapshot_id=? ORDER BY rowid'
-        : 'SELECT source_item_id,target_item_id,kind,weight,evidence FROM growth_edges WHERE snapshot_id=? ORDER BY rowid', live ? [projectId, id] : [id]).map(edge => ({ snapshotId: id, sourceId: String(edge.source_item_id), targetId: String(edge.target_item_id), kind: String(edge.kind), weight: Number(edge.weight || 0), evidence: String(edge.evidence || '') })) : [];
-      const signals = includeTopology ? this.rows(live
+        : 'SELECT source_item_id,target_item_id,kind,weight,evidence FROM growth_edges WHERE snapshot_id=? ORDER BY rowid', live ? [projectId, id] : [id]) : [];
+      const signalRows = includeTopology ? page(live
         ? 'SELECT item_id,type,level,value,source,source_ref,created_at FROM growth_live_signals WHERE project_id=? AND snapshot_id=? ORDER BY rowid'
-        : 'SELECT item_id,type,level,value,source,source_ref,created_at FROM growth_signals WHERE snapshot_id=? ORDER BY rowid', live ? [projectId, id] : [id]).map(signal => ({ snapshotId: id, nodeId: String(signal.item_id), type: String(signal.type), level: String(signal.level), value: String(signal.value || ''), source: String(signal.source), sourceRef: String(signal.source_ref), createdAt: new Date(Number(signal.created_at)).toISOString() })) : [];
-      const labels = includeTopology ? this.rows(live
+        : 'SELECT item_id,type,level,value,source,source_ref,created_at FROM growth_signals WHERE snapshot_id=? ORDER BY rowid', live ? [projectId, id] : [id]) : [];
+      const labelRows = includeTopology ? page(live
         ? 'SELECT node_id,label,role,source,confidence,updated_at FROM growth_live_module_labels WHERE project_id=? AND snapshot_id=? ORDER BY rowid'
-        : 'SELECT node_id,label,role,source,confidence,updated_at FROM growth_module_labels WHERE snapshot_id=? ORDER BY rowid', live ? [projectId, id] : [id]).map(label => ({ snapshotId: id, nodeId: String(label.node_id), label: String(label.label), role: String(label.role), source: String(label.source), confidence: Number(label.confidence), updatedAt: new Date(Number(label.updated_at)).toISOString() })) : [];
+        : 'SELECT node_id,label,role,source,confidence,updated_at FROM growth_module_labels WHERE snapshot_id=? ORDER BY rowid', live ? [projectId, id] : [id]) : [];
+      const nodes = nodeRows.slice(0, detailLimit).map(item => JSON.parse(String(item.metrics_json)));
+      const edges = edgeRows.slice(0, detailLimit).map(edge => ({ snapshotId: id, sourceId: String(edge.source_item_id), targetId: String(edge.target_item_id), kind: String(edge.kind), weight: Number(edge.weight || 0), evidence: String(edge.evidence || '') }));
+      const signals = signalRows.slice(0, detailLimit).map(signal => ({ snapshotId: id, nodeId: String(signal.item_id), type: String(signal.type), level: String(signal.level), value: String(signal.value || ''), source: String(signal.source), sourceRef: String(signal.source_ref), createdAt: new Date(Number(signal.created_at)).toISOString() }));
+      const labels = labelRows.slice(0, detailLimit).map(label => ({ snapshotId: id, nodeId: String(label.node_id), label: String(label.label), role: String(label.role), source: String(label.source), confidence: Number(label.confidence), updatedAt: new Date(Number(label.updated_at)).toISOString() }));
+      const nextDetailOffset = [nodeRows, edgeRows, signalRows, labelRows].some(rows => rows.length > detailLimit) ? detailOffset + detailLimit : null;
       let summary: GrowthSnapshotData['summary'];
       try {
         const parsed = JSON.parse(String(row.summary_json || '{}'));
@@ -7220,7 +8031,7 @@ export class UnifiedDataStore {
         const signalCount = this.rows('SELECT COUNT(*) AS count FROM growth_signals WHERE snapshot_id=?', [id])[0];
         summary = { files: Number(totals.files || 0), modules: Number(totals.modules || 0), capabilities: Number(totals.capabilities || 0), packages: Number(totals.packages || 0), loc: Number(totals.loc || 0), signals: Number(signalCount?.count || 0) };
       }
-      const data = { snapshot, nodes, edges, signals, labels, ...(summary ? { summary } : {}), topologyAvailable: includeTopology && (live || Boolean(nodes.length || edges.length || signals.length || labels.length)) } as GrowthSnapshotData;
+      const data = { snapshot, nodes, edges, signals, labels, ...(summary ? { summary } : {}), topologyAvailable: includeTopology && (live || Boolean(nodes.length || edges.length || signals.length || labels.length)), detailToken, detailOffset, nextDetailOffset } as GrowthSnapshotData;
       if (!data.summary && (nodes.length || signals.length)) data.summary = growthSnapshotSummary(data);
       return data;
     };
@@ -8547,13 +9358,24 @@ export class UnifiedDataStore {
       [object.objectId, object.revision, object.projectId, turn.task_id, object.data.turn_id as string, object.data.run_id as string || null, contentId,
         this.rows('SELECT sha256 FROM contents WHERE id=?', [contentId])[0].sha256, canonical(metadata), recordedAt]);
   }
-  public backfillReportVersions(projectId: string, limit = 50): number {
-    const marker = `report-versions-ready:${projectId}`;
-    if (this.rows('SELECT 1 FROM database_meta WHERE key=?', [marker]).length) return 0;
-    const missing = this.rows('SELECT v.object_id,v.revision,v.created_at FROM object_revisions v JOIN objects o ON o.id=v.object_id LEFT JOIN report_versions r ON r.object_id=v.object_id AND r.revision=v.revision WHERE o.project_id=? AND o.kind=\'report\' AND r.object_id IS NULL ORDER BY v.created_at,v.rowid LIMIT ?', [projectId, limit]);
-    if (missing.length) this.transaction(() => { for (const row of missing) this.indexReportRevision(this.read(String(row.object_id), Number(row.revision)), Number(row.created_at)); });
-    else this.db.run('INSERT OR IGNORE INTO database_meta VALUES(?,?)', [marker, '17']);
-    return missing.length;
+  public reportVersionBackfillState(): 'pending' | 'complete' {
+    return this.rows("SELECT value FROM database_meta WHERE key='report_versions_backfill_v61'")[0]?.value === 'pending' ? 'pending' : 'complete';
+  }
+  public backfillReportVersionsBatch(requestedLimit = 100): { processed: number; complete: boolean } {
+    if (this.reportVersionBackfillState() === 'complete') return { processed: 0, complete: true };
+    const limit = Math.max(1, Math.min(100, Math.floor(requestedLimit)));
+    return this.transaction(() => {
+      const missing = this.rows(`SELECT v.object_id,v.revision,v.created_at
+        FROM object_revisions v JOIN objects o ON o.id=v.object_id
+        LEFT JOIN report_versions r ON r.object_id=v.object_id AND r.revision=v.revision
+        WHERE o.kind='report' AND r.object_id IS NULL ORDER BY v.created_at,v.rowid LIMIT ?`, [limit]);
+      for (const row of missing) this.indexReportRevision(this.read(String(row.object_id), Number(row.revision)), Number(row.created_at));
+      const complete = missing.length < limit || !this.rows(`SELECT 1 FROM object_revisions v JOIN objects o ON o.id=v.object_id
+        LEFT JOIN report_versions r ON r.object_id=v.object_id AND r.revision=v.revision
+        WHERE o.kind='report' AND r.object_id IS NULL LIMIT 1`).length;
+      if (complete) this.db.run("UPDATE database_meta SET value='complete' WHERE key='report_versions_backfill_v61'");
+      return { processed: missing.length, complete };
+    });
   }
   private bumpReportSourceRevision(projectId: string): void {
     this.db.run('INSERT INTO report_source_generations(project_id,revision) VALUES(?,1) ON CONFLICT(project_id) DO UPDATE SET revision=revision+1', [projectId]);
@@ -8594,12 +9416,75 @@ export class UnifiedDataStore {
     const runFiles = this.rows('SELECT execution_log_id,files_json FROM project_run_indexes WHERE project_id=?', [projectId]).flatMap(row => JSON.parse(String(row.files_json)).map((file: any) => ({ ...file, executionLogId: Number(row.execution_log_id) })));
     return { tasks, reports: [...latestReports.values()], observations, runFiles, sourceRevision: this.reportSourceRevision(projectId) };
   }
+  public readRegisteredReportSourcePage(projectId: string, input: { section: string; taskId?: string; cursor?: number; limit?: number; metadataOnly?: boolean }): { items: any[]; nextCursor: number | null; sourceRevision: number } {
+    const cursor = Number(input.cursor || 0), limit = Number(input.limit || 100);
+    if (!Number.isInteger(cursor) || cursor < 0 || !Number.isInteger(limit) || limit < 1 || limit > 200) throw new Error('invalid_report_source_page');
+    const taskId = input.taskId ? String(this.rows('SELECT task_id FROM legacy_report_tasks WHERE project_id=? AND legacy_task_id=?', [projectId, input.taskId])[0]?.task_id || String(input.taskId).replace(/^task-/, '')) : '';
+    const page = (sql: string, values: SqlValue[]) => this.rows(`${sql} LIMIT ? OFFSET ?`, [...values, limit + 1, cursor]);
+    let rows: Record<string, SqlValue>[] = [], items: any[] = [];
+    if (input.section === 'tasks') {
+      rows = page(`SELECT t.id,t.original_request_content_id,substr(c.title,1,120) AS title,o.created_at,o.revision,l.legacy_task_id,l.started_at,l.title_preview
+        FROM tasks t JOIN objects o ON o.id=t.id JOIN conversations c ON c.id=t.conversation_id LEFT JOIN legacy_report_tasks l ON l.task_id=t.id
+        WHERE t.project_id=? AND o.archived_at IS NULL${taskId ? ' AND t.id=?' : ''} ORDER BY o.created_at,t.id`, [projectId, ...(taskId ? [taskId] : [])]);
+      items = rows.slice(0, limit).map(row => ({ taskId: row.legacy_task_id ? String(row.legacy_task_id) : `task-${row.id}`,
+        userMessage: input.metadataOnly ? String(row.title_preview ?? row.title ?? '') : this.decodedContent(String(row.original_request_content_id)), startedAt: row.legacy_task_id ? String(row.started_at || '') : new Date(Number(row.created_at)).toISOString(),
+        sourceRef: { objectId: String(row.id), revision: Number(row.revision) }, executions: [] }));
+    } else if (input.section === 'executions') {
+      rows = page(`SELECT task_id,public_task_id,execution_log_id,node_id FROM (
+        SELECT t.id AS task_id,COALESCE(l.legacy_task_id,'task-'||t.id) AS public_task_id,j.execution_log_id,COALESCE(c.node_key,'') AS node_id
+        FROM tasks t LEFT JOIN legacy_report_tasks l ON l.task_id=t.id JOIN run_turn_journals j ON j.project_id=t.project_id
+        JOIN turns turn ON turn.id=j.turn_id AND turn.task_id=t.id LEFT JOIN run_control c ON c.run_id=j.run_id WHERE t.project_id=?
+        UNION SELECT t.id,COALESCE(l.legacy_task_id,'task-'||t.id),CAST(json_extract(value,'$.id') AS INTEGER),COALESCE(json_extract(value,'$.nodeId'),'')
+        FROM tasks t JOIN legacy_report_tasks l ON l.task_id=t.id JOIN json_each(l.executions_json) WHERE t.project_id=?
+      ) WHERE 1=1${taskId ? ' AND task_id=?' : ''} ORDER BY public_task_id,execution_log_id,node_id`, [projectId, projectId, ...(taskId ? [taskId] : [])]);
+      items = rows.slice(0, limit).map(row => ({ taskId: String(row.public_task_id), id: Number(row.execution_log_id), nodeId: String(row.node_id || '') }));
+    } else if (input.section === 'observations' || input.section === 'reports') {
+      const reportsOnly = input.section === 'reports';
+      rows = page(`SELECT v.*,e.sequence AS committed_sequence,o.archived_at AS object_archived_at,COALESCE(l.legacy_sequence,t.sequence) AS sequence,
+          COALESCE(l.execution_log_id,j.execution_log_id) AS execution_log_id,s.source_created_at,COALESCE(taskmap.legacy_task_id,'task-'||v.task_id) AS public_task_id
+        FROM report_versions v JOIN objects o ON o.id=v.object_id JOIN object_revisions r ON r.object_id=v.object_id AND r.revision=v.revision
+        JOIN events e ON e.subject_id=r.object_id AND e.content_id=r.content_id JOIN turns t ON t.id=v.turn_id
+        LEFT JOIN run_turn_journals j ON j.project_id=v.project_id AND j.turn_id=v.turn_id LEFT JOIN legacy_report_turns l ON l.turn_id=v.turn_id
+        LEFT JOIN report_version_sources s ON s.object_id=v.object_id AND s.revision=v.revision LEFT JOIN legacy_report_tasks taskmap ON taskmap.task_id=v.task_id
+        WHERE v.project_id=?${taskId ? ' AND v.task_id=?' : ''}${!reportsOnly && input.metadataOnly ? ' AND o.archived_at IS NULL' : ''}${reportsOnly ? ` AND o.archived_at IS NULL AND json_extract(v.metadata_json,'$.availability')='recorded'
+          AND COALESCE(json_extract(v.metadata_json,'$.archived'),0)=0 AND NOT EXISTS (
+            SELECT 1 FROM report_versions newer JOIN object_revisions nr ON nr.object_id=newer.object_id AND nr.revision=newer.revision
+            JOIN events ne ON ne.subject_id=nr.object_id AND ne.content_id=nr.content_id JOIN objects no ON no.id=newer.object_id
+            WHERE newer.project_id=v.project_id AND newer.turn_id=v.turn_id AND no.archived_at IS NULL
+              AND json_extract(newer.metadata_json,'$.availability')='recorded' AND COALESCE(json_extract(newer.metadata_json,'$.archived'),0)=0 AND ne.sequence>e.sequence)` : ''}
+        ORDER BY e.sequence`, [projectId, ...(taskId ? [taskId] : [])]);
+      items = rows.slice(0, limit).map(row => {
+        const metadata = JSON.parse(String(row.metadata_json)), sourceRef = { objectId: String(row.object_id), revision: Number(row.revision) };
+        const value = { ...metadata, objectArchived: row.object_archived_at !== null, taskId: String(row.public_task_id), executionLogId: row.execution_log_id === null ? null : Number(row.execution_log_id),
+          sequence: Number(row.sequence), turnId: String(row.turn_id), hash: String(row.sha256), createdAt: row.source_created_at === null ? new Date(Number(row.recorded_at)).toISOString() : String(row.source_created_at),
+          sourceRef, versionKey: `${row.object_id}:${row.revision}`, ordinal: Number(row.committed_sequence), agent: '', envelope: null as any };
+        return value;
+      });
+    } else if (input.section === 'runFiles') {
+      rows = page(`SELECT p.execution_log_id,j.value AS file_json FROM project_run_indexes p JOIN json_each(p.files_json) j
+        WHERE p.project_id=?${taskId ? ' AND p.execution_log_id IN (SELECT j2.execution_log_id FROM run_turn_journals j2 JOIN turns t2 ON t2.id=j2.turn_id WHERE j2.project_id=? AND t2.task_id=?)' : ''}
+        ORDER BY p.execution_log_id,CAST(j.key AS INTEGER)`, [projectId, ...(taskId ? [projectId, taskId] : [])]);
+      items = rows.slice(0, limit).map(row => ({ ...JSON.parse(String(row.file_json)), executionLogId: Number(row.execution_log_id) }));
+    } else throw new Error('invalid_report_source_section');
+    return { items, nextCursor: rows.length > limit ? cursor + limit : null, sourceRevision: this.reportSourceRevision(projectId) };
+  }
   public readReportVersions(projectId: string, refs: Array<{ objectId: string; revision: number }>): Array<{ key: string; report: unknown }> {
     return refs.map(ref => {
       const row = this.rows('SELECT content_id FROM report_versions WHERE project_id=? AND object_id=? AND revision=?', [projectId, ref.objectId, ref.revision])[0];
       if (!row) throw new Error('report_version_denied');
       return { key: `${ref.objectId}:${ref.revision}`, report: JSON.parse(this.content(String(row.content_id)).toString('utf8')) };
     });
+  }
+  public readReportVersionPage(projectId: string, ref: { objectId: string; revision: number }, offset = 0, limit = 65536): { key: string; data: string; offset: number; totalBytes: number; nextOffset: number | null } {
+    if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 65536) throw new Error('invalid_report_version_page');
+    const row = this.rows('SELECT content_id FROM report_versions WHERE project_id=? AND object_id=? AND revision=?', [projectId, ref.objectId, ref.revision])[0];
+    if (!row) throw new Error('report_version_denied');
+    const content = this.rows('SELECT sha256,mime_type,byte_length,stored_byte_length,encoding,chunk_index_json FROM contents WHERE id=?', [row.content_id])[0];
+    const totalBytes = Number(content.byte_length);
+    if (offset > totalBytes) throw new Error('invalid_report_version_page');
+    const end = Math.min(totalBytes, offset + limit);
+    const bytes = this.contentRange(String(row.content_id), content, offset, end);
+    return { key: `${ref.objectId}:${ref.revision}`, data: bytes.toString('base64'), offset, totalBytes, nextOffset: end < totalBytes ? end : null };
   }
   public readGithubFacts(projectId: string, repository: string): { revision: number; facts: any } {
     const reference = this.readGrowthReportProjection(projectId, `github-facts:${repository}`).find(row => row.key === `github-facts:${repository}`)?.value as { objectId: string; revision: number } | undefined;
@@ -8621,8 +9506,10 @@ export class UnifiedDataStore {
       this.bumpReportSourceRevision(projectId);
     });
   }
-  public readGrowthReportProjection(projectId: string, prefix = ''): Array<{ key: string; value: unknown; revision: number }> {
-    return this.rows('SELECT key,value_json,revision FROM growth_report_projection WHERE project_id=? AND key LIKE ? ORDER BY key', [projectId, `${prefix}%`]).map(row => ({ key: String(row.key), value: JSON.parse(String(row.value_json)), revision: Number(row.revision) }));
+  public readGrowthReportProjection(projectId: string, prefix = '', afterKey = '', limit?: number): Array<{ key: string; value: unknown; revision: number }> {
+    const bounded = limit === undefined ? '' : ' LIMIT ?';
+    return this.rows(`SELECT key,value_json,revision FROM growth_report_projection WHERE project_id=? AND key LIKE ? AND key>? ORDER BY key${bounded}`,
+      [projectId, `${prefix}%`, afterKey, ...(limit === undefined ? [] : [limit])]).map(row => ({ key: String(row.key), value: JSON.parse(String(row.value_json)), revision: Number(row.revision) }));
   }
   public writeGrowthReportProjection(projectId: string, updates: Array<{ key: string; value: unknown; expectedRevision?: number }>, expectedSourceRevision?: number): Array<{ key: string; revision: number }> {
     return this.transaction(() => {
@@ -8701,7 +9588,8 @@ export class UnifiedDataStore {
     }
     return { items, sourceSequence: Math.max(result.sourceSequence, global.sourceSequence), remaining: items.length !== candidates.length || result.cursor !== null || global.cursor !== null };
   }
-  public async export(input: { ref: string; format: 'json' | 'md' | 'text'; destination: string; idempotencyKey: string }, projectObject?: (object: DataObject) => DataObject): Promise<{ destination: string; sha256: string; revision: number }> {
+  public async export(input: { ref: string; format: 'json' | 'md' | 'text'; destination: string; idempotencyKey: string }, projectObject?: (object: DataObject) => DataObject,
+    publication?: { authorize?(): void; agentProjection?: boolean; invocationFence?: { operationId: string; invocationId: string; ownerId: string; ownerGeneration: number } }): Promise<{ destination: string; sha256: string; revision: number }> {
     if (typeof input.idempotencyKey !== 'string' || !input.idempotencyKey.trim()) throw new Error('idempotency_key_required');
     if (!['json', 'md', 'text'].includes(input.format)) throw new Error('unknown_export_format');
     const destination = path.resolve(input.destination);
@@ -8709,38 +9597,121 @@ export class UnifiedDataStore {
     const relative = path.relative(exportRoot, destination);
     if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('export_destination_outside_exports');
     this.validateExportPath(destination);
-    const render = (object: DataObject): string | Buffer => this.exportBody(object, input.format);
-    const stored = this.transaction(() => {
-      const hash = digest(canonical(input));
-      const previous = this.rows('SELECT * FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, input.idempotencyKey])[0];
-      if (previous) {
-        if (previous.input_hash !== hash) throw new Error('idempotency_conflict');
-        const result = JSON.parse(this.content(String(previous.result_content_id)).toString('utf8')) as { destination: string; sha256: string; revision: number; contentId: string; outboxId: string };
-        if (projectObject && digest(render(this.read(input.ref, result.revision, projectObject))) !== result.sha256) throw new Error('export_authorization_changed');
-        return result;
-      }
-      const object = this.read(input.ref, undefined, projectObject);
-      const data = render(object);
-      const contentId = this.putContent(data, input.format === 'json' ? 'application/json' : 'text/plain');
-      const requestId = crypto.randomUUID();
+    const actorId = this.actorId, inputHash = digest(canonical(input));
+    type StoredExport = { destination: string; sha256: string; revision: number; contentId: string; outboxId: string; ref: string; format: 'json' | 'md' | 'text' };
+    const previousExport = (): StoredExport | null => {
+      const previous = this.rows('SELECT input_hash,result_content_id FROM requests WHERE actor_id=? AND idempotency_key=?', [actorId, input.idempotencyKey])[0];
+      if (!previous) return null;
+      if (previous.input_hash !== inputHash) throw new Error('idempotency_conflict');
+      return JSON.parse(this.content(String(previous.result_content_id)).toString('utf8')) as StoredExport;
+    };
+    let stored = previousExport();
+    if (stored && publication?.agentProjection) {
+      try {
+        const manifest = JSON.parse(this.content(stored.contentId).toString('utf8'));
+        if (manifest.type !== 'file_export_manifest' || manifest.agentProjection !== true) throw new Error('export_authorization_changed');
+      } catch (error) { throw (error as Error).message === 'export_authorization_changed' ? error : new Error('export_authorization_changed'); }
+    }
+    let staged: { path: string; sha256: string; bytes: number } | undefined;
+    if (!stored) {
+      const metadata = this.readMetadata(input.ref);
+      projectObject?.(metadata);
+      publication?.authorize?.();
       const outboxId = crypto.randomUUID();
-      const eventId = crypto.randomUUID();
-      const sequence = Number(this.rows('SELECT COALESCE(MAX(sequence),0)+1 AS seq FROM events')[0].seq);
-      const result = { destination, sha256: digest(data), revision: object.revision, contentId, outboxId, ref: object.objectId, format: input.format };
-      const resultId = this.putContent(canonical(result), 'application/json');
-      this.db.run('INSERT INTO requests VALUES(?,?,?,?,?,?,?)', [this.actorId, input.idempotencyKey, requestId, hash, resultId, 'committed', sequence]);
-      this.db.run('INSERT INTO events VALUES(?,?,?,?,?,?,?,?)', [eventId, sequence, object.objectId, this.actorId, 'object.export', contentId, Date.now(), requestId]);
-      this.db.run('INSERT INTO outbox VALUES(?,?,?,?,?,?,?,0,NULL)', [outboxId, eventId, 'file_export', destination, contentId, 1, 'pending']);
-      return result;
-    });
-    const bytes = this.content(stored.contentId);
+      const stageInput = { outboxId, ref: metadata.objectId, revision: metadata.revision, format: input.format, agentProjection: publication?.agentProjection === true };
+      staged = this.maintenanceCompute?.stageFileExport
+        ? await this.maintenanceCompute.stageFileExport(stageInput)
+        : this.stageFileExport(stageInput);
+      try {
+        stored = this.transaction(() => {
+          const raced = previousExport();
+          if (raced) return raced;
+          const current = this.readMetadata(metadata.objectId, metadata.revision);
+          projectObject?.(current);
+          publication?.authorize?.();
+          const requestId = crypto.randomUUID(), eventId = crypto.randomUUID();
+          const sequence = Number(this.rows('SELECT COALESCE(MAX(sequence),0)+1 AS seq FROM events')[0].seq);
+          const manifest = { schemaVersion: 1, type: 'file_export_manifest', ref: metadata.objectId, revision: metadata.revision,
+            format: input.format, sha256: staged!.sha256, bytes: staged!.bytes, agentProjection: publication?.agentProjection === true };
+          const contentId = this.putContent(canonical(manifest), 'application/json');
+          const result = { destination, sha256: staged!.sha256, revision: metadata.revision, contentId, outboxId, ref: metadata.objectId, format: input.format,
+            ...(publication?.invocationFence ? { invocationFence: publication.invocationFence } : {}) };
+          const resultId = this.putContent(canonical(result), 'application/json');
+          this.db.run('INSERT INTO requests VALUES(?,?,?,?,?,?,?)', [actorId, input.idempotencyKey, requestId, inputHash, resultId, 'committed', sequence]);
+          this.db.run('INSERT INTO events VALUES(?,?,?,?,?,?,?,?)', [eventId, sequence, metadata.objectId, actorId, 'object.export', contentId, Date.now(), requestId]);
+          this.db.run('INSERT INTO outbox VALUES(?,?,?,?,?,?,?,0,NULL)', [outboxId, eventId, 'file_export', destination, contentId, 1, 'pending']);
+          return result;
+        });
+      } catch (error) {
+        try { fs.unlinkSync(staged.path); } catch (cleanupError) { if ((cleanupError as NodeJS.ErrnoException).code !== 'ENOENT') throw cleanupError; }
+        throw error;
+      }
+      if (stored.outboxId !== outboxId) {
+        try { fs.unlinkSync(staged.path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        staged = undefined;
+      }
+    }
     await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+    staged ||= this.maintenanceCompute?.stageFileExport
+      ? await this.maintenanceCompute.stageFileExport({ contentId: stored.contentId, outboxId: stored.outboxId })
+      : this.stageFileExport({ contentId: stored.contentId, outboxId: stored.outboxId });
+    if (staged.sha256 !== stored.sha256) throw new Error('export_staging_invalid');
+    let alreadyPublished = false;
+    try {
+      const existing = await this.maintenanceDigestFile(destination);
+      if (existing.sha256 !== stored.sha256 || existing.bytes !== staged.bytes) throw new Error('EEXIST: export_destination_exists');
+      alreadyPublished = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && (error as Error).message !== 'maintenance_file_invalid') throw error;
+    }
     const destinationParent = this.captureSafeDestinationParent(destination, 'export_destination_invalid');
     projectObject?.(this.readMetadata(input.ref));
-    // Existing user exports are never overwritten. A replay may accept only identical bytes.
-    this.writeFileAtStableParent(destination, bytes, destinationParent, 'export_destination_invalid');
-    this.db.run("UPDATE outbox SET state='delivered',attempt=attempt+1 WHERE id=?", [stored.outboxId]);
+    publication?.authorize?.();
+    // Existing user exports are never overwritten. Publication is a metadata-only
+    // hard link from the worker-owned stage, never a large Writer-thread copy.
+    if (!alreadyPublished) {
+      if (this.maintenanceCompute) this.publishStagedFileAtStableParent(destination, staged.path, destinationParent, 'export_destination_invalid');
+      else this.writeFileAtStableParent(destination, fs.readFileSync(staged.path), destinationParent, 'export_destination_invalid');
+    }
+    this.transaction(() => {
+      publication?.authorize?.();
+      this.db.run("UPDATE outbox SET state='delivered',attempt=attempt+1 WHERE id=?", [stored.outboxId]);
+    });
+    try { fs.unlinkSync(staged.path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     return { destination: stored.destination, sha256: stored.sha256, revision: stored.revision };
+  }
+  public readContentForMaintenance(contentId: string): Buffer { return this.content(contentId); }
+  public stageFileExport(input: { outboxId: string; contentId?: string; ref?: string; revision?: number; format?: 'json' | 'md' | 'text'; agentProjection?: boolean }): { path: string; sha256: string; bytes: number } {
+    if (!/^[a-f0-9-]{36}$/i.test(input.outboxId)) throw new Error('export_staging_invalid');
+    const directory = path.join(this.root, '.solomap-maintenance-staging');
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const directoryStat = fs.lstatSync(directory);
+    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink() || fs.realpathSync(directory) !== directory) throw new Error('export_staging_invalid');
+    let bytes: Buffer;
+    if (input.ref && input.revision && input.format) {
+      const object = this.read(input.ref, input.revision, input.agentProjection ? agentReadableObject : undefined);
+      bytes = Buffer.from(this.exportBody(object, input.format));
+    } else if (input.contentId) {
+      const content = this.content(input.contentId);
+      let manifest: { type?: string; ref?: string; revision?: number; format?: 'json' | 'md' | 'text'; sha256?: string; bytes?: number; agentProjection?: boolean } | undefined;
+      try { manifest = JSON.parse(content.toString('utf8')); } catch { /* Legacy outbox content is exported byte-for-byte. */ }
+      if (manifest?.type === 'file_export_manifest' && manifest.ref && manifest.revision && manifest.format) {
+        const object = this.read(manifest.ref, manifest.revision, manifest.agentProjection ? agentReadableObject : undefined);
+        bytes = Buffer.from(this.exportBody(object, manifest.format));
+        if (digest(bytes) !== manifest.sha256 || bytes.length !== manifest.bytes) throw new Error('export_staging_invalid');
+      } else bytes = content;
+    } else throw new Error('export_staging_invalid');
+    const sha256 = digest(bytes);
+    const stagedPath = path.join(directory, `export-${input.outboxId}-${sha256}.stage`);
+    try {
+      const descriptor = fs.openSync(stagedPath, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW || 0), 0o600);
+      try { fs.writeFileSync(descriptor, bytes); fs.fsyncSync(descriptor); } finally { fs.closeSync(descriptor); }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const stat = fs.lstatSync(stagedPath);
+      if (!stat.isFile() || stat.isSymbolicLink() || digest(fs.readFileSync(stagedPath)) !== sha256) throw new Error('export_staging_invalid');
+    }
+    return { path: stagedPath, sha256, bytes: bytes.length };
   }
   private exportBody(object: DataObject, format: 'json' | 'md' | 'text'): string | Buffer {
     const body = object.data.content as { encoding?: string; data?: string } | undefined;
@@ -8755,13 +9726,19 @@ export class UnifiedDataStore {
       if (!canAgentRead(object, scope, ref, this.learningReviewScopeCurrent(object))) throw new Error('scope_denied');
       return agentReadableObject(object);
     };
-    const check = () => { projectObject(this.readMetadata(ref)); };
-    check();
     const saved = JSON.parse(this.content(String(event.result_content_id)).toString('utf8'));
+    const check = () => {
+      if (saved.invocationFence) this.assertPiToolInvocationActive(String(saved.invocationFence.operationId), String(saved.invocationFence.invocationId), {
+        ownerId: String(saved.invocationFence.ownerId), generation: Number(saved.invocationFence.ownerGeneration)
+      });
+      projectObject(this.readMetadata(ref));
+    };
+    check();
     if (saved.outboxId !== effect.id || saved.contentId !== effect.content_id || saved.destination !== effect.destination_ref || (saved.ref && saved.ref !== ref)) throw new Error('export_authorization_changed');
-    const object = this.read(ref, saved.revision, projectObject);
-    const formats: Array<'json' | 'md' | 'text'> = saved.format ? [saved.format] : ['json', 'md', 'text'];
-    if (!formats.some(format => digest(this.exportBody(object, format)) === saved.sha256)) throw new Error('export_authorization_changed');
+    try {
+      const manifest = JSON.parse(this.content(String(effect.content_id)).toString('utf8'));
+      if (manifest.type === 'file_export_manifest' && (manifest.ref !== ref || manifest.revision !== saved.revision || manifest.format !== saved.format || manifest.sha256 !== saved.sha256 || manifest.agentProjection !== true)) throw new Error('export_authorization_changed');
+    } catch (error) { if ((error as Error).message === 'export_authorization_changed') throw error; }
     return check;
   }
   private validateExportPath(destination: string): void {
@@ -8832,6 +9809,20 @@ export class UnifiedDataStore {
       finally { fs.closeSync(descriptor); }
     } finally { fs.closeSync(stableParent.descriptor); }
   }
+  private publishStagedFileAtStableParent(destination: string, stagedPath: string, parent: fs.Stats, code: string): void {
+    const staged = fs.lstatSync(stagedPath);
+    if (!staged.isFile() || staged.isSymbolicLink()) throw new Error('export_staging_invalid');
+    const stableParent = this.openStableDestinationParent(destination, parent, code);
+    try {
+      this.assertSafeDestinationParent(destination, parent, code);
+      const stableDestination = path.join(stableParent.directory, path.basename(destination));
+      try { fs.linkSync(stagedPath, stableDestination); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('EEXIST: export_destination_exists'); throw error; }
+      const published = fs.lstatSync(stableDestination);
+      if (!published.isFile() || published.isSymbolicLink() || published.dev !== staged.dev || published.ino !== staged.ino) throw new Error(code);
+      this.assertSafeDestinationParent(destination, parent, code);
+    } finally { fs.closeSync(stableParent.descriptor); }
+  }
   public async recoverOutbox(): Promise<{ delivered: number; pending: Array<{ id: string; error: string }> }> {
     const effects = this.rows("SELECT * FROM outbox WHERE state<>'delivered' AND channel IN ('project_identity','file_export','roadmap_projection') ORDER BY rowid");
     const pending: Array<{ id: string; error: string }> = [];
@@ -8857,20 +9848,33 @@ export class UnifiedDataStore {
           if (!this.rows("SELECT id FROM project_locations WHERE root_path=? AND status='active'", [projectRoot]).length) throw new Error('project_location_missing');
           this.assertProjectControlDirectory(projectRoot);
         }
-        const bytes = this.content(String(effect.content_id));
         await fs.promises.mkdir(path.dirname(destination), { recursive: true });
         if (effect.channel === 'file_export') {
+          const staged = this.maintenanceCompute?.stageFileExport
+            ? await this.maintenanceCompute.stageFileExport({ contentId: String(effect.content_id), outboxId: id })
+            : this.stageFileExport({ contentId: String(effect.content_id), outboxId: id });
+          let alreadyPublished = false;
+          try {
+            const existing = await this.maintenanceDigestFile(destination);
+            if (existing.sha256 !== staged.sha256 || existing.bytes !== staged.bytes) throw new Error('EEXIST: export_destination_exists');
+            alreadyPublished = true;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && (error as Error).message !== 'maintenance_file_invalid') throw error;
+          }
           const destinationParent = this.captureSafeDestinationParent(destination, 'export_destination_invalid');
           authorize?.();
-          this.writeFileAtStableParent(destination, bytes, destinationParent, 'export_destination_invalid');
+          if (!alreadyPublished) this.publishStagedFileAtStableParent(destination, staged.path, destinationParent, 'export_destination_invalid');
+          this.transaction(() => { authorize?.(); this.db.run("UPDATE outbox SET state='delivered',attempt=attempt+1,next_attempt_at=NULL WHERE id=?", [id]); });
+          try { fs.unlinkSync(staged.path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
         } else {
+          const bytes = this.content(String(effect.content_id));
           const projectRoot = path.dirname(path.dirname(destination));
           this.assertProjectControlDirectory(projectRoot);
           const destinationParent = this.captureSafeDestinationParent(destination, 'project_control_path_invalid');
           this.writeFileAtStableParent(destination, bytes, destinationParent, 'project_control_path_invalid');
           this.assertProjectControlDirectory(projectRoot);
+          this.db.run("UPDATE outbox SET state='delivered',attempt=attempt+1,next_attempt_at=NULL WHERE id=?", [id]);
         }
-        this.db.run("UPDATE outbox SET state='delivered',attempt=attempt+1,next_attempt_at=NULL WHERE id=?", [id]);
         delivered++;
       } catch (error) {
         this.db.run("UPDATE outbox SET attempt=attempt+1 WHERE id=?", [id]);
@@ -8923,12 +9927,14 @@ export class UnifiedDataStore {
     const items = matches.slice(0, limit);
     return { items, cursor: matches.length > limit ? Buffer.from(canonical({ id: items[items.length - 1].objectId, sequence: after?.sequence ?? sequence, fingerprint })).toString('base64url') : null, sourceSequence: sequence, sourceChanged };
   }
-  public readIntelligenceConversation(id: string): { conversation: IntelligenceConversation; revision: number; contextCheckpoint?: IntelligenceContextCheckpoint } | null {
+  public readIntelligenceConversation(id: string, messageOffset = 0, messageLimit = 200): { conversation: IntelligenceConversation; revision: number; messageOffset: number; totalMessages: number; nextMessageOffset: number | null; contextCheckpoint?: IntelligenceContextCheckpoint } | null {
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(id)) throw new Error('Invalid intelligence conversation ID.');
     const row = this.rows("SELECT o.* FROM objects o JOIN conversations c ON c.id=o.id WHERE o.id=? AND o.project_id IS NULL AND c.mode='intelligence' AND o.archived_at IS NULL", [id])[0];
     if (!row) return null;
     const object = this.current(id, false);
-    const messages = this.rows('SELECT role,content_id FROM messages WHERE conversation_id=? ORDER BY sequence', [id]).map(message => ({ role: String(message.role) as 'user' | 'assistant', content: this.decodedContent(String(message.content_id)) as string }));
+    const totalMessages = Number(this.rows('SELECT COUNT(*) AS count FROM messages WHERE conversation_id=?', [id])[0].count);
+    const messages = this.rows('SELECT role,content_id FROM messages WHERE conversation_id=? ORDER BY sequence LIMIT ? OFFSET ?', [id, messageLimit, messageOffset])
+      .map(message => ({ role: String(message.role) as 'user' | 'assistant', content: this.decodedContent(String(message.content_id)) as string }));
     const conversation = { id, title: String(object.data.title), createdAt: new Date(Number(row.created_at)).toISOString(), updatedAt: new Date(Number(row.updated_at)).toISOString(), messages };
     const projection = this.rows('SELECT content_id FROM projections WHERE namespace=? AND scope_key=? AND projection_key=?', [
       INTELLIGENCE_CONTEXT_CHECKPOINT_NAMESPACE, id, INTELLIGENCE_CONTEXT_CHECKPOINT_KEY
@@ -8937,13 +9943,41 @@ export class UnifiedDataStore {
     if (projection) {
       try {
         const value = JSON.parse(this.content(String(projection.content_id)).toString('utf8'));
-        if (validIntelligenceContextCheckpoint(value, messages) && value.sourceRevision <= Number(row.revision)) contextCheckpoint = value;
+        if (messageOffset === 0 && messages.length === totalMessages && validIntelligenceContextCheckpoint(value, messages) && value.sourceRevision <= Number(row.revision)) contextCheckpoint = value;
       } catch { /* A malformed derived checkpoint never invalidates the authoritative conversation. */ }
     }
-    return { revision: Number(row.revision), conversation, ...(contextCheckpoint ? { contextCheckpoint } : {}) };
+    const nextMessageOffset = messageOffset + messages.length < totalMessages ? messageOffset + messages.length : null;
+    return { revision: Number(row.revision), conversation, messageOffset, totalMessages, nextMessageOffset, ...(contextCheckpoint ? { contextCheckpoint } : {}) };
   }
-  public listIntelligenceConversations(): Array<Pick<IntelligenceConversation, 'id' | 'title' | 'updatedAt'>> {
-    return this.rows("SELECT o.id,c.title,o.updated_at FROM objects o JOIN conversations c ON c.id=o.id WHERE o.project_id IS NULL AND c.mode='intelligence' AND o.archived_at IS NULL ORDER BY o.updated_at DESC,o.id").map(row => ({ id: String(row.id), title: String(row.title), updatedAt: new Date(Number(row.updated_at)).toISOString() }));
+  private readCompleteIntelligenceConversation(id: string): ReturnType<UnifiedDataStore['readIntelligenceConversation']> {
+    const first = this.readIntelligenceConversation(id, 0, 200);
+    if (!first || first.nextMessageOffset === null) return first;
+    const messages = [...first.conversation.messages];
+    let offset: number | null = first.nextMessageOffset;
+    while (offset !== null) {
+      const page = this.readIntelligenceConversation(id, offset, 200);
+      if (!page || page.revision !== first.revision || page.totalMessages !== first.totalMessages || page.messageOffset !== offset) throw new Error('conversation_history_changed');
+      messages.push(...page.conversation.messages);
+      offset = page.nextMessageOffset;
+    }
+    if (messages.length !== first.totalMessages) throw new Error('conversation_history_incomplete');
+    return { ...first, conversation: { ...first.conversation, messages }, nextMessageOffset: null };
+  }
+  public listIntelligenceConversations(input: { cursor?: string; limit?: number } = {}): { items: Array<Pick<IntelligenceConversation, 'id' | 'title' | 'updatedAt'>>; nextCursor: string | null } {
+    const limit = Number(input.limit || 100);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new Error('invalid_intelligence_conversation_page');
+    let beforeUpdatedAt = Number.MAX_SAFE_INTEGER, afterId = '';
+    if (input.cursor) {
+      try {
+        const cursor = JSON.parse(Buffer.from(input.cursor, 'base64url').toString('utf8')) as { updatedAt?: unknown; id?: unknown };
+        beforeUpdatedAt = Number(cursor.updatedAt); afterId = String(cursor.id || '');
+        if (!Number.isFinite(beforeUpdatedAt) || !afterId) throw new Error('invalid');
+      } catch { throw new Error('invalid_intelligence_conversation_cursor'); }
+    }
+    const rows = this.rows("SELECT o.id,c.title,o.updated_at FROM objects o JOIN conversations c ON c.id=o.id WHERE o.project_id IS NULL AND c.mode='intelligence' AND o.archived_at IS NULL AND (o.updated_at<? OR (o.updated_at=? AND o.id>?)) ORDER BY o.updated_at DESC,o.id LIMIT ?", [beforeUpdatedAt, beforeUpdatedAt, afterId, limit + 1]);
+    const page = rows.slice(0, limit), last = page[page.length - 1];
+    return { items: page.map(row => ({ id: String(row.id), title: String(row.title), updatedAt: new Date(Number(row.updated_at)).toISOString() })),
+      nextCursor: rows.length > limit && last ? Buffer.from(canonical({ updatedAt: Number(last.updated_at), id: String(last.id) })).toString('base64url') : null };
   }
   public writeIntelligenceConversation(input: { conversation: IntelligenceConversation; expectedRevision: number; idempotencyKey: string; commitGuard?: IntelligenceCommitGuard; contextCheckpoint?: StagedIntelligenceContextCheckpoint }): WriteReceipt {
     const value = input.conversation;
@@ -8958,7 +9992,7 @@ export class UnifiedDataStore {
           .find(item => item.key === 'replyGeneration')?.value;
         if (generation !== input.commitGuard.generation) throw new Error('intelligence_reply_revoked');
       }
-      const current = this.readIntelligenceConversation(value.id);
+      const current = this.readCompleteIntelligenceConversation(value.id);
       if ((current?.revision || 0) !== input.expectedRevision) throw new Error('revision_conflict');
       const oldMessages = current?.conversation.messages || [];
       if (value.messages.length < oldMessages.length || canonical(value.messages.slice(0, oldMessages.length)) !== canonical(oldMessages)) throw new Error('conversation_history_conflict');
@@ -9206,21 +10240,77 @@ export class UnifiedDataStore {
       return this.appendProjectJournal(projectId, `historical-raw:${sourceKey}`, entry, 0, Math.max(next, minimumExecutionLogId)).executionLogId;
     });
   }
-  public readProjectRunIndexes(projectId: string, input: { limit?: number; offset?: number } = {}): RunIndexEntry[] {
+  public readProjectRunIndexes(projectId: string, input: { limit?: number; offset?: number; beforeExecutionLogId?: number } = {}): RunIndexEntry[] {
     const values: SqlValue[] = [projectId];
+    const cursor = Number(input.beforeExecutionLogId || 0);
+    if (cursor > 0) values.push(cursor);
     if (input.limit !== undefined) values.push(Math.max(1, Math.min(500, Number(input.limit || 200))), Math.max(0, Number(input.offset || 0)));
-    return this.rows(`SELECT record_json,files_json,signals_json FROM project_run_indexes WHERE project_id=? ORDER BY execution_log_id DESC ${input.limit === undefined ? '' : 'LIMIT ? OFFSET ?'}`, values).map(row => ({ ...JSON.parse(String(row.record_json)), files: JSON.parse(String(row.files_json)), signals: JSON.parse(String(row.signals_json)) }));
+    return this.rows(`SELECT record_json,files_json,signals_json FROM project_run_indexes WHERE project_id=? ${cursor > 0 ? 'AND execution_log_id<?' : ''} ORDER BY execution_log_id DESC ${input.limit === undefined ? '' : 'LIMIT ? OFFSET ?'}`, values).map(row => ({ ...JSON.parse(String(row.record_json)), files: JSON.parse(String(row.files_json)), signals: JSON.parse(String(row.signals_json)) }));
   }
-  public readProjectInvestmentRuns(projectId: string): Array<{ runKind: string; status: string; startedAt: string; finishedAt: string; durationMs: number }> {
-    return this.rows(`SELECT json_extract(record_json,'$.runKind') AS kind,json_extract(record_json,'$.status') AS status,json_extract(record_json,'$.startedAt') AS started,json_extract(record_json,'$.finishedAt') AS finished,json_extract(record_json,'$.durationMs') AS duration FROM project_run_indexes WHERE project_id=? ORDER BY execution_log_id DESC`, [projectId]).map(row => ({
-      runKind: String(row.kind || 'step'), status: String(row.status || ''), startedAt: String(row.started || ''), finishedAt: String(row.finished || row.started || ''), durationMs: Math.max(0, Number(row.duration || 0))
+  public readProjectInvestmentRuns(projectId: string, input: { limit?: number; beforeExecutionLogId?: number } = {}): Array<{ executionLogId: number; runKind: string; status: string; startedAt: string; finishedAt: string; durationMs: number }> {
+    const cursor = Number(input.beforeExecutionLogId || 0);
+    const values: SqlValue[] = [projectId];
+    if (cursor > 0) values.push(cursor);
+    if (input.limit !== undefined) values.push(Math.max(1, Math.min(500, Number(input.limit || 200))));
+    return this.rows(`SELECT execution_log_id,json_extract(record_json,'$.runKind') AS kind,json_extract(record_json,'$.status') AS status,json_extract(record_json,'$.startedAt') AS started,json_extract(record_json,'$.finishedAt') AS finished,json_extract(record_json,'$.durationMs') AS duration FROM project_run_indexes WHERE project_id=? ${cursor > 0 ? 'AND execution_log_id<?' : ''} ORDER BY execution_log_id DESC ${input.limit === undefined ? '' : 'LIMIT ?'}`, values).map(row => ({
+      executionLogId: Number(row.execution_log_id), runKind: String(row.kind || 'step'), status: String(row.status || ''), startedAt: String(row.started || ''), finishedAt: String(row.finished || row.started || ''), durationMs: Math.max(0, Number(row.duration || 0))
     }));
   }
-  public readProjectImpactRuns(projectId: string): RunImpactRecord[] {
+  public readProjectInvestmentStats(projectId: string, now = new Date()): ProjectInvestmentStats {
+    const maxTrusted = 12 * 60 * 60 * 1000;
+    const recentBoundary = now.getTime() - 14 * 24 * 60 * 60 * 1000;
+    const base = `WITH investment AS (
+      SELECT json_extract(record_json,'$.runKind') AS kind,json_extract(record_json,'$.status') AS status,
+        json_extract(record_json,'$.startedAt') AS started,json_extract(record_json,'$.finishedAt') AS finished,
+        CAST(json_extract(record_json,'$.durationMs') AS INTEGER) AS duration,
+        julianday(json_extract(record_json,'$.startedAt')) AS start_day,julianday(json_extract(record_json,'$.finishedAt')) AS finish_day
+      FROM project_run_indexes WHERE project_id=? AND json_extract(record_json,'$.runKind') IN ('step','step_continue','solo','solo_continue','roadmap_revision')
+    ), classified AS (SELECT *,duration BETWEEN 0 AND ${maxTrusted} AND (start_day IS NULL OR finish_day IS NULL OR (finish_day>=start_day AND duration<=ROUND((finish_day-start_day)*86400000)+300000)) AS trusted FROM investment)`;
+    const total = this.rows(`${base} SELECT COUNT(*) AS run_count,SUM(kind IN ('solo','solo_continue')) AS solo_count,
+      SUM(kind NOT IN ('solo','solo_continue')) AS task_count,SUM(status='Completed') AS completed_count,SUM(status='Failed') AS failed_count,
+      SUM(CASE WHEN trusted THEN duration ELSE 0 END) AS total_duration,
+      SUM(CASE WHEN trusted AND finish_day IS NOT NULL AND (finish_day-2440587.5)*86400000>=? THEN duration ELSE 0 END) AS recent_duration,
+      MAX(CASE WHEN finish_day IS NOT NULL THEN (finish_day-2440587.5)*86400000 WHEN start_day IS NOT NULL THEN (start_day-2440587.5)*86400000 END) AS latest_at,
+      SUM(trusted AND start_day IS NOT NULL) AS observed_count,SUM(NOT (trusted AND start_day IS NOT NULL)) AS excluded_count,
+      MAX(CASE WHEN trusted AND start_day IS NOT NULL THEN duration ELSE 0 END) AS longest_duration
+      FROM classified`, [projectId, recentBoundary])[0];
+    const observed = Number(total.observed_count || 0);
+    const medianRows = observed ? this.rows(`${base} SELECT duration FROM classified WHERE trusted AND start_day IS NOT NULL ORDER BY duration LIMIT ? OFFSET ?`,
+      [projectId, observed % 2 ? 1 : 2, Math.max(0, Math.floor((observed - 1) / 2))]) : [];
+    const median = medianRows.length ? Math.round(medianRows.reduce((sum, row) => sum + Number(row.duration), 0) / medianRows.length) : 0;
+    const hours = Array.from({ length: 24 }, () => 0), weekdays = Array.from({ length: 7 }, () => 0);
+    for (const row of this.rows(`${base} SELECT CAST(strftime('%H',started) AS INTEGER) AS bucket,COUNT(*) AS count FROM classified WHERE trusted AND start_day IS NOT NULL GROUP BY bucket`, [projectId])) hours[Number(row.bucket)] = Number(row.count);
+    for (const row of this.rows(`${base} SELECT CAST(strftime('%w',started) AS INTEGER) AS bucket,COUNT(*) AS count FROM classified WHERE trusted AND start_day IS NOT NULL GROUP BY bucket`, [projectId])) weekdays[Number(row.bucket)] = Number(row.count);
+    const dayStats = this.rows(`${base}, days AS (SELECT date(started) AS day,SUM(duration) AS duration FROM classified WHERE trusted AND start_day IS NOT NULL GROUP BY day),
+      numbered AS (SELECT day,duration,julianday(day)-ROW_NUMBER() OVER (ORDER BY day) AS grp FROM days), streaks AS (SELECT MIN(day) AS first_day,MAX(day) AS last_day,COUNT(*) AS length FROM numbered GROUP BY grp)
+      SELECT (SELECT COUNT(*) FROM days) AS active_days,(SELECT ROUND(AVG(duration)) FROM days) AS average_daily,
+        COALESCE(MAX(length),0) AS longest_streak,COALESCE(MAX(CASE WHEN julianday(date(?))-julianday(last_day)<=1 THEN length ELSE 0 END),0) AS current_streak FROM streaks`, [projectId, now.toISOString()])[0] || {};
+    const maxIndex = (values: number[]): number | null => { const maximum = Math.max(...values); return maximum > 0 ? values.indexOf(maximum) : null; };
+    const runCount = Number(total.run_count || 0), totalDurationMs = Number(total.total_duration || 0), recentDurationMs = Number(total.recent_duration || 0);
+    const latestAt = Number(total.latest_at || 0);
+    const recencyBoost = latestAt ? Math.max(0, 20 - Math.floor((now.getTime() - latestAt) / 86400000)) : 0;
+    const investmentScore = Math.min(60, Math.round(totalDurationMs / 60000 / 20)) + Math.min(40, runCount * 4);
+    const momentumScore = Math.min(70, Math.round(recentDurationMs / 60000 / 10)) + Math.min(30, recencyBoost);
+    return {
+      schemaVersion: 1, generatedAt: now.toISOString(), taskRunCount: Number(total.task_count || 0), soloConversationCount: Number(total.solo_count || 0),
+      completedRunCount: Number(total.completed_count || 0), failedRunCount: Number(total.failed_count || 0), totalDurationMs, recentDurationMs,
+      averageRunDurationMs: observed ? Math.round(totalDurationMs / observed) : 0, latestRunAt: latestAt ? new Date(latestAt).toISOString() : '',
+      investmentScore, momentumScore, focusScore: Math.min(100, Math.round(investmentScore * 0.45 + momentumScore * 0.55)),
+      workHabits: { schemaVersion: 1, observedSessionCount: observed, excludedSessionCount: Number(total.excluded_count || 0), activeDayCount: Number(dayStats.active_days || 0),
+        currentStreakDays: Number(dayStats.current_streak || 0), longestStreakDays: Number(dayStats.longest_streak || 0), averageSessionDurationMs: observed ? Math.round(totalDurationMs / observed) : 0,
+        medianSessionDurationMs: median, averageDailyDurationMs: Number(dayStats.average_daily || 0), longestSessionDurationMs: Number(total.longest_duration || 0),
+        preferredStartHour: maxIndex(hours), preferredWeekday: maxIndex(weekdays), sessionsByStartHour: hours, sessionsByWeekday: weekdays }
+    };
+  }
+  public readProjectImpactRuns(projectId: string, input: { limit?: number; beforeExecutionLogId?: number } = {}): RunImpactRecord[] {
     const fields = ['runKind', 'agentCli', 'status', 'startedAt', 'finishedAt', 'durationMs', 'inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningOutputTokens', 'totalTokens'];
     const projection = fields.map(field => `json_extract(record_json,'$.${field}') AS "${field}"`).join(',');
-    return this.rows(`SELECT ${projection},(SELECT json_group_array(json_object('filePath',json_extract(f.value,'$.filePath'),'role',json_extract(f.value,'$.role'))) FROM json_each(files_json) f WHERE json_extract(f.value,'$.role') IN ('changed','touched')) AS files FROM project_run_indexes WHERE project_id=? ORDER BY execution_log_id DESC`, [projectId]).map(row => ({
-      runKind: String(row.runKind || 'step'), agentCli: String(row.agentCli || ''), status: String(row.status || ''), startedAt: String(row.startedAt || ''), finishedAt: String(row.finishedAt || row.startedAt || ''), durationMs: Math.max(0, Number(row.durationMs || 0)),
+    const cursor = Number(input.beforeExecutionLogId || 0);
+    const values: SqlValue[] = [projectId];
+    if (cursor > 0) values.push(cursor);
+    if (input.limit !== undefined) values.push(Math.max(1, Math.min(500, Number(input.limit || 200))));
+    return this.rows(`SELECT execution_log_id,${projection},(SELECT json_group_array(json_object('filePath',json_extract(f.value,'$.filePath'),'role',json_extract(f.value,'$.role'))) FROM json_each(files_json) f WHERE json_extract(f.value,'$.role') IN ('changed','touched')) AS files FROM project_run_indexes WHERE project_id=? ${cursor > 0 ? 'AND execution_log_id<?' : ''} ORDER BY execution_log_id DESC ${input.limit === undefined ? '' : 'LIMIT ?'}`, values).map(row => ({
+      executionLogId: Number(row.execution_log_id), runKind: String(row.runKind || 'step'), agentCli: String(row.agentCli || ''), status: String(row.status || ''), startedAt: String(row.startedAt || ''), finishedAt: String(row.finishedAt || row.startedAt || ''), durationMs: Math.max(0, Number(row.durationMs || 0)),
       inputTokens: Number(row.inputTokens || 0), cachedInputTokens: Number(row.cachedInputTokens || 0), outputTokens: Number(row.outputTokens || 0), reasoningOutputTokens: Number(row.reasoningOutputTokens || 0), totalTokens: Number(row.totalTokens || 0), files: JSON.parse(String(row.files))
     }));
   }
@@ -9255,28 +10345,129 @@ export class UnifiedDataStore {
       return { objectId: receipt.objectId, revision: receipt.revision, value: JSON.parse(String(this.read(receipt.objectId, receipt.revision).data.content)) };
     });
   }
-  public reserveSidebarCoreRefresh(requestId: string): { requestId: string; generation: number } {
-    if (!requestId.trim()) throw new Error('invalid_sidebar_core_refresh');
-    const current = this.readAnalysisState(null, 'sidebar-core-refresh', 'current');
-    const written = this.writeAnalysisState(null, {
-      namespace: 'sidebar-core-refresh', key: 'current', expectedRevision: current.revision,
-      value: { requestId }, idempotencyKey: `reserve:${requestId}`
+  public pendingSidebarCoreProjectionInputs(limit = 16): SidebarCoreProjectionInput[] {
+    const bounded = Math.max(1, Math.min(64, Math.trunc(limit) || 16));
+    const rows = this.rows(`SELECT s.project_id,s.source_revision,p.name,p.type,p.priority,p.pinned_at,l.root_path
+      FROM sidebar_core_projection_state s
+      JOIN projects p ON p.id=s.project_id
+      JOIN objects o ON o.id=p.id
+      JOIN project_locations l ON l.project_id=p.id AND l.device_id=? AND l.status='active'
+      WHERE s.source_revision>s.projection_revision AND o.archived_at IS NULL AND p.hidden=0
+      ORDER BY s.updated_at,s.project_id LIMIT ?`, [this.deviceId, bounded]);
+    const learningOverview = this.readLearningOverview();
+    return rows.map(row => {
+      const projectId = String(row.project_id);
+      let nodes: SidebarCoreProjectionInput['nodes'] = [];
+      try {
+        nodes = this.readRoadmapByProject(projectId).nodes.map(node => ({
+          id: node.id, title: node.title, stage: node.stage, status: node.status,
+          agentCli: node.agentCli, dependencies: node.dependencies
+        }));
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== 'roadmap_import_required') throw error;
+      }
+      return {
+        projectId,
+        sourceRevision: Number(row.source_revision),
+        project: {
+          name: String(row.name), path: String(row.root_path), type: String(row.type || '') || undefined,
+          priority: String(row.priority || '') || undefined,
+          pinnedAt: row.pinned_at ? new Date(Number(row.pinned_at)).toISOString() : undefined
+        },
+        nodes,
+        investmentStats: this.readProjectInvestmentStats(projectId),
+        learningOverview,
+        reusableSourceCount: this.readProjectReusableSourceCount(projectId),
+        documentationManifest: this.readDocumentationManifest(projectId),
+        recentActivityAt: this.readProjectAnalysisSource(projectId).recentActivityAt
+      };
     });
-    return { requestId, generation: written.revision };
   }
-  public commitSidebarCoreRefresh(input: { requestId: string; generation: number; value: unknown }): { accepted: boolean; state: { objectId: string | null; revision: number; value: unknown } } {
-    if (!String(input.requestId || '').trim() || !Number.isInteger(input.generation) || input.generation < 1 || input.value === undefined) throw new Error('invalid_sidebar_core_refresh');
-    return this.transaction(() => {
-      const reservation = this.readAnalysisState(null, 'sidebar-core-refresh', 'current');
-      const reserved = reservation.value as { requestId?: string } | null;
-      const current = this.readAnalysisState(null, 'sidebar', 'core');
-      if (reservation.revision !== input.generation || reserved?.requestId !== input.requestId) return { accepted: false, state: current };
-      const state = this.writeAnalysisState(null, {
-        namespace: 'sidebar', key: 'core', expectedRevision: current.revision, value: input.value,
-        idempotencyKey: `commit:${input.requestId}`
-      });
-      return { accepted: true, state };
+  public sidebarCoreProjectionTargets(projectPaths: string[] = []): SidebarCoreProjectionTarget[] {
+    const normalized = [...new Set(projectPaths.map(value => String(value || '').trim()).filter(Boolean).map(value => path.resolve(value)))];
+    const where = normalized.length
+      ? ` AND l.root_path IN (SELECT value FROM json_each(?))`
+      : '';
+    const values: SqlValue[] = [this.deviceId];
+    if (normalized.length) values.push(canonical(normalized));
+    return this.rows(`SELECT s.project_id,s.source_revision
+      FROM sidebar_core_projection_state s
+      JOIN projects p ON p.id=s.project_id
+      JOIN objects o ON o.id=p.id
+      JOIN project_locations l ON l.project_id=p.id AND l.device_id=? AND l.status='active'
+      WHERE o.archived_at IS NULL AND p.hidden=0${where}
+      ORDER BY l.root_path`, values).map(row => ({ projectId: String(row.project_id), sourceRevision: Number(row.source_revision) }));
+  }
+  public invalidateSidebarCoreProjections(projectPaths: string[]): SidebarCoreProjectionTarget[] {
+    const normalized = [...new Set(projectPaths.map(value => String(value || '').trim()).filter(Boolean).map(value => path.resolve(value)))];
+    if (!normalized.length) return [];
+    this.db.run(`UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=?
+      WHERE project_id IN (SELECT project_id FROM project_locations WHERE device_id=? AND status='active' AND root_path IN (SELECT value FROM json_each(?)))`,
+      [Date.now(), this.deviceId, canonical(normalized)]);
+    return this.sidebarCoreProjectionTargets(normalized);
+  }
+  public reconcileSidebarFoundationSignatures(items: Array<{ path: string; signature: string }>): { changedPaths: string[]; projectionTargets: SidebarCoreProjectionTarget[] } {
+    const normalized = new Map<string, string>();
+    for (const item of items) {
+      const root = path.resolve(String(item.path || ''));
+      const signature = String(item.signature || '');
+      if (!root || !/^[01]{5}$/.test(signature)) throw new Error('invalid_sidebar_foundation_signature');
+      normalized.set(root, signature);
+    }
+    const changedPaths = this.transaction(() => {
+      const changed: string[] = [];
+      for (const [root, signature] of normalized) {
+        const row = this.rows(`SELECT s.project_id,s.foundation_signature FROM sidebar_core_projection_state s
+          JOIN project_locations l ON l.project_id=s.project_id WHERE l.device_id=? AND l.status='active' AND l.root_path=?`, [this.deviceId, root])[0];
+        if (!row || String(row.foundation_signature) === signature) continue;
+        this.db.run('UPDATE sidebar_core_projection_state SET foundation_signature=?,source_revision=source_revision+1,updated_at=? WHERE project_id=?', [signature, Date.now(), row.project_id]);
+        changed.push(root);
+      }
+      return changed;
     });
+    return { changedPaths, projectionTargets: this.sidebarCoreProjectionTargets(changedPaths) };
+  }
+  public sidebarFoundationObservationInputs(): Array<{ path: string; signature: string }> {
+    return this.rows(`SELECT l.root_path,s.foundation_signature
+      FROM sidebar_core_projection_state s
+      JOIN projects p ON p.id=s.project_id
+      JOIN objects o ON o.id=p.id
+      JOIN project_locations l ON l.project_id=p.id AND l.device_id=? AND l.status='active'
+      WHERE o.archived_at IS NULL AND p.hidden=0
+      ORDER BY l.root_path`, [this.deviceId]).map(row => ({
+        path: String(row.root_path), signature: String(row.foundation_signature)
+      }));
+  }
+  public sidebarCoreProjectionTargetsSettled(targets: SidebarCoreProjectionTarget[]): boolean {
+    if (!targets.length) return true;
+    const pending = Number(this.rows(`SELECT count(*) AS total FROM json_each(?) target
+      LEFT JOIN sidebar_core_projection_state s ON s.project_id=json_extract(target.value,'$.projectId')
+      WHERE s.project_id IS NULL OR s.projection_revision<json_extract(target.value,'$.sourceRevision')`, [canonical(targets)])[0].total);
+    return pending === 0;
+  }
+  public commitSidebarCoreProjection(input: { projectId: string; sourceRevision: number; summary: unknown }): { accepted: boolean } {
+    if (!input.projectId || !Number.isInteger(input.sourceRevision) || input.sourceRevision < 1 || input.summary === undefined) throw new Error('invalid_sidebar_core_projection');
+    return this.transaction(() => {
+      const current = this.rows('SELECT source_revision FROM sidebar_core_projection_state WHERE project_id=?', [input.projectId])[0];
+      if (!current || Number(current.source_revision) !== input.sourceRevision) return { accepted: false };
+      this.db.run(`UPDATE sidebar_core_projection_state SET projection_revision=?,projection_json=?,updated_at=?
+        WHERE project_id=? AND source_revision=?`, [input.sourceRevision, canonical(input.summary), Date.now(), input.projectId, input.sourceRevision]);
+      return { accepted: true };
+    });
+  }
+  public readSidebarCoreProjections(projectPaths: string[] = []): SidebarCoreProjectionRecord[] {
+    const projectIds = [...new Set(projectPaths.map(root => this.lookupProjectForRead(root)).filter((value): value is string => Boolean(value)))];
+    if (projectPaths.length && !projectIds.length) return [];
+    return this.rows(`SELECT s.project_id,s.source_revision,s.projection_revision,s.projection_json
+      FROM sidebar_core_projection_state s
+      JOIN projects p ON p.id=s.project_id
+      JOIN objects o ON o.id=p.id
+      JOIN project_locations l ON l.project_id=p.id AND l.device_id=? AND l.status='active'
+      WHERE s.projection_json IS NOT NULL AND o.archived_at IS NULL AND p.hidden=0${projectPaths.length ? ` AND s.project_id IN (${projectIds.map(() => '?').join(',')})` : ''}
+      ORDER BY l.root_path`, [this.deviceId, ...projectIds]).map(row => ({
+        projectId: String(row.project_id), sourceRevision: Number(row.source_revision), projectionRevision: Number(row.projection_revision),
+        summary: JSON.parse(String(row.projection_json))
+      }));
   }
   public reserveExternalRefresh(projectId: string, key: string, requestId: string): { requestId: string; generation: number } {
     if (!key.trim() || !requestId.trim()) throw new Error('invalid_external_refresh');
@@ -9339,7 +10530,7 @@ export class UnifiedDataStore {
   public readStrategySourceRevision(projectIds: string[]): string {
     return digest(canonical([this.readLearningSourceRevision(), [...new Set(projectIds)].sort().map(id => {
       const row = this.rows("SELECT s.id,o.revision FROM settings s JOIN objects o ON o.id=s.id WHERE s.namespace='strategy' AND s.key='preferences' AND s.owner_scope=? AND o.project_id=? AND o.archived_at IS NULL", [id, id])[0];
-      return [id, row ? [row.id, row.revision] : null, this.readProjectInvestmentRuns(id)];
+      return [id, row ? [row.id, row.revision] : null, this.readProjectAnalysisSource(id).conversationRevision];
     })]));
   }
   public writeStrategyState(projectId: string | null, input: { expectedRevision: number; value: unknown; idempotencyKey: string; expectedSourceRevision?: string; sourceProjectIds?: string[] }): { objectId: string; revision: number; value: unknown } {
@@ -9590,23 +10781,44 @@ export class UnifiedDataStore {
       lastMaintenance: maintenance ? { startedAt: Number(maintenance.started_at), finishedAt: maintenance.finished_at === null ? null : Number(maintenance.finished_at), status: String(maintenance.status), error: String(maintenance.error), deletedArtifacts: Number(maintenance.deleted_artifacts), deletedSources: Number(maintenance.deleted_sources), deletedContents: Number(maintenance.deleted_contents), reclaimedStoredBytes: Number(maintenance.reclaimed_stored_bytes), compacted: Boolean(maintenance.compacted), beforeBytes: Number(maintenance.before_bytes), afterBytes: Number(maintenance.after_bytes), integrity: String(maintenance.integrity) } : null };
   }
   public readDatabaseOverview(): {
-    databaseBytes: number; freePageBytes: number; contents: { records: number };
+    databaseBytes: number; freePageBytes: number; contents: { records: number | null; exact: boolean };
     lastMaintenance: { finishedAt: number | null; status: string } | null;
   } {
     const { databaseBytes } = this.databaseStorageFileSizes();
     const pageSize = Number(this.rows('PRAGMA page_size')[0]?.page_size || 0);
     const freePages = Number(this.rows('PRAGMA freelist_count')[0]?.freelist_count || 0);
-    const records = Number(this.rows('SELECT COUNT(*) AS records FROM contents INDEXED BY sqlite_autoindex_contents_1')[0]?.records || 0);
+    const projection = this.rows('SELECT contents_records,exact FROM database_overview_projection WHERE singleton=1')[0];
+    if (!projection) throw new Error('database_overview_projection_missing');
+    const exact = Number(projection.exact) === 1;
     const maintenance = this.rows('SELECT finished_at,status FROM database_storage_maintenance ORDER BY started_at DESC,id DESC LIMIT 1')[0];
     return {
       databaseBytes,
       freePageBytes: pageSize * freePages,
-      contents: { records },
+      contents: { records: exact ? Number(projection.contents_records) : null, exact },
       lastMaintenance: maintenance ? {
         finishedAt: maintenance.finished_at === null ? null : Number(maintenance.finished_at),
         status: String(maintenance.status)
       } : null
     };
+  }
+  public backfillDatabaseOverviewProjectionBatch(requestedLimit = 2_000): { processed: number; complete: boolean } {
+    const limit = Math.max(1, Math.min(10_000, Math.floor(requestedLimit)));
+    return this.transaction(() => {
+      const state = this.rows('SELECT contents_records,baseline_cursor,baseline_target,exact FROM database_overview_projection WHERE singleton=1')[0];
+      if (!state) throw new Error('database_overview_projection_missing');
+      if (Number(state.exact) === 1) return { processed: 0, complete: true };
+      const cursor = Number(state.baseline_cursor), target = Number(state.baseline_target);
+      const rows = this.rows('SELECT rowid FROM contents WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT ?', [cursor, target, limit]);
+      if (!rows.length) {
+        this.db.run('UPDATE database_overview_projection SET baseline_cursor=baseline_target,exact=1,updated_at=? WHERE singleton=1', [Date.now()]);
+        return { processed: 0, complete: true };
+      }
+      const nextCursor = Number(rows[rows.length - 1].rowid);
+      const complete = nextCursor >= target;
+      this.db.run('UPDATE database_overview_projection SET contents_records=contents_records+?,baseline_cursor=?,exact=?,updated_at=? WHERE singleton=1',
+        [rows.length, complete ? target : nextCursor, complete ? 1 : 0, Date.now()]);
+      return { processed: rows.length, complete };
+    });
   }
   public maintainPlannerStatistics(force = false, now = Date.now()): boolean {
     if (this.transactionDepth) throw new Error('database_maintenance_transaction_active');
@@ -9699,7 +10911,7 @@ export class UnifiedDataStore {
       if (!stat.isFile() || stat.isSymbolicLink()) return null;
       return [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(':');
     };
-    const inspectSnapshot = (file: string): InspectedSnapshot | null => {
+    const inspectSnapshot = async (file: string): Promise<InspectedSnapshot | null> => {
       const identity = regularFileIdentity(file);
       if (!identity) return null;
       try {
@@ -9707,30 +10919,30 @@ export class UnifiedDataStore {
           database.exec("SELECT value FROM database_meta WHERE key='database_id'")[0]?.values?.[0]?.[0] === this.databaseId);
         if (!valid) return null;
       } catch { return null; }
-      const inspected = digestFile(file);
+      const inspected = await this.maintenanceDigestFile(file);
       if (regularFileIdentity(file) !== identity || inspected.bytes !== fs.lstatSync(file).size) return null;
       return { ...inspected, identity };
     };
-    const inspectVerifiedDigest = (file: string): { sha256: string; bytes: number } | null => {
+    const inspectVerifiedDigest = async (file: string): Promise<{ sha256: string; bytes: number } | null> => {
       if (!fs.existsSync(file)) return null;
       const stat = fs.lstatSync(file);
       if (!stat.isFile() || stat.isSymbolicLink()) return null;
-      return digestFile(file);
+      return this.maintenanceDigestFile(file);
     };
     const previous = this.rows('SELECT input_hash,result_content_id,status FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, requestKey])[0];
     if (previous && previous.input_hash !== inputHash) throw new Error('idempotency_conflict');
-    const cleanupPublishedStage = (stored: StoredBackupReceipt): void => {
+    const cleanupPublishedStage = async (stored: StoredBackupReceipt): Promise<void> => {
       if (!fs.existsSync(temporary) || !fs.existsSync(destination)) return;
       const stage = fs.lstatSync(temporary), target = fs.lstatSync(destination);
       if (stage.isFile() && !stage.isSymbolicLink() && target.isFile() && !target.isSymbolicLink()
-        && stage.dev === target.dev && stage.ino === target.ino && digestFile(temporary).sha256 === stored.sha256) fs.unlinkSync(temporary);
+        && stage.dev === target.dev && stage.ino === target.ino && (await this.maintenanceDigestFile(temporary)).sha256 === stored.sha256) fs.unlinkSync(temporary);
     };
     if (previous?.status === 'committed') {
       const stored = JSON.parse(this.content(String(previous.result_content_id)).toString('utf8')) as StoredBackupReceipt;
       assertDestinationInactive();
-      const published = inspectSnapshot(destination);
+      const published = await inspectSnapshot(destination);
       if (!published || published.bytes !== stored.bytes || published.sha256 !== stored.sha256) throw new Error('backup_receipt_target_changed');
-      cleanupPublishedStage(stored);
+      await cleanupPublishedStage(stored);
       try { if (fs.existsSync(delivery)) fs.unlinkSync(delivery); } catch {}
       return publicReceipt(stored);
     }
@@ -9746,11 +10958,11 @@ export class UnifiedDataStore {
     let verifiedTemporary: InspectedSnapshot | null = null;
     try {
       if (!stored) {
-        let snapshot = inspectSnapshot(stableTemporary);
+        let snapshot = await inspectSnapshot(stableTemporary);
         verifiedTemporary = snapshot;
         if (!snapshot && fs.existsSync(stableTemporary)) fs.unlinkSync(stableTemporary);
         if (fs.existsSync(stableDestination)) assertDestinationInactive();
-        const prior = fs.existsSync(stableDestination) ? inspectSnapshot(stableDestination) : null;
+        const prior = fs.existsSync(stableDestination) ? await inspectSnapshot(stableDestination) : null;
         if (fs.existsSync(stableDestination) && !prior) throw new Error('backup_destination_exists');
         if (!snapshot) {
           this.assertSafeDestinationParent(destination, destinationParent, 'backup_destination_invalid');
@@ -9758,7 +10970,7 @@ export class UnifiedDataStore {
           try { await this.db.backup(stableTemporary); }
           catch (error) { try { fs.unlinkSync(stableTemporary); } catch {} throw error; }
           this.assertSafeDestinationParent(destination, destinationParent, 'backup_destination_invalid');
-          snapshot = inspectSnapshot(stableTemporary);
+          snapshot = await inspectSnapshot(stableTemporary);
           if (!snapshot) throw new Error('backup_verification_failed');
           verifiedTemporary = snapshot;
         }
@@ -9767,17 +10979,17 @@ export class UnifiedDataStore {
         prepared = true;
       }
       if (fs.existsSync(stableDestination)) assertDestinationInactive();
-      const published = inspectSnapshot(stableDestination);
+      const published = await inspectSnapshot(stableDestination);
       if (published?.sha256 === stored.sha256 && published.bytes === stored.bytes) {
         this.assertSafeDestinationParent(destination, destinationParent, 'backup_destination_invalid');
         this.db.run("UPDATE requests SET status='committed',committed_sequence=? WHERE actor_id=? AND idempotency_key=?", [Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS value FROM events')[0].value), this.actorId, requestKey]);
-        cleanupPublishedStage(stored);
+        await cleanupPublishedStage(stored);
         return publicReceipt(stored);
       }
       if (stored.previousSha256 === null ? fs.existsSync(stableDestination) : !published || published.sha256 !== stored.previousSha256) throw new Error('backup_destination_changed');
       const stage = verifiedTemporary && regularFileIdentity(stableTemporary) === verifiedTemporary.identity
         ? verifiedTemporary
-        : inspectVerifiedDigest(stableTemporary);
+        : await inspectVerifiedDigest(stableTemporary);
       if (!stage || stage.sha256 !== stored.sha256 || stage.bytes !== stored.bytes) throw new Error('backup_staging_missing');
       this.assertSafeDestinationParent(destination, destinationParent, 'backup_destination_invalid');
       if (fs.existsSync(stableDelivery)) fs.unlinkSync(stableDelivery);
@@ -9799,12 +11011,27 @@ export class UnifiedDataStore {
       throw error;
     } finally { fs.closeSync(stableParent.descriptor); }
   }
-  public async exportProject(input: { root: string; destination: string; idempotencyKey: string }): Promise<{ destination: string; projectId: string; sha256: string; bytes: number; tableCount: number }> {
-    if (!input.idempotencyKey?.trim()) throw new Error('idempotency_key_required');
+  public exportProject(input: { root: string; destination: string; idempotencyKey: string }): Promise<{ destination: string; projectId: string; sha256: string; bytes: number; tableCount: number }> {
+    return this.exportProjectInternal(input) as Promise<{ destination: string; projectId: string; sha256: string; bytes: number; tableCount: number }>;
+  }
+  public async prepareProjectExport(root: string): Promise<PreparedProjectExport> {
+    this.db.run('BEGIN');
+    try {
+      const prepared = await this.exportProjectInternal({ root, destination: '', idempotencyKey: '', prepareOnly: true }) as PreparedProjectExport;
+      this.db.run('COMMIT');
+      return prepared;
+    } catch (error) {
+      try { this.db.run('ROLLBACK'); } catch {}
+      throw error;
+    }
+  }
+  private async exportProjectInternal(input: { root: string; destination: string; idempotencyKey: string; prepareOnly?: boolean }): Promise<{ destination: string; projectId: string; sha256: string; bytes: number; tableCount: number } | PreparedProjectExport> {
+    if (!input.prepareOnly && !input.idempotencyKey?.trim()) throw new Error('idempotency_key_required');
     const root = fs.realpathSync(input.root);
-    const { projectId } = await this.registerProject({ root });
-    const destination = path.resolve(input.destination);
-    this.validateExportPath(destination);
+    const projectId = input.prepareOnly ? this.lookupProjectForRead(root) : (await this.registerProject({ root })).projectId;
+    if (!projectId) throw new Error('project_scope_required');
+    const destination = input.prepareOnly ? '' : path.resolve(input.destination);
+    if (!input.prepareOnly) this.validateExportPath(destination);
     const requestKey = `project-export:${input.idempotencyKey}`;
     const inputHash = digest(canonical({ root, destination, projectId }));
     const deliver = async (bytes: Buffer): Promise<void> => {
@@ -9812,20 +11039,54 @@ export class UnifiedDataStore {
       const parent = this.captureSafeDestinationParent(destination, 'project_export_destination_invalid');
       this.writeFileAtStableParent(destination, bytes, parent, 'project_export_destination_invalid');
     };
-    const previous = this.rows('SELECT input_hash,result_content_id,status FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, requestKey])[0];
+    const deliverStaged = async (stagedPath: string, sha256: string, bytes: number): Promise<void> => {
+      await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+      try {
+        const existing = await this.maintenanceDigestFile(destination);
+        if (existing.sha256 !== sha256 || existing.bytes !== bytes) throw new Error('EEXIST: export_destination_exists');
+        return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && (error as Error).message !== 'maintenance_file_invalid') throw error;
+      }
+      const parent = this.captureSafeDestinationParent(destination, 'project_export_destination_invalid');
+      this.publishStagedFileAtStableParent(destination, stagedPath, parent, 'project_export_destination_invalid');
+    };
+    const previous = input.prepareOnly ? undefined : this.rows('SELECT input_hash,result_content_id,status FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, requestKey])[0];
     if (previous) {
       if (previous.input_hash !== inputHash) throw new Error('idempotency_conflict');
       if (previous.status !== 'committed') throw new Error('project_export_pending');
       const stored = JSON.parse(this.content(String(previous.result_content_id)).toString('utf8')) as { destination: string; projectId: string; sha256: string; bytes: number; tableCount: number; archiveContentId: string };
-      const archiveBytes = this.content(stored.archiveContentId);
-      if (archiveBytes.length !== stored.bytes || digest(archiveBytes) !== stored.sha256) throw new Error('project_export_receipt_invalid');
-      await deliver(archiveBytes);
+      if (this.maintenanceCompute?.stageFileExport) {
+        const staged = await this.maintenanceCompute.stageFileExport({ contentId: stored.archiveContentId, outboxId: stored.archiveContentId });
+        if (staged.bytes !== stored.bytes || staged.sha256 !== stored.sha256) throw new Error('project_export_receipt_invalid');
+        await deliverStaged(staged.path, staged.sha256, staged.bytes);
+        try { fs.unlinkSync(staged.path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      } else {
+        const archiveBytes = this.content(stored.archiveContentId);
+        if (archiveBytes.length !== stored.bytes || digest(archiveBytes) !== stored.sha256) throw new Error('project_export_receipt_invalid');
+        await deliver(archiveBytes);
+      }
       const { archiveContentId: _archiveContentId, ...receipt } = stored;
       return receipt;
     }
+    if (this.maintenanceCompute && !input.prepareOnly) {
+      const prepared = await this.maintenanceCompute.stageProjectExport(root);
+      try {
+        if (prepared.projectId !== projectId) throw new Error('project_export_identity_changed');
+        const archiveContentId = await this.putStagedProjectExportContent(prepared, requestKey);
+        const receipt = this.transaction(() => {
+          const stored = { destination, projectId, sha256: prepared.sha256, bytes: prepared.bytes, tableCount: prepared.tableCount, archiveContentId };
+          this.db.run('INSERT INTO requests(actor_id,idempotency_key,id,input_hash,result_content_id,status,committed_sequence) VALUES(?,?,?,?,?,?,?)', [this.actorId, requestKey, crypto.randomUUID(), inputHash, this.putContent(canonical(stored), 'application/json'), 'committed', Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS value FROM events')[0].value)]);
+          return stored;
+        });
+        await deliverStaged(prepared.path, prepared.sha256, prepared.bytes);
+        const { archiveContentId: _archiveContentId, ...result } = receipt;
+        return result;
+      } finally { await this.maintenanceCompute.cleanupProjectExportStage(prepared.stageDirectory); }
+    }
     const tableRows = new Map<string, Map<string, Record<string, SqlValue>>>();
     const tables = this.rows("SELECT name FROM sqlite_master WHERE type='table' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY name")
-      .map(row => String(row.name)).filter(name => !name.startsWith('object_search') && !['mcp_conversation_launches', 'mcp_conversation_dispatches'].includes(name));
+      .map(row => String(row.name)).filter(name => !name.startsWith('object_search') && !['mcp_conversation_launches', 'mcp_conversation_dispatches', 'sidebar_core_projection_state', 'project_import_staging'].includes(name));
     const columns = new Map(tables.map(table => [table, this.rows(`PRAGMA table_info(${quoteSqlIdentifier(table)})`).map(row => String(row.name))]));
     const foreignKeys = new Map(tables.map(table => [table, this.rows(`PRAGMA foreign_key_list(${quoteSqlIdentifier(table)})`)]));
     const rowKey = (row: Record<string, SqlValue>) => canonical(Object.fromEntries(Object.entries(row).map(([key, value]) => [key, encodePortableCell(value)])));
@@ -9929,7 +11190,10 @@ export class UnifiedDataStore {
         return Object.fromEntries(Object.entries(sanitized).map(([key, value]) => [key, encodePortableCell(value)]));
       }) }))
     };
-    const payload = canonical(archive), envelope = Buffer.from(canonical({ archive, sha256: digest(payload) }) + '\n');
+    const payload = await this.maintenanceCanonicalize(archive);
+    const envelope = Buffer.from(await this.maintenanceCanonicalize({ archive, sha256: digest(payload) }) + '\n');
+    if (input.prepareOnly) return { projectId, envelope, tableCount: archive.tables.length,
+      content: prepareContentForStorage(envelope, 'application/vnd.solomap.project+json', 'binary') };
     const receipt = this.transaction(() => {
       const archiveContentId = this.putContent(envelope, 'application/vnd.solomap.project+json');
       const stored = { destination, projectId, sha256: digest(envelope), bytes: envelope.length, tableCount: archive.tables.length, archiveContentId };
@@ -9942,7 +11206,7 @@ export class UnifiedDataStore {
   }
   private validatePortableProjectArchive(archive: PortableProjectArchive, tables: Map<string, Record<string, SqlValue>[]>): void {
     if (archive.tables.length !== tables.size) throw new Error('project_archive_table_invalid');
-    const schemaTables = new Set(this.rows("SELECT name FROM sqlite_master WHERE type='table' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%'").map(row => String(row.name)).filter(name => !name.startsWith('object_search') && !['mcp_conversation_launches', 'mcp_conversation_dispatches'].includes(name)));
+    const schemaTables = new Set(this.rows("SELECT name FROM sqlite_master WHERE type='table' AND sql IS NOT NULL AND name NOT LIKE 'sqlite_%'").map(row => String(row.name)).filter(name => !name.startsWith('object_search') && !['mcp_conversation_launches', 'mcp_conversation_dispatches', 'sidebar_core_projection_state', 'project_import_staging'].includes(name)));
     const columns = new Map([...schemaTables].map(table => [table, this.rows(`PRAGMA table_info(${quoteSqlIdentifier(table)})`).map(row => String(row.name))]));
     const foreignKeys = new Map([...schemaTables].map(table => [table, this.rows(`PRAGMA foreign_key_list(${quoteSqlIdentifier(table)})`)]));
     for (const [table, rows] of tables) {
@@ -10051,22 +11315,8 @@ export class UnifiedDataStore {
     }
     for (const [table, rows] of tables) if (rows.some((_row, index) => !marked.get(table)?.has(index))) throw new Error(`project_archive_unreachable_row:${table}`);
   }
-  public async importProject(input: { source: string; root: string; idempotencyKey: string }): Promise<{ projectId: string; locationId: string; identityPath: string; roadmapPath: string }> {
-    if (!input.idempotencyKey?.trim()) throw new Error('idempotency_key_required');
-    const source = path.resolve(input.source), root = path.resolve(input.root);
-    const assertTargetBoundary = (): void => {
-      if (fs.existsSync(root)) {
-        const rootStat = fs.lstatSync(root);
-        if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('project_import_target_invalid');
-      }
-      const controlDirectory = path.join(root, '.solopreneur');
-      if (fs.existsSync(controlDirectory)) {
-        const controlStat = fs.lstatSync(controlDirectory);
-        if (!controlStat.isDirectory() || controlStat.isSymbolicLink()) throw new Error('project_import_target_invalid');
-        if (!fs.existsSync(root) || fs.realpathSync(controlDirectory) !== path.join(fs.realpathSync(root), '.solopreneur')) throw new Error('project_import_target_invalid');
-      }
-    };
-    assertTargetBoundary();
+  public prepareProjectImport(sourceInput: string): PreparedProjectImport {
+    const source = path.resolve(sourceInput);
     const stat = fs.lstatSync(source);
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('project_archive_invalid');
     const envelope = JSON.parse(fs.readFileSync(source, 'utf8')) as { archive?: PortableProjectArchive; sha256?: string };
@@ -10074,21 +11324,12 @@ export class UnifiedDataStore {
     if (!archive || archive.schemaVersion !== 1 || typeof archive.projectId !== 'string'
       || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(archive.projectId)
       || envelope.sha256 !== digest(canonical(archive))) throw new Error('project_archive_invalid');
-    const requestKey = `project-import:${input.idempotencyKey}`;
-    const inputHash = digest(canonical({ sourceHash: envelope.sha256, root }));
-    const previous = this.rows('SELECT input_hash,result_content_id,status FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, requestKey])[0];
-    if (previous && previous.input_hash !== inputHash) throw new Error('idempotency_conflict');
     if (archive.sourceSchemaVersion > Number(this.rows('SELECT COALESCE(MAX(version),0) AS version FROM schema_migrations')[0].version)) throw new Error('project_archive_schema_newer');
     const tables = new Map(archive.tables.map(table => [table.name, table.rows.map(row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, decodePortableCell(value)])) as Record<string, SqlValue>)]));
     const existingTables = new Set(this.rows("SELECT name FROM sqlite_master WHERE type='table'").map(row => String(row.name)));
     if ([...tables.keys()].some(table => !existingTables.has(table) || table.startsWith('object_search'))) throw new Error('project_archive_table_invalid');
     this.validatePortableProjectArchive(archive, tables);
-    const importedProjectionIds = new Set((tables.get('outbox') || []).filter(row => row.channel === 'roadmap_projection').map(row => String(row.id)));
-    const identityPath = path.join(root, '.solopreneur', 'project.json'), roadmapPath = path.join(root, '.solopreneur', 'roadmap.csv');
-    const state = tables.get('roadmap_file_states')?.find(row => String(row.project_id) === archive.projectId);
-    const contentRow = state ? tables.get('contents')?.find(row => String(row.id) === String(state.accepted_content_id)) : undefined;
-    if (!state || !contentRow) throw new Error('project_archive_roadmap_missing');
-    const decodePortableContent = (portable: Record<string, SqlValue>): Buffer => {
+    const decodeContent = (portable: Record<string, SqlValue>): Buffer => {
       const encoding = String(portable.encoding), expected = String(portable.sha256);
       let bytes: Buffer;
       if (encoding.startsWith('chunked:')) {
@@ -10107,7 +11348,53 @@ export class UnifiedDataStore {
       if (bytes.length !== Number(portable.byte_length) || digest(bytes) !== expected) throw new Error('project_archive_content_invalid');
       return bytes;
     };
-    const roadmapBytes = decodePortableContent(contentRow); parseRoadmapCsv(roadmapBytes.toString('utf8'), { strictHeader: true });
+    const decodedContents = (tables.get('contents') || []).map(row => [String(row.id), decodeContent(row)] as [string, Uint8Array]);
+    const state = tables.get('roadmap_file_states')?.find(row => String(row.project_id) === archive.projectId);
+    const roadmap = state ? decodedContents.find(([id]) => id === String(state.accepted_content_id))?.[1] : undefined;
+    if (!state || !roadmap) throw new Error('project_archive_roadmap_missing');
+    parseRoadmapCsv(Buffer.from(roadmap).toString('utf8'), { strictHeader: true });
+    return { archive, sourceHash: String(envelope.sha256), tables: [...tables], decodedContents, roadmapBytes: roadmap };
+  }
+  public validateStagedProjectImport(tables: string[]): void {
+    for (const table of [...new Set(tables)]) {
+      const identifier = quoteSqlIdentifier(table);
+      const violations = this.db.exec(`PRAGMA foreign_key_check(${identifier})`);
+      if (violations.some(result => result.values.length)) throw new Error(`project_archive_foreign_key_error:${canonical(violations)}`);
+    }
+  }
+  public async importProject(input: { source: string; root: string; idempotencyKey: string }): Promise<{ projectId: string; locationId: string; identityPath: string; roadmapPath: string }> {
+    if (!input.idempotencyKey?.trim()) throw new Error('idempotency_key_required');
+    const source = path.resolve(input.source), root = path.resolve(input.root);
+    const assertTargetBoundary = (): void => {
+      if (fs.existsSync(root)) {
+        const rootStat = fs.lstatSync(root);
+        if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('project_import_target_invalid');
+      }
+      const controlDirectory = path.join(root, '.solopreneur');
+      if (fs.existsSync(controlDirectory)) {
+        const controlStat = fs.lstatSync(controlDirectory);
+        if (!controlStat.isDirectory() || controlStat.isSymbolicLink()) throw new Error('project_import_target_invalid');
+        if (!fs.existsSync(root) || fs.realpathSync(controlDirectory) !== path.join(fs.realpathSync(root), '.solopreneur')) throw new Error('project_import_target_invalid');
+      }
+    };
+    assertTargetBoundary();
+    const prepared = this.maintenanceCompute ? await this.maintenanceCompute.prepareProjectImport(source) : this.prepareProjectImport(source);
+    const archive = prepared.archive;
+    const envelope = { sha256: prepared.sourceHash };
+    const requestKey = `project-import:${input.idempotencyKey}`;
+    const inputHash = digest(canonical({ sourceHash: envelope.sha256, root }));
+    const previous = this.rows('SELECT input_hash,result_content_id,status FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, requestKey])[0];
+    if (previous && previous.input_hash !== inputHash) throw new Error('idempotency_conflict');
+    const tables = new Map(prepared.tables);
+    const decodedContents = new Map(prepared.decodedContents.map(([id, bytes]) => [id, Buffer.from(bytes)]));
+    const importedProjectionIds = new Set((tables.get('outbox') || []).filter(row => row.channel === 'roadmap_projection').map(row => String(row.id)));
+    const identityPath = path.join(root, '.solopreneur', 'project.json'), roadmapPath = path.join(root, '.solopreneur', 'roadmap.csv');
+    const decodePortableContent = (portable: Record<string, SqlValue>): Buffer => {
+      const bytes = decodedContents.get(String(portable.id));
+      if (!bytes) throw new Error('project_archive_content_invalid');
+      return bytes;
+    };
+    const roadmapBytes = Buffer.from(prepared.roadmapBytes);
     const identityBytes = Buffer.from(JSON.stringify({ schemaVersion: 1, projectId: archive.projectId }) + '\n');
     const matchingFiles = (): boolean => {
       if (!fs.existsSync(identityPath) || !fs.existsSync(roadmapPath)
@@ -10135,7 +11422,9 @@ export class UnifiedDataStore {
       await recoverImportedProjections();
       return result;
     }
-    if (this.rows('SELECT 1 FROM projects WHERE id=?', [archive.projectId]).length) {
+    const stagedImport = this.rows('SELECT request_key,target_root,source_hash FROM project_import_staging WHERE project_id=?', [archive.projectId])[0];
+    if (stagedImport && (stagedImport.request_key !== requestKey || stagedImport.target_root !== root || stagedImport.source_hash !== envelope.sha256)) throw new Error('project_import_identity_exists');
+    if (this.rows('SELECT 1 FROM projects WHERE id=?', [archive.projectId]).length && !stagedImport) {
       const realRoot = fs.existsSync(root) ? fs.realpathSync(root) : '';
       const location = realRoot ? this.rows("SELECT id FROM project_locations WHERE project_id=? AND root_path=? AND status='active'", [archive.projectId, realRoot])[0] : undefined;
       if (previous?.status === 'pending' && matchingFiles() && location) {
@@ -10145,6 +11434,7 @@ export class UnifiedDataStore {
       throw new Error('project_import_identity_exists');
     }
     if (!previous) this.db.run('INSERT INTO requests(actor_id,idempotency_key,id,input_hash,status) VALUES(?,?,?,?,?)', [this.actorId, requestKey, crypto.randomUUID(), inputHash, 'pending']);
+    if (!stagedImport) this.db.run('INSERT INTO project_import_staging VALUES(?,?,?,?,?,?)', [archive.projectId, requestKey, root, envelope.sha256, 'preparing', Date.now()]);
     const identityExists = fs.existsSync(identityPath), roadmapExists = fs.existsSync(roadmapPath);
     const identityMatches = identityExists && fs.lstatSync(identityPath).isFile() && !fs.lstatSync(identityPath).isSymbolicLink() && fs.readFileSync(identityPath).equals(identityBytes);
     const roadmapMatches = roadmapExists && fs.lstatSync(roadmapPath).isFile() && !fs.lstatSync(roadmapPath).isSymbolicLink() && fs.readFileSync(roadmapPath).equals(roadmapBytes);
@@ -10178,12 +11468,9 @@ export class UnifiedDataStore {
       }
       throw error;
     }
-    const locationId = crypto.randomUUID();
-    let transactionStarted = false;
+    const locationId = stablePortableUuid(`${archive.projectId}:${envelope.sha256}:location:${root}`);
+    const yieldWriter = () => new Promise<void>(resolve => setImmediate(resolve));
     try {
-      this.db.run('PRAGMA foreign_keys=OFF');
-      this.db.run('BEGIN IMMEDIATE');
-      transactionStarted = true;
       const importForeignKeys = new Map([...tables.keys()].map(table => [table, this.rows(`PRAGMA foreign_key_list(${quoteSqlIdentifier(table)})`)]));
       const formalReferenceContentIds = new Set([
         ...(tables.get('object_revisions') || []).map(row => String(row.content_id)),
@@ -10192,10 +11479,7 @@ export class UnifiedDataStore {
       const actorRemap = new Map<string, string>();
       for (const actor of tables.get('actors') || []) {
         const sourceActorId = String(actor.id);
-        let targetActorId = stablePortableUuid(`${archive.projectId}:${envelope.sha256}:actor:${sourceActorId}`), ordinal = 0;
-        while (this.rows('SELECT 1 FROM actors WHERE id=?', [targetActorId]).length || [...actorRemap.values()].includes(targetActorId)) {
-          targetActorId = stablePortableUuid(`${archive.projectId}:${envelope.sha256}:actor:${sourceActorId}:${++ordinal}`);
-        }
+        const targetActorId = stablePortableUuid(`${archive.projectId}:${envelope.sha256}:actor:${sourceActorId}`);
         actorRemap.set(sourceActorId, targetActorId); actor.id = targetActorId;
       }
       for (const [table, rows] of tables) for (const row of rows) for (const fk of importForeignKeys.get(table) || []) {
@@ -10220,9 +11504,10 @@ export class UnifiedDataStore {
           const hash = digest(bytes);
           const duplicate = this.rows('SELECT id FROM contents WHERE sha256=? AND mime_type=? AND encoding IN (?,?,?)', [hash, mimeType, baseEncoding, `gzip:${baseEncoding}`, `chunked:${baseEncoding}`])[0];
           if (duplicate || !bytes.equals(original)) {
-            const targetId = this.putContent(bytes, mimeType, baseEncoding);
+            const targetId = duplicate ? String(duplicate.id) : this.putContent(bytes, mimeType, baseEncoding);
             contentRemap.set(sourceId, targetId); remapChanged = true;
           }
+          await yieldWriter();
         }
       }
       for (const [table, rows] of tables) for (const row of rows) {
@@ -10236,7 +11521,11 @@ export class UnifiedDataStore {
       const eventSequenceMap = new Map<number, number>();
       let sequence = Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS sequence FROM events')[0].sequence);
       const eventRows = tables.get('events') || [];
-      for (const row of eventRows.sort((left, right) => Number(left.sequence) - Number(right.sequence))) { const previous = Number(row.sequence); row.sequence = ++sequence; eventSequenceMap.set(previous, sequence); }
+      for (const row of eventRows.sort((left, right) => Number(left.sequence) - Number(right.sequence))) {
+        const previous = Number(row.sequence), staged = this.rows('SELECT sequence FROM events WHERE id=?', [row.id])[0];
+        row.sequence = staged ? Number(staged.sequence) : ++sequence;
+        eventSequenceMap.set(previous, Number(row.sequence));
+      }
       for (const row of tables.get('requests') || []) if (row.committed_sequence !== null) row.committed_sequence = eventSequenceMap.get(Number(row.committed_sequence)) || null;
       for (const row of tables.get('project_locations') || []) row.status = 'moved';
       for (const row of tables.get('outbox') || []) if (row.channel === 'roadmap_projection') row.destination_ref = roadmapPath;
@@ -10244,41 +11533,101 @@ export class UnifiedDataStore {
         const priority = (name: string) => name === 'objects' ? 0 : name === 'projects' ? 1 : 2;
         return priority(left) - priority(right) || left.localeCompare(right);
       });
-      for (const [table, rows] of insertionOrder) {
-        for (const row of rows) {
-          if (table === 'contents' && contentRemap.has(String(row.id)) || table === 'content_chunks' && contentRemap.has(String(row.content_id))) continue;
-          const keys = Object.keys(row), identifier = quoteSqlIdentifier(table);
-          const existing = keys.includes('id') ? this.rows(`SELECT * FROM ${identifier} WHERE id=?`, [row.id])[0] : undefined;
-          if (existing) {
-            if (table === 'devices') continue;
-            if (canonical(Object.fromEntries(Object.entries(existing).map(([key, value]) => [key, encodePortableCell(value)]))) === canonical(Object.fromEntries(Object.entries(row).map(([key, value]) => [key, encodePortableCell(value)])))) continue;
-            throw new Error(`project_import_collision:${table}`);
-          }
-          try { this.db.run(`INSERT INTO ${identifier}(${keys.map(quoteSqlIdentifier).join(',')}) VALUES(${keys.map(() => '?').join(',')})`, keys.map(key => row[key])); }
-          catch (error) { throw new Error(`project_import_row_failed:${table}:${error instanceof Error ? error.message : String(error)}`); }
+      const primaryKeys = new Map(insertionOrder.map(([table]) => [table, this.rows(`PRAGMA table_info(${quoteSqlIdentifier(table)})`)
+        .filter(row => Number(row.pk) > 0).sort((left, right) => Number(left.pk) - Number(right.pk)).map(row => String(row.name))]));
+      const stagedRows: Array<{ table: string; row: Record<string, SqlValue> }> = [];
+      for (const [table, rows] of insertionOrder) for (const row of rows) {
+        if (table === 'outbox'
+          || table === 'contents' && contentRemap.has(String(row.id))
+          || table === 'content_chunks' && contentRemap.has(String(row.content_id))) continue;
+        stagedRows.push({ table, row });
+      }
+      const sameRow = (left: Record<string, SqlValue>, right: Record<string, SqlValue>) => canonical(Object.fromEntries(Object.entries(left).map(([key, value]) => [key, encodePortableCell(value)])))
+        === canonical(Object.fromEntries(Object.entries(right).map(([key, value]) => [key, encodePortableCell(value)])));
+      const insertRow = (table: string, row: Record<string, SqlValue>): void => {
+        const keys = Object.keys(row), identifier = quoteSqlIdentifier(table);
+        const identity = primaryKeys.get(table)?.length ? primaryKeys.get(table)! : keys;
+        const existing = this.rows(`SELECT * FROM ${identifier} WHERE ${identity.map(key => `${quoteSqlIdentifier(key)} IS ?`).join(' AND ')} LIMIT 1`, identity.map(key => row[key]))[0];
+        if (existing) {
+          if (table === 'devices') return;
+          if (sameRow(existing, row)) return;
+          throw new Error(`project_import_collision:${table}`);
         }
+        try { this.db.run(`INSERT INTO ${identifier}(${keys.map(quoteSqlIdentifier).join(',')}) VALUES(${keys.map(() => '?').join(',')})`, keys.map(key => row[key])); }
+        catch (error) { throw new Error(`project_import_row_failed:${table}:${error instanceof Error ? error.message : String(error)}`); }
+      };
+      assertTargetBoundary();
+      const activeRoot = fs.realpathSync(root);
+      const outboxRows = tables.get('outbox') || [];
+      this.db.run('PRAGMA foreign_keys=OFF');
+      this.db.run('BEGIN IMMEDIATE');
+      try {
+        stagedRows.forEach(item => insertRow(item.table, item.row));
+        this.db.run("UPDATE project_import_staging SET status='activating',updated_at=? WHERE project_id=?", [Date.now(), archive.projectId]);
+        for (const row of outboxRows) insertRow('outbox', row);
+        this.db.run("UPDATE project_locations SET status='moved' WHERE project_id=?", [archive.projectId]);
+        this.db.run('INSERT INTO project_locations VALUES(?,?,?,?,?)', [locationId, archive.projectId, this.deviceId, activeRoot, 'active']);
+        for (const row of this.rows('SELECT id FROM objects WHERE project_id=? OR id=?', [archive.projectId, archive.projectId])) this.indexSearchObject(this.read(String(row.id)));
+        const violations = this.db.exec('PRAGMA foreign_key_check');
+        if (violations.some(result => result.values.length)) throw new Error(`project_archive_foreign_key_error:${canonical(violations)}`);
+        this.db.run('DELETE FROM project_import_staging WHERE project_id=?', [archive.projectId]);
+        this.db.run('COMMIT');
+      } catch (error) {
+        try { this.db.run('ROLLBACK'); } catch {}
+        throw error;
       }
-      this.db.run("UPDATE project_locations SET status='moved' WHERE project_id=?", [archive.projectId]);
-      this.db.run('INSERT INTO project_locations VALUES(?,?,?,?,?)', [locationId, archive.projectId, this.deviceId, fs.realpathSync(root), 'active']);
-      for (const row of this.rows('SELECT id FROM objects WHERE project_id=? OR id=?', [archive.projectId, archive.projectId])) this.indexSearchObject(this.read(String(row.id)));
-      const violations = this.db.exec('PRAGMA foreign_key_check');
-      if (violations.length && violations.some(result => result.values.length)) throw new Error('project_archive_foreign_key_error');
-      this.db.run('COMMIT');
     } catch (error) {
-      if (transactionStarted) try { this.db.run('ROLLBACK'); } catch {}
-      let safeCleanup = false;
-      try { assertTargetBoundary(); safeCleanup = true; } catch {}
-      if (safeCleanup && !resumedFiles) {
-        try { if (createdRoadmap) fs.unlinkSync(roadmapPath); } catch {}
-        try { if (createdIdentity) fs.unlinkSync(identityPath); } catch {}
-        for (const directory of createdDirectories) { try { fs.rmdirSync(directory); } catch {} }
-      }
       throw error;
     } finally { this.db.run('PRAGMA foreign_keys=ON'); }
     await recoverImportedProjections();
     return finish({ projectId: archive.projectId, locationId, identityPath, roadmapPath });
   }
-  public restoreBackup(input: { source: string; destinationRoot: string; idempotencyKey: string }): { destination: string; databaseId: string; sha256: string; bytes: number } {
+  public readCommittedProjectImport(input: { sourceHash: string; targetRoot: string; idempotencyKey: string }): { projectId: string; locationId: string; identityPath: string; roadmapPath: string } | null {
+    const requestKey = `project-import:${input.idempotencyKey}`;
+    const row = this.rows("SELECT input_hash,result_content_id FROM requests WHERE actor_id=? AND idempotency_key=? AND status='committed'", [this.actorId, requestKey])[0];
+    if (!row) return null;
+    const expected = digest(canonical({ sourceHash: input.sourceHash, root: path.resolve(input.targetRoot) }));
+    if (row.input_hash !== expected) throw new Error('idempotency_conflict');
+    return JSON.parse(this.content(String(row.result_content_id)).toString('utf8'));
+  }
+  public retargetPreparedProjectImport(input: { projectId: string; locationId: string; hiddenRoot: string; targetRoot: string; sourceHash: string; idempotencyKey: string }): { projectId: string; locationId: string; identityPath: string; roadmapPath: string } {
+    const hiddenRoot = path.resolve(input.hiddenRoot), targetRoot = path.resolve(input.targetRoot);
+    const hiddenIdentity = path.join(hiddenRoot, '.solopreneur', 'project.json'), hiddenRoadmap = path.join(hiddenRoot, '.solopreneur', 'roadmap.csv');
+    if (!fs.existsSync(hiddenIdentity) || !fs.existsSync(hiddenRoadmap)) throw new Error('project_import_generation_files_missing');
+    const result = { projectId: input.projectId, locationId: input.locationId,
+      identityPath: path.join(targetRoot, '.solopreneur', 'project.json'), roadmapPath: path.join(targetRoot, '.solopreneur', 'roadmap.csv') };
+    return this.transaction(() => {
+      this.db.run('UPDATE project_locations SET root_path=? WHERE id=? AND project_id=? AND root_path=?', [targetRoot, input.locationId, input.projectId, fs.realpathSync(hiddenRoot)]);
+      if (this.db.getRowsModified() !== 1) throw new Error('project_import_generation_location_changed');
+      this.db.run("UPDATE outbox SET destination_ref=? WHERE channel='roadmap_projection' AND destination_ref=?", [result.roadmapPath, hiddenRoadmap]);
+      const requestKey = `project-import:${input.idempotencyKey}`;
+      const inputHash = digest(canonical({ sourceHash: input.sourceHash, root: targetRoot }));
+      this.db.run("UPDATE requests SET input_hash=?,result_content_id=? WHERE actor_id=? AND idempotency_key=? AND status='committed'", [inputHash, this.putContent(canonical(result), 'application/json'), this.actorId, requestKey]);
+      if (this.db.getRowsModified() !== 1) throw new Error('project_import_generation_receipt_missing');
+      return result;
+    });
+  }
+  private async restoreBackupIsolated(input: { source: string; destinationRoot: string; idempotencyKey: string }): Promise<{ destination: string; databaseId: string; sha256: string; bytes: number }> {
+    if (!input.idempotencyKey?.trim()) throw new Error('idempotency_key_required');
+    const source = path.resolve(input.source), destinationRoot = path.resolve(input.destinationRoot);
+    const inspected = await this.maintenanceCompute!.inspectBackup(source);
+    const requestKey = `database-restore:${input.idempotencyKey}`;
+    const inputHash = digest(canonical({ source, sourceHash: inspected.sha256, destinationRoot }));
+    const previous = this.rows('SELECT input_hash,result_content_id,status FROM requests WHERE actor_id=? AND idempotency_key=?', [this.actorId, requestKey])[0];
+    if (previous && previous.input_hash !== inputHash) throw new Error('idempotency_conflict');
+    if (!previous) this.db.run('INSERT INTO requests(actor_id,idempotency_key,id,input_hash,status) VALUES(?,?,?,?,?)', [this.actorId, requestKey, crypto.randomUUID(), inputHash, 'pending']);
+    const receipt = await this.maintenanceCompute!.restoreBackup({ source, destinationRoot, ...inspected });
+    if (previous?.status === 'committed') {
+      const stored = JSON.parse(this.content(String(previous.result_content_id)).toString('utf8')) as typeof receipt;
+      if (canonical(stored) !== canonical(receipt)) throw new Error('restore_receipt_target_changed');
+      return stored;
+    }
+    const resultContentId = this.putContent(canonical(receipt), 'application/json');
+    this.db.run("UPDATE requests SET status='committed',result_content_id=?,committed_sequence=? WHERE actor_id=? AND idempotency_key=?", [resultContentId, Number(this.rows('SELECT COALESCE(MAX(sequence),0) AS value FROM events')[0].value), this.actorId, requestKey]);
+    return receipt;
+  }
+  public restoreBackup(input: { source: string; destinationRoot: string; idempotencyKey: string }): { destination: string; databaseId: string; sha256: string; bytes: number } | Promise<{ destination: string; databaseId: string; sha256: string; bytes: number }> {
+    if (this.maintenanceCompute) return this.restoreBackupIsolated(input);
     if (!input.idempotencyKey?.trim()) throw new Error('idempotency_key_required');
     const sourcePath = path.resolve(input.source), root = path.resolve(input.destinationRoot), destination = path.join(root, 'solomap.db');
     const sourceStat = fs.lstatSync(sourcePath);

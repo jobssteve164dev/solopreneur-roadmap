@@ -197,10 +197,21 @@ test('planner statistics are initialized after schema changes and refreshed at m
   assert.equal(first.store.maintainPlannerStatistics(false, optimizedAt + 24 * 60 * 60 * 1000), true);
 });
 
-test('autonomous runtime isolates planner statistics maintenance from the main cycle', () => {
+test('autonomous runtime admits planner statistics only as delayed shared-scheduler maintenance', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'autonomousRuntimeProcess.ts'), 'utf8');
-  assert.match(source, /try \{ dataStore\.maintainPlannerStatistics\(\); \}\s*catch \(error\) \{ recordLocalDiagnosticError\([^\n]+autonomous-runtime\.planner-statistics/);
-  assert.match(source, /autonomous-runtime\.planner-statistics[\s\S]*?await refreshProjectRegistry/);
+  const cycle = source.slice(source.indexOf('async function runCycle()'), source.indexOf("process.once('SIGTERM'"));
+  assert.doesNotMatch(cycle, /maintain_planner_statistics/);
+  assert.match(source, /scheduleControl\('maintenance', 'maintain_planner_statistics'\)/);
+  assert.match(source, /startupMigrationReady\.then\(\s*\(\) => schedulePlannerMaintenance\(30_000\),\s*\(\) => undefined\s*\)/);
+  assert.match(source, /scheduler: executionScheduler/);
+});
+
+test('report-version maintenance releases the Writer after every bounded batch', () => {
+  const processSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'autonomousRuntimeProcess.ts'), 'utf8');
+  const workerSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'runtimeDataDomainWorker.ts'), 'utf8');
+  assert.match(workerSource, /case 'backfill_report_versions': return store\.backfillReportVersionsBatch\(100\)/);
+  assert.doesNotMatch(workerSource.slice(workerSource.indexOf("case 'backfill_report_versions'"), workerSource.indexOf("case 'reap_finished_legacy_runs'")), /while|for\s*\(/);
+  assert.match(processSource, /if \(!result\.complete\) scheduleReportVersionBackfill\(25\)/);
 });
 
 test('simultaneous usage events with the same timestamp both commit', async (t) => {
@@ -215,7 +226,6 @@ test('simultaneous usage events with the same timestamp both commit', async (t) 
   };
   global.Date = class FixedDate extends OriginalDate {
     constructor(...args) { super(...(args.length ? args : ['2026-10-12T12:00:00.000Z'])); }
-    static now() { return OriginalDate.parse('2026-10-12T12:00:00.000Z'); }
   };
   t.after(async () => {
     global.Date = OriginalDate;

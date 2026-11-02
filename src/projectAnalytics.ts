@@ -20,6 +20,7 @@ export interface ProjectInvestmentStats {
 }
 
 interface InvestmentRun {
+  executionLogId?: number;
   runKind: string;
   status: string;
   startedAt: string;
@@ -57,7 +58,7 @@ function isInvestmentRun(kind: string): boolean {
   return /^(step|step_continue|solo|solo_continue|roadmap_revision)$/.test(kind);
 }
 
-function buildProjectInvestmentStatsFromRuns(runs: InvestmentRun[], now: Date): ProjectInvestmentStats {
+export function buildProjectInvestmentStatsFromRuns(runs: InvestmentRun[], now: Date): ProjectInvestmentStats {
   const stats = emptyProjectInvestmentStats(now);
   const nowMs = now.getTime();
   let latestRunAtMs = 0;
@@ -108,6 +109,18 @@ export async function readProjectInvestmentStatsFromDatabase(projectPath: string
     return emptyProjectInvestmentStats(now);
   }
   const root = normalizeGlobalDataPathForExtension(globalDataPath, projectPath);
-  const runs = await sendRuntimeDataRequest<InvestmentRun[]>(root, { operation: 'read_project_investment_runs', input: { root: projectPath } });
+  const runs: InvestmentRun[] = [];
+  let beforeExecutionLogId = 0;
+  for (;;) {
+    const page = await sendRuntimeDataRequest<InvestmentRun[]>(root, { operation: 'read_project_investment_runs', input: {
+      root: projectPath, limit: 200, ...(beforeExecutionLogId ? { beforeExecutionLogId } : {})
+    } });
+    runs.push(...page);
+    if (page.length !== 200) break;
+    const nextCursor = Math.min(...page.map(run => Number(run.executionLogId || 0)).filter(Boolean));
+    if (!nextCursor || nextCursor === beforeExecutionLogId) break;
+    beforeExecutionLogId = nextCursor;
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
   return buildProjectInvestmentStatsFromRuns(runs, now);
 }

@@ -2905,6 +2905,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       padding: 9px;
       background: rgba(255,255,255,0.03);
       cursor: pointer;
+      content-visibility: auto;
+      contain: layout paint style;
+      contain-intrinsic-block-size: 180px;
     }
 
     .portfolio-card.is-selected {
@@ -5016,6 +5019,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     const pastedAttachmentErrors = {};
     const projectRefreshPaths = new Set();
     const pendingConversationContinuations = new Set();
+    const pendingConversationDraftClears = new Map();
     const conversationContinuationKey = (projectPath, conversationId) => JSON.stringify([String(projectPath || ''), String(conversationId || '')]);
     const pendingSidebarAgentActions = new Map();
     const currentProjects = { projects: [], selectedProjectPath: '', portfolio: [], globalStore: null };
@@ -8858,6 +8862,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           intelligencePendingText = '';
           intelligencePendingConversationId = '';
           break;
+        case 'intelligenceReplyAccepted':
+          if (message.requestId !== intelligencePendingRequest) break;
+          renderIntelligenceThread();
+          break;
         case 'intelligenceReplyFailed':
           if (message.requestId !== intelligencePendingRequest) break;
           intelligencePendingRequest = '';
@@ -9363,11 +9371,25 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           break;
 
         case 'conversationActionAccepted':
-          if (message.launchActionId) SoloMapWebview.acknowledgeMessage(message.launchActionId);
+          // Accepted is only an in-memory Host receipt. Retransmission stops
+          // after Runtime durability, not inside the Host crash window.
           break;
+
+        case 'conversationActionDurable': {
+          if (message.launchActionId) SoloMapWebview.acknowledgeMessage(message.launchActionId);
+          const pending = pendingConversationDraftClears.get(message.launchActionId);
+          if (!pending) break;
+          pendingConversationDraftClears.delete(message.launchActionId);
+          clearSubmittedSidebarDraft(pending.mode, pending.projectPath, pending.targetId, pending.draft);
+          if (clearSubmittedAttachments(pending.targetId, pending.projectPath, pending.files)) {
+            refreshSubmittedAttachments(portfolioList.querySelector('[data-project-continue-composer]'), pending.projectPath);
+          }
+          break;
+        }
 
         case 'conversationActionSettled':
           if (message.launchActionId) SoloMapWebview.acknowledgeMessage(message.launchActionId);
+          pendingConversationDraftClears.delete(message.launchActionId);
           if (message.action === 'continue') {
             const conversationId = String(message.conversationId || '');
             if (!pendingConversationContinuations.delete(conversationContinuationKey(message.projectPath, conversationId))) break;
@@ -9375,6 +9397,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             updateContinuationButtons(message.projectPath, conversationId, false);
             flushPendingAsyncPortfolioRender();
           } else if (message.action === 'runSolo') {
+            pendingConversationDraftClears.delete(message.launchActionId);
             for (const [key, action] of pendingSidebarAgentActions) {
               if (action.id !== message.launchActionId || action.projectPath !== message.projectPath) continue;
               pendingSidebarAgentActions.delete(key);
@@ -9919,6 +9942,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       delete queuedPastedAttachmentActions[attachmentKey];
       delete pastedAttachmentErrors[attachmentKey];
       action();
+      if (projectPath === currentProjects.selectedProjectPath) {
+        renderPortfolioAfterAttachmentUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
+      }
       return true;
     }
 
@@ -9933,10 +9959,12 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         });
     }
 
-    function clearSubmittedAttachments(targetId, projectPath = currentProjects.selectedProjectPath) {
+    function clearSubmittedAttachments(targetId, projectPath = currentProjects.selectedProjectPath, submittedFiles) {
       const attachmentKey = sidebarAttachmentKey(targetId, projectPath);
       if (pendingPastedAttachments[attachmentKey] && pendingPastedAttachments[attachmentKey].size > 0) return false;
-      const hadAttachments = getSidebarProjectFiles(projectPath, targetId).length > 0
+      const currentFiles = getSidebarProjectFiles(projectPath, targetId);
+      if (Array.isArray(submittedFiles) && JSON.stringify(currentFiles) !== JSON.stringify(submittedFiles)) return false;
+      const hadAttachments = currentFiles.length > 0
         || Boolean(queuedPastedAttachmentActions[attachmentKey])
         || Boolean(pastedAttachmentErrors[attachmentKey]);
       delete queuedPastedAttachmentActions[attachmentKey];
@@ -10741,6 +10769,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             if (mode === 'solo') {
               if (!projectPath || !userMessage.trim()) return;
               const launchActionId = 'launch-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+              const submittedFiles = getSidebarProjectFiles(projectPath, targetId);
+              pendingConversationDraftClears.set(launchActionId, {
+                mode, projectPath, targetId, draft: userMessage, files: [...submittedFiles]
+              });
               SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
                 command: 'conversation.runSolo',
                 ...conversationActionEnvelope(),
@@ -10749,36 +10781,30 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
                 userMessage,
                 agentCli: selectedAgentCli,
                 model: selectedModel,
-                supplementFiles: getSidebarProjectFiles(projectPath, targetId)
+                supplementFiles: submittedFiles
               }, launchActionId);
-              clearSubmittedSidebarDraft(mode, projectPath, targetId, userMessage);
-              if (clearSubmittedAttachments(targetId, projectPath)) {
-                refreshSubmittedAttachments(panel, projectPath);
-              }
               return;
             }
             if (mode === 'flow') {
               if (!projectPath || !userMessage.trim()) return;
-              vscode.postMessage({
+              const launchActionId = 'launch-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+              const submittedFiles = getSidebarProjectFiles(projectPath, targetId);
+              pendingConversationDraftClears.set(launchActionId, {
+                mode, projectPath, targetId, draft: userMessage, files: [...submittedFiles]
+              });
+              SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
                 command: 'flow.run',
                 ...conversationActionEnvelope(),
+                launchActionId,
                 projectPath,
                 goal: userMessage,
                 agentCli: selectedAgentCli,
                 model: selectedModel,
-                supplementFiles: getSidebarProjectFiles(projectPath, targetId)
-              });
-              clearSubmittedSidebarDraft(mode, projectPath, targetId, userMessage);
-              if (clearSubmittedAttachments(targetId, projectPath)) {
-                refreshSubmittedAttachments(panel, projectPath);
-              }
+                supplementFiles: submittedFiles
+              }, launchActionId);
               return;
             }
-            runNodeAgent(projectPath, nodeId, userMessage, selectedAgentCli, selectedModel, getSidebarProjectFiles(projectPath, targetId));
-            clearSubmittedSidebarDraft(mode, projectPath, targetId, userMessage);
-            if (clearSubmittedAttachments(targetId, projectPath)) {
-              refreshSubmittedAttachments(panel, projectPath);
-            }
+            runNodeAgent(projectPath, nodeId, userMessage, selectedAgentCli, selectedModel, getSidebarProjectFiles(projectPath, targetId), targetId);
           };
           if (!userMessage.trim()) return;
           queuePastedAttachmentAction(targetId, send, projectPath);
@@ -12054,14 +12080,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function renderPortfolio(portfolio, selectedProjectPath, preserveComposerInput = true, updatedProjectPath = '') {
       const preservedComposerState = preserveComposerInput ? captureProjectConversationInputState() : null;
-      const unchangedCards = new Map();
       const previouslyFocused = document.activeElement;
-      if (updatedProjectPath) {
-        portfolioList.querySelectorAll('[data-select-project-path]').forEach(card => {
-          const projectPath = card.getAttribute('data-select-project-path');
-          if (projectPath && projectPath !== updatedProjectPath) unchangedCards.set(projectPath, card);
-        });
-      }
       hoveredConversationCard = null;
       focusedConversationCard = null;
       if (!portfolio || portfolio.length === 0) {
@@ -12096,7 +12115,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         return;
       }
 
-      portfolioList.innerHTML = visibleProjects.map(project => {
+      const renderPortfolioCardMarkup = project => {
         const isSelected = project.path === selectedProjectPath;
         const relativeTime = formatRelativeTime(project.recentActivityAt);
         const recommendation = project.recommendedNodeTitle || '';
@@ -12150,9 +12169,41 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             \${isSelected ? renderProjectDeliveryPanel(project) + renderProjectIssuePanel(project) + '<div class="portfolio-action-zone">' + renderProjectConversationComposer(project, currentNodes) + '</div>' : ''}
           </div>
         \`;
-      }).join('');
+      };
+      let portfolioBindingRoot = portfolioList;
+      if (updatedProjectPath) {
+        const currentCard = Array.from(portfolioList.querySelectorAll('[data-select-project-path]'))
+          .find(card => card.getAttribute('data-select-project-path') === updatedProjectPath);
+        const updatedProject = visibleProjects.find(project => project.path === updatedProjectPath);
+        if (!updatedProject) {
+          if (currentCard) currentCard.remove();
+          restoreProjectConversationInputState(preservedComposerState);
+          return;
+        }
+        const template = document.createElement('template');
+        template.innerHTML = renderPortfolioCardMarkup(updatedProject).trim();
+        const nextCard = template.content && template.content.firstElementChild;
+        if (!nextCard) {
+          renderPortfolio(portfolio, selectedProjectPath, preserveComposerInput);
+          return;
+        }
+        if (currentCard) currentCard.replaceWith(nextCard);
+        else {
+          const projectIndex = visibleProjects.findIndex(project => project.path === updatedProjectPath);
+          const nextExisting = visibleProjects.slice(projectIndex + 1)
+            .map(project => Array.from(portfolioList.children).find(card => card.getAttribute && card.getAttribute('data-select-project-path') === project.path))
+            .find(Boolean);
+          portfolioList.insertBefore(nextCard, nextExisting || null);
+        }
+        portfolioBindingRoot = nextCard;
+      } else {
+        portfolioList.innerHTML = visibleProjects.map(renderPortfolioCardMarkup).join('');
+      }
 
-      portfolioList.querySelectorAll('[data-select-project-path]').forEach(card => {
+      const portfolioCardsToBind = portfolioBindingRoot.matches && portfolioBindingRoot.matches('[data-select-project-path]')
+        ? [portfolioBindingRoot]
+        : Array.from(portfolioBindingRoot.querySelectorAll('[data-select-project-path]'));
+      portfolioCardsToBind.forEach(card => {
         card.addEventListener('click', (event) => {
           if (event.target.closest('button') || event.target.closest('input') || event.target.closest('textarea') || event.target.closest('[data-solo-select]') || event.target.closest('[data-sidebar-solo-history]') || event.target.closest('[data-issue-panel]') || event.target.closest('[data-delivery-action-panel]')) return;
           const projectPath = card.getAttribute('data-select-project-path') || '';
@@ -12160,7 +12211,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           selectProjectInSidebar(projectPath, true);
         });
       });
-      portfolioList.querySelectorAll('[data-open-project-path]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-open-project-path]').forEach(button => {
         button.addEventListener('click', () => {
           vscode.postMessage({
             command: 'project.openRoadmap',
@@ -12168,7 +12219,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           });
         });
       });
-      portfolioList.querySelectorAll('[data-open-project-growth-path]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-open-project-growth-path]').forEach(button => {
         button.addEventListener('click', () => {
           vscode.postMessage({
             command: 'project.openGrowth',
@@ -12176,7 +12227,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           });
         });
       });
-      portfolioList.querySelectorAll('[data-continue-next-action-project-path]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-continue-next-action-project-path]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           vscode.postMessage({
@@ -12188,7 +12239,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           });
         });
       });
-      portfolioList.querySelectorAll('[data-adjust-roadmap-project-path]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-adjust-roadmap-project-path]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const projectPath = button.getAttribute('data-adjust-roadmap-project-path') || '';
@@ -12198,7 +12249,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
-      portfolioList.querySelectorAll('[data-roadmap-revision-input]').forEach(input => {
+      portfolioBindingRoot.querySelectorAll('[data-roadmap-revision-input]').forEach(input => {
         const projectPath = input.getAttribute('data-roadmap-revision-input') || '';
         input.addEventListener('input', () => {
           roadmapRevisionDrafts[projectPath] = input.value || '';
@@ -12211,7 +12262,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (sendButton) sendButton.click();
         });
       });
-      portfolioList.querySelectorAll('[data-send-roadmap-revision-project-path]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-send-roadmap-revision-project-path]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const projectPath = button.getAttribute('data-send-roadmap-revision-project-path') || '';
@@ -12228,7 +12279,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
-      portfolioList.querySelectorAll('[data-refresh-project-path]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-refresh-project-path]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const projectPath = button.getAttribute('data-refresh-project-path') || '';
@@ -12243,14 +12294,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           requestSidebarProjectConversationSnapshot(projectPath, true);
         });
       });
-      portfolioList.querySelectorAll('[data-toggle-delivery-panel]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-toggle-delivery-panel]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           deliveryActionPanelExpanded = !deliveryActionPanelExpanded;
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
-      portfolioList.querySelectorAll('[data-open-delivery-run]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-open-delivery-run]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const url = button.getAttribute('data-open-delivery-run') || '';
@@ -12258,7 +12309,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           vscode.postMessage({ command: 'external.open', url });
         });
       });
-      portfolioList.querySelectorAll('[data-open-security-audit]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-open-security-audit]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const url = button.getAttribute('data-open-security-audit') || '';
@@ -12266,7 +12317,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           vscode.postMessage({ command: 'external.open', url });
         });
       });
-      portfolioList.querySelectorAll('[data-open-pr-url]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-open-pr-url]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const url = button.getAttribute('data-open-pr-url') || '';
@@ -12274,7 +12325,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           vscode.postMessage({ command: 'external.open', url });
         });
       });
-      portfolioList.querySelectorAll('[data-refresh-delivery-project-path]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-refresh-delivery-project-path]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const projectPath = button.getAttribute('data-refresh-delivery-project-path') || '';
@@ -12286,7 +12337,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           requestSidebarProjectConversationSnapshot(projectPath, true);
         });
       });
-      portfolioList.querySelectorAll('[data-agent-fix-delivery-project-path]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-agent-fix-delivery-project-path]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const projectPath = button.getAttribute('data-agent-fix-delivery-project-path') || '';
@@ -12312,7 +12363,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }, launchActionId);
         });
       });
-      portfolioList.querySelectorAll('[data-agent-fix-security-project-path]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-agent-fix-security-project-path]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const projectPath = button.getAttribute('data-agent-fix-security-project-path') || '';
@@ -12338,7 +12389,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
-      portfolioList.querySelectorAll('[data-agent-review-pr]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-agent-review-pr]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const projectPath = button.getAttribute('data-project-path') || currentProjects.selectedProjectPath;
@@ -12368,7 +12419,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }, launchActionId);
         });
       });
-      portfolioList.querySelectorAll('[data-close-pr]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-close-pr]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           vscode.postMessage({
@@ -12378,7 +12429,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           });
         });
       });
-      portfolioList.querySelectorAll('[data-agent-fix-foundation-project-path]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-agent-fix-foundation-project-path]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const projectPath = button.getAttribute('data-agent-fix-foundation-project-path') || '';
@@ -12404,7 +12455,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }, launchActionId);
         });
       });
-      portfolioList.querySelectorAll('[data-toggle-pin-project-path]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-toggle-pin-project-path]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const projectPath = button.getAttribute('data-toggle-pin-project-path') || '';
@@ -12419,7 +12470,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           });
         });
       });
-      portfolioList.querySelectorAll('[data-open-issue-url]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-open-issue-url]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const url = button.getAttribute('data-open-issue-url') || '';
@@ -12428,7 +12479,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }
         });
       });
-      portfolioList.querySelectorAll('[data-toggle-issue-form]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-toggle-issue-form]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const panel = button.closest('[data-issue-panel]');
@@ -12455,7 +12506,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }
         });
       });
-      portfolioList.querySelectorAll('[data-quick-issue-input]').forEach(input => {
+      portfolioBindingRoot.querySelectorAll('[data-quick-issue-input]').forEach(input => {
         input.addEventListener('input', () => {
           quickIssueDraftTitle = input.value;
         });
@@ -12480,7 +12531,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }
         });
       });
-      portfolioList.querySelectorAll('[data-toggle-issue-panel]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-toggle-issue-panel]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           issuePanelExpanded = !issuePanelExpanded;
@@ -12492,7 +12543,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
-      portfolioList.querySelectorAll('[data-cancel-issue-form]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-cancel-issue-form]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           issueFormOpen = false;
@@ -12503,29 +12554,29 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
-      portfolioList.querySelectorAll('[data-issue-title]').forEach(input => {
+      portfolioBindingRoot.querySelectorAll('[data-issue-title]').forEach(input => {
         input.addEventListener('input', () => {
           issueDraftTitle = input.value;
         });
         input.addEventListener('click', (event) => event.stopPropagation());
       });
-      portfolioList.querySelectorAll('[data-issue-body]').forEach(input => {
+      portfolioBindingRoot.querySelectorAll('[data-issue-body]').forEach(input => {
         input.addEventListener('input', () => {
           issueDraftBody = input.value;
         });
         input.addEventListener('click', (event) => event.stopPropagation());
       });
-      portfolioList.querySelectorAll('[data-issue-category]').forEach(select => {
+      portfolioBindingRoot.querySelectorAll('[data-issue-category]').forEach(select => {
         bindSoloSelect(select, (value) => {
           issueDraftCategory = value || 'bug';
         });
       });
-      portfolioList.querySelectorAll('[data-issue-priority]').forEach(select => {
+      portfolioBindingRoot.querySelectorAll('[data-issue-priority]').forEach(select => {
         bindSoloSelect(select, (value) => {
           issueDraftPriority = value || '';
         });
       });
-      portfolioList.querySelectorAll('[data-create-issue]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-create-issue]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const form = button.closest('[data-issue-create-form]');
@@ -12549,7 +12600,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           });
         });
       });
-      portfolioList.querySelectorAll('[data-expand-issue-number]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-expand-issue-number]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const issueNumber = Number(button.getAttribute('data-expand-issue-number') || 0);
@@ -12573,7 +12624,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           });
         });
       });
-      portfolioList.querySelectorAll('[data-close-issue]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-close-issue]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           vscode.postMessage({
@@ -12583,7 +12634,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           });
         });
       });
-      portfolioList.querySelectorAll('[data-agent-fix-issue]').forEach(button => {
+      portfolioBindingRoot.querySelectorAll('[data-agent-fix-issue]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();
           const projectPath = button.getAttribute('data-project-path') || currentProjects.selectedProjectPath;
@@ -12610,17 +12661,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           }, launchActionId);
         });
       });
-      bindProjectContinueComposer(portfolioList);
+      bindProjectContinueComposer(portfolioBindingRoot);
       updateSidebarAgentActionButtons();
       if (preserveComposerInput) restoreProjectConversationInputState(preservedComposerState);
-      if (updatedProjectPath) {
-        portfolioList.querySelectorAll('[data-select-project-path]').forEach(card => {
-          const previous = unchangedCards.get(card.getAttribute('data-select-project-path'));
-          if (previous) card.replaceWith(previous);
-        });
-        if (previouslyFocused && previouslyFocused.isConnected && previouslyFocused !== document.activeElement) {
-          previouslyFocused.focus();
-        }
+      if (updatedProjectPath && previouslyFocused && previouslyFocused.isConnected && previouslyFocused !== document.activeElement) {
+        previouslyFocused.focus();
       }
     }
 
@@ -12730,17 +12775,24 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       SoloMapWebview.bindOnboardingActions(container, message => vscode.postMessage(message));
     }
 
-    function runNodeAgent(projectPath, nodeId, userMessage, agentCli, model, supplementFiles) {
-      vscode.postMessage({
+    function runNodeAgent(projectPath, nodeId, userMessage, agentCli, model, supplementFiles, draftTargetId) {
+      const launchActionId = 'launch-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+      const targetId = draftTargetId || nodeId || getProjectContinueDraftKey(projectPath);
+      const submittedFiles = supplementFiles || [];
+      pendingConversationDraftClears.set(launchActionId, {
+        mode: 'continue', projectPath, targetId, draft: userMessage || '', files: [...submittedFiles]
+      });
+      SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
         command: 'conversation.runStep',
         ...conversationActionEnvelope(),
+        launchActionId,
         projectPath: projectPath,
         nodeId: nodeId,
         userMessage: userMessage || '',
         agentCli: agentCli || '',
         model: model || '',
-        supplementFiles: supplementFiles || []
-      });
+        supplementFiles: submittedFiles
+      }, launchActionId);
     }
     vscode.postMessage({ command: 'automationSoundReady', pageId: automationSoundPageId });
   </script>

@@ -208,6 +208,25 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   const storedGrowth = await sendRuntimeDataRequest(globalDataPath, { operation: 'read_project_growth', input: { root: tempRoot, historyLimit: 5 } });
   const latest = storedGrowth.latest;
 
+  fs.appendFileSync(path.join(tempRoot, 'src', 'db', 'cache.ts'), '\nexport const runtimeOwnedRefresh = true;\n');
+  const runtimeRefresh = await sendRuntimeDataRequest(globalDataPath, {
+    operation: 'refresh_project_growth',
+    input: {
+      root: tempRoot,
+      extensionPath: projectRoot,
+      requestId: randomUUID(),
+      scanReason: 'runtime-owned-refresh',
+      now: '2026-01-03T00:10:00.000Z'
+    }
+  });
+  assert.equal(runtimeRefresh.accepted, true);
+  assert.ok(runtimeRefresh.snapshotId);
+  const runtimeOwnedGrowth = await sendRuntimeDataRequest(globalDataPath, {
+    operation: 'read_project_growth',
+    input: { root: tempRoot, historyLimit: 1 }
+  });
+  assert.equal(runtimeOwnedGrowth.latest.snapshot.scanReason, 'runtime-owned-refresh');
+
   assert.equal(latest.snapshot.scanReason, 'test');
   assert.ok(latest.nodes.some((node) => node.kind === 'module' && node.nodeId !== 'module:roadmap:roadmap-data' && node.label !== '补强项目数据链路'));
   assert.ok(!latest.nodes.some((node) => node.label === '补强项目数据链路' && node.kind === 'module'));
@@ -278,7 +297,7 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   assert.ok(secondView.diff);
   assert.equal(secondView.diff.filesAdded, 1);
   assert.equal(secondView.diff.filesRemoved, 0);
-  assert.equal(secondView.history.length, 2);
+  assert.equal(secondView.history.length, 3);
   assert.equal(secondView.history[0].snapshotId, secondView.snapshotId);
 
   const laterJournalWriter = new SqliteStore(dbPath, projectRoot);
@@ -294,35 +313,37 @@ test('project growth snapshot closes filesystem, run index, roadmap, and query m
   assert.equal(queriedView.snapshotId, secondView.snapshotId);
   assert.ok(queriedView.diff);
   assert.equal(queriedView.diff.filesAdded, 1);
-  assert.equal(queriedView.history.length, 2);
+  assert.equal(queriedView.history.length, 3);
   assert.equal(fs.existsSync(growthDbPath), false);
 });
 
 test('parallel projects can write and immediately read isolated growth snapshots', async (t) => {
   const globalDataPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-growth-concurrent-')), '.solomap-global');
   const projects = ['alpha', 'beta'].map(name => path.join(fs.mkdtempSync(path.join(os.tmpdir(), `solomap-${name}-`)), name));
-  projects.forEach(root => fs.mkdirSync(root));
+  projects.forEach(root => {
+    fs.mkdirSync(path.join(root, '.solopreneur'), { recursive: true });
+    writeFile(path.join(root, '.solopreneur', 'roadmap.csv'), 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n');
+    writeFile(path.join(root, 'index.js'), `module.exports = ${JSON.stringify(path.basename(root))};\n`);
+  });
   const runtime = launchRuntime(globalDataPath);
   await waitForRuntime(runtime, globalDataPath);
   t.after(async () => {
     try { await stopRuntime(runtime, globalDataPath); }
     finally {
       for (const root of projects) {
-        unlinkExisting([path.join(root, '.solopreneur', 'project.json')]);
+        unlinkExisting([path.join(root, '.solopreneur', 'project.json'), path.join(root, '.solopreneur', 'roadmap.csv'), path.join(root, 'index.js')]);
         removeEmptyDirectories([path.join(root, '.solopreneur'), root, path.dirname(root)]);
       }
       cleanupRuntimeDataRoot(globalDataPath);
     }
   });
-  const snapshots = projects.map((root, index) => ({
-    snapshot: { id: `snapshot-${index}`, projectPath: root, createdAt: `2026-01-0${index + 1}T00:00:00.000Z`, gitHead: '', scanReason: 'concurrent-test', status: 'completed', durationMs: index, error: '' },
-    nodes: [{ snapshotId: `snapshot-${index}`, nodeId: 'directory:.', parentId: '', kind: 'directory', path: '.', label: path.basename(root), language: '', bytes: 1, loc: 1, fileCount: 1, testFileCount: 0, generated: false, excluded: false, primaryRole: 'root', confidence: 1 }],
-    edges: [], signals: [], labels: []
-  }));
-  await Promise.all(projects.map((root, index) => sendRuntimeDataRequest(globalDataPath, { operation: 'write_project_growth', input: { root, data: snapshots[index], idempotencyKey: `parallel-${index}` } })));
+  await Promise.all(projects.map((root, index) => sendRuntimeDataRequest(globalDataPath, { operation: 'refresh_project_growth', input: {
+    root, extensionPath: projectRoot, requestId: randomUUID(), scanReason: 'concurrent-test', now: `2026-01-0${index + 1}T00:00:00.000Z`
+  } })));
   const states = await Promise.all(projects.map(root => sendRuntimeDataRequest(globalDataPath, { operation: 'read_project_growth', input: { root, historyLimit: 1 } })));
   assert.deepEqual(states.map(state => state.latest.snapshot.projectPath), projects);
-  assert.deepEqual(states.map(state => state.latest.nodes[0].label), projects.map(root => path.basename(root)));
+  assert.deepEqual(states.map(state => state.latest.nodes[0].label), ['Project', 'Project']);
+  assert.ok(states.every(state => state.latest.nodes.some(node => node.path === 'index.js')));
   assert.ok(projects.every(root => !fs.existsSync(path.join(root, '.solopreneur', 'project_growth.db'))));
 });
 

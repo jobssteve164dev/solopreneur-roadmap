@@ -367,6 +367,16 @@ test('concurrent logical aliases share one identity and retain distinct bindings
   assert.deepEqual(fs.readFileSync(path.join(f.root, 'solomap.db-wal')), wal);
 });
 
+test('project location changes invalidate the durable sidebar projection source revision', async t => {
+  const f = await fixture(t);
+  const registered = await f.call('register_project', { root: f.project });
+  const before = Number(f.store.rows('SELECT source_revision FROM sidebar_core_projection_state WHERE project_id=?', [registered.projectId])[0].source_revision);
+  const moved = path.join(f.base, 'moved-project');
+  f.store.db.run("UPDATE project_locations SET root_path=? WHERE project_id=? AND root_path=? AND status='active'", [moved, registered.projectId, f.project]);
+  const after = Number(f.store.rows('SELECT source_revision FROM sidebar_core_projection_state WHERE project_id=?', [registered.projectId])[0].source_revision);
+  assert.equal(after, before + 1);
+});
+
 test('a retargeted directory alias cannot apply metadata to another project under its previous binding', async t => {
   const f = await fixture(t), peer = path.join(f.base, 'other-project'), alias = path.join(f.base, 'retargeted-alias'); fs.mkdirSync(peer); fs.symlinkSync(f.project, alias, 'dir');
   const own = await f.call('register_project', { root: alias }), foreign = await f.call('register_project', { root: peer });

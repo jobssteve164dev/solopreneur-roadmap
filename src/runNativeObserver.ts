@@ -11,6 +11,7 @@ import type { FileHandle } from 'fs/promises';
 import { claudeNativeEventPurpose, validateClaudeNativeEvent, ClaudeNativeEvent } from './claudeNativeEvent';
 import { taskIngressDiagnosticEvent, taskIngressReceiptFields } from './providerTaskIngress';
 import { createInteractionBudgetAt } from './interactionBudget';
+import type { RuntimeWorkspaceCompute } from './runtimeDataOperations';
 
 const observations = new WeakMap<UnifiedDataStore, Map<string, Promise<void>>>();
 interface ClaudeLineage {
@@ -32,7 +33,9 @@ function nativeTime(value: unknown): number {
 
 /** Observes official native events even while the plugin window is closed. */
 export class RunNativeObserver {
-  constructor(private readonly store: UnifiedDataStore) {}
+  constructor(private readonly store: UnifiedDataStore, private readonly workspaceCompute: RuntimeWorkspaceCompute = {
+    snapshot: snapshotWorkspace, gitHead: readWorkspaceGitHead, gitEvidence: captureRunGitEvidence
+  }) {}
 
   public forget(state: RunState): void {
     const cache = claudeLineages.get(this.store); const key = `${state.projectId}:${state.runId}`;
@@ -125,8 +128,8 @@ export class RunNativeObserver {
     let observation: Promise<{ workspaceSnapshot: Awaited<ReturnType<typeof snapshotWorkspace>>; gitEvidence: Awaited<ReturnType<typeof captureRunGitEvidence>>; observedAt: string }> | undefined;
     const observedWorkspace = () => observation ||= (async () => {
       const observedAt = new Date().toISOString();
-      const workspaceSnapshot = await snapshotWorkspace(String(observed.status.workspaceRoot));
-      const gitEvidence = await captureRunGitEvidence(String(observed.status.workspaceRoot), String(observed.status.baseGitHash || ''), workspaceSnapshot);
+      const workspaceSnapshot = await this.workspaceCompute.snapshot(String(observed.status.workspaceRoot));
+      const gitEvidence = await this.workspaceCompute.gitEvidence(String(observed.status.workspaceRoot), String(observed.status.baseGitHash || ''), workspaceSnapshot);
       return { workspaceSnapshot, gitEvidence, observedAt };
     })();
     for (const frame of frames) {
@@ -326,8 +329,8 @@ export class RunNativeObserver {
     }
     let observation: Promise<{ workspaceSnapshot: Awaited<ReturnType<typeof snapshotWorkspace>>; gitEvidence: Awaited<ReturnType<typeof captureRunGitEvidence>>; observedAt: string }> | undefined;
     const observedWorkspace = () => observation ||= (async () => {
-      const observedAt = new Date().toISOString(); const workspaceSnapshot = await snapshotWorkspace(workspaceRoot);
-      return { workspaceSnapshot, gitEvidence: await captureRunGitEvidence(workspaceRoot, String(observed.status.baseGitHash || ''), workspaceSnapshot), observedAt };
+      const observedAt = new Date().toISOString(); const workspaceSnapshot = await this.workspaceCompute.snapshot(workspaceRoot);
+      return { workspaceSnapshot, gitEvidence: await this.workspaceCompute.gitEvidence(workspaceRoot, String(observed.status.baseGitHash || ''), workspaceSnapshot), observedAt };
     })();
     for await (const frame of this.rows(observed.projectId, executionLogId, cursor, end, stream)) {
       const row = frame.row; const time = nativeTime(row?.timestamp); const state = current();
@@ -544,12 +547,12 @@ export class RunNativeObserver {
     if (this.store.readMetadata(state.turnId).data.finished_at !== null && state.status.nativeOutputPending !== true) return;
     const boundaryUnavailable = (source?.lastStartedOffset ?? -1) > sourceOffset || state.status[native('WorkspaceBeforeRecorded')] !== true;
     const nativeWorkspaceObservation = boundaryUnavailable ? source ? await source.observedWorkspace() : await (async () => {
-      const observedAt = new Date().toISOString(); const workspaceSnapshot = await snapshotWorkspace(String(state.status.workspaceRoot));
-      return { observedAt, workspaceSnapshot, gitEvidence: await captureRunGitEvidence(String(state.status.workspaceRoot), String(state.status.baseGitHash || ''), workspaceSnapshot) };
+      const observedAt = new Date().toISOString(); const workspaceSnapshot = await this.workspaceCompute.snapshot(String(state.status.workspaceRoot));
+      return { observedAt, workspaceSnapshot, gitEvidence: await this.workspaceCompute.gitEvidence(String(state.status.workspaceRoot), String(state.status.baseGitHash || ''), workspaceSnapshot) };
     })() : undefined;
-    const workspaceSnapshot = boundaryUnavailable ? undefined : await snapshotWorkspace(String(state.status.workspaceRoot));
-    const gitEvidence = workspaceSnapshot ? await captureRunGitEvidence(String(state.status.workspaceRoot), String(state.status.baseGitHash || ''), workspaceSnapshot) : undefined;
-    const gitAfterHash = await readWorkspaceGitHead(String(state.status.workspaceRoot));
+    const workspaceSnapshot = boundaryUnavailable ? undefined : await this.workspaceCompute.snapshot(String(state.status.workspaceRoot));
+    const gitEvidence = workspaceSnapshot ? await this.workspaceCompute.gitEvidence(String(state.status.workspaceRoot), String(state.status.baseGitHash || ''), workspaceSnapshot) : undefined;
+    const gitAfterHash = await this.workspaceCompute.gitHead(String(state.status.workspaceRoot));
     const latest = current();
     if (latest.turnId !== state.turnId) throw new Error('checkpoint_turn_conflict');
     const aborted = payload.type === 'turn_aborted';

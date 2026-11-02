@@ -173,6 +173,8 @@ type AgentCliTurn =
 
 class AgentCliTurnProtocolError extends Error {}
 
+class DurableToolFailureSignal extends Error {}
+
 function parseAgentCliTurn(output: unknown): AgentCliTurn {
   const answer = String(output).trim();
   if (!answer) throw new AgentCliTurnProtocolError('Intelligence did not return an answer.');
@@ -392,15 +394,16 @@ function embeddedModel(agentCli: string, model: string, ai: PiAiModule): Record<
   };
 }
 
-function boundedToolResult(agent: PiAgentModule, response: unknown): { content: Array<{ type: 'text'; text: string }>; details?: unknown } {
+function boundedToolResult(agent: PiAgentModule, response: unknown): { content: Array<{ type: 'text'; text: string }>; details?: unknown; isError?: true } {
   const envelope = toolResultEnvelope(response);
   const combined = readableJson(envelope);
   const bounded = agent.truncateHead(combined);
-  if (!bounded.truncated) return { content: [{ type: 'text', text: combined }] };
+  if (!bounded.truncated) return { content: [{ type: 'text', text: combined }], ...(envelope.isError === true ? { isError: true as const } : {}) };
   const notice = `[Pi Harness tool output limit: showing ${bounded.outputLines} of ${bounded.totalLines} lines, ${agent.formatSize(bounded.outputBytes)} of ${agent.formatSize(bounded.totalBytes)}.]`;
   return {
     content: [{ type: 'text', text: [bounded.content, notice].filter(Boolean).join('\n\n') }],
-    details: { truncation: { ...bounded, content: undefined } }
+    details: { truncation: { ...bounded, content: undefined } },
+    ...(envelope.isError === true ? { isError: true as const } : {})
   };
 }
 
@@ -411,6 +414,12 @@ function toolResultEnvelope(response: unknown): Record<string, unknown> {
     ...(source.structuredContent !== undefined ? { structuredContent: source.structuredContent } : {}),
     ...(source.isError === true ? { isError: true } : {})
   };
+}
+
+class McpToolResultSignal extends Error {
+  constructor(readonly result: ReturnType<typeof boundedToolResult>) {
+    super(result.content.map(item => item.text).filter(Boolean).join('\n').trim() || 'MCP tool returned an error result.');
+  }
 }
 
 interface ToolLoopState { signature?: string; repetitions: number }
@@ -467,6 +476,12 @@ function restoredNativeToolLoop(messages: Array<Record<string, unknown>>, operat
 
 function toolFailureResult(message: string): { content: Array<{ type: 'text'; text: string }>; isError: true } {
   return { content: [{ type: 'text', text: message }], isError: true };
+}
+
+function signalDurableToolFailure(toolName: string, result: { content: Array<{ type: 'text'; text: string }>; isError?: true }): void {
+  if (result.isError !== true) return;
+  const detail = result.content.map(item => item.text).filter(Boolean).join('\n').trim();
+  throw new DurableToolFailureSignal(detail || `Intelligence tool unavailable: ${toolName}`);
 }
 
 function intelligenceLocalTimeContext(now = new Date()): string {
@@ -543,7 +558,7 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
   private activeAgent?: { abort(): void };
   private cancelled = false;
 
-  constructor(options: { agentCli: string; model?: string; configRevision?: string; workingDirectory?: string; runner?: CognitiveCliRunner }) {
+  constructor(options: { agentCli: string; model?: string; configRevision?: string; workingDirectory?: string; runner?: CognitiveCliRunner; runnerCancel?: () => void }) {
     this.agentCli = options.runner ? options.agentCli : resolveAgentCliWithinFamily(options.agentCli, options.agentCli);
     this.model = String(options.model || 'auto');
     this.workingDirectory = options.workingDirectory;
@@ -551,6 +566,7 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
       this.cancelInvocation = cancel;
       if (cancel && this.cancelled) cancel();
     }));
+    if (options.runnerCancel) this.cancelInvocation = options.runnerCancel;
     this.id = `pi-agent:agent-cli:${getAgentCliFamily(this.agentCli)}:${this.model}:${String(options.configRevision || 'unversioned')}`;
   }
 
@@ -567,7 +583,8 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
     };
     systemPrompt?: string;
     toolSnapshot?: unknown[];
-    authorizeTool?: (input: { invocationId: string; toolName: string; arguments: Record<string, unknown>; replay: 'safe' | 'never' }) => void;
+    authorizeTool?: (input: { invocationId: string; toolName: string; arguments: Record<string, unknown>; replay: 'safe' | 'never' }) =>
+      { completed?: boolean; result?: unknown } | Promise<{ completed?: boolean; result?: unknown }>;
     withToolFence?: <T>(invocationId: string, action: () => Promise<T>) => Promise<T>;
     cancelRequested?: boolean;
   }, storage: PiSessionStorage, readTools?: Pick<Client, 'listTools' | 'callTool'> & Partial<Pick<Client, 'readResource'>>): Promise<{
@@ -634,22 +651,37 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
       parameters: tool.inputSchema,
       replay: tool.annotations?.readOnlyHint === true ? 'safe' : 'never',
       execute: async (_toolCallId: string, args: Record<string, unknown>, _onUpdate: unknown, _toolContext: unknown, invocation: { invocationId: string }) => {
-        if (!readTools) throw new Error('Intelligence tools are unavailable.');
         try {
           const acceptsIdempotency = Boolean((tool.inputSchema as any)?.properties?.idempotencyKey);
           const callArguments = acceptsIdempotency && !args.idempotencyKey ? { ...args, idempotencyKey: `pi:${invocation.invocationId}` } : args;
           const replay = tool.annotations?.readOnlyHint === true ? 'safe' : 'never';
-          input.authorizeTool?.({ invocationId: invocation.invocationId, toolName: tool.name, arguments: callArguments, replay });
-          const call = () => observeLocalDiagnosticStage(`mcp.${tool.name}`, async () => {
-            const response = await readTools.callTool({ name: tool.name, arguments: callArguments });
-            if (response.isError) throw new Error(`Intelligence read tool failed: ${tool.name}: ${boundedToolResult(pi.agent, response).content[0].text}`);
-            return response;
-          });
-          const response = await (input.withToolFence ? input.withToolFence(invocation.invocationId, call) : call());
-          const bounded = boundedToolResult(pi.agent, response);
-          recordToolOutcome(repeatedToolOutcomes, tool.name, args, { content: bounded.content, isError: false });
+          const admission = await input.authorizeTool?.({ invocationId: invocation.invocationId, toolName: tool.name, arguments: callArguments, replay });
+          if (admission?.completed) {
+            const recovered = admission.result as ReturnType<typeof boundedToolResult> | ReturnType<typeof toolFailureResult>;
+            recordToolOutcome(repeatedToolOutcomes, tool.name, args, { content: recovered.content, isError: recovered.isError === true });
+            signalDurableToolFailure(tool.name, recovered);
+            return recovered;
+          }
+          const call = async () => {
+            try {
+              return await observeLocalDiagnosticStage(`mcp.${tool.name}`, async () => {
+              if (!readTools) throw new Error('Intelligence tools are unavailable.');
+                const result = boundedToolResult(pi.agent, await readTools.callTool({ name: tool.name, arguments: callArguments }));
+                if (result.isError === true) throw new McpToolResultSignal(result);
+                return result;
+              });
+            } catch (error) {
+              if (error instanceof McpToolResultSignal) return error.result;
+              const message = error instanceof Error ? error.message : String(error);
+              return toolFailureResult(`Intelligence tool unavailable: ${tool.name} (${classifyDiagnosticFailure(error)}): ${message}`);
+            }
+          };
+          const bounded = await (input.withToolFence ? input.withToolFence(invocation.invocationId, call) : call());
+          recordToolOutcome(repeatedToolOutcomes, tool.name, args, { content: bounded.content, isError: bounded.isError === true });
+          signalDurableToolFailure(tool.name, bounded);
           return bounded;
         } catch (error) {
+          if (error instanceof DurableToolFailureSignal) throw error;
           if (error instanceof Error && error.message.startsWith('tool_loop_no_progress:')) throw error;
           const message = error instanceof Error ? error.message : String(error);
           const finalMessage = `Intelligence tool unavailable: ${tool.name} (${classifyDiagnosticFailure(error)}): ${message}`;

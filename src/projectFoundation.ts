@@ -18,13 +18,17 @@ export interface ProjectFoundationAssessment {
   message: string;
 }
 
-const FOUNDATION_ITEMS: Array<Omit<ProjectFoundationItem, 'present'>> = [
+export const FOUNDATION_ITEMS: ReadonlyArray<Omit<ProjectFoundationItem, 'present'>> = [
   { key: 'readme', label: 'README', relativePath: 'README.md' },
   { key: 'agents', label: 'Agent rules', relativePath: 'AGENTS.md' },
   { key: 'memory', label: 'Project memory', relativePath: 'PROJECT_MEMORY.md' },
   { key: 'ci', label: 'CI', relativePath: '.github/workflows/ci.yml' },
   { key: 'security', label: 'Security checks', relativePath: '.github/workflows/security.yml' }
 ];
+
+export function projectFoundationSignature(projectRoot: string): string {
+  return FOUNDATION_ITEMS.map(item => fs.existsSync(path.join(projectRoot, item.relativePath)) ? '1' : '0').join('');
+}
 
 function safeProjectName(projectRoot: string): string {
   return path.basename(projectRoot).replace(/[-_]+/g, ' ').trim() || 'Project';

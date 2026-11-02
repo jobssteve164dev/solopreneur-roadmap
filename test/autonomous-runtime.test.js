@@ -43,6 +43,8 @@ async function createFixture() {
     { name: 'Beta', path: beta, priority: 'P2' },
     { name: 'Hidden', path: hidden, priority: 'P0' }
   ], legacyHiddenProjects: [hidden] }), call);
+  await call('accept_roadmap_csv', { root: alpha });
+  await call('accept_roadmap_csv', { root: beta });
   return { root, globalRoot, alpha, beta, hidden, store, operations, call };
 }
 
@@ -137,11 +139,17 @@ test('database Today planning isolates one project with an invalid roadmap', asy
         { name: 'Beta', path: fixture.beta, priority: 'P2' }
       ],
       now: new Date('2026-09-22T08:00:00.000Z'),
-      operation: request => {
-        if (request.operation === 'read_roadmap' && request.input.root === fixture.alpha) {
-          return Promise.reject(new Error('roadmap_csv_invalid:dependency'));
+      operation: async request => {
+        const result = await fixture.operations(request);
+        if (request.operation === 'read_shadow_decision_inputs') {
+          return {
+            ...result,
+            items: result.items.map(item => item.root === fixture.alpha
+              ? { root: item.root, nodes: [], invalid: true }
+              : item)
+          };
         }
-        return fixture.operations(request);
+        return result;
       }
     });
 
@@ -152,6 +160,45 @@ test('database Today planning isolates one project with an invalid roadmap', asy
   } finally {
     await removeFixture(fixture);
   }
+});
+
+test('database Today planning pages one background read model instead of flooding interactive roadmap reads', async () => {
+  const projects = Array.from({ length: 57 }, (_, index) => ({
+    name: `Project ${index + 1}`,
+    path: path.join(os.tmpdir(), `solomap-shadow-project-${index + 1}`),
+    priority: index === 0 ? 'P0' : 'P2'
+  }));
+  const calls = [];
+  let active = 0;
+  let maximumActive = 0;
+  const decision = await runtime.runShadowDecisionCycleFromDatabase({
+    globalDataPath: path.join(os.tmpdir(), 'solomap-shadow-background-root'),
+    projects,
+    now: new Date('2026-09-22T08:00:00.000Z'),
+    operation: async request => {
+      calls.push(request.operation);
+      assert.equal(request.operation, 'read_shadow_decision_inputs');
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise(resolve => setImmediate(resolve));
+      active -= 1;
+      const roots = request.input.roots.slice(request.input.offset, request.input.offset + request.input.limit);
+      return {
+        items: roots.map((root, index) => ({
+          root,
+          nodes: [{ id: `node-${request.input.offset + index}`, title: 'Continue', stage: 'Build', status: 'Pending' }]
+        })),
+        nextOffset: request.input.offset + roots.length < request.input.roots.length
+          ? request.input.offset + roots.length
+          : null
+      };
+    }
+  });
+
+  assert.equal(decision.projectCount, 57);
+  assert.equal(calls.length, 3);
+  assert.ok(calls.every(operation => operation === 'read_shadow_decision_inputs'));
+  assert.equal(maximumActive, 1);
 });
 
 test('cognitive Today arrangement reuses unchanged database facts and reruns Pi after a committed roadmap change', async () => {
@@ -516,6 +563,40 @@ test('runtime lease reclaims a dead claim file, preserves a live claim and fence
     assert.equal(live.acquired, false);
     assert.equal(live.owner.runtimeId, 'after-pid-reuse');
   } finally { await removeFixture(fixture); }
+});
+
+test('runtime lease treats the parent and child publication of one process identity as the same claim', async () => {
+  const fixture = await createFixture();
+  const claimPath = path.join(fixture.globalRoot, 'runtime', 'control.claim');
+  const ownerPath = path.join(claimPath, 'owner.json');
+  try {
+    fs.mkdirSync(claimPath, { recursive: true });
+    fs.writeFileSync(ownerPath, JSON.stringify({
+      schemaVersion: 1,
+      runtimeId: 'shared-startup-runtime',
+      pid: 4242,
+      processBirth: 'proc:shared-startup',
+      token: 'other-publisher-token',
+      createdAt: Date.now()
+    }));
+
+    const lease = runtime.claimRuntimeLease(fixture.globalRoot, {
+      runtimeId: 'shared-startup-runtime',
+      pid: 4242,
+      processBirth: 'proc:shared-startup',
+      isProcessOwnerAlive: (pid, birth) => pid === 4242 && birth === 'proc:shared-startup'
+    });
+
+    assert.equal(lease.acquired, true);
+    assert.equal(lease.owner.runtimeId, 'shared-startup-runtime');
+    assert.equal(lease.owner.pid, 4242);
+    assert.equal(JSON.parse(fs.readFileSync(ownerPath, 'utf8')).token, 'other-publisher-token',
+      'the second publisher must not remove the first publisher claim token');
+  } finally {
+    if (fs.existsSync(ownerPath)) fs.unlinkSync(ownerPath);
+    if (fs.existsSync(claimPath)) fs.rmdirSync(claimPath);
+    await removeFixture(fixture);
+  }
 });
 
 test('runtime lease recovers after an interrupted disk-full claim left two empty owner files', async () => {

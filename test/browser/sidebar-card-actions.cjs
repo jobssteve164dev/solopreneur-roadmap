@@ -93,11 +93,11 @@ const projects = [
     await send({ command: 'projectPullRequestsLoaded', projectPath: projects[1].path, pullRequests: { available: true, openCount: 2 } });
     await page.mouse.up();
     await page.waitForTimeout(20);
-    assert.deepEqual(
-      await page.evaluate(() => window.messages.filter(message => message.command === 'project.select')),
-      [{ command: 'project.select', projectPath: projects[1].path }],
-      'the shared card guard must preserve project selection actions too'
-    );
+    const projectSelections = await page.evaluate(() => window.messages.filter(message => message.command === 'project.select'));
+    assert.equal(projectSelections.length, 1, 'the shared card guard must preserve project selection actions too');
+    assert.equal(projectSelections[0].projectPath, projects[1].path);
+    assert.match(projectSelections[0].interactionId, /^sidebar-project-/,
+      'project selection keeps the foreground interaction identity used for host acknowledgement');
 
     await page.evaluate(() => { window.messages = []; });
     const growth = page.locator('[data-open-project-growth-path="/fixture/a"]');

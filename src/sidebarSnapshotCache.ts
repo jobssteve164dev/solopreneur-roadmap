@@ -1,12 +1,8 @@
-import * as fs from 'fs';
-import * as path from 'path';
 import { randomUUID } from 'crypto';
 import { AgentConversation } from './db/types';
-import { ProjectPortfolioSummary, SolopreneurProject } from './projectPortfolio';
+import { ProjectPortfolioSummary } from './projectPortfolio';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
-
-const cacheVersion = 3;
 
 export interface SidebarConversationSnapshot {
   solo: AgentConversation[];
@@ -22,35 +18,14 @@ interface CachedConversationSnapshot {
 
 interface AnalysisState<T> { objectId: string | null; revision: number; value: T | null }
 
-export interface SidebarCoreSnapshotCache {
-  version: number;
-  projectSignature: string;
-  portfolio: ProjectPortfolioSummary[];
-}
-
-export interface SidebarCoreSnapshotReservation {
-  requestId: string;
-  generation: number;
-}
-
-function statSignature(filePath: string): string {
-  try {
-    const stat = fs.statSync(filePath);
-    return `${Math.trunc(stat.mtimeMs)}:${stat.size}`;
-  } catch {
-    return 'missing';
-  }
-}
-
-export function buildSidebarProjectSignature(projects: SolopreneurProject[]): string {
-  return projects.map((project) => JSON.stringify({
-    name: project.name,
-    path: project.path,
-    type: project.type || '',
-    priority: project.priority || '',
-    pinnedAt: project.pinnedAt || '',
-    roadmap: statSignature(path.join(project.path, '.solopreneur', 'roadmap.csv'))
-  })).join('|');
+export async function readSidebarCoreProjections(globalDataPath: string, projectPaths: string[] = []): Promise<ProjectPortfolioSummary[]> {
+  if (!globalDataPath) return [];
+  const records = await sendRuntimeDataRequest<Array<{ summary: ProjectPortfolioSummary }>>(dataRoot(globalDataPath), {
+    operation: 'read_sidebar_core_projections',
+    input: projectPaths.length ? { projectPaths } : {},
+    supersedesKey: `sidebar-core:${projectPaths.length ? [...projectPaths].sort().join('|') : 'all'}`
+  });
+  return records.map(record => record.summary).filter(summary => Boolean(summary?.path));
 }
 
 function dataRoot(globalDataPath: string, projectPath = ''): string {
@@ -86,49 +61,6 @@ export async function buildConversationDatabaseSignature(globalDataPath: string,
     operation: 'read_project_analysis_source', input: { root: projectPath }
   });
   return source.conversationRevision;
-}
-
-export async function readSidebarCoreSnapshot(globalDataPath: string): Promise<SidebarCoreSnapshotCache | null> {
-  if (!globalDataPath) return null;
-  try {
-    const state = await readState<SidebarCoreSnapshotCache>(globalDataPath, null, 'core');
-    const parsed = state.value;
-    if (!parsed || parsed.version !== cacheVersion || !Array.isArray(parsed.portfolio)) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-export async function writeSidebarPortfolioSnapshot(globalDataPath: string, projectSignature: string, portfolio: ProjectPortfolioSummary[]): Promise<void> {
-  if (!globalDataPath) return;
-  const reservation = await reserveSidebarPortfolioSnapshot(globalDataPath);
-  await commitSidebarPortfolioSnapshot(globalDataPath, reservation, projectSignature, portfolio);
-}
-
-export async function reserveSidebarPortfolioSnapshot(globalDataPath: string): Promise<SidebarCoreSnapshotReservation> {
-  if (!globalDataPath) throw new Error('sidebar_data_root_missing');
-  const requestId = randomUUID();
-  return sendRuntimeDataRequest<SidebarCoreSnapshotReservation>(dataRoot(globalDataPath), {
-    operation: 'reserve_sidebar_core_refresh', input: { requestId }
-  });
-}
-
-export async function commitSidebarPortfolioSnapshot(
-  globalDataPath: string,
-  reservation: SidebarCoreSnapshotReservation,
-  projectSignature: string,
-  portfolio: ProjectPortfolioSummary[]
-): Promise<boolean> {
-  if (!globalDataPath) return false;
-  const result = await sendRuntimeDataRequest<{ accepted: boolean }>(dataRoot(globalDataPath), {
-    operation: 'commit_sidebar_core_refresh', input: {
-      requestId: reservation.requestId,
-      generation: reservation.generation,
-      value: { version: cacheVersion, projectSignature, portfolio }
-    }
-  });
-  return result.accepted;
 }
 
 export async function readCachedConversationSnapshot(globalDataPath: string, projectPath: string): Promise<SidebarConversationSnapshot | null> {

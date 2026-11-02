@@ -82,6 +82,78 @@ test('host preparation persists all task input and native identity without produ
   } finally { await operations.close(); store.close(); }
 });
 
+test('Runtime owns one complete foreground launch preparation command across fresh delivery and retry', async () => {
+  const base = fixtureRoot('solomap-runtime-launch-preparation-');
+  const root = path.join(base, '.solomap-global');
+  const projectRoot = path.join(base, 'project');
+  fs.mkdirSync(projectRoot);
+  const store = new UnifiedDataStore(root);
+  assert.equal(typeof store.runAtomicCommand, 'function', 'the Writer must expose a real command transaction boundary');
+  const runAtomicCommand = store.runAtomicCommand.bind(store);
+  let atomicCommands = 0;
+  store.runAtomicCommand = async operation => { atomicCommands += 1; return runAtomicCommand(operation); };
+  const operations = createRuntimeDataOperations(store);
+  try {
+    const input = {
+      agentCli: 'claude', selectedModel: 'chosen-model', prompt: '完整用户目标🌿', workspaceRoot: projectRoot,
+      nodeId: '__solo__', executionLogId: 0, userMessage: '完整用户目标🌿', runKind: 'solo',
+      globalDataPath: root, taskPermissionMode: 'auto', launchIntentId: 'runtime-owned-launch'
+    };
+    const first = await operations({ operation: 'prepare_agent_launch', input });
+    const second = await operations({ operation: 'prepare_agent_launch', input });
+    assert.equal(first.runId, second.runId);
+    assert.equal(first.status.rootExecutionLogId, second.status.rootExecutionLogId);
+    assert.equal(first.status.deliveryPending, true);
+    assert.equal(atomicCommands, 1, 'fresh launch preparation commits as one Writer command, while retry is read-only');
+    assert.match(first.finalCommand, /runAgentProcess/);
+    const plan = await operations({ operation: 'read_run_execution_plan', input: {
+      root: projectRoot, executionLogId: first.status.rootExecutionLogId
+    } });
+    assert.match(plan.prompt, /完整用户目标🌿/);
+    assert.equal((await operations({ operation: 'read_project_journal', input: { root: projectRoot } })).logs.length, 1);
+  } finally { await operations.close(); store.close(); }
+});
+
+test('Runtime begins one terminal delivery with the lease and terminal identity committed together', async () => {
+  const base = fixtureRoot('solomap-runtime-terminal-delivery-');
+  const root = path.join(base, '.solomap-global');
+  const projectRoot = path.join(base, 'project');
+  fs.mkdirSync(projectRoot);
+  const store = new UnifiedDataStore(root);
+  const operations = createRuntimeDataOperations(store);
+  try {
+    const prepared = await operations({ operation: 'prepare_agent_launch', input: {
+      agentCli: 'claude', selectedModel: '', prompt: '交付当前用户目标', workspaceRoot: projectRoot,
+      nodeId: '__solo__', executionLogId: 0, userMessage: '交付当前用户目标', runKind: 'solo',
+      globalDataPath: root, taskPermissionMode: 'auto', launchIntentId: 'runtime-delivery-begin'
+    } });
+    const owner = { id: prepared.status.deliveryOwnerId, pid: prepared.status.deliveryOwnerPid,
+      birth: prepared.status.deliveryOwnerBirth };
+    const request = {
+      root: projectRoot, executionLogId: prepared.status.rootExecutionLogId, generation: prepared.generation,
+      expectedRevision: prepared.revision, owner, terminalName: 'SoloMap Agent (solomap)',
+      terminalDeliveryId: 'delivery-one', terminalDeliveryTraceId: 'trace-one',
+      terminalDeliveryStartedAt: new Date().toISOString(), terminalDeliveryAttempt: 1,
+      idempotencyKey: `run:${prepared.runId}:${prepared.generation}:begin-terminal-delivery:delivery-one`
+    };
+    const first = await operations({ operation: 'begin_run_delivery', input: request });
+    const replay = await operations({ operation: 'begin_run_delivery', input: request });
+    assert.equal(replay.revision, first.revision);
+    assert.equal(first.status.deliveryOwnerId, owner.id);
+    assert.equal(first.status.terminalName, request.terminalName);
+    assert.equal(first.status.terminalDeliveryId, request.terminalDeliveryId);
+    assert.equal(first.status.terminalDeliveryTraceId, request.terminalDeliveryTraceId);
+    assert.equal(first.status.terminalDeliveryAttempt, 1);
+    const claimed = await operations({ operation: 'claim_run', input: {
+      projectId: prepared.projectId, executionLogId: prepared.status.rootExecutionLogId,
+      expectedRevision: first.revision, agentPid: process.pid, processBirth: 'fixture-process',
+      terminalDeliveryId: request.terminalDeliveryId, idempotencyKey: 'runner-owns-submission-acknowledgement'
+    } });
+    assert.ok(claimed.status.terminalCommandSubmittedAt);
+    assert.equal(claimed.status.foregroundRunnerPid, process.pid);
+  } finally { await operations.close(); store.close(); }
+});
+
 test('interactive Codex preparation preserves a resume-only command without creating a synthetic prompt turn', async () => {
   const { prepareAgentRun } = require('../out/agentRunPreparation.js');
   const base = fixtureRoot('solomap-codex-direct-retirement-');

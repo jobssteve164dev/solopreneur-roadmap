@@ -1,7 +1,7 @@
 import * as crypto from 'crypto';
 import { IntelligenceTimeScheduleInput, validateIntelligenceTimeScheduleInput } from './intelligenceMcp';
 import { SolomapScheduledAutomationTask } from './pluginContracts';
-import { occurrenceForTask, readScheduledTaskDatabase, syncScheduledTaskDatabase } from './scheduledTaskLedger';
+import { occurrenceForTask, readScheduledTasksById, syncScheduledTaskDatabase } from './scheduledTaskLedger';
 
 type Operation = (operation: string, input: Record<string, unknown>) => Promise<unknown>;
 type SynchronousOperation = (operation: string, input: Record<string, unknown>) => unknown;
@@ -50,8 +50,7 @@ export async function setIntelligenceTimeScheduleInDatabase(globalDataPath: stri
       if ((error as Error).message !== 'revision_conflict' || attempt === 4) throw error;
     }
   }
-  const currentLedger = await readScheduledTaskDatabase(project.path, globalDataPath, operation);
-  const internalTasks = currentLedger.tasks
+  const internalTasks = (await readScheduledTasksById(project.path, globalDataPath, ['__solomap_focus_reminder__'], operation))
     .map(item => item.task)
     .filter(item => item.internalKind === 'focus_reminder');
   await syncScheduledTaskDatabase(project.path, globalDataPath, [...tasks, ...internalTasks], new Date(), operation);
@@ -78,7 +77,7 @@ export function setIntelligenceTimeScheduleInDatabaseSync(project: Project, raw:
     tasks = [...tasks, task];
     operation('patch_host_settings', { namespace: 'extension', ownerScope: 'global', patches: [{ key: 'automationTasks', expectedRevision: item?.revision || 0, value: { ...automation, scheduledTasks: tasks } }], idempotencyKey: `intelligence-time-schedule:${taskId}:${item?.revision || 0}` });
   }
-  const ledger = operation('read_schedule_ledger', {}) as { tasks: Array<{ task: SolomapScheduledAutomationTask }> };
+  const ledger = operation('read_schedule_ledger', { taskIds: ['__solomap_focus_reminder__'] }) as { tasks: Array<{ task: SolomapScheduledAutomationTask }> };
   const allTasks = [...tasks, ...ledger.tasks.map(item => item.task).filter(item => item.internalKind === 'focus_reminder')];
   const now = new Date();
   const schedules = allTasks.filter(item => item.id).map(item => {

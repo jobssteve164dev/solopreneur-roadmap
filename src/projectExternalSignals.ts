@@ -4,12 +4,23 @@ import * as fs from 'fs';
 
 import { commandExists, resolveCommandOnSearchPath } from './agentCli';
 import { ExternalDataLoadOptions, invalidateExternalData, loadExternalData } from './externalDataLoader';
-import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
+import { RuntimeDataRequest, sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
 
 const DELIVERY_WORKFLOW_RUN_DISPLAY_LIMIT = 3;
 const DELIVERY_WORKFLOW_RUN_FETCH_LIMIT = 20;
 const PULL_REQUEST_DISPLAY_LIMIT = 5;
+
+type ExternalSignalDataRequest = (root: string, request: RuntimeDataRequest) => Promise<unknown>;
+let externalSignalDataRequest: ExternalSignalDataRequest = sendRuntimeDataRequest;
+
+export function configureExternalSignalDataRequest(request: ExternalSignalDataRequest): void {
+  externalSignalDataRequest = request;
+}
+
+function requestExternalSignalData<T>(root: string, request: RuntimeDataRequest): Promise<T> {
+  return externalSignalDataRequest(root, request) as Promise<T>;
+}
 
 export interface ProjectIssueItem {
   number: number;
@@ -230,7 +241,7 @@ function externalDataRoot(globalDataPath: string, projectPath: string): string {
 }
 
 async function readExternalProjection<T>(globalDataPath: string, projectPath: string, key: string): Promise<AnalysisState<ExternalProjection<T>>> {
-  return sendRuntimeDataRequest<AnalysisState<ExternalProjection<T>>>(externalDataRoot(globalDataPath, projectPath), {
+  return requestExternalSignalData<AnalysisState<ExternalProjection<T>>>(externalDataRoot(globalDataPath, projectPath), {
     operation: 'read_analysis_state', input: { root: projectPath, namespace: 'external', key }
   });
 }
@@ -244,14 +255,14 @@ async function readExternalCache<T extends { repo?: string }>(globalDataPath: st
 
 async function beginExternalRefresh(globalDataPath: string, projectPath: string, key: string): Promise<ExternalRefreshToken> {
   const requestId = crypto.randomUUID();
-  const reserved = await sendRuntimeDataRequest<{ requestId: string; generation: number }>(externalDataRoot(globalDataPath, projectPath), {
+  const reserved = await requestExternalSignalData<{ requestId: string; generation: number }>(externalDataRoot(globalDataPath, projectPath), {
     operation: 'reserve_external_refresh', input: { root: projectPath, key, requestId }
   });
   return { ...reserved, requestedAt: externalRequestTime() };
 }
 
 async function commitExternalCache<T extends { repo?: string }>(globalDataPath: string, projectPath: string, key: string, request: ExternalRefreshToken, cache: T): Promise<T> {
-  const committed = await sendRuntimeDataRequest<{ accepted: boolean; state: AnalysisState<ExternalProjection<T>> }>(externalDataRoot(globalDataPath, projectPath), {
+  const committed = await requestExternalSignalData<{ accepted: boolean; state: AnalysisState<ExternalProjection<T>> }>(externalDataRoot(globalDataPath, projectPath), {
     operation: 'commit_external_refresh', input: { root: projectPath, key, ...request, cache }
   });
   const accepted = committed.state.value?.cache;
@@ -489,8 +500,8 @@ function createIssueCache(repo: string, issues: ProjectIssueItem[], details: Iss
   };
 }
 
-export async function readCachedIssueDetails(projectPath: string, issueNumber: number, globalDataPath = ''): Promise<{ ok: boolean; issue?: ProjectIssueItem; comments: ProjectIssueComment[]; message: string; stale: boolean } | null> {
-  const repo = getGithubRepoSlug(projectPath);
+export async function readCachedIssueDetails(projectPath: string, issueNumber: number, globalDataPath = '', resolvedRepo?: string): Promise<{ ok: boolean; issue?: ProjectIssueItem; comments: ProjectIssueComment[]; message: string; stale: boolean } | null> {
+  const repo = resolvedRepo === undefined ? getGithubRepoSlug(projectPath) : resolvedRepo;
   const cache = await readExternalCache<IssueCacheFile>(globalDataPath, projectPath, 'issues', repo);
   const detail = cache?.details[String(issueNumber)];
   if (!detail) {
@@ -609,6 +620,13 @@ function ensureGithubIssueLabel(projectPath: string, label: string): void {
     meta.description,
     '--force'
   ], 6000);
+}
+
+async function ensureGithubIssueLabelAsync(projectPath: string, repo: string, label: string): Promise<void> {
+  const meta = getGithubIssueLabelMeta(label);
+  await runGhIssueCommandAsync(projectPath, [
+    'label', 'create', label, '--color', meta.color, '--description', meta.description, '--force'
+  ], 6000, repo);
 }
 
 export function parseIssueNumberFromOutput(output: string): number {
@@ -1047,17 +1065,17 @@ export function invalidateExternalPullRequestSummary(projectPath: string): void 
   invalidateExternalData('github-pull-requests', projectPath);
 }
 
-export async function readProjectIssueDetails(projectPath: string, issueNumber: number, globalDataPath = ''): Promise<{ ok: boolean; issue?: ProjectIssueItem; comments: ProjectIssueComment[]; message: string; stale?: boolean }> {
-  const result = runGhIssueCommand(projectPath, [
+export async function readProjectIssueDetails(projectPath: string, issueNumber: number, globalDataPath = '', resolvedRepo?: string): Promise<{ ok: boolean; issue?: ProjectIssueItem; comments: ProjectIssueComment[]; message: string; stale?: boolean }> {
+  const result = await runGhIssueCommandAsync(projectPath, [
     'issue',
     'view',
     String(issueNumber),
     '--comments',
     '--json',
     'number,title,body,state,labels,comments,reactionGroups,updatedAt,url'
-  ], 7000);
+  ], 7000, resolvedRepo);
   if (!result.ok) {
-    return await readCachedIssueDetails(projectPath, issueNumber, globalDataPath)
+    return await readCachedIssueDetails(projectPath, issueNumber, globalDataPath, result.repo)
       || { ok: false, comments: [], message: String(result.stderr || result.stdout || 'GitHub issue unavailable').trim() };
   }
   try {
@@ -1088,21 +1106,21 @@ export async function readProjectIssueDetails(projectPath: string, issueNumber: 
     await commitExternalCache(globalDataPath, projectPath, 'issues', refresh, cache);
     return { ok: true, issue, comments, message: '', stale: false };
   } catch {
-    return await readCachedIssueDetails(projectPath, issueNumber, globalDataPath)
+    return await readCachedIssueDetails(projectPath, issueNumber, globalDataPath, result.repo)
       || { ok: false, comments: [], message: 'GitHub issue data could not be read' };
   }
 }
 
-export function createProjectIssue(projectPath: string, title: string, body: string, category: string, priority: string): { ok: boolean; message: string } {
+export async function createProjectIssue(projectPath: string, title: string, body: string, category: string, priority: string, resolvedRepo?: string): Promise<{ ok: boolean; message: string }> {
   const labels = getProjectIssueLabels(category, priority);
   const args = ['issue', 'create', '--title', title, '--body', body || title];
-  const result = runGhIssueCommand(projectPath, args, 10000);
+  const result = await runGhIssueCommandAsync(projectPath, args, 10000, resolvedRepo);
   if (result.ok) {
     invalidateExternalIssueSummary(projectPath);
     const issueNumber = parseIssueNumberFromOutput(result.stdout);
     if (issueNumber && labels.length) {
-      labels.forEach((label) => ensureGithubIssueLabel(projectPath, label));
-      runGhIssueCommand(projectPath, ['issue', 'edit', String(issueNumber), '--add-label', labels.join(',')], 8000);
+      await Promise.all(labels.map(label => ensureGithubIssueLabelAsync(projectPath, result.repo, label)));
+      await runGhIssueCommandAsync(projectPath, ['issue', 'edit', String(issueNumber), '--add-label', labels.join(',')], 8000, result.repo);
     }
   }
   return {
@@ -1111,8 +1129,8 @@ export function createProjectIssue(projectPath: string, title: string, body: str
   };
 }
 
-export function closeProjectIssue(projectPath: string, issueNumber: number): { ok: boolean; message: string } {
-  const result = runGhIssueCommand(projectPath, ['issue', 'close', String(issueNumber)], 8000);
+export async function closeProjectIssue(projectPath: string, issueNumber: number, resolvedRepo?: string): Promise<{ ok: boolean; message: string }> {
+  const result = await runGhIssueCommandAsync(projectPath, ['issue', 'close', String(issueNumber)], 8000, resolvedRepo);
   if (result.ok) {
     invalidateExternalIssueSummary(projectPath);
   }
@@ -1122,14 +1140,14 @@ export function closeProjectIssue(projectPath: string, issueNumber: number): { o
   };
 }
 
-export function closeProjectPullRequest(projectPath: string, pullRequestNumber: number): { ok: boolean; message: string } {
-  const result = runGhIssueCommand(projectPath, [
+export async function closeProjectPullRequest(projectPath: string, pullRequestNumber: number, resolvedRepo?: string): Promise<{ ok: boolean; message: string }> {
+  const result = await runGhIssueCommandAsync(projectPath, [
     'pr',
     'close',
     String(pullRequestNumber),
     '--comment',
     'Closed from SoloMap after user action.'
-  ], 10000);
+  ], 10000, resolvedRepo);
   if (result.ok) {
     invalidateExternalPullRequestSummary(projectPath);
   }

@@ -860,4 +860,229 @@ CREATE TABLE growth_detail_cleanup_batches(
  receipt_json TEXT,created_at INTEGER NOT NULL,applied_at INTEGER,PRIMARY KEY(plan_id,batch_index));
 CREATE INDEX growth_detail_cleanup_plan_status ON growth_detail_cleanup_plans(status,created_at);
 CREATE INDEX content_ref_growth_detail_cleanup_plans_result ON growth_detail_cleanup_plans(result_content_id);
+` }, { version: 56, sql: `
+CREATE TABLE sidebar_core_projection_state(
+ project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+ source_revision INTEGER NOT NULL DEFAULT 1 CHECK(source_revision>0),
+ projection_revision INTEGER NOT NULL DEFAULT 0 CHECK(projection_revision>=0),
+ projection_json TEXT,updated_at INTEGER NOT NULL DEFAULT 0);
+INSERT INTO sidebar_core_projection_state(project_id) SELECT id FROM projects;
+CREATE INDEX sidebar_core_projection_pending ON sidebar_core_projection_state(source_revision,projection_revision);
+CREATE TRIGGER sidebar_core_project_insert AFTER INSERT ON projects BEGIN
+ INSERT OR IGNORE INTO sidebar_core_projection_state(project_id) VALUES(NEW.id);
+END;
+CREATE TRIGGER sidebar_core_project_update AFTER UPDATE ON projects BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=NEW.id;
+END;
+CREATE TRIGGER sidebar_core_roadmap_insert AFTER INSERT ON roadmap_nodes BEGIN
+ INSERT INTO sidebar_core_projection_state(project_id,source_revision) VALUES(NEW.project_id,1)
+ ON CONFLICT(project_id) DO UPDATE SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000;
+END;
+CREATE TRIGGER sidebar_core_roadmap_update AFTER UPDATE ON roadmap_nodes BEGIN
+ INSERT INTO sidebar_core_projection_state(project_id,source_revision) VALUES(NEW.project_id,1)
+ ON CONFLICT(project_id) DO UPDATE SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000;
+END;
+CREATE TRIGGER sidebar_core_roadmap_delete AFTER DELETE ON roadmap_nodes BEGIN
+ INSERT INTO sidebar_core_projection_state(project_id,source_revision) VALUES(OLD.project_id,1)
+ ON CONFLICT(project_id) DO UPDATE SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000;
+END;
+CREATE TRIGGER sidebar_core_dependency_insert AFTER INSERT ON roadmap_dependencies BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000
+ WHERE project_id=(SELECT project_id FROM roadmap_nodes WHERE id=NEW.node_id);
+END;
+CREATE TRIGGER sidebar_core_dependency_delete AFTER DELETE ON roadmap_dependencies BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000
+ WHERE project_id=(SELECT project_id FROM roadmap_nodes WHERE id=OLD.node_id);
+END;
+CREATE TRIGGER sidebar_core_archive_update AFTER UPDATE OF archived_at ON objects
+WHEN NEW.kind='roadmap_node' AND NEW.archived_at IS NOT OLD.archived_at BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=NEW.project_id;
+END;
+` }, { version: 57, sql: `
+CREATE TRIGGER sidebar_projection_run_insert AFTER INSERT ON project_run_indexes BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=NEW.project_id;
+END;
+CREATE TRIGGER sidebar_projection_run_update AFTER UPDATE ON project_run_indexes BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=NEW.project_id;
+END;
+CREATE TRIGGER sidebar_projection_run_delete AFTER DELETE ON project_run_indexes BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=OLD.project_id;
+END;
+CREATE TRIGGER sidebar_projection_memory_insert AFTER INSERT ON project_step_memory BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=NEW.project_id;
+END;
+CREATE TRIGGER sidebar_projection_memory_update AFTER UPDATE ON project_step_memory BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=NEW.project_id;
+END;
+CREATE TRIGGER sidebar_projection_memory_delete AFTER DELETE ON project_step_memory BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=OLD.project_id;
+END;
+CREATE TRIGGER sidebar_projection_analysis_insert AFTER INSERT ON project_analysis_sources BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=NEW.project_id;
+END;
+CREATE TRIGGER sidebar_projection_analysis_update AFTER UPDATE ON project_analysis_sources BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=NEW.project_id;
+END;
+CREATE TRIGGER sidebar_projection_analysis_delete AFTER DELETE ON project_analysis_sources BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=OLD.project_id;
+END;
+CREATE TRIGGER sidebar_projection_documentation_insert AFTER INSERT ON evidence WHEN NEW.type='documentation_manifest' BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=NEW.project_id;
+END;
+CREATE TRIGGER sidebar_projection_documentation_update AFTER UPDATE ON evidence WHEN NEW.type='documentation_manifest' OR OLD.type='documentation_manifest' BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id IN (NEW.project_id,OLD.project_id);
+END;
+CREATE TRIGGER sidebar_projection_documentation_delete AFTER DELETE ON evidence WHEN OLD.type='documentation_manifest' BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=OLD.project_id;
+END;
+CREATE TRIGGER sidebar_projection_learning_event_insert AFTER INSERT ON learning_events BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000;
+END;
+CREATE TRIGGER sidebar_projection_learning_event_update AFTER UPDATE ON learning_events BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000;
+END;
+CREATE TRIGGER sidebar_projection_learning_event_delete AFTER DELETE ON learning_events BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000;
+END;
+CREATE TRIGGER sidebar_projection_lesson_insert AFTER INSERT ON lessons BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000;
+END;
+CREATE TRIGGER sidebar_projection_lesson_update AFTER UPDATE ON lessons BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000;
+END;
+CREATE TRIGGER sidebar_projection_lesson_delete AFTER DELETE ON lessons BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000;
+END;
+CREATE TRIGGER sidebar_projection_lesson_decision_insert AFTER INSERT ON lesson_decisions BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000;
+END;
+CREATE TRIGGER sidebar_projection_lesson_decision_update AFTER UPDATE ON lesson_decisions BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000;
+END;
+CREATE TRIGGER sidebar_projection_lesson_decision_delete AFTER DELETE ON lesson_decisions BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000;
+END;
+` }, { version: 58, sql: `
+CREATE TRIGGER sidebar_projection_location_insert AFTER INSERT ON project_locations BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=NEW.project_id;
+END;
+CREATE TRIGGER sidebar_projection_location_update AFTER UPDATE ON project_locations BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id IN (OLD.project_id,NEW.project_id);
+END;
+CREATE TRIGGER sidebar_projection_location_delete AFTER DELETE ON project_locations BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=OLD.project_id;
+END;
+` }, { version: 59, sql: `
+ALTER TABLE sidebar_core_projection_state ADD COLUMN foundation_signature TEXT NOT NULL DEFAULT '';
+` }, { version: 60, sql: `
+CREATE TABLE project_import_staging(
+ project_id TEXT PRIMARY KEY,request_key TEXT NOT NULL UNIQUE,target_root TEXT NOT NULL,source_hash TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('preparing','activating')),updated_at INTEGER NOT NULL);
+` }, { version: 61, sql: `
+INSERT OR REPLACE INTO database_meta(key,value) VALUES('report_versions_backfill_v61','pending');
+` }, { version: 62, sql: `
+ALTER TABLE pi_compatible_releases RENAME TO pi_compatible_releases_v51;
+CREATE TABLE pi_compatible_releases(
+ release_version TEXT NOT NULL,build_id TEXT NOT NULL,first_seen_at INTEGER NOT NULL,last_seen_at INTEGER NOT NULL,
+ PRIMARY KEY(release_version,build_id));
+INSERT INTO pi_compatible_releases SELECT release_version,build_id,first_seen_at,last_seen_at FROM pi_compatible_releases_v51;
+DROP TABLE pi_compatible_releases_v51;
+` }, { version: 63, sql: `
+ALTER TABLE migration_recycling ADD COLUMN restored_hash TEXT;
+CREATE TABLE maintenance_recycling_restore_cleanup(
+ item_id TEXT PRIMARY KEY REFERENCES migration_recycling(id),destination TEXT NOT NULL,receipt_path TEXT NOT NULL,
+ held_path TEXT,restored_hash TEXT NOT NULL,source_device TEXT,source_inode TEXT,created_at INTEGER NOT NULL);
+` }, { version: 64, sql: `
+CREATE TABLE database_overview_projection(
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+ contents_records INTEGER NOT NULL DEFAULT 0 CHECK(contents_records>=0),
+ baseline_cursor INTEGER NOT NULL DEFAULT 0 CHECK(baseline_cursor>=0),
+ baseline_target INTEGER NOT NULL DEFAULT 0 CHECK(baseline_target>=0),
+ exact INTEGER NOT NULL DEFAULT 0 CHECK(exact IN (0,1)),
+ updated_at INTEGER NOT NULL);
+INSERT INTO database_overview_projection(singleton,contents_records,baseline_cursor,baseline_target,exact,updated_at)
+ SELECT 1,0,0,COALESCE(MAX(rowid),0),CASE WHEN COALESCE(MAX(rowid),0)=0 THEN 1 ELSE 0 END,CAST(unixepoch('subsec')*1000 AS INTEGER) FROM contents;
+CREATE TRIGGER database_overview_content_insert AFTER INSERT ON contents BEGIN
+ UPDATE database_overview_projection SET
+  contents_records=contents_records+CASE WHEN exact=1 OR NEW.rowid<=baseline_cursor OR NEW.rowid>baseline_target THEN 1 ELSE 0 END,
+  updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
+ WHERE singleton=1;
+END;
+CREATE TRIGGER database_overview_content_delete AFTER DELETE ON contents BEGIN
+ UPDATE database_overview_projection SET
+  contents_records=MAX(0,contents_records-CASE WHEN exact=1 OR OLD.rowid<=baseline_cursor OR OLD.rowid>baseline_target THEN 1 ELSE 0 END),
+  updated_at=CAST(unixepoch('subsec')*1000 AS INTEGER)
+ WHERE singleton=1;
+END;
+` }, { version: 65, sql: `
+CREATE TABLE documentation_projection_state(
+ project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+ source_object_id TEXT NOT NULL REFERENCES evidence(id),
+ manifest_content_id TEXT NOT NULL REFERENCES contents(id),
+ idempotency_key TEXT NOT NULL,
+ cursor INTEGER NOT NULL DEFAULT 0 CHECK(cursor>=0),
+ document_count INTEGER NOT NULL CHECK(document_count>=0),
+ phase TEXT NOT NULL DEFAULT 'binding' CHECK(phase IN ('binding','document')),
+ status TEXT NOT NULL CHECK(status IN ('pending','complete')),
+ updated_at INTEGER NOT NULL);
+CREATE INDEX documentation_projection_pending ON documentation_projection_state(status,updated_at,project_id);
+ALTER TABLE diagnostic_events ADD COLUMN idempotency_key TEXT;
+CREATE UNIQUE INDEX diagnostic_events_idempotency ON diagnostic_events(idempotency_key) WHERE idempotency_key IS NOT NULL;
+` }, { version: 66, sql: `
+CREATE TABLE pi_conversation_ingress(
+ operation_id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL,request_key TEXT NOT NULL UNIQUE,
+ request_content_id TEXT NOT NULL REFERENCES contents(id),request_hash TEXT NOT NULL,baseline_revision INTEGER NOT NULL,
+ owner_generation INTEGER NOT NULL,status TEXT NOT NULL CHECK(status IN ('admitted','materialized','cancelled')),
+ created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+CREATE INDEX pi_conversation_ingress_recovery ON pi_conversation_ingress(status,created_at,operation_id);
+CREATE INDEX pi_conversation_ingress_lane ON pi_conversation_ingress(conversation_id,status,created_at,operation_id);
+CREATE INDEX content_ref_pi_ingress_request ON pi_conversation_ingress(request_content_id);
+CREATE TABLE pi_session_commits(
+ session_id TEXT NOT NULL REFERENCES pi_sessions(session_id) ON DELETE CASCADE,commit_id TEXT NOT NULL,
+ request_hash TEXT NOT NULL,result_content_id TEXT NOT NULL REFERENCES contents(id),created_at INTEGER NOT NULL,
+ PRIMARY KEY(session_id,commit_id));
+CREATE INDEX content_ref_pi_session_commits_result ON pi_session_commits(result_content_id);
+` }, { version: 67, sql: `
+ALTER TABLE mcp_conversation_dispatches ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'legacy-runtime-process';
+CREATE INDEX mcp_conversation_dispatches_owner ON mcp_conversation_dispatches(owner_id);
+` }, { version: 68, sql: `
+ALTER TABLE pi_session_commits ADD COLUMN operation_id TEXT REFERENCES pi_conversation_operations(operation_id) ON DELETE CASCADE;
+ALTER TABLE pi_session_commits ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(acknowledged IN (0,1));
+CREATE INDEX pi_session_commits_operation ON pi_session_commits(operation_id,created_at,commit_id);
+` }, { version: 69, sql: `
+CREATE INDEX content_ref_documentation_projection_manifest ON documentation_projection_state(manifest_content_id);
+` }, { version: 70, sql: `
+CREATE TABLE run_effects_v70(
+ id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),run_id TEXT NOT NULL REFERENCES runs(id),
+ turn_id TEXT NOT NULL REFERENCES turns(id),checkpoint_sequence INTEGER NOT NULL,execution_log_id INTEGER NOT NULL,source_revision INTEGER NOT NULL,
+ kind TEXT NOT NULL CHECK(kind IN ('roadmap','review','revision','refresh','telegram','automation','flow','documentation')),
+ payload_content_id TEXT NOT NULL REFERENCES contents(id),state TEXT NOT NULL CHECK(state IN ('queued','claimed','done')),
+ owner_id TEXT NOT NULL DEFAULT '',pid INTEGER NOT NULL DEFAULT 0,birth TEXT NOT NULL DEFAULT '',token TEXT NOT NULL DEFAULT '',
+ error TEXT NOT NULL DEFAULT '',completed_at INTEGER,
+ UNIQUE(run_id,turn_id,checkpoint_sequence,kind),
+ FOREIGN KEY(run_id,project_id) REFERENCES runs(id,project_id),FOREIGN KEY(turn_id,project_id) REFERENCES turns(id,project_id),
+ FOREIGN KEY(run_id,turn_id,checkpoint_sequence) REFERENCES run_settlements(run_id,turn_id,checkpoint_sequence));
+INSERT INTO run_effects_v70 SELECT id,project_id,run_id,turn_id,checkpoint_sequence,execution_log_id,source_revision,kind,
+ payload_content_id,state,owner_id,pid,birth,token,error,completed_at FROM run_effects;
+DROP TABLE run_effects;
+ALTER TABLE run_effects_v70 RENAME TO run_effects;
+CREATE INDEX run_effects_pending ON run_effects(state,project_id);
+CREATE INDEX content_ref_run_effects_payload_content_id ON run_effects(payload_content_id);
+` }, { version: 71, sql: `
+CREATE INDEX runs_conversation_history ON runs(project_id,conversation_id,id);
+` }, { version: 72, sql: `
+ALTER TABLE pi_tool_invocations ADD COLUMN result_content_id TEXT REFERENCES contents(id);
+CREATE INDEX content_ref_pi_tool_invocations_result ON pi_tool_invocations(result_content_id);
+ALTER TABLE pi_conversation_ingress ADD COLUMN last_error_content_id TEXT REFERENCES contents(id);
+ALTER TABLE pi_conversation_ingress ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0 CHECK(retry_count>=0);
+ALTER TABLE pi_conversation_ingress ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0 CHECK(retry_at>=0);
+DROP INDEX pi_conversation_ingress_recovery;
+CREATE INDEX pi_conversation_ingress_recovery ON pi_conversation_ingress(status,retry_at,conversation_id,created_at,operation_id);
+CREATE INDEX content_ref_pi_ingress_last_error ON pi_conversation_ingress(last_error_content_id);
+INSERT OR IGNORE INTO contents(id,sha256,mime_type,encoding,byte_length,stored_byte_length,data,chunk_index_json)
+ VALUES('pi-tool-legacy-result-v72','76a92ea324d8c47d51599938590a8e606840831f1b0b6f9b7e4a12aad9dbc255','application/json','utf8',141,141,
+ CAST('{"content":[{"text":"Tool completed before SoloMap could preserve its result. It will not be executed again.","type":"text"}],"isError":true}' AS BLOB),NULL);
+UPDATE pi_tool_invocations SET result_content_id=(SELECT id FROM contents
+ WHERE sha256='76a92ea324d8c47d51599938590a8e606840831f1b0b6f9b7e4a12aad9dbc255' AND mime_type='application/json' AND encoding='utf8')
+ WHERE status='completed' AND result_content_id IS NULL;
 ` }];

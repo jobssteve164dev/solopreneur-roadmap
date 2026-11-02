@@ -98,7 +98,7 @@ async function continueReport(f, taskId, turnId, executionLogId) {
   const vm = require('node:vm');
   const compiled = fs.readFileSync(path.join(f.extension, 'out/extension.js'), 'utf8');
   const captureStart = compiled.indexOf('async function captureConversationLaunchTarget(');
-  const captureEnd = compiled.indexOf('async function resumeOrdinaryConversation(', captureStart);
+  const captureEnd = compiled.indexOf('async function prepareOrdinaryConversation(', captureStart);
   assert.ok(captureStart > 0 && captureEnd > captureStart);
   const capture = new vm.Script(compiled.slice(captureStart, captureEnd) + '\ncaptureConversationLaunchTarget(context, workspaceRoot, globalDataPath, settings)');
   const branch = compiled.slice(compiled.indexOf("case 'growth.reports':"), compiled.indexOf("case 'project.select':", compiled.indexOf("case 'growth.reports':")));
@@ -116,6 +116,10 @@ async function continueReport(f, taskId, turnId, executionLogId) {
       interactionBudget_1: require('../out/interactionBudget.js'),
       panelMessages_1: require('../out/panelMessages.js'),
       vscode: { window: { showInputBox: async () => '继续完成日期选择' } },
+      coordinateExtensionConversationLaunch: input => require('../out/conversationLaunchCoordinator.js').coordinateConversationLaunch(input),
+      findReusableAgentTerminal: async () => undefined,
+      revealAgentStartupTerminal: async () => undefined,
+      discardReservedAgentStartupTerminal: () => {},
       captureConversationLaunchTarget: (context, workspaceRoot, globalDataPath, settings) => capture.runInNewContext({ context, workspaceRoot, globalDataPath, settings,
         path, crypto: require('node:crypto'), syncEngine_1: require('../out/db/syncEngine.js'),
         autonomousRuntimeHost_1: { ensureHealthyAutonomousRuntime: async input => { runtimeRoots.push(input.globalDataPath); } } }),
@@ -180,7 +184,7 @@ test('the real work-report continue action uses the native execution identity', 
   await continueReport(f, `task-${f.prepared.taskId}`, f.prepared.turnId, 1);
 });
 
-test('backfilling older report indexes cannot replace a later committed version', async t => {
+test('the schema upgrade backfills older report indexes without replacing a later committed version', async t => {
   const f = await fixture(t);
   const index = f.store.indexReportRevision.bind(f.store);
   const now = Date.now; const timestamp = now();
@@ -194,16 +198,27 @@ test('backfilling older report indexes cannot replace a later committed version'
     f.store.write({ kind: 'report', action: 'patch', scope: f.projectId, objectId: receipt.objectId, expectedRevision: 1,
       idempotencyKey: 'after-version-index', data: { content: { summary: '新提交', unmetRequirements: [] } } });
   } finally { Date.now = now; f.store.indexReportRevision = index; }
-  const detail = await queryGrowthReports(f.project, f.extension, { taskId: `task-${f.prepared.taskId}` }, f.root);
-  assert.equal(detail.tasks[0].latestSummary, '新提交', 'index creation order is not report commit order');
-  assert.deepEqual(detail.turns[0].history.map(item => item.report.summary), ['旧提交', '新提交']);
+  const beforeUpgrade = f.store.readRegisteredReportSources(f.projectId);
+  assert.deepEqual(beforeUpgrade.observations.map(item => item.envelope.report.summary), ['新提交'], 'ordinary reads must remain read-only instead of performing a hidden backfill');
   const savedRoot = path.join(f.root, 'exports', 'reopened');
   await f.store.backup({ destination: path.join(savedRoot, 'solomap.db'), idempotencyKey: 'report-version-backup' });
+  const { DiskDatabase } = require('../out/db/diskDatabase.js');
+  const preUpgrade = new DiskDatabase(path.join(savedRoot, 'solomap.db'));
+  preUpgrade.run('DELETE FROM schema_migrations WHERE version=61');
+  preUpgrade.close();
   const reopened = require('../out/db/unifiedDataStore.js').UnifiedDataStore.open(savedRoot);
   try {
+    assert.equal(reopened.reportVersionBackfillState(), 'pending');
+    const beforeMaintenance = reopened.readRegisteredReportSources(f.projectId);
+    assert.deepEqual(beforeMaintenance.observations.map(item => item.envelope.report.summary), ['新提交'],
+      'structural startup must not hide an unbounded history scan inside the schema transaction');
+    const batch = reopened.backfillReportVersionsBatch(1);
+    assert.equal(batch.processed, 1);
+    while (!reopened.backfillReportVersionsBatch(1).complete) {}
     const restored = reopened.readRegisteredReportSources(f.projectId);
     assert.equal(restored.reports[0].report.summary, '新提交');
     assert.deepEqual(restored.observations.map(item => item.envelope.report.summary), ['旧提交', '新提交']);
+    assert.equal(reopened.reportVersionBackfillState(), 'complete');
   } finally { reopened.close(); }
 });
 
@@ -333,8 +348,8 @@ test('explicit history migration preserves registered report versions and unknow
 
 test('a report changed while the overview loads is re-read before publishing the page', async t => {
   const f = await fixture(t); submit(f, '过时结果', 'late-old');
-  const readSources = f.store.readRegisteredReportSources.bind(f.store); let changed = false;
-  f.store.readRegisteredReportSources = (...args) => {
+  const readSources = f.store.readRegisteredReportSourcePage.bind(f.store); let changed = false;
+  f.store.readRegisteredReportSourcePage = (...args) => {
     const value = readSources(...args);
     if (!changed) { changed = true; queueMicrotask(() => submit(f, '当前结果', 'late-new')); }
     return value;

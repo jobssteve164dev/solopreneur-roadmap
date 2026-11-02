@@ -6,6 +6,7 @@ import { snapshotWorkspace, captureRunGitEvidence } from './runWorkspace';
 import type { RunState } from './runLifecycleTypes';
 import { readWindowsProcessBirthMarkerAsync } from './processIdentity.js';
 import { RunNativeObserver } from './runNativeObserver';
+import type { RuntimeWorkspaceCompute } from './runtimeDataOperations';
 
 interface TrackedProcess { pid: number; birth: string }
 
@@ -59,7 +60,9 @@ async function alive(target: TrackedProcess, requireVerifiedIdentity = false): P
 export class RunStop {
   private readonly pending = new Map<string, Promise<RunState>>();
   private interrupted = false;
-  constructor(private readonly store: UnifiedDataStore) {}
+  constructor(private readonly store: UnifiedDataStore, private readonly workspaceCompute: RuntimeWorkspaceCompute = {
+    snapshot: snapshotWorkspace, gitHead: async () => '', gitEvidence: captureRunGitEvidence
+  }) {}
 
   public stop(projectId: string, input: Parameters<UnifiedDataStore['requestRunStop']>[1]): Promise<RunState> {
     if (this.interrupted) return Promise.reject(new Error('run_stop_interrupted'));
@@ -119,12 +122,12 @@ export class RunStop {
     // The wrapper must finish committing accepted output before closure.
     while (await alive(wrapper)) { current(); await new Promise(resolve => setTimeout(resolve, 25)); }
     state = current();
-    if (state.status.interactiveSessionClosed) { new RunNativeObserver(this.store).forget(state); return state; }
-    await new RunNativeObserver(this.store).observe(state, false, 143);
+    if (state.status.interactiveSessionClosed) { new RunNativeObserver(this.store, this.workspaceCompute).forget(state); return state; }
+    await new RunNativeObserver(this.store, this.workspaceCompute).observe(state, false, 143);
     state = current();
     const finishedBeforeStop = Boolean(state.status.finishedAt);
-    const workspaceSnapshot = state.status.finishedAt && !state.status.hostOutputPending && !state.status.nativeOutputPending ? undefined : await snapshotWorkspace(String(state.status.workspaceRoot));
-    const gitEvidence = workspaceSnapshot ? await captureRunGitEvidence(String(state.status.workspaceRoot), String(state.status.baseGitHash || ''), workspaceSnapshot) : undefined;
+    const workspaceSnapshot = state.status.finishedAt && !state.status.hostOutputPending && !state.status.nativeOutputPending ? undefined : await this.workspaceCompute.snapshot(String(state.status.workspaceRoot));
+    const gitEvidence = workspaceSnapshot ? await this.workspaceCompute.gitEvidence(String(state.status.workspaceRoot), String(state.status.baseGitHash || ''), workspaceSnapshot) : undefined;
     state = current();
     if (state.status.hostOutputPending) state = this.store.finalizeRunOutput(projectId, { executionLogId: input.executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, exitCode: 143, source: 'recovery', workspaceSnapshot, gitEvidence, idempotencyKey: `${input.idempotencyKey}:finalize-output` });
     if (!state.status.finishedAt) state = this.store.checkpointRun(projectId, { executionLogId: input.executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'complete', outcome: input.outcome === 'partial' ? 'partial' : 'failed', summary: input.reason, exitCode: 143, workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery', idempotencyKey: `${input.idempotencyKey}:complete` });
@@ -132,7 +135,7 @@ export class RunStop {
       state = current();
       state = this.store.checkpointRun(projectId, { executionLogId: input.executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'session-close', exitCode: 143, ...(state.status.nativeOutputPending ? { workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery' as const } : {}), idempotencyKey: `${input.idempotencyKey}:close` });
     }
-    new RunNativeObserver(this.store).forget(state);
+    new RunNativeObserver(this.store, this.workspaceCompute).forget(state);
     return state;
   }
 

@@ -708,6 +708,10 @@ test('standalone Telegram scheduling preserves the active focus reminder in the 
     scheduledAt: '2099-10-18T08:30:00+08:00', projectPath: projectRoot, internalKind: 'focus_reminder', focusMinutes: 25, notify: true, sound: false };
   try {
     await syncScheduledTaskDatabase(projectRoot, globalRoot, [focus], new Date('2099-10-18T00:00:00Z'), call);
+    const claimed = await call('claim_due_schedules', { owner: { id: 'focus-fixture', pid: process.pid, birth: 'fixture' }, now: Date.parse('2099-10-18T01:00:00Z'), leaseMs: 60_000, limit: 1 });
+    await call('settle_schedule_occurrence', { occurrenceId: claimed.items[0].occurrenceId, token: claimed.items[0].token, state: 'failed', idempotencyKey: 'focus-fixture-failed' });
+    focus.scheduledAt = '2099-10-18T10:30:00+08:00';
+    await syncScheduledTaskDatabase(projectRoot, globalRoot, [focus], new Date('2099-10-18T01:30:00Z'), call);
     const scheduled = await setIntelligenceTimeScheduleInDatabase(globalRoot, { name: 'Alpha', path: projectRoot },
       { title: '检查发布结果', scheduleKind: 'once', scheduledAt: '2099-10-18T09:00:00+08:00', assignee: 'user' }, call);
     const ledger = await call('read_schedule_ledger', {});

@@ -104,7 +104,17 @@ export async function attachCapabilityOperation(root: string, operationId: strin
 }
 
 export async function readCapabilityOperations(root: string, activeOnly = false, recentLimit?: number): Promise<CapabilityOperation[]> {
-  return sendRuntimeDataRequest(root, { operation: 'read_capability_operations', input: { activeOnly, ...(recentLimit ? { recentLimit } : {}) } });
+  const active: CapabilityOperation[] = [];
+  let afterOrdinal = 0;
+  for (;;) {
+    const page = await sendRuntimeDataRequest<CapabilityOperation[]>(root, { operation: 'read_capability_operations', input: { activeOnly: true, afterOrdinal, limit: 200 } });
+    active.push(...page);
+    if (page.length < 200) break;
+    afterOrdinal = page[page.length - 1].ordinal;
+  }
+  if (activeOnly) return active;
+  const recent = await sendRuntimeDataRequest<CapabilityOperation[]>(root, { operation: 'read_capability_operations', input: { terminalOnly: true, recentLimit: recentLimit || 100 } });
+  return [...active, ...recent].sort((left, right) => left.ordinal - right.ordinal);
 }
 
 export async function readCapabilityOperation(root: string, operationId: string): Promise<CapabilityOperation> {

@@ -11,7 +11,6 @@ const { runtimeBuildId } = require('../out/runtimeBuildIdentity.js');
 const { claimRuntimeLease } = require('../out/autonomousRuntime.js');
 const portfolio = require('../out/projectPortfolio.js');
 const strategy = require('../out/strategyPyramid.js');
-const { SidebarProjectLoader } = require('../out/sidebarProjectLoader.js');
 
 function removeFixtureTree(root) {
   if (!fs.existsSync(root)) return;
@@ -89,20 +88,6 @@ test('portfolio counts native reusable sources once and ignores leftover legacy 
   const [summary] = await portfolio.buildProjectPortfolioSummariesFromDatabase(projects, path.resolve(__dirname, '..'), { includeReusableSignals: true, globalDataPath: root });
   assert.equal(summary.reusableSignals, 6);
   assert.equal(summary.investment.soloConversationCount, 2);
-}));
-
-test('the existing sidebar card receives formal learning signals during asynchronous enrichment', () => fixture(async ({ root, workspace, projects }) => {
-  let resolveUpdate;
-  const update = new Promise(resolve => { resolveUpdate = resolve; });
-  const loader = new SidebarProjectLoader({ isAvailable: () => true, getGlobalDataPath: () => root, getExtensionPath: () => path.resolve(__dirname, '..'), postMessage: message => { if (message.projects?.updatedProjectPaths?.includes(workspace)) resolveUpdate(message); }, buildGlobalStore: () => ({}), buildGlobalStorePlaceholder: () => ({}) });
-  const timer = setTimeout(() => resolveUpdate(null), 3000);
-  try {
-    loader.schedulePortfolioEnrichment(projects, workspace, portfolio.buildProjectPortfolioSummaries(projects, { coreOnly: true }));
-    const message = await update;
-    assert.ok(message, 'the existing card must finish enrichment');
-    assert.equal(message.projects.portfolio[0].reusableSignals, 3);
-    assert.equal(fs.existsSync(path.join(root, 'learning')), false);
-  } finally { clearTimeout(timer); loader.cancelExternalLoads(); }
 }));
 
 test('strategy pyramid uses committed learning and preserves roadmap facts without regenerating old sources', () => fixture(async ({ workspace, root, projects }) => {

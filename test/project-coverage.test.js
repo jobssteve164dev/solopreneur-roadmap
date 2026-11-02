@@ -5,7 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
-const { sendRuntimeControlCommand } = require('../out/autonomousRuntimeControl.js');
+const { sendRuntimeControlCommand, sendRuntimeDataRequest } = require('../out/autonomousRuntimeControl.js');
 
 const projectRoot = path.resolve(__dirname, '..');
 
@@ -64,6 +64,11 @@ test('coverage analysis runs c8 once, persists Istanbul evidence, and reuses the
     loadProjectCoverageSnapshot,
     runProjectCoverageAnalysis
   } = require(path.join(projectRoot, 'out', 'projectCoverage.js'));
+  const runtimeOwned = await sendRuntimeDataRequest(globalDataPath, {
+    operation: 'run_project_coverage_analysis',
+    input: { root: tempRoot, extensionPath: projectRoot }
+  });
+  assert.equal(runtimeOwned.status, 'ready');
   const firstRun = runProjectCoverageAnalysis(tempRoot, projectRoot, globalDataPath);
   const duplicateRun = runProjectCoverageAnalysis(tempRoot, projectRoot, globalDataPath);
   assert.equal(firstRun, duplicateRun);

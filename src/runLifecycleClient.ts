@@ -4,6 +4,7 @@ import type { ContentPage, DataObject, UnifiedDataStore } from './db/unifiedData
 import type { RunCheckpointInput, RunState, RunConsumerLease, RunSettlementInput } from './runLifecycleTypes';
 import { workspaceDocumentPurpose, gitEvidenceDocumentPurpose, RunGitEvidence } from './runWorkspace';
 import { getResumableSessionValue, NativeSessionBinding, ResumableSessionBinding } from './sessionIdentity';
+import { readCompleteRunDocument } from './runDocumentClient';
 
 type Operation = (operation: string, input: Record<string, unknown>) => Promise<unknown>;
 const runSnapshot = Symbol('runStatusSnapshot');
@@ -74,6 +75,7 @@ export function parseRunDataReference(reference: string): { reference: string; f
 /** Plugin consumers use the same owner operations as the packaged Agent. */
 export class RunLifecycleClient {
   constructor(private readonly operation: Operation, public readonly dataRoot?: string) {}
+  private readDocument(input: Record<string, unknown>) { return readCompleteRunDocument(this.operation, input); }
 
   public async recordVerification(root: string, executionLogId: number, input: { claim: string; result: 'pass' | 'fail'; evidence: string; idempotencyKey: string }): Promise<{ objectId: string; revision: number }> {
     return this.operation('record_run_verification', { root, executionLogId, ...input }) as Promise<{ objectId: string; revision: number }>;
@@ -112,7 +114,14 @@ export class RunLifecycleClient {
   }
 
   public async listConversationStatuses(root: string, executionLogId: number) {
-    const { items } = await this.operation('list_conversation_run_states', { root, executionLogId }) as { items: RunState[] };
+    const items: RunState[] = [];
+    let cursor: number | null = null;
+    do {
+      const page = await this.operation('list_conversation_run_states', { root, executionLogId,
+        ...(cursor === null ? {} : { cursor }), limit: 200 }) as { items: RunState[]; nextCursor: number | null };
+      items.push(...page.items);
+      cursor = page.nextCursor;
+    } while (cursor !== null);
     return items.map(state => {
       const reference = runStatusReference(root, Number(state.status.rootExecutionLogId));
       return { reference, status: this.status(reference, state), turnId: state.turnId, runId: state.runId, generation: state.generation, revision: state.revision };
@@ -176,7 +185,7 @@ export class RunLifecycleClient {
     const state = await this.selectedState(reference, status);
     if (!state.status.gitEvidenceObjectId || !state.status.gitEvidenceRevision) return null;
     const identity = { projectId: state.projectId, executionLogId: parseRunStatusReference(reference).executionLogId };
-    const document = await this.operation('read_run_document', { ...identity, purpose: gitEvidenceDocumentPurpose(state.turnId), revision: state.status.gitEvidenceRevision }) as { objectId: string; bytes: string } | null;
+    const document = await this.readDocument({ ...identity, purpose: gitEvidenceDocumentPurpose(state.turnId), revision: state.status.gitEvidenceRevision });
     if (!document || document.objectId !== state.status.gitEvidenceObjectId) throw new Error('run_git_evidence_mismatch');
     return JSON.parse(Buffer.from(document.bytes, 'base64').toString('utf8')) as RunGitEvidence;
   }
@@ -185,9 +194,9 @@ export class RunLifecycleClient {
     const state = await this.selectedState(reference, status);
     if (!state.status.reviewResultObjectId || !state.status.reviewResultRevision) return null;
     const identity = { projectId: state.projectId, executionLogId: parseRunStatusReference(reference).executionLogId };
-    const result = await this.operation('read_run_document', { ...identity, purpose: 'review_result', revision: state.status.reviewResultRevision }) as { objectId: string; bytes: string } | null;
+    const result = await this.readDocument({ ...identity, purpose: 'review_result', revision: state.status.reviewResultRevision });
     if (!result || result.objectId !== state.status.reviewResultObjectId) throw new Error('run_review_evidence_mismatch');
-    const request = await this.operation('read_run_document', { ...identity, purpose: 'launch_request', revision: 1 }) as { bytes: string } | null;
+    const request = await this.readDocument({ ...identity, purpose: 'launch_request', revision: 1 });
     if (!request) throw new Error('run_launch_request_missing');
     const launch = JSON.parse(Buffer.from(request.bytes, 'base64').toString('utf8'));
     let manifest = launch.reviewEvidence || {};
@@ -222,7 +231,7 @@ export class RunLifecycleClient {
     }
     if (field === 'roadmap-backup') {
       if (!state.status.roadmapBackupObjectId || !state.status.roadmapBackupRevision) return Buffer.alloc(0);
-      const document = await this.operation('read_run_document', { projectId: state.projectId, executionLogId: parseRunStatusReference(reference).executionLogId, purpose: 'roadmap_backup', revision: state.status.roadmapBackupRevision }) as { objectId: string; bytes: string } | null;
+      const document = await this.readDocument({ projectId: state.projectId, executionLogId: parseRunStatusReference(reference).executionLogId, purpose: 'roadmap_backup', revision: state.status.roadmapBackupRevision });
       if (!document || document.objectId !== state.status.roadmapBackupObjectId) throw new Error('run_roadmap_backup_mismatch');
       return Buffer.from(document.bytes, 'base64');
     }
@@ -405,7 +414,7 @@ export class RunLifecycleClient {
       return Buffer.from(journal.entry.output);
     }
     if (stream === 'output' && status && state.status.nativeReplyObjectId) {
-      const reply = await this.operation('read_run_document', { projectId: state.projectId, executionLogId: identity.executionLogId, purpose: `native_reply_${state.turnId.replace(/-/g, '')}`, revision: Number(state.status.nativeReplyRevision) }) as { objectId: string; bytes: string } | null;
+      const reply = await this.readDocument({ projectId: state.projectId, executionLogId: identity.executionLogId, purpose: `native_reply_${state.turnId.replace(/-/g, '')}`, revision: Number(state.status.nativeReplyRevision) });
       if (!reply || reply.objectId !== state.status.nativeReplyObjectId) throw new Error('run_native_reply_mismatch');
       return Buffer.from(reply.bytes, 'base64');
     }
@@ -466,7 +475,7 @@ export class RunLifecycleClient {
     if (field === 'changes' || field === 'workspace') {
       if (field === 'changes' && state.status.workspaceEvidenceBoundary === 'unavailable') return '变更待核验。';
       const revision = Number(state.status[field === 'changes' ? 'workspaceChangesRevision' : 'workspaceSnapshotRevision'] || 0);
-      const document = await this.operation('read_run_document', { projectId: state.projectId, executionLogId: identity.executionLogId, purpose: workspaceDocumentPurpose(state.turnId, field === 'changes' ? 'changes' : 'before'), ...(revision ? { revision } : {}) }) as { bytes: string } | null;
+      const document = await this.readDocument({ projectId: state.projectId, executionLogId: identity.executionLogId, purpose: workspaceDocumentPurpose(state.turnId, field === 'changes' ? 'changes' : 'before'), ...(revision ? { revision } : {}) });
       return document ? Buffer.from(document.bytes, 'base64').toString('utf8') : '';
     }
     return (await this.readContent(state.runId, state.revision, `${field}_content`)).toString('utf8');

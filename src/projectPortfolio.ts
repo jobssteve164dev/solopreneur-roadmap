@@ -99,6 +99,7 @@ export interface ProjectPortfolioBuildOptions {
   learningOverview?: LearningOverview;
   reusableSourceCountsByProjectPath?: Map<string, number>;
   documentationManifestsByProjectPath?: Map<string, DocumentationManifest>;
+  foundationAssessmentsByProjectPath?: Map<string, ProjectFoundationAssessment>;
   recentActivityAtByProjectPath?: Map<string, string>;
   externalSignalsByProjectPath?: Map<string, Pick<ProjectPortfolioSummary, 'issues' | 'pullRequests' | 'delivery' | 'security'>>;
   roadmapNodesByProjectPath?: Map<string, RoadmapNodeLike[]>;
@@ -439,7 +440,9 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
     pullRequests: existingSignals?.pullRequests || createEmptyPullRequestSummary(),
     delivery: existingSignals?.delivery || createEmptyDeliverySummary(),
     security: existingSignals?.security || createEmptySecuritySummary(),
-    foundation: options.coreOnly ? emptyFoundationAssessment() : assessProjectFoundation(project.path)
+    foundation: options.coreOnly
+      ? emptyFoundationAssessment()
+      : (options.foundationAssessmentsByProjectPath?.get(project.path) || assessProjectFoundation(project.path))
   };
   const inferredPriority = inferGlobalPriority(baseSummary);
   const globalPriority = project.priority || inferredPriority;

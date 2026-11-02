@@ -10,7 +10,6 @@ import { buildDatabaseAgentCommand, DatabaseAgentLaunch } from './agentDatabaseL
 import { prepareNativeAgentLaunch, CapturedAgentProcess } from './agentRunPreflight';
 import type { RunState } from './runLifecycleTypes';
 import { snapshotWorkspace, workspaceDocumentPurpose, workspaceChanges, readWorkspaceGitHead } from './runWorkspace';
-import { createPreSessionGitCommit, retainPreSessionGitCommit } from './preSessionGit';
 import { buildReadOnlyAgentCommandForPromptFile } from './agentCli';
 import { getCodexSessionHome, NativeSessionBinding } from './sessionIdentity';
 import { readWindowsProcessBirthMarker } from './processIdentity.js';
@@ -18,6 +17,7 @@ import { maintenanceRunKinds } from './runLifecycleTypes';
 import { captureMaintenanceRunResult, maintenanceResultSignature } from './maintenanceRunResult';
 import { captureRunLog } from './runLogBatching';
 import { ForegroundTerminalReconnectServer } from './foregroundTerminalReconnect';
+import { readCompleteRunDocument } from './runDocumentClient';
 
 function argument(name: string): string {
   const index = process.argv.indexOf(name);
@@ -69,6 +69,16 @@ async function main(): Promise<void> {
         // Keep accepted output queued while the same database owner restarts.
         await new Promise(resolve => setTimeout(resolve, 250));
       }
+    }
+  };
+  const captureRollbackBaseline = async (revision = ''): Promise<string> => {
+    try {
+      const result = await request<{ revision: string | null }>('capture_pre_session_git_snapshot', {
+        root: projectRoot, ...(revision ? { revision } : {})
+      });
+      return String(result.revision || '');
+    } catch {
+      return '';
     }
   };
   const plan = await request<RunState & { command: string; prompt: string }>('read_run_execution_plan', { root: projectRoot, executionLogId });
@@ -386,16 +396,12 @@ async function main(): Promise<void> {
     let baseGitHash = String(state.status.baseGitHash || '');
     if (!baseGitHash) {
       baseGitHash = rollbackRequired
-        ? await createPreSessionGitCommit(projectRoot) || ''
+        ? await captureRollbackBaseline()
         : await readWorkspaceGitHead(projectRoot);
     } else if (rollbackRequired) {
-      baseGitHash = await retainPreSessionGitCommit(projectRoot, baseGitHash) || '';
+      baseGitHash = await captureRollbackBaseline(baseGitHash);
     }
     if (rollbackRequired) recordDeliveryStage('terminal.delivery.rollback.snapshot', process.pid, baseGitHash ? 'ok' : 'error');
-    if (rollbackRequired && !baseGitHash) {
-      await diagnosticQueue;
-      throw new Error('pre_session_git_backup_failed');
-    }
     if (baseGitHash !== String(state.status.baseGitHash || '')) {
       await patch({ baseGitHash });
     }
@@ -440,7 +446,8 @@ async function main(): Promise<void> {
     let { code } = execution;
     if (maintenance && plan.status.maintenanceResultPath && !await captureMaintenanceResult() && code === 0) throw new Error('maintenance_result_missing');
     if (launch?.readOnly) {
-      const baseline = await request<{ bytes: string }>('read_run_document', { ...identity, purpose: baselinePurpose });
+      const baseline = await readCompleteRunDocument((operation, input) => request(operation, input), { ...identity, purpose: baselinePurpose });
+      if (!baseline) throw new Error('run_workspace_baseline_missing');
       const after = await snapshotWorkspace(projectRoot);
       const changes = workspaceChanges(JSON.parse(Buffer.from(baseline.bytes, 'base64').toString('utf8')), after);
       const match = Buffer.concat([execution.stdout, execution.stderr]).toString('utf8').match(/SOLOMAP_REVIEW_JSON_START\s*([\s\S]*?)\s*SOLOMAP_REVIEW_JSON_END/);

@@ -4,6 +4,7 @@ import { RunNativeObserver } from './runNativeObserver';
 import { RunStop } from './runStop';
 import { RunInputMaterialization } from './runInputMaterialization';
 import { captureMaintenanceRunResult } from './maintenanceRunResult';
+import type { RuntimeWorkspaceCompute } from './runtimeDataOperations';
 
 export class RunRecovery {
   private recovery: Promise<void> | undefined;
@@ -12,7 +13,8 @@ export class RunRecovery {
   constructor(
     private readonly store: UnifiedDataStore,
     private readonly stops = new RunStop(store),
-    private readonly now = () => Date.now()
+    private readonly now = () => Date.now(),
+    private readonly workspaceCompute: RuntimeWorkspaceCompute = { snapshot: snapshotWorkspace, gitHead: async () => '', gitEvidence: captureRunGitEvidence }
   ) {}
 
   private retryDeferred(observed: { revision: number; status: Record<string, unknown> }): boolean {
@@ -78,7 +80,7 @@ export class RunRecovery {
           // closed creator is not evidence that the Agent has already failed.
           if (observed.status.deliveryPending) continue;
           stage = 'native-observer';
-          try { await new RunNativeObserver(this.store).observe(observed); }
+          try { await new RunNativeObserver(this.store, this.workspaceCompute).observe(observed); }
           catch (error) {
             if (['run_owner_conflict', 'revision_conflict', 'checkpoint_turn_conflict', 'identity_index_conflict'].includes((error as Error).message)) continue;
             errors.push(error);
@@ -96,7 +98,11 @@ export class RunRecovery {
           stage = 'maintenance-capture';
           try {
             await captureMaintenanceRunResult(this.store.root, before, async (operation, input) => operation === 'read_run_document'
-              ? this.store.readRunDocument(before.projectId, executionLogId, String(input.purpose))
+              ? this.store.readRunDocument(before.projectId, executionLogId, String(input.purpose),
+                input.revision === undefined ? undefined : Number(input.revision),
+                input.tailBytes === undefined ? undefined : Number(input.tailBytes),
+                input.tailBytes === undefined ? Number(input.offset || 0) : undefined,
+                input.tailBytes === undefined ? Number(input.limit || 65536) : undefined)
               : this.store.writeRunDocument(before.projectId, input as unknown as Parameters<UnifiedDataStore['writeRunDocument']>[1]));
           } catch (error) {
             maintenanceCaptureError = error instanceof Error ? error.message : String(error);
@@ -105,16 +111,16 @@ export class RunRecovery {
               bytes: Buffer.from(`安装回执保存失败：${maintenanceCaptureError}\n`).toString('base64'), idempotencyKey: `run:${before.runId}:${before.generation}:recovery-maintenance-error` });
           }
           stage = 'workspace-snapshot';
-          const workspaceSnapshot = before.status.finishedAt && !before.status.hostOutputPending && !before.status.nativeOutputPending ? undefined : await snapshotWorkspace(String(before.status.workspaceRoot));
+          const workspaceSnapshot = before.status.finishedAt && !before.status.hostOutputPending && !before.status.nativeOutputPending ? undefined : await this.workspaceCompute.snapshot(String(before.status.workspaceRoot));
           stage = 'git-evidence';
-          const gitEvidence = workspaceSnapshot ? await captureRunGitEvidence(String(before.status.workspaceRoot), String(before.status.baseGitHash || ''), workspaceSnapshot) : undefined;
+          const gitEvidence = workspaceSnapshot ? await this.workspaceCompute.gitEvidence(String(before.status.workspaceRoot), String(before.status.baseGitHash || ''), workspaceSnapshot) : undefined;
           stage = 'state-recheck';
           const state = this.store.readRunCheckpointState(observed.projectId, executionLogId);
           if (state.generation !== before.generation || state.turnId !== before.turnId || this.store.runProcessAlive(observed.projectId, executionLogId)) continue;
           if (state.status.hostOutputPending) {
             stage = 'output-finalize';
             this.store.finalizeRunOutput(state.projectId, { executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, exitCode: 1, source: 'recovery', workspaceSnapshot, gitEvidence, idempotencyKey: `run:${state.runId}:${state.generation}:recover-output:${state.turnId}` });
-            new RunNativeObserver(this.store).forget(state);
+            new RunNativeObserver(this.store, this.workspaceCompute).forget(state);
             continue;
           }
           stage = 'checkpoint';
@@ -123,7 +129,7 @@ export class RunRecovery {
             action: state.status.finishedAt ? 'session-close' : 'complete', ...(state.status.nativeOutputPending ? { exitCode: 1, workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery' as const } : {}), ...(state.status.finishedAt ? {} : { outcome: 'failed', summary: maintenanceCaptureError || '执行已中断，完整已提交记录已保留，可重新继续。', exitCode: 1, workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery' }),
             idempotencyKey: `run:${state.runId}:${state.generation}:recover:${state.revision}`
           });
-          new RunNativeObserver(this.store).forget(state);
+          new RunNativeObserver(this.store, this.workspaceCompute).forget(state);
         } catch (error) { errors.push(error); this.recordFailure(observed, stage, error, startedAt); }
         await new Promise<void>(resolve => setImmediate(resolve));
       }

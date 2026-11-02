@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { captureInstallationFiles } from './capabilityRegistry';
 import { maintenanceResultRunKinds, RunState } from './runLifecycleTypes';
+import { readCompleteRunDocument } from './runDocumentClient';
 
 export function maintenanceResultSignature(file: string): string | null {
   try {
@@ -16,7 +17,7 @@ export async function captureMaintenanceRunResult(dataRoot: string, state: RunSt
   if (!maintenanceResultRunKinds.includes(String(state.status.runKind)) || !state.status.maintenanceResultPath) return false;
   const identity = { projectId: state.projectId, executionLogId: Number(state.status.rootExecutionLogId || state.status.executionLogId) };
   const purpose = `maintenance_result_${state.generation}`;
-  const existing = await operation('read_run_document', { ...identity, purpose });
+  const existing = await readCompleteRunDocument(operation, { ...identity, purpose });
   if (existing) {
     if (secureDescriptorRoot(platform)) removeCapturedMaintenanceResult(dataRoot, String(state.status.maintenanceResultPath), existing, undefined, platform);
     return true;
@@ -33,7 +34,7 @@ export async function captureMaintenanceRunResult(dataRoot: string, state: RunSt
   if (!sameFile(before, after)) throw new Error('maintenance_result_source_changed');
   await operation('write_run_document', { ...identity, generation: state.generation, turnId: state.turnId, purpose,
     bytes: content.bytes, mimeType: 'application/json', expectedRevision: 0, idempotencyKey: `run:${state.runId}:${state.generation}:maintenance-result` });
-  const stored = await operation('read_run_document', { ...identity, purpose });
+  const stored = await readCompleteRunDocument(operation, { ...identity, purpose });
   if (!stored) throw new Error('maintenance_result_readback_missing');
   if (secureDescriptorRoot(platform)) removeCapturedMaintenanceResult(dataRoot, file, stored, after, platform);
   return true;

@@ -34,9 +34,25 @@ function loadLoader(overrides = {}) {
     }
     if (parent?.filename === loaderPath && request === './autonomousRuntimeControl') {
       return { sendRuntimeDataRequest: async (_root, request) => {
-        if (request.operation === 'read_project_reusable_source_count') return 0;
-        if (request.operation === 'read_documentation_manifest') return { documents: [] };
-        if (request.operation === 'read_project_analysis_source') return { recentActivityAt: '' };
+        if (overrides.runtime) return overrides.runtime(_root, request);
+        if (request.operation === 'resolve_project_repository') {
+          const resolve = overrides.signals?.resolveGithubRepoSlug || (async projectPath => `owner/${path.basename(projectPath)}`);
+          return { repo: await resolve(request.input.root) };
+        }
+        if (request.operation === 'refresh_project_signal') {
+          const loaders = {
+            issues: overrides.signals?.loadExternalIssueSummary,
+            pullRequests: overrides.signals?.loadExternalPullRequestSummary,
+            delivery: overrides.signals?.loadExternalDeliverySummary,
+            security: overrides.signals?.loadExternalSecuritySummary
+          };
+          const load = loaders[request.input.kind] || (async () => ({}));
+          return { repo: request.input.repo, value: await load(request.input.root, {
+            globalDataPath: _root,
+            repo: request.input.repo,
+            force: request.input.force
+          }) };
+        }
         assert.fail(`unexpected operation: ${request.operation}`);
       } };
     }
@@ -53,62 +69,15 @@ function createLoader(Loader, posted, options = {}) {
   return new Loader({
     isAvailable: () => true,
     postMessage: message => posted.push(message),
-    getGlobalDataPath: options.getGlobalDataPath || (() => '/tmp/solomap-loader-test'),
-    getExtensionPath: () => '/tmp',
-    buildGlobalStore: (_path, portfolio) => ({ ready: true, paths: portfolio.map(item => item.path) }),
-    buildGlobalStorePlaceholder: () => ({ ready: false })
+    getGlobalDataPath: options.getGlobalDataPath || (() => '/tmp/solomap-loader-test')
   });
 }
 
-test('refreshing one project does not cancel another pending portfolio enrichment', async () => {
-  const alpha = deferred();
-  const Loader = loadLoader({ investment: projectPath => projectPath === '/alpha' ? alpha.promise : Promise.resolve({}) });
-  const posted = [];
-  const loader = createLoader(Loader, posted);
-  const projects = [{ name: 'Alpha', path: '/alpha' }, { name: 'Beta', path: '/beta' }];
-  loader.schedulePortfolioEnrichment(projects, '/alpha', projects);
-  await new Promise(resolve => setTimeout(resolve, 1050));
-  loader.schedulePortfolioEnrichment(projects, '/alpha', projects, ['/beta']);
-  alpha.resolve({});
-  await new Promise(resolve => setTimeout(resolve, 1100));
-  assert.ok(posted.some(message => message.projects?.updatedProjectPaths?.[0] === '/alpha'));
-  assert.ok(posted.some(message => message.projects?.updatedProjectPaths?.[0] === '/beta'));
-  const settled = posted.at(-1);
-  assert.equal(settled.projects.globalStore.ready, true);
-  assert.deepEqual(settled.projects.globalStore.paths, ['/alpha', '/beta']);
-});
-
-test('refreshing one portfolio card restores a real global store', async () => {
+test('the external loader exposes no compatibility portfolio publishing path', () => {
   const Loader = loadLoader();
-  const posted = [];
-  const loader = createLoader(Loader, posted);
-  const projects = [{ name: 'Alpha', path: '/alpha' }, { name: 'Beta', path: '/beta' }];
-  loader.schedulePortfolioEnrichment(projects, '/alpha', projects, ['/beta']);
-  await new Promise(resolve => setTimeout(resolve, 1100));
-  assert.equal(posted.at(-1).projects.globalStore.ready, true);
-  assert.deepEqual(posted.at(-1).projects.globalStore.paths, ['/alpha', '/beta']);
-});
-
-test('one project enrichment failure does not stop projects after it from refreshing', async () => {
-  const projects = Array.from({ length: 28 }, (_, index) => ({
-    name: `Project ${index + 1}`,
-    path: `/project-${index + 1}`
-  }));
-  const Loader = loadLoader({
-    investment: async projectPath => {
-      if (projectPath === '/project-26') throw new Error('runtime connection replaced');
-      return {};
-    }
-  });
-  const posted = [];
-  const loader = createLoader(Loader, posted);
-  loader.schedulePortfolioEnrichment(projects, projects[0].path, projects);
-  await new Promise(resolve => setTimeout(resolve, 1200));
-  const refreshedPaths = posted.flatMap(message => message.projects?.updatedProjectPaths || []);
-  assert.equal(refreshedPaths.includes('/project-26'), false);
-  assert.equal(refreshedPaths.includes('/project-27'), true);
-  assert.equal(refreshedPaths.includes('/project-28'), true);
-  assert.equal(posted.at(-1).projects.globalStore.ready, true);
+  const loader = createLoader(Loader, []);
+  assert.equal(loader.scheduleAll, undefined);
+  assert.equal(loader.schedulePortfolioEnrichment, undefined);
 });
 
 test('invalidating one project issue load rejects its old response but keeps another project', async () => {
@@ -141,53 +110,16 @@ test('invalidating one project pull request load leaves another project in fligh
   assert.deepEqual(posted.filter(message => message.command === 'projectPullRequestsLoaded').map(message => message.projectPath), ['/beta']);
 });
 
-test('selected project cached Issues and Actions render before live GitHub refresh finishes', async () => {
-  const liveIssues = deferred();
-  const Loader = loadLoader({ signals: {
-    readCachedExternalSignals: async projectPath => projectPath === '/alpha' ? {
-      issues: { available: true, stale: true, repo: 'owner/alpha', open: 3 },
-      delivery: { available: true, stale: true, repo: 'owner/alpha', latestWorkflowStatus: 'completed' },
-      pullRequests: null,
-      security: null
-    } : null,
-    loadExternalIssueSummary: () => liveIssues.promise
-  } });
-  const posted = [];
-  const loader = createLoader(Loader, posted);
+test('the loader never replays cached database signals outside the sidebar projection', async () => {
+  let cachedReads = 0;
+  const Loader = loadLoader({ signals: { readCachedExternalSignals: async () => { cachedReads += 1; return null; } } });
+  const loader = createLoader(Loader, []);
   loader.scheduleExternalSignals([{ name: 'Alpha', path: '/alpha' }], '/alpha');
-
   await new Promise(resolve => setTimeout(resolve, 20));
-
-  assert.equal(posted.find(message => message.command === 'projectIssuesLoaded')?.issues.open, 3);
-  assert.equal(posted.find(message => message.command === 'projectDeliveryLoaded')?.delivery.latestWorkflowStatus, 'completed');
-  liveIssues.resolve({ available: true, stale: false, open: 4 });
+  assert.equal(cachedReads, 0);
 });
 
-test('cached external signals render automatically for every project card', async () => {
-  const posted = [];
-  const Loader = loadLoader({ signals: {
-    readCachedExternalSignals: async projectPath => ({
-      issues: { available: true, stale: true, open: projectPath === '/alpha' ? 1 : 2 },
-      pullRequests: null,
-      delivery: null,
-      security: null
-    })
-  } });
-  const loader = createLoader(Loader, posted);
-
-  loader.scheduleExternalSignals([
-    { name: 'Alpha', path: '/alpha' },
-    { name: 'Beta', path: '/beta' }
-  ], '/alpha');
-  await new Promise(resolve => setTimeout(resolve, 30));
-
-  assert.deepEqual(
-    new Set(posted.filter(message => message.command === 'projectIssuesLoaded').map(message => message.projectPath)),
-    new Set(['/alpha', '/beta'])
-  );
-});
-
-test('cached signal replay limits repository work to two projects at a time', async () => {
+test('background signal scheduling limits repository work to two projects at a time', async () => {
   let active = 0;
   let maximum = 0;
   const pending = [];
@@ -210,7 +142,7 @@ test('cached signal replay limits repository work to two projects at a time', as
     { name: 'Delta', path: '/delta' }
   ], '/alpha');
 
-  await new Promise(resolve => setTimeout(resolve, 20));
+  await new Promise(resolve => setTimeout(resolve, 1350));
   assert.equal(active, 2);
   let released = 0;
   while (released < 4) {
@@ -296,25 +228,29 @@ test('one external refresh resolves each project repository only once across sig
   assert.deepEqual(Object.fromEntries(resolutions), { '/alpha': 1, '/beta': 1 });
 });
 
-test('switching projects immediately reads the new selected project cache', async () => {
-  const posted = [];
+test('switching projects prioritizes a live worker refresh without reading cached database signals', async () => {
+  const starts = [];
   const Loader = loadLoader({ signals: {
-    readCachedExternalSignals: async projectPath => ({
-      issues: { available: true, stale: true, open: projectPath === '/beta' ? 7 : 1 },
-      pullRequests: null,
-      delivery: { available: true, stale: true, latestWorkflowStatus: 'completed' },
-      security: null
-    })
+    readCachedExternalSignals: async () => assert.fail('cache reads belong to the projection worker'),
+    loadExternalIssueSummary: async projectPath => { starts.push(projectPath); return { available: true }; }
   } });
-  const loader = createLoader(Loader, posted);
-
-  loader.scheduleExternalSignals([{ name: 'Alpha', path: '/alpha' }, { name: 'Beta', path: '/beta' }], '/alpha');
+  const loader = createLoader(Loader, []);
   loader.prioritizeProjectSignals({ name: 'Beta', path: '/beta' });
-  await new Promise(resolve => setTimeout(resolve, 30));
+  await new Promise(resolve => setTimeout(resolve, 1250));
+  assert.equal(starts.includes('/beta'), true);
+});
 
-  assert.equal(posted.some(message => message.command === 'projectIssuesLoaded'
-    && message.projectPath === '/beta'
-    && message.issues.open === 7), true);
+test('a new full refresh invalidates the previous repository resolution generation', async () => {
+  let resolutions = 0;
+  const Loader = loadLoader({ signals: {
+    resolveGithubRepoSlug: async () => `owner/app-${++resolutions}`
+  } });
+  const loader = createLoader(Loader, []);
+  loader.scheduleExternalSignals([{ name: 'App', path: '/app' }], '/app');
+  await new Promise(resolve => setTimeout(resolve, 1700));
+  loader.scheduleExternalSignals([{ name: 'App', path: '/app' }], '/app');
+  await new Promise(resolve => setTimeout(resolve, 1700));
+  assert.equal(resolutions, 2);
 });
 
 test('a scheduled external batch never follows a later data root selection', async () => {

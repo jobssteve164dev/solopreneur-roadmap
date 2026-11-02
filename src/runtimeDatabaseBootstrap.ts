@@ -2,7 +2,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { UnifiedDataStore } from './db/unifiedDataStore';
-import { RuntimeDataOperations } from './runtimeDataOperations';
+import type { RuntimeDataOperations } from './runtimeDataOperations';
 import { runArtifactKind, shouldDescendRunArtifactDirectory } from './runArtifactPolicy.js';
 import { discoverLegacyRunProcesses, reapFinishedLegacyRunProcesses, type LegacyRunProcess } from './legacyRunProcessRecovery.js';
 import { legacyProjectFilesStamp } from './legacyProjectFileMigration.js';
@@ -10,6 +10,25 @@ import { globalRetiredDataStamp } from './globalRetiredDataMigration.js';
 
 type MigrationOperations = (request: Parameters<RuntimeDataOperations>[0]) => Promise<unknown>;
 type MigrationAcknowledgement = { scheduled?: boolean };
+
+async function migrationProject(
+  store: UnifiedDataStore,
+  root: string,
+  name: string | undefined,
+  readOnlyDiscovery: boolean
+): Promise<{ projectId: string }> {
+  if (!readOnlyDiscovery) return store.registerProject({ root, ...(name ? { name } : {}) });
+  const projectId = store.lookupProjectForRead(root);
+  if (!projectId) throw Object.assign(new Error('project_not_registered'), { code: 'ENOENT' });
+  return { projectId };
+}
+
+async function migrationRegistryProjects(store: UnifiedDataStore, readOnlyDiscovery: boolean): Promise<Array<{ path: string; name?: string }>> {
+  const current = readOnlyDiscovery ? store.readProjectRegistry() : await store.initializeProjectRegistry();
+  return current && 'registry' in current && Array.isArray(current.registry.projects)
+    ? current.registry.projects
+    : [];
+}
 
 async function historicalRunSourceStamp(store: UnifiedDataStore, roots: string[], shouldContinue: () => boolean, discoveredOwners: LegacyRunProcess[]): Promise<string> {
   const hash = crypto.createHash('sha256'), pending = [...roots].sort();
@@ -100,8 +119,22 @@ export async function enqueueStartupDataMigrations(store: UnifiedDataStore, oper
   await enqueueAvailableDataMigrations(store, operations, shouldContinue, false, undefined, false);
 }
 
+/**
+ * Performs startup source discovery with a read-only database handle. The
+ * Maintenance Compute Worker owns filesystem traversal; the Write Actor later
+ * admits the returned idempotent requests in short turns.
+ */
+export async function collectStartupDataMigrations(store: UnifiedDataStore, shouldContinue: () => boolean, projectRoot?: string, globalOnly = false): Promise<Parameters<RuntimeDataOperations>[0][]> {
+  const requests: Parameters<RuntimeDataOperations>[0][] = [];
+  await enqueueAvailableDataMigrations(store, async request => {
+    requests.push(request);
+    return { scheduled: true };
+  }, shouldContinue, false, projectRoot, false, true, !globalOnly);
+  return requests;
+}
+
 /** Discovers current legacy sources without blocking the caller on their import. */
-export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, refreshCompleted = false, projectRoot?: string, includeLegacyProjectFiles = true): Promise<{ queued: number }> {
+export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, refreshCompleted = false, projectRoot?: string, includeLegacyProjectFiles = true, readOnlyDiscovery = false, includeRegisteredProjects = true): Promise<{ queued: number }> {
   let queued = 0;
   const enqueue = async (request: Parameters<RuntimeDataOperations>[0]): Promise<unknown> => {
     const result = await operations(refreshCompleted ? { ...request, input: { ...request.input, refreshCompleted: true } } : request) as MigrationAcknowledgement;
@@ -109,7 +142,7 @@ export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, op
     return result;
   };
   if (projectRoot) {
-    try { await enqueueStartupProjectMigrations(store, enqueue, shouldContinue, projectRoot, includeLegacyProjectFiles); }
+    try { await enqueueStartupProjectMigrations(store, enqueue, shouldContinue, projectRoot, includeLegacyProjectFiles, readOnlyDiscovery); }
     catch (error) { process.stderr.write(`SoloMap project data migration startup: ${String(error)}\n`); }
     return { queued };
   }
@@ -125,17 +158,19 @@ export async function enqueueAvailableDataMigrations(store: UnifiedDataStore, op
   } catch (error) { process.stderr.write(`SoloMap capability migration startup: ${String(error)}\n`); }
   try { await enqueueStartupProjectAutonomyMigration(store, enqueue, shouldContinue); }
   catch (error) { process.stderr.write(`SoloMap project autonomy migration startup: ${String(error)}\n`); }
-  try { await enqueueStartupMemoryMigration(store, enqueue, shouldContinue); }
+  try { await enqueueStartupMemoryMigration(store, enqueue, shouldContinue, readOnlyDiscovery); }
   catch (error) { process.stderr.write(`SoloMap memory migration startup: ${String(error)}\n`); }
-  try { await enqueueStartupProjectMigrations(store, enqueue, shouldContinue, undefined, includeLegacyProjectFiles); }
-  catch (error) { process.stderr.write(`SoloMap project data migration startup: ${String(error)}\n`); }
-  try { await enqueueStartupLearningMigration(store, enqueue, shouldContinue); }
+  if (includeRegisteredProjects) {
+    try { await enqueueStartupProjectMigrations(store, enqueue, shouldContinue, undefined, includeLegacyProjectFiles, readOnlyDiscovery); }
+    catch (error) { process.stderr.write(`SoloMap project data migration startup: ${String(error)}\n`); }
+  }
+  try { await enqueueStartupLearningMigration(store, enqueue, shouldContinue, readOnlyDiscovery); }
   catch (error) { process.stderr.write(`SoloMap learning migration startup: ${String(error)}\n`); }
-  try { await enqueueStartupLearningReviewMigration(store, enqueue, shouldContinue); }
+  try { await enqueueStartupLearningReviewMigration(store, enqueue, shouldContinue, readOnlyDiscovery); }
   catch (error) { process.stderr.write(`SoloMap review migration startup: ${String(error)}\n`); }
-  try { await enqueueStartupStrategyMigration(store, enqueue, shouldContinue); }
+  try { await enqueueStartupStrategyMigration(store, enqueue, shouldContinue, readOnlyDiscovery); }
   catch (error) { process.stderr.write(`SoloMap strategy migration startup: ${String(error)}\n`); }
-  try { await enqueueStartupAnalysisMigration(store, enqueue, shouldContinue); }
+  try { await enqueueStartupAnalysisMigration(store, enqueue, shouldContinue, readOnlyDiscovery); }
   catch (error) { process.stderr.write(`SoloMap analysis cache migration startup: ${String(error)}\n`); }
   try { await enqueueStartupGlobalRetiredMigration(store, enqueue, shouldContinue); }
   catch (error) { process.stderr.write(`SoloMap retired global data migration startup: ${String(error)}\n`); }
@@ -182,13 +217,13 @@ async function enqueueStartupProjectAutonomyMigration(store: UnifiedDataStore, o
   } });
 }
 
-async function enqueueStartupAnalysisMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
+async function enqueueStartupAnalysisMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, readOnlyDiscovery = false): Promise<void> {
   const projectScopes: Record<string, string> = {};
   const files = [path.join(store.root, 'usage', 'solomap-usage.json'), path.join(store.root, 'sidebar-core-snapshot-v1.json')];
   for (const projectRoot of store.existingRegisteredProjectRoots()) {
     if (!shouldContinue()) return;
     let project;
-    try { project = await store.registerProject({ root: projectRoot }); }
+    try { project = await migrationProject(store, projectRoot, undefined, readOnlyDiscovery); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw error;
@@ -209,7 +244,7 @@ async function enqueueStartupAnalysisMigration(store: UnifiedDataStore, operatio
   await operations({ operation: 'import_project_data', input: { collection: 'analysis-caches', sourceRoot: store.root, projectScopes, archiveUnresolved: true, idempotencyKey: `startup-analysis-caches-v3:${signature}` } });
 }
 
-async function enqueueStartupLearningReviewMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
+async function enqueueStartupLearningReviewMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, readOnlyDiscovery = false): Promise<void> {
   const sourceRoot = path.join(store.root, 'maintenance');
   try { if (!(await fs.promises.lstat(sourceRoot)).isDirectory()) return; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
@@ -217,7 +252,7 @@ async function enqueueStartupLearningReviewMigration(store: UnifiedDataStore, op
   for (const root of store.existingRegisteredProjectRoots()) {
     if (!shouldContinue()) return;
     let project;
-    try { project = await store.registerProject({ root }); }
+    try { project = await migrationProject(store, root, undefined, readOnlyDiscovery); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw error;
@@ -241,7 +276,7 @@ async function enqueueStartupLearningReviewMigration(store: UnifiedDataStore, op
   if (shouldContinue()) await operations({ operation: 'import_project_data', input: { collection: 'learning-review', sourceRoot, projectScopes, archiveUnresolved: true, idempotencyKey: `startup-learning-review-v3:${signature}` } });
 }
 
-async function enqueueStartupStrategyMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
+async function enqueueStartupStrategyMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, readOnlyDiscovery = false): Promise<void> {
   const sourceRoot = path.join(store.root, 'strategy');
   try { if (!(await fs.promises.stat(sourceRoot)).isDirectory()) return; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
@@ -249,7 +284,7 @@ async function enqueueStartupStrategyMigration(store: UnifiedDataStore, operatio
   for (const projectRoot of store.existingRegisteredProjectRoots()) {
     if (!shouldContinue()) return;
     try {
-      const registered = await store.registerProject({ root: projectRoot });
+      const registered = await migrationProject(store, projectRoot, undefined, readOnlyDiscovery);
       mappings.push([projectRoot, registered.projectId]);
     } catch (error) { process.stderr.write(`SoloMap strategy project discovery: ${projectRoot}: ${String(error)}\n`); }
   }
@@ -258,7 +293,7 @@ async function enqueueStartupStrategyMigration(store: UnifiedDataStore, operatio
   if (shouldContinue()) await operations({ operation: 'import_project_data', input: { collection: 'strategy', sourceRoot, projectScopes, idempotencyKey: `startup-strategy-v1:${signature}` } });
 }
 
-async function enqueueStartupLearningMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
+async function enqueueStartupLearningMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, readOnlyDiscovery = false): Promise<void> {
   const sourceRoot = path.join(store.root, 'learning');
   try { if (!(await fs.promises.stat(sourceRoot)).isDirectory()) return; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
@@ -266,7 +301,7 @@ async function enqueueStartupLearningMigration(store: UnifiedDataStore, operatio
   for (const projectRoot of store.existingRegisteredProjectRoots()) {
     if (!shouldContinue()) return;
     try {
-      const project = await store.registerProject({ root: projectRoot });
+      const project = await migrationProject(store, projectRoot, undefined, readOnlyDiscovery);
       mappings.push([path.resolve(projectRoot), project.projectId]);
     } catch (error) { process.stderr.write(`SoloMap learning project discovery: ${projectRoot}: ${String(error)}\n`); }
   }
@@ -275,17 +310,17 @@ async function enqueueStartupLearningMigration(store: UnifiedDataStore, operatio
   if (shouldContinue()) await operations({ operation: 'import_project_data', input: { collection: 'learning', sourceRoot, projectScopes, archiveUnresolved: true, idempotencyKey: `startup-learning-v4:${signature}` } });
 }
 
-async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, selectedProjectRoot?: string, includeLegacyProjectFiles = true): Promise<void> {
+async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, selectedProjectRoot?: string, includeLegacyProjectFiles = true, readOnlyDiscovery = false): Promise<void> {
   let projects: Array<{ path: string }> = store.existingRegisteredProjectRoots().map(projectPath => ({ path: projectPath }));
   try {
-    const registry = (await store.initializeProjectRegistry()).registry;
+    const registry = { projects: await migrationRegistryProjects(store, readOnlyDiscovery) };
     const known = new Set(projects.map(project => path.resolve(project.path)));
     for (const project of registry.projects) {
       const projectPath = String(project?.path || '');
       if (path.isAbsolute(projectPath) && !known.has(path.resolve(projectPath))) projects.push({ path: projectPath });
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`SoloMap growth project registry: ${String(error)}\n`);
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`SoloMap growth project registry: ${error instanceof Error ? error.stack || error.message : String(error)}\n`);
   }
   if (selectedProjectRoot) {
     const selectedPhysical = await fs.promises.realpath(selectedProjectRoot);
@@ -298,11 +333,11 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
     if (!shouldContinue()) return;
     const projectRoot = String(project?.path || '');
     if (!path.isAbsolute(projectRoot)) continue;
-    let registered: Awaited<ReturnType<UnifiedDataStore['registerProject']>>;
+    let registered: { projectId: string };
     try {
-      registered = await store.registerProject({ root: projectRoot });
+      registered = await migrationProject(store, projectRoot, undefined, readOnlyDiscovery);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`SoloMap project registration startup: ${projectRoot}: ${String(error)}\n`);
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`SoloMap project registration startup: ${projectRoot}: ${error instanceof Error ? error.stack || error.message : String(error)}\n`);
       continue;
     }
     if (store.missingProjectJournalSources(registered.projectId, 1).length) {
@@ -358,7 +393,7 @@ async function enqueueStartupProjectMigrations(store: UnifiedDataStore, operatio
 }
 
 /** Runs after the owner's control endpoint is ready; sources stay untouched. */
-export async function enqueueStartupMemoryMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean): Promise<void> {
+export async function enqueueStartupMemoryMigration(store: UnifiedDataStore, operations: MigrationOperations, shouldContinue: () => boolean, readOnlyDiscovery = false): Promise<void> {
   const sourceRoot = path.join(store.root, 'memory');
   try { if (!(await fs.promises.stat(sourceRoot)).isDirectory()) return; }
   catch (error) {
@@ -369,7 +404,7 @@ export async function enqueueStartupMemoryMigration(store: UnifiedDataStore, ope
   const mappings = new Map<string, string | null>();
   const projects: Array<{ path: string; name?: string }> = store.existingRegisteredProjectRoots().map(projectPath => ({ path: projectPath }));
   try {
-    const registry = (await store.initializeProjectRegistry()).registry;
+    const registry = { projects: await migrationRegistryProjects(store, readOnlyDiscovery) };
     const known = new Set(projects.map(project => path.resolve(project.path)));
     for (const project of registry.projects) {
       if (!project || typeof project.path !== 'string' || !path.isAbsolute(project.path)) continue;
@@ -397,7 +432,7 @@ export async function enqueueStartupMemoryMigration(store: UnifiedDataStore, ope
     if (!shouldContinue()) return;
     try {
       if (!project || typeof project.path !== 'string' || !path.isAbsolute(project.path)) throw new Error('project_registry_invalid');
-      const registered = await store.registerProject({ root: project.path, name: project.name });
+      const registered = await migrationProject(store, project.path, project.name, readOnlyDiscovery);
       // This is the legacy memory producer's path-based slug, not a display-name ID.
       const slug = legacySlug(project.path);
       if (legacySlugs.get(slug)!.size > 1) { mappings.set(slug, null); continue; }

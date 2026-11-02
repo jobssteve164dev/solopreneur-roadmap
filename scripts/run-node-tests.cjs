@@ -3,18 +3,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-
-function removeOwnedEntry(root, target) {
-  const relative = path.relative(root, target);
-  if (relative.startsWith('..') || path.isAbsolute(relative)) throw new Error(`test_fixture_outside_owned_root:${target}`);
-  const info = fs.lstatSync(target);
-  if (info.isDirectory() && !info.isSymbolicLink()) {
-    for (const name of fs.readdirSync(target)) removeOwnedEntry(root, path.join(target, name));
-    fs.rmdirSync(target);
-    return;
-  }
-  fs.unlinkSync(target);
-}
+const { removeOwnedEntry } = require('./owned-fixture-cleanup.cjs');
 
 const ownedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-node-tests-'));
 const agentCliFixtureRoot = path.join(ownedRoot, 'agent-cli-bin');
@@ -39,7 +28,9 @@ for (const name of agentCliFixtureNames) {
 const testRunId = crypto.randomUUID();
 const inheritedOwners = String(process.env.SOLOMAP_TEST_RUN_OWNERS || '').split(',').filter(Boolean);
 const testRunOwners = [...inheritedOwners, testRunId].join(',');
-const requestedTests = process.argv.slice(2).flatMap(file => {
+const requestedArguments = process.argv.slice(2);
+const nodeTestOptions = requestedArguments.filter(argument => argument.startsWith('--'));
+const requestedTests = requestedArguments.filter(argument => !argument.startsWith('--')).flatMap(file => {
   const pattern = process.platform === 'win32' ? file.replaceAll(path.sep, '/') : file;
   const matches = fs.globSync(pattern);
   return matches.length > 0 ? matches : [file];
@@ -53,7 +44,7 @@ let child;
 let requestedSignal;
 
 function startTestBatch() {
-  child = childProcess.spawn(process.execPath, ['--test', ...testBatches.shift()], {
+  child = childProcess.spawn(process.execPath, ['--test', ...nodeTestOptions, ...testBatches.shift()], {
     cwd: process.cwd(),
     env: {
       ...process.env,

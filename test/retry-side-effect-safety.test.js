@@ -381,5 +381,6 @@ test('the status consumer queues mutable auxiliary work instead of running it be
   const growthSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'projectGrowth.ts'), 'utf8');
   const capture = growthSource.slice(growthSource.indexOf('export async function captureProjectGrowthSnapshot('), growthSource.indexOf('export async function getProjectGrowthView('));
   assert.match(capture, /options\.shouldCommit\?\.\(\) === false/);
-  assert.ok(capture.lastIndexOf('options.shouldCommit?.() === false') > capture.indexOf('await finalizeProjectGrowthSnapshot('));
+  assert.match(capture, /refreshProjectGrowthInRuntime/);
+  assert.doesNotMatch(capture, /roadmapNodes|runEntries|commit_project_growth_refresh/);
 });

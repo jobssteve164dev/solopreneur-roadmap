@@ -152,7 +152,7 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     const actionableJobs = jobs.filter((job: any) => ['failed', 'completed_with_conflicts', 'interrupted'].includes(job.status));
     const history = overview?.recycling || [];
     const recoveryConflicts = overview?.recoveryConflicts || [];
-    const unfinishedCleanup = history.filter((item: any) => ['approved', 'moving', 'held'].includes(item.status));
+    const unfinishedCleanup = history.filter((item: any) => ['approved', 'moving', 'held', 'restoring'].includes(item.status));
     card!.hidden = error.hidden && !busy && !notice && !plan && !active && !failedMaintenance && !needsAttention.length && !recoveryConflicts.length && !Number(overview?.reviewableFiles || overview?.recyclableFiles || 0) && !history.length;
     const migrated = Number(overview?.migratedFiles || 0);
     const count = Number(overview?.capturedFiles || 0);
@@ -211,6 +211,7 @@ function bindMigrationSettings(vscode: { postMessage(message: unknown): void }, 
     element('[data-migration-history]').innerHTML = history.map((item: any) => {
       const state = item.status === 'trashed' ? text('已移到回收站', 'Moved to recycle bin')
         : item.status === 'restored' ? text('已恢复', 'Restored')
+        : item.status === 'restoring' ? text('文件已恢复，正在完成清理', 'File restored; cleanup is finishing')
         : item.status === 'changed' ? text('内容已变化，继续保留', 'Changed and kept in place')
         : ['approved', 'moving', 'held'].includes(item.status) ? text('清理尚未完成', 'Cleanup not finished')
         : text('已安全保留', 'Safely kept');

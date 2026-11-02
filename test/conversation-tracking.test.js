@@ -287,6 +287,9 @@ test('cross-project task export stays portable and excludes host Telegram associ
   await f.store.exportProject({ root: f.projects[1].path, destination, idempotencyKey: 'export-tracked' });
   const archive = JSON.parse(fs.readFileSync(destination, 'utf8')).archive;
   assert.equal(archive.tables.some(table => table.name === 'mcp_conversation_launches'), false);
+  const portableLocations = archive.tables.find(table => table.name === 'project_locations').rows;
+  assert.ok(portableLocations.length > 0);
+  assert.ok(portableLocations.every(row => row.status === 'moved' && String(row.root_path).startsWith(`solomap://project/${launch.projectId}/`)));
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   const imported = new UnifiedDataStore(path.join(f.base, 'imported-data'));
   try {
@@ -295,6 +298,8 @@ test('cross-project task export stays portable and excludes host Telegram associ
     assert.equal(result.projectId, launch.projectId);
     assert.equal(imported.rows('PRAGMA foreign_key_check').length, 0);
     assert.equal(imported.rows('SELECT COUNT(*) AS n FROM mcp_conversation_launches')[0].n, 0);
+    assert.equal(imported.rows("SELECT COUNT(*) AS n FROM project_locations WHERE project_id=? AND status='active'", [launch.projectId])[0].n, 1);
+    assert.equal(imported.rows("SELECT COUNT(*) AS n FROM project_locations WHERE project_id=? AND status='moved'", [launch.projectId])[0].n, portableLocations.length);
   } finally { imported.close(); }
 });
 
@@ -327,7 +332,7 @@ test('failed attempts are bounded, task-backed references persist, and repeated 
   t.diagnostic(`2000 history associations: table+index growth=${associationGrowth} bytes, database+WAL growth=${growth} bytes; recent-query index used; 10 unchanged queries wrote 0 rows; failed-attempt retention=20; active dispatches=0`);
 });
 
-test('schema 52 upgrades in place and reopening schema 55 preserves identities and source rows', () => {
+test('schema 52 upgrades in place and reopening schema 68 preserves identities and source rows', () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-conversation-tracking-upgrade-'));
   try {
     const root = path.join(base, '.solomap-global'); fs.mkdirSync(root);
@@ -346,7 +351,8 @@ test('schema 52 upgrades in place and reopening schema 55 preserves identities a
     for (let i = 0; i < 2; i++) {
       const store = new UnifiedDataStore(root);
       try {
-        assert.equal(store.rows('SELECT MAX(version) AS version FROM schema_migrations')[0].version, 55);
+        assert.equal(store.rows('SELECT MAX(version) AS version FROM schema_migrations')[0].version, 72);
+        assert.equal(store.rows("SELECT COUNT(*) AS count FROM pragma_index_list('runs') WHERE name='runs_conversation_history'")[0].count, 1);
         assert.equal(store.rows("SELECT value FROM database_meta WHERE key='database_id'")[0].value, 'preserved-tracking-identity');
         assert.equal(store.rows("SELECT source_generation FROM pi_legacy_conversation_operations WHERE operation_id='old-operation'")[0].source_generation, 0);
         assert.equal(store.rows('PRAGMA integrity_check')[0].integrity_check, 'ok');
@@ -423,7 +429,7 @@ test('Runtime startup recovers interrupted dispatches before read-only conversat
     project: 'Alpha', mode: 'solo', message: '启动失败', idempotencyKey: 'cold-start' } })).isError, true);
   const ref = (await f.tool(s, 'solomap_get_conversation')).latest[0].conversationRef;
   f.store.db.run("UPDATE mcp_conversation_launches SET error='' WHERE ref=?", [ref]);
-  f.store.db.run('INSERT INTO mcp_conversation_dispatches VALUES(?,?,?,?)', [crypto.randomUUID(), ref, 2147483647, 'dead-owner']);
+  f.store.db.run('INSERT INTO mcp_conversation_dispatches(id,ref,owner_pid,owner_birth) VALUES(?,?,?,?)', [crypto.randomUUID(), ref, 2147483647, 'dead-owner']);
   assert.equal((await f.tool(s, 'solomap_get_conversation', { ref })).state, 'starting');
   f.ops.recoverRuns();
   assert.equal(f.store.rows('SELECT COUNT(*) AS n FROM mcp_conversation_dispatches')[0].n, 0);
@@ -455,4 +461,19 @@ test('a launch reservation and its dispatch become durable together before any t
   f.ops.recoverRuns();
   assert.equal((await f.tool(s, 'solomap_get_conversation', { ref })).state, 'launch_failed');
   assert.equal(f.store.rows('SELECT COUNT(*) AS n FROM mcp_conversation_dispatches')[0].n, 0);
+});
+
+test('a crashed External Worker releases only its own live-process editor dispatches', async t => {
+  const f = await fixture(t); const s = await f.session();
+  const projectId = f.projectIds.get(f.projects[0].path);
+  const tracking = f.store.conversationTracking();
+  const origin = tracking.origin('unused', s.operationId);
+  const reservation = tracking.reserve(projectId, projectId, origin, {
+    mode: 'solo', message: 'worker crash handoff', idempotencyKey: 'worker-crash-handoff', dispatchOwnerId: 'external-worker-a'
+  });
+  assert.equal(f.store.rows('SELECT owner_id FROM mcp_conversation_dispatches WHERE id=?', [reservation.dispatchToken])[0].owner_id,
+    'external-worker-a');
+  tracking.abandonDispatches('external-worker-a');
+  assert.equal(f.store.rows('SELECT COUNT(*) AS n FROM mcp_conversation_dispatches WHERE id=?', [reservation.dispatchToken])[0].n, 0);
+  assert.match(tracking.query(origin, { ref: reservation.launch.ref }).error, /已中断/);
 });

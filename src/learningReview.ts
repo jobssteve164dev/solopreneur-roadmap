@@ -1,22 +1,19 @@
 import * as crypto from 'crypto';
-import * as childProcess from 'child_process';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl.js';
+import { normalizeGlobalDataPathForExtension } from './projectRegistry.js';
 
 export const reviewHash = (value: string): string => crypto.createHash('sha256').update(value).digest('hex');
 export type GithubRead = (endpoint: string) => Promise<any>;
 
-export const readGithubApi: GithubRead = endpoint => new Promise((resolve, reject) => {
-  childProcess.execFile('gh', ['api', '--method', 'GET', endpoint], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
-    if (error) { reject(new Error(`GitHub read unavailable: ${endpoint.split('?')[0]}`)); return; }
-    try { resolve(JSON.parse(stdout)); } catch { reject(new Error('GitHub returned invalid JSON')); }
-  });
-});
+export const readGithubApi = (endpoint: string, globalDataPath = ''): Promise<any> => {
+  if (!globalDataPath) return Promise.reject(new Error('database_root_required'));
+  return sendRuntimeDataRequest(globalDataPath, { operation: 'read_github_api', input: { endpoint } });
+};
 
-export async function projectGithubRepository(projectPath: string): Promise<string> {
-  return new Promise(resolve => childProcess.execFile('git', ['remote', 'get-url', 'origin'], { cwd: projectPath, encoding: 'utf8' }, (error, stdout) => {
-    const match = !error && stdout.trim().match(/^(?:https:\/\/github\.com\/|git@github\.com:)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?$/);
-    resolve(match ? match[1] : '');
-  }));
+export async function projectGithubRepository(projectPath: string, globalDataPath = ''): Promise<string> {
+  const root = normalizeGlobalDataPathForExtension(globalDataPath, projectPath);
+  const result = await sendRuntimeDataRequest<{ repo: string | null }>(root, { operation: 'resolve_project_repository', input: { root: projectPath } });
+  return result.repo || '';
 }
 
 function taskTrailers(message: string, known: Set<string>): string[] {
@@ -45,12 +42,12 @@ async function collectGithubFacts(input: EvidenceInput, scope: string): Promise<
   if (!repository) { result.gaps.push('No GitHub origin; only local reports are available.'); return result; }
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('Invalid GitHub repository');
   if (persist && !input.globalDataPath) throw new Error('database_root_required');
-  const api = input.api || readGithubApi;
+  const api = input.api || ((endpoint: string) => readGithubApi(endpoint, input.globalDataPath));
   const known = new Set<string>(tasks.map(task => task.taskId));
   const loadFacts = async () => sendRuntimeDataRequest<{ revision: number; facts: any }>(input.globalDataPath!, { operation: 'read_github_facts', input: { root: input.projectPath, repository } });
   const previous = persist ? (await loadFacts()).facts : undefined;
   const cursorKey = `github-cursor:${repository}:${scope}`;
-  const loadCursor = async () => (await sendRuntimeDataRequest<Array<{ key: string; value: any; revision: number }>>(input.globalDataPath!, { operation: 'read_growth_report_projection', input: { root: input.projectPath, prefix: cursorKey } })).find(row => row.key === cursorKey);
+  const loadCursor = async () => (await sendRuntimeDataRequest<Array<{ key: string; value: any; revision: number }>>(input.globalDataPath!, { operation: 'read_growth_report_projection', input: { root: input.projectPath, prefix: cursorKey, limit: 1 } })).find(row => row.key === cursorKey);
   const nativeCursor = persist ? await loadCursor() : undefined;
   let cursorRevision = nativeCursor?.revision || 0;
   let cursorSuperseded = false;

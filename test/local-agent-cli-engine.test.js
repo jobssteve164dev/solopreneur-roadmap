@@ -4,7 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
-const { LocalAgentCliEngine, buildCognitiveCliInvocation, runCognitiveCliInvocation } = require('../out/localAgentCliEngine.js');
+const { LocalAgentCliEngine, buildCognitiveCliInvocation, reclaimStaleCognitiveCliArtifacts, runCognitiveCliInvocation } = require('../out/localAgentCliEngine.js');
 const { cognitiveRuntimeConfigRevision, persistCognitiveRuntimeConfig, readCognitiveRuntimeConfig, refreshCognitiveRuntimeConfig, writeCognitiveRuntimeConfig } = require('../out/cognitiveRuntimeConfig.js');
 
 test('a real cognitive subprocess records spawn, first byte and actual exit without logging content', async t => {
@@ -21,9 +21,10 @@ test('a real cognitive subprocess records spawn, first byte and actual exit with
   assert.doesNotMatch(JSON.stringify(events), /private|API_KEY/);
 });
 
-test('a Codex structured judgment receives a private schema and retires it after exit', async () => {
+test('a Codex structured judgment receives a private schema and retires it after exit', async t => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cognitive-schema-test-'));
   const binary = path.join(base, 'codex');
+  t.after(() => { if (fs.existsSync(binary)) fs.unlinkSync(binary); if (fs.existsSync(base)) fs.rmdirSync(base); });
   fs.writeFileSync(binary, '#!' + process.execPath + '\nconst fs=require("fs"); const index=process.argv.indexOf("--output-schema"); const file=index<0?null:process.argv[index+1]; console.log(JSON.stringify({file, schema:file?JSON.parse(fs.readFileSync(file)):null}));', { mode: 0o700 });
   const schema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false };
   const result = JSON.parse(await runCognitiveCliInvocation({ command: binary, args: ['exec'], stdin: 'private prompt', shell: false, outputSchema: schema }, () => {}));
@@ -35,6 +36,65 @@ test('a Codex structured judgment receives a private schema and retires it after
 test('a complete structured response is not silently truncated at 64K characters', async () => {
   const output = await runCognitiveCliInvocation({ command: process.execPath, args: ['-e', 'process.stdout.write("x".repeat(70000))'], stdin: '', shell: false }, () => {});
   assert.equal(output.length, 70000);
+});
+
+test('noisy Agent CLI output is backpressured to an exact temporary spool instead of accumulating in Runtime memory', async () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'localAgentCliEngine.ts'), 'utf8');
+  const spoolSource = source.slice(source.indexOf('const writeOutput ='), source.indexOf("child.stderr.on('data'"));
+  assert.doesNotMatch(spoolSource, /fs\.(?:writeSync|readSync|ftruncateSync)\(/,
+    'continuous CLI output must not perform synchronous disk I/O on the Runtime Supervisor event loop');
+  const ownSpoolPrefix = `solomap-cognitive-output-${process.pid}-`;
+  const before = new Set(fs.readdirSync(os.tmpdir()).filter(name => name.startsWith(ownSpoolPrefix)));
+  const marker = '{"kind":"final","content":"bounded result"}';
+  const running = runCognitiveCliInvocation({
+    command: process.execPath,
+    args: ['-e', `const chunk='x'.repeat(65536);for(let i=0;i<145;i++)process.stdout.write(chunk);process.stdout.write(${JSON.stringify(marker)});setTimeout(()=>{},250)`],
+    stdin: '', shell: false
+  }, () => {});
+  let spool;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    spool = fs.readdirSync(os.tmpdir()).find(name => name.startsWith(ownSpoolPrefix) && !before.has(name));
+    if (spool && fs.existsSync(path.join(os.tmpdir(), spool, 'stdout.log'))
+      && fs.statSync(path.join(os.tmpdir(), spool, 'stdout.log')).size >= 8 * 1024 * 1024) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.ok(spool, 'the bounded spool must be observable while the CLI is still running');
+  assert.ok(fs.statSync(path.join(os.tmpdir(), spool, 'stdout.log')).size <= 8 * 1024 * 1024,
+    'the physical spool must stay bounded while the producer is running');
+  const output = await running;
+  assert.ok(output.length <= 8 * 1024 * 1024);
+  assert.equal(output.endsWith(marker), true, 'the completed result at the tail survives bounded materialization');
+  assert.deepEqual(fs.readdirSync(os.tmpdir()).filter(name => name.startsWith(ownSpoolPrefix) && !before.has(name)), []);
+});
+
+test('the bounded spool completes partial asynchronous reads and writes without corrupting output', async t => {
+  const originalWrite = fs.write, originalRead = fs.read;
+  fs.write = (descriptor, buffer, offset, length, position, callback) =>
+    originalWrite(descriptor, buffer, offset, Math.min(length, 11), position, callback);
+  fs.read = (descriptor, buffer, offset, length, position, callback) =>
+    originalRead(descriptor, buffer, offset, Math.min(length, 13), position, callback);
+  t.after(() => { fs.write = originalWrite; fs.read = originalRead; });
+  const expected = 'partial-io-result-'.repeat(300);
+  const output = await runCognitiveCliInvocation({
+    command: process.execPath, args: ['-e', `process.stdout.write(${JSON.stringify(expected)})`], stdin: '', shell: false
+  }, () => {});
+  assert.equal(output, expected);
+});
+
+test('the next Runtime reclaims exact cognitive temp artifacts left by a dead owner', async t => {
+  const outputRoot = path.join(os.tmpdir(), 'solomap-cognitive-output-2147483647-dead-fixture');
+  const schemaRoot = path.join(os.tmpdir(), 'solomap-cognitive-schema-2147483647-dead-fixture');
+  fs.mkdirSync(outputRoot); fs.writeFileSync(path.join(outputRoot, 'stdout.log'), 'orphan');
+  fs.mkdirSync(schemaRoot); fs.writeFileSync(path.join(schemaRoot, 'judgment.json'), '{}');
+  t.after(() => {
+    for (const [root, file] of [[outputRoot, 'stdout.log'], [schemaRoot, 'judgment.json']]) {
+      if (fs.existsSync(path.join(root, file))) fs.unlinkSync(path.join(root, file));
+      if (fs.existsSync(root)) fs.rmdirSync(root);
+    }
+  });
+  await reclaimStaleCognitiveCliArtifacts();
+  assert.equal(fs.existsSync(outputRoot), false);
+  assert.equal(fs.existsSync(schemaRoot), false);
 });
 
 test('a failed cognitive subprocess retains an actionable stderr tail after a long prompt echo', async () => {

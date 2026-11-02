@@ -138,7 +138,9 @@ test('the shared conversation delivery starts the runner through the foreground 
   assert.match(body, /buildForegroundRunnerInvocation/);
   assert.match(body, /ForegroundAgentTerminalBridge/);
   assert.match(body, /foregroundBridge\.start\(\)/);
-  assert.match(body, /await awaitAgentTaskIngress/);
+  assert.match(body, /scheduleAgentTaskIngressObservation/);
+  assert.doesNotMatch(body, /await awaitAgentTaskIngress/,
+    'Provider startup and native observation must not remain in the synchronous conversation-launch chain');
   assert.match(body, /agentInputMode/);
   assert.match(body, /session_reentry/);
   assert.match(body, /foreground_terminal_surface_unavailable/);

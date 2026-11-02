@@ -40,11 +40,12 @@ export type PiWrite =
   | { kind: 'value'; op: 'delete'; namespace: string; key: string }
   | { kind: 'list'; op: 'append'; namespace: string; key: string; value: unknown }
   | { kind: 'list'; op: 'delete'; namespace: string; key: string };
-export interface PiCommitResult { firstSeq: number; seqs: number[]; timestamp: number; stats: PiSessionStats }
+export interface PiCommitResult { firstSeq: number; seqs: number[]; timestamp: number; stats: PiSessionStats; commitId?: string }
+export interface PiCommitContext { commitId?: string; operationId?: string }
 
 export interface PiSessionStorage {
   readonly metadata?: { id: string; createdAt: number; storageVersion: number; cwd?: string; parentSessionId?: string; legacyParentSessionPath?: string };
-  commit(writes: PiWrite[], context?: unknown): Promise<PiCommitResult>;
+  commit(writes: PiWrite[], context?: PiCommitContext): Promise<PiCommitResult>;
   getEntries(ids: string[], context?: unknown): Promise<Map<string, PiEntry>>;
   getValue<T>(address: PiValue<T>, context?: unknown): Promise<PiStoredValue<T> | undefined>;
   scanValues<T>(prefix: PiValue<T>, context?: unknown): Promise<PiStoredValue<T>[]>;

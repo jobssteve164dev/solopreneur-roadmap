@@ -62,7 +62,14 @@ test('investment source projection retains every session and excludes unrelated 
   const otherRoot = path.join(workspace, 'other-project'); fs.mkdirSync(otherRoot);
   const other = (await ops({ operation: 'register_project', input: { root: otherRoot } })).projectId;
   store.upsertProjectRunIndex(other, record(1, 900000));
-  const result = await ops({ operation: 'read_project_investment_runs', input: { root: workspace } });
+  const result = [];
+  let beforeExecutionLogId = 0;
+  for (;;) {
+    const page = await ops({ operation: 'read_project_investment_runs', input: { root: workspace, limit: 200, ...(beforeExecutionLogId ? { beforeExecutionLogId } : {}) } });
+    result.push(...page);
+    if (page.length < 200) break;
+    beforeExecutionLogId = Math.min(...page.map(run => run.executionLogId));
+  }
   assert.equal(result.length, 503);
   assert.equal(result.reduce((n, run) => n + run.durationMs, 0), 301800000);
   assert.ok(result.every(run => run.runKind === 'solo' && run.status === 'Completed'));

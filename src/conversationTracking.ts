@@ -33,7 +33,7 @@ export class ConversationTracking {
       const existing = this.database.rows('SELECT * FROM mcp_conversation_launches WHERE origin_key=? AND request_key=?', [origin.key, String(input.idempotencyKey)])[0];
       if (existing) {
         if (existing.intent_hash !== hash) throw new Error('idempotency_conflict');
-        return { launch: existing, ...(existing.acknowledged ? {} : { dispatchToken: this.beginDispatch(existing) }) };
+        return { launch: existing, ...(existing.acknowledged ? {} : { dispatchToken: this.beginDispatch(existing, String(input.dispatchOwnerId || 'runtime-process')) }) };
       }
       const ref = crypto.randomUUID(), intentId = `mcp:${ref}`;
       const flowId = input.mode === 'flow' ? `flow-${crypto.createHash('sha256').update(intentId).digest('hex').slice(0, 32)}` : '';
@@ -41,7 +41,7 @@ export class ConversationTracking {
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'')`, [ref, origin.key, ownerProjectId, projectId, String(input.idempotencyKey), hash, intentId,
         String(input.mode), flowId, String(input.message).slice(0, 200), origin.source, origin.chatId, origin.generation, Date.now()]);
       const launch = this.database.rows('SELECT * FROM mcp_conversation_launches WHERE ref=?', [ref])[0];
-      return { launch, dispatchToken: this.beginDispatch(launch) };
+      return { launch, dispatchToken: this.beginDispatch(launch, String(input.dispatchOwnerId || 'runtime-process')) };
     });
   }
 
@@ -55,10 +55,11 @@ export class ConversationTracking {
     launch.acknowledged = 1; launch.error = '';
   }
 
-  public beginDispatch(launch: Launch): string {
+  public beginDispatch(launch: Launch, ownerId = 'runtime-process'): string {
     return this.database.transaction(() => {
       const token = crypto.randomUUID();
-      this.database.run('INSERT INTO mcp_conversation_dispatches VALUES(?,?,?,?)', [token, launch.ref, process.pid, readProcessBirthMarker(process.pid)]);
+      this.database.run('INSERT INTO mcp_conversation_dispatches(id,ref,owner_pid,owner_birth,owner_id) VALUES(?,?,?,?,?)',
+        [token, launch.ref, process.pid, readProcessBirthMarker(process.pid), ownerId]);
       this.database.run("UPDATE mcp_conversation_launches SET error='' WHERE ref=?", [launch.ref]);
       this.pruneFailures(String(launch.origin_key));
       return token;
@@ -72,9 +73,43 @@ export class ConversationTracking {
     });
   }
 
+  public settleDispatch(token: string, ref: string, error = ''): Launch {
+    return this.database.transaction(() => {
+      const launch = this.database.rows(`SELECT l.* FROM mcp_conversation_dispatches d
+        JOIN mcp_conversation_launches l ON l.ref=d.ref WHERE d.id=? AND d.ref=?`, [token, ref])[0];
+      if (!launch) throw new Error('conversation_dispatch_missing');
+      if (error) this.fail(ref, error);
+      else this.acknowledge(launch);
+      this.finishDispatch(token, String(launch.origin_key));
+      return launch;
+    });
+  }
+
   public recoverDispatches(): void {
     const origins = this.database.rows('SELECT DISTINCT l.origin_key FROM mcp_conversation_dispatches d JOIN mcp_conversation_launches l ON l.ref=d.ref', []);
     for (const origin of origins) this.database.transaction(() => this.pruneFailures(String(origin.origin_key)));
+  }
+
+  public abandonDispatches(ownerId: string): void {
+    if (!ownerId) throw new Error('conversation_dispatch_owner_required');
+    const origins = this.database.rows(`SELECT DISTINCT l.origin_key FROM mcp_conversation_dispatches d
+      JOIN mcp_conversation_launches l ON l.ref=d.ref WHERE d.owner_id=?`, [ownerId]);
+    for (const origin of origins) this.database.transaction(() => {
+      const rows = this.database.rows(`SELECT d.id,d.ref FROM mcp_conversation_dispatches d
+        JOIN mcp_conversation_launches l ON l.ref=d.ref WHERE d.owner_id=? AND l.origin_key=?`, [ownerId, String(origin.origin_key)]);
+      for (const row of rows) {
+        this.database.run('DELETE FROM mcp_conversation_dispatches WHERE id=? AND owner_id=?', [row.id, ownerId]);
+        this.database.run("UPDATE mcp_conversation_launches SET error='启动过程已中断，可重试。' WHERE ref=? AND acknowledged=0 AND NOT EXISTS(SELECT 1 FROM mcp_conversation_dispatches WHERE ref=?)", [row.ref, row.ref]);
+      }
+      this.pruneFailures(String(origin.origin_key));
+    });
+  }
+
+  public abandonDispatchesByPrefix(ownerPrefix: string): void {
+    if (!ownerPrefix) throw new Error('conversation_dispatch_owner_required');
+    const ownerIds = this.database.rows('SELECT DISTINCT owner_id FROM mcp_conversation_dispatches WHERE substr(owner_id,1,?)=?',
+      [ownerPrefix.length, ownerPrefix]);
+    for (const row of ownerIds) this.abandonDispatches(String(row.owner_id));
   }
 
   private pruneFailures(originKey: string): void {

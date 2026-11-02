@@ -1,51 +1,33 @@
-import {
-  loadExternalDeliverySummary,
-  loadExternalIssueSummary,
-  loadExternalPullRequestSummary,
-  loadExternalSecuritySummary,
-  readCachedExternalSignals,
-  resolveGithubRepoSlug
-} from './projectExternalSignals';
-import { buildProjectPortfolioSummary, ProjectPortfolioSummary, SolopreneurProject } from './projectPortfolio';
-import { readProjectInvestmentStatsFromDatabase } from './projectAnalytics';
-import { readLearningOverview } from './learningLedger';
+import { SolopreneurProject } from './projectPortfolio';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
-import type { DocumentationManifest } from './documentationManifest';
 
 interface SidebarProjectLoaderOptions {
   isAvailable: () => boolean;
   postMessage: (message: any) => void;
   getGlobalDataPath: () => string;
-  getExtensionPath: () => string;
-  buildGlobalStore: (dataPath: string, portfolio: ProjectPortfolioSummary[]) => any;
-  buildGlobalStorePlaceholder: (dataPath: string, portfolio: ProjectPortfolioSummary[]) => any;
 }
 
 export class SidebarProjectLoader {
-  private portfolioRequest = 0;
   private issueRequest = 0;
   private pullRequestRequest = 0;
   private deliveryRequest = 0;
   private securityRequest = 0;
-  private cachedSignalRequest = 0;
   private repositoryRequest = 0;
   private activeSignalLoads = 0;
   private readonly signalLoadWaiters: Array<() => void> = [];
-  private readonly portfolioProjectRequests = new Map<string, number>();
-  private readonly latestEnrichedPortfolio = new Map<string, ProjectPortfolioSummary>();
   private readonly signalRequests = new Map<string, number>();
+  private readonly repositoryLoads = new Map<string, Promise<string | null>>();
 
   constructor(private readonly options: SidebarProjectLoaderOptions) {}
 
   public cancelExternalLoads(): void {
-    this.portfolioRequest += 1;
     this.issueRequest += 1;
     this.pullRequestRequest += 1;
     this.deliveryRequest += 1;
     this.securityRequest += 1;
-    this.cachedSignalRequest += 1;
     this.repositoryRequest += 1;
+    this.repositoryLoads.clear();
   }
 
   public invalidateProjectSignals(projectPath: string, kinds: Array<'issues' | 'pullRequests' | 'delivery' | 'security'>): void {
@@ -59,34 +41,17 @@ export class SidebarProjectLoader {
     return this.signalRequests.get(`${kind}:${projectPath}`) || 0;
   }
 
-  public scheduleAll(projects: SolopreneurProject[], selectedProjectPath: string, basePortfolio: ProjectPortfolioSummary[] = []): void {
-    this.schedulePortfolioEnrichment(projects, selectedProjectPath, basePortfolio);
-    this.scheduleExternalSignals(projects, selectedProjectPath);
-  }
-
   public scheduleExternalSignals(projects: SolopreneurProject[], selectedProjectPath: string, scoped = false): void {
     const globalDataPath = this.options.getGlobalDataPath();
     const isCurrentRoot = () => globalDataPath === this.options.getGlobalDataPath();
-    const requestId = scoped ? this.repositoryRequest : ++this.repositoryRequest;
-    const repos = new Map<string, Promise<string | null>>();
-    const resolveRepo = (project: SolopreneurProject) => {
-      let pending = repos.get(project.path);
-      if (!pending) {
-        pending = resolveGithubRepoSlug(project.path).then(repo => {
-          if (repo !== null && isCurrentRoot() && this.options.isAvailable() && requestId === this.repositoryRequest) {
-            this.options.postMessage({ command: 'projectRepositoryResolved', projectPath: project.path, repo });
-          }
-          return repo;
-        });
-        repos.set(project.path, pending);
-      }
-      return pending;
-    };
-    this.publishCachedSignals(projects, selectedProjectPath, resolveRepo, scoped, globalDataPath, isCurrentRoot);
-    this.scheduleIssueLoads(projects, selectedProjectPath, resolveRepo, scoped, globalDataPath, isCurrentRoot);
-    this.schedulePullRequestLoads(projects, selectedProjectPath, resolveRepo, scoped, globalDataPath, isCurrentRoot);
-    this.scheduleDeliveryLoads(projects, selectedProjectPath, resolveRepo, scoped, globalDataPath, isCurrentRoot);
-    this.scheduleSecurityLoads(projects, selectedProjectPath, resolveRepo, scoped, globalDataPath, isCurrentRoot);
+    if (!scoped) {
+      this.repositoryRequest += 1;
+      this.repositoryLoads.clear();
+    }
+    this.scheduleIssueLoads(projects, selectedProjectPath, scoped, globalDataPath, isCurrentRoot);
+    this.schedulePullRequestLoads(projects, selectedProjectPath, scoped, globalDataPath, isCurrentRoot);
+    this.scheduleDeliveryLoads(projects, selectedProjectPath, scoped, globalDataPath, isCurrentRoot);
+    this.scheduleSecurityLoads(projects, selectedProjectPath, scoped, globalDataPath, isCurrentRoot);
   }
 
   public prioritizeProjectSignals(project: SolopreneurProject): void {
@@ -101,27 +66,19 @@ export class SidebarProjectLoader {
     security: any;
   }> {
     const globalDataPath = this.options.getGlobalDataPath();
-    const repo = await resolveGithubRepoSlug(projectPath);
-    if (repo === null || globalDataPath !== this.options.getGlobalDataPath()) {
-      return { issues: null, pullRequests: null, delivery: null, security: null };
-    }
-    if (this.options.isAvailable()) {
-      this.options.postMessage({ command: 'projectRepositoryResolved', projectPath, repo });
-    }
-    const options = { force: true, globalDataPath, resolvedRepo: repo };
-    const loadSignal = async (load: () => Promise<any>, label: string) => {
+    const loadSignal = async (kind: 'issues' | 'pullRequests' | 'delivery' | 'security', label: string) => {
       try {
-        return await this.withSignalSlot(load, true);
+        return await this.withSignalSlot(() => this.loadRuntimeSignal(projectPath, kind, true, globalDataPath), true);
       } catch (error) {
         console.error(`SoloMap sidebar failed to refresh ${label}:`, error);
         return null;
       }
     };
     const [issues, pullRequests, delivery, security] = await Promise.all([
-      loadSignal(() => loadExternalIssueSummary(projectPath, options), 'issue summary'),
-      loadSignal(() => loadExternalPullRequestSummary(projectPath, options), 'pull request summary'),
-      loadSignal(() => loadExternalDeliverySummary(projectPath, options), 'delivery summary'),
-      loadSignal(() => loadExternalSecuritySummary(projectPath, options), 'security summary')
+      loadSignal('issues', 'issue summary'),
+      loadSignal('pullRequests', 'pull request summary'),
+      loadSignal('delivery', 'delivery summary'),
+      loadSignal('security', 'security summary')
     ]);
     return { issues, pullRequests, delivery, security };
   }
@@ -132,139 +89,45 @@ export class SidebarProjectLoader {
     globalDataPath = this.options.getGlobalDataPath()
   ): Promise<any> {
     if (globalDataPath !== this.options.getGlobalDataPath()) return null;
-    const repo = await resolveGithubRepoSlug(projectPath);
-    if (repo === null || globalDataPath !== this.options.getGlobalDataPath()) return null;
-    if (this.options.isAvailable()) {
-      this.options.postMessage({ command: 'projectRepositoryResolved', projectPath, repo });
-    }
-    const options = { force: true, globalDataPath, resolvedRepo: repo };
-    const loaders: Record<'issues' | 'pullRequests' | 'delivery' | 'security', () => Promise<any>> = {
-      issues: () => loadExternalIssueSummary(projectPath, options),
-      pullRequests: () => loadExternalPullRequestSummary(projectPath, options),
-      delivery: () => loadExternalDeliverySummary(projectPath, options),
-      security: () => loadExternalSecuritySummary(projectPath, options)
-    };
     try {
-      return await this.withSignalSlot(loaders[kind], true);
+      return await this.withSignalSlot(() => this.loadRuntimeSignal(projectPath, kind, true, globalDataPath), true);
     } catch (error) {
       console.error(`SoloMap sidebar failed to refresh ${kind}:`, error);
       return null;
     }
   }
 
-  private publishCachedSignals(
-    projects: SolopreneurProject[],
-    selectedProjectPath: string,
-    resolveRepo: (project: SolopreneurProject) => Promise<string | null>,
-    scoped: boolean,
-    globalDataPath: string,
-    isCurrentRoot: () => boolean
-  ): void {
-    const requestId = scoped ? this.cachedSignalRequest : ++this.cachedSignalRequest;
-    this.scheduleSignalQueue(projects, selectedProjectPath, 0, 0,
-      () => isCurrentRoot() && this.options.isAvailable() && requestId === this.cachedSignalRequest,
-      async project => {
-        const repo = await resolveRepo(project);
-        return repo === null || !isCurrentRoot() ? undefined : readCachedExternalSignals(project.path, globalDataPath, repo);
-      },
-      (project, cached) => {
-        if (!cached) return;
-        if (cached.issues) this.options.postMessage({ command: 'projectIssuesLoaded', projectPath: project.path, issues: cached.issues });
-        if (cached.pullRequests) this.options.postMessage({ command: 'projectPullRequestsLoaded', projectPath: project.path, pullRequests: cached.pullRequests });
-        if (cached.delivery) this.options.postMessage({ command: 'projectDeliveryLoaded', projectPath: project.path, delivery: cached.delivery });
-        if (cached.security) this.options.postMessage({ command: 'projectSecurityLoaded', projectPath: project.path, security: cached.security });
-      },
-      'SoloMap sidebar failed to read cached external signals:');
-  }
-
-  public schedulePortfolioEnrichment(
-    projects: SolopreneurProject[],
-    selectedProjectPath: string,
-    basePortfolio: ProjectPortfolioSummary[] = [],
-    projectPaths: string[] = []
-  ): void {
-    const scoped = projectPaths.length > 0;
-    const requestId = scoped ? this.portfolioRequest : ++this.portfolioRequest;
-    if (!scoped) this.latestEnrichedPortfolio.clear();
-    const requestedPaths = new Set(projectPaths.filter(Boolean));
-    const ordered = this.orderedProjects(projects, selectedProjectPath)
-      .filter((project) => requestedPaths.size === 0 || requestedPaths.has(project.path));
-    const projectRequests = new Map(ordered.map(project => {
-      const next = (this.portfolioProjectRequests.get(project.path) || 0) + 1;
-      this.portfolioProjectRequests.set(project.path, next);
-      return [project.path, next] as const;
-    }));
-    setTimeout(() => {
-      void (async () => {
-        try {
-          const globalDataPath = this.options.getGlobalDataPath();
-          const learningOverview = await readLearningOverview(ordered[0]?.path || process.cwd(), globalDataPath);
-          const summaries = new Map<string, ProjectPortfolioSummary>(basePortfolio.map((summary) => [summary.path, summary]));
-          for (const project of ordered) {
-            if (!this.options.isAvailable() || requestId !== this.portfolioRequest) return;
-            if (projectRequests.get(project.path) !== this.portfolioProjectRequests.get(project.path)) {
-              continue;
-            }
-            try {
-              const [investment, sourceCount, documentationManifest, analysisSource] = await Promise.all([
-                readProjectInvestmentStatsFromDatabase(project.path, this.options.getExtensionPath(), new Date(), globalDataPath),
-                sendRuntimeDataRequest<number>(normalizeGlobalDataPathForExtension(globalDataPath, project.path), { operation: 'read_project_reusable_source_count', input: { root: project.path } }),
-                sendRuntimeDataRequest<DocumentationManifest>(normalizeGlobalDataPathForExtension(globalDataPath, project.path), { operation: 'read_documentation_manifest', input: { root: project.path } }),
-                sendRuntimeDataRequest<{ recentActivityAt: string }>(normalizeGlobalDataPathForExtension(globalDataPath, project.path), { operation: 'read_project_analysis_source', input: { root: project.path } })
-              ]);
-              if (!this.options.isAvailable() || requestId !== this.portfolioRequest) return;
-              if (projectRequests.get(project.path) !== this.portfolioProjectRequests.get(project.path)) {
-                continue;
-              }
-              summaries.set(project.path, buildProjectPortfolioSummary(project, {
-                includeReusableSignals: true,
-                globalDataPath,
-                learningOverview,
-                documentationManifestsByProjectPath: new Map([[project.path, documentationManifest]]),
-                reusableSourceCountsByProjectPath: new Map([[project.path, sourceCount]]),
-                investmentStatsByProjectPath: { [project.path]: investment },
-                recentActivityAtByProjectPath: new Map([[project.path, analysisSource.recentActivityAt]]),
-                externalSignalsByProjectPath: summaries.get(project.path) ? new Map([[project.path, summaries.get(project.path)!]]) : undefined
-              }));
-              this.latestEnrichedPortfolio.set(project.path, summaries.get(project.path)!);
-              const portfolio = projects.map((item) => summaries.get(item.path)).filter(Boolean) as ProjectPortfolioSummary[];
-              this.options.postMessage({
-                command: 'projectsLoaded',
-                projects: {
-                  projects,
-                  selectedProjectPath,
-                  portfolio,
-                  updatedProjectPaths: [project.path]
-                }
-              });
-            } catch (error) {
-              console.error(`SoloMap sidebar failed to enrich project ${project.path}:`, error);
-            }
-            await new Promise<void>((resolve) => setTimeout(resolve, 0));
-          }
-          if (!this.options.isAvailable() || requestId !== this.portfolioRequest) return;
-          const portfolio = projects.map((item) => this.latestEnrichedPortfolio.get(item.path) || summaries.get(item.path)).filter(Boolean) as ProjectPortfolioSummary[];
-          let globalStore: any;
-          try {
-            globalStore = this.options.buildGlobalStore(globalDataPath, portfolio);
-          } catch {
-            globalStore = this.options.buildGlobalStorePlaceholder(globalDataPath, portfolio);
-          }
-          this.options.postMessage({
-            command: 'projectsLoaded',
-            projects: {
-              projects,
-              selectedProjectPath,
-              portfolio,
-              globalStore,
-              updatedProjectPaths: []
-            }
-          });
-        } catch (error) {
-          console.error('SoloMap sidebar failed to enrich portfolio:', error);
-        }
-      })();
-    }, 1000);
+  private async loadRuntimeSignal(projectPath: string, kind: 'issues' | 'pullRequests' | 'delivery' | 'security', force: boolean, globalDataPath: string): Promise<any> {
+    const dataRoot = normalizeGlobalDataPathForExtension(globalDataPath, projectPath);
+    let repository = this.repositoryLoads.get(projectPath);
+    if (!repository) {
+      const generation = this.repositoryRequest;
+      repository = sendRuntimeDataRequest<{ repo: string | null }>(dataRoot, {
+        operation: 'resolve_project_repository',
+        input: { root: projectPath },
+        supersedesKey: `project-repository:${projectPath}`
+      }).then(result => generation === this.repositoryRequest ? result.repo : null);
+      this.repositoryLoads.set(projectPath, repository);
+      void repository.catch(() => {
+        if (this.repositoryLoads.get(projectPath) === repository) this.repositoryLoads.delete(projectPath);
+      });
+    }
+    const repo = await repository;
+    if (globalDataPath !== this.options.getGlobalDataPath()) return null;
+    if (repo === null) return undefined;
+    if (this.options.isAvailable() && globalDataPath === this.options.getGlobalDataPath()) {
+      this.options.postMessage({ command: 'projectRepositoryResolved', projectPath, repo });
+    }
+    if (!repo) return undefined;
+    const result = await sendRuntimeDataRequest<{ repo: string | null; value: any }>(
+      dataRoot,
+      {
+        operation: 'refresh_project_signal',
+        input: { root: projectPath, repo, kind, force },
+        ...(force ? {} : { supersedesKey: `project-signal:${kind}:${projectPath}` })
+      }
+    );
+    return result.value === null ? undefined : result.value;
   }
 
   private orderedProjects(projects: SolopreneurProject[], selectedProjectPath: string): SolopreneurProject[] {
@@ -324,7 +187,6 @@ export class SidebarProjectLoader {
   private scheduleIssueLoads(
     projects: SolopreneurProject[],
     selectedProjectPath: string,
-    resolveRepo: (project: SolopreneurProject) => Promise<string | null> = project => resolveGithubRepoSlug(project.path),
     scoped = false,
     globalDataPath = this.options.getGlobalDataPath(),
     isCurrentRoot: () => boolean = () => globalDataPath === this.options.getGlobalDataPath()
@@ -333,10 +195,7 @@ export class SidebarProjectLoader {
     const projectRequests = new Map(projects.map(project => [project.path, this.signalRequest('issues', project.path)]));
     this.scheduleSignalQueue(projects, selectedProjectPath, 1200, 80,
       project => isCurrentRoot() && this.options.isAvailable() && requestId === this.issueRequest && projectRequests.get(project.path) === this.signalRequest('issues', project.path),
-      async project => {
-        const repo = await resolveRepo(project);
-        return repo === null ? undefined : loadExternalIssueSummary(project.path, { globalDataPath, resolvedRepo: repo });
-      },
+      project => this.loadRuntimeSignal(project.path, 'issues', false, globalDataPath),
       (project, issues) => this.options.postMessage({ command: 'projectIssuesLoaded', projectPath: project.path, issues }),
       'SoloMap sidebar failed to refresh issue summary:');
   }
@@ -344,7 +203,6 @@ export class SidebarProjectLoader {
   private schedulePullRequestLoads(
     projects: SolopreneurProject[],
     selectedProjectPath: string,
-    resolveRepo: (project: SolopreneurProject) => Promise<string | null> = project => resolveGithubRepoSlug(project.path),
     scoped = false,
     globalDataPath = this.options.getGlobalDataPath(),
     isCurrentRoot: () => boolean = () => globalDataPath === this.options.getGlobalDataPath()
@@ -353,10 +211,7 @@ export class SidebarProjectLoader {
     const projectRequests = new Map(projects.map(project => [project.path, this.signalRequest('pullRequests', project.path)]));
     this.scheduleSignalQueue(projects, selectedProjectPath, 1300, 100,
       project => isCurrentRoot() && this.options.isAvailable() && requestId === this.pullRequestRequest && projectRequests.get(project.path) === this.signalRequest('pullRequests', project.path),
-      async project => {
-        const repo = await resolveRepo(project);
-        return repo === null ? undefined : loadExternalPullRequestSummary(project.path, { globalDataPath, resolvedRepo: repo });
-      },
+      project => this.loadRuntimeSignal(project.path, 'pullRequests', false, globalDataPath),
       (project, pullRequests) => this.options.postMessage({ command: 'projectPullRequestsLoaded', projectPath: project.path, pullRequests }),
       'SoloMap sidebar failed to refresh pull request summary:');
   }
@@ -364,7 +219,6 @@ export class SidebarProjectLoader {
   private scheduleDeliveryLoads(
     projects: SolopreneurProject[],
     selectedProjectPath: string,
-    resolveRepo: (project: SolopreneurProject) => Promise<string | null> = project => resolveGithubRepoSlug(project.path),
     scoped = false,
     globalDataPath = this.options.getGlobalDataPath(),
     isCurrentRoot: () => boolean = () => globalDataPath === this.options.getGlobalDataPath()
@@ -373,10 +227,7 @@ export class SidebarProjectLoader {
     const projectRequests = new Map(projects.map(project => [project.path, this.signalRequest('delivery', project.path)]));
     this.scheduleSignalQueue(projects, selectedProjectPath, 1400, 120,
       project => isCurrentRoot() && this.options.isAvailable() && requestId === this.deliveryRequest && projectRequests.get(project.path) === this.signalRequest('delivery', project.path),
-      async project => {
-        const repo = await resolveRepo(project);
-        return repo === null ? undefined : loadExternalDeliverySummary(project.path, { globalDataPath, resolvedRepo: repo });
-      },
+      project => this.loadRuntimeSignal(project.path, 'delivery', false, globalDataPath),
       (project, delivery) => this.options.postMessage({ command: 'projectDeliveryLoaded', projectPath: project.path, delivery }),
       'SoloMap sidebar failed to refresh delivery summary:');
   }
@@ -384,7 +235,6 @@ export class SidebarProjectLoader {
   private scheduleSecurityLoads(
     projects: SolopreneurProject[],
     selectedProjectPath: string,
-    resolveRepo: (project: SolopreneurProject) => Promise<string | null> = project => resolveGithubRepoSlug(project.path),
     scoped = false,
     globalDataPath = this.options.getGlobalDataPath(),
     isCurrentRoot: () => boolean = () => globalDataPath === this.options.getGlobalDataPath()
@@ -393,10 +243,7 @@ export class SidebarProjectLoader {
     const projectRequests = new Map(projects.map(project => [project.path, this.signalRequest('security', project.path)]));
     this.scheduleSignalQueue(projects, selectedProjectPath, 1600, 140,
       project => isCurrentRoot() && this.options.isAvailable() && requestId === this.securityRequest && projectRequests.get(project.path) === this.signalRequest('security', project.path),
-      async project => {
-        const repo = await resolveRepo(project);
-        return repo === null ? undefined : loadExternalSecuritySummary(project.path, { globalDataPath, resolvedRepo: repo });
-      },
+      project => this.loadRuntimeSignal(project.path, 'security', false, globalDataPath),
       (project, security) => this.options.postMessage({ command: 'projectSecurityLoaded', projectPath: project.path, security }),
       'SoloMap sidebar failed to refresh security summary:');
   }

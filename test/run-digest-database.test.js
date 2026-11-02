@@ -422,7 +422,7 @@ test('ordinary MCP reads digest evidence in full without gaining host query or f
 test('index maintenance repairs a preexisting formal digest after sources are moved and unchanged health reads no digest bodies', async () => {
   const f = await fixture(); const sourceRoot = path.join(f.project, '.solopreneur', 'run-digests'); fs.mkdirSync(sourceRoot);
   fs.writeFileSync(path.join(sourceRoot, 'one.json'), JSON.stringify(digest(30, { tokenUsage: { totalTokens: 42 }, changedFiles: Array.from({ length: 91 }, (_, i) => `file-${i}.js`) })));
-  const { getRunIndexHealth, backfillRunIndexFromDigests } = require('../out/runIndexMaintenance.js');
+  const { getRunIndexHealth } = require('../out/runIndexMaintenance.js');
   try {
     const bytes = fs.readFileSync(path.join(sourceRoot, 'one.json'));
     const source = { identity: `run-digests:${f.identity.projectId}`, key: 'one.json', hash: require('node:crypto').createHash('sha256').update(bytes).digest('hex') };
@@ -430,11 +430,13 @@ test('index maintenance repairs a preexisting formal digest after sources are mo
     f.store().importRunDigestSource(f.identity.projectId, { source, bytes });
     fs.renameSync(sourceRoot, sourceRoot + '-retained');
     const before = await getRunIndexHealth(f.project, path.resolve(__dirname, '..'), f.root); assert.equal(before.digestCount, 1); assert.equal(before.missingDigestCount, 1);
-    const after = await backfillRunIndexFromDigests(f.project, path.resolve(__dirname, '..'), f.root); assert.equal(after.backfilledCount, 1); assert.equal(after.ok, true);
+    const prepared = f.store().prepareRunIndexBackfill(f.identity.projectId, 1);
+    const backfilledCount = prepared.filter(item => f.store().commitPreparedRunIndexBackfill(f.identity.projectId, item)).length;
+    const after = { ...f.store().readRunIndexHealth(f.identity.projectId), backfilledCount }; assert.equal(after.backfilledCount, 1); assert.equal(after.ok, true);
     const entries = await f.call('read_project_run_indexes', { root: f.project }); assert.equal(entries[0].files.length, 91); assert.equal(entries[0].totalTokens, 42);
     const store = f.store(); const ids = new Set(store.rows('SELECT content_id FROM run_digests').map(row => row.content_id)); let decodes = 0; const original = store.content.bind(store);
     store.content = id => { if (ids.has(id)) decodes++; return original(id); };
-    try { for (let i = 0; i < 12; i++) assert.equal((await getRunIndexHealth(f.project, '', f.root)).ok, true); assert.equal((await backfillRunIndexFromDigests(f.project, '', f.root)).backfilledCount, 0); } finally { store.content = original; }
+    try { for (let i = 0; i < 12; i++) assert.equal((await getRunIndexHealth(f.project, '', f.root)).ok, true); assert.equal(store.prepareRunIndexBackfill(f.identity.projectId, 1).length, 0); } finally { store.content = original; }
     assert.equal(decodes, 0); assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'project_journal.db')), false);
   } finally { await f.close(); }
 });

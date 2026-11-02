@@ -91,6 +91,7 @@ test('native Pi Harness owns model retry and lets the model recover from a tool 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-pi-native-retry-'));
   t.after(() => cleanupExact(root));
   let modelCalls = 0, toolCalls = 0;
+  const durableToolResults = [];
   const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async invocation => {
     modelCalls++;
     if (modelCalls === 1) throw new Error('connection refused by temporary model transport');
@@ -106,12 +107,19 @@ test('native Pi Harness owns model retry and lets the model recover from a tool 
   const owner = database.claimPiExecutionOwner('runtime-native-retry');
   const result = await engine.chatNative({
     sessionId: 'native-retry-session', lane: 'main', operationId: 'native-retry-operation',
-    messages: [{ role: 'user', content: 'Recover safely' }], projectContext: { selectedProject: '', projects: [] }
+    messages: [{ role: 'user', content: 'Recover safely' }], projectContext: { selectedProject: '', projects: [] },
+    withToolFence: async (_invocationId, action) => {
+      const durable = await action();
+      durableToolResults.push(durable);
+      return durable;
+    }
   }, database.createPiSessionStorage('native-retry-session', owner), readTools);
   assert.equal(result.status, 'completed');
   assert.equal(result.finalAssistant, 'Recovered through the native tool lifecycle');
   assert.equal(modelCalls, 3);
   assert.equal(toolCalls, 1);
+  assert.equal(durableToolResults.length, 1);
+  assert.equal(durableToolResults[0].isError, true, 'transport errors must cross the durable tool-result fence');
   database.close();
 });
 
@@ -206,6 +214,7 @@ test('native Pi Harness preserves an MCP error payload for model recovery', asyn
   const engine = new EmbeddedPiAgentEngine({ agentCli: 'codex', runner: async invocation => {
     modelCalls++;
     if (modelCalls === 1) return JSON.stringify({ kind: 'tool_call', call: { name: 'list_projects', arguments: {} } });
+    assert.match(invocation.stdin, /"isError":true/);
     assert.match(invocation.stdin, /missing required project scope/);
     assert.match(invocation.stdin, /INVALID_ARGUMENT/);
     return JSON.stringify({ kind: 'final', content: 'Explained the tool error' });

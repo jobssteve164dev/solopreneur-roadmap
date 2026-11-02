@@ -2343,6 +2343,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
     const projectInteractionStates = new Map();
     let soloDraft = '';
     let flowDraft = '';
+    const pendingConversationDraftClears = new Map();
     const uiStateSaveTimers = new Map();
     const uiStatePendingValues = new Map();
     const uiStateLoadRevisions = new Map();
@@ -3827,10 +3828,26 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           break;
         }
         case 'conversationActionAccepted':
-          if (message.launchActionId) SoloMapWebview.acknowledgeMessage(message.launchActionId);
+          // Host acceptance is not yet a durable Runtime boundary.
           break;
+        case 'conversationActionDurable': {
+          if (message.launchActionId) SoloMapWebview.acknowledgeMessage(message.launchActionId);
+          const pending = pendingConversationDraftClears.get(message.launchActionId);
+          if (!pending) break;
+          pendingConversationDraftClears.delete(message.launchActionId);
+          clearProjectDraft(pending.projectPath, pending.targetId, pending.draft);
+          clearSubmittedAttachments(pending.targetId, pending.projectPath, pending.files);
+          if (pending.projectPath === activeProjectPath) {
+            if (pending.targetId === soloConversationId) renderSoloPanel(currentNodes, false);
+            else if (pending.targetId === flowTargetId) renderFlowPanel();
+            else if (pending.targetId === roadmapRevisionId) renderRoadmapRevisionPanel(currentNodes);
+            else renderRoadmap(currentNodes);
+          }
+          break;
+        }
         case 'conversationActionSettled':
           if (message.launchActionId) SoloMapWebview.acknowledgeMessage(message.launchActionId);
+          pendingConversationDraftClears.delete(message.launchActionId);
           break;
         case 'pastedAttachmentsAccepted':
           SoloMapWebview.acceptPastedImageAttachments(message.requestId);
@@ -4384,13 +4401,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
             const model = getSoloSelectValue(modelSelect);
             const actionProjectPath = activeProjectPath;
             queuePastedAttachmentAction(node.id, () => {
-              triggerRun(node.id, request, agentCli, model, getProjectSupplementFiles(actionProjectPath, node.id), actionProjectPath);
-              clearProjectDraft(actionProjectPath, node.id, request);
-              clearSubmittedAttachments(node.id, actionProjectPath);
-              if (actionProjectPath === activeProjectPath) {
-                saveRoadmapInteractionState();
-                renderRoadmap(currentNodes);
-              }
+              const launchActionId = 'launch-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+              const submittedFiles = getProjectSupplementFiles(actionProjectPath, node.id);
+              pendingConversationDraftClears.set(launchActionId, { projectPath: actionProjectPath,
+                targetId: node.id, draft: request, files: [...submittedFiles] });
+              triggerRun(node.id, request, agentCli, model, submittedFiles, actionProjectPath, launchActionId);
             }, () => { if (actionProjectPath === activeProjectPath) renderRoadmap(currentNodes); }, actionProjectPath);
           });
         }
@@ -4617,6 +4632,9 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           const actionProjectPath = activeProjectPath;
           queuePastedAttachmentAction(soloConversationId, () => {
             const launchActionId = 'launch-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+            const submittedFiles = getProjectSupplementFiles(actionProjectPath, soloConversationId);
+            pendingConversationDraftClears.set(launchActionId, { projectPath: actionProjectPath,
+              targetId: soloConversationId, draft: submittedDraft, files: [...submittedFiles] });
             SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
               command: 'conversation.runSolo',
               ...conversationActionEnvelope(),
@@ -4625,11 +4643,8 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
               userMessage: request,
               agentCli,
               model,
-              supplementFiles: getProjectSupplementFiles(actionProjectPath, soloConversationId)
+              supplementFiles: submittedFiles
             }, launchActionId);
-            clearProjectDraft(actionProjectPath, soloConversationId, submittedDraft);
-            clearSubmittedAttachments(soloConversationId, actionProjectPath);
-            if (actionProjectPath === activeProjectPath) renderSoloPanel(currentNodes, false);
           }, () => { if (actionProjectPath === activeProjectPath) renderSoloPanel(currentNodes); }, actionProjectPath);
         });
       }
@@ -4807,21 +4822,20 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           const model = getSoloSelectValue(modelSelect);
           const actionProjectPath = activeProjectPath;
           queuePastedAttachmentAction(flowTargetId, () => {
-            vscode.postMessage({
+            const launchActionId = 'launch-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+            const submittedFiles = getProjectSupplementFiles(actionProjectPath, flowTargetId);
+            pendingConversationDraftClears.set(launchActionId, { projectPath: actionProjectPath,
+              targetId: flowTargetId, draft: submittedDraft, files: [...submittedFiles] });
+            SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
               command: 'flow.run',
               ...conversationActionEnvelope(),
+              launchActionId,
               projectPath: actionProjectPath,
               goal,
               agentCli,
               model,
-              supplementFiles: getProjectSupplementFiles(actionProjectPath, flowTargetId)
-            });
-            clearProjectDraft(actionProjectPath, flowTargetId, submittedDraft);
-            clearSubmittedAttachments(flowTargetId, actionProjectPath);
-            if (actionProjectPath === activeProjectPath) {
-              renderFlowPanel();
-              saveRoadmapInteractionState();
-            }
+              supplementFiles: submittedFiles
+            }, launchActionId);
           }, () => { if (actionProjectPath === activeProjectPath) renderFlowPanel(); }, actionProjectPath);
         });
       }
@@ -4961,21 +4975,20 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           const model = getSoloSelectValue(modelSelect);
           const actionProjectPath = activeProjectPath;
           queuePastedAttachmentAction(roadmapRevisionId, () => {
-            vscode.postMessage({
+            const launchActionId = 'launch-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+            const submittedFiles = getProjectSupplementFiles(actionProjectPath, roadmapRevisionId);
+            pendingConversationDraftClears.set(launchActionId, { projectPath: actionProjectPath,
+              targetId: roadmapRevisionId, draft: submittedDraft, files: [...submittedFiles] });
+            SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
               command: 'conversation.runRoadmapRevision',
               ...conversationActionEnvelope(),
+              launchActionId,
               projectPath: actionProjectPath,
               userMessage: request,
               agentCli,
               model,
-              supplementFiles: getProjectSupplementFiles(actionProjectPath, roadmapRevisionId)
-            });
-            clearProjectDraft(actionProjectPath, roadmapRevisionId, submittedDraft);
-            clearSubmittedAttachments(roadmapRevisionId, actionProjectPath);
-            if (actionProjectPath === activeProjectPath) {
-              renderRoadmapRevisionPanel(currentNodes);
-              saveRoadmapInteractionState();
-            }
+              supplementFiles: submittedFiles
+            }, launchActionId);
           }, () => { if (actionProjectPath === activeProjectPath) renderRoadmapRevisionPanel(currentNodes); }, actionProjectPath);
         });
       }
@@ -5562,9 +5575,11 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       return true;
     }
 
-    function clearSubmittedAttachments(nodeId, projectPath = activeProjectPath) {
+    function clearSubmittedAttachments(nodeId, projectPath = activeProjectPath, submittedFiles) {
       const attachmentKey = pastedAttachmentKey(nodeId, projectPath);
       if (pendingPastedAttachments[attachmentKey] && pendingPastedAttachments[attachmentKey].size > 0) return false;
+      if (Array.isArray(submittedFiles)
+        && JSON.stringify(getProjectSupplementFiles(projectPath, nodeId)) !== JSON.stringify(submittedFiles)) return false;
       delete queuedPastedAttachmentActions[attachmentKey];
       delete pastedAttachmentErrors[attachmentKey];
       pastedAttachmentEpochs[attachmentKey] = Number(pastedAttachmentEpochs[attachmentKey] || 0) + 1;
@@ -5662,17 +5677,22 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
       return String(value).replace(/"/g, '\\"');
     }
 
-    function triggerRun(nodeId, userMessage, agentCli, model, supplementFiles, projectPath = activeProjectPath) {
-      vscode.postMessage({
+    function triggerRun(nodeId, userMessage, agentCli, model, supplementFiles, projectPath = activeProjectPath, launchActionId) {
+      const actionId = launchActionId || 'launch-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+      if (!pendingConversationDraftClears.has(actionId)) pendingConversationDraftClears.set(actionId, {
+        projectPath, targetId: nodeId, draft: userMessage || '', files: [...(supplementFiles || [])]
+      });
+      SoloMapWebview.postAcknowledgedMessage(message => vscode.postMessage(message), {
         command: 'conversation.runStep',
         ...conversationActionEnvelope(),
+        launchActionId: actionId,
         projectPath,
         nodeId: nodeId,
         userMessage: userMessage || '',
         agentCli: agentCli || '',
         model: model || '',
         supplementFiles: supplementFiles || []
-      });
+      }, actionId);
     }
     vscode.postMessage({ command: 'automationSoundReady', pageId: automationSoundPageId });
   </script>

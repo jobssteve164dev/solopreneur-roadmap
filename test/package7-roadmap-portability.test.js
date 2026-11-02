@@ -735,6 +735,66 @@ test('project export pins its physical parent when the requested path is replace
   assert.equal(fs.existsSync(path.join(moved, 'project.json')), false);
 });
 
+test('project export yields the Write Actor between prepared archive batches before committing its receipt', async t => {
+  const { prepareContentForStorage } = require('../out/db/unifiedDataStore.js');
+  const f = fixture(t), accepted = await f.call('accept_roadmap_csv', { root: f.project });
+  const destination = path.join(f.dataRoot, 'exports', 'interleaved.json');
+  const envelope = crypto.randomBytes(4 * 1024 * 1024 + 17);
+  let statusAtForeground = 'not-run';
+  f.store.setMaintenanceCompute({
+    async digestFile(file) {
+      if (!fs.existsSync(file)) { const error = new Error('missing'); error.code = 'ENOENT'; throw error; }
+      const bytes = fs.readFileSync(file);
+      return { sha256: crypto.createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length };
+    },
+    async canonicalize(value) { return canonicalJson(value); },
+    async inspectBackup() { throw new Error('unused'); },
+    async restoreBackup() { throw new Error('unused'); },
+    async prepareProjectImport() { throw new Error('unused'); },
+    async validateProjectImport() {},
+    async verifyProjectExportContent(contentId, sha256, bytes) {
+      const value = f.store.readContentForMaintenance(contentId);
+      assert.equal(value.length, bytes); assert.equal(crypto.createHash('sha256').update(value).digest('hex'), sha256);
+    },
+    async cleanupProjectExportStage(stageDirectory) {
+      const chunks = path.join(stageDirectory, 'chunks');
+      for (const name of fs.readdirSync(chunks)) fs.unlinkSync(path.join(chunks, name));
+      fs.rmdirSync(chunks); fs.unlinkSync(path.join(stageDirectory, 'archive.stage')); fs.rmdirSync(stageDirectory);
+    },
+    async stageProjectExport() {
+      setImmediate(() => {
+        statusAtForeground = String(f.store.rows("SELECT status FROM requests WHERE idempotency_key='project-export:interleaved-export'")[0]?.status || 'absent');
+        f.store.appendDiagnosticEvent({ kind: 'operation', occurredAt: new Date().toISOString(), scope: 'export-interleave', payload: {}, idempotencyKey: 'export-interleave' });
+      });
+      const sha256 = crypto.createHash('sha256').update(envelope).digest('hex');
+      const directory = path.join(f.dataRoot, '.solomap-maintenance-staging');
+      fs.mkdirSync(directory, { recursive: true });
+      const stageDirectory = path.join(directory, `project-export-${crypto.randomUUID()}`);
+      fs.mkdirSync(stageDirectory);
+      const stagedPath = path.join(stageDirectory, 'archive.stage');
+      fs.writeFileSync(stagedPath, envelope);
+      const prepared = prepareContentForStorage(envelope, 'application/vnd.solomap.project+json', 'binary');
+      const chunksDirectory = path.join(stageDirectory, 'chunks');
+      fs.mkdirSync(chunksDirectory, { recursive: true });
+      const chunks = prepared.chunks.map(chunk => {
+        const file = path.join(chunksDirectory, `${String(chunk.ordinal).padStart(8, '0')}.chunk`);
+        fs.writeFileSync(file, chunk.data);
+        return { ordinal: chunk.ordinal, file, bytes: chunk.data.length, sha256: crypto.createHash('sha256').update(chunk.data).digest('hex') };
+      });
+      const contentManifestPath = path.join(chunksDirectory, 'manifest.json');
+      const manifest = Buffer.from(JSON.stringify({ ...prepared, data: Buffer.from(prepared.data).toString('base64'), chunks }));
+      fs.writeFileSync(contentManifestPath, manifest);
+      return { projectId: accepted.projectId, path: stagedPath, sha256, bytes: envelope.length, tableCount: 1, contentManifestPath,
+        manifestSha256: crypto.createHash('sha256').update(manifest).digest('hex'), stageDirectory };
+    }
+  });
+  const result = await f.store.exportProject({ root: f.project, destination, idempotencyKey: 'interleaved-export' });
+  assert.equal(statusAtForeground, 'absent', 'foreground writes must run before the archive receipt becomes committed');
+  assert.equal(result.bytes, envelope.length);
+  assert.deepEqual(fs.readFileSync(destination), envelope);
+  assert.equal(f.store.rows("SELECT COUNT(*) AS count FROM diagnostic_events WHERE scope='export-interleave'")[0].count, 1);
+});
+
 test('a single-project archive restores complete revisions, relations and large bytes without secrets or foreign project data', async t => {
   const f = fixture(t);
   const accepted = await f.call('accept_roadmap_csv', { root: f.project });
@@ -903,7 +963,7 @@ test('project import deduplicates matching small and chunked content without col
   assert.equal(target.rows("SELECT COUNT(*) AS count FROM outbox WHERE channel='file_export' AND state='pending'")[0].count, 1);
 });
 
-test('project import resumes exact crash residue but cleans a caught pre-transaction failure', async t => {
+test('project import resumes exact crash residue and keeps a guarded durable stage across a batch interruption', async t => {
   const f = fixture(t), accepted = await f.call('accept_roadmap_csv', { root: f.project });
   const archive = path.join(f.dataRoot, 'exports', 'resumable.json');
   await f.call('export_project', { root: f.project, destination: archive, idempotencyKey: 'resumable-export' });
@@ -923,10 +983,14 @@ test('project import resumes exact crash residue but cleans a caught pre-transac
   let fail = true;
   retryStore.db.run = (sql, values) => { if (fail && sql === 'PRAGMA foreign_keys=OFF') { fail = false; throw new Error('injected_import_begin_failure'); } return run(sql, values); };
   await assert.rejects(retryStore.importProject({ source: archive, root: retryRoot, idempotencyKey: 'retry-import' }), /injected_import_begin_failure/);
-  assert.equal(fs.existsSync(path.join(retryRoot, '.solopreneur', 'project.json')), false);
-  assert.equal(fs.existsSync(path.join(retryRoot, '.solopreneur', 'roadmap.csv')), false);
+  assert.equal(fs.existsSync(path.join(retryRoot, '.solopreneur', 'project.json')), true);
+  assert.equal(fs.existsSync(path.join(retryRoot, '.solopreneur', 'roadmap.csv')), true);
+  assert.equal(retryStore.rows('SELECT status FROM project_import_staging WHERE project_id=?', [accepted.projectId])[0].status, 'preparing');
+  await assert.rejects(retryStore.registerProject({ root: retryRoot }), /project_import_in_progress/,
+    'a partially imported identity must remain undiscoverable until the final activation transaction');
   retryStore.db.run = run;
   assert.equal((await retryStore.importProject({ source: archive, root: retryRoot, idempotencyKey: 'retry-import' })).projectId, accepted.projectId);
+  assert.equal(retryStore.rows('SELECT COUNT(*) AS count FROM project_import_staging')[0].count, 0);
 });
 
 test('project import resumes either single matching crash file only for its durable pending request', async t => {

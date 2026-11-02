@@ -52,6 +52,107 @@ test('only fully migrated unchanged files enter an exact approved recycling plan
   } finally { await f.operations.close(); f.store.close(); }
 });
 
+test('production Runtime restores recycled bytes through Maintenance Compute and commits only durable status on Writer', async () => {
+  const { RuntimeDataExecutionDomains } = require('../out/runtimeDataExecutionDomains.js');
+  const f = fixture(); let domains;
+  try {
+    await importLegacyIntelligenceConversation(f.store, f.file);
+    const plan = await f.call('prepare_recycling');
+    await f.call('confirm_recycling', { planId: plan.planId });
+    const held = await f.call('hold_recycling_file', { itemId: plan.files[0].itemId });
+    fs.renameSync(held.path, path.join(f.root, 'fixture-runtime-trash.json'));
+    await f.call('finish_recycling_file', { itemId: plan.files[0].itemId });
+    const databaseId = f.store.databaseId;
+    await f.operations.close(); f.store.close();
+    domains = await RuntimeDataExecutionDomains.start({ root: f.root, databaseId });
+    const restored = await domains.dispatch({ operation: 'restore_recycling_file', input: { itemId: plan.files[0].itemId } });
+    assert.deepEqual(restored, { restored: true, path: f.file });
+    assert.equal(fs.readFileSync(f.file, 'utf8'), f.original);
+  } finally {
+    if (domains) await domains.close();
+    else { await f.operations.close().catch(() => undefined); try { f.store.close(); } catch {} }
+  }
+});
+
+test('Maintenance restore stays restoring until cleanup settles and retries the exact held source', async () => {
+  const crypto = require('node:crypto');
+  const f = fixture();
+  try {
+    await importLegacyIntelligenceConversation(f.store, f.file);
+    const plan = await f.call('prepare_recycling');
+    await f.call('confirm_recycling', { planId: plan.planId });
+    const held = await f.call('hold_recycling_file', { itemId: plan.files[0].itemId });
+    const receiptPath = path.join(f.root, '.migration-recycle', `${plan.files[0].itemId}.restore-maintenance`);
+    let restores = 0, cleanupAttempts = 0, retriedCleanup;
+    f.store.setMaintenanceCompute({
+      digestFile: async () => { throw new Error('unused'); }, canonicalize: async () => { throw new Error('unused'); },
+      inspectBackup: async () => { throw new Error('unused'); }, restoreBackup: async () => { throw new Error('unused'); },
+      prepareProjectImport: async () => { throw new Error('unused'); }, stageProjectExport: async () => { throw new Error('unused'); },
+      verifyProjectExportContent: async () => { throw new Error('unused'); }, cleanupProjectExportStage: async () => { throw new Error('unused'); },
+      validateProjectImport: async () => { throw new Error('unused'); },
+      restoreRecyclingFile: async input => {
+        restores += 1; const bytes = fs.readFileSync(held.path); const stat = fs.lstatSync(held.path);
+        fs.copyFileSync(held.path, receiptPath); fs.linkSync(receiptPath, input.destination);
+        return { path: input.destination, receiptPath, sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+          bytes: bytes.length, sourceDevice: stat.dev, sourceInode: stat.ino };
+      },
+      cleanupRecyclingRestore: async input => {
+        cleanupAttempts += 1;
+        if (cleanupAttempts === 1) throw new Error('fixture_cleanup_crash');
+        retriedCleanup = input;
+        fs.unlinkSync(input.receiptPath); fs.unlinkSync(input.heldPath);
+      }
+    });
+    await assert.rejects(f.call('restore_recycling_file', { itemId: plan.files[0].itemId }), /fixture_cleanup_crash/);
+    assert.equal(f.store.recyclingItem(plan.files[0].itemId).status, 'restoring');
+    assert.equal(fs.existsSync(held.path), true);
+    const pendingOverview = await f.call('migration_overview');
+    assert.ok(pendingOverview.recycling.some(item => item.itemId === plan.files[0].itemId),
+      'durable maintenance cleanup must remain visible through the normal recovery overview');
+    await f.call('restore_recycling_file', { itemId: plan.files[0].itemId });
+    assert.equal(restores, 1, 'retry must finish the durable cleanup receipt without republishing bytes');
+    assert.equal(retriedCleanup.heldPath, held.path);
+    assert.equal(fs.existsSync(held.path), false);
+    assert.equal(f.store.maintenanceRecyclingRestoreCleanup(plan.files[0].itemId), null);
+    assert.equal(f.store.recyclingItem(plan.files[0].itemId).status, 'restored');
+    assert.equal(fs.readFileSync(f.file, 'utf8'), f.original);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
+test('local restore retry settles an already published file after held-copy cleanup fails', async () => {
+  const { MigrationRecycling } = require('../out/migrationRecycling.js');
+  const f = fixture();
+  try {
+    await importLegacyIntelligenceConversation(f.store, f.file);
+    const recycling = new MigrationRecycling(f.store);
+    const plan = await recycling.prepare();
+    recycling.confirm(plan.planId);
+    const held = await recycling.hold(plan.files[0].itemId);
+    const unlink = fs.promises.unlink;
+    let interrupted = false;
+    fs.promises.unlink = async file => {
+      if (!interrupted && file === held.path) {
+        interrupted = true;
+        throw new Error('fixture_held_cleanup_failure');
+      }
+      return unlink(file);
+    };
+    let first;
+    try { first = await recycling.restore(plan.files[0].itemId); }
+    finally { fs.promises.unlink = unlink; }
+    assert.equal(first.retainedCopy, held.path);
+    assert.equal(f.store.recyclingItem(plan.files[0].itemId).status, 'restoring');
+    assert.equal(fs.readFileSync(f.file, 'utf8'), f.original);
+    assert.equal(fs.existsSync(held.path), true);
+
+    const retried = await recycling.restore(plan.files[0].itemId);
+    assert.deepEqual(retried, { restored: true, path: f.file });
+    assert.equal(f.store.recyclingItem(plan.files[0].itemId).status, 'restored');
+    assert.equal(fs.existsSync(held.path), false);
+    assert.equal(fs.readFileSync(f.file, 'utf8'), f.original);
+  } finally { await f.operations.close(); f.store.close(); }
+});
+
 test('recycling a migrated project artifact prunes its now-empty legacy directory chain', async () => {
   const f = fixture();
   const projectRoot = path.join(path.dirname(f.root), 'project-with-retired-coverage');
@@ -380,6 +481,29 @@ test('migration overview stays small with populated history while job detail ret
     if (restarted) restarted.close();
     else { await f.operations.close(); f.store.close(); }
   }
+});
+
+test('migration overview bounds global task and recycling history with explicit continuation offsets', async () => {
+  const { MigrationRecycling } = require('../out/migrationRecycling.js');
+  const jobs = Array.from({ length: 250 }, (_, index) => ({ jobId: `job-${index}`, args: {}, status: 'completed', progress: {}, error: null }));
+  const recycling = Array.from({ length: 350 }, (_, index) => ({
+    itemId: `item-${index}`, planId: `plan-${index}`, identity: `memory:/fixture-${index}`, key: `${index}.md`,
+    hash: 'a'.repeat(64), path: `/fixture/${index}.md`, restorePath: null, restoredHash: null,
+    bytes: index, status: 'trashed', error: null
+  }));
+  const overview = await new MigrationRecycling({
+    root: '/fixture', migrationJobSummaries: () => jobs, recyclingItems: () => recycling,
+    migrationSourceOverview: () => ({ capturedFiles: 350, migratedFiles: 350, reviewableFiles: 0 }),
+    recyclingRestoreConflicts: () => []
+  }).overview();
+  assert.equal(overview.jobs.length, 100);
+  assert.equal(overview.jobsTotal, 250);
+  assert.equal(overview.nextJobOffset, 100);
+  assert.equal(overview.recycling.length, 100);
+  assert.equal(overview.recyclingTotal, 350);
+  assert.equal(overview.nextRecyclingOffset, 100);
+  assert.equal(overview.recycling[0].itemId, 'item-349', 'routine status starts with the newest user-visible history');
+  assert.ok(Buffer.byteLength(JSON.stringify(overview)) < 100000);
 });
 
 test('migration overview shows only the newest job for each exact collection and source', async () => {

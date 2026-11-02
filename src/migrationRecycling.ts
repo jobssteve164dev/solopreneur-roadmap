@@ -251,13 +251,15 @@ export class MigrationRecycling {
       await sourceDirectory.handle.close().catch(() => undefined);
     }
   }
-  private async verifiedFileRecord(file: string, expectedHash: string, source?: Pick<RecyclingItem, 'identity' | 'key'>, projects?: RegisteredProjectScope[]): Promise<VerifiedSource> {
+  private async verifiedFileRecord(file: string, expectedHash: string, source?: Pick<RecyclingItem, 'identity' | 'key'>, projects?: RegisteredProjectScope[], loadBytes = false): Promise<VerifiedSource> {
     if (!this.allowedPath(file, source, projects)) throw new Error('recycling_path_invalid');
     const before = await fs.promises.lstat(file);
     if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) throw new Error('recycling_path_invalid');
-    const bytes = await fs.promises.readFile(file);
+    const inspected = loadBytes ? null : await this.store.digestMaintenanceFile(file);
+    const bytes = loadBytes ? await fs.promises.readFile(file) : Buffer.alloc(0);
     const after = await fs.promises.lstat(file);
-    if (!after.isFile() || after.isSymbolicLink() || before.dev !== after.dev || before.ino !== after.ino || before.mtimeMs !== after.mtimeMs || before.size !== after.size || hash(bytes) !== expectedHash) throw new Error('recycling_source_changed');
+    if (!after.isFile() || after.isSymbolicLink() || before.dev !== after.dev || before.ino !== after.ino || before.mtimeMs !== after.mtimeMs || before.size !== after.size
+      || (loadBytes ? hash(bytes) !== expectedHash : inspected!.sha256 !== expectedHash || inspected!.bytes !== before.size)) throw new Error('recycling_source_changed');
     return { bytes, stat: after, symbolicLink: false };
   }
   private async verifiedFile(file: string, expectedHash: string, source?: Pick<RecyclingItem, 'identity' | 'key'>, projects?: RegisteredProjectScope[]): Promise<Buffer> {
@@ -267,7 +269,7 @@ export class MigrationRecycling {
     return (source.kind ?? this.store.migrationSourceKind(source.identity, source.key)) === 'symlink';
   }
   private async verifiedSourceRecord(file: string, expectedHash: string, source: CandidateSource, projects?: RegisteredProjectScope[]): Promise<VerifiedSource> {
-    if (!this.symbolicLinkSource(source)) return this.verifiedFileRecord(file, expectedHash, source, projects);
+    if (!this.symbolicLinkSource(source)) return this.verifiedFileRecord(file, expectedHash, source, projects, source.identity.startsWith('intelligence:'));
     if (!this.allowedPath(file, source, projects)) throw new Error('recycling_path_invalid');
     const before = await fs.promises.lstat(file);
     if (!before.isSymbolicLink()) throw new Error('recycling_path_invalid');
@@ -291,22 +293,8 @@ export class MigrationRecycling {
     if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) throw new Error('recycling_path_invalid');
     const previous = this.fileChecks.get(file);
     if (previous?.hash === expectedHash && previous.device === stat.dev && previous.inode === stat.ino && previous.size === stat.size && previous.mtime === stat.mtimeMs && previous.ctime === stat.ctimeMs) return stat.size;
-    const digest = crypto.createHash('sha256');
-    const buffer = Buffer.allocUnsafe(1024 * 1024);
-    const handle = await fs.promises.open(file, 'r');
-    try {
-      const opened = await handle.stat();
-      if (!opened.isFile() || opened.dev !== stat.dev || opened.ino !== stat.ino || opened.size !== stat.size || opened.mtimeMs !== stat.mtimeMs || opened.ctimeMs !== stat.ctimeMs) throw new Error('recycling_source_changed');
-      let position = 0;
-      while (position < opened.size) {
-        const { bytesRead } = await handle.read(buffer, 0, Math.min(buffer.length, opened.size - position), position);
-        if (!bytesRead) throw new Error('recycling_source_changed');
-        digest.update(buffer.subarray(0, bytesRead));
-        position += bytesRead;
-      }
-      const closedOver = await handle.stat();
-      if (closedOver.dev !== opened.dev || closedOver.ino !== opened.ino || closedOver.size !== opened.size || closedOver.mtimeMs !== opened.mtimeMs || closedOver.ctimeMs !== opened.ctimeMs || digest.digest('hex') !== expectedHash) throw new Error('recycling_source_changed');
-    } finally { await handle.close(); }
+    const inspected = await this.store.digestMaintenanceFile(file);
+    if (inspected.bytes !== stat.size || inspected.sha256 !== expectedHash) throw new Error('recycling_source_changed');
     const after = await fs.promises.lstat(file);
     if (!after.isFile() || after.isSymbolicLink() || after.nlink !== 1 || stat.dev !== after.dev || stat.ino !== after.ino || stat.mtimeMs !== after.mtimeMs || stat.ctimeMs !== after.ctimeMs || stat.size !== after.size) throw new Error('recycling_source_changed');
     this.fileChecks.set(file, { hash: expectedHash, device: after.dev, inode: after.ino, size: after.size, mtime: after.mtimeMs, ctime: after.ctimeMs });
@@ -428,8 +416,13 @@ export class MigrationRecycling {
     }
     return files;
   }
-  public async overview(scope?: MigrationProjectScope) {
-    const jobs = this.store.migrationJobSummaries().filter(job => !scope || this.jobBelongsToProject(job, scope));
+  public async overview(scope?: MigrationProjectScope, page: { jobOffset?: number; jobLimit?: number; recyclingOffset?: number; recyclingLimit?: number } = {}) {
+    const jobOffset = Math.max(0, Math.floor(Number(page.jobOffset) || 0));
+    const jobLimit = Math.max(1, Math.min(200, Math.floor(Number(page.jobLimit) || 100)));
+    const recyclingOffset = Math.max(0, Math.floor(Number(page.recyclingOffset) || 0));
+    const recyclingLimit = Math.max(1, Math.min(200, Math.floor(Number(page.recyclingLimit) || 100)));
+    const allJobs = this.store.migrationJobSummaries().filter(job => !scope || this.jobBelongsToProject(job, scope));
+    const jobs = allJobs.slice(jobOffset, jobOffset + jobLimit);
     const allRecycling = this.store.recyclingItems().filter(item => this.belongsToProject(item.identity, scope));
     const intelligenceIdentity = `intelligence:${path.join(this.store.root, 'intelligence-conversations')}`;
     const sourceOverview = this.store.migrationSourceOverview(intelligenceIdentity, scope ? this.sourceIdentities(scope) : undefined);
@@ -437,16 +430,25 @@ export class MigrationRecycling {
     for (const item of allRecycling) {
       if (item.status === 'prepared') continue;
       if (item.status === 'restored') {
+        if (this.store.maintenanceRecyclingRestoreCleanup(item.itemId)) {
+          recycling.push(item);
+          continue;
+        }
         try { await fs.promises.lstat(path.join(this.store.root, '.migration-recycle', item.itemId + '.restore')); }
         catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !this.store.recyclingRestoreStage(item.itemId)) continue; if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
       }
       recycling.push(item);
     }
-    return { jobs, ...sourceOverview,
+    const orderedRecycling = recycling.slice().reverse();
+    return { jobs, jobsTotal: allJobs.length,
+      nextJobOffset: jobOffset + jobs.length < allJobs.length ? jobOffset + jobs.length : null,
+      ...sourceOverview,
       recyclableFiles: 0, recyclableBytes: 0,
       recycledFiles: recycling.filter(item => item.status === 'trashed').length,
       heldFiles: recycling.filter(item => ['moving', 'held'].includes(item.status)).length,
-      recycling: recycling.map(({ identity, key, hash: _hash, ...item }) => item),
+      recyclingTotal: orderedRecycling.length,
+      nextRecyclingOffset: recyclingOffset + recyclingLimit < orderedRecycling.length ? recyclingOffset + recyclingLimit : null,
+      recycling: orderedRecycling.slice(recyclingOffset, recyclingOffset + recyclingLimit).map(({ identity, key, hash: _hash, ...item }) => item),
       recoveryConflicts: this.store.recyclingRestoreConflicts().filter(conflict => allRecycling.some(item => item.itemId === conflict.itemId)) };
   }
   public jobBelongsToProject(job: { args: Record<string, unknown> }, scope: MigrationProjectScope): boolean {
@@ -566,7 +568,10 @@ export class MigrationRecycling {
       await fs.promises.unlink(this.heldPath(item));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        this.store.setRecyclingStatus(item.itemId, 'changed', 'restored_with_retained_copy');
+        // The destination is already linked to our private receipt. Keep the
+        // durable restoring state so a retry revalidates that exact inode and
+        // finishes cleanup instead of trying to publish over its own target.
+        this.store.setRecyclingStatus(item.itemId, 'restoring', 'restoring_with_retained_symlink');
         return { restored: true, path: item.path, retainedCopy: this.heldPath(item) };
       }
     }
@@ -717,7 +722,7 @@ export class MigrationRecycling {
         try {
           this.assertReconciled(item);
           if (!(await fs.promises.lstat(this.store.filePath)).isFile()) throw new Error('database_restore_required');
-          if (this.store.recyclingSnapshot(item.itemId).hash !== item.hash) throw new Error('recycling_snapshot_changed');
+          if (this.store.recyclingSnapshotMetadata(item.itemId).hash !== item.hash) throw new Error('recycling_snapshot_changed');
           try {
             await this.verifiedSource(this.heldPath(item), item.hash, item);
             this.assertReconciled(item);
@@ -798,7 +803,7 @@ export class MigrationRecycling {
       // The immutable committed snapshot is the recovery authority, including when
       // an editor host has no usable operating-system trash implementation.
       if (!(await fs.promises.lstat(this.store.filePath)).isFile()) throw new Error('database_restore_required');
-      if (this.store.recyclingSnapshot(itemId).hash !== item.hash) throw new Error('recycling_snapshot_changed');
+      if (this.store.recyclingSnapshotMetadata(itemId).hash !== item.hash) throw new Error('recycling_snapshot_changed');
       try {
         await this.verifiedSource(this.heldPath(item), item.hash, item);
         this.assertReconciled(item);
@@ -833,6 +838,38 @@ export class MigrationRecycling {
       }
       const item = this.item(itemId);
       if (item.status === 'prepared' || item.status === 'approved') throw new Error('recycling_state_invalid');
+      const pendingMaintenanceCleanup = this.store.maintenanceRecyclingRestoreCleanup(itemId);
+      if (['restoring', 'restored'].includes(item.status) && pendingMaintenanceCleanup) {
+        await this.store.cleanupRecyclingRestoreInMaintenance({ itemId, destination: pendingMaintenanceCleanup.destination,
+          receiptPath: pendingMaintenanceCleanup.receiptPath, ...(pendingMaintenanceCleanup.heldPath ? { heldPath: pendingMaintenanceCleanup.heldPath } : {}),
+          ...(this.symbolicLinkSource(item) ? { symbolicLink: true } : {}), expectedHash: pendingMaintenanceCleanup.restoredHash,
+          ...(pendingMaintenanceCleanup.sourceDevice !== undefined ? { sourceDevice: pendingMaintenanceCleanup.sourceDevice, sourceInode: pendingMaintenanceCleanup.sourceInode } : {}) });
+        this.store.settleMaintenanceRecyclingRestoreCleanup(itemId);
+        return { restored: true, path: pendingMaintenanceCleanup.destination };
+      }
+      const maintenanceRestore = this.store.restoreRecyclingFileInMaintenance({
+        itemId, destination: item.path, expectedHash: item.status === 'changed' ? '' : item.restoredHash || item.hash,
+        ...(item.status === 'changed' && fs.existsSync(this.heldPath(item)) ? { sourcePath: this.heldPath(item) } : {}),
+        ...(this.symbolicLinkSource(item) ? { symbolicLink: true } : {}), ...(item.status === 'restored' ? { alreadyRestored: true } : {})
+      });
+      if (maintenanceRestore) {
+        const restored = await maintenanceRestore;
+        if (item.status === 'restored') {
+          if (restored.receiptPath) await this.store.cleanupRecyclingRestoreInMaintenance({ itemId, destination: restored.path,
+            receiptPath: restored.receiptPath, ...(this.symbolicLinkSource(item) ? { symbolicLink: true } : {}), expectedHash: restored.sha256 });
+          return { restored: true, path: restored.path };
+        }
+        const heldPath = ['moving', 'held', 'changed'].includes(item.status) ? this.heldPath(item) : undefined;
+        this.store.commitMaintenanceRecyclingRestore(itemId, { destination: restored.path, receiptPath: restored.receiptPath,
+          ...(heldPath ? { heldPath } : {}), restoredHash: restored.sha256,
+          ...(restored.sourceDevice !== undefined ? { sourceDevice: restored.sourceDevice, sourceInode: restored.sourceInode } : {}) });
+        await this.store.cleanupRecyclingRestoreInMaintenance({ itemId, destination: restored.path, receiptPath: restored.receiptPath,
+          ...(heldPath ? { heldPath } : {}),
+          ...(this.symbolicLinkSource(item) ? { symbolicLink: true } : {}), expectedHash: restored.sha256,
+          ...(restored.sourceDevice !== undefined ? { sourceDevice: restored.sourceDevice, sourceInode: restored.sourceInode } : {}) });
+        this.store.settleMaintenanceRecyclingRestoreCleanup(itemId);
+        return { restored: true, path: restored.path };
+      }
       const source = this.store.recyclingSnapshot(itemId);
       if (source.hash !== item.hash) throw new Error('recycling_snapshot_changed');
       if (item.status === 'restored') {
@@ -868,7 +905,8 @@ export class MigrationRecycling {
         }
       }
       let bytes = source.bytes;
-      let restoreAsSymbolicLink = this.symbolicLinkSource(item);
+      let restoreAsSymbolicLink = this.symbolicLinkSource(item)
+        || item.status === 'restoring' && item.error === 'restoring_with_retained_symlink';
       // Preserve a late edit found in the held copy, if the move raced with an editor.
       if (item.status === 'changed') {
         try {
@@ -935,7 +973,9 @@ export class MigrationRecycling {
         await fs.promises.unlink(this.heldPath(item));
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-          this.store.setRecyclingStatus(itemId, 'changed', 'restored_with_retained_copy');
+          // Publication succeeded and the receipt still proves ownership.
+          // Retain that recoverable state so retry only completes cleanup.
+          this.store.setRecyclingStatus(itemId, 'restoring', 'restoring_with_retained_copy');
           return { restored: true, path: item.path, retainedCopy: this.heldPath(item) };
         }
       }

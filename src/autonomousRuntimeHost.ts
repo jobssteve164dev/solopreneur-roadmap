@@ -130,18 +130,18 @@ function runtimeHasActiveDataLease(globalDataPath: string, runtimeId: string, en
     const exactRequestedBuild = endpointEntryPath === path.resolve(entryPath)
       && endpoint.buildId === buildId
       && endpoint.releaseVersion === releaseVersion;
-    const validNewerBuild = preserveNewerRelease
+    const validCompatibleBuild = preserveNewerRelease
       && path.basename(endpointEntryPath) === 'autonomousRuntimeProcess.js'
       && path.basename(path.dirname(endpointEntryPath)) === 'out'
       && typeof endpoint.buildId === 'string'
       && endpoint.buildId.length > 0
-      && isStrictlyNewerRuntimeRelease(endpoint.releaseVersion, releaseVersion);
+      && (endpoint.releaseVersion === releaseVersion || isStrictlyNewerRuntimeRelease(endpoint.releaseVersion, releaseVersion));
     return endpoint.schemaVersion === 1
       && endpoint.runtimeId === runtimeId
       && endpoint.host === '127.0.0.1'
       && Number.isInteger(endpoint.port) && Number(endpoint.port) > 0
       && typeof endpoint.token === 'string' && endpoint.token.length >= 32
-      && (exactRequestedBuild || validNewerBuild)
+      && (exactRequestedBuild || validCompatibleBuild)
       && lease.schemaVersion === 1
       && lease.runtimeId === runtimeId
       && leaseEntryPath === endpointEntryPath
@@ -288,7 +288,8 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
       }
       // A packaged Runtime can be temporarily unable to answer health while a
       // synchronous SQLite request owns its event loop. Preserve the exact
-      // build or a strictly newer build while its accepted-work lease is
+      // release (including a same-version replacement build) or a strictly
+      // newer release while its accepted-work lease is
       // bounded; an expired lease still follows stale-owner recovery below.
       if (releaseVersion && runtimeHasActiveDataLease(globalDataPath, current.runtimeId, entryPath, buildId, releaseVersion, true)) {
         return { started: false, pid: current.pid, runtimeId: current.runtimeId };
@@ -302,25 +303,14 @@ async function ensureHealthyAutonomousRuntimeOnce(options: RuntimeHostOptions): 
       if (isStrictlyNewerRuntimeRelease(health.releaseVersion, releaseVersion)) {
         return { started: false, pid: current.pid, runtimeId: current.runtimeId };
       }
-      const drainingEntryPath = registeredRuntimeEntryPath(globalDataPath, current.runtimeId);
       try {
         await (options.sendControl || ((command, expectedRuntimeId, replacementBuildId, replacementVersion) => sendRuntimeControlCommand(globalDataPath, command, { expectedRuntimeId, replacementBuildId, replacementVersion })))('drain', current.runtimeId, buildId, releaseVersion);
       } catch (error) {
         if (error instanceof Error && error.message === 'different_runtime') throw error;
         throw new Error('control_unavailable');
       }
-      const deadline = Date.now() + (options.drainTimeoutMs ?? 30_000);
-      while (Date.now() < deadline) {
-        if (!isOwnerAlive(current.pid, current.processBirth || '')) break;
+      while (isOwnerAlive(current.pid, current.processBirth || '')) {
         await new Promise(resolve => setTimeout(resolve, 50));
-      }
-      if (isOwnerAlive(current.pid, current.processBirth || '')) {
-        const verified = options.verifyRuntimeProcess
-          ? options.verifyRuntimeProcess(current.pid, current.runtimeId, globalDataPath)
-          : verifiedDrainedRuntimeProcess(current, globalDataPath, drainingEntryPath);
-        if (!verified) throw new Error('runtime_drain_timeout');
-        await (options.terminateProcess || terminateVerifiedRuntimeProcess)(current.pid);
-        if (isOwnerAlive(current.pid, current.processBirth || '')) throw new Error('runtime_termination_failed');
       }
     }
   }

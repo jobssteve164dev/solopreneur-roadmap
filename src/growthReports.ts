@@ -1,7 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { execFileSync } from 'child_process';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl.js';
 import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost.js';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry.js';
@@ -113,10 +112,84 @@ export interface GrowthReportQuery { taskId?: string; offset?: number; limit?: n
 export interface GrowthReportPage { projectPath: string; tasks: any[]; turns: any[]; total: number; nextOffset: number | null }
 const queries = new Map<string, Promise<GrowthReportPage>>();
 
-export async function readRegisteredProjectSources(projectPath: string, extensionPath: string, globalDataPath = ''): Promise<ReturnType<typeof readRegisteredTaskSources>> {
+async function readReportVersionBody(globalDataPath: string, projectPath: string, ref: { objectId: string; revision: number }): Promise<any> {
+  const chunks: Buffer[] = []; let offset = 0, key = '';
+  for (;;) {
+    const page = await sendRuntimeDataRequest<{ key: string; data: string; offset: number; totalBytes: number; nextOffset: number | null }>(globalDataPath, {
+      operation: 'read_report_versions', input: { root: projectPath, ref, offset, limit: 65536 }
+    });
+    if (!page || page.offset !== offset || key && page.key !== key) throw new Error('report_version_page_invalid');
+    key = page.key; const bytes = Buffer.from(page.data, 'base64'); chunks.push(bytes);
+    if (page.nextOffset === null) return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (!Number.isInteger(page.nextOffset) || page.nextOffset <= offset) throw new Error('report_version_page_invalid');
+    offset = page.nextOffset;
+  }
+}
+
+async function readRegisteredReportSourcePages(globalDataPath: string, input: Record<string, unknown>): Promise<any> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let sourceRevision: number | undefined, changed = false;
+    const merged = { tasks: [] as any[], reports: [] as any[], observations: [] as any[], runFiles: [] as any[], sourceRevision: 0 };
+    const executions: any[] = [];
+    const sections = input.metadataOnly === true ? ['tasks', 'executions', 'observations', 'runFiles'] : ['tasks', 'executions', 'observations', 'reports', 'runFiles'];
+    for (const section of sections) {
+      let cursor = 0;
+      for (;;) {
+        const page = await sendRuntimeDataRequest<any>(globalDataPath, { operation: 'read_registered_report_sources', input: { ...input, section, cursor, limit: 100 } });
+        if (sourceRevision !== undefined && page.sourceRevision !== sourceRevision) { changed = true; break; }
+        sourceRevision = Number(page.sourceRevision || 0); merged.sourceRevision = sourceRevision;
+        if (section === 'executions') executions.push(...array(page.items));
+        else (merged as any)[section].push(...array(page.items));
+        if (page.nextCursor === null || page.nextCursor === undefined) break;
+        if (!Number.isInteger(page.nextCursor) || page.nextCursor <= cursor) throw new Error('report_source_page_invalid');
+        cursor = page.nextCursor;
+      }
+      if (changed) break;
+    }
+    if (changed) continue;
+    const taskById = new Map(merged.tasks.map(task => [String(task.taskId), task]));
+    for (const execution of executions) {
+      const task = taskById.get(String(execution.taskId));
+      if (!task || task.executions.some((item: any) => item.id === execution.id)) continue;
+      task.executions.push({ id: execution.id, nodeId: execution.nodeId });
+    }
+    for (const task of merged.tasks) task.executions.sort((left: any, right: any) => left.id - right.id);
+    if (input.metadataOnly !== true) {
+      for (let index = 0; index < merged.observations.length; index += 8) await Promise.all(merged.observations.slice(index, index + 8).map(async observation => {
+        if (observation.availability !== 'recorded' || observation.archived) return;
+        observation.envelope = { schemaVersion: 1, taskId: observation.taskId, executionLogId: observation.executionLogId,
+          turnId: observation.turnId, createdAt: observation.createdAt, sourceRef: observation.sourceRef,
+          report: await readReportVersionBody(globalDataPath, String(input.root || ''), observation.sourceRef) };
+      }));
+      const reports = merged.reports;
+      merged.reports = await Promise.all(reports.map(async report => ({ schemaVersion: 1, taskId: report.taskId, executionLogId: report.executionLogId,
+        turnId: report.turnId, createdAt: report.createdAt, sourceRef: report.sourceRef,
+        report: await readReportVersionBody(globalDataPath, String(input.root || ''), report.sourceRef) })));
+    }
+    return merged;
+  }
+  throw new Error('report_source_changed');
+}
+
+async function readGrowthProjectionPages(globalDataPath: string, projectPath: string, prefix: string): Promise<Array<{ key: string; value: any; revision: number }>> {
+  const rows: Array<{ key: string; value: any; revision: number }> = [];
+  let afterKey = '';
+  for (;;) {
+    const page = await sendRuntimeDataRequest<Array<{ key: string; value: any; revision: number }>>(globalDataPath, {
+      operation: 'read_growth_report_projection', input: { root: projectPath, prefix, afterKey, limit: 200 }
+    });
+    rows.push(...page);
+    if (page.length < 200) return rows;
+    const next = page[page.length - 1]?.key;
+    if (!next || next <= afterKey) throw new Error('growth_projection_page_invalid');
+    afterKey = next;
+  }
+}
+
+export async function readRegisteredProjectSources(projectPath: string, extensionPath: string, globalDataPath = '', taskId = ''): Promise<ReturnType<typeof readRegisteredTaskSources>> {
   const dataRoot = normalizeGlobalDataPathForExtension(globalDataPath, projectPath);
   await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath: dataRoot });
-  return sendRuntimeDataRequest<ReturnType<typeof readRegisteredTaskSources>>(dataRoot, { operation: 'read_registered_report_sources', input: { root: projectPath } });
+  return readRegisteredReportSourcePages(dataRoot, { root: projectPath, ...(taskId ? { taskId } : {}) });
 }
 export function queryGrowthReports(projectPath: string, extensionPath: string, query: GrowthReportQuery, globalDataPath = ''): Promise<GrowthReportPage> {
   const dataRoot = normalizeGlobalDataPathForExtension(globalDataPath, projectPath);
@@ -128,12 +201,12 @@ export function queryGrowthReports(projectPath: string, extensionPath: string, q
 
 async function readProjection(projectPath: string, extensionPath: string, query: GrowthReportQuery, globalDataPath: string): Promise<GrowthReportPage> {
   await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
-  const nativeSource = await sendRuntimeDataRequest<any>(globalDataPath, { operation: 'read_registered_report_sources', input: { root: projectPath, taskId: query.taskId, metadataOnly: true } });
+  const nativeSource = await readRegisteredReportSourcePages(globalDataPath, { root: projectPath, taskId: query.taskId, metadataOnly: true });
   const requestedTaskId = query.taskId
     ? String(nativeSource.tasks.find((task: any) => task.taskId === query.taskId || task.sourceRef?.objectId === query.taskId || task.taskId === `task-${query.taskId}`)?.taskId || query.taskId)
     : query.taskId;
   const runs = nativeSource.runFiles || [];
-  const readRows = async (prefix: string) => sendRuntimeDataRequest<Array<{ key: string; value: any }>>(globalDataPath, { operation: 'read_growth_report_projection', input: { root: projectPath, prefix } });
+  const readRows = async (prefix: string) => readGrowthProjectionPages(globalDataPath, projectPath, prefix);
   const writeRows = async (updates: { key: string; value: any }[]) => {
     if (updates.length) await sendRuntimeDataRequest(globalDataPath, { operation: 'write_growth_report_projection', input: { root: projectPath, updates, expectedSourceRevision: nativeSource.sourceRevision } });
   };
@@ -150,13 +223,53 @@ async function readProjection(projectPath: string, extensionPath: string, query:
         versionRefs: [...(old?.versionRefs || []), ...(recorded ? [item.sourceRef] : [])] });
     }
     metadata.push(...turnMap.values());
-    const snapshot = (await sendRuntimeDataRequest<{ latest: any }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: 1 } })).latest;
+    let snapshot: any = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const first = await sendRuntimeDataRequest<{ latest: any }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: 1, detailOffset: 0, detailLimit: 200 } });
+        snapshot = first.latest;
+        if (!snapshot) break;
+        const snapshotId = snapshot.snapshot.id;
+        const detailToken = snapshot.detailToken;
+        let detailOffset = snapshot.detailOffset || 0;
+        while (snapshot.nextDetailOffset !== null && snapshot.nextDetailOffset !== undefined) {
+          if (!Number.isInteger(snapshot.nextDetailOffset) || snapshot.nextDetailOffset <= detailOffset || !detailToken) throw new Error('growth_detail_page_invalid');
+          detailOffset = snapshot.nextDetailOffset;
+          const page = await sendRuntimeDataRequest<{ latest: any }>(globalDataPath, { operation: 'read_project_growth', input: {
+            root: projectPath, historyLimit: 1, snapshotId, detailToken, detailOffset, detailLimit: 200
+          } });
+          if (!page.latest || page.latest.snapshot.id !== snapshotId || page.latest.detailToken !== detailToken) throw new Error('growth_detail_snapshot_changed');
+          snapshot = { ...page.latest, nodes: [...snapshot.nodes, ...page.latest.nodes], edges: [...snapshot.edges, ...page.latest.edges],
+            signals: [...snapshot.signals, ...page.latest.signals], labels: [...snapshot.labels, ...page.latest.labels] };
+        }
+        break;
+      } catch (error) {
+        snapshot = null;
+        if (attempt === 0 && String((error as Error)?.message || error).includes('growth_detail_snapshot_changed')) continue;
+        throw error;
+      }
+    }
     const nodes = new Map<string, any>(array(snapshot?.nodes).map((node: any) => [String(node.nodeId), node]));
     const moduleByPath = new Map<string, string>();
     for (const edge of snapshot?.edges || []) if (edge.kind === 'contains' && edge.sourceId.startsWith('module:')) {
       const file = nodes.get(edge.targetId); if (file) moduleByPath.set(file.path, edge.sourceId);
     }
     const evidence = (await readRows('github-summary:')).flatMap(row => array(row.value?.commits));
+    const versionKey = (sha: string, files: string[]) => `${sha}\n${files.join('\n')}`;
+    const historyKey = (sha: string, file: string) => `${sha}\n${file}`;
+    const versionRequests = [...new Map(evidence.map(commit => {
+      const files = array(commit.files).map(file => reportRelativePath(file.filename)).filter(Boolean);
+      return [versionKey(String(commit.sha || ''), files), { sha: String(commit.sha || ''), files }];
+    })).values()].slice(0, 1000);
+    const historyRequests = [...new Map(metadata.flatMap(turn => array(turn.commits).flatMap(commit => array(commit.files).map(file => {
+      const normalized = reportRelativePath(file);
+      return [historyKey(String(commit.sha || ''), normalized), { sha: String(commit.sha || ''), file: normalized }];
+    })))).values()].slice(0, 5000);
+    const inspected = await sendRuntimeDataRequest<{ versions: string[]; history: boolean[] }>(globalDataPath, {
+      operation: 'inspect_report_git_state', input: { root: projectPath, versions: versionRequests, history: historyRequests }
+    });
+    const versionStates = new Map(versionRequests.map((request, index) => [versionKey(request.sha, request.files), inspected.versions[index] || 'unknown']));
+    const historyStates = new Map(historyRequests.map((request, index) => [historyKey(request.sha, request.file), inspected.history[index] === true]));
     const associations = new Map((await readRows('association:')).map(row => [row.key, row.value]));
     const associationUpdates: { key: string; value: any }[] = [];
     const rows = source.tasks.filter(task => !requestedTaskId || task.taskId === requestedTaskId).map(task => {
@@ -181,7 +294,7 @@ async function readProjection(projectPath: string, extensionPath: string, query:
         if (!old) {
           // A missing historic file or a delete/recreate path cannot establish present ownership.
           const commits = turns.flatMap(turn => array(turn.commits)).filter(commit => array(commit.files).includes(file));
-          if (commits.length && !commits.some(commit => hasContinuousFileHistory(projectPath, commit.sha, file))) continue;
+          if (commits.length && !commits.some(commit => historyStates.get(historyKey(String(commit.sha || ''), file)) === true)) continue;
           associationUpdates.push({ key, value: { moduleId, identity, snapshotId: snapshot?.snapshot.id || '', sourceVersions: turns.filter(turn => array(turn.files).includes(file)).map(turn => turn.hash), basis: runFiles.includes(file) ? 'run_files' : diffFiles.includes(file) ? 'commit_diff' : 'agent_report' } });
         }
         modules.add(moduleId);
@@ -205,9 +318,13 @@ async function readProjection(projectPath: string, extensionPath: string, query:
     catch (error) { if (String(error).includes('report_source_changed')) return readProjection(projectPath, extensionPath, query, globalDataPath); throw error; }
     const taskTurns = metadata.filter(turn => turn.taskId === requestedTaskId).sort((a, b) => b.executionLogId - a.executionLogId || b.sequence - a.sequence);
     const selectedTurns = taskTurns.slice(offset, offset + limit);
-    const bodies = new Map<string, any>(query.taskId
-      ? (await sendRuntimeDataRequest<Array<{ key: string; report: any }>>(globalDataPath, { operation: 'read_report_versions', input: { root: projectPath, refs: selectedTurns.flatMap(turn => turn.versionRefs || []) } })).map(row => [row.key, row.report])
-      : []);
+    const bodies = new Map<string, any>();
+    if (query.taskId) {
+      const refs = selectedTurns.flatMap(turn => turn.versionRefs || []);
+      for (let index = 0; index < refs.length; index += 8) await Promise.all(refs.slice(index, index + 8).map(async (ref: { objectId: string; revision: number }) => {
+        bodies.set(`${ref.objectId}:${ref.revision}`, await readReportVersionBody(globalDataPath, projectPath, ref));
+      }));
+    }
     const turns = requestedTaskId && source.tasks.some(task => task.taskId === requestedTaskId)
       ? selectedTurns.map((turn, index) => ({
         ...turn, roundNumber: taskTurns.length - offset - index, report: turn.bodyKey ? presentReport(bodies.get(turn.bodyKey)) : null,
@@ -215,7 +332,10 @@ async function readProjection(projectPath: string, extensionPath: string, query:
       })) : [];
     const total = query.taskId ? taskTurns.length : rows.length;
     if ((await sendRuntimeDataRequest<{ revision: number }>(globalDataPath, { operation: 'read_report_source_revision', input: { root: projectPath } })).revision !== nativeSource.sourceRevision) return readProjection(projectPath, extensionPath, query, globalDataPath);
-    return { projectPath, tasks: (query.taskId ? rows : rows.slice(offset, offset + limit)).map(task => ({ ...task, evidence: task.evidence.map(({ files, ...commit }) => ({ ...commit, versionState: commitVersionState(projectPath, commit.sha, array(files).map(file => file.filename)) })) })), turns, total, nextOffset: offset + limit < total ? offset + limit : null };
+    return { projectPath, tasks: (query.taskId ? rows : rows.slice(offset, offset + limit)).map(task => ({ ...task, evidence: task.evidence.map(({ files, ...commit }) => {
+      const scopedFiles = array(files).map(file => reportRelativePath(file.filename)).filter(Boolean);
+      return { ...commit, versionState: versionStates.get(versionKey(String(commit.sha || ''), scopedFiles)) || 'unknown' };
+    }) })), turns, total, nextOffset: offset + limit < total ? offset + limit : null };
   }
 }
 
@@ -223,22 +343,4 @@ export function reportFiles(report: any): string[] {
   const references = [...array(report.outputs), ...array(report.artifacts), ...array(report.verification).flatMap(item => array(item?.evidence))];
   return [...new Set([...array(report.commits).flatMap(commit => array(commit?.files)),
     ...references.map(reference => typeof reference === 'string' ? reference : reference?.path || reference?.filePath || '')].map(reportRelativePath).filter(Boolean))];
-}
-
-export function commitVersionState(projectPath: string, sha: string, files: string[]): 'current' | 'stale' | 'unknown' {
-  if (!/^[a-f0-9]{40}$/.test(sha) || !files.length || files.some(file => !reportRelativePath(file))) return 'unknown';
-  try {
-    execFileSync('git', ['cat-file', '-e', `${sha}^{commit}`], { cwd: projectPath, stdio: 'ignore' });
-    const changed = execFileSync('git', ['diff', '--name-only', sha, '--', ...files], { cwd: projectPath, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    return changed.trim() ? 'stale' : 'current';
-  } catch { return 'unknown'; }
-}
-
-function hasContinuousFileHistory(projectPath: string, sha: string, file: string): boolean {
-  if (!/^[a-f0-9]{40}$/.test(sha)) return false;
-  try {
-    execFileSync('git', ['cat-file', '-e', `${sha}:${file}`], { cwd: projectPath, stdio: 'ignore' });
-    execFileSync('git', ['merge-base', '--is-ancestor', sha, 'HEAD'], { cwd: projectPath, stdio: 'ignore' });
-    return !execFileSync('git', ['log', '--format=%H', '--diff-filter=DR', `${sha}..HEAD`, '--', file], { cwd: projectPath, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-  } catch { return false; }
 }

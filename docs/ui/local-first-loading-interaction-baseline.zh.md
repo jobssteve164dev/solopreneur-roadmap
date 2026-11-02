@@ -48,7 +48,7 @@ SoloMap 是本地数据优先的行动工具。用户已经保存在本地的数
 | --- | --- | --- | --- |
 | 插件冷启动 | 侧边栏可操作 | 当前项目任务卡片和已保存设置全部显示 | 15 秒内 |
 | 切换侧边栏项目 | 新项目选中态立即成立 | 目标项目任务卡片与最近一次对话数据一致 | 5 秒内 |
-| 从任意入口发送对话 | 插件 UI 动作被 Host/持久生产者接受；原生 CLI 直接输入则由 Provider 官方 submit-accepted 事件确认已接受 | 新 CLI 进程进入本次任务，或已绑定 CLI 确认本轮输入进入 task | 正常目标 5 秒，发布硬上限 10 秒 |
+| 从任意入口发送对话 | 插件 UI 动作被 Host/持久生产者接受；原生 CLI 直接输入则由 Provider 官方 submit-accepted 事件确认已接受 | 启动意图已持久化、唯一正式 runner 已取得任务并完成命令提交；Provider 冷启动和 task-ingress 收据随后异步收敛 | 正常目标 5 秒，发布硬上限 10 秒 |
 | 打开路线图等大图 | 目标大图可操作 | 目标项目的大图本地数据全部显示 | 10 秒内可用，20 秒内完整 |
 | 大图打开时切换项目 | 大图明确切到目标项目 | 大图、侧边栏和对话数据全部属于同一目标项目 | 10 秒内完整切换 |
 
@@ -159,14 +159,15 @@ SoloMap 是本地数据优先的行动工具。用户已经保存在本地的数
 - 项目、数据根、Agent CLI、模型和不可重置计时起点已经在生产者接收动作时固定；定时任务以 occurrence claim、需要确认的维护动作以最终确认为接受点。远程、定时和自动入口不能到 Host 执行时再读取当前活动项目或设置。
 - 对应项目的集成终端已经创建、显示并获得焦点或明确可见。
 - 终端明确对应本次对话，而不是无法归属的通用“准备中”终端。
-- 新会话或复用已有 CLI 的续轮中，插件已取得与本次 interaction、run、generation 和 turn 精确绑定的 task-ingress 收据。优先使用 CLI 官方生命周期/持久机器状态形成 `provider_native` 收据；尚无原生观察器的已支持 CLI，必须由正在执行本轮任务的 Agent loop 主动调用治理型 `solomap_conversation_status(start)`，形成 `agent_acknowledged` 收据。进程树与 terminal bridge 只证明执行身份和输入 transport；只创建窗口、放行 runner 启动门、启动 `script`/Shell/CLI 进程、`sendText()`/PTY write 返回或观察普通输出都不算完成。
+- 新会话或复用已有 CLI 的续轮中，持久化接受与正式 runner 命令提交已经完成；runner identity、delivery identity、interaction、run、generation 和 turn 必须完全一致。仅创建窗口、放行启动门或显示 loading 不能冒充这一步。Provider 冷启动和 task-ingress 观察不属于同步返回条件，否则外部 CLI、网络和模型准备会重新阻塞最基本的发起体验。
+- 正式命令提交后，task-ingress 收据继续异步收敛：优先使用 CLI 官方生命周期/持久机器状态形成 `provider_native` 收据；尚无原生观察器的已支持 CLI，由正在执行本轮任务的 Agent loop 主动调用治理型 `solomap_conversation_status(start)`，形成 `agent_acknowledged` 收据。收据仍必须与本次 interaction、run、generation 和 turn 精确绑定，不能用进程树、普通输出或 bridge 自报替代。
 - 用户原输入只有在本地接收成功后才清空；启动失败时必须可以恢复。
 
-以上状态正常目标为 5 秒内全部成立。单个样本超过 5 秒但不超过 10 秒时必须标为体验退化并保留分段证据；任一真实入口样本超过 10 秒、提前失败或没有进入本次真实 Agent CLI 任务，整版验收失败。计时只能沿入口收到时创建的同一个 `interactionId` 传播，禁止在 prepare、delivery、runner 或包装器阶段重新起表。
+以上同步状态正常目标为 5 秒内全部成立。单个样本超过 5 秒但不超过 10 秒时必须标为体验退化并保留分段证据；任一真实入口未在 10 秒内完成持久化接受与唯一 runner 命令提交，整版验收失败。计时只能沿入口收到时创建的同一个 `interactionId` 传播，禁止在 prepare、delivery、runner 或包装器阶段重新起表。Provider task-ingress 另行记录实际开始时延与观察时延，但不得让外部冷启动把已经成功交付的用户动作改判为发起失败。
 
-runner claim 后的 Git 基线、工作区 snapshot、Agent 数据库准备、Provider `--help`/`--version`、原生会话创建等 preflight 全部处于任务开始之前，必须计入同一预算。当前原生权威来源是 Codex `task_started` 与 Claude 根 `turn.start`；Cursor、Copilot、OpenCode、Grok 和 Antigravity 当前以同一 run proof、session binding、turn 和 interaction 精确核对的 `agent_acknowledged` 收据闭合。Host 预登记 checkpoint、prepare `Running`、普通 `turnStartedAt`、`checkpointEventId=:start`、模型普通文本或 Shell 自报均不算。后到的 `provider_native` 可升级同一 interaction 的 `agent_acknowledged` 收据，反向覆盖禁止；恢复轮询发现时间不能重置起点。
+runner claim 前的启动意图、回滚边界和正式命令构造属于同步交付预算；完整工作区 baseline、Provider `--help`/`--version`、原生会话创建、模型网络初始化和原生事件观察必须并行或后置，不能占据同步返回链。当前原生权威来源是 Codex `task_started` 与 Claude 根 `turn.start`；Cursor、Copilot、OpenCode、Grok 和 Antigravity当前以同一 run proof、session binding、turn 和 interaction 精确核对的 `agent_acknowledged` 收据闭合。Host 预登记 checkpoint、prepare `Running`、普通 `turnStartedAt`、`checkpointEventId=:start`、模型普通文本或 Shell 自报均不算 task-ingress。后到的 `provider_native` 可升级同一 interaction 的 `agent_acknowledged` 收据，反向覆盖禁止；恢复轮询发现时间不能重置起点。
 
-10 秒时尚未观察到收据，只能先持久化“观察窗口未命中”的 `deadline_exceeded` 证据，阶段名必须明确为 `task.ingress.observation`，不能伪装成 Provider 接单事实。若唯一正式 runner 已提交且仍受控，不能仅因 observer 迟到就向用户返回“暂时无法回答”、关闭任务或重复投递；后到收据必须使用 Provider 原始开始时间裁决，并以同一 trace 的权威 `task.ingress` 事件修正这条临时观察结果，同时标记是否调和过观察超时。只有 Provider 原始任务开始时间本身达到或超过 10 秒，才是版本硬门禁失败；时钟不可验证则记为 `clock_untrusted`，不得伪造达标。这样既不放宽 `<10s` 的发布标准，也不把观测链路延迟误报成真实任务启动失败。
+10 秒时尚未观察到收据，只记录“观察 SLO 未命中”的 `deadline_exceeded` 诊断，阶段名必须明确为 `task.ingress.observation`，不能写入 `deliveryLastError`，不能伪装成 Provider 接单事实，也不能返回给用户当作发起失败。若唯一正式 runner 已提交且仍受控，观察分支必须继续；后到收据使用 Provider 原始开始时间记录真实冷启动时延，并以同一 trace 的权威 `task.ingress` 事件闭合。时钟不可验证则记为 `clock_untrusted`，不得伪造达标。
 
 “已经显示一个准备终端”可以满足终端可见要求，但不能掩盖正式命令尚未发送。界面应区分：
 
@@ -298,10 +299,13 @@ projectPath + projectGeneration + interactionId
 - 用户主动发起、继续、停止对话以及目标终端创建、显示、PTY 就绪和 Agent 启动是最高优先级前台工作。
 - 用户对话到达后，成长扫描、衍生统计、全库维护、迁移、智能后台循环、诊断持久化和外部刷新必须让行；不能让已有后台事务、无界队列或持续写入继续占满 CPU、I/O、数据库事件循环或宿主消息通道。
 - 前台与后台共享 Runtime、数据库、锁、事件循环或进程资源时，必须存在可验证的优先调度、时间片让行、独立队列或资源隔离；只有异步调用、`setImmediate` 或不同业务函数不算隔离。
+- Runtime 的后台查询必须有固定活动上限，当前 4 vCPU 正式预算为 2；全速调用方只能进入有界队列。维护任务对尚在排队的前台 command 与 interactive query 让出下一次准入；已准入且可能等待其他执行域的前台任务不能冻结维护域，否则会形成跨域环形等待。维护的计算和提交仍必须受独立容量、分片与唯一 Writer 约束，不能仅靠逻辑 domain 名称伪装资源隔离。
+- “维护让行”必须覆盖 Runtime 自己产生的工作，不能只约束外部 RPC。端点发布后的迁移、历史回填、存储回收、规划统计、Telegram、诊断和自治循环都必须进入与用户请求相同的准入面；不可抢占维护不得位于启动主循环，可分片维护必须在每一片后释放 Writer 并重新准入。
+- 面向用户的数据库总览不得在打开或刷新时对 19GB 权威表执行全量计数；精确总数由事务触发器持续维护，历史基线在前台空档按可恢复小页回填，未完成时显示“计算中”而不是错误的零或内部迁移说明。
 - 前台完成时限必须在后台满载场景下成立。空闲环境达标、并发时退化为几十秒，按架构不合规处理，不能归因于“本地机器忙”。
 - 权威日志和状态持久化仍需保证完整，但不能反向阻塞下一次用户控制动作；持久化吞吐、批量大小和背压必须服从对话控制面的优先级。
 - 同一次前端交互产生的草稿、展开态、选择态等 UI 状态变更必须按作用域合并为一次数据库 mutation；禁止把一个快照拆成逐叶读取、逐叶写入的请求风暴，与用户对话争抢 Runtime 和 SQLite。
-- 5 秒仍是正常体验目标；10 秒是不可越过的发布红线。所有插件可触发的对话入口都必须在真实 code-server / VS Code 宿主和后台负载存在时，从用户动作或自动触发被接收开始计时，以同 interaction 的 `provider_native` 或 `agent_acknowledged` task-ingress 收据为终点。进程树和 terminal bridge 仅作诊断/transport，永不结束计时。任一入口在 10 秒门禁触发前仍无收据，整版不得发布。
+- 5 秒仍是正常体验目标；10 秒是不可越过的同步发起红线。所有插件可触发的对话入口都必须在真实 code-server / VS Code 宿主和后台负载存在时，从用户动作或自动触发被接收开始计时，以同 interaction 的持久化接受、唯一 runner identity 和正式命令提交为终点。task-ingress 收据继续异步收敛并证明真实任务最终进入 Provider；缺少最终收据、任务未执行或出现重复 runner 仍判失败，但外部 Provider 冷启动时间不再阻塞用户动作返回。
 - 验收不得只覆盖共享 helper。Solo、步骤对话、路线图调整、Flow 各角色、续聊、Continue Turn、项目成长汇报继续、原生 Agent 终端直接输入、重试、时间计划、项目卡片动作、内部/远程发起、定时自动化、自动 effect、自动复核、全局提示词复盘及维护类 Agent 入口都必须有真实入口收据；同一底层调用不免除入口自身的准备与清理验收。自动复核只能接受已具备且真实验证只读命令的 reviewer：当前为 Codex、Antigravity、Cursor、Claude 与 Grok；Copilot/OpenCode 在补齐只读合同前必须于设置保存与动作接受前拒绝，不能创建一个注定在 runner 中失败的对话。
 - 自动 effect 从持久父 `eligibleAt/budgetOriginAt` 开始计时，并在 claim 时固定完整启动配置；retry 与 custom prompt 使用确定性子 interaction、独立启动，但都继承父预算起点。claim 后重读当前设置、reclaim 重置时钟或让前一个派生动作阻塞后一个，均判失败。
 - `cliPath` 只能保存七类具备正式 Provider adapter 的 CLI；未知自定义 executable 必须在设置保存和动作接受前明确拒绝，不能先创建对话，也不能把仍可触发的兼容入口排除出发布样本。
@@ -436,7 +440,7 @@ projectPath + projectGeneration + interactionId
 6. 项目成长图缓存命中和缓存未命中。
 7. Git 仓库大、Git status 慢或 Git 不可用时发送对话。
 8. CLI、模型发现和 GitHub 网络不可用。
-9. 从每一种对话入口发送，验证只有一个正确终端，真实 Agent CLI 正常目标 5 秒内启动且任何样本不超过 10 秒。
+9. 从每一种对话入口发送，验证只有一个正确终端，持久化接受与唯一 runner 命令提交正常目标 5 秒内完成且任何样本不超过 10 秒；随后等待真实 task-ingress 和任务结果闭环。
 10. 数据为空、损坏或迁移失败时进入明确终态，不无限 loading。
 11. Solo 历史超过一页时，首屏只读取固定页大小，后续页面按顺序追加且不重复。
 12. 用户持续输入和中文输入法组词期间故意让设置、节点、对话与外部数据乱序返回，输入框 DOM、焦点、光标和组词状态保持不变。
@@ -450,7 +454,7 @@ projectPath + projectGeneration + interactionId
 20. 连续执行 A → B → A 与 B → A → B，让核心数据早于宿主选择确认到达；断言回包保留其原始项目和 generation，当前界面只有在匹配确认后进入已就绪。
 21. 目标项目尚未由宿主确认时打开 Solo 或 Flow 标签；断言不会向旧项目读取、不会提前进入无限 loading，匹配确认后只读取一次目标项目。
 22. 首次选择目标项目后立即切走再切回，并让首次读取保持在途；断言共享读取没有被取消或重复打开，只有当前订阅者可以提交。
-23. 在 Runtime 持续写 run log、成长快照或其他可延后后台工作，并让 GitHub 登录/检查、Agent 安装/检查等非对话终端入口竞争 terminal service / PTY Host 时，逐一触发全部 Agent 对话入口；清单必须显式包含项目成长汇报继续、全局提示词复盘和 SoloMap 原生 Agent 终端直接输入。以动作接收事件为起点，以同 interaction 的 `provider_native` 或 `agent_acknowledged` task-ingress 收据为终点。每个样本必须在 10 秒门禁触发前取得收据，且正常目标为 5 秒内。`script`、Shell、runner、CLI spawn、fd 启动门、进程树、terminal bridge、键盘回显、普通输出、PTY write、`sendText()` 和命令提交事件均不能冒充终点。任一入口超限、提前失败、复用错误终端或未进入本次任务均判整版失败。
+23. 在 Runtime 持续写 run log、成长快照或其他可延后后台工作，并让 GitHub 登录/检查、Agent 安装/检查等非对话终端入口竞争 terminal service / PTY Host 时，逐一触发全部 Agent 对话入口；清单必须显式包含项目成长汇报继续、全局提示词复盘和 SoloMap 原生 Agent 终端直接输入。以动作接收事件为起点，以同 interaction 的持久化接受与唯一 runner 正式命令提交为同步终点；每个样本必须在 10 秒内返回，且正常目标为 5 秒内。随后继续等待 `provider_native` 或 `agent_acknowledged` 收据和真实结果，证明命令提交不是假启动。任一入口超限、提前失败、复用错误终端、重复投递或最终未进入本次任务均判整版失败。
 24. 对 stdout 和 stderr 分别制造真实管道背压并执行停止；断言权威日志先持久化，显示通道不能阻止进程自然退出、会话关闭和下一轮续接。
 25. 隔离复现出的阻塞机制必须与生产路径证据分别记录；没有受影响生产路径的调用栈或新版本端到端结果时，不得写成唯一生产根因或生产恢复结论。
 

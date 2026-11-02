@@ -150,10 +150,10 @@ test('the SoloMap experience baseline requires direct runner delivery and Provid
     path.join(projectRoot, 'docs/ui/local-first-loading-interaction-baseline.zh.md'),
     'utf8'
   );
-  assert.match(baseline, /插件已取得与本次 interaction、run、generation 和 turn 精确绑定的 task-ingress 收据/);
+  assert.match(baseline, /持久化接受与正式 runner 命令提交/);
   assert.match(baseline, /`provider_native` 收据/);
   assert.match(baseline, /`agent_acknowledged` 收据/);
-  assert.match(baseline, /`sendText\(\)`\/PTY write 返回或观察普通输出都不算完成/);
+  assert.match(baseline, /Provider 冷启动和 task-ingress 观察不属于同步返回条件/);
   assert.match(baseline, /故意延迟或阻断普通终端 Shell\/PTY 进程创建/);
-  assert.match(baseline, /进程树和 terminal bridge 仅作诊断\/transport，永不结束计时/);
+  assert.match(baseline, /task-ingress 收据继续异步收敛/);
 });

@@ -12,9 +12,11 @@ import { cognitiveCliEnvironment } from './localAgentCliEngine';
 import { sanitizeDiagnosticText } from './localDiagnostics';
 import { runtimeBuildId, runtimeReleaseVersion } from './runtimeBuildIdentity';
 import { UnifiedDataStore } from './db/unifiedDataStore';
+import { DiskDatabase } from './db/diskDatabase';
 import { createRuntimeDataOperations } from './runtimeDataOperations';
 import { writeRuntimePauseState } from './runtimePauseState';
 import { isProcessOwnerAlive } from './processIdentity';
+import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost';
 
 type SupportedPlatform = 'linux' | 'darwin' | 'win32';
 type Command = [string, string[]];
@@ -47,6 +49,20 @@ interface RuntimeServiceOptions {
   waitForServiceStop?: (pid: number) => Promise<void>;
   waitForTaskStopped?: () => Promise<void>;
   ignoreDisabled?: boolean;
+  recoverCurrentRuntime?: () => Promise<void>;
+}
+
+const rollForwardSchemaVersion = 56;
+
+function databaseSchemaVersion(globalDataPath: string): number | null {
+  const file = path.join(normalizeGlobalDataPathForExtension(globalDataPath), 'solomap.db');
+  if (!fs.existsSync(file)) return 0;
+  let database: DiskDatabase | undefined;
+  try {
+    database = new DiskDatabase(file, { readOnly: true });
+    return Number(database.exec('SELECT COALESCE(MAX(version),0) FROM schema_migrations')[0]?.values?.[0]?.[0] || 0);
+  } catch { return null; }
+  finally { database?.close(); }
 }
 
 interface RuntimeServiceRegistration {
@@ -437,6 +453,20 @@ export async function ensureAutonomousRuntimeService(options: RuntimeServiceOpti
           if (canRestore && plan.prepareUpgradeCommand) await runCommand(...plan.prepareUpgradeCommand);
         } catch {
           // The failed replacement may already be unloaded.
+        }
+        const currentSchemaVersion = databaseSchemaVersion(options.globalDataPath);
+        if (currentSchemaVersion === null || currentSchemaVersion >= rollForwardSchemaVersion) {
+          try {
+            await (options.recoverCurrentRuntime || (() => ensureHealthyAutonomousRuntime({
+              extensionPath: options.extensionPath,
+              globalDataPath: options.globalDataPath,
+              buildId: replacementBuildId,
+              releaseVersion: replacementVersion
+            }).then(() => undefined)))();
+          } catch {
+            throw new Error('runtime_service_rollforward_failed');
+          }
+          throw new Error('runtime_service_rollforward_fallback');
         }
         writeDefinition(plan.definitionPath, previous);
         try {

@@ -5,41 +5,47 @@ import * as fs from 'fs';
 import {
   claimRuntimeLease,
   hasRuntimeLease,
-  readCurrentRegisteredShadowDecision,
   refreshShadowRuntimeState,
-  runCognitiveShadowDecisionCycle,
   runShadowDecisionCycleFromDatabase,
   runtimeRootRequiresExistingDatabase,
   persistShadowRuntimeState,
   updateRuntimeState
 } from './autonomousRuntime';
-import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig, refreshCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
-import { EmbeddedPiAgentEngine } from './piAgentEngine';
-import { sendRuntimeControlCommand, startRuntimeControlServer } from './autonomousRuntimeControl';
+import { refreshCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
+import { AutonomousCycleExecutor } from './autonomousCycleExecution';
+import { sendRuntimeControlCommand, sendRuntimeDataRequest, serializedRuntimeDataResult, startRuntimeControlServer, type RuntimeDataRequest } from './autonomousRuntimeControl';
 import { runtimeBuildId, runtimeReleaseVersion } from './runtimeBuildIdentity';
-import { classifyDiagnosticFailure, configureLocalDiagnosticPersistence, createLocalDiagnosticTrace, importLegacyLocalDiagnostics, recordLocalDiagnosticError, sanitizeDiagnosticText } from './localDiagnostics';
+import { classifyDiagnosticFailure, configureLocalDiagnosticPersistence, createLocalDiagnosticTrace, recordLocalDiagnosticError, sanitizeDiagnosticText } from './localDiagnostics';
 import { runPiMainPathRequestFile } from './piMainPathRuntime';
-import { startTelegramBackgroundRuntime } from './telegramRuntime';
+import { TelegramRuntimeWorkerHost } from './telegramRuntimeWorkerHost';
 import { UnifiedDataStore } from './db/unifiedDataStore';
 import { createRuntimeDataOperations } from './runtimeDataOperations';
 import { normalizeGlobalDataPathForExtension, refreshProjectRegistry } from './projectRegistry';
-import { enqueueStartupDataMigrations, historicalRunOwnerStateStamp, refreshHistoricalRunMigrations } from './runtimeDatabaseBootstrap';
 import { isAutonomousRuntimeDisabled } from './autonomousRuntimeService';
 import { importLegacyRuntimeState } from './runtimeStateMigration';
 import { readRuntimePauseState, writeRuntimePauseState } from './runtimePauseState';
-import { reapFinishedLegacyRunProcesses } from './legacyRunProcessRecovery';
-import { IntelligenceRuntime } from './intelligenceRuntime';
-import { RuntimeDataExecutionDomains } from './runtimeDataExecutionDomains';
+import { RuntimeDataExecutionDomains, RuntimeWriteActorControl } from './runtimeDataExecutionDomains';
 import { activeCognitiveCliInvocationCount, cancelActiveCognitiveCliInvocations, signalCognitiveCliShutdown } from './localAgentCliEngine';
 import { terminateRuntimeOwnedChildProcesses } from './runtimeChildProcessSupervisor';
+import { reclaimOrphanedDatabaseGenerations, recoverPendingDatabaseGenerationCutover } from './databaseGeneration';
+import { runtimeOperationDefinition } from './runtimeOperationRegistry';
+import { executeTelegramExtensionCommand, registerTelegramEditorEndpoint } from './telegramExtensionBridge';
+import { RuntimeExecutionScheduler } from './runtimePriorityScheduler';
+import type { RuntimeExecutionDomain } from './runtimeOperationRegistry';
+import { RuntimeControlProjection, type ProjectRegistryReadInput, type ProjectRegistryReadResult } from './runtimeControlProjection';
+import type { ProjectRegistrySnapshot } from './projectRegistry';
 
 function argumentValue(name: string): string {
   const index = process.argv.indexOf(name);
   return index >= 0 ? String(process.argv[index + 1] || '') : '';
 }
 
-let closeFailedRuntimeInitialization: (() => Promise<void>) | undefined;
+let closeFailedRuntimeInitialization: ((exitCode?: number, reason?: string) => Promise<void>) | undefined;
 let runtimeInitializationId = '';
+
+function isDatabaseGenerationCutoverError(error: unknown): boolean {
+  return /(?:^|:)database_generation_cutover(?:$|:)|runtime_data_domain_exited:writer-actor:75/.test(String(error));
+}
 
 function intervalValue(): number {
   const parsed = Number(argumentValue('--interval-ms') || 30_000);
@@ -60,6 +66,8 @@ async function main(): Promise<void> {
     const runtimeId = crypto.randomUUID();
     const lease = claimRuntimeLease(databaseRoot, { runtimeId, pid: process.pid });
     if (lease.acquired) {
+      recoverPendingDatabaseGenerationCutover(databaseRoot);
+      reclaimOrphanedDatabaseGenerations(databaseRoot);
       const store = lease.owner.databaseId || runtimeWasInitialized || fs.existsSync(path.join(databaseRoot, 'solomap.db'))
         ? UnifiedDataStore.open(databaseRoot, lease.owner.databaseId || undefined)
         : new UnifiedDataStore(databaseRoot);
@@ -90,6 +98,8 @@ async function main(): Promise<void> {
       await sendRuntimeControlCommand(globalDataPath, 'refresh', { expectedRuntimeId: lease.owner.runtimeId, timeoutMs: 10_000 });
       return;
     }
+    recoverPendingDatabaseGenerationCutover(databaseRoot);
+    reclaimOrphanedDatabaseGenerations(databaseRoot);
     const root = databaseRoot;
     const store = runtimeWasInitialized || fs.existsSync(path.join(root, 'solomap.db')) ? UnifiedDataStore.open(root) : new UnifiedDataStore(root);
     importLegacyRuntimeState(store, root);
@@ -113,138 +123,286 @@ async function main(): Promise<void> {
     || (!argumentValue('--runtime-id') && runtimeRootRequiresExistingDatabase(databaseRoot));
   const lease = claimRuntimeLease(globalDataPath, { runtimeId, pid: process.pid });
   if (!lease.acquired) return;
-  const databaseId = argumentValue('--database-id') || lease.owner.databaseId;
-  const dataStore = databaseId || runtimeWasInitialized || fs.existsSync(path.join(databaseRoot, 'solomap.db'))
-    ? UnifiedDataStore.open(databaseRoot, databaseId || undefined)
+  recoverPendingDatabaseGenerationCutover(databaseRoot);
+  reclaimOrphanedDatabaseGenerations(databaseRoot);
+  const expectedDatabaseId = argumentValue('--database-id') || lease.owner.databaseId;
+  const bootstrapStore = expectedDatabaseId || runtimeWasInitialized || fs.existsSync(path.join(databaseRoot, 'solomap.db'))
+    ? UnifiedDataStore.open(databaseRoot, expectedDatabaseId || undefined)
     : new UnifiedDataStore(databaseRoot);
-  let rawStoreClosed = false;
+  const databaseId = bootstrapStore.databaseId;
+  bootstrapStore.close();
+  let dataExecutionDomains: RuntimeDataExecutionDomains | undefined;
+  let autonomousCycle: AutonomousCycleExecutor | undefined;
+  let runtimeDomainsClosed = false;
   closeFailedRuntimeInitialization = async () => {
-    if (!rawStoreClosed) {
-      rawStoreClosed = true;
-      try { dataStore.close(); } catch { /* Preserve the initialization failure. */ }
+    if (!runtimeDomainsClosed) {
+      runtimeDomainsClosed = true;
+      await dataExecutionDomains?.close().catch(() => undefined);
       updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
     }
   };
-  importLegacyRuntimeState(dataStore, databaseRoot);
-  updateRuntimeState(globalDataPath, runtimeId, { databaseId: dataStore.databaseId });
-  const dataOperations = createRuntimeDataOperations(dataStore);
-  let initializationTelegram: ReturnType<typeof startTelegramBackgroundRuntime> | undefined;
+  const runtimeBuild = runtimeBuildId(path.dirname(path.dirname(path.resolve(process.argv[1]))));
+  const releaseVersion = argumentValue('--runtime-version') || runtimeReleaseVersion(path.dirname(path.dirname(path.resolve(process.argv[1]))));
+  const executionScheduler = new RuntimeExecutionScheduler();
+  const controlProjection = new RuntimeControlProjection();
+  let intelligenceExecutionMode: { mode: 'legacy' | 'harness' } | undefined;
+  const dispatchSupervisorOperation = async (request: RuntimeDataRequest): Promise<unknown> => {
+    if (request.operation === 'read_project_registry') {
+      return controlProjection.readProjectRegistryWithFallback(request.input,
+        (input: ProjectRegistryReadInput) => dataExecutionDomains!.control('read_project_registry_projection', input) as Promise<ProjectRegistryReadResult>);
+    }
+    if (request.operation === 'read_intelligence_execution_mode') {
+      if (!intelligenceExecutionMode) throw new Error('runtime_intelligence_execution_mode_not_ready');
+      return intelligenceExecutionMode;
+    }
+    if (request.operation === 'wait_sidebar_core_projection_revision') {
+      return dataExecutionDomains!.dispatch(request);
+    }
+    if (request.operation === 'register_telegram_editor_endpoint') {
+      return registerTelegramEditorEndpoint(globalDataPath,
+        request.input as Parameters<typeof registerTelegramEditorEndpoint>[1]);
+    }
+    if (request.operation === 'execute_telegram_editor_command') {
+      return executeTelegramExtensionCommand(globalDataPath, String(request.input.command || ''),
+        Array.isArray(request.input.args) ? request.input.args.map(String) : []);
+    }
+    throw new Error(`runtime_supervisor_operation_unknown:${request.operation}`);
+  };
+  dataExecutionDomains = await RuntimeDataExecutionDomains.start({
+    root: databaseRoot,
+    databaseId,
+    runtime: { runtimeId, releaseVersion, buildId: runtimeBuild },
+    scheduler: executionScheduler,
+    dispatchSupervisorOperation,
+    onProjectRegistryProjection: snapshot => controlProjection.hydrateProjectRegistry(snapshot)
+  });
+  controlProjection.hydrateProjectRegistry(await dataExecutionDomains.control('read_project_registry_projection') as ProjectRegistrySnapshot | null);
+  const dataOperations = dataExecutionDomains.operations;
+  const scheduledOperations = Object.assign(
+    (request: Parameters<typeof dataOperations>[0]) => {
+      const definition = runtimeOperationDefinition(request.operation);
+      if (definition.executor === 'supervisor') return dispatchSupervisorOperation(request);
+      return executionScheduler.submit(definition.domain, () => dataOperations(request), {
+        deadlineAt: request.deadlineAt,
+        supersedesKey: request.supersedesKey,
+        label: `internal:${request.operation}`
+      });
+    },
+    dataOperations
+  );
+  const scheduleControl = <T = unknown>(domain: RuntimeExecutionDomain, action: RuntimeWriteActorControl, input: Record<string, unknown> = {}): Promise<T> =>
+    executionScheduler.submit(domain, admission => dataExecutionDomains!.control(action, input, admission) as Promise<T>, { label: `internal:${action}` });
+  const startAutonomousCycle = async (): Promise<AutonomousCycleExecutor> => {
+    const executor = new AutonomousCycleExecutor({ globalDataPath, runtimeId, ownerPid: process.pid });
+    await executor.ready();
+    return executor;
+  };
+  updateRuntimeState(globalDataPath, runtimeId, { databaseId });
+  let initializationTelegram: TelegramRuntimeWorkerHost | undefined;
   let heartbeatStopped: (() => Promise<unknown>) | undefined;
   let earlyCleanup: Promise<void> | undefined;
   closeFailedRuntimeInitialization = () => {
     if (earlyCleanup) return earlyCleanup;
     earlyCleanup = (async () => {
-      dataOperations.interruptMigrations();
-      dataOperations.interruptRuns();
+      await dataExecutionDomains?.control('interrupt').catch(() => undefined);
       await initializationTelegram?.close('handoff').catch(() => undefined);
+      await autonomousCycle?.close().catch(() => undefined);
       await heartbeatStopped?.().catch(() => undefined);
-      await dataOperations.close().catch(() => undefined);
-      try { dataStore.close(); } catch { /* Preserve the initialization failure. */ }
+      if (!runtimeDomainsClosed) {
+        runtimeDomainsClosed = true;
+        await dataExecutionDomains?.close().catch(() => undefined);
+      }
       updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
     })();
     return earlyCleanup;
   };
   configureLocalDiagnosticPersistence({
-    append: (_root, event) => dataOperations({ operation: 'append_diagnostic_event', input: event as unknown as Record<string, unknown> }).then(() => undefined),
-    read: (_root) => dataOperations({ operation: 'read_diagnostic_events', input: { limit: 250 } }) as Promise<{ items: Record<string, unknown>[] }>
+    append: (_root, event) => scheduledOperations({ operation: 'append_diagnostic_event', input: event as unknown as Record<string, unknown> }).then(() => undefined),
+    read: (_root) => scheduledOperations({ operation: 'read_diagnostic_events', input: { limit: 250 } }) as Promise<{ items: Record<string, unknown>[] }>
   }, databaseRoot);
-  await importLegacyLocalDiagnostics(databaseRoot,
-    event => dataOperations({ operation: 'append_diagnostic_event', input: event as unknown as Record<string, unknown> }).then(() => undefined),
-    (source, bytes) => dataStore.captureMigrationSource(source, bytes, { mimeType: 'application/json', encoding: 'utf8', pending: true }),
-    (source, result, error) => result === 'imported'
-      ? dataStore.markMigrationSourceImported(source.identity, source.key)
-      : dataStore.markMigrationSourceConflict(source.identity, source.key, error || 'legacy_diagnostic_invalid'));
-  const runtimeBuild = runtimeBuildId(path.dirname(path.dirname(path.resolve(process.argv[1]))));
-  const releaseVersion = argumentValue('--runtime-version') || runtimeReleaseVersion(path.dirname(path.dirname(path.resolve(process.argv[1]))));
+  await dataExecutionDomains.control('import_legacy_diagnostics');
   const registeredRuntime = await dataOperations({ operation: 'register_runtime_instance', input: { runtimeId, pid: process.pid, processStartedAt: Date.parse(lease.owner.startedAt), processBirth: lease.owner.processBirth || '', status: 'running', buildId: runtimeBuild, idempotencyKey: `runtime-register:${runtimeId}` } }) as { generation: number };
   const heartbeatRuntime = (status: 'running' | 'paused' | 'stopped' | 'failed') => {
     const heartbeatAt = Date.now();
-    return dataOperations({ operation: 'heartbeat_runtime_instance', input: { runtimeId, generation: registeredRuntime.generation, status, heartbeatAt, idempotencyKey: `runtime-heartbeat:${runtimeId}:${status}:${heartbeatAt}` } });
+    return scheduledOperations({ operation: 'heartbeat_runtime_instance', input: { runtimeId, generation: registeredRuntime.generation, status, heartbeatAt, idempotencyKey: `runtime-heartbeat:${runtimeId}:${status}:${heartbeatAt}` } });
   };
   heartbeatStopped = () => heartbeatRuntime('stopped');
-  const intelligenceRuntime = new IntelligenceRuntime(databaseRoot, dataStore, dataOperations, runtimeId, releaseVersion, runtimeBuild);
-  dataOperations.setIntelligenceRuntime(intelligenceRuntime);
-  await refreshCognitiveRuntimeConfig(databaseRoot, dataOperations);
-  await refreshShadowRuntimeState(databaseRoot, dataOperations);
+  intelligenceExecutionMode = await dataExecutionDomains.control('initialize_intelligence') as { mode: 'legacy' | 'harness' };
+  await refreshCognitiveRuntimeConfig(databaseRoot, scheduledOperations);
+  await refreshShadowRuntimeState(databaseRoot, scheduledOperations);
   let outboxRecovery: Promise<unknown> | undefined;
   let storageMaintenance: Promise<unknown> | undefined;
   let startupMigration: Promise<void> | undefined;
-  let historicalOwnerStamp = '';
-  let startupMigrationsReady = false;
-  let resolveStorageMaintenanceBarrier!: () => void;
-  let rejectStorageMaintenanceBarrier!: (error: unknown) => void;
-  const storageMaintenanceBarrier = new Promise<void>((resolve, reject) => { resolveStorageMaintenanceBarrier = resolve; rejectStorageMaintenanceBarrier = reject; });
-  void storageMaintenanceBarrier.catch(() => undefined);
-  dataOperations.setStorageMaintenanceBarrier(storageMaintenanceBarrier);
-
   let stopping = false;
-  let paused = await readRuntimePauseState(dataOperations, isAutonomousRuntimeDisabled(globalDataPath));
+  let paused = await readRuntimePauseState(scheduledOperations, isAutonomousRuntimeDisabled(globalDataPath));
   let running = false;
   let rerunRequested = false;
   let timer: NodeJS.Timeout | undefined;
-  let activeEngine: EmbeddedPiAgentEngine | undefined;
-  let controlServer: { beginBusy(): () => void; close(): Promise<void> } | undefined;
-  let dataExecutionDomains: RuntimeDataExecutionDomains | undefined;
-  let telegram = initializationTelegram = startTelegramBackgroundRuntime(globalDataPath, dataOperations);
+  let databaseOverviewProjectionTimer: NodeJS.Timeout | undefined;
+  let reportVersionBackfillTimer: NodeJS.Timeout | undefined;
+  let plannerMaintenanceTimer: NodeJS.Timeout | undefined;
+  let controlServer: { beginBusy(): () => void; close(mode?: 'drain' | 'handoff'): Promise<void> } | undefined;
+  let telegram = initializationTelegram = new TelegramRuntimeWorkerHost(globalDataPath, scheduledOperations);
+  await telegram.ready();
   let shutdownPromise: Promise<void> | undefined;
   let upgradeReplacement: { buildId: string; releaseVersion: string } | undefined;
+  let documentationProjectionDrainRunning = false;
+  let documentationProjectionDrainRequested = false;
+  const scheduleDocumentationProjectionDrain = (): void => {
+    if (stopping) return;
+    documentationProjectionDrainRequested = true;
+    if (documentationProjectionDrainRunning) return;
+    documentationProjectionDrainRunning = true;
+    setImmediate(() => {
+      void (async () => {
+        try {
+          while (!stopping && documentationProjectionDrainRequested) {
+            documentationProjectionDrainRequested = false;
+            let result: { processed: number; pending: boolean };
+            do {
+              result = await scheduleControl('background-command', 'drain_documentation_projections');
+              if (result.pending) await new Promise<void>(resolve => setImmediate(resolve));
+            } while (!stopping && result.pending);
+          }
+        } catch (error) {
+          recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.documentation-projection', error);
+        } finally {
+          documentationProjectionDrainRunning = false;
+          if (documentationProjectionDrainRequested && !stopping) scheduleDocumentationProjectionDrain();
+        }
+      })();
+    });
+  };
   if (paused) { updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' }); await heartbeatRuntime('paused'); }
   const stop = (exitCode = 0, reason = 'lease_lost'): Promise<void> => {
     if (exitCode !== 0) process.exitCode = exitCode;
-    if (reason !== 'upgrade_drain') {
+    const handoff = reason === 'upgrade_drain';
+    if (shutdownPromise) return shutdownPromise;
+    if (!handoff) {
       signalCognitiveCliShutdown();
       cancelActiveCognitiveCliInvocations();
     }
-    if (shutdownPromise) return shutdownPromise;
     stopping = true;
     const shutdownTrace = createLocalDiagnosticTrace(globalDataPath, `runtime.shutdown.${reason}`, { targetId: runtimeId });
     shutdownTrace.record(`runtime.shutdown.${reason}`, exitCode ? 'error' : 'ok', 0, undefined, { pid: process.pid, exitCode });
     shutdownPromise = (async () => {
       let shutdownError: unknown;
+      let intelligenceDrained = !handoff;
       const attempt = async (action: () => unknown | Promise<unknown>): Promise<void> => {
         try { await action(); }
         catch (error) { shutdownError ||= error; }
       };
       if (timer) clearInterval(timer);
-      const telegramClosed = telegram?.close(reason === 'upgrade_drain' ? 'drain' : 'handoff');
-      activeEngine?.cancel();
+      timer = undefined;
+      if (databaseOverviewProjectionTimer) clearTimeout(databaseOverviewProjectionTimer);
+      if (reportVersionBackfillTimer) clearTimeout(reportVersionBackfillTimer);
+      if (plannerMaintenanceTimer) clearTimeout(plannerMaintenanceTimer);
+      databaseOverviewProjectionTimer = undefined;
+      reportVersionBackfillTimer = undefined;
+      plannerMaintenanceTimer = undefined;
       shutdownTrace.record('runtime.shutdown.cognitive-invocations', 'ok', activeCognitiveCliInvocationCount());
-      dataOperations.interruptMigrations();
-      dataOperations.interruptRuns();
+      if (handoff) {
+        try {
+          if (!dataExecutionDomains) throw new Error('runtime_intelligence_drain_unavailable');
+          await dataExecutionDomains.control('drain_intelligence');
+          intelligenceDrained = true;
+          shutdownTrace.record('runtime.shutdown.intelligence-drain', 'ok');
+        } catch (error) {
+          shutdownTrace.record('runtime.shutdown.intelligence-drain', 'error', 0, error);
+          try { await dataExecutionDomains.control('resume_intelligence'); }
+          catch (resumeError) {
+            recordLocalDiagnosticError(globalDataPath, 'runtime.shutdown.intelligence-resume', resumeError);
+            shutdownPromise = undefined;
+            throw resumeError;
+          }
+          paused = await readRuntimePauseState(scheduledOperations, isAutonomousRuntimeDisabled(globalDataPath));
+          stopping = false;
+          upgradeReplacement = undefined;
+          updateRuntimeState(globalDataPath, runtimeId, { status: paused ? 'paused' : 'running' });
+          await heartbeatRuntime(paused ? 'paused' : 'running').catch(() => undefined);
+          scheduleDatabaseOverviewProjectionBackfill(1_000);
+          scheduleReportVersionBackfill(1_000);
+          schedulePlannerMaintenance(30_000);
+          if (!paused) runCycleObserved();
+          timer = setInterval(runCycleObserved, intervalValue());
+          shutdownPromise = undefined;
+          throw error;
+        }
+      } else shutdownTrace.record('runtime.shutdown.intelligence-drain', 'ok');
+      const controlClosed = controlServer?.close(handoff ? 'handoff' : 'drain');
+      const telegramClosed = telegram?.close('handoff');
+      await attempt(() => dataExecutionDomains?.control('interrupt'));
+      shutdownTrace.record('runtime.shutdown.interrupt', shutdownError ? 'error' : 'ok');
       // Leaf runtimes must release their MCP sessions, inbox claims, and
       // accepted work while the shared data plane is still available.
       // Closing RPC first creates a circular shutdown dependency once data
       // connections are persistent.
       await attempt(() => telegramClosed);
-      await attempt(() => controlServer?.close());
-      await attempt(() => dataExecutionDomains?.close());
-      if (reason !== 'upgrade_drain') terminateRuntimeOwnedChildProcesses();
-      await attempt(() => startupMigration);
-      await attempt(() => storageMaintenance);
-      await attempt(() => heartbeatRuntime('stopped'));
-      await attempt(() => dataOperations.close());
-      await attempt(() => outboxRecovery);
+      shutdownTrace.record('runtime.shutdown.telegram', shutdownError ? 'error' : 'ok');
+      await attempt(() => autonomousCycle?.close());
+      shutdownTrace.record('runtime.shutdown.autonomous-cycle', shutdownError ? 'error' : 'ok');
+      await attempt(() => controlClosed);
+      shutdownTrace.record('runtime.shutdown.control-server', shutdownError ? 'error' : 'ok');
+      if (!handoff) terminateRuntimeOwnedChildProcesses();
       const replacement = upgradeReplacement;
-      if (reason === 'upgrade_drain' && replacement) await attempt(() => dataStore.recordPiCompatibilityDrain({
+      if (reason === 'upgrade_drain' && replacement && intelligenceDrained && !shutdownError) await attempt(() => dataExecutionDomains?.control('record_compatibility_drain', {
         runtimeId, releaseVersion, buildId: runtimeBuild,
         replacementVersion: replacement.releaseVersion, replacementBuildId: replacement.buildId
       }));
-      try { dataStore?.close(); }
-      catch (error) { shutdownError ||= error; }
-      finally { updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' }); }
-      if (shutdownError) throw shutdownError;
+      await attempt(() => heartbeatRuntime('stopped'));
+      shutdownTrace.record('runtime.shutdown.heartbeat', shutdownError ? 'error' : 'ok');
+      if (!runtimeDomainsClosed) {
+        runtimeDomainsClosed = true;
+        await attempt(() => dataExecutionDomains?.close());
+        shutdownTrace.record('runtime.shutdown.execution-domains', shutdownError ? 'error' : 'ok');
+      }
+      const backgroundSettlements = [startupMigration, storageMaintenance, outboxRecovery]
+        .filter((value): value is Promise<unknown> => Boolean(value));
+      await Promise.allSettled(backgroundSettlements);
+      shutdownTrace.record('runtime.shutdown.background-settlement', 'ok', backgroundSettlements.length);
+      updateRuntimeState(globalDataPath, runtimeId, { status: 'stopped' });
+      if (shutdownError && reason !== 'database_generation_cutover') throw shutdownError;
     })();
-    void shutdownPromise.catch(error => { process.stderr.write(`SoloMap Runtime shutdown: ${String(error)}\n`); process.exitCode = 1; });
+    void shutdownPromise.catch(error => {
+      process.stderr.write(`SoloMap Runtime shutdown: ${String(error)}\n`);
+      if (!handoff) process.exitCode = 1;
+    });
     process.exitCode ??= exitCode;
     return shutdownPromise;
   };
-  closeFailedRuntimeInitialization = async () => { await stop(1, 'initialization_failed').catch(() => undefined); };
+  closeFailedRuntimeInitialization = async (exitCode = 1, reason = 'initialization_failed') => {
+    await stop(exitCode, reason).catch(() => undefined);
+  };
+  const stopAndExit = (exitCode: number, reason: string): void => {
+    void stop(exitCode, reason).then(
+      () => process.exit(process.exitCode ?? exitCode),
+      () => { if (reason !== 'upgrade_drain') process.exit(process.exitCode ?? exitCode); }
+    );
+  };
+  process.once('SIGTERM', () => stopAndExit(0, 'sigterm'));
+  process.once('SIGINT', () => stopAndExit(0, 'sigint'));
+  void dataExecutionDomains.waitForFatalFailure().catch(error => {
+    const generationCutover = isDatabaseGenerationCutoverError(error);
+    if (!generationCutover) recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.write-actor-failed', error);
+    stopAndExit(generationCutover ? 75 : 1, generationCutover ? 'database_generation_cutover' : 'write_actor_failed');
+  });
+  void telegram.waitForFatalFailure().catch(error => {
+    recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.telegram-worker-failed', error);
+    stopAndExit(1, 'telegram_worker_failed');
+  });
   try {
-    dataExecutionDomains = await RuntimeDataExecutionDomains.start({
-      root: databaseRoot,
-      databaseId: dataStore.databaseId,
-      writer: request => dataOperations(request)
-    });
+    // The endpoint is not published until bounded state repair required by
+    // every request has completed. Long historical work remains post-ready
+    // maintenance and is admitted by the shared scheduler below.
+    await dataExecutionDomains.control('settle_redundant_upgrade_migrations');
+    await dataExecutionDomains.control('recover_runs');
+  } catch (error) {
+    await dataExecutionDomains.control('storage_maintenance_failed', { error: String(error) }).catch(() => undefined);
+    const generationCutover = isDatabaseGenerationCutoverError(error);
+    await stop(generationCutover ? 75 : 1, generationCutover ? 'database_generation_cutover' : 'startup_failed');
+    throw error;
+  }
+  try {
     controlServer = await startRuntimeControlServer({
     globalDataPath,
     runtimeId,
@@ -253,21 +411,38 @@ async function main(): Promise<void> {
     releaseVersion,
     owner: argumentValue('--runtime-owner') === 'service' ? 'service' : 'fallback',
     enforceOperationRegistry: true,
-    onData: request => dataExecutionDomains!.dispatch(request),
+    scheduler: executionScheduler,
+    executorActivity: () => ({ ...dataExecutionDomains!.activitySnapshot(), 'telegram-worker': telegram?.activity() }),
+    onData: async (request, admission) => {
+      const definition = runtimeOperationDefinition(request.operation);
+      if (definition.executor === 'supervisor') return dispatchSupervisorOperation(request);
+      const result = await dataExecutionDomains!.dispatchSerialized(request, admission);
+      if (request.operation === 'sync_documentation_manifest' || request.operation === 'refresh_documentation_manifest') {
+        scheduleDocumentationProjectionDrain();
+      }
+      return serializedRuntimeDataResult(result);
+    },
     async onCommand(command, replacement) {
       if (command === 'pause' || command === 'drain') {
         paused = true;
-        if (command === 'pause') await writeRuntimePauseState(dataOperations, true);
+        if (command === 'pause') await writeRuntimePauseState(scheduledOperations, true);
         if (command === 'drain') upgradeReplacement = replacement;
         updateRuntimeState(globalDataPath, runtimeId, { status: 'paused' });
         await heartbeatRuntime('paused');
-        if (command === 'drain') setTimeout(() => stop(0, 'upgrade_drain'), 25).unref();
+        if (command === 'drain') setTimeout(() => stopAndExit(0, 'upgrade_drain'), 25).unref();
         return { status: 'paused' };
       }
       if (command === 'resume') {
-        await writeRuntimePauseState(dataOperations, false);
+        await writeRuntimePauseState(scheduledOperations, false);
         paused = false;
-        telegram ||= startTelegramBackgroundRuntime(globalDataPath, dataOperations);
+        if (!telegram) {
+          telegram = new TelegramRuntimeWorkerHost(globalDataPath, scheduledOperations);
+          await telegram.ready();
+          void telegram.waitForFatalFailure().catch(error => {
+            recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.telegram-worker-failed', error);
+            stopAndExit(1, 'telegram_worker_failed');
+          });
+        }
         updateRuntimeState(globalDataPath, runtimeId, { status: 'running' });
         await heartbeatRuntime('running');
         if (running) rerunRequested = true;
@@ -280,55 +455,148 @@ async function main(): Promise<void> {
         return { status: paused ? 'paused' : 'running' };
       }
       if (command === 'stop') {
-        stop(0, 'control_stop');
+        stopAndExit(0, 'control_stop');
         return { status: 'stopped' };
       }
       return { status: paused ? 'paused' : 'running' };
     }
     });
+    autonomousCycle = await startAutonomousCycle();
   } catch (error) {
-    rejectStorageMaintenanceBarrier(error);
+    await dataExecutionDomains.control('storage_maintenance_failed', { error: String(error) }).catch(() => undefined);
     await stop(1, 'control_start_failed').catch(() => undefined);
     throw error;
   }
-  let releaseStartupMigrationBusy = () => {};
-  try {
-    releaseStartupMigrationBusy = controlServer.beginBusy();
-    dataStore.settleRedundantAgentRunUpgradeMigrations();
-    dataOperations.recoverMigrations();
+  scheduleDocumentationProjectionDrain();
+  function scheduleDatabaseOverviewProjectionBackfill(delayMs: number): void {
+    if (stopping || databaseOverviewProjectionTimer) return;
+    databaseOverviewProjectionTimer = setTimeout(() => {
+      databaseOverviewProjectionTimer = undefined;
+      if (stopping) return;
+      void sendRuntimeDataRequest<{ processed: number; complete: boolean }>(databaseRoot, {
+        operation: 'backfill_database_overview_projection',
+        input: { limit: 2_000, idempotencyKey: 'database-overview-projection-v64' },
+        deadlineAt: Date.now() + 1_000
+      }).then(
+        result => { if (!result.complete) scheduleDatabaseOverviewProjectionBackfill(100); },
+        error => {
+          if (!stopping) {
+            process.stderr.write(`SoloMap database overview projection: ${String(error)}\n`);
+            scheduleDatabaseOverviewProjectionBackfill(1_000);
+          }
+        }
+      );
+    }, delayMs);
+    databaseOverviewProjectionTimer.unref();
   }
-  catch (error) {
-    releaseStartupMigrationBusy();
-    rejectStorageMaintenanceBarrier(error);
-    await stop(1, 'startup_failed');
-    throw error;
+  scheduleDatabaseOverviewProjectionBackfill(5_000);
+  function scheduleReportVersionBackfill(delayMs: number): void {
+    if (stopping || reportVersionBackfillTimer) return;
+    reportVersionBackfillTimer = setTimeout(() => {
+      reportVersionBackfillTimer = undefined;
+      if (stopping) return;
+      void scheduleControl<{ processed: number; complete: boolean }>('maintenance', 'backfill_report_versions').then(
+        result => { if (!result.complete) scheduleReportVersionBackfill(25); },
+        error => {
+          if (!stopping) {
+            process.stderr.write(`SoloMap report index maintenance: ${String(error)}\n`);
+            scheduleReportVersionBackfill(1_000);
+          }
+        }
+      );
+    }, delayMs);
+    reportVersionBackfillTimer.unref();
   }
-  dataOperations.recoverRuns();
-  void intelligenceRuntime.recover().catch(error => process.stderr.write(`SoloMap intelligence recovery: ${String(error)}\n`));
-  outboxRecovery = dataStore?.recoverOutbox().catch(error => process.stderr.write(`SoloMap Runtime outbox recovery: ${String(error)}\n`));
+  function schedulePlannerMaintenance(delayMs: number): void {
+    if (stopping || plannerMaintenanceTimer) return;
+    plannerMaintenanceTimer = setTimeout(() => {
+      plannerMaintenanceTimer = undefined;
+      if (stopping) return;
+      void scheduleControl('maintenance', 'maintain_planner_statistics')
+        .catch(error => recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.planner-statistics', classifyDiagnosticFailure(error)));
+    }, delayMs);
+    plannerMaintenanceTimer.unref();
+  }
+  scheduleReportVersionBackfill(5_000);
+  const startupMaintenanceQuantum = <T>(action: () => Promise<T>, label: string): Promise<T> =>
+    executionScheduler.submit('maintenance', action, { label });
   const startupMigrationReady = (async () => {
+    // Give the first host/user action a reserved admission window. Every later
+    // step is a separate maintenance quantum and cannot start while foreground
+    // work is active or queued.
+    const admissionAt = Date.now() + 1_000;
+    while (!stopping && Date.now() < admissionAt) await new Promise(resolve => setTimeout(resolve, Math.min(100, admissionAt - Date.now())));
+    if (stopping) return;
+    const releaseStartupMigrationBusy = controlServer!.beginBusy();
     try {
-      await outboxRecovery;
-      if (!stopping) historicalOwnerStamp = await historicalRunOwnerStateStamp(dataStore, () => !stopping);
-      if (!stopping) await enqueueStartupDataMigrations(dataStore, dataOperations, () => !stopping);
-      if (!stopping) await dataOperations.waitForMigrations();
+      await startupMaintenanceQuantum(() => dataExecutionDomains!.control('recover_migrations'), 'internal:recover-migrations');
+      await startupMaintenanceQuantum(() => dataExecutionDomains!.control('recover_outbox'), 'internal:recover-outbox');
+      await startupMaintenanceQuantum(() => dataExecutionDomains!.control('enqueue_startup_migrations', {
+        phase: 'registry'
+      }), 'internal:startup-initialize-registry');
+      const registry = controlProjection.readProjectRegistry({}) as {
+        registry?: { projects?: Array<{ path?: string; name?: string }> };
+      } | null;
+      const projects = Array.isArray(registry?.registry?.projects) ? registry!.registry!.projects! : [];
+      const admitRequests = async (requests: RuntimeDataRequest[]): Promise<void> => {
+        for (const request of requests) {
+          if (stopping) return;
+          await startupMaintenanceQuantum(
+            () => dataOperations(request),
+            `internal:startup-migration:${request.operation}`
+          );
+        }
+      };
+      for (const project of projects) {
+        if (stopping) break;
+        if (!path.isAbsolute(String(project.path || ''))) continue;
+        const root = path.resolve(String(project.path));
+        await startupMaintenanceQuantum(() => dataExecutionDomains!.control('enqueue_startup_migrations', {
+          phase: 'register', root, name: String(project.name || '')
+        }), 'internal:startup-register-project');
+        const discovered = await startupMaintenanceQuantum(() => dataExecutionDomains!.control('enqueue_startup_migrations', {
+          phase: 'project', root
+        }) as Promise<{ requests: RuntimeDataRequest[] }>, 'internal:startup-discover-project');
+        await admitRequests(discovered.requests || []);
+      }
       if (!stopping) {
-        const recovered = await reapFinishedLegacyRunProcesses(dataStore);
+        const discovered = await startupMaintenanceQuantum(() => dataExecutionDomains!.control('enqueue_startup_migrations', {
+          phase: 'global'
+        }) as Promise<{ requests: RuntimeDataRequest[] }>, 'internal:startup-discover-global');
+        await admitRequests(discovered.requests || []);
+      }
+      if (!stopping) await startupMaintenanceQuantum(() => dataExecutionDomains!.control('wait_for_migrations'), 'internal:wait-for-migrations');
+      if (!stopping) {
+        const recovered = await startupMaintenanceQuantum(() => dataExecutionDomains!.control('reap_finished_legacy_runs') as Promise<{ conflicts: string[] }>, 'internal:reap-legacy-runs');
         for (const conflict of recovered.conflicts) process.stderr.write(`SoloMap legacy run recovery: ${conflict}\n`);
       }
-      if (!stopping) startupMigrationsReady = true;
     } finally { releaseStartupMigrationBusy(); }
   })();
-  void startupMigrationReady.then(resolveStorageMaintenanceBarrier, rejectStorageMaintenanceBarrier);
+  outboxRecovery = startupMigrationReady;
+  void startupMigrationReady.then(() => scheduleControl('maintenance', 'recover_intelligence'))
+    .catch(error => process.stderr.write(`SoloMap intelligence recovery: ${String(error)}\n`));
+  void startupMigrationReady.then(
+    () => scheduleControl('runtime-event', 'storage_maintenance_ready'),
+    error => scheduleControl('runtime-event', 'storage_maintenance_failed', { error: String(error) })
+  ).catch(error => process.stderr.write(`SoloMap storage maintenance barrier: ${String(error)}\n`));
   startupMigration = startupMigrationReady.catch(error => { process.stderr.write(`SoloMap Runtime memory migration: ${String(error)}\n`); });
   void startupMigrationReady.catch(error => {
+    const generationCutover = isDatabaseGenerationCutoverError(error);
+    if (generationCutover) {
+      stopAndExit(75, 'database_generation_cutover');
+      return;
+    }
     recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.migration.failed', error);
-    void stop(1, 'migration_failed');
+    stopAndExit(1, 'migration_failed');
   });
   storageMaintenance = (async () => {
     await startupMigrationReady;
-    if (!stopping) await dataOperations({ operation: 'maintain_database_storage', input: { compact: false, automatic: true } });
+    if (!stopping) await scheduledOperations({ operation: 'maintain_database_storage', input: { compact: false, automatic: true } });
   })().catch(error => { process.stderr.write(`SoloMap Runtime storage maintenance: ${String(error)}\n`); });
+  void startupMigrationReady.then(
+    () => schedulePlannerMaintenance(30_000),
+    () => undefined
+  );
   function runCycleObserved(): void {
     void runCycle().catch(error => {
       recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.cycle.fatal', classifyDiagnosticFailure(error));
@@ -337,67 +605,26 @@ async function main(): Promise<void> {
   async function runCycle(): Promise<void> {
     if (stopping || running) return;
     running = true;
-    let releaseBusy: (() => void) | undefined;
+    let executor: AutonomousCycleExecutor | undefined;
     try {
-      releaseBusy = controlServer?.beginBusy();
-      if (!hasRuntimeLease(globalDataPath, runtimeId, process.pid)) {
-        stop();
+      executor = autonomousCycle ||= await startAutonomousCycle();
+      const result = await executor.run(paused);
+      if (result.diagnosticError) {
+        recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.cycle', classifyDiagnosticFailure(result.diagnosticError));
+      }
+      if (result.leaseLost) {
+        stopAndExit(0, 'lease_lost');
         return;
       }
-      try { dataStore.maintainPlannerStatistics(); }
-      catch (error) { recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.planner-statistics', classifyDiagnosticFailure(error)); }
-      await refreshProjectRegistry(globalDataPath, undefined, (operation, input) => dataOperations({ operation, input }));
-      await refreshCognitiveRuntimeConfig(globalDataPath, dataOperations);
-      const current = readCurrentRegisteredShadowDecision(globalDataPath);
-      const cognitiveConfig = readCognitiveRuntimeConfig(globalDataPath);
-      const cognitiveConfigRevision = cognitiveRuntimeConfigRevision(cognitiveConfig);
-      const engine = cognitiveConfig.mode === 'agent_cli' ? new EmbeddedPiAgentEngine({
-        agentCli: cognitiveConfig.agentCli,
-        model: cognitiveConfig.model,
-        configRevision: cognitiveConfigRevision,
-        workingDirectory: globalDataPath
-      }) : null;
-      activeEngine = engine || undefined;
-      const decision = engine
-        ? await runCognitiveShadowDecisionCycle({
-          globalDataPath,
-          engine,
-          operation: dataOperations,
-          currentDecision: current,
-          engineConfigRevision: cognitiveConfigRevision,
-          beforeCommit: () => hasRuntimeLease(globalDataPath, runtimeId, process.pid)
-            && cognitiveRuntimeConfigRevision(readCognitiveRuntimeConfig(globalDataPath)) === cognitiveConfigRevision
-        })
-        : await runShadowDecisionCycleFromDatabase({ globalDataPath, operation: dataOperations });
-      if (!hasRuntimeLease(globalDataPath, runtimeId, process.pid)) {
-        stop();
-        return;
-      }
-      await persistShadowRuntimeState(globalDataPath, dataOperations);
       updateRuntimeState(globalDataPath, runtimeId, { status: paused ? 'paused' : 'running' });
       await heartbeatRuntime(paused ? 'paused' : 'running');
-      if (!stopping && startupMigrationsReady) {
-        try { historicalOwnerStamp = await refreshHistoricalRunMigrations(dataStore, dataOperations, () => !stopping, historicalOwnerStamp); }
-        catch (error) { recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.migration-refresh', classifyDiagnosticFailure(error)); }
-      }
     } catch (error) {
-      recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.cycle', classifyDiagnosticFailure(error));
-      if (stopping) return;
-      if (!hasRuntimeLease(globalDataPath, runtimeId, process.pid)) {
-        stop();
-        return;
+      if (!stopping) {
+        recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.cycle.fatal', classifyDiagnosticFailure(error));
+        if (executor && autonomousCycle === executor) autonomousCycle = undefined;
+        await executor?.close().catch(() => undefined);
       }
-      const fallback = await runShadowDecisionCycleFromDatabase({ globalDataPath, operation: dataOperations });
-      if (!hasRuntimeLease(globalDataPath, runtimeId, process.pid)) {
-        stop();
-        return;
-      }
-      await persistShadowRuntimeState(globalDataPath, dataOperations);
-      updateRuntimeState(globalDataPath, runtimeId, { status: paused ? 'paused' : 'running' });
-      await heartbeatRuntime(paused ? 'paused' : 'running');
     } finally {
-      releaseBusy?.();
-      activeEngine = undefined;
       running = false;
       if (rerunRequested && !stopping) {
         rerunRequested = false;
@@ -405,21 +632,20 @@ async function main(): Promise<void> {
       }
     }
   }
-  process.once('SIGTERM', () => { void stop(0, 'sigterm'); });
-  process.once('SIGINT', () => { void stop(0, 'sigint'); });
   runCycleObserved();
   timer = setInterval(runCycleObserved, intervalValue());
 }
 
 void main().catch(async error => {
   const globalDataPath = argumentValue('--global-data-path');
+  const generationCutover = isDatabaseGenerationCutoverError(error);
   const failureReason = sanitizeDiagnosticText(error);
   const failureCode = /^[a-z0-9_]{1,80}$/i.test(failureReason) ? failureReason : classifyDiagnosticFailure(error);
-  if (globalDataPath) recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.initialize', failureCode);
-  try { await closeFailedRuntimeInitialization?.(); }
+  if (globalDataPath && !generationCutover) recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.initialize', failureCode);
+  try { await closeFailedRuntimeInitialization?.(generationCutover ? 75 : 1, generationCutover ? 'database_generation_cutover' : 'initialization_failed'); }
   catch (cleanupError) { process.stderr.write(`SoloMap Runtime initialization cleanup: ${String(cleanupError)}\n`); }
   const runtimeId = argumentValue('--runtime-id') || runtimeInitializationId;
-  if (globalDataPath && runtimeId) updateRuntimeState(globalDataPath, runtimeId, { status: 'failed', failureCode, failureReason });
-  process.stderr.write(`SoloMap Runtime could not initialize autonomous execution: ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
+  if (globalDataPath && runtimeId && !generationCutover) updateRuntimeState(globalDataPath, runtimeId, { status: 'failed', failureCode, failureReason });
+  if (!generationCutover) process.stderr.write(`SoloMap Runtime could not initialize autonomous execution: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = generationCutover ? 75 : 1;
 });

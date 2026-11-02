@@ -1,9 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { execFile, execFileSync } from 'child_process';
+import { execFile } from 'child_process';
 import { randomUUID } from 'crypto';
 import { promisify } from 'util';
-import { CsvStore } from './db/csvStore';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
@@ -27,6 +26,7 @@ export interface ProjectGrowthScanOptions {
   forceRefresh?: boolean;
   historyLimit?: number;
   globalDataPath?: string;
+  gitFacts?: { head: string; churn: Array<[string, number]> };
 }
 
 export interface ProjectGrowthCaptureOptions extends ProjectGrowthScanOptions {
@@ -37,12 +37,6 @@ export interface ProjectGrowthCommitResult {
   accepted: boolean;
   snapshotId: string | null;
   unchanged: boolean;
-}
-
-async function readProjectRunEntries(projectPath: string, globalDataPath: string): Promise<RunIndexEntry[]> {
-  return sendRuntimeDataRequest<RunIndexEntry[]>(globalDataPath, {
-    operation: 'read_project_run_indexes', input: { root: projectPath }
-  });
 }
 
 export interface ProjectGrowthSummaryNode {
@@ -538,42 +532,6 @@ function dominantRoleForFiles(files: ScannedFileNode[]): string {
     counts.set(file.primaryRole || 'implementation', (counts.get(file.primaryRole || 'implementation') || 0) + Math.max(1, file.loc || 1));
   }
   return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || 'implementation';
-}
-
-function readGitHead(projectPath: string): string {
-  try {
-    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
-      cwd: projectPath,
-      encoding: 'utf8',
-      timeout: 2000,
-      stdio: ['ignore', 'pipe', 'ignore']
-    }).trim();
-  } catch {
-    return '';
-  }
-}
-
-function readGitChurn(projectPath: string): Map<string, number> {
-  const result = new Map<string, number>();
-  try {
-    const output = execFileSync('git', ['log', '--name-only', '--pretty=format:', '--since=90 days'], {
-      cwd: projectPath,
-      encoding: 'utf8',
-      timeout: 3000,
-      maxBuffer: 4 * 1024 * 1024,
-      stdio: ['ignore', 'pipe', 'ignore']
-    });
-    for (const line of output.split(/\r?\n/)) {
-      const file = toPosixPath(line.trim());
-      if (!file || isGeneratedOrExcluded(file)) {
-        continue;
-      }
-      result.set(file, (result.get(file) || 0) + 1);
-    }
-  } catch {
-    // Git is an optional evolution signal.
-  }
-  return result;
 }
 
 function walkProjectFiles(projectPath: string, maxFiles: number): FileFact[] {
@@ -2216,7 +2174,7 @@ export function buildProjectGrowthSnapshot(
   const now = options.now || new Date();
   const nowIso = now.toISOString();
   const snapshotId = `growth-${now.getTime().toString(36)}-${randomUUID()}`;
-  const gitHead = readGitHead(projectPath);
+  const gitHead = options.gitFacts?.head || '';
   const files = walkProjectFiles(projectPath, options.maxFiles || 4000);
   const nodes = new Map<string, GrowthNodeRecord>();
   const edges: GrowthEdgeRecord[] = [];
@@ -2240,7 +2198,7 @@ export function buildProjectGrowthSnapshot(
       createdAt: nowIso
     });
   }
-  addGitSignals(snapshotId, readGitChurn(projectPath), nodes, signals, nowIso);
+  addGitSignals(snapshotId, new Map(options.gitFacts?.churn || []), nodes, signals, nowIso);
 
   const importCounts = new Map<string, number>();
   for (const edge of edges) {
@@ -2317,6 +2275,71 @@ async function finalizeProjectGrowthSnapshot(
   snapshot.labels = labels;
 }
 
+export async function buildCompleteProjectGrowthSnapshot(
+  projectPath: string,
+  extensionPath: string,
+  roadmapNodes: RoadmapNode[],
+  runEntries: RunIndexEntry[],
+  options: ProjectGrowthScanOptions = {}
+): Promise<GrowthSnapshotData> {
+  const snapshot = buildProjectGrowthSnapshot(projectPath, roadmapNodes, runEntries, options);
+  await finalizeProjectGrowthSnapshot(snapshot, projectPath, extensionPath, roadmapNodes, runEntries);
+  return snapshot;
+}
+
+async function refreshProjectGrowthInRuntime(
+  globalDataPath: string,
+  projectPath: string,
+  extensionPath: string,
+  requestId: string,
+  options: ProjectGrowthScanOptions
+): Promise<ProjectGrowthCommitResult> {
+  return sendRuntimeDataRequest<ProjectGrowthCommitResult>(globalDataPath, {
+    operation: 'refresh_project_growth', input: {
+      root: projectPath,
+      extensionPath,
+      requestId,
+      scanReason: options.scanReason,
+      maxFiles: options.maxFiles,
+      now: options.now?.toISOString()
+    }
+  });
+}
+
+async function readProjectGrowthPages(globalDataPath: string, projectPath: string, historyLimit: number): Promise<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const first = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, {
+        operation: 'read_project_growth', input: { root: projectPath, historyLimit, detailOffset: 0, detailLimit: 200 }
+      });
+      const history: GrowthSnapshotData[] = [];
+      for (const initial of first.history) {
+        let merged = initial;
+        let detailOffset = initial.detailOffset || 0;
+        while (merged.nextDetailOffset !== null && merged.nextDetailOffset !== undefined) {
+          if (!Number.isInteger(merged.nextDetailOffset) || merged.nextDetailOffset <= detailOffset || !merged.detailToken) throw new Error('growth_detail_page_invalid');
+          detailOffset = merged.nextDetailOffset;
+          const page = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, {
+            operation: 'read_project_growth',
+            input: { root: projectPath, historyLimit: 1, snapshotId: initial.snapshot.id, detailToken: initial.detailToken, detailOffset, detailLimit: 200 }
+          });
+          const item = page.latest;
+          if (!item || item.snapshot.id !== initial.snapshot.id || item.detailToken !== initial.detailToken) throw new Error('growth_detail_snapshot_changed');
+          merged = { ...item,
+            nodes: [...merged.nodes, ...item.nodes], edges: [...merged.edges, ...item.edges],
+            signals: [...merged.signals, ...item.signals], labels: [...merged.labels, ...item.labels] };
+        }
+        history.push(merged);
+      }
+      return { latest: history[0] || null, history };
+    } catch (error) {
+      if (attempt === 0 && String((error as Error)?.message || error).includes('growth_detail_snapshot_changed')) continue;
+      throw error;
+    }
+  }
+  throw new Error('growth_detail_snapshot_changed');
+}
+
 export async function refreshProjectGrowthSnapshot(
   projectPath: string,
   extensionPath: string,
@@ -2325,16 +2348,11 @@ export async function refreshProjectGrowthSnapshot(
   {
     const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath || '', projectPath);
     await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
-    const before = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: 1 } });
+    const before = await readProjectGrowthPages(globalDataPath, projectPath, 1);
     const previous = before.latest;
     const requestId = randomUUID();
-    const reservation = await sendRuntimeDataRequest<{ requestId: string; generation: number }>(globalDataPath, { operation: 'reserve_project_growth_refresh', input: { root: projectPath, requestId } });
-    const roadmapNodes = new CsvStore(path.join(projectPath, '.solopreneur', 'roadmap.csv')).readNodes();
-    const runEntries = await readProjectRunEntries(projectPath, globalDataPath);
-    const snapshot = buildProjectGrowthSnapshot(projectPath, roadmapNodes, runEntries, options);
-    await finalizeProjectGrowthSnapshot(snapshot, projectPath, extensionPath, roadmapNodes, runEntries);
-    await sendRuntimeDataRequest(globalDataPath, { operation: 'commit_project_growth_refresh', input: { root: projectPath, ...reservation, data: snapshot } });
-    const stored = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: options.historyLimit || 12 } });
+    await refreshProjectGrowthInRuntime(globalDataPath, projectPath, extensionPath, requestId, options);
+    const stored = await readProjectGrowthPages(globalDataPath, projectPath, options.historyLimit || 12);
     if (!stored.latest) throw new Error('growth_snapshot_commit_missing');
     const coverageSnapshot = await loadProjectCoverageSnapshot(projectPath, globalDataPath);
     const view = buildProjectGrowthViewModel(stored.latest, { previous, history: stored.history, coverageSnapshot });
@@ -2353,17 +2371,7 @@ export async function captureProjectGrowthSnapshot(
   if (options.shouldCommit?.() === false) return { accepted: false, snapshotId: null, unchanged: false };
   const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath || '', projectPath);
   await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
-  const reservation = await sendRuntimeDataRequest<{ requestId: string; generation: number }>(globalDataPath, {
-    operation: 'reserve_project_growth_refresh', input: { root: projectPath, requestId }
-  });
-  const roadmapNodes = new CsvStore(path.join(projectPath, '.solopreneur', 'roadmap.csv')).readNodes();
-  const runEntries = await readProjectRunEntries(projectPath, globalDataPath);
-  const snapshot = buildProjectGrowthSnapshot(projectPath, roadmapNodes, runEntries, options);
-  await finalizeProjectGrowthSnapshot(snapshot, projectPath, extensionPath, roadmapNodes, runEntries);
-  if (options.shouldCommit?.() === false) return { accepted: false, snapshotId: null, unchanged: false };
-  return sendRuntimeDataRequest<ProjectGrowthCommitResult>(globalDataPath, {
-    operation: 'commit_project_growth_refresh', input: { root: projectPath, ...reservation, data: snapshot }
-  });
+  return refreshProjectGrowthInRuntime(globalDataPath, projectPath, extensionPath, requestId, options);
 }
 
 export async function getProjectGrowthView(
@@ -2374,7 +2382,7 @@ export async function getProjectGrowthView(
   const globalDataPath = normalizeGlobalDataPathForExtension(options.globalDataPath || '', projectPath);
   await ensureHealthyAutonomousRuntime({ extensionPath, globalDataPath });
   {
-    const stored = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: options.historyLimit || 12 } });
+    const stored = await readProjectGrowthPages(globalDataPath, projectPath, options.historyLimit || 12);
     const cacheKey = projectGrowthCacheKey(globalDataPath, projectPath);
     const cached = projectGrowthViewCache.get(cacheKey);
     if (!options.forceRefresh && cached && stored.latest?.snapshot.id === cached.snapshotId) {
@@ -2384,16 +2392,11 @@ export async function getProjectGrowthView(
     if (options.forceRefresh || (options.refreshIfMissing !== false && !stored.latest)) {
       const previous = stored.latest;
       const requestId = randomUUID();
-      const reservation = await sendRuntimeDataRequest<{ requestId: string; generation: number }>(globalDataPath, { operation: 'reserve_project_growth_refresh', input: { root: projectPath, requestId } });
-      const roadmapNodes = new CsvStore(path.join(projectPath, '.solopreneur', 'roadmap.csv')).readNodes();
-      const runEntries = await readProjectRunEntries(projectPath, globalDataPath);
-      const snapshot = buildProjectGrowthSnapshot(projectPath, roadmapNodes, runEntries, {
+      await refreshProjectGrowthInRuntime(globalDataPath, projectPath, extensionPath, requestId, {
         ...options,
         scanReason: options.scanReason || 'query_refresh'
       });
-      await finalizeProjectGrowthSnapshot(snapshot, projectPath, extensionPath, roadmapNodes, runEntries);
-      await sendRuntimeDataRequest(globalDataPath, { operation: 'commit_project_growth_refresh', input: { root: projectPath, ...reservation, data: snapshot } });
-      const committed = await sendRuntimeDataRequest<{ latest: GrowthSnapshotData | null; history: GrowthSnapshotData[] }>(globalDataPath, { operation: 'read_project_growth', input: { root: projectPath, historyLimit: options.historyLimit || 12 } });
+      const committed = await readProjectGrowthPages(globalDataPath, projectPath, options.historyLimit || 12);
       if (!committed.latest) throw new Error('growth_snapshot_commit_missing');
       const coverageSnapshot = await loadProjectCoverageSnapshot(projectPath, globalDataPath);
       const view = buildProjectGrowthViewModel(committed.latest, { previous, history: committed.history, coverageSnapshot });

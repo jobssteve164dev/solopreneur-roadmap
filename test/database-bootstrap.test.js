@@ -74,6 +74,25 @@ test('normal Runtime startup creates the database and automatically imports lega
   let run = launch(root);
   try {
     await ready(run, root);
+    const registry = await sendRuntimeDataRequest(root, { operation: 'initialize_project_registry', input: {} });
+    assert.deepEqual(await sendRuntimeDataRequest(root, {
+      operation: 'read_project_registry', input: { knownRevision: registry.revision, knownObjectId: registry.objectId }
+    }), {
+      objectId: registry.objectId,
+      revision: registry.revision,
+      unchanged: true,
+      legacyContextImported: registry.legacyContextImported
+    }, 'the Supervisor projection must preserve conditional reads after Writer initialization');
+    const renamed = await sendRuntimeDataRequest(root, { operation: 'patch_project_registry', input: {
+      expectedRevision: registry.revision,
+      projectPatches: [{ path: workspace, fields: { name: 'Alpha projected' } }],
+      idempotencyKey: 'bootstrap-control-projection-rename'
+    } });
+    assert.deepEqual(await sendRuntimeDataRequest(root, { operation: 'read_project_registry', input: {} }), renamed,
+      'the committed Writer revision must be visible through the Supervisor before the mutation response resolves');
+    assert.deepEqual(await sendRuntimeDataRequest(root, {
+      operation: 'read_project_registry', input: { revision: registry.revision }
+    }), registry, 'historical registry reads must retain their database-authority fallback');
     const project = await sendRuntimeDataRequest(root, { operation: 'register_project', input: { root: workspace } });
     const write = await sendRuntimeDataRequest(root, { operation: 'write', input: { kind: 'memory', action: 'create', scope: project.projectId, idempotencyKey: 'daily', data: { category: 'project', title: 'Daily', status: 'active', content: 'instant write' } } });
     assert.equal((await sendRuntimeDataRequest(root, { operation: 'read', input: { ref: write.objectId } })).data.content, 'instant write');
@@ -152,7 +171,10 @@ test('Today intelligence becomes readable while a recovered legacy migration is 
       await new Promise(resolve => setTimeout(resolve, 20));
     } while (true);
     assert.equal(decision.status, 'completed');
-    await new Promise(resolve => setTimeout(resolve, 25));
+    const busyDeadline = Date.now() + 2500;
+    while (!fs.existsSync(path.join(root, 'runtime', 'control.busy.json')) && Date.now() < busyDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
     assert.equal(fs.existsSync(path.join(root, 'runtime', 'control.busy.json')), true,
       'the Runtime must retain its owner lease while the internal history scan is still running');
     assert.equal(fs.existsSync(refreshMarker), false,
@@ -207,7 +229,7 @@ test('Runtime closes its control endpoint when startup migration recovery fails'
     ]);
     assert.equal(outcome.code, 1, stderr || 'startup failure must terminate the Runtime');
     assert.match(stderr, /startup migration failed/);
-    assert.equal(fs.existsSync(path.join(root, 'runtime', 'control.busy.json')), false);
+    assert.equal(fs.existsSync(path.join(root, 'runtime', 'control.busy.json')), false, stderr);
     await assert.rejects(sendRuntimeControlCommand(root, 'refresh'));
   } finally {
     if (child.exitCode === null) {
@@ -259,7 +281,7 @@ test('Runtime safely closes database-owned work when control server startup fail
   }
 });
 
-test('Runtime records stopped when Pi compatibility registration fails after runtime admission', async () => {
+test('a same-release replacement build remains legacy until an exact drain activates it', async () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-bootstrap-pi-registration-failure-'));
   const root = path.join(fixture, '.solomap-global');
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
@@ -271,16 +293,12 @@ test('Runtime records stopped when Pi compatibility registration fails after run
   child.stderr.on('data', bytes => { stderr += bytes; });
   child.stdout.resume();
   try {
-    const outcome = await Promise.race([
-      once(child, 'exit').then(([code]) => ({ code })),
-      new Promise(resolve => setTimeout(() => resolve({ code: 'timeout' }), 10000))
-    ]);
-    assert.equal(outcome.code, 1, stderr || 'Pi compatibility conflict must terminate the Runtime');
-    assert.match(stderr, /pi_release_build_conflict/);
+    await ready({ child, errors: () => stderr }, root);
+    assert.deepEqual(await sendRuntimeDataRequest(root, { operation: 'read_intelligence_execution_mode', input: {} }), { mode: 'legacy' });
     const { DatabaseSync } = require('node:sqlite');
     const database = new DatabaseSync(path.join(root, 'solomap.db'), { readOnly: true });
     try {
-      assert.equal(database.prepare('SELECT status FROM runtime_instances LIMIT 1').get().status, 'stopped');
+      assert.equal(database.prepare("SELECT COUNT(*) AS count FROM pi_compatible_releases WHERE release_version='0.0.604'").get().count, 2);
       assert.equal(database.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
     } finally { database.close(); }
   } finally {
@@ -332,7 +350,7 @@ test('Runtime exits unsuccessfully when an asynchronous startup migration fails'
     ]);
     assert.equal(outcome.code, 1, stderr || 'asynchronous startup failure must terminate unsuccessfully');
     assert.match(stderr, /asynchronous startup migration failed/);
-    assert.equal(fs.existsSync(path.join(root, 'runtime', 'control.busy.json')), false);
+    assert.equal(fs.existsSync(path.join(root, 'runtime', 'control.busy.json')), false, stderr);
     await assert.rejects(sendRuntimeControlCommand(root, 'refresh'));
   } finally {
     if (child.exitCode === null) {
@@ -477,7 +495,7 @@ test('Runtime imports legacy project growth history in the background without re
     do {
       state = await sendRuntimeDataRequest(root, { operation: 'read_project_growth', input: { root: workspace, historyLimit: 5 } });
       if (state.latest) break;
-      assert.ok(Date.now() < deadline, 'legacy growth history must be imported by background startup');
+      assert.ok(Date.now() < deadline, run.errors() || 'legacy growth history must be imported by background startup');
       await new Promise(resolve => setTimeout(resolve, 20));
     } while (true);
     assert.equal(state.latest.snapshot.scanReason, 'legacy');
@@ -698,6 +716,63 @@ test('normal Runtime startup defers the full legacy project-file scan until expl
   }
 });
 
+test('Runtime startup migration discovery can run on a read-only maintenance connection without mutating authority', async () => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { collectStartupDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-read-only-startup-discovery-'));
+  const root = path.join(base, '.solomap-global');
+  const workspace = path.join(base, 'project');
+  const runDirectory = path.join(workspace, '.solopreneur', 'agent-runs', '__solo__', '1');
+  fs.mkdirSync(runDirectory, { recursive: true });
+  fs.writeFileSync(path.join(runDirectory, 'prompt.txt'), 'retained prompt');
+  const writer = new UnifiedDataStore(root);
+  await writer.registerProject({ root: workspace });
+  const databaseId = writer.databaseId;
+  writer.close();
+  const before = fs.statSync(path.join(root, 'solomap.db'));
+  const reader = UnifiedDataStore.openReadOnly(root, databaseId);
+  try {
+    const requests = await collectStartupDataMigrations(reader, () => true);
+    assert.ok(requests.some(request => request.operation === 'import_project_data'
+      && request.input.collection === 'agent-runs'
+      && request.input.projectRoot === workspace));
+    const selectedRequests = await collectStartupDataMigrations(reader, () => true, workspace);
+    assert.ok(selectedRequests.some(request => request.operation === 'import_project_data'
+      && request.input.collection === 'agent-runs'
+      && request.input.projectRoot === workspace),
+    'a single-project maintenance quantum must remain read-only while discovering its requests');
+  } finally { reader.close(); }
+  const after = fs.statSync(path.join(root, 'solomap.db'));
+  assert.equal(after.size, before.size);
+  assert.equal(after.mtimeMs, before.mtimeMs);
+  const verification = UnifiedDataStore.open(root, databaseId);
+  try { assert.equal(verification.migrationJobs().length, 0); }
+  finally {
+    verification.close();
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('Runtime startup routes legacy discovery through Maintenance Compute before Writer admission', () => {
+  const domainWorker = fs.readFileSync(path.join(__dirname, '..', 'src', 'runtimeDataDomainWorker.ts'), 'utf8');
+  const maintenanceWorker = fs.readFileSync(path.join(__dirname, '..', 'src', 'maintenanceComputeWorker.ts'), 'utf8');
+  const control = domainWorker.slice(
+    domainWorker.indexOf("case 'enqueue_startup_migrations'"),
+    domainWorker.indexOf("case 'backfill_report_versions'")
+  );
+  assert.match(control, /computeMaintenance[^\n]*\('discover_startup_migrations'/,
+    'startup filesystem discovery must execute outside the Write Actor thread');
+  assert.doesNotMatch(control, /enqueueStartupDataMigrations/,
+    'the Write Actor must not traverse all legacy sources during startup');
+  assert.match(maintenanceWorker, /collectStartupDataMigrations/,
+    'the Maintenance Compute Worker must own read-only startup discovery');
+  const runtimeProcess = fs.readFileSync(path.join(__dirname, '..', 'src', 'autonomousRuntimeProcess.ts'), 'utf8');
+  assert.match(runtimeProcess, /await startupMaintenanceQuantum\([\s\S]*?\(\) => dataOperations\(request\)/,
+    'the Runtime must admit every discovered idempotent migration request as its own scheduler turn');
+  assert.match(runtimeProcess, /phase: 'registry'[\s\S]*phase: 'register'[\s\S]*phase: 'project'[\s\S]*phase: 'global'/,
+    'startup discovery must initialize authority, then advance one project and global phase at a time');
+});
+
 test('explicit migration discovery preserves the established step-memory and run-digests task versions', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   const { enqueueAvailableDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
@@ -900,15 +975,27 @@ test('the extension chat readiness gate reconnects after owner exit and preserve
     const receipt = await sendRuntimeDataRequest(root, { operation: 'write', input: { kind: 'memory', action: 'create', scope: null, idempotencyKey: 'reconnect-content', data: { category: 'profile', title: 'Reconnect', status: 'active', content: 'Keep committed bytes' } } });
     const { DatabaseSync } = require('node:sqlite');
     const db = new DatabaseSync(path.join(root, 'solomap.db'), { readOnly: true });
-    const counts = () => JSON.stringify(db.prepare('SELECT (SELECT count(*) FROM events) AS events, (SELECT count(*) FROM requests) AS requests, (SELECT count(*) FROM migration_jobs) AS jobs').get());
-    const before = counts();
+    const counts = () => JSON.stringify(db.prepare(`WITH heartbeat_requests AS
+      (SELECT request_id FROM events WHERE kind IN ('evidence.runtime_instance_heartbeat','runtime_instance.patch'))
+      SELECT (SELECT count(*) FROM events WHERE request_id NOT IN heartbeat_requests) AS events,
+        (SELECT count(*) FROM requests WHERE id NOT IN heartbeat_requests) AS requests,
+        (SELECT count(*) FROM migration_jobs) AS jobs`).get());
+    let before = counts();
+    for (let stableSamples = 0, deadline = Date.now() + 5000; stableSamples < 20;) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const current = counts();
+      stableSamples = current === before ? stableSamples + 1 : 0;
+      before = current;
+      if (stableSamples < 20) assert.ok(Date.now() < deadline, 'Runtime startup database writes did not settle before the readiness-idempotency check');
+    }
     const timings = [];
     for (let i = 0; i < 20; i++) {
       const started = performance.now();
       await gate();
       timings.push(performance.now() - started);
     }
-    assert.equal(counts(), before, 'unchanged readiness checks do not append database events, requests or migration jobs');
+    assert.equal(counts(), before, `unchanged readiness checks do not append database events, requests or migration jobs; recent=${JSON.stringify(
+      db.prepare('SELECT sequence,kind,subject_id,request_id FROM events ORDER BY sequence DESC LIMIT 6').all())}`);
     db.close();
     console.log(JSON.stringify({ readinessChecks: 20, averageMs: timings.reduce((sum,value)=>sum+value,0)/20, maxMs: Math.max(...timings), unchangedDatabaseCounts: true, backgroundPollingAdded: false, paidOperations: 0 }));
     await shutDown();

@@ -4,8 +4,8 @@ import * as net from 'net';
 import * as path from 'path';
 
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
-import { RuntimeExecutionScheduler } from './runtimePriorityScheduler';
-import { runtimeOperationDefinition } from './runtimeOperationRegistry';
+import { RuntimeExecutionScheduler, type RuntimeSchedulerAdmission } from './runtimePriorityScheduler';
+import { runtimeOperationDefinition, RuntimeExecutionDomain } from './runtimeOperationRegistry';
 
 export type RuntimeControlCommand = 'health' | 'refresh' | 'pause' | 'resume' | 'drain' | 'stop';
 
@@ -23,7 +23,13 @@ export interface RuntimeControlResponse {
 export interface RuntimeDataRequest {
   operation: string;
   input: Record<string, unknown>;
+  /** Optional admission deadline. Accepted work still drains to completion. */
+  deadlineAt?: number;
+  /** Optional key for replacing an older queued background/external observation. */
+  supersedesKey?: string;
   sessionToken?: string;
+  /** Writer-signed, Runtime-epoch-bound authority for delegated read-only MCP queries. */
+  readAuthority?: string;
   piToolFence?: { operationId: string; invocationId: string; ownerId: string; ownerGeneration: number };
 }
 
@@ -32,11 +38,13 @@ export function isRuntimeDataTransportError(error: unknown): boolean {
   return ['ENOENT', 'ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT'].includes(String(failure?.code))
     || error instanceof SyntaxError
     || ['Invalid Runtime endpoint.', 'different_runtime', 'runtime_data_response_incomplete',
-      'Runtime data service is unavailable.'].includes(String(failure?.message));
+      'Runtime data service is unavailable.', 'runtime_draining'].includes(String(failure?.message));
 }
 
 interface RuntimeControlEndpoint {
   schemaVersion: 1;
+  /** Version 2 advertises newline-framed, request-id multiplexed data RPC. */
+  dataProtocolVersion?: 2;
   runtimeId: string;
   host: '127.0.0.1';
   port: number;
@@ -67,9 +75,27 @@ interface RuntimeControlServerOptions {
   buildId?: string;
   releaseVersion?: string;
   owner?: string;
+  /** Shared Runtime admission plane for both external RPC and internal work. */
+  scheduler?: RuntimeExecutionScheduler;
+  executorActivity?: () => unknown;
   enforceOperationRegistry?: boolean;
   onCommand(command: RuntimeControlCommand, replacement?: { buildId: string; releaseVersion: string }): RuntimeControlResponse | Pick<RuntimeControlResponse, 'status'> | Promise<RuntimeControlResponse | Pick<RuntimeControlResponse, 'status'>>;
-  onData?(request: RuntimeDataRequest): unknown | Promise<unknown>;
+  onData?(request: RuntimeDataRequest, admission?: RuntimeSchedulerAdmission): unknown | Promise<unknown>;
+}
+
+const serializedRuntimeDataResultBrand = Symbol('serializedRuntimeDataResult');
+
+export interface SerializedRuntimeDataResult {
+  [serializedRuntimeDataResultBrand]: string;
+}
+
+export function serializedRuntimeDataResult(value: string): SerializedRuntimeDataResult {
+  return { [serializedRuntimeDataResultBrand]: value };
+}
+
+function isSerializedRuntimeDataResult(value: unknown): value is SerializedRuntimeDataResult {
+  return Boolean(value && typeof value === 'object'
+    && typeof (value as SerializedRuntimeDataResult)[serializedRuntimeDataResultBrand] === 'string');
 }
 
 function compareReleaseVersions(left: string, right: string): number {
@@ -124,64 +150,106 @@ function writeEndpoint(filePath: string, endpoint: RuntimeControlEndpoint): void
   }
 }
 
-function writeBusyLease(filePath: string, lease: RuntimeBusyLease): void {
+async function writeBusyLease(filePath: string, lease: RuntimeBusyLease): Promise<void> {
   const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(temporaryPath, JSON.stringify(lease), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  await fs.promises.writeFile(temporaryPath, JSON.stringify(lease), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   try {
-    fs.renameSync(temporaryPath, filePath);
-    fs.chmodSync(filePath, 0o600);
+    await fs.promises.rename(temporaryPath, filePath);
+    await fs.promises.chmod(filePath, 0o600);
   } catch (error) {
-    if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath);
+    await fs.promises.unlink(temporaryPath).catch(unlinkError => {
+      if ((unlinkError as NodeJS.ErrnoException).code !== 'ENOENT') throw unlinkError;
+    });
     throw error;
   }
 }
 
-function clearOwnedBusyLease(filePath: string, runtimeId: string): void {
+async function clearOwnedBusyLease(filePath: string, runtimeId: string): Promise<void> {
   try {
-    const lease = JSON.parse(fs.readFileSync(filePath, 'utf8')) as Partial<RuntimeBusyLease>;
-    if (lease.runtimeId === runtimeId) fs.unlinkSync(filePath);
+    const lease = JSON.parse(await fs.promises.readFile(filePath, 'utf8')) as Partial<RuntimeBusyLease>;
+    if (lease.runtimeId === runtimeId) await fs.promises.unlink(filePath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 }
 
-export async function startRuntimeControlServer(options: RuntimeControlServerOptions): Promise<{ beginBusy(): () => void; close(): Promise<void> }> {
+export async function startRuntimeControlServer(options: RuntimeControlServerOptions): Promise<{ beginBusy(): () => void; close(mode?: 'drain' | 'handoff'): Promise<void> }> {
   const token = crypto.randomBytes(32).toString('hex');
   const filePath = endpointPath(options.globalDataPath);
   const busyFilePath = path.join(path.dirname(filePath), 'control.busy.json');
   const connections = new Set<net.Socket>();
   const busy = new Map<net.Socket, number>();
+  const nonReplayableBusy = new Map<net.Socket, number>();
   let internalBusy = 0;
   let acceptedWork = 0;
+  let nonReplayableAcceptedWork = 0;
   const acceptedWorkWaiters = new Set<() => void>();
+  const nonReplayableWorkWaiters = new Set<() => void>();
   let closing = false;
   let endpoint: RuntimeControlEndpoint;
-  const dataScheduler = new RuntimeExecutionScheduler();
-  const acquireBusyLease = () => {
-    if (busy.size === 0 && internalBusy === 0) writeBusyLease(busyFilePath, {
-      schemaVersion: 1,
-      runtimeId: options.runtimeId,
-      entryPath: String(options.entryPath || ''),
-      buildId: String(options.buildId || ''),
-      releaseVersion: String(options.releaseVersion || ''),
-      busySince: new Date().toISOString()
+  const dataScheduler = options.scheduler || new RuntimeExecutionScheduler();
+  let busyLeaseProjection = Promise.resolve();
+  let busyLeaseActive = false;
+  let busyLeaseIdleTimer: NodeJS.Timeout | undefined;
+  const projectBusyLease = (active: boolean) => {
+    if (busyLeaseActive === active) return;
+    busyLeaseActive = active;
+    busyLeaseProjection = busyLeaseProjection.then(() => active
+      ? writeBusyLease(busyFilePath, {
+        schemaVersion: 1,
+        runtimeId: options.runtimeId,
+        entryPath: String(options.entryPath || ''),
+        buildId: String(options.buildId || ''),
+        releaseVersion: String(options.releaseVersion || ''),
+        busySince: new Date().toISOString()
+      })
+      : clearOwnedBusyLease(busyFilePath, options.runtimeId)
+    ).catch(() => {
+      // The lease is a recovery projection. Live drain correctness is owned by
+      // acceptedWork and must not be replaced by filesystem latency or failure.
     });
   };
-  const clearIdleBusyLease = () => {
-    if (busy.size === 0 && internalBusy === 0) {
-      try { clearOwnedBusyLease(busyFilePath, options.runtimeId); } catch { /* bounded stale marker */ }
-    }
+  const cancelBusyLeaseIdleClear = () => {
+    if (!busyLeaseIdleTimer) return;
+    clearTimeout(busyLeaseIdleTimer);
+    busyLeaseIdleTimer = undefined;
   };
-  const beginSocketWork = (socket: net.Socket) => {
+  const acquireBusyLease = () => {
+    cancelBusyLeaseIdleClear();
+    if (busy.size === 0 && internalBusy === 0) projectBusyLease(true);
+  };
+  const clearIdleBusyLease = () => {
+    if (closing || busy.size > 0 || internalBusy > 0 || busyLeaseIdleTimer) return;
+    busyLeaseIdleTimer = setTimeout(() => {
+      busyLeaseIdleTimer = undefined;
+      if (!closing && busy.size === 0 && internalBusy === 0) projectBusyLease(false);
+    }, 250);
+    busyLeaseIdleTimer.unref();
+  };
+  const beginSocketWork = (socket: net.Socket, replayable: boolean) => {
     acquireBusyLease();
     busy.set(socket, (busy.get(socket) || 0) + 1);
     acceptedWork += 1;
+    if (!replayable) {
+      nonReplayableBusy.set(socket, (nonReplayableBusy.get(socket) || 0) + 1);
+      nonReplayableAcceptedWork += 1;
+    }
   };
-  const finishSocketWork = (socket: net.Socket) => {
+  const finishSocketWork = (socket: net.Socket, replayable: boolean) => {
     const remaining = (busy.get(socket) || 1) - 1;
     if (remaining > 0) busy.set(socket, remaining);
     else busy.delete(socket);
     acceptedWork = Math.max(0, acceptedWork - 1);
+    if (!replayable) {
+      const nonReplayableRemaining = (nonReplayableBusy.get(socket) || 1) - 1;
+      if (nonReplayableRemaining > 0) nonReplayableBusy.set(socket, nonReplayableRemaining);
+      else nonReplayableBusy.delete(socket);
+      nonReplayableAcceptedWork = Math.max(0, nonReplayableAcceptedWork - 1);
+      if (nonReplayableAcceptedWork === 0) {
+        for (const resolve of nonReplayableWorkWaiters) resolve();
+        nonReplayableWorkWaiters.clear();
+      }
+    }
     if (acceptedWork === 0) {
       for (const resolve of acceptedWorkWaiters) resolve();
       acceptedWorkWaiters.clear();
@@ -199,6 +267,20 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
     socket.setEncoding('utf8');
     let request = '';
     let authenticated = false;
+    let responseTail = Promise.resolve();
+    const enqueueResponse = (write: () => Promise<void>): Promise<void> => {
+      const queued = responseTail.then(write, write);
+      responseTail = queued.catch(() => undefined);
+      return queued;
+    };
+    const writeResponseChunk = (chunk: string): Promise<void> => new Promise((resolve, reject) => {
+      if (socket.destroyed) { resolve(); return; }
+      socket.write(chunk, error => error ? reject(error) : resolve());
+    });
+    const endResponse = (chunk: string): Promise<void> => new Promise(resolve => {
+      if (socket.destroyed) { resolve(); return; }
+      socket.end(chunk, resolve);
+    });
     socket.on('data', (chunk) => {
       request += chunk;
       if (!authenticated && request.length > 65_536) {
@@ -221,11 +303,27 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
         void (async () => {
           let requestId = '';
           let persistent = false;
-          const respond = (payload: Record<string, unknown>) => {
+          const respond = (payload: Record<string, unknown>): Promise<void> => enqueueResponse(async () => {
             const framed = JSON.stringify({ ...payload, ...(requestId ? { requestId } : {}) }) + '\n';
-            if (persistent && !socket.destroyed) socket.write(framed);
-            else socket.end(framed);
-          };
+            if (persistent) await writeResponseChunk(framed);
+            else await endResponse(framed);
+          });
+          const respondSerialized = (serializedResult: string): Promise<void> => enqueueResponse(async () => {
+            const prefix = `{"ok":true,"runtimeId":${JSON.stringify(options.runtimeId)},"result":`;
+            const suffix = `${requestId ? `,"requestId":${JSON.stringify(requestId)}` : ''}}\n`;
+            await writeResponseChunk(prefix);
+            const chunkCodeUnits = 64 * 1024;
+            for (let offset = 0; offset < serializedResult.length;) {
+              let end = Math.min(serializedResult.length, offset + chunkCodeUnits);
+              const finalCodeUnit = serializedResult.charCodeAt(end - 1);
+              if (end < serializedResult.length && finalCodeUnit >= 0xD800 && finalCodeUnit <= 0xDBFF) end--;
+              await writeResponseChunk(serializedResult.slice(offset, end));
+              offset = end;
+              if (offset < serializedResult.length) await new Promise<void>(resolve => setImmediate(resolve));
+            }
+            if (persistent) await writeResponseChunk(suffix);
+            else await endResponse(suffix);
+          });
           try {
         const parsed = JSON.parse(frame) as { token?: string; command?: RuntimeControlCommand | 'data'; expectedRuntimeId?: string; replacementBuildId?: string; replacementVersion?: string; requestId?: string; request?: RuntimeDataRequest };
         requestId = String(parsed.requestId || '');
@@ -233,18 +331,18 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
         const providedToken = Buffer.from(String(parsed.token || ''));
         const expectedToken = Buffer.from(token);
         if (providedToken.length !== expectedToken.length || !crypto.timingSafeEqual(providedToken, expectedToken)) {
-          respond({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'Runtime control authentication failed.' });
+          await respond({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'Runtime control authentication failed.' });
           return;
         }
         authenticated = true;
         if (persistent) socket.setTimeout(0);
         const command = parsed.command;
         if (!command || !['health', 'refresh', 'pause', 'resume', 'drain', 'stop', 'data'].includes(command)) {
-          respond({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'Unknown Runtime control command.' });
+          await respond({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'Unknown Runtime control command.' });
           return;
         }
         if (parsed.expectedRuntimeId && parsed.expectedRuntimeId !== options.runtimeId) {
-          respond({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'different_runtime' });
+          await respond({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'different_runtime' });
           return;
         }
         if (command === 'drain' && options.buildId) {
@@ -253,41 +351,53 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
           else if (options.releaseVersion && parsed.replacementVersion) {
             const comparison = compareReleaseVersions(parsed.replacementVersion, options.releaseVersion);
             if (comparison < 0) replacementError = 'runtime_downgrade_rejected';
-            else if (comparison === 0 && parsed.replacementBuildId !== options.buildId) replacementError = 'runtime_same_version_build_conflict';
           }
           if (replacementError) {
-            respond({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: replacementError });
+            await respond({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: replacementError });
             return;
           }
         }
         if (command === 'data') {
+          if (closing) {
+            await respond({ ok: false, runtimeId: options.runtimeId, status: 'rejected', error: 'runtime_draining' });
+            return;
+          }
           if (!options.onData || !parsed.request) throw new Error('Runtime data service is unavailable.');
           // Accepted work must finish even when a backup or export outlives a control timeout.
           socket.setTimeout(0);
-          beginSocketWork(socket);
+          const domain = options.enforceOperationRegistry
+            ? runtimeOperationDefinition(parsed.request.operation).domain
+            : (() => { try { return runtimeOperationDefinition(parsed.request!.operation).domain; } catch { return 'background-query' as const; } })();
+          const tracksAcceptedWork = domain !== 'subscription-event';
+          const replayable = runtimeDataRequestReplaySafe(parsed.request);
+          if (tracksAcceptedWork) beginSocketWork(socket, replayable);
           let result: unknown;
           try {
-            const domain = options.enforceOperationRegistry
-              ? runtimeOperationDefinition(parsed.request.operation).domain
-              : (() => { try { return runtimeOperationDefinition(parsed.request!.operation).domain; } catch { return 'background-query' as const; } })();
-            result = await dataScheduler.submit(domain, () => Promise.resolve(options.onData!(parsed.request!)));
+            result = await dataScheduler.submit(
+              domain,
+              admission => Promise.resolve(options.onData!(parsed.request!, admission)),
+              { deadlineAt: parsed.request.deadlineAt, supersedesKey: parsed.request.supersedesKey, label: parsed.request.operation }
+            );
+            if (isSerializedRuntimeDataResult(result)) await respondSerialized(result[serializedRuntimeDataResultBrand]);
+            else await respond({ ok: true, runtimeId: options.runtimeId, result });
           }
           finally {
             // Clearing a completed-work marker must not replace the operation's
             // result or root error. A failed unlink remains bounded by the
             // host-side lease age and cannot impersonate another Runtime.
-            finishSocketWork(socket);
+            if (tracksAcceptedWork) finishSocketWork(socket, replayable);
           }
-          respond({ ok: true, runtimeId: options.runtimeId, result });
           return;
         }
         const replacement = command === 'drain' && parsed.replacementBuildId && parsed.replacementVersion
           ? { buildId: parsed.replacementBuildId, releaseVersion: parsed.replacementVersion }
           : undefined;
         const result = await options.onCommand(command, replacement);
-        respond({ ok: true, runtimeId: options.runtimeId, ...result, entryPath: options.entryPath, buildId: options.buildId, releaseVersion: options.releaseVersion, owner: options.owner });
+        await respond({ ok: true, runtimeId: options.runtimeId, ...result,
+          ...(command === 'health' ? { scheduler: dataScheduler.snapshot(), executors: options.executorActivity?.() } : {}),
+          entryPath: options.entryPath, buildId: options.buildId, releaseVersion: options.releaseVersion, owner: options.owner });
       } catch (error) {
-        respond({
+        await respond({
           ok: false,
           runtimeId: options.runtimeId,
           status: 'failed',
@@ -309,6 +419,7 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
   if (!address || typeof address === 'string') throw new Error('Runtime control server did not bind a local TCP port.');
   endpoint = {
     schemaVersion: 1,
+    dataProtocolVersion: 2,
     runtimeId: options.runtimeId,
     host: '127.0.0.1',
     port: address.port,
@@ -334,20 +445,31 @@ export async function startRuntimeControlServer(options: RuntimeControlServerOpt
         clearIdleBusyLease();
       };
     },
-    close: async () => {
+    close: async (mode: 'drain' | 'handoff' = 'drain') => {
       closing = true;
+      cancelBusyLeaseIdleClear();
       const closePromise = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-      const forceCloseTimer = setTimeout(() => connections.forEach(socket => { if (!busy.has(socket)) socket.destroy(); }), 100);
+      const forceCloseTimer = setTimeout(() => connections.forEach(socket => {
+        if (!busy.has(socket)) socket.destroy();
+      }), 100);
       forceCloseTimer.unref();
+      if (mode === 'handoff' && nonReplayableAcceptedWork > 0) {
+        await new Promise<void>(resolve => nonReplayableWorkWaiters.add(resolve));
+      }
+      if (mode === 'handoff') connections.forEach(socket => socket.destroy());
       await closePromise;
       clearTimeout(forceCloseTimer);
-      if (acceptedWork > 0) await new Promise<void>(resolve => acceptedWorkWaiters.add(resolve));
+      if (mode === 'drain' && acceptedWork > 0) await new Promise<void>(resolve => acceptedWorkWaiters.add(resolve));
       try {
         const current = JSON.parse(fs.readFileSync(filePath, 'utf8')) as RuntimeControlEndpoint;
         if (current.runtimeId === options.runtimeId) fs.unlinkSync(filePath);
       } catch {
         // A newer Runtime may already own the endpoint.
       }
+      // No work remains reachable after the owning server is closed. A newer
+      // Runtime's marker is protected by the runtime-id ownership check.
+      projectBusyLease(false);
+      await busyLeaseProjection;
     }
   };
 }
@@ -376,7 +498,9 @@ class RuntimeDataConnection {
   private responseBuffer = '';
   private connected = false;
   private settled = false;
+  private retired = false;
   private activeRequests = 0;
+  private idleCloseTimer?: NodeJS.Timeout;
   private readonly pending = new Map<string, { resolve(value: unknown): void; reject(error: unknown): void }>();
 
   constructor(
@@ -423,14 +547,29 @@ class RuntimeDataConnection {
       const pending = this.pending.get(requestId);
       if (!pending) continue;
       this.pending.delete(requestId);
-      if (!response.ok || response.runtimeId !== this.endpoint.runtimeId) pending.reject(new Error(response.error || 'different_runtime'));
-      else pending.resolve(response.result);
+      if (!response.ok || response.runtimeId !== this.endpoint.runtimeId) {
+        const detail = response.error || 'different_runtime';
+        if (detail === 'runtime_draining' || detail === 'different_runtime' || response.runtimeId !== this.endpoint.runtimeId) {
+          this.retire();
+          pending.reject(taggedRuntimeDataError(detail, 'runtimeDataPrewrite'));
+        } else pending.reject(new Error(detail));
+      } else pending.resolve(response.result);
     }
+  }
+
+  private retire(): void {
+    if (this.retired) return;
+    this.retired = true;
+    // Accepted work may still be draining on this socket, so only remove the
+    // connection from the reuse pool. Existing replies remain deliverable.
+    this.onClosed(this);
   }
 
   private fail(error: unknown): void {
     if (this.settled) return;
     this.settled = true;
+    if (this.idleCloseTimer) clearTimeout(this.idleCloseTimer);
+    this.idleCloseTimer = undefined;
     for (const request of this.pending.values()) request.reject(error);
     this.pending.clear();
     this.onClosed(this);
@@ -438,9 +577,14 @@ class RuntimeDataConnection {
 
   async request<T>(request: RuntimeDataRequest): Promise<T> {
     this.activeRequests += 1;
+    if (this.idleCloseTimer) {
+      clearTimeout(this.idleCloseTimer);
+      this.idleCloseTimer = undefined;
+    }
     this.socket.ref();
     try {
       await this.ready;
+      if (this.retired) throw taggedRuntimeDataError('runtime_draining', 'runtimeDataPrewrite');
       if (this.settled || this.socket.destroyed) throw taggedRuntimeDataError('runtime_data_response_incomplete', 'runtimeDataPrewrite');
       const requestId = crypto.randomUUID();
       return await new Promise<T>((resolve, reject) => {
@@ -465,7 +609,14 @@ class RuntimeDataConnection {
       });
     } finally {
       this.activeRequests -= 1;
-      if (this.activeRequests === 0) this.socket.unref();
+      if (this.activeRequests === 0) {
+        this.socket.unref();
+        this.idleCloseTimer = setTimeout(() => {
+          this.idleCloseTimer = undefined;
+          if (this.activeRequests === 0) this.socket.destroy();
+        }, 1_000);
+        this.idleCloseTimer.unref();
+      }
     }
   }
 }
@@ -488,32 +639,40 @@ function runtimeDataRequestReplaySafe(request: RuntimeDataRequest): boolean {
 
 const runtimeDataConnections = new Map<string, Promise<RuntimeDataConnection>>();
 
-async function runtimeDataConnection(globalDataPath: string): Promise<RuntimeDataConnection> {
+function runtimeDataConnectionLane(request: RuntimeDataRequest): RuntimeExecutionDomain {
+  try { return runtimeOperationDefinition(request.operation).domain; }
+  catch { return 'background-query'; }
+}
+
+async function runtimeDataConnection(globalDataPath: string, request: RuntimeDataRequest): Promise<RuntimeDataConnection> {
   const root = normalizeGlobalDataPathForExtension(globalDataPath);
-  let connection = runtimeDataConnections.get(root);
-  if (!connection) {
-    connection = readReadyEndpoint(root).then(endpoint => {
-      const value = new RuntimeDataConnection(endpoint, _closed => {
-        if (runtimeDataConnections.get(root) === connection) runtimeDataConnections.delete(root);
-      });
-      return value;
-    }).catch(error => {
-      if (runtimeDataConnections.get(root) === connection) runtimeDataConnections.delete(root);
-      throw error;
-    });
-    runtimeDataConnections.set(root, connection);
-  }
+  const key = `${root}\0${runtimeDataConnectionLane(request)}`;
+  let connection = runtimeDataConnections.get(key);
+  if (connection) return connection;
+  const endpoint = await readReadyEndpoint(root);
+  if (endpoint.dataProtocolVersion !== 2) return new RuntimeDataConnection(endpoint, () => undefined);
+  connection = runtimeDataConnections.get(key);
+  if (connection) return connection;
+  const value = new RuntimeDataConnection(endpoint, _closed => {
+    if (runtimeDataConnections.get(key) === connection) runtimeDataConnections.delete(key);
+  });
+  connection = Promise.resolve(value);
+  runtimeDataConnections.set(key, connection);
   return connection;
 }
 
 export async function sendRuntimeDataRequest<T>(globalDataPath: string, request: RuntimeDataRequest): Promise<T> {
-  const reconnectDeadline = Date.now() + 3_000;
+  const reconnectDeadline = Date.now() + (request.operation === 'await_intelligence_message' ? 30_000 : 3_000);
   for (;;) {
     try {
-      return await (await runtimeDataConnection(globalDataPath)).request<T>(request);
+      return await (await runtimeDataConnection(globalDataPath, request)).request<T>(request);
     } catch (error) {
       if (!(error instanceof Error)) throw error;
       const transport = error as RuntimeDataTransportError;
+      // A Runtime epoch owns its in-memory session token. Let the session
+      // client reopen from its durable actor/proof instead of replaying an old
+      // token directly against the replacement owner.
+      if (request.sessionToken && transport.message === 'different_runtime') throw error;
       const retryable = transport.runtimeDataPreconnect || transport.runtimeDataPrewrite || (transport.runtimeDataAmbiguous && runtimeDataRequestReplaySafe(request));
       if (!retryable || Date.now() >= reconnectDeadline) throw error;
       await new Promise(resolve => setTimeout(resolve, 25));

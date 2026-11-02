@@ -2,7 +2,7 @@
   "name": "solopreneur-roadmap",
   "displayName": "SoloMap - AI Coding Agent Roadmap",
   "description": "AI coding agent cockpit for solo developers. Run Claude Code, Codex, Cursor Agent and other local agents, keep sessions organized, and turn scattered AI chats into a Git-friendly project roadmap.",
-  "version": "0.0.635",
+  "version": "0.0.639",
   "publisher": "SZLK",
   "icon": "resources/logo.png",
   "repository": {
@@ -244,6 +244,7 @@
     "package:vsix": "node scripts/package-vsix.cjs",
     "verify:vsix": "node scripts/verify-vsix-package.cjs",
     "check:plan-single-track": "node scripts/check-plan-single-track.mjs",
+    "validate:runtime-load": "npm run compile --silent && node scripts/validate-runtime-load-gate.cjs",
     "pi:deliver": "npm run compile --silent && node scripts/run-pi-main-path-delivery.cjs",
     "install:local-dev": "node scripts/install-local-dev.js",
     "build-webview": "echo 'No webview build configured yet'"

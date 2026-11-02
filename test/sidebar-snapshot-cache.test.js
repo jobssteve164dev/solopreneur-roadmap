@@ -9,13 +9,9 @@ const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const {
   buildConversationDatabaseSignature,
-  buildSidebarProjectSignature,
   readCachedConversationSnapshot,
-  readSidebarCoreSnapshot,
-  reserveSidebarPortfolioSnapshot,
-  commitSidebarPortfolioSnapshot,
-  writeCachedConversationSnapshot,
-  writeSidebarPortfolioSnapshot
+  readSidebarCoreProjections,
+  writeCachedConversationSnapshot
 } = require('../out/sidebarSnapshotCache.js');
 
 async function createFixture() {
@@ -51,21 +47,25 @@ async function cleanupFixture(fixture) {
   fs.rmdirSync(fixture.root);
 }
 
-test('sidebar core snapshot is stored in the unified database and tracks the roadmap contract', async () => {
-  const fixture = await createFixture();
+test('sidebar core data reads the durable projection without synchronously rebuilding it', async () => {
+  const transport = require('../out/autonomousRuntimeControl.js');
+  const previous = transport.sendRuntimeDataRequest;
+  const projectPath = '/fixture/project';
+  let observed;
+  transport.sendRuntimeDataRequest = async (_root, request) => {
+    observed = request;
+    return [{ summary: { name: 'Project', path: projectPath, recommendedNodeTitle: 'Ship' } }];
+  };
   try {
-    const projects = [{ name: 'Project', path: fixture.projectPath }];
-    const signature = buildSidebarProjectSignature(projects);
-    const portfolio = [{ name: 'Project', path: fixture.projectPath, nodes: [{ id: '1', title: 'Ship', status: 'Pending' }] }];
-    await writeSidebarPortfolioSnapshot(fixture.globalRoot, signature, portfolio);
-    const cached = await readSidebarCoreSnapshot(fixture.globalRoot);
-    assert.equal(cached.version, 3);
-    assert.equal(cached.projectSignature, signature);
-    assert.deepEqual(cached.portfolio, portfolio);
-    assert.deepEqual(fs.readdirSync(fixture.globalRoot).filter(name => name !== 'runtime' && !name.startsWith('solomap.db')), []);
-    fs.appendFileSync(path.join(fixture.solopreneurPath, 'roadmap.csv'), '2,Verify,Pending\n');
-    assert.notEqual(buildSidebarProjectSignature(projects), cached.projectSignature);
-  } finally { await cleanupFixture(fixture); }
+    const projected = await readSidebarCoreProjections('/fixture/global');
+    assert.equal(projected.length, 1);
+    assert.equal(projected[0].path, projectPath);
+    assert.equal(projected[0].recommendedNodeTitle, 'Ship');
+    assert.equal(observed.operation, 'read_sidebar_core_projections');
+    assert.deepEqual(observed.input, {});
+  } finally {
+    transport.sendRuntimeDataRequest = previous;
+  }
 });
 
 test('conversation snapshot is invalidated only by a newer unified journal revision', async () => {
@@ -87,36 +87,13 @@ test('conversation snapshot is invalidated only by a newer unified journal revis
   } finally { await cleanupFixture(fixture); }
 });
 
-test('same-millisecond sidebar snapshot writers use independent idempotency identities', async () => {
-  const fixture = await createFixture();
-  const originalNow = Date.now;
-  Date.now = () => 1770800000000;
-  try {
-    const first = [{ name: 'Project', path: fixture.projectPath, nodes: [{ id: '1', title: 'First', status: 'Pending' }] }];
-    const second = [{ name: 'Project', path: fixture.projectPath, nodes: [{ id: '1', title: 'Second', status: 'Completed' }] }];
-    await Promise.all([
-      writeSidebarPortfolioSnapshot(fixture.globalRoot, 'first', first),
-      writeSidebarPortfolioSnapshot(fixture.globalRoot, 'second', second)
-    ]);
-    const cached = await readSidebarCoreSnapshot(fixture.globalRoot);
-    assert.ok(['first', 'second'].includes(cached.projectSignature));
-  } finally {
-    Date.now = originalNow;
-    await cleanupFixture(fixture);
-  }
-});
-
-test('sidebar core snapshot generation rejects inverse completion', async () => {
-  const fixture = await createFixture();
-  try {
-    const older = await reserveSidebarPortfolioSnapshot(fixture.globalRoot);
-    const newer = await reserveSidebarPortfolioSnapshot(fixture.globalRoot);
-    const latest = [{ name: 'Project', path: fixture.projectPath, nodes: [{ id: '1', title: 'Latest', status: 'Completed' }] }];
-    const stale = [{ name: 'Project', path: fixture.projectPath, nodes: [{ id: '1', title: 'Stale', status: 'Pending' }] }];
-    assert.equal(await commitSidebarPortfolioSnapshot(fixture.globalRoot, newer, 'latest', latest), true);
-    assert.equal(await commitSidebarPortfolioSnapshot(fixture.globalRoot, older, 'stale', stale), false);
-    const cached = await readSidebarCoreSnapshot(fixture.globalRoot);
-    assert.equal(cached.projectSignature, 'latest');
-    assert.deepEqual(cached.portfolio, latest);
-  } finally { await cleanupFixture(fixture); }
+test('retired view-level sidebar snapshot APIs are not exported', () => {
+  const cache = require('../out/sidebarSnapshotCache.js');
+  for (const name of [
+    'buildSidebarProjectSignature',
+    'readSidebarCoreSnapshot',
+    'reserveSidebarPortfolioSnapshot',
+    'commitSidebarPortfolioSnapshot',
+    'writeSidebarPortfolioSnapshot'
+  ]) assert.equal(cache[name], undefined, `${name} must not remain as a parallel production path`);
 });

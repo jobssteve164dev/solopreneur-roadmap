@@ -8,6 +8,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const control = require('../out/autonomousRuntimeControl.js');
+const { RuntimeExecutionScheduler } = require('../out/runtimePriorityScheduler.js');
 
 async function waitFor(check, timeoutMs = 3000) {
   const deadline = Date.now() + timeoutMs;
@@ -27,6 +28,53 @@ async function waitForAsync(check, timeoutMs = 10000) {
   throw new Error('Timed out waiting for Runtime state.');
 }
 
+test('runtime control lets independent maintenance run beside an admitted control read', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-shared-scheduler-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  fs.mkdirSync(globalRoot);
+  const scheduler = new RuntimeExecutionScheduler();
+  let server;
+  let releaseRead;
+  const readGate = new Promise(resolve => { releaseRead = resolve; });
+  try {
+    server = await control.startRuntimeControlServer({
+      globalDataPath: globalRoot,
+      runtimeId: 'runtime-shared-scheduler',
+      scheduler,
+      onCommand() { return { status: 'running' }; },
+      onData: async request => {
+        if (request.operation === 'read_project_registry') await readGate;
+        return { operation: request.operation };
+      }
+    });
+
+    const read = control.sendRuntimeDataRequest(globalRoot, {
+      operation: 'read_project_registry', input: {}, deadlineAt: Date.now() + 2_000
+    });
+    await waitFor(() => scheduler.snapshot()['control-query'].active === 1);
+    let maintenanceStarted = false;
+    const maintenance = scheduler.submit('maintenance', async () => {
+      maintenanceStarted = true;
+      return 'maintained';
+    }, { label: 'internal:planner-statistics' });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(maintenanceStarted, true, 'an admitted control read must not globally lock an independent maintenance executor');
+    assert.equal(await maintenance, 'maintained');
+
+    releaseRead();
+    assert.deepEqual(await read, { operation: 'read_project_registry' });
+  } finally {
+    releaseRead?.();
+    if (server) await server.close();
+    const endpointPath = path.join(globalRoot, 'runtime', 'control.json');
+    if (fs.existsSync(endpointPath)) fs.unlinkSync(endpointPath);
+    const runtimeRoot = path.join(globalRoot, 'runtime');
+    if (fs.existsSync(runtimeRoot)) fs.rmdirSync(runtimeRoot);
+    if (fs.existsSync(globalRoot)) fs.rmdirSync(globalRoot);
+    fs.rmdirSync(root);
+  }
+});
+
 test('runtime control authenticates local health, pause and resume commands', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-control-'));
   const globalRoot = path.join(root, '.solomap-global');
@@ -40,6 +88,9 @@ test('runtime control authenticates local health, pause and resume commands', as
       entryPath: '/opt/solomap/out/autonomousRuntimeProcess.js',
       buildId: 'build-a',
       releaseVersion: '0.0.513',
+      executorActivity: () => ({ 'writer-actor': { threadId: 7, queued: [], active: [
+        { id: 3, kind: 'request', label: 'write_run_binding', phase: 'binding.commit', postedAt: 10, startedAt: 11, ageMs: 5 }
+      ] } }),
       onCommand(command, replacement) {
         calls.push(replacement ? `${command}:${replacement.releaseVersion}:${replacement.buildId}` : command);
         return { status: command === 'pause' ? 'paused' : 'running' };
@@ -59,13 +110,10 @@ test('runtime control authenticates local health, pause and resume commands', as
       }),
       /runtime_downgrade_rejected/
     );
-    await assert.rejects(
-      control.sendRuntimeControlCommand(globalRoot, 'drain', {
-        expectedRuntimeId: 'runtime-control-test', replacementBuildId: 'build-b', replacementVersion: '0.0.513'
-      }),
-      /runtime_same_version_build_conflict/
-    );
-    const drained = await control.sendRuntimeControlCommand(globalRoot, 'drain', {
+    const sameReleaseDrained = await control.sendRuntimeControlCommand(globalRoot, 'drain', {
+      expectedRuntimeId: 'runtime-control-test', replacementBuildId: 'build-b', replacementVersion: '0.0.513'
+    });
+    const newerReleaseDrained = await control.sendRuntimeControlCommand(globalRoot, 'drain', {
       expectedRuntimeId: 'runtime-control-test', replacementBuildId: 'build-b', replacementVersion: '0.0.514'
     });
     await assert.rejects(control.sendRuntimeControlCommand(globalRoot, 'drain', { expectedRuntimeId: 'replaced-runtime' }), /different_runtime/);
@@ -75,10 +123,13 @@ test('runtime control authenticates local health, pause and resume commands', as
     assert.equal(health.entryPath, '/opt/solomap/out/autonomousRuntimeProcess.js');
     assert.equal(health.buildId, 'build-a');
     assert.equal(health.releaseVersion, '0.0.513');
+    assert.deepEqual(health.scheduler['foreground-command'], { active: 0, queued: 0, capacity: 2048, concurrency: 16, blockers: {} });
+    assert.equal(health.executors['writer-actor'].active[0].phase, 'binding.commit');
     assert.equal(paused.status, 'paused');
     assert.equal(resumed.status, 'running');
-    assert.equal(drained.status, 'running');
-    assert.deepEqual(calls, ['health', 'pause', 'resume', 'drain:0.0.514:build-b']);
+    assert.equal(sameReleaseDrained.status, 'running');
+    assert.equal(newerReleaseDrained.status, 'running');
+    assert.deepEqual(calls, ['health', 'pause', 'resume', 'drain:0.0.513:build-b', 'drain:0.0.514:build-b']);
     const endpointPath = path.join(globalRoot, 'runtime', 'control.json');
     assert.equal(fs.statSync(endpointPath).mode & 0o777, 0o600);
   } finally {
@@ -168,13 +219,139 @@ test('runtime control publishes an exact busy lease around accepted data work', 
   }
 });
 
+test('accepted data work never performs busy-lease filesystem writes on the control-plane event loop', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-control-async-busy-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  fs.mkdirSync(globalRoot);
+  let server;
+  let release;
+  const originalWriteFileSync = fs.writeFileSync;
+  const originalRenameSync = fs.renameSync;
+  const originalUnlinkSync = fs.unlinkSync;
+  try {
+    const gate = new Promise(resolve => { release = resolve; });
+    server = await control.startRuntimeControlServer({
+      globalDataPath: globalRoot,
+      runtimeId: 'runtime-control-async-busy',
+      entryPath: '/opt/solomap/out/autonomousRuntimeProcess.js',
+      buildId: 'build-async-busy',
+      releaseVersion: '0.0.638',
+      onCommand() { return { status: 'running' }; },
+      async onData() { await gate; return { done: true }; }
+    });
+    const busyPath = path.join(globalRoot, 'runtime', 'control.busy.json');
+    const touchedSynchronously = [];
+    fs.writeFileSync = (target, ...args) => {
+      if (String(target).startsWith(busyPath)) touchedSynchronously.push(['write', String(target)]);
+      return originalWriteFileSync(target, ...args);
+    };
+    fs.renameSync = (source, target) => {
+      if (String(source).startsWith(busyPath) || String(target) === busyPath) touchedSynchronously.push(['rename', String(target)]);
+      return originalRenameSync(source, target);
+    };
+    fs.unlinkSync = target => {
+      if (String(target) === busyPath) touchedSynchronously.push(['unlink', String(target)]);
+      return originalUnlinkSync(target);
+    };
+    const pending = control.sendRuntimeDataRequest(globalRoot, { operation: 'slow_database_read', input: {} });
+    await waitFor(() => fs.existsSync(busyPath));
+    release();
+    assert.deepEqual(await pending, { done: true });
+    await waitFor(() => !fs.existsSync(busyPath));
+    assert.deepEqual(touchedSynchronously, []);
+  } finally {
+    fs.writeFileSync = originalWriteFileSync;
+    fs.renameSync = originalRenameSync;
+    fs.unlinkSync = originalUnlinkSync;
+    release?.();
+    if (server) await server.close();
+    const endpointPath = path.join(globalRoot, 'runtime', 'control.json');
+    if (fs.existsSync(endpointPath)) fs.unlinkSync(endpointPath);
+    const runtimeRoot = path.join(globalRoot, 'runtime');
+    if (fs.existsSync(runtimeRoot)) fs.rmdirSync(runtimeRoot);
+    if (fs.existsSync(globalRoot)) fs.rmdirSync(globalRoot);
+    fs.rmdirSync(root);
+  }
+});
+
+test('the control plane streams worker-encoded results without serializing their data on its event loop', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-control-encoded-result-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  fs.mkdirSync(globalRoot);
+  let server;
+  const originalStringify = JSON.stringify;
+  let controlPlaneDataSerializations = 0;
+  try {
+    server = await control.startRuntimeControlServer({
+      globalDataPath: globalRoot,
+      runtimeId: 'runtime-control-encoded-result',
+      onCommand() { return { status: 'running' }; },
+      onData() { return control.serializedRuntimeDataResult('{"value":"worker-encoded"}'); }
+    });
+    JSON.stringify = (value, ...args) => {
+      if (value?.result) controlPlaneDataSerializations += 1;
+      return originalStringify(value, ...args);
+    };
+    assert.deepEqual(await control.sendRuntimeDataRequest(globalRoot, { operation: 'slow_database_read', input: {} }), { value: 'worker-encoded' });
+    assert.equal(controlPlaneDataSerializations, 0);
+  } finally {
+    JSON.stringify = originalStringify;
+    if (server) await server.close();
+    const endpointPath = path.join(globalRoot, 'runtime', 'control.json');
+    if (fs.existsSync(endpointPath)) fs.unlinkSync(endpointPath);
+    const runtimeRoot = path.join(globalRoot, 'runtime');
+    if (fs.existsSync(runtimeRoot)) fs.rmdirSync(runtimeRoot);
+    if (fs.existsSync(globalRoot)) fs.rmdirSync(globalRoot);
+    fs.rmdirSync(root);
+  }
+});
+
+test('worker-encoded responses are written in bounded frames without corrupting multiplexed replies', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-control-bounded-frame-'));
+  const globalRoot = path.join(root, '.solomap-global');
+  fs.mkdirSync(globalRoot);
+  const encoded = JSON.stringify({ value: 'x'.repeat(2 * 1024 * 1024) });
+  let server;
+  const originalWrite = net.Socket.prototype.write;
+  const writes = [];
+  try {
+    server = await control.startRuntimeControlServer({
+      globalDataPath: globalRoot,
+      runtimeId: 'runtime-control-bounded-frame',
+      onCommand() { return { status: 'running' }; },
+      onData(request) {
+        if (request.operation === 'read_project_registry') return control.serializedRuntimeDataResult(encoded);
+        return { mode: 'harness' };
+      }
+    });
+    net.Socket.prototype.write = function(chunk, ...args) {
+      writes.push(Buffer.byteLength(typeof chunk === 'string' ? chunk : Buffer.from(chunk)));
+      return originalWrite.call(this, chunk, ...args);
+    };
+    const large = control.sendRuntimeDataRequest(globalRoot, { operation: 'read_project_registry', input: {} });
+    const mode = control.sendRuntimeDataRequest(globalRoot, { operation: 'read_intelligence_execution_mode', input: {}, deadlineAt: Date.now() + 500 });
+    assert.deepEqual(await mode, { mode: 'harness' });
+    assert.equal((await large).value.length, 2 * 1024 * 1024);
+    assert.ok(Math.max(...writes) <= 64 * 1024, `unbounded_control_write:${Math.max(...writes)}`);
+  } finally {
+    net.Socket.prototype.write = originalWrite;
+    if (server) await server.close();
+    const endpointPath = path.join(globalRoot, 'runtime', 'control.json');
+    if (fs.existsSync(endpointPath)) fs.unlinkSync(endpointPath);
+    const runtimeRoot = path.join(globalRoot, 'runtime');
+    if (fs.existsSync(runtimeRoot)) fs.rmdirSync(runtimeRoot);
+    if (fs.existsSync(globalRoot)) fs.rmdirSync(globalRoot);
+    fs.rmdirSync(root);
+  }
+});
+
 test('busy marker cleanup never replaces the accepted database error', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-runtime-control-busy-error-'));
   const globalRoot = path.join(root, '.solomap-global');
   fs.mkdirSync(globalRoot);
   let server;
   let release;
-  const originalUnlink = fs.unlinkSync;
+  const originalUnlink = fs.promises.unlink;
   try {
     const gate = new Promise(resolve => { release = resolve; });
     server = await control.startRuntimeControlServer({
@@ -186,16 +363,16 @@ test('busy marker cleanup never replaces the accepted database error', async () 
     const busyPath = path.join(globalRoot, 'runtime', 'control.busy.json');
     const pending = control.sendRuntimeDataRequest(globalRoot, { operation: 'failing_database_write', input: {} });
     await waitFor(() => fs.existsSync(busyPath));
-    fs.unlinkSync = target => {
+    fs.promises.unlink = async target => {
       if (path.resolve(String(target)) === path.resolve(busyPath)) throw Object.assign(new Error('cleanup ENOSPC'), { code: 'ENOSPC' });
-      return originalUnlink(target);
+      return originalUnlink.call(fs.promises, target);
     };
     release();
     await assert.rejects(pending, /SQLITE_FULL/);
-    fs.unlinkSync = originalUnlink;
+    fs.promises.unlink = originalUnlink;
     assert.equal(fs.existsSync(busyPath), true);
   } finally {
-    fs.unlinkSync = originalUnlink;
+    fs.promises.unlink = originalUnlink;
     release?.();
     if (server) await server.close();
     for (const file of ['control.busy.json', 'control.json']) {

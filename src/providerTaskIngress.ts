@@ -147,7 +147,6 @@ export function taskIngressDeadlineFields(
     taskIngressElapsedMs: advanced.elapsedMs,
     taskIngressVerdict: advanced.clockTrusted ? 'deadline_exceeded' : 'clock_untrusted',
     taskIngressObservedAt: observedAt,
-    taskIngressDeadlineExceededAt: observedAt,
-    deliveryLastError: advanced.clockTrusted ? 'agent_task_ingress_timeout' : 'agent_task_ingress_clock_untrusted'
+    taskIngressDeadlineExceededAt: observedAt
   };
 }

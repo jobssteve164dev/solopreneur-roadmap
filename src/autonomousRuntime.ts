@@ -2,7 +2,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { buildProjectPortfolioSummaries, ProjectPortfolioSummary, readProjectRoadmapNodesFromDatabase, RoadmapNodeLike } from './projectPortfolio';
+import { buildProjectPortfolioSummaries, ProjectPortfolioSummary, RoadmapNodeLike } from './projectPortfolio';
 import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
 import { getProjectsReadOnly, normalizeGlobalDataPathForExtension, refreshProjectRegistry, SolopreneurProject } from './projectRegistry';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
@@ -216,15 +216,26 @@ export async function readDatabaseTodaySourceRevision(
 ): Promise<string | null> {
   try {
     const globalRoot = normalizeGlobalDataPathForExtension(globalDataPath, projects[0]?.path);
-    const result = operation
-      ? await operation({ operation: 'read_today_roadmaps', input: { roots: projects.map(project => project.path) } })
-      : await sendRuntimeDataRequest(globalRoot, { operation: 'read_today_roadmaps', input: { roots: projects.map(project => project.path) } });
-    const items = (result as { items?: Array<{ root: string; nodes: RoadmapNodeLike[]; unavailable?: boolean }> })?.items;
-    if (!Array.isArray(items)) return null;
+    const roots = projects.map(project => project.path), items: Array<{ root: string; revision: string; unavailable?: boolean }> = [];
+    let offset = 0;
+    for (;;) {
+      const result = operation
+        ? await operation({ operation: 'read_today_roadmaps', input: { roots, offset, limit: 20 } })
+        : await sendRuntimeDataRequest(globalRoot, { operation: 'read_today_roadmaps', input: { roots, offset, limit: 20 } });
+      const page = result as { items?: Array<{ root: string; revision: string; unavailable?: boolean }>; nextOffset?: number | null };
+      if (!Array.isArray(page.items)) return null;
+      items.push(...page.items);
+      if (page.nextOffset === null || page.nextOffset === undefined) break;
+      if (!Number.isSafeInteger(page.nextOffset) || page.nextOffset <= offset) return null;
+      offset = page.nextOffset;
+    }
     if (items.some(item => item.unavailable)) return null;
-    const byPath = new Map(items.map(item => [String(item.root), normalizeRoadmapNodes(item.nodes)]));
+    const byPath = new Map(items.map(item => [String(item.root), String(item.revision || '')]));
     if (projects.some(project => !byPath.has(project.path))) return null;
-    return buildDatabaseProjectSourceRevision(projects, byPath);
+    return stableHash(JSON.stringify(projects.map(project => ({
+      name: String(project.name || ''), path: String(project.path || ''), type: String(project.type || ''),
+      priority: String(project.priority || ''), pinnedAt: String(project.pinnedAt || ''), roadmapRevision: byPath.get(project.path) || ''
+    }))));
   } catch {
     return null;
   }
@@ -403,16 +414,24 @@ export function claimRuntimeLease(globalDataPath: string, options: RuntimeLeaseO
       if (error?.code !== 'EEXIST') throw error;
       let live = true;
       let legacyFile = false;
+      let sameProcessClaim = false;
       try {
         legacyFile = fs.statSync(claimPath).isFile();
         const file = legacyFile ? claimPath : claimOwnerPath;
-        const claim = JSON.parse(fs.readFileSync(file, 'utf8')) as { pid?: number; processBirth?: string };
+        const claim = JSON.parse(fs.readFileSync(file, 'utf8')) as { runtimeId?: string; pid?: number; processBirth?: string };
+        sameProcessClaim = String(claim.runtimeId || '') === options.runtimeId
+          && Number(claim.pid || 0) === options.pid
+          && String(claim.processBirth || '') === String(processBirth || '');
         live = ownerAlive(Number(claim.pid || 0), String(claim.processBirth || ''));
       } catch {
         try { live = Date.now() - fs.statSync(claimPath).mtimeMs < 500; }
         catch (statError: any) { if (statError?.code !== 'ENOENT') throw statError; }
       }
       if (live) {
+        if (sameProcessClaim) {
+          acquiredClaim = true;
+          break;
+        }
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
         continue;
       }
@@ -535,16 +554,45 @@ async function buildDatabaseShadowDecision(options: ShadowCycleOptions): Promise
     legacyHiddenProjects: []
   });
   const roadmaps = new Map<string, RoadmapNodeLike[]>();
-  await Promise.all(projects.map(async project => {
+  const unavailableRoots: string[] = [];
+  const roots = projects.map(project => project.path);
+  let offset = 0;
+  for (;;) {
+    const result = options.operation
+      ? await options.operation({ operation: 'read_shadow_decision_inputs', input: { roots, offset, limit: 20 } })
+      : await sendRuntimeDataRequest(globalRoot, { operation: 'read_shadow_decision_inputs', input: { roots, offset, limit: 20 } });
+    const page = result as {
+      items?: Array<{ root?: string; nodes?: RoadmapNodeLike[]; unavailable?: boolean; invalid?: boolean }>;
+      nextOffset?: number | null;
+    };
+    if (!Array.isArray(page.items)) throw new Error('shadow_decision_inputs_invalid');
+    for (const item of page.items) {
+      const root = String(item.root || '');
+      if (!roots.includes(root) || roadmaps.has(root) || !Array.isArray(item.nodes)) throw new Error('shadow_decision_inputs_invalid');
+      if (item.unavailable) unavailableRoots.push(root);
+      else roadmaps.set(root, normalizeRoadmapNodes(item.nodes));
+    }
+    if (page.nextOffset === null || page.nextOffset === undefined) break;
+    if (!Number.isSafeInteger(page.nextOffset) || page.nextOffset <= offset) throw new Error('shadow_decision_inputs_invalid');
+    offset = page.nextOffset;
+  }
+  await Promise.all(unavailableRoots.map(async root => {
     try {
-      const nodes = await readProjectRoadmapNodesFromDatabase(project.path, globalRoot,
-        options.operation ? (name, input) => options.operation!({ operation: name, input }) : undefined);
-      roadmaps.set(project.path, nodes);
+      const snapshot = await (operation
+        ? operation('accept_roadmap_csv', { root })
+        : sendRuntimeDataRequest(globalRoot, { operation: 'accept_roadmap_csv', input: { root } })) as { nodes?: RoadmapNodeLike[] };
+      if (!Array.isArray(snapshot.nodes)) throw new Error('shadow_decision_inputs_invalid');
+      roadmaps.set(root, normalizeRoadmapNodes(snapshot.nodes));
     } catch (error) {
-      if (!(error instanceof Error) || !error.message.startsWith('roadmap_csv_invalid:')) throw error;
-      roadmaps.set(project.path, []);
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === 'ENOENT' || error instanceof Error && (error.message.startsWith('roadmap_csv_invalid:') || /\bENOENT\b/.test(error.message))) {
+        roadmaps.set(root, []);
+        return;
+      }
+      throw error;
     }
   }));
+  if (projects.some(project => !roadmaps.has(project.path))) throw new Error('shadow_decision_inputs_incomplete');
   const sourceRevision = buildDatabaseProjectSourceRevision(projects, roadmaps);
   const portfolio = buildProjectPortfolioSummaries(projects, { coreOnly: true, roadmapNodesByProjectPath: roadmaps });
   return {

@@ -21,7 +21,7 @@ const MAX_BACKGROUND_KEYS = 128;
 const MAX_WAITERS_PER_KEY = 64;
 
 const foregroundCommands = new Set([
-  'agentCliUpgradeResult', 'cliTestResult', 'conversationActionAccepted', 'conversationActionSettled',
+  'agentCliUpgradeResult', 'cliTestResult', 'conversationActionAccepted', 'conversationActionDurable', 'conversationActionSettled',
   'coverageAnalysisStarted', 'globalPromptReviewCompleted', 'globalPromptReviewStarted',
   'growth.reportActionSettled', 'intelligenceLoadFailed', 'intelligenceReplyFailed',
   'issueActionCompleted', 'mcpInstallResult', 'navigationReady', 'pastedAttachmentsAccepted',

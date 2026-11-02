@@ -1,12 +1,9 @@
-import * as fs from 'fs';
-import * as path from 'path';
-import * as Papa from 'papaparse';
 import { RunImpactRecord } from './db/types';
 import { AgentTokenUsage, normalizeTokenUsage } from './tokenUsage';
 import { getTrustedWorkDurationMs } from './workHabits';
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { normalizeGlobalDataPathForExtension } from './projectRegistry';
-import { observeLocalDiagnosticStage, recordCurrentDiagnosticStage } from './localDiagnostics';
+import { observeLocalDiagnosticStage } from './localDiagnostics';
 
 export interface AgentImpactProject {
   name: string;
@@ -46,7 +43,7 @@ interface RoadmapNodeLike {
   status: string;
 }
 
-interface AgentImpactRun {
+export interface AgentImpactRun {
   agent: string;
   status: 'completed' | 'failed' | 'unknown';
   timestamp: number;
@@ -86,7 +83,7 @@ function statusFromDigest(value: unknown): 'completed' | 'failed' | 'unknown' {
   return 'unknown';
 }
 
-function readRunsFromRunIndexEntries(entries: RunImpactRecord[]): AgentImpactRun[] {
+export function readRunsFromRunIndexEntries(entries: RunImpactRecord[]): AgentImpactRun[] {
   return entries.map((entry) => {
     const runKind = normalizeRunKind(entry.runKind);
     if (!isImpactRunKind(runKind)) {
@@ -114,31 +111,10 @@ function readRunsFromRunIndexEntries(entries: RunImpactRecord[]): AgentImpactRun
   }).filter((run): run is AgentImpactRun => Boolean(run));
 }
 
-function readProjectRoadmapNodes(projectPath: string): RoadmapNodeLike[] {
-  const roadmapPath = path.join(projectPath, '.solopreneur', 'roadmap.csv');
-  if (!fs.existsSync(roadmapPath)) {
-    return [];
-  }
-  try {
-    const content = fs.readFileSync(roadmapPath, 'utf8');
-    const parsed = Papa.parse<RoadmapNodeLike>(content, {
-      header: true,
-      skipEmptyLines: true
-    });
-    return parsed.data
-      .map((node) => ({
-        id: String(node.id || '').trim(),
-        status: String(node.status || 'Pending').trim() || 'Pending'
-      }))
-      .filter((node) => node.id);
-  } catch {
-    return [];
-  }
-}
-
-function buildAgentImpactSummaryFromProjectRuns(
+export function buildAgentImpactSummaryFromProjectRuns(
   projects: AgentImpactProject[],
   getRuns: (project: AgentImpactProject) => AgentImpactRun[],
+  getRoadmapNodes: (project: AgentImpactProject) => RoadmapNodeLike[],
   now = new Date()
 ): AgentImpactSummary {
   const weekStartMs = now.getTime() - 7 * 24 * 60 * 60 * 1000;
@@ -156,7 +132,7 @@ function buildAgentImpactSummaryFromProjectRuns(
   let completedNodes = 0;
 
   for (const project of projects) {
-    const nodes = readProjectRoadmapNodes(project.path);
+    const nodes = getRoadmapNodes(project);
     totalNodes += nodes.length;
     completedNodes += nodes.filter((node) => node.status === 'Completed').length;
 
@@ -230,29 +206,12 @@ function buildAgentImpactSummaryFromProjectRuns(
   };
 }
 
-export async function buildAgentImpactSummaryFromDatabase(projects: AgentImpactProject[], extensionPath: string, now = new Date(), globalDataPath = ''): Promise<AgentImpactSummary> {
-  const runsByProject = new Map<string, AgentImpactRun[]>();
-  let slowestQuery: { index: number; durationMs: number } | undefined;
-  for (const [index, project] of projects.entries()) {
-    const root = normalizeGlobalDataPathForExtension(globalDataPath, project.path);
-    const startedAt = Date.now();
-    let indexedRuns: RunImpactRecord[];
-    try {
-      indexedRuns = await sendRuntimeDataRequest<RunImpactRecord[]>(root, { operation: 'read_project_impact_runs', input: { root: project.path } });
-    } catch (error) {
-      recordCurrentDiagnosticStage(`agentImpact.project.${index + 1}.query`, 'error', Date.now() - startedAt, error);
-      throw error;
-    }
-    const durationMs = Date.now() - startedAt;
-    if (!slowestQuery || durationMs > slowestQuery.durationMs) slowestQuery = { index: index + 1, durationMs };
-    runsByProject.set(project.path, readRunsFromRunIndexEntries(indexedRuns));
-  }
-  if (slowestQuery && slowestQuery.durationMs >= 250) {
-    recordCurrentDiagnosticStage(`agentImpact.project.${slowestQuery.index}.query`, 'ok', slowestQuery.durationMs);
-  }
-  return observeLocalDiagnosticStage('agentImpact.aggregate', async () =>
-    buildAgentImpactSummaryFromProjectRuns(projects, (project) => runsByProject.get(project.path) || [], now)
-  );
+export async function buildAgentImpactSummaryFromDatabase(projects: AgentImpactProject[], _extensionPath: string, now = new Date(), globalDataPath = ''): Promise<AgentImpactSummary> {
+  const root = normalizeGlobalDataPathForExtension(globalDataPath, projects[0]?.path || '');
+  return observeLocalDiagnosticStage('agentImpact.aggregate', () => sendRuntimeDataRequest<AgentImpactSummary>(root, {
+    operation: 'read_agent_impact_summary',
+    input: { projects: projects.map(project => ({ name: project.name, path: project.path })), now: now.toISOString() }
+  }));
 }
 
 export async function getAgentImpactStatusFromDatabase(projects: AgentImpactProject[], extensionPath: string, globalDataPath = ''): Promise<AgentImpactStatus> {

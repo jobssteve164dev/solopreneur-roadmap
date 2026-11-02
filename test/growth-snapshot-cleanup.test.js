@@ -131,6 +131,31 @@ test('detail cleanup preserves every snapshot summary and only removes topology 
   await assert.rejects(f.call('apply_growth_snapshot_detail_cleanup', { ...input, batchSize: 2 }), /idempotency_conflict/);
 });
 
+test('growth detail pagination pins one snapshot and rejects pages after its topology changes', async t => {
+  const f = await fixture(t);
+  const [firstId] = await writeHistory(f, ['A']);
+  const firstPage = f.store.readProjectGrowth(f.projectId, 1, firstId, 0, 1);
+
+  assert.equal(firstPage.latest.snapshot.id, firstId);
+  assert.match(firstPage.latest.detailToken, /^[a-f0-9]{64}$/);
+  assert.equal(firstPage.latest.nextDetailOffset, 1);
+
+  f.store.writeProjectGrowth(f.projectId, snapshot(f.projectRoot, 'b-2', 'B', 2), 'growth-after-first-2');
+  f.store.writeProjectGrowth(f.projectId, snapshot(f.projectRoot, 'c-3', 'C', 3), 'growth-after-first-3');
+
+  assert.throws(
+    () => f.store.readProjectGrowth(
+      f.projectId,
+      1,
+      firstId,
+      firstPage.latest.nextDetailOffset,
+      1,
+      firstPage.latest.detailToken
+    ),
+    /growth_detail_snapshot_changed/
+  );
+});
+
 test('detail cleanup finalizes only while holding the write lock over its zero-residue checks', async t => {
   const f = await fixture(t);
   const ids = await writeLegacyHistory(f, ['A', 'B', 'C']);

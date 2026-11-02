@@ -17,6 +17,7 @@ import { runStatusReference, runDataReference } from './runLifecycleClient';
 import { readWindowsProcessBirthMarkerAsync } from './processIdentity.js';
 import { migrationRunKinds, soloConversationRunKinds } from './runLifecycleTypes';
 import { createInteractionBudget, currentInteractionBudget, InteractionBudget } from './interactionBudget';
+import { readCompleteRunDocument } from './runDocumentClient';
 
 export interface AgentRunPreparationInput {
   agentCli: string;
@@ -42,11 +43,29 @@ export interface AgentRunPreparationInput {
   readOnlyReview?: boolean;
   reviewEvidence?: Record<string, unknown>;
   interactionBudget?: InteractionBudget;
+  deliveryOwner?: { id: string; pid: number; birth: string };
   flowRole?: { flowId: string; loopId: string; role: 'planner' | 'builder' | 'verifier'; attempt: number; initialFlow?: FlowTrace };
 }
 
 type Operation = (operation: string, input: Record<string, unknown>) => Promise<unknown>;
+export interface AgentRunPreparationPreflight {
+  codexTranscript?: { path: string; workspaceRoot: string; nativeSessionId: string; size: number };
+}
 const deliveryOwnerId = crypto.randomUUID();
+
+export async function preflightAgentRunPreparation(input: AgentRunPreparationInput): Promise<AgentRunPreparationPreflight> {
+  const provider = getAgentProvider(input.agentCli);
+  const interactive = isInteractiveConversationRunKind(input.runKind);
+  const continuation = (interactive || input.runKind === 'agent_review_revision') && Boolean(input.nativeSessionId?.trim())
+    && (input.continuation ?? Boolean(input.directExecutionCommand));
+  if (provider !== 'codex' || !continuation || !input.metadata?.codexResumeTranscriptPath) return {};
+  const transcriptPath = String(input.metadata.codexResumeTranscriptPath);
+  const nativeSessionId = String(input.nativeSessionId).trim();
+  await assertCodexResumeTranscript(transcriptPath, input.workspaceRoot, nativeSessionId);
+  const stat = await fs.promises.stat(transcriptPath);
+  if (!stat.isFile()) throw new Error('identity_transcript_unavailable');
+  return { codexTranscript: { path: transcriptPath, workspaceRoot: input.workspaceRoot, nativeSessionId, size: stat.size } };
+}
 
 export async function getAgentRunDeliveryOwner(): Promise<{ id: string; pid: number; birth: string }> {
   if (process.platform === 'win32') return { id: deliveryOwnerId, pid: process.pid, birth: await readWindowsProcessBirthMarkerAsync(process.pid) };
@@ -106,9 +125,10 @@ function memoryContextTerms(...values: string[]): string[] {
   return [...terms];
 }
 
-export async function resumePreparedAgentRun(state: RunState, operation: Operation, dataRoot?: string): Promise<Awaited<ReturnType<typeof prepareAgentRun>>> {
+export async function resumePreparedAgentRun(state: RunState, operation: Operation, dataRoot?: string,
+  deliveryOwner?: { id: string; pid: number; birth: string }): Promise<Awaited<ReturnType<typeof prepareAgentRun>>> {
   const executionLogId = Number(state.status.rootExecutionLogId);
-  const document = await operation('read_run_document', { projectId: state.projectId, executionLogId, purpose: 'launch_request' }) as { bytes: string } | null;
+  const document = await readCompleteRunDocument(operation, { projectId: state.projectId, executionLogId, purpose: 'launch_request' });
   if (!document) throw new Error('run_launch_request_missing');
   const input = JSON.parse(Buffer.from(document.bytes, 'base64').toString('utf8')) as AgentRunPreparationInput;
   if (input.executionLogId !== executionLogId || input.workspaceRoot !== state.status.workspaceRoot || input.nodeId !== state.status.nodeId) throw new Error('run_launch_request_identity_mismatch');
@@ -116,7 +136,7 @@ export async function resumePreparedAgentRun(state: RunState, operation: Operati
   if (getAgentProvider(input.agentCli) === 'codex' && input.nativeSessionId?.trim() && input.metadata?.codexResumeTranscriptPath) {
     await assertCodexResumeTranscript(String(input.metadata.codexResumeTranscriptPath), input.workspaceRoot, input.nativeSessionId.trim());
   }
-  const owner = await getAgentRunDeliveryOwner();
+  const owner = deliveryOwner || await getAgentRunDeliveryOwner();
   const claimed = await operation('claim_run_delivery', { projectId: state.projectId, executionLogId, generation: state.generation, expectedRevision: state.revision, owner, idempotencyKey: `run:${state.runId}:${state.generation}:resume-delivery:${owner.id}:${state.revision}` }) as RunState;
   try {
     const prepared = await prepareAgentRun(input, operation);
@@ -128,7 +148,7 @@ export async function resumePreparedAgentRun(state: RunState, operation: Operati
   }
 }
 
-export async function prepareAgentRun(input: AgentRunPreparationInput, operation?: Operation): Promise<RunState & { dataRoot: string; finalCommand: string; outputFilePath: string; changesFilePath: string; commandFilePath: string; promptFilePath: string; runScriptPath: string }> {
+export async function prepareAgentRun(input: AgentRunPreparationInput, operation?: Operation, preflight: AgentRunPreparationPreflight = {}): Promise<RunState & { dataRoot: string; finalCommand: string; outputFilePath: string; changesFilePath: string; commandFilePath: string; promptFilePath: string; runScriptPath: string }> {
   const provider = getAgentProvider(input.agentCli);
   const interactive = isInteractiveConversationRunKind(input.runKind);
   const sessionReentry = input.metadata?.agentInputMode === 'session_reentry';
@@ -146,7 +166,7 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
   // The data root is delivery routing, not user intent. A queued launch can be
   // reclaimed from its physical owner after the saved root changes without
   // becoming a different conversation request.
-  const { interactionBudget: _interactionBudget, globalDataPath: _globalDataPath, ...stableIntentInput } = input;
+  const { interactionBudget: _interactionBudget, globalDataPath: _globalDataPath, deliveryOwner: _deliveryOwner, ...stableIntentInput } = input;
   const intent = input.launchSlotId && input.launchSlotScope === 'global'
     ? { launchSlotId: input.launchSlotId, launchSlotScope: input.launchSlotScope, runKind: input.runKind, prompt: input.prompt, userMessage: input.userMessage }
     : (input.flowRole || input.launchIntentId || input.launchSlotId) ? { ...stableIntentInput, executionLogId: 0 } : stableIntentInput;
@@ -161,10 +181,16 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
   let codexNativeSourceOffset: number | undefined;
   if (provider === 'codex' && continuation && input.metadata?.codexResumeTranscriptPath && (!state || state.status.deliveryPending)) {
     const transcriptPath = String(input.metadata.codexResumeTranscriptPath);
-    await assertCodexResumeTranscript(transcriptPath, input.workspaceRoot, String(input.nativeSessionId).trim());
-    const stat = await fs.promises.stat(transcriptPath);
-    if (!stat.isFile()) throw new Error('identity_transcript_unavailable');
-    codexNativeSourceOffset = stat.size;
+    const expected = { path: transcriptPath, workspaceRoot: input.workspaceRoot, nativeSessionId: String(input.nativeSessionId).trim() };
+    const verified = preflight.codexTranscript;
+    if (verified && verified.path === expected.path && verified.workspaceRoot === expected.workspaceRoot && verified.nativeSessionId === expected.nativeSessionId) {
+      codexNativeSourceOffset = verified.size;
+    } else {
+      await assertCodexResumeTranscript(transcriptPath, input.workspaceRoot, expected.nativeSessionId);
+      const stat = await fs.promises.stat(transcriptPath);
+      if (!stat.isFile()) throw new Error('identity_transcript_unavailable');
+      codexNativeSourceOffset = stat.size;
+    }
   }
   if (!state) {
     const plannedNativeSessionId = continuation ? input.nativeSessionId!.trim() : interactive && ['claude', 'copilot', 'grok'].includes(provider) ? crypto.randomUUID() : '';
@@ -181,7 +207,8 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
         ...(input.readOnlyReview ? { readOnly: true } : {}) }
     };
     try {
-      state = await call(input.flowRole ? 'prepare_flow_role' : input.launchSlotId ? 'prepare_run_slot' : input.launchIntentId ? 'prepare_run_intent' : 'prepare_run', { ...scope, ...(input.launchSlotId ? { launchSlotId: input.launchSlotId, launchSlotScope: input.launchSlotScope || 'project' } : {}), ...(input.launchIntentId ? { launchIntentId: input.launchIntentId } : {}), ...(input.flowRole || {}), ...(input.parentExecutionLogId ? { parentExecutionLogId: input.parentExecutionLogId } : {}), ...(input.expectedParentTurnId ? { expectedParentTurnId: input.expectedParentTurnId } : {}), nodeId: input.nodeId, runKind: input.runKind, prompt: input.prompt, ...(input.globalPrompt !== undefined ? { globalPrompt: input.globalPrompt } : {}), command: input.directExecutionCommand || '', userMessage: input.userMessage, status: 'Preparing', metadata, deliveryOwner: await getAgentRunDeliveryOwner(), launchRequest: input as unknown as Record<string, unknown>, idempotencyKey: prepareKey }) as RunState;
+      const deliveryOwner = input.deliveryOwner || await getAgentRunDeliveryOwner();
+      state = await call(input.flowRole ? 'prepare_flow_role' : input.launchSlotId ? 'prepare_run_slot' : input.launchIntentId ? 'prepare_run_intent' : 'prepare_run', { ...scope, ...(input.launchSlotId ? { launchSlotId: input.launchSlotId, launchSlotScope: input.launchSlotScope || 'project' } : {}), ...(input.launchIntentId ? { launchIntentId: input.launchIntentId } : {}), ...(input.flowRole || {}), ...(input.parentExecutionLogId ? { parentExecutionLogId: input.parentExecutionLogId } : {}), ...(input.expectedParentTurnId ? { expectedParentTurnId: input.expectedParentTurnId } : {}), nodeId: input.nodeId, runKind: input.runKind, prompt: input.prompt, ...(input.globalPrompt !== undefined ? { globalPrompt: input.globalPrompt } : {}), command: input.directExecutionCommand || '', userMessage: input.userMessage, status: 'Preparing', metadata, deliveryOwner, launchRequest: input as unknown as Record<string, unknown>, idempotencyKey: prepareKey }) as RunState;
     } catch (error) {
       if (input.launchIntentId || input.launchSlotId || !['idempotency_conflict', 'execution_identity_conflict'].includes((error as Error).message)) throw error;
       state = await call('read_run_state', scope) as RunState;
@@ -209,8 +236,12 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
     let nativeSessionIdIsCurrent = false;
     const transcriptPath = String(input.metadata?.codexResumeTranscriptPath || '');
     if (binding && provider === 'codex' && continuation && transcriptPath && binding.headRevision === 2) {
-      const stat = await fs.promises.stat(transcriptPath);
-      if (!stat.isFile()) throw new Error('identity_transcript_unavailable');
+      const verified = preflight.codexTranscript;
+      if (!verified || verified.path !== transcriptPath || verified.workspaceRoot !== input.workspaceRoot
+        || verified.nativeSessionId !== plannedSessionId) {
+        const stat = await fs.promises.stat(transcriptPath);
+        if (!stat.isFile()) throw new Error('identity_transcript_unavailable');
+      }
       binding = await call('write_run_binding', { ...identity, expectedHeadRevision: 2, confirmSessionId: plannedSessionId, evidence: { source: 'confirmed_resume_target', transcriptPath: path.resolve(transcriptPath) }, idempotencyKey: `${prepareKey}:confirmed-session` }) as NativeSessionBinding;
       nativeSessionIdIsCurrent = true;
     }
@@ -247,7 +278,7 @@ export async function prepareAgentRun(input: AgentRunPreparationInput, operation
     state = await call('patch_run_inputs', { ...identity, expectedRevision: state.revision, prompt, command, status: sessionReentry || input.metadata?.startWaiting === true ? 'Waiting' : 'Running', idempotencyKey: `${prepareKey}:ready:${state.revision}` }) as RunState;
   }
   } catch (error) {
-    if ((input.flowRole || input.launchIntentId || input.launchSlotId) && ['revision_conflict', 'idempotency_conflict'].includes((error as Error).message)) return prepareAgentRun(input, call);
+    if ((input.flowRole || input.launchIntentId || input.launchSlotId) && ['revision_conflict', 'idempotency_conflict'].includes((error as Error).message)) return prepareAgentRun(input, call, preflight);
     throw error;
   }
   return preparedRunResult(state, String(state.status.workspaceRoot || input.workspaceRoot), input.executionLogId, input.globalDataPath);

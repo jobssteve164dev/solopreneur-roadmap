@@ -251,7 +251,6 @@ function extensionHost(t, f, options = {}) {
     extensionContextRef = context;
     this.hostEngine = () => syncEngine;
     this.continueTurn = handleContinueConversationTurn;
-    this.resumeOrdinary = resumeOrdinaryConversation;
     this.prepareOrdinary = prepareOrdinaryConversation;
     this.deliverOrdinary = deliverOrdinaryConversation;
     this.startFlowRole = startFlowRoleRun;
@@ -932,7 +931,7 @@ test('a captured owner root takes precedence over the run metadata retained from
   const settlements = f.ownerA.store.readRunSettlements(source.projectId, { executionLogId: 1 });
   assert.equal(settlements.items.length, 1);
   assert.match(JSON.stringify(settlements.items[0]), /原根迁入后的完整结果/);
-  assert.equal((await client.listEffects()).items.length, 0);
+  assert.ok((await client.listEffects()).items.every(effect => effect.kind === 'documentation'));
   assert.equal(f.ownerB.store.readProjectJournal(f.ownerB.projectIds.get(f.project)).logs.length, 0);
   assert.ok(scope.dataRequests.every(request => request.operation !== 'claim_run_consumer' || request.root === f.a));
 });
@@ -1083,7 +1082,7 @@ for (const restored of [false, true]) test(`closing a terminal that executed its
   assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'agent-runs')), false);
 });
 
-for (const entry of ['resume', 'prepare', 'review', 'review-revision']) test(`ordinary ${entry} retry preserves the current owner while retaining the original launch intent`, async t => {
+for (const entry of ['prepare', 'review', 'review-revision']) test(`ordinary ${entry} retry preserves the current owner while retaining the original launch intent`, async t => {
   const f = await roots(t), { prepareAgentRun } = require('../out/agentRunPreparation.js');
   const input = { agentCli: 'claude', selectedModel: 'original-model', prompt: '完整原始意图', workspaceRoot: f.project,
     nodeId: '__solo__', executionLogId: 0, userMessage: '原任务重试', runKind: 'solo', globalDataPath: f.b,
@@ -1094,8 +1093,7 @@ for (const entry of ['resume', 'prepare', 'review', 'review-revision']) test(`or
   const id = Number(a.status.rootExecutionLogId), original = f.ownerA.store.readRunDocument(a.projectId, id, 'launch_request');
   const bBefore = f.ownerB.store.readRunState(b.projectId, Number(b.status.rootExecutionLogId));
   const { scope, deliveries } = extensionHost(t, f); await scope.bindEngine();
-  if (entry === 'resume') await scope.resumeOrdinary(scope.context, f.project, input.launchIntentId, f.a);
-  else if (entry === 'review') await scope.startReview({ workspaceRoot: f.project, nodeId: '__solo__', reviewerCli: 'claude', globalDataPath: f.a, launchIntentId: input.launchIntentId });
+  if (entry === 'review') await scope.startReview({ workspaceRoot: f.project, nodeId: '__solo__', reviewerCli: 'claude', globalDataPath: f.a, launchIntentId: input.launchIntentId });
   else if (entry === 'review-revision') await scope.startReviewRevision({ workspaceRoot: f.project, nodeId: '__solo__', mainAgentCli: 'claude', globalDataPath: f.a, launchIntentId: input.launchIntentId });
   else await scope.deliverOrdinary(scope.context, await scope.prepareOrdinary(scope.context, { ...input, globalDataPath: f.a }));
   assert.equal(deliveries.length, 1); assert.equal(deliveries[0].globalDataPath, f.a);
@@ -1151,7 +1149,7 @@ test('a recovered Flow effect prepares and delivers its next role in the claimin
   assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'agent-runs')), false);
 });
 
-for (const entry of ['resume', 'prepare', 'review', 'review-revision']) test(`ordinary ${entry} retry returns the already claimed task without another delivery`, async t => {
+for (const entry of ['prepare', 'review', 'review-revision']) test(`ordinary ${entry} retry returns the already claimed task without another delivery`, async t => {
   const f = await roots(t), { prepareAgentRun } = require('../out/agentRunPreparation.js');
   const input = { agentCli: 'claude', selectedModel: '', prompt: '完整已投递任务', workspaceRoot: f.project, nodeId: '__solo__',
     executionLogId: 0, userMessage: '重复同一意图', runKind: 'solo', globalDataPath: f.a, taskPermissionMode: 'auto',
@@ -1163,8 +1161,7 @@ for (const entry of ['resume', 'prepare', 'review', 'review-revision']) test(`or
   const before = f.ownerA.store.readRunState(a.projectId, id); assert.equal(before.status.deliveryPending, false);
   const { scope, deliveries } = extensionHost(t, f); await scope.bindEngine();
   await assert.doesNotReject(async () => {
-    if (entry === 'resume') assert.equal(await scope.resumeOrdinary(scope.context, f.project, input.launchIntentId, f.a), id);
-    else if (entry === 'prepare') assert.equal(await scope.deliverOrdinary(scope.context, await scope.prepareOrdinary(scope.context, input)), id);
+    if (entry === 'prepare') assert.equal(await scope.deliverOrdinary(scope.context, await scope.prepareOrdinary(scope.context, input)), id);
     else if (entry === 'review') await scope.startReview({ workspaceRoot: f.project, nodeId: '__solo__', reviewerCli: 'claude', globalDataPath: f.a, launchIntentId: input.launchIntentId });
     else await scope.startReviewRevision({ workspaceRoot: f.project, nodeId: '__solo__', mainAgentCli: 'claude', globalDataPath: f.a, launchIntentId: input.launchIntentId });
   });

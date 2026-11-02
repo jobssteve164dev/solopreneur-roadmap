@@ -25,19 +25,29 @@ function messagePrefixHash(messages, count = messages.length) {
   return crypto.createHash('sha256').update(JSON.stringify(messages.slice(0, count))).digest('hex');
 }
 
-test('production conversation client submits one action to the Runtime owner', async () => {
+test('production conversation client durably admits the Webview request before waiting for its answer', async () => {
   const id = '105f896d-ca66-4574-a166-74f32f69c876';
   const requests = [];
+  const accepted = [];
   const expected = { id, title: 'Owned by Runtime', createdAt: '2026-10-19T00:00:00.000Z', updatedAt: '2026-10-19T00:00:00.000Z', messages: [{ role: 'user', content: 'hello' }, { role: 'assistant', content: 'hi' }] };
   const store = new IntelligenceConversationStore('/unused', undefined, async (_root, request) => {
     requests.push(request);
-    return expected;
+    if (request.operation === 'read_intelligence_execution_mode') return { mode: 'harness' };
+    if (request.operation === 'admit_intelligence_message') return {
+      operationId: request.input.operationId, requestId: request.input.requestId,
+      conversationId: request.input.conversationId, status: 'accepted', acceptedAt: 1
+    };
+    if (request.operation === 'await_intelligence_message') return expected;
+    throw new Error(`unexpected operation: ${request.operation}`);
   });
-  assert.deepEqual(await store.send('hello', id), expected);
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0].operation, 'send_intelligence_message');
+  assert.deepEqual(await store.send('hello', id, () => true, undefined, 'webview-request-1', receipt => accepted.push(receipt)), expected);
+  assert.deepEqual(requests.map(request => request.operation), ['admit_intelligence_message', 'await_intelligence_message']);
   assert.equal(requests[0].input.conversationId, id);
   assert.equal(requests[0].input.text, 'hello');
+  assert.equal(requests[0].input.requestId, 'webview-request-1');
+  assert.equal(requests[0].input.operationId, 'webview-request-1');
+  assert.equal(requests[1].input.operationId, 'webview-request-1');
+  assert.deepEqual(accepted, [{ operationId: 'webview-request-1', requestId: 'webview-request-1', conversationId: id, status: 'accepted', acceptedAt: 1 }]);
 });
 
 test('chat fails closed when the database owner is unavailable and never recreates legacy JSON', async t => {
@@ -137,7 +147,7 @@ test('ordinary conversation reads ignore legacy JSON added after startup migrati
   fs.writeFileSync(path.join(directory, id + '.json'), JSON.stringify({ id, title: 'Late legacy file', createdAt: '2026-09-22T08:00:00.000Z', updatedAt: '2026-09-22T08:01:00.000Z', messages: [] }));
   try {
     assert.equal(await operations({ operation: 'read_intelligence_conversation', input: { id } }), null);
-    assert.deepEqual(await operations({ operation: 'list_intelligence_conversations', input: {} }), []);
+    assert.deepEqual(await operations({ operation: 'list_intelligence_conversations', input: {} }), { items: [], nextCursor: null });
     assert.equal(database.readIntelligenceConversation(id), null);
   } finally { await operations.close(); database.close(); }
 });
