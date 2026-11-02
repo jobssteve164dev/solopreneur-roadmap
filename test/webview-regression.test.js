@@ -1186,6 +1186,10 @@ test('Provider ingress observation converges after the launch SLA without conver
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
   const extension = loadCompiledModule('out/extension.js', 'module.exports.awaitIngress = awaitAgentTaskIngress;');
+  // Production polling timers are intentionally unref'ed. Keep only this
+  // direct-await fixture referenced so a clean Node worker cannot finish
+  // before the production observation promise settles.
+  const eventLoopReference = setTimeout(() => {}, 5_000);
   try {
     const budget = createInteractionBudget();
     const run = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '任务', command: 'grok', userMessage: '目标',
@@ -1210,7 +1214,7 @@ test('Provider ingress observation converges after the launch SLA without conver
     const observed = await ops({ operation: 'read_run_state', input: { root: project, executionLogId: 2 } });
     assert.equal(observed.status.taskIngressVerdict, 'deadline_exceeded');
     assert.notEqual(observed.status.deliveryLastError, 'agent_task_ingress_timeout');
-  } finally { await ops.close(); store.close(); }
+  } finally { clearTimeout(eventLoopReference); await ops.close(); store.close(); }
 });
 
 test('task-ingress waiting follows the same delivery across the runner claim generation handoff', async () => {
@@ -2549,8 +2553,31 @@ async function claimScheduleOccurrence(ledger, operations, project, root, task, 
 
 function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
   if (!Object.hasOwn(requireOverrides, '__sharedAutonomousRuntimeControl')) {
+    const runtimeControl = require(path.join(projectRoot, 'out/autonomousRuntimeControl.js'));
+    const fixtureRoot = fs.realpathSync(os.tmpdir());
+    const isFixtureRuntimeRoot = root => {
+      const resolvedRoot = path.resolve(String(root || ''));
+      let existingAncestor = resolvedRoot;
+      while (!fs.existsSync(existingAncestor)) {
+        const parent = path.dirname(existingAncestor);
+        if (parent === existingAncestor) return false;
+        existingAncestor = parent;
+      }
+      const physicalRoot = path.resolve(fs.realpathSync(existingAncestor), path.relative(existingAncestor, resolvedRoot));
+      return physicalRoot === fixtureRoot || physicalRoot.startsWith(`${fixtureRoot}${path.sep}`);
+    };
     Object.defineProperty(requireOverrides, '__sharedAutonomousRuntimeControl', {
-      value: { ...require(path.join(projectRoot, 'out/autonomousRuntimeControl.js')) },
+      value: {
+        ...runtimeControl,
+        sendRuntimeDataRequest: (root, request) => {
+          if (isFixtureRuntimeRoot(root)) return runtimeControl.sendRuntimeDataRequest(root, request);
+          if (request.operation === 'wait_sidebar_core_projection_revision') return new Promise(() => {});
+          return Promise.reject(new Error('Invalid Runtime endpoint.'));
+        },
+        sendRuntimeControlCommand: (root, ...args) => isFixtureRuntimeRoot(root)
+          ? runtimeControl.sendRuntimeControlCommand(root, ...args)
+          : Promise.reject(new Error('Invalid Runtime endpoint.'))
+      },
       enumerable: false
     });
   }
@@ -2917,6 +2944,22 @@ function loadCompiledModule(relativePath, exportPatch, requireOverrides = {}) {
   context.module.exports.__vscodeTestState = vscodeTestState;
   return context.module.exports;
 }
+
+test('compiled VM fixtures isolate both Runtime data and control channels from the host', async t => {
+  const extension = loadCompiledModule('out/extension.js', `
+    module.exports.data = autonomousRuntimeControl_1.sendRuntimeDataRequest;
+    module.exports.control = autonomousRuntimeControl_1.sendRuntimeControlCommand;
+  `);
+  const outsideRoot = path.join(projectRoot, '.fixture-runtime-denied');
+  const linkedRoot = path.join(os.tmpdir(), `solomap-runtime-boundary-link-${process.pid}-${crypto.randomUUID()}`);
+  fs.symlinkSync(projectRoot, linkedRoot, 'dir');
+  t.after(() => fs.unlinkSync(linkedRoot));
+
+  await assert.rejects(extension.data(outsideRoot, { operation: 'read_project_registry', input: {} }), /Invalid Runtime endpoint/);
+  await assert.rejects(extension.control(outsideRoot, 'pause'), /Invalid Runtime endpoint/);
+  await assert.rejects(extension.data(linkedRoot, { operation: 'read_project_registry', input: {} }), /Invalid Runtime endpoint/);
+  await assert.rejects(extension.control(linkedRoot, 'resume'), /Invalid Runtime endpoint/);
+});
 
 test('automatic sidebar card refresh scopes each status event to the project that changed', () => {
   const extension = loadCompiledModule('out/extension.js', `
@@ -10799,6 +10842,14 @@ for (const cached of [true, false]) test(`strategy panel switches data roots whi
     owner.store.writeStrategyState(null, { expectedRevision: state.revision, value: { ...state.value, snapshot: { ...state.value.snapshot, mainJudgment: i ? '新目录结果' : '旧目录结果' } }, idempotencyKey: `root-snapshot-${i}` });
   }
   let rendered; const newRendered = new Promise(resolve => { rendered = resolve; }); const paints = [];
+  const runtimeControl = {
+    ...require('../out/autonomousRuntimeControl.js'),
+    sendRuntimeDataRequest: (root, request) => {
+      const index = roots.findIndex(candidate => path.resolve(candidate) === path.resolve(root));
+      assert.notEqual(index, -1, 'strategy root-switch fixture must stay inside its isolated Runtime owners');
+      return owners[index].ops(request);
+    }
+  };
   const extension = loadCompiledModule('out/extension.js', `
     module.exports.refresh = refreshStrategyPyramidPanel; module.exports.updateSettings = updatePersistedSettings;
     module.exports.broadcast = broadcastSettings;
@@ -10807,12 +10858,13 @@ for (const cached of [true, false]) test(`strategy panel switches data roots whi
     syncCognitiveRuntimeConfig = () => {}; synchronizeTelegramChannel = () => {}; activateObservedBackgroundRuntime = async () => {};
     getSettingsWithOpenCodeSecretState = async context => getPersistedSettings(context);
   `, {
+    './autonomousRuntimeControl': runtimeControl,
     './cognitiveRuntimeConfig': { ...require('../out/cognitiveRuntimeConfig.js'), readCognitiveRuntimeConfig: () => ({ mode: 'none' }), cognitiveRuntimeConfigRevision: () => '' },
     './strategyPyramidWebview': { getStrategyPyramidWebviewHtml: (_webview, _context, snapshot) => { paints.push(snapshot.mainJudgment); if (snapshot.mainJudgment === '新目录结果') rendered(); return snapshot.mainJudgment; } }
   });
   let settings = { globalDataPath: roots[0] };
   const context = { extensionPath: projectRoot, globalState: { get: key => key === 'solopreneur.settings' ? settings : undefined, update: async (_key, value) => { settings = value; } } };
-  const panel = { title: '', webview: { html: '', postMessage: async () => true } }; extension.connect(panel);
+  const panel = { title: '', webview: { html: '', asWebviewUri: uri => String(uri), postMessage: async () => true } }; extension.connect(panel);
   const method = cached ? 'readStrategyState' : 'readLearningOverview';
   const original = owners[0].store[method].bind(owners[0].store); let enter; let release;
   const entered = new Promise(resolve => { enter = resolve; }); const gate = new Promise(resolve => { release = resolve; });
