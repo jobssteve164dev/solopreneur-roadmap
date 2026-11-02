@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.0.640 - 2026-11-02
+
+### Added
+- complete concurrent runtime architecture migration (e4717d9)
+
+### Fixed
+- harden runtime recovery and bounded test cleanup (bc679a0)
+
+### Tests
+- isolate runtime regression fixtures (4c9e7c8)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.635 - 2026-10-31
 
 ### Changed
