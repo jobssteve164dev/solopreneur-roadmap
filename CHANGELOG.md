@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.0.641 - 2026-11-07
+
+### Fixed
+- restore default roadmaps after runtime migration (a88088c)
+
+### Docs
+- enforce authority execution separation (5f6c060)
+
+### Tests
+- retry review output finalization conflicts (9b05b77)
+- keep task-ingress fixture alive in CI (bd8c75f)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.640 - 2026-11-02
 
 ### Added
