@@ -1225,6 +1225,7 @@ test('task-ingress waiting follows the same delivery across the runner claim gen
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
   const extension = loadCompiledModule('out/extension.js', 'module.exports.awaitIngress = awaitAgentTaskIngress;');
+  const eventLoopReference = setTimeout(() => {}, 5_000);
   try {
     const budget = createInteractionBudget(); const deliveryId = 'same-delivery-claim';
     let run = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '任务', command: 'codex', userMessage: '目标',
@@ -1240,7 +1241,7 @@ test('task-ingress waiting follows the same delivery across the runner claim gen
     assert.equal(accepted.generation, claimed.generation);
     assert.equal(accepted.status.terminalClaimDeliveryId, deliveryId);
     assert.equal(accepted.status.taskIngressReceipt.interactionId, budget.interactionId);
-  } finally { await ops.close(); store.close(); }
+  } finally { clearTimeout(eventLoopReference); await ops.close(); store.close(); }
 });
 
 test('conversation launch schedules a stalled Provider observer without waiting on it', async () => {
