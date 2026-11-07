@@ -22368,7 +22368,14 @@ for (const [changeRoot, transientFailure] of [[false, false], [true, false], [fa
         if (error.message !== 'revision_conflict') throw error;
       }
     }
-    if (state.status.hostOutputPending) await ops({ operation: 'finalize_run_output', input: { root: project, executionLogId: id, generation: state.generation, proof, expectedRevision: state.revision, expectedTurnId: state.turnId, exitCode: 0, source: 'host', idempotencyKey: 'host-review-output-final' } });
+    while (state.status.hostOutputPending) {
+      try {
+        state = await ops({ operation: 'finalize_run_output', input: { root: project, executionLogId: id, generation: state.generation, proof, expectedRevision: state.revision, expectedTurnId: state.turnId, exitCode: 0, source: 'host', idempotencyKey: 'host-review-output-final' } });
+      } catch (error) {
+        if (error.message !== 'revision_conflict') throw error;
+        state = await ops({ operation: 'read_run_state', input: { root: project, executionLogId: id } });
+      }
+    }
     if (changeRoot) saved = { ...saved, globalDataPath: path.join(base, 'selected', '.solomap-global') };
     return true;
   });
