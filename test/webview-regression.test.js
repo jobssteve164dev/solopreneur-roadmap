@@ -17750,7 +17750,7 @@ for (const { mode, historical } of [{ mode: 'all', historical: false }, { mode: 
   const native = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
   const engine = new (require('../out/db/syncEngine.js').SyncEngine)(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
   await engine.initAndSync(); t.after(() => engine.close());
-  engine.setNodes([{ id: 'unchanged', title: '用户既有环节', description: '不得由 Solo 对话改变', stage: '实施', status: 'Pending' }]);
+  await engine.setNodes([{ id: 'unchanged', title: '用户既有环节', description: '不得由 Solo 对话改变', stage: '实施', status: 'Pending' }]);
   const roadmap = fs.readFileSync(path.join(project, '.solopreneur', 'roadmap.csv'));
   let run;
   if (historical) {

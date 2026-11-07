@@ -99,6 +99,27 @@ test('a default roadmap does not direct the Agent to retired project support fil
   assert.match(prompt, /共享路线图校验器/);
 });
 
+test('a new project receives the default roadmap through the global writer runtime', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-global-default-roadmap-'));
+  t.after(() => cleanupExact(base));
+  const project = path.join(base, 'project');
+  const globalRoot = path.join(base, '.solomap-global');
+  const csv = path.join(project, '.solopreneur', 'roadmap.csv');
+  const db = path.join(project, '.solopreneur', 'project_journal.db');
+  fs.mkdirSync(path.dirname(csv), { recursive: true });
+  const owner = await openAnalysisOwner(t, globalRoot, [{ path: project }]);
+  const engine = new SyncEngine(csv, db, path.resolve(__dirname, '..'), globalRoot);
+  t.after(() => engine.close());
+
+  await engine.initAndSync({ history: 'skip' });
+
+  assert.equal(engine.getNodes()[0]?.title, '生成初始路线图');
+  assert.equal(fs.existsSync(csv), true);
+  const stored = await owner.ops({ operation: 'read_roadmap', input: { root: project } });
+  assert.equal(stored.nodes[0]?.title, '生成初始路线图');
+  assert.ok(stored.revision > 0);
+});
+
 test('a late roadmap refresh cannot overwrite a newer revision, including from revision zero', async t => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-roadmap-refresh-order-'));
   t.after(() => cleanupExact(base));

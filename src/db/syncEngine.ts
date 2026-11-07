@@ -69,7 +69,9 @@ export class SyncEngine {
       try { return await sendRuntimeDataRequest(this.globalDataPath, { operation: 'read_roadmap', input: { root: this.projectRoot } }); }
       catch (readError) {
         if (!/roadmap_import_required/.test(readError instanceof Error ? readError.message : String(readError))) throw readError;
-        return { nodes: this.nodeCache, revision: 0 };
+        const defaultNodes = this.createDefaultRoadmap();
+        this.csvStore.writeNodes(defaultNodes);
+        return sendRuntimeDataRequest(this.globalDataPath, { operation: 'accept_roadmap_csv', input: { root: this.projectRoot } });
       }
     }
   }

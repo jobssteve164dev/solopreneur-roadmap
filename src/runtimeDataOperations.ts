@@ -382,6 +382,10 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
             items.push({ root, nodes: snapshot.nodes });
           } catch (error) {
             const code = (error as NodeJS.ErrnoException)?.code;
+            if (error instanceof Error && error.message === 'roadmap_import_required') {
+              items.push({ root, nodes: [], unavailable: true });
+              continue;
+            }
             if (code === 'ENOENT' || (error instanceof Error && (error.message.startsWith('roadmap_csv_invalid:') || /\bENOENT\b/.test(error.message)))) {
               items.push({ root, nodes: [], invalid: true });
               continue;

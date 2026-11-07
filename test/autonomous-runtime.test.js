@@ -162,6 +162,35 @@ test('database Today planning isolates one project with an invalid roadmap', asy
   }
 });
 
+test('database Today planning imports an unbound registered roadmap through the writer path', async () => {
+  const fixture = await createFixture();
+  await fixture.store.registerProject({ root: fixture.hidden });
+  const readerStore = UnifiedDataStore.openReadOnly(fixture.globalRoot, fixture.store.databaseId);
+  const readerOperations = createRuntimeDataOperations(readerStore);
+  try {
+    const decision = await runtime.runShadowDecisionCycleFromDatabase({
+      globalDataPath: fixture.globalRoot,
+      projects: [
+        { name: 'Alpha', path: fixture.alpha, priority: 'P1' },
+        { name: 'Hidden', path: fixture.hidden, priority: 'P0' }
+      ],
+      now: new Date('2026-09-22T08:00:00.000Z'),
+      operation: request => request.operation === 'read_shadow_decision_inputs'
+        ? readerOperations(request)
+        : fixture.operations(request)
+    });
+
+    assert.equal(decision.status, 'completed');
+    assert.equal(decision.projectCount, 2);
+    assert.equal(decision.recommendations[0].projectPath, fixture.hidden);
+    assert.equal((await fixture.call('read_roadmap', { root: fixture.hidden })).nodes[0].title, 'Hidden task');
+  } finally {
+    await readerOperations.close();
+    readerStore.close();
+    await removeFixture(fixture);
+  }
+});
+
 test('database Today planning pages one background read model instead of flooding interactive roadmap reads', async () => {
   const projects = Array.from({ length: 57 }, (_, index) => ({
     name: `Project ${index + 1}`,
