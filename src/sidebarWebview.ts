@@ -2915,6 +2915,151 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       background: rgba(0, 229, 255, 0.07);
     }
 
+    .project-source-panel {
+      margin-top: 8px;
+      border: 1px solid rgba(255,255,255,0.09);
+      border-radius: 6px;
+      background: rgba(0,0,0,0.12);
+      cursor: default;
+    }
+
+    .source-panel-header,
+    .source-toolbar,
+    .source-create-row,
+    .source-branch-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .source-panel-header {
+      width: 100%;
+      justify-content: space-between;
+      border: 0;
+      padding: 7px 8px;
+      color: var(--text-main);
+      background: transparent;
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .source-panel-header:focus-visible,
+    .source-toolbar button:focus-visible,
+    .source-create-row button:focus-visible,
+    .source-branch-row button:focus-visible,
+    .source-toolbar input:focus-visible,
+    .source-create-row input:focus-visible {
+      outline: 2px solid var(--accent-cyan);
+      outline-offset: 1px;
+    }
+
+    .source-panel-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .source-panel-summary {
+      min-width: 0;
+      color: var(--text-muted);
+      font-size: 10px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .source-panel-body {
+      padding: 0 8px 8px;
+      border-top: 1px solid rgba(255,255,255,0.07);
+    }
+
+    .source-panel-body[hidden],
+    .source-create-row[hidden] {
+      display: none;
+    }
+
+    .source-toolbar {
+      padding-top: 8px;
+    }
+
+    .source-toolbar input,
+    .source-create-row input {
+      min-width: 0;
+      flex: 1;
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 5px;
+      padding: 6px 7px;
+      background: rgba(0,0,0,0.18);
+      color: var(--text-main);
+      font: inherit;
+    }
+
+    .source-toolbar button,
+    .source-create-row button,
+    .source-branch-row button {
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 5px;
+      padding: 5px 7px;
+      background: rgba(255,255,255,0.045);
+      color: var(--text-main);
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .source-toolbar button:disabled,
+    .source-create-row button:disabled,
+    .source-branch-row button:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+
+    .source-status-line {
+      min-height: 17px;
+      padding: 6px 0 3px;
+      color: var(--text-muted);
+      font-size: 10px;
+      line-height: 1.4;
+    }
+
+    .source-status-line.is-error {
+      color: var(--danger);
+    }
+
+    .source-branch-list {
+      display: grid;
+      gap: 4px;
+      max-height: 180px;
+      overflow: auto;
+    }
+
+    .source-branch-row {
+      justify-content: space-between;
+      min-width: 0;
+      padding: 5px 6px;
+      border-radius: 5px;
+      background: rgba(255,255,255,0.025);
+    }
+
+    .source-branch-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 10.5px;
+    }
+
+    .source-branch-row.is-current .source-branch-name {
+      color: var(--accent-cyan);
+      font-weight: 700;
+    }
+
+    .source-create-row {
+      margin-top: 6px;
+    }
+
     .portfolio-card-head,
     .portfolio-card-meta,
     .portfolio-card-actions {
@@ -4937,6 +5082,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let issueDetailsRequestId = '';
     let issuePanelExpanded = false;
     let deliveryActionPanelExpanded = false;
+    const projectSourceStates = new Map();
+    const activeSourceBranchPointers = new Set();
+    const activeSourceBranchKeys = new Set();
+    const pendingSourceBranchRows = new Set();
     let issueFormOpen = false;
     let issueDraftTitle = '';
     let quickIssueDraftTitle = '';
@@ -5077,9 +5226,14 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     function currentSidebarInteractionState() {
+      const source = activeProjectPath ? projectSourceState(activeProjectPath) : null;
       return {
         issueDraftTitle, issueDraftBody, issueDraftCategory, issueDraftPriority, quickIssueDraftTitle, expandedIssueNumber,
         issuePanelExpanded, deliveryActionPanelExpanded, issueFormOpen,
+        sourcePanelExpanded: Boolean(source && source.expanded),
+        sourceSearch: source ? source.search : '',
+        sourceCreateOpen: Boolean(source && source.createOpen),
+        sourceCreateDraft: source ? source.createDraft : '',
         roadmapRevisionDrafts: { ...roadmapRevisionDrafts },
         projectContinueNodeSelections: { ...projectContinueNodeSelections },
         projectConversationModes: { ...projectConversationModes },
@@ -7045,6 +7199,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       issuePanelExpanded = remembered.issuePanelExpanded === true;
       deliveryActionPanelExpanded = remembered.deliveryActionPanelExpanded === true;
       issueFormOpen = remembered.issueFormOpen === true;
+      const source = projectSourceState(activeProjectPath);
+      source.expanded = remembered.sourcePanelExpanded === true || source.expanded;
+      source.search = typeof remembered.sourceSearch === 'string' ? remembered.sourceSearch : source.search;
+      source.createOpen = remembered.sourceCreateOpen === true || source.createOpen;
+      source.createDraft = typeof remembered.sourceCreateDraft === 'string' ? remembered.sourceCreateDraft : source.createDraft;
       Object.assign(roadmapRevisionDrafts, remembered.roadmapRevisionDrafts || {});
       Object.assign(projectContinueNodeSelections, remembered.projectContinueNodeSelections || {});
       Object.assign(projectConversationModes, remembered.projectConversationModes || {});
@@ -8736,10 +8895,52 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     // Handle messages
     window.addEventListener('message', event => {
       const message = event.data;
-      if (Number(message.projectGeneration ?? message.projects?.projectGeneration) < projectGeneration) return;
+      const isSourceMessage = message.command === 'sourceSnapshotResolved' || message.command === 'sourceStatusResolved' || message.command === 'sourceActionSettled';
+      if (!isSourceMessage && Number(message.projectGeneration ?? message.projects?.projectGeneration) < projectGeneration) return;
       if (pendingProjectSelectionPath && ['nodesUpdated', 'sidebarSoloConversationLoaded', 'sidebarStepConversationLoaded',
         'sidebarProjectConversationLoaded', 'sidebarProjectConversationSnapshotLoaded'].includes(message.command)) return;
       switch (message.command) {
+        case 'sourceSnapshotResolved': {
+          const projectPath = String(message.projectPath || '');
+          const state = projectSourceState(projectPath);
+          if (!projectPath || message.requestId !== state.requestId || Number(message.sourceEpoch || 0) !== state.sourceEpoch
+            || Number(message.projectGeneration || 0) !== state.requestGeneration || state.requestGeneration !== projectGeneration) break;
+          state.loading = false;
+          state.error = String(message.error || '');
+          if (message.snapshot) state.snapshot = message.snapshot;
+          updateProjectSourcePanel(projectPath);
+          break;
+        }
+        case 'sourceStatusResolved': {
+          const projectPath = String(message.projectPath || '');
+          const state = projectSourceState(projectPath);
+          if (!projectPath || message.requestId !== state.requestId || Number(message.sourceEpoch || 0) !== state.sourceEpoch
+            || Number(message.projectGeneration || 0) !== state.requestGeneration || state.requestGeneration !== projectGeneration
+            || !state.snapshot || !message.status) break;
+          state.snapshot = { ...state.snapshot, ...message.status };
+          updateProjectSourcePanel(projectPath, true);
+          break;
+        }
+        case 'sourceActionSettled': {
+          const projectPath = String(message.projectPath || '');
+          const state = projectSourceState(projectPath);
+          if (!projectPath || message.requestId !== state.requestId || Number(message.sourceEpoch || 0) !== state.sourceEpoch
+            || Number(message.projectGeneration || 0) !== state.requestGeneration || state.requestGeneration !== projectGeneration) break;
+          state.actionPending = false;
+          state.error = message.success ? '' : String(message.error || 'action_failed');
+          if (message.snapshot) state.snapshot = message.snapshot;
+          if (message.success && message.snapshot) {
+            state.createOpen = false;
+            state.createDraft = '';
+            const branch = message.snapshot.currentBranch || (message.snapshot.detachedHead ? 'HEAD ' + message.snapshot.detachedHead : '');
+            state.actionMessage = branch
+              ? (currentLanguage === 'zh' ? '已切换到 ' + branch : 'Switched to ' + branch)
+              : (currentLanguage === 'zh' ? '分支操作已完成。' : 'Branch action completed.');
+            saveSidebarInteractionState();
+          }
+          updateProjectSourcePanel(projectPath);
+          break;
+        }
         case 'uiStateLoaded': {
           if (message.view !== 'sidebar') break;
           if (!message.loadRequestId || uiStateLoadRequestIds.get(message.scopeKey) !== message.loadRequestId) break;
@@ -8773,6 +8974,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           issuePanelExpanded = interaction.issuePanelExpanded === true;
           deliveryActionPanelExpanded = interaction.deliveryActionPanelExpanded === true;
           issueFormOpen = interaction.issueFormOpen === true;
+          const source = projectSourceState(String(message.scopeKey || ''));
+          source.expanded = interaction.sourcePanelExpanded === true;
+          source.search = typeof interaction.sourceSearch === 'string' ? interaction.sourceSearch : '';
+          source.createOpen = interaction.sourceCreateOpen === true;
+          source.createDraft = typeof interaction.sourceCreateDraft === 'string' ? interaction.sourceCreateDraft : '';
           for (const value of [roadmapRevisionDrafts, projectContinueNodeSelections, projectConversationModes,
             projectConversationAgentSelections, projectConversationModelSelections, projectContinueFiles, projectSoloFiles,
             projectSoloDrafts, projectContinueDrafts, sidebarExpandedConversations, sidebarLogsExpandedConversations]) Object.keys(value).forEach(key => delete value[key]);
@@ -8870,6 +9076,13 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (pendingProjectSelectionInteractionId && message.interactionId !== pendingProjectSelectionInteractionId) break;
           if (Number(message.generation) < projectGeneration) break;
           projectGeneration = Number(message.generation) || 0;
+          projectSourceStates.forEach(state => {
+            if (state.requestGeneration >= projectGeneration) return;
+            state.loading = false;
+            state.actionPending = false;
+            state.requestId = '';
+            state.actionMessage = '';
+          });
           pendingProjectSelectionPath = '';
           pendingProjectSelectionInteractionId = '';
           if (message.projectRoot !== activeProjectPath) {
@@ -9066,6 +9279,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             uiStateLoadRequestIds.clear();
             uiStateLeafEditRevisions.clear();
             sidebarProjectInteractionStates.clear();
+            projectSourceStates.clear();
             activeProjectPath = '';
             resetProjectScopedState(selectedProjectPath, true);
             loadSidebarUiState('global');
@@ -11723,6 +11937,301 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       ].filter(Boolean).join('\\n');
     }
 
+    function projectSourceState(projectPath) {
+      let state = projectSourceStates.get(projectPath);
+      if (!state) {
+        state = {
+          expanded: false, loading: false, actionPending: false, requestId: '', requestGeneration: 0,
+          sourceEpoch: 0, snapshot: null, error: '', search: '', createOpen: false, createDraft: '', actionMessage: ''
+        };
+        projectSourceStates.set(projectPath, state);
+      }
+      return state;
+    }
+
+    function sourcePanelBodyId(projectPath) {
+      let hash = 2166136261;
+      for (let index = 0; index < projectPath.length; index += 1) {
+        hash ^= projectPath.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+      }
+      return 'project-source-' + (hash >>> 0).toString(36);
+    }
+
+    function sourceErrorText(code) {
+      const zh = {
+        invalid_branch: '这个分支名称不可用，请换一个名称。',
+        branch_exists: '这个分支已经存在，可以直接切换。',
+        local_changes: '当前修改会被覆盖，Git 已阻止切换；文件保持不变。',
+        branch_missing: '没有找到这个本地分支，请刷新后重试。',
+        result_unknown: '未能确认完整结果。请先在源代码管理中检查工作区，再刷新本地分支；SoloMap 不会自动重试。',
+        action_failed: '操作没有完成，文件保持不变。请重试。'
+      };
+      const en = {
+        invalid_branch: 'This branch name cannot be used. Choose another name.',
+        branch_exists: 'This branch already exists. You can switch to it.',
+        local_changes: 'Git stopped the switch because it would overwrite local changes. Your files were kept.',
+        branch_missing: 'This local branch was not found. Refresh and try again.',
+        result_unknown: 'The complete result could not be confirmed. Check the workspace in Source Control, then refresh local branches; SoloMap will not retry automatically.',
+        action_failed: 'The action did not finish. Your files were kept. Try again.'
+      };
+      return (currentLanguage === 'zh' ? zh : en)[code] || (currentLanguage === 'zh' ? zh.action_failed : en.action_failed);
+    }
+
+    function sourceCurrentLabel(state) {
+      const snapshot = state.snapshot;
+      if (!snapshot) return currentLanguage === 'zh' ? '未读取' : 'Not loaded';
+      if (!snapshot.available) return snapshot.unavailableReason === 'read_error'
+        ? (currentLanguage === 'zh' ? '暂时无法读取' : 'Temporarily unavailable')
+        : (currentLanguage === 'zh' ? '未启用 Git' : 'Git not available');
+      return snapshot.currentBranch || (snapshot.detachedHead ? 'HEAD ' + snapshot.detachedHead : (currentLanguage === 'zh' ? '未知分支' : 'Unknown branch'));
+    }
+
+    function sourceStatusText(state) {
+      if (state.error) return sourceErrorText(state.error);
+      if (state.actionPending) return currentLanguage === 'zh' ? '正在完成分支操作…' : 'Finishing branch action…';
+      if (state.loading) return state.snapshot
+        ? (currentLanguage === 'zh' ? '正在刷新本地分支…' : 'Refreshing local branches…')
+        : (currentLanguage === 'zh' ? '正在读取本地分支…' : 'Loading local branches…');
+      if (state.actionMessage) return state.actionMessage;
+      const snapshot = state.snapshot;
+      if (!snapshot) return '';
+      if (!snapshot.available) return snapshot.unavailableReason === 'read_error'
+        ? (currentLanguage === 'zh' ? '暂时无法读取本地分支，请刷新重试。' : 'Local branches are temporarily unavailable. Refresh to try again.')
+        : (currentLanguage === 'zh' ? '这个项目还不是 Git 仓库。' : 'This project is not a Git repository yet.');
+      if (snapshot.statusError) return currentLanguage === 'zh'
+        ? '本地分支已就绪，工作区状态暂时无法读取。'
+        : 'Local branches are ready. Workspace status is temporarily unavailable.';
+      if (snapshot.statusLoaded !== true) return currentLanguage === 'zh' ? '本地分支已就绪' : 'Local branches are ready';
+      const parts = [];
+      if (snapshot.changedFiles) parts.push(currentLanguage === 'zh' ? snapshot.changedFiles + ' 个文件有改动' : snapshot.changedFiles + ' changed files');
+      if (snapshot.ahead) parts.push(currentLanguage === 'zh' ? '领先 ' + snapshot.ahead : snapshot.ahead + ' ahead');
+      if (snapshot.behind) parts.push(currentLanguage === 'zh' ? '落后 ' + snapshot.behind : snapshot.behind + ' behind');
+      if (snapshot.truncated) parts.push(currentLanguage === 'zh' ? '仅显示最近 200 个分支' : 'Showing the latest 200 branches');
+      return parts.join(' · ') || (currentLanguage === 'zh' ? '工作区无本地改动' : 'No local changes');
+    }
+
+    function renderSourceBranchRows(state) {
+      const snapshot = state.snapshot;
+      if (!snapshot || !snapshot.available) return '';
+      const query = String(state.search || '').trim().toLocaleLowerCase();
+      const branches = (Array.isArray(snapshot.branches) ? snapshot.branches : [])
+        .filter(branch => !query || String(branch.name || '').toLocaleLowerCase().includes(query));
+      if (!branches.length) return '<div class="source-status-line">'
+        + escapeHtml(currentLanguage === 'zh' ? '没有匹配的本地分支。' : 'No matching local branches.') + '</div>';
+      return branches.map(branch => '<div class="source-branch-row ' + (branch.current ? 'is-current' : '') + '" data-source-branch="' + escapeHtml(branch.name) + '">'
+        + '<span class="source-branch-name" title="' + escapeHtml(branch.name) + '">' + escapeHtml(branch.name) + '</span>'
+        + '<button type="button" data-switch-source-branch="' + escapeHtml(branch.name) + '" '
+        + (branch.current || state.actionPending ? 'disabled ' : '')
+        + (branch.current ? 'aria-current="true"' : '') + '>'
+        + escapeHtml(branch.current ? (currentLanguage === 'zh' ? '当前' : 'Current') : (currentLanguage === 'zh' ? '切换' : 'Switch'))
+        + '</button></div>').join('');
+    }
+
+    function renderProjectSourcePanel(project) {
+      const state = projectSourceState(project.path);
+      const bodyId = sourcePanelBodyId(project.path);
+      return '<section class="project-source-panel" data-source-panel="' + escapeHtml(project.path) + '">'
+        + '<button type="button" class="source-panel-header" data-toggle-source-panel="' + escapeHtml(project.path) + '" '
+        + 'aria-expanded="' + (state.expanded ? 'true' : 'false') + '" aria-controls="' + bodyId + '">'
+        + '<span class="source-panel-title"><span class="codicon codicon-source-control"></span>Source</span>'
+        + '<span class="source-panel-summary" data-source-current-branch>' + escapeHtml(sourceCurrentLabel(state)) + '</span>'
+        + '<span class="codicon ' + (state.expanded ? 'codicon-chevron-up' : 'codicon-chevron-down') + '" aria-hidden="true"></span>'
+        + '</button>'
+        + '<div class="source-panel-body" id="' + bodyId + '" ' + (state.expanded ? '' : 'hidden') + '>'
+        + '<div class="source-toolbar">'
+        + '<input type="search" data-source-search value="' + escapeHtml(state.search) + '" placeholder="'
+        + escapeHtml(currentLanguage === 'zh' ? '搜索本地分支' : 'Search local branches') + '" aria-label="'
+        + escapeHtml(currentLanguage === 'zh' ? '搜索本地分支' : 'Search local branches') + '">'
+        + '<button type="button" data-refresh-source title="' + escapeHtml(currentLanguage === 'zh' ? '刷新本地分支' : 'Refresh local branches') + '" '
+        + ((state.loading || state.actionPending) ? 'disabled' : '') + '>' + escapeHtml(currentLanguage === 'zh' ? '刷新' : 'Refresh') + '</button>'
+        + '<button type="button" data-open-source-scm>' + escapeHtml(currentLanguage === 'zh' ? '源代码管理' : 'Source Control') + '</button>'
+        + '</div>'
+        + '<div class="source-status-line ' + (state.error ? 'is-error' : '') + '" data-source-status '
+        + (state.error ? 'role="alert"' : 'role="status"') + '>' + escapeHtml(sourceStatusText(state)) + '</div>'
+        + '<div class="source-branch-list" data-source-branch-list aria-label="'
+        + escapeHtml(currentLanguage === 'zh' ? '本地分支' : 'Local branches') + '">' + renderSourceBranchRows(state) + '</div>'
+        + '<div class="source-create-row"><button type="button" data-toggle-source-create>'
+        + escapeHtml(currentLanguage === 'zh' ? '新建分支' : 'New branch') + '</button></div>'
+        + '<div class="source-create-row" data-source-create-row ' + (state.createOpen ? '' : 'hidden') + '>'
+        + '<input type="text" data-source-create-input value="' + escapeHtml(state.createDraft) + '" placeholder="feature/my-change" aria-label="'
+        + escapeHtml(currentLanguage === 'zh' ? '新分支名称' : 'New branch name') + '">'
+        + '<button type="button" data-create-source-branch ' + ((!String(state.createDraft || '').trim() || state.actionPending) ? 'disabled' : '') + '>'
+        + escapeHtml(currentLanguage === 'zh' ? '创建并切换' : 'Create and switch') + '</button>'
+        + '</div></div></section>';
+    }
+
+    function updateProjectSourcePanel(projectPath, preserveBranchRows) {
+      if (!portfolioList || !portfolioList.querySelectorAll) return;
+      const panel = Array.from(portfolioList.querySelectorAll('[data-source-panel]'))
+        .find(candidate => candidate.getAttribute('data-source-panel') === projectPath);
+      if (!panel) return;
+      const state = projectSourceState(projectPath);
+      const toggle = panel.querySelector('[data-toggle-source-panel]');
+      const body = panel.querySelector('.source-panel-body');
+      if (toggle) {
+        toggle.setAttribute('aria-expanded', state.expanded ? 'true' : 'false');
+        const icon = toggle.querySelector('.codicon-chevron-down, .codicon-chevron-up');
+        if (icon) icon.className = 'codicon ' + (state.expanded ? 'codicon-chevron-up' : 'codicon-chevron-down');
+      }
+      if (body) body.hidden = !state.expanded;
+      const current = panel.querySelector('[data-source-current-branch]');
+      if (current) current.textContent = sourceCurrentLabel(state);
+      const status = panel.querySelector('[data-source-status]');
+      if (status) {
+        status.textContent = sourceStatusText(state);
+        status.classList.toggle('is-error', Boolean(state.error));
+        status.setAttribute('role', state.error ? 'alert' : 'status');
+      }
+      const search = panel.querySelector('[data-source-search]');
+      if (search && search !== document.activeElement && search.value !== state.search) search.value = state.search;
+      const branchList = panel.querySelector('[data-source-branch-list]');
+      if (branchList && !preserveBranchRows) {
+        if (activeSourceBranchPointers.has(projectPath) || activeSourceBranchKeys.has(projectPath)) pendingSourceBranchRows.add(projectPath);
+        else branchList.innerHTML = renderSourceBranchRows(state);
+      }
+      const refresh = panel.querySelector('[data-refresh-source]');
+      if (refresh) refresh.disabled = state.loading || state.actionPending;
+      const createRow = panel.querySelector('[data-source-create-row]');
+      if (createRow) createRow.hidden = !state.createOpen;
+      const createInput = panel.querySelector('[data-source-create-input]');
+      if (createInput && createInput !== document.activeElement && createInput.value !== state.createDraft) createInput.value = state.createDraft;
+      const create = panel.querySelector('[data-create-source-branch]');
+      if (create) create.disabled = !String(state.createDraft || '').trim() || state.actionPending;
+    }
+
+    function requestProjectSourceSnapshot(projectPath) {
+      const state = projectSourceState(projectPath);
+      if (!projectPath || state.loading || state.actionPending) return;
+      state.loading = true;
+      state.error = '';
+      state.actionMessage = '';
+      state.requestId = 'source-read:' + Date.now() + ':' + Math.random().toString(36).slice(2);
+      state.requestGeneration = projectGeneration;
+      updateProjectSourcePanel(projectPath);
+      vscode.postMessage({
+        command: 'source.read', projectPath, requestId: state.requestId,
+        sourceEpoch: state.sourceEpoch, projectGeneration: state.requestGeneration
+      });
+    }
+
+    function beginProjectSourceAction(projectPath, action, branch) {
+      const state = projectSourceState(projectPath);
+      if (!projectPath || state.actionPending || !branch) return;
+      state.sourceEpoch += 1;
+      state.loading = false;
+      state.actionPending = true;
+      state.error = '';
+      state.actionMessage = '';
+      state.requestId = 'source-action:' + Date.now() + ':' + Math.random().toString(36).slice(2);
+      state.requestGeneration = projectGeneration;
+      const interactionId = 'source-' + action + ':' + Date.now() + ':' + Math.random().toString(36).slice(2);
+      updateProjectSourcePanel(projectPath);
+      vscode.postMessage({
+        command: action === 'create' ? 'source.createBranch' : 'source.switchBranch',
+        projectPath, branch, requestId: state.requestId, sourceEpoch: state.sourceEpoch,
+        projectGeneration: state.requestGeneration, interactionId, interactionAcceptedWallMs: Date.now()
+      });
+    }
+
+    function bindProjectSourcePanel(panel) {
+      const projectPath = panel.getAttribute('data-source-panel') || '';
+      const state = projectSourceState(projectPath);
+      const toggle = panel.querySelector('[data-toggle-source-panel]');
+      if (toggle) toggle.addEventListener('click', event => {
+        event.stopPropagation();
+        state.expanded = !state.expanded;
+        updateProjectSourcePanel(projectPath);
+        if (state.expanded && !state.snapshot && !state.loading) requestProjectSourceSnapshot(projectPath);
+      });
+      const search = panel.querySelector('[data-source-search]');
+      if (search) {
+        search.addEventListener('click', event => event.stopPropagation());
+        search.addEventListener('input', () => {
+          state.search = search.value;
+          const branchList = panel.querySelector('[data-source-branch-list]');
+          if (branchList) branchList.innerHTML = renderSourceBranchRows(state);
+        });
+      }
+      const refresh = panel.querySelector('[data-refresh-source]');
+      if (refresh) refresh.addEventListener('click', event => {
+        event.stopPropagation();
+        requestProjectSourceSnapshot(projectPath);
+      });
+      const openScm = panel.querySelector('[data-open-source-scm]');
+      if (openScm) openScm.addEventListener('click', event => {
+        event.stopPropagation();
+        vscode.postMessage({ command: 'source.openScm', projectPath });
+      });
+      const toggleCreate = panel.querySelector('[data-toggle-source-create]');
+      if (toggleCreate) toggleCreate.addEventListener('click', event => {
+        event.stopPropagation();
+        state.createOpen = !state.createOpen;
+        updateProjectSourcePanel(projectPath);
+        if (state.createOpen) setTimeout(() => panel.querySelector('[data-source-create-input]')?.focus(), 0);
+      });
+      const createInput = panel.querySelector('[data-source-create-input]');
+      const create = panel.querySelector('[data-create-source-branch]');
+      if (createInput) {
+        createInput.addEventListener('click', event => event.stopPropagation());
+        createInput.addEventListener('input', () => {
+          state.createDraft = createInput.value;
+          if (create) create.disabled = !state.createDraft.trim() || state.actionPending;
+        });
+        createInput.addEventListener('keydown', event => {
+          if (event.key !== 'Enter') return;
+          event.preventDefault();
+          event.stopPropagation();
+          beginProjectSourceAction(projectPath, 'create', state.createDraft.trim());
+        });
+      }
+      if (create) create.addEventListener('click', event => {
+        event.stopPropagation();
+        beginProjectSourceAction(projectPath, 'create', state.createDraft.trim());
+      });
+      const branchList = panel.querySelector('[data-source-branch-list]');
+      if (branchList) {
+        branchList.addEventListener('pointerdown', event => {
+          const button = event.target && event.target.closest ? event.target.closest('[data-switch-source-branch]') : null;
+          if (button) activeSourceBranchPointers.add(projectPath);
+        });
+        branchList.addEventListener('keydown', event => {
+          if (!['Enter', ' ', 'Spacebar'].includes(event.key)) return;
+          const button = event.target && event.target.closest ? event.target.closest('[data-switch-source-branch]') : null;
+          if (button) activeSourceBranchKeys.add(projectPath);
+        });
+        branchList.addEventListener('click', event => {
+          const button = event.target && event.target.closest ? event.target.closest('[data-switch-source-branch]') : null;
+          if (!button) return;
+          event.stopPropagation();
+          beginProjectSourceAction(projectPath, 'switch', button.getAttribute('data-switch-source-branch') || '');
+        });
+      }
+    }
+
+    function settleSourceBranchPointer() {
+      const projectPaths = Array.from(activeSourceBranchPointers);
+      activeSourceBranchPointers.clear();
+      setTimeout(() => projectPaths.forEach(projectPath => {
+        if (!pendingSourceBranchRows.delete(projectPath)) return;
+        updateProjectSourcePanel(projectPath);
+      }), 0);
+    }
+
+    function settleSourceBranchKey(event) {
+      if (!['Enter', ' ', 'Spacebar'].includes(event.key)) return;
+      const projectPaths = Array.from(activeSourceBranchKeys);
+      activeSourceBranchKeys.clear();
+      setTimeout(() => projectPaths.forEach(projectPath => {
+        if (!pendingSourceBranchRows.delete(projectPath)) return;
+        updateProjectSourcePanel(projectPath);
+      }), 0);
+    }
+
+    document.addEventListener('pointerup', settleSourceBranchPointer, true);
+    document.addEventListener('pointercancel', settleSourceBranchPointer, true);
+    document.addEventListener('keyup', settleSourceBranchKey, true);
+
     function renderProjectDeliveryPanel(project) {
       const delivery = project && project.delivery ? project.delivery : null;
       const pullRequests = project && project.pullRequests ? project.pullRequests : null;
@@ -12140,7 +12649,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
               <button class="portfolio-action-btn" data-open-project-growth-path="\${escapeHtml(project.path)}">\${t('projectGrowth')}</button>
               \${!isSelected && project.recommendedNodeId ? \`<button class="portfolio-action-btn primary" data-continue-next-action-project-path="\${escapeHtml(project.path)}" data-continue-next-action-node-id="\${escapeHtml(project.recommendedNodeId)}">\${escapeHtml(Number(project.failedNodes || 0) > 0 ? t('projectReviewFailure') : t('projectContinue'))}</button>\` : ''}
             </div>
-            \${isSelected ? renderProjectDeliveryPanel(project) + renderProjectIssuePanel(project) + '<div class="portfolio-action-zone">' + renderProjectConversationComposer(project, currentNodes) + '</div>' : ''}
+            \${isSelected ? renderProjectSourcePanel(project) + renderProjectDeliveryPanel(project) + renderProjectIssuePanel(project) + '<div class="portfolio-action-zone">' + renderProjectConversationComposer(project, currentNodes) + '</div>' : ''}
           </div>
         \`;
       };
@@ -12253,6 +12762,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
         });
       });
+      portfolioBindingRoot.querySelectorAll('[data-source-panel]').forEach(bindProjectSourcePanel);
       portfolioBindingRoot.querySelectorAll('[data-refresh-project-path]').forEach(button => {
         button.addEventListener('click', (event) => {
           event.stopPropagation();

@@ -28,7 +28,7 @@ const foregroundCommands = new Set([
   'pastedAttachmentsFailed', 'projectMetadataSaveFailed', 'projectMetadataSaved',
   'projectRefreshCompleted', 'projectSelectionChanged', 'pullRequestActionCompleted',
   'roadmapLoadFailed', 'roadmapRevisionLaunchRegistered', 'settingsSaved', 'sidebarActionFailed',
-  'skillInstallResult', 'supplementFilesSelected'
+  'skillInstallResult', 'sourceActionSettled', 'sourceSnapshotResolved', 'supplementFilesSelected'
 ]);
 
 function backgroundDeliveryKey(message: Record<string, unknown>): string {
@@ -36,6 +36,7 @@ function backgroundDeliveryKey(message: Record<string, unknown>): string {
   if (['projectIssuesLoaded', 'projectPullRequestsLoaded', 'projectDeliveryLoaded', 'projectSecurityLoaded', 'projectGrowthLoaded'].includes(command)) {
     return `${command}:${String(message.projectPath || '')}`;
   }
+  if (command === 'sourceStatusResolved') return `${command}:${String(message.projectPath || '')}`;
   if (command === 'projectsLoaded') {
     const projects = message.projects as { updatedProjectPaths?: unknown } | undefined;
     const updated = Array.isArray(projects?.updatedProjectPaths) ? projects.updatedProjectPaths.map(String).sort() : [];

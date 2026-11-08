@@ -448,3 +448,63 @@ Launch Coordinator（并发分支）
 - 不为性能缩短日志、正文、附件、历史、恢复证据或任务生命周期。
 - 不用更早超时、禁用后台功能、跳过数据库权威校验或新增用户等待确认来制造快速假象。
 - 不在本架构任务中回收任何历史物理文件；该操作继续受精确清单和用户单独授权约束。
+
+## 15. Source 卡片执行域与消息合同（2026-11-08）
+
+Source 是选中项目卡片中的局部 Git 操作面，不是 Sidebar 核心投影的新字段。其实现必须复用已经落地的并发拓扑，不能把 Git 重新带回 Extension Host 或恢复共享串行链。
+
+### 15.1 拓扑与数据所有权
+
+```text
+Source UI（显式展开/刷新/分支动作）
+  -> Extension Host 动作路由（只校验项目与请求身份）
+  -> Runtime Source Git domain（首次请求时启动）
+  -> Source Git Worker（单并发、无 SQLite 写权）
+  -> Git 仓库权威状态
+  -> UI Broker
+  -> 匹配项目的 Source 稳定 DOM
+```
+
+- Source 不进入 `ProjectPortfolioSummary`、Sidebar core projection、项目注册表投影、数据库 Writer 或 `projectsLoaded`。其权威来自目标工作区的 Git 仓库。
+- Git Worker 是唯一执行 `git` 的生产边界；Extension Host 不运行 Git 子进程，不扫描分支，也不根据文件监听猜测当前分支。
+- Source 分支核心读取、创建和切换使用专属的单并发 Source Git Worker；它在首次 Source 请求时惰性启动，因此未展开 Source 的 Runtime 冷启动不新增线程或就绪条件。它不与 Agent 启动前快照所在的 foreground Git Worker 共用队列，也不与后台 Git Worker 共用队列。工作区状态增强仍走后台 Git 执行域。三者都不占用 Writer、interactive reader 或 background reader 的保留资源。
+- 不同工作区继续通过独立 Worker 并行；同一规范化工作区内，Source 创建/切换与 Agent 启动前安全快照进入一个仅覆盖冲突窗口的互斥序列，防止分支变化穿插在回滚基线的 HEAD、index 和 tree 采集之间。Source 只读与其他工作区不受该互斥影响。
+- 每个 Webview 只持有当前会话所需的有界 Source 视图模型；它不是第二事实源，也不持久化替代 Git 的分支状态。
+
+### 15.2 操作注册合同
+
+| 操作 | kind / domain | executor | replay | authority |
+| --- | --- | --- | --- | --- |
+| 读取 Source 快照 | query / `foreground-command` | `git-worker` | `safe` | `stateless` |
+| 读取工作区状态增强 | query / `git-job` | `git-worker` | `safe` | `stateless` |
+| 创建并切换分支 | command / `foreground-command` | `git-worker` | `never` | `stateless` |
+| 切换已有分支 | command / `foreground-command` | `git-worker` | `never` | `stateless` |
+
+- 创建/切换不是可安全重放操作。连接中断或响应丢失时，调用方必须读取当前 Git 状态确认结果，不能自动再次执行写操作。
+- 分支名在进入 Git Worker 后按 Git 自身规则校验；所有参数以 argv 传递，禁止 Shell 拼接。
+- 首版只读取有界本地分支；远端 Fetch、发布和删除不借用本合同偷偷进入主路径。
+
+### 15.3 请求身份与提交权
+
+每个 Source 请求携带：`projectPath`、Webview `generation`、单调 `requestId`、项目级 `sourceEpoch`，动作还携带唯一 `interactionId`。
+
+- 读取以项目为键 single-flight；排队中的同键刷新只保留最新观察者，已在执行的 Git 命令可以完成，但旧结果没有 UI 提交权。
+- 创建/切换动作被接收时先推进 `sourceEpoch`。任何较早 epoch 的读取，即使晚到，也只能丢弃。
+- 动作只有在同 epoch 权威读回确认目标分支已成为当前分支后才能报告成功；首次读回失败时不重放动作，只再做一次 fresh read 收敛。UI 不先行伪造当前分支。
+- Webview 只接受 generation、项目、requestId、sourceEpoch 全部匹配的结果。项目已切换时，结果可以留在对应项目的会话内缓存，但不能改变当前卡片。
+
+### 15.4 UI Broker 与刷新隔离
+
+- 用户显式读取的分支核心结果和动作结算是 foreground 消息，必须越过 background；工作区改动数量与 ahead/behind 使用独立后台 Git 读取和 `sourceStatusResolved:<projectPath>` 合并键，慢状态增强不能延迟分支列表。未来由文件观察产生的同类增强复用该键。
+- Source 消息处理器只调用局部 `updateProjectSourcePanel(projectPath)`，禁止调用 `renderPortfolio()`、`selectProjectInSidebar()` 或任何核心/外部刷新入口。
+- 分支变化若自然触发现有文件观察器，由既有项目投影链按自己的源版本收敛；Source handler 不手动重启组合读取、外部信号或对话加载。
+- Source 失败只降级 Source 面板。Git Worker 超时、仓库不可用和分支冲突均不能占用或取消项目选择、对话启动、Writer 提交和 Sidebar core 订阅。
+- 创建和切换操作绝不自动重放。若命令结果回传失败，Host 只做一次新的权威快照读取：目标分支已经成为当前分支时按成功收敛，否则连同最新快照返回失败；界面始终以该快照更新，而不是保留过期乐观状态。
+
+### 15.5 发布门禁
+
+- Registry 完备性测试必须覆盖四个新操作的 kind、domain、executor、replay 与 authority。
+- 使用真实临时 Git 仓库验证分支读取、创建、切换、detached HEAD、脏工作区冲突、无仓库和有界列表；测试结束不遗留临时分支或仓库对象。
+- 浏览器回归必须证明：折叠状态不发请求；展开只发一次；搜索本地完成；Source 回包不替换项目卡片、对话输入或焦点；旧项目/旧 epoch 回包被丢弃。
+- 运行并发回归，证明慢后台 Git 不阻止 foreground Source，慢 Source 不阻止项目核心、Agent 发起、数据库读写或网络增强。
+- 交付前直接校验最终生成的 Webview 脚本，并在真实渲染环境完成用户视角二次检查。

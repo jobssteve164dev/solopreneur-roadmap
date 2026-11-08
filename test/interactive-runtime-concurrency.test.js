@@ -5,6 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const vm = require('node:vm');
 const test = require('node:test');
+const { removeOwnedEntry } = require('../scripts/owned-fixture-cleanup.cjs');
 
 const projectRoot = path.resolve(__dirname, '..');
 
@@ -905,6 +906,7 @@ test('foreground run preparation keeps child workspace Git work on the foregroun
   const domains = Object.create(RuntimeDataExecutionDomains.prototype);
   domains.foregroundGit = { request: async request => { calls.push(['foreground-git', request.operation]); return 'foreground-git'; } };
   domains.git = { request: async request => { calls.push(['background-git', request.operation]); return 'background-git'; } };
+  domains.workspaceGit = { run: (_request, action) => action() };
   const request = { operation: 'compute_workspace_snapshot', input: { root: '/fixture' } };
   assert.equal(await domains.dispatchThroughWorker(request, false, { id: 1, domain: 'foreground-command' }), 'foreground-git');
   assert.equal(await domains.dispatchThroughWorker(request, false), 'background-git');
@@ -1086,6 +1088,113 @@ exec /usr/bin/git "$@"
   } finally { await domains.close(); }
 });
 
+test('a slow Source read cannot queue Agent launch snapshot work behind the Source Git lane', async t => {
+  const childProcess = require('node:child_process');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { RuntimeDataExecutionDomains } = require('../out/runtimeDataExecutionDomains.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-source-git-lane-'));
+  const root = path.join(base, 'global'), sourceProject = path.join(base, 'source-project'), agentProject = path.join(base, 'agent-project');
+  const bin = path.join(base, 'bin'), entered = path.join(base, 'source-entered');
+  fs.mkdirSync(sourceProject, { recursive: true }); fs.mkdirSync(agentProject, { recursive: true }); fs.mkdirSync(bin, { recursive: true });
+  for (const repository of [sourceProject, agentProject]) {
+    childProcess.execFileSync('/usr/bin/git', ['init', '--quiet'], { cwd: repository });
+    childProcess.execFileSync('/usr/bin/git', ['config', 'user.email', 'test@example.invalid'], { cwd: repository });
+    childProcess.execFileSync('/usr/bin/git', ['config', 'user.name', 'SoloMap Test'], { cwd: repository });
+    fs.writeFileSync(path.join(repository, 'README.md'), 'baseline\n');
+    childProcess.execFileSync('/usr/bin/git', ['add', 'README.md'], { cwd: repository });
+    childProcess.execFileSync('/usr/bin/git', ['commit', '--quiet', '-m', 'baseline'], { cwd: repository });
+  }
+  fs.writeFileSync(path.join(agentProject, 'README.md'), 'launch boundary\n');
+  const fakeGit = path.join(bin, 'git');
+  fs.writeFileSync(fakeGit, `#!/bin/sh
+case " $* " in
+*" for-each-ref --count=201 "*)
+  : > "$SOLOMAP_SOURCE_GIT_ENTERED"
+  sleep 1.5
+  ;;
+esac
+exec /usr/bin/git "$@"
+`, { mode: 0o755 });
+  const bootstrap = new UnifiedDataStore(root), databaseId = bootstrap.databaseId;
+  bootstrap.close();
+  const originalPath = process.env.PATH, originalEntered = process.env.SOLOMAP_SOURCE_GIT_ENTERED;
+  process.env.PATH = `${bin}${path.delimiter}${originalPath || ''}`;
+  process.env.SOLOMAP_SOURCE_GIT_ENTERED = entered;
+  t.after(() => {
+    process.env.PATH = originalPath;
+    if (originalEntered === undefined) delete process.env.SOLOMAP_SOURCE_GIT_ENTERED;
+    else process.env.SOLOMAP_SOURCE_GIT_ENTERED = originalEntered;
+    removeOwnedEntry(base, base);
+  });
+  const domains = await RuntimeDataExecutionDomains.start({ root, databaseId });
+  try {
+    const sourceRead = domains.dispatch({ operation: 'read_project_source_snapshot', input: { root: sourceProject } });
+    const deadline = Date.now() + 2_000;
+    while (!fs.existsSync(entered) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(fs.existsSync(entered), true);
+    const snapshot = await Promise.race([
+      domains.dispatch({ operation: 'capture_pre_session_git_snapshot', input: { root: agentProject } }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Agent launch snapshot queued behind Source Git')), 1_000))
+    ]);
+    assert.match(String(snapshot.revision || ''), /^[a-f0-9]{40}$/);
+    assert.equal(childProcess.execFileSync('/usr/bin/git', ['show', `${snapshot.revision}:README.md`], { cwd: agentProject, encoding: 'utf8' }), 'launch boundary\n');
+    assert.equal((await sourceRead).available, true);
+  } finally { await domains.close(); }
+});
+
+test('Source branch mutation and Agent launch snapshot serialize only for the same workspace', async t => {
+  const childProcess = require('node:child_process');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { RuntimeDataExecutionDomains } = require('../out/runtimeDataExecutionDomains.js');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-source-agent-git-lock-'));
+  const root = path.join(base, 'global'), project = path.join(base, 'project'), bin = path.join(base, 'bin');
+  const entered = path.join(base, 'source-switch-entered');
+  fs.mkdirSync(project, { recursive: true }); fs.mkdirSync(bin, { recursive: true });
+  childProcess.execFileSync('/usr/bin/git', ['init', '--quiet', '-b', 'main'], { cwd: project });
+  childProcess.execFileSync('/usr/bin/git', ['config', 'user.email', 'test@example.invalid'], { cwd: project });
+  childProcess.execFileSync('/usr/bin/git', ['config', 'user.name', 'SoloMap Test'], { cwd: project });
+  fs.writeFileSync(path.join(project, 'README.md'), 'main branch\n');
+  childProcess.execFileSync('/usr/bin/git', ['add', 'README.md'], { cwd: project });
+  childProcess.execFileSync('/usr/bin/git', ['commit', '--quiet', '-m', 'main'], { cwd: project });
+  childProcess.execFileSync('/usr/bin/git', ['switch', '--quiet', '-c', 'feature/source-lock'], { cwd: project });
+  fs.writeFileSync(path.join(project, 'README.md'), 'feature branch\n');
+  childProcess.execFileSync('/usr/bin/git', ['add', 'README.md'], { cwd: project });
+  childProcess.execFileSync('/usr/bin/git', ['commit', '--quiet', '-m', 'feature'], { cwd: project });
+  childProcess.execFileSync('/usr/bin/git', ['switch', '--quiet', 'main'], { cwd: project });
+  const fakeGit = path.join(bin, 'git');
+  fs.writeFileSync(fakeGit, `#!/bin/sh
+case " $* " in
+*" switch feature/source-lock "*)
+  : > "$SOLOMAP_SOURCE_SWITCH_ENTERED"
+  sleep 1.5
+  ;;
+esac
+exec /usr/bin/git "$@"
+`, { mode: 0o755 });
+  const bootstrap = new UnifiedDataStore(root), databaseId = bootstrap.databaseId;
+  bootstrap.close();
+  const originalPath = process.env.PATH, originalEntered = process.env.SOLOMAP_SOURCE_SWITCH_ENTERED;
+  process.env.PATH = `${bin}${path.delimiter}${originalPath || ''}`;
+  process.env.SOLOMAP_SOURCE_SWITCH_ENTERED = entered;
+  t.after(() => {
+    process.env.PATH = originalPath;
+    if (originalEntered === undefined) delete process.env.SOLOMAP_SOURCE_SWITCH_ENTERED;
+    else process.env.SOLOMAP_SOURCE_SWITCH_ENTERED = originalEntered;
+    removeOwnedEntry(base, base);
+  });
+  const domains = await RuntimeDataExecutionDomains.start({ root, databaseId });
+  try {
+    const sourceSwitch = domains.dispatch({ operation: 'switch_project_branch', input: { root: project, branch: 'feature/source-lock' } });
+    const deadline = Date.now() + 2_000;
+    while (!fs.existsSync(entered) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(fs.existsSync(entered), true);
+    const agentSnapshot = domains.dispatch({ operation: 'capture_pre_session_git_snapshot', input: { root: project } });
+    assert.equal((await sourceSwitch).currentBranch, 'feature/source-lock');
+    const snapshot = await agentSnapshot;
+    assert.equal(childProcess.execFileSync('/usr/bin/git', ['show', `${snapshot.revision}:README.md`], { cwd: project, encoding: 'utf8' }), 'feature branch\n');
+  } finally { await domains.close(); }
+});
+
 test('Writer is single-threaded but cooperatively yields while external jobs are pending', () => {
   const domainsSource = fs.readFileSync(path.join(projectRoot, 'src', 'runtimeDataExecutionDomains.ts'), 'utf8');
   const workerSource = fs.readFileSync(path.join(projectRoot, 'src', 'runtimeDataDomainWorker.ts'), 'utf8');
@@ -1202,6 +1311,8 @@ test('Runtime supervisor owns no SQLite connection and routes every mutation to 
     databaseId
   });
   try {
+    assert.equal(domains.topology().sourceGitCommand.threadId, 0, 'Source adds no worker to Runtime startup before the user requests it');
+    await domains.dispatch({ operation: 'read_project_source_snapshot', input: { root: project } });
     const topology = domains.topology();
     assert.ok(topology.writerActor.threadId > 0);
     assert.equal(topology.writerActor.readOnly, false);
@@ -1213,11 +1324,15 @@ test('Runtime supervisor owns no SQLite connection and routes every mutation to 
     assert.ok(topology.backgroundQuery.threadIds.every(id => id > 0));
     assert.ok(topology.gitJob.threadId > 0);
     assert.ok(topology.foregroundGitCommand.threadId > 0);
+    assert.ok(topology.sourceGitCommand.threadId > 0);
     assert.ok(topology.networkJob.threadId > 0);
     assert.ok(topology.intelligenceJob.threadId > 0);
     assert.equal(topology.gitJob.concurrency, 1);
     assert.equal(topology.foregroundGitCommand.concurrency, 1);
+    assert.equal(topology.sourceGitCommand.concurrency, 1);
     assert.notEqual(topology.foregroundGitCommand.threadId, topology.gitJob.threadId);
+    assert.notEqual(topology.sourceGitCommand.threadId, topology.foregroundGitCommand.threadId);
+    assert.notEqual(topology.sourceGitCommand.threadId, topology.gitJob.threadId);
     assert.equal(topology.networkJob.concurrency, 2);
     assert.equal(topology.intelligenceJob.concurrency, 2);
     assert.notEqual(topology.intelligenceJob.threadId, topology.writerActor.threadId);

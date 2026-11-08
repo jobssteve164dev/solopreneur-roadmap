@@ -17,6 +17,8 @@ type ExternalWorkerRole = 'intelligence' | 'conversation';
 const writerUserDomains = new Set<RuntimeExecutionDomain>([
   'control-query', 'foreground-command', 'foreground-query', 'interactive-query', 'subscription-event', 'runtime-event'
 ]);
+const sourceGitOperations = new Set(['read_project_source_snapshot', 'create_project_branch', 'switch_project_branch']);
+const workspaceExclusiveGitOperations = new Set(['capture_pre_session_git_snapshot', 'create_project_branch', 'switch_project_branch']);
 const writerDomainPriority: readonly RuntimeExecutionDomain[] = [
   'control-query', 'foreground-command', 'foreground-query', 'interactive-query', 'subscription-event', 'runtime-event',
   'background-command', 'external-job', 'git-job', 'network-job', 'background-query', 'maintenance'
@@ -536,6 +538,46 @@ class RuntimeDomainWorkerPool {
   async close(): Promise<void> { await Promise.all(this.workers.map(worker => worker.close())); }
 }
 
+class LazyRuntimeDomainWorker {
+  private worker: RuntimeDomainWorker | undefined;
+
+  constructor(private readonly createWorker: () => RuntimeDomainWorker) {}
+
+  private current(): RuntimeDomainWorker {
+    if (!this.worker) this.worker = this.createWorker();
+    return this.worker;
+  }
+
+  request(request: RuntimeDataRequest, serializeResult = false, admission?: RuntimeSchedulerAdmission): Promise<unknown> {
+    return this.current().request(request, serializeResult, admission);
+  }
+
+  activitySnapshot(now = Date.now()): RuntimeExecutorActivitySnapshot[WorkerAffinity] {
+    return this.worker?.activitySnapshot(now) || { threadId: 0, queued: [], active: [] };
+  }
+
+  threadId(): number { return this.worker?.threadId() || 0; }
+
+  async close(): Promise<void> { await this.worker?.close(); }
+}
+
+class RuntimeWorkspaceGitCoordinator {
+  private readonly tails = new Map<string, Promise<void>>();
+
+  run<T>(request: RuntimeDataRequest, action: () => Promise<T>): Promise<T> {
+    if (!workspaceExclusiveGitOperations.has(request.operation)) return action();
+    const workspace = path.resolve(String(request.input.root || ''));
+    const previous = this.tails.get(workspace) || Promise.resolve();
+    let release!: () => void;
+    const turn = new Promise<void>(resolve => { release = resolve; });
+    this.tails.set(workspace, turn);
+    return previous.catch(() => undefined).then(action).finally(() => {
+      release();
+      if (this.tails.get(workspace) === turn) this.tails.delete(workspace);
+    });
+  }
+}
+
 interface ProjectionSubscriptionWaiter {
   resolve(value: { revision: number; projectPaths: string[] }): void;
   timer: NodeJS.Timeout;
@@ -596,6 +638,8 @@ export class RuntimeDataExecutionDomains {
     private readonly intelligence: RuntimeDomainWorker,
     private readonly conversation: RuntimeDomainWorker,
     private readonly foregroundGit: RuntimeDomainWorker,
+    private readonly sourceGit: LazyRuntimeDomainWorker,
+    private readonly workspaceGit: RuntimeWorkspaceGitCoordinator,
     private readonly git: RuntimeDomainWorker,
     private readonly network: RuntimeDomainWorker,
     private readonly fatalFailure: Promise<never>,
@@ -646,6 +690,10 @@ export class RuntimeDataExecutionDomains {
     const interactive = new RuntimeDomainWorkerPool(interactiveWorkers);
     const background = new RuntimeDomainWorkerPool(backgroundWorkers);
     const foregroundGit = new RuntimeDomainWorker(options.root, options.databaseId, 'git-worker', readAuthoritySecret, undefined, rejectFatal);
+    const sourceGit = new LazyRuntimeDomainWorker(() => new RuntimeDomainWorker(
+      options.root, options.databaseId, 'git-worker', readAuthoritySecret, undefined, rejectFatal
+    ));
+    const workspaceGit = new RuntimeWorkspaceGitCoordinator();
     const git = new RuntimeDomainWorker(options.root, options.databaseId, 'git-worker', readAuthoritySecret, undefined, rejectFatal);
     const scheduler = options.scheduler || new RuntimeExecutionScheduler();
     const scheduleInternal = (request: RuntimeDataRequest, action: () => Promise<unknown>, admission?: RuntimeSchedulerAdmission): Promise<unknown> => {
@@ -675,9 +723,10 @@ export class RuntimeDataExecutionDomains {
       if (executor === 'interactive-reader') return interactive.request(request, false, admission);
       if (executor === 'background-reader') return background.request(request, false, admission);
       if (executor === 'git-worker') {
-        const foregroundLane = request.operation === 'capture_pre_session_git_snapshot'
-          || Boolean(admission && writerUserDomains.has(admission.domain));
-        return (foregroundLane ? foregroundGit : git).request(request, false, admission);
+        const worker = sourceGitOperations.has(request.operation) ? sourceGit
+          : request.operation === 'capture_pre_session_git_snapshot' || Boolean(admission && writerUserDomains.has(admission.domain))
+            ? foregroundGit : git;
+        return workspaceGit.run(request, () => worker.request(request, false, admission));
       }
       if (executor === 'network-worker') return network.request(request, false, admission);
       if (executor === 'external-worker' && request.operation === 'start_conversation') {
@@ -702,7 +751,7 @@ export class RuntimeDataExecutionDomains {
       await Promise.allSettled(workers.map(worker => worker.close()));
       throw error;
     }
-    return new RuntimeDataExecutionDomains(writer, controlReader, foreground, interactive, background, intelligence, conversation, foregroundGit, git, network, fatalFailure,
+    return new RuntimeDataExecutionDomains(writer, controlReader, foreground, interactive, background, intelligence, conversation, foregroundGit, sourceGit, workspaceGit, git, network, fatalFailure,
       projectionSubscriptions);
   }
 
@@ -736,12 +785,15 @@ export class RuntimeDataExecutionDomains {
       })(),
       'git-worker': (() => {
         const foreground = this.foregroundGit.activitySnapshot(now);
+        const source = this.sourceGit.activitySnapshot(now);
         const background = this.git.activitySnapshot(now);
         return {
           threadId: foreground.threadId,
-          threadIds: [foreground.threadId, background.threadId],
-          queued: [...foreground.queued, ...background.queued.map(item => ({ ...item, id: item.id + 1_000_000 }))],
-          active: [...foreground.active, ...background.active.map(item => ({ ...item, id: item.id + 1_000_000 }))]
+          threadIds: [foreground.threadId, ...(source.threadId ? [source.threadId] : []), background.threadId],
+          queued: [...foreground.queued, ...source.queued.map(item => ({ ...item, id: item.id + 1_000_000 })),
+            ...background.queued.map(item => ({ ...item, id: item.id + 2_000_000 }))],
+          active: [...foreground.active, ...source.active.map(item => ({ ...item, id: item.id + 1_000_000 })),
+            ...background.active.map(item => ({ ...item, id: item.id + 2_000_000 }))]
         };
       })(),
       'network-worker': this.network.activitySnapshot(now)
@@ -804,10 +856,10 @@ export class RuntimeDataExecutionDomains {
       return this.intelligence.request(request, serializeResult, admission);
     }
     if (definition.executor === 'git-worker') {
-      const foregroundLane = request.operation === 'capture_pre_session_git_snapshot'
-        || Boolean(admission && writerUserDomains.has(admission.domain));
-      return (foregroundLane ? this.foregroundGit : this.git)
-        .request(request, serializeResult, admission);
+      const worker = sourceGitOperations.has(request.operation) ? this.sourceGit
+        : request.operation === 'capture_pre_session_git_snapshot' || Boolean(admission && writerUserDomains.has(admission.domain))
+          ? this.foregroundGit : this.git;
+      return this.workspaceGit.run(request, () => worker.request(request, serializeResult, admission));
     }
     if (definition.executor === 'network-worker') return this.network.request(request, serializeResult, admission);
     if (definition.executor === 'maintenance-worker') return this.writer.request(request, serializeResult, admission);
@@ -822,6 +874,7 @@ export class RuntimeDataExecutionDomains {
     backgroundQuery: { threadIds: number[]; readOnly: true; concurrency: number };
     gitJob: { threadId: number; readOnly: true; concurrency: 1 };
     foregroundGitCommand: { threadId: number; readOnly: true; concurrency: 1 };
+    sourceGitCommand: { threadId: number; readOnly: true; concurrency: 1 };
     networkJob: { threadId: number; readOnly: true; concurrency: 2 };
     intelligenceJob: { threadId: number; readOnly: true; concurrency: 2 };
     conversationJob: { threadId: number; readOnly: true; concurrency: 2 };
@@ -836,6 +889,7 @@ export class RuntimeDataExecutionDomains {
       backgroundQuery: { threadIds: this.background.threadIds(), readOnly: true, concurrency: this.background.threadIds().length },
       gitJob: { threadId: this.git.threadId(), readOnly: true, concurrency: 1 },
       foregroundGitCommand: { threadId: this.foregroundGit.threadId(), readOnly: true, concurrency: 1 },
+      sourceGitCommand: { threadId: this.sourceGit.threadId(), readOnly: true, concurrency: 1 },
       networkJob: { threadId: this.network.threadId(), readOnly: true, concurrency: 2 },
       intelligenceJob: { threadId: this.intelligence.threadId(), readOnly: true, concurrency: 2 },
       conversationJob: { threadId: this.conversation.threadId(), readOnly: true, concurrency: 2 },
@@ -851,7 +905,7 @@ export class RuntimeDataExecutionDomains {
     this.projectionSubscriptions.close();
     await Promise.all([this.intelligence.close(), this.conversation.close()]);
     await this.network.close();
-    await Promise.all([this.foregroundGit.close(), this.git.close()]);
+    await Promise.all([this.foregroundGit.close(), this.sourceGit.close(), this.git.close()]);
     await this.controlReader.close();
     await this.foreground.close();
     await this.interactive.close();

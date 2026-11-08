@@ -120,11 +120,12 @@ const backgroundQueries = [
 
 const externalJobs = [
   'capture_pre_session_git_snapshot', 'close_project_issue', 'close_project_pull_request', 'compare_git_file_version', 'create_project_issue',
+  'create_project_branch',
   'compute_workspace_snapshot', 'compute_workspace_git_head', 'compute_workspace_git_evidence',
   'execute_project_git_rollback', 'inspect_project_git_rollback', 'inspect_report_git_state', 'read_cached_project_issue_details',
-  'read_git_file_at_revision', 'read_project_growth_git_facts', 'read_project_issue_details',
+  'read_git_file_at_revision', 'read_project_growth_git_facts', 'read_project_issue_details', 'read_project_source_snapshot', 'read_project_source_status',
   'read_github_api', 'refresh_project_signal', 'resolve_project_repository', 'reconcile_external_memory_target', 'reconcile_unknown_inbox_actions',
-  'await_intelligence_message', 'sync_external_memory'
+  'await_intelligence_message', 'switch_project_branch', 'sync_external_memory'
 ] as const;
 
 const maintenanceOperations = [
@@ -207,12 +208,15 @@ register({ domain: 'external-job', kind: 'job', executor: 'writer-actor', replay
   compute_workspace_git_head: { domain: 'git-job', executor: 'git-worker', replay: 'safe', authority: 'stateless' },
   compute_workspace_git_evidence: { domain: 'git-job', executor: 'git-worker', replay: 'safe', authority: 'stateless' },
   capture_pre_session_git_snapshot: { domain: 'foreground-command', executor: 'git-worker', replay: 'never', authority: 'stateless' },
+  create_project_branch: { domain: 'foreground-command', kind: 'command', executor: 'git-worker', replay: 'never', authority: 'stateless' },
   read_git_file_at_revision: { domain: 'git-job', executor: 'git-worker', replay: 'safe', authority: 'stateless' },
   inspect_project_git_rollback: { domain: 'git-job', executor: 'git-worker', replay: 'safe', authority: 'stateless' },
   execute_project_git_rollback: { domain: 'git-job', executor: 'git-worker', replay: 'never', authority: 'stateless' },
   compare_git_file_version: { domain: 'git-job', executor: 'git-worker', replay: 'safe', authority: 'stateless' },
   inspect_report_git_state: { domain: 'git-job', executor: 'git-worker', replay: 'safe', authority: 'stateless' },
   read_project_growth_git_facts: { domain: 'git-job', executor: 'git-worker', replay: 'safe', authority: 'stateless' },
+  read_project_source_snapshot: { domain: 'foreground-command', kind: 'query', executor: 'git-worker', replay: 'safe', authority: 'stateless' },
+  read_project_source_status: { domain: 'git-job', kind: 'query', executor: 'git-worker', replay: 'safe', authority: 'stateless' },
   read_github_api: { domain: 'network-job', executor: 'network-worker', replay: 'safe', authority: 'stateless' },
   read_cached_project_issue_details: { domain: 'network-job', kind: 'query', executor: 'network-worker', replay: 'safe', authority: 'stateless' },
   read_project_issue_details: { domain: 'network-job', executor: 'network-worker', replay: 'safe', authority: 'stateless' },
@@ -221,6 +225,7 @@ register({ domain: 'external-job', kind: 'job', executor: 'writer-actor', replay
   close_project_pull_request: { domain: 'network-job', executor: 'network-worker', replay: 'never', authority: 'stateless' },
   refresh_project_signal: { domain: 'network-job', executor: 'network-worker', replay: 'never', authority: 'stateless' },
   resolve_project_repository: { domain: 'git-job', executor: 'git-worker', replay: 'safe', authority: 'stateless' },
+  switch_project_branch: { domain: 'foreground-command', kind: 'command', executor: 'git-worker', replay: 'never', authority: 'stateless' },
   reconcile_external_memory_target: { authority: 'writer-session', replay: 'idempotency-key' },
   reconcile_unknown_inbox_actions: { authority: 'writer-session', replay: 'idempotency-key' },
   sync_external_memory: { authority: 'writer-session', replay: 'idempotency-key' }

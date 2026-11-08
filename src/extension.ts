@@ -192,7 +192,7 @@ import {
 import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost';
 import { ensurePersistentRuntimeDatabaseAuthority } from './databaseAuthorityBootstrap';
 import { buildAgentDatabaseInstructions, codexDatabaseProfileName } from './agentDatabaseConfig';
-import { runtimeProjectMcpSource } from './runtimeDataOperations';
+import { confirmProjectSourceMutation, projectSourceMutationSettledError, runtimeProjectMcpSource, type ProjectSourceSnapshot, type ProjectSourceStatus } from './runtimeDataOperations';
 import { readRuntimeState, refreshShadowRuntimeState, registerRuntimeDatabaseAuthority, runtimeDatabaseAuthorityRegistered } from './autonomousRuntime';
 import { sendRuntimeControlCommand, sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { disableAutonomousRuntimeService, enableAutonomousRuntime, ensureAutonomousRuntimeService, isAutonomousRuntimeDisabled, isRuntimeServiceManagerAvailable, registeredAutonomousRuntimeDataRoot } from './autonomousRuntimeService';
@@ -1648,6 +1648,16 @@ function buildScheduledTasksFromTimePlan(
 }
 
 const agentImpactRequests = new WeakMap<vscode.Webview, object>();
+const projectSourceReads = new Map<string, Promise<ProjectSourceSnapshot>>();
+
+function projectSourceErrorCode(error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  if (message.includes('invalid_source_branch') || message.includes('not a valid branch')) return 'invalid_branch';
+  if (message.includes('already exists')) return 'branch_exists';
+  if (message.includes('local changes') || message.includes('would be overwritten') || message.includes('untracked working tree')) return 'local_changes';
+  if (message.includes('pathspec') || message.includes('invalid reference')) return 'branch_missing';
+  return 'action_failed';
+}
 
 async function requireWebviewDelivery(delivery: Thenable<boolean> | Promise<boolean>): Promise<void> {
   if (!await delivery) throw new Error('webview_delivery_failed');
@@ -1763,6 +1773,51 @@ async function handleSharedWebviewAction(
     if (nodeId) {
       postNodeConversations(nodeId, [], true, workspaceRoot);
     }
+  };
+  const sourceProjectPath = (request: PluginActionRequest): string => {
+    const requested = String(request.projectPath || '');
+    const project = getProjects(context).find(candidate => requested && path.resolve(candidate.path) === path.resolve(requested));
+    if (!project) throw new Error('source_project_not_registered');
+    return project.path;
+  };
+  const sourceRuntimeRoot = (): string => normalizeGlobalDataPathForExtension(getPersistedSettings(context).globalDataPath);
+  const readFreshSourceSnapshot = async (projectPath: string): Promise<ProjectSourceSnapshot> => {
+    const runtimeRoot = sourceRuntimeRoot();
+    await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: runtimeRoot });
+    return sendRuntimeDataRequest<ProjectSourceSnapshot>(runtimeRoot, {
+      operation: 'read_project_source_snapshot', input: { root: projectPath }
+    });
+  };
+  const readSourceSnapshot = async (projectPath: string): Promise<ProjectSourceSnapshot> => {
+    const runtimeRoot = sourceRuntimeRoot();
+    const key = `${runtimeRoot}\n${projectPath}`;
+    const existing = projectSourceReads.get(key);
+    if (existing) return existing;
+    const read = readFreshSourceSnapshot(projectPath);
+    projectSourceReads.set(key, read);
+    try { return await read; }
+    finally { if (projectSourceReads.get(key) === read) projectSourceReads.delete(key); }
+  };
+  const deliverSourceStatus = (
+    projectPath: string,
+    requestId: string,
+    sourceEpoch: number,
+    responseGeneration: number
+  ): void => {
+    const runtimeRoot = sourceRuntimeRoot();
+    void sendRuntimeDataRequest<ProjectSourceStatus>(runtimeRoot, {
+      operation: 'read_project_source_status', input: { root: projectPath }
+    }).then(status => respond({
+      command: 'sourceStatusResolved', projectPath, requestId, sourceEpoch,
+      status, projectGeneration: responseGeneration
+    })).catch(error => {
+      recordLocalDiagnosticError(runtimeRoot, 'source.status', error);
+      return respond({
+        command: 'sourceStatusResolved', projectPath, requestId, sourceEpoch,
+        status: { changedFiles: 0, upstream: '', ahead: 0, behind: 0, statusLoaded: false, statusError: true },
+        projectGeneration: responseGeneration
+      });
+    });
   };
   try {
     const dispatch = () => dispatchPluginAction(message, surface, {
@@ -2803,6 +2858,76 @@ async function handleSharedWebviewAction(
       if (warnings.length) vscode.window.showWarningMessage(warnings.join('；'));
     },
     'project.togglePinned': async (request) => toggleProjectPinned(context, String(request.projectPath || '')),
+    'source.read': async (request) => {
+      const projectPath = sourceProjectPath(request);
+      const requestId = String(request.requestId || '');
+      const sourceEpoch = Math.max(0, Number(request.sourceEpoch || 0));
+      const requestGeneration = Math.max(0, Number(request.projectGeneration || 0));
+      try {
+        const snapshot = await readSourceSnapshot(projectPath);
+        await respond({ command: 'sourceSnapshotResolved', projectPath, requestId, sourceEpoch, snapshot, projectGeneration: requestGeneration });
+        if (snapshot.available) deliverSourceStatus(projectPath, requestId, sourceEpoch, requestGeneration);
+      } catch (error) {
+        await respond({ command: 'sourceSnapshotResolved', projectPath, requestId, sourceEpoch,
+          error: projectSourceErrorCode(error), projectGeneration: requestGeneration });
+      }
+    },
+    'source.createBranch': async (request) => {
+      const projectPath = sourceProjectPath(request);
+      const runtimeRoot = sourceRuntimeRoot();
+      const requestId = String(request.requestId || '');
+      const interactionId = String(request.interactionId || '');
+      const sourceEpoch = Math.max(0, Number(request.sourceEpoch || 0));
+      const requestGeneration = Math.max(0, Number(request.projectGeneration || 0));
+      const targetBranch = String(request.branch || '');
+      try {
+        await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: runtimeRoot });
+        const snapshot = await sendRuntimeDataRequest<ProjectSourceSnapshot>(runtimeRoot, {
+          operation: 'create_project_branch', input: { root: projectPath, branch: targetBranch }
+        });
+        await respond({ command: 'sourceActionSettled', action: 'create', success: true, projectPath, requestId,
+          interactionId, sourceEpoch, snapshot, projectGeneration: requestGeneration });
+        if (snapshot.available) deliverSourceStatus(projectPath, requestId, sourceEpoch, requestGeneration);
+      } catch (error) {
+        const errorCode = projectSourceErrorCode(error);
+        const confirmation = await confirmProjectSourceMutation(targetBranch, errorCode, () => readFreshSourceSnapshot(projectPath));
+        const settledError = projectSourceMutationSettledError(errorCode, confirmation.success);
+        await respond({ command: 'sourceActionSettled', action: 'create', success: confirmation.success, recovered: confirmation.recovered,
+          projectPath, requestId, interactionId, sourceEpoch, snapshot: confirmation.snapshot,
+          error: confirmation.success ? '' : settledError, projectGeneration: requestGeneration });
+        if (confirmation.snapshot?.available) deliverSourceStatus(projectPath, requestId, sourceEpoch, requestGeneration);
+      }
+    },
+    'source.switchBranch': async (request) => {
+      const projectPath = sourceProjectPath(request);
+      const runtimeRoot = sourceRuntimeRoot();
+      const requestId = String(request.requestId || '');
+      const interactionId = String(request.interactionId || '');
+      const sourceEpoch = Math.max(0, Number(request.sourceEpoch || 0));
+      const requestGeneration = Math.max(0, Number(request.projectGeneration || 0));
+      const targetBranch = String(request.branch || '');
+      try {
+        await ensureHealthyAutonomousRuntime({ extensionPath: context.extensionPath, globalDataPath: runtimeRoot });
+        const snapshot = await sendRuntimeDataRequest<ProjectSourceSnapshot>(runtimeRoot, {
+          operation: 'switch_project_branch', input: { root: projectPath, branch: targetBranch }
+        });
+        await respond({ command: 'sourceActionSettled', action: 'switch', success: true, projectPath, requestId,
+          interactionId, sourceEpoch, snapshot, projectGeneration: requestGeneration });
+        if (snapshot.available) deliverSourceStatus(projectPath, requestId, sourceEpoch, requestGeneration);
+      } catch (error) {
+        const errorCode = projectSourceErrorCode(error);
+        const confirmation = await confirmProjectSourceMutation(targetBranch, errorCode, () => readFreshSourceSnapshot(projectPath));
+        const settledError = projectSourceMutationSettledError(errorCode, confirmation.success);
+        await respond({ command: 'sourceActionSettled', action: 'switch', success: confirmation.success, recovered: confirmation.recovered,
+          projectPath, requestId, interactionId, sourceEpoch, snapshot: confirmation.snapshot,
+          error: confirmation.success ? '' : settledError, projectGeneration: requestGeneration });
+        if (confirmation.snapshot?.available) deliverSourceStatus(projectPath, requestId, sourceEpoch, requestGeneration);
+      }
+    },
+    'source.openScm': async (request) => {
+      sourceProjectPath(request);
+      await vscode.commands.executeCommand('workbench.view.scm');
+    },
     'project.openRoadmap': async (request) => {
       const projectPath = String(request.projectPath || '');
       void openRoadmapPanel(context, 'roadmap', projectPath);

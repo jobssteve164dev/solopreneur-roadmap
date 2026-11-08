@@ -79,6 +79,164 @@ function validGitRoot(value: unknown): string {
   return root;
 }
 
+export interface ProjectSourceBranch {
+  name: string;
+  current: boolean;
+}
+
+export interface ProjectSourceSnapshot {
+  available: boolean;
+  currentBranch: string;
+  detachedHead: string;
+  branches: ProjectSourceBranch[];
+  changedFiles: number;
+  upstream: string;
+  ahead: number;
+  behind: number;
+  statusLoaded: boolean;
+  statusError: boolean;
+  truncated: boolean;
+  unavailableReason: '' | 'not_repository' | 'read_error';
+}
+
+export interface ProjectSourceStatus {
+  changedFiles: number;
+  upstream: string;
+  ahead: number;
+  behind: number;
+  statusLoaded: boolean;
+  statusError: boolean;
+}
+
+export type ProjectSourceGitRunner = (root: string, args: string[]) => Promise<string>;
+
+const runProjectSourceGit: ProjectSourceGitRunner = (root, args) => executeExternal('git', args, {
+  cwd: validGitRoot(root), timeout: 5_000, maxBuffer: 2 * 1024 * 1024
+});
+
+export async function readProjectSourceSnapshot(
+  rootValue: unknown,
+  runGit: ProjectSourceGitRunner = runProjectSourceGit
+): Promise<ProjectSourceSnapshot> {
+  const root = validGitRoot(rootValue);
+  const unavailable = (unavailableReason: 'not_repository' | 'read_error'): ProjectSourceSnapshot => ({
+    available: false, currentBranch: '', detachedHead: '', branches: [], changedFiles: 0,
+    upstream: '', ahead: 0, behind: 0, statusLoaded: false, statusError: false, truncated: false, unavailableReason
+  });
+  try {
+    if ((await runGit(root, ['rev-parse', '--is-inside-work-tree'])).trim() !== 'true') return unavailable('not_repository');
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return unavailable(/not a git repository|not a work tree/i.test(detail) ? 'not_repository' : 'read_error');
+  }
+  let currentBranch = '';
+  let detachedHead = '';
+  try { currentBranch = (await runGit(root, ['symbolic-ref', '--quiet', '--short', 'HEAD'])).trim(); }
+  catch {
+    try { detachedHead = (await runGit(root, ['rev-parse', '--short', 'HEAD'])).trim(); } catch {}
+  }
+  let branchOutput = '';
+  try {
+    branchOutput = await runGit(root, ['for-each-ref', '--count=201', '--sort=-committerdate', '--format=%(refname:short)%00%(HEAD)', 'refs/heads']);
+  } catch {
+    return unavailable('read_error');
+  }
+  const allBranches = branchOutput.split(/\r?\n/).filter(Boolean).map(line => {
+    const [name = '', marker = ''] = line.split('\0');
+    return { name, current: marker.trim() === '*' || Boolean(currentBranch && name === currentBranch) };
+  }).filter(branch => branch.name);
+  const branchLimit = 200;
+  const branches = allBranches.slice(0, branchLimit);
+  if (currentBranch && !branches.some(branch => branch.name === currentBranch)) {
+    if (branches.length >= branchLimit) branches[branchLimit - 1] = { name: currentBranch, current: true };
+    else branches.push({ name: currentBranch, current: true });
+  }
+  return { available: true, currentBranch, detachedHead, branches, changedFiles: 0,
+    upstream: '', ahead: 0, behind: 0, statusLoaded: false, statusError: false,
+    truncated: allBranches.length > branchLimit, unavailableReason: '' };
+}
+
+export async function readProjectSourceStatus(
+  rootValue: unknown,
+  runGit: ProjectSourceGitRunner = runProjectSourceGit
+): Promise<ProjectSourceStatus> {
+  const root = validGitRoot(rootValue);
+  let changedFiles = 0;
+  let statusLoaded = false;
+  try {
+    changedFiles = (await runGit(root, ['status', '--porcelain=v1'])).split(/\r?\n/).filter(Boolean).length;
+    statusLoaded = true;
+  } catch {
+    return { changedFiles: 0, upstream: '', ahead: 0, behind: 0, statusLoaded: false, statusError: true };
+  }
+  let upstream = '';
+  let ahead = 0;
+  let behind = 0;
+  try {
+    upstream = (await runGit(root, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'])).trim();
+    const counts = (await runGit(root, ['rev-list', '--left-right', '--count', '@{upstream}...HEAD'])).trim().split(/\s+/).map(Number);
+    behind = Number.isFinite(counts[0]) ? counts[0] : 0;
+    ahead = Number.isFinite(counts[1]) ? counts[1] : 0;
+  } catch {}
+  return { changedFiles, upstream, ahead, behind, statusLoaded: true, statusError: false };
+}
+
+export async function confirmProjectSourceMutation(
+  targetBranch: string,
+  errorCode: string,
+  readSnapshot: () => Promise<ProjectSourceSnapshot>
+): Promise<{ success: boolean; recovered: boolean; snapshot?: ProjectSourceSnapshot }> {
+  try {
+    const snapshot = await readSnapshot();
+    return {
+      success: errorCode === 'action_failed' && snapshot.available && snapshot.currentBranch === targetBranch,
+      recovered: errorCode === 'action_failed' && snapshot.available && snapshot.currentBranch === targetBranch,
+      snapshot
+    };
+  } catch {
+    return { success: false, recovered: false };
+  }
+}
+
+export function projectSourceMutationSettledError(errorCode: string, success: boolean): string {
+  if (success) return '';
+  return errorCode === 'action_failed' ? 'result_unknown' : errorCode;
+}
+
+async function validateProjectSourceBranch(root: string, branchValue: unknown, runGit: ProjectSourceGitRunner): Promise<string> {
+  const branch = String(branchValue || '').trim();
+  if (!branch || branch.length > 200 || /[\r\n\0]/.test(branch)) throw new Error('invalid_source_branch');
+  try { await runGit(root, ['check-ref-format', '--branch', branch]); }
+  catch { throw new Error('invalid_source_branch'); }
+  return branch;
+}
+
+export async function createProjectBranch(
+  rootValue: unknown,
+  branchValue: unknown,
+  runGit: ProjectSourceGitRunner = runProjectSourceGit
+): Promise<ProjectSourceSnapshot> {
+  const root = validGitRoot(rootValue);
+  const branch = await validateProjectSourceBranch(root, branchValue, runGit);
+  await runGit(root, ['switch', '-c', branch]);
+  const snapshot = await readProjectSourceSnapshot(root, runGit);
+  if (!snapshot.available || snapshot.currentBranch !== branch) throw new Error('source_mutation_unconfirmed');
+  return snapshot;
+}
+
+export async function switchProjectBranch(
+  rootValue: unknown,
+  branchValue: unknown,
+  runGit: ProjectSourceGitRunner = runProjectSourceGit
+): Promise<ProjectSourceSnapshot> {
+  const root = validGitRoot(rootValue);
+  const branch = await validateProjectSourceBranch(root, branchValue, runGit);
+  await runGit(root, ['switch', branch]);
+  const snapshot = await readProjectSourceSnapshot(root, runGit);
+  if (!snapshot.available || snapshot.currentBranch !== branch) throw new Error('source_mutation_unconfirmed');
+  return snapshot;
+}
+
 async function inspectReportGitState(input: Record<string, unknown>): Promise<{ versions: string[]; history: boolean[] }> {
   const root = validGitRoot(input.root);
   const versions = Array.isArray(input.versions) ? input.versions as Array<{ sha?: unknown; files?: unknown }> : [];
@@ -469,6 +627,10 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
         if (!path.isAbsolute(root)) throw new Error('invalid_project_repository');
         return { repo: await resolveGithubRepoSlug(root) };
       }
+      case 'read_project_source_snapshot': return readProjectSourceSnapshot(input.root);
+      case 'read_project_source_status': return readProjectSourceStatus(input.root);
+      case 'create_project_branch': return createProjectBranch(input.root, input.branch);
+      case 'switch_project_branch': return switchProjectBranch(input.root, input.branch);
       case 'compute_workspace_snapshot': return snapshotWorkspace(String(input.root || ''));
       case 'compute_workspace_git_head': return readWorkspaceGitHead(String(input.root || ''));
       case 'compute_workspace_git_evidence': return captureRunGitEvidence(

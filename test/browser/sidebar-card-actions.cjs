@@ -48,6 +48,212 @@ const projects = [
     await send({ command: 'uiStateLoaded', view: 'sidebar', scopeKey: initialStateLoad.scopeKey, loadRequestId: initialStateLoad.loadRequestId, state: {} });
     await page.evaluate(() => { window.messages = []; });
 
+    const sourcePanel = page.locator('[data-source-panel="/fixture/a"]');
+    const sourceToggle = page.locator('[data-toggle-source-panel="/fixture/a"]');
+    assert.equal(await sourcePanel.count(), 1, 'the selected project exposes one Source panel');
+    assert.equal(await sourceToggle.getAttribute('aria-expanded'), 'false', 'Source starts collapsed');
+    assert.equal(
+      await page.evaluate(() => window.messages.filter(message => message.command.startsWith('source.')).length),
+      0,
+      'project loading does not trigger Git work before the user opens Source'
+    );
+    await sourceToggle.click();
+    assert.equal(await sourceToggle.getAttribute('aria-expanded'), 'true', 'Source expands immediately');
+    const sourceReads = await page.evaluate(() => window.messages.filter(message => message.command === 'source.read'));
+    assert.equal(sourceReads.length, 1, 'the first explicit expansion requests one Source snapshot');
+    assert.equal(sourceReads[0].projectPath, '/fixture/a');
+    assert.ok(sourceReads[0].requestId);
+    assert.equal(sourceReads[0].sourceEpoch, 0);
+    await send({
+      command: 'sourceSnapshotResolved',
+      projectPath: '/fixture/a',
+      requestId: sourceReads[0].requestId,
+      sourceEpoch: 0,
+      snapshot: {
+        available: true,
+        currentBranch: 'main',
+        detachedHead: '',
+        branches: [{ name: 'main', current: true }, { name: 'feature/source', current: false }]
+      }
+    });
+    assert.equal(await page.locator('[data-source-current-branch]').textContent(), 'main');
+    assert.equal(await page.locator('[data-source-branch]').count(), 2);
+    const sourceSearch = page.locator('[data-source-search]');
+    await sourceSearch.fill('feature');
+    assert.equal(await page.locator('[data-source-branch]:visible').count(), 1, 'branch search filters locally without another Git request');
+    assert.equal(
+      await page.evaluate(() => window.messages.filter(message => message.command === 'source.read').length),
+      1,
+      'local search does not request another Source snapshot'
+    );
+    const sourceSearchBeforeStatus = await sourceSearch.elementHandle();
+    await send({
+      command: 'sourceStatusResolved', projectPath: '/fixture/a', requestId: sourceReads[0].requestId, sourceEpoch: 0,
+      status: { changedFiles: 2, upstream: 'origin/main', ahead: 1, behind: 0, statusLoaded: true }
+    });
+    assert.equal(await sourceSearchBeforeStatus.evaluate(element => element.isConnected), true, 'status enhancement keeps Source controls stable');
+    assert.equal(await sourceSearch.inputValue(), 'feature');
+    assert.match(await page.locator('[data-source-status]').textContent(), /2 个文件有改动/);
+    await send({
+      command: 'sourceStatusResolved', projectPath: '/fixture/a', requestId: sourceReads[0].requestId, sourceEpoch: 0,
+      status: { changedFiles: 0, upstream: '', ahead: 0, behind: 0, statusLoaded: false, statusError: true }
+    });
+    assert.match(await page.locator('[data-source-status]').textContent(), /工作区状态暂时无法读取/);
+    assert.doesNotMatch(await page.locator('[data-source-status]').textContent(), /工作区已同步/);
+    await page.locator('[data-refresh-source]').click();
+    const refreshRead = await page.evaluate(() => window.messages.filter(message => message.command === 'source.read').at(-1));
+    assert.notEqual(refreshRead.requestId, sourceReads[0].requestId);
+    await page.locator('[data-switch-source-branch="feature/source"]').click();
+    const switchAction = await page.evaluate(() => window.messages.filter(message => message.command === 'source.switchBranch').at(-1));
+    assert.equal(switchAction.branch, 'feature/source');
+    assert.equal(switchAction.sourceEpoch, 1, 'a branch mutation advances the Source epoch');
+    await send({
+      command: 'sourceSnapshotResolved', projectPath: '/fixture/a', requestId: refreshRead.requestId,
+      sourceEpoch: 0, snapshot: { available: true, currentBranch: 'stale', detachedHead: '', branches: [{ name: 'stale', current: true }] }
+    });
+    assert.equal(await page.locator('[data-source-current-branch]').textContent(), 'main', 'a pre-mutation read cannot overwrite Source after the epoch advances');
+    await sourceSearch.focus();
+    const sourceSearchHandle = await sourceSearch.elementHandle();
+    await send({
+      command: 'sourceActionSettled', action: 'switch', success: true, projectPath: '/fixture/a',
+      requestId: switchAction.requestId, sourceEpoch: 1,
+      snapshot: {
+        available: true, currentBranch: 'feature/source', detachedHead: '',
+        branches: [{ name: 'feature/source', current: true }, { name: 'main', current: false }]
+      }
+    });
+    assert.equal(await sourceSearchHandle.evaluate(element => element.isConnected), true, 'Source results keep the active search node stable');
+    assert.equal(await page.evaluate(() => document.activeElement?.hasAttribute('data-source-search')), true, 'Source results preserve search focus');
+    assert.equal(await sourceSearch.inputValue(), 'feature');
+    assert.equal(await page.locator('[data-source-current-branch]').textContent(), 'feature/source');
+
+    await page.locator('[data-toggle-source-create]').click();
+    const createInput = page.locator('[data-source-create-input]');
+    await createInput.fill('feature/new-card');
+    await page.locator('[data-create-source-branch]').click();
+    const createAction = await page.evaluate(() => window.messages.filter(message => message.command === 'source.createBranch').at(-1));
+    assert.equal(createAction.branch, 'feature/new-card');
+    assert.equal(createAction.sourceEpoch, 2);
+    await page.evaluate(() => { window.messages = []; });
+    await send({
+      command: 'sourceActionSettled', action: 'create', success: true, projectPath: '/fixture/a',
+      requestId: createAction.requestId, sourceEpoch: 2,
+      snapshot: {
+        available: true, currentBranch: 'feature/new-card', detachedHead: '',
+        branches: [{ name: 'feature/new-card', current: true }, { name: 'feature/source', current: false }, { name: 'main', current: false }]
+      }
+    });
+    assert.equal(await page.locator('[data-source-current-branch]').textContent(), 'feature/new-card');
+    assert.equal(await page.locator('[data-source-create-row]').isHidden(), true, 'successful creation closes the local form');
+    await page.waitForTimeout(160);
+    const sourceStatePatches = await page.evaluate(() => window.messages
+      .filter(message => message.command === 'uiState.patch')
+      .flatMap(message => message.patches || [{ key: message.key, value: message.value }]));
+    assert.equal(sourceStatePatches.some(patch => patch.key.endsWith('sourceCreateDraft') && patch.value === ''), true,
+      'successful creation persists the cleared Source draft');
+
+    const pointerSwitchCount = await page.evaluate(() => window.messages.filter(message => message.command === 'source.switchBranch').length);
+    const pointerSwitchButton = page.locator('[data-switch-source-branch="feature/source"]');
+    const pointerSwitchBox = await pointerSwitchButton.boundingBox();
+    assert.ok(pointerSwitchBox);
+    await page.mouse.move(pointerSwitchBox.x + pointerSwitchBox.width / 2, pointerSwitchBox.y + pointerSwitchBox.height / 2);
+    await page.mouse.down();
+    await send({
+      command: 'sourceStatusResolved', projectPath: '/fixture/a', requestId: createAction.requestId, sourceEpoch: 2,
+      status: { changedFiles: 1, upstream: '', ahead: 0, behind: 0, statusLoaded: true, statusError: false }
+    });
+    await page.mouse.up();
+    await page.waitForTimeout(20);
+    const pointerSwitchAction = await page.evaluate(() => window.messages.filter(message => message.command === 'source.switchBranch').at(-1));
+    assert.equal(
+      await page.evaluate(() => window.messages.filter(message => message.command === 'source.switchBranch').length),
+      pointerSwitchCount + 1,
+      'a status enhancement between pointerdown and click cannot swallow a branch switch'
+    );
+    assert.equal(pointerSwitchAction.branch, 'feature/source');
+    assert.equal(pointerSwitchAction.sourceEpoch, 3);
+    await send({
+      command: 'sourceActionSettled', action: 'switch', success: true, projectPath: '/fixture/a',
+      requestId: pointerSwitchAction.requestId, sourceEpoch: 3,
+      snapshot: {
+        available: true, currentBranch: 'feature/source', detachedHead: '', statusLoaded: false,
+        branches: [{ name: 'feature/source', current: true }, { name: 'main', current: false }]
+      }
+    });
+
+    await sourceSearch.fill('');
+    await page.locator('[data-refresh-source]').click();
+    const keyboardRead = await page.evaluate(() => window.messages.filter(message => message.command === 'source.read').at(-1));
+    const keyboardSwitchCount = await page.evaluate(() => window.messages.filter(message => message.command === 'source.switchBranch').length);
+    await page.locator('[data-switch-source-branch="main"]').focus();
+    await page.keyboard.down('Space');
+    await send({
+      command: 'sourceSnapshotResolved', projectPath: '/fixture/a', requestId: keyboardRead.requestId, sourceEpoch: 3,
+      snapshot: {
+        available: true, currentBranch: 'feature/source', detachedHead: '', statusLoaded: false,
+        branches: [{ name: 'feature/source', current: true }, { name: 'main', current: false }]
+      }
+    });
+    await page.keyboard.up('Space');
+    await page.waitForTimeout(20);
+    const keyboardSwitchAction = await page.evaluate(() => window.messages.filter(message => message.command === 'source.switchBranch').at(-1));
+    assert.equal(
+      await page.evaluate(() => window.messages.filter(message => message.command === 'source.switchBranch').length),
+      keyboardSwitchCount + 1,
+      'a Source snapshot between Space keydown and keyup cannot swallow keyboard activation'
+    );
+    assert.equal(keyboardSwitchAction.branch, 'main');
+    assert.equal(keyboardSwitchAction.sourceEpoch, 4);
+    await send({
+      command: 'sourceActionSettled', action: 'switch', success: true, projectPath: '/fixture/a',
+      requestId: keyboardSwitchAction.requestId, sourceEpoch: 4,
+      snapshot: {
+        available: true, currentBranch: 'main', detachedHead: '', statusLoaded: false,
+        branches: [{ name: 'main', current: true }, { name: 'feature/source', current: false }]
+      }
+    });
+
+    await page.locator('[data-source-search]').fill('');
+    await page.locator('[data-refresh-source]').click();
+    const abaRead = await page.evaluate(() => window.messages.filter(message => message.command === 'source.read').at(-1));
+    const selectB = page.locator('[data-select-project-path="/fixture/b"]');
+    await selectB.click();
+    const selectBMessage = await page.evaluate(() => window.messages.filter(message => message.command === 'project.select').at(-1));
+    await send({ command: 'projectSelectionChanged', projectRoot: '/fixture/b', generation: 1, interactionId: selectBMessage.interactionId });
+    await page.locator('[data-select-project-path="/fixture/a"]').click();
+    const selectAMessage = await page.evaluate(() => window.messages.filter(message => message.command === 'project.select').at(-1));
+    await send({ command: 'projectSelectionChanged', projectRoot: '/fixture/a', generation: 2, interactionId: selectAMessage.interactionId });
+    await send({
+      command: 'sourceSnapshotResolved', projectPath: '/fixture/a', requestId: abaRead.requestId,
+      projectGeneration: 0, sourceEpoch: 4,
+      snapshot: { available: true, currentBranch: 'stale-aba', detachedHead: '', branches: [{ name: 'stale-aba', current: true }] }
+    });
+    assert.equal(await page.locator('[data-source-current-branch]').textContent(), 'main', 'A→B→A rejects the earlier A generation');
+    assert.equal(await page.locator('[data-refresh-source]').isDisabled(), false, 'generation invalidation clears the obsolete loading state');
+
+    await page.locator('[data-switch-source-branch="feature/source"]').click();
+    const failedSwitch = await page.evaluate(() => window.messages.filter(message => message.command === 'source.switchBranch').at(-1));
+    await send({
+      command: 'sourceActionSettled', action: 'switch', success: false, error: 'result_unknown', projectPath: '/fixture/a',
+      requestId: failedSwitch.requestId, projectGeneration: 2, sourceEpoch: 5,
+      snapshot: {
+        available: true, currentBranch: 'feature/source', detachedHead: '', statusLoaded: false,
+        branches: [{ name: 'feature/source', current: true }, { name: 'main', current: false }]
+      }
+    });
+    assert.equal(await page.locator('[data-source-current-branch]').textContent(), 'feature/source', 'a failed mutation still applies its authoritative readback');
+    assert.match(await page.locator('[data-source-status]').textContent(), /源代码管理中检查工作区/);
+    assert.doesNotMatch(await page.locator('[data-source-status]').textContent(), /文件保持不变/);
+    await page.locator('[data-open-source-scm]').click();
+    assert.deepEqual(
+      await page.evaluate(() => window.messages.filter(message => message.command === 'source.openScm').map(message => ({ command: message.command, projectPath: message.projectPath }))),
+      [{ command: 'source.openScm', projectPath: '/fixture/a' }]
+    );
+    const currentSourceToggle = page.locator('[data-toggle-source-panel="/fixture/a"]');
+    await currentSourceToggle.click();
+    assert.equal(await currentSourceToggle.getAttribute('aria-expanded'), 'false', 'Source collapses without changing the loaded snapshot');
+
+    await page.evaluate(() => { window.messages = []; });
     await loadProjects([{ ...projects[1], description: 'background update' }], [projects[1].path]);
     assert.equal(
       await page.evaluate(() => window.messages.filter(message => message.command === 'uiState.load').length),
@@ -70,6 +276,7 @@ const projects = [
     assert.equal(await page.locator('[data-issue-title]').inputValue(), '保留这段输入');
 
     const button = page.locator('[data-open-project-path="/fixture/a"]');
+    await button.scrollIntoViewIfNeeded();
     const box = await button.boundingBox();
     assert.ok(box);
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
