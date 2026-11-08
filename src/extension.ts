@@ -10438,7 +10438,7 @@ async function consumeAutomationUiDelivery(globalDataPath: string, id: string, s
   const existing = automationUiFlights.get(key); if (existing) return;
   let started!: () => void; const visible = new Promise<void>(resolve => { started = resolve; });
   const flight = (async () => {
-    let token: string = crypto.randomUUID(); let claimAttempted = false; let effectStartAttempted = false;
+    let token: string = crypto.randomUUID(); let claimAttempted = false; let soundStartAttempted = false;
     try {
       const pending = automationUiConfirmations.get(key);
       if (pending) { await confirmAutomationUiDelivery(key, pending); return; }
@@ -10462,13 +10462,12 @@ async function consumeAutomationUiDelivery(globalDataPath: string, id: string, s
           await confirmAutomationUiDelivery(key, { root, id, token, state: 'queued' });
           return;
         }
-        effectStartAttempted = true;
+        soundStartAttempted = true;
         await sendRuntimeDataRequest(root, { operation: 'begin_automation_delivery', input: { id, token } });
         if (!await playAutomationSound(id, token, started)) {
           return;
         }
       } else {
-        effectStartAttempted = true;
         await sendRuntimeDataRequest(root, { operation: 'begin_automation_delivery', input: { id, token } });
         const notice = claim.payload.warning ? vscode.window.showWarningMessage(claim.payload.message || '') : vscode.window.showInformationMessage(claim.payload.message || '');
         started();
@@ -10476,7 +10475,7 @@ async function consumeAutomationUiDelivery(globalDataPath: string, id: string, s
       }
       await confirmAutomationUiDelivery(key, { root, id, token, state: 'delivered' });
     } catch (error) {
-      if (claimAttempted && !effectStartAttempted && !automationUiConfirmations.has(key)) {
+      if (claimAttempted && !soundStartAttempted && !automationUiConfirmations.has(key)) {
         try { await confirmAutomationUiDelivery(key, { root, id, token, state: 'queued', error: error instanceof Error ? error.message : String(error) }); }
         catch (releaseError) { if ((releaseError as Error).message !== 'automation_delivery_lease_lost') console.warn('SoloMap notification retry could not be recorded:', releaseError); }
       }
