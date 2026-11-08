@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.642 - 2026-11-08
+
+### Fixed
+- keep rejected notices recoverable (bddc859)
+- prevent repeated automation sounds (9c7c64d)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.641 - 2026-11-07
 
 ### Fixed
