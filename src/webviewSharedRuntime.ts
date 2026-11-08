@@ -49,6 +49,54 @@ function bootstrapSoloMapWebviewRuntime(): void {
     return remainder + 's';
   }
 
+  async function playAutomationTone(): Promise<boolean> {
+    let audioContext: any; let oscillator: any; let gain: any; let watchdog: any; let forced = false;
+    const forceSilence = (): void => {
+      if (forced) return;
+      forced = true;
+      try {
+        gain?.gain.cancelScheduledValues(audioContext?.currentTime || 0);
+        gain?.gain.setValueAtTime(0.0001, audioContext?.currentTime || 0);
+      } catch {}
+      try { oscillator?.stop(); } catch {}
+      try { oscillator?.disconnect(); } catch {}
+      try { gain?.disconnect(); } catch {}
+    };
+    try {
+      const AudioContextClass = root.AudioContext || root.webkitAudioContext;
+      if (!AudioContextClass) return false;
+      audioContext = new AudioContextClass();
+      if (audioContext.state === 'suspended') await audioContext.resume();
+      if (audioContext.state !== 'running') return false;
+      oscillator = audioContext.createOscillator();
+      gain = audioContext.createGain();
+      oscillator.type = 'sine';
+      oscillator.frequency.value = 880;
+      gain.gain.setValueAtTime(0.0001, audioContext.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.08, audioContext.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.28);
+      oscillator.connect(gain);
+      gain.connect(audioContext.destination);
+      const ended = new Promise<void>(resolve => {
+        oscillator.onended = resolve;
+        watchdog = root.setTimeout(() => { forceSilence(); resolve(); }, 1_000);
+      });
+      oscillator.start();
+      oscillator.stop(audioContext.currentTime + 0.3);
+      await ended;
+      return true;
+    } catch (error) {
+      root.console?.warn?.('SoloMap automation sound failed:', error);
+      return false;
+    } finally {
+      if (watchdog != null) root.clearTimeout(watchdog);
+      forceSilence();
+      if (audioContext) {
+        try { void audioContext.close().catch(() => {}); } catch {}
+      }
+    }
+  }
+
   function normalizeAgentOptionLabel(value: unknown): string {
     const normalized = String(value || '').trim();
     const name = (normalized.split(/[\\/]/).pop() || '').toLowerCase();
@@ -665,6 +713,7 @@ function bootstrapSoloMapWebviewRuntime(): void {
     interactionEnvelope,
     extractNativeSessionId,
     formatDurationMs,
+    playAutomationTone,
     normalizeAgentOptionLabel,
     getCliPresetFromCliPath,
     buildAgentOption,

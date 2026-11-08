@@ -118,6 +118,21 @@ test('a UI effect started by a dead owner remains unknown and is never displayed
   } finally { await f.close(); }
 });
 
+test('a started sound delivery cannot return to the queue and play again', async () => {
+  const f = await fixture();
+  try {
+    const action = await f.call('prepare_automation_delivery', { root: f.project, intentId: 'sound-at-most-once', event: { trigger: 'completed', action: 'sound' }, payload: { kind: 'sound' } });
+    const claim = await f.call('claim_automation_delivery', { id: action.id, owner: owner('sound-window'), token: 'sound-attempt' });
+    await f.call('begin_automation_delivery', { id: action.id, token: claim.token });
+    await assert.rejects(
+      f.call('settle_automation_delivery', { id: action.id, token: claim.token, state: 'queued', error: 'playback_ack_missing' }),
+      /automation_delivery_effect_started/
+    );
+    assert.equal((await f.call('list_automation_deliveries', {})).items.length, 0);
+    assert.equal(await f.call('claim_automation_delivery', { id: action.id, owner: owner('replacement-window'), token: 'replacement-attempt' }), null);
+  } finally { await f.close(); }
+});
+
 test('Windows delivery ownership checks the process creation marker and recovers a reused PID', async () => {
   const filename = path.resolve(__dirname, '../out/db/unifiedDataStore.js'); const nativeRequire = createRequire(filename);
   let created = '638954012345678901'; let probes = 0;

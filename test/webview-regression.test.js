@@ -2299,6 +2299,42 @@ test('pasted image delivery is visible immediately and slows recovery retries af
   assert.equal(timers.at(-1).active, false);
 });
 
+test('automation tone stops on a wall-clock watchdog when the audio ended event is lost', async () => {
+  const { getSharedWebviewRuntimeScript } = require(path.join(projectRoot, 'out/webviewSharedRuntime.js'));
+  const timers = []; const stops = []; let closed = 0; let muted = 0;
+  const oscillator = {
+    type: '', frequency: { value: 0 }, onended: null,
+    connect() {}, disconnect() {}, start() {}, stop(when) { stops.push(when); }
+  };
+  const gain = {
+    connect() {}, disconnect() {}, gain: {
+      setValueAtTime(value) { if (value === 0.0001) muted++; },
+      exponentialRampToValueAtTime() {}, cancelScheduledValues() {}
+    }
+  };
+  class AudioContext {
+    constructor() { this.state = 'running'; this.currentTime = 4; this.destination = {}; }
+    createOscillator() { return oscillator; }
+    createGain() { return gain; }
+    close() { closed++; return Promise.resolve(); }
+  }
+  const sandbox = { globalThis: {
+    AudioContext,
+    setTimeout(callback, delay) { const timer = { callback, delay, active: true }; timers.push(timer); return timer; },
+    clearTimeout(timer) { timer.active = false; }
+  } };
+  vm.runInNewContext(getSharedWebviewRuntimeScript(), sandbox);
+  assert.equal(typeof sandbox.globalThis.SoloMapWebview.playAutomationTone, 'function', 'the final shared Webview runtime must own the bounded tone');
+  const playback = sandbox.globalThis.SoloMapWebview.playAutomationTone();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(timers.length, 1); assert.equal(timers[0].delay, 1_000);
+  timers[0].callback();
+  assert.equal(await playback, true);
+  assert.deepEqual(stops, [4.3, undefined]);
+  assert.ok(muted >= 2, 'the watchdog must force the gain back to silence');
+  assert.equal(closed, 1);
+});
+
 test('pasted image delivery keeps multi-image batches whole and ignores non-images', async () => {
   const { getSharedWebviewRuntimeScript } = require(path.join(projectRoot, 'out/webviewSharedRuntime.js'));
   const sandbox = {
@@ -22048,15 +22084,22 @@ test('a queued automation sound remains pending without a view and completes thr
     assert.equal(messages.length, 2);
     await extension.message({ command: 'automationSoundReady', pageId: 'sidebar-page-reloaded' }, sidebar._view.webview);
     await extension.idle();
-    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items[0].state, 'queued');
+    assert.equal((await ops({ operation: 'list_automation_deliveries', input: {} })).items.length, 0, 'a sound already posted to a page must not return to the queue');
     await extension.drain(root);
-    assert.equal(messages.length, 3); assert.equal(messages[2].deliveryId, messages[1].deliveryId);
-    assert.equal(messages[2].pageId, 'sidebar-page-reloaded');
+    assert.equal(messages.length, 2, 'a page reload must not play the same sound again');
     await extension.message({ command: 'automationSoundPlayed', pageId: messages[1].pageId, deliveryId: messages[1].deliveryId, token: messages[1].token, played: true }, sidebar._view.webview);
-    assert.deepEqual(store.rows('SELECT state,claim_token FROM automation_deliveries WHERE id=?', [messages[2].deliveryId]).map(row => ({ state: row.state, token: row.claim_token })), [{ state: 'claimed', token: messages[2].token }], 'a late reply from the reloaded page cannot settle the renewed claim');
-    await extension.message({ command: 'automationSoundPlayed', pageId: messages[2].pageId, deliveryId: messages[2].deliveryId, token: messages[2].token, played: true }, sidebar._view.webview);
     await extension.idle();
-    assert.deepEqual(store.rows('SELECT state FROM automation_deliveries WHERE id=?', [messages[2].deliveryId]).map(row => row.state), ['delivered']);
+    assert.deepEqual(store.rows('SELECT state,claim_token FROM automation_deliveries WHERE id=?', [messages[1].deliveryId]).map(row => ({ state: row.state, token: row.claim_token })), [{ state: 'claimed', token: messages[1].token }], 'a late reply from the replaced page cannot settle the unknown one-time attempt');
+    await extension.run({}, 'completed', { ...input, effectId: 'sound-failed-ack' });
+    const failedAttempt = messages.at(-1);
+    await extension.message({ command: 'automationSoundPlayed', pageId: failedAttempt.pageId, deliveryId: failedAttempt.deliveryId, token: failedAttempt.token, played: false }, sidebar._view.webview);
+    await extension.idle(); await extension.drain(root);
+    const attempts = messages.filter(message => message.deliveryId === failedAttempt.deliveryId);
+    try { assert.equal(attempts.length, 1, 'an accepted playback attempt must never be posted again when its acknowledgement is false'); }
+    finally {
+      for (const repeated of attempts.slice(1)) await extension.message({ command: 'automationSoundPlayed', pageId: repeated.pageId, deliveryId: repeated.deliveryId, token: repeated.token, played: true }, sidebar._view.webview);
+      await extension.idle();
+    }
   } finally { await ops.close(); store.close(); }
 });
 

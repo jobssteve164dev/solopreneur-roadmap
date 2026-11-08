@@ -8660,33 +8660,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     async function playAutomationTone() {
-      let audioContext;
-      try {
-        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-        if (!AudioContextClass) return false;
-        audioContext = new AudioContextClass();
-        if (audioContext.state === 'suspended') await audioContext.resume();
-        if (audioContext.state !== 'running') return false;
-        const oscillator = audioContext.createOscillator();
-        const gain = audioContext.createGain();
-        oscillator.type = 'sine';
-        oscillator.frequency.value = 880;
-        gain.gain.setValueAtTime(0.0001, audioContext.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.08, audioContext.currentTime + 0.02);
-        gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.28);
-        oscillator.connect(gain);
-        gain.connect(audioContext.destination);
-        const ended = new Promise(resolve => { oscillator.onended = resolve; });
-        oscillator.start();
-        oscillator.stop(audioContext.currentTime + 0.3);
-        await ended;
-        return true;
-      } catch (error) {
-        console.warn('SoloMap automation sound failed:', error);
-        return false;
-      } finally {
-        if (audioContext) await audioContext.close().catch(() => {});
-      }
+      return SoloMapWebview.playAutomationTone();
     }
 
     renderGlobalFocus(currentProjects.portfolio, currentProjects.selectedProjectPath);

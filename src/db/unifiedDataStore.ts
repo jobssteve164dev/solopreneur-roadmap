@@ -6992,6 +6992,7 @@ export class UnifiedDataStore {
   public settleAutomationDelivery(input: { id: string; token: string; state: 'queued' | 'delivered' | 'cancelled'; error?: string }): Record<string, unknown> {
     if (!input.id || !input.token || !['queued', 'delivered', 'cancelled'].includes(input.state)) throw new Error('invalid_automation_delivery_settlement');
     return this.transaction(() => {
+      if (input.state === 'queued' && this.rows("SELECT 1 FROM automation_delivery_receipts WHERE delivery_id=? AND claim_token=? AND state='started'", [input.id, input.token]).length) throw new Error('automation_delivery_effect_started');
       const previous = this.rows('SELECT content_id FROM automation_delivery_receipts WHERE delivery_id=? AND claim_token=? AND state=?', [input.id, input.token, input.state])[0];
       if (previous) return JSON.parse(this.content(String(previous.content_id)).toString('utf8'));
       const current = this.rows('SELECT * FROM automation_deliveries WHERE id=?', [input.id])[0];

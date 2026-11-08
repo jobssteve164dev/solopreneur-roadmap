@@ -10465,7 +10465,6 @@ async function consumeAutomationUiDelivery(globalDataPath: string, id: string, s
         effectStartAttempted = true;
         await sendRuntimeDataRequest(root, { operation: 'begin_automation_delivery', input: { id, token } });
         if (!await playAutomationSound(id, token, started)) {
-          await confirmAutomationUiDelivery(key, { root, id, token, state: 'queued' });
           return;
         }
       } else {
@@ -10477,7 +10476,7 @@ async function consumeAutomationUiDelivery(globalDataPath: string, id: string, s
       }
       await confirmAutomationUiDelivery(key, { root, id, token, state: 'delivered' });
     } catch (error) {
-      if (claimAttempted && !automationUiConfirmations.has(key)) {
+      if (claimAttempted && !effectStartAttempted && !automationUiConfirmations.has(key)) {
         try { await confirmAutomationUiDelivery(key, { root, id, token, state: 'queued', error: error instanceof Error ? error.message : String(error) }); }
         catch (releaseError) { if ((releaseError as Error).message !== 'automation_delivery_lease_lost') console.warn('SoloMap notification retry could not be recorded:', releaseError); }
       }
