@@ -166,6 +166,10 @@ test('cache publication rejects changed preferences or investment and retries co
   await assert.rejects(ops({ operation: 'write_strategy_state', input: { ...input, expectedRevision: 1, idempotencyKey: 'old-preference-cache' } }), /strategy_source_conflict/);
   const laterSource = await ops({ operation: 'read_strategy_source_revision', input: { roots: [workspace] } });
   store.upsertProjectRunIndex(project, { executionLogId: 1, nodeId: '1', runKind: 'step', status: 'Completed', durationMs: 600000 });
+  const indexedSource = await ops({ operation: 'read_strategy_source_revision', input: { roots: [workspace] } });
+  store.upsertProjectRunIndex(project, { executionLogId: 1, nodeId: '1', runKind: 'step', status: 'Completed', durationMs: 900000 });
+  assert.notEqual((await ops({ operation: 'read_strategy_source_revision', input: { roots: [workspace] } })).revision, indexedSource.revision,
+    'updating an existing investment record must invalidate the strategy source');
   await assert.rejects(ops({ operation: 'write_strategy_state', input: { ...input, expectedRevision: 1, expectedSourceRevision: laterSource.revision, idempotencyKey: 'old-investment-cache' } }), /strategy_source_conflict/);
   assert.equal(store.readStrategyState(null).revision, 1);
 }));

@@ -351,7 +351,7 @@ test('schema 52 upgrades in place and reopening schema 68 preserves identities a
     for (let i = 0; i < 2; i++) {
       const store = new UnifiedDataStore(root);
       try {
-        assert.equal(store.rows('SELECT MAX(version) AS version FROM schema_migrations')[0].version, 72);
+        assert.equal(store.rows('SELECT MAX(version) AS version FROM schema_migrations')[0].version, 73);
         assert.equal(store.rows("SELECT COUNT(*) AS count FROM pragma_index_list('runs') WHERE name='runs_conversation_history'")[0].count, 1);
         assert.equal(store.rows("SELECT value FROM database_meta WHERE key='database_id'")[0].value, 'preserved-tracking-identity');
         assert.equal(store.rows("SELECT source_generation FROM pi_legacy_conversation_operations WHERE operation_id='old-operation'")[0].source_generation, 0);

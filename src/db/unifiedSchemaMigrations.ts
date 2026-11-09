@@ -1085,4 +1085,54 @@ INSERT OR IGNORE INTO contents(id,sha256,mime_type,encoding,byte_length,stored_b
 UPDATE pi_tool_invocations SET result_content_id=(SELECT id FROM contents
  WHERE sha256='76a92ea324d8c47d51599938590a8e606840831f1b0b6f9b7e4a12aad9dbc255' AND mime_type='application/json' AND encoding='utf8')
  WHERE status='completed' AND result_content_id IS NULL;
+` }, { version: 73, sql: `
+ALTER TABLE project_analysis_sources ADD COLUMN conversation_revision INTEGER NOT NULL DEFAULT 1 CHECK(conversation_revision>0);
+ALTER TABLE project_analysis_sources ADD COLUMN run_index_revision INTEGER NOT NULL DEFAULT 1 CHECK(run_index_revision>0);
+CREATE TRIGGER project_conversation_journal_insert AFTER INSERT ON project_journal_entries BEGIN
+ UPDATE project_analysis_sources SET conversation_revision=conversation_revision+1 WHERE project_id=NEW.project_id;
+END;
+CREATE TRIGGER project_conversation_journal_update AFTER UPDATE ON project_journal_entries BEGIN
+ UPDATE project_analysis_sources SET conversation_revision=conversation_revision+1 WHERE project_id=NEW.project_id;
+END;
+CREATE TRIGGER project_conversation_journal_delete AFTER DELETE ON project_journal_entries BEGIN
+ UPDATE project_analysis_sources SET conversation_revision=conversation_revision+1 WHERE project_id=OLD.project_id;
+END;
+CREATE TRIGGER project_conversation_link_insert AFTER INSERT ON project_journal_links BEGIN
+ UPDATE project_analysis_sources SET conversation_revision=conversation_revision+1 WHERE project_id=NEW.project_id;
+END;
+CREATE TRIGGER project_conversation_link_update AFTER UPDATE ON project_journal_links BEGIN
+ UPDATE project_analysis_sources SET conversation_revision=conversation_revision+1 WHERE project_id=NEW.project_id;
+END;
+CREATE TRIGGER project_conversation_link_delete AFTER DELETE ON project_journal_links BEGIN
+ UPDATE project_analysis_sources SET conversation_revision=conversation_revision+1 WHERE project_id=OLD.project_id;
+END;
+CREATE TRIGGER project_conversation_mapping_insert AFTER INSERT ON run_turn_journals BEGIN
+ UPDATE project_analysis_sources SET conversation_revision=conversation_revision+1 WHERE project_id=NEW.project_id;
+END;
+CREATE TRIGGER project_conversation_mapping_update AFTER UPDATE ON run_turn_journals BEGIN
+ UPDATE project_analysis_sources SET conversation_revision=conversation_revision+1 WHERE project_id=NEW.project_id;
+END;
+CREATE TRIGGER project_conversation_mapping_delete AFTER DELETE ON run_turn_journals BEGIN
+ UPDATE project_analysis_sources SET conversation_revision=conversation_revision+1 WHERE project_id=OLD.project_id;
+END;
+CREATE TRIGGER project_conversation_turn_update AFTER UPDATE OF request_content_id,summary_content_id ON turns
+WHEN NEW.request_content_id IS NOT OLD.request_content_id OR NEW.summary_content_id IS NOT OLD.summary_content_id BEGIN
+ UPDATE project_analysis_sources SET conversation_revision=conversation_revision+1 WHERE project_id=NEW.project_id;
+END;
+CREATE TRIGGER project_strategy_run_insert AFTER INSERT ON project_run_indexes BEGIN
+ INSERT INTO project_analysis_sources(project_id,revision,run_count,latest_run_at,recent_activity_at,conversation_revision,run_index_revision)
+ VALUES(NEW.project_id,1,0,0,0,1,1)
+ ON CONFLICT(project_id) DO UPDATE SET run_index_revision=project_analysis_sources.run_index_revision+1;
+END;
+CREATE TRIGGER project_strategy_run_update AFTER UPDATE ON project_run_indexes BEGIN
+ UPDATE project_analysis_sources SET run_index_revision=run_index_revision+1 WHERE project_id=NEW.project_id;
+END;
+CREATE TRIGGER project_strategy_run_delete AFTER DELETE ON project_run_indexes BEGIN
+ UPDATE project_analysis_sources SET run_index_revision=run_index_revision+1 WHERE project_id=OLD.project_id;
+END;
+DROP TRIGGER sidebar_projection_analysis_update;
+CREATE TRIGGER sidebar_projection_analysis_update AFTER UPDATE OF run_count,latest_run_at,recent_activity_at ON project_analysis_sources
+WHEN NEW.run_count IS NOT OLD.run_count OR NEW.latest_run_at IS NOT OLD.latest_run_at OR NEW.recent_activity_at IS NOT OLD.recent_activity_at BEGIN
+ UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=NEW.project_id;
+END;
 ` }];

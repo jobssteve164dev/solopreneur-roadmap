@@ -160,7 +160,7 @@ test('schema 70 preserves queued, claimed and completed run effects during its p
     storeOpen = true;
     assert.deepEqual(f.store.rows(`SELECT id,project_id,run_id,turn_id,checkpoint_sequence,execution_log_id,source_revision,kind,
       payload_content_id,state,owner_id,pid,birth,token,error,completed_at FROM run_effects ORDER BY kind`), expected);
-    assert.equal(f.store.rows('SELECT MAX(version) AS version FROM schema_migrations')[0].version, 72);
+    assert.equal(f.store.rows('SELECT MAX(version) AS version FROM schema_migrations')[0].version, 73);
     assert.equal(f.store.rows('PRAGMA integrity_check')[0].integrity_check, 'ok');
     assert.deepEqual(f.store.rows('PRAGMA foreign_key_check'), []);
   } finally {

@@ -42,6 +42,51 @@ test('conversation history only rehydrates entries whose presentation dependenci
   assert.equal(second.logs[0].dataState.conclusion, '第二条的最终回复');
 });
 
+test('internal native cursor progress does not invalidate the sidebar conversation snapshot', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-conversation-revision-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const projectId = owner.projectIds.get(project), registration = await owner.store.registerProject({ root: project });
+  const prepared = owner.store.prepareRun(projectId, registration.locationId, {
+    root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '用户输入',
+    command: 'codex', userMessage: '用户目标', metadata: { interactiveSession: true },
+    idempotencyKey: 'conversation-revision:prepare'
+  });
+  const mapped = owner.store.readProjectAnalysisSource(projectId).conversationRevision;
+  owner.store.db.run('DELETE FROM run_turn_journals WHERE project_id=? AND run_id=? AND turn_id=?', [projectId, prepared.runId, prepared.turnId]);
+  const unmapped = owner.store.readProjectAnalysisSource(projectId).conversationRevision;
+  assert.notEqual(unmapped, mapped, 'removing a user-visible run mapping must invalidate the conversation snapshot');
+  owner.store.db.run('INSERT INTO run_turn_journals VALUES(?,?,?,?)', [projectId, prepared.runId, prepared.turnId, 1]);
+  const initial = owner.store.readProjectAnalysisSource(projectId).conversationRevision;
+  assert.notEqual(initial, unmapped, 'restoring a historical run mapping must invalidate the conversation snapshot');
+  const initialCoreRevision = owner.store.rows(
+    'SELECT source_revision FROM sidebar_core_projection_state WHERE project_id=?', [projectId]
+  )[0]?.source_revision;
+  owner.store.patchRunState(projectId, {
+    executionLogId: 1, generation: prepared.generation, expectedRevision: prepared.revision,
+    patch: { codexNativeCursor: 4096 }, idempotencyKey: 'conversation-revision:cursor'
+  });
+  assert.equal(owner.store.readProjectAnalysisSource(projectId).conversationRevision, initial,
+    'an observer cursor is internal progress, not a user-visible conversation change');
+  assert.equal(owner.store.rows(
+    'SELECT source_revision FROM sidebar_core_projection_state WHERE project_id=?', [projectId]
+  )[0]?.source_revision, initialCoreRevision,
+  'an observer cursor must not invalidate the sidebar core projection either');
+  const turn = owner.store.read(prepared.turnId);
+  owner.store.write({ kind: 'turn', action: 'patch', scope: projectId, objectId: prepared.turnId,
+    expectedRevision: turn.revision, idempotencyKey: 'conversation-revision:request', data: { request_content: '用户修改后的请求' } });
+  const requestChanged = owner.store.readProjectAnalysisSource(projectId).conversationRevision;
+  assert.notEqual(requestChanged, initial, 'a changed user-visible request must invalidate the conversation snapshot');
+  owner.store.writeRunDocument(projectId, {
+    executionLogId: 1, generation: prepared.generation, turnId: prepared.turnId,
+    purpose: `native_reply_${prepared.turnId.replace(/-/g, '')}`,
+    bytes: Buffer.from('用户可见的最终回复').toString('base64'), mimeType: 'text/plain', expectedRevision: 0,
+    idempotencyKey: 'conversation-revision:native-reply'
+  });
+  assert.notEqual(owner.store.readProjectAnalysisSource(projectId).conversationRevision, requestChanged,
+    'a native reply must still invalidate the conversation snapshot');
+});
+
 test('formal conversation pages remain usable with an unreadable retired journal', async t => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-formal-journal-'));
   const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);

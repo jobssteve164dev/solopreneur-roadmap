@@ -434,7 +434,7 @@ test('staged growth topology rejects invalid parent relationships', async (t) =>
   }
 });
 
-test('sidebar source revision covers command output links and indexed run payloads and rejects stale publication', async (t) => {
+test('sidebar conversation revision covers visible conversation changes but not analytics indexes', async (t) => {
   const first = await fixture();
   const operations = createRuntimeDataOperations(first.store);
   t.after(async () => { await operations.close(); first.store.close(); cleanupFixture(first); });
@@ -452,7 +452,7 @@ test('sidebar source revision covers command output links and indexed run payloa
     executionLogId: 1, nodeId: '__solo__', runKind: 'solo', agentCli: 'codex', status: 'Processed', startedAt: '2026-10-12T12:00:00.000Z', finishedAt: '2026-10-12T12:01:00.000Z', durationMs: 60000
   }, [{ filePath: 'src/a.ts', role: 'changed' }], [{ type: 'verification', value: 'passed', source: 'agent' }]);
   const indexedRevision = first.store.readProjectAnalysisSource(first.project.projectId).conversationRevision;
-  assert.notEqual(indexedRevision, linkedRevision);
+  assert.equal(indexedRevision, linkedRevision, 'run analytics have their own sidebar projection and must not invalidate conversation history');
   const run = await operations({ operation: 'prepare_run', input: {
     root: first.projectRoot, executionLogId: 2, nodeId: '__solo__', runKind: 'solo', prompt: '完整任务', command: 'codex', userMessage: '交付结果', status: 'Running', idempotencyKey: 'package6-source-run'
   } });

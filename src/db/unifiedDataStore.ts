@@ -7477,6 +7477,7 @@ export class UnifiedDataStore {
       this.db.run('UPDATE run_control SET binding_content_id=?,metadata_content_id=? WHERE run_id=?', [this.putContent(canonical(next), 'application/json'), this.putContent(canonical(metadata), 'application/json'), row.run_id]);
       this.db.run('UPDATE objects SET revision=revision+1,updated_at=? WHERE id=?', [Date.now(), row.run_id]);
       this.saveRunControlRevision(String(row.run_id));
+      this.touchProjectConversationSource(projectId);
       return this.current(String(row.run_id), false);
     }, undefined, false);
     const history = this.rows('SELECT binding_content_id FROM run_control_revisions WHERE run_id=? AND revision=?', [receipt.objectId, receipt.revision])[0];
@@ -7765,7 +7766,7 @@ export class UnifiedDataStore {
         this.db.run('INSERT INTO relations VALUES(?,?,?)', [run.run_id, 'source', id]);
       }
       if (input.turnId) this.db.run('INSERT OR IGNORE INTO relations VALUES(?,?,?)', [id, 'source', input.turnId]);
-      if (input.purpose.startsWith('native_reply_')) this.touchProjectAnalysisSource(projectId);
+      if (input.purpose.startsWith('native_reply_')) this.touchProjectConversationSource(projectId);
       return this.current(id, false);
     });
     return receipt;
@@ -9428,6 +9429,10 @@ export class UnifiedDataStore {
   private touchProjectAnalysisSource(projectId: string): void {
     this.db.run('INSERT INTO project_analysis_sources(project_id,revision,run_count,latest_run_at,recent_activity_at) VALUES(?,1,0,0,0) ON CONFLICT(project_id) DO UPDATE SET revision=project_analysis_sources.revision+1', [projectId]);
   }
+  private touchProjectConversationSource(projectId: string): void {
+    this.db.run(`INSERT INTO project_analysis_sources(project_id,revision,run_count,latest_run_at,recent_activity_at,conversation_revision)
+      VALUES(?,1,0,0,0,1) ON CONFLICT(project_id) DO UPDATE SET conversation_revision=project_analysis_sources.conversation_revision+1`, [projectId]);
+  }
   public reportSourceRevision(projectId: string): number {
     return Number(this.rows('SELECT revision FROM report_source_generations WHERE project_id=?', [projectId])[0]?.revision || 0);
   }
@@ -10582,7 +10587,7 @@ export class UnifiedDataStore {
     });
   }
   public readProjectAnalysisSource(projectId: string): { runCount: number; latestRunAt: string; recentActivityAt: string; conversationRevision: string } {
-    const row = this.rows('SELECT revision,run_count,latest_run_at,recent_activity_at FROM project_analysis_sources WHERE project_id=?', [projectId])[0];
+    const row = this.rows('SELECT run_count,latest_run_at,recent_activity_at,conversation_revision FROM project_analysis_sources WHERE project_id=?', [projectId])[0];
     const runCount = Number(row?.run_count || 0);
     const timestamp = (value: unknown): string => {
       const milliseconds = Number(value || 0);
@@ -10590,12 +10595,12 @@ export class UnifiedDataStore {
     };
     const latestRunAt = timestamp(row?.latest_run_at);
     const recentActivityAt = timestamp(row?.recent_activity_at);
-    const revision = Number(row?.revision || 0);
+    const conversationRevision = Number(row?.conversation_revision || 0);
     return {
       runCount,
       latestRunAt,
       recentActivityAt,
-      conversationRevision: digest(canonical([projectId, revision, runCount, latestRunAt, recentActivityAt]))
+      conversationRevision: digest(canonical([projectId, conversationRevision]))
     };
   }
   public readStrategyState(projectId: string | null): { objectId: string | null; revision: number; value: unknown } {
@@ -10608,7 +10613,8 @@ export class UnifiedDataStore {
   public readStrategySourceRevision(projectIds: string[]): string {
     return digest(canonical([this.readLearningSourceRevision(), [...new Set(projectIds)].sort().map(id => {
       const row = this.rows("SELECT s.id,o.revision FROM settings s JOIN objects o ON o.id=s.id WHERE s.namespace='strategy' AND s.key='preferences' AND s.owner_scope=? AND o.project_id=? AND o.archived_at IS NULL", [id, id])[0];
-      return [id, row ? [row.id, row.revision] : null, this.readProjectAnalysisSource(id).conversationRevision];
+      const source = this.rows('SELECT run_index_revision FROM project_analysis_sources WHERE project_id=?', [id])[0];
+      return [id, row ? [row.id, row.revision] : null, Number(source?.run_index_revision || 0)];
     })]));
   }
   public writeStrategyState(projectId: string | null, input: { expectedRevision: number; value: unknown; idempotencyKey: string; expectedSourceRevision?: string; sourceProjectIds?: string[] }): { objectId: string; revision: number; value: unknown } {
