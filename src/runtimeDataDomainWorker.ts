@@ -5,7 +5,7 @@ import { AsyncLocalStorage } from 'async_hooks';
 import { parentPort, threadId, Worker, workerData } from 'worker_threads';
 
 import { sendRuntimeDataRequest, type RuntimeDataRequest } from './autonomousRuntimeControl';
-import { UnifiedDataStore } from './db/unifiedDataStore';
+import { projectJournalSerializedResult, UnifiedDataStore } from './db/unifiedDataStore';
 import { createRuntimeDataOperations, RuntimeDataOperations, RuntimeWorkspaceCompute } from './runtimeDataOperations';
 import { runtimeOperationDefinition, RuntimeExecutorAffinity } from './runtimeOperationRegistry';
 import { configureLocalDiagnosticPersistence, importLegacyLocalDiagnostics } from './localDiagnostics';
@@ -814,7 +814,10 @@ port.on('message', async (message: { id?: number; request?: RuntimeDataRequest; 
       scheduleSidebarProjection();
       if (foundationObserverSyncOperations.has(message.request.operation)) projectionWorker?.postMessage({ syncFoundations: true });
     }
-    const serializedResult = message.serializeResult === true ? JSON.stringify(result ?? null) : undefined;
+    const cachedProjectJournal = message.request.operation === 'read_project_journal' && result && typeof result === 'object'
+      ? (result as { [projectJournalSerializedResult]?: string })[projectJournalSerializedResult]
+      : undefined;
+    const serializedResult = message.serializeResult === true ? cachedProjectJournal ?? JSON.stringify(result ?? null) : undefined;
     port.postMessage(message.serializeResult === true ? { id, serializedResult } : { id, result });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);

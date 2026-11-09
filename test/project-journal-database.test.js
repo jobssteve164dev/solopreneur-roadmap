@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+const { UnifiedDataStore, projectJournalSerializedResult } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const { SyncEngine } = require('../out/db/syncEngine.js');
@@ -72,11 +72,24 @@ test('internal native cursor progress does not invalidate the sidebar conversati
     'SELECT source_revision FROM sidebar_core_projection_state WHERE project_id=?', [projectId]
   )[0]?.source_revision, initialCoreRevision,
   'an observer cursor must not invalidate the sidebar core projection either');
+  const cachedPage = owner.store.readProjectJournal(projectId, { limit: 200 });
+  const cachedAgain = owner.store.readProjectJournal(projectId, { limit: 200 });
+  assert.strictEqual(cachedAgain, cachedPage, 'an unchanged sidebar page must reuse its complete immutable Runtime snapshot');
+  assert.equal(Object.isFrozen(cachedPage), true);
+  assert.equal(Object.isFrozen(cachedPage.logs), true);
+  assert.equal(Object.isFrozen(cachedPage.logs[0]), true);
+  assert.equal(Object.isFrozen(cachedPage.logs[0].dataState), true);
+  assert.throws(() => cachedPage.logs.pop(), TypeError, 'a caller cannot corrupt the shared Runtime snapshot');
+  assert.equal(cachedPage[projectJournalSerializedResult], JSON.stringify(cachedPage),
+    'the cached page must carry its reusable transport serialization');
   const turn = owner.store.read(prepared.turnId);
   owner.store.write({ kind: 'turn', action: 'patch', scope: projectId, objectId: prepared.turnId,
     expectedRevision: turn.revision, idempotencyKey: 'conversation-revision:request', data: { request_content: '用户修改后的请求' } });
   const requestChanged = owner.store.readProjectAnalysisSource(projectId).conversationRevision;
   assert.notEqual(requestChanged, initial, 'a changed user-visible request must invalidate the conversation snapshot');
+  const changedPage = owner.store.readProjectJournal(projectId, { limit: 200 });
+  assert.notStrictEqual(changedPage, cachedPage, 'a visible conversation change must replace the cached Runtime page');
+  assert.equal(changedPage.logs[0].dataState.requestPreview, '用户修改后的请求');
   owner.store.writeRunDocument(projectId, {
     executionLogId: 1, generation: prepared.generation, turnId: prepared.turnId,
     purpose: `native_reply_${prepared.turnId.replace(/-/g, '')}`,

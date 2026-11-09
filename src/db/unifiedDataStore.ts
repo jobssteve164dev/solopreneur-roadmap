@@ -577,6 +577,9 @@ function mergeRoadmapNodes(base: RoadmapNode[], database: RoadmapNode[], file: R
 }
 
 /** Authoritative domain operations. Only Runtime exposes this owner to other processes. */
+export const projectJournalSerializedResult: unique symbol = Symbol('projectJournalSerializedResult');
+type ProjectJournalPage = { logs: AgentConversation[]; hasMore: boolean; [projectJournalSerializedResult]?: string };
+
 export class UnifiedDataStore {
   private readonly capabilityReadEpoch = crypto.randomUUID();
   private capabilityLegacySkillsPending: boolean | undefined;
@@ -591,6 +594,8 @@ export class UnifiedDataStore {
   private generationSearchObjectIds: Set<string> | undefined;
   private readonly projectJournalStateCache = new Map<string, { value: NonNullable<AgentConversation['dataState']>; bytes: number }>();
   private projectJournalStateCacheBytes = 0;
+  private readonly projectJournalPageCache = new Map<string, { revision: number; value: ProjectJournalPage; bytes: number }>();
+  private projectJournalPageCacheBytes = 0;
   private readCachedProjectJournalState(key: string): NonNullable<AgentConversation['dataState']> | undefined {
     const cached = this.projectJournalStateCache.get(key);
     if (!cached) return undefined;
@@ -614,6 +619,44 @@ export class UnifiedDataStore {
     }
     this.projectJournalStateCache.set(key, { value: structuredClone(value), bytes });
     this.projectJournalStateCacheBytes += bytes;
+  }
+  private readCachedProjectJournalPage(key: string, revision: number): ProjectJournalPage | undefined {
+    const cached = this.projectJournalPageCache.get(key);
+    if (!cached) return undefined;
+    if (cached.revision !== revision) {
+      this.projectJournalPageCache.delete(key);
+      this.projectJournalPageCacheBytes -= cached.bytes;
+      return undefined;
+    }
+    this.projectJournalPageCache.delete(key);
+    this.projectJournalPageCache.set(key, cached);
+    return cached.value;
+  }
+  private cacheProjectJournalPage(key: string, revision: number, value: ProjectJournalPage, serialized: string): void {
+    const previous = this.projectJournalPageCache.get(key);
+    if (previous) {
+      this.projectJournalPageCacheBytes -= previous.bytes;
+      this.projectJournalPageCache.delete(key);
+    }
+    const serializedBytes = Buffer.byteLength(serialized);
+    if (serializedBytes > 8 * 1024 * 1024) return;
+    for (const log of value.logs) {
+      if (log.dataState) Object.freeze(log.dataState);
+      Object.freeze(log);
+    }
+    Object.freeze(value.logs);
+    Object.defineProperty(value, projectJournalSerializedResult, { value: serialized, enumerable: false });
+    Object.freeze(value);
+    // The cache retains both the UTF-16 JSON string and a similarly sized object graph.
+    const bytes = Math.max(serialized.length * 4, serializedBytes * 2);
+    while (this.projectJournalPageCache.size >= 12 || this.projectJournalPageCacheBytes + bytes > 24 * 1024 * 1024) {
+      const oldest = this.projectJournalPageCache.entries().next().value as [string, { bytes: number }] | undefined;
+      if (!oldest) break;
+      this.projectJournalPageCache.delete(oldest[0]);
+      this.projectJournalPageCacheBytes -= oldest[1].bytes;
+    }
+    this.projectJournalPageCache.set(key, { revision, value, bytes });
+    this.projectJournalPageCacheBytes += bytes;
   }
   public get databaseId(): string {
     return String(this.rows("SELECT value FROM database_meta WHERE key='database_id'")[0].value);
@@ -10148,9 +10191,16 @@ export class UnifiedDataStore {
     if (!linked) throw new Error('project_journal_link_missing');
     return linked;
   }
-  public readProjectJournal(projectId: string, input: { nodeId?: string; executionLogId?: number; limit?: number; offset?: number } = {}): { logs: AgentConversation[]; hasMore: boolean } {
+  public readProjectJournal(projectId: string, input: { nodeId?: string; executionLogId?: number; limit?: number; offset?: number } = {}): ProjectJournalPage {
     const limit = Math.max(1, Math.min(500, Number(input.limit || 200)));
     const offset = Math.max(0, Number(input.offset || 0));
+    const cacheable = input.executionLogId === undefined && limit >= 50 && offset === 0;
+    const cacheKey = cacheable ? canonical([projectId, input.nodeId || '', limit, offset]) : '';
+    const conversationRevision = cacheable
+      ? Number(this.rows('SELECT conversation_revision FROM project_analysis_sources WHERE project_id=?', [projectId])[0]?.conversation_revision || 0)
+      : 0;
+    const cachedPage = cacheable ? this.readCachedProjectJournalPage(cacheKey, conversationRevision) : undefined;
+    if (cachedPage) return cachedPage;
     let rows: Record<string, SqlValue>[];
     if (input.nodeId) {
       const executionClause = input.executionLogId ? ' AND j.execution_log_id=?' : '';
@@ -10177,7 +10227,7 @@ export class UnifiedDataStore {
       LEFT JOIN objects reply_object ON reply_object.id=reply_document.object_id
       WHERE j.project_id=? AND j.execution_log_id IN (SELECT value FROM json_each(?))`, [projectId, canonical(executionLogIds)]) : [];
     const dependencies = new Map<number, Record<string, SqlValue>>(dependencyRows.map(row => [Number(row.execution_log_id), row]));
-    return { logs: page.map(row => {
+    const result: ProjectJournalPage = { logs: page.map(row => {
       const id = Number(row.execution_log_id);
       const dependency = dependencies.get(id);
       const stateKey = digest(canonical([projectId, id, Boolean(row.linked), String(row.node_id), dependency || null]));
@@ -10206,6 +10256,8 @@ export class UnifiedDataStore {
       return { id, nodeId: row.linked ? String(input.nodeId) : String(row.node_id), timestamp: row.linked ? String(row.linked_at) : String(row.timestamp), agentCli: String(row.agent_cli), command: String(row.command), output: String(row.output), status: row.linked ? 'Linked' : String(row.status),
         dataState };
     }), hasMore: rows.length > limit };
+    if (cacheable) this.cacheProjectJournalPage(cacheKey, conversationRevision, result, JSON.stringify(result));
+    return result;
   }
   public upsertProjectRunIndex(projectId: string, record: RunIndexRecord, files: RunIndexFile[] = [], signals: RunIndexSignal[] = []): void {
     this.transaction(() => {

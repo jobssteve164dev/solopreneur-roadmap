@@ -1682,6 +1682,15 @@ test('Runtime run-index transport is page-bounded and host consumers never rebui
   assert.match(maintenanceSource, /page\.length < GROWTH_STAGE_PAGE_SIZE/);
 });
 
+test('unchanged conversation pages reuse the Runtime-owned transport serialization', () => {
+  const storeSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'db', 'unifiedDataStore.ts'), 'utf8');
+  const workerSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'runtimeDataDomainWorker.ts'), 'utf8');
+  assert.match(storeSource, /readCachedProjectJournalPage\(cacheKey, conversationRevision\)/);
+  assert.match(storeSource, /Object\.defineProperty\(value, projectJournalSerializedResult/);
+  assert.match(workerSource, /message\.request\.operation === 'read_project_journal'/);
+  assert.match(workerSource, /cachedProjectJournal \?\? JSON\.stringify/);
+});
+
 test('autonomous Runtime does not poll retired legacy run directories after startup migration', () => {
   const processSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'autonomousRuntimeProcess.ts'), 'utf8');
   const domainsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'runtimeDataExecutionDomains.ts'), 'utf8');
