@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.650 - 2026-11-09
+
+### Fixed
+- cache immutable conversation pages in runtime (a2303c9)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.649 - 2026-11-09
 
 ### Fixed
