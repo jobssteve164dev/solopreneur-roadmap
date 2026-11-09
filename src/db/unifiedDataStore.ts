@@ -124,7 +124,7 @@ export interface WriteReceipt {
   status: 'committed';
   pendingEffects: string[];
 }
-export interface SidebarCoreProjectionInput {
+export interface SidebarCoreProjectionBuildInput {
   projectId: string;
   sourceRevision: number;
   project: { name: string; path: string; type?: string; priority?: string; pinnedAt?: string };
@@ -135,6 +135,11 @@ export interface SidebarCoreProjectionInput {
   documentationManifest: DocumentationManifest;
   recentActivityAt: string;
 }
+export type SidebarCoreProjectionInput = {
+  projectId: string;
+  sourceRevision: number;
+  settledSummary: unknown;
+} | SidebarCoreProjectionBuildInput;
 export interface SidebarCoreProjectionTarget { projectId: string; sourceRevision: number }
 export interface SidebarCoreProjectionRecord {
   projectId: string;
@@ -7857,6 +7862,8 @@ export class UnifiedDataStore {
     this.db.run(`CREATE TEMP TABLE IF NOT EXISTS runtime_growth_refresh_stage_items(
       stage_id TEXT NOT NULL,section TEXT NOT NULL,ordinal INTEGER NOT NULL,payload_json TEXT NOT NULL,
       PRIMARY KEY(stage_id,section,ordinal))`);
+    this.db.run(`CREATE INDEX IF NOT EXISTS runtime_growth_refresh_stage_node_identity
+      ON runtime_growth_refresh_stage_items(stage_id,section,json_extract(payload_json,'$.nodeId'))`);
   }
   public beginProjectGrowthRefreshStage(projectId: string, input: { requestId: string; generation: number; manifest: GrowthSnapshotStageManifest }): void {
     if (!input.requestId.trim() || !Number.isInteger(input.generation) || input.generation < 1
@@ -7899,19 +7906,30 @@ export class UnifiedDataStore {
         if (Number(range.minimum) !== 0 || Number(range.maximum) !== count - 1) throw new Error(`growth_refresh_stage_order_invalid:${section}`);
       }
     }
-    const missingParent = this.rows(`SELECT 1 FROM runtime_growth_refresh_stage_items child
-      LEFT JOIN runtime_growth_refresh_stage_items parent ON parent.stage_id=child.stage_id AND parent.section='nodes'
-        AND json_extract(parent.payload_json,'$.nodeId')=json_extract(child.payload_json,'$.parentId')
-      WHERE child.stage_id=? AND child.section='nodes' AND COALESCE(json_extract(child.payload_json,'$.parentId'),'')<>'' AND parent.ordinal IS NULL LIMIT 1`, [stageId])[0];
-    if (missingParent) throw new Error('growth_parent_missing');
-    const reachable = Number(this.rows(`WITH RECURSIVE tree(node_id) AS (
-      SELECT json_extract(payload_json,'$.nodeId') FROM runtime_growth_refresh_stage_items
-       WHERE stage_id=? AND section='nodes' AND COALESCE(json_extract(payload_json,'$.parentId'),'')=''
-      UNION
-      SELECT json_extract(child.payload_json,'$.nodeId') FROM runtime_growth_refresh_stage_items child JOIN tree parent
-       ON json_extract(child.payload_json,'$.parentId')=parent.node_id WHERE child.stage_id=? AND child.section='nodes')
-      SELECT COUNT(*) AS count FROM tree`, [stageId, stageId])[0].count);
-    if (reachable !== manifest.counts.nodes) throw new Error('growth_parent_cycle');
+    const parentByNode = new Map<string, string>();
+    for (const row of this.rows(`SELECT json_extract(payload_json,'$.nodeId') AS node_id,
+      COALESCE(json_extract(payload_json,'$.parentId'),'') AS parent_id
+      FROM runtime_growth_refresh_stage_items WHERE stage_id=? AND section='nodes' ORDER BY ordinal`, [stageId])) {
+      const nodeId = String(row.node_id ?? ''), parentId = String(row.parent_id ?? '');
+      if (parentByNode.has(nodeId)) throw new Error('growth_node_duplicate');
+      parentByNode.set(nodeId, parentId);
+    }
+    for (const parentId of parentByNode.values()) {
+      if (parentId && !parentByNode.has(parentId)) throw new Error('growth_parent_missing');
+    }
+    const visitState = new Map<string, 1 | 2>();
+    for (const nodeId of parentByNode.keys()) {
+      if (visitState.get(nodeId) === 2) continue;
+      const chain: string[] = [];
+      let current = nodeId;
+      while (current && visitState.get(current) !== 2) {
+        if (visitState.get(current) === 1) throw new Error('growth_parent_cycle');
+        visitState.set(current, 1);
+        chain.push(current);
+        current = parentByNode.get(current) || '';
+      }
+      for (const visited of chain) visitState.set(visited, 2);
+    }
     for (const section of ['edges', 'signals', 'labels'] as const) {
       const sourceFields = section === 'edges' ? ['sourceId', 'targetId'] : [section === 'signals' ? 'nodeId' : 'nodeId'];
       for (const field of sourceFields) {
@@ -10348,17 +10366,30 @@ export class UnifiedDataStore {
   }
   public pendingSidebarCoreProjectionInputs(limit = 16): SidebarCoreProjectionInput[] {
     const bounded = Math.max(1, Math.min(64, Math.trunc(limit) || 16));
-    const rows = this.rows(`SELECT s.project_id,s.source_revision,p.name,p.type,p.priority,p.pinned_at,l.root_path
+    const rows = this.rows(`SELECT s.project_id,s.source_revision,s.projection_json,p.name,p.type,p.priority,p.pinned_at,l.root_path
       FROM sidebar_core_projection_state s
       JOIN projects p ON p.id=s.project_id
       JOIN objects o ON o.id=p.id
       JOIN project_locations l ON l.project_id=p.id AND l.device_id=? AND l.status='active'
       WHERE s.source_revision>s.projection_revision AND o.archived_at IS NULL AND p.hidden=0
       ORDER BY s.updated_at,s.project_id LIMIT ?`, [this.deviceId, bounded]);
-    const learningOverview = this.readLearningOverview();
+    let learningOverview: LearningOverview | undefined;
     return rows.map(row => {
       const projectId = String(row.project_id);
-      let nodes: SidebarCoreProjectionInput['nodes'] = [];
+      const projectPath = String(row.root_path);
+      const settledInput = (): SidebarCoreProjectionInput => ({
+        projectId,
+        sourceRevision: Number(row.source_revision),
+        settledSummary: row.projection_json === null ? null : JSON.parse(String(row.projection_json))
+      });
+      try {
+        if (!fs.statSync(projectPath).isDirectory()) return settledInput();
+      } catch (error) {
+        const code = String((error as NodeJS.ErrnoException).code || '');
+        if (!['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM', 'ELOOP', 'ENAMETOOLONG'].includes(code)) throw error;
+        return settledInput();
+      }
+      let nodes: SidebarCoreProjectionBuildInput['nodes'] = [];
       try {
         nodes = this.readRoadmapByProject(projectId).nodes.map(node => ({
           id: node.id, title: node.title, stage: node.stage, status: node.status,
@@ -10371,13 +10402,13 @@ export class UnifiedDataStore {
         projectId,
         sourceRevision: Number(row.source_revision),
         project: {
-          name: String(row.name), path: String(row.root_path), type: String(row.type || '') || undefined,
+          name: String(row.name), path: projectPath, type: String(row.type || '') || undefined,
           priority: String(row.priority || '') || undefined,
           pinnedAt: row.pinned_at ? new Date(Number(row.pinned_at)).toISOString() : undefined
         },
         nodes,
         investmentStats: this.readProjectInvestmentStats(projectId),
-        learningOverview,
+        learningOverview: learningOverview ||= this.readLearningOverview(),
         reusableSourceCount: this.readProjectReusableSourceCount(projectId),
         documentationManifest: this.readDocumentationManifest(projectId),
         recentActivityAt: this.readProjectAnalysisSource(projectId).recentActivityAt

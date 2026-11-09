@@ -197,6 +197,36 @@ test('planner statistics are initialized after schema changes and refreshed at m
   assert.equal(first.store.maintainPlannerStatistics(false, optimizedAt + 24 * 60 * 60 * 1000), true);
 });
 
+test('sidebar projection settles an unavailable project without rebuilding its cached summary', async (t) => {
+  const first = await fixture();
+  t.after(() => { first.store.close(); cleanupFixture(first); });
+  const state = first.store.rows('SELECT source_revision FROM sidebar_core_projection_state WHERE project_id=?', [first.project.projectId])[0];
+  const sourceRevision = Number(state.source_revision);
+  assert.equal(first.store.commitSidebarCoreProjection({
+    projectId: first.project.projectId,
+    sourceRevision,
+    summary: { marker: 'retained-offline-summary' }
+  }).accepted, true);
+  first.store.db.run("UPDATE project_locations SET root_path=? WHERE project_id=? AND status='active'", [
+    path.join(first.root, 'unavailable-project'), first.project.projectId
+  ]);
+  const nextRevision = sourceRevision + 1;
+  first.store.readLearningOverview = () => { throw new Error('offline projection must not rebuild global learning'); };
+
+  const input = first.store.pendingSidebarCoreProjectionInputs(1);
+  assert.deepEqual(input, [{
+    projectId: first.project.projectId,
+    sourceRevision: nextRevision,
+    settledSummary: { marker: 'retained-offline-summary' }
+  }]);
+  assert.equal(first.store.commitSidebarCoreProjection({
+    projectId: first.project.projectId,
+    sourceRevision: nextRevision,
+    summary: input[0].settledSummary
+  }).accepted, true);
+  assert.deepEqual(first.store.pendingSidebarCoreProjectionInputs(1), []);
+});
+
 test('autonomous runtime admits planner statistics only as delayed shared-scheduler maintenance', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'autonomousRuntimeProcess.ts'), 'utf8');
   const cycle = source.slice(source.indexOf('async function runCycle()'), source.indexOf("process.once('SIGTERM'"));
@@ -301,6 +331,107 @@ test('growth refresh generation rejects inverse completion and preserves one new
   const state = first.store.readProjectGrowth(first.project.projectId, 12);
   assert.equal(state.latest.snapshot.scanReason, 'newer');
   assert.equal(state.history.length, 1);
+});
+
+test('large staged growth topology commits within the Writer foreground latency budget', async (t) => {
+  const first = await fixture();
+  t.after(() => { first.store.close(); cleanupFixture(first); });
+  const stageId = '00000000-0000-4000-8000-000000000001';
+  const requestId = 'large-growth-stage';
+  const nodeCount = 5_553;
+  const reservation = first.store.reserveProjectGrowthRefresh(first.project.projectId, requestId);
+  const nodes = Array.from({ length: nodeCount }, (_, index) => ({
+    snapshotId: 'staged-snapshot',
+    nodeId: index === 0 ? 'directory:.' : `file:src/module-${index}.ts`,
+    parentId: index === 0 ? '' : 'directory:.',
+    kind: index === 0 ? 'directory' : 'file',
+    path: index === 0 ? '.' : `src/module-${index}.ts`,
+    label: index === 0 ? 'project' : `module-${index}.ts`,
+    language: index === 0 ? '' : 'TypeScript',
+    bytes: 10,
+    loc: 1,
+    fileCount: index === 0 ? nodeCount - 1 : 1,
+    testFileCount: 0,
+    generated: false,
+    excluded: false,
+    primaryRole: index === 0 ? 'root' : 'source',
+    confidence: 1
+  }));
+  const edges = nodes.slice(1).map(node => ({
+    snapshotId: 'staged-snapshot', sourceId: 'directory:.', targetId: node.nodeId,
+    kind: 'contains', weight: 1, evidence: ''
+  }));
+  first.store.beginProjectGrowthRefreshStage(first.project.projectId, {
+    requestId,
+    generation: reservation.generation,
+    manifest: {
+      stageId,
+      snapshot: {
+        id: 'staged-snapshot', projectPath: first.projectRoot, createdAt: '2026-10-12T12:00:00.000Z',
+        gitHead: '', scanReason: 'performance-regression', status: 'completed', durationMs: 1, error: ''
+      },
+      payloadHash: 'a'.repeat(64),
+      summary: { files: nodeCount - 1, modules: 1, capabilities: 0, packages: 0, loc: nodeCount - 1, signals: 0 },
+      semanticHash: 'b'.repeat(64),
+      counts: { nodes: nodes.length, edges: edges.length, signals: 0, labels: 0 },
+      sourceVersion: { gitHead: '', contentHash: 'c'.repeat(64) }
+    }
+  });
+  for (const [section, items] of [['nodes', nodes], ['edges', edges]]) {
+    for (let offset = 0; offset < items.length; offset += 200) {
+      first.store.appendProjectGrowthRefreshStage(stageId, section, offset, items.slice(offset, offset + 200));
+    }
+  }
+
+  const startedAt = process.hrtime.bigint();
+  const result = first.store.commitProjectGrowthRefreshStage(first.project.projectId, stageId);
+  const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+
+  assert.equal(result.accepted, true);
+  assert.ok(elapsedMs < 3_000, `large growth stage occupied the Writer for ${elapsedMs.toFixed(1)}ms`);
+  assert.equal(first.store.readProjectGrowth(first.project.projectId, 1).latest.nodes.length, 200);
+});
+
+test('staged growth topology rejects invalid parent relationships', async (t) => {
+  const first = await fixture();
+  t.after(() => { first.store.close(); cleanupFixture(first); });
+  const cases = [
+    {
+      suffix: '2', requestId: 'cyclic-growth-stage', error: /growth_parent_cycle/,
+      nodes: [{ nodeId: 'file:a', parentId: 'file:b' }, { nodeId: 'file:b', parentId: 'file:a' }]
+    },
+    {
+      suffix: '3', requestId: 'missing-parent-growth-stage', error: /growth_parent_missing/,
+      nodes: [{ nodeId: 'file:a', parentId: 'directory:missing' }]
+    },
+    {
+      suffix: '4', requestId: 'duplicate-node-growth-stage', error: /growth_node_duplicate/,
+      nodes: [{ nodeId: 'file:a', parentId: '' }, { nodeId: 'file:a', parentId: '' }]
+    }
+  ];
+  for (const scenario of cases) {
+    const stageId = `00000000-0000-4000-8000-00000000000${scenario.suffix}`;
+    const reservation = first.store.reserveProjectGrowthRefresh(first.project.projectId, scenario.requestId);
+    first.store.beginProjectGrowthRefreshStage(first.project.projectId, {
+      requestId: scenario.requestId,
+      generation: reservation.generation,
+      manifest: {
+        stageId,
+        snapshot: {
+          id: `invalid-snapshot-${scenario.suffix}`, projectPath: first.projectRoot, createdAt: '2026-10-12T12:00:00.000Z',
+          gitHead: '', scanReason: 'parent-validation-regression', status: 'completed', durationMs: 1, error: ''
+        },
+        payloadHash: 'd'.repeat(64),
+        summary: { files: scenario.nodes.length, modules: 1, capabilities: 0, packages: 0, loc: scenario.nodes.length, signals: 0 },
+        semanticHash: 'e'.repeat(64),
+        counts: { nodes: scenario.nodes.length, edges: 0, signals: 0, labels: 0 },
+        sourceVersion: { gitHead: '', contentHash: 'f'.repeat(64) }
+      }
+    });
+    first.store.appendProjectGrowthRefreshStage(stageId, 'nodes', 0,
+      scenario.nodes.map(node => ({ snapshotId: `invalid-snapshot-${scenario.suffix}`, ...node })));
+    assert.throws(() => first.store.commitProjectGrowthRefreshStage(first.project.projectId, stageId), scenario.error);
+  }
 });
 
 test('sidebar source revision covers command output links and indexed run payloads and rejects stale publication', async (t) => {

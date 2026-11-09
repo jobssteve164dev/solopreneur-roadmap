@@ -89,6 +89,7 @@ port.on('message', (message: { id?: number; limit?: number; syncFoundations?: bo
   const id = Number(message.id);
   try {
     const items = store.pendingSidebarCoreProjectionInputs(Number(message.limit) || 16).map(input => {
+      if ('settledSummary' in input) return { projectId: input.projectId, sourceRevision: input.sourceRevision, summary: input.settledSummary };
       const nodes = new Map<string, RoadmapNodeLike[]>([[input.project.path, input.nodes]]);
       const projectPath = input.project.path;
       return {
