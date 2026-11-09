@@ -589,6 +589,32 @@ export class UnifiedDataStore {
   private projectObjectReferenceColumnsCache?: Array<{ table: string; column: string }>;
   private storageCleanupProtectedContents?: Set<string>;
   private generationSearchObjectIds: Set<string> | undefined;
+  private readonly projectJournalStateCache = new Map<string, { value: NonNullable<AgentConversation['dataState']>; bytes: number }>();
+  private projectJournalStateCacheBytes = 0;
+  private readCachedProjectJournalState(key: string): NonNullable<AgentConversation['dataState']> | undefined {
+    const cached = this.projectJournalStateCache.get(key);
+    if (!cached) return undefined;
+    this.projectJournalStateCache.delete(key);
+    this.projectJournalStateCache.set(key, cached);
+    return structuredClone(cached.value);
+  }
+  private cacheProjectJournalState(key: string, value: NonNullable<AgentConversation['dataState']>): void {
+    const bytes = Buffer.byteLength(canonical(value));
+    if (bytes > 512 * 1024) return;
+    const previous = this.projectJournalStateCache.get(key);
+    if (previous) {
+      this.projectJournalStateCacheBytes -= previous.bytes;
+      this.projectJournalStateCache.delete(key);
+    }
+    while (this.projectJournalStateCache.size >= 512 || this.projectJournalStateCacheBytes + bytes > 16 * 1024 * 1024) {
+      const oldest = this.projectJournalStateCache.entries().next().value as [string, { bytes: number }] | undefined;
+      if (!oldest) break;
+      this.projectJournalStateCache.delete(oldest[0]);
+      this.projectJournalStateCacheBytes -= oldest[1].bytes;
+    }
+    this.projectJournalStateCache.set(key, { value: structuredClone(value), bytes });
+    this.projectJournalStateCacheBytes += bytes;
+  }
   public get databaseId(): string {
     return String(this.rows("SELECT value FROM database_meta WHERE key='database_id'")[0].value);
   }
@@ -10133,27 +10159,47 @@ export class UnifiedDataStore {
       if (input.executionLogId) { clauses.push('execution_log_id=?'); values.push(input.executionLogId); }
       rows = this.rows(`SELECT *,NULL AS linked_at,0 AS linked FROM project_journal_entries WHERE ${clauses.join(' AND ')} ORDER BY execution_log_id DESC LIMIT ? OFFSET ?`, [...values, limit + 1, offset]);
     }
-    return { logs: rows.slice(0, limit).map(row => {
+    const page = rows.slice(0, limit);
+    const executionLogIds = [...new Set(page.map(row => Number(row.execution_log_id)))];
+    const dependencyRows = executionLogIds.length ? this.rows(`SELECT j.execution_log_id,j.run_id,j.turn_id,
+      run_object.revision AS run_revision,turn_object.revision AS turn_revision,reply_object.revision AS reply_revision,
+      control.generation,control.checkpoint_sequence,control.current_turn_id,control.metadata_content_id,control.binding_content_id,
+      control.process_pid,control.process_birth,control.child_pid,control.child_birth,control.delivery_pending,
+      control.delivery_owner_id,control.delivery_pid,control.delivery_birth,control.recovery_needed
+      FROM run_turn_journals j JOIN run_control control ON control.run_id=j.run_id AND control.project_id=j.project_id
+      JOIN objects run_object ON run_object.id=j.run_id JOIN objects turn_object ON turn_object.id=j.turn_id
+      LEFT JOIN run_documents reply_document ON reply_document.run_id=j.run_id AND reply_document.purpose='native_reply_'||replace(j.turn_id,'-','')
+      LEFT JOIN objects reply_object ON reply_object.id=reply_document.object_id
+      WHERE j.project_id=? AND j.execution_log_id IN (SELECT value FROM json_each(?))`, [projectId, canonical(executionLogIds)]) : [];
+    const dependencies = new Map<number, Record<string, SqlValue>>(dependencyRows.map(row => [Number(row.execution_log_id), row]));
+    return { logs: page.map(row => {
       const id = Number(row.execution_log_id);
-      const source = this.resolveRunConversation(projectId, id);
-      let binding: NativeSessionBinding | null = null;
-      try { if (source) binding = this.readRunBinding(projectId, Number(source.state.status.rootExecutionLogId)); }
-      catch (error) { if ((error as Error & { code?: string }).code !== 'identity_binding_invalid') throw error; }
-      const resumable = binding ? getResumableSessionValue(binding) : null;
-      const turn = source ? this.readMetadata(source.turnId) : null;
-      const nativeReply = source ? this.readRunDocument(projectId, Number(source.state.status.rootExecutionLogId), `native_reply_${source.turnId.replace(/-/g, '')}`) : null;
-      const presentation = turn ? {
-        requestPreview: turn.data.request_content_id ? String(this.decodedContent(String(turn.data.request_content_id))).replace(/\s+/g, ' ').slice(0, 120) : '',
-        conclusion: nativeReply ? Buffer.from(nativeReply.bytes, 'base64').toString('utf8') : turn.data.summary_content_id ? String(this.decodedContent(String(turn.data.summary_content_id))) : ''
-      } : {};
-      return { id, nodeId: row.linked ? String(input.nodeId) : String(row.node_id), timestamp: row.linked ? String(row.linked_at) : String(row.timestamp), agentCli: String(row.agent_cli), command: String(row.command), output: String(row.output), status: row.linked ? 'Linked' : String(row.status),
-        dataState: {
+      const dependency = dependencies.get(id);
+      const stateKey = digest(canonical([projectId, id, Boolean(row.linked), String(row.node_id), dependency || null]));
+      let dataState = this.readCachedProjectJournalState(stateKey);
+      if (!dataState) {
+        const source = this.resolveRunConversation(projectId, id);
+        let binding: NativeSessionBinding | null = null;
+        try { if (source) binding = this.readRunBinding(projectId, Number(source.state.status.rootExecutionLogId)); }
+        catch (error) { if ((error as Error & { code?: string }).code !== 'identity_binding_invalid') throw error; }
+        const resumable = binding ? getResumableSessionValue(binding) : null;
+        const turn = source ? this.readMetadata(source.turnId) : null;
+        const nativeReply = source ? this.readRunDocument(projectId, Number(source.state.status.rootExecutionLogId), `native_reply_${source.turnId.replace(/-/g, '')}`) : null;
+        const presentation = turn ? {
+          requestPreview: turn.data.request_content_id ? String(this.decodedContent(String(turn.data.request_content_id))).replace(/\s+/g, ' ').slice(0, 120) : '',
+          conclusion: nativeReply ? Buffer.from(nativeReply.bytes, 'base64').toString('utf8') : turn.data.summary_content_id ? String(this.decodedContent(String(turn.data.summary_content_id))) : ''
+        } : {};
+        dataState = {
           resumableSessionId: resumable?.sessionId || '',
           sessionOpen: Boolean(source?.state.status.interactiveSession && !source.state.status.interactiveSessionClosed),
           ...(row.linked ? { linkedFromNodeId: String(row.node_id) } : {}),
           ...(source ? { runId: source.state.runId, turnId: source.turnId, runRevision: source.state.revision, hasExecutionLogs: true } : {}),
           ...presentation
-        } };
+        };
+        this.cacheProjectJournalState(stateKey, dataState);
+      }
+      return { id, nodeId: row.linked ? String(input.nodeId) : String(row.node_id), timestamp: row.linked ? String(row.linked_at) : String(row.timestamp), agentCli: String(row.agent_cli), command: String(row.command), output: String(row.output), status: row.linked ? 'Linked' : String(row.status),
+        dataState };
     }), hasMore: rows.length > limit };
   }
   public upsertProjectRunIndex(projectId: string, record: RunIndexRecord, files: RunIndexFile[] = [], signals: RunIndexSignal[] = []): void {

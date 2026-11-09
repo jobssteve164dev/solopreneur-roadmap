@@ -11,6 +11,37 @@ const { SyncEngine } = require('../out/db/syncEngine.js');
 const { importAgentRuns, importProjectGrowth } = require('../out/projectDataMigration.js');
 const { enqueueAvailableDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
 
+test('conversation history only rehydrates entries whose presentation dependencies changed', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-journal-projection-cache-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const projectId = owner.projectIds.get(project), registration = await owner.store.registerProject({ root: project });
+  const prepare = executionLogId => owner.store.prepareRun(projectId, registration.locationId, {
+    root: project, executionLogId, nodeId: '__solo__', runKind: 'solo', prompt: `完整输入 ${executionLogId}`,
+    command: 'codex', userMessage: `用户目标 ${executionLogId}`, metadata: { interactiveSession: true },
+    idempotencyKey: `journal-projection-cache:${executionLogId}`
+  });
+  prepare(1); const latest = prepare(2);
+  const reader = UnifiedDataStore.openReadOnly(root); t.after(() => reader.close());
+  const originalResolve = reader.resolveRunConversation.bind(reader), resolved = new Map();
+  reader.resolveRunConversation = (id, executionLogId) => {
+    resolved.set(executionLogId, (resolved.get(executionLogId) || 0) + 1);
+    return originalResolve(id, executionLogId);
+  };
+  reader.readProjectJournal(projectId);
+  assert.deepEqual(Object.fromEntries(resolved), { 2: 1, 1: 1 });
+  resolved.clear();
+  owner.store.writeRunDocument(projectId, {
+    executionLogId: 2, generation: latest.generation, turnId: latest.turnId,
+    purpose: `native_reply_${latest.turnId.replace(/-/g, '')}`,
+    bytes: Buffer.from('第二条的最终回复').toString('base64'), mimeType: 'text/plain', expectedRevision: 0,
+    idempotencyKey: 'journal-projection-cache:native-reply'
+  });
+  const second = reader.readProjectJournal(projectId);
+  assert.deepEqual(Object.fromEntries(resolved), { 2: 1 }, 'unchanged historical entries must not be rehydrated');
+  assert.equal(second.logs[0].dataState.conclusion, '第二条的最终回复');
+});
+
 test('formal conversation pages remain usable with an unreadable retired journal', async t => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-formal-journal-'));
   const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
