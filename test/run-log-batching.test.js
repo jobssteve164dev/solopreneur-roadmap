@@ -2,7 +2,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { PassThrough } = require('node:stream');
 
-const { captureRunLog, responsiveRunLogBatchMaxDelayMs } = require('../out/runLogBatching.js');
+const {
+  captureRunLog,
+  interactiveRunLogBatchMaxDelayMs,
+  runLogBatchMaxBytes,
+  runLogBatchMaxDelayFor,
+  runLogBatchMaxDelayMs
+} = require('../out/runLogBatching.js');
 
 async function* chunks(values, pauseMs = 0) {
   for (const value of values) {
@@ -118,49 +124,34 @@ test('captureRunLog durably flushes a quiet stream before the next chunk arrives
   assert.deepEqual(forwarded, ['first', 'second']);
 });
 
-test('captureRunLog reschedules an existing batch when its latency policy changes', async () => {
-  const stream = new PassThrough();
-  let responsive = false;
-  let notifyDelayChange = () => {};
-  const order = [];
-  const capturing = captureRunLog(stream, {
-    maxBytes: 256 * 1024,
-    maxDelayMs: () => responsive ? 20 : 1_000,
-    onDidChangeMaxDelay: listener => {
-      notifyDelayChange = listener;
-      return () => { notifyDelayChange = undefined; };
-    },
-    append: async bytes => order.push(`append:${bytes.toString()}`),
-    forward: async bytes => order.push(`forward:${bytes.toString()}`)
-  });
-  try {
-    stream.write('pending');
-    await new Promise(resolve => setTimeout(resolve, 40));
-    assert.deepEqual(order, []);
-    responsive = true;
-    const startedAt = Date.now();
-    notifyDelayChange();
-    const deadline = startedAt + 200;
-    while (order.length < 2 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
-    assert.deepEqual(order, ['append:pending', 'forward:pending']);
-    assert.ok(Date.now() - startedAt < 200, 'the existing batch kept its original delay after the policy changed');
-    responsive = false;
-    stream.write('background');
-    await new Promise(resolve => setTimeout(resolve, 60));
-    assert.deepEqual(order, ['append:pending', 'forward:pending'], 'background output lost its ordinary batching delay');
-  } finally {
-    stream.end();
-    await capturing;
-  }
-  assert.deepEqual(order, ['append:pending', 'forward:pending', 'append:background', 'forward:background']);
+test('the batching profile isolates low latency to formal interactive PTY output', () => {
+  assert.equal(runLogBatchMaxDelayFor({ terminal: true, executionKind: 'formal', stream: 'stdout' }), interactiveRunLogBatchMaxDelayMs);
+  assert.equal(runLogBatchMaxDelayFor({ terminal: false, executionKind: 'formal', stream: 'stdout' }), runLogBatchMaxDelayMs);
+  assert.equal(runLogBatchMaxDelayFor({ terminal: true, executionKind: 'preflight', stream: 'stdout' }), runLogBatchMaxDelayMs);
+  assert.equal(runLogBatchMaxDelayFor({ terminal: true, executionKind: 'formal', stream: 'stderr' }), runLogBatchMaxDelayMs);
 });
 
-test('responsive capture keeps sustained output below its database transaction ceiling', async () => {
+test('an idle interactive capture performs no persistence writes', async () => {
+  const stream = new PassThrough();
+  let batches = 0;
+  const capturing = captureRunLog(stream, {
+    maxDelayMs: interactiveRunLogBatchMaxDelayMs,
+    append: async () => { batches++; },
+    forward: async () => undefined
+  });
+  await new Promise(resolve => setTimeout(resolve, interactiveRunLogBatchMaxDelayMs * 2));
+  assert.equal(batches, 0);
+  stream.end();
+  await capturing;
+  assert.equal(batches, 0);
+});
+
+test('interactive capture bounds ordinary small-frame persistence frequency', async () => {
   const stream = new PassThrough();
   let batches = 0;
   const startedAt = Date.now();
   const capturing = captureRunLog(stream, {
-    maxDelayMs: responsiveRunLogBatchMaxDelayMs,
+    maxDelayMs: interactiveRunLogBatchMaxDelayMs,
     append: async () => { batches++; },
     forward: async () => undefined
   });
@@ -175,5 +166,21 @@ test('responsive capture keeps sustained output below its database transaction c
   const elapsedMs = Date.now() - startedAt;
   const transactionsPerSecond = batches * 1_000 / elapsedMs;
   assert.ok(transactionsPerSecond <= 35,
-    `responsive batching persisted ${transactionsPerSecond.toFixed(1)} transactions per second`);
+    `interactive batching persisted ${transactionsPerSecond.toFixed(1)} transactions per second`);
+});
+
+test('interactive capture flushes at the byte ceiling instead of growing an unbounded batch', async () => {
+  const stream = new PassThrough();
+  const batches = [];
+  const capturing = captureRunLog(stream, {
+    maxDelayMs: 1_000,
+    append: async bytes => { batches.push(bytes.length); },
+    forward: async () => undefined
+  });
+  stream.write(Buffer.alloc(runLogBatchMaxBytes));
+  const deadline = Date.now() + 200;
+  while (!batches.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.deepEqual(batches, [runLogBatchMaxBytes]);
+  stream.end();
+  await capturing;
 });

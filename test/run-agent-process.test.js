@@ -887,7 +887,35 @@ test('an interactive runner durably displays typed input without waiting for the
   } finally { await f.close(); }
 });
 
-test('sustained terminal input keeps responsive database log batches bounded', async () => {
+test('interactive output stays responsive after the latest input is no longer recent', async () => {
+  const source = "process.stdin.setRawMode(true);process.stdin.resume();let scheduled=false;process.stdout.write('input-ready\\n');process.stdin.on('data',bytes=>{if(bytes.includes(113))process.exit(0);if(scheduled)return;scheduled=true;setTimeout(()=>process.stdout.write('delayed:'+Date.now()+'\\n'),400);});";
+  const f = await executionFixture(`exec env -u NO_COLOR ${shellQuote(process.execPath)} -e ${shellQuote(source)}`, { interactiveSession: true });
+  try {
+    const agent = f.startAgent();
+    const readyDeadline = Date.now() + 10000;
+    while (!f.stdout().includes(Buffer.from('input-ready'))) {
+      assert.equal(agent.exitCode, null, f.stderr().toString());
+      assert.ok(Date.now() < readyDeadline, 'the delayed-output fixture did not become ready');
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    agent.stdin.write('x');
+    const displayDeadline = Date.now() + 2000;
+    let match;
+    while (!(match = /delayed:(\d+)/.exec(f.stdout().toString()))) {
+      assert.equal(agent.exitCode, null, f.stderr().toString());
+      assert.ok(Date.now() < displayDeadline, 'interactive output remained hidden behind the background log batch');
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    const displayedAfterMs = Date.now() - Number(match[1]);
+    assert.ok(displayedAfterMs < 250, `interactive output display took ${displayedAfterMs}ms after the input window expired`);
+    const durable = await f.call('read_run_log', { stream: 'stdout' });
+    assert.match(Buffer.from(durable.bytes, 'base64').toString(), /delayed:\d+/);
+    agent.stdin.end('q');
+    assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
+  } finally { await f.close(); }
+});
+
+test('sustained interactive output keeps database log batches bounded without repeated input', async () => {
   const source = "process.stdin.setRawMode(true);process.stdin.resume();let started=false;process.stdout.write('input-ready\\n');process.stdin.on('data',bytes=>{if(bytes.includes(113))process.exit(0);if(started)return;started=true;let count=0;const timer=setInterval(()=>{count++;process.stdout.write('typed:'+count+'\\n');if(count===200)clearInterval(timer);},5);});";
   const f = await executionFixture(`exec env -u NO_COLOR ${shellQuote(process.execPath)} -e ${shellQuote(source)}`, { interactiveSession: true });
   try {
@@ -895,27 +923,23 @@ test('sustained terminal input keeps responsive database log batches bounded', a
     const readyDeadline = Date.now() + 10000;
     while (!f.stdout().includes(Buffer.from('input-ready'))) {
       assert.equal(agent.exitCode, null, f.stderr().toString());
-      assert.ok(Date.now() < readyDeadline, 'the sustained-input fixture did not become ready');
+      assert.ok(Date.now() < readyDeadline, 'the sustained-output fixture did not become ready');
       await new Promise(resolve => setTimeout(resolve, 5));
     }
     const initialHead = await f.call('read_run_log_head', { stream: 'stdout' });
     const workloadStartedAt = Date.now();
     agent.stdin.write('x');
-    for (let index = 1; index < 10; index++) {
-      await new Promise(resolve => setTimeout(resolve, 100));
-      agent.stdin.write('x');
-    }
     const displayDeadline = workloadStartedAt + 10000;
     while (!f.stdout().includes(Buffer.from('typed:200'))) {
       assert.equal(agent.exitCode, null, f.stderr().toString());
-      assert.ok(Date.now() < displayDeadline, 'sustained input did not remain responsive');
+      assert.ok(Date.now() < displayDeadline, 'sustained interactive output did not remain responsive');
       await new Promise(resolve => setTimeout(resolve, 5));
     }
     const elapsedMs = Date.now() - workloadStartedAt;
     const head = await f.call('read_run_log_head', { stream: 'stdout' });
-    const responsiveTransactions = head.nextSequence - initialHead.nextSequence;
-    const transactionsPerSecond = responsiveTransactions * 1000 / elapsedMs;
-    assert.ok(transactionsPerSecond <= 35, `sustained input created ${transactionsPerSecond.toFixed(1)} durable log transactions/second`);
+    const interactiveTransactions = head.nextSequence - initialHead.nextSequence;
+    const transactionsPerSecond = interactiveTransactions * 1000 / elapsedMs;
+    assert.ok(transactionsPerSecond <= 35, `sustained interactive output created ${transactionsPerSecond.toFixed(1)} durable log transactions/second`);
     const durable = await f.call('read_run_log', { stream: 'stdout' });
     assert.match(Buffer.from(durable.bytes, 'base64').toString(), /typed:200/);
     agent.stdin.end('q');

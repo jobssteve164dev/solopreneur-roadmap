@@ -15,11 +15,9 @@ import { getCodexSessionHome, NativeSessionBinding } from './sessionIdentity';
 import { readWindowsProcessBirthMarker } from './processIdentity.js';
 import { maintenanceRunKinds } from './runLifecycleTypes';
 import { captureMaintenanceRunResult, maintenanceResultSignature } from './maintenanceRunResult';
-import { captureRunLog, responsiveRunLogBatchMaxDelayMs, runLogBatchMaxDelayMs } from './runLogBatching';
+import { captureRunLog, runLogBatchMaxDelayFor } from './runLogBatching';
 import { ForegroundTerminalReconnectServer } from './foregroundTerminalReconnect';
 import { readCompleteRunDocument } from './runDocumentClient';
-
-const terminalInputResponsivenessWindowMs = 250;
 
 function argument(name: string): string {
   const index = process.argv.indexOf(name);
@@ -152,8 +150,6 @@ async function main(): Promise<void> {
   let agentInputClosed = false;
   const pendingReconnectInput: Array<{ bytes: Buffer; resolve(): void; reject(error: Error): void }> = [];
   let agentInputQueue = Promise.resolve();
-  let responsiveInputUntil = 0;
-  const responsiveInputListeners = new Set<() => void>();
   let exited: Promise<[number | null, NodeJS.Signals | null]> | undefined;
   let captures: Promise<void>[] = [];
   let temporaryInput = false;
@@ -175,15 +171,9 @@ async function main(): Promise<void> {
     try { target.write(bytes, error => error ? reject(error) : resolve()); }
     catch (error) { reject(error instanceof Error ? error : new Error(String(error))); }
   });
-  const writeResponsiveAgentInput = async (target: Writable, bytes: Buffer): Promise<void> => {
-    await writeAgentInput(target, bytes);
-    if (!bytes.length) return;
-    responsiveInputUntil = Date.now() + terminalInputResponsivenessWindowMs;
-    for (const listener of responsiveInputListeners) listener();
-  };
   const forwardAgentInput = (bytes: Buffer): Promise<void> => {
     const accepted = agentInputQueue.then(() => {
-      if (agentInputTarget) return writeResponsiveAgentInput(agentInputTarget, bytes);
+      if (agentInputTarget) return writeAgentInput(agentInputTarget, bytes);
       if (agentInputClosed) throw new Error('foreground_runner_input_closed');
       return new Promise<void>((resolve, reject) => pendingReconnectInput.push({ bytes: Buffer.from(bytes), resolve, reject }));
     });
@@ -265,17 +255,11 @@ async function main(): Promise<void> {
     };
   };
   const stdoutDisplay = display(process.stdout, 1); const stderrDisplay = display(process.stderr, 2);
-  const capture = async (stream: NodeJS.ReadableStream, name: string, forward: (bytes: Buffer) => Promise<void>, head: { nextSequence: number; totalBytes: number }): Promise<void> => {
+  const capture = async (stream: NodeJS.ReadableStream, name: string, forward: (bytes: Buffer) => Promise<void>, head: { nextSequence: number; totalBytes: number }, maxDelayMs?: number): Promise<void> => {
     let sequence = head.nextSequence;
     let offset = head.totalBytes;
     await captureRunLog(stream, {
-      ...(name === 'stdout' ? {
-        maxDelayMs: () => interactive && Date.now() <= responsiveInputUntil ? responsiveRunLogBatchMaxDelayMs : runLogBatchMaxDelayMs,
-        onDidChangeMaxDelay: (listener: () => void) => {
-          responsiveInputListeners.add(listener);
-          return () => responsiveInputListeners.delete(listener);
-        }
-      } : {}),
+      ...(maxDelayMs === undefined ? {} : { maxDelayMs }),
       forward: async bytes => {
         if (reconnectServer && (name === 'stdout' || name === 'stderr')) {
           reconnectOutputOffset += bytes.length;
@@ -322,7 +306,7 @@ async function main(): Promise<void> {
       agentInputTarget = child.stdin!;
       process.stdin.on('data', forwardProcessInput);
       for (const pending of pendingReconnectInput.splice(0)) {
-        void writeResponsiveAgentInput(agentInputTarget, pending.bytes).then(pending.resolve, pending.reject);
+        void writeAgentInput(agentInputTarget, pending.bytes).then(pending.resolve, pending.reject);
       }
       child.once('close', () => {
         agentInputClosed = true;
@@ -351,7 +335,12 @@ async function main(): Promise<void> {
       if (collect) collected[index].push(bytes);
       if (visible) await display(bytes);
     };
-    captures = [capture(child.stdout!, streams[0], forward(0, stdoutDisplay), heads[0]), capture(child.stderr!, streams[1], forward(1, stderrDisplay), heads[1])];
+    captures = [
+      // `script` carries the PTY data stream on stdout. Its stderr is reserved for
+      // wrapper failures and keeps the ordinary batching policy.
+      capture(child.stdout!, streams[0], forward(0, stdoutDisplay), heads[0], runLogBatchMaxDelayFor({ terminal, executionKind, stream: 'stdout' })),
+      capture(child.stderr!, streams[1], forward(1, stderrDisplay), heads[1], runLogBatchMaxDelayFor({ terminal, executionKind, stream: 'stderr' }))
+    ];
     const finished = Promise.all([...captures, exited]);
     void finished.catch(() => undefined);
     for (;;) {
