@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.645 - 2026-11-09
+
+### Fixed
+- make interactive terminal output consistently responsive (eb6f9e6)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.644 - 2026-11-09
 
 ### Fixed
