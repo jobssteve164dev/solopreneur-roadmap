@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.648 - 2026-11-09
+
+### Fixed
+- incrementally hydrate conversation history (3c6e13e)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.647 - 2026-11-09
 
 ### Fixed
