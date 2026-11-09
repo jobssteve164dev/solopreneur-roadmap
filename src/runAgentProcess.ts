@@ -15,9 +15,11 @@ import { getCodexSessionHome, NativeSessionBinding } from './sessionIdentity';
 import { readWindowsProcessBirthMarker } from './processIdentity.js';
 import { maintenanceRunKinds } from './runLifecycleTypes';
 import { captureMaintenanceRunResult, maintenanceResultSignature } from './maintenanceRunResult';
-import { captureRunLog } from './runLogBatching';
+import { captureRunLog, responsiveRunLogBatchMaxDelayMs, runLogBatchMaxDelayMs } from './runLogBatching';
 import { ForegroundTerminalReconnectServer } from './foregroundTerminalReconnect';
 import { readCompleteRunDocument } from './runDocumentClient';
+
+const terminalInputResponsivenessWindowMs = 250;
 
 function argument(name: string): string {
   const index = process.argv.indexOf(name);
@@ -150,6 +152,8 @@ async function main(): Promise<void> {
   let agentInputClosed = false;
   const pendingReconnectInput: Array<{ bytes: Buffer; resolve(): void; reject(error: Error): void }> = [];
   let agentInputQueue = Promise.resolve();
+  let responsiveInputUntil = 0;
+  const responsiveInputListeners = new Set<() => void>();
   let exited: Promise<[number | null, NodeJS.Signals | null]> | undefined;
   let captures: Promise<void>[] = [];
   let temporaryInput = false;
@@ -171,9 +175,15 @@ async function main(): Promise<void> {
     try { target.write(bytes, error => error ? reject(error) : resolve()); }
     catch (error) { reject(error instanceof Error ? error : new Error(String(error))); }
   });
+  const writeResponsiveAgentInput = async (target: Writable, bytes: Buffer): Promise<void> => {
+    await writeAgentInput(target, bytes);
+    if (!bytes.length) return;
+    responsiveInputUntil = Date.now() + terminalInputResponsivenessWindowMs;
+    for (const listener of responsiveInputListeners) listener();
+  };
   const forwardAgentInput = (bytes: Buffer): Promise<void> => {
     const accepted = agentInputQueue.then(() => {
-      if (agentInputTarget) return writeAgentInput(agentInputTarget, bytes);
+      if (agentInputTarget) return writeResponsiveAgentInput(agentInputTarget, bytes);
       if (agentInputClosed) throw new Error('foreground_runner_input_closed');
       return new Promise<void>((resolve, reject) => pendingReconnectInput.push({ bytes: Buffer.from(bytes), resolve, reject }));
     });
@@ -259,6 +269,13 @@ async function main(): Promise<void> {
     let sequence = head.nextSequence;
     let offset = head.totalBytes;
     await captureRunLog(stream, {
+      ...(name === 'stdout' ? {
+        maxDelayMs: () => interactive && Date.now() <= responsiveInputUntil ? responsiveRunLogBatchMaxDelayMs : runLogBatchMaxDelayMs,
+        onDidChangeMaxDelay: (listener: () => void) => {
+          responsiveInputListeners.add(listener);
+          return () => responsiveInputListeners.delete(listener);
+        }
+      } : {}),
       forward: async bytes => {
         if (reconnectServer && (name === 'stdout' || name === 'stderr')) {
           reconnectOutputOffset += bytes.length;
@@ -305,7 +322,7 @@ async function main(): Promise<void> {
       agentInputTarget = child.stdin!;
       process.stdin.on('data', forwardProcessInput);
       for (const pending of pendingReconnectInput.splice(0)) {
-        void writeAgentInput(agentInputTarget, pending.bytes).then(pending.resolve, pending.reject);
+        void writeResponsiveAgentInput(agentInputTarget, pending.bytes).then(pending.resolve, pending.reject);
       }
       child.once('close', () => {
         agentInputClosed = true;

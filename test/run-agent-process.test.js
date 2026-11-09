@@ -859,6 +859,70 @@ test('the packaged interactive runner gives the Agent a real terminal and closes
   } finally { await f.close(); }
 });
 
+test('an interactive runner durably displays typed input without waiting for the background log batch', async () => {
+  const source = "process.stdin.setRawMode(true);process.stdin.resume();process.stdout.write('input-ready\\n');process.stdin.once('data',bytes=>{process.stdout.write('typed:'+bytes.toString('hex')+'\\n');process.stdin.once('data',()=>process.exit(0));});";
+  const f = await executionFixture(`exec env -u NO_COLOR ${shellQuote(process.execPath)} -e ${shellQuote(source)}`, { interactiveSession: true });
+  try {
+    const agent = f.startAgent();
+    const readyDeadline = Date.now() + 10000;
+    while (!f.stdout().includes(Buffer.from('input-ready'))) {
+      assert.equal(agent.exitCode, null, f.stderr().toString());
+      assert.ok(Date.now() < readyDeadline, 'the interactive fixture did not become ready');
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    const startedAt = Date.now();
+    agent.stdin.write('x');
+    const displayDeadline = startedAt + 250;
+    while (!f.stdout().includes(Buffer.from('typed:78'))) {
+      assert.equal(agent.exitCode, null, f.stderr().toString());
+      assert.ok(Date.now() < displayDeadline, 'typed input remained hidden behind the 500ms log batch');
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    const displayedAfterMs = Date.now() - startedAt;
+    assert.ok(displayedAfterMs < 250, `typed input display took ${displayedAfterMs}ms`);
+    const durable = await f.call('read_run_log', { stream: 'stdout' });
+    assert.match(Buffer.from(durable.bytes, 'base64').toString(), /typed:78/);
+    agent.stdin.end('q');
+    assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
+  } finally { await f.close(); }
+});
+
+test('sustained terminal input keeps responsive database log batches bounded', async () => {
+  const source = "process.stdin.setRawMode(true);process.stdin.resume();let started=false;process.stdout.write('input-ready\\n');process.stdin.on('data',bytes=>{if(bytes.includes(113))process.exit(0);if(started)return;started=true;let count=0;const timer=setInterval(()=>{count++;process.stdout.write('typed:'+count+'\\n');if(count===200)clearInterval(timer);},5);});";
+  const f = await executionFixture(`exec env -u NO_COLOR ${shellQuote(process.execPath)} -e ${shellQuote(source)}`, { interactiveSession: true });
+  try {
+    const agent = f.startAgent();
+    const readyDeadline = Date.now() + 10000;
+    while (!f.stdout().includes(Buffer.from('input-ready'))) {
+      assert.equal(agent.exitCode, null, f.stderr().toString());
+      assert.ok(Date.now() < readyDeadline, 'the sustained-input fixture did not become ready');
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    const initialHead = await f.call('read_run_log_head', { stream: 'stdout' });
+    const workloadStartedAt = Date.now();
+    agent.stdin.write('x');
+    for (let index = 1; index < 10; index++) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      agent.stdin.write('x');
+    }
+    const displayDeadline = workloadStartedAt + 10000;
+    while (!f.stdout().includes(Buffer.from('typed:200'))) {
+      assert.equal(agent.exitCode, null, f.stderr().toString());
+      assert.ok(Date.now() < displayDeadline, 'sustained input did not remain responsive');
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    const elapsedMs = Date.now() - workloadStartedAt;
+    const head = await f.call('read_run_log_head', { stream: 'stdout' });
+    const responsiveTransactions = head.nextSequence - initialHead.nextSequence;
+    const transactionsPerSecond = responsiveTransactions * 1000 / elapsedMs;
+    assert.ok(transactionsPerSecond <= 35, `sustained input created ${transactionsPerSecond.toFixed(1)} durable log transactions/second`);
+    const durable = await f.call('read_run_log', { stream: 'stdout' });
+    assert.match(Buffer.from(durable.bytes, 'base64').toString(), /typed:200/);
+    agent.stdin.end('q');
+    assert.equal((await once(agent, 'exit'))[0], 0, f.stderr().toString());
+  } finally { await f.close(); }
+});
+
 test('a replacement packaged runner appends to the committed stream rather than restarting its offsets', async () => {
   const f = await executionFixture("printf 'new bytes'", {}, 'old bytes');
   try {
