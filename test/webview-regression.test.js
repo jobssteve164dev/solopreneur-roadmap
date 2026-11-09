@@ -21225,6 +21225,32 @@ test('conversation snapshots re-read when the database changes during their read
   assert.equal(reads, 2);
 });
 
+test('conversation snapshot consistency retries stay bounded while the source keeps changing', async () => {
+  let signature = 0;
+  const snapshotCache = makeSidebarSnapshotCacheStub({
+    buildConversationDatabaseSignature: async () => `revision-${++signature}`
+  });
+  const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '', { './sidebarSnapshotCache': snapshotCache });
+  let reads = 0;
+  const messages = [];
+  const projectPath = '/fixture/continuously-writing';
+  const provider = new SolopreneurSidebarProvider(createUri(projectRoot), { getNodes: () => [] }, {
+    getSettings: () => ({ globalDataPath: '/fixture/global' }), updateSettings: async () => {},
+    getProjects: () => ({ projects: [{ path: projectPath }], selectedProjectPath: projectPath }),
+    getProjectConversationSnapshot: async () => ({
+      solo: [{ id: ++reads, nodeId: '__solo__', status: 'Running' }], project: [], flow: [], revision: []
+    })
+  });
+  provider._view = { webview: { postMessage: message => { messages.push(message); return Promise.resolve(true); } } };
+
+  await provider.sendProjectConversationSnapshot(projectPath, true);
+
+  assert.equal(reads, 2, 'one consistency retry is enough during a continuously changing run');
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].soloConversations[0].id, 2);
+  assert.equal(snapshotCache.__getConversation(projectPath), null, 'an unstable snapshot must not become the durable cache owner');
+});
+
 test('generated task script prepares CLI configuration and uses database tools before running the agent', async () => {
   const extensionModule = loadCompiledModule('out/extension.js', [require('./fixtures/legacy-agent-shell-source.cjs') + '\n' +
       'module.exports.__buildAgentShellScript = buildAgentShellScript;']);

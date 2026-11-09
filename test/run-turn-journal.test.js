@@ -34,6 +34,71 @@ test('a prepared run binds its existing execution record to the actual turn and 
   } finally { await f.close(); }
 });
 
+test('internal run documents do not invalidate the user conversation projection', async () => {
+  const f = await fixture();
+  try {
+    const run = await f.call('prepare_run', prepare(f.project));
+    const before = await f.call('read_project_analysis_source', { root: f.project });
+    await f.call('write_run_document', {
+      projectId: run.projectId,
+      executionLogId: 17,
+      generation: run.generation,
+      turnId: run.turnId,
+      purpose: 'review_result',
+      bytes: Buffer.from(JSON.stringify({ status: 'pass' })).toString('base64'),
+      mimeType: 'application/json',
+      expectedRevision: 0,
+      idempotencyKey: 'journal-internal-document'
+    });
+    const afterDocument = await f.call('read_project_analysis_source', { root: f.project });
+    assert.equal(afterDocument.conversationRevision, before.conversationRevision);
+
+    await f.call('write_run_document', {
+      projectId: run.projectId,
+      executionLogId: 17,
+      generation: run.generation,
+      turnId: run.turnId,
+      purpose: `native_reply_${run.turnId.replace(/-/g, '')}`,
+      bytes: Buffer.from('用户可见回复').toString('base64'),
+      mimeType: 'text/plain',
+      expectedRevision: 0,
+      idempotencyKey: 'journal-visible-reply'
+    });
+    const afterReply = await f.call('read_project_analysis_source', { root: f.project });
+    assert.notEqual(afterReply.conversationRevision, before.conversationRevision);
+
+    await f.call('write_run_binding', {
+      projectId: run.projectId,
+      executionLogId: 17,
+      generation: run.generation,
+      expectedHeadRevision: 0,
+      seed: {
+        runId: '17', provider: 'codex', workspaceRoot: f.project, cliPath: 'codex',
+        bindingNonce: 'journal-visible-binding', method: 'caller_assigned', contract: 'official_stable'
+      },
+      idempotencyKey: 'journal-visible-binding'
+    });
+    const afterBinding = await f.call('read_project_analysis_source', { root: f.project });
+    assert.notEqual(afterBinding.conversationRevision, afterReply.conversationRevision);
+    const current = await f.call('read_run_state', { projectId: run.projectId, executionLogId: 17 });
+
+    await f.call('checkpoint_run', {
+      projectId: run.projectId,
+      executionLogId: 17,
+      generation: run.generation,
+      proof: run.proof,
+      expectedRevision: current.revision,
+      expectedTurnId: current.turnId,
+      action: 'complete',
+      outcome: 'partial',
+      summary: '用户可见结果',
+      idempotencyKey: 'journal-visible-checkpoint'
+    });
+    const afterCheckpoint = await f.call('read_project_analysis_source', { root: f.project });
+    assert.notEqual(afterCheckpoint.conversationRevision, afterBinding.conversationRevision);
+  } finally { await f.close(); }
+});
+
 test('concurrent start observations create one durable journal per turn and replay keeps the original journal identity', async () => {
   const f = await fixture();
   try {

@@ -1055,7 +1055,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  public async sendProjectConversationSnapshot(projectPath: string, force = false, supersedeInFlight = false) {
+  public async sendProjectConversationSnapshot(projectPath: string, force = false, supersedeInFlight = false, consistencyRetry = 0) {
     const projectGeneration = this.currentProjectGeneration();
     const requestId = ++this._conversationSnapshotRequest;
     let claimedSnapshotLoad: Promise<SidebarConversationSnapshot> | null = null;
@@ -1100,7 +1100,14 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
         const sourceSignature = await buildConversationDatabaseSignature(rootState.root, projectPath);
         if (!isCurrent()) return;
         if (snapshotLoad.sourceSignature !== sourceSignature) {
-          await this.sendProjectConversationSnapshot(projectPath, true, true);
+          if (consistencyRetry < 1) {
+            await this.sendProjectConversationSnapshot(projectPath, true, true, consistencyRetry + 1);
+          } else {
+            // A live Agent can keep advancing its durable evidence while the
+            // sidebar reads. Paint the newest completed read without claiming
+            // it as the stable cache; the settled status event refreshes it.
+            this.postProjectConversationSnapshot(projectPath, snapshot, projectGeneration);
+          }
           return;
         }
         if (!this.isCurrentDataRoot(rootState.root, rootState.generation, projectPath)) return;

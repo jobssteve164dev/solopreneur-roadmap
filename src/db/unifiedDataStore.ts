@@ -7739,7 +7739,7 @@ export class UnifiedDataStore {
         this.db.run('INSERT INTO relations VALUES(?,?,?)', [run.run_id, 'source', id]);
       }
       if (input.turnId) this.db.run('INSERT OR IGNORE INTO relations VALUES(?,?,?)', [id, 'source', input.turnId]);
-      this.touchProjectAnalysisSource(projectId);
+      if (input.purpose.startsWith('native_reply_')) this.touchProjectAnalysisSource(projectId);
       return this.current(id, false);
     });
     return receipt;
