@@ -1691,6 +1691,12 @@ test('unchanged conversation pages reuse the Runtime-owned transport serializati
   assert.match(workerSource, /cachedProjectJournal \?\? JSON\.stringify/);
 });
 
+test('terminal log persistence does not wake the unrelated Sidebar core projection', () => {
+  const workerSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'runtimeDataDomainWorker.ts'), 'utf8');
+  assert.match(workerSource, /message\.request\.operation !== 'append_run_log'[\s\S]*?scheduleSidebarProjection\(\)/,
+    'high-frequency terminal log batches must not schedule a portfolio projection whose source revision they cannot change');
+});
+
 test('autonomous Runtime does not poll retired legacy run directories after startup migration', () => {
   const processSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'autonomousRuntimeProcess.ts'), 'utf8');
   const domainsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'runtimeDataExecutionDomains.ts'), 'utf8');

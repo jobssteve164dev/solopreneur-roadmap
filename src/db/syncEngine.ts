@@ -6,6 +6,21 @@ import { SqliteStore } from './sqliteStore';
 import { AgentConversation, GrowthSnapshotData, GrowthSnapshotRecord, RoadmapNode, RoadmapEdge, RunIndexEntry, RunIndexFile, RunIndexRecord, RunIndexSignal } from './types';
 import { sendRuntimeDataRequest } from '../autonomousRuntimeControl';
 
+export const conversationPageCacheMaxEntries = 8;
+export const conversationPageCacheMaxBytes = 16 * 1024 * 1024;
+const conversationPageCacheMaxEntryBytes = 8 * 1024 * 1024;
+
+type ConversationPageCacheEntry = { revision: number; logs: AgentConversation[]; hasMore: boolean; bytes: number };
+
+function conversationPageEstimatedBytes(logs: AgentConversation[]): number {
+  return logs.reduce((total, log) => {
+    const textBytes = [log.nodeId, log.timestamp, log.agentCli, log.command, log.output, log.status]
+      .reduce((sum, value) => sum + String(value || '').length * 2, 0);
+    const stateBytes = log.dataState ? Buffer.byteLength(JSON.stringify(log.dataState)) * 2 : 0;
+    return total + 1_024 + textBytes + stateBytes;
+  }, 0);
+}
+
 export class SyncEngine {
   private csvStore: CsvStore;
   private sqliteStore: SqliteStore | undefined;
@@ -18,6 +33,8 @@ export class SyncEngine {
   private cacheRevision = 0;
   private minimumExecutionLogId = 1;
   private readonly conversationRevisions = new Map<string, number>();
+  private readonly conversationPageCache = new Map<string, ConversationPageCacheEntry>();
+  private conversationPageCacheBytes = 0;
   private readonly indexRevisions = new Map<number, number>();
   private roadmapRevision = 0;
   private roadmapRefreshGeneration = 0;
@@ -129,6 +146,8 @@ export class SyncEngine {
 
   public close(): void {
     this.closed = true;
+    this.conversationPageCache.clear();
+    this.conversationPageCacheBytes = 0;
     this.sqliteStore?.close();
   }
 
@@ -216,6 +235,27 @@ export class SyncEngine {
     return this.getProjectAgentExecutions().find(item => item.id === executionLogId) || null;
   }
 
+  private cacheConversationPage(key: string, entry: Omit<ConversationPageCacheEntry, 'bytes'>): void {
+    if (this.closed) return;
+    const current = this.conversationPageCache.get(key);
+    if (current && current.revision > entry.revision) return;
+    if (current) {
+      this.conversationPageCache.delete(key);
+      this.conversationPageCacheBytes -= current.bytes;
+    }
+    const bytes = conversationPageEstimatedBytes(entry.logs);
+    if (bytes > conversationPageCacheMaxEntryBytes || bytes > conversationPageCacheMaxBytes) return;
+    while (this.conversationPageCache.size >= conversationPageCacheMaxEntries
+      || this.conversationPageCacheBytes + bytes > conversationPageCacheMaxBytes) {
+      const oldest = this.conversationPageCache.entries().next().value as [string, ConversationPageCacheEntry] | undefined;
+      if (!oldest) break;
+      this.conversationPageCache.delete(oldest[0]);
+      this.conversationPageCacheBytes -= oldest[1].bytes;
+    }
+    this.conversationPageCache.set(key, { ...entry, bytes });
+    this.conversationPageCacheBytes += bytes;
+  }
+
   private async readConversationPage(nodeId: string, limit: number, offset: number): Promise<{ logs: AgentConversation[]; hasMore: boolean }> {
     const startedRevision = this.cacheRevision;
     const safeLimit = Math.max(1, Math.min(500, Math.floor(Number(limit) || 20)));
@@ -224,7 +264,23 @@ export class SyncEngine {
     const logs: AgentConversation[] = [];
     let databaseHasMore = false;
     do {
-      const page = await sendRuntimeDataRequest<{ logs: AgentConversation[]; hasMore: boolean }>(this.globalDataPath, { operation: 'read_project_journal', input: { root: this.projectRoot, ...(nodeId ? { nodeId } : {}), limit: Math.min(500, needed - logs.length), offset: logs.length } });
+      const pageKey = safeOffset === 0 && logs.length === 0 ? JSON.stringify([nodeId, needed]) : '';
+      const cachedPage = pageKey ? this.conversationPageCache.get(pageKey) : undefined;
+      const page = await sendRuntimeDataRequest<{ logs: AgentConversation[]; hasMore: boolean; revision?: number; unchanged?: true }>(this.globalDataPath, { operation: 'read_project_journal', input: {
+        root: this.projectRoot, ...(nodeId ? { nodeId } : {}), limit: Math.min(500, needed - logs.length), offset: logs.length,
+        ...(cachedPage ? { knownRevision: cachedPage.revision } : {})
+      } });
+      if (page.unchanged) {
+        if (!cachedPage || Number(page.revision) !== cachedPage.revision) throw new Error('conversation_page_cache_missing');
+        page.logs = cachedPage.logs;
+        page.hasMore = cachedPage.hasMore;
+        if (!this.closed && this.conversationPageCache.get(pageKey) === cachedPage) {
+          this.conversationPageCache.delete(pageKey);
+          this.conversationPageCache.set(pageKey, cachedPage);
+        }
+      } else if (pageKey && Number.isInteger(page.revision) && Number(page.revision) > 0) {
+        this.cacheConversationPage(pageKey, { revision: Number(page.revision), logs: page.logs, hasMore: page.hasMore });
+      }
       logs.push(...page.logs); databaseHasMore = page.hasMore;
       if (!databaseHasMore || !page.logs.length) break;
     } while (logs.length < needed);

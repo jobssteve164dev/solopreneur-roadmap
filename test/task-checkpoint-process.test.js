@@ -83,8 +83,12 @@ test('the shared checkpoint submits a report with its actual turn and leaves no 
   let errors = ''; runtime.stderr.on('data', b => { errors += b; }); runtime.stdout.resume();
   try {
     const deadline = Date.now() + 10000;
-    while (!fs.existsSync(path.join(root, 'runtime', 'control.json'))) {
+    for (;;) {
       assert.equal(runtime.exitCode, null, errors); assert.ok(Date.now() < deadline, errors);
+      try {
+        const health = await sendRuntimeControlCommand(root, 'health', { timeoutMs: 1000 });
+        if (health.ok && health.status === 'running') break;
+      } catch { /* The endpoint file can precede the listening control server. */ }
       await new Promise(resolve => setTimeout(resolve, 20));
     }
     const env = { ...process.env, SOLOMAP_GLOBAL_DATA_PATH: root, SOLOMAP_PROJECT_ID: prepared.projectId, SOLOMAP_EXECUTION_LOG_ID: '1', SOLOMAP_RUN_GENERATION: String(prepared.generation), SOLOMAP_RUN_PROOF: prepared.proof, SOLOMAP_TASK_TURN_ID: prepared.turnId };

@@ -379,9 +379,13 @@ test('external Agent CLI receives migration tools from the ordinary managed MCP 
   let transport;
   try {
     const deadline = Date.now() + 10000;
-    while (!fs.existsSync(path.join(root, 'runtime/control.json'))) {
+    for (;;) {
       assert.equal(runtime.exitCode, null, stderr);
       assert.ok(Date.now() < deadline, stderr || 'runtime did not start');
+      try {
+        const health = await sendRuntimeControlCommand(root, 'health', { timeoutMs: 1000 });
+        if (health.ok && health.status === 'running') break;
+      } catch { /* The endpoint file can precede the listening control server. */ }
       await new Promise(resolve => setTimeout(resolve, 20));
     }
     const state = await sendRuntimeDataRequest(root, { operation: 'read_run_checkpoint_state', input: { projectId: identity.projectId, executionLogId: 1 } });

@@ -298,9 +298,13 @@ test('an established MCP process resumes its database session after the Runtime 
     const child = spawn(process.execPath, [path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root, '--runtime-id', runtimeId, '--database-required'], { stdio: 'pipe' });
     let stderr = ''; child.stderr.on('data', value => { stderr += value; }); child.stdout.resume();
     const deadline = Date.now() + 10000;
-    while (!fs.existsSync(path.join(root, 'runtime', 'control.json'))) {
+    for (;;) {
       assert.equal(child.exitCode, null, stderr);
       assert.ok(Date.now() < deadline, stderr || 'runtime did not start');
+      try {
+        const health = await sendRuntimeControlCommand(root, 'health', { timeoutMs: 1000 });
+        if (health.ok && health.status === 'running') break;
+      } catch { /* The endpoint file can precede the listening control server. */ }
       await new Promise(resolve => setTimeout(resolve, 20));
     }
     return { child, stderr: () => stderr };
@@ -503,9 +507,13 @@ for (const separateProjects of [false, true]) test(`external stdio clients concu
   const deadline = Date.now() + 10000;
   const sessions = [];
   try {
-    while (!fs.existsSync(path.join(root, 'runtime/control.json'))) {
+    for (;;) {
       assert.equal(runtime.exitCode, null, stderr);
       assert.ok(Date.now() < deadline, stderr || 'runtime did not start');
+      try {
+        const health = await sendRuntimeControlCommand(root, 'health', { timeoutMs: 1000 });
+        if (health.ok && health.status === 'running') break;
+      } catch { /* The endpoint file can precede the listening control server. */ }
       await new Promise(resolve => setTimeout(resolve, 20));
     }
     await sendRuntimeControlCommand(root, 'pause');

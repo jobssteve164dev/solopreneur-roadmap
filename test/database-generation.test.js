@@ -28,9 +28,13 @@ async function launchRuntime(root) {
   const child = spawn(process.execPath, [path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root], { stdio: 'pipe' });
   let stderr = ''; child.stderr.on('data', bytes => { stderr += bytes; }); child.stdout.resume();
   const deadline = Date.now() + 15_000;
-  while (!fs.existsSync(path.join(root, 'runtime', 'control.json'))) {
+  for (;;) {
     assert.equal(child.exitCode, null, stderr);
     assert.ok(Date.now() < deadline, stderr || 'Runtime generation fixture did not become ready');
+    try {
+      const health = await sendRuntimeControlCommand(root, 'health', { timeoutMs: 1000 });
+      if (health.ok && health.status === 'running') break;
+    } catch { /* The endpoint file can precede the listening control server. */ }
     await new Promise(resolve => setTimeout(resolve, 20));
   }
   return { child, stderr: () => stderr };

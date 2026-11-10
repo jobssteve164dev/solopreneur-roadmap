@@ -811,7 +811,7 @@ port.on('message', async (message: { id?: number; request?: RuntimeDataRequest; 
       if (message.request.operation === 'initialize_project_registry' || message.request.operation === 'patch_project_registry') {
         publishProjectRegistryProjection(result as ProjectRegistrySnapshot);
       }
-      scheduleSidebarProjection();
+      if (message.request.operation !== 'append_run_log') scheduleSidebarProjection();
       if (foundationObserverSyncOperations.has(message.request.operation)) projectionWorker?.postMessage({ syncFoundations: true });
     }
     const cachedProjectJournal = message.request.operation === 'read_project_journal' && result && typeof result === 'object'

@@ -578,7 +578,13 @@ function mergeRoadmapNodes(base: RoadmapNode[], database: RoadmapNode[], file: R
 
 /** Authoritative domain operations. Only Runtime exposes this owner to other processes. */
 export const projectJournalSerializedResult: unique symbol = Symbol('projectJournalSerializedResult');
-type ProjectJournalPage = { logs: AgentConversation[]; hasMore: boolean; [projectJournalSerializedResult]?: string };
+type ProjectJournalPage = {
+  logs: AgentConversation[];
+  hasMore: boolean;
+  revision: number;
+  unchanged?: true;
+  [projectJournalSerializedResult]?: string;
+};
 
 export class UnifiedDataStore {
   private readonly capabilityReadEpoch = crypto.randomUUID();
@@ -10191,14 +10197,18 @@ export class UnifiedDataStore {
     if (!linked) throw new Error('project_journal_link_missing');
     return linked;
   }
-  public readProjectJournal(projectId: string, input: { nodeId?: string; executionLogId?: number; limit?: number; offset?: number } = {}): ProjectJournalPage {
+  public readProjectJournal(projectId: string, input: { nodeId?: string; executionLogId?: number; limit?: number; offset?: number; knownRevision?: number } = {}): ProjectJournalPage {
     const limit = Math.max(1, Math.min(500, Number(input.limit || 200)));
     const offset = Math.max(0, Number(input.offset || 0));
-    const cacheable = input.executionLogId === undefined && limit >= 50 && offset === 0;
+    const revisioned = input.executionLogId === undefined && offset === 0;
+    const cacheable = revisioned && limit >= 50;
     const cacheKey = cacheable ? canonical([projectId, input.nodeId || '', limit, offset]) : '';
-    const conversationRevision = cacheable
+    const conversationRevision = revisioned
       ? Number(this.rows('SELECT conversation_revision FROM project_analysis_sources WHERE project_id=?', [projectId])[0]?.conversation_revision || 0)
       : 0;
+    if (revisioned && Number.isInteger(input.knownRevision) && input.knownRevision === conversationRevision) {
+      return { logs: [], hasMore: false, revision: conversationRevision, unchanged: true };
+    }
     const cachedPage = cacheable ? this.readCachedProjectJournalPage(cacheKey, conversationRevision) : undefined;
     if (cachedPage) return cachedPage;
     let rows: Record<string, SqlValue>[];
@@ -10255,7 +10265,7 @@ export class UnifiedDataStore {
       }
       return { id, nodeId: row.linked ? String(input.nodeId) : String(row.node_id), timestamp: row.linked ? String(row.linked_at) : String(row.timestamp), agentCli: String(row.agent_cli), command: String(row.command), output: String(row.output), status: row.linked ? 'Linked' : String(row.status),
         dataState };
-    }), hasMore: rows.length > limit };
+    }), hasMore: rows.length > limit, revision: conversationRevision };
     if (cacheable) this.cacheProjectJournalPage(cacheKey, conversationRevision, result, JSON.stringify(result));
     return result;
   }

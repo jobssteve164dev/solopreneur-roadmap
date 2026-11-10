@@ -7,7 +7,7 @@ export interface RunLogCaptureOptions {
 
 export const runLogBatchMaxBytes = 256 * 1024;
 export const runLogBatchMaxDelayMs = 500;
-export const interactiveRunLogBatchMaxDelayMs = 32;
+export const interactiveRunLogBatchMaxDelayMs = 160;
 
 export interface RunLogBatchProfile {
   terminal: boolean;

@@ -17,9 +17,13 @@ function launchRuntime(root) {
 }
 async function readyRuntime(run, root) {
   const deadline = Date.now() + 10000;
-  while (!fs.existsSync(path.join(root, 'runtime', 'control.json'))) {
+  for (;;) {
     assert.equal(run.child.exitCode, null, run.errors());
     assert.ok(Date.now() < deadline, run.errors() || 'Runtime did not publish readiness');
+    try {
+      const health = await sendRuntimeControlCommand(root, 'health', { timeoutMs: 1000 });
+      if (health.ok && health.status === 'running') return;
+    } catch { /* The endpoint file can precede the listening control server. */ }
     await new Promise(resolve => setTimeout(resolve, 20));
   }
 }

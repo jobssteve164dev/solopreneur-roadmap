@@ -7,7 +7,7 @@ const crypto = require('node:crypto');
 const { UnifiedDataStore, projectJournalSerializedResult } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
-const { SyncEngine } = require('../out/db/syncEngine.js');
+const { SyncEngine, conversationPageCacheMaxBytes, conversationPageCacheMaxEntries } = require('../out/db/syncEngine.js');
 const { importAgentRuns, importProjectGrowth } = require('../out/projectDataMigration.js');
 const { enqueueAvailableDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
 
@@ -98,6 +98,200 @@ test('internal native cursor progress does not invalidate the sidebar conversati
   });
   assert.notEqual(owner.store.readProjectAnalysisSource(projectId).conversationRevision, requestChanged,
     'a native reply must still invalidate the conversation snapshot');
+});
+
+test('an unchanged journal revision returns a transport marker instead of the full page', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-journal-conditional-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
+  const projectId = owner.projectIds.get(project);
+  owner.store.appendProjectJournal(projectId, 'conditional:1', {
+    nodeId: '__solo__', timestamp: '2026-01-01T00:00:00.000Z', agentCli: 'codex', command: 'run',
+    output: '完整会话正文🌿'.repeat(20_000), status: 'Completed'
+  }, 1);
+  const first = owner.store.readProjectJournal(projectId, { nodeId: '__solo__', limit: 200 });
+  assert.ok(Number.isInteger(first.revision) && first.revision > 0);
+  const unchanged = owner.store.readProjectJournal(projectId, {
+    nodeId: '__solo__', limit: 200, knownRevision: first.revision
+  });
+  assert.deepEqual(unchanged, { logs: [], hasMore: false, revision: first.revision, unchanged: true });
+  owner.store.updateProjectJournal(projectId, 1, {
+    agentCli: 'codex', command: 'run', output: '更新后的完整正文', status: 'Completed'
+  });
+  const changed = owner.store.readProjectJournal(projectId, {
+    nodeId: '__solo__', limit: 200, knownRevision: first.revision
+  });
+  assert.notEqual(changed.revision, first.revision);
+  assert.equal(changed.unchanged, undefined);
+  assert.equal(changed.logs[0].output, '更新后的完整正文');
+});
+
+test('SyncEngine reuses an unchanged conversation page without retransferring its output', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-journal-host-cache-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
+  const registered = await store.registerProject({ root: project });
+  store.appendProjectJournal(registered.projectId, 'host-cache:1', {
+    nodeId: '__solo__', timestamp: '2026-01-01T00:00:00.000Z', agentCli: 'codex', command: 'run',
+    output: '需保留的完整正文🌿'.repeat(20_000), status: 'Completed'
+  }, 1);
+  const requestInputs = []; const responseBytes = [];
+  const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'host-cache-owner', onCommand: () => ({ status: 'running' }), onData: async request => {
+    const result = await operations(request);
+    if (request.operation === 'read_project_journal' && request.input.nodeId === '__solo__') {
+      requestInputs.push(request.input);
+      responseBytes.push(Buffer.byteLength(JSON.stringify(result)));
+    }
+    return result;
+  } });
+  const engine = new SyncEngine(path.join(project, '.solopreneur/roadmap.csv'), path.join(project, '.solopreneur/project_journal.db'), path.resolve(__dirname, '..'), root);
+  try {
+    await engine.initAndSync({ history: 'skip' });
+    const first = await engine.readAgentExecutionPage('__solo__', 20, 0);
+    const second = await engine.readAgentExecutionPage('__solo__', 20, 0);
+    assert.deepEqual(second, first);
+    assert.equal(requestInputs.length, 2);
+    assert.equal(requestInputs[0].knownRevision, undefined);
+    assert.ok(Number.isInteger(requestInputs[1].knownRevision));
+    assert.ok(responseBytes[1] * 100 < responseBytes[0],
+      `unchanged response ${responseBytes[1]} bytes should be tiny relative to ${responseBytes[0]} bytes`);
+    store.updateProjectJournal(registered.projectId, 1, {
+      agentCli: 'codex', command: 'run', output: '修订后的完整正文', status: 'Completed'
+    });
+    assert.equal((await engine.readAgentExecutionPage('__solo__', 20, 0)).logs[0].output, '修订后的完整正文');
+    assert.ok(responseBytes[2] * 100 > responseBytes[1], 'a changed revision must send the new full page');
+  } finally { engine.close(); await server.close(); await operations.close(); store.close(); }
+});
+
+test('SyncEngine bounds conditional page retention by entries and estimated bytes', async () => {
+  assert.ok(Number.isInteger(conversationPageCacheMaxEntries) && conversationPageCacheMaxEntries > 0);
+  assert.ok(Number.isInteger(conversationPageCacheMaxBytes) && conversationPageCacheMaxBytes > 0);
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-journal-host-budget-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
+  const requests = [];
+  const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'host-budget-owner', onCommand: () => ({ status: 'running' }), onData: async request => {
+    if (request.operation !== 'read_project_journal' || !String(request.input.nodeId || '').startsWith('large-')) return operations(request);
+    requests.push(request.input);
+    const index = Number(String(request.input.nodeId).slice('large-'.length));
+    return { logs: [{ id: index + 1, nodeId: request.input.nodeId, timestamp: '', agentCli: 'codex', command: '', output: 'x'.repeat(3 * 1024 * 1024), status: 'Completed' }], hasMore: false, revision: index + 1 };
+  } });
+  const engine = new SyncEngine(path.join(project, '.solopreneur/roadmap.csv'), path.join(project, '.solopreneur/project_journal.db'), path.resolve(__dirname, '..'), root);
+  try {
+    await engine.initAndSync({ history: 'skip' });
+    for (let index = 0; index < 10; index++) await engine.readAgentExecutionPage(`large-${index}`, 20, 0);
+    assert.ok(engine.conversationPageCache.size <= conversationPageCacheMaxEntries);
+    assert.ok(engine.conversationPageCacheBytes <= conversationPageCacheMaxBytes);
+    assert.ok(engine.conversationPageCache.size < 10, 'large overlapping pages must be evicted instead of retained by entry count alone');
+    await engine.readAgentExecutionPage('large-0', 20, 0);
+    assert.equal(requests.at(-1).knownRevision, undefined, 'an evicted large page must be fetched without a stale conditional token');
+  } finally { engine.close(); await server.close(); await operations.close(); store.close(); }
+});
+
+test('SyncEngine ignores late unchanged markers after eviction, replacement, or close', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-journal-host-race-'));
+  const root = path.join(base, '.solomap-global');
+  const records = new Map(); const requests = []; const holds = new Map();
+  const setRecord = (nodeId, revision, output = `正文-${revision}`) => records.set(nodeId, { revision, output });
+  const holdNextMarker = nodeId => {
+    let markStarted; let release;
+    const started = new Promise(resolve => { markStarted = resolve; });
+    const released = new Promise(resolve => { release = resolve; });
+    holds.set(nodeId, { markStarted, released });
+    return { started, release };
+  };
+  const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'host-race-owner', onCommand: () => ({ status: 'running' }), onData: async request => {
+    if (request.operation === 'initialize_project_journal') return { minimumExecutionLogId: 1 };
+    if (request.operation !== 'read_project_journal') throw new Error(`unexpected operation ${request.operation}`);
+    const nodeId = String(request.input.nodeId || ''); const record = records.get(nodeId);
+    if (!record) throw new Error(`missing record ${nodeId}`);
+    requests.push({ nodeId, knownRevision: request.input.knownRevision });
+    const requestedRevision = record.revision;
+    const hold = holds.get(nodeId);
+    if (hold && request.input.knownRevision === requestedRevision) {
+      holds.delete(nodeId); hold.markStarted(); await hold.released;
+      return { logs: [], hasMore: false, revision: requestedRevision, unchanged: true };
+    }
+    if (request.input.knownRevision === requestedRevision) {
+      return { logs: [], hasMore: false, revision: requestedRevision, unchanged: true };
+    }
+    return { logs: [{ id: requestedRevision, nodeId, timestamp: '', agentCli: 'codex', command: '', output: record.output, status: 'Completed' }], hasMore: false, revision: requestedRevision };
+  } });
+  const openEngine = async name => {
+    const project = path.join(base, name); fs.mkdirSync(project);
+    const engine = new SyncEngine(path.join(project, '.solopreneur/roadmap.csv'), path.join(project, '.solopreneur/project_journal.db'), path.resolve(__dirname, '..'), root, { roadmap: 'skip' });
+    await engine.initAndSync({ history: 'skip' }); return engine;
+  };
+  const pageKey = nodeId => JSON.stringify([nodeId, 21]);
+  try {
+    setRecord('evicted', 1, '待淘汰正文');
+    const evictedEngine = await openEngine('evicted-project');
+    await evictedEngine.readAgentExecutionPage('evicted', 20, 0);
+    const evictedHold = holdNextMarker('evicted');
+    const lateEvictedRead = evictedEngine.readAgentExecutionPage('evicted', 20, 0);
+    await evictedHold.started;
+    for (let index = 0; index < conversationPageCacheMaxEntries; index++) {
+      setRecord(`filler-${index}`, index + 2);
+      await evictedEngine.readAgentExecutionPage(`filler-${index}`, 20, 0);
+    }
+    assert.equal(evictedEngine.conversationPageCache.has(pageKey('evicted')), false, 'the requested page must actually be evicted while its marker is in flight');
+    evictedHold.release(); await lateEvictedRead;
+    assert.equal(evictedEngine.conversationPageCache.has(pageKey('evicted')), false, 'a late marker must not reinsert an evicted page');
+    assert.equal(evictedEngine.conversationPageCacheBytes,
+      [...evictedEngine.conversationPageCache.values()].reduce((total, entry) => total + entry.bytes, 0),
+      'byte accounting must still match the retained entries');
+    assert.ok(evictedEngine.conversationPageCache.size <= conversationPageCacheMaxEntries);
+    evictedEngine.close();
+
+    setRecord('replaced', 1, '旧正文');
+    const replacedEngine = await openEngine('replaced-project');
+    await replacedEngine.readAgentExecutionPage('replaced', 20, 0);
+    const replacedHold = holdNextMarker('replaced');
+    const lateReplacedRead = replacedEngine.readAgentExecutionPage('replaced', 20, 0);
+    await replacedHold.started;
+    setRecord('replaced', 2, '新正文');
+    assert.equal((await replacedEngine.readAgentExecutionPage('replaced', 20, 0)).logs[0].output, '新正文');
+    replacedHold.release(); await lateReplacedRead;
+    assert.equal(replacedEngine.conversationPageCache.get(pageKey('replaced')).revision, 2,
+      'a late old marker must not replace a newer cached revision');
+    await replacedEngine.readAgentExecutionPage('replaced', 20, 0);
+    assert.equal(requests.at(-1).knownRevision, 2);
+    replacedEngine.close();
+
+    setRecord('closed', 1, '关闭前正文');
+    const closedEngine = await openEngine('closed-project');
+    await closedEngine.readAgentExecutionPage('closed', 20, 0);
+    const closedHold = holdNextMarker('closed');
+    const lateClosedRead = closedEngine.readAgentExecutionPage('closed', 20, 0);
+    await closedHold.started; closedEngine.close(); closedHold.release(); await lateClosedRead;
+    assert.equal(closedEngine.conversationPageCache.size, 0, 'a marker completing after close must not repopulate the cache');
+    assert.equal(closedEngine.conversationPageCacheBytes, 0);
+  } finally { await server.close(); }
+});
+
+test('SyncEngine remains compatible with an older Runtime that returns no journal revision', async () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-journal-old-runtime-'));
+  const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
+  const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
+  const registered = await store.registerProject({ root: project });
+  store.appendProjectJournal(registered.projectId, 'old-runtime:1', { nodeId: '__solo__', timestamp: '2026-01-01T00:00:00.000Z', output: '旧 Runtime 正文', status: 'Completed' }, 1);
+  const inputs = [];
+  const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'old-runtime-owner', onCommand: () => ({ status: 'running' }), onData: async request => {
+    const result = await operations(request);
+    if (request.operation === 'read_project_journal' && request.input.nodeId === '__solo__') {
+      inputs.push(request.input);
+      const { revision: _revision, unchanged: _unchanged, ...legacy } = result;
+      return legacy;
+    }
+    return result;
+  } });
+  const engine = new SyncEngine(path.join(project, '.solopreneur/roadmap.csv'), path.join(project, '.solopreneur/project_journal.db'), path.resolve(__dirname, '..'), root);
+  try {
+    await engine.initAndSync({ history: 'skip' });
+    assert.equal((await engine.readAgentExecutionPage('__solo__', 20, 0)).logs[0].output, '旧 Runtime 正文');
+    assert.equal((await engine.readAgentExecutionPage('__solo__', 20, 0)).logs[0].output, '旧 Runtime 正文');
+    assert.deepEqual(inputs.map(input => input.knownRevision), [undefined, undefined]);
+  } finally { engine.close(); await server.close(); await operations.close(); store.close(); }
 });
 
 test('formal conversation pages remain usable with an unreadable retired journal', async t => {

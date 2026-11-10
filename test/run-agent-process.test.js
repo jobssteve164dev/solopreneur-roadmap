@@ -132,8 +132,12 @@ test('the shared packaged runner commits complete output and host completion wit
   let agent;
   try {
     const deadline = Date.now() + 10000;
-    while (!fs.existsSync(path.join(root, 'runtime', 'control.json'))) {
+    for (;;) {
       assert.equal(runtime.exitCode, null, errors); assert.ok(Date.now() < deadline, errors || 'Runtime must become ready');
+      try {
+        const health = await sendRuntimeControlCommand(root, 'health', { timeoutMs: 1000 });
+        if (health.ok && health.status === 'running') break;
+      } catch { /* The endpoint file can precede the listening control server. */ }
       await new Promise(resolve => setTimeout(resolve, 20));
     }
     const agentEnv = { ...process.env }; delete agentEnv.SOLOMAP_TERMINAL_DELIVERY_ID;
@@ -350,8 +354,12 @@ async function executionFixture(command, metadata = {}, initialOutput = '', runK
     runtime = spawn(process.execPath, [path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root], { stdio: 'pipe' });
     runtime.stdout.resume(); let runtimeErrors = ''; runtime.stderr.on('data', b => { runtimeErrors += b; });
     const deadline = Date.now() + 10000;
-    while (!fs.existsSync(path.join(root, 'runtime', 'control.json'))) {
+    for (;;) {
       assert.equal(runtime.exitCode, null, runtimeErrors); assert.ok(Date.now() < deadline, runtimeErrors || 'Runtime readiness');
+      try {
+        const health = await sendRuntimeControlCommand(root, 'health', { timeoutMs: 1000 });
+        if (health.ok && health.status === 'running') break;
+      } catch { /* The endpoint file can precede the listening control server. */ }
       await new Promise(resolve => setTimeout(resolve, 20));
     }
   };
@@ -939,7 +947,7 @@ test('sustained interactive output keeps database log batches bounded without re
     const head = await f.call('read_run_log_head', { stream: 'stdout' });
     const interactiveTransactions = head.nextSequence - initialHead.nextSequence;
     const transactionsPerSecond = interactiveTransactions * 1000 / elapsedMs;
-    assert.ok(transactionsPerSecond <= 35, `sustained interactive output created ${transactionsPerSecond.toFixed(1)} durable log transactions/second`);
+    assert.ok(transactionsPerSecond <= 7, `sustained interactive output created ${transactionsPerSecond.toFixed(1)} durable log transactions/second`);
     const durable = await f.call('read_run_log', { stream: 'stdout' });
     assert.match(Buffer.from(durable.bytes, 'base64').toString(), /typed:200/);
     agent.stdin.end('q');

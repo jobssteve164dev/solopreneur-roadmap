@@ -125,7 +125,10 @@ test('captureRunLog durably flushes a quiet stream before the next chunk arrives
 });
 
 test('the batching profile isolates low latency to formal interactive PTY output', () => {
-  assert.equal(runLogBatchMaxDelayFor({ terminal: true, executionKind: 'formal', stream: 'stdout' }), interactiveRunLogBatchMaxDelayMs);
+  assert.ok(interactiveRunLogBatchMaxDelayMs >= 150 && interactiveRunLogBatchMaxDelayMs <= 160,
+    'interactive persistence must amortize SQLite transactions instead of committing terminal frames at display cadence');
+  assert.equal(runLogBatchMaxDelayFor({ terminal: true, executionKind: 'formal', stream: 'stdout' }),
+    interactiveRunLogBatchMaxDelayMs);
   assert.equal(runLogBatchMaxDelayFor({ terminal: false, executionKind: 'formal', stream: 'stdout' }), runLogBatchMaxDelayMs);
   assert.equal(runLogBatchMaxDelayFor({ terminal: true, executionKind: 'preflight', stream: 'stdout' }), runLogBatchMaxDelayMs);
   assert.equal(runLogBatchMaxDelayFor({ terminal: true, executionKind: 'formal', stream: 'stderr' }), runLogBatchMaxDelayMs);
@@ -165,7 +168,7 @@ test('interactive capture bounds ordinary small-frame persistence frequency', as
   await capturing;
   const elapsedMs = Date.now() - startedAt;
   const transactionsPerSecond = batches * 1_000 / elapsedMs;
-  assert.ok(transactionsPerSecond <= 35,
+  assert.ok(transactionsPerSecond <= 7,
     `interactive batching persisted ${transactionsPerSecond.toFixed(1)} transactions per second`);
 });
 
