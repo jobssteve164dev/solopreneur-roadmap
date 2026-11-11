@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.652 - 2026-11-11
+
+### Fixed
+- show Source branch automatically and align card styling (2ee519d)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.651 - 2026-11-10
 
 ### Fixed
