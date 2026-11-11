@@ -2915,14 +2915,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       background: rgba(0, 229, 255, 0.07);
     }
 
-    .project-source-panel {
-      margin-top: 8px;
-      border: 1px solid rgba(255,255,255,0.09);
-      border-radius: 6px;
-      background: rgba(0,0,0,0.12);
-      cursor: default;
-    }
-
     .source-panel-header,
     .source-toolbar,
     .source-create-row,
@@ -2933,17 +2925,10 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     .source-panel-header {
-      width: 100%;
-      justify-content: space-between;
-      border: 0;
-      padding: 7px 8px;
-      color: var(--text-main);
-      background: transparent;
-      cursor: pointer;
-      text-align: left;
+      gap: 10px;
     }
 
-    .source-panel-header:focus-visible,
+    .source-panel-header button:focus-visible,
     .source-toolbar button:focus-visible,
     .source-create-row button:focus-visible,
     .source-branch-row button:focus-visible,
@@ -2953,25 +2938,15 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       outline-offset: 1px;
     }
 
-    .source-panel-title {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 11px;
-      font-weight: 700;
-    }
-
     .source-panel-summary {
       min-width: 0;
-      color: var(--text-muted);
-      font-size: 10px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      background: rgba(0, 176, 255, 0.15);
+      color: #90caf9;
+      border-color: rgba(0, 176, 255, 0.25);
     }
 
     .source-panel-body {
-      padding: 0 8px 8px;
+      margin-top: 8px;
       border-top: 1px solid rgba(255,255,255,0.07);
     }
 
@@ -2988,24 +2963,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     .source-create-row input {
       min-width: 0;
       flex: 1;
-      border: 1px solid rgba(255,255,255,0.12);
-      border-radius: 5px;
-      padding: 6px 7px;
-      background: rgba(0,0,0,0.18);
-      color: var(--text-main);
-      font: inherit;
-    }
-
-    .source-toolbar button,
-    .source-create-row button,
-    .source-branch-row button {
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 5px;
-      padding: 5px 7px;
-      background: rgba(255,255,255,0.045);
-      color: var(--text-main);
-      font: inherit;
-      cursor: pointer;
     }
 
     .source-toolbar button:disabled,
@@ -9095,6 +9052,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             }
             renderSidebar(currentNodes);
           }
+          scheduleSelectedProjectSourceRead();
           break;
         case 'nodesUpdated':
           if (Number(message.projectGeneration) < projectGeneration) break;
@@ -9348,6 +9306,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
             coreDiagnosticTraceId = message.projects.diagnosticTraceId;
             reportSidebarCoreReady();
           }
+          scheduleSelectedProjectSourceRead();
           break;
 
         case 'projectIssuesLoaded':
@@ -11980,7 +11939,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function sourceCurrentLabel(state) {
       const snapshot = state.snapshot;
-      if (!snapshot) return currentLanguage === 'zh' ? '未读取' : 'Not loaded';
+      if (!snapshot) return state.error
+        ? (currentLanguage === 'zh' ? '暂时无法读取' : 'Temporarily unavailable')
+        : (currentLanguage === 'zh' ? '读取中…' : 'Loading…');
       if (!snapshot.available) return snapshot.unavailableReason === 'read_error'
         ? (currentLanguage === 'zh' ? '暂时无法读取' : 'Temporarily unavailable')
         : (currentLanguage === 'zh' ? '未启用 Git' : 'Git not available');
@@ -12021,7 +11982,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         + escapeHtml(currentLanguage === 'zh' ? '没有匹配的本地分支。' : 'No matching local branches.') + '</div>';
       return branches.map(branch => '<div class="source-branch-row ' + (branch.current ? 'is-current' : '') + '" data-source-branch="' + escapeHtml(branch.name) + '">'
         + '<span class="source-branch-name" title="' + escapeHtml(branch.name) + '">' + escapeHtml(branch.name) + '</span>'
-        + '<button type="button" data-switch-source-branch="' + escapeHtml(branch.name) + '" '
+        + '<button type="button" class="portfolio-issue-action" data-switch-source-branch="' + escapeHtml(branch.name) + '" '
         + (branch.current || state.actionPending ? 'disabled ' : '')
         + (branch.current ? 'aria-current="true"' : '') + '>'
         + escapeHtml(branch.current ? (currentLanguage === 'zh' ? '当前' : 'Current') : (currentLanguage === 'zh' ? '切换' : 'Switch'))
@@ -12031,32 +11992,35 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     function renderProjectSourcePanel(project) {
       const state = projectSourceState(project.path);
       const bodyId = sourcePanelBodyId(project.path);
-      return '<section class="project-source-panel" data-source-panel="' + escapeHtml(project.path) + '">'
-        + '<button type="button" class="source-panel-header" data-toggle-source-panel="' + escapeHtml(project.path) + '" '
-        + 'aria-expanded="' + (state.expanded ? 'true' : 'false') + '" aria-controls="' + bodyId + '">'
-        + '<span class="source-panel-title"><span class="codicon codicon-source-control"></span>Source</span>'
-        + '<span class="source-panel-summary" data-source-current-branch>' + escapeHtml(sourceCurrentLabel(state)) + '</span>'
+      const currentLabel = sourceCurrentLabel(state);
+      const toggleLabel = (currentLanguage === 'zh' ? (state.expanded ? '收起' : '展开') : (state.expanded ? 'Collapse' : 'Expand')) + ' Source · ' + currentLabel;
+      return '<section class="portfolio-delivery-panel project-source-panel" data-source-panel="' + escapeHtml(project.path) + '">'
+        + '<div class="delivery-collapsed-row source-panel-header">'
+        + '<div class="delivery-title-wrapper"><span class="codicon codicon-source-control delivery-rocket-icon" aria-hidden="true"></span><span class="delivery-panel-title">Source</span></div>'
+        + '<span class="delivery-status-badge source-panel-summary" data-source-current-branch role="status" title="' + escapeHtml(currentLabel) + '">' + escapeHtml(currentLabel) + '</span>'
+        + '<button type="button" class="delivery-toggle-btn" data-toggle-source-panel="' + escapeHtml(project.path) + '" '
+        + 'aria-expanded="' + (state.expanded ? 'true' : 'false') + '" aria-controls="' + bodyId + '" aria-label="' + escapeHtml(toggleLabel) + '" title="' + escapeHtml(toggleLabel) + '">'
         + '<span class="codicon ' + (state.expanded ? 'codicon-chevron-up' : 'codicon-chevron-down') + '" aria-hidden="true"></span>'
-        + '</button>'
+        + '</button></div>'
         + '<div class="source-panel-body" id="' + bodyId + '" ' + (state.expanded ? '' : 'hidden') + '>'
         + '<div class="source-toolbar">'
-        + '<input type="search" data-source-search value="' + escapeHtml(state.search) + '" placeholder="'
+        + '<input type="search" class="portfolio-issue-input" data-source-search value="' + escapeHtml(state.search) + '" placeholder="'
         + escapeHtml(currentLanguage === 'zh' ? '搜索本地分支' : 'Search local branches') + '" aria-label="'
         + escapeHtml(currentLanguage === 'zh' ? '搜索本地分支' : 'Search local branches') + '">'
-        + '<button type="button" data-refresh-source title="' + escapeHtml(currentLanguage === 'zh' ? '刷新本地分支' : 'Refresh local branches') + '" '
+        + '<button type="button" class="portfolio-issue-action" data-refresh-source title="' + escapeHtml(currentLanguage === 'zh' ? '刷新本地分支' : 'Refresh local branches') + '" '
         + ((state.loading || state.actionPending) ? 'disabled' : '') + '>' + escapeHtml(currentLanguage === 'zh' ? '刷新' : 'Refresh') + '</button>'
-        + '<button type="button" data-open-source-scm>' + escapeHtml(currentLanguage === 'zh' ? '源代码管理' : 'Source Control') + '</button>'
+        + '<button type="button" class="portfolio-issue-action" data-open-source-scm>' + escapeHtml(currentLanguage === 'zh' ? '源代码管理' : 'Source Control') + '</button>'
         + '</div>'
         + '<div class="source-status-line ' + (state.error ? 'is-error' : '') + '" data-source-status '
         + (state.error ? 'role="alert"' : 'role="status"') + '>' + escapeHtml(sourceStatusText(state)) + '</div>'
         + '<div class="source-branch-list" data-source-branch-list aria-label="'
         + escapeHtml(currentLanguage === 'zh' ? '本地分支' : 'Local branches') + '">' + renderSourceBranchRows(state) + '</div>'
-        + '<div class="source-create-row"><button type="button" data-toggle-source-create>'
+        + '<div class="source-create-row"><button type="button" class="portfolio-issue-action" data-toggle-source-create>'
         + escapeHtml(currentLanguage === 'zh' ? '新建分支' : 'New branch') + '</button></div>'
         + '<div class="source-create-row" data-source-create-row ' + (state.createOpen ? '' : 'hidden') + '>'
-        + '<input type="text" data-source-create-input value="' + escapeHtml(state.createDraft) + '" placeholder="feature/my-change" aria-label="'
+        + '<input type="text" class="portfolio-issue-input" data-source-create-input value="' + escapeHtml(state.createDraft) + '" placeholder="feature/my-change" aria-label="'
         + escapeHtml(currentLanguage === 'zh' ? '新分支名称' : 'New branch name') + '">'
-        + '<button type="button" data-create-source-branch ' + ((!String(state.createDraft || '').trim() || state.actionPending) ? 'disabled' : '') + '>'
+        + '<button type="button" class="portfolio-issue-action" data-create-source-branch ' + ((!String(state.createDraft || '').trim() || state.actionPending) ? 'disabled' : '') + '>'
         + escapeHtml(currentLanguage === 'zh' ? '创建并切换' : 'Create and switch') + '</button>'
         + '</div></div></section>';
     }
@@ -12071,12 +12035,18 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       const body = panel.querySelector('.source-panel-body');
       if (toggle) {
         toggle.setAttribute('aria-expanded', state.expanded ? 'true' : 'false');
+        const label = (currentLanguage === 'zh' ? (state.expanded ? '收起' : '展开') : (state.expanded ? 'Collapse' : 'Expand')) + ' Source · ' + sourceCurrentLabel(state);
+        toggle.setAttribute('aria-label', label);
+        toggle.title = label;
         const icon = toggle.querySelector('.codicon-chevron-down, .codicon-chevron-up');
         if (icon) icon.className = 'codicon ' + (state.expanded ? 'codicon-chevron-up' : 'codicon-chevron-down');
       }
       if (body) body.hidden = !state.expanded;
       const current = panel.querySelector('[data-source-current-branch]');
-      if (current) current.textContent = sourceCurrentLabel(state);
+      if (current) {
+        current.textContent = sourceCurrentLabel(state);
+        current.title = sourceCurrentLabel(state);
+      }
       const status = panel.querySelector('[data-source-status]');
       if (status) {
         status.textContent = sourceStatusText(state);
@@ -12098,6 +12068,24 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       if (createInput && createInput !== document.activeElement && createInput.value !== state.createDraft) createInput.value = state.createDraft;
       const create = panel.querySelector('[data-create-source-branch]');
       if (create) create.disabled = !String(state.createDraft || '').trim() || state.actionPending;
+    }
+
+    function scheduleSelectedProjectSourceRead() {
+      const projectPath = currentProjects.selectedProjectPath;
+      const generation = projectGeneration;
+      if (!projectPath || pendingProjectSelectionPath) return;
+      const current = projectSourceState(projectPath);
+      if (current.requestId && current.requestGeneration === generation) return;
+      setTimeout(() => {
+        if (projectGeneration !== generation || currentProjects.selectedProjectPath !== projectPath || pendingProjectSelectionPath) return;
+        const state = projectSourceState(projectPath);
+        if (state.requestId && state.requestGeneration === generation) return;
+        if (state.requestGeneration !== generation) {
+          state.loading = false;
+          state.actionPending = false;
+        }
+        requestProjectSourceSnapshot(projectPath);
+      }, 0);
     }
 
     function requestProjectSourceSnapshot(projectPath) {
@@ -12142,7 +12130,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         event.stopPropagation();
         state.expanded = !state.expanded;
         updateProjectSourcePanel(projectPath);
-        if (state.expanded && !state.snapshot && !state.loading) requestProjectSourceSnapshot(projectPath);
+        if (state.expanded && !state.snapshot && !state.loading && !state.requestId && !pendingProjectSelectionPath) requestProjectSourceSnapshot(projectPath);
       });
       const search = panel.querySelector('[data-source-search]');
       if (search) {

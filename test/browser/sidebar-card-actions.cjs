@@ -2,13 +2,14 @@
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const vm = require('node:vm');
+const fs = require('node:fs');
 const { chromium } = require('playwright');
 
 const root = path.resolve(__dirname, '../..');
 const webview = { asWebviewUri: () => '', cspSource: '' };
 const uri = { fsPath: root };
 const projects = [
-  { path: '/fixture/a', name: 'Project A' },
+  { path: '/fixture/a', name: 'Project A', delivery: { available: true, recentWorkflowRuns: [] } },
   { path: '/fixture/b', name: 'Project B' }
 ];
 
@@ -17,7 +18,7 @@ const projects = [
   for (const script of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)) new vm.Script(script[1]);
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium', headless: true });
   try {
-    const page = await browser.newPage();
+    const page = await browser.newPage({ viewport: { width: 380, height: 1000 } });
     await page.route('**/*', route => route.abort());
     await page.evaluate(() => {
       window.messages = [];
@@ -28,6 +29,9 @@ const projects = [
       });
     });
     await page.setContent(html);
+    const codiconFont = fs.readFileSync(path.join(root, 'node_modules/@vscode/codicons/dist/codicon.ttf')).toString('base64');
+    await page.addStyleTag({ content: fs.readFileSync(path.join(root, 'node_modules/@vscode/codicons/dist/codicon.css'), 'utf8')
+      .replace(/url\("\.\/codicon\.ttf[^\"]*"\)/, 'url("data:font/ttf;base64,' + codiconFont + '")') });
     const send = message => page.evaluate(value => {
       window.dispatchEvent(new MessageEvent('message', { data: value }));
     }, message);
@@ -46,24 +50,23 @@ const projects = [
     const initialStateLoad = await page.evaluate(() => window.messages.filter(message => message.command === 'uiState.load').at(-1));
     assert.ok(initialStateLoad, 'the selected project state is loaded once');
     await send({ command: 'uiStateLoaded', view: 'sidebar', scopeKey: initialStateLoad.scopeKey, loadRequestId: initialStateLoad.loadRequestId, state: {} });
-    await page.evaluate(() => { window.messages = []; });
-
     const sourcePanel = page.locator('[data-source-panel="/fixture/a"]');
     const sourceToggle = page.locator('[data-toggle-source-panel="/fixture/a"]');
     assert.equal(await sourcePanel.count(), 1, 'the selected project exposes one Source panel');
     assert.equal(await sourceToggle.getAttribute('aria-expanded'), 'false', 'Source starts collapsed');
-    assert.equal(
-      await page.evaluate(() => window.messages.filter(message => message.command.startsWith('source.')).length),
-      0,
-      'project loading does not trigger Git work before the user opens Source'
-    );
-    await sourceToggle.click();
-    assert.equal(await sourceToggle.getAttribute('aria-expanded'), 'true', 'Source expands immediately');
+    await page.waitForFunction(() => window.messages.some(message => message.command === 'source.read'), null, { timeout: 2000 });
     const sourceReads = await page.evaluate(() => window.messages.filter(message => message.command === 'source.read'));
-    assert.equal(sourceReads.length, 1, 'the first explicit expansion requests one Source snapshot');
+    assert.equal(sourceReads.length, 1, 'the selected project loads Source once without expanding it');
     assert.equal(sourceReads[0].projectPath, '/fixture/a');
     assert.ok(sourceReads[0].requestId);
     assert.equal(sourceReads[0].sourceEpoch, 0);
+    const selectedCardBeforeSource = await page.locator('.portfolio-card.is-selected').elementHandle();
+    const composerBeforeSource = await page.locator('[data-project-conversation-input]').elementHandle();
+    await page.locator('[data-project-conversation-input]').fill('分支读取期间保留输入');
+    await page.locator('[data-project-conversation-input]').focus();
+    await loadProjects();
+    assert.equal(await page.evaluate(() => window.messages.filter(message => message.command === 'source.read').length), 1,
+      'ordinary project updates reuse the pending read');
     await send({
       command: 'sourceSnapshotResolved',
       projectPath: '/fixture/a',
@@ -77,7 +80,39 @@ const projects = [
       }
     });
     assert.equal(await page.locator('[data-source-current-branch]').textContent(), 'main');
+    assert.equal(await sourceToggle.getAttribute('aria-expanded'), 'false', 'current branch is visible while Source stays collapsed');
+    assert.equal(await page.locator('[data-source-current-branch]').isVisible(), true);
+    assert.equal(await selectedCardBeforeSource.evaluate(element => element.isConnected), true, 'Source readback preserves the selected card');
+    assert.equal(await composerBeforeSource.evaluate(element => element.isConnected && document.activeElement === element), true,
+      'Source readback preserves the active conversation input');
+    assert.equal(await page.locator('[data-project-conversation-input]').inputValue(), '分支读取期间保留输入');
+    const sourceAppearance = await sourcePanel.evaluate(element => {
+      const style = getComputedStyle(element);
+      const actions = getComputedStyle(document.querySelector('[data-delivery-action-panel]'));
+      const toggle = getComputedStyle(element.querySelector('[data-toggle-source-panel]'));
+      const issueToggle = getComputedStyle(document.querySelector('[data-toggle-issue-panel]'));
+      return { radius: style.borderRadius, padding: style.padding, actionsRadius: actions.borderRadius, actionsPadding: actions.padding,
+        toggleWidth: toggle.width, toggleHeight: toggle.height, issueToggleWidth: issueToggle.width, issueToggleHeight: issueToggle.height };
+    });
+    assert.equal(sourceAppearance.radius, sourceAppearance.actionsRadius, 'Source shares Actions card corners');
+    assert.equal(sourceAppearance.padding, sourceAppearance.actionsPadding, 'Source shares Actions card spacing');
+    assert.equal(sourceAppearance.toggleWidth, sourceAppearance.issueToggleWidth, 'Source shares Issues disclosure width');
+    assert.equal(sourceAppearance.toggleHeight, sourceAppearance.issueToggleHeight, 'Source shares Issues disclosure height');
+    const sourceIcon = await sourcePanel.locator('.codicon-source-control').evaluate(element => getComputedStyle(element, '::before').content);
+    const actionIcon = await page.locator('[data-delivery-action-panel] .codicon-rocket').evaluate(element => getComputedStyle(element, '::before').content);
+    assert.notEqual(sourceIcon, actionIcon, 'Source keeps its branch icon while Actions keeps its rocket icon');
+    assert.match(await sourceToggle.getAttribute('aria-label'), /main/, 'keyboard users can read the full branch from the disclosure');
+    if (process.env.SOURCE_CARD_SCREENSHOT_DIR) {
+      await page.locator('.portfolio-card.is-selected').screenshot({ path: path.join(process.env.SOURCE_CARD_SCREENSHOT_DIR, 'source-collapsed.png') });
+    }
+    await sourceToggle.click();
+    assert.equal(await sourceToggle.getAttribute('aria-expanded'), 'true', 'Source expands immediately');
+    assert.equal(await page.evaluate(() => window.messages.filter(message => message.command === 'source.read').length), 1,
+      'expansion reuses the automatically loaded snapshot');
     assert.equal(await page.locator('[data-source-branch]').count(), 2);
+    if (process.env.SOURCE_CARD_SCREENSHOT_DIR) {
+      await page.locator('.portfolio-card.is-selected').screenshot({ path: path.join(process.env.SOURCE_CARD_SCREENSHOT_DIR, 'source-expanded.png') });
+    }
     const sourceSearch = page.locator('[data-source-search]');
     await sourceSearch.fill('feature');
     assert.equal(await page.locator('[data-source-branch]:visible').count(), 1, 'branch search filters locally without another Git request');
@@ -220,16 +255,43 @@ const projects = [
     await selectB.click();
     const selectBMessage = await page.evaluate(() => window.messages.filter(message => message.command === 'project.select').at(-1));
     await send({ command: 'projectSelectionChanged', projectRoot: '/fixture/b', generation: 1, interactionId: selectBMessage.interactionId });
+    await page.waitForFunction(() => window.messages.some(message => message.command === 'source.read' && message.projectPath === '/fixture/b'));
+    const sourceBRead = await page.evaluate(() => window.messages.filter(message => message.command === 'source.read' && message.projectPath === '/fixture/b').at(-1));
+    assert.equal(sourceBRead.projectGeneration, 1, 'automatic reads wait for the selected project generation');
+    await send({ command: 'sourceSnapshotResolved', projectPath: '/fixture/b', requestId: sourceBRead.requestId, projectGeneration: 1,
+      sourceEpoch: 0, error: 'action_failed' });
+    assert.match(await page.locator('[data-source-current-branch]').textContent(), /暂时无法读取/,
+      'a failed automatic read settles the collapsed loading badge');
+    await send({ command: 'projectsLoaded', projects: { projects, portfolio: projects, selectedProjectPath: '/fixture/b', projectGeneration: 1 } });
+    assert.equal(await page.evaluate(() => window.messages.filter(message => message.command === 'source.read' && message.projectPath === '/fixture/b').length), 1,
+      'a failed automatic read does not loop on background updates');
+    await page.locator('[data-toggle-source-panel="/fixture/b"]').click();
+    await page.locator('[data-refresh-source]').click();
+    const retryBRead = await page.evaluate(() => window.messages.filter(message => message.command === 'source.read' && message.projectPath === '/fixture/b').at(-1));
+    assert.notEqual(retryBRead.requestId, sourceBRead.requestId, 'manual refresh retries a failed automatic read');
+    await send({ command: 'sourceSnapshotResolved', projectPath: '/fixture/b', requestId: retryBRead.requestId, projectGeneration: 1,
+      sourceEpoch: 0, snapshot: { available: true, currentBranch: '', detachedHead: 'abc1234', branches: [] } });
+    assert.equal(await page.locator('[data-source-current-branch]').textContent(), 'HEAD abc1234');
+    await page.locator('[data-toggle-source-panel="/fixture/b"]').click();
+    assert.equal(await page.locator('[data-source-current-branch]').isVisible(), true, 'detached HEAD remains visible when collapsed');
     await page.locator('[data-select-project-path="/fixture/a"]').click();
     const selectAMessage = await page.evaluate(() => window.messages.filter(message => message.command === 'project.select').at(-1));
     await send({ command: 'projectSelectionChanged', projectRoot: '/fixture/a', generation: 2, interactionId: selectAMessage.interactionId });
+    await page.waitForFunction(() => window.messages.some(message => message.command === 'source.read' && message.projectGeneration === 2));
+    const returnedARead = await page.evaluate(() => window.messages.filter(message => message.command === 'source.read' && message.projectGeneration === 2).at(-1));
     await send({
       command: 'sourceSnapshotResolved', projectPath: '/fixture/a', requestId: abaRead.requestId,
       projectGeneration: 0, sourceEpoch: 4,
       snapshot: { available: true, currentBranch: 'stale-aba', detachedHead: '', branches: [{ name: 'stale-aba', current: true }] }
     });
     assert.equal(await page.locator('[data-source-current-branch]').textContent(), 'main', 'A→B→A rejects the earlier A generation');
-    assert.equal(await page.locator('[data-refresh-source]').isDisabled(), false, 'generation invalidation clears the obsolete loading state');
+    await send({ command: 'sourceSnapshotResolved', projectPath: '/fixture/b', requestId: sourceBRead.requestId, projectGeneration: 1,
+      sourceEpoch: 0, snapshot: { available: true, currentBranch: 'other-project', detachedHead: '', branches: [] } });
+    assert.equal(await page.locator('[data-source-current-branch]').textContent(), 'main', 'a late automatic read cannot change another project');
+    await send({ command: 'sourceSnapshotResolved', projectPath: '/fixture/a', requestId: returnedARead.requestId, projectGeneration: 2,
+      sourceEpoch: 4, snapshot: { available: true, currentBranch: 'main', detachedHead: '',
+        branches: [{ name: 'main', current: true }, { name: 'feature/source', current: false }] } });
+    assert.equal(await page.locator('[data-refresh-source]').isDisabled(), false, 'the current generation read settles loading');
 
     await page.locator('[data-switch-source-branch="feature/source"]').click();
     const failedSwitch = await page.evaluate(() => window.messages.filter(message => message.command === 'source.switchBranch').at(-1));
@@ -255,6 +317,8 @@ const projects = [
 
     await page.evaluate(() => { window.messages = []; });
     await loadProjects([{ ...projects[1], description: 'background update' }], [projects[1].path]);
+    assert.equal(await page.evaluate(() => window.messages.filter(message => message.command === 'source.read').length), 0,
+      'background project updates do not restart settled Source reads');
     assert.equal(
       await page.evaluate(() => window.messages.filter(message => message.command === 'uiState.load').length),
       0,
@@ -364,7 +428,7 @@ const projects = [
     );
     await securityPage.close();
 
-    console.log(JSON.stringify({ stableUiStateLoads: true, pointerActionSurvivesRefresh: true, keyboardActionWorks: true, focusedInputSurvivesRefresh: true, securityActionEscapesRender: true }));
+    console.log(JSON.stringify({ collapsedBranchLoadsAutomatically: true, sourceMatchesAdjacentCards: true, stableUiStateLoads: true, pointerActionSurvivesRefresh: true, keyboardActionWorks: true, focusedInputSurvivesRefresh: true, securityActionEscapesRender: true }));
   } finally {
     await browser.close();
   }
