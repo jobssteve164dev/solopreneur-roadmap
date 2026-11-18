@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const { buildAgentImpactSummaryFromDatabase } = require('../out/agentImpact.js');
 
@@ -21,6 +21,16 @@ function cleanupExact(root) {
   inventory(root);
   files.forEach(file => fs.unlinkSync(file));
   directories.sort((left, right) => right.length - left.length).forEach(directory => fs.rmdirSync(directory));
+}
+
+function enableFixtureCollection(store) {
+  store.beginContentPreparationRecovery();
+  for (let index = 0; index < 2000; index++) {
+    const batch = store.prepareStorageReferenceBatch(128);
+    store.commitStorageReferenceBatch(batch);
+    if (!batch.pending) { store.activateStorageContentLifecycle(); return; }
+  }
+  assert.fail('fixture reference projection did not converge');
 }
 
 async function fixture(action) {
@@ -136,7 +146,7 @@ test('explicit raw history import restores old-only contribution and full token 
   fs.renameSync(source, `${source}-retained`); assert.deepEqual(await read(), first);
 }));
 
-test('storage maintenance classifies retained run data and removes previously imported byproducts without touching source files', () => fixture(async ({ workspace, project, store, ops }) => {
+test('storage maintenance removes byproduct metadata, preserves captured history and reclaims unreferenced bodies without touching source files', () => fixture(async ({ workspace, project, store, ops }) => {
   const crypto = require('node:crypto');
   const sourceRoot = path.join(workspace, '.solopreneur', 'agent-runs');
   const run = path.join(sourceRoot, '__solo__', '44'); fs.mkdirSync(path.join(run, 'evidence'), { recursive: true });
@@ -158,6 +168,8 @@ test('storage maintenance classifies retained run data and removes previously im
     store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 1000 + index, repeatedPath, promptContentId, crypto.createHash('sha256').update(prompt).digest('hex'), 'application/octet-stream', now]);
     store.captureMigrationSource({ identity: `agent-runs:${workspace}-${index}`, key: repeatedPath, hash: crypto.createHash('sha256').update(prompt).digest('hex') }, prompt, { mimeType: 'application/octet-stream', encoding: 'binary' });
   }
+  const unreferencedBytes = crypto.randomBytes(192 * 1024), unreferencedId = put(unreferencedBytes);
+  store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 44, '__solo__/44/evidence/unreferenced.vsix', unreferencedId, crypto.createHash('sha256').update(unreferencedBytes).digest('hex'), 'application/octet-stream', now]);
   assert.match(String(store.rows("EXPLAIN QUERY PLAN SELECT 1 FROM project_run_artifacts WHERE artifact_kind IN ('unclassified','byproduct') LIMIT 1")[0].detail), /project_run_artifacts_kind/);
   assert.match(String(store.rows("EXPLAIN QUERY PLAN SELECT 1 FROM migration_items WHERE source_identity LIKE 'agent-runs:%' AND source_kind IN ('unclassified','byproduct') LIMIT 1")[0].detail), /migration_items_source_kind/);
   const artifactUnclassified = Number(store.rows("SELECT COUNT(*) AS count FROM project_run_artifacts WHERE artifact_kind='unclassified'")[0].count);
@@ -165,19 +177,24 @@ test('storage maintenance classifies retained run data and removes previously im
   const before = await ops({ operation: 'read_database_storage', input: {} });
   assert.equal(Number(store.rows("SELECT COUNT(*) AS count FROM project_run_artifacts WHERE artifact_kind='unclassified'")[0].count), artifactUnclassified, 'a storage read must not classify or rewrite artifacts');
   assert.equal(Number(store.rows("SELECT COUNT(*) AS count FROM migration_items WHERE source_kind='unclassified'")[0].count), sourceUnclassified, 'a storage read must not classify or rewrite migration sources');
-  assert.equal(before.runArtifacts.byKind.unclassified.records, 604); assert.equal(before.runArtifacts.pendingByproductRecords, 604);
+  assert.equal(before.runArtifacts.byKind.unclassified.records, 605); assert.equal(before.runArtifacts.pendingByproductRecords, 605);
   assert.equal(before.migrationSources.byKind.byproduct.records, 602); assert.equal(before.migrationSources.pendingByproductRecords, 602);
+  enableFixtureCollection(store);
+  const contentsBefore = Number(store.rows('SELECT COUNT(*) AS n FROM contents')[0].n);
   const cleaned = await ops({ operation: 'maintain_database_storage', input: { compact: false } });
-  assert.equal(cleaned.deletedArtifacts, 603); assert.equal(cleaned.deletedSources, 602); assert.equal(cleaned.deletedContents, 1);
-  assert.ok(cleaned.reclaimedStoredBytes >= byproduct.length); assert.equal(cleaned.pendingByproductRecords, 0);
+  assert.equal(cleaned.deletedArtifacts, 604); assert.equal(cleaned.deletedSources, 602);
+  assert.ok(cleaned.deletedContents >= 1);
+  assert.equal(cleaned.deletedContents, contentsBefore - Number(store.rows('SELECT COUNT(*) AS n FROM contents')[0].n), 'reported deletions match actual physical content exits, including other released preparation bodies');
+  assert.equal(store.rows('SELECT id FROM contents WHERE id=?', [unreferencedId]).length, 0);
+  assert.ok(cleaned.reclaimedStoredBytes >= unreferencedBytes.length, JSON.stringify(cleaned)); assert.equal(cleaned.pendingByproductRecords, 0);
   assert.equal(Buffer.from(store.readRunArtifact(project, 44, promptPath).bytes, 'base64').toString(), prompt.toString());
   assert.equal(store.readRunArtifact(project, 44, byproductPath), null);
-  assert.equal(store.rows('SELECT id FROM contents WHERE id=?', [byproductContentId]).length, 0);
+  assert.deepEqual(store.content(byproductContentId), byproduct, 'the migration capture event retains its complete original body through its JSON reference');
   assert.deepEqual(fs.readFileSync(path.join(run, 'evidence', 'release.vsix')), byproduct, 'database cleanup never deletes legacy source files');
   const after = await ops({ operation: 'read_database_storage', input: {} });
   assert.equal(after.runArtifacts.byKind.prompt.records, 1); assert.equal(after.runArtifacts.pendingByproductRecords, 0);
   assert.equal(after.migrationSources.byKind.prompt.records, 1); assert.equal(after.migrationSources.pendingByproductRecords, 0);
-  assert.equal(after.lastMaintenance.deletedArtifacts, 603); assert.equal(after.lastMaintenance.deletedSources, 602);
+  assert.equal(after.lastMaintenance.deletedArtifacts, 604); assert.equal(after.lastMaintenance.deletedSources, 602);
   assert.equal(after.lastMaintenance.status, 'completed'); assert.equal(after.lastMaintenance.error, '');
   assert.equal(cleaned.compacted, false, 'online cleanup must not obtain an exclusive VACUUM on the interactive Runtime');
   const repeated = await ops({ operation: 'maintain_database_storage', input: { compact: false } });
@@ -206,16 +223,15 @@ test('project registration replay has an indexed event request lookup', () => fi
   assert.equal(indexed, true, 'registering existing projects must not scan the complete event history');
 }));
 
-test('database compaction reserves space for both the vacuum image and WAL commit', () => fixture(async ({ store }) => {
-  const pageSize = Number(store.rows('PRAGMA page_size')[0].page_size);
-  const usedPages = Number(store.rows('PRAGMA page_count')[0].page_count) - Number(store.rows('PRAGMA freelist_count')[0].freelist_count);
-  const available = Math.ceil(usedPages * pageSize * 1.5 + 64 * 1024 * 1024);
-  const originalStatfs = fs.statfsSync;
-  fs.statfsSync = () => ({ bavail: available, bsize: 1 });
+test('retired Source compaction performs no checkpoint, vacuum or whole-database integrity scan', () => fixture(async ({ store }) => {
+  const run = store.db.run.bind(store.db), rows = store.rows.bind(store);
+  const check = sql => assert.doesNotMatch(String(sql), /VACUUM|wal_checkpoint|integrity_check|foreign_key_check/i, 'the supported generation path owns exclusive physical database maintenance');
+  store.db.run = (sql, values) => { check(sql); return run(sql, values); };
+  store.rows = (sql, values) => { check(sql); return rows(sql, values); };
   try {
-    assert.throws(() => store.compactDatabaseStorage(), /database_compaction_space_insufficient/);
+    assert.throws(() => store.compactDatabaseStorage(), /runtime_online_compaction_retired/);
   } finally {
-    fs.statfsSync = originalStatfs;
+    store.db.run = run; store.rows = rows;
   }
 }));
 
@@ -325,7 +341,7 @@ test('storage maintenance preserves vanished temporary projects with metadata, o
   }
 }));
 
-test('storage maintenance checks shared content references once after multiple cleanup batches', () => fixture(async ({ project, store, ops }) => {
+test('storage maintenance uses the unified collector after multiple metadata cleanup batches without legacy reference sweeps', () => fixture(async ({ project, store, ops }) => {
   const crypto = require('node:crypto'), bytes = Buffer.from('repeated task byproduct');
   const contentId = store.putContent(bytes, 'application/octet-stream', 'binary'), hash = crypto.createHash('sha256').update(bytes).digest('hex');
   store.db.run('BEGIN');
@@ -333,15 +349,17 @@ test('storage maintenance checks shared content references once after multiple c
     for (let index = 0; index < 5001; index++) store.db.run('INSERT INTO project_run_artifacts(project_id,execution_log_id,relative_path,content_id,sha256,mime_type,updated_at) VALUES(?,?,?,?,?,?,?)', [project, 44, `__solo__/44/evidence/${index}.tmp`, contentId, hash, 'application/octet-stream', Date.now()]);
     store.db.run('COMMIT');
   } catch (error) { store.db.run('ROLLBACK'); throw error; }
-  const referenceTables = store.rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-    .flatMap(row => store.rows(`PRAGMA foreign_key_list(${row.name})`).filter(foreignKey => foreignKey.table === 'contents' && row.name !== 'content_chunks')).length;
+  enableFixtureCollection(store);
+  const contentsBefore = Number(store.rows('SELECT COUNT(*) AS n FROM contents')[0].n);
   const originalRun = store.db.run.bind(store.db); let referenceSweeps = 0;
   store.db.run = (sql, values) => { if (String(sql).startsWith('DELETE FROM database_storage_cleanup_candidates WHERE content_id IN') && !String(sql).includes('storage_cleanup_batch')) referenceSweeps++; return originalRun(sql, values); };
   let cleaned;
   try { cleaned = await ops({ operation: 'maintain_database_storage', input: { compact: false } }); }
   finally { store.db.run = originalRun; }
-  assert.equal(cleaned.deletedArtifacts, 5001); assert.equal(cleaned.deletedContents, 1);
-  assert.equal(referenceSweeps, referenceTables, 'reference tables are swept once for the complete cleanup, not once per batch');
+  assert.equal(cleaned.deletedArtifacts, 5001); assert.ok(cleaned.deletedContents >= 1);
+  assert.equal(cleaned.deletedContents, contentsBefore - Number(store.rows('SELECT COUNT(*) AS n FROM contents')[0].n));
+  assert.equal(referenceSweeps, 0, 'metadata cleanup must not fall back to the retired collector');
+  assert.equal(store.rows('SELECT 1 FROM contents WHERE id=?', [contentId]).length, 0);
 }));
 
 test('direct references empty the cleanup queue before any historical JSON scan', () => fixture(async ({ project, store, ops }) => {
@@ -501,9 +519,13 @@ test('interrupted storage cleanup records failure and resumes its persistent con
   assert.equal(store.cleanupDatabaseStorageBatch(5000, interruptedId).deletedArtifacts, 1);
   const running = store.rows('SELECT status,deleted_artifacts FROM database_storage_maintenance WHERE id=?', [interruptedId])[0];
   assert.equal(running.status, 'running'); assert.equal(running.deleted_artifacts, 1);
-  assert.equal(store.rows('SELECT COUNT(*) AS count FROM database_storage_cleanup_candidates')[0].count, 1);
+  assert.equal(store.rows('SELECT COUNT(*) AS count FROM database_storage_cleanup_candidates')[0].count, 0);
+  assert.equal(store.rows('SELECT 1 FROM content_lifecycle_gc_pending WHERE content_id=?', [contentId]).length, 1);
+  enableFixtureCollection(store);
+  const contentsBefore = Number(store.rows('SELECT COUNT(*) AS n FROM contents')[0].n);
   const resumed = await ops({ operation: 'maintain_database_storage', input: { compact: false } });
-  assert.equal(resumed.deletedContents, 1); assert.equal(store.rows('SELECT id FROM contents WHERE id=?', [contentId]).length, 0);
+  assert.ok(resumed.deletedContents >= 1); assert.equal(store.rows('SELECT id FROM contents WHERE id=?', [contentId]).length, 0);
+  assert.equal(resumed.deletedContents, contentsBefore - Number(store.rows('SELECT COUNT(*) AS n FROM contents')[0].n));
   const failed = store.rows('SELECT status,error,deleted_artifacts FROM database_storage_maintenance WHERE id=?', [interruptedId])[0];
   assert.equal(failed.status, 'failed'); assert.equal(failed.error, 'maintenance_interrupted'); assert.equal(failed.deleted_artifacts, 1);
   assert.equal(store.rows("SELECT COUNT(*) AS count FROM database_storage_maintenance WHERE status='completed'")[0].count, 1);
@@ -633,8 +655,8 @@ for (const rawFirst of [true, false]) test(`digest and raw imports retain missin
   const digestRoot = path.join(workspace, '.solopreneur', 'run-digests'); fs.mkdirSync(digestRoot);
   fs.writeFileSync(path.join(digestRoot, '12.json'), JSON.stringify({ schemaVersion: 2, runId: 'solo:12', executionLogId: 12, nodeId: '__solo__', runKind: 'solo', agentCli: 'codex', status: 'Completed', startedAt: '2026-10-09T09:00:00Z', finishedAt: '2026-10-09T09:03:00Z', durationMs: 180000, changedFiles: ['digest-result.js'], tokenUsage: { totalTokens: 0 }, rawRefs: { executionLogId: 12, outputPath: '.solopreneur/agent-runs/__solo__/12/output.log' } }));
   const collections = rawFirst ? ['agent-runs', 'run-digests'] : ['run-digests', 'agent-runs'];
-  const healthDuring = []; const importDigest = store.importRunDigestSource.bind(store);
-  store.importRunDigestSource = (...args) => { const result = importDigest(...args); healthDuring.push(store.readRunIndexHealth(args[0]).ok); return result; };
+  const healthDuring = []; const importDigest = store.publishCapturedRunDigest.bind(store);
+  store.publishCapturedRunDigest = async (...args) => { const result = await importDigest(...args); healthDuring.push(store.readRunIndexHealth(args[0]).ok); return result; };
   for (const collection of collections) { const job = await ops({ operation: 'import_project_data', input: { collection, projectRoot: workspace, sourceRoot: collection === 'agent-runs' ? source : digestRoot, idempotencyKey: `impact-order:${rawFirst}:${collection}` } }); await ops.waitForMigrations(); assert.equal(store.readMigrationJob(job.jobId).status, 'completed'); }
   assert.equal(healthDuring[0], false);
   const result = await read(); assert.equal(result.totalRuns, 1); assert.equal(result.totalTokens, 12345); assert.equal(result.completedRuns, 1); assert.equal(result.totalMinutes, 3); assert.equal(result.changedFiles, 1);

@@ -1,6 +1,7 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import { isDeepStrictEqual } from 'util';
 
 import { buildProjectPortfolioSummaries, ProjectPortfolioSummary, RoadmapNodeLike } from './projectPortfolio';
 import { cognitiveRuntimeConfigRevision, readCognitiveRuntimeConfig } from './cognitiveRuntimeConfig';
@@ -8,6 +9,7 @@ import { getProjectsReadOnly, normalizeGlobalDataPathForExtension, refreshProjec
 import { sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import type { RuntimeDataOperations } from './runtimeDataOperations';
 import { isProcessOwnerAlive, readProcessBirthMarker } from './processIdentity.js';
+import { todayRegistryRevision, todayRoadmapRevision, todayRoadmapSnapshotRevision, todaySourceRevision, type TodayLearningInput } from './todayDecisionInputs.js';
 
 const SHADOW_ALGORITHM_VERSION = 'today-shadow-v1';
 const shadowDecisions = new Map<string, ShadowDecision>();
@@ -24,6 +26,7 @@ export interface ShadowRecommendation {
   action: 'open_project' | 'continue_step';
   evidence: string[];
   score: number;
+  blockedActions?: Array<{ nodeId: string; title: string; reason: string }>;
 }
 
 export interface ShadowDecision {
@@ -35,6 +38,7 @@ export interface ShadowDecision {
   algorithmVersion: string;
   sourceRevision: string;
   projectRevision?: string;
+  sourceRegistryRevision?: string;
   projectCount: number;
   readOnly: true;
   baselineProjectPath: string;
@@ -45,6 +49,8 @@ export interface ShadowDecision {
   ledgerEventCount?: number;
   ledgerCandidateCount?: number;
   confirmedLearningCount?: number;
+  blockedDependencyCount?: number;
+  learning?: TodayLearningInput;
   engineId?: string;
   engineConfigRevision?: string;
   engineStatus?: 'completed' | 'failed' | 'unavailable';
@@ -53,6 +59,7 @@ export interface ShadowDecision {
 
 export interface CognitiveShadowInput {
   decisionId: string;
+  instructions?: string;
   candidates: Array<{
     id: string;
     name: string;
@@ -60,6 +67,8 @@ export interface CognitiveShadowInput {
     reason: string;
     evidence: string[];
     baselineRank: number;
+    learning?: TodayLearningInput['projects'][number]['lessons'];
+    blockedActions?: Array<{ nodeId: string; title: string; reason: string }>;
   }>;
 }
 
@@ -186,18 +195,6 @@ function buildProjectMetadataRevision(projects: SolopreneurProject[]): string {
   }))));
 }
 
-function buildDatabaseProjectSourceRevision(projects: SolopreneurProject[], roadmaps: Map<string, RoadmapNodeLike[]>): string {
-  const facts = (projects || []).map(project => ({
-    name: String(project.name || ''),
-    path: String(project.path || ''),
-    type: String(project.type || ''),
-    priority: String(project.priority || ''),
-    pinnedAt: String(project.pinnedAt || ''),
-    roadmap: roadmaps.get(project.path) || []
-  }));
-  return stableHash(JSON.stringify(facts));
-}
-
 function normalizeRoadmapNodes(nodes: RoadmapNodeLike[]): RoadmapNodeLike[] {
   return (nodes || []).map(node => ({
     id: String(node.id || '').trim(),
@@ -217,12 +214,13 @@ export async function readDatabaseTodaySourceRevision(
   try {
     const globalRoot = normalizeGlobalDataPathForExtension(globalDataPath, projects[0]?.path);
     const roots = projects.map(project => project.path), items: Array<{ root: string; revision: string; unavailable?: boolean }> = [];
-    let offset = 0;
+    let offset = 0, learningRevision = '';
     for (;;) {
       const result = operation
         ? await operation({ operation: 'read_today_roadmaps', input: { roots, offset, limit: 20 } })
         : await sendRuntimeDataRequest(globalRoot, { operation: 'read_today_roadmaps', input: { roots, offset, limit: 20 } });
-      const page = result as { items?: Array<{ root: string; revision: string; unavailable?: boolean }>; nextOffset?: number | null };
+      const page = result as { items?: Array<{ root: string; revision: string; unavailable?: boolean }>; nextOffset?: number | null; learningRevision?: string };
+      if (offset === 0) learningRevision = page.learningRevision || '';
       if (!Array.isArray(page.items)) return null;
       items.push(...page.items);
       if (page.nextOffset === null || page.nextOffset === undefined) break;
@@ -232,10 +230,7 @@ export async function readDatabaseTodaySourceRevision(
     if (items.some(item => item.unavailable)) return null;
     const byPath = new Map(items.map(item => [String(item.root), String(item.revision || '')]));
     if (projects.some(project => !byPath.has(project.path))) return null;
-    return stableHash(JSON.stringify(projects.map(project => ({
-      name: String(project.name || ''), path: String(project.path || ''), type: String(project.type || ''),
-      priority: String(project.priority || ''), pinnedAt: String(project.pinnedAt || ''), roadmapRevision: byPath.get(project.path) || ''
-    }))));
+    return todaySourceRevision(projects, byPath, learningRevision);
   } catch {
     return null;
   }
@@ -258,6 +253,7 @@ function shadowScore(project: ProjectPortfolioSummary): number {
 }
 
 function recommendationReason(project: ProjectPortfolioSummary): { reason: string; evidence: string[] } {
+  if (!project.recommendedNodeId && project.blockedNodes) return { reason: project.globalNextAction, evidence: (project.blockedActions || []).map(action => action.reason) };
   if (project.failedNodes > 0) {
     return { reason: '先处理失败环节，避免它继续阻塞项目推进。', evidence: [`失败环节 ${project.failedNodes} 个`] };
   }
@@ -286,7 +282,8 @@ export function buildShadowDecision(
   now = new Date()
 ): ShadowDecision {
   const sorted = [...portfolio].sort((a, b) => (
-    shadowScore(b) - shadowScore(a)
+    Number(!a.recommendedNodeId && Boolean(a.blockedNodes)) - Number(!b.recommendedNodeId && Boolean(b.blockedNodes))
+    || shadowScore(b) - shadowScore(a)
     || priorityRank(a.globalPriority) - priorityRank(b.globalPriority)
     || a.name.localeCompare(b.name)
     || a.path.localeCompare(b.path)
@@ -304,7 +301,8 @@ export function buildShadowDecision(
       reason: explanation.reason,
       action: project.recommendedNodeId ? 'continue_step' as const : 'open_project' as const,
       evidence: explanation.evidence,
-      score: shadowScore(project)
+      score: shadowScore(project),
+      blockedActions: project.blockedActions || []
     };
   });
   return {
@@ -523,7 +521,8 @@ export function updateRuntimeState(globalDataPath: string, runtimeId: string, pa
 }
 
 function appendDecisionEvent(globalDataPath: string, decision: ShadowDecision): void {
-  shadowDecisions.set(normalizeGlobalDataPathForExtension(globalDataPath), structuredClone(decision));
+  const { learning: _inputContent, ...projection } = decision;
+  shadowDecisions.set(normalizeGlobalDataPathForExtension(globalDataPath), structuredClone(projection));
 }
 
 export function runShadowDecisionCycle(options: ShadowCycleOptions): ShadowDecision {
@@ -546,31 +545,37 @@ async function buildDatabaseShadowDecision(options: ShadowCycleOptions): Promise
   const operation = options.operation
     ? (name: string, input: Record<string, unknown>) => options.operation!({ operation: name, input })
     : undefined;
-  if (!options.projects && operation) await refreshProjectRegistry(globalRoot, undefined, operation);
+  const registrySnapshot = await refreshProjectRegistry(globalRoot, undefined, operation);
   const projects = options.projects || getProjectsReadOnly({
     globalDataPath: globalRoot,
     projectRegistryFileName: options.projectRegistryFileName || 'projects.json',
     legacyProjects: [],
-    legacyHiddenProjects: []
+    legacyHiddenProjects: [],
+    registry: registrySnapshot.registry
   });
   const roadmaps = new Map<string, RoadmapNodeLike[]>();
+  const roadmapRevisions = new Map<string, string>();
   const unavailableRoots: string[] = [];
   const roots = projects.map(project => project.path);
   let offset = 0;
+  let learning: TodayLearningInput | undefined;
   for (;;) {
     const result = options.operation
       ? await options.operation({ operation: 'read_shadow_decision_inputs', input: { roots, offset, limit: 20 } })
       : await sendRuntimeDataRequest(globalRoot, { operation: 'read_shadow_decision_inputs', input: { roots, offset, limit: 20 } });
     const page = result as {
-      items?: Array<{ root?: string; nodes?: RoadmapNodeLike[]; unavailable?: boolean; invalid?: boolean }>;
+      items?: Array<{ root?: string; nodes?: RoadmapNodeLike[]; revision?: string; unavailable?: boolean; invalid?: boolean }>;
       nextOffset?: number | null;
+      learning?: TodayLearningInput;
     };
+    if (offset === 0) learning = page.learning;
     if (!Array.isArray(page.items)) throw new Error('shadow_decision_inputs_invalid');
     for (const item of page.items) {
       const root = String(item.root || '');
       if (!roots.includes(root) || roadmaps.has(root) || !Array.isArray(item.nodes)) throw new Error('shadow_decision_inputs_invalid');
       if (item.unavailable) unavailableRoots.push(root);
       else roadmaps.set(root, normalizeRoadmapNodes(item.nodes));
+      if (item.revision) roadmapRevisions.set(root, item.revision);
     }
     if (page.nextOffset === null || page.nextOffset === undefined) break;
     if (!Number.isSafeInteger(page.nextOffset) || page.nextOffset <= offset) throw new Error('shadow_decision_inputs_invalid');
@@ -580,9 +585,10 @@ async function buildDatabaseShadowDecision(options: ShadowCycleOptions): Promise
     try {
       const snapshot = await (operation
         ? operation('accept_roadmap_csv', { root })
-        : sendRuntimeDataRequest(globalRoot, { operation: 'accept_roadmap_csv', input: { root } })) as { nodes?: RoadmapNodeLike[] };
+        : sendRuntimeDataRequest(globalRoot, { operation: 'accept_roadmap_csv', input: { root } })) as { nodes?: RoadmapNodeLike[]; acceptedHash?: string; revision?: number; generation?: number; projectedGeneration?: number; pending?: boolean };
       if (!Array.isArray(snapshot.nodes)) throw new Error('shadow_decision_inputs_invalid');
       roadmaps.set(root, normalizeRoadmapNodes(snapshot.nodes));
+      if (typeof snapshot.acceptedHash === 'string' && typeof snapshot.revision === 'number') roadmapRevisions.set(root, todayRoadmapSnapshotRevision(snapshot as Parameters<typeof todayRoadmapSnapshotRevision>[0]));
     } catch (error) {
       const code = (error as NodeJS.ErrnoException)?.code;
       if (code === 'ENOENT' || error instanceof Error && (error.message.startsWith('roadmap_csv_invalid:') || /\bENOENT\b/.test(error.message))) {
@@ -593,17 +599,22 @@ async function buildDatabaseShadowDecision(options: ShadowCycleOptions): Promise
     }
   }));
   if (projects.some(project => !roadmaps.has(project.path))) throw new Error('shadow_decision_inputs_incomplete');
-  const sourceRevision = buildDatabaseProjectSourceRevision(projects, roadmaps);
+  const sourceRevision = todaySourceRevision(projects, new Map([...roadmaps].map(([root, nodes]) => [root, roadmapRevisions.get(root) || todayRoadmapRevision(nodes)])), learning?.revision);
   const portfolio = buildProjectPortfolioSummaries(projects, { coreOnly: true, roadmapNodesByProjectPath: roadmaps });
   return {
     ...buildShadowDecision(projects, portfolio, sourceRevision, options.now || new Date()),
     projectRevision: buildProjectMetadataRevision(projects),
+    sourceRegistryRevision: todayRegistryRevision(registrySnapshot.registry),
+    blockedDependencyCount: portfolio.reduce((sum, project) => sum + Number(project.blockedNodes || 0), 0),
+    ...(learning ? { learning } : {}),
     sourceAuthority: 'database'
   };
 }
 
 export async function runShadowDecisionCycleFromDatabase(options: ShadowCycleOptions): Promise<ShadowDecision> {
-  const decision = await buildDatabaseShadowDecision(options);
+  let decision = await buildDatabaseShadowDecision(options);
+  const current = shadowDecisions.get(normalizeGlobalDataPathForExtension(options.globalDataPath));
+  if (current && !current.engineId && current.sourceRevision === decision.sourceRevision && current.generatedAt.slice(0, 10) === decision.generatedAt.slice(0, 10)) decision = { ...current, sourceRegistryRevision: decision.sourceRegistryRevision };
   appendDecisionEvent(options.globalDataPath, decision);
   return decision;
 }
@@ -618,8 +629,9 @@ export async function runCognitiveShadowDecisionCycle(
     && current.engineStatus === 'completed'
     && current.engineId === options.engine.id
     && (!options.engineConfigRevision || current.engineConfigRevision === options.engineConfigRevision)) {
-    appendDecisionEvent(options.globalDataPath, current);
-    return current;
+    const reused = { ...current, sourceRegistryRevision: baseline.sourceRegistryRevision };
+    appendDecisionEvent(options.globalDataPath, reused);
+    return reused;
   }
   while (true) {
     if (!baseline.recommendations.length) {
@@ -628,13 +640,16 @@ export async function runCognitiveShadowDecisionCycle(
     }
     const input: CognitiveShadowInput = {
       decisionId: baseline.decisionId,
+      instructions: baseline.learning?.instructions || '',
       candidates: baseline.recommendations.map((item) => ({
         id: item.id,
         name: item.projectName,
         title: item.title,
         reason: item.reason,
         evidence: [...item.evidence],
-        baselineRank: item.rank
+        baselineRank: item.rank,
+        learning: baseline.learning?.projects.find(project => project.root === item.projectPath)?.lessons || [],
+        blockedActions: item.blockedActions || []
       }))
     };
     const proposal = await options.engine.plan(input);
@@ -644,6 +659,7 @@ export async function runCognitiveShadowDecisionCycle(
         baseline = latest;
         continue;
       }
+      baseline.sourceRegistryRevision = latest.sourceRegistryRevision;
     }
     const selected = baseline.recommendations.find((item) => item.id === String(proposal?.candidateId || ''));
     if (!selected) throw new Error('Cognitive engine selected an unknown Today arrangement candidate.');
@@ -766,7 +782,7 @@ export function projectShadowDecisionForToday(decision: ShadowDecision, feedback
       ledgerEventCount: decision.ledgerEventCount || 0,
       ledgerCandidateCount: decision.ledgerCandidateCount || 0,
       confirmedLearningCount: decision.confirmedLearningCount || 0,
-      blockedDependencyCount: 0,
+      blockedDependencyCount: decision.blockedDependencyCount || 0,
       reviewMode: 'shadow_decision'
     },
     baselineProjectPath: decision.baselineProjectPath,
@@ -788,9 +804,13 @@ export async function recordShadowDecisionFeedback(globalDataPath: string, input
   const root = normalizeGlobalDataPathForExtension(globalDataPath);
   const operationId = String(input.operationId || '').trim();
   if (!operationId) throw new Error('Shadow feedback requires an operationId.');
-  const decision = shadowDecisions.get(root);
+  let decision = shadowDecisions.get(root);
+  if (decision?.decisionId !== input.decisionId) {
+    const history = await shadowOperation(root, operation)('read_host_settings', { namespace: 'runtime_shadow_history', ownerScope: 'global', keys: [input.decisionId] }) as { items: Array<{ value?: unknown }> };
+    decision = history.items[0]?.value as ShadowDecision | undefined;
+  }
   if (!decision) throw new Error('Shadow feedback requires a current decision.');
-  if (decision.decisionId !== input.decisionId) throw new Error('Shadow feedback decision is no longer current.');
+  if (decision.decisionId !== input.decisionId) throw new Error('Shadow feedback decision is unknown.');
   if (readShadowDecisionFeedbackOutcome(globalDataPath, decision.decisionId) === 'ignored') return;
   const selectedProjectPath = String(input.selectedProjectPath || '');
   const ignored = input.outcome === 'ignored';
@@ -802,7 +822,7 @@ export async function recordShadowDecisionFeedback(globalDataPath: string, input
   const rows = shadowFeedback.get(root) || [];
   const existing = rows.some(row => String(row.operationId || '') === operationId);
   if (existing) return;
-  rows.push({
+  const feedbackRow = {
     operationId,
     decisionId: String(input.decisionId || ''),
     baselineProjectPath: decision.baselineProjectPath,
@@ -812,9 +832,10 @@ export async function recordShadowDecisionFeedback(globalDataPath: string, input
     cognitive: decision.engineStatus === 'completed' && Boolean(decision.engineId),
     engineId: decision.engineId || '',
     recordedAt: String(input.recordedAt || new Date().toISOString())
-  });
+  };
+  rows.push(feedbackRow);
   shadowFeedback.set(root, rows);
-  await persistShadowRuntimeState(root, operation, `shadow-feedback:${operationId}`);
+  await persistShadowRuntimeState(root, operation, `shadow-feedback:${operationId}`, { feedbackOnly: true, feedback: feedbackRow });
 }
 
 function buildShadowDecisionEvaluation(globalDataPath: string): ShadowDecisionEvaluation {
@@ -836,7 +857,7 @@ function buildShadowDecisionEvaluation(globalDataPath: string): ShadowDecisionEv
   const comparisonCount = cognitiveWins + baselineWins + ties;
   return {
     schemaVersion: 1,
-    updatedAt: new Date().toISOString(),
+    updatedAt: String(rows[rows.length - 1]?.recordedAt || shadowDecisions.get(normalizeGlobalDataPathForExtension(globalDataPath))?.generatedAt || new Date(0).toISOString()),
     feedbackCount: rows.length,
     acceptedCount: rows.filter(row => row.outcome === 'accepted').length,
     overriddenCount: rows.filter(row => row.outcome === 'overridden').length,
@@ -864,13 +885,14 @@ export async function refreshShadowRuntimeState(globalDataPath: string, operatio
   const decision = values.get('decision');
   const feedback = values.get('feedback');
   if (decision && typeof decision === 'object') shadowDecisions.set(root, decision as ShadowDecision);
+  else shadowDecisions.delete(root);
   if (Array.isArray(feedback)) shadowFeedback.set(root, feedback as Array<Record<string, unknown>>);
 }
 
-export async function persistShadowRuntimeState(globalDataPath: string, operation?: RuntimeDataOperations, idempotencyKey = `runtime-shadow:${crypto.randomUUID()}`): Promise<void> {
+export async function persistShadowRuntimeState(globalDataPath: string, operation?: RuntimeDataOperations, idempotencyKey = `runtime-shadow:${crypto.randomUUID()}`, options: { feedbackOnly?: boolean; feedback?: Record<string, unknown> } = {}): Promise<void> {
   const root = normalizeGlobalDataPathForExtension(globalDataPath);
   const call = shadowOperation(root, operation);
-  const desiredDecision = shadowDecisions.get(root) ? structuredClone(shadowDecisions.get(root)!) : undefined;
+  const desiredDecision = !options.feedbackOnly && shadowDecisions.get(root) ? structuredClone(shadowDecisions.get(root)!) : undefined;
   if (desiredDecision) {
     const learning = await call('read_learning_overview', {}) as {
       eventCount?: number;
@@ -901,13 +923,27 @@ export async function persistShadowRuntimeState(globalDataPath: string, operatio
     const feedback = [...feedbackByOperation.values()];
     if (decision) shadowDecisions.set(root, decision);
     shadowFeedback.set(root, feedback);
+    const archived = remoteDecision && decision?.decisionId !== remoteDecision.decisionId ? remoteDecision : undefined;
+    if (archived) {
+      const history = await call('read_host_settings', { namespace: 'runtime_shadow_history', ownerScope: 'global', keys: [archived.decisionId] }) as { items: unknown[] };
+      if (!history.items.length) await call('patch_host_settings', { namespace: 'runtime_shadow_history', ownerScope: 'global',
+        patches: [{ key: archived.decisionId, expectedRevision: 0, value: {
+          decisionId: archived.decisionId, baselineProjectPath: archived.baselineProjectPath, recommendedProjectPath: archived.recommendedProjectPath,
+          engineStatus: archived.engineStatus || '', engineId: archived.engineId || '', recommendations: archived.recommendations.map(item => ({ projectPath: item.projectPath }))
+        } }], idempotencyKey: `shadow-history:${archived.decisionId}` });
+    }
     const patches = [
       ...(decision ? [{ key: 'decision', expectedRevision: fields.get('decision')?.revision || 0, value: decision }] : []),
       { key: 'feedback', expectedRevision: fields.get('feedback')?.revision || 0, value: feedback },
       { key: 'evaluation', expectedRevision: fields.get('evaluation')?.revision || 0, value: buildShadowDecisionEvaluation(root) }
-    ];
+    ].filter(patch => !isDeepStrictEqual(fields.get(patch.key)?.value, patch.value));
+    if (!patches.length) return;
     try {
-      await call('patch_host_settings', { namespace: 'runtime_shadow', ownerScope: 'global', patches, idempotencyKey });
+      await call('patch_host_settings', { namespace: 'runtime_shadow', ownerScope: 'global', patches, idempotencyKey,
+        ...(options.feedback ? { todayFeedback: options.feedback } : {}),
+        ...(decision?.sourceAuthority === 'database' && patches.some(patch => patch.key === 'decision') ? { todaySourceGuard: {
+          projects: getProjectsReadOnly({ globalDataPath: root, projectRegistryFileName: 'projects.json', legacyProjects: [], legacyHiddenProjects: [] }), revision: decision.sourceRevision, registryRevision: decision.sourceRegistryRevision || ''
+        } } : {}) });
       return;
     } catch (error) {
       if ((error as Error).message !== 'revision_conflict' || attempt === 4) throw error;

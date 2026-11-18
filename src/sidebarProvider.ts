@@ -516,12 +516,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             }
             const request = this.beginDailyReviewRequest();
             if (!request || !request.isCurrent()) break;
-            const currentReview = await readTodayReviewFromDatabase(request.globalDataPath, request.projectState.projects);
-            if (!request.isCurrent()) break;
-            if (!currentReview || currentReview.stale || currentReview.decisionId !== String(data.decisionId || '')) {
-              this.sendDailyReview();
-              break;
-            }
+            if (!request.projectState.projects.some(project => project.path === String(data.selectedProjectPath || '')) && outcome !== 'ignored') break;
             await recordShadowDecisionFeedback(request.globalDataPath, {
               operationId: String(data.operationId || ''),
               decisionId: String(data.decisionId || ''),
@@ -748,7 +743,7 @@ export class SolopreneurSidebarProvider implements vscode.WebviewViewProvider {
             dataPath: '',
             portfolio: [],
             dependencies: [],
-            learningCandidateCount: 0
+            learningCandidateCount: null
           }
         }
       });

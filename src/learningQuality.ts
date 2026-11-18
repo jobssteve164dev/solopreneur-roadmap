@@ -2,7 +2,8 @@ export function isTrashOrLocalPrivate(candidate: {
   summary: string; appliesWhen: string; doThis: string; avoidThis: string;
   evidenceRefs?: Array<{ type: string; ref: string; summary?: string }>; promotionTarget?: string;
 }): boolean {
-  const textToCheck = `${candidate.summary}\n${candidate.appliesWhen}\n${candidate.doThis}\n${candidate.avoidThis}\n${(candidate.evidenceRefs || []).map((ref) => `${ref.type}:${ref.ref} ${ref.summary || ''}`).join('\n')}`.toLowerCase();
+  // Evidence locations retain provenance; only the reusable instruction is judged here.
+  const textToCheck = `${candidate.summary}\n${candidate.appliesWhen}\n${candidate.doThis}\n${candidate.avoidThis}`.toLowerCase();
   if (textToCheck.includes('run completed without explicit verification signal in captured tail')) return true;
   if (isLowValueLearningText(textToCheck)) return true;
   if (candidate.promotionTarget === 'pattern' || candidate.promotionTarget === 'operating_rule' || candidate.promotionTarget === 'decision' || candidate.promotionTarget === 'domain' || !candidate.promotionTarget) {

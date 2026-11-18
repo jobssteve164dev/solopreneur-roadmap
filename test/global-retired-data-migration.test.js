@@ -5,9 +5,9 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
-const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+const { ContentComputeDataStore: UnifiedDataStore } = require('./content-compute-fixture.cjs');
 const { MigrationRecycling } = require('../out/migrationRecycling.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { enqueueAvailableDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
 const { globalRetiredDataStamp, importGlobalRetiredData } = require('../out/globalRetiredDataMigration.js');
 
@@ -91,7 +91,7 @@ test('database-owned prompt and sidebar state archive stale file copies without 
   fs.writeFileSync(path.join(root, ...conversationFileKey.split('/')), conversationBytes);
   const store = new UnifiedDataStore(root);
   t.after(() => { store.close(); fs.rmSync(fixture, { recursive: true, force: true }); });
-  store.saveGlobalPrompt({ policy: null, content: 'database authority\n', source: 'user', idempotencyKey: 'database-authority' });
+  store.write({ kind: 'policy', action: 'create', scope: null, idempotencyKey: 'database-authority', data: { kind: 'global_prompt', status: 'active', content: 'database authority\n' } });
 
   const result = await importGlobalRetiredData(store, root, {});
 

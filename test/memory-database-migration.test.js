@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+const { attachLazyContentCompute } = require('./content-compute-fixture.cjs');
 
 test('structured legacy entries retain validity, revocation, provenance and explicit project scope', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-json-'));
@@ -14,7 +15,7 @@ test('structured legacy entries retain validity, revocation, provenance and expl
   const entry = { schemaVersion: 1, objectType: 'memory_entry', entryId: 'legacy-id', scopeId: 'memory_scope:project:original', layer: 'stable', kind: 'project_fact', status: 'invalidated', title: 'Original', content: 'complete original content', tags: ['source-tag'], revision: 2, validity: { validFrom: '2026-01-01T00:00:00Z', validUntil: '2026-09-01T00:00:00Z' }, provenance: { sourceType: 'agent', evidenceRefs: ['original-evidence'] }, metadata: { invalidation: { reason: 'old claim withdrawn' } }, supersedes: ['older-entry'] };
   const bytes = Buffer.from(JSON.stringify(entry, null, 2) + '\r\n');
   fs.writeFileSync(source, bytes);
-  const store = new UnifiedDataStore(path.join(root, 'database'));
+  const store = new UnifiedDataStore(path.join(root, 'database')); const closeCompute = attachLazyContentCompute(store);
   try {
     const { importMemoryDirectory } = require('../out/memoryDatabaseMigration.js');
     const first = await importMemoryDirectory(store, sourceRoot);
@@ -37,7 +38,7 @@ test('structured legacy entries retain validity, revocation, provenance and expl
     assert.deepEqual(JSON.parse(data.supersedes_json), entry.supersedes);
     assert.equal(store.context({ project: project.objectId }).items.length, 0, 'withdrawn sources must not enter active context');
     assert.equal((await importMemoryDirectory(store, sourceRoot, { projectScopes: { original: project.objectId } })).unchanged, 1);
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('context applies both ends of imported validity and keeps withdrawn records readable as history', async () => {
@@ -52,14 +53,14 @@ test('context applies both ends of imported validity and keeps withdrawn records
     { title: 'withdrawn', status: 'invalidated', validity: { validFrom: null, validUntil: null } }
   ];
   for (const entry of entries) fs.writeFileSync(path.join(memory, 'entries', entry.title + '.json'), JSON.stringify({ schemaVersion: 1, objectType: 'memory_entry', entryId: entry.title, scopeId: 'memory_scope:global', kind: 'rules', content: entry.title, revision: 1, ...entry }));
-  const store = new UnifiedDataStore(path.join(root, 'database'));
+  const store = new UnifiedDataStore(path.join(root, 'database')); const closeCompute = attachLazyContentCompute(store);
   try {
     const { importMemoryDirectory } = require('../out/memoryDatabaseMigration.js');
     assert.equal((await importMemoryDirectory(store, memory)).imported, 4);
     const project = store.write({ kind: 'project', action: 'create', scope: null, idempotencyKey: 'context-project', data: { name: 'Context project' } });
     assert.deepEqual(store.context({ project: project.objectId }).items.map(item => item.data.title), ['current']);
     assert.equal(store.search({ scope: null, kinds: ['memory'] }).items.length, 4, 'validity filtering must preserve history');
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('memory migration preserves full source bytes, repeats without new writes, and retains old revisions', async () => {
@@ -70,7 +71,7 @@ test('memory migration preserves full source bytes, repeats without new writes, 
   const source = path.join(memoryRoot, 'domains', 'data.md');
   const original = '# 数据\r\n完整正文🙂\r\n'.repeat(4000);
   fs.writeFileSync(source, original);
-  const store = new UnifiedDataStore(root);
+  const store = new UnifiedDataStore(root); const closeCompute = attachLazyContentCompute(store);
   const native = new DatabaseSync(store.filePath);
   try {
     let module;
@@ -92,7 +93,7 @@ test('memory migration preserves full source bytes, repeats without new writes, 
     assert.equal(native.prepare('SELECT COUNT(*) AS count FROM migration_items').get().count, 1);
     assert.equal(fs.readFileSync(source, 'utf8'), original + '新正文');
     assert.deepEqual(fs.readdirSync(memoryRoot), ['domains']);
-  } finally { native.close(); store.close(); }
+  } finally { native.close(); await closeCompute(); store.close(); }
 });
 
 test('a changed legacy memory cannot overwrite a newer database edit', async () => {
@@ -101,7 +102,7 @@ test('a changed legacy memory cannot overwrite a newer database edit', async () 
   fs.mkdirSync(memoryRoot);
   const source = path.join(memoryRoot, 'profile.md');
   fs.writeFileSync(source, 'old memory');
-  const store = new UnifiedDataStore(path.join(fixture, '.solomap-global'));
+  const store = new UnifiedDataStore(path.join(fixture, '.solomap-global')); const closeCompute = attachLazyContentCompute(store);
   try {
     let module;
     try { module = require('../out/memoryDatabaseMigration.js'); } catch {}
@@ -120,7 +121,7 @@ test('a changed legacy memory cannot overwrite a newer database edit', async () 
       for (let retry = 0; retry < 3; retry++) assert.equal((await module.importMemoryDirectory(store, memoryRoot)).conflicts.length, 1);
       assert.equal(audit.prepare('SELECT COUNT(*) AS n FROM events').get().n, count, 'unchanged conflict retries must not manufacture source transitions');
     } finally { audit.close(); }
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('project runtime artifacts nested in the memory tree are not misclassified as global memory', async () => {
@@ -129,14 +130,14 @@ test('project runtime artifacts nested in the memory tree are not misclassified 
   const artifact = path.join(memoryRoot, 'inbox', '.solopreneur', 'agent-runs', 'prompt.md');
   fs.mkdirSync(path.dirname(artifact), { recursive: true });
   fs.writeFileSync(artifact, 'project-private agent prompt');
-  const store = new UnifiedDataStore(path.join(root, '.solomap-global'));
+  const store = new UnifiedDataStore(path.join(root, '.solomap-global')); const closeCompute = attachLazyContentCompute(store);
   try {
     const { importMemoryDirectory } = require('../out/memoryDatabaseMigration.js');
     const result = await importMemoryDirectory(store, memoryRoot);
     assert.equal(result.imported, 0);
     assert.equal(store.search({ scope: null, kinds: ['memory'] }).items.length, 0);
     assert.equal(fs.readFileSync(artifact, 'utf8'), 'project-private agent prompt');
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('a source can return to an earlier content version without colliding with its first import', async () => {
@@ -144,7 +145,7 @@ test('a source can return to an earlier content version without colliding with i
   const memoryRoot = path.join(fixture, 'memory');
   fs.mkdirSync(memoryRoot);
   const source = path.join(memoryRoot, 'profile.md');
-  const store = new UnifiedDataStore(path.join(fixture, '.solomap-global'));
+  const store = new UnifiedDataStore(path.join(fixture, '.solomap-global')); const closeCompute = attachLazyContentCompute(store);
   try {
     const { importMemoryDirectory } = require('../out/memoryDatabaseMigration.js');
     for (const content of ['A', 'B', 'A']) {
@@ -158,7 +159,7 @@ test('a source can return to an earlier content version without colliding with i
     const object = store.search({ scope: null, kinds: ['memory'] }).items[0];
     assert.equal(object.revision, 3);
     assert.equal((await importMemoryDirectory(store, memoryRoot)).unchanged, 1);
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('unmapped project memory is preserved in the database without becoming global memory, then resolves to its project', async () => {
@@ -168,7 +169,7 @@ test('unmapped project memory is preserved in the database without becoming glob
   const source = path.join(sourceRoot, 'projects', 'unknown.md');
   const bytes = Buffer.from('# 原项目\r\n只有该项目应看到的完整内容🙂\r\n');
   fs.writeFileSync(source, bytes);
-  const store = new UnifiedDataStore(path.join(fixture, '.solomap-global'));
+  const store = new UnifiedDataStore(path.join(fixture, '.solomap-global')); const closeCompute = attachLazyContentCompute(store);
   const db = new DatabaseSync(store.filePath, { readOnly: true });
   try {
     const { importMemoryDirectory } = require('../out/memoryDatabaseMigration.js');
@@ -203,9 +204,9 @@ test('unmapped project memory is preserved in the database without becoming glob
     assert.equal(store.read(memory.objectId).revision, 1);
     const binding = db.prepare('SELECT * FROM migration_items WHERE source_identity=? AND source_key=?').get('legacy-memory', 'projects/unknown.md');
     assert.equal(binding.stage, 'conflict');
-    assert.throws(() => store.importObject({ kind: 'lesson', action: 'create', scope: project, idempotencyKey: 'wrong-kind', data: {} }, { identity: 'legacy-memory', key: 'projects/unknown.md', hash: binding.source_hash }), /source_binding_mismatch/);
+    await assert.rejects(async () => store.importObject({ kind: 'lesson', action: 'create', scope: project, idempotencyKey: 'wrong-kind', data: {} }, { identity: 'legacy-memory', key: 'projects/unknown.md', hash: binding.source_hash }), /source_binding_mismatch/);
     assert.deepEqual(fs.readFileSync(source), bytes);
-  } finally { db.close(); store.close(); }
+  } finally { db.close(); await closeCompute(); store.close(); }
 });
 
 test('an unchanged captured source keeps its committed receipt when another host resumes migration', () => {

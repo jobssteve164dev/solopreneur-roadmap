@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const { createRequire } = require('node:module');
 const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
-const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+const { ContentComputeDataStore: UnifiedDataStore } = require('./content-compute-fixture.cjs');
 
 function windowsModules(overrides = {}) {
   const probes = [];
@@ -118,10 +118,10 @@ for (const mode of ['native', 'reused', 'legacy-ps', 'unverified-resume']) test(
   const service = new (w.load('runStop.js').RunStop)(store);
   try {
     const identity = await store.registerProject({ root: project });
-    let run = store.prepareRun(identity.projectId, identity.locationId, { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo',
+    let run = await store.prepareRun(identity.projectId, identity.locationId, { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo',
       prompt: '完整输入', command: '正式命令', userMessage: '停止当前会话', metadata: { interactiveSession: true, finishedAt: 'already-settled', hostOutputPending: false, nativeOutputPending: false,
         agentPid: 42, processBirth: reused ? 'win32:an-older-process' : birth(42) }, idempotencyKey: 'windows-stop-run' });
-    run = store.patchRunState(run.projectId, { executionLogId: 1, generation: run.generation, expectedRevision: run.revision,
+    run = await store.patchRunState(run.projectId, { executionLogId: 1, generation: run.generation, expectedRevision: run.revision,
       patch: { agentChildPid: 43, processChildBirth: birth(43) }, idempotencyKey: 'windows-child-registration' });
     assert.equal(run.status.agentChildPid, 43, 'the formal run must contain the child identity before stopping');
     const stopping = service.stop(run.projectId, { executionLogId: 1, generation: run.generation, expectedRevision: run.revision, expectedTurnId: run.turnId, reason: '用户停止', idempotencyKey: 'windows-stop', ...(strict ? { requireVerifiedIdentity: true } : {}) });

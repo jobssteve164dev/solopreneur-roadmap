@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const { runtimeBuildId } = require('../out/runtimeBuildIdentity.js');
 const { claimRuntimeLease } = require('../out/autonomousRuntime.js');
@@ -80,7 +80,7 @@ test('project portfolio uses committed learning signals without a legacy learnin
 }));
 
 test('portfolio counts native reusable sources once and ignores leftover legacy directories', () => fixture(async ({ workspace, root, projects, project, store }) => {
-  for (const nodeId of ['1', '2']) store.writeStepMemory(project, { nodeId, expectedRevision: 0, patch: { goal: 'Verify the outcome' }, idempotencyKey: `portfolio-memory:${nodeId}` });
+  for (const nodeId of ['1', '2']) await store.writeStepMemory(project, { nodeId, expectedRevision: 0, patch: { goal: 'Verify the outcome' }, idempotencyKey: `portfolio-memory:${nodeId}` });
   for (const executionLogId of [1, 2]) store.upsertProjectRunIndex(project, { executionLogId, nodeId: '__solo__', runKind: 'solo', status: 'Completed', startedAt: '2026-10-09T10:00:00Z', finishedAt: '2026-10-09T10:05:00Z', durationMs: 300000 });
   fs.mkdirSync(path.join(workspace, '.solopreneur', 'agent-runs', 'phantom-old-group'), { recursive: true });
   fs.mkdirSync(path.join(workspace, '.solopreneur', 'step-memory'), { recursive: true });
@@ -161,7 +161,7 @@ test('cache publication rejects changed preferences or investment and retries co
   const source = await ops({ operation: 'read_strategy_source_revision', input: { roots: [workspace] } });
   const input = { expectedRevision: 0, value: { snapshot: 'current' }, expectedSourceRevision: source.revision, sourceProjectIds: source.projectIds, idempotencyKey: 'committed-cache-intent' };
   const first = await ops({ operation: 'write_strategy_state', input });
-  store.writeStrategyState(project, { expectedRevision: 0, value: { role: 'frozen' }, idempotencyKey: 'later-preference' });
+  await store.writeStrategyState(project, { expectedRevision: 0, value: { role: 'frozen' }, idempotencyKey: 'later-preference' });
   assert.deepEqual(await ops({ operation: 'write_strategy_state', input }), first);
   await assert.rejects(ops({ operation: 'write_strategy_state', input: { ...input, expectedRevision: 1, idempotencyKey: 'old-preference-cache' } }), /strategy_source_conflict/);
   const laterSource = await ops({ operation: 'read_strategy_source_revision', input: { roots: [workspace] } });

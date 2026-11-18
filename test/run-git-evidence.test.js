@@ -5,7 +5,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 
 test('checkpoint seals the complete Git evidence and later review never re-reads changed workspace files', async () => {
   const { RunLifecycleClient, runStatusReference } = require('../out/runLifecycleClient.js');

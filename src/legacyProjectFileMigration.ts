@@ -186,10 +186,10 @@ export async function importLegacyProjectFiles(store: UnifiedDataStore, sourceRo
         catch { /* Invalid historical status is archived after no live process claims it. */ }
       }
       if (processOwnsSource || statusOwnsSource) { result.retainedFiles.push(source.file); continue; }
-      store.captureMigrationSource({ identity, key: source.key, hash: captured.hash }, captured.bytes, {
+      await store.publishMigrationSource({ identity, key: source.key, hash: captured.hash }, captured.bytes, {
         mimeType: mimeType(source.file), encoding: /^(?:text\/|application\/(?:json|javascript|x-ndjson))/.test(mimeType(source.file)) ? 'utf8' : 'binary'
       });
-      const archived = store.archiveMigrationSource({ identity, key: source.key, hash: captured.hash }, captured.bytes, {
+      const archived = await store.archiveMigrationSource({ identity, key: source.key, hash: captured.hash }, captured.bytes, {
         reason: 'retired SoloMap project file', mimeType: mimeType(source.file), projectId: project.projectId
       });
       result.archivedSources ||= [];

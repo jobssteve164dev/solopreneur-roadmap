@@ -9,7 +9,7 @@ const {
   revokeAllProjectAutonomyAuthorizations
 } = require('../out/projectAutonomyAuthorization.js');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { enqueueAvailableDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
 
 function fixture(t) {
@@ -145,6 +145,11 @@ test('startup migration imports legacy authorization once without making it a li
   } }));
   const operations = createRuntimeDataOperations(dataStore);
   t.after(async () => operations.close());
+  const patch=dataStore.patchHostSettings.bind(dataStore);
+  dataStore.patchHostSettings=input=>{
+    if(input.idempotencyKey.startsWith('project-autonomy-import:'))throw new Error('legacy_autonomy_used_writer_settings');
+    return patch(input);
+  };
 
   await enqueueAvailableDataMigrations(dataStore, operations, () => true);
   await operations.waitForMigrations();

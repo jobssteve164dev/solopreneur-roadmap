@@ -6,7 +6,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { RunLifecycleClient, readConversationLogSnapshot, runStatusReference } = require('../out/runLifecycleClient.js');
 const { captureMaintenanceRunResult } = require('../out/maintenanceRunResult.js');
 const { readCompleteRunDocument } = require('../out/runDocumentClient.js');
@@ -98,7 +98,7 @@ test('a delayed MCP start cannot acknowledge a newer host turn or interaction', 
     const first = await f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'start', turnId: ready.turnId, interactionId: firstBudget.interactionId } });
     const completed = await f.call('checkpoint_run', { projectId: first.projectId, executionLogId: 1, generation: first.generation, proof: prepared.proof, expectedRevision: first.revision, expectedTurnId: first.turnId, action: 'complete', outcome: 'partial', summary: '第一轮完成', idempotencyKey: 'mcp-stale-complete' });
     const secondBudget = createInteractionBudget({ wallMs: Date.now(), bootId: 'integration-boot', uptimeMs: 2000, interactionId: 'second-interaction' });
-    const accepted = f.store.patchRunState(completed.projectId, { executionLogId: 1, generation: completed.generation, expectedRevision: completed.revision, patch: { interactionBudget: secondBudget, interactionId: secondBudget.interactionId, taskIngressReceipt: null, taskIngressVerdict: '' }, idempotencyKey: 'mcp-stale-second-budget' });
+    const accepted = await f.store.patchRunState(completed.projectId, { executionLogId: 1, generation: completed.generation, expectedRevision: completed.revision, patch: { interactionBudget: secondBudget, interactionId: secondBudget.interactionId, taskIngressReceipt: null, taskIngressVerdict: '' }, idempotencyKey: 'mcp-stale-second-budget' });
     const second = await f.call('checkpoint_run', { projectId: accepted.projectId, executionLogId: 1, generation: accepted.generation, proof: prepared.proof, expectedRevision: accepted.revision, expectedTurnId: accepted.turnId, action: 'start', message: '第二轮', foregroundStart: true, interactionId: secondBudget.interactionId, idempotencyKey: 'mcp-stale-second-start' });
     await assert.rejects(f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'start', turnId: first.turnId, interactionId: firstBudget.interactionId } }), /checkpoint_turn_conflict/);
     await assert.rejects(f.operations({ operation: 'checkpoint_current_run', sessionToken: opened.sessionToken, input: { action: 'complete', turnId: first.turnId, interactionId: firstBudget.interactionId, outcome: 'partial', summary: '迟到完成' } }), /checkpoint_turn_conflict/);

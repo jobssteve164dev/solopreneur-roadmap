@@ -28,15 +28,15 @@ export async function importAnalysisCaches(store: UnifiedDataStore, sourceRoot: 
     result.retainedFiles.push(file);
     const source = { identity, key: path.relative(sourceRoot, file).split(path.sep).join('/'), hash: captured.hash };
     store.markMigrationSourceRechecking(identity, source.key);
-    store.captureMigrationSource(source, captured.bytes, { mimeType: 'application/json', encoding: 'utf8' });
+    await store.publishMigrationSource(source, captured.bytes, { mimeType: 'application/json', encoding: 'utf8' });
     try {
       if (captured.parseError) throw new Error(captured.parseError);
-      const imported = store.importAnalysisState(projectId, namespace, key, transform(captured.value), source);
+      const imported = await store.importAnalysisState(projectId, namespace, key, transform(captured.value), source);
       imported.unchanged ? result.unchanged++ : result.imported++;
       store.markMigrationSourceImported(identity, source.key);
     } catch (error) {
       const message = String(error);
-      if (!archiveUnresolvedMigrationSource(store, result, source, captured.bytes, message, options, { displaySource: file, mimeType: 'application/json', projectId })) {
+      if (!await archiveUnresolvedMigrationSource(store, result, source, captured.bytes, message, options, { displaySource: file, mimeType: 'application/json', projectId })) {
         result.conflicts.push({ source: file, error: message });
         store.markMigrationSourceConflict(identity, source.key, message);
       }

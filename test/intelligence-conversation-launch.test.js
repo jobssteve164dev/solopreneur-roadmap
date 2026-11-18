@@ -9,7 +9,7 @@ const { IntelligenceConversationStore } = require('../out/intelligenceChat.js');
 const { IntelligenceRuntime } = require('../out/intelligenceRuntime.js');
 const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
 const { EmbeddedPiAgentEngine } = require('../out/piAgentEngine.js');
-const { runtimeProjectMcpSource } = require('../out/runtimeDataOperations.js');
+const { runtimeProjectMcpSource } = require('./runtime-data-fixture.cjs');
 const { createTelegramIntelligenceReply } = require('../out/telegramIntelligenceChat.js');
 const { startTelegramExtensionBridge, executeTelegramExtensionCommand } = require('../out/telegramExtensionBridge.js');
 const { sendRuntimeDataRequest } = require('../out/autonomousRuntimeControl.js');
@@ -174,8 +174,8 @@ for (const mode of ['legacy', 'harness']) {
   test(`${mode} Telegram executes a project query after a model preamble and reads every page before replying`, async t => {
     const f = await fixture(t, mode);
     const targetId = f.projectIds.get(f.otherProject);
-    const token = f.database.reserveExternalRefresh(targetId, 'delivery', 'preamble-query');
-    f.database.commitExternalRefresh(targetId, { key: 'delivery', ...token, requestedAt: Date.now(), cache: {
+    const token = await f.database.reserveExternalRefresh(targetId, 'delivery', 'preamble-query');
+    await f.database.commitExternalRefresh(targetId, { key: 'delivery', ...token, requestedAt: Date.now(), cache: {
       schemaVersion: 1, syncedAt: '2026-10-21T04:10:29.484Z',
       workflowRuns: Array.from({ length: 26 }, (_, index) => ({ name: 'Security',
         displayTitle: 'Complete retained workflow record ' + index + ' '.repeat(160),
@@ -200,8 +200,8 @@ for (const mode of ['legacy', 'harness']) {
         status: 'Running', metadata: { interactiveSession: true, launchIntentHash: 'maintenance-fixture' }, idempotencyKey: payload.launchIntentId } });
     });
     const targetId = f.projectIds.get(f.otherProject);
-    const token = f.database.reserveExternalRefresh(targetId, 'security', 'maintenance-signal');
-    f.database.commitExternalRefresh(targetId, { key: 'security', ...token, requestedAt: Date.now(), cache: {
+    const token = await f.database.reserveExternalRefresh(targetId, 'security', 'maintenance-signal');
+    await f.database.commitExternalRefresh(targetId, { key: 'security', ...token, requestedAt: Date.now(), cache: {
       schemaVersion: 1, repo: 'owner/beta', syncedAt: '2026-10-20T00:00:00Z', message: '',
       alerts: [{ source: 'dependabot', title: '修复 Beta 依赖漏洞', severity: 'high', state: 'open', url: 'https://example.test/beta/security/7' }]
     } });
@@ -211,13 +211,13 @@ for (const mode of ['legacy', 'harness']) {
     assert.equal(f.launches[0].projectPath, f.otherProject);
     assert.equal(f.launches[0].message, '修复 Beta 依赖漏洞 https://example.test/beta/security/7');
     assert.equal(await f.ask({}, '1234', 'solomap_get_conversation'), '任务正在执行。');
-    const done = f.database.checkpointRun(targetId, { executionLogId: run.status.executionLogId, generation: run.generation,
+    const done = await f.database.checkpointRun(targetId, { executionLogId: run.status.executionLogId, generation: run.generation,
       proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'candidate_complete',
       summary: '依赖漏洞已修复并验证', idempotencyKey: 'maintenance-complete' });
     const owner = await require('../out/agentRunPreparation.js').getAgentRunDeliveryOwner();
     const scope = { executionLogId: run.status.executionLogId, generation: done.generation, expectedRevision: done.revision, expectedTurnId: done.turnId };
     const lease = f.database.claimRunConsumer(targetId, { ...scope, owner });
-    f.database.commitRunSettlement(targetId, { ...scope, token: lease.token,
+    await f.database.commitRunSettlement(targetId, { ...scope, token: lease.token,
       journal: { agentCli: 'isolated-agent', command: 'isolated-agent', output: '依赖漏洞已修复并验证', status: 'Completed' },
       digest: { schemaVersion: 2, runId: run.runId, nodeId: '__solo__', executionLogId: run.status.executionLogId, outcome: '依赖漏洞已修复并验证' }, idempotencyKey: 'maintenance-settle' });
     assert.equal(await f.ask({}, '1234', 'solomap_get_conversation'), '任务本轮已完成。');
@@ -234,13 +234,13 @@ for (const mode of ['legacy', 'harness']) {
     const chatId = '1234';
     assert.equal(await f.ask({ project: 'Alpha', mode: 'solo', message: '执行后查询结果', idempotencyKey: 'follow-up' }, chatId), '任务已启动。');
     assert.equal(await f.ask({}, chatId, 'solomap_get_conversation'), '任务正在执行。');
-    const done = f.database.checkpointRun(run.projectId, { executionLogId: run.status.executionLogId, generation: run.generation,
+    const done = await f.database.checkpointRun(run.projectId, { executionLogId: run.status.executionLogId, generation: run.generation,
       proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete',
       outcome: 'candidate_complete', summary: '交付已验证', idempotencyKey: 'follow-up-done' });
     const owner = await require('../out/agentRunPreparation.js').getAgentRunDeliveryOwner();
     const scope = { executionLogId: run.status.executionLogId, generation: done.generation, expectedRevision: done.revision, expectedTurnId: done.turnId };
     const lease = f.database.claimRunConsumer(run.projectId, { ...scope, owner });
-    f.database.commitRunSettlement(run.projectId, { ...scope, token: lease.token,
+    await f.database.commitRunSettlement(run.projectId, { ...scope, token: lease.token,
       journal: { agentCli: 'isolated-agent', command: 'isolated-agent', output: '交付已验证', status: 'Completed' },
       digest: { schemaVersion: 2, runId: run.runId, nodeId: '__solo__', executionLogId: run.status.executionLogId, outcome: '交付已验证' }, idempotencyKey: 'follow-up-settle' });
     assert.equal(await f.ask({}, chatId, 'solomap_get_conversation'), '任务本轮已完成。');

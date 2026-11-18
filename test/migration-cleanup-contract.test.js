@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { readProcessBirthMarker } = require('../out/processIdentity.js');
 
 async function fixture(action) {
@@ -62,7 +62,7 @@ test('a selected historical growth snapshot remains available as lightweight tot
       signals: [{ snapshotId: id, nodeId: 'root', type: 'verification', level: 'info', value: 'full signal', source: 'test', sourceRef: 'proof', createdAt: '2026-01-01T00:00:00.000Z' }],
       labels: [{ snapshotId: id, nodeId: 'root', label: 'full label', role: 'feature', source: 'test', confidence: 1, updatedAt: '2026-01-01T00:00:00.000Z' }]
     };
-    const receipt = f.store.writeProjectGrowth(f.registered.projectId, data, `snapshot-${index}`);
+    const receipt = await f.store.writeProjectGrowth(f.registered.projectId, data, `snapshot-${index}`);
     if (!index) first = receipt.objectId;
   }
   const recent = await f.call('read_project_growth', { root: f.project, historyLimit: 50 });
@@ -463,6 +463,8 @@ test('recycling refuses a nested directory replaced by a link to a matching fore
 }));
 
 test('ordinary artifact archiving cannot grant physical recycling eligibility without lifecycle adoption', () => fixture(async f => {
+  const closeCompute = await require('./content-compute-fixture.cjs').attachContentCompute(f.store);
+  try {
   const key = '__solo__/71/prompt.txt';
   const file = path.join(f.project, '.solopreneur/agent-runs', key);
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -473,4 +475,5 @@ test('ordinary artifact archiving cannot grant physical recycling eligibility wi
   assert.deepEqual((await f.call('prepare_recycling', { projectRoot: f.project })).files, []);
   assert.equal(f.store.readMigrationSource(`agent-runs:${f.project}`, key).stage, 'captured');
   assert.equal(fs.readFileSync(file).compare(bytes), 0);
+  } finally { await closeCompute(); }
 }));

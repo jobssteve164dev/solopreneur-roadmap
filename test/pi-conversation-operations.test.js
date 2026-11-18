@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { IntelligenceRuntime } = require('../out/intelligenceRuntime.js');
 const { CognitiveCliProcessExecutor } = require('../out/cognitiveCliProcessExecutor.js');
 
@@ -41,6 +41,34 @@ function envelope(overrides = {}) {
     ...overrides
   };
 }
+
+test('Pi durable ingress, acceptance and tool results publish their exact reference summaries', t => {
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-pi-reference-publication-'));
+  t.after(()=>cleanupExact(root));const database=new UnifiedDataStore(root);t.after(()=>database.close());
+  const target=database.putContent('retained tool source'),owner=database.claimPiExecutionOwner('pi-reference-publication');
+  for(let i=0;i<10000;i++){const batch=database.prepareStorageReferenceBatch(128);database.commitStorageReferenceBatch(batch);if(!batch.pending)break;assert.notEqual(i,9999);}
+  database.beginContentPreparationRecovery();database.activateStorageContentLifecycle({strictPublication:true});
+  database.admitPiConversationIngress({conversationId:envelope().conversationId,operationId:'pi-reference-ingress',requestKey:'pi-reference-ingress',text:'keep this input',source:'sidebar',sourceGeneration:1},owner);
+  const accepted=database.admitPiConversationOperation(envelope({attachments:[{contentId:target}]}),owner);
+  database.admitPiToolInvocation(accepted.operationId,owner,{invocationId:'source-tool',toolName:'solomap_read',arguments:{ref:target},replay:'never'});
+  database.completePiToolInvocation(accepted.operationId,'source-tool',owner,{contentId:target});
+  const queued=database.admitPiConversationOperation(envelope({operationId:'pi-reference-queued',requestKey:'pi-reference-queued',attachments:[{contentId:target}]}),owner);
+  assert.equal(queued.status,'queued');
+  database.markPiConversationOperation(accepted.operationId,owner,{status:'completed',tipId:null,finalAssistant:'full answer'});
+  database.discardCompletedPiConversationOperation(accepted.operationId,owner,'fixture keeps the terminal receipt');
+  assert.equal(database.promoteNextPiConversationOperation(accepted.conversationId,owner).operationId,queued.operationId);
+  for(const [table,column,where,args,hasTarget] of [
+    ['pi_conversation_ingress','request_content_id','operation_id=?',['pi-reference-ingress'],false],
+    ['pi_conversation_operations','acceptance_content_id','operation_id=?',[accepted.operationId],true],
+    ['pi_conversation_operations','terminal_content_id','operation_id=?',[accepted.operationId],false],
+    ['pi_conversation_operations','acceptance_content_id','operation_id=?',[queued.operationId],true],
+    ['pi_tool_invocations','result_content_id','operation_id=? AND invocation_id=?',[accepted.operationId,'source-tool'],true]
+  ]){
+    const id=database.rows(`SELECT ${column} AS id FROM ${table} WHERE ${where}`,args)[0].id;
+    assert.equal(database.rows('SELECT 1 FROM content_lifecycle_reference_unpublished WHERE content_id=?',[id]).length,0);
+    if(hasTarget)assert.equal(database.rows('SELECT 1 FROM content_lifecycle_edges WHERE source_id=? AND target_id=?',[id,target]).length,1);
+  }
+});
 
 test('Pi conversation admission is idempotent and fences stale Runtime owners', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-pi-operation-'));
@@ -194,6 +222,9 @@ test('schema 72 gives pre-upgrade completed tools a durable non-replay receipt',
   database.close();
   const { DatabaseSync } = require('node:sqlite');
   const raw = new DatabaseSync(path.join(root, 'solomap.db'));
+  // Temporarily remove later guards while reconstructing the pre-v72 columns.
+  const laterGuards=raw.prepare("SELECT name,sql FROM sqlite_schema WHERE type='trigger' AND tbl_name IN ('pi_tool_invocations','pi_conversation_ingress')").all();
+  for(const guard of laterGuards)raw.exec(`DROP TRIGGER "${guard.name}"`);
   raw.exec(`PRAGMA foreign_keys=OFF;
     DROP INDEX content_ref_pi_tool_invocations_result;
     DROP INDEX content_ref_pi_ingress_last_error;
@@ -208,6 +239,7 @@ test('schema 72 gives pre-upgrade completed tools a durable non-replay receipt',
   raw.close();
   database = new UnifiedDataStore(root);
   try {
+    for(const guard of laterGuards)database.db.exec(guard.sql);
     const replacement = database.claimPiExecutionOwner('runtime-v72');
     const replay = database.admitPiToolInvocation(operation.operationId, replacement, {
       invocationId: 'legacy-completed-tool', toolName: 'update_settings', arguments: {}, replay: 'never'
@@ -712,9 +744,9 @@ test('set_time_schedule keeps settings and schedule ledger inside one fenced tra
     database.admitPiToolInvocation(operation.operationId, owner, {
       invocationId: 'schedule-race', toolName: 'set_time_schedule', arguments: { title: 'Must roll back' }, replay: 'never'
     });
-    const originalPatch = database.patchHostSettings.bind(database);
-    database.patchHostSettings = input => {
-      const result = originalPatch(input);
+    const originalPatch = database.applyHostSettingsPatch.bind(database);
+    database.applyHostSettingsPatch = (...args) => {
+      const result = originalPatch(...args);
       database.claimPiExecutionOwner('runtime-b');
       return result;
     };
@@ -728,6 +760,132 @@ test('set_time_schedule keeps settings and schedule ledger inside one fenced tra
     assert.equal(database.rows('SELECT COUNT(*) AS count FROM scheduled_occurrences')[0].count, 0);
     await operations.close();
   } finally { database.close(); }
+});
+
+test('the fenced Pi schedule reads existing settings and publishes both changes through preparation', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-pi-schedule-prepared-'));
+  t.after(() => cleanupExact(root));
+  const projectRoot = path.join(root, 'project');
+  fs.mkdirSync(projectRoot, { recursive: true });
+  const database = new UnifiedDataStore(root);
+  const operations = createRuntimeDataOperations(database);
+  try {
+    await database.registerProject({ root: projectRoot });
+    const note = '完整计划'.repeat(25000);
+    await operations({ operation: 'patch_host_settings', input: { namespace: 'extension', ownerScope: 'global',
+      patches: [{ key: 'automationTasks', expectedRevision: 0, value: { note, scheduledTasks: [] } }], idempotencyKey: 'prepared-pi-seed' } });
+    const focus = { id: '__solomap_focus_reminder__', title: '专注提醒', projectPath: projectRoot, enabled: true,
+      scheduleKind: 'once', scheduledAt: '2099-10-18T09:00:00+08:00', assignee: 'user', internalKind: 'focus_reminder' };
+    await operations({ operation: 'sync_schedules', input: { schedules: [{ id: focus.id, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      trigger: { kind: focus.scheduleKind, timeOfDay: '', scheduledAt: focus.scheduledAt }, enabled: true, nextDueAt: Date.parse(focus.scheduledAt), task: focus }],
+      idempotencyKey: 'prepared-pi-focus' } });
+    const owner = database.claimPiExecutionOwner('test-pi-schedule-prepared');
+    const operation = database.admitPiConversationOperation(envelope({ projectScope: projectRoot }), owner);
+    database.admitPiToolInvocation(operation.operationId, owner, {
+      invocationId: 'prepared-schedule', toolName: 'set_time_schedule', arguments: { title: '检查发布结果' }, replay: 'never'
+    });
+    const readSettings = database.readHostSettings.bind(database);
+    database.readHostSettings = () => { throw new Error('writer_schedule_settings_read'); };
+    database.patchHostSettings = () => { throw new Error('writer_schedule_legacy_patch'); };
+    const result = await operations({ operation: 'set_intelligence_time_schedule', input: {
+      projectPath: projectRoot, projectName: 'Prepared project', title: '检查发布结果', scheduleKind: 'daily', timeOfDay: '09:00', assignee: 'user'
+    }, piToolFence: { operationId: operation.operationId, invocationId: 'prepared-schedule', ownerId: owner.ownerId, ownerGeneration: owner.generation } });
+    const setting = readSettings({ namespace: 'extension', ownerScope: 'global', keys: ['automationTasks'] }).items[0].value;
+    assert.equal(setting.note === note, true);
+    assert.equal(setting.scheduledTasks[0].id, result.taskId);
+    const entry = database.readScheduleLedger({ taskIds: [result.taskId] }).tasks[0];
+    assert.deepEqual(entry.task, setting.scheduledTasks[0]);
+    assert.deepEqual(database.readScheduleLedger({ taskIds: [focus.id] }).tasks[0].task, focus);
+  } finally { await operations.close(); database.close(); }
+});
+
+test('the fenced Pi schedule reselects a changed ledger even when the old sync has a fixed receipt', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-pi-schedule-stale-ledger-'));
+  t.after(() => cleanupExact(root));
+  const projectRoot = path.join(root, 'project');
+  fs.mkdirSync(projectRoot, { recursive: true });
+  const database = new UnifiedDataStore(root);
+  const operations = createRuntimeDataOperations(database);
+  try {
+    await database.registerProject({ root: projectRoot });
+    const owner = database.claimPiExecutionOwner('test-pi-schedule-stale-ledger');
+    const operation = database.admitPiConversationOperation(envelope({ projectScope: projectRoot }), owner);
+    database.admitPiToolInvocation(operation.operationId, owner, {
+      invocationId: 'stale-ledger', toolName: 'set_time_schedule', arguments: { title: '检查发布' }, replay: 'never'
+    });
+    const request = { operation: 'set_intelligence_time_schedule', input: { projectPath: projectRoot, projectName: 'Project',
+      title: '检查发布', scheduleKind: 'once', scheduledAt: '2099-10-18T09:00:00+08:00', assignee: 'user' },
+      piToolFence: { operationId: operation.operationId, invocationId: 'stale-ledger', ownerId: owner.ownerId, ownerGeneration: owner.generation } };
+    const first = await operations(request);
+    const query = { namespace: 'extension', ownerScope: 'global', keys: ['automationTasks'] };
+    const forgetTask = async () => {
+      const setting = database.readHostSettings(query).items[0];
+      await operations({ operation: 'patch_host_settings', input: { ...query,
+        patches: [{ key: 'automationTasks', expectedRevision: setting.revision, value: { scheduledTasks: [] } }],
+        idempotencyKey: `set-stale-ledger-settings:${setting.revision}` } });
+    };
+    await forgetTask();
+    assert.equal((await operations(request)).taskId, first.taskId);
+    await forgetTask();
+    const inspect = database.inspectProjectMigration.bind(database);
+    let disabled = false;
+    database.inspectProjectMigration = async request => {
+      const value = await inspect(request);
+      if (request.kind === 'piTimeSchedule' && !disabled) {
+        assert.ok(database.rows('SELECT id FROM requests WHERE idempotency_key=?', [value.schedules.idempotencyKey])[0], 'the prior sync must have a fixed receipt');
+        disabled = true;
+        await database.publishScheduleSync({ schedules: [], idempotencyKey: 'disable-during-pi-plan' });
+      }
+      return value;
+    };
+    const accepted = await operations(request);
+    assert.equal(disabled, true);
+    assert.equal(accepted.taskId, first.taskId);
+    assert.equal(database.readHostSettings(query).items[0].value.scheduledTasks[0].id, first.taskId);
+    assert.equal(database.readScheduleLedger({ taskIds: [first.taskId] }).tasks[0]?.task.id, first.taskId);
+  } finally { await operations.close(); database.close(); }
+});
+
+for (const phase of ['preparation', 'settings publication']) test(`the fenced Pi schedule replans a daily task after the due-time window rolls over during ${phase}`, async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-pi-schedule-clock-'));
+  t.after(() => cleanupExact(root));
+  const projectRoot = path.join(root, 'project');
+  fs.mkdirSync(projectRoot, { recursive: true });
+  const database = new UnifiedDataStore(root);
+  const operations = createRuntimeDataOperations(database);
+  const before = new Date(2090, 0, 15, 9, 29, 59).getTime();
+  const after = new Date(2090, 0, 15, 9, 30, 1).getTime();
+  const nextDue = new Date(2090, 0, 16, 9).toISOString();
+  t.mock.timers.enable({ apis: ['Date'], now: before });
+  try {
+    await database.registerProject({ root: projectRoot });
+    const owner = database.claimPiExecutionOwner('test-pi-schedule-clock');
+    const operation = database.admitPiConversationOperation(envelope({ projectScope: projectRoot }), owner);
+    database.admitPiToolInvocation(operation.operationId, owner, {
+      invocationId: 'schedule-clock', toolName: 'set_time_schedule', arguments: { title: '每日提醒' }, replay: 'never'
+    });
+    const inspect = database.inspectProjectMigration.bind(database);
+    let preparations = 0;
+    database.inspectProjectMigration = async request => {
+      const value = await inspect(request);
+      if (request.kind === 'piTimeSchedule' && ++preparations === 1 && phase === 'preparation') t.mock.timers.setTime(after);
+      return value;
+    };
+    if (phase === 'settings publication') {
+      const apply = database.applyHostSettingsPatch.bind(database);
+      database.applyHostSettingsPatch = (...args) => {
+        const result = apply(...args);
+        t.mock.timers.setTime(after);
+        return result;
+      };
+    }
+    const result = await operations({ operation: 'set_intelligence_time_schedule', input: { projectPath: projectRoot, projectName: 'Project',
+      title: '每日提醒', scheduleKind: 'daily', timeOfDay: '09:00', assignee: 'user' },
+      piToolFence: { operationId: operation.operationId, invocationId: 'schedule-clock', ownerId: owner.ownerId, ownerGeneration: owner.generation } });
+    const task = database.readScheduleLedger({ taskIds: [result.taskId] }).tasks[0];
+    assert.equal(task.dueAt, nextDue);
+    assert.equal(preparations, 2);
+  } finally { await operations.close(); database.close(); }
 });
 
 test('Runtime close waits for in-flight native recovery before its database can close', async t => {

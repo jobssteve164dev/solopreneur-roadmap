@@ -34,8 +34,8 @@ test('the real growth panel observes native reports without watching retired rep
   await scope.growthReportWatcher.ready;
   const projectId = f.projectIds.get(f.project);
   const registration = await f.store.registerProject({ root: f.project });
-  const run = f.store.prepareRun(projectId, registration.locationId, { root: f.project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '需求', command: 'codex', userMessage: '开始', idempotencyKey: 'notification-run' });
-  f.store.submitRunReport(projectId, { executionLogId: 1, generation: run.generation, turnId: run.turnId, report: { summary: '刚提交的新汇报' }, availability: 'available', idempotencyKey: 'notification-report' });
+  const run = await f.store.prepareRun(projectId, registration.locationId, { root: f.project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '需求', command: 'codex', userMessage: '开始', idempotencyKey: 'notification-run' });
+  await f.store.submitRunReport(projectId, { executionLogId: 1, generation: run.generation, turnId: run.turnId, report: { summary: '刚提交的新汇报' }, availability: 'available', idempotencyKey: 'notification-report' });
   for (let attempt = 0; attempt < 40 && !changed.length; attempt++) await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(changed.length, 1);
   assert.equal(changed[0].command, 'growth.reportsChanged'); assert.equal(changed[0].projectPath, f.project);

@@ -628,6 +628,7 @@ export async function buildSolomapStartupPackInstructions(input: {
     '- 先读取下列存在的文件；文件不存在时记录为 skipped，不得因此中断主任务：',
     ...requiredReadFiles.map((filePath) => `  - ${relativeOrAbsolute(workspaceRoot, filePath)}`),
     buildAgentDatabaseInstructions({ migrationTools: ['solo', 'solo_continue'].includes(String(input.runKind || '')) }),
+    '- 按需通过 solomap_context 查找当前项目与已授权全局经验，通过 solomap_read 读取适用经验的固定版本全文；历史任务结果用 solomap_search 定位。只有实际改变本轮动作的经验才写入报告的 experienceUsage，无适用经验时继续完成用户目标。',
     '- 读取后用一句话形成本轮约束：用户目标、必须保留的边界、适用经验、最窄验证。',
     skillBlocks.length
       ? ['- 命中的技能必须逐一判定 used / skipped-not-applicable；判定为 used 的技能必须先读取入口 SKILL.md：', ...skillBlocks].join('\n')

@@ -408,7 +408,7 @@ for (const nodeId of ['__solo__', 'step']) test(`the actual new ${nodeId} handle
   const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
   fs.mkdirSync(path.join(project, '.solopreneur'));
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const store = new UnifiedDataStore(root), ops = createRuntimeDataOperations(store);
   const transport = require('../out/autonomousRuntimeControl.js'), original = transport.sendRuntimeDataRequest;
   transport.sendRuntimeDataRequest = (_root, request) => ops(request);
@@ -449,7 +449,7 @@ for (const [handler, kind, value] of [
   ['handleUpgradeAllAgentClis', 'agent_cli_upgrade', undefined]
 ]) test(`the actual ${kind} entry launches one formal task through the shared runner`, async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-maintenance-entry-'));
   const project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
@@ -603,7 +603,7 @@ for (const mode of ['solo', 'step']) test(`the final ${mode} conversation prompt
 
 test('production review launch retries one formal run and full evidence without permanent review files', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { SyncEngine } = require('../out/db/syncEngine.js');
   const actualTransport = require('../out/autonomousRuntimeControl.js'); const previous = actualTransport.sendRuntimeDataRequest;
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-review-launch-'));
@@ -614,14 +614,14 @@ test('production review launch retries one formal run and full evidence without 
   const gitBaseline = git('rev-parse', 'HEAD');
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
   const registered = await store.registerProject({ root: project });
-  const main = store.prepareRun(registered.projectId, registered.locationId, { root: project, executionLogId: 1, nodeId: 'step', runKind: 'step', prompt: '原始任务', command: 'main', userMessage: '原始目标', metadata: { interactiveSession: true, baseGitHash: gitBaseline }, idempotencyKey: 'review-main' });
+  const main = await store.prepareRun(registered.projectId, registered.locationId, { root: project, executionLogId: 1, nodeId: 'step', runKind: 'step', prompt: '原始任务', command: 'main', userMessage: '原始目标', metadata: { interactiveSession: true, baseGitHash: gitBaseline }, idempotencyKey: 'review-main' });
   const mainOutput = '必须完整复核🌿'.repeat(30000);
-  store.appendRunLog(registered.projectId, { executionLogId: 1, generation: main.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from(mainOutput).toString('base64'), idempotencyKey: 'main-output' });
+  await store.appendRunLog(registered.projectId, { executionLogId: 1, generation: main.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from(mainOutput).toString('base64'), idempotencyKey: 'main-output' });
   fs.writeFileSync(path.join(project, 'result.txt'), '原轮次交付');
   const source = await ops({ operation: 'checkpoint_run', input: { projectId: main.projectId, executionLogId: 1, generation: main.generation, proof: main.proof, expectedRevision: main.revision, expectedTurnId: main.turnId, action: 'complete', outcome: 'candidate_complete', summary: '原轮次已完成', idempotencyKey: 'source-complete' } });
   const nextTurn = await ops({ operation: 'checkpoint_run', input: { projectId: main.projectId, executionLogId: 1, generation: main.generation, proof: main.proof, expectedRevision: source.revision, expectedTurnId: source.turnId, action: 'start', message: '下一轮不同要求', idempotencyKey: 'source-next-turn' } });
   const logHead = store.readRunLogHead(main.projectId, 1, 'stdout');
-  store.appendRunLog(main.projectId, { executionLogId: 1, generation: main.generation, stream: 'stdout', sequence: logHead.nextSequence, offset: logHead.totalBytes, bytes: Buffer.from('下一轮不同输出').toString('base64'), idempotencyKey: 'next-turn-output' });
+  await store.appendRunLog(main.projectId, { executionLogId: 1, generation: main.generation, stream: 'stdout', sequence: logHead.nextSequence, offset: logHead.totalBytes, bytes: Buffer.from('下一轮不同输出').toString('base64'), idempotencyKey: 'next-turn-output' });
   fs.writeFileSync(path.join(project, 'result.txt'), '下一轮不同文件');
   const engine = new SyncEngine(path.join(project, '.solopreneur', 'roadmap.csv'), path.join(project, '.solopreneur', 'project_journal.db'), projectRoot, root);
   engine.setNodes([{ id: 'step', title: '实际交付', description: '原始目标', stage: '实施', dependencies: '', agentCli: 'claude', agentPrompt: '原始任务', status: 'Running', createdAt: new Date().toISOString(), completedAt: '' }]);
@@ -688,7 +688,7 @@ test('production review launch retries one formal run and full evidence without 
 
 test('production Flow role launch registers its formal run before attaching the workflow role', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { SyncEngine } = require('../out/db/syncEngine.js');
   const { createFlowTrace, createFlowLoop } = require('../out/flowStore.js');
   const actualTransport = require('../out/autonomousRuntimeControl.js'); const previousTransport = actualTransport.sendRuntimeDataRequest;
@@ -754,7 +754,7 @@ test('production Flow role launch registers its formal run before attaching the 
 
 test('production Flow settlement reads formal role evidence and commits scoring and learning without legacy files', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { SyncEngine } = require('../out/db/syncEngine.js');
   const { createFlowTrace, createFlowLoop } = require('../out/flowStore.js');
   const actualTransport = require('../out/autonomousRuntimeControl.js'); const previousTransport = actualTransport.sendRuntimeDataRequest;
@@ -800,7 +800,7 @@ test('production Flow settlement reads formal role evidence and commits scoring 
 
 test('production polling resumes an undelivered task after its creating window and Runtime restart', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { prepareAgentRun } = require('../out/agentRunPreparation.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-auto-delivery-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -853,7 +853,7 @@ test('production polling resumes an undelivered task after its creating window a
 
 test('production polling recovers follow-up actions when the settlement reply is lost and the window reopens', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { SyncEngine } = require('../out/db/syncEngine.js');
   const actualTransport = require('../out/autonomousRuntimeControl.js');
   const previousTransport = actualTransport.sendRuntimeDataRequest;
@@ -903,7 +903,7 @@ test('production polling recovers follow-up actions when the settlement reply is
 
 test('production settlement cannot turn an agent-reported passing phrase into an effective adoption', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { SyncEngine } = require('../out/db/syncEngine.js');
   const actualTransport = require('../out/autonomousRuntimeControl.js');
   const previousTransport = actualTransport.sendRuntimeDataRequest;
@@ -911,8 +911,8 @@ test('production settlement cannot turn an agent-reported passing phrase into an
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
   await ops({ operation: 'save_global_prompt', input: { policy: null, content: '只记录真实采用。\n', source: 'user', idempotencyKey: 'production-rsi-policy' } });
-  const lesson = store.write({ kind: 'lesson', action: 'create', scope: null, idempotencyKey: 'production-rsi-lesson', data: { status: 'approved', summary: '先运行真实回归', confidence: 1 } });
-  const run = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: `原始目标\n来源：solomap://objects/${lesson.objectId} · revision=${lesson.revision}`, command: 'actual command', userMessage: '完整用户目标', metadata: { interactiveSession: true, agentCli: 'codex' }, idempotencyKey: 'production-rsi-run' } });
+  const lesson = store.write({ kind: 'lesson', action: 'create', scope: null, idempotencyKey: 'production-rsi-lesson', data: { status: 'approved', summary: '先运行真实回归', do_this: '先运行真实回归', confidence: 1 } });
+  const run = await ops({ operation: 'prepare_run', input: { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: `原始目标\n来源：solomap://objects/${lesson.objectId} · revision=${lesson.revision}\n先运行真实回归`, command: 'actual command', userMessage: '完整用户目标', metadata: { interactiveSession: true, agentCli: 'codex' }, idempotencyKey: 'production-rsi-run' } });
   const output = Buffer.from('完整原始日志🌿\n'.repeat(200) + 'Tests: 5 passed\n');
   await ops({ operation: 'append_run_log', input: { projectId: run.projectId, executionLogId: 1, generation: run.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: output.toString('base64'), idempotencyKey: 'production-rsi-log' } });
   const report = { schemaVersion: 1, summary: '已完成实际交付', unmetRequirements: [], decisions: [], corrections: [], verification: [], commits: [], experienceUsage: [{ experienceId: lesson.objectId, experienceRevision: lesson.revision, action: '先运行真实回归', result: '测试通过', verdict: 'effective', evidence: ['Tests: 5 passed'] }], lessons: [] };
@@ -945,17 +945,25 @@ test('production settlement cannot turn an agent-reported passing phrase into an
     const client = new RunLifecycleClient((operation, input) => ops({ operation, input }), root);
     await extension.recordAcceptedReviewVerification(client, project, 1, 'formal-review-turn', {
       status: 'pass', summary: '独立复核确认真实回归通过', findings: [], nextAction: '', goalSatisfied: true, evidenceSufficient: true,
+      sourceTurnId: run.turnId,
+      experienceAssessments: [{ lessonId: lesson.objectId, lessonRevision: lesson.revision, action: '先运行真实回归', result: 'pass', evidence: '独立检查了真实回归结果' }],
       criteria: [{ criterion: '真实回归', status: 'pass', evidence: ['host:test'], reason: '宿主保存了完整复核结果' }]
     });
     const verifiedCycles = await ops({ operation: 'read_rsi_cycles', input: { projectId: run.projectId } });
     assert.equal(verifiedCycles.items[0].evaluation.verdict, 'effective');
     assert.ok(verifiedCycles.items[0].evaluation.verificationId);
+    await extension.recordAcceptedReviewVerification(client, project, 1, 'negative-review-turn', {
+      status: 'revise', summary: '反例证明该经验没有产生预期结果', findings: ['安装后运行失败'], nextAction: '修正经验适用范围', goalSatisfied: false, evidenceSufficient: true,
+      sourceTurnId: run.turnId, experienceAssessments: [{ lessonId: lesson.objectId, lessonRevision: lesson.revision, action: '先运行真实回归', result: 'fail', evidence: '独立检查安装后失败输出' }], criteria: []
+    });
+    const negative = await ops({ operation: 'read_rsi_cycles', input: { projectId: run.projectId } });
+    assert.equal(negative.items[0].evaluation.verdict, 'ineffective');
   } finally { actualTransport.sendRuntimeDataRequest = previousTransport; engine.close(); await ops.close(); store.close(); }
 });
 
 test('production settlement commits the accepted turn to durable history and creates no run, digest or learning files', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { SyncEngine } = require('../out/db/syncEngine.js');
   const actualTransport = require('../out/autonomousRuntimeControl.js');
   const previousTransport = actualTransport.sendRuntimeDataRequest;
@@ -1023,7 +1031,7 @@ test('production settlement commits the accepted turn to durable history and cre
 
 test('the production Agent preparation entry commits to Runtime and creates no permanent run or status files', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-production-prepare-'));
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
@@ -1054,7 +1062,7 @@ test('the production Agent preparation entry commits to Runtime and creates no p
 
 test('production status consumers read and patch formal run snapshots without legacy status files', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-production-status-'));
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
@@ -1086,7 +1094,7 @@ test('production status consumers read and patch formal run snapshots without le
 
 test('the production interactive turn entry starts from the formal Waiting conversation without checkpoint or status files', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-production-next-turn-'));
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
@@ -1118,7 +1126,7 @@ test('the production interactive turn entry starts from the formal Waiting conve
 test('production terminal delivery keeps waiting for real shell readiness beyond the former ten second cutoff', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { prepareAgentRun } = require('../out/agentRunPreparation.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-production-terminal-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -1180,7 +1188,7 @@ test('foreground continuation enters the owned runner input sequence without rea
 
 test('Provider ingress observation converges after the launch SLA without converting latency into delivery failure', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { createInteractionBudget } = require('../out/interactionBudget.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-task-ingress-gate-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -1219,7 +1227,7 @@ test('Provider ingress observation converges after the launch SLA without conver
 
 test('task-ingress waiting follows the same delivery across the runner claim generation handoff', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { createInteractionBudget } = require('../out/interactionBudget.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-task-ingress-claim-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -1357,7 +1365,7 @@ test('terminal process readiness exhaustion never creates a second terminal and 
 
 test('the production stop action settles the database task without writing run files', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-production-stop-'));
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
@@ -1387,7 +1395,7 @@ test('the production stop action settles the database task without writing run f
 
 test('the production terminal-close callback preserves a settled turn and closes its session in Runtime', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-production-close-'));
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
@@ -1453,7 +1461,7 @@ for (const kind of ['native', 'turn']) for (const unavailable of [false, true]) 
   const status = { workspaceRoot: project, nodeId: '__solo__', executionLogId: 85, rootExecutionLogId: 85, runKind: 'solo', agentCli: 'claude', selectedModel: 'original-model', status: 'Failed', userMessage: '完整历史目标', interactiveSession: true, interactiveSessionClosed: true, startedAt, turnStartedAt: startedAt, finishedAt, checkpointSequence: 0, checkpointSummary: '完整历史结束说明', sessionProvider: 'claude', bindingNonce: originalBinding.bindingNonce, sessionBindingHeadRevision: originalBinding.headRevision };
   const statusBytes = Buffer.from(JSON.stringify(status)); const source = { identity: `agent-status:${project}`, key: '85.json', hash: require('node:crypto').createHash('sha256').update(statusBytes).digest('hex') };
   f.store.captureMigrationSource(source, statusBytes); const location = await f.store.registerProject({ root: project });
-  const run = f.store.adoptHistoricalRun(location.projectId, location.locationId, source, { status, binding: originalBinding, prompt: '完整历史提示词🌿', command: 'claude original command', output: Buffer.from('完整历史输出🌿'), unregisteredReports: [] }).state;
+  const run = (await f.store.adoptHistoricalRun(location.projectId, location.locationId, source, { status, binding: originalBinding, prompt: '完整历史提示词🌿', command: 'claude original command', output: Buffer.from('完整历史输出🌿'), unregisteredReports: [] })).state;
   const closed = run;
   const transcriptPath = path.join(claudeHome, 'projects', project.replace(/[^a-zA-Z0-9]/g, '-'), sessionId + '.jsonl'); fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
   const transcript = Buffer.from(JSON.stringify({ type: 'user', uuid: 'historical-user', sessionId, cwd: project, timestamp: run.status.startedAt, message: { role: 'user', content: '完整历史用户原文🌿' } }) + '\n'); fs.writeFileSync(transcriptPath, transcript);
@@ -1512,7 +1520,7 @@ test('project switching during historical reads cannot continue or display the o
 
 test('new Solo launch opens its terminal while a full history refresh is pending', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { startRuntimeControlServer, sendRuntimeDataRequest } = require('../out/autonomousRuntimeControl.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-launch-no-history-'));
   const projectPath = path.join(base, 'project'); const root = path.join(base, '.solomap-global'); fs.mkdirSync(projectPath);
@@ -2047,7 +2055,7 @@ function assertBundledHandoffInstructions(instructions, globalRoot) {
 
 test('first step and revision prompts use the formal handoff MCP on the current project scope', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const transport = require('../out/autonomousRuntimeControl.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-first-prompt-handoff-'));
   const root = path.join(base, "store 'quoted'", '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -2082,7 +2090,7 @@ test('first step and revision prompts use the formal handoff MCP on the current 
 test('settings follow a restored database at the same capability sequence without manual invalidation', async () => {
   const extensionModule = loadCompiledModule('out/extension.js', 'module.exports.__getPersistedSettings = getPersistedSettings;');
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const global = require('../out/solomapGlobal.js'), transport = require('../out/autonomousRuntimeControl.js');
   const previous = transport.sendRuntimeDataRequest;
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-settings-restore-'));
@@ -2524,7 +2532,7 @@ function createWebviewStub() {
 
 function isolatedCapabilityRuntime(root) {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const transport = require('../out/autonomousRuntimeControl.js'), previous = transport.sendRuntimeDataRequest;
   let store, operations;
   transport.sendRuntimeDataRequest = (resolvedRoot, request) => {
@@ -5885,7 +5893,7 @@ test('manual Today refresh and feedback share the current normalized project gen
   await listener({ command: 'recordTodayShadowFeedback', outcome: 'accepted', operationId: 'stale-op', decisionId: 'decision', recommendedProjectPath: '/fixture-b/app', selectedProjectPath: '/fixture-b/app' });
 
   assert.deepEqual(posted.filter(message => message.command === 'dailyReviewLoaded').map(message => message.review.summary), ['B']);
-  assert.deepEqual(feedbackRoots, ['/fixture-b/.solomap-global']);
+  assert.deepEqual(feedbackRoots, ['/fixture-b/.solomap-global', '/fixture-b/.solomap-global'], 'feedback must reach the original-decision validator even when the displayed review is stale');
 });
 
 test('full roadmap webview runtime script parses and opens settings panel', async () => {
@@ -8937,8 +8945,19 @@ test('project investment analytics read a migrated run index for enriched portfo
   }
   const globalRoot = path.join(projectRootA, '.solomap-global');
   const native = await require('./analysis-fixture.js').openAnalysisOwner(t, globalRoot, [{ path: projectRootA }]);
-  const job = await native.ops({ operation: 'import_project_data', input: { collection: 'project-journal', sourceRoot: path.join(solopreneurDir, 'project_journal.db'), projectRoot: projectRootA, idempotencyKey: 'investment-old-journal-import' } });
-  await native.ops.waitForMigrations(); assert.equal(native.store.readMigrationJob(job.jobId).status, 'completed');
+  const initJournal = SqliteStore.prototype.initJournalReadOnly;
+  SqliteStore.prototype.initJournalReadOnly = () => { throw new Error('legacy_journal_sqlite_opened_on_writer'); };
+  const writeIndex=native.store.importHistoricalRunIndex.bind(native.store);
+  native.store.importHistoricalRunIndex=(...args)=>{
+    if(!args[7])throw new Error('historical_index_used_legacy_writer_plan');
+    return writeIndex(...args);
+  };
+  try {
+    const job = await native.ops({ operation: 'import_project_data', input: { collection: 'project-journal', sourceRoot: path.join(solopreneurDir, 'project_journal.db'), projectRoot: projectRootA, idempotencyKey: 'investment-old-journal-import' } });
+    await native.ops.waitForMigrations();
+    const accepted=native.store.readMigrationJob(job.jobId);
+    assert.equal(accepted.status,'completed',JSON.stringify(accepted));
+  } finally { SqliteStore.prototype.initJournalReadOnly=initJournal; native.store.importHistoricalRunIndex=writeIndex; }
   const stats = await analytics.readProjectInvestmentStatsFromDatabase(
     projectRootA,
     projectRoot,
@@ -10876,7 +10895,7 @@ for (const cached of [true, false]) test(`strategy panel switches data roots whi
       (operation, input) => owner.ops({ operation, input }));
     await strategy.buildStrategyPyramidSnapshotData(projects, roots[i], project);
     const state = owner.store.readStrategyState(null);
-    owner.store.writeStrategyState(null, { expectedRevision: state.revision, value: { ...state.value, snapshot: { ...state.value.snapshot, mainJudgment: i ? '新目录结果' : '旧目录结果' } }, idempotencyKey: `root-snapshot-${i}` });
+    await owner.store.writeStrategyState(null, { expectedRevision: state.revision, value: { ...state.value, snapshot: { ...state.value.snapshot, mainJudgment: i ? '新目录结果' : '旧目录结果' } }, idempotencyKey: `root-snapshot-${i}` });
   }
   let rendered; const newRendered = new Promise(resolve => { rendered = resolve; }); const paints = [];
   const runtimeControl = {
@@ -10972,7 +10991,7 @@ test('strategy command renders an offline portfolio and persists its diagnostic 
 
 test('strategy cache connection failures reach the existing failure page and retry action', async t => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-strategy-disconnected-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -11396,7 +11415,7 @@ test('global engineering snapshot stays in memory instead of creating parallel p
   assert.equal(snapshot.portfolio[0].name, 'SoloMap');
   assert.equal(snapshot.portfolio[0].nextAction, 'Build MVP');
   assert.equal(fs.existsSync(globalRoot), false);
-  assert.equal(snapshot.learningCandidateCount, 0);
+  assert.equal(snapshot.learningCandidateCount, null, 'missing learning input must stay unknown instead of being reported as zero');
   assert.equal(sidebarModule.__normalizeGlobalDataPath(root, []), globalRoot);
 });
 
@@ -12947,12 +12966,14 @@ test('the active conversation poller does not fail a quiet long-running Agent', 
 
 test('agent command builder keeps background one-shot commands and uses native interactive user conversations', async t => {
   const capabilityStores = new Map();
+  let requireLocalLearningLaunch = false;
   const transportFixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-webview-composite-data-'));
   const transportProjectRoot = path.join(transportFixtureRoot, 'project');
   fs.mkdirSync(transportProjectRoot);
   const capabilityTransport = require('../out/autonomousRuntimeControl.js');
   const previousCapabilityTransport = capabilityTransport.sendRuntimeDataRequest;
   capabilityTransport.sendRuntimeDataRequest = (root, request) => {
+    if (requireLocalLearningLaunch && (['read_learning_overview', 'query_run_digests'].includes(request.operation) || request.operation === 'context' && request.input.kinds?.includes('lesson'))) throw new Error(`learning_scan_on_launch:${request.operation}`);
     let owner = capabilityStores.get(root);
     if (!owner) {
       const resolvedRoot = path.resolve(root);
@@ -12961,7 +12982,7 @@ test('agent command builder keeps background one-shot commands and uses native i
         ? root
         : path.join(transportFixtureRoot, String(capabilityStores.size), '.solomap-global');
       const store = new (require('../out/db/unifiedDataStore.js').UnifiedDataStore)(dataRoot);
-      owner = { store, operations: require('../out/runtimeDataOperations.js').createRuntimeDataOperations(store) };
+      owner = { store, operations: require('./runtime-data-fixture.cjs').createRuntimeDataOperations(store) };
       capabilityStores.set(root, owner);
     }
     const input = { ...(request.input || {}) };
@@ -13349,7 +13370,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   const promptFixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-continuation-prompt-'));
   const promptWorkspace = path.join(promptFixture, 'app'), promptRoot = path.join(promptFixture, '.solomap-global'); fs.mkdirSync(promptWorkspace);
   const { UnifiedDataStore: PromptStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations: createPromptOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations: createPromptOperations } = require('./runtime-data-fixture.cjs');
   const promptStore = new PromptStore(promptRoot), promptOperations = createPromptOperations(promptStore);
   const promptTransport = require('../out/autonomousRuntimeControl.js'), previousPromptTransport = promptTransport.sendRuntimeDataRequest;
   promptTransport.sendRuntimeDataRequest = (_root, request) => promptOperations(request);
@@ -13722,7 +13743,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.equal(ensuredMemory.memoryRoot, path.join(memoryRoot, 'memory'));
   assert.equal(fs.existsSync(ensuredMemory.memoryRoot), false, 'the compatibility locator must not recreate the retired Markdown producer');
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const memoryStore = new UnifiedDataStore(memoryRoot); const memoryOps = createRuntimeDataOperations(memoryStore);
   const memoryTransport = require('../out/autonomousRuntimeControl.js'); const previousMemoryTransport = memoryTransport.sendRuntimeDataRequest;
   memoryTransport.sendRuntimeDataRequest = (_root, request) => memoryOps(request);
@@ -14204,6 +14225,7 @@ test('agent command builder keeps background one-shot commands and uses native i
   assert.match(attachedSoloPrompt, /用户为本次 Solo 对话选择了补充文件/);
   assert.match(attachedSoloPrompt, /docs\/brief\.md/);
   assert.doesNotMatch(attachedSoloPrompt, /\.\.\/outside\.md/);
+  requireLocalLearningLaunch = true;
   const flowPlannerPrompt = await extensionModule.__buildFlowPlannerPrompt({
     goal: '让 Flow 使用统一记忆机制',
     workspaceRoot: transportProjectRoot,
@@ -14233,6 +14255,8 @@ test('agent command builder keeps background one-shot commands and uses native i
     globalDataPath: path.join(transportFixtureRoot, 'flow-global', '.solomap-global')
   });
   assert.match(flowVerifierPrompt, /运行类型：flow \/ 角色：verifier/);
+  assert.match(flowVerifierPrompt, /solomap_context/);
+  requireLocalLearningLaunch = false;
 
   const manifestPath = path.join(soloAttachmentRoot, '.solopreneur', 'documentation.json');
   assert.equal(fs.existsSync(manifestPath), false);
@@ -15268,7 +15292,7 @@ test('sidebar contribution switches to a saved data root even while newer settin
 
 test('agent impact disconnected entry resolves with a safe failure and recovers on refresh', async t => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-impact-disconnect-entry-'));
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -17229,7 +17253,7 @@ test('continuation recovers a preparing Codex binding from its exact launch tran
   const capture = (identity, key, bytes) => { const source = { identity, key, hash: require('node:crypto').createHash('sha256').update(bytes).digest('hex') }; f.store.captureMigrationSource(source, bytes); return source; };
   const statusBytes = Buffer.from(JSON.stringify(status)); const statusSource = capture(`agent-status:${project}`, '85.json', statusBytes);
   const nativeBytes = fs.readFileSync(transcriptPath); const nativeSource = capture(`native-codex:${project}`, transcriptPath, nativeBytes);
-  const old = f.store.adoptHistoricalRun(projectId, location.locationId, statusSource, { status, binding, prompt: `完整历史提示词\nSoloMap binding nonce: ${nonce}.`, command: 'codex original arguments', output: Buffer.from('完整历史原始输出'), nativeTranscript: { source: nativeSource, bytes: nativeBytes }, unregisteredReports: [] }).state;
+  const old = (await f.store.adoptHistoricalRun(projectId, location.locationId, statusSource, { status, binding, prompt: `完整历史提示词\nSoloMap binding nonce: ${nonce}.`, command: 'codex original arguments', output: Buffer.from('完整历史原始输出'), nativeTranscript: { source: nativeSource, bytes: nativeBytes }, unregisteredReports: [] })).state;
   await assert.rejects(f.ops({ operation: 'recover_run_executions', input: { root: project, executionLogId: 85, generation: old.generation + 1, identityOnly: true } }), /run_owner_conflict/);
   assert.deepEqual(await f.ops({ operation: 'read_run_binding', input: { root: project, executionLogId: 85 } }), binding);
   const delivered = [];
@@ -18482,7 +18506,7 @@ test('continuation runs are recorded without task status judgment while preservi
     let native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)},root,[{path:project},{path:other}]);
     t.after(async()=>{for(const close of closes.splice(0).reverse())await close();});
     await native.ops({operation:'save_global_prompt',input:{policy:null,content:'续聊也如实记录采用。\n',source:'user',idempotencyKey:`continuation-rsi-policy:${mode}`}});
-    const lesson = await native.ops({operation:'write',input:{kind:'lesson',action:'create',scope:null,idempotencyKey:`continuation-rsi-lesson:${mode}`,data:{status:'approved',summary:'续聊保留采用记录',confidence:1}}});
+    const lesson = await native.ops({operation:'write',input:{kind:'lesson',action:'create',scope:null,idempotencyKey:`continuation-rsi-lesson:${mode}`,data:{status:'approved',summary:'续聊保留采用记录',do_this:'续聊中继续采用',confidence:1}}});
     const csvPath = path.join(project,'.solopreneur','roadmap.csv'), otherCsvPath = path.join(other,'.solopreneur','roadmap.csv');
     const originalCsv = [
       'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt',
@@ -18497,6 +18521,8 @@ test('continuation runs are recorded without task status judgment while preservi
     const run = await prepare(project,88,'step_continue',{parentExecutionLogId:12,expectedParentTurnId:parentRun.turnId});
     assert.equal(run.taskId,parentRun.taskId);assert.equal(run.conversationId,parentRun.conversationId);assert.notEqual(run.turnId,parentRun.turnId);
     assert.equal(run.status.sourceParentRunId,parentRun.runId);assert.equal(run.status.sourceParentTurnId,parentRun.turnId);assert.equal(run.status.interactiveSession,true);assert.equal(run.status.checkpointPreserveRoadmapState,true);
+    const recall = require('./runtime-data-fixture.cjs').runtimeMcpSource(root, run.projectId, true, { executionLogId: 88, generation: run.generation, proof: run.proof });
+    try { await recall.call('read', { ref: lesson.objectId, revision: lesson.revision, view: 'full' }); } finally { await recall.close(); }
     const read = (workspace,id)=>native.ops({operation:'read_run_state',input:{root:workspace,executionLogId:id}});
     const parent = await read(project,12), peer = await read(project,13), foreign = await read(other,88);
     const client = new (require('../out/runLifecycleClient.js').RunLifecycleClient)((operation,input)=>native.ops({operation,input}),root);
@@ -19678,7 +19704,7 @@ test('project registry persists projects and pin state in the global database', 
   };
 
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const transport = require('../out/autonomousRuntimeControl.js'); const previous = transport.sendRuntimeDataRequest;
   const store = new UnifiedDataStore(globalRoot); const operations = createRuntimeDataOperations(store);
   transport.sendRuntimeDataRequest = (_root, request) => operations(request);
@@ -19774,7 +19800,7 @@ test('partial settings updates preserve existing user settings after extension u
   };
 
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const store = new UnifiedDataStore(globalRoot); const operations = createRuntimeDataOperations(store);
   extensionModule.__connectSettingsDatabase(operations);
 
@@ -19912,7 +19938,7 @@ test('cold-start cognitive config is immediately readable after projecting the s
   const root = path.join(tempRoot, '.solomap-global');
   const cognitive = require('../out/cognitiveRuntimeConfig.js');
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const store = new UnifiedDataStore(root);
   const operations = createRuntimeDataOperations(store);
   t.after(async () => {
@@ -19987,7 +20013,7 @@ test('manual experience review is routed from the existing settings action', asy
 
 test('concurrent settings patches serialize without restoring stale values', async t => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'concurrent-settings-'));
   const globalRoot = path.join(tempRoot, '.solomap-global');
   const store = new UnifiedDataStore(globalRoot), operations = createRuntimeDataOperations(store);
@@ -20075,7 +20101,7 @@ test('concurrent settings patches serialize without restoring stale values', asy
 
 test('two settings windows project the committed agent and model combination after crossed writes', async t => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cognitive-settings-windows-'));
   const root = path.join(base, '.solomap-global');
   const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
@@ -20137,7 +20163,7 @@ test('two settings windows project the committed agent and model combination aft
 
 test('two independent settings hosts cannot restore an older global instruction while saving another field', async t => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-prompt-settings-windows-'));
   const root = path.join(base, '.solomap-global');
   const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
@@ -20183,7 +20209,7 @@ test('two independent settings hosts cannot restore an older global instruction 
 
 test('a committed global instruction remains authoritative after the host loses the post-policy response', async t => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-prompt-policy-restart-'));
   const root = path.join(base, '.solomap-global');
   const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
@@ -20213,7 +20239,7 @@ test('a committed global instruction remains authoritative after the host loses 
 
 test('two fresh settings hosts converge when both bootstrap the same empty database', async t => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-settings-bootstrap-race-'));
   const root = path.join(base, '.solomap-global');
   const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
@@ -20567,7 +20593,7 @@ test('sidebar ignores issue detail responses that no longer belong to the expand
 
 test('two extension windows persist independent draft, expanded and selected UI fields', async t => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-ui-state-windows-'));
   const root = path.join(base, '.solomap-global');
   const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
@@ -21255,7 +21281,7 @@ test('generated task script prepares CLI configuration and uses database tools b
   const extensionModule = loadCompiledModule('out/extension.js', [require('./fixtures/legacy-agent-shell-source.cjs') + '\n' +
       'module.exports.__buildAgentShellScript = buildAgentShellScript;']);
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-task-database-'));
   const root = path.join(fixture, '.solomap-global');
@@ -21390,7 +21416,7 @@ test('old project initialization failure cannot replace the newly selected roadm
 
 test('the actual native settlement consumer uses the sealed turn duration and token delta rather than the whole live session', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { RunNativeObserver } = require('../out/runNativeObserver.js');
   const { SyncEngine } = require('../out/db/syncEngine.js');
   const transport = require('../out/autonomousRuntimeControl.js'); const previous = transport.sendRuntimeDataRequest;
@@ -21435,7 +21461,7 @@ test('the actual native settlement consumer uses the sealed turn duration and to
 
 for (const scenario of ['user-completed', 'other-started', 'other-finished']) test(`the real delayed roadmap effect preserves current state after ${scenario}`, async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { SyncEngine } = require('../out/db/syncEngine.js');
   const { CsvStore } = require('../out/db/csvStore.js');
   const transport = require('../out/autonomousRuntimeControl.js'); const previous = transport.sendRuntimeDataRequest;
@@ -21471,7 +21497,7 @@ for (const scenario of ['user-completed', 'other-started', 'other-finished']) te
 for (const scenario of ['__solo__', 'step', 'unavailable-cli', 'missing-node']) test(`the actual automatic prompt launch for ${scenario} remains in its source project and reuses the same durable intent after a window restart`, async () => {
   const nodeId = scenario === '__solo__' ? '__solo__' : scenario === 'missing-node' ? 'absent' : 'step';
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { SyncEngine } = require('../out/db/syncEngine.js');
   const transport = require('../out/autonomousRuntimeControl.js'); const previous = transport.sendRuntimeDataRequest;
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-automatic-source-intent-'));
@@ -21560,7 +21586,7 @@ for (const scenario of ['__solo__', 'step', 'unavailable-cli', 'missing-node']) 
 
 for (const editedLater of [false, true]) test(`formal roadmap recovery ${editedLater ? 'preserves a newer user edit' : 'restores the original bytes without a backup file'}`, async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { RunLifecycleClient, runStatusReference } = require('../out/runLifecycleClient.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-formal-roadmap-recovery-'));
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -21588,7 +21614,7 @@ for (const editedLater of [false, true]) test(`formal roadmap recovery ${editedL
 
 test('the actual step criteria initializer preserves all database criteria and creates missing defaults without permanent memory files', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-step-criteria-consumer-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
@@ -21621,7 +21647,7 @@ test('the actual step criteria initializer preserves all database criteria and c
 });
 
 for (const continuation of [false, true]) test(`the actual ${continuation ? 'continuation' : 'step'} prompt reads pinned step context through ordinary MCP without legacy files`, async () => {
-  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-step-prompt-reference-')); const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
@@ -21646,7 +21672,14 @@ for (const continuation of [false, true]) test(`the actual ${continuation ? 'con
     assert.ok(prompt.includes(memory.objectId), 'the actual preparation prompt must pin the formal step snapshot');
     assert.ok(prompt.includes(memory.sources[0].objectId)); assert.match(prompt, /solomap_read/); assert.match(prompt, /revision[^\n]*1/);
     assert.ok(prompt.includes(source.completionCriteria[30])); assert.ok(prompt.includes('执行本轮最新要求'));
-    assert.ok(prompt.includes('保留用户当前选择')); assert.ok(prompt.includes(`solomap://objects/${lesson.objectId}`));
+    assert.ok(!prompt.includes('保留用户当前选择')); assert.ok(!prompt.includes(`solomap://objects/${lesson.objectId}`));
+    assert.match(prompt, /solomap_context/);
+    const recall = require('./runtime-data-fixture.cjs').runtimeMcpSource(root, identity.projectId, true);
+    try {
+      const context = await recall.call('context', { project: identity.projectId, kinds: ['lesson'], view: 'metadata' });
+      assert.ok(context.items.some(item => item.objectId === lesson.objectId));
+      assert.equal((await recall.call('read', { ref: lesson.objectId, revision: lesson.revision, view: 'full' })).data.summary, '保留用户当前选择');
+    } finally { await recall.close(); }
     assert.doesNotMatch(prompt, /环节交接文件|环节交接 JSON|环节运行记录目录|must-not-read-step|must-not-read-runs|\.solopreneur\/step-memory/);
     assert.ok(prompt.length < source.entries[0].usefulSignals.length / 4, 'preparation uses pinned references rather than injecting the retained history body');
     assert.equal(reads, 1, 'criteria and source pointers must come from the same accepted snapshot');
@@ -21683,7 +21716,7 @@ test('an external time-schedule wake waits until a pending local settings write 
 
 test('late step criteria hydration cannot replace the user latest roadmap state or newer database criteria', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { SyncEngine } = require('../out/db/syncEngine.js');
   const { CsvStore } = require('../out/db/csvStore.js');
   const transport = require('../out/autonomousRuntimeControl.js'); const previous = transport.sendRuntimeDataRequest;
@@ -21735,7 +21768,7 @@ test('late step criteria hydration cannot replace the user latest roadmap state 
 
 test('a delayed default criteria initializer keeps concurrently committed user standards', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-criteria-write-conflict-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
@@ -21766,7 +21799,7 @@ test('a delayed default criteria initializer keeps concurrently committed user s
 
 test('default step criteria for identical nodes in two projects commit independently in one database', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-criteria-project-identity-'));
   const root = path.join(base, '.solomap-global'); const projects = ['A', 'B'].map(name => path.join(base, name)); projects.forEach(project => fs.mkdirSync(project));
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
@@ -21791,7 +21824,7 @@ test('default step criteria for identical nodes in two projects commit independe
 
 for (const refused of [false, true]) test(`scheduled reminder ${refused ? 'preserves its occurrence when event commit fails' : 'waits for event commit before completion'}`, async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const ledger = require('../out/scheduledTaskLedger.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reminder-commit-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -21837,7 +21870,7 @@ for (const refused of [false, true]) test(`scheduled reminder ${refused ? 'prese
 for (const scenario of ['accepted', 'refused', 'cancelled']) test(`focus reminder ${scenario === 'refused' ? 'handles a refused event commit without notifying' : scenario === 'cancelled' ? 'does not notify after cancellation during commit' : 'waits for event commit in its original project'}`, async () => {
   const refused = scenario === 'refused';
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const ledger = require('../out/scheduledTaskLedger.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-focus-commit-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'A'); const selectedLater = path.join(base, 'B'); fs.mkdirSync(project); fs.mkdirSync(selectedLater);
@@ -21885,7 +21918,7 @@ for (const scenario of ['accepted', 'refused', 'cancelled']) test(`focus reminde
 
 for (const mutation of ['add', 'edit', 'delete', 'unchanged']) test(`a completed one-time reminder preserves current scheduled settings after ${mutation}`, async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const ledger = require('../out/scheduledTaskLedger.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reminder-settings-race-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -21924,7 +21957,7 @@ for (const mutation of ['add', 'edit', 'delete', 'unchanged']) test(`a completed
 
 test('an actual scheduled prompt remains in project A when the user selects B during terminal readiness', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { SyncEngine } = require('../out/db/syncEngine.js'); const ledger = require('../out/scheduledTaskLedger.js');
   const transport = require('../out/autonomousRuntimeControl.js'); const previous = transport.sendRuntimeDataRequest;
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-scheduled-source-race-'));
@@ -21969,7 +22002,7 @@ test('an actual scheduled prompt remains in project A when the user selects B du
 
 test('replaying a committed scheduled reminder after a window restart does not notify again', async t => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js'); const ledger = require('../out/scheduledTaskLedger.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs'); const ledger = require('../out/scheduledTaskLedger.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reminder-replay-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   t.after(() => {
@@ -22003,7 +22036,7 @@ test('replaying a committed scheduled reminder after a window restart does not n
 
 for (const edited of [false, true]) test(`a scheduled reminder does not acknowledge occurrence completion when another window holds the database lease${edited ? ' and settings are later edited' : ''}`, async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js'); const ledger = require('../out/scheduledTaskLedger.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs'); const ledger = require('../out/scheduledTaskLedger.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reminder-lock-contention-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
@@ -22033,7 +22066,7 @@ for (const edited of [false, true]) test(`a scheduled reminder does not acknowle
 
 test('a scheduled reminder committed before a lost window reply is displayed after restart rather than silently completed', async t => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js'); const ledger = require('../out/scheduledTaskLedger.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs'); const ledger = require('../out/scheduledTaskLedger.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reminder-lost-reply-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   t.after(() => {
@@ -22075,7 +22108,7 @@ test('a scheduled reminder committed before a lost window reply is displayed aft
 
 test('a queued automation sound remains pending without a view and completes through the actual sidebar message acknowledgement', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-sound-delivery-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -22131,7 +22164,7 @@ test('a queued automation sound remains pending without a view and completes thr
 
 for (const providerExists of [false, true]) test(`repeated unchanged sound polling without ${providerExists ? 'a resolved sidebar view' : 'any view'} does not write delivery history`, async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js'); const { DatabaseSync } = require('node:sqlite');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs'); const { DatabaseSync } = require('node:sqlite');
   const { SolopreneurSidebarProvider } = loadCompiledModule('out/sidebarProvider.js', '');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-sound-idle-resource-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -22165,7 +22198,7 @@ test('the Windows UI owner obtains a verifiable process creation marker without 
 });
 
 for (const scenario of ['lost-claim-reply', 'delivered-ack-outage']) test(`a live notification instance recovers after ${scenario} without a plugin restart`, async () => {
-  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-ui-runtime-outage-'));
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
@@ -22198,7 +22231,7 @@ for (const scenario of ['lost-claim-reply', 'delivered-ack-outage']) test(`a liv
 });
 
 test('an asynchronously rejected notification remains recoverable while an open notice does not block another delivery', async () => {
-  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-notice-rejection-'));
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root); const ops = createRuntimeDataOperations(store);
@@ -22224,7 +22257,7 @@ test('an asynchronously rejected notification remains recoverable while an open 
 });
 
 test('a focus reminder preserves both actions when the enqueue reply is lost after commit', async () => {
-  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const ledger = require('../out/scheduledTaskLedger.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-focus-batch-loss-'));
   const root = path.join(base, 'global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -22255,7 +22288,7 @@ test('a focus reminder preserves both actions when the enqueue reply is lost aft
 });
 
 test('a pending focus notification is cancelled after restart when the user has disabled reminders', async () => {
-  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-focus-pending-disabled-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
   let store = new UnifiedDataStore(root); let ops = createRuntimeDataOperations(store);
@@ -22275,7 +22308,7 @@ test('a pending focus notification is cancelled after restart when the user has 
 
 for (const delayed of [true, false]) test(`database-only step criteria migration refreshes the actual ${delayed ? 'delayed' : 'already visible'} page without a node action`, async t => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { SyncEngine } = require('../out/db/syncEngine.js');
   const actualTransport = require('../out/autonomousRuntimeControl.js'); const previous = actualTransport.sendRuntimeDataRequest;
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-step-migration-refresh-'));
@@ -22340,7 +22373,7 @@ for (const delayed of [true, false]) test(`database-only step criteria migration
 
 
 for (const delayed of [false, true]) test(`switching the settings data root refreshes ${delayed ? 'an in-flight' : 'a visible'} criteria snapshot even when both roots have the same revision`, async () => {
-  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { SyncEngine } = require('../out/db/syncEngine.js'); const transport = require('../out/autonomousRuntimeControl.js'); const previous = transport.sendRuntimeDataRequest;
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-criteria-root-switch-')); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const roots = [path.join(base, 'a', '.solomap-global'), path.join(base, 'b', '.solomap-global')];
@@ -22386,7 +22419,7 @@ for (const delayed of [false, true]) test(`switching the settings data root refr
 
 
 for (const [changeRoot, transientFailure] of [[false, false], [true, false], [false, true]]) test(`production experience review button applies a database proposal using the shared launcher without review files${changeRoot ? ' and preserves a later root selection' : ''}${transientFailure ? ' after a transient state RPC failure' : ''}`, async () => {
-  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-formal-review-host-')), project = path.join(base, 'project'), root = path.join(base, '.solomap-global'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root), ops = createRuntimeDataOperations(store);
   const { projectId } = await ops({ operation: 'register_project', input: { root: project } });
@@ -22461,7 +22494,7 @@ for (const [changeRoot, transientFailure] of [[false, false], [true, false], [fa
 
 for (const appliedFirst of [true, false]) test(`production default instruction save keeps the next review baseline current after ${appliedFirst ? 'a completed review' : 'an interrupted review'}`, async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { reviewHash } = require('../out/learningReview.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'review-settings-'));
   const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -22498,7 +22531,7 @@ for (const appliedFirst of [true, false]) test(`production default instruction s
 
 for (const unchanged of [true, false]) test(`production default instruction save ${unchanged ? 'does not version an unchanged settings submission' : 'discards a delayed review projection after a newer user save'}`, async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'review-settings-order-'));
   const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root), ops = createRuntimeDataOperations(store);
@@ -22544,7 +22577,7 @@ for (const unchanged of [true, false]) test(`production default instruction save
 
 for(const mixed of [false,true]) test(mixed?'production default instruction save a superseded prompt preserves the earlier automation settings patch':'production default instruction save the real save projects a validated complete prompt including its final newline',async()=>{
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { reviewHash } = require('../out/learningReview.js');
  const base=fs.mkdtempSync(path.join(os.tmpdir(),'review-save-boundary-')),root=path.join(base,'.solomap-global'),project=path.join(base,'project');fs.mkdirSync(project);
  const store=new UnifiedDataStore(root),ops=createRuntimeDataOperations(store);let saved={globalDataPath:root,globalPrompt:'保留用户目标。',cliPath:'fixture',automationTasks:{focusMinutes:10}};
@@ -22574,7 +22607,7 @@ for(const mixed of [false,true]) test(mixed?'production default instruction save
 });
 
 for (const kind of ['step', 'solo', 'roadmap_revision']) test(`the actual automatic ${kind} handler keeps prompt context in the same original data root as its formal run`, async () => {
-  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js'); const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { SyncEngine } = require('../out/db/syncEngine.js'); const transport = require('../out/autonomousRuntimeControl.js'); const previous = transport.sendRuntimeDataRequest;
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-automatic-prompt-root-')); const project = path.join(base, 'project'); fs.mkdirSync(project);
   const roots = [path.join(base, 'original', '.solomap-global'), path.join(base, 'selected', '.solomap-global')];

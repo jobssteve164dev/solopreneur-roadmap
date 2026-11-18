@@ -4,8 +4,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { UnifiedDataStore, projectJournalSerializedResult } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { projectJournalSerializedResult } = require('../out/db/unifiedDataStore.js');
+const { ContentComputeDataStore: UnifiedDataStore } = require('./content-compute-fixture.cjs');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const { SyncEngine, conversationPageCacheMaxBytes, conversationPageCacheMaxEntries } = require('../out/db/syncEngine.js');
 const { importAgentRuns, importProjectGrowth } = require('../out/projectDataMigration.js');
@@ -21,7 +22,7 @@ test('conversation history only rehydrates entries whose presentation dependenci
     command: 'codex', userMessage: `用户目标 ${executionLogId}`, metadata: { interactiveSession: true },
     idempotencyKey: `journal-projection-cache:${executionLogId}`
   });
-  prepare(1); const latest = prepare(2);
+  await prepare(1); const latest = await prepare(2);
   const reader = UnifiedDataStore.openReadOnly(root); t.after(() => reader.close());
   const originalResolve = reader.resolveRunConversation.bind(reader), resolved = new Map();
   reader.resolveRunConversation = (id, executionLogId) => {
@@ -31,7 +32,7 @@ test('conversation history only rehydrates entries whose presentation dependenci
   reader.readProjectJournal(projectId);
   assert.deepEqual(Object.fromEntries(resolved), { 2: 1, 1: 1 });
   resolved.clear();
-  owner.store.writeRunDocument(projectId, {
+  await owner.store.writeRunDocument(projectId, {
     executionLogId: 2, generation: latest.generation, turnId: latest.turnId,
     purpose: `native_reply_${latest.turnId.replace(/-/g, '')}`,
     bytes: Buffer.from('第二条的最终回复').toString('base64'), mimeType: 'text/plain', expectedRevision: 0,
@@ -47,7 +48,7 @@ test('internal native cursor progress does not invalidate the sidebar conversati
   const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
   const owner = await require('./analysis-fixture.js').openAnalysisOwner(t, root, [{ path: project }]);
   const projectId = owner.projectIds.get(project), registration = await owner.store.registerProject({ root: project });
-  const prepared = owner.store.prepareRun(projectId, registration.locationId, {
+  const prepared = await owner.store.prepareRun(projectId, registration.locationId, {
     root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '用户输入',
     command: 'codex', userMessage: '用户目标', metadata: { interactiveSession: true },
     idempotencyKey: 'conversation-revision:prepare'
@@ -62,7 +63,7 @@ test('internal native cursor progress does not invalidate the sidebar conversati
   const initialCoreRevision = owner.store.rows(
     'SELECT source_revision FROM sidebar_core_projection_state WHERE project_id=?', [projectId]
   )[0]?.source_revision;
-  owner.store.patchRunState(projectId, {
+  await owner.store.patchRunState(projectId, {
     executionLogId: 1, generation: prepared.generation, expectedRevision: prepared.revision,
     patch: { codexNativeCursor: 4096 }, idempotencyKey: 'conversation-revision:cursor'
   });
@@ -90,7 +91,7 @@ test('internal native cursor progress does not invalidate the sidebar conversati
   const changedPage = owner.store.readProjectJournal(projectId, { limit: 200 });
   assert.notStrictEqual(changedPage, cachedPage, 'a visible conversation change must replace the cached Runtime page');
   assert.equal(changedPage.logs[0].dataState.requestPreview, '用户修改后的请求');
-  owner.store.writeRunDocument(projectId, {
+  await owner.store.writeRunDocument(projectId, {
     executionLogId: 1, generation: prepared.generation, turnId: prepared.turnId,
     purpose: `native_reply_${prepared.turnId.replace(/-/g, '')}`,
     bytes: Buffer.from('用户可见的最终回复').toString('base64'), mimeType: 'text/plain', expectedRevision: 0,
@@ -316,10 +317,10 @@ test('damaged native identity does not hide the complete formal conversation or 
   const root=path.join(base,'.solomap-global'),project=path.join(base,'project');fs.mkdirSync(project);
   const owner=await require('./analysis-fixture.js').openAnalysisOwner(t,root,[{path:project}]);
   const id=owner.projectIds.get(project),location=await owner.store.registerProject({root:project});
-  const run=owner.store.prepareRun(id,location.locationId,{root:project,executionLogId:1,nodeId:'__solo__',runKind:'solo',prompt:'完整用户原文🌿'.repeat(10000),command:'claude',userMessage:'原目标',metadata:{interactiveSession:true,agentCli:'claude'},idempotencyKey:'damaged-history-run'});
-  let binding=owner.store.writeRunBinding(id,{executionLogId:1,generation:run.generation,expectedHeadRevision:0,seed:{runId:'1',provider:'claude',workspaceRoot:project,cliPath:'claude',bindingNonce:'damaged-view',method:'caller_assigned',contract:'official_stable'},idempotencyKey:'damaged-view-seed'});
-  binding=owner.store.writeRunBinding(id,{executionLogId:1,generation:run.generation,expectedHeadRevision:binding.headRevision,revision:{sessionId:'original-native-session',method:'caller_assigned',contract:'official_stable',state:'planned'},idempotencyKey:'damaged-view-plan'});
-  binding=owner.store.writeRunBinding(id,{executionLogId:1,generation:run.generation,expectedHeadRevision:binding.headRevision,confirmSessionId:'original-native-session',evidence:{source:'owned-fixture'},idempotencyKey:'damaged-view-confirm'});
+  const run=await owner.store.prepareRun(id,location.locationId,{root:project,executionLogId:1,nodeId:'__solo__',runKind:'solo',prompt:'完整用户原文🌿'.repeat(10000),command:'claude',userMessage:'原目标',metadata:{interactiveSession:true,agentCli:'claude'},idempotencyKey:'damaged-history-run'});
+  let binding=await owner.store.writeRunBinding(id,{executionLogId:1,generation:run.generation,expectedHeadRevision:0,seed:{runId:'1',provider:'claude',workspaceRoot:project,cliPath:'claude',bindingNonce:'damaged-view',method:'caller_assigned',contract:'official_stable'},idempotencyKey:'damaged-view-seed'});
+  binding=await owner.store.writeRunBinding(id,{executionLogId:1,generation:run.generation,expectedHeadRevision:binding.headRevision,revision:{sessionId:'original-native-session',method:'caller_assigned',contract:'official_stable',state:'planned'},idempotencyKey:'damaged-view-plan'});
+  binding=await owner.store.writeRunBinding(id,{executionLogId:1,generation:run.generation,expectedHeadRevision:binding.headRevision,confirmSessionId:'original-native-session',evidence:{source:'owned-fixture'},idempotencyKey:'damaged-view-confirm'});
   const output='完整保存的原始输出🌿\n'.repeat(10000);
   owner.store.updateProjectJournal(id,1,{agentCli:'claude',command:'claude',output,status:'Completed'});
   const before=owner.store.readRunTurnJournal(id,1);
@@ -610,8 +611,9 @@ test('journal migration yields during both logs and indexes so new data can comm
   const source = path.join(project, '.solopreneur/project_journal.db');
   const { SqliteStore } = require('../out/db/sqliteStore.js');
   const legacy = new SqliteStore(source, path.resolve(__dirname, '..')); await legacy.init();
+  const complete='完整旧日志 🌿'.repeat(10000);
   for (let index = 0; index < 3; index++) {
-    const id = legacy.logExecution('step', 'codex', 'run', `old ${index}`, 'Completed');
+    const id = legacy.logExecution('step', 'codex', 'run', index===2?complete:`old ${index}`, 'Completed');
     legacy.upsertRunIndex({ executionLogId: id, nodeId: 'step', runKind: 'step', agentCli: 'codex', status: 'Completed', startedAt: '', finishedAt: '', durationMs: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0, totalTokens: 0, outputPath: '', outputBytes: 0, outputTail: '', commandPath: '', promptPath: '', changesPath: '', touchedFilesPath: '', updatedAt: '' });
   }
   legacy.close();
@@ -619,6 +621,7 @@ test('journal migration yields during both logs and indexes so new data can comm
   let logs = 0; let indexes = 0; const observed = [];
   const importLog = store.importProjectJournal.bind(store); const importIndex = store.importHistoricalRunIndex.bind(store);
   store.importProjectJournal = (...args) => {
+    if(!args[2])throw new Error('historical_journal_used_legacy_source_sync');
     const result = importLog(...args); logs++;
     if (logs === 1) setImmediate(() => {
       observed.push(['logs', logs]);
@@ -637,6 +640,7 @@ test('journal migration yields during both logs and indexes so new data can comm
     await require('../out/projectDataMigration.js').importProjectJournal(store, source, { projectRoot: project });
     assert.deepEqual(observed, [['logs', 1], ['indexes', 1]]);
     assert.equal(store.readProjectJournal(registered.projectId).logs[0].output, 'new live data');
+    assert.ok(Buffer.from(store.readProjectJournal(registered.projectId,{executionLogId:3}).logs[0].output).equals(Buffer.from(complete)));
     assert.equal(store.readProjectRunIndexes(registered.projectId, { limit: 1, offset: 1 }).length, 1);
     assert.equal(store.readProjectRunIndexes(registered.projectId).find(index => index.executionLogId === 2).outputTail, 'fresh live state', 'legacy imports cannot overwrite a live index committed during a yield');
   } finally { store.close(); }
@@ -707,12 +711,26 @@ test('linking an existing conversation projects it onto a step without creating 
       command: 'copilot -p', output: '用户可见的完整回答', status: 'Completed'
     }
   } });
-  await f.ops({ operation: 'link_project_journal', input: {
-    root: project, executionLogId: source.executionLogId, nodeId: 'step-1', linkedAt: '2026-10-11T10:01:00.000Z'
-  } });
-  await f.ops({ operation: 'link_project_journal', input: {
-    root: project, executionLogId: source.executionLogId, nodeId: 'step-1', linkedAt: '2026-10-11T10:01:00.000Z'
-  } });
+  const read=f.store.readProjectJournal;
+  f.store.readProjectJournal=function(projectId,input){
+    if(input?.executionLogId===source.executionLogId && input?.nodeId==='step-1')throw new Error('writer_read_linked_journal_body');
+    return read.call(this,projectId,input);
+  };
+  const link={root:project,executionLogId:source.executionLogId,nodeId:'step-1',linkedAt:'2026-10-11T10:01:00.000Z'};
+  const inspect=f.store.projectMigrationInspectionCompute;
+  let reads=0;
+  f.store.projectMigrationInspectionCompute=request=>{
+    if(request.kind==='linkedJournal' && ++reads===1){
+      assert.equal(f.store.rows('SELECT linked_at FROM project_journal_links WHERE execution_log_id=?',[source.executionLogId])[0].linked_at,link.linkedAt);
+      return Promise.reject(new Error('maintenance_compute_exited:1'));
+    }
+    return inspect(request);
+  };
+  const linked=await f.ops({operation:'link_project_journal',input:link});
+  assert.equal(reads,2);
+  assert.equal(linked.output,'用户可见的完整回答');
+  assert.equal(linked.timestamp,link.linkedAt);
+  assert.deepEqual(await f.ops({operation:'link_project_journal',input:{...link,linkedAt:'2026-10-11T10:02:00.000Z'}}),linked);
 
   const solo = await f.ops({ operation: 'read_project_journal', input: { root: project, nodeId: '__solo__' } });
   const step = await f.ops({ operation: 'read_project_journal', input: { root: project, nodeId: 'step-1' } });
@@ -825,12 +843,13 @@ test('completed run artifacts are content-addressed in the global database', asy
   fs.mkdirSync(project); fs.mkdirSync(root);
   const store = new UnifiedDataStore(root);
   const operations = createRuntimeDataOperations(store);
+  const closeCompute = await require('./content-compute-fixture.cjs').attachContentCompute(store);
   try {
     const content = Buffer.from('the final task report');
     await operations({ operation: 'write_run_artifact', input: { root: project, executionLogId: 41, relativePath: 'task-report.json', mimeType: 'application/json', bytes: content.toString('base64'), hash: require('node:crypto').createHash('sha256').update(content).digest('hex') } });
     const artifact = await operations({ operation: 'read_run_artifact', input: { root: project, executionLogId: 41, relativePath: 'task-report.json' } });
     assert.equal(Buffer.from(artifact.bytes, 'base64').toString(), content.toString());
-  } finally { await operations.close(); store.close(); }
+  } finally { await operations.close(); await closeCompute(); store.close(); }
 });
 
 test('completed run artifacts can be read in bounded pages', async () => {
@@ -839,6 +858,7 @@ test('completed run artifacts can be read in bounded pages', async () => {
   fs.mkdirSync(project); fs.mkdirSync(root);
   const store = new UnifiedDataStore(root);
   const operations = createRuntimeDataOperations(store);
+  const closeCompute = await require('./content-compute-fixture.cjs').attachContentCompute(store);
   try {
     const content = Buffer.from('paged artifact content\n'.repeat(10000));
     const hash = crypto.createHash('sha256').update(content).digest('hex');
@@ -849,7 +869,7 @@ test('completed run artifacts can be read in bounded pages', async () => {
     assert.equal(second.offset, 65536); assert.equal(second.totalBytes, content.length); assert.equal(second.nextOffset, null);
     assert.equal(first.hash, hash); assert.equal(second.hash, hash);
     assert.deepEqual(Buffer.concat([Buffer.from(first.bytes, 'base64'), Buffer.from(second.bytes, 'base64')]), content);
-  } finally { await operations.close(); store.close(); }
+  } finally { await operations.close(); await closeCompute(); store.close(); }
 });
 
 test('legacy project data migrates in the background and terminal run files become recyclable after database readback', async () => {
@@ -901,9 +921,16 @@ test('legacy growth migration yields between snapshots so Runtime control remain
   });
   legacy.close();
   const store = new UnifiedDataStore(root);
-  const originalWrite = store.writeProjectGrowth.bind(store);
+  const initLegacy = SqliteStore.prototype.initReadOnly;
+  SqliteStore.prototype.initReadOnly = () => { throw new Error('legacy_growth_sqlite_opened_on_writer'); };
+  const inspect=store.inspectProjectMigration.bind(store);
+  store.inspectProjectMigration=request=>{
+    if(request.kind==='legacyGrowthSnapshot')throw new Error('legacy_growth_graph_returned_to_writer');
+    return inspect(request);
+  };
+  const originalWrite = store.publishDirectGrowth.bind(store);
   let yieldedAfterFirst = false; let writes = 0; const observations = [];
-  store.writeProjectGrowth = (...args) => {
+  store.publishDirectGrowth = (...args) => {
     writes += 1;
     if (writes === 2) observations.push(yieldedAfterFirst);
     const result = originalWrite(...args);
@@ -913,7 +940,7 @@ test('legacy growth migration yields between snapshots so Runtime control remain
   try {
     await importProjectGrowth(store, source, { projectRoot: project });
     assert.deepEqual(observations, [true]);
-  } finally { store.close(); }
+  } finally { SqliteStore.prototype.initReadOnly=initLegacy; store.close(); }
 });
 
 test('legacy growth migration exposes every report projection through the formal reader', async () => {
@@ -930,7 +957,12 @@ test('legacy growth migration exposes every report projection through the formal
   legacy.close();
   const store = new UnifiedDataStore(root);
   try {
+    const read=store.readGrowthReportProjection,write=store.writeGrowthReportProjection;
+    store.readGrowthReportProjection=()=>{throw new Error('legacy_growth_projection_compared_on_writer');};
+    store.writeGrowthReportProjection=()=>{throw new Error('legacy_growth_projection_encoded_on_writer');};
     const result = await importProjectGrowth(store, source, { projectRoot: project });
+    store.readGrowthReportProjection=read;
+    store.writeGrowthReportProjection=write;
     const registered = await store.registerProject({ root: project });
     assert.deepEqual(store.readGrowthReportProjection(registered.projectId), [
       { key: 'legacy:coverage', value: { complete: true, scanned: 73 }, revision: 1 },
@@ -1132,8 +1164,12 @@ test('unchanged migration capture reuses its committed hash without rereading th
 test('project journal migration uses a read-only history path without lifecycle reconciliation writes', () => {
   const source = fs.readFileSync(path.resolve(__dirname, '../src/projectDataMigration.ts'), 'utf8');
   const body = source.slice(source.indexOf('export async function importProjectJournal'), source.indexOf('async function filesUnder'));
-  assert.match(body, /getExecutionJournalPageRaw/);
+  assert.match(body, /inspectProjectMigration\(\{kind:'legacyJournalPage'/);
   assert.doesNotMatch(body, /getAllExecutionLogs\(\)/);
+  const reader = fs.readFileSync(path.resolve(__dirname, '../src/projectMigrationInspection.ts'), 'utf8');
+  const page = reader.slice(reader.indexOf("case 'legacyJournalPage':"), reader.indexOf("case 'legacyJournalIndexPage':"));
+  assert.match(page, /readLegacyProjectSqlite\(request,'journal',store=>store\.getExecutionJournalPageRaw/);
+  assert.doesNotMatch(page, /getAllExecutionLogs\(\)/);
 });
 
 test('agent-run migration skips unrelated changing files and records unreadable durable directories without stopping the queue', async () => {

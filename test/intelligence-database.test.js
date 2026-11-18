@@ -5,7 +5,7 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const { IntelligenceConversationStore } = require('../out/intelligenceChat.js');
 
@@ -214,11 +214,12 @@ test('an invalid Pi Harness checkpoint rolls back the complete conversation appe
   } finally { database.close(); }
 });
 
-test('Pi Harness checkpoint replacement stays single-current and queues the retired body for cleanup', t => {
+test('Pi Harness checkpoint replacement hands its retired body to the unified collector and preserves full messages', async t => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-chat-checkpoint-retention-'));
   t.after(() => cleanupExact(fixture));
   const root = path.join(fixture, '.solomap-global');
   const database = new UnifiedDataStore(root);
+  const operations = createRuntimeDataOperations(database);
   const id = '3f1e1c08-1916-43cf-b68f-98d2a216c9b9';
   const createdAt = '2026-10-18T00:00:00.000Z';
   const firstMessages = [{ role: 'user', content: 'first question' }, { role: 'assistant', content: 'first answer' }];
@@ -233,6 +234,7 @@ test('Pi Harness checkpoint replacement stays single-current and queues the reti
         tokensBefore: 200_000, summary: 'first checkpoint', createdAt: Date.now()
       }
     });
+    const retiredContentId = String(database.rows('SELECT content_id FROM projections WHERE scope_key=?', [id])[0].content_id);
     const current = database.readIntelligenceConversation(id);
     const secondMessages = [...firstMessages, { role: 'user', content: 'second question' }, { role: 'assistant', content: 'second answer' }];
     database.writeIntelligenceConversation({
@@ -246,13 +248,27 @@ test('Pi Harness checkpoint replacement stays single-current and queues the reti
       }
     });
     assert.equal(database.readIntelligenceConversation(id).contextCheckpoint.summary, 'second checkpoint');
-    assert.equal(database.hasDatabaseStorageCleanupCandidates(), true);
+    assert.equal(database.hasDatabaseStorageCleanupCandidates(), false);
+    assert.equal(database.rows('SELECT 1 FROM content_lifecycle_gc_pending WHERE content_id=?', [retiredContentId]).length, 1);
     database.prepareDatabaseStorageCleanup();
     const cleanup = database.finalizeDatabaseStorageCleanupBatch();
-    assert.equal(cleanup.deletedContents, 1);
+    assert.equal(cleanup.deletedContents, 0);
     assert.equal(cleanup.pending, false);
+    assert.equal(database.rows('SELECT 1 FROM contents WHERE id=?', [retiredContentId]).length, 1, 'disabled collection keeps the physical body and its persistent exit responsibility');
+    database.beginContentPreparationRecovery();
+    for (let index = 0; index < 2000; index++) {
+      const batch = database.prepareStorageReferenceBatch(128); database.commitStorageReferenceBatch(batch);
+      if (!batch.pending) { database.activateStorageContentLifecycle(); break; }
+      assert.notEqual(index, 1999, 'fixture reference projection must converge');
+    }
+    const contentsBefore = Number(database.rows('SELECT COUNT(*) AS n FROM contents')[0].n);
+    const collected = await operations({ operation: 'maintain_database_storage', input: { compact: false } });
+    assert.ok(collected.deletedContents >= 1);
+    assert.equal(collected.deletedContents, contentsBefore - Number(database.rows('SELECT COUNT(*) AS n FROM contents')[0].n));
+    assert.equal(database.rows('SELECT 1 FROM contents WHERE id=?', [retiredContentId]).length, 0);
     assert.equal(database.readIntelligenceConversation(id).contextCheckpoint.summary, 'second checkpoint');
-  } finally { database.close(); }
+    assert.deepEqual(database.readIntelligenceConversation(id).conversation.messages, secondMessages);
+  } finally { await operations.close(); database.close(); }
 });
 
 test('Runtime reclaims retired Pi Harness checkpoint bodies without requiring a restart', async t => {

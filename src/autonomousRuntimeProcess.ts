@@ -19,18 +19,16 @@ import { classifyDiagnosticFailure, configureLocalDiagnosticPersistence, createL
 import { runPiMainPathRequestFile } from './piMainPathRuntime';
 import { TelegramRuntimeWorkerHost } from './telegramRuntimeWorkerHost';
 import { UnifiedDataStore } from './db/unifiedDataStore';
-import { createRuntimeDataOperations } from './runtimeDataOperations';
 import { normalizeGlobalDataPathForExtension, refreshProjectRegistry } from './projectRegistry';
 import { isAutonomousRuntimeDisabled } from './autonomousRuntimeService';
-import { importLegacyRuntimeState } from './runtimeStateMigration';
 import { readRuntimePauseState, writeRuntimePauseState } from './runtimePauseState';
 import { RuntimeDataExecutionDomains, RuntimeWriteActorControl } from './runtimeDataExecutionDomains';
 import { activeCognitiveCliInvocationCount, cancelActiveCognitiveCliInvocations, signalCognitiveCliShutdown } from './localAgentCliEngine';
 import { terminateRuntimeOwnedChildProcesses } from './runtimeChildProcessSupervisor';
-import { reclaimOrphanedDatabaseGenerations, recoverPendingDatabaseGenerationCutover } from './databaseGeneration';
+import { isDatabaseGenerationCutoverError, reclaimOrphanedDatabaseGenerations, recoverPendingDatabaseGenerationCutover } from './databaseGeneration';
 import { runtimeOperationDefinition } from './runtimeOperationRegistry';
 import { executeTelegramExtensionCommand, registerTelegramEditorEndpoint } from './telegramExtensionBridge';
-import { RuntimeExecutionScheduler } from './runtimePriorityScheduler';
+import { RuntimeExecutionScheduler, mapRuntimeWorkResult } from './runtimePriorityScheduler';
 import type { RuntimeExecutionDomain } from './runtimeOperationRegistry';
 import { RuntimeControlProjection, type ProjectRegistryReadInput, type ProjectRegistryReadResult } from './runtimeControlProjection';
 import type { ProjectRegistrySnapshot } from './projectRegistry';
@@ -42,10 +40,6 @@ function argumentValue(name: string): string {
 
 let closeFailedRuntimeInitialization: ((exitCode?: number, reason?: string) => Promise<void>) | undefined;
 let runtimeInitializationId = '';
-
-function isDatabaseGenerationCutoverError(error: unknown): boolean {
-  return /(?:^|:)database_generation_cutover(?:$|:)|runtime_data_domain_exited:writer-actor:75/.test(String(error));
-}
 
 function intervalValue(): number {
   const parsed = Number(argumentValue('--interval-ms') || 30_000);
@@ -71,15 +65,20 @@ async function main(): Promise<void> {
       const store = lease.owner.databaseId || runtimeWasInitialized || fs.existsSync(path.join(databaseRoot, 'solomap.db'))
         ? UnifiedDataStore.open(databaseRoot, lease.owner.databaseId || undefined)
         : new UnifiedDataStore(databaseRoot);
-      const operations = createRuntimeDataOperations(store);
+      const databaseId = store.databaseId;
+      store.close();
       try {
-        updateRuntimeState(databaseRoot, runtimeId, { databaseId: store.databaseId });
-        await refreshCognitiveRuntimeConfig(databaseRoot, (request) => operations(request));
+        updateRuntimeState(databaseRoot, runtimeId, { databaseId });
+        const reader = UnifiedDataStore.openReadOnly(databaseRoot, databaseId);
+        try {
+          await refreshCognitiveRuntimeConfig(databaseRoot, async ({ input }) =>
+            reader.readHostSettings(input as unknown as Parameters<UnifiedDataStore['readHostSettings']>[0]));
+        } finally {
+          reader.close();
+        }
         const result = await runPiMainPathRequestFile(databaseRoot, deliveryRequestFile);
         process.stdout.write(`${JSON.stringify(result)}\n`);
       } finally {
-        await operations.close();
-        store.close();
         updateRuntimeState(databaseRoot, runtimeId, { status: 'stopped' });
       }
     } else {
@@ -102,15 +101,26 @@ async function main(): Promise<void> {
     reclaimOrphanedDatabaseGenerations(databaseRoot);
     const root = databaseRoot;
     const store = runtimeWasInitialized || fs.existsSync(path.join(root, 'solomap.db')) ? UnifiedDataStore.open(root) : new UnifiedDataStore(root);
-    importLegacyRuntimeState(store, root);
-    const operations = createRuntimeDataOperations(store);
+    const databaseId = store.databaseId;
+    store.close();
+    let domains: RuntimeDataExecutionDomains | undefined;
+    const dispatchSupervisorOperation = async (request: RuntimeDataRequest): Promise<unknown> => {
+      if (request.operation === 'read_project_registry') {
+        return domains!.control('read_project_registry_projection', request.input);
+      }
+      throw new Error(`runtime_supervisor_operation_unknown:${request.operation}`);
+    };
     try {
+      domains = await RuntimeDataExecutionDomains.start({ root, databaseId, dispatchSupervisorOperation });
+      const scheduled = domains.operations;
+      const operations = Object.assign((request: RuntimeDataRequest) => runtimeOperationDefinition(request.operation).executor === 'supervisor'
+        ? dispatchSupervisorOperation(request) : scheduled(request), scheduled);
       await refreshProjectRegistry(root, undefined, (operation, input) => operations({ operation, input }));
-      const decision = await runShadowDecisionCycleFromDatabase({ globalDataPath, operation: operations });
+      await runShadowDecisionCycleFromDatabase({ globalDataPath, operation: operations });
       if (!hasRuntimeLease(globalDataPath, onceRuntimeId, process.pid)) return;
       await persistShadowRuntimeState(globalDataPath, operations);
     } finally {
-      await operations.close(); store.close();
+      await domains?.close();
       updateRuntimeState(globalDataPath, onceRuntimeId, { status: 'stopped' });
     }
     return;
@@ -144,6 +154,8 @@ async function main(): Promise<void> {
   const runtimeBuild = runtimeBuildId(path.dirname(path.dirname(path.resolve(process.argv[1]))));
   const releaseVersion = argumentValue('--runtime-version') || runtimeReleaseVersion(path.dirname(path.dirname(path.resolve(process.argv[1]))));
   const executionScheduler = new RuntimeExecutionScheduler();
+  let storageWakePending=false;
+  let requestStorageMaintenanceWake=():void=>{storageWakePending=true;};
   const controlProjection = new RuntimeControlProjection();
   let intelligenceExecutionMode: { mode: 'legacy' | 'harness' } | undefined;
   const dispatchSupervisorOperation = async (request: RuntimeDataRequest): Promise<unknown> => {
@@ -173,6 +185,7 @@ async function main(): Promise<void> {
     databaseId,
     runtime: { runtimeId, releaseVersion, buildId: runtimeBuild },
     scheduler: executionScheduler,
+    onStorageMaintenanceWake:()=>requestStorageMaintenanceWake(),
     dispatchSupervisorOperation,
     onProjectRegistryProjection: snapshot => controlProjection.hydrateProjectRegistry(snapshot)
   });
@@ -182,7 +195,7 @@ async function main(): Promise<void> {
     (request: Parameters<typeof dataOperations>[0]) => {
       const definition = runtimeOperationDefinition(request.operation);
       if (definition.executor === 'supervisor') return dispatchSupervisorOperation(request);
-      return executionScheduler.submit(definition.domain, () => dataOperations(request), {
+      return executionScheduler.submit(definition.domain, admission => dataExecutionDomains!.dispatchAdmitted(request,admission), {
         deadlineAt: request.deadlineAt,
         supersedesKey: request.supersedesKey,
         label: `internal:${request.operation}`
@@ -232,6 +245,9 @@ async function main(): Promise<void> {
   await refreshShadowRuntimeState(databaseRoot, scheduledOperations);
   let outboxRecovery: Promise<unknown> | undefined;
   let storageMaintenance: Promise<unknown> | undefined;
+  let storageColdTimer: NodeJS.Timeout | undefined;
+  let storageColdFailure = '';
+  let storageColdReady=false,storageColdRunning=false,storageColdRetryAt=0;
   let startupMigration: Promise<void> | undefined;
   let stopping = false;
   let paused = await readRuntimePauseState(scheduledOperations, isAutonomousRuntimeDisabled(globalDataPath));
@@ -297,6 +313,8 @@ async function main(): Promise<void> {
       if (databaseOverviewProjectionTimer) clearTimeout(databaseOverviewProjectionTimer);
       if (reportVersionBackfillTimer) clearTimeout(reportVersionBackfillTimer);
       if (plannerMaintenanceTimer) clearTimeout(plannerMaintenanceTimer);
+      if (storageColdTimer) clearTimeout(storageColdTimer);
+      storageColdTimer=undefined;
       databaseOverviewProjectionTimer = undefined;
       reportVersionBackfillTimer = undefined;
       plannerMaintenanceTimer = undefined;
@@ -323,6 +341,7 @@ async function main(): Promise<void> {
           scheduleDatabaseOverviewProjectionBackfill(1_000);
           scheduleReportVersionBackfill(1_000);
           schedulePlannerMaintenance(30_000);
+          scheduleStorageColdMaintenance(5_000);
           if (!paused) runCycleObserved();
           timer = setInterval(runCycleObserved, intervalValue());
           shutdownPromise = undefined;
@@ -364,7 +383,7 @@ async function main(): Promise<void> {
       if (shutdownError && reason !== 'database_generation_cutover') throw shutdownError;
     })();
     void shutdownPromise.catch(error => {
-      process.stderr.write(`SoloMap Runtime shutdown: ${String(error)}\n`);
+      process.stderr.write(`SoloMap Runtime shutdown (${reason}): ${String(error)}\n`);
       if (!handoff) process.exitCode = 1;
     });
     process.exitCode ??= exitCode;
@@ -417,10 +436,10 @@ async function main(): Promise<void> {
       const definition = runtimeOperationDefinition(request.operation);
       if (definition.executor === 'supervisor') return dispatchSupervisorOperation(request);
       const result = await dataExecutionDomains!.dispatchSerialized(request, admission);
-      if (request.operation === 'sync_documentation_manifest' || request.operation === 'refresh_documentation_manifest') {
-        scheduleDocumentationProjectionDrain();
-      }
-      return serializedRuntimeDataResult(result);
+      return mapRuntimeWorkResult(result,serialized=>{
+        if (request.operation === 'sync_documentation_manifest' || request.operation === 'refresh_documentation_manifest')scheduleDocumentationProjectionDrain();
+        return serializedRuntimeDataResult(serialized);
+      });
     },
     async onCommand(command, replacement) {
       if (command === 'pause' || command === 'drain') {
@@ -589,10 +608,28 @@ async function main(): Promise<void> {
     recordLocalDiagnosticError(globalDataPath, 'autonomous-runtime.migration.failed', error);
     stopAndExit(1, 'migration_failed');
   });
-  storageMaintenance = (async () => {
-    await startupMigrationReady;
-    if (!stopping) await scheduledOperations({ operation: 'maintain_database_storage', input: { compact: false, automatic: true } });
-  })().catch(error => { process.stderr.write(`SoloMap Runtime storage maintenance: ${String(error)}\n`); });
+  function scheduleStorageColdMaintenance(delayMs: number): void {
+    if(stopping)return;
+    if(!storageColdReady || storageColdRunning){storageWakePending=true;return;}
+    const delay=Math.max(delayMs,storageColdRetryAt-Date.now(),0);
+    if(storageColdTimer){if(delayMs!==0)return;clearTimeout(storageColdTimer);storageColdTimer=undefined;}
+    storageColdTimer = setTimeout(() => {
+      storageColdTimer = undefined;
+      if (stopping) return;
+      storageColdRunning=true;storageWakePending=false;
+      storageMaintenance = scheduledOperations({ operation: 'maintain_database_storage', input: { phase: 'lifecycle', automatic: true, limit: 64 } }).then(
+        result => {
+          storageColdFailure = '';storageColdRunning=false;storageColdRetryAt=0;
+          const state = result as { pending?: boolean; runnable?: boolean };
+          scheduleStorageColdMaintenance(storageWakePending?0:state.pending ? state.runnable === false ? 100 : 0 : 30_000);
+        },
+        error => { storageColdRunning=false;storageColdRetryAt=Date.now()+5_000;if (!stopping) { const failure = String(error); if (failure !== storageColdFailure) { storageColdFailure = failure; process.stderr.write(`SoloMap cold storage maintenance: ${failure}\n`); } scheduleStorageColdMaintenance(5_000); } }
+      );
+    }, delay);
+    storageColdTimer.unref();
+  }
+  requestStorageMaintenanceWake=()=>scheduleStorageColdMaintenance(0);
+  void startupMigrationReady.then(() => {storageColdReady=true;scheduleStorageColdMaintenance(storageWakePending?0:5_000);}, () => undefined);
   void startupMigrationReady.then(
     () => schedulePlannerMaintenance(30_000),
     () => undefined

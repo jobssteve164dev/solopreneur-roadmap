@@ -205,7 +205,7 @@ test('the real direct bridge reaches an interactive child without a VS Code shel
   fs.mkdirSync(workspaceRoot);
   execFileSync('git', ['init', '-q', workspaceRoot]);
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
   const { shellQuote } = require('../out/agentCli.js');
   const store = new UnifiedDataStore(globalDataPath);

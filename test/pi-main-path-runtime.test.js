@@ -8,7 +8,7 @@ const childProcess = require('node:child_process');
 const { writeCognitiveRuntimeConfig, persistCognitiveRuntimeConfig } = require('../out/cognitiveRuntimeConfig.js');
 const { runConfiguredPiMainPath } = require('../out/piMainPathRuntime.js');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 
 function git(root, args) {
   return childProcess.execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();

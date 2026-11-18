@@ -17,7 +17,7 @@ test('Codex observation reads each new native log range once and commits its cur
 });
 const crypto = require('node:crypto');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { snapshotWorkspace, workspaceDocumentPurpose } = require('../out/runWorkspace.js');
 const { createInteractionBudget } = require('../out/interactionBudget.js');
 
@@ -94,6 +94,19 @@ test('session reentry records the first real native TUI request on the precreate
     assert.match(journal.entry.output, new RegExp(request));
     assert.doesNotMatch(journal.entry.output, /等待本轮用户消息/);
   } finally { await ops.close(); store.close(); }
+});
+
+test('an actual native reentry request prepares its complete turn metadata and journal outside Source',async()=>{
+  const {RunNativeObserver}=require('../out/runNativeObserver.js'),base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-native-request-publication-')),root=path.join(base,'data'),project=path.join(base,'project');fs.mkdirSync(project);
+  const store=new UnifiedDataStore(root),ops=createRuntimeDataOperations(store),metadata='完整保留的运行上下文🌿'.repeat(12000),request='重新进入后完整真实用户要求🌿\n'.repeat(12000),read=store.content,put=store.putContent;
+  try{
+    const run=await ops({operation:'prepare_run',input:{root:project,executionLogId:1,nodeId:'__solo__',runKind:'solo',prompt:'',command:'codex resume session-1',userMessage:'',status:'Waiting',metadata:{interactiveSession:true,sessionProvider:'codex',nativeSessionId:'session-1',agentInputMode:'session_reentry',nativeSessionReentryAwaitingRequest:true,nativeRequestPublicationFixture:metadata},idempotencyKey:'native-request-publication-prepare'}}),scope={executionLogId:1,generation:run.generation},current=async()=>(await store.readRunContextPublication(run.projectId,{...scope,includeProof:true})).state;
+    const patch=async(fields,event)=>{const latest=await current();return store.publishRunControl(run.projectId,{type:'state',input:{...scope,expectedRevision:latest.revision,patch:fields,idempotencyKey:`native-request-publication:${event}:${latest.revision}`}});};
+    store.content=function(id){if(Number(this.rows('SELECT byte_length FROM contents WHERE id=?',[id])[0]?.byte_length)>65536)throw Error('Source decoded large native request metadata');return read.call(this,id);};
+    store.putContent=function(value,...args){if((typeof value==='string'?Buffer.byteLength(value):value.byteLength)>65536)throw Error('Source encoded a large native turn request');return put.call(this,value,...args);};
+    const timestamp=new Date(Date.parse(run.status.startedAt)+10).toISOString();await new RunNativeObserver(store).observeRow(current,patch,{type:'response_item',timestamp,payload:{type:'message',role:'user',content:[{type:'input_text',text:request}]}},100);
+    store.content=read;store.putContent=put;const final=await current();assert.equal(final.turnId,run.turnId);assert.equal(final.status.userMessage,request);assert.equal(final.status.nativeRequestPublicationFixture,metadata);assert.equal(store.read(run.turnId).data.request_content,request);assert.ok(store.readRunTurnJournal(run.projectId,1).entry.output.includes(request));
+  }finally{store.content=read;store.putContent=put;await ops.close();store.close();}
 });
 
 test('closing a resume-only session before user input does not create a failed task turn', async () => {

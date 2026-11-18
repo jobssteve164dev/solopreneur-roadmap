@@ -7,7 +7,7 @@ const { execFileSync } = require('node:child_process');
 const { removeOwnedEntry } = require('../scripts/owned-fixture-cleanup.cjs');
 
 const { runtimeOperationDefinition } = require('../out/runtimeOperationRegistry.js');
-const runtimeDataOperations = require('../out/runtimeDataOperations.js');
+const runtimeDataOperations = require('./runtime-data-fixture.cjs');
 
 test('Source Git operations have explicit foreground worker contracts', () => {
   assert.deepEqual(runtimeOperationDefinition('read_project_source_snapshot'), {

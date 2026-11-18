@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 
 async function fixture(t) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-growth-cleanup-'));
@@ -37,7 +37,7 @@ async function writeHistory(f, states) {
   const ids = [];
   for (const [index, state] of states.entries()) {
     const id = `${state.toLowerCase()}-${index + 1}`;
-    ids.push(f.store.writeProjectGrowth(f.projectId, snapshot(f.projectRoot, id, state, index), `growth-${index + 1}`).objectId);
+    ids.push((await f.store.writeProjectGrowth(f.projectId, snapshot(f.projectRoot, id, state, index), `growth-${index + 1}`)).objectId);
   }
   return ids;
 }
@@ -46,7 +46,7 @@ async function writeLegacyHistory(f, states) {
   const ids = [];
   for (const [index, state] of states.entries()) {
     const id = `${state.toLowerCase()}-legacy-${index + 1}`;
-    const snapshotId = f.store.writeProjectGrowth(f.projectId, snapshot(f.projectRoot, id, state, index), `legacy-growth-${index + 1}`).objectId;
+    const snapshotId = (await f.store.writeProjectGrowth(f.projectId, snapshot(f.projectRoot, id, state, index), `legacy-growth-${index + 1}`)).objectId;
     ids.push(snapshotId);
     f.store.db.run(`INSERT INTO growth_items(snapshot_id,item_id,parent_id,kind,relative_path,label,metrics_json,production_files,test_files,test_cases,bytes)
       SELECT snapshot_id,item_id,parent_id,kind,relative_path,label,metrics_json,production_files,test_files,test_cases,bytes
@@ -140,8 +140,8 @@ test('growth detail pagination pins one snapshot and rejects pages after its top
   assert.match(firstPage.latest.detailToken, /^[a-f0-9]{64}$/);
   assert.equal(firstPage.latest.nextDetailOffset, 1);
 
-  f.store.writeProjectGrowth(f.projectId, snapshot(f.projectRoot, 'b-2', 'B', 2), 'growth-after-first-2');
-  f.store.writeProjectGrowth(f.projectId, snapshot(f.projectRoot, 'c-3', 'C', 3), 'growth-after-first-3');
+  await f.store.writeProjectGrowth(f.projectId, snapshot(f.projectRoot, 'b-2', 'B', 2), 'growth-after-first-2');
+  await f.store.writeProjectGrowth(f.projectId, snapshot(f.projectRoot, 'c-3', 'C', 3), 'growth-after-first-3');
 
   assert.throws(
     () => f.store.readProjectGrowth(
@@ -233,7 +233,7 @@ test('detail cleanup freezes its boundary and stops a resumed plan after snapsho
   assert.equal(Number(f.store.rows('SELECT COUNT(*) AS count FROM growth_items WHERE snapshot_id=?', [ids[0]])[0].count), 0);
   assert.equal(Number(f.store.rows('SELECT COUNT(*) AS count FROM growth_items WHERE snapshot_id=?', [ids[1]])[0].count), 2);
 
-  f.store.writeProjectGrowth(f.projectId, snapshot(f.projectRoot, 'e-live-5', 'E', 5), 'growth-after-interruption');
+  await f.store.writeProjectGrowth(f.projectId, snapshot(f.projectRoot, 'e-live-5', 'E', 5), 'growth-after-interruption');
   await assert.rejects(f.call('apply_growth_snapshot_detail_cleanup', input), /growth_detail_cleanup_plan_invalidated/);
   assert.equal(Number(f.store.rows('SELECT COUNT(*) AS count FROM growth_items WHERE snapshot_id=?', [ids[1]])[0].count), 2);
   assert.equal(f.store.rows('SELECT status FROM growth_detail_cleanup_plans WHERE plan_id=?', [preview.planId])[0].status, 'invalidated');
@@ -298,7 +298,7 @@ test('cleanup apply requires the exact confirmation and rejects a drifted snapsh
   }), /growth_cleanup_confirmation_required/);
   assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_snapshots')[0].count, 3);
 
-  f.store.writeProjectGrowth(f.projectId, snapshot(f.projectRoot, 'c-4', 'C', 4), 'growth-drift');
+  await f.store.writeProjectGrowth(f.projectId, snapshot(f.projectRoot, 'c-4', 'C', 4), 'growth-drift');
   await assert.rejects(f.call('apply_growth_snapshot_cleanup', {
     planId: preview.planId, planHash: preview.planHash, confirmation: '确认删除该清单记录', idempotencyKey: 'apply-drift'
   }), /growth_cleanup_plan_invalidated/);
@@ -335,6 +335,26 @@ test('confirmed cleanup applies in idempotent batches and preserves A-B-A with v
   assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM object_search WHERE rowid IN (?,?)', manifest.records.objectSearch.rowids)[0].count, 0);
   assert.deepEqual(await f.call('apply_growth_snapshot_cleanup', input), applied);
   assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_snapshot_cleanup_batches WHERE plan_id=?', [preview.planId])[0].count, 2);
+});
+
+test('confirmed growth cleanup leaves content exit to GC while retained fixed history stays readable', async t => {
+  const f=await fixture(t),ids=await writeHistory(f,['A','A']);
+  const kept=f.store.rows('SELECT content_id FROM object_revisions WHERE object_id=?',[ids[0]])[0].content_id;
+  const original=f.store.content(kept);
+  const memory=f.store.write({kind:'memory',action:'create',scope:null,idempotencyKey:'growth-gc-held-history',data:{category:'inbox',title:'retained original snapshot',status:'captured',content:{contentId:kept}}});
+  f.store.beginContentPreparationRecovery();f.store.activateStorageContentLifecycle();
+  const preview=await f.call('preview_growth_snapshot_cleanup',{idempotencyKey:'growth-gc-preview'}),manifest=fullManifest(f,preview);
+  assert.deepEqual(manifest.records.contents.deletableIds,[]);
+  const input={planId:preview.planId,planHash:preview.planHash,confirmation:'确认删除该清单记录',idempotencyKey:'growth-gc-apply'};
+  const result=await f.call('apply_growth_snapshot_cleanup',input);
+  assert.equal(result.deleted.contents,0);assert.equal(result.deleted.contentChunks,0);
+  for(let i=0;i<2000;i++){const batch=f.store.prepareStorageReferenceBatch(128);f.store.commitStorageReferenceBatch(batch);if(!batch.pending)break;assert.notEqual(i,1999);}
+  for(let i=0;i<10000;i++){const batch=f.store.prepareStorageGcBatch(128);f.store.commitStorageGcBatch(batch);if(!batch.pending)break;assert.notEqual(i,9999);}
+  assert.deepEqual(f.store.content(kept),original);
+  assert.equal(f.store.read(memory.objectId,1).data.content,JSON.stringify({contentId:kept}));
+  assert.ok(manifest.records.contents.candidateIds.some(id=>!f.store.rows('SELECT 1 FROM contents WHERE id=?',[id]).length),'released growth receipts exit through the shared collector');
+  assert.deepEqual(await f.call('apply_growth_snapshot_cleanup',input),result);
+  assert.deepEqual(f.store.rows('PRAGMA foreign_key_check'),[]);
 });
 
 test('snapshot cleanup leaves directly referenced content to separate garbage collection', async t => {

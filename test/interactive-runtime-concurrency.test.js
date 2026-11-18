@@ -194,11 +194,11 @@ test('Write Actor keeps one physical thread while external awaits yield and life
   assert.match(source, /this\.affinity === 'writer-actor'[\s\S]*?cancel_intelligence_operation'[\s\S]*?return this\.performControl/);
 });
 
-test('Agent launch completes filesystem identity preflight before opening the Writer transaction', () => {
+test('Agent launch uses prepared publication rather than an asynchronous Writer transaction', () => {
   const operations = fs.readFileSync(path.join(__dirname, '..', 'src', 'runtimeDataOperations.ts'), 'utf8');
   const launch = operations.slice(operations.indexOf("case 'prepare_agent_launch'"), operations.indexOf("case 'read_run_state'"));
-  assert.ok(launch.indexOf('preflightAgentRunPreparation(launch)') < launch.indexOf('store.runAtomicCommand('));
-  assert.match(launch, /store\.runAtomicCommand\(\(\) => prepareAgentRun\(launch, nested, preflight\)\)/);
+  assert.match(launch, /store\.publishAgentLaunch\(/);
+  assert.doesNotMatch(launch, /runAtomicCommand|prepareAgentRun\(|preflightAgentRunPreparation/);
 });
 
 test('Autonomous decision work cannot stall the Runtime Supervisor event loop', async () => {
@@ -918,7 +918,7 @@ test('foreground run preparation keeps child workspace Git work on the foregroun
 
 test('a read-only operation worker verifies Writer-signed MCP authority without copying Writer session memory', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reader-authority-'));
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reader-authority-project-'));
   const secret = 'test-reader-authority-secret';
@@ -948,7 +948,7 @@ test('a read-only operation worker verifies Writer-signed MCP authority without 
 
 test('a signed read authority preserves field authorization and discovery filtering inside the Reader', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reader-projection-authority-'));
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reader-projection-project-'));
   const secret = 'test-reader-projection-authority-secret';
@@ -1411,6 +1411,11 @@ test('Writer publishes every committed project-registry revision to the Supervis
     onProjectRegistryProjection: snapshot => projected.push(structuredClone(snapshot))
   });
   try {
+    const writerControl = domains.writer.control.bind(domains.writer);
+    domains.writer.control = (action,...rest) => {
+      if (action === 'read_project_registry_projection') throw new Error('registry_projection_used_writer');
+      return writerControl(action,...rest);
+    };
     assert.equal(await domains.control('read_project_registry_projection'), null);
     const initial = await domains.dispatch({ operation: 'initialize_project_registry', input: {
       legacyProjects: [{ name: 'Alpha', path: '/project/alpha' }]
@@ -1426,6 +1431,10 @@ test('Writer publishes every committed project-registry revision to the Supervis
     assert.equal(projected.at(-1).revision, patched.revision);
     assert.equal(projected.at(-1).registry.projects[0].name, 'Updated Alpha');
     assert.deepEqual(await domains.control('read_project_registry_projection'), patched);
+    assert.deepEqual(await domains.control('read_project_registry_projection',{revision:initial.revision}), initial);
+    assert.deepEqual(await domains.control('read_project_registry_projection',{knownRevision:patched.revision,knownObjectId:patched.objectId}),{
+      objectId:patched.objectId,revision:patched.revision,unchanged:true,legacyContextImported:true
+    });
   } finally {
     await domains.close();
   }
@@ -1684,11 +1693,18 @@ test('Runtime run-index transport is page-bounded and host consumers never rebui
 
 test('unchanged conversation pages reuse the Runtime-owned transport serialization', () => {
   const storeSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'db', 'unifiedDataStore.ts'), 'utf8');
-  const workerSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'runtimeDataDomainWorker.ts'), 'utf8');
+  const workerSource = fs.readFileSync(path.join(__dirname, '..', 'out', 'runtimeDataDomainWorker.js'), 'utf8');
   assert.match(storeSource, /readCachedProjectJournalPage\(cacheKey, conversationRevision\)/);
   assert.match(storeSource, /Object\.defineProperty\(value, projectJournalSerializedResult/);
-  assert.match(workerSource, /message\.request\.operation === 'read_project_journal'/);
-  assert.match(workerSource, /cachedProjectJournal \?\? JSON\.stringify/);
+  const unifiedDataStore=require('../out/db/unifiedDataStore.js'),runInputsPublication=require('../out/db/runInputsPublication.js'),messages=[];
+  const page={logs:[{output:'完整缓存会话正文'.repeat(12000)}]},serialized=JSON.stringify(page);
+  Object.defineProperty(page,unifiedDataStore.projectJournalSerializedResult,{value:serialized});
+  const begin=workerSource.indexOf('function postWorkResult('),end=workerSource.indexOf('const configuration =',begin);assert.ok(begin>=0 && end>begin);
+  const context=vm.createContext({workContinuations:{expose:()=>undefined},unifiedDataStore_1:unifiedDataStore,runInputsPublication_js_1:runInputsPublication,port:{postMessage:message=>messages.push(message)},JSON:{stringify:()=>assert.fail('cached output must not be serialized again')}});
+  vm.runInContext(workerSource.slice(begin,end),context);context.postWorkResult(1,page,true);
+  assert.equal(messages[0].serializedResult,serialized);
+  const run={status:{retained:'完整运行元数据'.repeat(12000)}},runSerialized=JSON.stringify(run);runInputsPublication.cacheRunInputsResult(run,runSerialized);context.postWorkResult(2,run,true);
+  assert.equal(messages[1].serializedResult,runSerialized);
 });
 
 test('terminal log persistence does not wake the unrelated Sidebar core projection', () => {

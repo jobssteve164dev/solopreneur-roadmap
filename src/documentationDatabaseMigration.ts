@@ -35,7 +35,7 @@ export async function importDocumentationManifest(store: UnifiedDataStore, sourc
   const source = { identity, key, hash: digest(bytes) };
   result.originalBytes = bytes.length;
   result.retainedFiles.push(key);
-  store.captureMigrationSource(source, bytes, { mimeType: 'application/json', encoding: 'utf8', pending: true });
+  await store.publishMigrationSource(source, bytes, { mimeType: 'application/json', encoding: 'utf8', pending: true });
   try {
     let manifest: DocumentationManifest;
     try { manifest = JSON.parse(bytes.toString('utf8')) as DocumentationManifest; }
@@ -47,7 +47,7 @@ export async function importDocumentationManifest(store: UnifiedDataStore, sourc
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const projectId = (await store.registerProject({ root: projectRoot })).projectId;
-    if (!archiveUnresolvedMigrationSource(store, result, source, bytes, message, options, { displaySource: key, mimeType: 'application/json', projectId })) {
+    if (!await archiveUnresolvedMigrationSource(store, result, source, bytes, message, options, { displaySource: key, mimeType: 'application/json', projectId })) {
       if (store.migrationSourceState(identity, key)?.stage !== 'conflict') store.markMigrationSourceConflict(identity, key, message);
       result.conflicts.push({ source: key, error: message });
     }

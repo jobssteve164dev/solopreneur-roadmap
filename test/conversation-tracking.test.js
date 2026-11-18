@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { openAnalysisOwner } = require('./analysis-fixture.js');
-const { runtimeProjectMcpSource } = require('../out/runtimeDataOperations.js');
+const { runtimeProjectMcpSource } = require('./runtime-data-fixture.cjs');
 const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
 const { startTelegramExtensionBridge } = require('../out/telegramExtensionBridge.js');
 const { getAgentRunDeliveryOwner } = require('../out/agentRunPreparation.js');
@@ -81,7 +81,7 @@ async function fixture(t, afterPrepared, beforePrepared) {
   async function settle(launch, status = 'Completed', report, defer = false) {
     let state = f.store.readRunCheckpointState(launch.projectId, launch.executionLogId);
     if (report) {
-      f.store.submitRunReport(state.projectId, { executionLogId: launch.executionLogId, generation: state.generation,
+      await f.store.submitRunReport(state.projectId, { executionLogId: launch.executionLogId, generation: state.generation,
         turnId: state.turnId, report, availability: 'available', idempotencyKey: `${state.turnId}:report` });
       state = f.store.readRunCheckpointState(launch.projectId, launch.executionLogId);
     }
@@ -351,7 +351,7 @@ test('schema 52 upgrades in place and reopening schema 68 preserves identities a
     for (let i = 0; i < 2; i++) {
       const store = new UnifiedDataStore(root);
       try {
-        assert.equal(store.rows('SELECT MAX(version) AS version FROM schema_migrations')[0].version, 73);
+        assert.equal(store.rows('SELECT MAX(version) AS version FROM schema_migrations')[0].version, require('../out/db/unifiedSchemaMigrations.js').unifiedSchemaMigrations.at(-1).version);
         assert.equal(store.rows("SELECT COUNT(*) AS count FROM pragma_index_list('runs') WHERE name='runs_conversation_history'")[0].count, 1);
         assert.equal(store.rows("SELECT value FROM database_meta WHERE key='database_id'")[0].value, 'preserved-tracking-identity');
         assert.equal(store.rows("SELECT source_generation FROM pi_legacy_conversation_operations WHERE operation_id='old-operation'")[0].source_generation, 0);

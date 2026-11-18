@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { unifiedSchemaMigrations } = require('../out/db/unifiedSchemaMigrations.js');
 
 test('database-backed initialization stops generating memory and example Markdown while preserving existing user files', () => {

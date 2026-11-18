@@ -5,7 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { confirmTimePlan, extractTimePlanDraft, readTimePlan, saveTimePlan } = require('../out/timePlan.js');
 const { importAnalysisCaches } = require('../out/analysisDatabaseMigration.js');
 const { MigrationRecycling } = require('../out/migrationRecycling.js');

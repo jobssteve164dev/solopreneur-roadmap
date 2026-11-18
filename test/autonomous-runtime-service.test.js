@@ -6,6 +6,51 @@ const test = require('node:test');
 
 const service = require('../out/autonomousRuntimeService.js');
 
+test('a real writer with a late legacy startup SQL error exits and rejects domain readiness',async()=>{
+  const { UnifiedDataStore }=require('../out/db/unifiedDataStore.js');
+  const { RuntimeDataExecutionDomains }=require('../out/runtimeDataExecutionDomains.js');
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-writer-startup-failure-'));
+  const store=new UnifiedDataStore(root),databaseId=store.databaseId;
+  store.db.run("CREATE TRIGGER startup_setting_failure BEFORE INSERT ON settings WHEN NEW.namespace='cognitive' BEGIN SELECT RAISE(ABORT,'actual_startup_setting_sql'); END");
+  store.close();
+  fs.mkdirSync(path.join(root,'runtime'));
+  fs.writeFileSync(path.join(root,'runtime','cognitive-config.json'),JSON.stringify({mode:'agent_cli',agentCli:'codex',model:'startup-sql-fixture'}));
+  await assert.rejects(RuntimeDataExecutionDomains.start({root,databaseId}),/actual_startup_setting_sql/);
+});
+
+test('offline autonomy revocation uses the leased production writer and releases it while the runtime is stopped', async t => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const { RuntimeDataExecutionDomains } = require('../out/runtimeDataExecutionDomains.js');
+  const { readRuntimeState } = require('../out/autonomousRuntime.js');
+  const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-offline-autonomy-'));
+  const root=path.join(base,'.solomap-global'),project=path.join(base,'project');
+  fs.mkdirSync(project);
+  const store=new UnifiedDataStore(root),databaseId=store.databaseId;
+  const initial=store.patchProjectAutonomyAuthorization({projectPath:project,registeredProjectPaths:[project],enabled:true,
+    toolNetworkDisabled:true,expectedEpoch:0,idempotencyKey:'offline-enabled'});
+  store.close();
+  const start=RuntimeDataExecutionDomains.start;
+  let calls=0;
+  RuntimeDataExecutionDomains.start=async function(options){
+    calls++;
+    assert.equal(options.databaseId,databaseId);
+    assert.match(readRuntimeState(root).runtimeId,/^offline-maintenance:/);
+    return start.call(this,options);
+  };
+  t.after(()=>{RuntimeDataExecutionDomains.start=start;});
+  await service.revokePersistentRuntimeAuthorizations(root);
+  assert.equal(calls,1);
+  assert.equal(readRuntimeState(root).status,'stopped');
+  const opened=UnifiedDataStore.open(root);
+  try{
+    const value=opened.readProjectAutonomyAuthorization({projectPath:project});
+    assert.equal(value.projectId,initial.projectId);
+    assert.equal(value.enabled,false);
+    assert.equal(value.toolNetworkDisabled,true);
+    assert.equal(value.epoch,2);
+  }finally{opened.close();}
+});
+
 test('a registered service root is restored as database authority before uninstall cleanup', async t => {
   const runtime = require('../out/autonomousRuntime.js');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-uninstall-authority-'));

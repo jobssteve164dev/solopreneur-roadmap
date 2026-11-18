@@ -386,7 +386,7 @@ test('first database creation is durably indexed before later runtime activation
 
 test('memory startup uses database project identities without recreating a legacy registry', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { enqueueStartupMemoryMigration } = require('../out/runtimeDatabaseBootstrap.js');
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-db-project-'));
   const root = path.join(fixture, '.solomap-global');
@@ -419,7 +419,7 @@ test('memory startup uses database project identities without recreating a legac
 
 test('database and legacy projects with the same memory slug stay ambiguous instead of sharing private history', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { enqueueStartupMemoryMigration } = require('../out/runtimeDatabaseBootstrap.js');
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-db-collision-'));
   const root = path.join(fixture, '.solomap-global');
@@ -445,7 +445,7 @@ test('database and legacy projects with the same memory slug stay ambiguous inst
 
 test('a legacy alias and database location for the same project do not create a false memory conflict', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { enqueueStartupMemoryMigration } = require('../out/runtimeDatabaseBootstrap.js');
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-memory-db-alias-'));
   const root = path.join(fixture, '.solomap-global');
@@ -611,7 +611,7 @@ test('a data root with a retained database artifact but no Runtime directory can
 
 test('a damaged project registry cannot block global memory import or assign unproven project memory globally', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { enqueueStartupMemoryMigration } = require('../out/runtimeDatabaseBootstrap.js');
   const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-bootstrap-registry-')), '.solomap-global');
   fs.mkdirSync(path.join(root, 'memory', 'projects'), { recursive: true });
@@ -652,7 +652,7 @@ test('disabled autonomous work still permits database requests without starting 
 
 test('a disconnected project with the same legacy slug prevents assigning ambiguous memory to another project', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { enqueueStartupMemoryMigration } = require('../out/runtimeDatabaseBootstrap.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-bootstrap-collision-'));
   const root = path.join(base, '.solomap-global');
@@ -677,7 +677,7 @@ test('a disconnected project with the same legacy slug prevents assigning ambigu
 
 test('an unreadable memory source does not prevent queuing independent chat migration', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { enqueueStartupDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
   const root = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-bootstrap-independent-')), '.solomap-global');
   fs.mkdirSync(path.join(root, 'intelligence-conversations'), { recursive: true });
@@ -831,7 +831,7 @@ test('one project-source enqueue failure does not block retired-file discovery f
 
 test('on-demand migration discovery queues every registered legacy source idempotently', async () => {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { enqueueAvailableDataMigrations } = require('../out/runtimeDatabaseBootstrap.js');
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-discover-migrations-'));
   const root = path.join(base, '.solomap-global');

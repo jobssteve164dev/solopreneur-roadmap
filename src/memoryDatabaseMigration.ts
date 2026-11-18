@@ -70,7 +70,7 @@ export function resolveLegacyProjectScope(options: MemoryImportOptions, value: s
   return matches.size === 1 ? [...matches][0] : null;
 }
 
-export function archiveUnresolvedMigrationSource(
+export async function archiveUnresolvedMigrationSource(
   store: UnifiedDataStore,
   result: MemoryImportResult,
   source: { identity: string; key: string; hash: string },
@@ -78,9 +78,9 @@ export function archiveUnresolvedMigrationSource(
   error: string,
   options: MemoryImportOptions,
   input: { displaySource?: string; mimeType?: string; projectId?: string | null; observedAt?: number } = {}
-): boolean {
+): Promise<boolean> {
   if (!options.archiveUnresolved || !isArchivableMigrationConflict(error)) return false;
-  const archived = store.archiveMigrationSource(source, bytes, { reason: error, mimeType: input.mimeType, projectId: input.projectId, observedAt: input.observedAt });
+  const archived = await store.archiveMigrationSource(source, bytes, { reason: error, mimeType: input.mimeType, projectId: input.projectId, observedAt: input.observedAt });
   result.archivedSources ||= [];
   result.archivedSources.push({ source: input.displaySource || source.key, error, evidenceRef: `solomap://evidence/${archived.objectId}` });
   if (archived.unchanged) result.unchanged++; else result.imported++;
@@ -164,15 +164,15 @@ export async function importMemoryDirectory(store: UnifiedDataStore, sourceRoot:
           try { const mapped = structuredMemory(bytes, options); scope = mapped.scope; structuredData = mapped.data; }
           catch (error) { mappingError = error instanceof Error ? error.message : String(error); }
         }
-        store.captureMigrationSource({ identity, key, hash }, bytes, { mimeType: structured ? 'application/json' : typeof content === 'string' ? 'text/plain' : 'text/markdown', encoding: typeof content === 'string' ? 'utf8' : 'binary', ...(mappingError || (category === 'project' && !scope) ? { error: mappingError || 'project_scope_mapping_required' } : {}) });
+        await store.publishMigrationSource({ identity, key, hash }, bytes, { mimeType: structured ? 'application/json' : typeof content === 'string' ? 'text/plain' : 'text/markdown', encoding: typeof content === 'string' ? 'utf8' : 'binary', ...(mappingError || (category === 'project' && !scope) ? { error: mappingError || 'project_scope_mapping_required' } : {}) });
         if (mappingError) throw new Error(mappingError);
         if (category === 'project' && !scope) throw new Error('project_scope_mapping_required');
-        const imported = store.importObject({ kind: 'memory', action: 'create', scope: scope || null, idempotencyKey: `import:${identity}:${key}:${hash}`, data: { ...(structuredData || { category, title: path.basename(entry.name, '.md'), status: category === 'inbox' ? 'captured' : 'active', confidence: 0, content }), external_source: `${identity}/${key}`, external_revision: hash, canonical_hash: hash } }, { identity, key, hash });
+        const imported = await store.importObject({ kind: 'memory', action: 'create', scope: scope || null, idempotencyKey: `import:${identity}:${key}:${hash}`, data: { ...(structuredData || { category, title: path.basename(entry.name, '.md'), status: category === 'inbox' ? 'captured' : 'active', confidence: 0, content }), external_source: `${identity}/${key}`, external_revision: hash, canonical_hash: hash } }, { identity, key, hash });
         if (imported.unchanged) result.unchanged++; else result.imported++;
         result.originalBytes += bytes.length;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (!capturedSource || !capturedBytes || !archiveUnresolvedMigrationSource(store, result, capturedSource, capturedBytes, message, options, { displaySource: key, mimeType: key.endsWith('.json') ? 'application/json' : 'text/markdown' })) result.conflicts.push({ source: key, error: message });
+        if (!capturedSource || !capturedBytes || !await archiveUnresolvedMigrationSource(store, result, capturedSource, capturedBytes, message, options, { displaySource: key, mimeType: key.endsWith('.json') ? 'application/json' : 'text/markdown' })) result.conflicts.push({ source: key, error: message });
       }
       options.onProgress?.(result);
       // Source traversal never monopolizes the owner between separate file commits.

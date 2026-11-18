@@ -122,11 +122,12 @@ test('the shared packaged runner commits complete output and host completion wit
   const root = path.join(base, '.solomap-global');
   const projectRoot = path.join(base, 'project'); fs.mkdirSync(projectRoot);
   const seed = new UnifiedDataStore(root);
+  const closeSeedCompute = require('./content-compute-fixture.cjs').attachLazyContentCompute(seed);
   const project = await seed.registerProject({ root: projectRoot });
   const expected = Buffer.from('α🌿\n'.repeat(10000));
   const source = "process.stdout.write('α🌿\\n'.repeat(10000));process.stderr.write(Buffer.from([0,255,10]));";
-  seed.prepareRun(project.projectId, project.locationId, { root: projectRoot, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '任务全文', command: `env -u NO_COLOR ${shellQuote(process.execPath)} -e ${shellQuote(source)}`, userMessage: '用户目标', metadata: { interactiveSession: false }, idempotencyKey: 'prepare' });
-  seed.close();
+  await seed.prepareRun(project.projectId, project.locationId, { root: projectRoot, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '任务全文', command: `env -u NO_COLOR ${shellQuote(process.execPath)} -e ${shellQuote(source)}`, userMessage: '用户目标', metadata: { interactiveSession: false }, idempotencyKey: 'prepare' });
+  await closeSeedCompute(); seed.close();
   const runtime = spawn(process.execPath, [path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root], { stdio: 'pipe' });
   let errors = ''; runtime.stderr.on('data', b => { errors += b; }); runtime.stdout.resume();
   let agent;
@@ -263,7 +264,7 @@ test('the shared runner records claim and Agent launch stages in the originating
     ];
     assert.deepEqual(stages.slice(0, 6), expected.slice(0, 6));
     for (const stage of expected.slice(6)) assert.equal(stages.filter(candidate => candidate[0] === stage[0] && candidate[1] === stage[1]).length, 1);
-    assert.ok(stages.findIndex(candidate => candidate[0] === 'terminal.delivery.workspace.baseline' && candidate[1] === 'ok') < stages.findIndex(candidate => candidate[0] === 'terminal.delivery.agent.launch'));
+    assert.ok(stages.findIndex(candidate => candidate[0] === 'terminal.delivery.rollback.snapshot' && candidate[1] === 'ok') < stages.findIndex(candidate => candidate[0] === 'terminal.delivery.agent.launch'));
     assert.ok(stages.findIndex(candidate => candidate[0] === 'terminal.delivery.agent.spawn') < stages.findIndex(candidate => candidate[0] === 'terminal.delivery.agent.launch'));
   } finally { await f.close(); }
 });
@@ -344,11 +345,12 @@ async function executionFixture(command, metadata = {}, initialOutput = '', runK
   require('node:child_process').execFileSync('git', ['init', '-q', projectRoot]);
   assert.equal(require('node:child_process').execFileSync('git', ['-C', projectRoot, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim(), projectRoot);
   const seed = new UnifiedDataStore(root);
+  const closeSeedCompute = require('./content-compute-fixture.cjs').attachLazyContentCompute(seed);
   const project = await seed.registerProject({ root: projectRoot });
-  const prepared = seed.prepareRun(project.projectId, project.locationId, { root: projectRoot, executionLogId: 1, nodeId: '__solo__', runKind,
+  const prepared = await seed.prepareRun(project.projectId, project.locationId, { root: projectRoot, executionLogId: 1, nodeId: '__solo__', runKind,
     prompt: inputs.prompt ?? '任务原文', command, userMessage: inputs.userMessage ?? '用户目标', ...(inputs.status ? { status: inputs.status } : {}), metadata, idempotencyKey: 'prepare' });
-  if (initialOutput) seed.appendRunLog(project.projectId, { executionLogId: 1, generation: prepared.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from(initialOutput).toString('base64'), idempotencyKey: 'existing-output' });
-  seed.close();
+  if (initialOutput) await seed.appendRunLog(project.projectId, { executionLogId: 1, generation: prepared.generation, stream: 'stdout', sequence: 0, offset: 0, bytes: Buffer.from(initialOutput).toString('base64'), idempotencyKey: 'existing-output' });
+  await closeSeedCompute(); seed.close();
   let runtime; let agent; const output = []; const errors = [];
   const startRuntime = async () => {
     runtime = spawn(process.execPath, [path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root], { stdio: 'pipe' });

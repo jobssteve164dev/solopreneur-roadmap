@@ -1,8 +1,31 @@
 import type { RuntimeExecutionDomain } from './runtimeOperationRegistry';
 import { AsyncLocalStorage } from 'async_hooks';
 
+const runtimeWorkContinuation: unique symbol = Symbol.for('solomap.runtime.workContinuation');
+export interface RuntimeWorkContinuation<T> {
+  [runtimeWorkContinuation]: (admission: RuntimeSchedulerAdmission) => Promise<T | RuntimeWorkContinuation<T>>;
+  waitFor?: Promise<unknown>;
+}
+export function continueRuntimeWork<T>(action: (admission: RuntimeSchedulerAdmission) => Promise<T | RuntimeWorkContinuation<T>>, waitFor?: Promise<unknown>): RuntimeWorkContinuation<T> {
+  return { [runtimeWorkContinuation]: action, ...(waitFor === undefined ? {} : { waitFor }) };
+}
+
+export function readRuntimeWorkContinuation<T>(value: unknown): RuntimeWorkContinuation<T> | undefined {
+  return value && typeof value==='object' && typeof (value as RuntimeWorkContinuation<T>)[runtimeWorkContinuation]==='function'
+    ? value as RuntimeWorkContinuation<T> : undefined;
+}
+
+export function resumeRuntimeWork<T>(value: RuntimeWorkContinuation<T>, admission: RuntimeSchedulerAdmission): Promise<T | RuntimeWorkContinuation<T>> {
+  return value[runtimeWorkContinuation](admission);
+}
+
+export function mapRuntimeWorkResult<T,U>(value: T | RuntimeWorkContinuation<T>, project: (result: T)=>U): U | RuntimeWorkContinuation<U> {
+  const continuation=readRuntimeWorkContinuation<T>(value);
+  return continuation?continueRuntimeWork(async admission=>mapRuntimeWorkResult(await resumeRuntimeWork(continuation,admission),project),continuation.waitFor):project(value as T);
+}
+
 interface ScheduledWork<T> {
-  action: (admission: RuntimeSchedulerAdmission) => Promise<T>;
+  action: (admission: RuntimeSchedulerAdmission) => Promise<T | RuntimeWorkContinuation<T>>;
   resolve: (value: T | PromiseLike<T>) => void;
   reject: (reason?: unknown) => void;
   deadlineAt?: number;
@@ -10,6 +33,7 @@ interface ScheduledWork<T> {
   label?: string;
   deadlineTimer?: NodeJS.Timeout;
   parentAdmission?: RuntimeSchedulerAdmission;
+  waiting?: boolean;
 }
 
 export interface RuntimeSchedulerAdmission {
@@ -92,7 +116,7 @@ export class RuntimeExecutionScheduler {
   private readonly admissions = new WeakSet<object>();
   private readonly admissionContext = new AsyncLocalStorage<RuntimeSchedulerAdmission>();
 
-  submit<T>(domain: RuntimeExecutionDomain, action: (admission: RuntimeSchedulerAdmission) => Promise<T>, options: RuntimeScheduleOptions = {}): Promise<T> {
+  submit<T>(domain: RuntimeExecutionDomain, action: (admission: RuntimeSchedulerAdmission) => Promise<T | RuntimeWorkContinuation<T>>, options: RuntimeScheduleOptions = {}): Promise<T> {
     if (options.deadlineAt !== undefined && (!Number.isFinite(options.deadlineAt) || options.deadlineAt <= Date.now())) {
       return Promise.reject(new Error(this.deadlineEvidence(domain, options.label)));
     }
@@ -167,9 +191,11 @@ export class RuntimeExecutionScheduler {
     if ((this.active.get(domain) || 0) >= domainConcurrency[domain]) return;
     const queue = this.queues.get(domain)!;
     if (!queue.length) return;
-    let workIndex = 0;
+    let workIndex = queue.findIndex(work => !work.waiting);
+    if (workIndex < 0) return;
     if (backgroundYieldDomains.has(domain) && this.foregroundReservation()) {
-      workIndex = queue.findIndex(work => Boolean(work.parentAdmission
+      workIndex = queue.findIndex(work => Boolean(!work.waiting && work.parentAdmission
+        && this.admissions.has(work.parentAdmission)
         && foregroundDomains.has(work.parentAdmission.domain)));
       if (workIndex < 0) {
         this.scheduleForegroundReservationWake();
@@ -191,11 +217,35 @@ export class RuntimeExecutionScheduler {
     let result: Promise<unknown>;
     try { result = this.admissionContext.run(admission, () => Promise.resolve(work.action(admission))); }
     catch (error) { result = Promise.reject(error); }
-    void result.then(work.resolve, work.reject).finally(() => {
+    let continuation: ScheduledWork<unknown>['action'] | undefined;
+    let waitFor: Promise<unknown> | undefined;
+    void result.then(value => {
+      const next = value && typeof value === 'object' ? (value as RuntimeWorkContinuation<unknown>)[runtimeWorkContinuation] : undefined;
+      if (typeof next === 'function') { continuation = next; waitFor = (value as RuntimeWorkContinuation<unknown>).waitFor; }
+      else work.resolve(value);
+    }, work.reject).catch(work.reject).finally(() => {
+      this.admissions.delete(admission);
       this.active.set(domain, Math.max(0, (this.active.get(domain) || 1) - 1));
       this.changeActiveLabel(domain, work.label, -1);
       if (foregroundDomains.has(domain)) {
         this.foregroundReservedUntil = Math.max(this.foregroundReservedUntil, Date.now() + foregroundReservationMs);
+      }
+      if (continuation) {
+        work.action = continuation;
+        // This is the same accepted operation, not another admission attempt.
+        work.deadlineAt = undefined;
+        work.supersedesKey = undefined;
+        work.waiting = waitFor !== undefined;
+        queue.push(work);
+        if (waitFor !== undefined) void Promise.resolve(waitFor).then(() => {
+          work.waiting = false;
+          this.schedule();
+        }, error => {
+          const index = queue.indexOf(work);
+          if (index >= 0) queue.splice(index, 1);
+          work.reject(error);
+          this.schedule();
+        });
       }
       this.schedule();
     });
@@ -203,12 +253,12 @@ export class RuntimeExecutionScheduler {
   }
 
   private foregroundReservation(): boolean {
-    return [...foregroundDomains].some(domain => this.queues.get(domain)!.length > 0)
+    return [...foregroundDomains].some(domain => this.queues.get(domain)!.some(work => !work.waiting))
       || Date.now() < this.foregroundReservedUntil;
   }
 
   private scheduleForegroundReservationWake(): void {
-    if ([...foregroundDomains].some(domain => this.queues.get(domain)!.length > 0)) return;
+    if ([...foregroundDomains].some(domain => this.queues.get(domain)!.some(work => !work.waiting))) return;
     if (this.foregroundReservationTimer) return;
     const delay = Math.max(1, this.foregroundReservedUntil - Date.now());
     this.foregroundReservationTimer = setTimeout(() => {

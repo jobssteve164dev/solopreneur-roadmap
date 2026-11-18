@@ -6,11 +6,11 @@ const path = require('node:path');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { startRuntimeControlServer, sendRuntimeDataRequest } = require('../out/autonomousRuntimeControl.js');
 const { getAgentRunDeliveryOwner } = require('../out/agentRunPreparation.js');
 const { buildExecutionExperiencePrompt, readExecutionGraph } = require('../out/runDigest.js');
-const { runtimeMcpSource } = require('../out/runtimeDataOperations.js');
+const { runtimeMcpSource } = require('./runtime-data-fixture.cjs');
 const { registerUnifiedMcpTools } = require('../out/unifiedMcp.js');
 const { anonymousToolEnv } = require('./analysis-fixture.js');
 
@@ -296,6 +296,7 @@ test('background migration converges a derived index to a changed source while a
     assert.equal((await getRunIndexHealth(f.project, '', f.root)).ok, true, 'background migration must refresh its own derived index');
     assert.equal((await backfillRunIndexFromDigests(f.project, '', f.root)).backfilledCount, 0);
     let entry = (await f.call('read_project_run_indexes', { root: f.project }))[0]; assert.equal(entry.totalTokens, 42); assert.deepEqual(entry.files.map(file => file.filePath), ['new.js']);
+    f.store().encodeRunIndex=()=>{throw new Error('formal_run_index_encoded_on_writer');};
     await f.call('upsert_project_run_index', { root: f.project, record: { ...entry, totalTokens: 99 }, files: [{ role: 'changed', filePath: 'formal.js' }], signals: [] });
     fs.writeFileSync(file, JSON.stringify(digest(0, { changedFiles: ['later-legacy.js'], tokenUsage: { totalTokens: 1 } }))); await f.import('keep-formal-index');
     assert.equal((await backfillRunIndexFromDigests(f.project, '', f.root)).backfilledCount, 0);
@@ -307,7 +308,10 @@ test('distributed full history reads a formal journal with no digest through ord
   const f = await fixture();
   try {
     const output = '完整 journal 原文🌿\n'.repeat(10000);
-    const journal = await f.call('append_project_journal', { root: f.project, idempotencyKey: 'journal-without-digest', entry: { nodeId: 'step', timestamp: '2026-10-09T00:00:00Z', agentCli: 'codex', command: 'actual command', output, status: 'Completed' } });
+    f.store().syncProjectJournalSource=()=>{throw new Error('formal_journal_used_legacy_source_sync');};
+    const input={root:f.project,idempotencyKey:'journal-without-digest',entry:{nodeId:'step',timestamp:'2026-10-09T00:00:00Z',agentCli:'codex',command:'actual command',output,status:'Completed'}};
+    const journal=await f.call('append_project_journal',input);
+    assert.deepEqual(await f.call('append_project_journal',{...input,entry:{...input.entry,output:'重复请求不得改变原文'}}),journal);
     const history = await runExperienceCli(f, 'history', ['--full']); assert.equal(history.payload.length, 1); assert.equal(history.payload[0].executionLogId, journal.executionLogId); assert.equal(history.payload[0].log.output, output);
     assert.ok(history.payload[0].sourceRef.objectId);
     const old = history.payload[0].sourceRef;
@@ -419,6 +423,133 @@ test('ordinary MCP reads digest evidence in full without gaining host query or f
   } finally { await source?.close(); await foreignSource?.close(); await f.close(); }
 });
 
+test('the historical digest directory publishes full raw evidence without its synchronous import kernel', async () => {
+  const f = await fixture();
+  const sourceRoot = path.join(f.project, '.solopreneur', 'run-digests');
+  fs.mkdirSync(sourceRoot);
+  const file = path.join(sourceRoot, 'migration.json');
+  const input = digest(12, { outcome: '完整运行摘要'.repeat(30000), changedFiles: ['src/result.js'], tags: ['adopted'] });
+  const importedText = `${JSON.stringify(input, null, 2)}\n`;
+  fs.writeFileSync(file, importedText);
+  const store = f.store();
+  store.importRunDigestSource = () => { throw new Error('synchronous_digest_import_called'); };
+  try {
+    assert.equal((await f.import('prepared-digest-first')).status, 'completed');
+    const first = (await f.call('read_run_digests', { root: f.project })).items[0];
+    assert.equal(first.digest.outcome === input.outcome, true, 'the complete digest must survive import');
+    const decoded = store.read(first.ref.objectId, first.ref.revision).data.content;
+    assert.equal(decoded === importedText, true, 'the complete original bytes must remain readable');
+    assert.equal((await f.import('prepared-digest-repeat')).status, 'completed');
+    assert.equal((await f.call('read_run_digests', { root: f.project })).items[0].ref.objectId, first.ref.objectId);
+    const replacement = { ...input, outcome: '历史补录结论' };
+    fs.writeFileSync(file, JSON.stringify(replacement));
+    assert.equal((await f.import('prepared-digest-replace')).status, 'completed');
+    const current = (await f.call('read_run_digests', { root: f.project })).items[0];
+    assert.deepEqual(current.digest, replacement);
+    assert.notEqual(current.ref.objectId, first.ref.objectId);
+    assert.ok(store.read(current.ref.objectId).relations.some(relation => relation.relation === 'previous' && relation.target === first.ref.objectId));
+  } finally { await f.close(); }
+});
+
+test('a superseded digest capture cannot mark the new source as imported', async () => {
+  const f = await fixture();
+  const sourceRoot = path.join(f.project, '.solopreneur', 'run-digests');
+  fs.mkdirSync(sourceRoot);
+  fs.writeFileSync(path.join(sourceRoot, 'one.json'), JSON.stringify(digest(12)));
+  const replacement = Buffer.from(JSON.stringify(digest(13)));
+  const secondHash = require('node:crypto').createHash('sha256').update(replacement).digest('hex');
+  const store = f.store();
+  const publish = store.publishMigrationSource.bind(store);
+  const identity = `run-digests:${f.identity.projectId}`;
+  let recaptured = false;
+  store.publishMigrationSource = async (source, bytes, options) => {
+    const result = await publish(source, bytes, options);
+    if (!recaptured && source.identity === identity) {
+      recaptured = true;
+      await publish({ ...source, hash: secondHash }, replacement, options);
+    }
+    return result;
+  };
+  try {
+    const result = await f.import('superseded-capture');
+    assert.equal(result.status, 'failed');
+    const [row] = store.rows('SELECT stage,object_id,source_content_id FROM migration_items WHERE source_identity=? AND source_key=?', [identity, 'one.json']);
+    assert.equal(row.stage, 'captured');
+    assert.equal(row.object_id, null);
+    assert.equal(store.content(row.source_content_id).equals(replacement), true);
+    assert.deepEqual((await f.call('read_run_digests', { root: f.project })).items, []);
+    fs.writeFileSync(path.join(sourceRoot, 'one.json'), replacement);
+    assert.equal((await f.import('superseded-capture-retry')).status, 'completed');
+    assert.equal((await f.call('read_run_digests', { root: f.project })).items[0].digest.runId, 'history:13');
+  } finally { await f.close(); }
+});
+
+test('directory digest backfill uses Reader preparation and preserves a concurrently published native index', async () => {
+  const f = await fixture();
+  const sourceRoot = path.join(f.project, '.solopreneur', 'run-digests');
+  fs.mkdirSync(sourceRoot);
+  const first = digest(12, { tokenUsage: { totalTokens: 11 }, changedFiles: ['old-result.js'] });
+  const second = digest(13, { tokenUsage: { totalTokens: 22 }, changedFiles: ['derived-result.js'] });
+  for (const value of [first, second]) fs.writeFileSync(path.join(sourceRoot, `${value.executionLogId}.json`), JSON.stringify(value));
+  const store = f.store();
+  const inspect = store.inspectProjectMigration.bind(store);
+  const { digestToRunIndex } = require('../out/runDigestData.js');
+  let wroteNative = false;
+  store.prepareRunIndexBackfill = () => { throw new Error('synchronous_backfill_called'); };
+  store.runIndexBackfillCandidates = () => { throw new Error('writer_backfill_candidate_scan'); };
+  store.inspectProjectMigration = async request => {
+    const result = await inspect(request);
+    if (request.kind === 'runIndexBackfill' && result.length && !wroteNative) {
+      wroteNative = true;
+      const native = digestToRunIndex({ ...first, tokenUsage: { totalTokens: 77 }, changedFiles: ['native-result.js'] });
+      store.upsertProjectRunIndex(f.identity.projectId, native.record, native.files, native.signals);
+    }
+    return result;
+  };
+  try {
+    assert.equal((await f.import('prepared-directory-backfill')).status, 'completed');
+    assert.equal(wroteNative, true);
+    const indexes = store.readProjectRunIndexes(f.identity.projectId);
+    assert.deepEqual(indexes.map(index => [index.executionLogId, index.totalTokens, index.files[0]?.filePath]), [
+      [second.executionLogId, 22, 'derived-result.js'], [first.executionLogId, 77, 'native-result.js']
+    ]);
+    assert.equal(store.readRunIndexHealth(f.identity.projectId).ok, true);
+  } finally { await f.close(); }
+});
+
+test('backfill discards an archived output error after an authoritative index wins', async () => {
+  const f = await fixture();
+  const sourceRoot = path.join(f.project, '.solopreneur', 'run-digests');
+  fs.mkdirSync(sourceRoot);
+  const value = digest(5, { nodeId: 'sample' });
+  fs.writeFileSync(path.join(sourceRoot, 'one.json'), JSON.stringify(value));
+  const store = f.store();
+  const { digestToRunIndex } = require('../out/runDigestData.js');
+  const native = digestToRunIndex({ ...value, tokenUsage: { totalTokens: 77 } });
+  for (const [relativePath, text] of [['sample/6/output.log', 'tokens used\n11'], ['sample/output.log', 'tokens used\n12']]) {
+    const bytes = Buffer.from(text);
+    await store.publishRunArtifact(f.identity.projectId, { executionLogId: value.executionLogId, relativePath, bytes,
+      hash: require('node:crypto').createHash('sha256').update(bytes).digest('hex') });
+  }
+  const inspect = store.inspectProjectMigration.bind(store);
+  let discarded = false;
+  store.inspectProjectMigration = async request => {
+    try { return await inspect(request); }
+    catch (error) {
+      if (request.kind === 'runIndexBackfill' && error.message === 'historical_run_token_source_ambiguous') {
+        discarded = true;
+        store.upsertProjectRunIndex(f.identity.projectId, native.record, native.files, native.signals);
+      }
+      throw error;
+    }
+  };
+  try {
+    assert.equal((await f.import('obsolete-backfill-error')).status, 'completed');
+    assert.equal(discarded, true);
+    assert.equal(store.readProjectRunIndexes(f.identity.projectId)[0].totalTokens, 77);
+  } finally { await f.close(); }
+});
+
 test('index maintenance repairs a preexisting formal digest after sources are moved and unchanged health reads no digest bodies', async () => {
   const f = await fixture(); const sourceRoot = path.join(f.project, '.solopreneur', 'run-digests'); fs.mkdirSync(sourceRoot);
   fs.writeFileSync(path.join(sourceRoot, 'one.json'), JSON.stringify(digest(30, { tokenUsage: { totalTokens: 42 }, changedFiles: Array.from({ length: 91 }, (_, i) => `file-${i}.js`) })));
@@ -439,6 +570,27 @@ test('index maintenance repairs a preexisting formal digest after sources are mo
     try { for (let i = 0; i < 12; i++) assert.equal((await getRunIndexHealth(f.project, '', f.root)).ok, true); assert.equal(store.prepareRunIndexBackfill(f.identity.projectId, 1).length, 0); } finally { store.content = original; }
     assert.equal(decodes, 0); assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', 'project_journal.db')), false);
   } finally { await f.close(); }
+});
+
+test('actual runtime backfills and returns health for an already retained digest', async t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-run-index-runtime-'));
+  const root = path.join(base, 'global'), project = path.join(base, 'project');
+  fs.mkdirSync(project);
+  const setup = new UnifiedDataStore(root);
+  const { databaseId } = setup;
+  const { projectId } = await setup.registerProject({ root: project });
+  const bytes = Buffer.from(JSON.stringify(digest(7, { tokenUsage: { totalTokens: 71 } })));
+  const source = { identity: `run-digests:${projectId}`, key: 'already-retained.json', hash: require('node:crypto').createHash('sha256').update(bytes).digest('hex') };
+  setup.captureMigrationSource(source, bytes);
+  setup.importRunDigestSource(projectId, { bytes, source });
+  setup.close();
+  const { RuntimeDataExecutionDomains } = require('../out/runtimeDataExecutionDomains.js');
+  const domains = await RuntimeDataExecutionDomains.start({ root, databaseId });
+  t.after(() => domains.close());
+  const request = { operation: 'backfill_run_indexes', input: { root: project } };
+  const first = await domains.operations(request);
+  assert.deepEqual(first, { digestCount: 1, indexedCount: 1, missingDigestCount: 0, backfilledCount: 1, ok: true, error: '' });
+  assert.deepEqual(await domains.operations(request), { ...first, backfilledCount: 0 });
 });
 
 test('the distributed experience CLI reads complete formal evidence after the legacy source is moved', async () => {

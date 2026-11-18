@@ -1,5 +1,10 @@
 import type { DataObject, DataWrite } from './db/unifiedDataStore';
 
+export function normalizeObjectReference(value:unknown):string {
+  const raw=String(value || ''),uri=raw.match(/^solomap:\/(?:\/)?(?:objects|asset)\/([a-f0-9-]{36})$/);
+  return uri?uri[1]:raw;
+}
+
 const reviewedKinds = ['memory', 'lesson', 'review_batch'];
 const candidateStates = ['captured', 'candidate', 'pending', 'draft', 'rejected'];
 const hostKinds = ['project', 'roadmap_node', 'grant', 'runtime_instance', 'setting', 'integration', 'package_version', 'policy', 'policy_use', 'application', 'verification', 'evaluation', 'lesson_decision'];

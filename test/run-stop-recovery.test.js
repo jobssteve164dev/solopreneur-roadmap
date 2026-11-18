@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
-const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+const { ContentComputeDataStore: UnifiedDataStore } = require('./content-compute-fixture.cjs');
 const { RunStop, captureNativeStopBoundary } = require('../out/runStop.js');
 const { RunRecovery } = require('../out/runRecovery.js');
 
@@ -44,11 +44,11 @@ test('requestRunStop ignores caller-spoofed native boundary fields', async () =>
   const store = new UnifiedDataStore(root);
   try {
     const identity = await store.registerProject({ root: project });
-    const run = store.prepareRun(identity.projectId, identity.locationId, {
+    const run = await store.prepareRun(identity.projectId, identity.locationId, {
       root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '目标', command: 'codex', userMessage: '目标',
       metadata: { interactiveSession: true, sessionProvider: 'codex' }, idempotencyKey: 'spoofed-boundary-run'
     });
-    const stopped = store.requestRunStop(run.projectId, {
+    const stopped = await store.requestRunStop(run.projectId, {
       executionLogId: 1, generation: run.generation, expectedRevision: run.revision, expectedTurnId: run.turnId,
       reason: '停止', idempotencyKey: 'spoofed-boundary-stop', nativeStopStream: 'native:codex', nativeStopLogBoundary: Number.MAX_SAFE_INTEGER
     });
@@ -67,7 +67,7 @@ test('recovery preserves an accepted ordinary stop after a refused strict contin
   let store=new UnifiedDataStore(root),service=new RunStop(store),recovery;
   try{
     const projectIdentity=await store.registerProject({root:project});
-    let state=store.prepareRun(projectIdentity.projectId,projectIdentity.locationId,{root:project,executionLogId:1,nodeId:'__solo__',runKind:'solo',prompt:'原始完整输入',command:'not executed',userMessage:'原任务',metadata:{interactiveSession:true,agentPid:unrelated.pid,processBirth:'proc:reused-old-birth'},idempotencyKey:'stop-intent-prepare'});
+    let state=await store.prepareRun(projectIdentity.projectId,projectIdentity.locationId,{root:project,executionLogId:1,nodeId:'__solo__',runKind:'solo',prompt:'原始完整输入',command:'not executed',userMessage:'原任务',metadata:{interactiveSession:true,agentPid:unrelated.pid,processBirth:'proc:reused-old-birth'},idempotencyKey:'stop-intent-prepare'});
     const projectId=state.projectId;
     await assert.rejects(service.stop(projectId,{executionLogId:1,generation:state.generation,expectedRevision:state.revision,expectedTurnId:state.turnId,reason:'正在原会话中继续处理。',requireVerifiedIdentity:true,outcome:'partial',idempotencyKey:'strict-refused'}),/run_process_identity_unverified/);
     state=store.readRunState(projectId,1);assert.equal(state.status.stopRequireVerifiedIdentity,true);
@@ -95,7 +95,7 @@ test('Runtime shutdown hands an accepted stop back to recovery without waiting f
   let stopping; let closing;
   try {
     const identity = await store.registerProject({ root: project });
-    const run = store.prepareRun(identity.projectId, identity.locationId, { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '原始输入', command: 'actual command', userMessage: '目标', metadata: { interactiveSession: true, agentPid: wrapper.pid, processBirth: birth }, idempotencyKey: 'recoverable-stop-run' });
+    const run = await store.prepareRun(identity.projectId, identity.locationId, { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '原始输入', command: 'actual command', userMessage: '目标', metadata: { interactiveSession: true, agentPid: wrapper.pid, processBirth: birth }, idempotencyKey: 'recoverable-stop-run' });
     stopping = service.stop(run.projectId, { executionLogId: 1, generation: run.generation, expectedRevision: run.revision, expectedTurnId: run.turnId, reason: '用户要求停止', idempotencyKey: 'recoverable-stop' }).then(value => ({ value }), error => ({ error }));
     closing = service.close();
     const result = await Promise.race([closing.then(() => 'closed'), new Promise(resolve => setTimeout(() => resolve('waiting-for-wrapper'), 100))]);
@@ -121,9 +121,9 @@ test('recovery consumes a late stop request for an already finished non-interact
   const store = new UnifiedDataStore(root); let recovery;
   try {
     const identity = await store.registerProject({ root: project });
-    const run = store.prepareRun(identity.projectId, identity.locationId, { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'migration_apply', prompt: '迁移旧数据', command: 'completed command', userMessage: '迁移旧数据', metadata: { interactiveSession: false }, idempotencyKey: 'finished-stop-run' });
-    const completed = store.checkpointRun(run.projectId, { executionLogId: 1, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial', summary: '迁移已完成', exitCode: 0, idempotencyKey: 'finished-stop-complete' });
-    store.requestRunStop(run.projectId, { executionLogId: 1, generation: completed.generation, expectedRevision: completed.revision, expectedTurnId: completed.turnId, reason: '终端稍后关闭', idempotencyKey: 'finished-stop-late' });
+    const run = await store.prepareRun(identity.projectId, identity.locationId, { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'migration_apply', prompt: '迁移旧数据', command: 'completed command', userMessage: '迁移旧数据', metadata: { interactiveSession: false }, idempotencyKey: 'finished-stop-run' });
+    const completed = await store.checkpointRun(run.projectId, { executionLogId: 1, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId, action: 'complete', outcome: 'partial', summary: '迁移已完成', exitCode: 0, idempotencyKey: 'finished-stop-complete' });
+    await store.requestRunStop(run.projectId, { executionLogId: 1, generation: completed.generation, expectedRevision: completed.revision, expectedTurnId: completed.turnId, reason: '终端稍后关闭', idempotencyKey: 'finished-stop-late' });
     assert.equal(store.recoverableRunStates().items.length, 1);
     recovery = new RunRecovery(store); await recovery.recover();
     const settled = store.readRunState(run.projectId, 1);
@@ -138,19 +138,19 @@ test('recovery closes a stopped interactive run after observing a native start t
   const store = new UnifiedDataStore(root); let recovery;
   try {
     const identity = await store.registerProject({ root: project });
-    const run = store.prepareRun(identity.projectId, identity.locationId, {
+    const run = await store.prepareRun(identity.projectId, identity.locationId, {
       root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '原始目标', command: 'codex', userMessage: '原始目标',
       metadata: { interactiveSession: true, sessionProvider: 'codex' }, idempotencyKey: 'stopped-native-start-run'
     });
-    const completed = store.checkpointRun(run.projectId, {
+    const completed = await store.checkpointRun(run.projectId, {
       executionLogId: 1, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId,
       action: 'complete', outcome: 'partial', summary: '原轮已经完成', exitCode: 0, idempotencyKey: 'stopped-native-start-complete'
     });
-    const stopped = store.requestRunStop(run.projectId, {
+    const stopped = await store.requestRunStop(run.projectId, {
       executionLogId: 1, generation: completed.generation, expectedRevision: completed.revision, expectedTurnId: completed.turnId,
       reason: '正在原会话中继续处理。', outcome: 'partial', idempotencyKey: 'stopped-native-start-stop'
     }, { nativeStopStream: 'native:codex', nativeStopLogBoundary: 200 });
-    store.appendRunLog(run.projectId, { executionLogId: 1, generation: stopped.generation, stream: 'native:codex', sequence: 0, offset: 0,
+    await store.appendRunLog(run.projectId, { executionLogId: 1, generation: stopped.generation, stream: 'native:codex', sequence: 0, offset: 0,
       bytes: Buffer.alloc(200, 32).toString('base64'), idempotencyKey: 'stopped-native-source' });
     const nativeStartedAt = stopped.status.stopRequestedAt;
     const { RunNativeObserver } = require('../out/runNativeObserver.js');
@@ -185,11 +185,11 @@ test('an accepted stop keeps its original intent when the same key is retried wi
   const store = new UnifiedDataStore(root); let stops;
   try {
     const identity = await store.registerProject({ root: project });
-    const run = store.prepareRun(identity.projectId, identity.locationId, {
+    const run = await store.prepareRun(identity.projectId, identity.locationId, {
       root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '目标', command: 'codex', userMessage: '目标',
       metadata: { interactiveSession: true, sessionProvider: 'codex' }, idempotencyKey: 'stop-intent-run'
     });
-    store.requestRunStop(run.projectId, {
+    await store.requestRunStop(run.projectId, {
       executionLogId: 1, generation: run.generation, expectedRevision: run.revision, expectedTurnId: run.turnId,
       reason: '保留部分结果', outcome: 'partial', idempotencyKey: 'same-stop-key'
     });
@@ -212,19 +212,19 @@ test('a native start beyond the captured stop boundary cannot open another turn'
   const store = new UnifiedDataStore(root);
   try {
     const identity = await store.registerProject({ root: project });
-    const run = store.prepareRun(identity.projectId, identity.locationId, {
+    const run = await store.prepareRun(identity.projectId, identity.locationId, {
       root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '目标', command: 'codex', userMessage: '目标',
       metadata: { interactiveSession: true, sessionProvider: 'codex' }, idempotencyKey: 'stop-boundary-run'
     });
-    const completed = store.checkpointRun(run.projectId, {
+    const completed = await store.checkpointRun(run.projectId, {
       executionLogId: 1, generation: run.generation, proof: run.proof, expectedRevision: run.revision, expectedTurnId: run.turnId,
       action: 'complete', outcome: 'partial', summary: '完成', exitCode: 0, idempotencyKey: 'stop-boundary-complete'
     });
-    const stopped = store.requestRunStop(run.projectId, {
+    const stopped = await store.requestRunStop(run.projectId, {
       executionLogId: 1, generation: completed.generation, expectedRevision: completed.revision, expectedTurnId: completed.turnId,
       reason: '停止', idempotencyKey: 'stop-boundary-stop'
     }, { nativeStopStream: 'native:codex', nativeStopLogBoundary: 100 });
-    store.appendRunLog(run.projectId, { executionLogId: 1, generation: stopped.generation, stream: 'native:codex', sequence: 0, offset: 0,
+    await store.appendRunLog(run.projectId, { executionLogId: 1, generation: stopped.generation, stream: 'native:codex', sequence: 0, offset: 0,
       bytes: Buffer.alloc(101, 32).toString('base64'), idempotencyKey: 'stop-boundary-source' });
     const { RunNativeObserver } = require('../out/runNativeObserver.js');
     const observer = new RunNativeObserver(store);
@@ -252,12 +252,12 @@ test('recovery preserves a live interactive process when only its terminal host 
   const store = new UnifiedDataStore(root); let recovery;
   try {
     const identity = await store.registerProject({ root: project });
-    let run = store.prepareRun(identity.projectId, identity.locationId, {
+    let run = await store.prepareRun(identity.projectId, identity.locationId, {
       root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '原始输入', command: 'actual command', userMessage: '目标',
       metadata: { interactiveSession: true, terminalName: 'closed terminal', terminalDeliveryId: 'delivery-1' },
       deliveryOwner: { id: 'closed-window', pid: 1073741824, birth: 'proc:gone' }, idempotencyKey: 'orphaned-terminal-run'
     });
-    run = store.claimRun(run.projectId, { executionLogId: 1, expectedRevision: run.revision, agentPid: wrapper.pid, processBirth: birth, terminalDeliveryId: 'delivery-1', idempotencyKey: 'orphaned-terminal-claim' });
+    run = await store.claimRun(run.projectId, { executionLogId: 1, expectedRevision: run.revision, agentPid: wrapper.pid, processBirth: birth, terminalDeliveryId: 'delivery-1', idempotencyKey: 'orphaned-terminal-claim' });
     recovery = new RunRecovery(store);
     await recovery.recover();
     assert.equal(wrapper.exitCode, null, 'recovery must preserve a live run when its display owner is missing');
@@ -281,11 +281,11 @@ test('recovery backs off an unchanged failed run and persists its exact failure 
   const store = new UnifiedDataStore(root); let recovery; let now = 1_000; let checks = 0;
   try {
     const identity = await store.registerProject({ root: project });
-    let run = store.prepareRun(identity.projectId, identity.locationId, {
+    let run = await store.prepareRun(identity.projectId, identity.locationId, {
       root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'migration_apply', prompt: '恢复失败退避', command: 'not executed',
       userMessage: '恢复失败退避', metadata: { interactiveSession: false }, idempotencyKey: 'recovery-backoff-run'
     });
-    run = store.claimRun(run.projectId, { executionLogId: 1, expectedRevision: run.revision, agentPid: 1073741824,
+    run = await store.claimRun(run.projectId, { executionLogId: 1, expectedRevision: run.revision, agentPid: 1073741824,
       processBirth: 'proc:gone', idempotencyKey: 'recovery-backoff-claim' });
     const original = store.runProcessAlive.bind(store);
     store.runProcessAlive = () => { checks++; throw new Error('fixture_process_probe_failed'); };
@@ -297,7 +297,7 @@ test('recovery backs off an unchanged failed run and persists its exact failure 
     await recovery.recover();
     assert.equal(checks, 1, 'the cooldown must survive a Runtime rebuild instead of living only in one process Map');
     let deferred = store.readRunState(run.projectId, 1);
-    deferred = store.patchRunState(run.projectId, { executionLogId: 1, generation: deferred.generation, expectedRevision: deferred.revision,
+    deferred = await store.patchRunState(run.projectId, { executionLogId: 1, generation: deferred.generation, expectedRevision: deferred.revision,
       patch: { externalRecoverySignal: 'changed' }, idempotencyKey: 'external-state-change' });
     await assert.rejects(recovery.recover(), /fixture_process_probe_failed/);
     assert.equal(checks, 2, 'an external revision change must bypass the stale cooldown immediately');
@@ -331,15 +331,15 @@ test('recovery persists backoff after its observer advances the same run before 
   let recovery;
   try {
     const identity = await store.registerProject({ root: project });
-    let run = store.prepareRun(identity.projectId, identity.locationId, {
+    let run = await store.prepareRun(identity.projectId, identity.locationId, {
       root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '恢复观察', command: 'not executed', userMessage: '恢复观察',
       metadata: { interactiveSession: true, sessionProvider: 'codex' }, idempotencyKey: 'recovery-progress-run'
     });
-    run = store.claimRun(run.projectId, { executionLogId: 1, expectedRevision: run.revision, agentPid: 1073741824,
+    run = await store.claimRun(run.projectId, { executionLogId: 1, expectedRevision: run.revision, agentPid: 1073741824,
       processBirth: 'proc:gone', idempotencyKey: 'recovery-progress-claim' });
     RunNativeObserver.prototype.observe = async function(observed) {
       const latest = store.readRunState(observed.projectId, 1);
-      store.patchRunState(observed.projectId, { executionLogId: 1, generation: latest.generation, expectedRevision: latest.revision,
+      await store.patchRunState(observed.projectId, { executionLogId: 1, generation: latest.generation, expectedRevision: latest.revision,
         patch: { codexNativeCursor: 42 }, idempotencyKey: 'observer-progress-before-failure' });
       throw new Error('observer_failed_after_progress');
     };

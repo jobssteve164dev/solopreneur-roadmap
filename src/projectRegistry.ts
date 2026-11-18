@@ -49,6 +49,25 @@ export interface ProjectRegistryBootstrap {
   workspaceRoot?: string;
 }
 
+export function mergeProjectRegistryPatch(current:ProjectRegistryFile,input:ProjectRegistryPatch,updatedAt:string):ProjectRegistryFile {
+  let projects=[...current.projects];
+  for(const patch of input.projectPatches || []){
+    if(patch.remove)projects=projects.filter(project=>project.path!==patch.path);
+    else{
+      const index=projects.findIndex(project=>project.path===patch.path);
+      const project={...(index<0?{name:projectName(patch.path),path:patch.path}:projects[index]),...patch.fields};
+      if(index<0)projects.push(project);else projects[index]=project;
+    }
+  }
+  const hidden=new Set(current.hiddenProjects);
+  for(const patch of input.hiddenPatches || []){
+    if(patch.hidden)hidden.add(patch.path);else hidden.delete(patch.path);
+  }
+  const selected=input.selectedProjectPath ?? current.selectedProjectPath ?? '';
+  return {schemaVersion:1,updatedAt,projects:normalizeProjectsForStorage(projects),hiddenProjects:[...hidden],
+    selectedProjectPath:projects.some(project=>project.path===selected)?selected:''};
+}
+
 type RegistryOperation = (operation: string, input: Record<string, unknown>) => Promise<unknown>;
 const registrySnapshots = new Map<string, ProjectRegistrySnapshot>();
 const registryReads = new Map<string, Promise<ProjectRegistrySnapshot>>();
@@ -245,6 +264,7 @@ export function getProjectsReadOnly(input: {
   legacyProjects: SolopreneurProject[];
   legacyHiddenProjects: string[];
   workspaceRoot?: string;
+  registry?: ProjectRegistryFile;
 }): SolopreneurProject[] {
   const readableProjectDirectory = (projectPath: string): boolean => {
     if (!path.isAbsolute(projectPath)) return false;
@@ -255,7 +275,7 @@ export function getProjectsReadOnly(input: {
       return false;
     }
   };
-  const registry = readProjectRegistry(input.globalDataPath, input.projectRegistryFileName);
+  const registry = input.registry || readProjectRegistry(input.globalDataPath, input.projectRegistryFileName);
   const savedProjects = registry ? registry.projects : [];
   const hiddenProjects = new Set(registry ? registry.hiddenProjects : []);
   const workspaceRoot = String(input.workspaceRoot || '').trim();

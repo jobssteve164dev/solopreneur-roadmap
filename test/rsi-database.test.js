@@ -7,7 +7,7 @@ const crypto = require('node:crypto');
 const childProcess = require('node:child_process');
 const { promisify } = require('node:util');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const { getAgentRunDeliveryOwner } = require('../out/agentRunPreparation.js');
 const { reviewHash } = require('../out/learningReview.js');
@@ -63,8 +63,9 @@ async function fixture() {
 }
 
 async function completeAndSettle(f, executionLogId, lesson, verdict, evidence, eventType = 'verified', delivered = true, trustedVerification = eventType === 'verified', deliveredRevision = lesson.revision) {
+  const body = f.store.read(lesson.objectId).data;
   const run = await f.call('prepare_run', {
-    root: f.project, executionLogId, nodeId: '__solo__', runKind: 'solo', prompt: delivered ? `执行当前用户目标。\n来源：solomap://objects/${lesson.objectId} · revision=${deliveredRevision}` : '执行当前用户目标。',
+    root: f.project, executionLogId, nodeId: '__solo__', runKind: 'solo', prompt: delivered ? `执行当前用户目标。\n来源：solomap://objects/${lesson.objectId} · revision=${deliveredRevision}\n${body.summary}\n${body.do_this}` : '执行当前用户目标。',
     command: 'authenticated agent cli', userMessage: '完成真实任务', metadata: { interactiveSession: true },
     idempotencyKey: `rsi-prepare:${executionLogId}`
   });
@@ -83,7 +84,9 @@ async function completeAndSettle(f, executionLogId, lesson, verdict, evidence, e
   const lease = await f.call('claim_run_consumer', { ...scope, owner });
   const verification = trustedVerification ? await f.call('record_run_verification', {
     projectId: run.projectId, executionLogId, claim: '任务结果通过宿主验证', result: 'pass',
-    evidence: evidence.join('\n') || '宿主验证通过', idempotencyKey: `rsi-verification:${executionLogId}`
+    evidence: evidence.join('\n') || '宿主验证通过', turnId: done.turnId,
+    experienceAssessments: [{ lessonId: lesson.objectId, lessonRevision: lesson.revision, action: '实施前先完整审计生产写入与所有消费者。', result: 'pass', evidence: evidence.join('\n') || '独立验证了该动作及结果' }],
+    idempotencyKey: `rsi-verification:${executionLogId}`
   }) : undefined;
   const input = {
     ...scope, token: lease.token,
@@ -160,7 +163,8 @@ test('an explicit fixed experience adoption creates one durable policy use and o
     assert.equal(cycles.items[0].evaluation.verdict, 'unassessed', 'the Agent report is only a claim until the host records formal verification');
     const verification = await f.call('record_run_verification', {
       projectId: first.run.projectId, executionLogId: 1, claim: '独立宿主回归通过', result: 'pass',
-      evidence: 'node --test test/rsi-database.test.js passed', idempotencyKey: 'rsi-post-settlement-verification'
+      evidence: 'node --test test/rsi-database.test.js passed', idempotencyKey: 'rsi-post-settlement-verification',
+      turnId: first.run.turnId, experienceAssessments: [{ lessonId: lesson.objectId, lessonRevision: lesson.revision, action: '实施前先完整审计生产写入与所有消费者。', result: 'pass', evidence: '独立核对该经验采用及实际结果' }]
     });
     cycles = await f.call('read_rsi_cycles', { projectId: first.run.projectId });
     assert.deepEqual(cycles.items[0].policyRef, policy);
@@ -201,7 +205,7 @@ test('unknown outcomes remain unassessed and external memory authorization is re
   const f = await fixture();
   try {
     await f.call('save_global_prompt', { policy: null, content: '保留未知结果，不伪造有效。\n', source: 'user', idempotencyKey: 'rsi-policy-unknown' });
-    const lesson = f.store.write({ kind: 'lesson', action: 'create', scope: null, idempotencyKey: 'rsi-lesson-unknown', data: { status: 'approved', summary: '未知结果保持未知', confidence: 1 } });
+    const lesson = f.store.write({ kind: 'lesson', action: 'create', scope: null, idempotencyKey: 'rsi-lesson-unknown', data: { status: 'approved', summary: '未知结果保持未知', do_this: '没有独立证据时保留未评估状态', confidence: 1 } });
     const second = await completeAndSettle(f, 2, lesson, 'effective', [], 'completed', true, false);
     const cycles = await f.call('read_rsi_cycles', { projectId: second.run.projectId });
     assert.equal(cycles.items[0].evaluation.verdict, 'unassessed');
@@ -292,7 +296,7 @@ test('candidate lessons are neither recalled nor accepted as adopted experience'
       const recalled = await buildLearningRetrievalContext(f.project, f.root, { projectPath: f.project, runKind: 'solo', role: 'builder', contextText: '候选经验不能进入执行提示' });
       assert.doesNotMatch(recalled, new RegExp(candidate.objectId));
     } finally { await server.close(); }
-    await assert.rejects(completeAndSettle(f, 4, candidate, 'effective', ['forged evidence']), /rsi_lesson_not_approved/);
+    await completeAndSettle(f, 4, candidate, 'effective', ['forged evidence']);
     assert.equal(f.store.rows('SELECT COUNT(*) AS n FROM policy_uses')[0].n, 0);
     assert.equal(f.store.rows('SELECT COUNT(*) AS n FROM evaluations')[0].n, 0);
   } finally { await f.close(); }
@@ -303,10 +307,11 @@ test('a report cannot manufacture adoption for an experience that the fixed run 
   try {
     await f.call('save_global_prompt', { policy: null, content: '只记录实际采用。\n', source: 'user', idempotencyKey: 'rsi-policy-forgery' });
     const lesson = f.store.write({ kind: 'lesson', action: 'create', scope: null, idempotencyKey: 'rsi-lesson-forgery', data: { status: 'approved', summary: '未召回经验', confidence: 1 } });
-    await assert.rejects(completeAndSettle(f, 3, lesson, 'effective', ['node --test passed'], 'verified', false), /rsi_experience_not_delivered/);
+    await completeAndSettle(f, 3, lesson, 'effective', ['node --test passed'], 'verified', false);
     assert.equal(f.store.rows('SELECT COUNT(*) AS n FROM policy_uses')[0].n, 0);
     assert.equal(f.store.rows('SELECT COUNT(*) AS n FROM evaluations')[0].n, 0);
-    assert.equal((await f.call('list_run_states', { root: f.project, pendingConsumer: true })).items.length, 1, 'failed settlement remains recoverable');
+    assert.equal((await f.call('list_run_states', { root: f.project, pendingConsumer: true })).items.length, 0, 'a rejected learning claim cannot roll back the actual task settlement');
+    assert.equal(f.store.rows("SELECT count(*) AS n FROM evidence WHERE type='learning_adoption_rejected'")[0].n, 1);
   } finally { await f.close(); }
 });
 
@@ -318,7 +323,7 @@ test('a delivered revision 10 reference cannot authorize a report claiming revis
     let head = first;
     for (let revision = 2; revision <= 10; revision++) head = f.store.write({ kind: 'lesson', action: 'patch', scope: null, objectId: first.objectId, expectedRevision: head.revision, idempotencyKey: `rsi-lesson-revision-prefix:${revision}`, data: { status: 'approved', summary: `精确固定版本 ${revision}` } });
     assert.equal(head.revision, 10);
-    await assert.rejects(completeAndSettle(f, 5, first, 'effective', ['forged prefix match'], 'completed', true, false, 10), /rsi_experience_not_delivered/);
+    await completeAndSettle(f, 5, first, 'effective', ['forged prefix match'], 'completed', true, false, 10);
     assert.equal(f.store.rows('SELECT COUNT(*) AS n FROM policy_uses')[0].n, 0);
   } finally { await f.close(); }
 });

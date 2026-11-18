@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { reviewHash } = require('../out/learningReview.js');
 const { queryTokens } = require('../out/db/searchIndex.js');
 
@@ -48,8 +48,36 @@ async function semanticHistory(t, failure = false, deferSource = false, sourceOp
  return {...f,nativeProposal:f.proposal,get store(){return f.store;},sourceRoot,run,manifest,proposal,review,original,target,originals,previousLesson,importHistory,get persisted(){return persisted;}};
 }
 for(const partial of [false,true])test(`actual v2 ${partial?'partial':'applied'} multi-target history is typed without activating its old results`,async t=>{
- const f=await semanticHistory(t,partial), state=await f.importHistory('semantic-import');
+ const f=await semanticHistory(t,partial);
+ f.store.readMigrationSourceJsonVersion=()=>{throw new Error('legacy_writer_loaded_review_after_image');};
+ let historicalSource;
+ if(!partial){
+  const learningRoot=path.join(f.root,'learning'),candidateRoot=path.join(learningRoot,'candidates');
+  const filename=fs.readdirSync(candidateRoot).find(name=>name.endsWith('.json'));
+  const bytes=fs.readFileSync(path.join(candidateRoot,filename));
+  const identity=`learning:${learningRoot}`,key=`candidates/${filename}`,hash=reviewHash(bytes.toString('utf8'));
+  await f.store.publishMigrationSource({identity,key,hash},bytes,{mimeType:'application/json',encoding:'utf8',pending:true});
+  f.store.db.run('DELETE FROM migration_source_json_versions WHERE source_identity=? AND source_key=? AND capture_revision=1',[identity,key]);
+  f.store.db.run('DELETE FROM migration_source_json_heads WHERE source_identity=? AND source_key=?',[identity,key]);
+  const compute=f.store.projectMigrationInspectionCompute;
+  let interrupted=false;
+  f.store.projectMigrationInspectionCompute=request=>{
+   if(request.kind==='migrationSourceJsonVersion' && !interrupted){interrupted=true;return Promise.reject(new Error('maintenance_compute_exited:1'));}
+   return compute(request);
+  };
+  const unavailable=await f.importHistory('semantic-compute-unavailable');
+  assert.equal(unavailable.status,'failed');
+  assert.equal(interrupted,true);
+  assert.equal(f.store.search({scope:null,kinds:['review_batch']}).items.length,0);
+  historicalSource={identity,key,hash,bytes};
+ }
+ const state=await f.importHistory('semantic-import');
  assert.equal(state.status,'completed',JSON.stringify(state.progress));
+ if(historicalSource){
+  const row=f.store.rows('SELECT through_revision FROM migration_source_json_heads WHERE source_identity=? AND source_key=?',[historicalSource.identity,historicalSource.key])[0];
+  assert.equal(row.through_revision,1);
+  assert.deepEqual(f.store.readMigrationSource(historicalSource.identity,historicalSource.key).bytes,historicalSource.bytes);
+ }
  const batches=f.store.search({scope:null,kinds:['review_batch']}).items;
  assert.equal(batches.length,1,'valid semantic review must be imported as a formal batch');
  const batch=f.store.read(batches[0].objectId);
@@ -153,7 +181,7 @@ test('v2 hash-only cursor pins the original input across later import and indexe
  assert.ok(plan.some(row=>String(row.detail).includes('SEARCH')));assert.ok(plan.every(row=>!String(row.detail).includes('SCAN')));
  const moved={...f.manifest,sources:f.manifest.sources.map(source=>({...source,file:source.file+'.later-location',previousVersions:[]}))},bytes=Buffer.from(JSON.stringify(moved)),key='runs/semantic-legacy/manifest.json',hash=reviewHash(bytes);
  f.store.captureMigrationSource({identity,key,hash},bytes,{mimeType:'application/json',encoding:'utf8',pending:true});
- f.store.importLegacyLearningReview({identity,runKey:'runs/semantic-legacy',manifest:moved,proposal:null,application:null,files:[{key,hash}]});
+ await f.store.importLegacyLearningReview({identity,runKey:'runs/semantic-legacy',manifest:moved,proposal:null,application:null,files:[{key,hash}]});
  await f.restart();const batch=await f.begin('v2-pinned-after-import',f.persisted),source=batch.manifest.sources.find(item=>item.id==='semantic-original');
  assert.equal(source.file,f.manifest.sources[0].file);assert.equal(source.content,f.original);assert.deepEqual(source.previousVersions.map(item=>item.content),[prior.content]);
  assert.deepEqual(f.store.rows('SELECT * FROM legacy_learning_review_cursor_inputs'),pinned,'later imports never repoint a previously accepted cursor');
@@ -187,8 +215,8 @@ test('v2 hash-only cursor rejects a missing declared run rather than guessing an
 
 test('v2 multi-target preparation reads each full historical batch once through the actual store',async t=>{
  const f=await semanticHistory(t,'all-targets');assert.equal((await f.importHistory('v2-all-pending')).status,'completed');
- const legacy=f.store.search({scope:null,kinds:['review_batch']}).items[0];let reads=0;const read=f.store.read;
- f.store.read=function(ref,...args){if(ref===legacy.objectId)reads++;return read.call(this,ref,...args);};
+ const legacy=f.store.search({scope:null,kinds:['review_batch']}).items[0],actual=require('./review-preparation-read-store.cjs').attachReviewPreparationReadStore(f.store);t.after(actual.close);let reads=0;const read=actual.reader.read;
+ actual.reader.read=function(ref,...args){if(ref===legacy.objectId)reads++;return read.call(this,ref,...args);};
  const batch=await f.begin('v2-single-full-read');assert.equal(batch.pending.length,3);assert.deepEqual(batch.pending.map(item=>item.targetKind).sort(),['lesson','memory','policy']);
  assert.equal(reads,1,'target count must not multiply complete historical body reads');
  const prefix='runs/semantic-legacy#',plan=f.store.rows('EXPLAIN QUERY PLAN SELECT source_key,object_id FROM migration_items WHERE source_identity=? AND source_key>=? AND source_key<?',[`learning-review:${f.sourceRoot}:target`,prefix,'runs/semantic-legacy$']);
@@ -237,6 +265,21 @@ for(const [field,value]of [[null,null],['applies_when','用户后来改的适用
  else {const legacy=JSON.parse(f.store.read(batch.pending[0].legacyTarget.batchId,batch.pending[0].legacyTarget.revision).data.review_content),original=legacy.legacyTargets.find(target=>target.kind==='lesson').beforeData;assert.deepEqual(Object.fromEntries(Object.keys(original).map(key=>[key,key.endsWith('_json') && typeof before.data[key] === 'string' ? JSON.parse(before.data[key]) : before.data[key]])),original,'the canonical imported fields match the actual original candidate');await f.apply(batch,f.nativeProposal(batch),'v2-adopt-existing-lesson');const current=f.store.read(lesson.objectId);assert.equal(current.data.summary,f.proposal.lessons[0].summary);assert.equal(f.store.read(batch.pending[0].objectId).data.target_object_id,lesson.objectId);assert.equal(f.store.read(batch.pending[0].objectId).data.applied_revision,current.revision);}
 });
 
+test('duplicate canonical lesson pending targets preserve the original revision conflict before native insertion',async t=>{
+  const setup=async label=>{
+    const f=await semanticHistory(t,'lesson');assert.equal((await f.importHistory(`duplicate-${label}`)).status,'completed');
+    const applications=[...f.store.search({scope:null,kinds:['application']}).items,...f.store.search({scope:f.projectId,kinds:['application']}).items].map(item=>f.store.read(item.objectId)),original=applications.find(item=>item.data.status==='partial' && f.store.read(item.data.target_object_id).kind==='lesson');assert.ok(original);
+    f.store.write({kind:'application',action:'create',scope:original.projectId,idempotencyKey:'duplicate-pending-lesson-app',data:{review_id:original.data.review_id,target_object_id:original.data.target_object_id,expected_revision:original.data.expected_revision,before_content:original.data.before_content ?? null,after_content:original.data.after_content,status:'partial'}});
+    const batch=await f.begin(`duplicate-review-${label}`,f.persisted);assert.equal(batch.pending.filter(item=>item.targetKind==='lesson').length,2);const result=f.nativeProposal(batch);
+    return {f,input:{batchId:batch.objectId,expectedRevision:batch.revision,manifestHash:reviewHash(JSON.stringify(batch.manifest)),result,idempotencyKey:'duplicate-review-apply'}};
+  };
+  const old=await setup('old');let expected;
+  try{require('./fixtures/native-learning-producer-oracles.cjs').applyLearningReviewNative(old.f.store,old.input);}catch(error){expected=error.message;}
+  assert.equal(expected,'learning_review_target_revision_conflict');
+  const current=await setup('typed');await assert.rejects(current.f.call('apply_learning_review',current.input),error=>error.message===expected);
+  assert.equal(current.f.store.rows("SELECT COUNT(*) AS n FROM requests WHERE idempotency_key LIKE 'duplicate-review-apply%'")[0].n,0);
+});
+
 async function fixture(t) {
   const base = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'review-database-'));
   const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
@@ -246,14 +289,15 @@ async function fixture(t) {
   const call = (operation, input) => ops({ operation, input });
   const memory = (scope, text, title = '来源') => store.write({ kind: 'memory', action: 'create', scope, idempotencyKey: 'memory:' + title, data: { category: 'rules', title, status: 'captured', content: text } });
   const begin = (runId, prompt = '保留用户目标。') => call('prepare_learning_review', { runId, workspaceRoot: project, globalPrompt: prompt, persistedGlobalPrompt: prompt });
-  const proposal = (batch, globalPrompt = batch.manifest.globalPrompt) => ({ globalPrompt, changes: [], lessons: [], processedSourceIds: batch.manifest.sources.map(s => s.id), deferredSourceIds: [], unresolved: [], recovery: batch.pending.map(p => ({ applicationId: p.objectId, revision: p.revision, decision: 'resumed', reason: '承接原完整结果。' })) });
+  const retainedBatch = batch => { if(batch.manifest)return batch;const reader=UnifiedDataStore.openReadOnly(store.root,store.databaseId);try{const result=reader.projectLearningReviewPreparationResult({...reader.dataWriteDatabaseIdentity(),batchId:batch.objectId}).result;assert.equal(reviewHash(JSON.stringify(result.manifest)),batch.manifestHash);return result;}finally{reader.close();} };
+  const proposal = (input, prompt) => {const batch=retainedBatch(input),globalPrompt=prompt ?? batch.manifest.globalPrompt;return { globalPrompt, changes: [], lessons: [], processedSourceIds: batch.manifest.sources.map(s => s.id), deferredSourceIds: [], unresolved: [], recovery: batch.pending.map(p => ({ applicationId: p.objectId, revision: p.revision, decision: 'resumed', reason: '承接原完整结果。' })) };};
   const apply = (batch, result, key = 'apply:' + batch.manifest.runId) => call('apply_learning_review', { batchId: batch.objectId, expectedRevision: batch.revision, manifestHash: reviewHash(JSON.stringify(batch.manifest)), result, idempotencyKey: key });
   const reviewSession = async batch => {
     let state = await call('prepare_run', { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'learning_review', prompt: '完整提示词复盘。', command: 'formal-review', userMessage: '复盘经验', metadata: { learningReviewBatchId: batch.objectId }, idempotencyKey: 'prepare-review' });
     state = await call('claim_run', { root: project, executionLogId: 1, expectedRevision: state.revision, agentPid: process.pid, processBirth: '', idempotencyKey: 'claim-review' });
     return { ...await call('open_mcp_session', { projectId, runIdentity: { executionLogId: 1, generation: state.generation, proof: state.proof } }), state };
   };
-  return { base, root, project, projectId, get store() { return store; }, request: request => ops(request), call, memory, begin, proposal, apply, reviewSession,
+  return { base, root, project, projectId, get store() { return store; }, request: Object.assign(request => ops(request), { waitForMigrations: () => ops.waitForMigrations() }), call, memory, begin, retainedBatch, proposal, apply, reviewSession,
     async restart() { await ops.close(); store.close(); store = new UnifiedDataStore(root); ops = createRuntimeDataOperations(store); } };
 }
 
@@ -568,6 +612,7 @@ test('the background importer resumes a legacy partial review with full sources 
   const originals = new Map();
   for (const [name, value] of Object.entries(files)) { const bytes = Buffer.from(JSON.stringify(value, null, 2) + '\n'); fs.writeFileSync(path.join(run, name), bytes); originals.set(name, bytes); }
   const job = await f.call('import_project_data', { collection: 'learning-review', sourceRoot, projectScopes: { [f.project]: f.projectId }, idempotencyKey: 'import-legacy-partial-review' });
+  await f.request.waitForMigrations();
   let status;
   for (let attempt = 0; attempt < 100; attempt++) { status = await f.call('migration_status', { jobId: job.jobId }); if (!['queued', 'running'].includes(status.status)) break; await new Promise(resolve => setTimeout(resolve, 10)); }
   assert.equal(status.status, 'completed', status.error);
@@ -579,6 +624,7 @@ test('the background importer resumes a legacy partial review with full sources 
   assert.equal(f.store.readGlobalPromptPolicy(), null, 'import must not activate the old target as current user instructions');
   const originalRevision = saved.revision;
   const replay = await f.call('import_project_data', { collection: 'learning-review', sourceRoot, projectScopes: { [f.project]: f.projectId }, idempotencyKey: 'recheck-legacy-partial-review' });
+  await f.request.waitForMigrations();
   for (let attempt = 0; attempt < 100; attempt++) { status = await f.call('migration_status', { jobId: replay.jobId }); if (!['queued', 'running'].includes(status.status)) break; await new Promise(resolve => setTimeout(resolve, 10)); }
   assert.equal(status.progress.imported, 0, 'unchanged history is not reported as newly imported');
   assert.equal(status.progress.unchanged, 1);
@@ -610,6 +656,7 @@ async function legacyReview(t, status = 'partial') {
   if (status) fs.writeFileSync(path.join(run, 'application.json'), JSON.stringify({ schemaVersion: 1, status, proposalHash: reviewHash(JSON.stringify(proposal)), targetPromptHash: reviewHash(proposal.globalPrompt), targetPrompt: proposal.globalPrompt, sourceCursor: [source], deferredSourceIds: [], deferredSources: [], recovery: [], items: {}, errors: [] }));
   const importHistory = async key => {
     const job = await f.call('import_project_data', { collection: 'learning-review', sourceRoot, projectScopes: { [f.project]: f.projectId }, idempotencyKey: key });
+    await f.request.waitForMigrations();
     for (let attempt = 0; attempt < 100; attempt++) {
       const state = await f.call('migration_status', { jobId: job.jobId });
       if (!['queued', 'running'].includes(state.status)) return state;
@@ -760,7 +807,7 @@ for (const alreadyInterrupted of [false, true]) test(`a ${alreadyInterrupted ? '
 test('an explicit stop revokes queued delivery in its committed run revision', async t => {
   const f = await fixture(t);
   const run = await f.call('prepare_run', { root: f.project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '保留原始输入。', command: 'original-command', userMessage: '目标', deliveryOwner: { id: 'gone-window', pid: 999999999, birth: 'proc:gone' }, idempotencyKey: 'prepare-stopped-delivery' });
-  const stopped = f.store.requestRunStop(f.projectId, { executionLogId: 1, generation: run.generation, expectedRevision: run.revision, expectedTurnId: run.turnId, reason: '用户停止。', idempotencyKey: 'revoke-stopped-delivery' });
+  const stopped = await f.store.requestRunStop(f.projectId, { executionLogId: 1, generation: run.generation, expectedRevision: run.revision, expectedTurnId: run.turnId, reason: '用户停止。', idempotencyKey: 'revoke-stopped-delivery' });
   assert.equal(stopped.status.deliveryPending, false, 'the accepted stop must persist the delivery revocation');
   assert.equal(f.store.readRunState(f.projectId, 1, stopped.revision).status.deliveryPending, false);
   assert.deepEqual(f.store.listRunDeliveries({}).items, []);
@@ -1262,7 +1309,8 @@ test('the next manual click resumes the full accepted prompt when its host proje
   const { runDatabaseLearningReview } = require('../out/learningReviewRunner.js');
   const f = await fixture(t), original = f.memory(f.projectId, '用户要求在交付前核验真实结果。');
   let persisted = '保留用户目标。'; const full = persisted + '\n交付前核验真实结果。'; let prior;
-  const launch = async (_prompt, batch) => {
+  const launch = async (_prompt, identity) => {
+    assert.equal(identity.manifest,undefined);const batch=f.retainedBatch(identity);
     const source = batch.manifest.sources.find(s => s.ref?.objectId === original.objectId); assert.ok(source, 'pending accepted evidence must remain available to the recovering Agent');
     const result = f.proposal(batch, full); result.changes = [{ type: 'add', before: [], after: '交付前核验真实结果。', evidence: [source.id], reason: '实际用户要求。' }];
     f.store.write({ kind: 'review_batch', action: 'patch', scope: f.projectId, objectId: batch.objectId, expectedRevision: batch.revision, idempotencyKey: 'resume-proposal:' + batch.objectId, data: { proposal_content: JSON.stringify(result) } });

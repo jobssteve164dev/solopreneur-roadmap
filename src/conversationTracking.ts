@@ -2,14 +2,41 @@ import * as crypto from 'crypto';
 import * as path from 'path';
 import type { UnifiedDataStore } from './db/unifiedDataStore';
 import { isProcessOwnerAlive, readProcessBirthMarker } from './processIdentity';
+import type { FlowSnapshot } from './db/unifiedDataStore.js';
 
 interface LaunchOrigin { key: string; source: string; chatId: string; generation: number }
 type Launch = Record<string, any>;
+export interface SettlementConversationProjection {
+  runId:string;turnId:string;sourceRevision:number;checkpointSequence:number;payload:Record<string,any>;flow?:FlowSnapshot;
+}
+export interface ConversationNotificationInput {
+  channel:string;intentId:string;payload:Record<string,unknown>;idempotencyKey:string;
+}
+export interface ConversationNotificationCandidate {
+  tracked:boolean;row?:Launch;view?:Record<string,any>;input?:ConversationNotificationInput;
+  reports:Array<{objectId:string;revision:number;contentId:string|null}>;
+  pending?:{runId:string;turnId:string;after:number;through:number;exclude:number|null;exists:boolean};
+}
+
+export function describeFlowSnapshot(row:Launch,base:Record<string,unknown>,snapshot:FlowSnapshot|null,
+  readProgress:(executionLogId:number)=>{status:Record<string,unknown>}):Record<string,any> {
+  if(!snapshot)return {...base,flowId:row.flow_id,state:row.error?'launch_failed':'starting',turnCompleted:false,...(row.error?{error:row.error}:{})};
+  const flow=snapshot.flow,progressed=row.acknowledged || !row.error || flow.status!=='running' || flow.loops.some(loop=>(['planner','builder','verifier'] as const).some(role=>{
+    const execution=loop[role];if(execution.status==='completed')return true;if(!execution.executionLogId)return false;
+    const state=readProgress(execution.executionLogId);return !state.status.deliveryPending || Boolean(state.status.terminalCommandSubmittedAt);
+  }));
+  if(!row.acknowledged && row.error && !progressed)return {...base,flowId:flow.flowId,state:'launch_failed',turnCompleted:false,error:row.error};
+  const loop=flow.loops.find(candidate=>candidate.index===flow.currentLoopIndex) || flow.loops.at(-1),state=flow.status==='needs_user_confirmation'?'needs_input':flow.status;
+  return {...base,flowId:flow.flowId,state,turnCompleted:['completed','failed','abandoned'].includes(state),flowCompleted:state==='completed',currentLoop:flow.currentLoopIndex,
+    roles:loop?Object.fromEntries(['planner','builder','verifier'].map(role=>[role,(loop as any)[role].status])):{},
+    result:{summary:flow.latestSummary || '',verification:loop?.scoring || null,changedFiles:loop?.evidence?.changedFilesSummary || '',artifacts:[]}};
+}
 
 export class ConversationTracking {
   constructor(private readonly store: UnifiedDataStore, private readonly database: {
     rows(sql: string, values: Array<string | number>): Array<Record<string, any>>;
     run(sql: string, values: Array<string | number>): void;
+    nextLaunchSequence(): number;
     transaction<T>(action: () => T): T;
   }) {}
 
@@ -37,9 +64,9 @@ export class ConversationTracking {
       }
       const ref = crypto.randomUUID(), intentId = `mcp:${ref}`;
       const flowId = input.mode === 'flow' ? `flow-${crypto.createHash('sha256').update(intentId).digest('hex').slice(0, 32)}` : '';
-      this.database.run(`INSERT INTO mcp_conversation_launches(ref,origin_key,owner_project_id,project_id,request_key,intent_hash,launch_intent_id,mode,flow_id,title,source,chat_id,reply_generation,created_at,error)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'')`, [ref, origin.key, ownerProjectId, projectId, String(input.idempotencyKey), hash, intentId,
-        String(input.mode), flowId, String(input.message).slice(0, 200), origin.source, origin.chatId, origin.generation, Date.now()]);
+      this.database.run(`INSERT INTO mcp_conversation_launches(ref,origin_key,owner_project_id,project_id,request_key,intent_hash,launch_intent_id,mode,flow_id,title,source,chat_id,reply_generation,created_at,error,launch_sequence)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'',?)`, [ref, origin.key, ownerProjectId, projectId, String(input.idempotencyKey), hash, intentId,
+        String(input.mode), flowId, String(input.message).slice(0, 200), origin.source, origin.chatId, origin.generation, Date.now(),this.database.nextLaunchSequence()]);
       const launch = this.database.rows('SELECT * FROM mcp_conversation_launches WHERE ref=?', [ref])[0];
       return { launch, dispatchToken: this.beginDispatch(launch, String(input.dispatchOwnerId || 'runtime-process')) };
     });
@@ -119,7 +146,7 @@ export class ConversationTracking {
       this.database.run("UPDATE mcp_conversation_launches SET error='启动过程已中断，可重试。' WHERE ref=? AND acknowledged=0 AND NOT EXISTS(SELECT 1 FROM mcp_conversation_dispatches WHERE ref=?)", [row.ref, row.ref]);
     }
     const removable = "origin_key=? AND acknowledged=0 AND error<>'' AND run_id IS NULL AND flow_object_id IS NULL AND NOT EXISTS(SELECT 1 FROM mcp_conversation_dispatches d WHERE d.ref=mcp_conversation_launches.ref)";
-    this.database.run(`DELETE FROM mcp_conversation_launches WHERE ${removable} AND rowid NOT IN (SELECT rowid FROM mcp_conversation_launches WHERE ${removable} ORDER BY rowid DESC LIMIT 20)`, [originKey, originKey]);
+    this.database.run(`DELETE FROM mcp_conversation_launches WHERE ${removable} AND ref NOT IN (SELECT ref FROM mcp_conversation_launches WHERE ${removable} ORDER BY COALESCE(launch_sequence,rowid) DESC LIMIT 20)`, [originKey, originKey]);
   }
 
   public query(origin: LaunchOrigin, input: { ref?: string; limit?: number }): Record<string, any> {
@@ -131,7 +158,7 @@ export class ConversationTracking {
     const limit = input.limit ?? 5;
     if (!Number.isInteger(limit) || limit < 1 || limit > 20) throw new Error('invalid_conversation_query');
     const visible = this.visibleProjects();
-    return { latest: this.database.rows('SELECT * FROM mcp_conversation_launches WHERE origin_key=? AND project_id IN (SELECT value FROM json_each(?)) ORDER BY rowid DESC LIMIT ?',
+    return { latest: this.database.rows('SELECT * FROM mcp_conversation_launches WHERE origin_key=? AND project_id IN (SELECT value FROM json_each(?)) ORDER BY COALESCE(launch_sequence,rowid) DESC LIMIT ?',
       [origin.key, JSON.stringify([...visible]), limit]).map(row => this.describe(row)) };
   }
 
@@ -142,31 +169,15 @@ export class ConversationTracking {
       && this.store.readMetadata(project.projectId).archivedAt === null).map(project => project.projectId));
   }
 
-  public describe(row: Launch, sourceRevision?: number): Record<string, any> {
+  public describe(row: Launch, sourceRevision?: number,projection?:SettlementConversationProjection,facts?:ConversationNotificationCandidate): Record<string, any> {
     if (!this.visibleProjects().has(String(row.project_id))) throw new Error('conversation_scope_denied');
     const project = this.store.readMetadata(String(row.project_id));
     const base = { conversationRef: String(row.ref), projectId: String(row.project_id), project: String(project.data.name || ''),
       mode: String(row.mode), title: String(row.title), createdAt: new Date(Number(row.created_at)).toISOString() };
     if (project.archivedAt !== null) throw new Error('conversation_scope_denied');
     if (row.mode === 'flow') {
-      const snapshot = this.store.readFlowTrace(String(row.project_id), String(row.flow_id));
-      if (!snapshot) return { ...base, flowId: row.flow_id, state: row.error ? 'launch_failed' : 'starting', turnCompleted: false, ...(row.error ? { error: row.error } : {}) };
-      const flow = snapshot.flow;
-      const progressed = row.acknowledged || !row.error || flow.status !== 'running' || flow.loops.some(loop => (['planner', 'builder', 'verifier'] as const).some(role => {
-        const execution = loop[role];
-        if (execution.status === 'completed') return true;
-        if (!execution.executionLogId) return false;
-        const state = this.store.readRunState(String(row.project_id), execution.executionLogId);
-        return !state.status.deliveryPending || Boolean(state.status.terminalCommandSubmittedAt);
-      }));
-      if (!row.acknowledged && row.error && !progressed) return { ...base, flowId: flow.flowId, state: 'launch_failed', turnCompleted: false, error: row.error };
-      const loop = flow.loops.find(candidate => candidate.index === flow.currentLoopIndex) || flow.loops.at(-1);
-      const state = flow.status === 'needs_user_confirmation' ? 'needs_input' : flow.status;
-      return { ...base, flowId: flow.flowId, state, turnCompleted: ['completed', 'failed', 'abandoned'].includes(state),
-        flowCompleted: state === 'completed', currentLoop: flow.currentLoopIndex,
-        roles: loop ? Object.fromEntries(['planner', 'builder', 'verifier'].map(role => [role, (loop as any)[role].status])) : {},
-        result: { summary: flow.latestSummary || '', verification: loop?.scoring || null,
-          changedFiles: loop?.evidence?.changedFilesSummary || '', artifacts: [] } };
+      const snapshot = projection?.flow?.flow.flowId===String(row.flow_id)?projection.flow:this.store.readFlowTrace(String(row.project_id), String(row.flow_id));
+      return describeFlowSnapshot(row,base,snapshot,executionLogId=>this.store.readRunState(String(row.project_id),executionLogId));
     }
     let run = this.store.readRunIntent(String(row.project_id), String(row.launch_intent_id));
     if (!run) return { ...base, state: row.error ? 'launch_failed' : 'starting', turnCompleted: false, ...(row.error ? { error: row.error } : {}) };
@@ -175,9 +186,12 @@ export class ConversationTracking {
     if (sourceRevision !== undefined) run = this.store.readRunState(run.projectId, Number(run.status.rootExecutionLogId || run.status.executionLogId), sourceRevision);
     const status = run.status;
     const turn = this.store.readMetadata(run.turnId);
-    const settled = this.store.readLatestRunSettlement(run.projectId, run.runId, run.turnId, sourceRevision);
-    const pending = this.database.rows("SELECT 1 FROM run_consumer_sources WHERE run_id=? AND turn_id=? AND state='queued' AND source_revision>? AND source_revision<=? LIMIT 1",
-      [run.runId, run.turnId, Number(settled?.sourceRevision || 0), sourceRevision ?? Number.MAX_SAFE_INTEGER]).length > 0;
+    const previousSettlement = this.store.readLatestRunSettlement(run.projectId, run.runId, run.turnId, sourceRevision);
+    const projected=projection && projection.runId===run.runId && projection.turnId===run.turnId && projection.sourceRevision<=(sourceRevision ?? Number.MAX_SAFE_INTEGER)?projection:undefined;
+    const settled = projected && (!previousSettlement || projected.checkpointSequence>=Number(previousSettlement.checkpointSequence))?{...projected.payload,sourceRevision:projected.sourceRevision,checkpointSequence:projected.checkpointSequence}:previousSettlement;
+    const pending = this.database.rows(`SELECT 1 FROM run_consumer_sources WHERE run_id=? AND turn_id=? AND state='queued' AND source_revision>? AND source_revision<=? ${projected?'AND source_revision<>?':''} LIMIT 1`,
+      [run.runId, run.turnId, Number(settled?.sourceRevision || 0), sourceRevision ?? Number.MAX_SAFE_INTEGER,...(projected?[projected.sourceRevision]:[])]).length > 0;
+    if(facts)facts.pending={runId:run.runId,turnId:run.turnId,after:Number(settled?.sourceRevision || 0),through:sourceRevision ?? Number.MAX_SAFE_INTEGER,exclude:projected?.sourceRevision ?? null,exists:pending};
     const turnCompleted = Boolean(settled) && !pending;
     const journalStatus = String((settled?.journal as any)?.status || status.status);
     const state = !turnCompleted ? (['Failed', 'Cancelled', 'Interrupted'].includes(journalStatus) ? 'failed' : turn.data.finished_at ? 'settling' : 'running')
@@ -187,6 +201,7 @@ export class ConversationTracking {
     let report: Record<string, any> | null = null;
     if (turnCompleted && reportId) {
       const object = this.store.read(reportId, Number(settled!.reportRevision));
+      facts?.reports.push({objectId:object.objectId,revision:object.revision,contentId:typeof object.data.content_id==='string'?object.data.content_id:null});
       if (object.projectId !== run.projectId || object.kind !== 'report' || object.data.turn_id !== run.turnId) throw new Error('conversation_result_scope_mismatch');
       if (object.data.availability === 'available') report = typeof object.data.content === 'string' ? JSON.parse(object.data.content) : object.data.content as Record<string, any>;
     }
@@ -201,13 +216,19 @@ export class ConversationTracking {
   }
 
   public notifyRun(projectId: string, runId: string, turnId: string, sourceRevision: number): boolean {
+    const candidate=this.prepareRunNotificationCandidate(projectId,runId,turnId,sourceRevision);
+    if(candidate.input && !this.store.readNotification(candidate.input.intentId))this.store.enqueueNotification(candidate.input);
+    return candidate.tracked;
+  }
+
+  public prepareRunNotificationCandidate(projectId:string,runId:string,turnId:string,sourceRevision:number,projection?:SettlementConversationProjection):ConversationNotificationCandidate {
     const row = this.database.rows(`SELECT l.* FROM mcp_conversation_launches l JOIN run_launch_intents i ON i.project_id=l.project_id AND i.launch_intent_id=l.launch_intent_id
       WHERE l.project_id=? AND i.run_id=?`, [projectId, runId])[0];
-    if (!row) return false;
-    if (!this.visibleProjects().has(projectId)) return true;
-    const view = this.describe(row, sourceRevision);
-    if (view.turnCompleted && view.turnId === turnId) this.notify(row, view, `turn:${turnId}`);
-    return true;
+    const result:ConversationNotificationCandidate={tracked:Boolean(row),reports:[]};if(!row)return result;result.row=row;
+    if (!this.visibleProjects().has(projectId)) return result;
+    const view = this.describe(row, sourceRevision,projection,result);result.view=view;
+    if (view.turnCompleted && view.turnId === turnId) result.input=this.notificationInput(row, view, `turn:${turnId}`);
+    return result;
   }
 
   public notifyFlow(projectId: string, flowId: string, revision: number): void {
@@ -221,6 +242,10 @@ export class ConversationTracking {
   }
 
   private notify(row: Launch, view: Record<string, any>, identity: string): void {
+    const input=this.notificationInput(row,view,identity);if(!input || this.store.readNotification(input.intentId))return;this.store.enqueueNotification(input);
+  }
+
+  private notificationInput(row: Launch, view: Record<string, any>, identity: string): ConversationNotificationInput|undefined {
     if (row.source !== 'telegram' || !row.chat_id) return;
     const config = new Map(this.store.readHostSettings({ namespace: 'telegram', ownerScope: 'global' }).items.map(item => [item.key, item.value]));
     if (!config.get('enabled') || String(config.get('chatId')) !== row.chat_id || Number(config.get('replyGeneration') || 0) !== Number(row.reply_generation)) return;
@@ -231,8 +256,7 @@ export class ConversationTracking {
       String(view.result?.summary || view.error || '').slice(0, 2200),
       ...verification].filter(Boolean).join('\n');
     const intentId = `conversation:${row.ref}:${identity}`;
-    if (this.store.readNotification(intentId)) return;
-    this.store.enqueueNotification({ channel: 'telegram', intentId, payload: { replyGeneration: Number(row.reply_generation),
-      chatId: String(row.chat_id), text }, idempotencyKey: `enqueue:${intentId}` });
+    return { channel: 'telegram', intentId, payload: { replyGeneration: Number(row.reply_generation),
+      chatId: String(row.chat_id), text }, idempotencyKey: `enqueue:${intentId}` };
   }
 }

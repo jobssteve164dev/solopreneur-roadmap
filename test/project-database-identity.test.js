@@ -4,7 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 
 test('project registration creates only its stable identity file and preserves it after a move', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-identities-'));

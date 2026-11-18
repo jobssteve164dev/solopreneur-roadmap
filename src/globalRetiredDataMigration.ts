@@ -109,8 +109,8 @@ export async function importGlobalRetiredData(store: UnifiedDataStore, sourceRoo
       if (current?.hash === hash && current.stage === 'imported') {
         result.unchanged++;
       } else {
-        store.captureMigrationSource({ identity, key: source.key, hash }, bytes, { pending: true });
-        const archived = store.archiveMigrationSource({ identity, key: source.key, hash }, bytes, { reason: 'retired_global_file_chain', observedAt: source.info.mtimeMs });
+        await store.publishMigrationSource({ identity, key: source.key, hash }, bytes, { pending: true });
+        const archived = await store.archiveMigrationSource({ identity, key: source.key, hash }, bytes, { reason: 'retired_global_file_chain', observedAt: source.info.mtimeMs });
         result.archivedSources ||= [];
         result.archivedSources.push({ source: source.key, error: 'retired_global_file_chain', evidenceRef: `solomap://evidence/${archived.objectId}` });
         if (archived.unchanged) result.unchanged++; else result.imported++;

@@ -6,7 +6,7 @@ const path = require('node:path');
 
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { RuntimeDataExecutionDomains } = require('../out/runtimeDataExecutionDomains.js');
-const { runtimeProjectMcpSource } = require('../out/runtimeDataOperations.js');
+const { runtimeProjectMcpSource } = require('./runtime-data-fixture.cjs');
 
 test('an in-flight editor launch stays in the External Worker while unrelated Writer commits continue', async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-external-conversation-launch-'));

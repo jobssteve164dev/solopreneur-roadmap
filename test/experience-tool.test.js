@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { promisify } = require('node:util');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations, runtimeMcpSource } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations, runtimeMcpSource } = require('./runtime-data-fixture.cjs');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const { anonymousToolEnv } = require('./analysis-fixture.js');
 

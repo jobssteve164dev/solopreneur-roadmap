@@ -11399,11 +11399,11 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
               Number(project.delivery && project.delivery.failedWorkflowRuns || 0) > 0 ||
               Number(project.failedNodes || 0) > 0 ||
               Number(((project.issues || {}).byPriority || {}).P0 || 0) > 0) {
-            actionNodeId = project.failedNodeId || project.recommendedNodeId || '';
+            actionNodeId = project.recommendedNodeId || (!project.blockedNodes ? project.failedNodeId : '') || '';
             actionBtnHtml = '<button class="global-focus-action-btn urgent" type="button" data-action-project-path="' + escapeHtml(project.path) + '" data-action-node-id="' + escapeHtml(actionNodeId) + '"><span class="codicon codicon-warning"></span>' + escapeHtml(t('actionFix') || '去救火') + '</button>';
           } else if (Number(project.runningNodes || 0) > 0) {
             actionBtnHtml = '<button class="global-focus-action-btn running" type="button" data-action-project-path="' + escapeHtml(project.path) + '"><span class="codicon codicon-play"></span>' + escapeHtml(t('actionStatus') || '看状态') + '</button>';
-          } else if (Number(project.inProgressNodes || 0) > 0 || Number(project.pendingNodes || 0) > 0) {
+          } else if ((Number(project.inProgressNodes || 0) > 0 || Number(project.pendingNodes || 0) > 0) && (project.recommendedNodeId || !project.blockedNodes)) {
             actionNodeId = project.recommendedNodeId || '';
             actionBtnHtml = '<button class="global-focus-action-btn primary" type="button" data-action-project-path="' + escapeHtml(project.path) + '" data-action-node-id="' + escapeHtml(actionNodeId) + '"><span class="codicon codicon-debug-continue"></span>' + escapeHtml(t('actionStart') || '开始') + '</button>';
           } else if (hasCloseoutValue(project)) {
@@ -11461,7 +11461,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           </div>
           <div class="global-focus-foot">
             <span class="global-chip">\${escapeHtml(todayWorkRhythmLabel(rhythm))}</span>
-            <span class="global-chip">\${escapeHtml(t('globalLearning'))}: \${escapeHtml(store.learningCandidateCount || 0)}</span>
+            <span class="global-chip">\${escapeHtml(t('globalLearning'))}: \${escapeHtml(Number.isInteger(store.learningCandidateCount) ? store.learningCandidateCount : (currentLanguage === 'zh' ? '未更新' : 'Not updated'))}</span>
             <span class="global-chip">\${escapeHtml(t('globalDependencies'))}: \${escapeHtml((store.dependencies || []).length || 0)}</span>
           </div>
           \${renderDailyReview(currentDailyReview)}

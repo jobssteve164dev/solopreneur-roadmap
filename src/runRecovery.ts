@@ -22,10 +22,10 @@ export class RunRecovery {
       && Number(observed.status.recoveryRetryAtMs) > this.now();
   }
 
-  private recordFailure(observed: { projectId: string; runId: string; generation: number; revision: number; turnId: string; status: Record<string, unknown> }, stage: string, error: unknown, startedAt: number): void {
+  private async recordFailure(observed: { projectId: string; runId: string; generation: number; revision: number; turnId: string; status: Record<string, unknown> }, stage: string, error: unknown, startedAt: number): Promise<void> {
     let failed = observed;
     try {
-      const latest = this.store.readRunState(observed.projectId, Number(observed.status.executionLogId));
+      const {state:latest} = await this.store.readRunContextPublication(observed.projectId,{executionLogId:Number(observed.status.executionLogId)});
       if (latest.runId === observed.runId && latest.generation === observed.generation && latest.turnId === observed.turnId) failed = latest;
     } catch {}
     const continuingBackoff = Number(failed.status.recoveryBackoffRevision) === failed.revision;
@@ -34,16 +34,16 @@ export class RunRecovery {
     const retryAt = this.now() + retryDelayMs;
     const message = error instanceof Error ? error.message : String(error);
     try {
-      this.store.patchRunState(failed.projectId, {
+      await this.store.publishRunControl(failed.projectId, {type:'state',input:{
         executionLogId: Number(failed.status.executionLogId), generation: failed.generation, expectedRevision: failed.revision,
         patch: { recoveryBackoffRevision: failed.revision + 1, recoveryRetryAtMs: retryAt, recoveryRetryAttempts: attempts, recoveryFailureStage: stage },
         idempotencyKey: `run:${failed.runId}:${failed.generation}:recovery-backoff:${failed.revision}:${stage}`
-      });
+      }});
     } catch (error) {
       if (!['revision_conflict', 'run_owner_conflict'].includes((error as Error).message)) throw error;
     }
     try {
-      this.store.appendDiagnosticEvent({
+      await this.store.publishDiagnosticEvent({
         kind: 'error', occurredAt: new Date(this.now()).toISOString(), scope: 'runtime.run-recovery',
         payload: { projectId: failed.projectId, runId: failed.runId, executionLogId: Number(failed.status.executionLogId),
           generation: failed.generation, revision: failed.revision, turnId: failed.turnId, stage, error: message,
@@ -63,9 +63,13 @@ export class RunRecovery {
     catch (error) { errors.push(error); }
     let cursor: number | null = 0;
     do {
-      const page = this.store.recoverableRunStates(cursor);
-      for (const observed of page.items) {
+      const page = this.store.recoverableRunIdentities(cursor);
+      for (const identity of page.items) {
         if (this.stopped) return;
+        if(!this.store.runRecoveryIdentityCurrent(identity))continue;
+        const {state:observed}=await this.store.readRunContextPublication(identity.projectId,{executionLogId:identity.executionLogId});
+        if(this.stopped)return;
+        if(observed.runId!==identity.runId || observed.generation!==identity.generation || observed.revision!==identity.revision || !this.store.runRecoveryIdentityCurrent(identity))continue;
         if (this.retryDeferred(observed)) continue;
         const startedAt = this.now();
         let stage = 'stop';
@@ -84,7 +88,7 @@ export class RunRecovery {
           catch (error) {
             if (['run_owner_conflict', 'revision_conflict', 'checkpoint_turn_conflict', 'identity_index_conflict'].includes((error as Error).message)) continue;
             errors.push(error);
-            this.recordFailure(observed, stage, error, startedAt);
+            await this.recordFailure(observed, stage, error, startedAt);
             continue;
           }
           stage = 'process-check';
@@ -92,7 +96,7 @@ export class RunRecovery {
             continue;
           }
           stage = 'state-read';
-          const before = this.store.readRunCheckpointState(observed.projectId, executionLogId);
+          const {state:before} = await this.store.readRunContextPublication(observed.projectId,{executionLogId,includeProof:true});
           if (before.generation !== observed.generation) continue;
           let maintenanceCaptureError = '';
           stage = 'maintenance-capture';
@@ -103,11 +107,11 @@ export class RunRecovery {
                 input.tailBytes === undefined ? undefined : Number(input.tailBytes),
                 input.tailBytes === undefined ? Number(input.offset || 0) : undefined,
                 input.tailBytes === undefined ? Number(input.limit || 65536) : undefined)
-              : this.store.writeRunDocument(before.projectId, input as unknown as Parameters<UnifiedDataStore['writeRunDocument']>[1]));
+              : await this.store.publishRunDocument(before.projectId, input as unknown as Parameters<UnifiedDataStore['writeRunDocument']>[1]));
           } catch (error) {
             maintenanceCaptureError = error instanceof Error ? error.message : String(error);
             const head = this.store.readRunLogHead(before.projectId, executionLogId, 'stderr');
-            this.store.appendRunLog(before.projectId, { executionLogId, generation: before.generation, stream: 'stderr', sequence: head.nextSequence, offset: head.totalBytes,
+            await this.store.publishRunLog(before.projectId, { executionLogId, generation: before.generation, stream: 'stderr', sequence: head.nextSequence, offset: head.totalBytes,
               bytes: Buffer.from(`安装回执保存失败：${maintenanceCaptureError}\n`).toString('base64'), idempotencyKey: `run:${before.runId}:${before.generation}:recovery-maintenance-error` });
           }
           stage = 'workspace-snapshot';
@@ -115,22 +119,22 @@ export class RunRecovery {
           stage = 'git-evidence';
           const gitEvidence = workspaceSnapshot ? await this.workspaceCompute.gitEvidence(String(before.status.workspaceRoot), String(before.status.baseGitHash || ''), workspaceSnapshot) : undefined;
           stage = 'state-recheck';
-          const state = this.store.readRunCheckpointState(observed.projectId, executionLogId);
+          const {state} = await this.store.readRunContextPublication(observed.projectId,{executionLogId,includeProof:true});
           if (state.generation !== before.generation || state.turnId !== before.turnId || this.store.runProcessAlive(observed.projectId, executionLogId)) continue;
           if (state.status.hostOutputPending) {
             stage = 'output-finalize';
-            this.store.finalizeRunOutput(state.projectId, { executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, exitCode: 1, source: 'recovery', workspaceSnapshot, gitEvidence, idempotencyKey: `run:${state.runId}:${state.generation}:recover-output:${state.turnId}` });
-            new RunNativeObserver(this.store, this.workspaceCompute).forget(state);
+            await this.store.publishRunOutput(state.projectId, { executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, exitCode: 1, source: 'recovery', workspaceSnapshot, gitEvidence, idempotencyKey: `run:${state.runId}:${state.generation}:recover-output:${state.turnId}` });
+            await new RunNativeObserver(this.store, this.workspaceCompute).forget(state);
             continue;
           }
           stage = 'checkpoint';
-          this.store.checkpointRun(state.projectId, {
+          await this.store.publishRunCheckpoint(state.projectId, {
             executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId,
             action: state.status.finishedAt ? 'session-close' : 'complete', ...(state.status.nativeOutputPending ? { exitCode: 1, workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery' as const } : {}), ...(state.status.finishedAt ? {} : { outcome: 'failed', summary: maintenanceCaptureError || '执行已中断，完整已提交记录已保留，可重新继续。', exitCode: 1, workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery' }),
             idempotencyKey: `run:${state.runId}:${state.generation}:recover:${state.revision}`
           });
-          new RunNativeObserver(this.store, this.workspaceCompute).forget(state);
-        } catch (error) { errors.push(error); this.recordFailure(observed, stage, error, startedAt); }
+          await new RunNativeObserver(this.store, this.workspaceCompute).forget(state);
+        } catch (error) { errors.push(error); await this.recordFailure(observed, stage, error, startedAt); }
         await new Promise<void>(resolve => setImmediate(resolve));
       }
       cursor = page.nextCursor;

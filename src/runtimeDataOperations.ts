@@ -2,8 +2,10 @@ import { RuntimeDataRequest, sendRuntimeDataRequest } from './autonomousRuntimeC
 import { DataWrite, UnifiedDataStore } from './db/unifiedDataStore';
 import type { UnifiedMcpSource } from './unifiedMcp';
 import * as crypto from 'crypto';
-import type { DataObject } from './db/unifiedDataStore';
-import { agentReadableObject as agentObject, canAgentDiscover, canAgentRead, validateAgentLink, validateAgentWrite } from './dataAuthorization';
+import type { DataObject, ContentPublicationCommit, WriteReceipt } from './db/unifiedDataStore';
+import { agentReadableObject as agentObject, canAgentDiscover, canAgentRead, normalizeObjectReference } from './dataAuthorization.js';
+import { snapshotDataWrite } from './db/dataWritePublication.js';
+import { McpMutationAuthorizationChanged, type McpMutationIntent, type McpMutationAuthorizationHandle } from './db/mcpMutationAuthorization.js';
 import { DatabaseMigrationCoordinator } from './databaseMigrationCoordinator';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -11,6 +13,7 @@ import { execFile } from 'child_process';
 import { RunInputMaterialization } from './runInputMaterialization';
 import { configureAgentDatabase, databaseAgentProviders, DatabaseAgentProvider, isAgentDatabaseConfigPath, retireManagedCodexBaseConfig } from './agentDatabaseConfig';
 import { MigrationProjectScope, MigrationRecycling } from './migrationRecycling';
+import { RecyclingProjectScopePending, recyclingProjectScopeOperations } from './db/recyclingProjectScopeProof.js';
 import { initializeProjectJournalAllocation } from './projectDataMigration';
 import { enqueueAvailableDataMigrations } from './runtimeDatabaseBootstrap';
 import { validateTaskReport } from './taskReport';
@@ -21,16 +24,18 @@ import { RunStop } from './runStop';
 import { executeTelegramExtensionCommand } from './telegramExtensionBridge';
 import { persistTelegramRuntimeSecret } from './telegramRuntimeConfig';
 import { migrationRunKinds, soloConversationRunKinds } from './runLifecycleTypes';
-import { setIntelligenceTimeScheduleInDatabaseSync } from './intelligenceTimeSchedule';
 import { projectSignalProjects, readProjectSignals } from './projectSignalsRead';
 import { closeProjectIssue, closeProjectPullRequest, createProjectIssue, loadExternalDeliverySummary, loadExternalIssueSummary, loadExternalPullRequestSummary, loadExternalSecuritySummary, readCachedIssueDetails, readProjectIssueDetails, resolveGithubRepoSlug } from './projectExternalSignals';
-import { taskIngressDiagnosticEvent, taskIngressReceiptFields } from './providerTaskIngress';
 import { createInteractionBudgetAt } from './interactionBudget';
 import { createLocalDiagnosticTrace, withLocalDiagnosticTrace } from './localDiagnostics';
 import { createPreSessionGitCommit, retainPreSessionGitCommit } from './preSessionGit';
 import { moveUntrackedFilesToRollbackSafety } from './rollbackSafety';
 import { buildAgentImpactSummaryFromProjectRuns, readRunsFromRunIndexEntries, type AgentImpactProject, type AgentImpactRun } from './agentImpact';
-import { getAgentRunDeliveryOwner, preflightAgentRunPreparation, prepareAgentRun, resumePreparedAgentRun, type AgentRunPreparationInput } from './agentRunPreparation';
+import type { AgentRunPreparationInput } from './agentRunPreparation.js';
+import type { AgentLaunchOptions } from './db/agentLaunchPublication.js';
+import { todayRoadmapSnapshotRevision } from './todayDecisionInputs.js';
+import { signLearningDelivery, verifyLearningDelivery } from './learningDelivery.js';
+import { continueRuntimeWork, readRuntimeWorkContinuation, RuntimeExecutionScheduler } from './runtimePriorityScheduler.js';
 
 const PROJECT_RUN_INDEX_PAGE_SIZE = 200;
 
@@ -59,12 +64,6 @@ export interface IntelligenceRuntimeActions {
 
 export interface McpRunIdentity { executionLogId: number; generation: number; proof: string }
 type MigrationRunKind = typeof migrationRunKinds[number];
-
-function normalizeObjectReference(value: unknown): string {
-  const raw = String(value || '');
-  const uri = raw.match(/^solomap:\/(?:\/)?(?:objects|asset)\/([a-f0-9-]{36})$/);
-  return uri ? uri[1] : raw;
-}
 
 function executeExternal(command: string, args: string[], options: { cwd?: string; maxBuffer?: number; timeout?: number } = {}): Promise<string> {
   return new Promise((resolve, reject) => execFile(command, args, {
@@ -330,18 +329,22 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
   gitEvidence: captureRunGitEvidence
 }, readAuthoritySecret?: string, supervisor: RuntimeSupervisorActions = {
   executeTelegramEditorCommand: (command, args) => executeTelegramExtensionCommand(store.root, command, args)
-}, observer?: RuntimeDataOperationObserver): RuntimeDataOperations {
+}, observer?: RuntimeDataOperationObserver, databaseGenerationExecutor?: (request: RuntimeDataRequest) => Promise<unknown>, execution: {storageContinuations?:boolean;wakeStorageMaintenance?:()=>void} = {}): RuntimeDataOperations {
   const migrations = new DatabaseMigrationCoordinator(store);
-  const recycling = new MigrationRecycling(store);
+  const recycling = new MigrationRecycling(store,root=>store.recyclingProjectScopes(root));
   const runStops = new RunStop(store, workspaceCompute);
   const runs = new RunRecovery(store, runStops, undefined, workspaceCompute);
   const runInputs = new RunInputMaterialization(store);
   let storageMaintenanceTail: Promise<void> = Promise.resolve();
+  const recyclingScopeFlights = new Set<Promise<void>>();
+  let recyclingScopeRevision=0;
   let storageMaintenanceBarrier: Promise<unknown> = Promise.resolve();
+  let standaloneStorageScheduler: RuntimeExecutionScheduler | undefined;
   let intelligenceRuntime: IntelligenceRuntimeActions | undefined;
   type ProjectSession = { kind: 'project'; actorId: string; scope: string; intelligenceOperationId?: string; runIdentity?: McpRunIdentity; reviewBatchId?: string; migrationKind?: MigrationRunKind; migrationTargetId?: string | null; migrationProjectRoot?: string | null; migrationProjectId?: string | null; migrationPhysicalRoot?: string | null };
   type McpSessionResponse = { actorId: string; proof: string; authorityActorId: string; sessionToken: string; readAuthority: string; runKind: string; migrationKind: MigrationRunKind | null };
   const sessions = new Map<string, ProjectSession>();
+  const deliverySecret = readAuthoritySecret || crypto.randomBytes(32).toString('base64url');
   const openSessions = new Map<string, { intent: string; response: McpSessionResponse }>();
   const signReadAuthority = (sessionToken: string, session: ProjectSession): string => {
     if (!readAuthoritySecret) return '';
@@ -379,16 +382,9 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
     return { root: path.resolve(registered.root), projectId: registered.projectId, physicalRoot };
   };
   const allowedRead = (object: DataObject, session: ProjectSession): boolean => canAgentRead(object, session.scope, session.reviewBatchId, store.learningReviewScopeCurrent(object));
-  const preparePiMutation = (request: RuntimeDataRequest, session: ProjectSession): RuntimeDataRequest => {
-    if (!['write', 'link'].includes(request.operation)) throw new Error('pi_sync_mutation_required');
+  const normalizeMcpMutation = (request: RuntimeDataRequest): RuntimeDataRequest => {
     const input = request.input;
-    store.authorizeMcpAction(session.actorId, session.scope, request.operation);
-    if (session.runIdentity) store.authorizedLearningReviewBatch(session.scope, session.runIdentity);
     if (request.operation === 'write') {
-      if (input.scope !== session.scope) throw new Error('scope_denied');
-      const existing = input.objectId ? store.read(String(input.objectId)) : undefined;
-      if (existing && !allowedRead(store.readMetadata(normalizeObjectReference(input.objectId)), session)) throw new Error('scope_denied');
-      validateAgentWrite(input as unknown as DataWrite, existing);
       if (input.kind === 'lesson' && input.action === 'patch') return { ...request,
         input: { ...input, data: { external_updated_at: null, ...(input.data as Record<string, unknown>), semantic_review_json: null,
           ...(Object.prototype.hasOwnProperty.call(input.data, 'confidence') ? { external_confidence: null } : {}) } } };
@@ -396,13 +392,42 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
         input: { ...input, data: { ...(input.data as Record<string, unknown>), verification_signal: 0 } } };
       return request;
     }
-    const source = store.readMetadata(String(input.source));
-    if (source.projectId !== session.scope) throw new Error('scope_denied');
-    validateAgentLink(source, String(input.relation));
-    for (const key of ['source', 'target']) {
-      if (input[key] && !allowedRead(store.readMetadata(normalizeObjectReference(input[key])), session)) throw new Error('scope_denied');
-    }
     return request;
+  };
+  const publishRuntimeMutation = async (request: RuntimeDataRequest, fenced=false): Promise<unknown> => {
+    const snapshot={...request,input:snapshotDataWrite(request.input),...(request.piToolFence?{piToolFence:{...request.piToolFence}}:{})},session=request.sessionToken?sessions.get(request.sessionToken):undefined;
+    if(snapshot.sessionToken && (!session || session.kind!=='project'))throw new Error('invalid_session');
+    const fence=snapshot.piToolFence;
+    const owner=fence?{ownerId:fence.ownerId,generation:fence.ownerGeneration}:undefined;
+    const authorize=()=>{if(session && session.kind==='project'){store.authorizeMcpAction(session.actorId,session.scope,snapshot.operation);if(session.runIdentity)store.authorizedLearningReviewBatch(session.scope,session.runIdentity);}};
+    const action=async()=>{for(;;){
+      let authorization:McpMutationAuthorizationHandle|undefined;
+      let publishing=false;
+      try{
+        authorize();
+        if(session && session.kind==='project')authorization=await store.stageMcpMutationAuthorization({operation:snapshot.operation,input:snapshot.input} as unknown as McpMutationIntent,session.scope,session.reviewBatchId);
+        const applied=session?normalizeMcpMutation(snapshot):snapshot;
+        if(fenced && fence && owner)store.assertPiToolInvocationActive(fence.operationId,fence.invocationId,owner);
+        const guarded=(commit:()=>WriteReceipt):WriteReceipt=>{
+          const checked=()=>{
+            authorization?.check();authorize();publishing=true;
+            const receipt=commit();
+            if(receipt===undefined)publishing=false;
+            return receipt;
+          };
+          return fenced && fence && owner?store.withPiToolInvocationFenceSync(fence.operationId,fence.invocationId,owner,checked):checked();
+        };
+        const publish=()=>applied.operation==='link'?store.publishLink(applied.input as unknown as Parameters<UnifiedDataStore['publishLink']>[0],guarded,true):store.publishWrite(applied.input as unknown as DataWrite,guarded,true);
+        return await publish();
+      }catch(error){
+        if(publishing)throw error;
+        if(error instanceof McpMutationAuthorizationChanged)continue;
+        try{authorization?.check();}catch(changed){if(changed instanceof McpMutationAuthorizationChanged)continue;throw changed;}
+        throw error;
+      }finally{await authorization?.release();}
+    }};
+    const publish=()=>store.withMutationPublication({operation:snapshot.operation,input:snapshot.input} as unknown as McpMutationIntent,action);
+    return session?store.withActor(session.actorId,publish):publish();
   };
   const runProject = async (input: Record<string, unknown>): Promise<{ projectId: string }> => {
     if (input.projectId) {
@@ -428,63 +453,95 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       return { ...input, roadmapBackup: bytes.toString('base64') };
     } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return input; throw error; }
   };
-  const maintainDatabaseStorage = (compact: boolean, automatic: boolean) => {
+  const publicationCommit = (request: RuntimeDataRequest): ContentPublicationCommit => {
+    const fence=request.piToolFence?{...request.piToolFence}:undefined;
+    return publish=>fence?store.withPiToolInvocationFenceSync(fence.operationId,fence.invocationId,
+      {ownerId:fence.ownerId,generation:fence.ownerGeneration},publish):publish();
+  };
+  const maintainDatabaseStorage = (compact: boolean, automatic: boolean,commit:ContentPublicationCommit=publish=>publish()) => {
     if (compact) return Promise.reject(new Error('runtime_online_compaction_retired'));
-    const operation = storageMaintenanceTail.catch(() => undefined).then(async () => {
-      await storageMaintenanceBarrier;
+    const previous=storageMaintenanceTail;
+    let resolveDone!:()=>void,rejectDone!:(error:unknown)=>void;
+    const done=new Promise<void>((resolve,reject)=>{resolveDone=resolve;rejectDone=reject;});
+    storageMaintenanceTail=done.catch(()=>undefined);
+    const dependency=Promise.all([previous,storageMaintenanceBarrier]).catch(error=>{rejectDone(error);throw error;});
+    const generator=(async function*(){
       const currentSize = store.databaseStorageFileSizes();
-      store.recoverInterruptedDatabaseStorageMaintenance(Date.now(), currentSize.databaseBytes);
-      if (automatic && !store.hasPendingAutomaticDatabaseStorageCleanup() && !store.hasStaleSolomapTestProjectRegistrations()) return { skipped: true, reason: 'storage_current' };
+      for(;;){const recovery=store.recoverInterruptedDatabaseStorageMaintenanceBatch(128);if(!recovery.pending)break;yield undefined;}
+      let projectPage=await store.projectRetirementPage('');
+      while(!projectPage.projects.length && !projectPage.complete){yield undefined;projectPage=await store.projectRetirementPage(projectPage.cursor);}
+      if (automatic && !store.hasPendingAutomaticDatabaseStorageCleanup() && !projectPage.projects.length) return { skipped: true, reason: 'storage_current' };
       const startedAt = Date.now(), before = currentSize;
       const totals = { deletedArtifacts: 0, deletedSources: 0, deletedContents: 0, reclaimedStoredBytes: 0 };
-      const maintenanceId = store.beginDatabaseStorageMaintenance(startedAt, before.databaseBytes);
+      const maintenanceId = store.beginDatabaseStorageMaintenance(startedAt, before.databaseBytes, true);
       try {
-        const retiredTestProjects = store.cleanupStaleSolomapTestProjectRegistrations();
-        let indexCursor = 0;
-        for (;;) {
-          const batch = store.protectIndexedRunArtifactOutputsBatch(indexCursor, 250, !automatic);
-          if (batch.nextCursor === null) break;
-          indexCursor = batch.nextCursor;
-          await new Promise<void>(resolve => setImmediate(resolve));
-        }
-        for (;;) {
-          const batch = store.cleanupDatabaseStorageBatch(automatic ? 250 : 5000, maintenanceId, !automatic);
-          totals.deletedArtifacts += batch.deletedArtifacts; totals.deletedSources += batch.deletedSources;
-          if (!batch.pending) break;
-          await new Promise<void>(resolve => setImmediate(resolve));
-        }
-        if (store.hasDatabaseStorageCleanupCandidates()) {
-          store.prepareDatabaseStorageCleanup();
-          if (store.hasDatabaseStorageCleanupCandidates()) {
-            for (const table of ['object_revisions', 'learning_review_controls', 'legacy_learning_review_controls', 'legacy_learning_review_cursor_inputs'] as const) {
-              let cursor = 0;
-              for (;;) {
-                const batch = store.protectDatabaseStorageCleanupReferencesBatch(table, cursor, 250);
-                if (batch.nextCursor === null) break;
-                cursor = batch.nextCursor;
-                await new Promise<void>(resolve => setImmediate(resolve));
-              }
-            }
-            for (;;) {
-              const batch = store.finalizeDatabaseStorageCleanupBatch(250, maintenanceId);
-              totals.deletedContents += batch.deletedContents; totals.reclaimedStoredBytes += batch.reclaimedStoredBytes;
-              if (!batch.pending) break;
-              await new Promise<void>(resolve => setImmediate(resolve));
-            }
+        let retiredTestProjects=0;
+        for(;;){
+          for(const project of projectPage.projects)for(;;){
+            const attempt=await store.retireStaleProjectRegistration(project,commit);retiredTestProjects+=attempt.retired;
+            yield undefined;if(!attempt.retry)break;
           }
+          if(projectPage.complete)break;
+          yield undefined;projectPage=await store.projectRetirementPage(projectPage.cursor);
+        }
+        for (;;) {
+          const batch = await store.maintainStorageByproductsQuantum(128,commit,!automatic || store.usesStorageContentLifecycle(),maintenanceId);
+          totals.deletedArtifacts += batch.deletedArtifacts; totals.deletedSources += batch.deletedSources;
+          yield undefined;
+          if (!batch.pending) break;
+        }
+        while(store.hasDatabaseStorageCleanupCandidates()){
+          commit(()=>store.finalizeDatabaseStorageCleanupBatch(128,maintenanceId));
+          yield undefined;
+        }
+        let lifecyclePending=false;
+        if(store.usesStorageContentLifecycle())for(;;){
+          const quantum=await store.maintainStorageLifecycleQuantum(128,commit,counts=>{
+            totals.deletedArtifacts+=counts.deletedArtifacts || 0;totals.deletedSources+=counts.deletedSources || 0;
+            totals.deletedContents+=counts.deletedContents || 0;totals.reclaimedStoredBytes+=counts.reclaimedStoredBytes || 0;
+          },maintenanceId);
+          lifecyclePending=quantum.pending;
+          if(!quantum.pending || !quantum.runnable)break;
+          yield undefined;
         }
         const integrity = 'not_checked';
         const after = store.databaseStorageFileSizes(); const finishedAt = Date.now();
         store.settleDatabaseStorageMaintenance(maintenanceId, { status: 'completed', finishedAt, ...totals, compacted: compact, afterBytes: after.databaseBytes, integrity });
-        return { ...totals, retiredTestProjects, compacted: compact, integrity, beforeBytes: before.databaseBytes, afterBytes: after.databaseBytes, pendingByproductRecords: store.pendingDatabaseStorageCleanupRecords() };
+        return { ...totals, retiredTestProjects, compacted: compact, integrity, beforeBytes: before.databaseBytes, afterBytes: after.databaseBytes, pendingByproductRecords: store.pendingDatabaseStorageCleanupRecords(),pending:lifecyclePending };
       } catch (error) {
-        const after = store.databaseStorageFileSizes();
-        store.settleDatabaseStorageMaintenance(maintenanceId, { status: 'failed', finishedAt: Date.now(), error: String(error), ...totals, compacted: false, afterBytes: after.databaseBytes, integrity: 'not_checked' });
+        try{
+          const after = store.databaseStorageFileSizes();
+          store.settleDatabaseStorageMaintenance(maintenanceId, { status: 'failed', finishedAt: Date.now(), error: String(error), ...totals, compacted: false, afterBytes: after.databaseBytes, integrity: 'not_checked' });
+        }catch(settlementError){process.stderr.write(`SoloMap storage audit settlement pending (${maintenanceId}): ${String(settlementError)}\n`);}
         throw error;
+      } finally {
+        store.releaseDatabaseStorageMaintenance(maintenanceId);
       }
-    });
-    storageMaintenanceTail = operation.then(() => undefined, () => undefined);
-    return operation;
+    })();
+    const advance=async():Promise<unknown>=>{
+      try{commit(()=>undefined);const piece=await generator.next();commit(()=>undefined);if(piece.done){resolveDone();return piece.value;}return continueRuntimeWork(advance);}
+      catch(error){try{await generator.throw(error);}catch{/* Close the suspended generator's original audit/finally without replacing the root error. */}rejectDone(error);throw error;}
+    };
+    const initial=continueRuntimeWork(advance,dependency);
+    if(execution.storageContinuations)return Promise.resolve(initial);
+    standaloneStorageScheduler ||= new RuntimeExecutionScheduler();
+    return standaloneStorageScheduler.submit('maintenance',async()=>initial,{label:'standalone:maintain_database_storage'});
+  };
+  const afterStorageMaintenance=(request:RuntimeDataRequest):unknown=>{
+    let tail=storageMaintenanceTail,scopeRevision=recyclingScopeRevision;
+    let dependency=Promise.all([tail,...recyclingScopeFlights]);
+    const begin=async():Promise<unknown>=>{
+      if(storageMaintenanceTail!==tail || recyclingScopeRevision!==scopeRevision){
+        tail=storageMaintenanceTail;scopeRevision=recyclingScopeRevision;
+        dependency=Promise.all([tail,...recyclingScopeFlights]);return continueRuntimeWork(begin,dependency);
+      }
+      return databaseGenerationExecutor!(request);
+    };
+    return continueRuntimeWork(begin,dependency);
+  };
+  const wakeStorageMaintenance=():void=>{
+    if(execution.storageContinuations){execution.wakeStorageMaintenance?.();return;}
+    void maintainDatabaseStorage(false,true).catch(()=>undefined);
   };
   const dispatch = async (request: RuntimeDataRequest, authenticatedSession?: ProjectSession): Promise<unknown> => {
     if (!request || typeof request.operation !== 'string' || !request.input || typeof request.input !== 'object') throw new Error('invalid_data_request');
@@ -508,10 +565,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
           try {
             const project = await readProject({ root });
             if (!project) return { root, revision: '' };
-            const snapshot = store.readRoadmapByProject(project.projectId);
-            return { root, revision: crypto.createHash('sha256').update(JSON.stringify([
-              snapshot.acceptedHash, snapshot.revision, snapshot.generation, snapshot.projectedGeneration, snapshot.pending
-            ])).digest('hex') };
+            return { root, revision: store.readTodayRoadmapRevision(project.projectId) };
           } catch (error) {
             const code = (error as NodeJS.ErrnoException)?.code;
             if (error instanceof Error && error.message === 'roadmap_import_required') return { root, revision: '', unavailable: true };
@@ -519,7 +573,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
             throw error;
           }
         }));
-        return { items, nextOffset: offset + items.length < input.roots.length ? offset + items.length : null };
+        return { items, ...(offset === 0 ? { learningRevision: store.readTodayLearningRevision(input.roots.map(String)) } : {}), nextOffset: offset + items.length < input.roots.length ? offset + items.length : null };
       }
       case 'read_shadow_decision_inputs': {
         if (!Array.isArray(input.roots) || input.roots.some(root => typeof root !== 'string' || !path.isAbsolute(root))) throw new Error('invalid_shadow_decision_query');
@@ -527,7 +581,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
         const limit = Math.max(1, Math.min(20, Number(input.limit || 20)));
         if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(limit)) throw new Error('invalid_shadow_decision_query');
         const roots = input.roots.slice(offset, offset + limit);
-        const items: Array<{ root: string; nodes: unknown[]; unavailable?: boolean; invalid?: boolean }> = [];
+        const items: Array<{ root: string; nodes: unknown[]; revision?: string; unavailable?: boolean; invalid?: boolean }> = [];
         for (const rawRoot of roots) {
           const root = String(rawRoot);
           try {
@@ -537,7 +591,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
               continue;
             }
             const snapshot = store.readRoadmapByProject(project.projectId);
-            items.push({ root, nodes: snapshot.nodes });
+            items.push({ root, nodes: snapshot.nodes, revision: todayRoadmapSnapshotRevision(snapshot) });
           } catch (error) {
             const code = (error as NodeJS.ErrnoException)?.code;
             if (error instanceof Error && error.message === 'roadmap_import_required') {
@@ -551,7 +605,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
             throw error;
           }
         }
-        return { items, nextOffset: offset + items.length < input.roots.length ? offset + items.length : null };
+        return { items, ...(offset === 0 ? { learning: store.readTodayLearningInputs(input.roots.map(String)) } : {}), nextOffset: offset + items.length < input.roots.length ? offset + items.length : null };
       }
       case 'update_roadmap': return store.updateRoadmap(input as unknown as Parameters<UnifiedDataStore['updateRoadmap']>[0]);
       case 'resolve_roadmap_conflict': return store.resolveRoadmapConflict(input as unknown as Parameters<UnifiedDataStore['resolveRoadmapConflict']>[0]);
@@ -566,7 +620,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
           return previous.response;
         }
         const runIdentity = input.runIdentity as McpRunIdentity | undefined;
-        const authorizedRun = runIdentity ? store.authorizedRunState(scope, runIdentity) : undefined;
+        const authorizedRun = runIdentity ? (await store.readRunContextPublication(scope,runIdentity)).state : undefined;
         const runKind = String(authorizedRun?.status.runKind || '');
         const migrationKind = migrationRunKinds.includes(runKind as MigrationRunKind) ? runKind as MigrationRunKind : undefined;
         const migrationProjectRoot = migrationKind ? String(authorizedRun?.status.migrationProjectRoot || '') || null : null;
@@ -709,15 +763,15 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
         const selected = root ? projects.find(project => path.resolve(project.path) === path.resolve(root)) : projects.find(project => project.projectId);
         return { projectId: selected?.projectId || null };
       }
-      case 'patch_project_registry': return store.patchProjectRegistry(input as unknown as Parameters<UnifiedDataStore['patchProjectRegistry']>[0]);
-      case 'read_host_settings': return store.readHostSettings(input as Parameters<UnifiedDataStore['readHostSettings']>[0]);
-      case 'patch_host_settings': return store.patchHostSettings(input as unknown as Parameters<UnifiedDataStore['patchHostSettings']>[0]);
-      case 'migrate_host_secret_state': return store.migrateHostSecretState(input as Parameters<UnifiedDataStore['migrateHostSecretState']>[0]);
-      case 'project_cognitive_runtime_config': return store.projectCognitiveRuntimeConfig(input as Parameters<UnifiedDataStore['projectCognitiveRuntimeConfig']>[0]);
+      case 'patch_project_registry': return store.publishProjectRegistryPatch(input as unknown as Parameters<UnifiedDataStore['publishProjectRegistryPatch']>[0],publicationCommit(request));
+      case 'read_host_settings': return store.readHostSettings(input as unknown as Parameters<UnifiedDataStore['readHostSettings']>[0]);
+      case 'patch_host_settings': return store.publishHostSettings(input as unknown as Parameters<UnifiedDataStore['publishHostSettings']>[0], publicationCommit(request));
+      case 'migrate_host_secret_state': return store.publishHostSecretMigration(input as unknown as Parameters<UnifiedDataStore['publishHostSecretMigration']>[0],publicationCommit(request));
+      case 'project_cognitive_runtime_config': return store.publishCognitiveRuntimeConfig(input as Parameters<UnifiedDataStore['projectCognitiveRuntimeConfig']>[0], publicationCommit(request));
       case 'read_project_autonomy_authorization': return store.readProjectAutonomyAuthorization(input as Parameters<UnifiedDataStore['readProjectAutonomyAuthorization']>[0]);
-      case 'patch_project_autonomy_authorization': return store.patchProjectAutonomyAuthorization(input as unknown as Parameters<UnifiedDataStore['patchProjectAutonomyAuthorization']>[0]);
-      case 'revoke_project_autonomy_authorizations': return store.revokeProjectAutonomyAuthorizations(input as Parameters<UnifiedDataStore['revokeProjectAutonomyAuthorizations']>[0]);
-      case 'append_diagnostic_event': return store.appendDiagnosticEvent(input as Parameters<UnifiedDataStore['appendDiagnosticEvent']>[0]);
+      case 'patch_project_autonomy_authorization': return store.publishProjectAutonomyAuthorization(input as unknown as Parameters<UnifiedDataStore['publishProjectAutonomyAuthorization']>[0],publicationCommit(request));
+      case 'revoke_project_autonomy_authorizations': return store.publishProjectAutonomyRevocation(input as Parameters<UnifiedDataStore['publishProjectAutonomyRevocation']>[0],publicationCommit(request));
+      case 'append_diagnostic_event': return store.publishDiagnosticEvent(input as unknown as Parameters<UnifiedDataStore['publishDiagnosticEvent']>[0], publicationCommit(request));
       case 'read_diagnostic_events': return store.readDiagnosticEvents(input as Parameters<UnifiedDataStore['readDiagnosticEvents']>[0]);
       case 'record_native_projection': return store.recordNativeProjection(input as Parameters<UnifiedDataStore['recordNativeProjection']>[0]);
       case 'is_recent_native_projection': return store.isRecentNativeProjection(input as Parameters<UnifiedDataStore['isRecentNativeProjection']>[0]);
@@ -726,17 +780,17 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       case 'supersede_native_projections': return store.supersedeNativeProjections(input as Parameters<UnifiedDataStore['supersedeNativeProjections']>[0]);
       case 'read_ui_state': return store.readUiState(input as Parameters<UnifiedDataStore['readUiState']>[0]);
       case 'patch_ui_state': return store.patchUiState(input as unknown as Parameters<UnifiedDataStore['patchUiState']>[0]);
-      case 'sync_schedules': return store.syncSchedules(input as unknown as Parameters<UnifiedDataStore['syncSchedules']>[0]);
+      case 'sync_schedules': return store.publishScheduleSync(input as unknown as Parameters<UnifiedDataStore['publishScheduleSync']>[0],publicationCommit(request));
       case 'read_schedule_sync_state': return store.readScheduleSyncState();
-      case 'claim_due_schedules': return store.claimDueSchedules(input as unknown as Parameters<UnifiedDataStore['claimDueSchedules']>[0]);
+      case 'claim_due_schedules': return store.publishScheduleClaims(input as unknown as Parameters<UnifiedDataStore['publishScheduleClaims']>[0],publicationCommit(request));
       case 'read_schedule_ledger': return store.readScheduleLedger(input as Parameters<UnifiedDataStore['readScheduleLedger']>[0]);
-      case 'restore_legacy_scheduled_occurrences': return store.restoreLegacyScheduledOccurrences(input as unknown as Parameters<UnifiedDataStore['restoreLegacyScheduledOccurrences']>[0]);
-      case 'settle_schedule_occurrence': return store.settleScheduleOccurrence(input as unknown as Parameters<UnifiedDataStore['settleScheduleOccurrence']>[0]);
+      case 'restore_legacy_scheduled_occurrences': return store.publishLegacyScheduledOccurrences(input as unknown as Parameters<UnifiedDataStore['publishLegacyScheduledOccurrences']>[0], publicationCommit(request));
+      case 'settle_schedule_occurrence': return store.publishScheduleSettlement(input as unknown as Parameters<UnifiedDataStore['publishScheduleSettlement']>[0],publicationCommit(request));
       case 'accept_inbox_message': return store.acceptInboxMessage(input as unknown as Parameters<UnifiedDataStore['acceptInboxMessage']>[0]);
       case 'claim_inbox_messages': return store.claimInboxMessages(input as unknown as Parameters<UnifiedDataStore['claimInboxMessages']>[0]);
       case 'begin_inbox_action': return store.beginInboxAction(input as unknown as Parameters<UnifiedDataStore['beginInboxAction']>[0]);
       case 'settle_inbox_action': return store.settleInboxAction(input as unknown as Parameters<UnifiedDataStore['settleInboxAction']>[0]);
-      case 'import_legacy_telegram_conversations': return store.importLegacyTelegramConversationIds(input as Parameters<UnifiedDataStore['importLegacyTelegramConversationIds']>[0]);
+      case 'import_legacy_telegram_conversations': return store.publishLegacyTelegramConversationIds(input as Parameters<UnifiedDataStore['importLegacyTelegramConversationIds']>[0], publicationCommit(request));
       case 'reconcile_unknown_inbox_actions': return store.reconcileUnknownInboxActions(input as unknown as Parameters<UnifiedDataStore['reconcileUnknownInboxActions']>[0]);
       case 'acknowledge_inbox_message': return store.acknowledgeInboxMessage(input as unknown as Parameters<UnifiedDataStore['acknowledgeInboxMessage']>[0]);
       case 'release_inbox_message': return store.releaseInboxMessage(input as unknown as Parameters<UnifiedDataStore['releaseInboxMessage']>[0]);
@@ -749,11 +803,11 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       }
       case 'record_run_verification': {
         const project = await runProject(input);
-        return store.recordRunVerification(project.projectId, input as unknown as Parameters<UnifiedDataStore['recordRunVerification']>[1]);
+        return store.publishRunVerification(project.projectId, input as unknown as Parameters<UnifiedDataStore['publishRunVerification']>[1],publicationCommit(request));
       }
       case 'sync_external_memory': {
         const project = await runProject(input);
-        return store.syncExternalMemory(project.projectId, input as unknown as Parameters<UnifiedDataStore['syncExternalMemory']>[1]);
+        return store.publishExternalMemorySync(project.projectId, input as unknown as Parameters<UnifiedDataStore['syncExternalMemory']>[1],publicationCommit(request));
       }
       case 'read_external_memory_targets': {
         const project = await readProject(input);
@@ -761,24 +815,24 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       }
       case 'revoke_external_memory_target': {
         const project = await runProject(input);
-        return store.revokeExternalMemoryTarget(project.projectId, input as unknown as Parameters<UnifiedDataStore['revokeExternalMemoryTarget']>[1]);
+        return store.publishExternalMemoryTarget(project.projectId, {operation:'revoke',input:input as unknown as Parameters<UnifiedDataStore['revokeExternalMemoryTarget']>[1]},publicationCommit(request));
       }
       case 'reconcile_external_memory_target': {
         const project = await runProject(input);
-        return store.reconcileExternalMemoryTarget(project.projectId, input as unknown as Parameters<UnifiedDataStore['reconcileExternalMemoryTarget']>[1]);
+        return store.publishExternalMemoryTarget(project.projectId, {operation:'reconcile',input:input as unknown as Parameters<UnifiedDataStore['reconcileExternalMemoryTarget']>[1]},publicationCommit(request));
       }
       case 'record_learning_cycle': {
         const project = await runProject(input);
         const { root: _root, projectId: _projectId, ...cycle } = input;
-        return store.recordLearningCycle(project.projectId, cycle as unknown as Parameters<UnifiedDataStore['recordLearningCycle']>[1]);
+        return store.publishLearningCycle(project.projectId, cycle as unknown as Parameters<UnifiedDataStore['publishLearningCycle']>[1],publicationCommit(request));
       }
       case 'read_learning_source_revision': return store.readLearningSourceRevision();
       case 'read_global_prompt_policy': return store.readGlobalPromptPolicy();
-      case 'save_global_prompt': return store.saveGlobalPrompt(input as unknown as Parameters<UnifiedDataStore['saveGlobalPrompt']>[0]);
-      case 'prepare_learning_review': return store.prepareLearningReview(input as unknown as Parameters<UnifiedDataStore['prepareLearningReview']>[0]);
-      case 'apply_learning_review': return store.applyLearningReview(input as unknown as Parameters<UnifiedDataStore['applyLearningReview']>[0]);
-      case 'finish_learning_review': return store.finishLearningReview(input as unknown as Parameters<UnifiedDataStore['finishLearningReview']>[0]);
-      case 'interrupt_learning_review': return store.interruptLearningReview(String(input.batchId || ''));
+      case 'save_global_prompt': return store.publishGlobalPromptSave(input as unknown as Parameters<UnifiedDataStore['saveGlobalPrompt']>[0],publicationCommit(request));
+      case 'prepare_learning_review': return input.resultMode==='identity'?store.publishLearningReviewPrepare(input as unknown as Parameters<UnifiedDataStore['prepareLearningReview']>[0],publicationCommit(request),{resultMode:'identity'}):store.publishLearningReviewPrepare(input as unknown as Parameters<UnifiedDataStore['prepareLearningReview']>[0],publicationCommit(request));
+      case 'apply_learning_review': return store.publishLearningReviewApply(input as unknown as Parameters<UnifiedDataStore['publishLearningReviewApply']>[0],publicationCommit(request));
+      case 'finish_learning_review': return store.publishLearningReviewFinish(input as unknown as Parameters<UnifiedDataStore['publishLearningReviewFinish']>[0],publicationCommit(request));
+      case 'interrupt_learning_review': return store.publishLearningReviewInterrupt(String(input.batchId || ''),publicationCommit(request));
       case 'recover_run_inputs': return runInputs.recover();
       case 'materialize_run_prompt':
       case 'release_run_prompt': {
@@ -790,7 +844,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       case 'prepare_flow_role': {
         await initializeProjectJournalAllocation(store, String(input.root || ''));
         const project = await store.registerProject({ root: String(input.root || '') });
-        return store.prepareFlowRole(project.projectId, project.locationId, input as unknown as Parameters<UnifiedDataStore['prepareFlowRole']>[2]);
+        return store.publishFlowRole(project.projectId, project.locationId, await withRoadmapBackup(input) as unknown as Parameters<UnifiedDataStore['publishFlowRole']>[2],publicationCommit(request));
       }
       case 'read_run_intent': {
         const project = await readProject(input);
@@ -800,8 +854,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       case 'prepare_run_intent': {
         await initializeProjectJournalAllocation(store, String(input.root || ''));
         const project = await store.registerProject({ root: String(input.root || '') });
-        const prepared = store.readRunIntent(project.projectId, String(input.launchIntentId || '')) ? input : await withRoadmapBackup(input);
-        return store.prepareRunIntent(project.projectId, project.locationId, prepared as unknown as Parameters<UnifiedDataStore['prepareRunIntent']>[2]);
+        const prepared = store.hasRunAllocation(project.projectId,'intent',String(input.launchIntentId || '')) ? input : await withRoadmapBackup(input);
+        return store.publishRunAllocation(project.projectId, project.locationId, prepared as unknown as Parameters<UnifiedDataStore['publishRunAllocation']>[2],'intent',publicationCommit(request));
       }
       case 'read_run_slot': {
         const project = await readProject(input);
@@ -812,51 +866,36 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
         await initializeProjectJournalAllocation(store, String(input.root || ''));
         const project = await store.registerProject({ root: String(input.root || '') });
         const scope = input.launchSlotScope === 'global' ? 'global' : 'project';
-        const prepared = store.readRunSlot(project.projectId, String(input.launchSlotId || ''), scope) ? input : await withRoadmapBackup(input);
-        return store.prepareRunSlot(project.projectId, project.locationId, prepared as unknown as Parameters<UnifiedDataStore['prepareRunSlot']>[2]);
+        const prepared = store.hasRunAllocation(project.projectId,'slot',String(input.launchSlotId || ''),scope) ? input : await withRoadmapBackup(input);
+        return store.publishRunAllocation(project.projectId, project.locationId, prepared as unknown as Parameters<UnifiedDataStore['publishRunAllocation']>[2],'slot',publicationCommit(request));
       }
       case 'prepare_run': {
         const project = await store.registerProject({ root: String(input.root || '') });
-        return store.prepareRun(project.projectId, project.locationId, await withRoadmapBackup(input) as unknown as Parameters<UnifiedDataStore['prepareRun']>[2]);
+        return store.publishRunCreation(project.projectId, project.locationId, await withRoadmapBackup(input) as unknown as Parameters<UnifiedDataStore['prepareRun']>[2],publicationCommit(request));
       }
       case 'prepare_agent_launch': {
-        let launch = { ...(input as unknown as AgentRunPreparationInput), globalDataPath: store.root };
+        const {resumeRun,preparationOwner,providerContext,resumeSavedIntent,...launchInput}=input;
+        const options:AgentLaunchOptions={...(preparationOwner?{deliveryOwner:preparationOwner as NonNullable<AgentLaunchOptions['deliveryOwner']>}:{}),...(providerContext?{providerContext:providerContext as Record<string,unknown>}:{}),...(resumeSavedIntent===false?{resumeSavedIntent:false}:{})};
+        if(resumeRun){
+          const reference=resumeRun as {projectId:string;runId:string;executionLogId:number};
+          if(!reference.projectId || !reference.runId || !Number.isInteger(reference.executionLogId) || reference.executionLogId<1)throw new Error('invalid_run_request');
+          const project=await readProject({projectId:reference.projectId});
+          return store.publishAgentLaunch(project!.projectId,undefined,undefined,publicationCommit(request),{...options,resumeRun:{runId:reference.runId,executionLogId:reference.executionLogId},interactionBudget:input.interactionBudget as AgentLaunchOptions['interactionBudget']});
+        }
+        const launch = { ...(launchInput as unknown as AgentRunPreparationInput), globalDataPath: store.root };
         if (!path.isAbsolute(String(launch.workspaceRoot || ''))) throw new Error('invalid_run_request');
         if (launch.launchIntentId) {
           const project = await readProject({ root: launch.workspaceRoot });
-          const existing = project ? store.readRunIntent(project.projectId, launch.launchIntentId) : null;
-          if (existing) {
-            const expectedHash = String(launch.metadata?.uiLaunchActionHash || '');
-            if (expectedHash && existing.status.uiLaunchActionHash !== expectedHash) throw new Error('execution_identity_conflict');
-            return resumePreparedAgentRun(existing, (operation, nestedInput) => dispatch({ operation, input: nestedInput }), store.root, launch.deliveryOwner);
+          if (project) {
+            const existing = await store.publishAgentLaunch(project.projectId,undefined,launch,publicationCommit(request),options);
+            if (existing) return existing;
           }
         }
         const registration = await store.registerProject({ root: launch.workspaceRoot });
         if ((launch.flowRole || launch.launchIntentId || launch.launchSlotId) && store.readProjectJournalMinimum(registration.projectId) === null) {
           await initializeProjectJournalAllocation(store, launch.workspaceRoot);
         }
-        let roadmapBackup: string | undefined;
-        if (launch.metadata?.captureRoadmapBackup === true) {
-          const backedUp = await withRoadmapBackup({ root: launch.workspaceRoot, metadata: launch.metadata });
-          roadmapBackup = typeof backedUp.roadmapBackup === 'string' ? backedUp.roadmapBackup : undefined;
-        }
-        if (!launch.deliveryOwner) launch = { ...launch, deliveryOwner: await getAgentRunDeliveryOwner() };
-        const preflight = await preflightAgentRunPreparation(launch);
-        const nested = (operation: string, nestedInput: Record<string, unknown>): Promise<unknown> => {
-          if (operation === 'read_run_intent') return Promise.resolve(store.readRunIntent(registration.projectId, String(nestedInput.launchIntentId || '')));
-          if (operation === 'read_run_slot') return Promise.resolve(store.readRunSlot(registration.projectId, String(nestedInput.launchSlotId || ''), nestedInput.launchSlotScope === 'global' ? 'global' : 'project'));
-          const preparedInput = roadmapBackup === undefined ? nestedInput : { ...nestedInput, roadmapBackup };
-          if (operation === 'prepare_run_intent') return Promise.resolve(store.prepareRunIntent(registration.projectId, registration.locationId,
-            preparedInput as unknown as Parameters<UnifiedDataStore['prepareRunIntent']>[2]));
-          if (operation === 'prepare_run_slot') return Promise.resolve(store.prepareRunSlot(registration.projectId, registration.locationId,
-            preparedInput as unknown as Parameters<UnifiedDataStore['prepareRunSlot']>[2]));
-          if (operation === 'prepare_flow_role') return Promise.resolve(store.prepareFlowRole(registration.projectId, registration.locationId,
-            preparedInput as unknown as Parameters<UnifiedDataStore['prepareFlowRole']>[2]));
-          if (operation === 'prepare_run') return Promise.resolve(store.prepareRun(registration.projectId, registration.locationId,
-            preparedInput as unknown as Parameters<UnifiedDataStore['prepareRun']>[2]));
-          return dispatch({ operation, input: nestedInput });
-        };
-        return store.runAtomicCommand(() => prepareAgentRun(launch, nested, preflight));
+        return store.publishAgentLaunch(registration.projectId,registration.locationId,launch,publicationCommit(request),options);
       }
       case 'read_run_state': {
         const project = await readProject(input);
@@ -902,8 +941,9 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
         return store.resolveRunConversationTurn(project.projectId, Number(input.executionLogId));
       }
       case 'patch_run_inputs': {
+        const commit=publicationCommit(request);
         const project = await runProject(input);
-        return store.patchRunInputs(project.projectId, input as unknown as Parameters<UnifiedDataStore['patchRunInputs']>[1]);
+        return store.publishRunInputs(project.projectId, input as unknown as Parameters<UnifiedDataStore['publishRunInputs']>[1],commit);
       }
       case 'list_run_states': {
         const project = input.projectId || input.root ? await runProject(input) : undefined;
@@ -916,19 +956,19 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       }
       case 'release_run_delivery': {
         const project = await runProject(input);
-        return store.releaseRunDelivery(project.projectId, input as unknown as Parameters<UnifiedDataStore['releaseRunDelivery']>[1]);
+        return store.publishRunControl(project.projectId,{type:'deliveryRelease',input:input as unknown as Parameters<UnifiedDataStore['releaseRunDelivery']>[1]},publicationCommit(request));
       }
       case 'claim_run_terminal_owner': {
         const project = await runProject(input);
-        return store.claimRunTerminalOwner(project.projectId, input as unknown as Parameters<UnifiedDataStore['claimRunTerminalOwner']>[1]);
+        return store.publishRunControl(project.projectId,{type:'terminalOwner',input:input as unknown as Parameters<UnifiedDataStore['claimRunTerminalOwner']>[1]},publicationCommit(request));
       }
       case 'patch_run_state': {
         const project = await runProject(input);
-        return store.patchRunState(project.projectId, input as unknown as Parameters<UnifiedDataStore['patchRunState']>[1]);
+        return store.publishRunControl(project.projectId,{type:'state',input:input as unknown as Parameters<UnifiedDataStore['patchRunState']>[1]},publicationCommit(request));
       }
       case 'claim_run_consumer': {
         const project = await runProject(input);
-        return store.claimRunConsumer(project.projectId, input as unknown as Parameters<UnifiedDataStore['claimRunConsumer']>[1]);
+        return store.publishRunConsumerClaim(project.projectId, input as unknown as Parameters<UnifiedDataStore['publishRunConsumerClaim']>[1],publicationCommit(request));
       }
       case 'release_run_consumer': {
         const project = await runProject(input);
@@ -937,7 +977,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       }
       case 'commit_run_settlement': {
         const project = await runProject(input);
-        return store.commitRunSettlement(project.projectId, input as unknown as Parameters<UnifiedDataStore['commitRunSettlement']>[1]);
+        return store.publishRunSettlement(project.projectId, input as unknown as Parameters<UnifiedDataStore['publishRunSettlement']>[1],publicationCommit(request));
       }
       case 'read_run_settlements': {
         const project = await readProject(input);
@@ -981,8 +1021,9 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       case 'begin_notification_delivery': return store.beginNotificationDelivery(input as unknown as Parameters<UnifiedDataStore['beginNotificationDelivery']>[0]);
       case 'settle_notification_delivery': return store.settleNotificationDelivery(input as unknown as Parameters<UnifiedDataStore['settleNotificationDelivery']>[0]);
       case 'append_automation_event': {
+        const commit=publicationCommit(request);
         const project = await runProject(input);
-        return store.appendAutomationEvent(project.projectId, input as unknown as Parameters<UnifiedDataStore['appendAutomationEvent']>[1]);
+        return store.publishAutomationEvent(project.projectId, input as unknown as Parameters<UnifiedDataStore['appendAutomationEvent']>[1],commit);
       }
       case 'prepare_automation_delivery': {
         const project = await runProject(input);
@@ -998,8 +1039,9 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       case 'register_automation_ui_owner': return store.registerAutomationUiOwner(input as unknown as Parameters<UnifiedDataStore['registerAutomationUiOwner']>[0]);
       case 'settle_automation_delivery': return store.settleAutomationDelivery(input as unknown as Parameters<UnifiedDataStore['settleAutomationDelivery']>[0]);
       case 'write_step_memory': {
+        const commit=publicationCommit(request);
         const project = await runProject(input);
-        return store.writeStepMemory(project.projectId, input as unknown as Parameters<UnifiedDataStore['writeStepMemory']>[1]);
+        return store.publishStepMemory(project.projectId, input as unknown as Parameters<UnifiedDataStore['writeStepMemory']>[1],commit);
       }
       case 'read_flow_trace': {
         const project = await readProject(input);
@@ -1007,7 +1049,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       }
       case 'write_flow_trace': {
         const project = await runProject(input);
-        return store.writeFlowTrace(project.projectId, input as unknown as Parameters<UnifiedDataStore['writeFlowTrace']>[1]);
+        return store.publishFlowTrace(project.projectId, input as unknown as Parameters<UnifiedDataStore['writeFlowTrace']>[1],publicationCommit(request));
       }
       case 'list_flow_traces': {
         const project = await readProject(input);
@@ -1033,25 +1075,25 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       }
       case 'claim_run': {
         const project = await runProject(input);
-        return store.claimRun(project.projectId, input as unknown as Parameters<UnifiedDataStore['claimRun']>[1]);
+        return store.publishRunControl(project.projectId,{type:'runClaim',input:input as unknown as Parameters<UnifiedDataStore['claimRun']>[1]},publicationCommit(request));
       }
       case 'claim_run_delivery': {
         const project = await runProject(input);
-        return store.claimRunDelivery(project.projectId, input as unknown as Parameters<UnifiedDataStore['claimRunDelivery']>[1]);
+        return store.publishRunControl(project.projectId,{type:'deliveryClaim',input:input as unknown as Parameters<UnifiedDataStore['claimRunDelivery']>[1]},publicationCommit(request));
       }
       case 'begin_run_delivery': {
         const project = await runProject(input);
-        return store.beginRunDelivery(project.projectId, input as unknown as Parameters<UnifiedDataStore['beginRunDelivery']>[1]);
+        return store.publishRunDeliveryStart(project.projectId,input as unknown as Parameters<UnifiedDataStore['beginRunDelivery']>[1],publicationCommit(request));
       }
       case 'stop_run': {
         const project = await runProject(input);
-        return runStops.stop(project.projectId, input as unknown as Parameters<RunStop['stop']>[1]);
+        return runStops.stop(project.projectId, input as unknown as Parameters<RunStop['stop']>[1],publicationCommit(request));
       }
       case 'write_run_binding': {
         observer?.phase('binding.resolve-project');
         const project = await runProject(input);
         observer?.phase('binding.commit');
-        const binding = store.writeRunBinding(project.projectId, input as unknown as Parameters<UnifiedDataStore['writeRunBinding']>[1]);
+        const binding = await store.publishRunControl(project.projectId,{type:'binding',input:input as unknown as Parameters<UnifiedDataStore['writeRunBinding']>[1]},publicationCommit(request));
         observer?.phase('binding.committed');
         return binding;
       }
@@ -1066,50 +1108,33 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       }
       case 'submit_run_report': {
         const project = await store.registerProject({ root: String(input.root || '') });
-        let availability = 'available';
-        let validationError = '';
-        let report = input.report;
-        try { report = validateTaskReport(input.report, String(input.root)); }
-        catch (error) { availability = 'invalid'; validationError = error instanceof Error ? error.message : String(error); }
-        return store.submitRunReport(project.projectId, { ...input, report, availability, validationError } as unknown as Parameters<UnifiedDataStore['submitRunReport']>[1]);
+        return store.publishRunReport(project.projectId,{...input,root:String(input.root)} as unknown as Parameters<UnifiedDataStore['publishRunReport']>[1],publicationCommit(request));
       }
       case 'record_claude_native_ready': {
         const project = await runProject(input);
-        const state = store.recordClaudeNativeReady(project.projectId, input as unknown as Parameters<UnifiedDataStore['recordClaudeNativeReady']>[1]);
-        return { ...state, claudeNativeResume: store.readClaudeNativeResume(project.projectId, Number(input.executionLogId)) };
+        return store.publishRunNative(project.projectId,{type:'ready',input:input as unknown as Parameters<UnifiedDataStore['recordClaudeNativeReady']>[1]},publicationCommit(request));
       }
       case 'record_claude_native_append': {
         const project = await runProject(input);
-        return store.recordClaudeNativeAppend(project.projectId, input as unknown as Parameters<UnifiedDataStore['recordClaudeNativeAppend']>[1]);
+        return store.publishRunNative(project.projectId,{type:'append',input:input as unknown as Parameters<UnifiedDataStore['recordClaudeNativeAppend']>[1]},publicationCommit(request));
       }
       case 'record_claude_native_event': {
         const project = await runProject(input);
-        const state = store.recordClaudeNativeEvent(project.projectId, input as unknown as Parameters<UnifiedDataStore['recordClaudeNativeEvent']>[1]);
+        const state = await store.publishRunNative(project.projectId,{type:'event',input:input as unknown as Parameters<UnifiedDataStore['recordClaudeNativeEvent']>[1]},publicationCommit(request));
         await new RunNativeObserver(store, workspaceCompute).observe(state);
-        return store.readRunState(project.projectId, Number(input.executionLogId));
+        return (await store.readRunContextPublication(project.projectId,{executionLogId:Number(input.executionLogId)})).state;
       }
       case 'checkpoint_run': {
         const project = await runProject(input);
-        const checkpoint = { ...input };
-        if (checkpoint.report !== undefined) checkpoint.reportIntent = checkpoint.report;
-        else delete checkpoint.reportIntent;
-        store.verifyRunExecutionProof(project.projectId, Number(input.executionLogId), Number(input.generation), String(input.proof || ''));
-        let state = store.readRunState(project.projectId, Number(input.executionLogId));
-        if (checkpoint.action === 'complete') {
-          checkpoint.reportAvailability = checkpoint.report === undefined ? 'missing' : 'available';
-          if (checkpoint.report !== undefined) {
-            try { checkpoint.report = validateTaskReport(checkpoint.report, String(input.root || state.status.workspaceRoot)); }
-            catch (error) { checkpoint.reportAvailability = 'invalid'; checkpoint.reportValidationError = error instanceof Error ? error.message : String(error); }
-          }
-        }
-        const replay = store.readRunCheckpointReplay(project.projectId, checkpoint as unknown as Parameters<UnifiedDataStore['checkpointRun']>[1]);
-        if (replay) return replay;
+        const inspected=await store.inspectRunCheckpointPublication(project.projectId,input as unknown as Parameters<UnifiedDataStore['checkpointRun']>[1],String(input.root || ''),true),checkpoint=inspected.input;
+        let state=inspected.state;
+        if(inspected.replay)return store.publishRunCheckpoint(project.projectId,checkpoint,publicationCommit(request));
         if ((checkpoint.action === 'session-close' || checkpoint.action === 'complete' && checkpoint.exitCode !== undefined && state.status.sessionProvider === 'claude')
           && state.status.interactiveSession && !state.status.interactiveSessionClosed) {
           if (state.revision !== Number(checkpoint.expectedRevision)) throw new Error('revision_conflict');
           if (checkpoint.expectedTurnId && checkpoint.expectedTurnId !== state.turnId) throw new Error('checkpoint_turn_conflict');
           await new RunNativeObserver(store, workspaceCompute).observe(state, false, checkpoint.exitCode as number | undefined);
-          state = store.readRunState(project.projectId, Number(input.executionLogId));
+          state = (await store.inspectRunCheckpointPublication(project.projectId,checkpoint)).state;
           if (checkpoint.action === 'complete' && checkpoint.report === undefined && state.status.nativeReplyObjectId
             && state.status.nativeOutputPending !== true && store.readMetadata(state.turnId).data.finished_at !== null
             && !store.runChildProcessAlive(project.projectId, Number(input.executionLogId))) return state;
@@ -1117,7 +1142,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
         }
         if (checkpoint.action === 'start' && state.status.nativeOutputPending === true) {
           await new RunNativeObserver(store, workspaceCompute).observe(state);
-          state = store.readRunState(project.projectId, Number(input.executionLogId));
+          state = (await store.inspectRunCheckpointPublication(project.projectId,checkpoint)).state;
           if (state.revision !== Number(checkpoint.expectedRevision)) throw new Error('revision_conflict');
         }
         if (checkpoint.action === 'start' && checkpoint.foregroundStart !== true) {
@@ -1128,22 +1153,23 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
           checkpoint.workspaceSnapshot = await workspaceCompute.snapshot(String(state.status.workspaceRoot));
         }
         if (checkpoint.action !== 'start') checkpoint.gitEvidence = await workspaceCompute.gitEvidence(String(state.status.workspaceRoot), String(state.status.baseGitHash || ''), checkpoint.workspaceSnapshot as WorkspaceSnapshot | undefined);
-        const result = store.checkpointRun(project.projectId, checkpoint as unknown as Parameters<UnifiedDataStore['checkpointRun']>[1]);
-        if (checkpoint.action === 'session-close') new RunNativeObserver(store, workspaceCompute).forget(result);
+        const result = await store.publishRunCheckpoint(project.projectId,checkpoint,publicationCommit(request));
+        if (checkpoint.action === 'session-close') await new RunNativeObserver(store, workspaceCompute).forget(result);
         return result;
       }
       case 'finalize_run_output': {
         const project = await runProject(input);
         const finalize = input as unknown as Parameters<UnifiedDataStore['finalizeRunOutput']>[1];
-        const replay = store.readRunOutputFinalizationReplay(project.projectId, finalize);
-        if (replay) return replay;
-        const state = store.readRunState(project.projectId, Number(input.executionLogId));
+        const inspected = await store.inspectRunOutputPublication(project.projectId, finalize);
+        if (inspected.replay) return store.publishRunOutput(project.projectId,finalize,publicationCommit(request));
+        const state = inspected.state;
         const workspaceSnapshot = await workspaceCompute.snapshot(String(state.status.workspaceRoot));
-        return store.finalizeRunOutput(project.projectId, { ...finalize, workspaceSnapshot, gitEvidence: await workspaceCompute.gitEvidence(String(state.status.workspaceRoot), String(state.status.baseGitHash || ''), workspaceSnapshot) });
+        return store.publishRunOutput(project.projectId, { ...finalize, workspaceSnapshot, gitEvidence: await workspaceCompute.gitEvidence(String(state.status.workspaceRoot), String(state.status.baseGitHash || ''), workspaceSnapshot) },publicationCommit(request));
       }
       case 'append_run_log': {
+        const commit=publicationCommit(request);
         const project = await runProject(input);
-        return store.appendRunLog(project.projectId, input as unknown as Parameters<UnifiedDataStore['appendRunLog']>[1]);
+        return store.publishRunLog(project.projectId, input as unknown as Parameters<UnifiedDataStore['appendRunLog']>[1],commit);
       }
       case 'read_run_log': {
         const project = await readProject(input);
@@ -1156,8 +1182,9 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
         return store.readRunLogHead(project.projectId, Number(input.executionLogId), String(input.stream || ''));
       }
       case 'write_run_document': {
+        const commit=publicationCommit(request);
         const project = await runProject(input);
-        return store.writeRunDocument(project.projectId, input as unknown as Parameters<UnifiedDataStore['writeRunDocument']>[1]);
+        return store.publishRunDocument(project.projectId, input as unknown as Parameters<UnifiedDataStore['writeRunDocument']>[1],commit);
       }
       case 'read_run_document': {
         const project = await readProject(input);
@@ -1205,15 +1232,16 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       case 'append_project_journal': {
         await initializeProjectJournalAllocation(store, String(input.root || ''));
         const project = await store.registerProject({ root: String(input.root || '') });
-        return store.appendProjectJournal(project.projectId, String(input.idempotencyKey || ''), input.entry as any, Number(input.executionLogId || 0), Number(input.minimumExecutionLogId || 1));
+        return store.publishAppendProjectJournal(project.projectId,String(input.idempotencyKey || ''),input.entry as any,
+          Number(input.executionLogId || 0),Number(input.minimumExecutionLogId || 1),publicationCommit(request));
       }
       case 'update_project_journal': {
         const project = await store.registerProject({ root: String(input.root || '') });
-        return store.updateProjectJournal(project.projectId, Number(input.executionLogId || 0), input as any);
+        return store.publishUpdateProjectJournal(project.projectId,Number(input.executionLogId || 0),input as any,publicationCommit(request));
       }
       case 'link_project_journal': {
         const project = await store.registerProject({ root: String(input.root || '') });
-        return store.linkProjectJournal(project.projectId, Number(input.executionLogId), String(input.nodeId || ''), String(input.linkedAt || ''));
+        return store.publishProjectJournalLink(project.projectId, Number(input.executionLogId), String(input.nodeId || ''), String(input.linkedAt || ''),publicationCommit(request));
       }
       case 'read_project_journal': {
         const project = await readProject(input);
@@ -1222,7 +1250,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       }
       case 'upsert_project_run_index': {
         const project = await store.registerProject({ root: String(input.root || '') });
-        store.upsertProjectRunIndex(project.projectId, input.record as any, input.files as any, input.signals as any); return { written: true };
+        await store.publishProjectRunIndex(project.projectId, input.record as any, input.files as any, input.signals as any,publicationCommit(request));
+        return { written: true };
       }
       case 'read_project_run_indexes': {
         const project = await readProject(input);
@@ -1281,15 +1310,15 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
           return store.readAnalysisState(project || null, String(input.namespace || ''), String(input.key || ''));
         }
         const project = input.root === undefined ? null : (await store.registerProject({ root: String(input.root) })).projectId;
-        return store.writeAnalysisState(project, input as unknown as Parameters<UnifiedDataStore['writeAnalysisState']>[1]);
+        return store.writeAnalysisState(project, input as unknown as Parameters<UnifiedDataStore['writeAnalysisState']>[1],publicationCommit(request));
       }
       case 'reserve_external_refresh': {
         const project = await store.registerProject({ root: String(input.root || '') });
-        return store.reserveExternalRefresh(project.projectId, String(input.key || ''), String(input.requestId || ''));
+        return store.reserveExternalRefresh(project.projectId, String(input.key || ''), String(input.requestId || ''),publicationCommit(request));
       }
       case 'commit_external_refresh': {
         const project = await store.registerProject({ root: String(input.root || '') });
-        return store.commitExternalRefresh(project.projectId, input as unknown as Parameters<UnifiedDataStore['commitExternalRefresh']>[1]);
+        return store.commitExternalRefresh(project.projectId, input as unknown as Parameters<UnifiedDataStore['commitExternalRefresh']>[1],publicationCommit(request));
       }
       case 'read_strategy_source_revision': {
         if (!Array.isArray(input.roots) || input.roots.some(root => typeof root !== 'string')) throw new Error('strategy_source_roots_required');
@@ -1306,13 +1335,14 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       }
       case 'write_strategy_state': {
         const project = input.root === undefined ? null : (await store.registerProject({ root: String(input.root) })).projectId;
-        return store.writeStrategyState(project, input as unknown as Parameters<UnifiedDataStore['writeStrategyState']>[1]);
+        return store.writeStrategyState(project, input as unknown as Parameters<UnifiedDataStore['writeStrategyState']>[1],publicationCommit(request));
       }
       case 'write_run_artifact': {
-        const root = String(input.root || ''); const project = await store.registerProject({ root }); store.writeRunArtifact(project.projectId, input as any);
+        const commit=publicationCommit(request);
+        const root = String(input.root || ''); const project = await store.registerProject({ root }); await store.publishRunArtifact(project.projectId, input as any,undefined,commit);
         if (typeof input.sourceKey === 'string') {
           const bytes = Buffer.from(String(input.bytes || ''), 'base64'); const identity = `agent-runs:${root}`;
-          store.captureMigrationSource({ identity, key: input.sourceKey, hash: String(input.hash || '') }, bytes, { mimeType: String(input.mimeType || 'application/octet-stream'), encoding: 'binary' });
+          await store.publishMigrationSource({ identity, key: input.sourceKey, hash: String(input.hash || '') }, bytes, { mimeType: String(input.mimeType || 'application/octet-stream'), encoding: 'binary' },commit);
         }
         return { written: true };
       }
@@ -1379,9 +1409,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       case 'list_intelligence_conversations': return store.listIntelligenceConversations(input as Parameters<UnifiedDataStore['listIntelligenceConversations']>[0]);
       case 'write_intelligence_conversation': {
         const result = store.writeIntelligenceConversation(input as unknown as Parameters<UnifiedDataStore['writeIntelligenceConversation']>[0]);
-        if (input.contextCheckpoint && store.hasDatabaseStorageCleanupCandidates()) {
-          void maintainDatabaseStorage(false, true).catch(() => undefined);
-        }
+        if (input.contextCheckpoint)wakeStorageMaintenance();
         return result;
       }
       case 'begin_legacy_intelligence_operation': return store.admitLegacyIntelligenceOperation(input as unknown as Parameters<UnifiedDataStore['admitLegacyIntelligenceOperation']>[0]);
@@ -1392,7 +1420,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       case 'write_legacy_intelligence_conversation': {
         const { operationId, ...writeInput } = input;
         const result = store.writeLegacyIntelligenceConversation(String(operationId || ''), writeInput as unknown as Parameters<UnifiedDataStore['writeIntelligenceConversation']>[0]);
-        if (writeInput.contextCheckpoint && store.hasDatabaseStorageCleanupCandidates()) void maintainDatabaseStorage(false, true).catch(() => undefined);
+        if (writeInput.contextCheckpoint)wakeStorageMaintenance();
         return result;
       }
       case 'claim_pi_execution_owner': {
@@ -1555,7 +1583,8 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
         if (failures.length) throw new Error(`recycling_items_retained:${failures.join(',')}`);
         return recycling.overview(scope);
       }
-      case 'write': return store.write(input as unknown as DataWrite);
+      case 'write': return publishRuntimeMutation(request);
+      case 'record_learning_delivery': throw new Error('mcp_session_required');
       case 'read': {
         const ref = normalizeObjectReference(input.ref);
         const revision = input.revision as number | undefined;
@@ -1572,7 +1601,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
         const session = authenticatedSession || (request.sessionToken ? sessions.get(request.sessionToken) : undefined);
         return store.search(input as unknown as Parameters<UnifiedDataStore['search']>[0], session?.kind === 'project' ? object => allowedRead(object, session) && canAgentDiscover(object) : undefined, session?.kind === 'project' ? agentObject : undefined);
       }
-      case 'link': return store.link(input as unknown as Parameters<UnifiedDataStore['link']>[0]);
+      case 'link': return publishRuntimeMutation(request);
       case 'context': {
         const session = authenticatedSession || (request.sessionToken ? sessions.get(request.sessionToken) : undefined);
         return store.context(input as unknown as Parameters<UnifiedDataStore['context']>[0], session?.kind === 'project' ? object => allowedRead(object, session) : undefined);
@@ -1595,10 +1624,13 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       case 'backfill_database_overview_projection': return store.backfillDatabaseOverviewProjectionBatch(Number(input.limit || 2_000));
       case 'read_database_overview': return store.readDatabaseOverview();
       case 'read_database_storage': return store.readDatabaseStorage();
-      case 'maintain_database_storage': return maintainDatabaseStorage(input.compact === true, input.automatic === true);
+      case 'maintain_database_storage': return input.compact === true && databaseGenerationExecutor ? execution.storageContinuations
+        ? afterStorageMaintenance(request) : databaseGenerationExecutor(request) : input.phase === 'lifecycle' || input.phase === undefined && input.automatic === true && input.compact !== true && store.usesStorageContentLifecycle()
+        ? store.maintainStorageLifecycleQuantum(Number(input.limit || 64),publicationCommit(request)) : input.phase === 'cold' ? store.maintainStorageColdQuantum(Number(input.limit || 64),publicationCommit(request)) : maintainDatabaseStorage(input.compact === true, input.automatic === true,publicationCommit(request));
       case 'restore_backup': return store.restoreBackup({ source: String(input.source || ''), destinationRoot: String(input.destinationRoot || ''), idempotencyKey: String(input.idempotencyKey || '') });
       case 'export_project': return store.exportProject(input as unknown as Parameters<UnifiedDataStore['exportProject']>[0]);
-      case 'import_project': return store.importProject(input as unknown as Parameters<UnifiedDataStore['importProject']>[0]);
+      case 'import_project': return databaseGenerationExecutor ? execution.storageContinuations
+        ? afterStorageMaintenance(request) : databaseGenerationExecutor(request) : store.importProject(input as unknown as Parameters<UnifiedDataStore['importProject']>[0]);
       default: throw new Error(`unknown_data_operation:${request.operation}`);
     }
   };
@@ -1620,63 +1652,49 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
     const session = sessions.get(request.sessionToken) || verifyReadAuthority(request);
     if (!session) throw new Error('mcp_session_expired');
     const input = request.input;
+    if (request.operation === 'record_learning_delivery') {
+      if (!session.runIdentity) throw new Error('action_denied');
+      store.authorizeMcpAction(session.actorId, session.scope, 'read');
+      const state = store.authorizedRunState(session.scope, session.runIdentity);
+      const receipt = verifyLearningDelivery(String(input.receipt || ''), deliverySecret);
+      if (receipt.sessionToken !== request.sessionToken || receipt.actorId !== session.actorId || receipt.projectId !== session.scope || receipt.runId !== state.runId || receipt.turnId !== state.turnId) throw new Error('learning_delivery_scope_mismatch');
+      if (store.readMetadata(state.turnId).data.finished_at != null) throw new Error('learning_delivery_turn_closed');
+      if (JSON.stringify(receipt.piToolFence || null) !== JSON.stringify(request.piToolFence || null)) throw new Error('learning_delivery_invocation_mismatch');
+      const offset = Number(input.offset || 0);
+      if (!Number.isSafeInteger(offset) || offset < 0 || offset >= receipt.lessons.length) throw new Error('learning_delivery_page_invalid');
+      const refs = receipt.lessons.slice(offset, offset + 20);
+      for (const ref of refs) {
+        const current = store.readMetadata(ref.objectId);
+        if (!allowedRead(current, session) || current.kind !== 'lesson' || current.data.status !== 'approved' || current.revision !== ref.revision) throw new Error('learning_delivery_source_changed');
+      }
+      return store.recordLearningDelivery(state, refs);
+    }
     if (request.operation === 'checkpoint_current_run') {
       if (!session.runIdentity) throw new Error('action_denied');
-      const bound = store.authorizedRunState(session.scope, session.runIdentity);
-      const action = String(input.action || '');
-      if (!['start', 'complete'].includes(action)) throw new Error('invalid_checkpoint_action');
-      if (bound.status.interactiveSession === true) {
-        if (String(input.turnId || '') !== bound.turnId) throw new Error('checkpoint_turn_conflict');
-        if (String(input.interactionId || '') !== String(bound.status.interactionId || '')) throw new Error('checkpoint_interaction_conflict');
-      }
-      const recordTaskIngress = (state: import('./runLifecycleTypes').RunState): import('./runLifecycleTypes').RunState => {
-        const observedAt = new Date().toISOString();
-        const patch = taskIngressReceiptFields(state.status, {
-          provider: String(state.status.sessionProvider || 'unknown'),
-          kind: 'mcp_task_start',
-          nativeTurnId: String(state.status.codexNativeTurnId || state.status.claudeNativeTurnId || state.turnId),
-          sessionId: String(state.status.nativeSessionId || state.status.plannedNativeSessionId || state.runId),
-          providerStartedAt: observedAt,
-          observedAt
-        });
-        const diagnostic = taskIngressDiagnosticEvent(state.status, patch,
-          `run:${state.runId}:${state.generation}:mcp-ingress-diagnostic:${String(state.status.interactionId || state.turnId)}`);
+      const prepared=await store.prepareCurrentRunCheckpointPublication(session.scope,session.runIdentity,input);
+      const recordTaskIngress = async (state: import('./runLifecycleTypes').RunState): Promise<import('./runLifecycleTypes').RunState> => {
+        const {patch,key,diagnostic}=await store.prepareRunTaskIngressPublication(state);
         if (!Object.keys(patch).length) {
-          if (diagnostic) store.appendDiagnosticEvent(diagnostic);
+          if (diagnostic) await store.publishDiagnosticEvent(diagnostic,publicationCommit(request));
           return state;
         }
-        const updated = store.patchRunState(session.scope, {
+        const updated = await store.publishRunControl(session.scope,{type:'state',input:{
           executionLogId: session.runIdentity!.executionLogId,
           generation: session.runIdentity!.generation,
           expectedRevision: state.revision,
           patch,
-          idempotencyKey: `run:${state.runId}:${state.generation}:task-ingress:${String(state.status.interactionId || state.turnId)}`
-        });
-        if (diagnostic) store.appendDiagnosticEvent(diagnostic);
-        return updated;
+          idempotencyKey:key
+        }},publicationCommit(request));
+        if (diagnostic) await store.publishDiagnosticEvent(diagnostic,publicationCommit(request));
+        return updated as import('./runLifecycleTypes').RunState;
       };
-      if (action === 'start' && ['Running', 'Turn Started'].includes(String(bound.status.status)) && String(bound.status.checkpointEventId || '').endsWith(':start')) return recordTaskIngress(bound);
-      const payload = {
-        action,
-        ...(input.message === undefined ? {} : { message: String(input.message) }),
-        ...(input.outcome === undefined ? {} : { outcome: String(input.outcome) }),
-        ...(input.summary === undefined ? {} : { summary: String(input.summary) }),
-        ...(input.next === undefined ? {} : { next: String(input.next) }),
-        ...(input.report === undefined ? {} : { report: input.report })
-      };
-      const intentHash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
-      const sequenceKey = action === 'start' ? `:${bound.status.checkpointSequence}` : '';
-      const result = await dispatch({ operation: 'checkpoint_run', input: {
+      if(prepared.ingressOnly)return recordTaskIngress(prepared.state);
+      if(!prepared.input)throw new Error('run_checkpoint_input_missing');
+      const result = await dispatch({ operation: 'checkpoint_run',...(request.piToolFence?{piToolFence:{...request.piToolFence}}:{}),input: {
         projectId: session.scope,
-        executionLogId: session.runIdentity.executionLogId,
-        generation: session.runIdentity.generation,
-        proof: session.runIdentity.proof,
-        expectedRevision: bound.revision,
-        expectedTurnId: bound.turnId,
-        ...payload,
-        idempotencyKey: `mcp-conversation:${bound.runId}:${bound.turnId}${sequenceKey}:${intentHash}`
+        ...prepared.input
       } }) as import('./runLifecycleTypes').RunState;
-      return action === 'start' ? recordTaskIngress(result) : result;
+      return prepared.input.action === 'start' ? recordTaskIngress(result) : result;
     }
     if (session.migrationKind) {
       if (!session.runIdentity) throw new Error('action_denied');
@@ -1822,10 +1840,7 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
     }
     if (!['write', 'read', 'search', 'link', 'context', 'export'].includes(request.operation)) throw new Error('action_denied');
     if (request.operation === 'write' || request.operation === 'link') {
-      const applied = preparePiMutation(request, session);
-      return store.withActor(session.actorId, () => applied.operation === 'write'
-        ? store.write(applied.input as unknown as DataWrite)
-        : store.link(applied.input as unknown as Parameters<UnifiedDataStore['link']>[0]));
+      return publishRuntimeMutation(request);
     }
     store.authorizeMcpAction(session.actorId, session.scope, request.operation);
     if (session.runIdentity) store.authorizedLearningReviewBatch(session.scope, session.runIdentity);
@@ -1835,62 +1850,79 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       if (input[key] && !allowedRead(store.readMetadata(normalizeObjectReference(input[key])), session)) throw new Error('scope_denied');
     }
     return store.withActor(session.actorId, async () => {
+      const sourceState = session.runIdentity && ['read', 'context'].includes(request.operation) ? store.authorizedRunState(session.scope, session.runIdentity) : null;
       const result = await dispatch(request, session);
+      const delivered = (value: unknown, objects: DataObject[]): unknown => {
+        if (!session.runIdentity) return value;
+        const lessons = objects.filter(item => {
+          if (item.kind !== 'lesson' || item.data.status !== 'approved') return false;
+          const current = store.readMetadata(item.objectId);
+          return current.archivedAt === null && current.data.status === 'approved' && current.revision === item.revision && allowedRead(current, session);
+        })
+          .map(item => ({ objectId: item.objectId, revision: item.revision }));
+        if (!lessons.length) return value;
+        const state = store.authorizedRunState(session.scope, session.runIdentity);
+        if (!sourceState || sourceState.runId !== state.runId || sourceState.turnId !== state.turnId || sourceState.generation !== state.generation) return value;
+        if (store.readMetadata(state.turnId).data.finished_at != null) return value;
+        return { ...(value as Record<string, unknown>), __solomapLearningDelivery: signLearningDelivery({ sessionToken: request.sessionToken!, actorId: session.actorId, projectId: session.scope, runId: state.runId, turnId: state.turnId, lessons, ...(request.piToolFence ? { piToolFence: request.piToolFence } : {}) }, deliverySecret) };
+      };
       if (request.operation === 'read') {
         const value = result as DataObject | { object: DataObject };
         if (!allowedRead('object' in value ? value.object : value, session)) throw new Error('scope_denied');
-        return 'object' in value ? { ...value, object: agentObject(value.object) } : agentObject(value);
+        return delivered('object' in value ? { ...value, object: agentObject(value.object) } : agentObject(value), 'object' in value ? [] : [value]);
       }
       if (request.operation === 'context') {
         const context = result as { items: DataObject[] };
-        return { ...context, items: context.items.filter(item => allowedRead(item, session)) };
+        const items = context.items.filter(item => allowedRead(item, session));
+        return delivered({ ...context, items }, items);
       }
       return result;
     });
   };
-  const setIntelligenceTimeSchedule = (input: Record<string, unknown>): Record<string, unknown> => {
-    const projectPath = String(input.projectPath || '');
-    const projectName = String(input.projectName || '').trim();
-    if (!path.isAbsolute(projectPath) || !projectName || projectName.length > 1024) throw new Error('project_scope_denied');
-    const registered = store.existingRegisteredProjectScopes().find(candidate => samePhysicalRoot(candidate.root, projectPath));
-    if (!registered) throw new Error('project_scope_denied');
-    return setIntelligenceTimeScheduleInDatabaseSync({ name: projectName, path: path.resolve(registered.root) },
-      input as unknown as Parameters<typeof setIntelligenceTimeScheduleInDatabaseSync>[1], (operation, nestedInput) => {
-        switch (operation) {
-          case 'read_host_settings': return store.readHostSettings(nestedInput as Parameters<UnifiedDataStore['readHostSettings']>[0]);
-          case 'patch_host_settings': return store.patchHostSettings(nestedInput as unknown as Parameters<UnifiedDataStore['patchHostSettings']>[0]);
-          case 'read_schedule_ledger': return store.readScheduleLedger(nestedInput as Parameters<UnifiedDataStore['readScheduleLedger']>[0]);
-          case 'read_schedule_sync_state': return store.readScheduleSyncState();
-          case 'sync_schedules': return store.syncSchedules(nestedInput as unknown as Parameters<UnifiedDataStore['syncSchedules']>[0]);
-          default: throw new Error('invalid_time_schedule_operation');
-        }
-      });
-  };
-  const executeSynchronousPiMutation = (request: RuntimeDataRequest): unknown => {
-    const session = request.sessionToken ? sessions.get(request.sessionToken) : undefined;
-    if (!['write', 'link'].includes(request.operation)) throw new Error('pi_sync_mutation_required');
-    const input = request.input;
-    if (!request.sessionToken) return request.operation === 'write'
-      ? store.write(input as unknown as DataWrite)
-      : store.link(input as unknown as Parameters<UnifiedDataStore['link']>[0]);
-    if (!session || session.kind !== 'project') throw new Error('invalid_session');
-    const applied = preparePiMutation(request, session);
-    return store.withActor(session.actorId, () => applied.operation === 'write'
-      ? store.write(applied.input as unknown as DataWrite)
-      : store.link(applied.input as unknown as Parameters<UnifiedDataStore['link']>[0]));
-  };
-  const operations = async (request: RuntimeDataRequest): Promise<unknown> => {
+  const performOperation = async (request: RuntimeDataRequest): Promise<unknown> => {
     if (request.operation === 'set_intelligence_time_schedule') {
       if (!request.piToolFence) throw new Error('pi_tool_invocation_fenced');
-      return store.withPiToolInvocationFenceSync(request.piToolFence.operationId, request.piToolFence.invocationId, {
-        ownerId: request.piToolFence.ownerId, generation: request.piToolFence.ownerGeneration
-      }, () => setIntelligenceTimeSchedule(request.input));
+      const { operationId, invocationId, ownerId, ownerGeneration } = request.piToolFence;
+      return store.publishPiTimeSchedule(request.input, { operationId, invocationId, owner: { ownerId, generation: ownerGeneration } });
     }
     if (!request.piToolFence || request.operation === 'start_conversation') return executeOperation(request);
+    if(request.operation==='write' || request.operation==='link')return publishRuntimeMutation(request,true);
     const owner = { ownerId: request.piToolFence.ownerId, generation: request.piToolFence.ownerGeneration };
-    return ['write', 'link'].includes(request.operation)
-      ? store.withPiToolInvocationFenceSync(request.piToolFence.operationId, request.piToolFence.invocationId, owner, () => executeSynchronousPiMutation(request))
-      : store.withPiToolInvocationGuard(request.piToolFence.operationId, request.piToolFence.invocationId, owner, () => executeOperation(request));
+    return store.withPiToolInvocationGuard(request.piToolFence.operationId, request.piToolFence.invocationId, owner, () => executeOperation(request));
+  };
+  const operations = async (request:RuntimeDataRequest):Promise<unknown> => {
+    if(!recyclingProjectScopeOperations.has(request.operation))return performOperation(request);
+    const plan=store.createRecyclingProjectScopePlan();
+    let resolveDone!:()=>void;const done=new Promise<void>(resolve=>{resolveDone=resolve;});
+    recyclingScopeFlights.add(done);recyclingScopeRevision++;
+    let outcome:{failed:boolean;value:unknown}|undefined;
+    const cleanup=():unknown=>{
+      if(store.releaseRecyclingProjectScopePlanBatch(plan,128))return continueRuntimeWork(async()=>cleanup());
+      recyclingScopeFlights.delete(done);resolveDone();
+      if(outcome!.failed)throw outcome!.value;
+      return outcome!.value;
+    };
+    const advance=async():Promise<unknown>=>{
+      try{outcome={failed:false,value:await store.withRecyclingProjectScopePlan(plan,()=>performOperation(request))};}
+      catch(error){
+        if(error instanceof RecyclingProjectScopePending)return continueRuntimeWork(async()=>{
+          try{await store.prepareRecyclingProjectScope(plan,error.candidate);}
+          catch(preparationError){outcome={failed:true,value:preparationError};return cleanup();}
+          return continueRuntimeWork(advance);
+        });
+        outcome={failed:true,value:error};
+      }
+      return cleanup();
+    };
+    const initial=await advance();
+    if(execution.storageContinuations || !readRuntimeWorkContinuation(initial))return initial;
+    standaloneStorageScheduler ||= new RuntimeExecutionScheduler();
+    let admitted=false;
+    try{return await standaloneStorageScheduler.submit('maintenance',async()=>{admitted=true;return initial;},{label:`standalone:${request.operation}`});}
+    catch(error){
+      if(!admitted){store.releaseRecyclingProjectScopePlanBatch(plan,128);recyclingScopeFlights.delete(done);resolveDone();}
+      throw error;
+    }
   };
   return Object.assign(operations, {
     setStorageMaintenanceBarrier: (barrier: Promise<unknown>) => { storageMaintenanceBarrier = barrier; },
@@ -1902,10 +1934,12 @@ export function createRuntimeDataOperations(store: UnifiedDataStore, workspaceCo
       runStops.interrupt();
       await intelligenceRuntime?.close();
       await storageMaintenanceTail;
+      await Promise.all(recyclingScopeFlights);
+      await store.waitForStorageLifecycle();
       await runs.close();
       await migrations.close();
     },
-    close: async () => { await intelligenceRuntime?.close(); await storageMaintenanceTail; await runs.close(); await migrations.close(); }
+    close: async () => { await intelligenceRuntime?.close(); await storageMaintenanceTail;await Promise.all(recyclingScopeFlights); await store.waitForStorageLifecycle(); await runs.close(); await migrations.close(); }
   });
 }
 
@@ -1966,8 +2000,17 @@ export function runtimeMcpSource(globalDataPath: string, scope: string | null, g
       }
       const attempted = session!;
       try {
-        return await transport({ operation, input, sessionToken: attempted.sessionToken,
+        const result = await transport({ operation, input, sessionToken: attempted.sessionToken,
           ...(attempted.readAuthority ? { readAuthority: attempted.readAuthority } : {}), ...(piToolFence ? { piToolFence } : {}) });
+        if (result && typeof result === 'object' && '__solomapLearningDelivery' in result) {
+          const { __solomapLearningDelivery, ...body } = result as Record<string, unknown>;
+          const payload = JSON.parse(Buffer.from(String(__solomapLearningDelivery).split('.')[0], 'base64url').toString('utf8')) as { lessons: unknown[] };
+          for (let offset = 0; offset < payload.lessons.length; offset += 20) {
+            await transport({ operation: 'record_learning_delivery', input: { receipt: __solomapLearningDelivery, offset }, sessionToken: attempted.sessionToken, ...(piToolFence ? { piToolFence } : {}) });
+          }
+          return body;
+        }
+        return result;
       } catch (error) {
         const decision = retryOperation(error, operation, input);
         if (!decision.retry || Date.now() >= deadline) throw error;

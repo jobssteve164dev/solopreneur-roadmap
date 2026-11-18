@@ -6,6 +6,7 @@ const path = require('node:path');
 const { openAnalysisOwner } = require('./analysis-fixture.js');
 const { queryGrowthReports, readRegisteredProjectSources } = require('../out/growthReports.js');
 const { collectGithubEvidence } = require('../out/learningReview.js');
+const { submitRunReportNative } = require('./fixtures/native-run-report-oracles.cjs');
 
 async function fixture(t) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-native-reports-'));
@@ -13,7 +14,7 @@ async function fixture(t) {
   const project = path.join(base, 'project'); fs.mkdirSync(project);
   const owner = await openAnalysisOwner(t, root, [{ path: project, name: 'Reports' }]);
   const projectId = owner.projectIds.get(project);
-  const prepared = owner.store.prepareRun(projectId, (await owner.store.registerProject({ root: project })).locationId, {
+  const prepared = await owner.store.prepareRun(projectId, (await owner.store.registerProject({ root: project })).locationId, {
     root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '完整提示', command: 'codex',
     userMessage: '完整原始需求' + '甲'.repeat(500), idempotencyKey: 'native-report-run'
   });
@@ -22,7 +23,7 @@ async function fixture(t) {
 
 test('ordinary report consumers resolve the current project database when no data-root argument is supplied', async t => {
   const f = await fixture(t);
-  submit(f, '正式完整报告', 'default-root-native-report');
+  await submit(f, '正式完整报告', 'default-root-native-report');
   const page = await queryGrowthReports(f.project, f.extension, {});
   assert.equal(page.tasks.length, 1, 'omitting the optional root must use the authoritative project database rather than legacy files');
   assert.equal(page.tasks[0].summary, '正式完整报告');
@@ -34,7 +35,7 @@ test('ordinary report consumers resolve the current project database when no dat
 
 test('native report identity stays canonical through the real verify action and GitHub trailer matching', async t => {
   const f = await fixture(t);
-  submit(f, '等待验证的正式报告', 'canonical-report-task');
+  await submit(f, '等待验证的正式报告', 'canonical-report-task');
   const taskId = `task-${f.prepared.taskId}`;
   const sources = await readRegisteredProjectSources(f.project, f.extension, f.root);
   assert.equal(sources.tasks[0].taskId, taskId);
@@ -74,8 +75,8 @@ test('native report identity stays canonical through the real verify action and 
 
 test('default report reads preserve native fixed versions and ignore a conflicting legacy report directory', async t => {
   const f = await fixture(t);
-  const first = submit(f, '库中原始全文', 'default-root-first');
-  submit(f, '库中后续完整报告', 'default-root-next');
+  const first = await submit(f, '库中原始全文', 'default-root-first');
+  await submit(f, '库中后续完整报告', 'default-root-next');
   const { registerLearningTask, writeLearningJson } = require('./fixtures/legacy-task-report.cjs');
   const runDir = path.join(f.project, '.solopreneur', 'agent-runs', '__solo__', '1');
   const taskId = registerLearningTask(f.project, { executionLogId: 1, runDir, userMessage: '旧源不得覆盖新权威', startedAt: '' });
@@ -89,9 +90,13 @@ test('default report reads preserve native fixed versions and ignore a conflicti
   assert.equal(f.store.read(first.objectId, first.revision).data.summary, '库中原始全文');
 });
 
+function reportInput(f, summary, key) {
+  return { executionLogId: 1, generation: f.prepared.generation, turnId: f.prepared.turnId,
+    report: { summary, unmetRequirements: ['尚需验收'], decisions: ['完整决策' + '乙'.repeat(10000)] }, availability: 'available', idempotencyKey: key };
+}
+
 function submit(f, summary, key) {
-  return f.store.submitRunReport(f.projectId, { executionLogId: 1, generation: f.prepared.generation, turnId: f.prepared.turnId,
-    report: { summary, unmetRequirements: ['尚需验收'], decisions: ['完整决策' + '乙'.repeat(10000)] }, availability: 'available', idempotencyKey: key });
+  return f.store.submitRunReport(f.projectId, reportInput(f, summary, key));
 }
 
 async function continueReport(f, taskId, turnId, executionLogId) {
@@ -143,7 +148,7 @@ async function archiveReport(f, receipt, key) {
 }
 
 test('an archived report leaves ordinary results while its pinned full version remains readable', async t => {
-  const f = await fixture(t); const receipt = submit(f, '已经归档的结果', 'archive-single');
+  const f = await fixture(t); const receipt = await submit(f, '已经归档的结果', 'archive-single');
   await archiveReport(f, receipt, 'archive-single-host');
   const detail = await queryGrowthReports(f.project, f.extension, { taskId: `task-${f.prepared.taskId}` }, f.root);
   assert.equal(detail.turns.length, 0, 'archived material must leave ordinary results and actions');
@@ -156,7 +161,7 @@ test('an archived report leaves ordinary results while its pinned full version r
 });
 
 test('a stale revision cannot archive the authoritative report head', async t => {
-  const f = await fixture(t); const a = submit(f, '较早版本甲', 'archive-old-a'); submit(f, '仍然有效的乙', 'archive-old-b');
+  const f = await fixture(t); const a = await submit(f, '较早版本甲', 'archive-old-a'); await submit(f, '仍然有效的乙', 'archive-old-b');
   await assert.rejects(archiveReport(f, a, 'archive-old-a-host'), /revision_conflict/);
   const detail = await queryGrowthReports(f.project, f.extension, { taskId: `task-${f.prepared.taskId}` }, f.root);
   assert.equal(detail.tasks[0].latestSummary, '仍然有效的乙');
@@ -168,9 +173,9 @@ test('a stale revision cannot archive the authoritative report head', async t =>
 });
 
 test('archiving the report head withdraws ordinary actions while all fixed revisions stay readable', async t => {
-  const f = await fixture(t); submit(f, '保留的历史甲', 'archive-new-a'); const b = submit(f, '撤出的当前乙', 'archive-new-b');
+  const f = await fixture(t); await submit(f, '保留的历史甲', 'archive-new-a'); const b = await submit(f, '撤出的当前乙', 'archive-new-b');
   await archiveReport(f, b, 'archive-new-b-host');
-  const late = submit(f, '归档后的迟到结果丙', 'archive-late-c');
+  const late = await submit(f, '归档后的迟到结果丙', 'archive-late-c');
   assert.equal(late.objectId, b.objectId, 'late intake must not create a second report authority after archive');
   const detail = await queryGrowthReports(f.project, f.extension, { taskId: `task-${f.prepared.taskId}` }, f.root);
   assert.equal(detail.tasks[0].latestSummary, '');
@@ -180,7 +185,7 @@ test('archiving the report head withdraws ordinary actions while all fixed revis
 });
 
 test('the real work-report continue action uses the native execution identity', async t => {
-  const f = await fixture(t); submit(f, '可继续处理的汇报', 'continue-native');
+  const f = await fixture(t); await submit(f, '可继续处理的汇报', 'continue-native');
   await continueReport(f, `task-${f.prepared.taskId}`, f.prepared.turnId, 1);
 });
 
@@ -193,7 +198,7 @@ test('the schema upgrade backfills older report indexes without replacing a late
     Date.now = () => timestamp;
     // Model retained pre-index revisions with the actual mutation, content and audit store.
     f.store.indexReportRevision = () => {};
-    receipt = submit(f, '旧提交', 'before-version-index');
+    receipt = await submit(f, '旧提交', 'before-version-index');
     f.store.indexReportRevision = index;
     f.store.write({ kind: 'report', action: 'patch', scope: f.projectId, objectId: receipt.objectId, expectedRevision: 1,
       idempotencyKey: 'after-version-index', data: { content: { summary: '新提交', unmetRequirements: [] } } });
@@ -223,7 +228,7 @@ test('the schema upgrade backfills older report indexes without replacing a late
 });
 
 test('report ordering seeks the exact revision event instead of every event for each version', async t => {
-  const f = await fixture(t); const receipt = submit(f, '版本0', 'order-seek-first');
+  const f = await fixture(t); const receipt = await submit(f, '版本0', 'order-seek-first');
   for (let revision = 1; revision < 100; revision++) f.store.write({ kind: 'report', action: 'patch', scope: f.projectId,
     objectId: receipt.objectId, expectedRevision: revision, idempotencyKey: `order-seek-${revision}`, data: { content: { summary: `版本${revision}` } } });
   const original = f.store.rows.bind(f.store); let query;
@@ -260,14 +265,14 @@ test('history replay retains proven execution bindings when only the old run dir
   assert.ok(updated.sourceRevision > revision, 'a newly proven binding publishes a new source generation');
   const bytes = fs.readFileSync(path.join(sourceRoot, 'learning-tasks', `${taskId}.json`));
   const source = { identity: `agent-runs:${f.project}`, key: `learning-tasks/${taskId}.json`, hash: require('node:crypto').createHash('sha256').update(bytes).digest('hex') };
-  assert.throws(() => f.store.importRegisteredReportTask(f.projectId, source, bytes, {
+  await assert.rejects(f.store.importRegisteredReportTask(f.projectId, source, bytes, {
     taskId, userMessage: '旧任务继续', startedAt: '', executions: [{ id: 71, nodeId: 'another-node' }]
   }), /legacy_task_execution_conflict/);
   assert.equal(f.store.reportSourceRevision(f.projectId), updated.sourceRevision, 'conflicting identity changes roll back');
 });
 
 test('retained valid report material remains actionable after a later invalid receipt', async t => {
-  const f = await fixture(t); const receipt = submit(f, '上次有效材料', 'valid-before-invalid');
+  const f = await fixture(t); const receipt = await submit(f, '上次有效材料', 'valid-before-invalid');
   f.store.write({ kind: 'report', action: 'patch', scope: f.projectId, objectId: receipt.objectId, expectedRevision: 1,
     idempotencyKey: 'invalid-after-valid', data: { availability: 'invalid', validation_error: 'bad_json', content: 'null' } });
   const sources = await readRegisteredProjectSources(f.project, f.extension, f.root);
@@ -277,7 +282,7 @@ test('retained valid report material remains actionable after a later invalid re
 
 test('work reports read native tasks and all report versions without legacy task directories', async t => {
   const f = await fixture(t);
-  const first = submit(f, '第一版', 'first'); submit(f, '第二版', 'second'); submit(f, '第一版', 'third');
+  const first = await submit(f, '第一版', 'first'); await submit(f, '第二版', 'second'); await submit(f, '第一版', 'third');
   const page = await queryGrowthReports(f.project, f.extension, {}, f.root);
   assert.equal(page.tasks.length, 1, 'a submitted native task must appear in work reports');
   assert.equal(page.tasks[0].taskId, `task-${f.prepared.taskId}`); assert.equal(page.tasks[0].unmet, true);
@@ -293,7 +298,7 @@ test('work reports read native tasks and all report versions without legacy task
 });
 
 test('ordinary report lists decode no full bodies and generic report patches retain pinned versions', async t => {
-  const f = await fixture(t); const receipt = submit(f, '原始', 'original');
+  const f = await fixture(t); const receipt = await submit(f, '原始', 'original');
   f.store.write({ kind: 'report', action: 'patch', scope: f.projectId, objectId: receipt.objectId, expectedRevision: 1,
     idempotencyKey: 'report-patch', data: { content: { summary: '修订', unmetRequirements: [], lessons: ['全文' + '丙'.repeat(20000)] } } });
   const originalDecode = f.store.decodedContent.bind(f.store); let decodes = 0;
@@ -317,8 +322,8 @@ test('ordinary report lists decode no full bodies and generic report patches ret
 test('report retry rejects a changed availability intent rather than replaying a different receipt', async t => {
   const f = await fixture(t);
   const input = { executionLogId: 1, generation: f.prepared.generation, turnId: f.prepared.turnId, report: null, availability: 'missing', idempotencyKey: 'same-report-intent' };
-  f.store.submitRunReport(f.projectId, input);
-  assert.throws(() => f.store.submitRunReport(f.projectId, { ...input, availability: 'invalid', validationError: 'bad json' }), /idempotency_conflict/);
+  await f.store.submitRunReport(f.projectId, input);
+  await assert.rejects(f.store.submitRunReport(f.projectId, { ...input, availability: 'invalid', validationError: 'bad json' }), /idempotency_conflict/);
 });
 
 test('explicit history migration preserves registered report versions and unknown start times', async t => {
@@ -347,11 +352,11 @@ test('explicit history migration preserves registered report versions and unknow
 });
 
 test('a report changed while the overview loads is re-read before publishing the page', async t => {
-  const f = await fixture(t); submit(f, '过时结果', 'late-old');
+  const f = await fixture(t); await submit(f, '过时结果', 'late-old');
   const readSources = f.store.readRegisteredReportSourcePage.bind(f.store); let changed = false;
   f.store.readRegisteredReportSourcePage = (...args) => {
     const value = readSources(...args);
-    if (!changed) { changed = true; queueMicrotask(() => submit(f, '当前结果', 'late-new')); }
+    if (!changed) { changed = true; queueMicrotask(() => submitRunReportNative(f.store, f.projectId, reportInput(f, '当前结果', 'late-new'))); }
     return value;
   };
   const page = await queryGrowthReports(f.project, f.extension, {}, f.root);
@@ -360,6 +365,7 @@ test('a report changed while the overview loads is re-read before publishing the
 
 test('GitHub verification retains partial facts in native evidence and leaves no learning-evidence files', async t => {
   const f = await fixture(t); const { collectGithubEvidence } = require('../out/learningReview.js');
+const { submitRunReportNative } = require('./fixtures/native-run-report-oracles.cjs');
   const taskId = `task-${f.prepared.taskId}`; const sha = 'e'.repeat(40); let offline = false;
   const input = { projectPath: f.project, globalDataPath: f.root, repository: 'owner/repo', tasks: [{ taskId, startedAt: '2026-09-01' }], reports: [], api: async endpoint => {
     if (endpoint.includes('/commits?')) return [{ sha, commit: { message: `fix: native\n\nSoloMap-Task: ${taskId}` } }];

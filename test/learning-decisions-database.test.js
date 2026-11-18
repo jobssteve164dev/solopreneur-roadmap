@@ -8,7 +8,7 @@ const { DiskDatabase } = require('../out/db/diskDatabase.js');
 const { unifiedSchemaSql } = require('../out/db/unifiedSchema.js');
 const { unifiedSchemaMigrations } = require('../out/db/unifiedSchemaMigrations.js');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations, runtimeMcpSource } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations, runtimeMcpSource } = require('./runtime-data-fixture.cjs');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const { readLearningOverview } = require('../out/learningLedger.js');
 

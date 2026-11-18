@@ -1,7 +1,7 @@
 import * as crypto from 'crypto';
 import { IntelligenceTimeScheduleInput, validateIntelligenceTimeScheduleInput } from './intelligenceMcp';
 import { SolomapScheduledAutomationTask } from './pluginContracts';
-import { occurrenceForTask, readScheduledTasksById, syncScheduledTaskDatabase } from './scheduledTaskLedger';
+import { occurrenceForTask, readScheduledTasksById, scheduleOccurrenceValidUntil, syncScheduledTaskDatabase } from './scheduledTaskLedger';
 
 type Operation = (operation: string, input: Record<string, unknown>) => Promise<unknown>;
 type SynchronousOperation = (operation: string, input: Record<string, unknown>) => unknown;
@@ -58,10 +58,12 @@ export async function setIntelligenceTimeScheduleInDatabase(globalDataPath: stri
     ...(task.scheduledAt ? { scheduledAt: task.scheduledAt } : {}), ...(task.timeOfDay ? { timeOfDay: task.timeOfDay } : {}), assignee: task.assignee };
 }
 
-/** Native Pi tool path: the caller holds one SQLite writer transaction for this entire synchronous function. */
-export function setIntelligenceTimeScheduleInDatabaseSync(project: Project, raw: IntelligenceTimeScheduleInput, operation: SynchronousOperation): Record<string, unknown> {
-  const input = validateIntelligenceTimeScheduleInput(raw);
+/** Plans the database steps of the fenced Pi tool in their original order. */
+export function setIntelligenceTimeScheduleInDatabaseSync(project: Project, raw: IntelligenceTimeScheduleInput, operation: SynchronousOperation,
+  now = new Date(), observeDeadline?: (deadline: number, phase: 'input' | 'daily') => void): Record<string, unknown> {
+  const input = validateIntelligenceTimeScheduleInput(raw, now.getTime());
   if (!project.path) throw new Error('请先在 SoloMap 中选择要安排任务的项目。');
+  if (input.scheduleKind === 'once') observeDeadline?.(Date.parse(input.scheduledAt!), 'input');
   const taskId = intelligenceTimeScheduleTaskId(project.path, input);
   const task: SolomapScheduledAutomationTask = {
     id: taskId, title: input.title, enabled: true, projectPath: project.path, projectName: project.name,
@@ -79,11 +81,13 @@ export function setIntelligenceTimeScheduleInDatabaseSync(project: Project, raw:
   }
   const ledger = operation('read_schedule_ledger', { taskIds: ['__solomap_focus_reminder__'] }) as { tasks: Array<{ task: SolomapScheduledAutomationTask }> };
   const allTasks = [...tasks, ...ledger.tasks.map(item => item.task).filter(item => item.internalKind === 'focus_reminder')];
-  const now = new Date();
   const schedules = allTasks.filter(item => item.id).map(item => {
     const occurrence = occurrenceForTask(item, now);
+    const nextDueAt = occurrence ? Date.parse(occurrence.dueAt) : now.getTime();
+    const deadline = occurrence ? scheduleOccurrenceValidUntil(item, nextDueAt, now) : undefined;
+    if (deadline !== undefined) observeDeadline?.(deadline, 'daily');
     return { id: item.id, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', trigger: { kind: item.scheduleKind || 'daily', timeOfDay: item.timeOfDay || '', scheduledAt: item.scheduledAt || '' }, enabled: item.enabled !== false,
-      nextDueAt: occurrence ? Date.parse(occurrence.dueAt) : now.getTime(), task: item };
+      nextDueAt, task: item };
   });
   const desiredHash = crypto.createHash('sha256').update(JSON.stringify(schedules)).digest('hex');
   const state = operation('read_schedule_sync_state', {}) as { version: string };

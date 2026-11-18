@@ -7,10 +7,12 @@ import { Worker } from 'worker_threads';
 import type { RuntimeDataRequest } from './autonomousRuntimeControl';
 import type { RuntimeDataOperations } from './runtimeDataOperations';
 import { runtimeOperationDefinition, RuntimeExecutorAffinity, type RuntimeExecutionDomain } from './runtimeOperationRegistry';
-import { RuntimeExecutionScheduler, type RuntimeSchedulerAdmission } from './runtimePriorityScheduler';
+import { RuntimeExecutionScheduler, type RuntimeSchedulerAdmission, type RuntimeWorkContinuation } from './runtimePriorityScheduler';
+import { runtimeContinuableOperations, RuntimeContinuationClient, type RuntimeContinuationDescriptor, type RuntimeContinuationSession } from './runtimeWorkContinuationBridge.js';
 import { CognitiveCliProcessExecutor } from './cognitiveCliProcessExecutor';
 import type { CognitiveCliInvocation } from './localAgentCliEngine';
 import type { ProjectRegistrySnapshot } from './projectRegistry';
+import { dataValueTransferIfDeep,restoreDataValueTransfer,type DataValueTransfer } from './db/dataValueTransfer.js';
 
 type WorkerAffinity = Extract<RuntimeExecutorAffinity, 'writer-actor' | 'foreground-reader' | 'interactive-reader' | 'background-reader' | 'external-worker' | 'git-worker' | 'network-worker'>;
 type ExternalWorkerRole = 'intelligence' | 'conversation';
@@ -25,6 +27,9 @@ const writerDomainPriority: readonly RuntimeExecutionDomain[] = [
 ];
 
 interface DomainWorkerResponse {
+  storageMaintenanceWake?: boolean;
+  continuation?: RuntimeContinuationDescriptor;
+  continuationReady?: {token:string;error?:string};
   id?: number;
   internalRequestId?: number;
   internalParentId?: number;
@@ -36,6 +41,7 @@ interface DomainWorkerResponse {
   threadId?: number;
   maintenanceThreadId?: number;
   result?: unknown;
+  resultTransfer?:DataValueTransfer;
   serializedResult?: string;
   error?: string;
   activity?: { id: number; phase: string };
@@ -81,6 +87,7 @@ export interface RuntimeWriteActorConfiguration {
 }
 
 export type RuntimeWriteActorControl =
+  | 'resume_runtime_work'
   | 'import_legacy_diagnostics'
   | 'recover_migrations'
   | 'recover_runs'
@@ -117,6 +124,8 @@ class RuntimeDomainWorker {
     startedAt?: number;
     phaseAt: number;
     admission?: RuntimeSchedulerAdmission;
+    continuationSession?: RuntimeContinuationSession;
+    serializeResult?: boolean;
   }>();
   private sequence = 0;
   private readyThreadId = 0;
@@ -128,6 +137,9 @@ class RuntimeDomainWorker {
   private resolveClosed: (() => void) | undefined;
   private exited = false;
   private closing = false;
+  private drainingContinuations = false;
+  private readonly continuations=new RuntimeContinuationClient((token,admission,session)=>this.performControl(++this.sequence,
+    {action:'resume_runtime_work',input:{token}},admission,session));
   private restartTimer: NodeJS.Timeout | undefined;
   private terminalError: Error | undefined;
   private fatalReported = false;
@@ -150,7 +162,8 @@ class RuntimeDomainWorker {
     private readonly onWorkerExit?: (ownerId: string) => Promise<unknown>,
     private readonly externalRole?: ExternalWorkerRole,
     private readonly onProjectionEvent?: (projectPaths: string[]) => void,
-    private readonly onControlProjectionEvent?: (snapshot: ProjectRegistrySnapshot) => void
+    private readonly onControlProjectionEvent?: (snapshot: ProjectRegistrySnapshot) => void,
+    private readonly onStorageMaintenanceWake?:()=>void
   ) {
     // SQLite calls remain synchronous on this single Writer thread. A bounded
     // cooperative queue lets requests that are awaiting Git/file/network work
@@ -226,6 +239,8 @@ class RuntimeDomainWorker {
   }
 
   private onMessage(message: DomainWorkerResponse, workerOwnerId: string): void {
+    if(message.storageMaintenanceWake){this.onStorageMaintenanceWake?.();return;}
+    if(message.continuationReady){this.continuations.ready(message.continuationReady.token,message.continuationReady.error);return;}
     if (message.projectionEvent) {
       this.onProjectionEvent?.(message.projectionEvent.projectPaths.map(String));
       return;
@@ -296,11 +311,17 @@ class RuntimeDomainWorker {
     const pending = this.pending.get(Number(message.id));
     if (!pending) return;
     this.pending.delete(Number(message.id));
-    if (message.error) pending.reject(new Error(message.error));
-    else pending.resolve(message.serializedResult !== undefined ? message.serializedResult : message.result);
+    if (message.error) {
+      const error=new Error(message.error);if(pending.continuationSession)this.continuations.finish(pending.continuationSession,error);pending.reject(error);
+    } else if(message.continuation)pending.resolve(this.continuations.accept(message.continuation,pending.continuationSession,pending.serializeResult));
+    else {
+      if(pending.continuationSession)this.continuations.finish(pending.continuationSession);
+      pending.resolve(message.serializedResult !== undefined ? message.serializedResult : message.resultTransfer?restoreDataValueTransfer(message.resultTransfer):message.result);
+    }
   }
 
   private fail(error: unknown): void {
+    this.continuations.fail(error);
     this.rejectReady(error);
     for (const request of this.pending.values()) request.reject(error);
     this.pending.clear();
@@ -381,7 +402,9 @@ class RuntimeDomainWorker {
   }
 
   async request(request: RuntimeDataRequest, serializeResult = false, admission?: RuntimeSchedulerAdmission): Promise<unknown> {
+    if(this.drainingContinuations)throw new Error('runtime_data_domain_closing');
     await this.ready();
+    if(this.drainingContinuations)throw new Error('runtime_data_domain_closing');
     const id = ++this.sequence;
     if (this.requestConcurrency !== Number.MAX_SAFE_INTEGER) {
       return new Promise((resolve, reject) => {
@@ -436,8 +459,8 @@ class RuntimeDomainWorker {
     if (!worker) throw this.terminalError || new Error(`runtime_data_domain_unavailable:${this.affinity}`);
     return new Promise((resolve, reject) => {
       const postedAt = Date.now();
-      this.pending.set(id, { resolve, reject, kind: 'request', label: request.operation, phase: 'posted', postedAt, phaseAt: postedAt, admission });
-      try { worker.postMessage({ id, request, serializeResult }); }
+      this.pending.set(id, { resolve, reject, kind: 'request', label: request.operation, phase: 'posted', postedAt, phaseAt: postedAt, admission,serializeResult });
+      try { const requestTransfer=dataValueTransferIfDeep(request);worker.postMessage(requestTransfer?{id,requestTransfer,serializeResult}:{id,request,serializeResult}); }
       catch (error) { this.pending.delete(id); reject(error); }
     });
   }
@@ -461,21 +484,31 @@ class RuntimeDomainWorker {
     return this.performControl(id, { action, input }, admission);
   }
 
-  private async performControl(id: number, control: { action: RuntimeWriteActorControl; input: Record<string, unknown> }, admission?: RuntimeSchedulerAdmission): Promise<unknown> {
+  private async performControl(id: number, control: { action: RuntimeWriteActorControl; input: Record<string, unknown> }, admission?: RuntimeSchedulerAdmission,continuationSession?:RuntimeContinuationSession): Promise<unknown> {
     await this.ready();
     const worker = this.worker;
     if (!worker) throw this.terminalError || new Error(`runtime_data_domain_unavailable:${this.affinity}`);
     return new Promise((resolve, reject) => {
       const postedAt = Date.now();
-      this.pending.set(id, { resolve, reject, kind: 'control', label: control.action, phase: 'posted', postedAt, phaseAt: postedAt, admission });
-      try { worker.postMessage({ id, control }); }
-      catch (error) { this.pending.delete(id); reject(error); }
+      this.pending.set(id, { resolve, reject, kind: 'control', label: control.action, phase: 'posted', postedAt, phaseAt: postedAt, admission,continuationSession });
+      try { worker.postMessage({ id, control,admission,serializeResult:continuationSession?.context===true }); }
+      catch (error) { this.pending.delete(id);if(continuationSession)this.continuations.finish(continuationSession,error); reject(error); }
     });
   }
 
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
-    this.closePromise = new Promise<void>(resolve => {
+    this.drainingContinuations=true;this.closing=true;
+    this.closePromise = (async()=>{
+      let migrationDrainError:unknown;
+      if(this.affinity==='writer-actor' && this.worker && !this.exited && !this.terminalError){
+        try{
+          await this.performControl(++this.sequence,{action:'wait_for_migrations',input:{interrupt:true}});
+        }catch(error){if(!this.terminalError)migrationDrainError=error;}
+      }
+      while(this.continuations.activeCount || [...this.pending.values()].some(work=>work.kind==='request' && runtimeContinuableOperations.has(work.label))
+        || this.requestQueue.some(work=>work.kind==='request' && runtimeContinuableOperations.has(work.request.operation)))await new Promise<void>(resolve=>setTimeout(resolve,5));
+      await new Promise<void>(resolve => {
       this.closing = true;
       if (this.restartTimer) clearTimeout(this.restartTimer);
       this.restartTimer = undefined;
@@ -491,7 +524,9 @@ class RuntimeDomainWorker {
       deadline.unref();
       try { this.worker.postMessage({ close: true }); }
       catch { void this.worker.terminate().then(finish, finish); }
-    });
+      });
+      if(migrationDrainError)throw migrationDrainError;
+    })();
     return this.closePromise;
   }
 }
@@ -643,7 +678,8 @@ export class RuntimeDataExecutionDomains {
     private readonly git: RuntimeDomainWorker,
     private readonly network: RuntimeDomainWorker,
     private readonly fatalFailure: Promise<never>,
-    private readonly projectionSubscriptions: RuntimeProjectionSubscriptionBroker
+    private readonly projectionSubscriptions: RuntimeProjectionSubscriptionBroker,
+    private readonly scheduler: RuntimeExecutionScheduler
   ) {
     this.operations = Object.assign(
       (request: RuntimeDataRequest) => this.dispatch(request),
@@ -668,6 +704,7 @@ export class RuntimeDataExecutionDomains {
     scheduler?: RuntimeExecutionScheduler;
     dispatchSupervisorOperation?: (request: RuntimeDataRequest) => Promise<unknown>;
     onProjectRegistryProjection?: (snapshot: ProjectRegistrySnapshot) => void;
+    onStorageMaintenanceWake?:()=>void;
   }): Promise<RuntimeDataExecutionDomains> {
     let rejectFatal!: (error: Error) => void;
     const fatalFailure = new Promise<never>((_resolve, reject) => { rejectFatal = reject; });
@@ -681,7 +718,7 @@ export class RuntimeDataExecutionDomains {
     let routeInternal!: (request: RuntimeDataRequest, admission?: RuntimeSchedulerAdmission) => Promise<unknown>;
     const writer = new RuntimeDomainWorker(options.root, options.databaseId, 'writer-actor', readAuthoritySecret, options.runtime, rejectFatal,
       (request, admission) => routeInternal(request, admission), undefined, undefined,
-      projectPaths => projectionSubscriptions.publish(projectPaths), options.onProjectRegistryProjection);
+      projectPaths => projectionSubscriptions.publish(projectPaths), options.onProjectRegistryProjection,options.onStorageMaintenanceWake);
     const controlReader = new RuntimeDomainWorker(options.root, options.databaseId, 'foreground-reader', readAuthoritySecret);
     const foregroundWorkers = Array.from({ length: foregroundReaderCount }, () => new RuntimeDomainWorker(options.root, options.databaseId, 'foreground-reader', readAuthoritySecret));
     const interactiveWorkers = Array.from({ length: interactiveReaderCount }, () => new RuntimeDomainWorker(options.root, options.databaseId, 'interactive-reader', readAuthoritySecret));
@@ -752,7 +789,7 @@ export class RuntimeDataExecutionDomains {
       throw error;
     }
     return new RuntimeDataExecutionDomains(writer, controlReader, foreground, interactive, background, intelligence, conversation, foregroundGit, sourceGit, workspaceGit, git, network, fatalFailure,
-      projectionSubscriptions);
+      projectionSubscriptions,scheduler);
   }
 
   waitForFatalFailure(): Promise<never> { return this.fatalFailure; }
@@ -801,6 +838,7 @@ export class RuntimeDataExecutionDomains {
   }
 
   control(action: RuntimeWriteActorControl, input: Record<string, unknown> = {}, admission?: RuntimeSchedulerAdmission): Promise<unknown> {
+    if (action === 'read_project_registry_projection') return this.controlReader.control(action, input, admission);
     if (action === 'initialize_intelligence' || action === 'recover_intelligence' || action === 'cancel_intelligence_operation' || action === 'drain_intelligence' || action === 'resume_intelligence') {
       return this.intelligence.control(action, input, admission);
     }
@@ -808,11 +846,21 @@ export class RuntimeDataExecutionDomains {
   }
 
   dispatch(request: RuntimeDataRequest): Promise<unknown> {
-    return this.dispatchThroughWorker(request, false);
+    return this.dispatchScheduledIfNeeded(request,false);
   }
 
-  dispatchSerialized(request: RuntimeDataRequest, admission?: RuntimeSchedulerAdmission): Promise<string> {
-    return this.dispatchThroughWorker(request, true, admission) as Promise<string>;
+  dispatchSerialized(request: RuntimeDataRequest, admission?: RuntimeSchedulerAdmission): Promise<string | RuntimeWorkContinuation<string>> {
+    return this.dispatchScheduledIfNeeded(request,true,admission) as Promise<string | RuntimeWorkContinuation<string>>;
+  }
+
+  dispatchAdmitted(request:RuntimeDataRequest,admission:RuntimeSchedulerAdmission):Promise<unknown> {
+    return this.dispatchThroughWorker(request,false,admission);
+  }
+
+  private dispatchScheduledIfNeeded(request:RuntimeDataRequest,serialized:boolean,admission?:RuntimeSchedulerAdmission):Promise<unknown> {
+    if(!admission && runtimeContinuableOperations.has(request.operation))return this.scheduler.submit(runtimeOperationDefinition(request.operation).domain,
+      next=>this.dispatchThroughWorker(request,serialized,next),{deadlineAt:request.deadlineAt,supersedesKey:request.supersedesKey,label:request.operation});
+    return this.dispatchThroughWorker(request,serialized,admission);
   }
 
   private dispatchThroughWorker(request: RuntimeDataRequest, serializeResult: boolean, admission?: RuntimeSchedulerAdmission): Promise<unknown> {

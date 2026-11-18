@@ -5,7 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { getAgentRunDeliveryOwner } = require('../out/agentRunPreparation.js');
 const { saveTimePlan } = require('../out/timePlan.js');
 
@@ -15,10 +15,12 @@ async function fixture(prefix = 'solomap-retry-side-effects-') {
   const projectRoot = path.join(base, 'project');
   fs.mkdirSync(projectRoot);
   const store = new UnifiedDataStore(dataRoot);
+  const closeCompute = require('./content-compute-fixture.cjs').attachLazyContentCompute(store);
   const project = await store.registerProject({ root: projectRoot });
   return {
     base, dataRoot, projectRoot, project, store,
-    close() {
+    async close() {
+      await closeCompute();
       store.close();
       fs.rmSync(base, { recursive: true, force: true });
     }
@@ -80,41 +82,41 @@ function growthSnapshot(projectRoot, id, createdAt, durationMs = 1) {
 test('replaying one growth reservation returns the original generation', async () => {
   const f = await fixture();
   try {
-    const first = f.store.reserveProjectGrowthRefresh(f.project.projectId, 'stable-request');
-    const replay = f.store.reserveProjectGrowthRefresh(f.project.projectId, 'stable-request');
+    const first = await f.store.reserveProjectGrowthRefresh(f.project.projectId, 'stable-request');
+    const replay = await f.store.reserveProjectGrowthRefresh(f.project.projectId, 'stable-request');
     assert.deepEqual(replay, first);
     assert.equal(f.store.readAnalysisState(f.project.projectId, 'growth-refresh', 'current').revision, first.generation);
-  } finally { f.close(); }
+  } finally { await f.close(); }
 });
 
 test('an old growth reservation replays its receipt without replacing a newer reservation', async () => {
   const f = await fixture();
   try {
-    const first = f.store.reserveProjectGrowthRefresh(f.project.projectId, 'first-request');
-    const newer = f.store.reserveProjectGrowthRefresh(f.project.projectId, 'newer-request');
-    assert.deepEqual(f.store.reserveProjectGrowthRefresh(f.project.projectId, 'first-request'), first);
+    const first = await f.store.reserveProjectGrowthRefresh(f.project.projectId, 'first-request');
+    const newer = await f.store.reserveProjectGrowthRefresh(f.project.projectId, 'newer-request');
+    assert.deepEqual(await f.store.reserveProjectGrowthRefresh(f.project.projectId, 'first-request'), first);
     assert.deepEqual(f.store.readAnalysisState(f.project.projectId, 'growth-refresh', 'current').value, { requestId: 'newer-request' });
-    const stale = f.store.commitProjectGrowthRefresh(f.project.projectId, {
+    const stale = await f.store.commitProjectGrowthRefresh(f.project.projectId, {
       ...first,
       data: growthSnapshot(f.projectRoot, 'stale-snapshot', '2026-10-16T14:00:00.000Z')
     });
     assert.deepEqual(stale, { accepted: false, snapshotId: null, unchanged: false });
     assert.equal(newer.generation, first.generation + 1);
-  } finally { f.close(); }
+  } finally { await f.close(); }
 });
 
 test('unchanged growth retries write one snapshot and return only a lightweight receipt', async () => {
   const f = await fixture();
   try {
-    const firstReservation = f.store.reserveProjectGrowthRefresh(f.project.projectId, 'growth-first');
-    const first = f.store.commitProjectGrowthRefresh(f.project.projectId, {
+    const firstReservation = await f.store.reserveProjectGrowthRefresh(f.project.projectId, 'growth-first');
+    const first = await f.store.commitProjectGrowthRefresh(f.project.projectId, {
       ...firstReservation,
       data: growthSnapshot(f.projectRoot, 'snapshot-first', '2026-10-16T14:00:00.000Z', 10)
     });
-    const secondReservation = f.store.reserveProjectGrowthRefresh(f.project.projectId, 'growth-retry');
+    const secondReservation = await f.store.reserveProjectGrowthRefresh(f.project.projectId, 'growth-retry');
     const retriedSnapshot = growthSnapshot(f.projectRoot, 'snapshot-retry', '2026-10-16T14:01:00.000Z', 99);
     retriedSnapshot.snapshot.scanReason = 'agent_continuation';
-    const second = f.store.commitProjectGrowthRefresh(f.project.projectId, {
+    const second = await f.store.commitProjectGrowthRefresh(f.project.projectId, {
       ...secondReservation,
       data: retriedSnapshot
     });
@@ -128,7 +130,7 @@ test('unchanged growth retries write one snapshot and return only a lightweight 
     assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_live_module_labels WHERE snapshot_id=?', [first.snapshotId])[0].count, 1);
     const plan = f.store.rows('EXPLAIN QUERY PLAN SELECT id,payload_hash FROM growth_snapshots WHERE project_id=? ORDER BY rowid DESC LIMIT 1', [f.project.projectId]);
     assert.match(plan.map(row => String(row.detail)).join('\n'), /growth_snapshots_scope/);
-  } finally { f.close(); }
+  } finally { await f.close(); }
 });
 
 test('growth history keeps lightweight totals while bounding full topology to the latest two snapshots', async () => {
@@ -154,7 +156,7 @@ test('growth history keeps lightweight totals while bounding full topology to th
         primaryRole: 'source',
         confidence: 1
       });
-      storedIds.push(f.store.writeProjectGrowth(f.project.projectId, data, `bounded-growth-${index}`).objectId);
+      storedIds.push((await f.store.writeProjectGrowth(f.project.projectId, data, `bounded-growth-${index}`)).objectId);
     }
 
     assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_live_snapshots WHERE project_id=?', [f.project.projectId])[0].count, 2);
@@ -167,7 +169,7 @@ test('growth history keeps lightweight totals while bounding full topology to th
     assert.equal(stored.history[1].nodes.length, 2);
     assert.equal(stored.history[2].nodes.length, 0);
     assert.deepEqual(stored.history[2].summary, { files: 1, modules: 0, capabilities: 0, packages: 0, loc: 10, signals: 1 });
-  } finally { f.close(); }
+  } finally { await f.close(); }
 });
 
 test('upgraded legacy growth history exposes only the latest two topologies and synthesizes older totals', async () => {
@@ -193,9 +195,9 @@ test('upgraded legacy growth history exposes only the latest two topologies and 
         primaryRole: 'source',
         confidence: 1
       });
-      const snapshotId = f.store.writeProjectGrowth(f.project.projectId, data, `legacy-growth-${index}`).objectId;
+      const snapshotId = (await f.store.writeProjectGrowth(f.project.projectId, data, `legacy-growth-${index}`)).objectId;
       storedIds.push(snapshotId);
-      f.store.db.run(`INSERT INTO growth_items
+      f.store.db.run(`INSERT INTO growth_items(snapshot_id,item_id,parent_id,kind,relative_path,label,metrics_json,production_files,test_files,test_cases,bytes)
         SELECT snapshot_id,item_id,parent_id,kind,relative_path,label,metrics_json,production_files,test_files,test_cases,bytes
         FROM growth_live_items WHERE snapshot_id=?`, [snapshotId]);
       f.store.db.run(`INSERT INTO growth_edges(snapshot_id,source_item_id,target_item_id,kind,weight,evidence_id,evidence)
@@ -215,31 +217,31 @@ test('upgraded legacy growth history exposes only the latest two topologies and 
     assert.equal(stored.history[2].nodes.length, 0);
     assert.equal(stored.history[2].topologyAvailable, false);
     assert.deepEqual(stored.history[2].summary, { files: 1, modules: 0, capabilities: 0, packages: 0, loc: 20, signals: 1 });
-  } finally { f.close(); }
+  } finally { await f.close(); }
 });
 
 test('an unchanged growth request replays its first receipt after the project changes', async () => {
   const f = await fixture();
   try {
-    const seedReservation = f.store.reserveProjectGrowthRefresh(f.project.projectId, 'seed-request');
-    f.store.commitProjectGrowthRefresh(f.project.projectId, {
+    const seedReservation = await f.store.reserveProjectGrowthRefresh(f.project.projectId, 'seed-request');
+    await f.store.commitProjectGrowthRefresh(f.project.projectId, {
       ...seedReservation,
       data: growthSnapshot(f.projectRoot, 'seed-snapshot', '2026-10-16T14:00:00.000Z')
     });
-    const effectReservation = f.store.reserveProjectGrowthRefresh(f.project.projectId, 'effect-request');
-    const unchanged = f.store.commitProjectGrowthRefresh(f.project.projectId, {
+    const effectReservation = await f.store.reserveProjectGrowthRefresh(f.project.projectId, 'effect-request');
+    const unchanged = await f.store.commitProjectGrowthRefresh(f.project.projectId, {
       ...effectReservation,
       data: growthSnapshot(f.projectRoot, 'same-snapshot', '2026-10-16T14:01:00.000Z')
     });
     const changed = growthSnapshot(f.projectRoot, 'changed-snapshot', '2026-10-16T14:02:00.000Z');
     changed.nodes[0].label = 'Changed project';
-    const replay = f.store.commitProjectGrowthRefresh(f.project.projectId, {
-      ...f.store.reserveProjectGrowthRefresh(f.project.projectId, 'effect-request'),
+    const replay = await f.store.commitProjectGrowthRefresh(f.project.projectId, {
+      ...(await f.store.reserveProjectGrowthRefresh(f.project.projectId, 'effect-request')),
       data: changed
     });
     assert.deepEqual(replay, unchanged);
     assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM growth_snapshots WHERE project_id=?', [f.project.projectId])[0].count, 1);
-  } finally { f.close(); }
+  } finally { await f.close(); }
 });
 
 test('replaying the same time plan does not create another database revision', async () => {
@@ -262,7 +264,7 @@ test('replaying the same time plan does not create another database revision', a
     assert.equal(replay.revision, first.revision);
   } finally {
     await operations.close();
-    f.close();
+    await f.close();
   }
 });
 
@@ -295,7 +297,7 @@ test('an older time-plan effect cannot replace a newer or confirmed plan', async
     assert.equal(f.store.readAnalysisState(f.project.projectId, 'time-plan', 'current').revision, beforeReplay.revision);
   } finally {
     await operations.close();
-    f.close();
+    await f.close();
   }
 });
 
@@ -362,7 +364,7 @@ test('growth and time-plan work are durable post-settlement effects', async () =
     assert.deepEqual(effect.payload.timePlan, { version: 1 });
   } finally {
     await operations.close();
-    f.close();
+    await f.close();
   }
 });
 

@@ -1,5 +1,5 @@
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const { claimRuntimeLease } = require('../out/autonomousRuntime.js');
 const { runtimeBuildId } = require('../out/runtimeBuildIdentity.js');

@@ -23,7 +23,7 @@ export interface GlobalEngineeringSnapshot {
     reason: string;
     updatedAt: string;
   }>;
-  learningCandidateCount: number;
+  learningCandidateCount: number | null;
 }
 
 export function createGlobalEngineeringSnapshotPlaceholder(dataPath: string, portfolio: ProjectPortfolioSummary[]): GlobalEngineeringSnapshot {
@@ -41,18 +41,18 @@ export function createGlobalEngineeringSnapshotPlaceholder(dataPath: string, por
       nextAction: project.globalNextAction || project.recommendedNodeTitle || '',
       updatedAt: project.recentActivityAt || ''
     })),
-    dependencies: portfolio
-      .filter((project) => project.blocker)
-      .map((project) => ({
+    dependencies: portfolio.flatMap(project => (project.blockedActions || []).map(action => ({
         fromProject: slugifyProjectId(project.name || path.basename(project.path)),
         toProject: '',
-        capability: project.blocker,
+        capability: `${action.title}：${action.reason}`,
         status: 'blocked',
         priorityImpact: 'raise_to_P0',
-        reason: project.blocker,
+        reason: `${action.title}：${action.reason}`,
         updatedAt: project.recentActivityAt || ''
-      })),
-    learningCandidateCount: 0
+      }))),
+    learningCandidateCount: portfolio.every(project => Number.isInteger(project.learningCandidateCount))
+      ? portfolio.reduce((sum, project) => sum + Number(project.learningCandidateCount), 0) + Number(portfolio[0]?.globalLearningCandidateCount || 0)
+      : null
   };
 }
 

@@ -49,6 +49,10 @@ export interface ProjectPortfolioSummary {
   globalPriority: string;
   projectType: string;
   blocker: string;
+  blockedNodes?: number;
+  blockedActions?: Array<{ nodeId: string; title: string; reason: string }>;
+  learningCandidateCount?: number;
+  globalLearningCandidateCount?: number;
   globalNextAction: string;
   reusableSignals: number;
   issuePressure: string;
@@ -320,19 +324,25 @@ export function getRecommendedNode(nodes: RoadmapNodeLike[]): RoadmapNodeLike | 
       .filter(Boolean);
     return dependencies.every((dependency) => completedIds.has(dependency));
   };
-  const byStatus = (status: string) => nodes.find((node) => node.status === status);
+  const byStatus = (status: string) => nodes.find((node) => node.status === status && dependenciesSatisfied(node));
   const rankPending = (candidates: RoadmapNodeLike[]) => candidates
     .map((node, index) => ({ node, index, rank: rankNodeForStageGap(node, stageSummary) }))
     .sort((a, b) => a.rank - b.rank || a.index - b.index)[0]?.node || null;
   const readyPending = rankPending(nodes.filter((node) => node.status === 'Pending' && dependenciesSatisfied(node)));
-  const anyPending = rankPending(nodes.filter((node) => node.status === 'Pending'));
   return byStatus('Running')
     || byStatus('Failed')
     || byStatus('In Progress')
     || readyPending
-    || anyPending
-    || nodes.find((node) => node.status !== 'Completed')
-    || nodes[0];
+    || nodes.find((node) => node.status !== 'Completed' && dependenciesSatisfied(node))
+    || (nodes.every(node => node.status === 'Completed') ? nodes[0] : null);
+}
+
+export function roadmapBlockedActions(nodes: RoadmapNodeLike[]): Array<{ nodeId: string; title: string; reason: string }> {
+  const byId = new Map(nodes.map(node => [node.id, node]));
+  return nodes.filter(node => node.status !== 'Completed').flatMap(node => {
+    const pending = String(node.dependencies || '').split(',').map(id => id.trim()).filter(id => id && byId.get(id)?.status !== 'Completed');
+    return pending.length ? [{ nodeId: node.id, title: String(node.title || node.id), reason: `等待前置环节：${pending.map(id => String(byId.get(id)?.title || id)).join('、')}` }] : [];
+  });
 }
 
 function detectProjectType(nodes: RoadmapNodeLike[]): string {
@@ -457,8 +467,14 @@ export function buildProjectPortfolioSummary(project: SolopreneurProject, option
     nodes,
     globalPriority,
     projectType: project.type || detectProjectType(nodes),
-    blocker: failedNodes > 0 ? (recommendedNode?.title || 'Failed roadmap step') : '',
-    globalNextAction: baseSummary.security.openCriticalHigh > 0
+    blocker: failedNodes > 0 ? (recommendedNode?.title || 'Failed roadmap step') : (!recommendedNode ? roadmapBlockedActions(nodes)[0]?.reason || '' : ''),
+    blockedNodes: roadmapBlockedActions(nodes).length,
+    blockedActions: roadmapBlockedActions(nodes),
+    ...(options.learningOverview ? {
+      learningCandidateCount: options.learningOverview.projectSignals.find(signal => signal.projectPath === project.path)?.candidateCount || 0,
+      globalLearningCandidateCount: options.learningOverview.projectSignals.find(signal => !signal.projectId)?.candidateCount || 0
+    } : {}),
+    globalNextAction: !recommendedNode && roadmapBlockedActions(nodes).length > 0 ? roadmapBlockedActions(nodes)[0].reason : baseSummary.security.openCriticalHigh > 0
       ? '修复安全风险'
       : baseSummary.delivery.failedWorkflowRuns > 0
         ? '修复发布检查'

@@ -1,0 +1,5 @@
+const test=require('node:test'),assert=require('node:assert/strict'),path=require('node:path'),{spawn}=require('node:child_process');
+test('actual Runtime daily state responses and fixed replays preserve full bytes without Source JSON encoding',async t=>{
+  const child=spawn(process.execPath,['--require',path.join(__dirname,'fixtures/state-response-writer-probe.cjs'),path.join(__dirname,'fixtures/state-response-runtime.cjs')],{stdio:['ignore','pipe','pipe']});let stdout='',stderr='';child.stdout.on('data',bytes=>{stdout+=bytes;});child.stderr.on('data',bytes=>{stderr+=bytes;});
+  const code=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',resolve);});assert.equal(code,0,stderr || stdout);const evidence=JSON.parse(stdout.trim());assert.deepEqual(evidence.sourceJsonCalls,[]);assert.equal(evidence.responses,12);assert.ok(evidence.coverageBytes>300000);assert.ok(evidence.externalBytes>300000);assert.equal(evidence.results.length,2);for(const result of evidence.results)assert.ok(result.bytes>300000);t.diagnostic(JSON.stringify(evidence));
+});

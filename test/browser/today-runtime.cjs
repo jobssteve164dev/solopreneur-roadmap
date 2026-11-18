@@ -29,7 +29,10 @@ const html = getSidebarWebviewHtml({ cspSource: 'self', asWebviewUri: value => v
       window.acquireVsCodeApi = () => ({
         getState: () => state,
         setState: next => { state = next; },
-        postMessage: message => window.solomapPostMessage(message)
+        postMessage: message => {
+          if (message.command === 'checkDependencies') window.__dependenciesRequested = true;
+          return window.solomapPostMessage(message);
+        }
       });
     });
     await page.setContent(html);
@@ -50,6 +53,7 @@ const html = getSidebarWebviewHtml({ cspSource: 'self', asWebviewUri: value => v
         todos: [{ projectPath: '/workspace/beta', title: '推进 Beta', reason: '先收口已有进展。' }]
       }
     }, '*'));
+    await page.waitForFunction(() => document.querySelector('.global-focus-name')?.textContent === 'Beta');
     const names = await page.locator('.global-focus-name').allTextContents();
     assert.deepEqual(names.slice(0, 2), ['Beta', 'Alpha']);
     await page.evaluate(() => {
@@ -107,6 +111,8 @@ const html = getSidebarWebviewHtml({ cspSource: 'self', asWebviewUri: value => v
     await page.locator('[data-global-focus-project="/workspace/beta"]').click();
     assert.ok(messages.some(message => message.command === 'recordTodayShadowFeedback' && message.outcome === 'accepted'));
     await page.locator('#btn-toggle-settings').click();
+    await page.locator('#btn-check-dependencies').click();
+    await page.waitForFunction(() => window.__dependenciesRequested === true);
     assert.ok(messages.some(message => message.command === 'checkDependencies'));
     await page.evaluate(() => window.postMessage({
       command: 'dependenciesChecked',
@@ -128,6 +134,7 @@ const html = getSidebarWebviewHtml({ cspSource: 'self', asWebviewUri: value => v
         }]
       }
     }, '*'));
+    await page.waitForFunction(() => document.querySelector('#agent-readiness-panel')?.textContent.includes('Pro'));
     assert.match(await page.locator('#agent-readiness-panel').textContent(), /Pro/);
     assert.match(await page.locator('#agent-readiness-panel').textContent(), /36%/);
     assert.match(await page.locator('#agent-readiness-panel').textContent(), /12\.50/);
@@ -139,6 +146,7 @@ const html = getSidebarWebviewHtml({ cspSource: 'self', asWebviewUri: value => v
         ] } }, { family: 'cursor', title: 'Cursor', command: 'cursor', installed: true, account: { state: 'signed_out' } },
         { family: 'codex', title: 'Codex', command: 'codex', installed: true }]
     } }, '*'));
+    await page.waitForFunction(() => document.querySelector('#agent-readiness-panel')?.textContent.includes('Google AI Pro'));
     const accountText = await page.locator('#agent-readiness-panel').textContent();
     assert.match(accountText, /Google AI Pro/);
     assert.match(accountText, /Gemini Models.*100%/);

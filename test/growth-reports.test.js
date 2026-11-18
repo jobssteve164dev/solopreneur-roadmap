@@ -62,10 +62,12 @@ async function openImportedReportFixture(t, fixture) {
 async function writeGrowthSnapshotOffline(globalDataPath, project, snapshot, idempotencyKey) {
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
   const store = new UnifiedDataStore(globalDataPath);
+  const closeCompute=require('./content-compute-fixture.cjs').attachLazyContentCompute(store);
   try {
     const registered = await store.registerProject({ root: project });
-    store.writeProjectGrowth(registered.projectId, snapshot, idempotencyKey);
+    await store.writeProjectGrowth(registered.projectId, snapshot, idempotencyKey);
   } finally {
+    await closeCompute();
     store.close();
   }
 }

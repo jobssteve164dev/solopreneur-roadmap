@@ -4,7 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { createIntelligenceMcpSession } = require('../out/intelligenceMcp.js');
-const { runtimeProjectMcpSource } = require('../out/runtimeDataOperations.js');
+const { runtimeProjectMcpSource } = require('./runtime-data-fixture.cjs');
 
 async function fixture(t) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-project-signals-'));
@@ -26,10 +26,10 @@ async function fixture(t) {
       if (result.isError) throw new Error(result.content[0].text);
       return JSON.parse(result.content[0].text);
     },
-    save(project, kind, cache) {
+    async save(project, kind, cache) {
       const id = owner.projectIds.get(project.path);
-      const token = owner.store.reserveExternalRefresh(id, kind, `${kind}-${Math.random()}`);
-      return owner.store.commitExternalRefresh(id, { key: kind, ...token, requestedAt: Date.now(), cache }).state;
+      const token = await owner.store.reserveExternalRefresh(id, kind, `${kind}-${Math.random()}`);
+      return (await owner.store.commitExternalRefresh(id, { key: kind, ...token, requestedAt: Date.now(), cache })).state;
     }
   };
 }
@@ -40,7 +40,7 @@ test('project signals tool reads another project raw caches without display filt
   const cache = { schemaVersion: 1, repo: 'owner/beta', syncedAt: '2026-10-01T00:00:00Z', message: 'partial source warning',
     alerts: [{ source: 'dependabot', title: 'low retained', severity: 'low', state: 'closed', url: 'https://example.test/1' },
       { source: 'code-scanning', title: 'critical retained', severity: 'critical', state: 'open', url: 'https://example.test/2' }], extra: { preserved: true } };
-  f.save(beta, 'security', cache);
+  await f.save(beta, 'security', cache);
   await f.call({});
   const before = f.store.rows('SELECT COUNT(*) AS n FROM events')[0].n;
   const list = JSON.parse((await f.call({})).content);
@@ -62,13 +62,13 @@ test('project signals pages preserve the original revision across refreshes and 
   const beta = f.projects[1];
   const cache = { schemaVersion: 1, repo: 'owner/beta', syncedAt: '2026-10-20T00:00:00Z',
     issues: [{ number: 7, title: 'entire body', body: '中文😀'.repeat(20000) + 'ORIGINAL-END', labels: [], state: 'open' }] };
-  f.save(beta, 'issues', cache);
+  await f.save(beta, 'issues', cache);
   let page = await f.call({ project: 'Beta', kind: 'issues' });
   assert.ok(page.cursor);
   const first = page;
   let content = page.content;
   const originalRevision = page.revision;
-  f.save(beta, 'issues', { ...cache, issues: [] });
+  await f.save(beta, 'issues', { ...cache, issues: [] });
   await assert.rejects(f.call({ project: 'Alpha', kind: 'issues', cursor: page.cursor }), /cursor|scope/);
   await assert.rejects(f.call({ project: 'Beta', kind: 'security', cursor: page.cursor }), /cursor|scope/);
   while (page.cursor) {
@@ -117,7 +117,7 @@ test('project discovery pages without losing projects and refuses to mix changed
 
 test('revoking the MCP read grant also revokes ongoing project data pages', async t => {
   const f = await fixture(t);
-  f.save(f.projects[1], 'issues', { syncedAt: '2026-10-20T00:00:00Z', issues: [{ body: 'a'.repeat(8000) }] });
+  await f.save(f.projects[1], 'issues', { syncedAt: '2026-10-20T00:00:00Z', issues: [{ body: 'a'.repeat(8000) }] });
   const first = await f.call({ project: 'Beta', kind: 'issues' });
   assert.ok(first.cursor);
   f.store.db.run("UPDATE grants SET status='revoked' WHERE target_id=?", [f.projectIds.get(f.projects[0].path)]);
@@ -128,7 +128,7 @@ test('signal read does not broaden generic reads and retains all saved delivery 
   const f = await fixture(t);
   const cache = { repo: 'owner/beta', syncedAt: '2026-10-20T00:00:00Z', latestRelease: { tagName: 'v1' },
     workflowRuns: Array.from({ length: 12 }, (_, i) => ({ name: `run-${i}`, conclusion: i % 2 ? 'failure' : 'success' })) };
-  const state = f.save(f.projects[1], 'delivery', cache);
+  const state = await f.save(f.projects[1], 'delivery', cache);
   assert.deepEqual(JSON.parse((await f.call({ project: f.projects[1].path, kind: 'delivery' })).content), cache);
   const denied = await f.session.client.callTool({ name: 'solomap_read', arguments: { ref: state.objectId } });
   assert.equal(denied.isError, true);
@@ -144,12 +144,14 @@ test('cold database reads retain legacy caches when the project directory is una
   const projectPath = path.join(base, 'offline');
   fs.mkdirSync(path.join(projectPath, '.git'), { recursive: true });
   let store = new UnifiedDataStore(root);
-  t.after(() => store.close());
+  const closeCompute = require('./content-compute-fixture.cjs').attachLazyContentCompute(store);
+  t.after(async () => { await closeCompute(); store.close(); });
   const project = await store.registerProject({ root: projectPath });
   await store.initializeProjectRegistry({ legacyProjects: [{ name: 'Offline', path: projectPath }] });
   const cache = { repo: 'owner/offline', syncedAt: '2026-09-01T00:00:00Z', issues: [] };
-  store.writeAnalysisState(project.projectId, { namespace: 'external', key: 'issues', expectedRevision: 0,
+  await store.writeAnalysisState(project.projectId, { namespace: 'external', key: 'issues', expectedRevision: 0,
     value: cache, idempotencyKey: 'legacy-cache' });
+  await closeCompute();
   store.close();
   fs.renameSync(projectPath, path.join(base, 'unavailable-project'));
   store = UnifiedDataStore.open(root);
@@ -160,7 +162,7 @@ test('cold database reads retain legacy caches when the project directory is una
 
 test('formal intelligence MCP reads saved signals with no selection or an unavailable selected directory', async t => {
   const f = await fixture(t);
-  f.save(f.projects[1], 'security', { repo: 'owner/beta', alerts: [{ title: 'saved risk' }] });
+  await f.save(f.projects[1], 'security', { repo: 'owner/beta', alerts: [{ title: 'saved risk' }] });
   fs.renameSync(f.projects[0].path, f.projects[0].path + '-unavailable');
   for (const selected of [f.projects[0].path, '']) {
     const source = await runtimeProjectMcpSource(f.root, selected);

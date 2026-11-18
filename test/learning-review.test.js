@@ -1505,7 +1505,7 @@ function applicationFixture() {
 test('actual legacy review application retains candidate evidence after import without making it executable', async () => {
   const { applyLearningReview } = require('./fixtures/legacy-learning-review-apply.cjs');
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
   const { promisify } = require('node:util'); const cp = require('node:child_process');
   const { anonymousToolEnv } = require('./analysis-fixture.js');

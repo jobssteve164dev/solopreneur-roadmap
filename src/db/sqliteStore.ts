@@ -1394,7 +1394,7 @@ export class SqliteStore {
     return logs;
   }
 
-  public getExecutionJournalPageRaw(input: { nodeId?: string; executionLogId?: number; limit?: number; offset?: number } = {}): { logs: AgentConversation[]; hasMore: boolean } {
+  public getExecutionJournalPageRaw(input: { nodeId?: string; executionLogId?: number; limit?: number; offset?: number; maxPayloadBytes?:number } = {}): { logs: AgentConversation[]; hasMore: boolean } {
     if (!this.db) throw new Error('Database not initialized');
     const limit = Math.max(1, Math.min(500, Math.floor(Number(input.limit) || 200)));
     const clauses: string[] = []; const values: (string | number)[] = [];
@@ -1402,11 +1402,22 @@ export class SqliteStore {
     if (input.executionLogId) { clauses.push('id=?'); values.push(input.executionLogId); }
     const stmt = this.db.prepare(`SELECT id,nodeId,timestamp,agentCli,command,output,status FROM execution_logs ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY id DESC LIMIT ? OFFSET ?`);
     const logs: AgentConversation[] = [];
+    let bytes=0;
     try {
       stmt.bind([...values, limit + 1, Math.max(0, Math.floor(Number(input.offset) || 0))]);
-      while (stmt.step()) logs.push(stmt.getAsObject() as unknown as AgentConversation);
+      while (stmt.step()){
+        if(logs.length===limit)return {logs,hasMore:true};
+        const entry=stmt.getAsObject() as unknown as AgentConversation;
+        if(input.maxPayloadBytes!==undefined){
+          const length=[entry.nodeId,entry.timestamp,entry.agentCli,entry.command,entry.output,entry.status]
+            .reduce((sum,value)=>sum+Buffer.byteLength(String(value || '')),0);
+          if(logs.length && bytes+length>input.maxPayloadBytes)return {logs,hasMore:true};
+          bytes+=length;
+        }
+        logs.push(entry);
+      }
     } finally { stmt.free(); }
-    return { logs: logs.slice(0, limit), hasMore: logs.length > limit };
+    return {logs,hasMore:false};
   }
 
   public getLastExecutionLogId(): number {
@@ -1454,15 +1465,34 @@ export class SqliteStore {
   }
 
   public getGrowthReportProjection(prefix: string): { key: string; value: any }[] {
+    return this.collectGrowthReportProjection(prefix,(key,value)=>({key,value}));
+  }
+
+  public getGrowthReportProjectionKeys(prefix:string):string[] {
+    return this.collectGrowthReportProjection(prefix,key=>key);
+  }
+
+  public getGrowthReportProjectionValue(key:string):{value:unknown}|undefined {
+    if (!this.db) throw new Error('Database not initialized');
+    if (!this.sqliteObjectExists('table','growth_report_projection')) return;
+    const statement=this.db.prepare('SELECT value FROM growth_report_projection WHERE key=?');
+    try{
+      statement.bind([key]);
+      if(statement.step())return {value:JSON.parse(String(statement.getAsObject().value))};
+    }finally{statement.free();}
+    return undefined;
+  }
+
+  private collectGrowthReportProjection<T>(prefix:string,project:(key:string,value:unknown)=>T):T[] {
     if (!this.db) throw new Error('Database not initialized');
     if (!this.sqliteObjectExists('table', 'growth_report_projection')) return [];
     const statement = this.db.prepare('SELECT key, value FROM growth_report_projection WHERE substr(key, 1, ?) = ?');
-    const rows: { key: string; value: any }[] = [];
+    const rows:T[] = [];
     try {
       statement.bind([prefix.length, prefix]);
       while (statement.step()) {
         const row = statement.getAsObject();
-        rows.push({ key: String(row.key), value: JSON.parse(String(row.value)) });
+        rows.push(project(String(row.key),JSON.parse(String(row.value))));
       }
     } finally { statement.free(); }
     return rows;

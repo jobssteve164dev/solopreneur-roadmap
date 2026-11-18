@@ -3813,7 +3813,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
           clearSubmittedAttachments(pending.targetId, pending.projectPath, pending.files);
           if (pending.projectPath === activeProjectPath) {
             if (pending.targetId === soloConversationId) renderSoloPanel(currentNodes, false);
-            else if (pending.targetId === flowTargetId) renderFlowPanel();
+            else if (pending.targetId === 'flow') renderFlowPanel();
             else if (pending.targetId === roadmapRevisionId) renderRoadmapRevisionPanel(currentNodes);
             else renderRoadmap(currentNodes);
           }

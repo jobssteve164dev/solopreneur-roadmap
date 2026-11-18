@@ -673,7 +673,7 @@ test('standalone Telegram scheduling writes the authoritative settings and sched
   const globalRoot = path.join(base, 'global'), projectRoot = path.join(base, 'project');
   fs.mkdirSync(projectRoot);
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { setIntelligenceTimeScheduleInDatabase } = require('../out/intelligenceTimeSchedule.js');
   const store = new UnifiedDataStore(globalRoot), operations = createRuntimeDataOperations(store);
   const call = (operation, input) => operations({ operation, input });
@@ -699,7 +699,7 @@ test('standalone Telegram scheduling preserves the active focus reminder in the 
   const globalRoot = path.join(base, 'global'), projectRoot = path.join(base, 'project');
   fs.mkdirSync(projectRoot);
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { setIntelligenceTimeScheduleInDatabase } = require('../out/intelligenceTimeSchedule.js');
   const { syncScheduledTaskDatabase } = require('../out/scheduledTaskLedger.js');
   const store = new UnifiedDataStore(globalRoot), operations = createRuntimeDataOperations(store);

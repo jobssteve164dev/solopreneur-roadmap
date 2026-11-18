@@ -6,8 +6,8 @@ import type { DataObject } from './db/unifiedDataStore';
 import { isTrashOrLocalPrivate } from './learningQuality.js';
 export { isTrashOrLocalPrivate } from './learningQuality.js';
 
-export type LearningSourceType = 'step_run' | 'solo' | 'flow_loop' | 'review' | 'roadmap_revision' | 'issue' | 'release' | 'strategy' | 'user_correction';
-export type LearningEventType = 'completed' | 'failed' | 'verified' | 'deviated' | 'corrected' | 'blocked' | 'reused' | 'partial' | 'needs_confirmation';
+export type LearningSourceType = 'step_run' | 'solo' | 'flow_loop' | 'review' | 'roadmap_revision' | 'issue' | 'release' | 'strategy' | 'user_correction' | 'today_feedback';
+export type LearningEventType = 'completed' | 'failed' | 'verified' | 'verified_failed' | 'deviated' | 'corrected' | 'blocked' | 'reused' | 'partial' | 'needs_confirmation' | 'selected' | 'ignored';
 export type LessonType = 'verification_pattern' | 'boundary_rule' | 'planning_rule' | 'risk_pattern' | 'implementation_pattern' | 'strategy_signal' | 'user_preference';
 
 export interface LearningEvidenceRef {

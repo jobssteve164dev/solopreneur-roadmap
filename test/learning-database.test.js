@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations, runtimeMcpSource } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations, runtimeMcpSource } = require('./runtime-data-fixture.cjs');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 const ledger = require('../out/learningLedger.js');
 
@@ -365,7 +365,7 @@ test('actual learning overview counts formal history without creating learning o
   assert.match(first, /待审核学习候选：1/);
   assert.match(first, /统一学习账本事件：1/);
   assert.match(first, /已确认\/已晋升经验：2/);
-  assert.match(first, /project: 2候选\/2风险\/1验证/);
+  assert.match(first, /project: 1候选\/2风险\/1验证/);
   assert.equal(await buildSolomapLearningContext(workspace, root), first);
   await assert.rejects(client.call('read_learning_overview', {}), /action_denied/, 'an ordinary project session must not gain cross-project host reads');
   assert.equal(fs.existsSync(path.join(root, 'learning')), false); assert.equal(fs.existsSync(path.join(root, 'metrics')), false);

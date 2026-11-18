@@ -77,7 +77,7 @@ export class RunLifecycleClient {
   constructor(private readonly operation: Operation, public readonly dataRoot?: string) {}
   private readDocument(input: Record<string, unknown>) { return readCompleteRunDocument(this.operation, input); }
 
-  public async recordVerification(root: string, executionLogId: number, input: { claim: string; result: 'pass' | 'fail'; evidence: string; idempotencyKey: string }): Promise<{ objectId: string; revision: number }> {
+  public async recordVerification(root: string, executionLogId: number, input: { claim: string; result: 'pass' | 'fail'; evidence: string; idempotencyKey: string; turnId?: string; experienceAssessments?: Array<{ lessonId: string; lessonRevision: number; action: string; result: 'pass' | 'fail'; evidence: string }> }): Promise<{ objectId: string; revision: number }> {
     return this.operation('record_run_verification', { root, executionLogId, ...input }) as Promise<{ objectId: string; revision: number }>;
   }
 

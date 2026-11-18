@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { importLegacyIntelligenceConversation } = require('../out/intelligenceConversationData.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { readProcessBirthMarker } = require('../out/processIdentity.js');
 
 function fixture() {
@@ -265,7 +265,7 @@ test('recycling preview resolves each physical candidate only before and after i
 
 test('recycling preview filters unfinished and already trashed history before resolving physical paths', async () => {
   const f = fixture();
-  const registeredProjectScopes = f.store.registeredProjectScopes.bind(f.store);
+  const physicalScopes = f.store.registeredProjectScopesForPhysicalPaths.bind(f.store);
   try {
     await importLegacyIntelligenceConversation(f.store, f.file);
     const bytes = Buffer.from('captured but not imported');
@@ -273,24 +273,24 @@ test('recycling preview filters unfinished and already trashed history before re
     for (let index = 0; index < 250; index++) {
       f.store.captureMigrationSource({ identity: 'step-memory:unfinished-project', key: `history/${index}.md`, hash }, bytes);
     }
-    f.store.registeredProjectScopes = () => { throw new Error('unfinished_source_path_resolved'); };
+    f.store.registeredProjectScopesForPhysicalPaths = () => { throw new Error('unfinished_source_path_resolved'); };
     const first = await f.call('prepare_recycling');
     assert.deepEqual(first.files.map(file => file.path), [f.file]);
-    f.store.registeredProjectScopes = registeredProjectScopes;
+    f.store.registeredProjectScopesForPhysicalPaths = physicalScopes;
     await f.call('confirm_recycling', { planId: first.planId });
     await f.call('execute_recycling_plan', { planId: first.planId });
     assert.deepEqual(f.store.recyclingCandidateSources(), []);
     const repeated = await f.call('prepare_recycling');
     assert.deepEqual(repeated, { planId: null, files: [] });
   } finally {
-    f.store.registeredProjectScopes = registeredProjectScopes;
+    f.store.registeredProjectScopesForPhysicalPaths = physicalScopes;
     await f.operations.close(); f.store.close();
   }
 });
 
 test('recycling preview reuses one registered project snapshot for every eligible source path', async () => {
   const f = fixture();
-  const registeredProjectScopes = f.store.registeredProjectScopes.bind(f.store);
+  const physicalScopes = f.store.registeredProjectScopesForPhysicalPaths.bind(f.store);
   try {
     await importLegacyIntelligenceConversation(f.store, f.file);
     const projectRoot = path.join(path.dirname(f.root), 'project');
@@ -307,15 +307,15 @@ test('recycling preview reuses one registered project snapshot for every eligibl
       f.store.markMigrationSourceImported(identity, key);
     }
     let registryReads = 0;
-    f.store.registeredProjectScopes = () => {
+    f.store.registeredProjectScopesForPhysicalPaths = () => {
       registryReads++;
-      return registeredProjectScopes();
+      return physicalScopes();
     };
     const plan = await f.call('prepare_recycling');
     assert.equal(plan.files.length, 4);
     assert.equal(registryReads, 1, 'one preview must resolve all candidates against one registry snapshot');
   } finally {
-    f.store.registeredProjectScopes = registeredProjectScopes;
+    f.store.registeredProjectScopesForPhysicalPaths = physicalScopes;
     await f.operations.close(); f.store.close();
   }
 });
@@ -415,7 +415,7 @@ test('an archived legacy status owned by a live process cannot enter a recycling
     const key = 'agent-status/8.json';
     const hash = crypto.createHash('sha256').update(bytes).digest('hex');
     f.store.captureMigrationSource({ identity, key, hash }, bytes);
-    f.store.archiveMigrationSource({ identity, key, hash }, bytes, { reason: 'retired SoloMap project file', projectId: project.projectId });
+    await f.store.archiveMigrationSource({ identity, key, hash }, bytes, { reason: 'retired SoloMap project file', projectId: project.projectId });
     assert.deepEqual(await f.call('prepare_recycling', { projectRoot }), { planId: null, files: [] });
     assert.deepEqual(fs.readFileSync(statusFile), bytes);
   } finally { await f.operations.close(); f.store.close(); }

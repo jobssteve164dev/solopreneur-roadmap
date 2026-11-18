@@ -62,7 +62,7 @@ test('unauthenticated peers cannot stream an unbounded request into the owner', 
 });
 
 test('memory migration runs through the same owner while other projects keep writing and reading', async () => {
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const crypto = require('node:crypto');
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-live-memory-import-'));
   const root = path.join(fixture, '.solomap-global');
@@ -77,25 +77,32 @@ test('memory migration runs through the same owner while other projects keep wri
   }
   const store = new UnifiedDataStore(root);
   const dispatch = createRuntimeDataOperations(store);
+  const prepare = store.importObjectCompute;
+  let enter, release;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const gate = new Promise(resolve => { release = resolve; });
+  store.setImportObjectCompute(async value => {
+    const selected = await prepare(value);
+    if (value.source.key === 'domains/source-01.md') { enter(); await gate; }
+    return selected;
+  });
   const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'import-owner', onCommand: () => ({ status: 'paused' }), onData: dispatch });
   try {
     const project = await request(root, { operation: 'write', input: { kind: 'project', action: 'create', scope: null, idempotencyKey: 'other-project', data: { name: '另一个项目' } } });
     const importing = await request(root, { operation: 'import_memory', input: { sourceRoot, idempotencyKey: 'live-import' } });
     assert.equal(importing.ok, true, importing.error);
     assert.ok(importing.result.jobId);
-    let first;
-    for (let i = 0; i < 100; i++) {
-      first = await request(root, { operation: 'search', input: { scope: null, kinds: ['memory'], query: 'source-00', limit: 1 } });
-      if (first.result?.items.length) break;
-      await new Promise(resolve => setImmediate(resolve));
-    }
-    if (first.result?.items.length) {
+    await Promise.race([entered, dispatch.waitForMigrations().then(() => { throw new Error('migration_finished_before_second_source_preparation'); })]);
+    const first = await request(root, { operation: 'search', input: { scope: null, kinds: ['memory'], query: 'source-00', limit: 1 } });
+    assert.equal(first.result?.items.length, 1, 'the first source must already be searchable while the second actual preparation is pending');
+    {
       const write = await request(root, { operation: 'write', input: { kind: 'memory', action: 'create', scope: project.result.objectId, idempotencyKey: 'during-migration', data: { category: 'project', title: '即时写入', status: 'captured', confidence: 0, content: '其他项目即时回读' } } });
       assert.equal(write.ok, true, write.error);
       assert.equal(store.readMigrationJob(importing.result.jobId).status, 'running', 'a write must commit before the directory import finishes');
       const read = await request(root, { operation: 'read', input: { ref: write.result.objectId } });
       assert.equal(read.result.data.content, '其他项目即时回读');
     }
+    release();
     await dispatch.waitForMigrations();
     const migrated = await request(root, { operation: 'migration_status', input: { jobId: importing.result.jobId } });
     assert.equal(migrated.result.progress.imported, 30);
@@ -108,11 +115,11 @@ test('memory migration runs through the same owner while other projects keep wri
     const denied = await request(root, { operation: 'import_memory', input: { sourceRoot }, sessionToken: mcp.result.sessionToken });
     assert.equal(denied.ok, false);
     assert.equal(denied.error, 'action_denied');
-  } finally { await server.close(); await dispatch.close(); store.close(); }
+  } finally { release(); store.setImportObjectCompute(prepare); await server.close(); await dispatch.close(); store.close(); }
 });
 
 test('parallel task launches configure the native CLI through one owner without a persistent config lock', async () => {
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-cli-owner-'));
   const configDirectory = path.join(fixture, 'claude-config');
   fs.mkdirSync(configDirectory);

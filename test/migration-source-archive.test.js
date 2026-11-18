@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+const { attachLazyContentCompute } = require('./content-compute-fixture.cjs');
 const { importAnalysisCaches } = require('../out/analysisDatabaseMigration.js');
 const { importMemoryDirectory, isArchivableMigrationConflict } = require('../out/memoryDatabaseMigration.js');
 const { importLearningDirectory, importLearningReviewDirectory } = require('../out/learningDatabaseMigration.js');
@@ -14,9 +15,10 @@ const evidenceBytes = evidence => typeof evidence.data.content === 'string'
   ? Buffer.from(evidence.data.content)
   : Buffer.from(evidence.data.content.data, 'base64');
 
-test('an unresolved legacy source is preserved through the normal evidence reader before it becomes recyclable', () => {
+test('an unresolved legacy source is preserved through the normal evidence reader before it becomes recyclable', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-source-archive-'));
   const store = new UnifiedDataStore(root);
+  const closeCompute = attachLazyContentCompute(store);
   try {
     const bytes = Buffer.from('完整但不能安全归一化的旧数据🌿');
     const source = { identity: 'agent-status:/project', key: '71.json', hash: crypto.createHash('sha256').update(bytes).digest('hex') };
@@ -24,7 +26,7 @@ test('an unresolved legacy source is preserved through the normal evidence reade
 
     const readMigrationSource = store.readMigrationSource.bind(store);
     store.readMigrationSource = () => { throw new Error('archive_must_bind_captured_content_without_materializing_it'); };
-    const archived = store.archiveMigrationSource(source, bytes, {
+    const archived = await store.archiveMigrationSource(source, bytes, {
       reason: 'legacy_status_invalid',
       mimeType: 'application/json',
       observedAt: 123
@@ -38,11 +40,11 @@ test('an unresolved legacy source is preserved through the normal evidence reade
     assert.equal(evidence.data.observed_at, 123);
     assert.deepEqual(evidenceBytes(evidence), bytes);
     assert.equal(archived.unchanged, false);
-    assert.equal(store.archiveMigrationSource(source, bytes, { reason: 'legacy_status_invalid', mimeType: 'application/json', observedAt: 999 }).unchanged, true);
-    const changedReason = store.archiveMigrationSource(source, bytes, { reason: 'historical_run_input_invalid', mimeType: 'application/json', observedAt: 999 });
+    assert.equal((await store.archiveMigrationSource(source, bytes, { reason: 'legacy_status_invalid', mimeType: 'application/json', observedAt: 999 })).unchanged, true);
+    const changedReason = await store.archiveMigrationSource(source, bytes, { reason: 'historical_run_input_invalid', mimeType: 'application/json', observedAt: 999 });
     assert.equal(changedReason.unchanged, false);
     assert.equal(store.read(changedReason.objectId).data.type, `legacy_migration_source:${source.identity}/${source.key}#historical_run_input_invalid`);
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('unsupported step memory and run digests become exact evidence instead of permanent conflicts', async () => {
@@ -54,6 +56,7 @@ test('unsupported step memory and run digests become exact evidence instead of p
   const stepBytes = Buffer.from([0, 1, 2, 255]), digestBytes = Buffer.from('retired digest format');
   fs.writeFileSync(stepFile, stepBytes); fs.writeFileSync(digestFile, digestBytes);
   const store = new UnifiedDataStore(dataRoot);
+  const closeCompute = attachLazyContentCompute(store);
   try {
     const step = await importStepMemoryDirectory(store, stepRoot, { projectRoot: project, archiveUnresolved: true });
     const digest = await importRunDigestDirectory(store, digestRoot, { projectRoot: project, archiveUnresolved: true });
@@ -64,7 +67,7 @@ test('unsupported step memory and run digests become exact evidence instead of p
     assert.deepEqual(evidenceBytes(digestEvidence), digestBytes);
     const files = (await new (require('../out/migrationRecycling.js').MigrationRecycling)(store).prepare()).files.map(item => item.path);
     assert.ok(files.includes(stepFile)); assert.ok(files.includes(digestFile));
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('retired learning auxiliary files become exact database evidence instead of permanent filesystem residue', async () => {
@@ -80,6 +83,7 @@ test('retired learning auxiliary files become exact database evidence instead of
   }
   fs.writeFileSync(path.join(learningRoot, 'unknown.txt'), 'still owned by an unknown producer');
   const store = new UnifiedDataStore(dataRoot);
+  const closeCompute = attachLazyContentCompute(store);
   try {
     const result = await importLearningDirectory(store, learningRoot);
     assert.deepEqual(result.conflicts, []);
@@ -103,7 +107,7 @@ test('retired learning auxiliary files become exact database evidence instead of
     assert.equal(recycling.files.some(item => item.path.endsWith('unknown.txt')), false);
     const again = await importLearningDirectory(store, learningRoot);
     assert.equal(again.unchanged, 1); assert.equal(again.imported, 0);
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('an unexpected database failure stays conflicted and cannot be converted into recyclable evidence', async () => {
@@ -111,6 +115,7 @@ test('an unexpected database failure stays conflicted and cannot be converted in
   const dataRoot = path.join(root, '.solomap-global'), memoryRoot = path.join(root, 'memory');
   fs.mkdirSync(memoryRoot, { recursive: true }); fs.writeFileSync(path.join(memoryRoot, 'profile.md'), '# profile');
   const store = new UnifiedDataStore(dataRoot);
+  const closeCompute = attachLazyContentCompute(store);
   const importObject = store.importObject.bind(store);
   store.importObject = () => { throw new Error('database_write_failed'); };
   try {
@@ -118,7 +123,7 @@ test('an unexpected database failure stays conflicted and cannot be converted in
     assert.deepEqual(result.conflicts, [{ source: 'profile.md', error: 'database_write_failed' }]);
     assert.deepEqual(result.archivedSources || [], []);
     assert.notEqual(store.readMigrationSource(`memory:${memoryRoot}`, 'profile.md').stage, 'imported');
-  } finally { store.importObject = importObject; store.close(); }
+  } finally { store.importObject = importObject; await closeCompute(); store.close(); }
 });
 
 test('temporary and unknown historical errors never become terminal archive decisions', () => {
@@ -136,6 +141,7 @@ test('a current database parse failure cannot be mistaken for malformed legacy a
   const metadata = path.join(projectRoot, '.solopreneur'); fs.mkdirSync(metadata, { recursive: true });
   const sourceFile = path.join(metadata, 'issues-cache.json'); fs.writeFileSync(sourceFile, '{"issues":[]}');
   const store = new UnifiedDataStore(dataRoot); const project = await store.registerProject({ root: projectRoot });
+  const closeCompute = attachLazyContentCompute(store);
   const original = store.importAnalysisState.bind(store);
   store.importAnalysisState = () => { throw new SyntaxError('Unexpected end of JSON input'); };
   try {
@@ -144,7 +150,7 @@ test('a current database parse failure cannot be mistaken for malformed legacy a
     assert.ok(result.conflicts.some(item => item.source === sourceFile && item.error.startsWith('SyntaxError:')));
     const key = path.relative(dataRoot, sourceFile).split(path.sep).join('/');
     assert.equal(store.readMigrationSource(`analysis-caches:${dataRoot}`, key).stage, 'conflict');
-  } finally { store.importAnalysisState = original; store.close(); }
+  } finally { store.importAnalysisState = original; await closeCompute(); store.close(); }
 });
 
 test('malformed legacy analysis JSON is archived with its explicit source error', async () => {
@@ -153,22 +159,24 @@ test('malformed legacy analysis JSON is archived with its explicit source error'
   const metadata = path.join(projectRoot, '.solopreneur'); fs.mkdirSync(metadata, { recursive: true });
   const sourceFile = path.join(metadata, 'issues-cache.json'), bytes = Buffer.from('{'); fs.writeFileSync(sourceFile, bytes);
   const store = new UnifiedDataStore(dataRoot); const project = await store.registerProject({ root: projectRoot });
+  const closeCompute = attachLazyContentCompute(store);
   try {
     const result = await importAnalysisCaches(store, dataRoot, { projectScopes: { [projectRoot]: project.projectId }, archiveUnresolved: true });
     assert.deepEqual(result.conflicts, []); assert.equal(result.archivedSources.length, 1);
     assert.equal(result.archivedSources[0].error, 'Error: analysis_cache_source_invalid');
     assert.deepEqual(evidenceBytes(store.read(result.archivedSources[0].evidenceRef.split('/').at(-1))), bytes);
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('a previously retired agent-runs directory is a completed no-op on replay', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-missing-agent-runs-'));
   const project = path.join(root, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(path.join(root, '.solomap-global'));
+  const closeCompute = attachLazyContentCompute(store);
   try {
     const result = await importAgentRuns(store, path.join(project, '.solopreneur', 'agent-runs'), { projectRoot: project, archiveUnresolved: true });
     assert.deepEqual(result.conflicts, []); assert.equal(result.imported, 0); assert.equal(result.unchanged, 0);
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('a multi-file run conflict stays visible when any source evidence cannot be archived', async () => {
@@ -179,6 +187,7 @@ test('a multi-file run conflict stays visible when any source evidence cannot be
   fs.writeFileSync(path.join(runRoot, 'prompt.txt'), 'prompt'); fs.writeFileSync(path.join(runRoot, 'output.log'), 'output');
   fs.writeFileSync(path.join(runRoot, 'completion.json'), '{}');
   const store = new UnifiedDataStore(dataRoot); await store.registerProject({ root: project });
+  const closeCompute = attachLazyContentCompute(store);
   const archive = store.archiveMigrationSource.bind(store); let calls = 0;
   const importHistoricalRunIndex = store.importHistoricalRunIndex.bind(store);
   store.importHistoricalRunIndex = () => { throw new Error('historical_run_index_owner_unknown'); };
@@ -187,12 +196,13 @@ test('a multi-file run conflict stays visible when any source evidence cannot be
     const result = await importAgentRuns(store, sourceRoot, { projectRoot: project, archiveUnresolved: true });
     assert.ok(result.conflicts.some(item => item.error.includes('historical_run_index_owner_unknown')));
     assert.ok(['prompt.txt', 'output.log', 'completion.json'].some(key => store.readMigrationSource(`agent-runs:${project}`, `orphan/${key}`).stage !== 'imported'));
-  } finally { store.importHistoricalRunIndex = importHistoricalRunIndex; store.archiveMigrationSource = archive; store.close(); }
+  } finally { store.importHistoricalRunIndex = importHistoricalRunIndex; store.archiveMigrationSource = archive; await closeCompute(); store.close(); }
 });
 
 test('legacy project scopes resolve across case and relocation while truly unknown memory is archived outside global context', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-scope-recovery-'));
   const store = new UnifiedDataStore(path.join(root, '.solomap-global'));
+  const closeCompute = attachLazyContentCompute(store);
   const memoryRoot = path.join(root, 'memory');
   fs.mkdirSync(path.join(memoryRoot, 'projects'), { recursive: true });
   fs.writeFileSync(path.join(memoryRoot, 'projects', 'JW.md'), '# JW history');
@@ -221,7 +231,7 @@ test('legacy project scopes resolve across case and relocation while truly unkno
     const learning = await importLearningDirectory(store, learningRoot, { projectScopes: { '/current/workspace/SZLKBlog': blog }, archiveUnresolved: true });
     assert.deepEqual(learning.conflicts, []);
     assert.equal(store.search({ scope: blog, kinds: ['lesson'] }).items.length, 1);
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('a retired analysis cache cannot replace live state and is archived without remaining a conflict', async () => {
@@ -234,9 +244,10 @@ test('a retired analysis cache cannot replace live state and is archived without
   const bytes = Buffer.from(JSON.stringify({ syncedAt: '2025-01-01T00:00:00.000Z', issues: [{ id: 'old' }] }));
   fs.writeFileSync(sourceFile, bytes);
   const store = new UnifiedDataStore(dataRoot);
+  const closeCompute = attachLazyContentCompute(store);
   try {
     const project = await store.registerProject({ root: projectRoot });
-    store.writeAnalysisState(project.projectId, { namespace: 'external', key: 'issues', expectedRevision: 0, value: { current: true }, idempotencyKey: 'live-state' });
+    await store.writeAnalysisState(project.projectId, { namespace: 'external', key: 'issues', expectedRevision: 0, value: { current: true }, idempotencyKey: 'live-state' });
     const result = await importAnalysisCaches(store, dataRoot, { projectScopes: { [projectRoot]: project.projectId }, archiveUnresolved: true });
     assert.deepEqual(result.conflicts, []);
     assert.equal(result.archivedSources.length, 1);
@@ -247,7 +258,7 @@ test('a retired analysis cache cannot replace live state and is archived without
     assert.deepEqual(evidenceBytes(archived), bytes);
     const recycling = await new (require('../out/migrationRecycling.js').MigrationRecycling)(store).prepare();
     assert.ok(recycling.files.some(file => file.path === sourceFile));
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('a legacy project coverage cache imports into database state and becomes recyclable', async () => {
@@ -270,6 +281,7 @@ test('a legacy project coverage cache imports into database state and becomes re
   };
   fs.writeFileSync(sourceFile, JSON.stringify(snapshot));
   const store = new UnifiedDataStore(dataRoot);
+  const closeCompute = attachLazyContentCompute(store);
   try {
     const project = await store.registerProject({ root: projectRoot });
     const result = await importAnalysisCaches(store, dataRoot, { projectScopes: { [projectRoot]: project.projectId }, archiveUnresolved: true });
@@ -277,7 +289,7 @@ test('a legacy project coverage cache imports into database state and becomes re
     assert.deepEqual(store.readAnalysisState(project.projectId, 'coverage', 'project-growth').value, snapshot);
     const recycling = await new (require('../out/migrationRecycling.js').MigrationRecycling)(store).prepare();
     assert.ok(recycling.files.some(file => file.path === sourceFile));
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('archived global sources and abandoned atomic status temporaries enter the exact recycling plan', async () => {
@@ -288,6 +300,7 @@ test('archived global sources and abandoned atomic status temporaries enter the 
   const learningFile = path.join(learningRoot, 'retired.json'), temporary = path.join(statusRoot, '5.json.1234.abcdef.tmp');
   fs.writeFileSync(learningFile, '{"legacy":true}'); fs.writeFileSync(temporary, '');
   const store = new UnifiedDataStore(dataRoot);
+  const closeCompute = attachLazyContentCompute(store);
   try {
     for (const [identity, key, file] of [
       [`learning:${learningRoot}`, 'retired.json', learningFile],
@@ -295,12 +308,12 @@ test('archived global sources and abandoned atomic status temporaries enter the 
     ]) {
       const bytes = fs.readFileSync(file), source = { identity, key, hash: crypto.createHash('sha256').update(bytes).digest('hex') };
       store.captureMigrationSource(source, bytes, { error: 'legacy_source_unresolved' });
-      store.archiveMigrationSource(source, bytes, { reason: 'legacy_source_unresolved' });
+      await store.archiveMigrationSource(source, bytes, { reason: 'legacy_source_unresolved' });
     }
     const files = (await new (require('../out/migrationRecycling.js').MigrationRecycling)(store).prepare()).files.map(item => item.path);
     assert.ok(files.includes(learningFile));
     assert.ok(files.includes(temporary));
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('an incomplete review run keeps an exact formal inventory and every captured file becomes recyclable', async () => {
@@ -309,6 +322,7 @@ test('an incomplete review run keeps an exact formal inventory and every capture
   const runRoot = path.join(reviewRoot, 'runs', 'old-review'), resultFile = path.join(runRoot, 'result.json');
   fs.mkdirSync(runRoot, { recursive: true }); fs.writeFileSync(resultFile, '{"partial":true}');
   const store = new UnifiedDataStore(dataRoot);
+  const closeCompute = attachLazyContentCompute(store);
   try {
     const result = await importLearningReviewDirectory(store, reviewRoot, { archiveUnresolved: true });
     assert.deepEqual(result.conflicts, []);
@@ -321,7 +335,7 @@ test('an incomplete review run keeps an exact formal inventory and every capture
     assert.deepEqual(evidenceBytes(sourceEvidence), Buffer.from('{"partial":true}'));
     const recycling = await new (require('../out/migrationRecycling.js').MigrationRecycling)(store).prepare();
     assert.ok(recycling.files.some(file => file.path === resultFile));
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('an invalid learning ledger remains readable as exact evidence and no longer blocks retirement', async () => {
@@ -330,6 +344,7 @@ test('an invalid learning ledger remains readable as exact evidence and no longe
   const ledger = path.join(learningRoot, 'ledger', 'events.jsonl'), bytes = Buffer.from('{"broken":true}\n');
   fs.mkdirSync(path.dirname(ledger), { recursive: true }); fs.writeFileSync(ledger, bytes);
   const store = new UnifiedDataStore(dataRoot);
+  const closeCompute = attachLazyContentCompute(store);
   try {
     const result = await importLearningDirectory(store, learningRoot, { archiveUnresolved: true });
     assert.deepEqual(result.conflicts, []);
@@ -338,7 +353,7 @@ test('an invalid learning ledger remains readable as exact evidence and no longe
     assert.deepEqual(evidenceBytes(evidence), bytes);
     const recycling = await new (require('../out/migrationRecycling.js').MigrationRecycling)(store).prepare();
     assert.ok(recycling.files.some(file => file.path === ledger));
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('a retired review symlink is archived, recycled, and restored without following its target', async () => {
@@ -348,6 +363,7 @@ test('a retired review symlink is archived, recycled, and restored without follo
   const target = '/retired/tool/version/bin';
   fs.mkdirSync(runRoot, { recursive: true }); fs.symlinkSync(target, link);
   const store = new UnifiedDataStore(dataRoot);
+  const closeCompute = attachLazyContentCompute(store);
   try {
     const result = await importLearningReviewDirectory(store, reviewRoot, { archiveUnresolved: true });
     assert.deepEqual(result.conflicts, []);
@@ -374,7 +390,7 @@ test('a retired review symlink is archived, recycled, and restored without follo
     assert.ok(links >= 2);
     assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
     assert.equal(fs.readlinkSync(link), target);
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('a retired review symlink can be restored to its persisted alternate destination across filesystems', async () => {
@@ -384,6 +400,7 @@ test('a retired review symlink can be restored to its persisted alternate destin
   const destination = path.join(root, 'recovered', 'tool.symlink'), target = '/retired/tool/version/bin';
   fs.mkdirSync(runRoot, { recursive: true }); fs.symlinkSync(target, link);
   const store = new UnifiedDataStore(dataRoot);
+  const closeCompute = attachLazyContentCompute(store);
   try {
     await importLearningReviewDirectory(store, reviewRoot, { archiveUnresolved: true });
     const recycling = new (require('../out/migrationRecycling.js').MigrationRecycling)(store);
@@ -401,7 +418,7 @@ test('a retired review symlink can be restored to its persisted alternate destin
     assert.equal(fs.existsSync(link), false);
     assert.equal(fs.lstatSync(destination).isSymbolicLink(), true);
     assert.equal(fs.readlinkSync(destination), target);
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('a retired review symlink resumes after its private restore stage is written before state commit', async () => {
@@ -411,6 +428,7 @@ test('a retired review symlink resumes after its private restore stage is writte
   const target = '/retired/tool/version/bin';
   fs.mkdirSync(runRoot, { recursive: true }); fs.symlinkSync(target, link);
   let store = new UnifiedDataStore(dataRoot);
+  let closeCompute = attachLazyContentCompute(store);
   try {
     await importLearningReviewDirectory(store, reviewRoot, { archiveUnresolved: true });
     const recycling = new (require('../out/migrationRecycling.js').MigrationRecycling)(store);
@@ -424,11 +442,11 @@ test('a retired review symlink resumes after its private restore stage is writte
     };
     await assert.rejects(recycling.restore(item.itemId), /injected_before_restore_state_commit/);
     assert.equal(fs.lstatSync(path.join(dataRoot, '.migration-recycle', `${item.itemId}.restore`)).isSymbolicLink(), true);
-    store.close(); store = new UnifiedDataStore(dataRoot);
+    await closeCompute(); store.close(); store = new UnifiedDataStore(dataRoot); closeCompute = attachLazyContentCompute(store);
     await new (require('../out/migrationRecycling.js').MigrationRecycling)(store).restore(item.itemId);
     assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
     assert.equal(fs.readlinkSync(link), target);
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });
 
 test('an interrupted cross-filesystem symlink recovery can move to another persisted destination after restart', async () => {
@@ -439,6 +457,7 @@ test('an interrupted cross-filesystem symlink recovery can move to another persi
   const target = '/retired/tool/version/bin';
   fs.mkdirSync(runRoot, { recursive: true }); fs.symlinkSync(target, link);
   let store = new UnifiedDataStore(dataRoot);
+  let closeCompute = attachLazyContentCompute(store);
   try {
     await importLearningReviewDirectory(store, reviewRoot, { archiveUnresolved: true });
     const recycling = new (require('../out/migrationRecycling.js').MigrationRecycling)(store);
@@ -455,10 +474,10 @@ test('an interrupted cross-filesystem symlink recovery can move to another persi
     finally { fs.promises.link = linkFile; }
     assert.equal(store.recyclingItem(item.itemId).status, 'restoring');
     assert.ok(store.recyclingRestoreStage(item.itemId));
-    store.close(); store = new UnifiedDataStore(dataRoot);
+    await closeCompute(); store.close(); store = new UnifiedDataStore(dataRoot); closeCompute = attachLazyContentCompute(store);
     await new (require('../out/migrationRecycling.js').MigrationRecycling)(store).restore(item.itemId, secondDestination);
     assert.equal(fs.existsSync(firstDestination), false);
     assert.equal(fs.lstatSync(secondDestination).isSymbolicLink(), true);
     assert.equal(fs.readlinkSync(secondDestination), target);
-  } finally { store.close(); }
+  } finally { await closeCompute(); store.close(); }
 });

@@ -12,7 +12,7 @@ export async function importLegacyIntelligenceConversation(store: UnifiedDataSto
   if (!shouldContinue()) throw new Error('migration_interrupted');
   if (before.ino !== after.ino || before.size !== after.size || before.mtimeMs !== after.mtimeMs || bytes.length !== after.size) throw new Error('source_changed_during_read');
   const source = { identity: `intelligence:${path.dirname(file)}`, key: path.basename(file), hash: crypto.createHash('sha256').update(bytes).digest('hex') };
-  store.captureMigrationSource(source, bytes, { mimeType: 'application/json', encoding: 'utf8' });
+  await store.publishMigrationSource(source, bytes, { mimeType: 'application/json', encoding: 'utf8' });
   const conversation = JSON.parse(bytes.toString('utf8')) as IntelligenceConversation;
   if (conversation.id + '.json' !== path.basename(file)) throw new Error('conversation_identity_conflict');
   // A resumed/newer database conversation always wins over the retained historical source.

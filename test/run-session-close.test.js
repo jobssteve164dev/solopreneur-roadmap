@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { snapshotWorkspace, workspaceDocumentPurpose } = require('../out/runWorkspace.js');
 
 for (const status of ['Waiting', 'Processed']) test(`closing an unfinished ${status} turn settles its original evidence and report without leaving a recovery orphan`, async () => {

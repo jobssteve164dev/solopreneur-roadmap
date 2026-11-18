@@ -17,7 +17,7 @@ function cleanupExact(root) {
 }
 
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { importLegacyIntelligenceConversation } = require('../out/intelligenceConversationData.js');
 const { sendRuntimeControlCommand, sendRuntimeDataRequest } = require('../out/autonomousRuntimeControl.js');
 
@@ -134,7 +134,7 @@ test('a project-scoped migration session rejects a symlink retargeted after auth
     fs.symlinkSync(projectA, alias, 'dir');
     const identityA = await f.store.registerProject({ root: projectA });
     await f.store.registerProject({ root: projectB });
-    const run = f.store.prepareRun(identityA.projectId, identityA.locationId, {
+    const run = await f.store.prepareRun(identityA.projectId, identityA.locationId, {
       root: projectA, executionLogId: 1, nodeId: '__solo__', runKind: 'migration_apply',
       prompt: 'migration task', command: 'codex', userMessage: 'migration task',
       metadata: { migrationProjectRoot: alias }, idempotencyKey: 'symlink-scope'
@@ -182,12 +182,12 @@ test('scoped maintenance history uses immutable project identity after metadata 
     fs.symlinkSync(projectA, alias, 'dir');
     const identityA = await f.store.registerProject({ root: projectA });
     const identityB = await f.store.registerProject({ root: projectB });
-    const runA = f.store.prepareRun(identityA.projectId, identityA.locationId, {
+    const runA = await f.store.prepareRun(identityA.projectId, identityA.locationId, {
       root: projectA, executionLogId: 1, nodeId: '__solo__', runKind: 'migration_review',
       prompt: 'review a', command: 'codex', userMessage: 'review a',
       metadata: { migrationProjectRoot: alias }, idempotencyKey: 'history-a'
     });
-    const runB = f.store.prepareRun(identityB.projectId, identityB.locationId, {
+    const runB = await f.store.prepareRun(identityB.projectId, identityB.locationId, {
       root: projectB, executionLogId: 2, nodeId: '__solo__', runKind: 'migration_review',
       prompt: 'review b', command: 'codex', userMessage: 'review b', metadata: {}, idempotencyKey: 'history-b'
     });
@@ -361,16 +361,17 @@ test('external Agent CLI receives migration tools from the ordinary managed MCP 
   const project = path.join(base, 'project');
   fs.mkdirSync(project);
   const seed = new UnifiedDataStore(root);
+  const closeSeedCompute = require('./content-compute-fixture.cjs').attachLazyContentCompute(seed);
   const identity = await seed.registerProject({ root: project });
   const retainedFiles = Array.from({ length: 500 }, (_, index) => `history/${index}.log`);
   const conflicts = Array.from({ length: 500 }, (_, index) => ({ source: `history/${index}.log`, error: 'migration_source_changed' }));
   const job = seed.enqueueMemoryMigration({ collection: 'documentation', sourceRoot: path.join(project, '.solopreneur', 'documentation.json'), projectRoot: project }, 'stdio-detail');
   seed.updateMigrationJob(job.jobId, 'completed_with_conflicts', { retainedFiles, conflicts, imported: 500 });
-  const prepared = seed.prepareRun(identity.projectId, identity.locationId, {
+  const prepared = await seed.prepareRun(identity.projectId, identity.locationId, {
     root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'migration_apply', prompt: 'migrate', command: 'codex',
     userMessage: 'migrate', metadata: { migrationProjectRoot: project }, idempotencyKey: 'stdio-migration-run'
   });
-  seed.close();
+  await closeSeedCompute(); seed.close();
   const runtime = spawn(process.execPath, [path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root, '--runtime-id', 'migration-owner'], { stdio: 'pipe' });
   let stderr = '';
   runtime.stderr.on('data', chunk => { stderr += chunk; });

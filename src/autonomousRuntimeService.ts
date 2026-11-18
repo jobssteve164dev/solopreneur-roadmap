@@ -13,7 +13,8 @@ import { sanitizeDiagnosticText } from './localDiagnostics';
 import { runtimeBuildId, runtimeReleaseVersion } from './runtimeBuildIdentity';
 import { UnifiedDataStore } from './db/unifiedDataStore';
 import { DiskDatabase } from './db/diskDatabase';
-import { createRuntimeDataOperations } from './runtimeDataOperations';
+import type { RuntimeDataOperations } from './runtimeDataOperations';
+import { RuntimeDataExecutionDomains } from './runtimeDataExecutionDomains';
 import { writeRuntimePauseState } from './runtimePauseState';
 import { isProcessOwnerAlive } from './processIdentity';
 import { ensureHealthyAutonomousRuntime } from './autonomousRuntimeHost';
@@ -545,22 +546,22 @@ async function waitForRuntimeOwnerStopped(globalDataPath: string, timeoutMs = 10
   }
 }
 
-async function withOfflineRuntimeDataOwner<T>(globalDataPath: string, action: (operations: ReturnType<typeof createRuntimeDataOperations>) => Promise<T>): Promise<T> {
+async function withOfflineRuntimeDataOwner<T>(globalDataPath: string, action: (operations: RuntimeDataOperations) => Promise<T>): Promise<T> {
   const root = normalizeGlobalDataPathForExtension(globalDataPath);
   const runtimeWasInitialized = runtimeRootRequiresExistingDatabase(root);
   const runtimeId = `offline-maintenance:${crypto.randomUUID()}`;
   const lease = claimRuntimeLease(root, { runtimeId, pid: process.pid });
   if (!lease.acquired) throw new Error('runtime_owner_unavailable');
-  let store: UnifiedDataStore | undefined;
-  let operations: ReturnType<typeof createRuntimeDataOperations> | undefined;
+  let domains: RuntimeDataExecutionDomains | undefined;
   try {
-    store = runtimeWasInitialized || fs.existsSync(path.join(root, 'solomap.db')) ? UnifiedDataStore.open(root) : new UnifiedDataStore(root);
-    operations = createRuntimeDataOperations(store);
-    return await action(operations);
+    const store = runtimeWasInitialized || fs.existsSync(path.join(root, 'solomap.db')) ? UnifiedDataStore.open(root) : new UnifiedDataStore(root);
+    const { databaseId } = store;
+    store.close();
+    domains = await RuntimeDataExecutionDomains.start({ root, databaseId });
+    return await action(domains.operations);
   } finally {
-    if (operations) await operations.close();
-    store?.close();
-    updateRuntimeState(root, runtimeId, { status: 'stopped' });
+    try { await domains?.close(); }
+    finally { updateRuntimeState(root, runtimeId, { status: 'stopped' }); }
   }
 }
 

@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 
 function fixture(t, label) {
@@ -249,8 +249,9 @@ test('a terminal maintenance run without its promised result can be settled as f
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-capability-missing-result-'));
   const root = path.join(base, '.solomap-global'), project = path.join(base, 'project'); fs.mkdirSync(project);
   const store = new UnifiedDataStore(root);
-  t.after(() => {
-    store.close();
+  const closeCompute=require('./content-compute-fixture.cjs').attachLazyContentCompute(store);
+  t.after(async () => {
+    await closeCompute();store.close();
     fs.unlinkSync(path.join(root, 'solomap.db')); fs.rmdirSync(root);
     const metadata = path.join(project, '.solopreneur', 'project.json');
     if (fs.existsSync(metadata)) fs.unlinkSync(metadata);
@@ -261,11 +262,11 @@ test('a terminal maintenance run without its promised result can be settled as f
   store.beginCapabilityOperation({ operationId, kind: 'skill', action: 'install', requestKey: 'missing-result' });
   assert.deepEqual(store.readCapabilityOperationRunState({ operationId }), { attached: false, terminal: false, status: '', exitCode: null });
   const registered = await store.registerProject({ root: project });
-  const run = store.prepareRun(registered.projectId, registered.locationId, { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'skill_install', prompt: 'install', command: 'agy', userMessage: 'install', status: 'Failed', idempotencyKey: 'missing-result-run' });
+  const run = await store.prepareRun(registered.projectId, registered.locationId, { root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'skill_install', prompt: 'install', command: 'agy', userMessage: 'install', status: 'Failed', idempotencyKey: 'missing-result-run' });
   store.attachCapabilityOperation({ operationId, resultPath: path.join(root, 'tmp', operationId, 'result.json'), runId: run.runId });
   assert.deepEqual(store.readCapabilityOperationRunState({ operationId }), { attached: true, terminal: true, status: 'Failed', exitCode: null });
   const bytes = Buffer.from('{"ok":true,"skillId":"fixture-skill"}');
-  store.writeRunDocument(registered.projectId, { executionLogId: 1, generation: run.generation, turnId: run.turnId, purpose: `maintenance_result_${run.generation}`, bytes: bytes.toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: 'fixed-maintenance-result' });
+  await store.writeRunDocument(registered.projectId, { executionLogId: 1, generation: run.generation, turnId: run.turnId, purpose: `maintenance_result_${run.generation}`, bytes: bytes.toString('base64'), mimeType: 'application/json', expectedRevision: 0, idempotencyKey: 'fixed-maintenance-result' });
   const fixed = store.readCapabilityOperationResult({ operationId });
   assert.deepEqual(Buffer.from(fixed.bytes, 'base64'), bytes);
   assert.equal(fixed.hash, crypto.createHash('sha256').update(bytes).digest('hex'));

@@ -252,7 +252,12 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
         await send({ command: 'supplementFilesSelected', nodeId: roadmapAttachmentSave.nodeId, projectPath: roadmapAttachmentSave.projectPath, requestId: roadmapAttachmentSave.requestId, attachmentEpoch: roadmapAttachmentSave.attachmentEpoch, files: ['solomap://asset/22222222-2222-4222-8222-222222222222'] });
         check((await page.locator('#solo-body').innerText()).includes('截图'), 'roadmap renders the saved internal attachment with a user-facing label');
         check(!(await page.locator('#solo-body').innerText()).includes('solomap://asset'), 'roadmap hides internal attachment identifiers');
+        const submittedSoloDraft = await page.locator('[data-solo-input]').inputValue();
         await page.locator('[data-send-solo]').click();
+        const firstSoloLaunch = await page.evaluate(() => window.messages.filter(message => message.command === 'conversation.runSolo').at(-1));
+        await send({ command: 'conversationActionAccepted', launchActionId: firstSoloLaunch.launchActionId });
+        check(await page.locator('[data-solo-input]').inputValue() === submittedSoloDraft, 'roadmap retains the draft until Runtime durably accepts it');
+        await send({ command: 'conversationActionDurable', launchActionId: firstSoloLaunch.launchActionId });
         check(await page.locator('[data-solo-input]').inputValue() === '', 'roadmap immediate send clears the submitted draft');
         await page.locator('[data-solo-input]').fill('Keep composing');
         await composer.evaluate(el => { window.originalComposer = el; el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true })); });
@@ -281,6 +286,7 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
         check(queuedRun.userMessage === 'Keep composing', 'roadmap automatic send keeps the original user message');
         check(queuedRun.projectPath === project.path, 'roadmap automatic send remains bound to the project where the user clicked Send');
         check(queuedRun.supplementFiles.length === 1, 'roadmap automatic send includes the saved screenshot exactly once');
+        await send({ command: 'conversationActionDurable', launchActionId: queuedRun.launchActionId });
         await projects(project.path);
         check(!(await page.locator('#solo-body').innerText()).includes('图片保存后自动发送'), 'roadmap clears the queued status after the automatic send');
         check(await page.locator('[data-solo-input]').inputValue() === 'New draft after click', 'roadmap automatic send preserves text entered after the user clicked Send');
@@ -299,6 +305,9 @@ const settings = { cliPath: 'agy', language: 'zh', globalPrompt: 'Saved prompt',
         await page.locator('#btn-toggle-flow').click();
         await page.locator('[data-flow-goal-input]').fill('Flow goal');
         await page.locator('[data-send-flow]').click();
+        const flowLaunch = await page.evaluate(() => window.messages.filter(message => message.launchActionId).at(-1));
+        check(await page.locator('[data-flow-goal-input]').inputValue() === 'Flow goal', 'Flow retains the submitted goal until durable acceptance');
+        await send({ command: 'conversationActionDurable', launchActionId: flowLaunch.launchActionId });
         check(await page.locator('[data-flow-goal-input]').inputValue() === '', 'Flow send clears its submitted draft');
         const oldFlow = { command: 'flowStateLoaded', projectPath: project.path, state: { hasProAccess: true, flow: { id: 'flow-a', goal: 'Only project A goal', status: 'running', loops: [] }, history: [] } };
         await send(oldFlow);

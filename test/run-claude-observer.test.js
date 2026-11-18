@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { prepareAgentRun } = require('../out/agentRunPreparation.js');
 const { snapshotWorkspace, workspaceDocumentPurpose } = require('../out/runWorkspace.js');
 
@@ -39,6 +39,50 @@ async function fixture(unicodeHome = false) {
   return { base, root, project, claudeHome, configDirOverride, store, ops, call, run: claimed, scope, transcript, row };
 }
 
+function trackNativeLogBytes(store,observe){
+  const read=store.readRunLog,rows=store.prepareRunNativeRowsPublication;
+  store.readRunLog=function(...args){const page=read.apply(this,args);observe(Buffer.from(page.bytes,'base64').length);return page;};
+  store.prepareRunNativeRowsPublication=async function(input){const page=await rows.call(this,input);observe(page.state.offset-input.state.offset);return page;};
+  return()=>{store.readRunLog=read;store.prepareRunNativeRowsPublication=rows;};
+}
+
+for(const mode of ['runtime','direct'])for(const operation of ['record_claude_native_ready','record_claude_native_event','record_claude_native_append'])test(`${mode}: the actual ${operation} prepares complete large control metadata outside Source`,async()=>{
+  const f=await fixture(),metadata='完整原生控制元数据🌿'.repeat(12000),read=f.store.content,put=f.store.putContent;
+  const method={record_claude_native_ready:'recordClaudeNativeReady',record_claude_native_event:'recordClaudeNativeEvent',record_claude_native_append:'recordClaudeNativeAppend'}[operation],invoke=input=>Promise.resolve().then(()=>mode==='direct'?f.store[method](f.run.projectId,input):f.call(operation,input));
+  try{
+    const state=f.store.readRunCheckpointState(f.run.projectId,1);await f.store.patchRunState(f.run.projectId,{...f.scope,expectedRevision:state.revision,patch:{nativePublicationFixture:metadata,claudeNativeObserverCapable:true,claudeNativeContract:operation==='record_claude_native_ready'?'transcript-v1':'mods-v1'},idempotencyKey:`${operation}:large-metadata`});
+    f.store.content=function(id){if(Number(this.rows('SELECT byte_length FROM contents WHERE id=?',[id])[0]?.byte_length)>65536)throw Error('Source decoded large native mutation metadata');return read.call(this,id);};
+    f.store.putContent=function(value,...args){if((typeof value==='string'?Buffer.byteLength(value):value.byteLength)>65536)throw Error('Source encoded large native mutation metadata');return put.call(this,value,...args);};
+    const event=operation==='record_claude_native_append'?{schemaVersion:1,kind:'prompt',sessionId:f.row.sessionId,uuid:f.row.uuid}:{schemaVersion:1,sequence:1,sessionId:f.row.sessionId,providerTurnId:require('node:crypto').randomUUID(),userUuid:f.row.uuid,assistantUuids:['not-yet-flushed'],startedAt:f.row.timestamp,completedAt:new Date().toISOString(),reason:'answer'};
+    const result=await invoke({...f.scope,proof:f.run.proof,...(operation==='record_claude_native_ready'?{sessionId:f.row.sessionId}:{event})});
+    assert.equal(result.status.nativePublicationFixture,metadata);
+    const wal=()=>{const bytes=fs.readFileSync(f.store.filePath+'-wal');return{bytes:bytes.length,sha:require('node:crypto').createHash('sha256').update(bytes).digest('hex')};},before=wal();
+    const repeated=await invoke({...f.scope,proof:f.run.proof,...(operation==='record_claude_native_ready'?{sessionId:f.row.sessionId}:{event})});
+    assert.equal(repeated.status.nativePublicationFixture,metadata);assert.deepEqual(wal(),before);assert.equal(f.store.rows('SELECT COUNT(*) AS n FROM content_lifecycle_prepare_owners')[0].n,0);
+  }finally{f.store.content=read;f.store.putContent=put;await f.ops.close();f.store.close();}
+});
+
+for(const mode of ['published','direct'])test(`${mode}: native acknowledgement preserves the original missing-event error without decoding large control metadata in Source`,async()=>{
+  const f=await fixture(),read=f.store.content;
+  try{
+    const state=f.store.readRunCheckpointState(f.run.projectId,1);await f.store.patchRunState(f.run.projectId,{...f.scope,expectedRevision:state.revision,patch:{nativeAcknowledgementFixture:'完整确认元数据🌿'.repeat(12000),claudeNativeContract:'mods-v1',claudeNativeEventHead:1,claudeNativeEventCursor:0},idempotencyKey:'actual-large-native-acknowledgement'});
+    f.store.content=function(id){if(Number(this.rows('SELECT byte_length FROM contents WHERE id=?',[id])[0]?.byte_length)>65536)throw Error('Source decoded large native acknowledgement metadata');return read.call(this,id);};
+    const input={executionLogId:1,generation:f.scope.generation,sequence:1};await assert.rejects(Promise.resolve().then(()=>mode==='direct'?f.store.acknowledgeClaudeNativeEvent(f.run.projectId,input):f.store.publishRunNative(f.run.projectId,{type:'acknowledge',input})),/native_event_missing/);
+    assert.equal(f.store.rows('SELECT COUNT(*) AS n FROM content_lifecycle_prepare_owners')[0].n,0);
+  }finally{f.store.content=read;await f.ops.close();f.store.close();}
+});
+
+test('a new native generation retires the exact prior incomplete Claude prefix before its missing event fails',async()=>{
+  const f=await fixture(),{RunNativeObserver}=require('../out/runNativeObserver.js'),observer=new RunNativeObserver(f.store);
+  try{
+    const state=f.store.readRunCheckpointState(f.run.projectId,1);await f.store.patchRunState(f.run.projectId,{...f.scope,expectedRevision:state.revision,patch:{claudeNativeContract:'mods-v1'},idempotencyKey:'generation-prefix-contract'});
+    const reply={...f.row,type:'assistant',uuid:'generation-pending-assistant',parentUuid:f.row.uuid,message:{role:'assistant',id:'generation-pending-message',content:[{type:'text',text:'未完原始回复🌿'.repeat(115000)}]}},event={schemaVersion:1,sequence:1,sessionId:f.row.sessionId,providerTurnId:require('node:crypto').randomUUID(),userUuid:f.row.uuid,assistantUuids:[reply.uuid],startedAt:f.row.timestamp,completedAt:new Date().toISOString(),reason:'answer'};
+    fs.writeFileSync(f.transcript,JSON.stringify(f.row)+'\n'+JSON.stringify(reply));await f.store.recordClaudeNativeEvent(f.run.projectId,{...f.scope,proof:f.run.proof,event});await observer.observe(f.store.readRunCheckpointState(f.run.projectId,1));assert.equal(f.store.runObserverParserTokens.size,1);
+    const current=f.store.readRunCheckpointState(f.run.projectId,1),idle=await f.store.patchRunState(f.run.projectId,{executionLogId:1,generation:current.generation,expectedRevision:current.revision,patch:{agentPid:0,processBirth:'',agentChildPid:0,processChildBirth:''},idempotencyKey:'generation-prefix-old-process-exit'}),next=await f.store.claimRun(f.run.projectId,{executionLogId:1,expectedRevision:idle.revision,idempotencyKey:'generation-prefix-new-owner'});
+    assert.equal(next.generation,idle.generation+1);await assert.rejects(observer.observe(next),/native_event_missing/);assert.equal(f.store.runObserverParserTokens.size,0);assert.equal(f.store.retiredRunObserverParserTokens.size,0);assert.equal((await f.store.runObserverCompute.release({...f.store.dataWriteDatabaseIdentity(),tokens:[]})).remaining,0);
+  }finally{await f.ops.close();f.store.close();}
+});
+
 test('Claude end_turn in one append batch cannot seal a reply before later blocks and its whole-turn boundary', async () => {
   const f = await fixture();
   try {
@@ -65,15 +109,15 @@ for (const crashAfterReceipt of [false, true]) test(`a confirmed Claude child ex
     const stat = fs.readFileSync(`/proc/${child.pid}/stat`, 'utf8');
     const birth = 'proc:' + stat.slice(stat.lastIndexOf(') ') + 2).trim().split(/\s+/)[19];
     let state = f.store.readRunCheckpointState(f.run.projectId, 1);
-    f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { agentChildPid: child.pid, processChildBirth: birth }, idempotencyKey: 'exit-child' });
+    await f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { agentChildPid: child.pid, processChildBirth: birth }, idempotencyKey: 'exit-child' });
     const reply = { ...f.row, type: 'assistant', uuid: 'print-reply', parentUuid: f.row.uuid, message: { role: 'assistant', id: 'print', content: [{ type: 'text', text: '完整原生正文🌿\n' }], stop_reason: 'end_turn' } };
     fs.writeFileSync(f.transcript, [f.row, reply].map(JSON.stringify).join('\n') + '\n');
     await f.call('recover_run_executions', {});
     assert.equal(f.store.readMetadata(f.run.turnId).data.finished_at, null, 'a live child and API end_turn must not seal the native turn');
     const exited = require('node:events').once(child, 'exit'); child.stdin.end('exit'); await exited;
     if (crashAfterReceipt) {
-      const write = f.store.writeRunDocument.bind(f.store);
-      f.store.writeRunDocument = (...args) => { const result = write(...args); if (args[1].purpose.startsWith('claude_exit_')) throw Error('forced_after_exit_receipt'); return result; };
+      const write = f.store.publishRunDocument.bind(f.store);
+      f.store.publishRunDocument = async (...args) => { const result = await write(...args); if (args[1].purpose.startsWith('claude_exit_')) throw Error('forced_after_exit_receipt'); return result; };
       state = f.store.readRunCheckpointState(f.run.projectId, 1);
       await assert.rejects(f.call('checkpoint_run', { ...f.scope, proof: f.run.proof, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'session-close', exitCode: 0, idempotencyKey: 'print-exit-close' }), /forced_after_exit_receipt/);
       await f.ops.close(); f.store.close(); f.store = new UnifiedDataStore(f.root); f.ops = createRuntimeDataOperations(f.store);
@@ -103,7 +147,7 @@ for (const action of ['session-close', 'complete']) test(`a live Claude child ca
     const stat = fs.readFileSync(`/proc/${process.pid}/stat`, 'utf8');
     const birth = 'proc:' + stat.slice(stat.lastIndexOf(') ') + 2).trim().split(/\s+/)[19];
     let state = f.store.readRunCheckpointState(f.run.projectId, 1);
-    f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { agentChildPid: process.pid, processChildBirth: birth }, idempotencyKey: 'live-child' });
+    await f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { agentChildPid: process.pid, processChildBirth: birth }, idempotencyKey: 'live-child' });
     fs.writeFileSync(f.transcript, JSON.stringify(f.row) + '\n');
     await f.call('recover_run_executions', {});
     state = f.store.readRunCheckpointState(f.run.projectId, 1);
@@ -126,7 +170,7 @@ test('Claude machine completion persists before flush and only seals after every
   const f = await fixture(); let store = f.store; let ops = f.ops;
   try {
     let state = store.readRunCheckpointState(f.run.projectId, 1);
-    store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'machine-contract' });
+    await store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'machine-contract' });
     const block = (uuid, index, text, parentUuid) => ({ ...f.row, type: 'assistant', uuid, parentUuid, timestamp: new Date().toISOString(), apiBlockIndex: index,
       message: { id: 'fenced-message', role: 'assistant', content: [{ type: 'text', text }], stop_reason: 'end_turn' } });
     const first = block('fence-1', 0, '第一块全文🌿\n', f.row.uuid); const second = block('fence-2', 1, '第二块全文🧭\n', first.uuid);
@@ -155,7 +199,7 @@ for (const mode of ['settled', 'pending-ack', 'delayed-flush']) test(`Claude mod
   let withheldRow;
   try {
     const state = f.store.readRunCheckpointState(f.run.projectId, 1);
-    f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeObserverCapable: true }, idempotencyKey: 'reload-capable' });
+    await f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeObserverCapable: true }, idempotencyKey: 'reload-capable' });
     const source = fs.readFileSync(path.resolve(__dirname, '../resources/claude-observer/hooks/register.js'), 'utf8');
     const { register } = await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
     const $ = { clock: { now: async () => Date.now(), sleep: async () => {} }, session: { id: async () => f.row.sessionId },
@@ -219,7 +263,7 @@ test('Claude reload receipts retain compact UUIDs without rereading full native 
   const f = await fixture();
   try {
     let state = f.store.readRunCheckpointState(f.run.projectId, 1);
-    f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeObserverCapable: true }, idempotencyKey: 'append-capable' });
+    await f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeObserverCapable: true }, idempotencyKey: 'append-capable' });
     await f.call('record_claude_native_ready', { ...f.scope, proof: f.run.proof, sessionId: f.row.sessionId });
     fs.writeFileSync(f.transcript, JSON.stringify(f.row) + '\n');
     const event = { schemaVersion: 1, phase: 'start', sequence: 1, sessionId: f.row.sessionId, providerTurnId: require('node:crypto').randomUUID(), userUuid: f.row.uuid,
@@ -247,7 +291,7 @@ test('Claude queued prompts cannot steal the current reply and retain their own 
   const f = await fixture(); let store = f.store; let ops = f.ops;
   try {
     const state = store.readRunCheckpointState(f.run.projectId, 1);
-    store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'queued-contract' });
+    await store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'queued-contract' });
     const queued = { ...f.row, uuid: 'queued-user', parentUuid: f.row.uuid, message: { role: 'user', content: '排队的第二轮请求' } };
     const assistant = (uuid, parentUuid, text) => ({ ...f.row, type: 'assistant', uuid, parentUuid, timestamp: new Date().toISOString(), message: { role: 'assistant', id: uuid, content: [{ type: 'text', text }], stop_reason: 'end_turn' } });
     const first = assistant('queued-reply-1', f.row.uuid, '第一轮结果'); const second = assistant('queued-reply-2', queued.uuid, '第二轮结果');
@@ -270,7 +314,7 @@ test('Claude whole-turn interruption before any assistant block closes a failed 
   const f = await fixture();
   try {
     const state = f.store.readRunCheckpointState(f.run.projectId, 1);
-    f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'abort-contract' });
+    await f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'abort-contract' });
     fs.writeFileSync(f.transcript, JSON.stringify(f.row) + '\n');
     const event = { schemaVersion: 1, sequence: 1, sessionId: f.row.sessionId, providerTurnId: require('node:crypto').randomUUID(), userUuid: f.row.uuid,
       assistantUuids: [], startedAt: f.row.timestamp, completedAt: new Date().toISOString(), reason: 'aborted' };
@@ -286,13 +330,12 @@ test('Claude event source relation and consumed cursor survive a cold interrupti
   const f = await fixture(); let store = f.store; let ops = f.ops;
   try {
     const state = store.readRunCheckpointState(f.run.projectId, 1);
-    store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'ack-contract' });
+    await store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'ack-contract' });
     const reply = { ...f.row, type: 'assistant', uuid: 'ack-reply', parentUuid: f.row.uuid, message: { role: 'assistant', id: 'ack-message', content: [{ type: 'text', text: '中断后完整正文🌿\n' }] } };
     fs.writeFileSync(f.transcript, [f.row, reply].map(JSON.stringify).join('\n') + '\n');
     const event = { schemaVersion: 1, sequence: 1, sessionId: f.row.sessionId, providerTurnId: require('node:crypto').randomUUID(), userUuid: f.row.uuid,
       assistantUuids: [reply.uuid], startedAt: f.row.timestamp, completedAt: new Date().toISOString(), reason: 'answer' };
-    const patch = store.patchRunState.bind(store);
-    store.patchRunState = (...args) => { if (args[1].patch.claudeNativeEventCursor) throw Error('forced_cursor_ack_failure'); return patch(...args); };
+    store.db.exec("CREATE TEMP TRIGGER fail_native_cursor BEFORE INSERT ON requests WHEN NEW.idempotency_key LIKE '%:claude-machine-cursor:1' BEGIN SELECT RAISE(ABORT,'forced_cursor_ack_failure'); END");
     await assert.rejects(f.call('record_claude_native_event', { ...f.scope, proof: f.run.proof, event }), /forced_cursor_ack_failure/);
     const unacknowledged = store.readRunDocument(f.run.projectId, 1, `claude_event_${f.scope.generation}_1`);
     assert.deepEqual(store.rows("SELECT target_id FROM relations WHERE source_id=? AND relation='source'", [unacknowledged.objectId]), [], 'failed cursor acknowledgement must roll back the source relation too');
@@ -309,34 +352,32 @@ test('Claude event source relation and consumed cursor survive a cold interrupti
 
 test('Claude machine event body and queue head roll back together and reject changed replay or old ownership', async () => {
   const f = await fixture();
-  const patch = f.store.patchRunState.bind(f.store);
   try {
     const state = f.store.readRunCheckpointState(f.run.projectId, 1);
-    patch(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'atomic-contract' });
+    await f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'atomic-contract' });
     const event = { schemaVersion: 1, sequence: 1, sessionId: f.row.sessionId, providerTurnId: require('node:crypto').randomUUID(), userUuid: f.row.uuid,
       assistantUuids: ['not-flushed-yet'], startedAt: f.row.timestamp, completedAt: new Date().toISOString(), reason: 'answer' };
-    f.store.patchRunState = (...args) => { if (args[1].patch.claudeNativeEventHead) throw Error('forced_atomic_failure'); return patch(...args); };
+    f.store.db.exec("CREATE TEMP TRIGGER fail_native_head BEFORE INSERT ON requests WHEN NEW.idempotency_key LIKE '%:claude-machine:1:head' BEGIN SELECT RAISE(ABORT,'forced_atomic_failure'); END");
     await assert.rejects(f.call('record_claude_native_event', { ...f.scope, proof: f.run.proof, event }), /forced_atomic_failure/);
     assert.equal(f.store.readRunDocument(f.run.projectId, 1, `claude_event_${f.scope.generation}_1`), null);
     assert.equal(f.store.readRunCheckpointState(f.run.projectId, 1).status.claudeNativeEventHead || 0, 0);
-    f.store.patchRunState = patch;
+    f.store.db.exec('DROP TRIGGER fail_native_head');
     await f.call('record_claude_native_event', { ...f.scope, proof: f.run.proof, event });
     await assert.rejects(f.call('record_claude_native_event', { ...f.scope, proof: f.run.proof, event: { ...event, userUuid: 'different-user' } }), /native_event_conflict/);
     await assert.rejects(f.call('record_claude_native_event', { ...f.scope, generation: f.scope.generation + 1, proof: f.run.proof, event }), /run_owner_conflict/);
-  } finally { f.store.patchRunState = patch; await f.ops.close(); f.store.close(); }
+  } finally { await f.ops.close(); f.store.close(); }
 });
 
 test('a pending Claude UUID fence reads only new log bytes while unchanged recovery does not rescan full requests', async (t) => {
   const f = await fixture();
   try {
     const state = f.store.readRunCheckpointState(f.run.projectId, 1);
-    f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'cost-contract' });
+    await f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'cost-contract' });
     fs.writeFileSync(f.transcript, JSON.stringify(f.row) + '\n');
     const event = { schemaVersion: 1, sequence: 1, sessionId: f.row.sessionId, providerTurnId: require('node:crypto').randomUUID(), userUuid: f.row.uuid,
       assistantUuids: ['late-fenced-reply'], startedAt: f.row.timestamp, completedAt: new Date().toISOString(), reason: 'answer' };
     await f.call('record_claude_native_event', { ...f.scope, proof: f.run.proof, event });
-    let bytesRead = 0; let appendedBytes = 0; const read = f.store.readRunLog.bind(f.store);
-    f.store.readRunLog = (...args) => { const page = read(...args); bytesRead += Buffer.from(page.bytes, 'base64').length; return page; };
+    let bytesRead = 0; let appendedBytes = 0; const restore=trackNativeLogBytes(f.store,bytes=>{bytesRead+=bytes;});
     try {
       for (let i = 0; i < 10; i++) await f.call('recover_run_executions', {});
       assert.equal(bytesRead, 0, 'pending completion with unchanged source must not scan the retained request');
@@ -346,8 +387,9 @@ test('a pending Claude UUID fence reads only new log bytes while unchanged recov
         await f.call('recover_run_executions', {});
       }
       assert.ok(bytesRead <= appendedBytes * 2, `${bytesRead} body bytes for ${appendedBytes} new bytes`);
+      assert.ok(bytesRead>=appendedBytes,'measure the actual Compute byte ranges after moving the parser out of Source');
       t.diagnostic(`retainedRequestBytes=${Buffer.byteLength(JSON.stringify(f.row)) + 1} appendedBytes=${appendedBytes} databaseBodyBytesRead=${bytesRead}`);
-    } finally { f.store.readRunLog = read; }
+    } finally { restore(); }
     assert.equal(f.store.readMetadata(f.run.turnId).data.finished_at, null);
     assert.equal(f.store.readRunCheckpointState(f.run.projectId, 1).status.claudeNativeEventCursor || 0, 0);
   } finally { await f.ops.close(); f.store.close(); }
@@ -357,7 +399,7 @@ test('Claude machine start immediately opens the next running turn before its re
   const f = await fixture();
   try {
     const state = f.store.readRunCheckpointState(f.run.projectId, 1);
-    f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'start-contract' });
+    await f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'start-contract' });
     const reply = { ...f.row, type: 'assistant', uuid: 'start-first-reply', parentUuid: f.row.uuid, message: { role: 'assistant', id: 'first', content: [{ type: 'text', text: '第一轮结果' }] } };
     fs.writeFileSync(f.transcript, [f.row, reply].map(JSON.stringify).join('\n') + '\n');
     const first = { schemaVersion: 1, sequence: 1, sessionId: f.row.sessionId, providerTurnId: require('node:crypto').randomUUID(), userUuid: f.row.uuid,
@@ -390,7 +432,7 @@ test('Claude accepts a pre-stop transcript turn only when its byte range is insi
     assert.notEqual(f.store.readMetadata(first.turnId).data.finished_at, null);
     const nextUser = { ...f.row, uuid: 'stop-next-user', timestamp: new Date().toISOString(), message: { role: 'user', content: '停止前已经提交的第二轮' } };
     fs.appendFileSync(f.transcript, JSON.stringify(nextUser) + '\n');
-    const stopped = f.store.requestRunStop(f.run.projectId, {
+    const stopped = await f.store.requestRunStop(f.run.projectId, {
       ...f.scope, expectedRevision: first.revision, expectedTurnId: first.turnId, reason: '关闭当前终端', idempotencyKey: 'claude-stop-boundary'
     }, { nativeStopStream: 'native:claude', nativeStopLogBoundary: fs.statSync(f.transcript).size });
     await observer.observe(stopped);
@@ -404,7 +446,7 @@ test('a late Claude completion cannot be accepted as the next native turn after 
   const f = await fixture(); let store = f.store; let ops = f.ops;
   try {
     const state = store.readRunCheckpointState(f.run.projectId, 1);
-    store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'late-contract' });
+    await store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'late-contract' });
     const reply = { ...f.row, type: 'assistant', uuid: 'late-first-reply', parentUuid: f.row.uuid, message: { role: 'assistant', id: 'first', content: [{ type: 'text', text: '第一轮结果' }] } };
     fs.writeFileSync(f.transcript, [f.row, reply].map(JSON.stringify).join('\n') + '\n');
     const first = { schemaVersion: 1, phase: 'start', sequence: 1, sessionId: f.row.sessionId, providerTurnId: require('node:crypto').randomUUID(), userUuid: f.row.uuid,
@@ -434,7 +476,7 @@ test('Claude API failure retains partial user-facing text and keeps its error re
   const f = await fixture();
   try {
     const state = f.store.readRunCheckpointState(f.run.projectId, 1);
-    f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'error-contract' });
+    await f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'error-contract' });
     const reply = { ...f.row, type: 'assistant', uuid: 'partial-valid', parentUuid: f.row.uuid, message: { role: 'assistant', id: 'valid', content: [{ type: 'text', text: '已经完成的部分正文🌿\n' }] } };
     const error = { ...reply, uuid: 'api-error', parentUuid: reply.uuid, isApiErrorMessage: true, message: { ...reply.message, id: 'error', content: [{ type: 'text', text: 'API connection failed' }] } };
     const bytes = Buffer.from([f.row, reply, error].map(JSON.stringify).join('\n') + '\n'); fs.writeFileSync(f.transcript, bytes);
@@ -451,7 +493,7 @@ test('an unchanged pending machine fence does not reread a large unterminated Cl
   const f = await fixture();
   try {
     const state = f.store.readRunCheckpointState(f.run.projectId, 1);
-    f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'partial-machine-contract' });
+    await f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'mods-v1' }, idempotencyKey: 'partial-machine-contract' });
     const reply = { ...f.row, type: 'assistant', uuid: 'unterminated-reply', parentUuid: f.row.uuid, message: { role: 'assistant', id: 'partial', content: [{ type: 'text', text: '完整正文🌿'.repeat(20000) }] } };
     fs.writeFileSync(f.transcript, JSON.stringify(f.row) + '\n' + JSON.stringify(reply));
     const event = { schemaVersion: 1, sequence: 1, sessionId: f.row.sessionId, providerTurnId: require('node:crypto').randomUUID(), userUuid: f.row.uuid,
@@ -471,7 +513,7 @@ test('Claude uses transcript boundaries until the actual loaded native adapter c
   const f = await fixture();
   try {
     const state = f.store.readRunCheckpointState(f.run.projectId, 1);
-    f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'transcript-v1', claudeNativeObserverCapable: true }, idempotencyKey: 'ready-contract' });
+    await f.store.patchRunState(f.run.projectId, { ...f.scope, expectedRevision: state.revision, patch: { claudeNativeContract: 'transcript-v1', claudeNativeObserverCapable: true }, idempotencyKey: 'ready-contract' });
     const reply = { ...f.row, type: 'assistant', uuid: 'fallback-reply', parentUuid: f.row.uuid, message: { role: 'assistant', id: 'fallback', content: [{ type: 'text', text: '用户禁止 hooks 时仍能结束' }] } };
     fs.writeFileSync(f.transcript, [f.row, reply, duration(reply)].map(JSON.stringify).join('\n') + '\n');
     await f.call('recover_run_executions', {});
@@ -801,14 +843,14 @@ test('continued Claude log growth does not repeatedly scan already captured full
   const f = await fixture();
   try {
     const initial = JSON.stringify(f.row) + '\n'; fs.writeFileSync(f.transcript, initial); await f.call('recover_run_executions', {});
-    let bytesRead = 0; let appendedBytes = 0; const read = f.store.readRunLog.bind(f.store);
-    f.store.readRunLog = (...args) => { const page = read(...args); bytesRead += Buffer.from(page.bytes, 'base64').length; return page; };
+    let bytesRead = 0; let appendedBytes = 0; const restore=trackNativeLogBytes(f.store,bytes=>{bytesRead+=bytes;});
     try {
       for (let i = 0; i < 10; i++) {
         const row = { ...f.row, type: 'progress', uuid: `tick-${i}`, parentUuid: f.row.uuid, timestamp: new Date().toISOString(), data: { type: 'hook_progress' } }; delete row.message;
         const line = JSON.stringify(row) + '\n'; appendedBytes += Buffer.byteLength(line); fs.appendFileSync(f.transcript, line); await f.call('recover_run_executions', {});
       }
-    } finally { f.store.readRunLog = read; }
+    } finally { restore(); }
+    assert.ok(bytesRead>=appendedBytes,'new native bytes must be counted in the actual Reader');
     assert.ok(bytesRead <= Buffer.byteLength(initial) * 2 + appendedBytes * 4, `historical body reread: ${bytesRead} bytes for ${appendedBytes} appended bytes`);
     t.diagnostic(`initialBytes=${Buffer.byteLength(initial)} appendedBytes=${appendedBytes} databaseBodyBytesRead=${bytesRead}`);
     assert.equal((await f.call('read_run_log_head', { ...f.scope, stream: 'native:claude' })).totalBytes, Buffer.byteLength(initial) + appendedBytes);
@@ -823,8 +865,7 @@ test('a cold Claude owner rebuilds auxiliary ancestry from the complete stored l
     const initial = [f.row, progress].map(value => JSON.stringify(value)).join('\n') + '\n';
     fs.writeFileSync(f.transcript, initial); await f.call('recover_run_executions', {});
     await ops.close(); store.close(); store = new UnifiedDataStore(f.root); ops = createRuntimeDataOperations(store);
-    let bytesRead = 0; const read = store.readRunLog.bind(store);
-    store.readRunLog = (...args) => { const page = read(...args); bytesRead += Buffer.from(page.bytes, 'base64').length; return page; };
+    let bytesRead = 0; const restore=trackNativeLogBytes(store,bytes=>{bytesRead+=bytes;});
     let appendedBytes = 0; let parentUuid = progress.uuid;
     for (let i = 0; i < 5; i++) {
       const row = { ...progress, uuid: `cold-tick-${i}`, parentUuid }; parentUuid = row.uuid;
@@ -832,6 +873,7 @@ test('a cold Claude owner rebuilds auxiliary ancestry from the complete stored l
       await ops({ operation: 'recover_run_executions', input: {} });
     }
     assert.ok(bytesRead <= Buffer.byteLength(initial) + appendedBytes * 4, `cold recovery reread historical body: ${bytesRead}`);
+    assert.ok(bytesRead>=appendedBytes,'cold recovery must account for Compute log reads');restore();
     t.diagnostic(`coldInitialBytes=${Buffer.byteLength(initial)} appendedBytes=${appendedBytes} databaseBodyBytesRead=${bytesRead}`);
     const end = { ...f.row, type: 'assistant', uuid: 'cold-final', parentUuid, timestamp: new Date().toISOString(), message: { id: 'cold-message', role: 'assistant', content: [{ type: 'text', text: '冷恢复后的完整回复🌿'.repeat(10000) }], stop_reason: 'end_turn', usage: { output_tokens: 12 } } };
     fs.appendFileSync(f.transcript, [end, duration(end)].map(JSON.stringify).join('\n') + '\n'); await ops({ operation: 'recover_run_executions', input: {} });

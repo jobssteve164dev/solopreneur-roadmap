@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 
 function prepareCodegraphFixture(base, version) {
   const prefix = path.join(base, 'npm-prefix'), npmRoot = path.join(prefix, 'lib', 'node_modules');

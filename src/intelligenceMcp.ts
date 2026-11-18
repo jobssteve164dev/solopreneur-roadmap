@@ -27,7 +27,7 @@ export interface IntelligenceActionSource {
 
 export const intelligenceActionToolNames = ['set_time_schedule', 'solomap_start_conversation'];
 
-export function validateIntelligenceTimeScheduleInput(input: IntelligenceTimeScheduleInput): IntelligenceTimeScheduleInput {
+export function validateIntelligenceTimeScheduleInput(input: IntelligenceTimeScheduleInput, now = Date.now()): IntelligenceTimeScheduleInput {
   const normalized: IntelligenceTimeScheduleInput = {
     title: String(input.title || '').trim(),
     scheduleKind: input.scheduleKind,
@@ -40,7 +40,7 @@ export function validateIntelligenceTimeScheduleInput(input: IntelligenceTimeSch
   if (!['daily', 'once'].includes(normalized.scheduleKind) || !['user', 'agent'].includes(normalized.assignee)) throw new Error('invalid_time_schedule');
   if (normalized.scheduleKind === 'once') {
     if (!normalized.scheduledAt || !/(?:Z|[+-]\d{2}:\d{2})$/.test(normalized.scheduledAt)
-      || !Number.isFinite(Date.parse(normalized.scheduledAt)) || Date.parse(normalized.scheduledAt) <= Date.now()) {
+      || !Number.isFinite(Date.parse(normalized.scheduledAt)) || Date.parse(normalized.scheduledAt) <= now) {
       throw new Error('一次性安排需要填写 ISO-8601 未来时间，且必须包含时区。');
     }
   } else if (!normalized.timeOfDay || !/^([01]\d|2[0-3]):[0-5]\d$/.test(normalized.timeOfDay)) {

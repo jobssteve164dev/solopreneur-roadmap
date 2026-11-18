@@ -318,7 +318,7 @@ function readRecentErrors(globalDataPath: string): DiagnosticEntry[] {
 export async function importLegacyLocalDiagnostics(
   globalDataPath: string,
   append: (event: LocalDiagnosticEvent) => void | Promise<void>,
-  capture: (source: { identity: string; key: string; hash: string }, bytes: Buffer) => { unchanged?: boolean; stage?: string } | void,
+  capture: (source: { identity: string; key: string; hash: string }, bytes: Buffer) => { unchanged?: boolean; stage?: string } | void | Promise<{ unchanged?: boolean; stage?: string } | void>,
   settle?: (source: { identity: string; key: string; hash: string }, result: 'imported' | 'conflict', error?: string) => void
 ): Promise<{ files: number; events: number }> {
   const root = diagnosticRoot(globalDataPath);
@@ -331,7 +331,7 @@ export async function importLegacyLocalDiagnostics(
       const hash = crypto.createHash('sha256').update(bytes).digest('hex');
       const key = path.relative(root, filePath).split(path.sep).join('/');
       source = { identity: `local-diagnostics:${root}`, key, hash };
-      const captured = capture(source, bytes);
+      const captured = await capture(source, bytes);
       if (captured?.unchanged && captured.stage === 'imported') continue;
       const parsed = JSON.parse(bytes.toString('utf8')) as { entries?: unknown };
       if (!Array.isArray(parsed?.entries)) throw new Error('legacy_diagnostic_entries_invalid');

@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { shellQuote } = require('../out/agentCli.js');
 const fixtureRoots = [];
 function fixtureRoot(prefix) { const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); fixtureRoots.push(root); return root; }
@@ -88,10 +88,8 @@ test('Runtime owns one complete foreground launch preparation command across fre
   const projectRoot = path.join(base, 'project');
   fs.mkdirSync(projectRoot);
   const store = new UnifiedDataStore(root);
-  assert.equal(typeof store.runAtomicCommand, 'function', 'the Writer must expose a real command transaction boundary');
-  const runAtomicCommand = store.runAtomicCommand.bind(store);
   let atomicCommands = 0;
-  store.runAtomicCommand = async operation => { atomicCommands += 1; return runAtomicCommand(operation); };
+  store.runAtomicCommand = () => { atomicCommands += 1; throw new Error('retired asynchronous Agent transaction'); };
   const operations = createRuntimeDataOperations(store);
   try {
     const input = {
@@ -104,7 +102,7 @@ test('Runtime owns one complete foreground launch preparation command across fre
     assert.equal(first.runId, second.runId);
     assert.equal(first.status.rootExecutionLogId, second.status.rootExecutionLogId);
     assert.equal(first.status.deliveryPending, true);
-    assert.equal(atomicCommands, 1, 'fresh launch preparation commits as one Writer command, while retry is read-only');
+    assert.equal(atomicCommands, 0, 'fresh launch and recovery publish through the prepared synchronous boundary');
     assert.match(first.finalCommand, /runAgentProcess/);
     const plan = await operations({ operation: 'read_run_execution_plan', input: {
       root: projectRoot, executionLogId: first.status.rootExecutionLogId

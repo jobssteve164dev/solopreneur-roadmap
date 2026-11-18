@@ -87,12 +87,21 @@ export async function failScheduledTaskDatabase(workspaceRoot: string, globalDat
   return failed ? 'failed' : 'retrying';
 }
 
+const dailyGraceMs = 30 * 60 * 1000;
+
 function nextDailyAt(timeOfDay: string, now: Date): Date {
   const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(String(timeOfDay || '').trim());
   const next = new Date(now.getTime());
   next.setHours(match ? Number(match[1]) : 9, match ? Number(match[2]) : 0, 0, 0);
-  if (now.getTime() - next.getTime() > 30 * 60 * 1000) next.setDate(next.getDate() + 1);
+  if (now.getTime() - next.getTime() > dailyGraceMs) next.setDate(next.getDate() + 1);
   return next;
+}
+
+export function scheduleOccurrenceValidUntil(task: SolomapScheduledAutomationTask, dueAt: number, now: Date): number | undefined {
+  if (task.scheduleKind === 'once' && Number.isFinite(Date.parse(String(task.scheduledAt || '')))) return undefined;
+  const midnight = new Date(now.getTime());
+  midnight.setHours(24, 0, 0, 0);
+  return Math.min(midnight.getTime(), dueAt + dailyGraceMs + 1);
 }
 
 export function occurrenceForTask(task: SolomapScheduledAutomationTask, now = new Date()): ScheduledTaskOccurrence | null {

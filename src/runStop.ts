@@ -2,6 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execFile } from 'child_process';
 import { UnifiedDataStore } from './db/unifiedDataStore';
+import type { ContentPublicationCommit } from './db/unifiedDataStore';
+import type { NativeSessionBinding } from './sessionIdentity.js';
 import { snapshotWorkspace, captureRunGitEvidence } from './runWorkspace';
 import type { RunState } from './runLifecycleTypes';
 import { readWindowsProcessBirthMarkerAsync } from './processIdentity.js';
@@ -10,11 +12,11 @@ import type { RuntimeWorkspaceCompute } from './runtimeDataOperations';
 
 interface TrackedProcess { pid: number; birth: string }
 
-export function captureNativeStopBoundary(store: UnifiedDataStore, state: RunState): { nativeStopStream: 'native:codex' | 'native:claude'; nativeStopLogBoundary: number } | undefined {
+export function captureNativeStopBoundary(store: UnifiedDataStore, state: RunState, preparedBinding?: NativeSessionBinding | null): { nativeStopStream: 'native:codex' | 'native:claude'; nativeStopLogBoundary: number } | undefined {
   const provider = String(state.status.sessionProvider || '');
   if (!['codex', 'claude'].includes(provider)) return undefined;
   try {
-    const binding = store.readRunBinding(state.projectId, Number(state.status.executionLogId));
+    const binding = preparedBinding === undefined ? store.readRunBinding(state.projectId, Number(state.status.executionLogId)) : preparedBinding;
     if (!binding || binding.provider !== provider
       || path.resolve(binding.workspaceRoot) !== path.resolve(String(state.status.workspaceRoot || ''))
       || binding.resumableRevision !== binding.headRevision
@@ -64,44 +66,52 @@ export class RunStop {
     snapshot: snapshotWorkspace, gitHead: async () => '', gitEvidence: captureRunGitEvidence
   }) {}
 
-  public stop(projectId: string, input: Parameters<UnifiedDataStore['requestRunStop']>[1]): Promise<RunState> {
+  public stop(projectId: string, input: Parameters<UnifiedDataStore['requestRunStop']>[1],commit:ContentPublicationCommit=publish=>publish()): Promise<RunState> {
     if (this.interrupted) return Promise.reject(new Error('run_stop_interrupted'));
-    const current = this.store.readRunCheckpointState(projectId, input.executionLogId);
+    const owned={...input},key=JSON.stringify([projectId,owned.executionLogId,owned.generation,owned.idempotencyKey]);
+    const pending=this.pending.get(key);if(pending)return pending;
+    // Admission includes preparation, so shutdown cannot lose an accepted intent.
+    const stopping=this.acceptAndFinish(projectId,owned,commit);
+    this.pending.set(key,stopping);
+    void stopping.then(()=>this.pending.delete(key),()=>this.pending.delete(key));
+    return stopping;
+  }
+
+  private async acceptAndFinish(projectId:string,input:Parameters<UnifiedDataStore['requestRunStop']>[1],commit:ContentPublicationCommit):Promise<RunState> {
+    const context=await this.store.readRunContextPublication(projectId,{executionLogId:input.executionLogId,includeProof:true,includeBinding:true},true),current=context.state;
     const persistedIntent = current.status.stopRequestIntent;
     const replayingAcceptedStop = current.generation === input.generation
       && current.status.stopRequested === true
       && current.status.stopRequestKey === input.idempotencyKey
       && persistedIntent && typeof persistedIntent === 'object';
-    const accepted = replayingAcceptedStop ? current : this.store.requestRunStop(projectId, input, captureNativeStopBoundary(this.store, current));
+    const trustedBoundary=captureNativeStopBoundary(this.store,current,context.binding);
+    const accepted = replayingAcceptedStop ? commit(()=>{this.store.assertRunGeneration(projectId,input.executionLogId,current.generation);return current;}) : await this.store.publishRunControl(projectId,{type:'stop',input,contextRevision:current.revision,...(trustedBoundary?{trustedBoundary}:{})},commit) as RunState;
     const acceptedInput = replayingAcceptedStop
       ? { ...(persistedIntent as Parameters<UnifiedDataStore['requestRunStop']>[1]), expectedRevision: current.revision }
       : input;
-    const key = `${accepted.runId}:${accepted.generation}:${input.idempotencyKey}`;
-    const pending = this.pending.get(key);
-    if (pending) return pending;
-    const stopping = this.finish(projectId, acceptedInput, accepted);
-    this.pending.set(key, stopping);
-    void stopping.then(() => this.pending.delete(key), () => this.pending.delete(key));
-    return stopping;
+    return this.finish(projectId,acceptedInput,accepted,commit);
   }
 
-  private async finish(projectId: string, input: Parameters<UnifiedDataStore['requestRunStop']>[1], accepted: RunState): Promise<RunState> {
-    const current = () => {
+  private async finish(projectId: string, input: Parameters<UnifiedDataStore['requestRunStop']>[1], accepted: RunState,commit:ContentPublicationCommit): Promise<RunState> {
+    const fence = () => {
       if (this.interrupted) throw new Error('run_stop_interrupted');
-      const state = this.store.readRunCheckpointState(projectId, input.executionLogId);
-      if (state.generation !== accepted.generation) throw new Error('run_owner_conflict');
-      return state;
+      commit(()=>this.store.assertRunGeneration(projectId,input.executionLogId,accepted.generation));
     };
-    let state = current();
+    const current = async () => {
+      fence();
+      const {state}=await this.store.readRunContextPublication(projectId,{executionLogId:input.executionLogId,generation:accepted.generation,includeProof:true},true);
+      fence();return state;
+    };
+    let state = await current();
     const wrapper = { pid: Number(state.status.agentPid), birth: String(state.status.processBirth) };
     const child = { pid: Number(state.status.agentChildPid), birth: String(state.status.processChildBirth) };
     if (input.requireVerifiedIdentity) {
-      for (const target of [child, wrapper]) { current(); await alive(target, true); }
+      for (const target of [child, wrapper]) { fence(); await alive(target, true); }
     }
     for (const target of [child, wrapper]) {
-      current();
+      fence();
       if (await alive(target, input.requireVerifiedIdentity)) {
-        current();
+        fence();
         try { process.kill(target === child && process.platform !== 'win32' ? -target.pid : target.pid, 'SIGTERM'); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
       }
@@ -109,9 +119,10 @@ export class RunStop {
     const forceAfter = Date.now() + 1500;
     let forced = false;
     while (await alive(child)) {
-      current();
+      fence();
       if (!forced && Date.now() >= forceAfter) {
         if (await alive(child)) {
+          fence();
           try { process.kill(process.platform === 'win32' ? child.pid : -child.pid, 'SIGKILL'); }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
         }
@@ -120,22 +131,22 @@ export class RunStop {
       await new Promise(resolve => setTimeout(resolve, 25));
     }
     // The wrapper must finish committing accepted output before closure.
-    while (await alive(wrapper)) { current(); await new Promise(resolve => setTimeout(resolve, 25)); }
-    state = current();
-    if (state.status.interactiveSessionClosed) { new RunNativeObserver(this.store, this.workspaceCompute).forget(state); return state; }
+    while (await alive(wrapper)) { fence(); await new Promise(resolve => setTimeout(resolve, 25)); }
+    state = await current();
+    if (state.status.interactiveSessionClosed) { await new RunNativeObserver(this.store, this.workspaceCompute).forget(state); return state; }
     await new RunNativeObserver(this.store, this.workspaceCompute).observe(state, false, 143);
-    state = current();
+    state = await current();
     const finishedBeforeStop = Boolean(state.status.finishedAt);
     const workspaceSnapshot = state.status.finishedAt && !state.status.hostOutputPending && !state.status.nativeOutputPending ? undefined : await this.workspaceCompute.snapshot(String(state.status.workspaceRoot));
     const gitEvidence = workspaceSnapshot ? await this.workspaceCompute.gitEvidence(String(state.status.workspaceRoot), String(state.status.baseGitHash || ''), workspaceSnapshot) : undefined;
-    state = current();
-    if (state.status.hostOutputPending) state = this.store.finalizeRunOutput(projectId, { executionLogId: input.executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, exitCode: 143, source: 'recovery', workspaceSnapshot, gitEvidence, idempotencyKey: `${input.idempotencyKey}:finalize-output` });
-    if (!state.status.finishedAt) state = this.store.checkpointRun(projectId, { executionLogId: input.executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'complete', outcome: input.outcome === 'partial' ? 'partial' : 'failed', summary: input.reason, exitCode: 143, workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery', idempotencyKey: `${input.idempotencyKey}:complete` });
+    state = await current();
+    if (state.status.hostOutputPending) state = await this.store.publishRunOutput(projectId, { executionLogId: input.executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, exitCode: 143, source: 'recovery', workspaceSnapshot, gitEvidence, idempotencyKey: `${input.idempotencyKey}:finalize-output` },commit);
+    if (!state.status.finishedAt) state = await this.store.publishRunCheckpoint(projectId, { executionLogId: input.executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'complete', outcome: input.outcome === 'partial' ? 'partial' : 'failed', summary: input.reason, exitCode: 143, workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery', idempotencyKey: `${input.idempotencyKey}:complete` },commit);
     if ((state.status.interactiveSession || finishedBeforeStop) && !state.status.interactiveSessionClosed) {
-      state = current();
-      state = this.store.checkpointRun(projectId, { executionLogId: input.executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'session-close', exitCode: 143, ...(state.status.nativeOutputPending ? { workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery' as const } : {}), idempotencyKey: `${input.idempotencyKey}:close` });
+      state = await current();
+      state = await this.store.publishRunCheckpoint(projectId, { executionLogId: input.executionLogId, generation: state.generation, proof: state.proof!, expectedRevision: state.revision, expectedTurnId: state.turnId, action: 'session-close', exitCode: 143, ...(state.status.nativeOutputPending ? { workspaceSnapshot, gitEvidence, workspaceEvidenceSource: 'recovery' as const } : {}), idempotencyKey: `${input.idempotencyKey}:close` },commit);
     }
-    new RunNativeObserver(this.store, this.workspaceCompute).forget(state);
+    await new RunNativeObserver(this.store, this.workspaceCompute).forget(state);
     return state;
   }
 

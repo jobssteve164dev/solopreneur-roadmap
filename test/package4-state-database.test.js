@@ -10,7 +10,7 @@ const { importLegacyRuntimeState } = require('../out/runtimeStateMigration.js');
 const { claimTelegramChannelLease, requestTelegramChannelTakeover } = require('../out/telegramChannelLease.js');
 const { registerTelegramHostPresence, releaseTelegramHostPresence, withTelegramHostPresenceLock } = require('../out/telegramHostPresence.js');
 const { persistTelegramRuntimeConfig } = require('../out/telegramRuntimeConfig.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { readProcessBirthMarker } = require('../out/processIdentity.js');
 const { syncScheduledTaskDatabase } = require('../out/scheduledTaskLedger.js');
 
@@ -509,7 +509,7 @@ test('telegram generation change migrates a claimed message before any action st
   } finally { closeFixture(value); }
 });
 
-test('legacy runtime files are captured byte-for-byte and imported once', () => {
+test('legacy runtime files are captured byte-for-byte and imported once', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-p4-history-'));
   const runtime = path.join(root, 'runtime'); const scheduledRoot = path.join(runtime, 'scheduled-tasks');
   fs.mkdirSync(scheduledRoot, { recursive: true });
@@ -523,14 +523,14 @@ test('legacy runtime files are captured byte-for-byte and imported once', () => 
   fs.writeFileSync(schedulePath, JSON.stringify({ schemaVersion: 1, tasks: [{ occurrenceId: `daily@${dueAt}`, taskId: 'daily', dueAt, status: 'running', attempts: 2, task: { id: 'daily', scheduleKind: 'daily', timeOfDay: '09:00', title: 'Review' } }], failures: [] }));
   const store = new UnifiedDataStore(root);
   try {
-    importLegacyRuntimeState(store, root);
+    await importLegacyRuntimeState(store, root);
     assert.deepEqual(store.readHostSettings({ namespace: 'cognitive', ownerScope: 'global' }).items.map(item => [item.key, item.value]), [['agentCli', 'codex'], ['mode', 'agent_cli'], ['model', 'gpt-6-luna']]);
     assert.equal(store.readHostSettings({ namespace: 'telegram', ownerScope: 'global' }).items.find(item => item.key === 'chatId').value, '42');
     assert.equal(store.readScheduleLedger().tasks[0].attempts, 2);
     const source = store.readMigrationSource(`runtime-state:${root}`, 'runtime/cognitive-config.json');
     assert.deepEqual(source.bytes, cognitiveBytes); assert.equal(source.stage, 'imported');
     const revisions = store.readHostSettings({ namespace: 'cognitive', ownerScope: 'global' }).items.map(item => item.revision);
-    importLegacyRuntimeState(store, root);
+    await importLegacyRuntimeState(store, root);
     assert.deepEqual(store.readHostSettings({ namespace: 'cognitive', ownerScope: 'global' }).items.map(item => item.revision), revisions);
   } finally {
     store.close();
@@ -539,7 +539,7 @@ test('legacy runtime files are captured byte-for-byte and imported once', () => 
   }
 });
 
-test('the oldest top-level scheduled task ledger enters the same runtime-state migration', () => {
+test('the oldest top-level scheduled task ledger enters the same runtime-state migration', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-p4-top-level-schedules-'));
   const scheduledRoot = path.join(root, 'scheduled-tasks'); fs.mkdirSync(scheduledRoot, { recursive: true });
   const schedulePath = path.join(scheduledRoot, 'scheduled-tasks.json');
@@ -547,7 +547,7 @@ test('the oldest top-level scheduled task ledger enters the same runtime-state m
   fs.writeFileSync(schedulePath, JSON.stringify({ schemaVersion: 1, tasks: [{ occurrenceId: `old@${dueAt}`, taskId: 'old', dueAt, attempts: 1, task: { id: 'old', scheduleKind: 'daily', timeOfDay: '09:00', title: 'Old ledger' } }], failures: [] }));
   const store = new UnifiedDataStore(root);
   try {
-    importLegacyRuntimeState(store, root);
+    await importLegacyRuntimeState(store, root);
     assert.equal(store.readScheduleLedger().tasks[0].task.title, 'Old ledger');
     assert.equal(store.migrationSourceState(`runtime-state:${root}`, 'scheduled-tasks/scheduled-tasks.json').stage, 'imported');
   } finally {
@@ -557,7 +557,7 @@ test('the oldest top-level scheduled task ledger enters the same runtime-state m
   }
 });
 
-test('the newer runtime schedule source prevents an older top-level ledger from becoming authoritative', () => {
+test('the newer runtime schedule source prevents an older top-level ledger from becoming authoritative', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-p4-schedule-precedence-'));
   const runtimeRoot = path.join(root, 'runtime', 'scheduled-tasks');
   const oldestRoot = path.join(root, 'scheduled-tasks');
@@ -569,7 +569,7 @@ test('the newer runtime schedule source prevents an older top-level ledger from 
   fs.writeFileSync(oldestPath, JSON.stringify({ schemaVersion: 1, tasks: [{ occurrenceId: `old@${dueAt}`, taskId: 'old', dueAt, task: { id: 'old', scheduleKind: 'daily', timeOfDay: '09:00', title: 'Must not revive' } }], failures: [] }));
   const store = new UnifiedDataStore(root);
   try {
-    importLegacyRuntimeState(store, root);
+    await importLegacyRuntimeState(store, root);
     assert.deepEqual(store.readScheduleLedger().tasks, []);
     assert.equal(store.migrationSourceState(`runtime-state:${root}`, 'runtime/scheduled-tasks/scheduled-tasks.json').stage, 'imported');
     assert.equal(store.migrationSourceState(`runtime-state:${root}`, 'scheduled-tasks/scheduled-tasks.json').stage, 'conflict');
@@ -580,7 +580,70 @@ test('the newer runtime schedule source prevents an older top-level ledger from 
   }
 });
 
-test('legacy Telegram state resumes after config import was committed before a restart', () => {
+for(const lateFailure of [false,true])test(`startup Telegram prepares configuration and state together (late failure=${lateFailure})`,async t=>{
+  const f=fixture(),operations=createRuntimeDataOperations(f.store);
+  t.after(async()=>{await operations.close();f.store.close();});
+  const runtime=path.join(f.root,'runtime');fs.mkdirSync(runtime);
+  const retained='完整旧会话映射🌿'.repeat(9000);
+  fs.writeFileSync(path.join(runtime,'telegram-config.json'),JSON.stringify({enabled:true,botToken:'isolated-startup-test-token',chatId:'42',bindingGeneration:3,replyGeneration:2,conversationIds:{'42':'keep-config'}}));
+  fs.writeFileSync(path.join(runtime,'telegram-state.json'),JSON.stringify({offset:87,bindingGeneration:3,replyGeneration:5,conversationIds:{'42':'older-state','43':retained}}));
+  const original=f.store.patchHostSettings.bind(f.store);
+  f.store.patchHostSettings=input=>{
+    if(input.namespace==='telegram')throw new Error('startup_telegram_used_legacy_settings');
+    return original(input);
+  };
+  const publish=f.store.publishLegacyTelegramRuntimeState.bind(f.store);
+  let secretWrites=0;
+  f.store.publishLegacyTelegramRuntimeState=(input,persist)=>publish(input,()=>{
+    assert.equal(f.store.db.inTransaction,false,'the secret must be persisted before entering the SQLite write transaction');
+    secretWrites++;
+    persist();
+  });
+  if(lateFailure){
+    f.store.db.run("CREATE TEMP TRIGGER reject_telegram_second_batch BEFORE UPDATE ON settings WHEN OLD.namespace='telegram' AND OLD.key='replyGeneration' BEGIN SELECT RAISE(ABORT,'actual_telegram_state_sql'); END");
+    await assert.rejects(importLegacyRuntimeState(f.store,f.root),/actual_telegram_state_sql/);
+    assert.equal(secretWrites,1);
+    assert.deepEqual(f.store.readHostSettings({namespace:'telegram',ownerScope:'global'}).items,[]);
+    for(const key of ['telegram-config.json','telegram-state.json'])assert.equal(f.store.migrationSourceState(`runtime-state:${f.root}`,`runtime/${key}`).stage,'captured');
+    return;
+  }
+  await importLegacyRuntimeState(f.store,f.root);
+  assert.equal(secretWrites,1);
+  const items=new Map(f.store.readHostSettings({namespace:'telegram',ownerScope:'global'}).items.map(item=>[item.key,item]));
+  assert.equal(items.get('conversationIds').revision,2);
+  assert.equal(items.get('conversationIds').value['42'],'keep-config');
+  assert.ok(Buffer.from(items.get('conversationIds').value['43']).equals(Buffer.from(retained)));
+  assert.equal(items.get('replyGeneration').revision,2);
+  assert.equal(items.get('replyGeneration').value,5);
+  for(const key of ['telegram-config.json','telegram-state.json'])assert.equal(f.store.migrationSourceState(`runtime-state:${f.root}`,`runtime/${key}`).stage,'imported');
+});
+
+test('startup Telegram reselects a capture replaced before configuration planning',async t=>{
+  const f=fixture(),operations=createRuntimeDataOperations(f.store);
+  t.after(async()=>{await operations.close();f.store.close();});
+  const runtime=path.join(f.root,'runtime');fs.mkdirSync(runtime);
+  const configFile=path.join(runtime,'telegram-config.json');
+  fs.writeFileSync(configFile,JSON.stringify({chatId:'older-chat',bindingGeneration:3}));
+  fs.writeFileSync(path.join(runtime,'telegram-state.json'),JSON.stringify({bindingGeneration:3,offset:87}));
+  const capture=f.store.captureLegacyConfigurationSource.bind(f.store);
+  let replaced=false;
+  f.store.captureLegacyConfigurationSource=async(source,bytes,options)=>{
+    await capture(source,bytes,options);
+    if(!replaced && source.key==='runtime/telegram-state.json'){
+      replaced=true;
+      fs.writeFileSync(configFile,JSON.stringify({chatId:'newer-chat',bindingGeneration:3}));
+      const next=await f.store.inspectProjectMigration({kind:'runtimeStateFile',file:configFile,mode:'telegram-config'});
+      await capture({identity:source.identity,key:'runtime/telegram-config.json',hash:next.hash},next.bytes,{pending:true});
+    }
+  };
+  await importLegacyRuntimeState(f.store,f.root);
+  assert.ok(replaced);
+  const values=new Map(f.store.readHostSettings({namespace:'telegram',ownerScope:'global'}).items.map(item=>[item.key,item.value]));
+  assert.equal(values.get('chatId'),'newer-chat');
+  assert.equal(values.get('offset'),87);
+});
+
+test('legacy Telegram state resumes after config import was committed before a restart', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-p4-telegram-resume-'));
   const runtime = path.join(root, 'runtime'); fs.mkdirSync(runtime);
   const configPath = path.join(runtime, 'telegram-config.json');
@@ -588,9 +651,9 @@ test('legacy Telegram state resumes after config import was committed before a r
   fs.writeFileSync(configPath, JSON.stringify({ schemaVersion: 1, enabled: true, botToken: 'legacy-token', chatId: '42', bindingGeneration: 3 }));
   const store = new UnifiedDataStore(root);
   try {
-    importLegacyRuntimeState(store, root);
+    await importLegacyRuntimeState(store, root);
     fs.writeFileSync(statePath, JSON.stringify({ offset: 87, bindingGeneration: 3, conversationIds: { '42': 'legacy-conversation' } }));
-    importLegacyRuntimeState(store, root);
+    await importLegacyRuntimeState(store, root);
     const settings = new Map(store.readHostSettings({ namespace: 'telegram', ownerScope: 'global' }).items.map(item => [item.key, item.value]));
     assert.equal(settings.get('offset'), 87);
     assert.deepEqual(settings.get('conversationIds'), { '42': 'legacy-conversation' });
@@ -610,7 +673,7 @@ test('a state-only Telegram import cannot carry conversations into the first con
   const store = new UnifiedDataStore(root);
   const operations = createRuntimeDataOperations(store);
   try {
-    importLegacyRuntimeState(store, root);
+    await importLegacyRuntimeState(store, root);
     const imported = new Map(store.readHostSettings({ namespace: 'telegram', ownerScope: 'global' }).items.map(item => [item.key, item.value]));
     assert.deepEqual(imported.get('conversationIds'), { '42': 'legacy-conversation' });
     const configured = await persistTelegramRuntimeConfig(root, { enabled: true, botToken: 'new-token', chatId: '42' }, operations);
@@ -625,7 +688,7 @@ test('a state-only Telegram import cannot carry conversations into the first con
   }
 });
 
-test('legacy Telegram state cannot cross into a newer bot binding', () => {
+test('legacy Telegram state cannot cross into a newer bot binding', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-p4-telegram-conflict-'));
   const runtime = path.join(root, 'runtime'); fs.mkdirSync(runtime);
   const configPath = path.join(runtime, 'telegram-config.json');
@@ -633,11 +696,11 @@ test('legacy Telegram state cannot cross into a newer bot binding', () => {
   fs.writeFileSync(configPath, JSON.stringify({ schemaVersion: 1, enabled: true, botToken: 'legacy-token', chatId: '42', bindingGeneration: 3 }));
   const store = new UnifiedDataStore(root);
   try {
-    importLegacyRuntimeState(store, root);
+    await importLegacyRuntimeState(store, root);
     const token = store.readHostSettings({ namespace: 'telegram', ownerScope: 'global' }).items.find(item => item.key === 'botToken');
     store.patchHostSettings({ namespace: 'telegram', ownerScope: 'global', patches: [{ key: 'botToken', expectedRevision: token.revision, value: 'new-token' }], idempotencyKey: 'switch-telegram-bot' });
     fs.writeFileSync(statePath, JSON.stringify({ offset: 87, bindingGeneration: 3, conversationIds: { '42': 'legacy-conversation' } }));
-    importLegacyRuntimeState(store, root);
+    await importLegacyRuntimeState(store, root);
     const settings = new Map(store.readHostSettings({ namespace: 'telegram', ownerScope: 'global' }).items.map(item => [item.key, item.value]));
     assert.equal(settings.get('botToken'), 'new-token');
     assert.equal(settings.get('offset'), 0);
@@ -650,7 +713,7 @@ test('legacy Telegram state cannot cross into a newer bot binding', () => {
   }
 });
 
-test('malformed legacy runtime sources are isolated while valid shadow and Telegram sources continue', () => {
+test('malformed legacy runtime sources are isolated while valid shadow and Telegram sources continue', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-p4-malformed-'));
   const runtime = path.join(root, 'runtime'); fs.mkdirSync(runtime);
   const files = {
@@ -665,7 +728,7 @@ test('malformed legacy runtime sources are isolated while valid shadow and Teleg
   fs.writeFileSync(files.feedback, '{bad-json}\n');
   const store = new UnifiedDataStore(root);
   try {
-    assert.doesNotThrow(() => importLegacyRuntimeState(store, root));
+    await assert.doesNotReject(() => importLegacyRuntimeState(store, root));
     assert.equal(store.migrationSourceState(`runtime-state:${root}`, 'runtime/cognitive-config.json').stage, 'conflict');
     assert.equal(store.migrationSourceState(`runtime-state:${root}`, 'runtime/shadow-feedback.jsonl').stage, 'conflict');
     const telegram = new Map(store.readHostSettings({ namespace: 'telegram', ownerScope: 'global' }).items.map(item => [item.key, item.value]));
@@ -675,11 +738,11 @@ test('malformed legacy runtime sources are isolated while valid shadow and Teleg
     assert.deepEqual(shadow.get('decision'), { decisionId: 'decision-a' });
     assert.deepEqual(shadow.get('evaluation'), { evaluationId: 'evaluation-a' });
     fs.writeFileSync(files.feedback, '{"signal":"keep"}\n');
-    importLegacyRuntimeState(store, root);
+    await importLegacyRuntimeState(store, root);
     const afterRepair = new Map(store.readHostSettings({ namespace: 'runtime_shadow', ownerScope: 'global' }).items.map(item => [item.key, item]));
     assert.deepEqual(afterRepair.get('feedback').value, [{ signal: 'keep' }]);
     const revisions = [...afterRepair].map(([key, item]) => [key, item.revision]);
-    importLegacyRuntimeState(store, root);
+    await importLegacyRuntimeState(store, root);
     assert.deepEqual(store.readHostSettings({ namespace: 'runtime_shadow', ownerScope: 'global' }).items.map(item => [item.key, item.revision]), revisions);
     assert.equal(store.appendDiagnosticEvent({ kind: 'operation', occurredAt: new Date().toISOString(), scope: 'runtime.health', payload: { status: 'ok' }, idempotencyKey: 'runtime-still-writable' }).scope, 'runtime.health');
   } finally {
@@ -689,7 +752,7 @@ test('malformed legacy runtime sources are isolated while valid shadow and Teleg
   }
 });
 
-test('an unreadable legacy source is diagnosed without blocking other imports or database writes', () => {
+test('an unreadable legacy source is diagnosed without blocking other imports or database writes', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-p4-unreadable-'));
   const runtime = path.join(root, 'runtime'); fs.mkdirSync(runtime);
   const cognitive = path.join(runtime, 'cognitive-config.json');
@@ -705,7 +768,7 @@ test('an unreadable legacy source is diagnosed without blocking other imports or
     return readFileSync.call(this, file, ...args);
   };
   try {
-    assert.doesNotThrow(() => importLegacyRuntimeState(store, root));
+    await assert.doesNotReject(() => importLegacyRuntimeState(store, root));
     const config = new Map(store.readHostSettings({ namespace: 'telegram', ownerScope: 'global' }).items.map(item => [item.key, item.value]));
     assert.equal(config.get('botToken'), undefined);
     assert.equal(store.readHostSettings({ namespace: 'telegram', ownerScope: 'global' }).items.find(item => item.key === 'botToken').secretRef, 'vscode-secret://solopreneur.telegramBotToken');
@@ -719,7 +782,7 @@ test('an unreadable legacy source is diagnosed without blocking other imports or
   }
 });
 
-test('stale legacy schedules cannot overwrite or disable current database schedules', () => {
+test('stale legacy schedules cannot overwrite or disable current database schedules', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-p4-schedule-conflict-'));
   const runtime = path.join(root, 'runtime'); const scheduledRoot = path.join(runtime, 'scheduled-tasks'); fs.mkdirSync(scheduledRoot, { recursive: true });
   const schedulePath = path.join(scheduledRoot, 'scheduled-tasks.json');
@@ -731,7 +794,7 @@ test('stale legacy schedules cannot overwrite or disable current database schedu
       { id: 'b', timezone: 'UTC', trigger: { kind: 'daily', timeOfDay: '10:00' }, enabled: true, nextDueAt: dueAt + 3600000, task: { title: 'B current' } }
     ], idempotencyKey: 'current-schedules' });
     fs.writeFileSync(schedulePath, JSON.stringify({ tasks: [{ occurrenceId: `a@${new Date(dueAt).toISOString()}`, taskId: 'a', dueAt: new Date(dueAt).toISOString(), status: 'pending', task: { id: 'a', scheduleKind: 'daily', timeOfDay: '09:00', title: 'A stale' } }], failures: [] }));
-    importLegacyRuntimeState(store, root);
+    await importLegacyRuntimeState(store, root);
     assert.deepEqual(store.readScheduleLedger().tasks.map(item => [item.taskId, item.task.title]), [['a', 'A new'], ['b', 'B current']]);
     assert.equal(store.migrationSourceState(`runtime-state:${root}`, 'runtime/scheduled-tasks/scheduled-tasks.json').stage, 'conflict');
   } finally {
@@ -757,4 +820,453 @@ test('dead Telegram actions from every generation reconcile into the current del
     assert.ok(deliveries.every(item => item.payload.replyGeneration === 6));
     assert.equal(value.store.reconcileUnknownInboxActions({ channel: 'telegram', recoveryGeneration: 6 }).items.length, 0);
   } finally { closeFixture(value); }
+});
+
+test('runtime publishes a complete large host settings batch without synchronous setting writes', async t => {
+  const f = fixture();
+  const operations = createRuntimeDataOperations(f.store);
+  t.after(async () => { await operations.close(); closeFixture(f); });
+  const value = { scheduledTasks: [{ title: '完整设置与正文🌿'.repeat(7000) }] };
+  const input = { namespace: 'extension', ownerScope: 'global', idempotencyKey: 'complete-large-host-settings', patches: [
+    { key: 'automationTasks', expectedRevision: 0, value },
+    { key: 'secondarySetting', expectedRevision: 0, value: { enabled: true } }
+  ] };
+  const write = f.store.write;
+  f.store.write = function (mutation, ...rest) {
+    if (mutation.kind === 'setting' && mutation.idempotencyKey.startsWith(input.idempotencyKey)) {
+      throw new Error('host_setting_used_legacy_write');
+    }
+    return write.call(this, mutation, ...rest);
+  };
+  const result = await operations({ operation: 'patch_host_settings', input });
+  assert.deepEqual(result.items.map(item => [item.key, item.revision, item.value]), [
+    ['automationTasks', 1, value], ['secondarySetting', 1, {enabled: true}]
+  ]);
+  assert.deepEqual(await operations({ operation: 'patch_host_settings', input }), result);
+  assert.deepEqual(f.store.readHostSettings({ namespace: 'extension', ownerScope: 'global' }), result);
+  assert.equal(f.store.rows('SELECT COUNT(*) AS n FROM content_lifecycle_prepare_owners')[0].n, 0);
+});
+
+test('runtime can patch and replay a namespace containing more than 128 settings', async t => {
+  const f = fixture();
+  const operations = createRuntimeDataOperations(f.store);
+  t.after(async () => { await operations.close(); closeFixture(f); });
+  const scope = {namespace: 'existing-large-namespace', ownerScope: 'global'};
+  const patches = Array.from({length: 129}, (_, index) => ({key: `setting-${index}`, expectedRevision: 0, value: index}));
+  f.store.patchHostSettings({...scope, patches, idempotencyKey: 'seed-existing-settings'});
+  const input = {...scope, patches: [{key: 'setting-128', expectedRevision: 1, value: 'updated'}], idempotencyKey: 'modify-one-setting'};
+  const result = await operations({operation: 'patch_host_settings', input});
+  assert.equal(result.items.length, 129);
+  assert.deepEqual(result.items.find(item => item.key === 'setting-128').value, 'updated');
+  assert.deepEqual(await operations({operation: 'patch_host_settings', input}), result);
+});
+
+test('runtime host settings keeps both patches in the original native transaction on late SQL failure', async t => {
+  const f = fixture();
+  const operations = createRuntimeDataOperations(f.store);
+  t.after(async () => { await operations.close(); closeFixture(f); });
+  f.store.db.run("CREATE TEMP TRIGGER reject_second_host_setting BEFORE INSERT ON settings WHEN NEW.key='second' BEGIN SELECT RAISE(ABORT,'original_second_setting_sql'); END");
+  const scope = {namespace: 'rollback-host-settings', ownerScope: 'global'};
+  const input = {...scope, idempotencyKey: 'rollback-host-settings', patches: [
+    {key: 'first', expectedRevision: 0, value: '完整正文🌿'.repeat(7000)},
+    {key: 'second', expectedRevision: 0, value: {enabled: true}}
+  ]};
+  await assert.rejects(operations({operation: 'patch_host_settings', input}), /original_second_setting_sql/);
+  assert.deepEqual(f.store.readHostSettings(scope).items, []);
+  assert.equal(f.store.rows("SELECT COUNT(*) AS n FROM requests WHERE idempotency_key LIKE 'rollback-host-settings%'")[0].n, 0);
+  assert.equal(f.store.rows('SELECT COUNT(*) AS n FROM content_lifecycle_prepare_owners')[0].n, 0);
+});
+
+test('runtime migrates the old secret fingerprint atomically through preparation', async t => {
+  const f = fixture();
+  const operations = createRuntimeDataOperations(f.store);
+  t.after(async () => { await operations.close(); closeFixture(f); });
+  const fingerprint = 'c'.repeat(64);
+  const largeValue = '完整会话映射'.repeat(15000);
+  const scope = { namespace: 'telegram', ownerScope: 'global' };
+  const query = { ...scope, secretStateRef: 'test:bot-secret' };
+  const initial = await operations({ operation: 'patch_host_settings', input: { ...scope, idempotencyKey: 'seed-old-fingerprint', patches: [
+    { key: 'botTokenFingerprint', expectedRevision: 0, value: fingerprint }, { key: 'conversationIds', expectedRevision: 0, value: { local: largeValue } }
+  ] } });
+  const legacy = initial.items.find(item => item.key === 'botTokenFingerprint');
+  const formattedLegacy = f.store.write({ kind: 'setting', action: 'patch', scope: null, objectId: legacy.objectId,
+    expectedRevision: legacy.revision, idempotencyKey: 'retain-formatted-fingerprint', data: { content: `${' '.repeat(100000)}${JSON.stringify(fingerprint)}` } });
+  f.store.db.run("CREATE TEMP TRIGGER reject_secret_archive BEFORE UPDATE OF archived_at ON objects WHEN NEW.archived_at IS NOT NULL BEGIN SELECT RAISE(ABORT,'original_secret_archive_sql'); END");
+  f.store.migrateHostSecretState = () => { throw new Error('native_secret_state_legacy_entry'); };
+  const request = { operation: 'migrate_host_secret_state', input: { ...query, legacyKey: legacy.key,
+    expectedRevision: formattedLegacy.revision, fingerprint, secretRef: query.secretStateRef, idempotencyKey: 'migrate-old-fingerprint' } };
+  await assert.rejects(operations(request), /original_secret_archive_sql/);
+  assert.equal(f.store.readHostSettings(query).secretState, undefined);
+  assert.equal(f.store.readHostSettings(query).items.find(item => item.key === legacy.key).value, fingerprint);
+  f.store.db.run('DROP TRIGGER temp.reject_secret_archive');
+  const publish = f.store.publishWrite.bind(f.store);
+  let archiveRetried = false;
+  f.store.publishWrite = async (input, commit) => {
+    if (input.idempotencyKey === 'migrate-old-fingerprint:archive' && !archiveRetried) {
+      archiveRetried = true;
+      return commit(() => undefined);
+    }
+    return publish(input, commit);
+  };
+  const migrated = await operations(request);
+  assert.equal(archiveRetried, true);
+  assert.deepEqual(migrated.secretState, { fingerprint, revision: 1 });
+  assert.deepEqual(migrated.items.map(item => item.key), ['conversationIds']);
+  assert.equal(migrated.items[0].value.local === largeValue, true);
+  assert.deepEqual(await operations(request), migrated);
+});
+
+test('startup captures a complete legacy settings file without hashing or decoding it on Source', async t => {
+  const f = fixture();
+  const operations = createRuntimeDataOperations(f.store);
+  t.after(async () => { await operations.close(); f.store.close(); });
+  const runtime = path.join(f.root, 'runtime');
+  fs.mkdirSync(runtime);
+  const value = {decisionId: 'complete-legacy-startup', reason: '完整的历史启动信息🌿'.repeat(7000)};
+  const bytes = Buffer.from(JSON.stringify(value));
+  fs.writeFileSync(path.join(runtime, 'today-shadow.json'), bytes);
+  const parse = JSON.parse, capture = f.store.captureMigrationSource, violations = [];
+  JSON.parse = function(text, ...args) {
+    if (typeof text === 'string' && text.includes(value.reason) && /runtimeStateMigration\.js/.test(new Error().stack || '')) {
+      violations.push('legacy source JSON decoded on Source');
+    }
+    return parse.call(this, text, ...args);
+  };
+  f.store.captureMigrationSource = function(source, data, ...args) {
+    if (source.key === 'runtime/today-shadow.json') violations.push('legacy source captured synchronously');
+    return capture.call(this, source, data, ...args);
+  };
+  try { await importLegacyRuntimeState(f.store, f.root); }
+  finally { JSON.parse = parse; f.store.captureMigrationSource = capture; }
+  assert.deepEqual(f.store.readHostSettings({namespace: 'runtime_shadow', ownerScope: 'global'}).items[0].value, value);
+  assert.deepEqual(f.store.readMigrationSource(`runtime-state:${f.root}`, 'runtime/today-shadow.json').bytes, bytes);
+  assert.deepEqual(violations, []);
+});
+
+test('runtime cognitive projection consumes prepared settings while retaining the exact extension revisions', async t => {
+  const f = fixture();
+  const operations = createRuntimeDataOperations(f.store);
+  t.after(async () => { await operations.close(); closeFixture(f); });
+  const scope = {namespace: 'extension', ownerScope: 'global'};
+  f.store.patchHostSettings({...scope, patches: [{key: 'cliPath', expectedRevision: 0, value: 'codex'}], idempotencyKey: 'source-cli'});
+  const native = f.store.patchHostSettings;
+  f.store.patchHostSettings = function(input) {
+    if (input.namespace === 'cognitive') throw new Error('cognitive_used_legacy_setting_write');
+    return native.call(this, input);
+  };
+  const request = {operation:'project_cognitive_runtime_config', input: {
+    expectedSourceRevisions: {cliPath: 1, agentModelPreferences: 0, cognitiveEngineAgent: 0},
+    values: {mode:'agent_cli', agentCli:'codex', model:'local-model'}, idempotencyKey:'actual-cognitive-projection'
+  }};
+  assert.deepEqual((await operations(request)).items.map(item => [item.key,item.value]), [
+    ['agentCli','codex'], ['mode','agent_cli'], ['model','local-model']
+  ]);
+  await assert.rejects(operations({...request,input:{...request.input,expectedSourceRevisions:{...request.input.expectedSourceRevisions,cliPath:0}}}), /source_revision_conflict/);
+});
+
+test('runtime legacy Telegram conversation import prepares the complete canonical setting', async t => {
+  const f = fixture();
+  const operations = createRuntimeDataOperations(f.store);
+  t.after(async () => { await operations.close(); closeFixture(f); });
+  const ids = {'42': '完整历史 Telegram 记录🌿'.repeat(3500)};
+  const sourceHash = crypto.createHash('sha256').update(JSON.stringify(ids)).digest('hex');
+  const native = f.store.patchHostSettings;
+  f.store.patchHostSettings = function(input) {
+    if (input.namespace === 'telegram') throw new Error('telegram_used_legacy_setting_write');
+    return native.call(this, input);
+  };
+  const request = {operation: 'import_legacy_telegram_conversations', input: {sourceHash,ids}};
+  assert.deepEqual(await operations(request), {settled:true,imported:true});
+  assert.deepEqual(await operations(request), {settled:true,imported:true});
+  assert.deepEqual(f.store.readHostSettings({namespace:'telegram',ownerScope:'global'}).items[0].value,ids);
+});
+
+test('runtime restores complete legacy schedule occurrence bodies without synchronous encoding', async t => {
+  const f = fixture();
+  const operations = createRuntimeDataOperations(f.store);
+  t.after(async () => { await operations.close(); closeFixture(f); });
+  const dueAt = Date.parse('2026-12-01T09:00:00Z');
+  f.store.syncSchedules({schedules:[{id:'calendar-review',timezone:'UTC',trigger:{kind:'once'},enabled:true,nextDueAt:dueAt,task:{title:'Initial'}}],idempotencyKey:'seed-legacy-calendar'});
+  const task = {title:'完整时间安排🌿'.repeat(7000), action:'remind'};
+  const encode = f.store.putStructuredContent;
+  f.store.putStructuredContent = function(value, ...rest) {
+    if (value?.title === task.title) throw new Error('schedule_occurrence_used_legacy_encoder');
+    return encode.call(this, value, ...rest);
+  };
+  const request = {operation:'restore_legacy_scheduled_occurrences',input:{records:[
+    {scheduleId:'calendar-review', occurrenceKey:`calendar-review@${dueAt}`, dueAt, attempts:2, state:'failed', task}
+  ],idempotencyKey:'restore-complete-schedule'}};
+  await operations(request);
+  const occurrence = f.store.readScheduleLedger().failures[0];
+  assert.equal(occurrence.attempts,2);
+  assert.deepEqual(occurrence.task,task);
+  await operations(request);
+  assert.deepEqual(f.store.readScheduleLedger().failures,[occurrence]);
+});
+
+for(const replaced of [false,true])test(`runtime legacy schedule restore requalifies a changed body (identity replaced=${replaced})`, async t => {
+  const f = fixture(), operations = createRuntimeDataOperations(f.store);
+  t.after(async () => { await operations.close(); closeFixture(f); });
+  const dueAt = Date.parse('2026-12-01T09:00:00Z'), scheduleId = 'legacy-requalification';
+  f.store.syncSchedules({schedules:[{id:scheduleId,timezone:'UTC',trigger:{kind:'once'},enabled:true,nextDueAt:dueAt,task:{title:'Before restore'}}],idempotencyKey:'seed-legacy-requalification'});
+  const records = ['First retained body', 'Second retained body'].map((title, index) => ({
+    scheduleId, occurrenceKey: `legacy-requalification-${index}`, dueAt: dueAt + index,
+    attempts: 2, state: 'failed', task: {title}
+  }));
+  const stage = f.store.stageContentPublication.bind(f.store);
+  let firstContent, altered = false;
+  f.store.stageContentPublication = async (input, key, ...rest) => {
+    const result = await stage(input, key, ...rest);
+    if (key === 'legacy-schedule:requalify-legacy-restore:0') firstContent = result.contentId;
+    if (replaced && key === 'legacy-schedule:requalify-legacy-restore:0' && !altered) {
+      altered = true;
+      const other = Buffer.from(JSON.stringify({ title: 'Other complete body' }));
+      f.store.db.run('UPDATE contents SET sha256=?,byte_length=?,stored_byte_length=?,data=? WHERE id=?', [
+        crypto.createHash('sha256').update(other).digest('hex'), other.length, other.length, other, firstContent
+      ]);
+    }
+    if (!replaced && key === 'legacy-schedule:requalify-legacy-restore:1' && !altered) {
+      altered = true;
+      f.store.db.run('UPDATE contents SET data=zeroblob(length(data)) WHERE id=?', [firstContent]);
+    }
+    return result;
+  };
+  await operations({operation:'restore_legacy_scheduled_occurrences',input:{records,idempotencyKey:'requalify-legacy-restore'}});
+  assert.equal(altered,true);
+  assert.deepEqual(f.store.readScheduleLedger().failures.map(item => item.task.title).sort(), records.map(item => item.task.title).sort());
+  assert.equal(f.store.rows('SELECT COUNT(*) AS count FROM content_lifecycle_prepare_owners')[0].count,0);
+});
+
+test('runtime prepares complete schedule definitions and occurrence payloads in their original transaction', async t => {
+  const f = fixture();
+  const operations = createRuntimeDataOperations(f.store);
+  t.after(async () => { await operations.close(); closeFixture(f); });
+  const task = {title:'完整调度内容🌿'.repeat(7000), assignee:'user'};
+  const dueAt = Date.parse('2026-12-01T09:00:00Z');
+  const originalWrite=f.store.write, originalEncode=f.store.putStructuredContent;
+  f.store.write=function(input,...rest){
+    if(input.kind==='schedule')throw new Error('schedule_definition_used_legacy_write');
+    return originalWrite.call(this,input,...rest);
+  };
+  f.store.putStructuredContent=function(value,...rest){
+    if(value?.title===task.title)throw new Error('schedule_occurrence_used_legacy_encoder');
+    if(value?.ids?.includes('calendar-notice'))throw new Error('schedule_root_used_legacy_encoder');
+    return originalEncode.call(this,value,...rest);
+  };
+  const req={operation:'sync_schedules',input:{schedules:[
+    {id:'calendar-notice',timezone:'UTC',trigger:{kind:'once'},enabled:true,nextDueAt:dueAt,task}
+  ],idempotencyKey:'complete-schedule-definition'}};
+  const result=await operations(req);
+  assert.equal(result.schedules.length,1);
+  const saved=f.store.rows('SELECT e.subject_id FROM events e JOIN requests r ON r.id=e.request_id WHERE r.idempotency_key=?',[req.input.idempotencyKey])[0];
+  assert.deepEqual(JSON.parse(f.store.read(saved.subject_id).data.content),{ids:['calendar-notice']});
+  assert.deepEqual(f.store.readScheduleLedger().tasks[0].task,task);
+  assert.deepEqual(await operations(req),result);
+  const disabled=await operations({operation:'sync_schedules',input:{schedules:[],idempotencyKey:'remove-calendar-notice'}});
+  assert.equal(disabled.schedules[0].revision,2);
+  assert.deepEqual(f.store.readScheduleLedger().tasks,[]);
+});
+
+test('runtime prepares repeated schedule bindings and preserves numeric ID retirement and exact occurrence state', async t => {
+  const f=fixture(),operations=createRuntimeDataOperations(f.store);
+  t.after(async()=>{await operations.close();closeFixture(f);});
+  const at=Date.parse('2026-12-01T09:00:00Z');
+  const item=(id,title,dueAt=at)=>({id,timezone:'UTC',trigger:{kind:'once'},enabled:true,nextDueAt:dueAt,task:{title}});
+  const write=f.store.write.bind(f.store),encode=f.store.putStructuredContent.bind(f.store);
+  f.store.write=input=>{if(input.kind==='schedule')throw new Error('duplicate_used_legacy_schedule_write');return write(input);};
+  f.store.putStructuredContent=value=>{if(value?.title)throw new Error('duplicate_used_legacy_schedule_payload');return encode(value);};
+  const sync=(idempotencyKey,schedules)=>operations({operation:'sync_schedules',input:{idempotencyKey,schedules}});
+  const repeated=await sync('repeat-same-binding',[item('repeat','完整正文🌿'),item('repeat','完整正文🌿',at+1000)]);
+  assert.equal(repeated.schedules[0].revision,1);
+  assert.equal(f.store.readScheduleLedger().tasks[0].dueAt,new Date(at).toISOString());
+  const unchangedThenUpdated=await sync('repeat-then-update',[item('repeat','完整正文🌿'),item('repeat','后续编辑'),item('repeat','后续编辑')]);
+  assert.equal(unchangedThenUpdated.schedules[0].revision,2);
+  assert.equal(f.store.readScheduleLedger().tasks[0].task.title,'后续编辑');
+  await assert.rejects(sync('repeat-conflict',[item('repeat','先更新'),item('repeat','再更新')]),/idempotency_conflict/);
+  assert.equal(f.store.readScheduleLedger().tasks[0].task.title,'后续编辑');
+  assert.equal(f.store.rows("SELECT 1 FROM requests WHERE idempotency_key='repeat-conflict:schedule:repeat'").length,0);
+  const numeric=await sync('numeric-id-is-retired',[item(7,'旧数值 ID')]);
+  const numericId=String(f.store.rows('SELECT CAST(? AS TEXT) AS id',[7])[0].id);
+  assert.equal(numeric.schedules.find(schedule=>schedule.id===numericId).revision,2);
+  assert.equal(f.store.readScheduleLedger().tasks.length,0);
+  const shared=await sync('numeric-and-string-share-binding',[item(7,'恢复'),item(numericId,'恢复')]);
+  assert.equal(shared.schedules.find(schedule=>schedule.id===numericId).revision,3);
+  assert.deepEqual(f.store.readScheduleLedger().tasks.map(item=>item.task.title),['恢复','恢复']);
+  if(numericId!=='7')await assert.rejects(sync('numeric-and-string-share-request',[item(7,'不同绑定'),item('7','不同绑定')]),/idempotency_conflict/);
+  if(String(f.store.rows('SELECT CAST(? AS TEXT) AS id',[8])[0].id)!=='8'){
+    await assert.rejects(sync('numeric-and-string-collide-after-replay',[item(8,'同一请求'),item('8','同一请求')]),/UNIQUE constraint failed: schedule_bindings.schedule_id/);
+  }
+});
+
+test('runtime schedule sync reselects the real schedule behind a child request accepted during preparation',async t=>{
+  const f=fixture(),operations=createRuntimeDataOperations(f.store);
+  t.after(async()=>{await operations.close();closeFixture(f);});
+  const key='schedule-child-appeared',dueAt=Date.parse('2026-12-01T09:00:00Z'),task={title:'真实先写入的定义'};
+  const input={idempotencyKey:key,schedules:[{id:7,timezone:'UTC',trigger:{kind:'once'},enabled:true,nextDueAt:dueAt,task}]};
+  const prepare=f.store.scheduleSyncCompute;
+  let accepted,attempts=0;
+  f.store.scheduleSyncCompute=async request=>{
+    const plan=await prepare(request);
+    if(++attempts===1)accepted=f.store.write({kind:'schedule',action:'create',scope:null,idempotencyKey:`${key}:schedule:7`,
+      data:{timezone:'UTC',trigger_spec_json:{kind:'once'},enabled:true,next_due_at:dueAt,task_template_content:JSON.stringify(task)}});
+    return plan;
+  };
+  const result=await operations({operation:'sync_schedules',input});
+  assert.ok(attempts>=2);
+  assert.equal(result.schedules[0].objectId,accepted.objectId);
+  assert.equal(result.schedules[0].revision,2);
+  assert.equal(f.store.readScheduleLedger().tasks.length,0);
+});
+
+test('runtime schedule sync rereads a repaired same-ID template from an initially unbound replay',async t=>{
+  const f=fixture(),operations=createRuntimeDataOperations(f.store);
+  t.after(async()=>{await operations.close();closeFixture(f);});
+  const key='schedule-replay-body-repaired',dueAt=Date.parse('2026-12-01T09:00:00Z'),task={title:'修复后的旧日程'};
+  const id=4,binding=String(f.store.rows('SELECT CAST(? AS TEXT) AS id',[id])[0].id);
+  const accepted=f.store.write({kind:'schedule',action:'create',scope:null,idempotencyKey:`${key}:schedule:${id}`,
+    data:{timezone:'UTC',trigger_spec_json:{kind:'once'},enabled:true,next_due_at:dueAt,task_template_content:JSON.stringify(task)}});
+  const cid=f.store.readMetadata(accepted.objectId).data.task_template_content_id;
+  const old=f.store.rows('SELECT data FROM contents WHERE id=?',[cid])[0].data;
+  f.store.db.run('UPDATE contents SET data=zeroblob(stored_byte_length) WHERE id=?',[cid]);
+  const prepare=f.store.scheduleSyncCompute;
+  let attempts=0;
+  f.store.scheduleSyncCompute=async request=>{
+    const plan=await prepare(request);
+    if(++attempts===1){
+      assert.match(plan.failure.message,/integrity|hash|corrupt/i);
+      f.store.db.run('UPDATE contents SET data=? WHERE id=?',[old,cid]);
+    }
+    return plan;
+  };
+  const item={timezone:'UTC',trigger:{kind:'once'},enabled:true,nextDueAt:dueAt,task};
+  const result=await operations({operation:'sync_schedules',input:{idempotencyKey:key,schedules:[{...item,id},{...item,id:binding}]}});
+  assert.ok(attempts>=2);
+  assert.equal(result.schedules[0].objectId,accepted.objectId);
+  assert.ok(f.store.readScheduleLedger().tasks.every(entry=>entry.task.title===task.title));
+});
+
+for(const fail of [false,true])test(`startup publishes legacy schedule definitions and occurrences together on the prepared path (late failure=${fail})`, async t => {
+  const f=fixture(),operations=createRuntimeDataOperations(f.store);
+  t.after(async()=>{await operations.close();f.store.close();});
+  const directory=path.join(f.root,'scheduled-tasks');
+  fs.mkdirSync(directory);
+  const dueAt='2026-12-01T09:00:00.000Z',task={id:'startup-daily',scheduleKind:'daily',timeOfDay:'09:00',title:'完整启动安排🌿'.repeat(7000)};
+  const bytes=Buffer.from(JSON.stringify({tasks:[{occurrenceId:'legacy-startup-daily',taskId:task.id,dueAt,attempts:2,task}],failures:[]}));
+  fs.writeFileSync(path.join(directory,'scheduled-tasks.json'),bytes);
+  const write=f.store.write;
+  f.store.write=function(input,...rest){
+    if(input.kind==='schedule')throw new Error('startup_schedule_used_legacy_write');
+    return write.call(this,input,...rest);
+  };
+  if(fail){
+    f.store.db.run("CREATE TEMP TRIGGER reject_legacy_occurrence_attempts BEFORE UPDATE OF attempts ON scheduled_occurrences BEGIN SELECT RAISE(ABORT,'actual_late_occurrence_sql'); END");
+    await assert.rejects(importLegacyRuntimeState(f.store,f.root),/actual_late_occurrence_sql/);
+    assert.equal(f.store.scheduleDefinitionCount(),0);
+    assert.deepEqual(f.store.readScheduleLedger().tasks,[]);
+    assert.equal(f.store.readMigrationSource(`runtime-state:${f.root}`,'scheduled-tasks/scheduled-tasks.json').stage,'captured');
+    return;
+  }
+  await importLegacyRuntimeState(f.store,f.root);
+  assert.deepEqual(f.store.readScheduleLedger().tasks[0].task,task);
+  assert.equal(f.store.readScheduleLedger().tasks[0].attempts,2);
+  const source=f.store.readMigrationSource(`runtime-state:${f.root}`,'scheduled-tasks/scheduled-tasks.json');
+  assert.equal(source.stage,'imported');
+  assert.deepEqual(source.bytes,bytes);
+});
+
+test('runtime schedule sync keeps an earlier Native SQL failure ahead of damaged later template content', async t => {
+  const f=fixture(), operations=createRuntimeDataOperations(f.store);
+  t.after(async()=>{await operations.close();closeFixture(f);});
+  const dueAt=Date.parse('2026-12-01T09:00:00Z');
+  const schedule=(id,title)=>({id,timezone:'UTC',trigger:{kind:'once'},enabled:true,nextDueAt:dueAt,task:{title}});
+  f.store.syncSchedules({schedules:[schedule('first','first'),schedule('second','second')],idempotencyKey:'schedule-old-template-baseline'});
+  const first=f.store.rows("SELECT schedule_id FROM schedule_bindings WHERE external_id='first'")[0].schedule_id;
+  const content=f.store.rows("SELECT s.task_template_content_id FROM schedules s JOIN schedule_bindings b ON s.id=b.schedule_id WHERE b.external_id='second'")[0].task_template_content_id;
+  f.store.db.run('UPDATE contents SET data=zeroblob(stored_byte_length) WHERE id=?',[content]);
+  f.store.db.run(`CREATE TEMP TRIGGER reject_first_schedule_update BEFORE UPDATE ON schedules WHEN NEW.id='${first}' BEGIN SELECT RAISE(ABORT,'actual_first_schedule_sql'); END`);
+  const input={schedules:[schedule('first','changed'),schedule('second','second')],idempotencyKey:'schedule-original-error-order'};
+  assert.throws(()=>f.store.syncSchedules(input),/actual_first_schedule_sql/);
+  await assert.rejects(operations({operation:'sync_schedules',input}),/actual_first_schedule_sql/);
+});
+
+test('schedule sync keeps the actual search SQL ahead of final root snapshot preparation failure',async t=>{
+  const f=fixture(),operations=createRuntimeDataOperations(f.store);
+  t.after(async()=>{await operations.close();closeFixture(f);});
+  const key='schedule-root-compute-snapshot-error';
+  const search=f.store.dataWriteCompute.search,run=f.store.db.run.bind(f.store.db);
+  f.store.dataWriteCompute.search=async request=>{
+    if(request.input.idempotencyKey!==key)return search(request);
+    if(!request.evidenceRoot)throw new Error('actual_schedule_root_snapshot_prepare');
+    const plan=await search(request);
+    return {...plan,snapshot:undefined,snapshotFailure:{name:'Error',message:'actual_schedule_root_snapshot_prepare'}};
+  };
+  f.store.db.run=(sql,values)=>{
+    if(sql.startsWith('INSERT OR REPLACE INTO object_search(rowid,terms)') &&
+      f.store.rows('SELECT kind FROM objects WHERE rowid=?',[values[0]])[0]?.kind==='evidence')throw new Error('actual_schedule_root_search_sql');
+    return run(sql,values);
+  };
+  await assert.rejects(operations({operation:'sync_schedules',input:{schedules:[],idempotencyKey:key}}),/actual_schedule_root_search_sql/);
+  assert.equal(f.store.rows('SELECT 1 FROM requests WHERE idempotency_key=?',[key]).length,0);
+});
+
+test('runtime schedule sync uses the observed Compute version without a full version hash in Native', async t => {
+  const f=fixture(), operations=createRuntimeDataOperations(f.store);
+  t.after(async()=>{await operations.close();closeFixture(f);});
+  const {version}=f.store.readScheduleSyncState();
+  f.store.readScheduleSyncState=()=>{throw new Error('schedule_version_hashed_on_source');};
+  const result=await operations({operation:'sync_schedules',input:{idempotencyKey:'expected-schedule-version',expectedVersion:version,schedules:[]}});
+  assert.deepEqual(result.schedules,[]);
+});
+
+test('startup retries the same legacy file after a Compute worker restart', async t => {
+  const f=fixture(), operations=createRuntimeDataOperations(f.store);
+  t.after(async()=>{await operations.close();f.store.close();});
+  const directory=path.join(f.root,'runtime');
+  fs.mkdirSync(directory);
+  const file=path.join(directory,'cognitive-config.json');
+  fs.writeFileSync(file,JSON.stringify({mode:'agent_cli',agentCli:'codex',model:'retained-startup'}));
+  const compute=f.store.projectMigrationInspectionCompute;
+  let attempts=0;
+  f.store.setProjectMigrationInspectionCompute(request=>{
+    if(request.kind==='runtimeStateFile' && request.file===file && ++attempts===1)return Promise.reject(new Error('maintenance_compute_exited:1'));
+    return compute(request);
+  });
+  await importLegacyRuntimeState(f.store,f.root);
+  assert.equal(attempts,2);
+  assert.equal(f.store.readHostSettings({namespace:'cognitive',ownerScope:'global'}).items.find(item=>item.key==='model').value,'retained-startup');
+});
+
+test('startup retries the actual captured legacy body after Compute exits during content preparation',async t=>{
+  const f=fixture(),operations=createRuntimeDataOperations(f.store);
+  t.after(async()=>{await operations.close();f.store.close();});
+  const directory=path.join(f.root,'runtime');fs.mkdirSync(directory);
+  const file=path.join(directory,'cognitive-config.json'),bytes=Buffer.from(JSON.stringify({mode:'agent_cli',agentCli:'codex',model:'capture-retry'}));
+  fs.writeFileSync(file,bytes);
+  const stage=f.store.stageContentPublication;
+  let attempts=0;
+  f.store.stageContentPublication=function(input,key,...rest){
+    if(key.startsWith('migration:') && key.includes('cognitive-config.json') && ++attempts===1)return Promise.reject(new Error('maintenance_compute_exited:1'));
+    return stage.call(this,input,key,...rest);
+  };
+  await importLegacyRuntimeState(f.store,f.root);
+  const captured=f.store.readMigrationSource(`runtime-state:${f.root}`,'runtime/cognitive-config.json');
+  assert.equal(attempts,2);
+  assert.equal(captured.stage,'imported');
+  assert.deepEqual(captured.bytes,bytes);
+  assert.equal(f.store.readHostSettings({namespace:'cognitive',ownerScope:'global'}).items.find(item=>item.key==='model').value,'capture-retry');
+});
+
+test('runtime does not need an unused settings projection to settle legacy Telegram conversations', async t => {
+  const f=fixture(), operations=createRuntimeDataOperations(f.store);
+  t.after(async()=>{await operations.close();closeFixture(f);});
+  const ids={'42':'original-conversation'};
+  const input={ids,sourceHash:crypto.createHash('sha256').update(JSON.stringify(ids)).digest('hex')};
+  const compute=f.store.hostSettingsCompute;
+  f.store.setHostSettingsCompute({...compute,project:request=>{
+    if(request.rows.some(row=>row.key==='conversationIds'))return Promise.reject(new Error('unused_host_projection_failure'));
+    return compute.project(request);
+  }});
+  assert.deepEqual(await operations({operation:'import_legacy_telegram_conversations',input}),{settled:true,imported:true});
+  assert.deepEqual(await operations({operation:'import_legacy_telegram_conversations',input}),{settled:true,imported:true});
+  assert.deepEqual(f.store.readHostSettings({namespace:'telegram',ownerScope:'global'}).items[0].value,ids);
 });

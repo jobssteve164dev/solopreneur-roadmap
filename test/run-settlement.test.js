@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { getAgentRunDeliveryOwner } = require('../out/agentRunPreparation.js');
 
 async function fixture() {
@@ -123,36 +123,42 @@ test('schema 70 preserves queued, claimed and completed run effects during its p
     assert.equal(expected.find(effect => effect.kind === 'review').token, claimed.token);
     assert.equal(expected.find(effect => effect.kind === 'telegram').state, 'done');
 
-    await f.ops.close();
-    f.store.close();
-    storeOpen = false;
+    const { unifiedSchemaSql } = require('../out/db/unifiedSchema.js');
+    const { unifiedSchemaMigrations } = require('../out/db/unifiedSchemaMigrations.js');
+    const hash = value => require('node:crypto').createHash('sha256').update(value).digest('hex');
+    const legacyRoot = path.join(f.base, 'schema69'); fs.mkdirSync(legacyRoot);
     const { DatabaseSync } = require('node:sqlite');
-    rawDatabase = new DatabaseSync(path.join(f.root, 'solomap.db'));
-    rawDatabase.exec(`PRAGMA foreign_keys=OFF;
-      BEGIN IMMEDIATE;
-      DROP INDEX run_effects_pending;
-      DROP INDEX content_ref_run_effects_payload_content_id;
-      ALTER TABLE run_effects RENAME TO run_effects_after_v70;
-      CREATE TABLE run_effects(
-       id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),run_id TEXT NOT NULL REFERENCES runs(id),
-       turn_id TEXT NOT NULL REFERENCES turns(id),checkpoint_sequence INTEGER NOT NULL,execution_log_id INTEGER NOT NULL,source_revision INTEGER NOT NULL,
-       kind TEXT NOT NULL CHECK(kind IN ('roadmap','review','revision','refresh','telegram','automation','flow')),
-       payload_content_id TEXT NOT NULL REFERENCES contents(id),state TEXT NOT NULL CHECK(state IN ('queued','claimed','done')),
-       owner_id TEXT NOT NULL DEFAULT '',pid INTEGER NOT NULL DEFAULT 0,birth TEXT NOT NULL DEFAULT '',token TEXT NOT NULL DEFAULT '',
-       error TEXT NOT NULL DEFAULT '',completed_at INTEGER,
-       UNIQUE(run_id,turn_id,checkpoint_sequence,kind),
-       FOREIGN KEY(run_id,project_id) REFERENCES runs(id,project_id),FOREIGN KEY(turn_id,project_id) REFERENCES turns(id,project_id),
-       FOREIGN KEY(run_id,turn_id,checkpoint_sequence) REFERENCES run_settlements(run_id,turn_id,checkpoint_sequence));
-      INSERT INTO run_effects SELECT * FROM run_effects_after_v70;
-      DROP TABLE run_effects_after_v70;
-      CREATE INDEX run_effects_pending ON run_effects(state,project_id);
-      CREATE INDEX content_ref_run_effects_payload_content_id ON run_effects(payload_content_id);
-      DROP INDEX runs_conversation_history;
-      DELETE FROM schema_migrations WHERE version IN (70,71);
-      COMMIT;
-      PRAGMA foreign_keys=ON;`);
-    rawDatabase.close();
-    rawDatabase = undefined;
+    rawDatabase = new DatabaseSync(path.join(legacyRoot, 'solomap.db'));
+    rawDatabase.exec('PRAGMA foreign_keys=OFF');
+    rawDatabase.exec(unifiedSchemaSql());
+    rawDatabase.prepare('INSERT INTO schema_migrations VALUES(1,?,1)').run(hash(unifiedSchemaSql()));
+    for (const migration of unifiedSchemaMigrations.filter(item => item.version <= 69)) {
+      rawDatabase.exec(migration.sql);
+      rawDatabase.prepare('INSERT INTO schema_migrations VALUES(?,?,1)').run(migration.version,hash(migration.sql));
+    }
+    // Restore the populated fixture into a real historical schema prefix.
+    // Importing rows must not run the old projections a second time.
+    const triggers = rawDatabase.prepare("SELECT name,sql FROM sqlite_schema WHERE type='trigger'").all();
+    rawDatabase.exec('BEGIN IMMEDIATE');
+    for (const trigger of triggers) rawDatabase.exec(`DROP TRIGGER "${trigger.name}"`);
+    const sourceTables = new Set(f.store.rows("SELECT name FROM sqlite_schema WHERE type='table'").map(row => row.name));
+    for (const { name } of rawDatabase.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").all()) {
+      if (name === 'schema_migrations' || name.startsWith('object_search') || !sourceTables.has(name)) continue;
+      const columns = rawDatabase.prepare(`PRAGMA table_info("${name}")`).all().map(row => row.name);
+      const insert = rawDatabase.prepare(`INSERT OR REPLACE INTO "${name}"(${columns.map(column => `"${column}"`).join(',')}) VALUES(${columns.map(() => '?').join(',')})`);
+      for (const row of f.store.rows(`SELECT * FROM "${name}"`)) {
+        const values=columns.map(column => name === 'contents' && column === 'data' && row.data === null && String(row.encoding).startsWith('chunked:') ? Buffer.alloc(0) : row[column]);
+        const empty=value=>value instanceof Uint8Array && value.byteLength===0;
+        if(!values.some(empty))insert.run(...values);
+        else rawDatabase.prepare(`INSERT OR REPLACE INTO "${name}"(${columns.map(column=>`"${column}"`).join(',')}) VALUES(${values.map(value=>empty(value)?'zeroblob(0)':'?').join(',')})`).run(...values.filter(value=>!empty(value)));
+      }
+    }
+    for (const trigger of triggers) rawDatabase.exec(trigger.sql);
+    rawDatabase.exec('COMMIT; PRAGMA foreign_keys=ON');
+    assert.deepEqual(rawDatabase.prepare('PRAGMA foreign_key_check').all(),[]);
+    rawDatabase.close(); rawDatabase = undefined;
+    await f.ops.close(); f.store.close(); storeOpen = false;
+    f.root = legacyRoot;
 
     f.store = new UnifiedDataStore(f.root);
     f.ops = createRuntimeDataOperations(f.store);
@@ -160,7 +166,7 @@ test('schema 70 preserves queued, claimed and completed run effects during its p
     storeOpen = true;
     assert.deepEqual(f.store.rows(`SELECT id,project_id,run_id,turn_id,checkpoint_sequence,execution_log_id,source_revision,kind,
       payload_content_id,state,owner_id,pid,birth,token,error,completed_at FROM run_effects ORDER BY kind`), expected);
-    assert.equal(f.store.rows('SELECT MAX(version) AS version FROM schema_migrations')[0].version, 73);
+    assert.equal(f.store.rows('SELECT MAX(version) AS version FROM schema_migrations')[0].version, require('../out/db/unifiedSchemaMigrations.js').unifiedSchemaMigrations.at(-1).version);
     assert.equal(f.store.rows('PRAGMA integrity_check')[0].integrity_check, 'ok');
     assert.deepEqual(f.store.rows('PRAGMA foreign_key_check'), []);
   } finally {

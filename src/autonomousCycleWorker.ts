@@ -4,6 +4,7 @@ import {
   hasRuntimeLease,
   persistShadowRuntimeState,
   readCurrentRegisteredShadowDecision,
+  refreshShadowRuntimeState,
   runCognitiveShadowDecisionCycle,
   runShadowDecisionCycleFromDatabase
 } from './autonomousRuntime';
@@ -67,6 +68,7 @@ async function runCycle(paused: boolean): Promise<{ leaseLost?: boolean; diagnos
     await refreshProjectRegistry(configuration.globalDataPath, undefined,
       (name, input) => operation({ operation: name, input }));
     await refreshCognitiveRuntimeConfig(configuration.globalDataPath, operation);
+    await refreshShadowRuntimeState(configuration.globalDataPath, dataOperations);
     const current = readCurrentRegisteredShadowDecision(configuration.globalDataPath);
     const cognitiveConfig = readCognitiveRuntimeConfig(configuration.globalDataPath);
     const configRevision = cognitiveRuntimeConfigRevision(cognitiveConfig);
@@ -101,7 +103,11 @@ async function runCycle(paused: boolean): Promise<{ leaseLost?: boolean; diagnos
     activeEngine = undefined;
   }
   if (!ownsLease()) return { leaseLost: true, ...(diagnosticError ? { diagnosticError } : {}) };
-  await persistShadowRuntimeState(configuration.globalDataPath, dataOperations);
+  try { await persistShadowRuntimeState(configuration.globalDataPath, dataOperations); }
+  catch (error) {
+    if (error instanceof Error && error.message === 'today_source_conflict' && ownsLease()) return runCycle(paused);
+    throw error;
+  }
   return diagnosticError ? { diagnosticError } : {};
 }
 

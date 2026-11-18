@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 
 async function fixture(action) {
@@ -48,7 +48,7 @@ test('strategy history imports full original files and user choices then replays
 }));
 
 test('strategy history cannot replace a later native user choice and retains the conflicting source', () => fixture(async ({ project, store, sourceRoot, run }) => {
-  store.writeStrategyState(project, { expectedRevision: 0, value: { role: 'core_product', businessStage: 'sell' }, idempotencyKey: 'user-first' });
+  await store.writeStrategyState(project, { expectedRevision: 0, value: { role: 'core_product', businessStage: 'sell' }, idempotencyKey: 'user-first' });
   const job = await run('strategy-existing-choice');
   assert.equal(job.status, 'completed_with_conflicts');
   assert.equal(store.readStrategyState(project).value.role, 'core_product');

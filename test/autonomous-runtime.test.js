@@ -10,7 +10,7 @@ const runtimeHost = require('../out/autonomousRuntimeHost.js');
 const cognitiveEngine = require('../out/copilotShadowEngine.js');
 const cognitiveConfig = require('../out/cognitiveRuntimeConfig.js');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { refreshProjectRegistry } = require('../out/projectRegistry.js');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 
@@ -206,6 +206,7 @@ test('database Today planning pages one background read model instead of floodin
     now: new Date('2026-09-22T08:00:00.000Z'),
     operation: async request => {
       calls.push(request.operation);
+      if (request.operation === 'read_project_registry') return { objectId: 'registry-background', revision: 1, legacyContextImported: true, registry: { schemaVersion: 1, projects, hiddenProjects: [] } };
       assert.equal(request.operation, 'read_shadow_decision_inputs');
       active += 1;
       maximumActive = Math.max(maximumActive, active);
@@ -225,8 +226,7 @@ test('database Today planning pages one background read model instead of floodin
   });
 
   assert.equal(decision.projectCount, 57);
-  assert.equal(calls.length, 3);
-  assert.ok(calls.every(operation => operation === 'read_shadow_decision_inputs'));
+  assert.deepEqual(calls, ['read_project_registry', ...Array(3).fill('read_shadow_decision_inputs')]);
   assert.equal(maximumActive, 1);
 });
 
@@ -373,6 +373,64 @@ test('repeating a shadow cycle for the same facts does not append another decisi
   }
 });
 
+test('persisting authoritative Today reads the source guard in preparation instead of decoding the registry in Native', async () => {
+  const fixture = await createFixture();
+  try {
+    const expected = await runtime.runShadowDecisionCycleFromDatabase({ globalDataPath: fixture.globalRoot,
+      operation: fixture.operations, now: new Date('2026-09-22T08:00:00.000Z') });
+    const readRegistry = fixture.store.readProjectRegistry.bind(fixture.store);
+    fixture.store.readProjectRegistry = (...args) => {
+      if (fixture.store.transactionDepth) throw new Error('today_guard_decoded_registry_in_writer');
+      return readRegistry(...args);
+    };
+    await runtime.persistShadowRuntimeState(fixture.globalRoot, fixture.operations);
+    const saved = await fixture.call('read_host_settings', { namespace: 'runtime_shadow', ownerScope: 'global', keys: ['decision'] });
+    assert.equal(saved.items[0].value.decisionId, expected.decisionId);
+    assert.equal(saved.items[0].value.recommendedProjectPath, fixture.beta);
+  } finally { await removeFixture(fixture); }
+});
+
+test('Today persistence rejects changed roadmap facts after preparation and preserves an already accepted replay', async () => {
+  const fixture = await createFixture();
+  try {
+    const build = () => runtime.runShadowDecisionCycleFromDatabase({ globalDataPath: fixture.globalRoot,
+      operation: fixture.operations, now: new Date('2026-09-22T08:00:00.000Z') });
+    const changeRoadmap = async (from, to) => {
+      const file = path.join(fixture.beta, '.solopreneur', 'roadmap.csv');
+      fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace(from, to));
+      await fixture.call('accept_roadmap_csv', { root: fixture.beta });
+    };
+    await build();
+    const compute = fixture.store.hostSettingsCompute;
+    let changed = false, replayedWithoutSourceCheck = false, acceptedInput;
+    fixture.store.setHostSettingsCompute({ ...compute, prepare: async request => {
+      const plan = await compute.prepare(request);
+      if (!changed && plan.todayGuard && !plan.todayGuard.failure) {
+        changed = true;
+        await changeRoadmap('Recover Beta', 'Review Beta');
+      }
+      if (acceptedInput && request.input.idempotencyKey === acceptedInput.idempotencyKey && plan.replay && !plan.todayGuard) {
+        replayedWithoutSourceCheck = true;
+      }
+      return plan;
+    } });
+    await assert.rejects(runtime.persistShadowRuntimeState(fixture.globalRoot, fixture.operations), /today_source_conflict/);
+    assert.equal(changed, true);
+    const query = { namespace: 'runtime_shadow', ownerScope: 'global', keys: ['decision'] };
+    assert.deepEqual((await fixture.call('read_host_settings', query)).items, []);
+    const accepted = await build();
+    await runtime.persistShadowRuntimeState(fixture.globalRoot, request => {
+      if (request.operation === 'patch_host_settings' && request.input.todaySourceGuard) acceptedInput = request.input;
+      return fixture.operations(request);
+    });
+    assert.ok(acceptedInput);
+    await changeRoadmap('Review Beta', 'Launch Beta');
+    const replay = await fixture.call('patch_host_settings', acceptedInput);
+    assert.equal(replay.items.find(item => item.key === 'decision').value.decisionId, accepted.decisionId);
+    assert.equal(replayedWithoutSourceCheck, true);
+  } finally { await removeFixture(fixture); }
+});
+
 test('same-day Runtime persistence uses a new request identity when learning counts change', async () => {
   const fixture = await createFixture();
   try {
@@ -440,6 +498,14 @@ test('shadow feedback records one accepted or overridden outcome per operation',
       projectRegistryFileName: 'projects.json',
       now: new Date('2026-09-22T08:00:00.000Z')
     });
+    await runtime.persistShadowRuntimeState(fixture.globalRoot, fixture.operations);
+    const readSettings = fixture.store.readHostSettings.bind(fixture.store);
+    fixture.store.readHostSettings = query => {
+      if (fixture.store.transactionDepth && ['runtime_shadow', 'runtime_shadow_history'].includes(query.namespace)) {
+        throw new Error('today_feedback_decoded_decision_in_writer');
+      }
+      return readSettings(query);
+    };
     const input = {
       operationId: 'feedback-1',
       decisionId: decision.decisionId,
@@ -453,10 +519,37 @@ test('shadow feedback records one accepted or overridden outcome per operation',
     const stored = await fixture.call('read_host_settings', { namespace: 'runtime_shadow', ownerScope: 'global' });
     const rows = stored.items.find(item => item.key === 'feedback').value;
     assert.equal(rows.length, 1); assert.equal(rows[0].outcome, 'overridden'); assert.equal(rows[0].selectedProjectPath, fixture.alpha);
+    assert.equal(fixture.store.rows("SELECT COUNT(*) AS count FROM learning_events WHERE source_type='today_feedback'")[0].count, 1);
     assert.equal(runtime.readShadowDecisionEvaluation(fixture.globalRoot).result, 'insufficient_evidence');
   } finally {
     await removeFixture(fixture);
   }
+});
+
+test('Today feedback pins the preceding decision revision and rolls back settings on a late event failure', async () => {
+  const f = await createFixture();
+  try {
+    const decision = await runtime.runShadowDecisionCycleFromDatabase({ globalDataPath: f.globalRoot, operation: f.operations });
+    await runtime.persistShadowRuntimeState(f.globalRoot, f.operations);
+    const scope = { namespace: 'runtime_shadow', ownerScope: 'global' };
+    const prior = await f.call('read_host_settings', scope);
+    const source = prior.items.find(item => item.key === 'decision');
+    const previousFeedback = prior.items.find(item => item.key === 'feedback');
+    const feedback = { operationId: 'same-settings-feedback', decisionId: decision.decisionId, outcome: 'accepted', selectedProjectPath: decision.recommendedProjectPath };
+    const input = { ...scope, idempotencyKey: 'changed-decision-and-feedback', todayFeedback: feedback, patches: [
+      { key: 'decision', expectedRevision: source.revision, value: { ...source.value, feedbackSaved: true } },
+      { key: 'feedback', expectedRevision: previousFeedback.revision, value: [feedback] }
+    ] };
+    f.store.db.run("CREATE TEMP TRIGGER reject_today_feedback_event BEFORE INSERT ON learning_events WHEN NEW.source_type='today_feedback' BEGIN SELECT RAISE(ABORT,'original_today_feedback_write'); END");
+    await assert.rejects(f.call('patch_host_settings', input), /original_today_feedback_write/);
+    assert.deepEqual(await f.call('read_host_settings', scope), prior);
+    f.store.db.run('DROP TRIGGER temp.reject_today_feedback_event');
+    const applied = await f.call('patch_host_settings', input);
+    assert.equal(applied.items.find(item => item.key === 'decision').revision, source.revision + 1);
+    assert.deepEqual(await f.call('patch_host_settings', input), applied);
+    const events = f.store.rows("SELECT source_object_id,source_revision FROM learning_events WHERE source_type='today_feedback'");
+    assert.deepEqual(events.map(event => [event.source_object_id, event.source_revision]), [[source.objectId, source.revision]]);
+  } finally { await removeFixture(f); }
 });
 
 test('shadow evaluation quantifies whether cognitive choices beat the deterministic baseline', async () => {
@@ -477,6 +570,7 @@ test('shadow evaluation quantifies whether cognitive choices beat the determinis
       }
     });
 
+    await runtime.persistShadowRuntimeState(fixture.globalRoot, fixture.operations);
     await runtime.recordShadowDecisionFeedback(fixture.globalRoot, {
       operationId: 'evaluation-1',
       decisionId: decision.decisionId,
@@ -506,6 +600,7 @@ test('ignoring a shadow decision is counted without pretending a project was sel
       projectRegistryFileName: 'projects.json',
       now: new Date('2026-09-22T08:00:00.000Z')
     });
+    await runtime.persistShadowRuntimeState(fixture.globalRoot, fixture.operations);
     await runtime.recordShadowDecisionFeedback(fixture.globalRoot, {
       operationId: 'ignored-1',
       decisionId: decision.decisionId,

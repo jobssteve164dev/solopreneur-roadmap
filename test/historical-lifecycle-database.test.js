@@ -932,7 +932,7 @@ test('an already mixed legacy status receipt remains a conflict without guessing
   for (const [file, directory, status, binding] of [[rootStatus, f.runDir, f.status, f.binding], [nestedStatus, secondDir, secondStatus, secondBinding]]) {
     const bytes = fs.readFileSync(file), source = { identity: oldIdentity, key: oldKey, hash: crypto.createHash('sha256').update(bytes).digest('hex') };
     f.store.captureMigrationSource(source, bytes, { mimeType: 'application/json', encoding: 'utf8' });
-    f.store.adoptHistoricalRun(f.projectId, locationId, source, { status, binding, prompt: fs.readFileSync(path.join(directory, 'prompt.txt'), 'utf8'), command: fs.readFileSync(path.join(directory, 'command.txt'), 'utf8'), output: fs.readFileSync(path.join(directory, 'output.log')) });
+    await f.store.adoptHistoricalRun(f.projectId, locationId, source, { status, binding, prompt: fs.readFileSync(path.join(directory, 'prompt.txt'), 'utf8'), command: fs.readFileSync(path.join(directory, 'command.txt'), 'utf8'), output: fs.readFileSync(path.join(directory, 'output.log')) });
   }
   const before71 = f.store.readRunState(f.projectId, 71), before72 = f.store.readRunState(f.projectId, 72);
   assert.equal(f.store.readMigrationSource(oldIdentity, oldKey).sourceRevision, 2);
@@ -1556,4 +1556,63 @@ test('startup retries an unchanged historical source whose previous importer job
   const sequence = f.store.search({ scope: f.projectId }).sourceSequence, jobs = f.store.migrationJobCount();
   await enqueueStartupDataMigrations(f.store, f.ops, () => true);await f.ops.waitForMigrations();
   assert.equal(f.store.search({ scope: f.projectId }).sourceSequence, sequence);assert.equal(f.store.migrationJobCount(), jobs);
+});
+
+test('historical migration keeps large physical source hashing and JSON parsing on Compute', async t => {
+  const f = await history(t);
+  const summary = '完整历史状态与来源字节🌿'.repeat(7000);
+  f.status.checkpointSummary = summary;
+  writeLearningJson(f.statusFile, f.status);
+  fs.appendFileSync(path.join(f.runDir, 'output.log'), summary);
+  const originalHash = crypto.createHash;
+  const originalParse = JSON.parse;
+  const onMigrationSource = () => /(?:projectDataMigration|growthReports)\.js/.test(new Error().stack || '');
+  const violations = [];
+  crypto.createHash = function (...args) {
+    const hash = originalHash.apply(this, args);
+    const update = hash.update;
+    hash.update = function (value, ...rest) {
+      if (Buffer.byteLength(value) > 65536 && onMigrationSource()) violations.push('hash');
+      return update.call(this, value, ...rest);
+    };
+    return hash;
+  };
+  JSON.parse = function (value, ...args) {
+    if (typeof value === 'string' && value.includes(summary) && onMigrationSource()) violations.push('parse');
+    return originalParse.call(this, value, ...args);
+  };
+  try {
+    const result = await importAgentRuns(f.store, f.sourceRoot, { projectRoot: f.project });
+    assert.deepEqual(result.conflicts, []);
+  } finally {
+    crypto.createHash = originalHash;
+    JSON.parse = originalParse;
+  }
+  assert.equal(f.store.readRunState(f.projectId, 71).status.checkpointSummary, summary);
+  assert.deepEqual(violations, []);
+});
+
+test('historical migration leaves successful legacy completion retryable when Compute becomes unavailable', async t => {
+  const f = await history(t);
+  const directory = path.join(f.sourceRoot, '__solo__', '72');
+  fs.mkdirSync(directory);
+  const decision = {markCompleted: true, reason: '完整匿名成功结果'};
+  fs.writeFileSync(path.join(directory, 'completion.json'), JSON.stringify(decision));
+  fs.writeFileSync(path.join(directory, 'command.txt'), 'claude continuation');
+  const compute = f.store.projectMigrationInspectionCompute;
+  f.store.setProjectMigrationInspectionCompute(request => {
+    if (request.kind === 'json' && typeof request.value === 'string' && request.value.includes(decision.reason)) {
+      return Promise.reject(new Error('maintenance_compute_exited:1'));
+    }
+    return compute(request);
+  });
+  try {
+    await assert.rejects(importAgentRuns(f.store, f.sourceRoot, {projectRoot: f.project, archiveUnresolved: true}), /maintenance_compute_exited:1/);
+    assert.equal(f.store.historicalRunIndexHasOwner(f.projectId, 72), false);
+  } finally {
+    f.store.setProjectMigrationInspectionCompute(compute);
+  }
+  const retried = await importAgentRuns(f.store, f.sourceRoot, {projectRoot: f.project, archiveUnresolved: true});
+  assert.deepEqual(retried.conflicts, []);
+  assert.equal(f.store.historicalRunIndexHasOwner(f.projectId, 72), true);
 });

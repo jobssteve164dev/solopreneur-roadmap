@@ -54,7 +54,7 @@ test('strategy pyramid keeps offline projects and their saved facts without recr
     startedAt: '2026-10-09T10:00:00Z', finishedAt: '2026-10-09T10:10:00Z', durationMs: 600000,
     outputPath: '', outputBytes: 0, outputTail: '', commandPath: '', promptPath: '', changesPath: '', touchedFilesPath: '', updatedAt: '2026-10-09T10:10:00Z'
   });
-  native.store.writeStrategyState(native.projectIds.get(offline), { expectedRevision: 0, idempotencyKey: 'offline-strategy', value: {
+  await native.store.writeStrategyState(native.projectIds.get(offline), { expectedRevision: 0, idempotencyKey: 'offline-strategy', value: {
     role: 'cashflow', businessStage: 'sell', revenueTier: 'stable', timeLoad: 'low', strategicAction: 'maintain', abilities: 'CLI'
   } });
   fs.renameSync(offline, path.join(base, 'disconnected'));

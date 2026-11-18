@@ -75,10 +75,11 @@ test('the shared checkpoint submits a report with its actual turn and leaves no 
   const root = path.join(base, '.solomap-global');
   const projectRoot = path.join(base, 'project'); fs.mkdirSync(projectRoot);
   const seed = new UnifiedDataStore(root);
+  const closeSeedCompute = require('./content-compute-fixture.cjs').attachLazyContentCompute(seed);
   const project = await seed.registerProject({ root: projectRoot });
-  const queued = seed.prepareRun(project.projectId, project.locationId, { root: projectRoot, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '输入', command: 'codex', userMessage: '用户目标', metadata: { interactiveSession: true }, idempotencyKey: 'prepare' });
-  const prepared = seed.claimRun(project.projectId, { executionLogId: 1, expectedRevision: queued.revision, agentPid: process.pid, processBirth: readProcessBirthMarker(process.pid), idempotencyKey: 'claim-checkpoint-fixture' });
-  seed.close();
+  const queued = await seed.prepareRun(project.projectId, project.locationId, { root: projectRoot, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '输入', command: 'codex', userMessage: '用户目标', metadata: { interactiveSession: true }, idempotencyKey: 'prepare' });
+  const prepared = await seed.claimRun(project.projectId, { executionLogId: 1, expectedRevision: queued.revision, agentPid: process.pid, processBirth: readProcessBirthMarker(process.pid), idempotencyKey: 'claim-checkpoint-fixture' });
+  await closeSeedCompute(); seed.close();
   const runtime = spawn(process.execPath, [path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', root], { stdio: 'pipe' });
   let errors = ''; runtime.stderr.on('data', b => { errors += b; }); runtime.stdout.resume();
   try {

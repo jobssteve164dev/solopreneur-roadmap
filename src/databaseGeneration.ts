@@ -4,19 +4,40 @@ import * as path from 'path';
 
 import { DiskDatabase } from './db/diskDatabase';
 
-export interface DatabaseGenerationCutover {
+export function isDatabaseGenerationCutoverError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:^|:\s*)database_generation_cutover(?:$|:)|runtime_data_domain_exited:writer-actor:75(?:$|:)/.test(message);
+}
+
+interface DatabaseGenerationCutoverBase {
   schemaVersion: 1;
   state: 'ready' | 'publishing-files' | 'files-published' | 'old-moved' | 'activated' | 'complete';
   generationId: string;
   candidateDir: string;
   databaseId: string;
+  createdAt: number;
+  candidateProof?: DatabaseGenerationProof;
+}
+
+export interface DatabaseCompactionResult {
+  databaseId: string;
+  compacted: true;
+  beforeBytes: number;
+  afterBytes: number;
+  integrity: 'ok';
+}
+interface ProjectImportGenerationCutover extends DatabaseGenerationCutoverBase {
+  purpose?: 'project-import';
   result: { projectId: string; locationId: string; identityPath: string; roadmapPath: string };
   hiddenIdentityPath: string;
   hiddenRoadmapPath: string;
-  createdAt: number;
   publication?: { identityPreexisting: boolean; roadmapPreexisting: boolean };
-  candidateProof?: DatabaseGenerationProof;
 }
+interface CompactGenerationCutover extends DatabaseGenerationCutoverBase {
+  purpose: 'compact';
+  result: DatabaseCompactionResult;
+}
+export type DatabaseGenerationCutover = ProjectImportGenerationCutover | CompactGenerationCutover;
 
 export interface DatabaseGenerationProof {
   device: string;
@@ -38,7 +59,7 @@ export interface DatabaseGenerationReclaimEntry {
   files: Array<{ path: string; device: string; inode: string; size: string; modifiedNs: string }>;
 }
 
-export function readDatabaseGenerationReclaimManifest(rootInput: string): { activeGenerationId: string | null; entries: DatabaseGenerationReclaimEntry[] } {
+export function readDatabaseGenerationReclaimManifest(rootInput: string, selectedGenerationId?: string): { activeGenerationId: string | null; entries: DatabaseGenerationReclaimEntry[] } {
   const root = path.resolve(rootInput), generationsRoot = path.join(root, 'database-generations');
   let activeGenerationId: string | null = null;
   try {
@@ -46,7 +67,8 @@ export function readDatabaseGenerationReclaimManifest(rootInput: string): { acti
     activeGenerationId = active.generationId;
   } catch { /* An absent or invalid journal cannot authorize reclaiming any referenced directory. */ }
   let names: string[] = [];
-  try { names = fs.readdirSync(generationsRoot).filter(name => /^[a-f0-9-]{36}$/.test(name)).sort(); }
+  try { names = selectedGenerationId === undefined ? fs.readdirSync(generationsRoot).filter(name => /^[a-f0-9-]{36}$/.test(name)).sort()
+    : /^[a-f0-9-]{36}$/.test(selectedGenerationId) && fs.existsSync(path.join(generationsRoot, selectedGenerationId)) ? [selectedGenerationId] : []; }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   const entries = names.map(generationId => {
     const directory = path.join(generationsRoot, generationId);
@@ -80,9 +102,16 @@ export function readDatabaseGenerationReclaimManifest(rootInput: string): { acti
   return { activeGenerationId, entries };
 }
 
-export function reclaimDatabaseGeneration(rootInput: string, generationId: string): { generationId: string; files: number; bytes: number } {
+export function reclaimDatabaseGeneration(rootInput: string, generationId: string, expectedDirectory?: { device: string; inode: string }): { generationId: string; files: number; bytes: number } {
   const root = path.resolve(rootInput);
-  const manifest = readDatabaseGenerationReclaimManifest(root);
+  const assertDirectory = (): void => {
+    if (!expectedDirectory) return;
+    if (!/^[a-f0-9-]{36}$/.test(generationId)) throw new Error('database_generation_reclaim_not_safe');
+    const stat = fs.lstatSync(path.join(root, 'database-generations', generationId), { bigint: true });
+    if (!stat.isDirectory() || stat.isSymbolicLink() || String(stat.dev) !== expectedDirectory.device || String(stat.ino) !== expectedDirectory.inode) throw new Error('database_generation_reclaim_changed');
+  };
+  assertDirectory();
+  const manifest = readDatabaseGenerationReclaimManifest(root, generationId);
   const entry = manifest.entries.find(candidate => candidate.generationId === generationId);
   if (!entry || !entry.reclaimCandidate || !entry.safeInventory || manifest.activeGenerationId === generationId) {
     throw new Error('database_generation_reclaim_not_safe');
@@ -118,6 +147,7 @@ export function reclaimDatabaseGeneration(rootInput: string, generationId: strin
     }
     bytes += Number(stat.size);
   }
+  assertDirectory();
   for (const file of entry.files) fs.unlinkSync(file.path);
   for (const target of [...directories].sort((a, b) => b.length - a.length)) {
     if (fs.readdirSync(target).length) throw new Error('database_generation_reclaim_changed');
@@ -163,9 +193,14 @@ function validate(root: string, value: DatabaseGenerationCutover): DatabaseGener
   const relative = path.relative(generations, candidateDir);
   if (value.schemaVersion !== 1 || !['ready', 'publishing-files', 'files-published', 'old-moved', 'activated', 'complete'].includes(value.state)
     || !/^[a-f0-9-]{36}$/.test(value.generationId) || relative !== value.generationId
-    || !value.databaseId || !value.result?.projectId
-    || path.resolve(value.hiddenIdentityPath) !== path.join(candidateDir, 'project-files', '.solopreneur', 'project.json')
-    || path.resolve(value.hiddenRoadmapPath) !== path.join(candidateDir, 'project-files', '.solopreneur', 'roadmap.csv')) throw new Error('database_generation_journal_invalid');
+    || !value.databaseId) throw new Error('database_generation_journal_invalid');
+  if (value.purpose === 'compact') {
+    if (value.result?.databaseId !== value.databaseId || value.result.compacted !== true || value.result.integrity !== 'ok'
+      || !Number.isSafeInteger(value.result.beforeBytes) || value.result.beforeBytes < 0 || !Number.isSafeInteger(value.result.afterBytes) || value.result.afterBytes < 0
+      || value.state === 'publishing-files') throw new Error('database_generation_journal_invalid');
+  } else if (value.purpose !== undefined && value.purpose !== 'project-import' || !value.result?.projectId
+    || path.resolve(value.hiddenIdentityPath || '') !== path.join(candidateDir, 'project-files', '.solopreneur', 'project.json')
+    || path.resolve(value.hiddenRoadmapPath || '') !== path.join(candidateDir, 'project-files', '.solopreneur', 'roadmap.csv')) throw new Error('database_generation_journal_invalid');
   return { ...value, candidateDir };
 }
 
@@ -257,7 +292,7 @@ function rollbackPublishedExact(source: string, destination: string, preexisting
   if (sourceStat.dev === target.dev && sourceStat.ino === target.ino || digestFile(source) === digestFile(destination)) fs.unlinkSync(destination);
 }
 
-function publishProjectFiles(root: string, value: DatabaseGenerationCutover): DatabaseGenerationCutover {
+function publishProjectFiles(root: string, value: ProjectImportGenerationCutover): ProjectImportGenerationCutover {
   let current = value;
   if (current.state === 'ready') {
     const publication = {
@@ -291,8 +326,10 @@ export function recoverPendingDatabaseGenerationCutover(rootInput: string): Data
   if (value.state === 'complete') {
     if (value.candidateProof) verifyDatabaseGenerationProof(path.join(root, 'solomap.db'), value.candidateProof);
     else verifyDatabase(path.join(root, 'solomap.db'), value.databaseId);
-    preflightExact(value.hiddenIdentityPath, value.result.identityPath);
-    preflightExact(value.hiddenRoadmapPath, value.result.roadmapPath);
+    if (value.purpose !== 'compact') {
+      preflightExact(value.hiddenIdentityPath, value.result.identityPath);
+      preflightExact(value.hiddenRoadmapPath, value.result.roadmapPath);
+    }
     archiveCompletedJournal(root, value);
     reclaimDatabaseGeneration(root, value.generationId);
     return value;
@@ -301,9 +338,11 @@ export function recoverPendingDatabaseGenerationCutover(rootInput: string): Data
   if (value.state === 'ready') {
     if (value.candidateProof) verifyDatabaseGenerationProof(candidate, value.candidateProof);
     else verifyDatabase(candidate, value.databaseId);
-    value = publishProjectFiles(root, value);
+    if (value.purpose === 'compact') { value = { ...value, state: 'files-published' }; writeJournal(root, value); }
+    else value = publishProjectFiles(root, value);
   }
   if (value.state === 'publishing-files') {
+    if (value.purpose === 'compact') throw new Error('database_generation_journal_invalid');
     value = publishProjectFiles(root, value);
   }
   if (value.state === 'files-published') {
@@ -313,10 +352,12 @@ export function recoverPendingDatabaseGenerationCutover(rootInput: string): Data
   }
   if (value.state === 'old-moved') {
     try {
+      if (value.purpose !== 'compact') {
       preflightExact(value.hiddenIdentityPath, value.result.identityPath);
       preflightExact(value.hiddenRoadmapPath, value.result.roadmapPath);
       publishExact(value.hiddenIdentityPath, value.result.identityPath);
       publishExact(value.hiddenRoadmapPath, value.result.roadmapPath);
+      }
     } catch (error) {
       if (fs.existsSync(previous)) {
         if (fs.existsSync(active) && !fs.existsSync(candidate)) resumeDatabaseMove(active, candidate);

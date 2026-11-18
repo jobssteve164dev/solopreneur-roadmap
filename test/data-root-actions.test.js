@@ -630,7 +630,7 @@ async function nativeSource(f, root, owner, label, launch = {}) {
   const binding = await client.readBinding(reference);
   await client.writeBinding(reference, await client.readStatus(reference), { expectedHeadRevision: binding.headRevision,
     confirmSessionId: prepared.status.plannedNativeSessionId, evidence: { source: 'official_native_observation' }, idempotencyKey: `confirm:${label}` });
-  owner.store.submitRunReport(prepared.projectId, { executionLogId: 1, generation: prepared.generation, turnId: prepared.turnId,
+  await owner.store.submitRunReport(prepared.projectId, { executionLogId: 1, generation: prepared.generation, turnId: prepared.turnId,
     report: { summary: `完整来源报告 ${label}` }, availability: 'available', idempotencyKey: `report:${label}` });
   return prepared;
 }

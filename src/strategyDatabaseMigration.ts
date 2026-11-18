@@ -34,21 +34,21 @@ export async function importStrategyDirectory(store: UnifiedDataStore, sourceRoo
       if (!entry.isFile() || entry.isSymbolicLink()) { result.retainedFiles.push(entry.name); continue; }
       const bytes = await stableSource(path.join(root, entry.name));
       result.originalBytes += bytes.length;
-      store.captureMigrationSource({ identity, key: entry.name, hash: hash(bytes) }, bytes, { encoding: 'utf8', pending: true });
+      await store.publishMigrationSource({ identity, key: entry.name, hash: hash(bytes) }, bytes, { encoding: 'utf8', pending: true });
       if (known.has(entry.name)) captured.set(entry.name, bytes);
       else result.retainedFiles.push(entry.name);
     } catch (error) { result.conflicts.push({ source: entry.name, error: String(error) }); }
     options.onProgress?.(result); await new Promise<void>(resolve => setImmediate(resolve));
   }
-  const importValue = (scope: string | null, key: string, value: unknown) => {
+  const importValue = async (scope: string | null, key: string, value: unknown) => {
     const bytes = Buffer.from(JSON.stringify(value));
     const source = { identity, key, hash: hash(bytes) };
-    store.captureMigrationSource(source, bytes, { mimeType: 'application/json', encoding: 'utf8', pending: true });
+    await store.publishMigrationSource(source, bytes, { mimeType: 'application/json', encoding: 'utf8', pending: true });
     try {
-      const imported = store.importStrategyState(scope, value, source);
+      const imported = await store.importStrategyState(scope, value, source);
       if (imported.unchanged) result.unchanged++; else result.imported++;
     } catch (error) {
-      store.captureMigrationSource(source, bytes, { mimeType: 'application/json', encoding: 'utf8', error: String(error) });
+      await store.publishMigrationSource(source, bytes, { mimeType: 'application/json', encoding: 'utf8', error: String(error) });
       throw error;
     }
   };
@@ -61,7 +61,7 @@ export async function importStrategyDirectory(store: UnifiedDataStore, sourceRoo
     for (const key of keys) {
       const bytes = captured.get(key)!;
       if (result.conflicts.length === conflictStart) store.markMigrationSourceImported(identity, key);
-      else store.captureMigrationSource({ identity, key, hash: hash(bytes) }, bytes, { encoding: 'utf8', error: 'strategy_import_incomplete' });
+      else await store.publishMigrationSource({ identity, key, hash: hash(bytes) }, bytes, { encoding: 'utf8', error: 'strategy_import_incomplete' });
     }
   };
   const preferences = captured.get('project-strategy.csv');
@@ -77,7 +77,7 @@ export async function importStrategyDirectory(store: UnifiedDataStore, sourceRoo
           const scope = options.projectScopes?.[row.projectPath];
           if (!path.isAbsolute(row.projectPath || '') || !scope) throw new Error('project_mapping_required');
           if (paths.get(row.projectPath)! > 1) throw new Error('ambiguous_project_preferences');
-          importValue(scope, `preferences:${JSON.stringify([scope, row.projectPath])}`, row);
+          await importValue(scope, `preferences:${JSON.stringify([scope, row.projectPath])}`, row);
         } catch (error) { result.conflicts.push({ source: `project-strategy.csv:${row.projectPath || ''}`, error: String(error) }); }
         options.onProgress?.(result); await new Promise<void>(resolve => setImmediate(resolve));
       }
@@ -93,7 +93,7 @@ export async function importStrategyDirectory(store: UnifiedDataStore, sourceRoo
       const metadata = captured.has('pyramid-snapshot-meta.json') ? JSON.parse(captured.get('pyramid-snapshot-meta.json')!.toString('utf8')) : null;
       const abilities = captured.has('ability-registry.csv') ? csv(captured.get('ability-registry.csv')!) : [];
       const sourceHashes = Object.fromEntries(cacheKeys.sort().map(key => [key, hash(captured.get(key)!)]));
-      importValue(null, 'cache:legacy', { version: 1, signature: `legacy:${hash(Buffer.from(JSON.stringify(sourceHashes)))}`, engineConfigRevision: metadata?.engineConfigRevision || '', snapshot, legacyMetadata: metadata, derivedRegistries: { abilities } });
+      await importValue(null, 'cache:legacy', { version: 1, signature: `legacy:${hash(Buffer.from(JSON.stringify(sourceHashes)))}`, engineConfigRevision: metadata?.engineConfigRevision || '', snapshot, legacyMetadata: metadata, derivedRegistries: { abilities } });
     } catch (error) { result.conflicts.push({ source: 'strategy-cache', error: String(error) }); }
     await finish(cacheKeys, start);
   }

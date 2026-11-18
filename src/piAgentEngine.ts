@@ -973,6 +973,8 @@ export class EmbeddedPiAgentEngine implements CognitiveShadowEngine {
     try {
       await agent.prompt([
         '从候选中选择今天最值得先推进的一项。',
+        '遵守当前用户指令；仅在适用条件成立且没有反例时采用经验。历史选择只代表偏好，未评估或失败不得当成有效经验。',
+        input.instructions || '',
         '只输出一行合法 JSON：{"candidateId":"候选 ID","reason":"给最终用户的一句简短理由"}',
         JSON.stringify(input.candidates)
       ].join('\n'));

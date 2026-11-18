@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const cp = require('node:child_process');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { persistTelegramRuntimeConfig, refreshTelegramRuntimeConfig, telegramBotTokenSecretRef } = require('../out/telegramRuntimeConfig.js');
 const { importLegacyRuntimeState } = require('../out/runtimeStateMigration.js');
 const { serializeRoadmapNodes } = require('../out/db/csvStore.js');
@@ -55,6 +55,19 @@ function fixture(t) {
   });
   return { base, dataRoot, project, csvPath, store, operations, call: (operation, input = {}) => operations({ operation, input }) };
 }
+
+test('project identity publication preserves native JSON bytes under strict reference publication', async t => {
+  const f=fixture(t);f.store.beginContentPreparationRecovery();
+  for(let i=0;i<10000;i++){const batch=f.store.prepareStorageReferenceBatch(128);f.store.commitStorageReferenceBatch(batch);if(!batch.pending)break;assert.notEqual(i,9999);}
+  f.store.activateStorageContentLifecycle({strictPublication:true});
+  const input={root:f.project,name:'identity publication'},registered=await f.store.registerProject(input);
+  const body=JSON.stringify({schemaVersion:1,projectId:registered.projectId})+'\n';
+  assert.equal(fs.readFileSync(registered.identityPath,'utf8'),body);
+  const id=f.store.rows("SELECT content_id FROM outbox WHERE channel='project_identity'")[0].content_id;
+  assert.equal(f.store.content(id).toString(),body);
+  assert.equal(f.store.rows('SELECT 1 FROM content_lifecycle_reference_unpublished WHERE content_id=?',[id]).length,0);
+  assert.deepEqual(await f.store.registerProject(input),registered);
+});
 
 test('roadmap CSV is accepted into the unified database and remains readable when the file is unavailable', async t => {
   const f = fixture(t);
@@ -752,16 +765,10 @@ test('project export yields the Write Actor between prepared archive batches bef
     async restoreBackup() { throw new Error('unused'); },
     async prepareProjectImport() { throw new Error('unused'); },
     async validateProjectImport() {},
-    async verifyProjectExportContent(contentId, sha256, bytes) {
-      const value = f.store.readContentForMaintenance(contentId);
-      assert.equal(value.length, bytes); assert.equal(crypto.createHash('sha256').update(value).digest('hex'), sha256);
-    },
     async cleanupProjectExportStage(stageDirectory) {
-      const chunks = path.join(stageDirectory, 'chunks');
-      for (const name of fs.readdirSync(chunks)) fs.unlinkSync(path.join(chunks, name));
-      fs.rmdirSync(chunks); fs.unlinkSync(path.join(stageDirectory, 'archive.stage')); fs.rmdirSync(stageDirectory);
+      return require('../out/projectExportStaging.js').cleanupProjectExportStageBatch(f.dataRoot, f.store.databaseId, stageDirectory);
     },
-    async stageProjectExport() {
+    async stageProjectExport(_root, ownerId) {
       setImmediate(() => {
         statusAtForeground = String(f.store.rows("SELECT status FROM requests WHERE idempotency_key='project-export:interleaved-export'")[0]?.status || 'absent');
         f.store.appendDiagnosticEvent({ kind: 'operation', occurredAt: new Date().toISOString(), scope: 'export-interleave', payload: {}, idempotencyKey: 'export-interleave' });
@@ -769,8 +776,9 @@ test('project export yields the Write Actor between prepared archive batches bef
       const sha256 = crypto.createHash('sha256').update(envelope).digest('hex');
       const directory = path.join(f.dataRoot, '.solomap-maintenance-staging');
       fs.mkdirSync(directory, { recursive: true });
-      const stageDirectory = path.join(directory, `project-export-${crypto.randomUUID()}`);
+      const stageDirectory = path.join(directory, `project-export-${ownerId}`);
       fs.mkdirSync(stageDirectory);
+      fs.writeFileSync(path.join(stageDirectory, 'owner.json'), require('../out/projectExportStaging.js').projectExportStageOwnerBytes(f.store.databaseId, ownerId));
       const stagedPath = path.join(stageDirectory, 'archive.stage');
       fs.writeFileSync(stagedPath, envelope);
       const prepared = prepareContentForStorage(envelope, 'application/vnd.solomap.project+json', 'binary');
@@ -793,6 +801,32 @@ test('project export yields the Write Actor between prepared archive batches bef
   assert.equal(result.bytes, envelope.length);
   assert.deepEqual(fs.readFileSync(destination), envelope);
   assert.equal(f.store.rows("SELECT COUNT(*) AS count FROM diagnostic_events WHERE scope='export-interleave'")[0].count, 1);
+});
+
+test('a pre-sequence portable archive restores exact fixed handoff prefixes despite shuffled table rows',async t=>{
+  const f=fixture(t),accepted=await f.call('accept_roadmap_csv',{root:f.project}),identity=await f.store.registerProject({root:f.project});
+  for(let index=0;index<6;index++){
+    const nodeId=index%2?'other':'step',run=await f.store.prepareRun(accepted.projectId,identity.locationId,{root:f.project,executionLogId:index+1,nodeId,runKind:'step',prompt:'original prompt',command:'readonly',userMessage:'review',idempotencyKey:`portable-boundary-run-${index}`});
+    const checkpoint=index+1,purpose=`settlement_${run.turnId.replace(/-/g,'')}_${checkpoint}`;
+    const document=await f.store.writeRunDocument(accepted.projectId,{executionLogId:index+1,generation:run.generation,turnId:run.turnId,purpose,bytes:Buffer.from(JSON.stringify({original:index})).toString('base64'),mimeType:'application/json',expectedRevision:0,idempotencyKey:`portable-boundary-doc-${index}`});
+    f.store.insertStepHandoff(accepted.projectId,nodeId,run.runId,run.turnId,checkpoint,f.store.putStructuredContent({original:index}));
+    require('./fixtures/native-step-memory-import-oracles.cjs').saveStepMemoryRevisionNative(f.store,accepted.projectId,nodeId,undefined,document.objectId);
+    if(index===2)await f.store.writeStepMemory(accepted.projectId,{nodeId:'step',expectedRevision:2,patch:{objective:'manual metadata stays fixed'},idempotencyKey:'portable-manual-boundary'});
+  }
+  const source=path.join(f.dataRoot,'exports','handoff-sequences.json');
+  await f.call('export_project',{root:f.project,destination:source,idempotencyKey:'portable-boundary-export'});
+  const envelope=JSON.parse(fs.readFileSync(source,'utf8'));envelope.archive.sourceSchemaVersion=81;
+  for(const table of envelope.archive.tables)for(const row of table.rows){for(const specification of require('../out/db/orderedRecordSequences.js').orderedRecordSequences)delete row[specification.column];delete row.detail_ordinal;delete row.sequence_namespace;delete row.exit_proof_json;}
+  envelope.archive.tables.find(table=>table.name==='step_handoffs').rows.reverse();
+  envelope.archive.tables.find(table=>table.name==='run_control').rows.sort((left,right)=>right.execution_log_id-left.execution_log_id);
+  envelope.sha256=crypto.createHash('sha256').update(canonicalJson(envelope.archive)).digest('hex');
+  const legacy=path.join(f.dataRoot,'exports','legacy-handoff-sequences.json'),bytes=Buffer.from(canonicalJson(envelope));fs.writeFileSync(legacy,bytes);
+  const imported=new UnifiedDataStore(path.join(f.base,'imported-handoff-data')),operations=createRuntimeDataOperations(imported);
+  t.after(async()=>{await operations.close();imported.close();});
+  await operations({operation:'import_project',input:{source:legacy,root:path.join(f.base,'imported-handoff-project'),idempotencyKey:'portable-legacy-boundary-import'}});
+  for(let revision=1;revision<=4;revision++)assert.deepEqual(imported.readStepMemory(accepted.projectId,'step',{revision}),f.store.readStepMemory(accepted.projectId,'step',{revision}));
+  assert.deepEqual(imported.listRunStates({projectId:accepted.projectId}).items.map(run=>run.runId),f.store.listRunStates({projectId:accepted.projectId}).items.map(run=>run.runId));
+  assert.deepEqual(fs.readFileSync(legacy),bytes,'import must preserve the original archive and immutable snapshot bytes');
 });
 
 test('a single-project archive restores complete revisions, relations and large bytes without secrets or foreign project data', async t => {
@@ -938,6 +972,43 @@ test('a self-hashed archive cannot turn a portable roadmap projection into anoth
   }
 });
 
+for(const warm of [false,true]) test(`capture revisions exceed imported history after live Session replaces the same source head (${warm?'warm cache':'cold cache'})`, async t => {
+  const f=fixture(t),accepted=await f.store.acceptRoadmapCsv({root:f.project});
+  const identity='agent-runs:/merged🌿',key='__solo__/7/evidence/merged.bin';
+  const capture=(store,text)=>{const bytes=Buffer.from(text);return store.captureMigrationSource({identity,key,hash:crypto.createHash('sha256').update(bytes).digest('hex')},bytes);};
+  for(let i=1;i<=4;i++)capture(f.store,`donor ${i}`);
+  const source=f.store.readMigrationSource(identity,key);
+  await f.store.importObject({kind:'memory',action:'create',scope:accepted.projectId,idempotencyKey:'capture-owner',data:{category:'inbox',title:'retained source',status:'captured',content:'source binding'}},{identity,key,hash:source.hash});
+  const archive=path.join(f.dataRoot,'exports','merged-captures.json');
+  await f.store.exportProject({root:f.project,destination:archive,idempotencyKey:'merged-captures-export'});
+  const live=new UnifiedDataStore(path.join(f.base,'capture-live'));t.after(()=>live.close());
+  const candidateRoot=path.join(f.base,'capture-candidate');fs.mkdirSync(candidateRoot);
+  await live.db.backup(path.join(candidateRoot,'solomap.db'));
+  let candidate=new UnifiedDataStore(candidateRoot);t.after(()=>candidate.close());
+  await candidate.importProject({source:archive,root:path.join(f.base,'merged-project'),idempotencyKey:'merged-captures-import'});
+  assert.equal(candidate.readMigrationSource(identity,key).sourceRevision,4);
+  assert.equal(candidate.rows("SELECT COUNT(*) AS n FROM events WHERE kind='migration.source_captured'")[0].n,0,'exercise the existing portable format without capture events');
+  if(warm){capture(candidate,'candidate before replay');assert.equal(candidate.readMigrationSource(identity,key).sourceRevision,5);}
+  const boundary=live.readRuntimeWriterBarrier().committedSequence;
+  live.beginDatabaseGenerationCapture();capture(live,'live first capture');
+  const delta=live.stopDatabaseGenerationCapture(),sequence=live.readRuntimeWriterBarrier().committedSequence;
+  candidate.applyDatabaseGenerationChangeset(delta.changeset,delta.searchObjectIds,boundary,sequence);
+  assert.equal(candidate.readMigrationSource(identity,key).sourceRevision,1);
+  capture(candidate,'merged next capture');
+  assert.equal(candidate.readMigrationSource(identity,key).sourceRevision,warm?6:5);
+  assert.equal(candidate.readMigrationSource(identity,key).bytes.toString(),'merged next capture');
+  assert.equal(candidate.rows("SELECT COUNT(*) AS n FROM events WHERE kind='migration.source_captured'")[0].n,warm?3:2);
+  candidate.close();candidate=new UnifiedDataStore(candidateRoot);
+  live.beginDatabaseGenerationCapture();capture(live,'live second capture');
+  const second=live.stopDatabaseGenerationCapture(),secondSequence=live.readRuntimeWriterBarrier().committedSequence;
+  candidate.applyDatabaseGenerationChangeset(second.changeset,second.searchObjectIds,sequence,secondSequence);
+  assert.equal(candidate.readMigrationSource(identity,key).sourceRevision,2);
+  capture(candidate,'merged after restart and replay');
+  assert.equal(candidate.readMigrationSource(identity,key).sourceRevision,warm?7:6);
+  assert.equal(candidate.rows('SELECT revision FROM content_lifecycle_capture_imports WHERE source_identity=? AND source_key=?',[identity,key])[0].revision,4);
+  assert.equal(candidate.rows('PRAGMA foreign_key_check').length,0);
+});
+
 test('project import deduplicates matching small and chunked content without colliding actor request keys', async t => {
   const f = fixture(t), accepted = await f.call('accept_roadmap_csv', { root: f.project });
   const small = 'SHARED_SMALL_CONTENT', large = Buffer.alloc(1024 * 1024 + 113, 0x4c);
@@ -961,6 +1032,92 @@ test('project import deduplicates matching small and chunked content without col
   assert.deepEqual(Buffer.from(target.read(sourceLarge.objectId).data.content.data, 'base64'), large);
   assert.equal(target.rows('SELECT COUNT(*) AS count FROM projects')[0].count, 2);
   assert.equal(target.rows("SELECT COUNT(*) AS count FROM outbox WHERE channel='file_export' AND state='pending'")[0].count, 1);
+});
+
+for (const unavailable of ['retired','unfinished']) test(`project export preserves raw ${unavailable} identifiers without packaging unavailable payloads`, async t => {
+  const f=fixture(t),accepted=await f.call('accept_roadmap_csv',{root:f.project});
+  const asset=f.store.write({kind:'asset',action:'create',scope:accepted.projectId,idempotencyKey:`raw-${unavailable}-asset`,data:{name:'raw-history.txt',origin:'source',content:'retained current bytes'}});
+  const index=()=>{for(let i=0;i<5000;i++){const batch=f.store.prepareStorageReferenceBatch(128);f.store.commitStorageReferenceBatch(batch);if(!batch.pending)return;}assert.fail('index did not converge');};
+  f.store.beginContentPreparationRecovery();let target;
+  if(unavailable==='retired'){
+    target=f.store.putContent('retired raw target');index();f.store.activateStorageContentLifecycle();
+    let sealed=false;
+    for(let i=0;i<5000;i++){f.store.commitStorageGcBatch(f.store.prepareStorageGcBatch(128));if(f.store.rows("SELECT 1 FROM content_lifecycle_gc_members m JOIN content_lifecycle_gc_groups g ON g.id=m.group_id WHERE m.content_id=? AND g.state='sealed'",[target]).length){sealed=true;break;}}
+    assert.equal(sealed,true);
+  }else{
+    index();f.store.activateStorageContentLifecycle({strictPublication:true});let pending;
+    const prepared=require('../out/db/unifiedDataStore.js').prepareContentForStorage(crypto.randomBytes(2*1024*1024),'application/octet-stream','binary');
+    await assert.rejects(f.store.withPreparedContentOwnership(async()=>{pending=f.store.putPreparedContent(prepared,'portable-unfinished').then(()=>null,error=>error);target=f.store.rows("SELECT id FROM contents WHERE encoding LIKE 'staging:%'")[0].id;throw Error('cancel_portable_fixture');}),/cancel_portable_fixture/);
+    assert.match((await pending).message,/prepared_content_owner_finished/);
+    // Exercise the legacy export entry independently while producer wiring is still under construction.
+    f.store.db.run('UPDATE content_lifecycle_gc_state SET strict_publication=0 WHERE id=1');
+  }
+  const revision=f.store.rows('SELECT content_id FROM object_revisions WHERE object_id=? AND revision=1',[asset.objectId])[0];
+  const historical=JSON.parse(f.store.content(revision.content_id).toString());historical.diagnostics={unavailableContentId:target};
+  const original=Buffer.from(JSON.stringify(historical)),snapshot=f.store.putContent(original,'application/json');
+  f.store.db.run('UPDATE object_revisions SET content_id=? WHERE object_id=? AND revision=1',[snapshot,asset.objectId]);
+  const archive=path.join(f.dataRoot,'exports',`raw-${unavailable}.json`);
+  await f.call('export_project',{root:f.project,destination:archive,idempotencyKey:`raw-${unavailable}-export`});
+  const envelope=JSON.parse(fs.readFileSync(archive,'utf8'));
+  assert.equal(envelope.archive.tables.find(table=>table.name==='contents').rows.some(row=>row.id===target),false);
+  const destination=new UnifiedDataStore(path.join(f.base,`raw-${unavailable}-target`));t.after(()=>destination.close());
+  await destination.importProject({source:archive,root:path.join(f.base,`raw-${unavailable}-project`),idempotencyKey:`raw-${unavailable}-import`});
+  const imported=destination.rows('SELECT content_id FROM object_revisions WHERE object_id=? AND revision=1',[asset.objectId])[0].content_id;
+  assert.deepEqual(destination.content(imported),original);
+  assert.equal(destination.rows('SELECT 1 FROM contents WHERE id=?',[target]).length,0);
+});
+
+test('shadow repair exports active chunks and repairs an import-mapped codec identity', async t => {
+  const f=fixture(t),accepted=await f.call('accept_roadmap_csv',{root:f.project}),bytes=crypto.randomBytes(2*1024*1024);
+  const input={executionLogId:1,relativePath:'node/1/output.log',bytes:bytes.toString('base64'),hash:crypto.createHash('sha256').update(bytes).digest('hex')};
+  await f.store.publishRunArtifact(accepted.projectId,input);
+  const original=f.store.rows('SELECT content_id FROM project_run_artifacts WHERE project_id=?',[accepted.projectId])[0].content_id;
+  // A legacy large inline root and a newer chunked representation reserve separate codec slots.
+  f.store.db.run('UPDATE contents SET encoding=?,stored_byte_length=?,data=?,chunk_index_json=NULL WHERE id=?',['binary',bytes.length,bytes,original]);
+  const sibling=f.store.putContent(bytes,'application/x-fixture-sibling','binary');assert.notEqual(sibling,original);
+  f.store.db.run('UPDATE contents SET mime_type=? WHERE id=?',['application/octet-stream',sibling]);
+  f.store.db.run('UPDATE contents SET data=zeroblob(stored_byte_length) WHERE id=?',[original]);
+  await f.store.publishRunArtifact(accepted.projectId,input);
+  const row=f.store.rows('SELECT * FROM contents WHERE id=?',[original])[0];
+  assert.match(row.encoding,/^chunked:repair:.*:binary$/);
+  assert.deepEqual(f.store.content(original),bytes);assert.deepEqual(f.store.content(sibling),bytes);
+  assert.ok(JSON.parse(row.chunk_index_json).firstOrdinal>0);
+  const archive=path.join(f.dataRoot,'exports','repaired-identity.json');
+  await f.call('export_project',{root:f.project,destination:archive,idempotencyKey:'repair-identity-export'});
+  const destination=new UnifiedDataStore(path.join(f.base,'repair-import'));t.after(()=>destination.close());
+  const closeCompute=require('./content-compute-fixture.cjs').attachLazyContentCompute(destination);t.after(closeCompute);
+  const mapped=require('node:crypto').randomUUID();
+  const columns=Object.keys(row);destination.db.run(`INSERT INTO contents(${columns.join(',')}) VALUES(${columns.map(()=>'?').join(',')})`,columns.map(column=>column==='id'?mapped:row[column] instanceof Uint8Array?Buffer.from(row[column]):row[column]));
+  for(const chunk of f.store.rows('SELECT ordinal,data FROM content_chunks WHERE content_id=?',[original]))destination.db.run('INSERT INTO content_chunks VALUES(?,?,?)',[mapped,chunk.ordinal,chunk.data]);
+  const imported=await destination.importProject({source:archive,root:path.join(f.base,'repair-import-project'),idempotencyKey:'repair-identity-import'});
+  assert.equal(destination.rows('SELECT content_id FROM project_run_artifacts WHERE project_id=?',[imported.projectId])[0].content_id,mapped);
+  assert.deepEqual(destination.readRunArtifactBytes(imported.projectId,1,input.relativePath).bytes,bytes);
+  destination.db.run('UPDATE content_chunks SET data=zeroblob(length(data)) WHERE content_id=? AND ordinal=?',[mapped,JSON.parse(row.chunk_index_json).firstOrdinal]);
+  await destination.publishRunArtifact(imported.projectId,input);
+  assert.equal(destination.rows('SELECT content_id FROM project_run_artifacts WHERE project_id=?',[imported.projectId])[0].content_id,mapped);
+  assert.deepEqual(destination.content(mapped),bytes);
+});
+test('project import carrying original bytes replaces a retired deduplication identity', async t => {
+  const f = fixture(t), accepted = await f.call('accept_roadmap_csv', { root: f.project }), bytes = 'RESTORED_ORIGINAL_BYTES';
+  const asset = f.store.write({ kind:'asset',action:'create',scope:accepted.projectId,idempotencyKey:'retired-import-asset',data:{name:'restored.txt',origin:'source',content:bytes} });
+  const archive = path.join(f.dataRoot, 'exports', 'retired-import.json');
+  await f.call('export_project', {root:f.project,destination:archive,idempotencyKey:'retired-import-export'});
+  const target = new UnifiedDataStore(path.join(f.base,'retired-import-target')); t.after(() => target.close());
+  target.beginContentPreparationRecovery();
+  const retired = target.putContent(bytes);
+  for(let i=0;i<2000;i++) { const batch=target.prepareStorageReferenceBatch(128); target.commitStorageReferenceBatch(batch); if(!batch.pending) break; }
+  target.activateStorageContentLifecycle();
+  let sealed=false;
+  for(let i=0;i<2000;i++) {
+    target.commitStorageGcBatch(target.prepareStorageGcBatch(128));
+    if(target.rows("SELECT 1 FROM content_lifecycle_gc_members m JOIN content_lifecycle_gc_groups g ON g.id=m.group_id WHERE m.content_id=? AND g.state='sealed'",[retired]).length) { sealed=true; break; }
+  }
+  assert.equal(sealed,true);
+  await target.importProject({source:archive,root:path.join(f.base,'retired-import-project'),idempotencyKey:'retired-import'});
+  const importedId=target.rows('SELECT content_id FROM assets WHERE id=?',[asset.objectId])[0].content_id;
+  assert.notEqual(importedId,retired);
+  assert.equal(target.content(importedId).toString(),bytes);
+  assert.throws(()=>target.content(retired),/content_retired/);
 });
 
 test('project import resumes exact crash residue and keeps a guarded durable stage across a batch interruption', async t => {
@@ -1176,7 +1333,7 @@ test('legacy Telegram migration redacts token bytes before capturing source evid
   const operations = createRuntimeDataOperations(store);
   t.after(async () => { await operations.close(); store.close(); cleanupExact(base); });
   const previous = process.env.SOLOMAP_TEST_SECRET_STORE; process.env.SOLOMAP_TEST_SECRET_STORE = secretStore;
-  try { importLegacyRuntimeState(store, dataRoot); }
+  try { await importLegacyRuntimeState(store, dataRoot); }
   finally { if (previous === undefined) delete process.env.SOLOMAP_TEST_SECRET_STORE; else process.env.SOLOMAP_TEST_SECRET_STORE = previous; }
   const config = await refreshTelegramRuntimeConfig(dataRoot, request => operations(request));
   assert.equal(config.botToken, token);
@@ -1223,7 +1380,7 @@ test('legacy Telegram sources never overwrite a current binding and failed host 
     await persistTelegramRuntimeConfig(f.dataRoot, { enabled: true, botToken: oldToken, chatId: '42' }, request => f.call(request.operation, request.input), 'current-token');
     const runtime = path.join(f.dataRoot, 'runtime'); fs.mkdirSync(runtime, { recursive: true });
     fs.writeFileSync(path.join(runtime, 'telegram-config.json'), JSON.stringify({ enabled: true, botToken: legacyToken, chatId: '1' }));
-    importLegacyRuntimeState(f.store, f.dataRoot);
+    await importLegacyRuntimeState(f.store, f.dataRoot);
     assert.equal((await refreshTelegramRuntimeConfig(f.dataRoot, request => f.call(request.operation, request.input))).botToken, oldToken);
     assert.equal([...fs.readdirSync(secretStore)].map(name => fs.readFileSync(path.join(secretStore, name), 'utf8'))[0], oldToken);
 

@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import { DatabaseGenerationForeignKeys, prepareDatabaseGenerationForeignKeyIndexes } from './databaseGenerationForeignKeys.js';
 import * as path from 'path';
 import { pathToFileURL } from 'url';
 
@@ -10,6 +11,8 @@ interface NativeStatement {
   columns(): { name: string }[];
 }
 interface NativeDatabase {
+  readonly isOpen: boolean;
+  readonly isTransaction: boolean;
   prepare(sql: string): NativeStatement;
   exec(sql: string): void;
   close(): void;
@@ -86,6 +89,12 @@ export class DiskDatabase {
   private changes = 0;
   private readonly runStatements = new Map<string, NativeStatement>();
   private replicationSessions: Array<{ table: string; session: NativeSession }> | undefined;
+  private replayRevision = 0;
+  private generationForeignKeys?: DatabaseGenerationForeignKeys;
+  private verifiedGeneration?: { changes: number; dataVersion: number; schemaCookie: number };
+  get changesetReplayRevision(): number { return this.replayRevision; }
+  get isOpen(): boolean { return this.native.isOpen; }
+  get inTransaction(): boolean { return this.native.isTransaction; }
   constructor(public readonly filePath: string, options: { foreignKeys?: boolean; journalMode?: 'WAL' | 'DELETE'; readOnly?: boolean; immutable?: boolean } = {}) {
     if (!options.readOnly) fs.mkdirSync(path.dirname(filePath), { recursive: true });
     // Node's bundled driver avoids platform-specific extension ABI binaries.
@@ -127,17 +136,22 @@ export class DiskDatabase {
     const { backup } = require('node:sqlite') as { backup(source: NativeDatabase, target: string): Promise<void> };
     await backup(this.native, destination);
   }
-  checkpointForGeneration(): void {
-    const result = this.exec('PRAGMA wal_checkpoint(FULL)')[0]?.values?.[0] || [];
-    if (Number(result[0] || 0) !== 0) throw new Error('database_generation_checkpoint_busy');
-  }
+  get changesetCaptureActive(): boolean { return Boolean(this.replicationSessions); }
   startChangesetCapture(): void {
     if (this.replicationSessions) throw new Error('database_generation_capture_active');
     const tables = [...this.native.prepare("SELECT name,sql FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").iterate()]
       .map(row => ({ name: String(row.name), sql: String(row.sql || '') }));
     const virtual = tables.filter(table => /^CREATE\s+VIRTUAL\s+TABLE/i.test(table.sql)).map(table => table.name);
-    const authoritative = tables.filter(table => !virtual.some(name => table.name === name || table.name.startsWith(`${name}_`)));
-    this.replicationSessions = authoritative.map(table => ({ table: table.name, session: this.native.createSession({ db: 'main', table: table.name }) }));
+    const authoritative = tables.filter(table => !['content_lifecycle_replication_guard', 'content_lifecycle_gc_debt', 'content_lifecycle_capture_imports'].includes(table.name)
+      && !virtual.some(name => table.name === name || table.name.startsWith(`${name}_`)));
+    const sessions: Array<{ table: string; session: NativeSession }> = [];
+    try {
+      for (const table of authoritative) sessions.push({ table: table.name, session: this.native.createSession({ db: 'main', table: table.name }) });
+      this.replicationSessions = sessions;
+    } catch (error) {
+      for (const item of sessions) item.session.close();
+      throw error;
+    }
   }
   rotateChangesetCapture(): Uint8Array {
     if (!this.replicationSessions) throw new Error('database_generation_capture_inactive');
@@ -154,11 +168,49 @@ export class DiskDatabase {
     this.replicationSessions = undefined;
     return changeset;
   }
-  applyChangeset(changeset: Uint8Array, previousLiveSequence?: number, currentLiveSequence?: number): void {
+  cancelChangesetCapture(): void {
+    const sessions = this.replicationSessions;
+    this.replicationSessions = undefined;
+    let failure: unknown;
+    for (const item of sessions || []) { try { item.session.close(); } catch (error) { failure ||= error; } }
+    if (failure) throw failure;
+  }
+  private generationCounters(): { changes: number; dataVersion: number; schemaCookie: number } {
+    return { changes: Number(this.exec('SELECT total_changes()')[0].values[0][0]), dataVersion: Number(this.exec('PRAGMA main.data_version')[0].values[0][0]), schemaCookie: Number(this.exec('PRAGMA main.schema_version')[0].values[0][0]) };
+  }
+  prepareGenerationForeignKeyIndexes(): string[] {
+    if (this.generationForeignKeys) throw new Error('database_generation_validation_active');
+    return prepareDatabaseGenerationForeignKeyIndexes(this);
+  }
+  verifyGenerationIntegrity(): void {
+    this.verifiedGeneration = undefined;
+    const before = this.generationCounters();
+    if (this.exec('PRAGMA integrity_check')[0]?.values?.[0]?.[0] !== 'ok' || this.exec('PRAGMA foreign_key_check').length) throw new Error('database_generation_invalid');
+    const after = this.generationCounters();
+    if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error('database_generation_baseline_changed');
+    this.verifiedGeneration = after;
+  }
+  acceptVerifiedGenerationBaseline(): void {
+    if (!this.verifiedGeneration || JSON.stringify(this.generationCounters()) !== JSON.stringify(this.verifiedGeneration)) throw new Error('database_generation_baseline_changed');
+    const verified = this.verifiedGeneration;
+    this.verifiedGeneration = undefined;
+    if (this.generationForeignKeys) throw new Error('database_generation_validation_active');
+    this.generationForeignKeys = new DatabaseGenerationForeignKeys(this, verified);
+  }
+  verifyGenerationTail(): void {
+    if (!this.generationForeignKeys) throw new Error('database_generation_baseline_changed');
+    this.generationForeignKeys.verify();
+  }
+  applyChangeset(changeset: Uint8Array, previousLiveSequence?: number, currentLiveSequence?: number, afterApply?: () => void): void {
     if (!changeset.byteLength) return;
     const { constants } = require('node:sqlite') as { constants: Record<string, number> };
     this.native.exec('PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE');
     try {
+      this.generationForeignKeys?.begin();
+      // Candidate-only, transaction-local suppression: the exact source queue
+      // changeset follows below. Re-enqueueing here would invent new versions.
+      const lifecycleGuard = this.exec("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='content_lifecycle_replication_guard'").length > 0;
+      if (lifecycleGuard) this.native.exec('UPDATE content_lifecycle_replication_guard SET replaying=1 WHERE id=1');
       if (previousLiveSequence !== undefined || currentLiveSequence !== undefined) {
         if (!Number.isSafeInteger(previousLiveSequence) || !Number.isSafeInteger(currentLiveSequence)
           || Number(previousLiveSequence) < 0 || Number(currentLiveSequence) < Number(previousLiveSequence)) {
@@ -192,8 +244,13 @@ export class DiskDatabase {
           if (!applied) throw new Error('database_generation_changeset_rejected');
         } catch (error) { throw new Error(`database_generation_changeset_table:${part.table}:conflicts=${conflictTypes.join(',')}:${error instanceof Error ? error.message : String(error)}`); }
       }
-      this.native.exec('COMMIT; PRAGMA foreign_keys=ON');
-      if (this.exec('PRAGMA foreign_key_check').some(result => result.values.length)) throw new Error('database_generation_changeset_foreign_key');
+      if (lifecycleGuard) this.native.exec('UPDATE content_lifecycle_replication_guard SET replaying=0 WHERE id=1');
+      afterApply?.();
+      this.generationForeignKeys?.verify();
+      this.native.exec('COMMIT');
+      this.replayRevision++;
+      this.native.exec('PRAGMA foreign_keys=ON');
+      if (!this.generationForeignKeys && this.exec('PRAGMA foreign_key_check').some(result => result.values.length)) throw new Error('database_generation_changeset_foreign_key');
     } catch (error) {
       try { this.native.exec('ROLLBACK'); } catch {}
       try { this.native.exec('PRAGMA foreign_keys=ON'); } catch {}

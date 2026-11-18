@@ -7,7 +7,7 @@ const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const test = require('node:test');
 const { sendRuntimeControlCommand, sendRuntimeDataRequest } = require('../out/autonomousRuntimeControl.js');
-const { runtimeMcpSource } = require('../out/runtimeDataOperations.js');
+const { runtimeMcpSource } = require('./runtime-data-fixture.cjs');
 
 function cleanupExact(root) {
   let stat;
@@ -79,7 +79,7 @@ test('a maintenance CLI reads its formal task from an isolated cwd using the ver
   t.after(() => cleanupExact(base));
   const projectId = owner.projectIds.get(project);
   const registered = await owner.store.registerProject({ root: project });
-  const prepared = owner.store.prepareRun(projectId, registered.locationId, {
+  const prepared = await owner.store.prepareRun(projectId, registered.locationId, {
     root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'skill_install', prompt: '完整任务🌿'.repeat(10000),
     command: 'isolated fixture', userMessage: '安装技能', metadata: {}, idempotencyKey: 'formal-install'
   });
@@ -118,7 +118,7 @@ test('an ordinary Solo CLI receives project-scoped migration and preview tools w
   t.after(() => cleanupExact(base));
   const projectId = owner.projectIds.get(project);
   const registered = await owner.store.registerProject({ root: project });
-  const prepared = owner.store.prepareRun(projectId, registered.locationId, {
+  const prepared = await owner.store.prepareRun(projectId, registered.locationId, {
     root: project, executionLogId: 1, nodeId: '__solo__', runKind: 'solo', prompt: '迁移当前项目',
     command: 'codex', userMessage: '迁移当前项目', idempotencyKey: 'ordinary-solo-migration-tools'
   });
@@ -234,7 +234,7 @@ test('an agent review MCP session exposes read-only database memory tools and it
     kind: 'memory', action: 'create', scope: projectId, idempotencyKey: 'review-memory',
     data: { category: 'patterns', title: 'review context', status: 'verified', content: 'use the database memory' }
   });
-  const prepared = owner.store.prepareRun(projectId, registered.locationId, {
+  const prepared = await owner.store.prepareRun(projectId, registered.locationId, {
     root: project, executionLogId: 1, nodeId: '__review__', runKind: 'agent_review', prompt: 'review',
     command: 'codex review', userMessage: 'review', idempotencyKey: 'read-only-review-tools'
   });
@@ -334,7 +334,7 @@ test('opening an MCP session is idempotent for one client request across a lost 
   const root = path.join(base, '.solomap-global'), projectRoot = path.join(base, 'project');
   fs.mkdirSync(projectRoot, { recursive: true });
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   let store = new UnifiedDataStore(root);
   let operations = createRuntimeDataOperations(store);
   try {

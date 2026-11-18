@@ -6,6 +6,7 @@ import { isRetirableRunArtifact } from './projectDataMigration';
 import { discoverLegacyRunProcesses } from './legacyRunProcessRecovery.js';
 import { isRetiredProjectFile } from './legacyProjectFileMigration.js';
 import { isGlobalRetiredDataKey } from './globalRetiredDataMigration.js';
+import { rethrowRecyclingProjectScopePending } from './db/recyclingProjectScopeProof.js';
 
 const hash = (bytes: Buffer) => crypto.createHash('sha256').update(bytes).digest('hex');
 const conversationKey = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.json$/i;
@@ -21,7 +22,7 @@ export class MigrationRecycling {
   private busy = new Set<string>();
   private matches = new Map<string, { hash: string; revision: number; matches: boolean }>();
   private fileChecks = new Map<string, { hash: string; device: number; inode: number; size: number; mtime: number; ctime: number }>();
-  constructor(private readonly store: UnifiedDataStore) {}
+  constructor(private readonly store: UnifiedDataStore,private readonly registeredScopes:(root:string)=>RegisteredProjectScope[]=()=>store.registeredProjectScopes()) {}
 
   private sourceIdentities(scope: MigrationProjectScope): string[] {
     const roots = [...new Set([path.resolve(scope.root), scope.physicalRoot])];
@@ -71,7 +72,7 @@ export class MigrationRecycling {
         && path.basename(path.dirname(file)) === '.solopreneur';
       if (!isExternalCache && !isCoverageCache && !isTimePlan) return null;
       const projectRoot = isCoverageCache ? path.dirname(path.dirname(path.dirname(file))) : path.dirname(path.dirname(file));
-      const registered = (projects ?? this.store.registeredProjectScopes()).some(project => {
+      const registered = (projects ?? this.registeredScopes(projectRoot)).some(project => {
         try { return fs.realpathSync(project.root) === fs.realpathSync(projectRoot); } catch { return path.resolve(project.root) === projectRoot; }
       });
       return registered ? file : null;
@@ -92,7 +93,7 @@ export class MigrationRecycling {
       ? path.join(identity.slice('project-agent-status:'.length), key) : null;
     for (const collection of ['step-memory', 'run-digests']) if (identity.startsWith(collection + ':')) {
       const projectId = identity.slice(collection.length + 1);
-      const roots = [...new Set((projects ?? this.store.registeredProjectScopes()).filter(project => project.projectId === projectId)
+      const roots = [...new Set((projects ?? this.store.registeredProjectScopesForPhysicalPaths()).filter(project => project.projectId === projectId)
         .map(project => { try { return fs.realpathSync(project.root); } catch { return ''; } }).filter(Boolean))];
       if (roots.length !== 1) return null;
       const root = path.join(roots[0], '.solopreneur', collection);
@@ -125,7 +126,7 @@ export class MigrationRecycling {
     const collection = String(job.args.collection || '');
     const root = String(job.args.projectRoot || '');
     if (!root || !['project-growth', 'project-journal', 'agent-runs', 'documentation', 'step-memory', 'run-digests', 'project-legacy-files'].includes(collection)) throw new Error('migration_source_scope_mismatch');
-    const project = scope || this.store.registeredProjectScopes().map(candidate => {
+    const project = scope || this.store.registeredProjectScopesForPhysicalPaths().map(candidate => {
       try { return { ...candidate, physicalRoot: fs.realpathSync(candidate.root) }; } catch { return null; }
     }).find(candidate => candidate && candidate.physicalRoot === fs.realpathSync(root));
     if (!project || !this.jobBelongsToProject(job, project)) throw new Error('maintenance_scope_denied');
@@ -147,7 +148,7 @@ export class MigrationRecycling {
     }
     const declared = this.sourcePath(source.identity, source.key, projects);
     if (!declared) return false;
-    try { return this.physicalSourcePath(source, projects) === resolved; } catch { return false; }
+    try { return this.physicalSourcePath(source, projects) === resolved; } catch(error) { rethrowRecyclingProjectScopePending(error);return false; }
   }
 
   private physicalSourcePath(source: Pick<RecyclingItem, 'identity' | 'key'>, projects?: RegisteredProjectScope[]): string {
@@ -158,7 +159,7 @@ export class MigrationRecycling {
     let projectRoot = projectIdentity?.[2];
     const sharedIdentity = /^(step-memory|run-digests):(.+)$/.exec(source.identity);
     if (sharedIdentity) {
-      const roots = [...new Set((projects ?? this.store.registeredProjectScopes()).filter(project => project.projectId === sharedIdentity[2])
+      const roots = [...new Set((projects ?? this.store.registeredProjectScopesForPhysicalPaths()).filter(project => project.projectId === sharedIdentity[2])
         .map(project => { try { return fs.realpathSync(project.root); } catch { return ''; } }).filter(Boolean))];
       if (roots.length !== 1) throw new Error('recycling_path_invalid');
       projectRoot = roots[0];
@@ -345,7 +346,7 @@ export class MigrationRecycling {
   private runSourceRetirable(source: CandidateSource, projects?: RegisteredProjectScope[]): boolean {
     if (!isRetirableRunArtifact(source.key) && !['prompt', 'output', 'control', 'session', 'change_evidence', 'report'].includes(source.kind ?? this.store.migrationSourceKind(source.identity, source.key))) return false;
     const root = source.identity.slice('agent-runs:'.length);
-    const project = (projects ?? this.store.registeredProjectScopes()).find(project => {
+    const project = (projects ?? this.store.registeredProjectScopesForPhysicalPaths()).find(project => {
       try { return fs.realpathSync(project.root) === fs.realpathSync(root); } catch { return false; }
     });
     if (!source.key.startsWith('learning-tasks/')) {
@@ -393,7 +394,7 @@ export class MigrationRecycling {
     }
     const files = [];
     let registeredProjects: RegisteredProjectScope[] | undefined;
-    const projectSnapshot = () => registeredProjects ||= this.store.registeredProjectScopes();
+    const projectSnapshot = () => registeredProjects ||= this.store.registeredProjectScopesForPhysicalPaths();
     for (const source of this.store.recyclingCandidateSources(scope ? [...identities!] : undefined).filter(source => belongs(source.identity))) {
       const projects = /^(analysis-caches|step-memory|run-digests|agent-runs):/.test(source.identity) ? projectSnapshot() : undefined;
       const file = this.sourcePath(source.identity, source.key, projects);
@@ -411,7 +412,7 @@ export class MigrationRecycling {
         if (this.physicalSourcePath(source, projects) !== physical) throw new Error('recycling_path_invalid');
         files.push({ identity: source.identity, key: source.key, hash: source.hash, path: physical, bytes });
         occupied.add(physical);
-      } catch { /* Changed, missing, or unsafe sources stay outside the recyclable list. */ }
+      } catch(error) { rethrowRecyclingProjectScopePending(error);/* Changed, missing, or unsafe sources stay outside the recyclable list. */ }
       await new Promise<void>(resolve => setImmediate(resolve));
     }
     return files;
@@ -567,6 +568,7 @@ export class MigrationRecycling {
       await this.verifiedSource(this.heldPath(item), expectedHash, symbolicItem);
       await fs.promises.unlink(this.heldPath(item));
     } catch (error) {
+      rethrowRecyclingProjectScopePending(error);
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         // The destination is already linked to our private receipt. Keep the
         // durable restoring state so a retry revalidates that exact inode and
@@ -599,7 +601,7 @@ export class MigrationRecycling {
       sourceRoot = parent;
     }
     const projectRoot = path.dirname(sourceRoot);
-    const registered = this.store.registeredProjectScopes().some(project => {
+    const registered = this.store.registeredProjectScopesForPhysicalPaths().some(project => {
       try { return fs.realpathSync(project.root) === projectRoot; }
       catch { return false; }
     });
@@ -670,7 +672,8 @@ export class MigrationRecycling {
               }
             }
           }
-        } catch {
+        } catch(error) {
+          rethrowRecyclingProjectScopePending(error);
           failures.add(itemId);
           continue;
         }
@@ -706,6 +709,7 @@ export class MigrationRecycling {
           moved.push(item);
           held.set(item.itemId, item);
         } catch (error) {
+          rethrowRecyclingProjectScopePending(error);
           failures.add(item.itemId);
           moveFailures.push({ itemId: item.itemId, status: 'changed', error: String(error) });
         }
@@ -729,7 +733,8 @@ export class MigrationRecycling {
             await fs.promises.unlink(this.heldPath(item));
           } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
           retired.push(item);
-        } catch {
+        } catch(error) {
+          rethrowRecyclingProjectScopePending(error);
           failures.add(item.itemId);
         }
       }
@@ -777,6 +782,7 @@ export class MigrationRecycling {
         this.store.setRecyclingStatus(itemId, 'held');
         return { path: target, hash: item.hash };
       } catch (error) {
+        rethrowRecyclingProjectScopePending(error);
         this.store.setRecyclingStatus(itemId, 'changed', String(error));
         throw error;
       }
@@ -972,6 +978,7 @@ export class MigrationRecycling {
         await this.verifiedSource(this.heldPath(item), hash(bytes), item);
         await fs.promises.unlink(this.heldPath(item));
       } catch (error) {
+        rethrowRecyclingProjectScopePending(error);
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
           // Publication succeeded and the receipt still proves ownership.
           // Retain that recoverable state so retry only completes cleanup.

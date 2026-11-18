@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { prepareAgentRun, resumePreparedAgentRun } = require('../out/agentRunPreparation.js');
 
 async function fixture(t) {
@@ -108,15 +108,17 @@ test('importing first-launch configuration preserves a pending historical applic
   assert.deepEqual(f.store.read(receipt.objectId), before, 'configuration import is not a new user save or a review decision');
 });
 
-test('pinning reads the full policy only for delivery and a prepared retry does not read it again', async t => {
+test('pinning and retries keep full policy reads in Compute and deliver the fixed body once', async t => {
   const f = await fixture(t), body = '完整大正文🌿\n'.repeat(12000), policy = await f.save(null, body, 'policy-large-original');
   const read = f.store.read.bind(f.store); let reads = 0;
   f.store.read = (ref, ...args) => { if (ref === policy.objectId) reads++; return read(ref, ...args); };
   const prepared = await prepareAgentRun(f.input(0, { launchIntentId: 'large-policy-fixed' }), f.call);
-  assert.equal(reads, 1, 'reference pinning must not decode the full policy before its actual delivery');
-  assert.ok((await f.plan(Number(prepared.status.rootExecutionLogId))).prompt.includes(body));
+  assert.equal(reads, 0, 'Source must not decode the complete policy while Compute prepares its delivery');
+  const delivered = (await f.plan(Number(prepared.status.rootExecutionLogId))).prompt;
+  assert.equal(delivered.split(body).length - 1, 1, 'the actual delivered prompt contains the full fixed body exactly once');
   await resumePreparedAgentRun(prepared, f.call, f.root);
-  assert.equal(reads, 1, 'an unchanged pending launch must reuse its already prepared fixed inputs');
+  assert.equal(reads, 0, 'an unchanged pending launch must reuse its fixed inputs without a Source policy read');
+  assert.equal((await f.plan(Number(prepared.status.rootExecutionLogId))).prompt, delivered);
 });
 
 test('native backlog cannot attribute a later policy to an earlier turn that only received the original instructions', async t => {

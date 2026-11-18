@@ -59,14 +59,15 @@ test('real Codex honors closed stdin and resume-only reentry without a synthetic
   childProcess.execFileSync('git', ['-C', workspaceRoot, '-c', 'user.name=SoloMap Gate', '-c', 'user.email=gate@example.invalid', 'commit', '--quiet', '-m', 'baseline']);
 
   const store = new UnifiedDataStore(globalDataPath);
+  const closeSetupCompute = require('./content-compute-fixture.cjs').attachLazyContentCompute(store);
   const project = await store.registerProject({ root: workspaceRoot });
   const command = `${shellQuote(codex)} --profile solomap exec --json -C ${shellQuote(workspaceRoot)} --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox ${shellQuote('Reply with exactly REAL_INPUT_CONTRACT_OK. Do not use tools or modify files.')}`;
-  store.prepareRun(project.projectId, project.locationId, {
+  await store.prepareRun(project.projectId, project.locationId, {
     root: workspaceRoot, executionLogId: 1, nodeId: '__solo__', runKind: 'flow_planner',
     prompt: 'real closed stdin gate', command, userMessage: 'real closed stdin gate',
     metadata: { interactiveSession: false, agentInputMode: 'closed', agentCli: codex }, idempotencyKey: 'real-input-contract'
   });
-  store.close();
+  await closeSetupCompute(); store.close();
 
   const env = { ...process.env, CODEX_HOME: codexHome };
   const runtime = childProcess.spawn(process.execPath, [path.resolve(__dirname, '../out/autonomousRuntimeProcess.js'), '--global-data-path', globalDataPath], { env, stdio: 'pipe' });

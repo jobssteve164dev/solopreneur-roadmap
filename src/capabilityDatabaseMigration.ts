@@ -31,7 +31,7 @@ export async function importCapabilityDirectory(store: UnifiedDataStore, sourceR
       if (after.size !== before.size || after.mtimeMs !== before.mtimeMs || final.dev !== before.dev || final.ino !== before.ino || await fs.promises.realpath(file) !== physical) throw new Error('migration_source_changed');
     } finally { await handle.close(); }
     const key = path.relative(sourceRoot, file).split(path.sep).join('/'), source = { identity, key, hash: hash(bytes!) };
-    store.captureMigrationSource(source, bytes!, { pending: true });
+    await store.publishMigrationSource(source, bytes!, { pending: true });
     result.originalBytes += bytes!.length; result.retainedFiles.push(key);
     return { source, bytes: bytes! };
   };
@@ -73,7 +73,7 @@ export async function importCapabilityDirectory(store: UnifiedDataStore, sourceR
           }
           entryBytes = Buffer.from(JSON.stringify({ entry, attachments }));
           entrySource = { identity, key: `${registry.source.key}#entry:${entry.id}`, hash: hash(entryBytes) };
-          store.captureMigrationSource(entrySource, entryBytes, { pending: true });
+          await store.publishMigrationSource(entrySource, entryBytes, { pending: true });
           const imported = store.importCapabilityEntry(collection.kind, entry, entrySource, attachments);
           if (imported.unchanged) result.unchanged++; else result.imported++;
           for (const source of sources) store.markMigrationSourceImported(source.identity, source.key);
@@ -84,7 +84,7 @@ export async function importCapabilityDirectory(store: UnifiedDataStore, sourceR
           if (options.archiveUnresolved && isArchivableMigrationConflict(message)) {
             const sources = [registry, ...capturedFiles, ...(entrySource && entryBytes ? [{ source: entrySource, bytes: entryBytes }] : [])];
             archived = true;
-            for (const captured of sources) if (!archiveUnresolvedMigrationSource(store, result, captured.source, captured.bytes, message, options, {
+            for (const captured of sources) if (!await archiveUnresolvedMigrationSource(store, result, captured.source, captured.bytes, message, options, {
               displaySource, mimeType: captured === registry ? 'application/json' : 'application/octet-stream'
             })) archived = false;
           }
@@ -103,7 +103,7 @@ export async function importCapabilityDirectory(store: UnifiedDataStore, sourceR
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         const message = error instanceof Error ? error.message : String(error);
         const displaySource = path.relative(sourceRoot, file).split(path.sep).join('/');
-        if (!registry || !archiveUnresolvedMigrationSource(store, result, registry.source, registry.bytes, message, options, { displaySource, mimeType: 'application/json' })) {
+        if (!registry || !await archiveUnresolvedMigrationSource(store, result, registry.source, registry.bytes, message, options, { displaySource, mimeType: 'application/json' })) {
           result.conflicts.push({ source: displaySource, error: message });
           if (registry) store.markMigrationSourceConflict(identity, registry.source.key, message);
         }

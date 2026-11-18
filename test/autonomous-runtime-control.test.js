@@ -568,6 +568,9 @@ test('standalone runtime keeps Today suggestions fresh while autonomous executio
     await control.sendRuntimeControlCommand(globalRoot, 'pause');
     assert.equal(JSON.parse(fs.readFileSync(path.join(runtimeRoot, 'control.json'), 'utf8')).status, 'paused');
     const generatedBeforeRefresh = decisionBeforeRefresh.generatedAt;
+    await control.sendRuntimeDataRequest(globalRoot, {
+      operation: 'save_global_prompt', input: { policy: null, content: '保持当前目标。', source: 'user', idempotencyKey: 'paused-today-new-learning-input' }
+    });
     await new Promise(resolve => setTimeout(resolve, 20));
     const refreshed = await control.sendRuntimeControlCommand(globalRoot, 'refresh');
     assert.equal(refreshed.status, 'paused');

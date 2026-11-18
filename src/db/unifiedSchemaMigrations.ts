@@ -1,5 +1,10 @@
 /** Published migration SQL is immutable; new versions append rather than rewrite V1. */
 import { entityDefinitions } from './unifiedSchema';
+import { contentLifecycleGcSchemaSql, contentLifecycleGcRootTriggers, contentLifecycleGcRoots } from './contentLifecycleGcSchema.js';
+import { contentLifecycleRepairSchemaSql } from './contentLifecycleRepair.js';
+import { storageRunOutputsSchemaSql } from './storageRunOutputs.js';
+import { generationProjectionTriggersSchemaSql } from './generationProjectionTriggersSchema.js';
+import { contentLifecycleColdAliasesSchemaSql } from './contentLifecycleColdAliasesSchema.js';
 
 export const runtimeEntityDefinitions: typeof entityDefinitions = {
   ...entityDefinitions,
@@ -1135,4 +1140,189 @@ CREATE TRIGGER sidebar_projection_analysis_update AFTER UPDATE OF run_count,late
 WHEN NEW.run_count IS NOT OLD.run_count OR NEW.latest_run_at IS NOT OLD.latest_run_at OR NEW.recent_activity_at IS NOT OLD.recent_activity_at BEGIN
  UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000 WHERE project_id=NEW.project_id;
 END;
-` }];
+` }, { version: 74, sql: `
+UPDATE sidebar_core_projection_state SET source_revision=source_revision+1,updated_at=unixepoch('subsec')*1000;
+CREATE INDEX learning_delivery_run ON evidence(run_id,source_revision,id) WHERE type='host_learning_delivery';
+CREATE INDEX policy_uses_lesson_outcomes ON policy_uses(project_id,lesson_id,lesson_revision,id);
+CREATE INDEX evaluations_policy_use ON evaluations(policy_use_id);
+CREATE TABLE today_learning_revisions(scope_key TEXT PRIMARY KEY,revision INTEGER NOT NULL);
+INSERT INTO today_learning_revisions VALUES('global',1);
+INSERT OR IGNORE INTO today_learning_revisions SELECT id,1 FROM projects;
+CREATE TRIGGER today_lesson_insert AFTER INSERT ON lessons WHEN NEW.status='approved' BEGIN
+ INSERT INTO today_learning_revisions VALUES(COALESCE(NEW.project_id,'global'),1) ON CONFLICT(scope_key) DO UPDATE SET revision=revision+1;
+END;
+CREATE TRIGGER today_lesson_update AFTER UPDATE ON lessons WHEN NEW.status='approved' OR OLD.status='approved' BEGIN
+ INSERT INTO today_learning_revisions VALUES(COALESCE(NEW.project_id,'global'),1) ON CONFLICT(scope_key) DO UPDATE SET revision=revision+1;
+END;
+CREATE TRIGGER today_lesson_delete AFTER DELETE ON lessons WHEN OLD.status='approved' BEGIN
+ INSERT INTO today_learning_revisions VALUES(COALESCE(OLD.project_id,'global'),1) ON CONFLICT(scope_key) DO UPDATE SET revision=revision+1;
+END;
+CREATE TRIGGER today_evaluation_insert AFTER INSERT ON evaluations BEGIN
+ INSERT INTO today_learning_revisions VALUES(COALESCE(NEW.project_id,'global'),1) ON CONFLICT(scope_key) DO UPDATE SET revision=revision+1;
+END;
+CREATE TRIGGER today_evaluation_update AFTER UPDATE ON evaluations BEGIN
+ INSERT INTO today_learning_revisions VALUES(COALESCE(NEW.project_id,'global'),1) ON CONFLICT(scope_key) DO UPDATE SET revision=revision+1;
+END;
+CREATE TRIGGER today_evaluation_delete AFTER DELETE ON evaluations BEGIN
+ INSERT INTO today_learning_revisions VALUES(COALESCE(OLD.project_id,'global'),1) ON CONFLICT(scope_key) DO UPDATE SET revision=revision+1;
+END;
+CREATE TRIGGER today_policy_insert AFTER INSERT ON policies WHEN NEW.kind='global_prompt' BEGIN
+ UPDATE today_learning_revisions SET revision=revision+1 WHERE scope_key='global';
+END;
+CREATE TRIGGER today_policy_update AFTER UPDATE ON policies WHEN NEW.kind='global_prompt' OR OLD.kind='global_prompt' BEGIN
+ UPDATE today_learning_revisions SET revision=revision+1 WHERE scope_key='global';
+END;
+CREATE TRIGGER today_object_archive AFTER UPDATE OF archived_at ON objects WHEN NEW.archived_at IS NOT OLD.archived_at AND NEW.kind IN ('lesson','policy','evaluation') BEGIN
+ INSERT INTO today_learning_revisions VALUES(COALESCE(NEW.project_id,'global'),1) ON CONFLICT(scope_key) DO UPDATE SET revision=revision+1;
+END;
+` }, { version: 75, sql: `
+ALTER TABLE requests ADD COLUMN result_inline_json TEXT;
+CREATE TRIGGER request_result_inline_insert BEFORE INSERT ON requests
+WHEN NEW.result_inline_json IS NOT NULL AND (NEW.result_content_id IS NOT NULL OR length(CAST(NEW.result_inline_json AS BLOB))>512 OR NOT json_valid(NEW.result_inline_json))
+BEGIN SELECT RAISE(ABORT,'request_result_invalid'); END;
+CREATE TRIGGER request_result_inline_update BEFORE UPDATE OF result_inline_json,result_content_id ON requests
+WHEN NEW.result_inline_json IS NOT NULL AND (NEW.result_content_id IS NOT NULL OR length(CAST(NEW.result_inline_json AS BLOB))>512 OR NOT json_valid(NEW.result_inline_json))
+BEGIN SELECT RAISE(ABORT,'request_result_invalid'); END;
+CREATE TABLE content_lifecycle_progress(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL DEFAULT 0,content_cursor INTEGER NOT NULL DEFAULT 0,receipt_cursor INTEGER NOT NULL DEFAULT 0,compressed_contents INTEGER NOT NULL DEFAULT 0,compressed_bytes INTEGER NOT NULL DEFAULT 0,inlined_receipts INTEGER NOT NULL DEFAULT 0);
+INSERT INTO content_lifecycle_progress(id) VALUES(1);
+CREATE TABLE content_lifecycle_cold_pending(content_id TEXT PRIMARY KEY,sha256 TEXT NOT NULL);
+CREATE TRIGGER content_cold_insert AFTER INSERT ON contents
+WHEN NEW.mime_type='application/json' AND NEW.encoding='utf8' AND NEW.byte_length BETWEEN 256 AND 65536 BEGIN
+ INSERT OR REPLACE INTO content_lifecycle_cold_pending VALUES(NEW.id,NEW.sha256);
+END;
+CREATE TRIGGER content_cold_update AFTER UPDATE OF data,encoding ON contents
+WHEN NEW.mime_type='application/json' AND NEW.encoding='utf8' AND NEW.byte_length BETWEEN 256 AND 65536 BEGIN
+ INSERT OR REPLACE INTO content_lifecycle_cold_pending VALUES(NEW.id,NEW.sha256);
+END;
+CREATE TRIGGER content_cold_delete AFTER DELETE ON contents BEGIN
+ DELETE FROM content_lifecycle_cold_pending WHERE content_id=OLD.id;
+END;
+CREATE TABLE content_lifecycle_receipt_pending(request_id TEXT PRIMARY KEY,content_id TEXT NOT NULL);
+CREATE TRIGGER content_receipt_request_insert AFTER INSERT ON requests
+WHEN NEW.status='committed' AND NEW.result_content_id IS NOT NULL BEGIN
+ INSERT OR REPLACE INTO content_lifecycle_receipt_pending SELECT NEW.id,NEW.result_content_id FROM events WHERE request_id=NEW.id AND kind='run.log_appended';
+END;
+CREATE TRIGGER content_receipt_request_update AFTER UPDATE OF result_content_id,status ON requests
+WHEN NEW.status='committed' AND NEW.result_content_id IS NOT NULL BEGIN
+ INSERT OR REPLACE INTO content_lifecycle_receipt_pending SELECT NEW.id,NEW.result_content_id FROM events WHERE request_id=NEW.id AND kind='run.log_appended';
+END;
+CREATE TRIGGER content_receipt_event_insert AFTER INSERT ON events WHEN NEW.kind='run.log_appended' BEGIN
+ INSERT OR REPLACE INTO content_lifecycle_receipt_pending SELECT id,result_content_id FROM requests WHERE id=NEW.request_id AND status='committed' AND result_content_id IS NOT NULL;
+END;
+CREATE TRIGGER content_receipt_request_delete AFTER DELETE ON requests BEGIN
+ DELETE FROM content_lifecycle_receipt_pending WHERE request_id=OLD.id;
+END;
+CREATE TRIGGER content_receipt_event_delete AFTER DELETE ON events WHEN OLD.kind='run.log_appended' BEGIN
+ DELETE FROM content_lifecycle_receipt_pending WHERE request_id=OLD.request_id AND NOT EXISTS(SELECT 1 FROM events WHERE request_id=OLD.request_id AND kind='run.log_appended');
+END;
+CREATE TABLE content_lifecycle_release_holds(content_id TEXT PRIMARY KEY REFERENCES contents(id));
+` }, { version: 76, sql: `
+CREATE TABLE content_lifecycle_faults(content_id TEXT PRIMARY KEY REFERENCES contents(id),sha256 TEXT NOT NULL,encoding TEXT NOT NULL,error TEXT NOT NULL);
+CREATE TABLE content_lifecycle_prepare_owners(id TEXT PRIMARY KEY,writer_incarnation TEXT NOT NULL,stage_kind TEXT CHECK(stage_kind IS NULL OR stage_kind='project_export'),stage_error TEXT,stage_retry_at INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX content_lifecycle_prepare_owner_incarnation ON content_lifecycle_prepare_owners(writer_incarnation,id);
+CREATE TABLE content_lifecycle_prepare_pins(owner_id TEXT NOT NULL REFERENCES content_lifecycle_prepare_owners(id) ON DELETE CASCADE,content_id TEXT NOT NULL REFERENCES contents(id),PRIMARY KEY(owner_id,content_id));
+CREATE INDEX content_lifecycle_prepare_pin_content ON content_lifecycle_prepare_pins(content_id);
+CREATE TABLE content_lifecycle_preparation_names(owner_id TEXT NOT NULL REFERENCES content_lifecycle_prepare_owners(id) ON DELETE CASCADE,preparation_key TEXT NOT NULL,content_id TEXT NOT NULL,PRIMARY KEY(owner_id,preparation_key));
+` }, { version: 77, sql: `
+CREATE TABLE content_lifecycle_edges(source_id TEXT NOT NULL,target_id TEXT NOT NULL,generation INTEGER NOT NULL,PRIMARY KEY(source_id,target_id)) WITHOUT ROWID;
+CREATE INDEX content_lifecycle_edge_target ON content_lifecycle_edges(target_id,source_id);
+CREATE TABLE content_lifecycle_reference_pending(content_id TEXT PRIMARY KEY,version TEXT NOT NULL,enqueued_at REAL NOT NULL,ready INTEGER NOT NULL DEFAULT 0 CHECK(ready IN (-1,0,1)));
+CREATE INDEX content_lifecycle_reference_pending_order ON content_lifecycle_reference_pending(enqueued_at,content_id);
+CREATE TABLE content_lifecycle_replication_guard(id INTEGER PRIMARY KEY CHECK(id=1),replaying INTEGER NOT NULL CHECK(replaying IN (0,1)));
+INSERT INTO content_lifecycle_replication_guard VALUES(1,0);
+CREATE TABLE content_lifecycle_reference_progress(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL DEFAULT 0,cursor TEXT NOT NULL DEFAULT '',upper_id TEXT NOT NULL,prefer_pending INTEGER NOT NULL DEFAULT 0);
+INSERT INTO content_lifecycle_reference_progress(id,upper_id) SELECT 1,COALESCE(MAX(id),'') FROM contents;
+CREATE TABLE content_lifecycle_reference_jobs(source_id TEXT PRIMARY KEY,sha256 TEXT NOT NULL,queue_version TEXT NOT NULL,generation INTEGER NOT NULL,edge_offset INTEGER NOT NULL,total_edges INTEGER NOT NULL,scan_cursor TEXT);
+CREATE TABLE content_lifecycle_reference_faults(source_id TEXT PRIMARY KEY,queue_version TEXT NOT NULL,error TEXT NOT NULL);
+CREATE TABLE content_lifecycle_reference_unpublished(content_id TEXT PRIMARY KEY);
+CREATE TABLE content_lifecycle_reference_preparations(owner_id TEXT NOT NULL REFERENCES content_lifecycle_prepare_owners(id) ON DELETE CASCADE,content_id TEXT NOT NULL,sha256 TEXT NOT NULL,total INTEGER NOT NULL,committed INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(owner_id,content_id));
+CREATE INDEX content_lifecycle_reference_preparation_source ON content_lifecycle_reference_preparations(content_id);
+CREATE TRIGGER content_reference_preparation_release AFTER DELETE ON content_lifecycle_reference_preparations
+WHEN (SELECT replaying FROM content_lifecycle_replication_guard WHERE id=1)=0 AND NOT EXISTS(SELECT 1 FROM content_lifecycle_reference_preparations WHERE content_id=OLD.content_id) BEGIN
+ UPDATE content_lifecycle_reference_pending SET ready=0,version=lower(hex(randomblob(16))),enqueued_at=unixepoch('subsec')*1000 WHERE content_id=OLD.content_id AND ready=-1;
+END;
+CREATE TRIGGER content_reference_insert AFTER INSERT ON contents
+WHEN (SELECT replaying FROM content_lifecycle_replication_guard WHERE id=1)=0 BEGIN
+ INSERT INTO content_lifecycle_reference_pending VALUES(NEW.id,lower(hex(randomblob(16))),unixepoch('subsec')*1000,0)
+ ON CONFLICT(content_id) DO UPDATE SET version=excluded.version,enqueued_at=excluded.enqueued_at,ready=0;
+ INSERT OR IGNORE INTO content_lifecycle_reference_unpublished VALUES(NEW.id);
+END;
+CREATE TRIGGER content_reference_update AFTER UPDATE OF data,sha256,byte_length,encoding,chunk_index_json ON contents
+WHEN (SELECT replaying FROM content_lifecycle_replication_guard WHERE id=1)=0 BEGIN
+ INSERT INTO content_lifecycle_reference_pending VALUES(NEW.id,lower(hex(randomblob(16))),unixepoch('subsec')*1000,0)
+ ON CONFLICT(content_id) DO UPDATE SET version=excluded.version,enqueued_at=excluded.enqueued_at,ready=0;
+END;
+CREATE TRIGGER content_reference_delete AFTER DELETE ON contents
+WHEN (SELECT replaying FROM content_lifecycle_replication_guard WHERE id=1)=0 BEGIN
+ UPDATE content_lifecycle_reference_progress SET revision=revision+1 WHERE id=1 AND
+ EXISTS(SELECT 1 FROM content_lifecycle_reference_jobs WHERE source_id=OLD.id);
+ DELETE FROM content_lifecycle_reference_pending WHERE content_id=OLD.id;
+ DELETE FROM content_lifecycle_reference_unpublished WHERE content_id=OLD.id;
+ DELETE FROM content_lifecycle_reference_faults WHERE source_id=OLD.id;
+END;
+` }, { version: 78, sql: contentLifecycleGcSchemaSql }, { version: 79, sql: contentLifecycleRepairSchemaSql + contentLifecycleGcRootTriggers(contentLifecycleGcRoots.filter(root => root.table === 'content_lifecycle_repairs')) }, { version: 80, sql: `
+CREATE TABLE content_lifecycle_capture_heads(
+ source_identity TEXT NOT NULL,source_key TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>=0),
+ resolved INTEGER NOT NULL CHECK(resolved IN (0,1)),PRIMARY KEY(source_identity,source_key)
+) WITHOUT ROWID;
+CREATE TABLE content_lifecycle_capture_imports(
+ source_identity TEXT NOT NULL,source_key TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>0),
+ PRIMARY KEY(source_identity,source_key)
+) WITHOUT ROWID;
+CREATE TRIGGER content_lifecycle_capture_revision_hold BEFORE DELETE ON migration_items
+WHEN OLD.source_capture_revision>0 AND (SELECT replaying FROM content_lifecycle_replication_guard WHERE id=1)=0 BEGIN
+ INSERT INTO content_lifecycle_capture_heads VALUES(OLD.source_identity,OLD.source_key,OLD.source_capture_revision,0)
+ ON CONFLICT(source_identity,source_key) DO UPDATE SET revision=MAX(revision,excluded.revision);
+END;
+` }, { version: 81, sql: storageRunOutputsSchemaSql }, { version: 82, sql: `
+ALTER TABLE step_handoffs ADD COLUMN handoff_sequence INTEGER;
+ALTER TABLE pi_conversation_ingress ADD COLUMN admission_sequence INTEGER;
+ALTER TABLE growth_snapshots ADD COLUMN snapshot_sequence INTEGER;
+ALTER TABLE growth_items ADD COLUMN detail_ordinal INTEGER;
+ALTER TABLE growth_edges ADD COLUMN detail_ordinal INTEGER;
+ALTER TABLE growth_signals ADD COLUMN detail_ordinal INTEGER;
+ALTER TABLE growth_module_labels ADD COLUMN detail_ordinal INTEGER;
+ALTER TABLE growth_live_items ADD COLUMN detail_ordinal INTEGER;
+ALTER TABLE growth_live_edges ADD COLUMN detail_ordinal INTEGER;
+ALTER TABLE growth_live_signals ADD COLUMN detail_ordinal INTEGER;
+ALTER TABLE growth_live_module_labels ADD COLUMN detail_ordinal INTEGER;
+ALTER TABLE run_digests ADD COLUMN digest_sequence INTEGER;
+ALTER TABLE migration_jobs ADD COLUMN job_sequence INTEGER;
+ALTER TABLE run_control ADD COLUMN run_sequence INTEGER;
+ALTER TABLE run_consumer_sources ADD COLUMN source_sequence INTEGER;
+ALTER TABLE run_settlements ADD COLUMN settlement_sequence INTEGER;
+ALTER TABLE run_effects ADD COLUMN effect_sequence INTEGER;
+ALTER TABLE flow_control ADD COLUMN flow_sequence INTEGER;
+ALTER TABLE run_input_materializations ADD COLUMN materialization_sequence INTEGER;
+ALTER TABLE run_input_materializations ADD COLUMN exit_proof_json TEXT;
+ALTER TABLE reports ADD COLUMN creation_sequence INTEGER;
+ALTER TABLE mcp_conversation_launches ADD COLUMN launch_sequence INTEGER;
+CREATE TABLE database_record_order_namespaces(
+ id TEXT PRIMARY KEY,project_id TEXT NOT NULL,table_name TEXT NOT NULL CHECK(table_name IN ('run_control','run_consumer_sources','run_effects','run_input_materializations')),
+ source_hash TEXT NOT NULL,request_key TEXT NOT NULL,
+ offset INTEGER NOT NULL CHECK(offset>=0),maximum INTEGER NOT NULL CHECK(maximum>0),
+ end_sequence INTEGER NOT NULL CHECK(end_sequence=offset+maximum),
+ state TEXT NOT NULL CHECK(state IN ('preparing','active')),
+ UNIQUE(project_id,table_name));
+CREATE INDEX database_record_order_end ON database_record_order_namespaces(table_name,end_sequence);
+ALTER TABLE run_control ADD COLUMN sequence_namespace TEXT REFERENCES database_record_order_namespaces(id);
+ALTER TABLE run_consumer_sources ADD COLUMN sequence_namespace TEXT REFERENCES database_record_order_namespaces(id);
+ALTER TABLE run_effects ADD COLUMN sequence_namespace TEXT REFERENCES database_record_order_namespaces(id);
+ALTER TABLE run_input_materializations ADD COLUMN sequence_namespace TEXT REFERENCES database_record_order_namespaces(id);
+CREATE TRIGGER record_order_active_immutable BEFORE UPDATE ON database_record_order_namespaces
+WHEN OLD.state='active' AND (NEW.id IS NOT OLD.id OR NEW.project_id IS NOT OLD.project_id OR NEW.table_name IS NOT OLD.table_name
+ OR NEW.source_hash IS NOT OLD.source_hash OR NEW.request_key IS NOT OLD.request_key OR NEW.offset IS NOT OLD.offset
+ OR NEW.maximum IS NOT OLD.maximum OR NEW.end_sequence IS NOT OLD.end_sequence OR NEW.state IS NOT OLD.state)
+BEGIN SELECT RAISE(ABORT,'record_order_active_immutable'); END;
+${['run_control','run_consumer_sources','run_effects','run_input_materializations'].map(table => `
+CREATE TRIGGER record_order_${table}_insert BEFORE INSERT ON ${table}
+WHEN NEW.sequence_namespace IS NOT NULL AND NOT EXISTS(SELECT 1 FROM database_record_order_namespaces
+ WHERE id=NEW.sequence_namespace AND project_id=NEW.project_id AND table_name='${table}')
+BEGIN SELECT RAISE(ABORT,'record_order_namespace_scope_invalid'); END;
+CREATE TRIGGER record_order_${table}_update BEFORE UPDATE OF sequence_namespace,project_id ON ${table}
+WHEN NEW.sequence_namespace IS NOT NULL AND NOT EXISTS(SELECT 1 FROM database_record_order_namespaces
+ WHERE id=NEW.sequence_namespace AND project_id=NEW.project_id AND table_name='${table}')
+BEGIN SELECT RAISE(ABORT,'record_order_namespace_scope_invalid'); END;
+`).join('\n')}
+${generationProjectionTriggersSchemaSql}
+` }, { version: 83, sql: contentLifecycleColdAliasesSchemaSql }];

@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 
 test('continuation reads only its durable conversation family without decoding unrelated history', async () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-continuation-family-'));

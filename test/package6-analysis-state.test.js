@@ -7,7 +7,7 @@ const Module = require('node:module');
 const childProcess = require('node:child_process');
 
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('../out/runtimeDataOperations.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
 
 function loadExternalSignalInternals() {
@@ -43,21 +43,23 @@ function cleanupFixture(value) {
 
 test('analysis state is durable, project scoped and compare-and-set', async (t) => {
   const first = await fixture();
-  t.after(() => { first.store.close(); cleanupFixture(first); });
+  const closeCompute = require('./content-compute-fixture.cjs').attachLazyContentCompute(first.store);
+  t.after(async () => { await closeCompute(); first.store.close(); cleanupFixture(first); });
   assert.deepEqual(first.store.readAnalysisState(first.project.projectId, 'external', 'issues'), {
     objectId: null,
     revision: 0,
     value: null
   });
-  const written = first.store.writeAnalysisState(first.project.projectId, {
+  const written = await first.store.writeAnalysisState(first.project.projectId, {
     namespace: 'external', key: 'issues', expectedRevision: 0,
     value: { repo: 'owner/repo', issues: [{ number: 7 }] }, idempotencyKey: 'first'
   });
   assert.equal(written.revision, 1);
-  assert.throws(() => first.store.writeAnalysisState(first.project.projectId, {
+  await assert.rejects(async () => first.store.writeAnalysisState(first.project.projectId, {
     namespace: 'external', key: 'issues', expectedRevision: 0,
     value: { repo: 'owner/repo', issues: [] }, idempotencyKey: 'stale'
   }), /revision_conflict/);
+  await closeCompute();
   first.store.close();
   const reopened = new UnifiedDataStore(first.dataRoot);
   first.store = reopened;
@@ -318,16 +320,17 @@ test('remote projections reject late results with identical request timestamps',
 
 test('growth refresh generation rejects inverse completion and preserves one newest snapshot', async (t) => {
   const first = await fixture();
-  t.after(() => { first.store.close(); cleanupFixture(first); });
+  const closeCompute = require('./content-compute-fixture.cjs').attachLazyContentCompute(first.store);
+  t.after(async () => { await closeCompute(); first.store.close(); cleanupFixture(first); });
   const snapshot = (id, label) => ({
     snapshot: { id, projectPath: first.projectRoot, createdAt: '2026-10-12T12:00:00.000Z', gitHead: '', scanReason: label, status: 'completed', durationMs: 1, error: '' },
     nodes: [{ snapshotId: id, nodeId: 'directory:.', parentId: '', kind: 'directory', path: '.', label, language: '', bytes: 1, loc: 1, fileCount: 1, testFileCount: 0, generated: false, excluded: false, primaryRole: 'root', confidence: 1 }],
     edges: [], signals: [], labels: []
   });
-  const older = first.store.reserveProjectGrowthRefresh(first.project.projectId, 'older');
-  const newer = first.store.reserveProjectGrowthRefresh(first.project.projectId, 'newer');
-  assert.equal(first.store.commitProjectGrowthRefresh(first.project.projectId, { ...newer, data: snapshot('newer', 'newer') }).accepted, true);
-  assert.equal(first.store.commitProjectGrowthRefresh(first.project.projectId, { ...older, data: snapshot('older', 'older') }).accepted, false);
+  const older = await first.store.reserveProjectGrowthRefresh(first.project.projectId, 'older');
+  const newer = await first.store.reserveProjectGrowthRefresh(first.project.projectId, 'newer');
+  assert.equal((await first.store.commitProjectGrowthRefresh(first.project.projectId, { ...newer, data: snapshot('newer', 'newer') })).accepted, true);
+  assert.equal((await first.store.commitProjectGrowthRefresh(first.project.projectId, { ...older, data: snapshot('older', 'older') })).accepted, false);
   const state = first.store.readProjectGrowth(first.project.projectId, 12);
   assert.equal(state.latest.snapshot.scanReason, 'newer');
   assert.equal(state.history.length, 1);
@@ -335,11 +338,12 @@ test('growth refresh generation rejects inverse completion and preserves one new
 
 test('large staged growth topology commits within the Writer foreground latency budget', async (t) => {
   const first = await fixture();
-  t.after(() => { first.store.close(); cleanupFixture(first); });
+  const closeCompute = require('./content-compute-fixture.cjs').attachLazyContentCompute(first.store);
+  t.after(async () => { await closeCompute(); first.store.close(); cleanupFixture(first); });
   const stageId = '00000000-0000-4000-8000-000000000001';
   const requestId = 'large-growth-stage';
   const nodeCount = 5_553;
-  const reservation = first.store.reserveProjectGrowthRefresh(first.project.projectId, requestId);
+  const reservation = await first.store.reserveProjectGrowthRefresh(first.project.projectId, requestId);
   const nodes = Array.from({ length: nodeCount }, (_, index) => ({
     snapshotId: 'staged-snapshot',
     nodeId: index === 0 ? 'directory:.' : `file:src/module-${index}.ts`,
@@ -361,7 +365,7 @@ test('large staged growth topology commits within the Writer foreground latency 
     snapshotId: 'staged-snapshot', sourceId: 'directory:.', targetId: node.nodeId,
     kind: 'contains', weight: 1, evidence: ''
   }));
-  first.store.beginProjectGrowthRefreshStage(first.project.projectId, {
+  await first.store.beginProjectGrowthRefreshStage(first.project.projectId, {
     requestId,
     generation: reservation.generation,
     manifest: {
@@ -379,12 +383,12 @@ test('large staged growth topology commits within the Writer foreground latency 
   });
   for (const [section, items] of [['nodes', nodes], ['edges', edges]]) {
     for (let offset = 0; offset < items.length; offset += 200) {
-      first.store.appendProjectGrowthRefreshStage(stageId, section, offset, items.slice(offset, offset + 200));
+      await first.store.appendProjectGrowthRefreshStage(stageId, section, offset, items.slice(offset, offset + 200));
     }
   }
 
   const startedAt = process.hrtime.bigint();
-  const result = first.store.commitProjectGrowthRefreshStage(first.project.projectId, stageId);
+  const result = await first.store.commitProjectGrowthRefreshStage(first.project.projectId, stageId);
   const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
 
   assert.equal(result.accepted, true);
@@ -394,7 +398,8 @@ test('large staged growth topology commits within the Writer foreground latency 
 
 test('staged growth topology rejects invalid parent relationships', async (t) => {
   const first = await fixture();
-  t.after(() => { first.store.close(); cleanupFixture(first); });
+  const closeCompute = require('./content-compute-fixture.cjs').attachLazyContentCompute(first.store);
+  t.after(async () => { await closeCompute(); first.store.close(); cleanupFixture(first); });
   const cases = [
     {
       suffix: '2', requestId: 'cyclic-growth-stage', error: /growth_parent_cycle/,
@@ -411,8 +416,8 @@ test('staged growth topology rejects invalid parent relationships', async (t) =>
   ];
   for (const scenario of cases) {
     const stageId = `00000000-0000-4000-8000-00000000000${scenario.suffix}`;
-    const reservation = first.store.reserveProjectGrowthRefresh(first.project.projectId, scenario.requestId);
-    first.store.beginProjectGrowthRefreshStage(first.project.projectId, {
+    const reservation = await first.store.reserveProjectGrowthRefresh(first.project.projectId, scenario.requestId);
+    await first.store.beginProjectGrowthRefreshStage(first.project.projectId, {
       requestId: scenario.requestId,
       generation: reservation.generation,
       manifest: {
@@ -428,9 +433,9 @@ test('staged growth topology rejects invalid parent relationships', async (t) =>
         sourceVersion: { gitHead: '', contentHash: 'f'.repeat(64) }
       }
     });
-    first.store.appendProjectGrowthRefreshStage(stageId, 'nodes', 0,
+    await first.store.appendProjectGrowthRefreshStage(stageId, 'nodes', 0,
       scenario.nodes.map(node => ({ snapshotId: `invalid-snapshot-${scenario.suffix}`, ...node })));
-    assert.throws(() => first.store.commitProjectGrowthRefreshStage(first.project.projectId, stageId), scenario.error);
+    await assert.rejects(first.store.commitProjectGrowthRefreshStage(first.project.projectId, stageId), scenario.error);
   }
 });
 
@@ -458,7 +463,7 @@ test('sidebar conversation revision covers visible conversation changes but not 
   } });
   const preparedRevision = first.store.readProjectAnalysisSource(first.project.projectId).conversationRevision;
   assert.notEqual(preparedRevision, indexedRevision);
-  first.store.writeRunDocument(first.project.projectId, {
+  await first.store.writeRunDocument(first.project.projectId, {
     executionLogId: 2, generation: run.generation, turnId: run.turnId, purpose: `native_reply_${run.turnId.replace(/-/g, '')}`,
     bytes: Buffer.from('原生最终回复').toString('base64'), mimeType: 'text/plain', expectedRevision: 0, idempotencyKey: 'package6-native-reply'
   });
@@ -472,7 +477,7 @@ test('sidebar conversation revision covers visible conversation changes but not 
   assert.notEqual(completedRevision, replyRevision);
   assert.equal(first.store.readProjectJournal(first.project.projectId, { executionLogId: 2 }).logs[0].dataState.conclusion, '原生最终回复');
   assert.ok(completed.revision > run.revision);
-  assert.throws(() => first.store.writeAnalysisState(first.project.projectId, {
+  await assert.rejects(async () => first.store.writeAnalysisState(first.project.projectId, {
     namespace: 'sidebar', key: 'conversation', expectedRevision: 0, expectedSourceRevision: initial,
     value: { sourceRevision: initial, snapshot: { solo: [], project: [], flow: [], revision: [] } }, idempotencyKey: 'stale-sidebar'
   }), /analysis_source_conflict/);
@@ -585,7 +590,7 @@ test('repository changes cannot reuse a cached projection from the previous orig
     const runtimeRoot = path.join(first.dataRoot, 'runtime'); if (fs.existsSync(runtimeRoot)) fs.rmdirSync(runtimeRoot);
     cleanupFixture(first);
   });
-  first.store.writeAnalysisState(first.project.projectId, {
+  await first.store.writeAnalysisState(first.project.projectId, {
     namespace: 'external', key: 'delivery', expectedRevision: 0,
     value: { requestedAt: 1, cache: { schemaVersion: 1, repo, syncedAt: '2026-10-12T10:00:00.000Z', latestRelease: { tagName: 'v-old', name: 'Old', publishedAt: '', url: '' }, workflowRuns: [] } }, idempotencyKey: 'old-repo-cache'
   });
@@ -616,12 +621,12 @@ test('Agent prompt delivery and security context reuse committed remote projecti
   const write = (key, value, idempotencyKey) => first.store.writeAnalysisState(first.project.projectId, {
     namespace: 'external', key, expectedRevision: 0, value: { requestedAt: 1, cache: value }, idempotencyKey
   });
-  write('delivery', {
+  await write('delivery', {
     schemaVersion: 1, repo: 'owner/repo', syncedAt: '2026-10-12T10:00:00.000Z',
     latestRelease: { tagName: 'v1.2.3', name: 'Release 1.2.3', publishedAt: '2026-10-12T09:00:00.000Z', url: 'https://example.test/release' },
     workflowRuns: [{ name: 'CI', displayTitle: 'Verify', status: 'completed', conclusion: 'success', createdAt: '2026-10-12T08:00:00.000Z', updatedAt: '2026-10-12T08:01:00.000Z', url: 'https://example.test/ci' }]
   }, 'delivery-cache');
-  write('security', {
+  await write('security', {
     schemaVersion: 1, repo: 'owner/repo', syncedAt: '2026-10-12T10:00:00.000Z', message: '',
     alerts: [{ source: 'CodeQL', title: 'Unsafe flow', severity: 'high', state: 'open', url: 'https://example.test/security' }]
   }, 'security-cache');
@@ -697,7 +702,9 @@ test('growth importer accepts an in-project alias and rejects another physical p
   for (const source of [sourceA, sourceB]) { const legacy = new SqliteStore(source, path.resolve(__dirname, '..')); await legacy.init(); legacy.close(); }
   fs.symlinkSync(projectA, projectAlias, 'dir');
   const store = new UnifiedDataStore(dataRoot);
-  t.after(() => {
+  const closeCompute = require('./content-compute-fixture.cjs').attachLazyContentCompute(store);
+  t.after(async () => {
+    await closeCompute();
     store.close();
     if (fs.existsSync(projectAlias)) fs.unlinkSync(projectAlias);
     for (const file of [sourceA, `${sourceA}-wal`, `${sourceA}-shm`, sourceB, `${sourceB}-wal`, `${sourceB}-shm`, path.join(projectA, '.solopreneur', 'project.json'), path.join(dataRoot, 'solomap.db-wal'), path.join(dataRoot, 'solomap.db-shm'), path.join(dataRoot, 'solomap.db')]) if (fs.existsSync(file)) fs.unlinkSync(file);
@@ -721,7 +728,9 @@ test('journal importer reads one immutable WAL snapshot while the live source ke
   const { DatabaseSync } = require('node:sqlite');
   const writer = new DatabaseSync(source);
   const store = new UnifiedDataStore(dataRoot);
-  t.after(() => {
+  const closeCompute = require('./content-compute-fixture.cjs').attachLazyContentCompute(store);
+  t.after(async () => {
+    await closeCompute();
     writer.close(); store.close();
     for (const file of [source, `${source}-wal`, `${source}-shm`, path.join(project, '.solopreneur', 'project.json'), path.join(dataRoot, 'solomap.db-wal'), path.join(dataRoot, 'solomap.db-shm'), path.join(dataRoot, 'solomap.db')]) if (fs.existsSync(file)) fs.unlinkSync(file);
     for (const dir of [path.dirname(source), project, dataRoot, root]) if (fs.existsSync(dir)) fs.rmdirSync(dir);
@@ -768,8 +777,8 @@ test('growth view cache follows the selected global database root', async (t) =>
     nodes: [{ snapshotId: id, nodeId: 'directory:.', parentId: '', kind: 'directory', path: '.', label, language: '', bytes: 1, loc: 1, fileCount: 1, testFileCount: 0, generated: false, excluded: false, primaryRole: 'root', confidence: 1 }],
     edges: [], signals: [], labels: []
   });
-  first.store.writeProjectGrowth(first.project.projectId, snapshot('first', '2026-10-12T10:00:00.000Z', 'root-a'), 'root-a');
-  second.store.writeProjectGrowth(secondProject.projectId, snapshot('second', '2026-10-12T11:00:00.000Z', 'root-b'), 'root-b');
+  await first.store.writeProjectGrowth(first.project.projectId, snapshot('first', '2026-10-12T10:00:00.000Z', 'root-a'), 'root-a');
+  await second.store.writeProjectGrowth(secondProject.projectId, snapshot('second', '2026-10-12T11:00:00.000Z', 'root-b'), 'root-b');
   t.after(async () => {
     await firstServer.close(); await secondServer.close();
     await firstOperations.close(); await secondOperations.close();
