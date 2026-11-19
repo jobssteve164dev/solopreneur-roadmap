@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.654 - 2026-11-19
+
+### Changed
+- Drive cold receipt catch-up from the pending queue (62e0618)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.653 - 2026-11-19
 
 ### Added
