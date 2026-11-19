@@ -7,6 +7,7 @@ const { execFileSync } = require('node:child_process');
 const test = require('node:test');
 
 const { ForegroundAgentTerminalBridge, ReconnectedForegroundAgentTerminalBridge, buildForegroundRunnerInvocation, settleForegroundTerminalExit } = require('../out/foregroundAgentTerminal.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 
 function fakeChild(pid = 4321) {
   const child = new EventEmitter();
@@ -205,7 +206,6 @@ test('the real direct bridge reaches an interactive child without a VS Code shel
   fs.mkdirSync(workspaceRoot);
   execFileSync('git', ['init', '-q', workspaceRoot]);
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const { startRuntimeControlServer } = require('../out/autonomousRuntimeControl.js');
   const { shellQuote } = require('../out/agentCli.js');
   const store = new UnifiedDataStore(globalDataPath);

@@ -24,7 +24,7 @@ export interface TelegramHost {
   saveOffset?(offset: number): void | Promise<void>;
   waitForReplies?: boolean;
   acceptChatUpdate?(update: TelegramUpdate): boolean | Promise<boolean>;
-  finishChatUpdate?(update: TelegramUpdate): void | Promise<void>;
+  finishChatUpdate?(update: TelegramUpdate, completedAction?: 'authorize_chat'): void | Promise<void>;
   releaseChatUpdate?(update: TelegramUpdate): void | Promise<void>;
   sendReply?(chatId: string, text: string, options?: { intentId?: string; parseMode?: 'HTML'; audience?: 'binding' | 'requester' }): Promise<void>;
   beginChatAction?(update: TelegramUpdate, action: string): Promise<void>;
@@ -88,6 +88,13 @@ const pendingChatReplies = new Map<string, Promise<void>>();
 const pendingAuthRequests = new Map<string, number>(); // chat_id -> date
 const activeRequests = new Set<ClientRequest>();
 const activePollingRequests = new Set<ClientRequest>();
+
+function trackPendingChatReply(chatId: string, task: Promise<void>): Promise<void> {
+  pendingChatReplies.set(chatId, task);
+  return task.finally(() => {
+    if (pendingChatReplies.get(chatId) === task) pendingChatReplies.delete(chatId);
+  });
+}
 
 export interface TelegramUpdate {
   update_id: number;
@@ -414,10 +421,13 @@ export async function handleTelegramUpdate(context: TelegramHost, update: Telegr
     pendingAuthRequests.delete(senderChatId);
 
     if (approved) {
-      await context.bindChat(senderChatId, update.update_id + 1);
-      await confirmUpdateAction(context, update, 'authorize_chat');
-      await sendUpdateReply(context, update, senderChatId, 'authorization-approved', '🎉 <b>绑定成功！</b>\n现在可以直接发消息询问智能内核。输入 /help 查看其他指令。', 'HTML');
-      await context.finishChatUpdate?.(update);
+      // A binding changes the reply generation while this update still owns its original inbox lease.
+      await trackPendingChatReply(senderChatId, (async () => {
+        await context.bindChat(senderChatId, update.update_id + 1);
+        await confirmUpdateAction(context, update, 'authorize_chat');
+        await sendUpdateReply(context, update, senderChatId, 'authorization-approved', '🎉 <b>绑定成功！</b>\n现在可以直接发消息询问智能内核。输入 /help 查看其他指令。', 'HTML');
+        await context.finishChatUpdate?.(update, 'authorize_chat');
+      })());
     } else {
       await confirmUpdateAction(context, update, 'authorize_chat');
       await sendUpdateReply(context, update, senderChatId, 'authorization-denied', '❌ <b>授权已被拒绝。</b>\n您无权访问此本地电脑。', 'HTML', 'requester');
@@ -525,11 +535,9 @@ async function dispatchTelegramCommand(context: TelegramHost, chatId: string, te
       };
       return trace ? withLocalDiagnosticTrace(trace, execute) : execute();
     });
-    pendingChatReplies.set(chatId, task);
-    void task.finally(() => {
-      if (pendingChatReplies.get(chatId) === task) pendingChatReplies.delete(chatId);
-    }).catch(error => console.warn('Telegram intelligence reply failed:', error));
-    if (context.waitForReplies) await task;
+    const pending = trackPendingChatReply(chatId, task);
+    void pending.catch(error => console.warn('Telegram intelligence reply failed:', error));
+    if (context.waitForReplies) await pending;
     return;
   }
   

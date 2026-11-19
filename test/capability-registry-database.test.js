@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
+const { attachLazyContentCompute } = require('./content-compute-fixture.cjs');
 
 function prepareCodegraphFixture(base, version) {
   const prefix = path.join(base, 'npm-prefix'), npmRoot = path.join(prefix, 'lib', 'node_modules');
@@ -27,6 +28,7 @@ test('legacy capability registry keeps a valid external skill registration witho
     id: 'external-skill', title: 'External skill', status: 'installed', entry: '../../external/SKILL.md', packagePath: '../../external'
   }] }));
   const store = new UnifiedDataStore(root);
+  const closeCompute = attachLazyContentCompute(store);
   try {
     const result = await require('../out/capabilityDatabaseMigration.js').importCapabilityDirectory(store, root, { archiveUnresolved: true });
     assert.deepEqual(result.conflicts, []);
@@ -34,7 +36,10 @@ test('legacy capability registry keeps a valid external skill registration witho
     assert.equal(registered.entry.id, 'external-skill');
     assert.equal(store.read(registered.objectId).relations.some(relation => store.read(relation.target).data.type === 'installation:entry_document'), false);
     assert.equal(store.readMigrationSource(`capabilities:${root}`, 'skills/registry.json').stage, 'imported');
-  } finally { store.close(); }
+  } finally {
+    try { await closeCompute(); }
+    finally { store.close(); }
+  }
 });
 
 test('a terminal capability registry conflict is retained as exact evidence and becomes recyclable', async () => {
@@ -43,6 +48,7 @@ test('a terminal capability registry conflict is retained as exact evidence and 
   const bytes = Buffer.from(JSON.stringify({ skills: [{ id: '../invalid', title: 'retired' }] }));
   fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, bytes);
   const store = new UnifiedDataStore(root);
+  const closeCompute = attachLazyContentCompute(store);
   try {
     const result = await require('../out/capabilityDatabaseMigration.js').importCapabilityDirectory(store, root, { archiveUnresolved: true });
     assert.deepEqual(result.conflicts, []);
@@ -51,7 +57,10 @@ test('a terminal capability registry conflict is retained as exact evidence and 
     assert.deepEqual(Buffer.from(evidence.data.content.data, 'base64'), bytes);
     const plan = await new (require('../out/migrationRecycling.js').MigrationRecycling)(store).prepare();
     assert.ok(plan.files.some(item => item.path === file));
-  } finally { store.close(); }
+  } finally {
+    try { await closeCompute(); }
+    finally { store.close(); }
+  }
 });
 
 // Original host regression 166: capability registration must survive the move

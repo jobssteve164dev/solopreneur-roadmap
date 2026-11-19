@@ -6,5 +6,16 @@ test('actual Runtime begin SQL failure releases Source staging and its already-b
   const deadline=Date.now()+10000;for(;;){assert.equal(child.exitCode,null,errors);assert.ok(Date.now()<deadline,errors || 'Runtime readiness');try{if((await sendRuntimeControlCommand(root,'health',{timeoutMs:500})).ok)break;}catch{}await new Promise(resolve=>setTimeout(resolve,20));}
   await assert.rejects(sendRuntimeDataRequest(root,{operation:'refresh_project_growth',input:{root:project,extensionPath:repo,requestId:'actual-begin-failure',scanReason:'exit-proof'}}),/actual_runtime_growth_begin_sql_failure/);assert.equal((await sendRuntimeControlCommand(root,'health')).ok,true);
   const observed=fs.readFileSync(events,'utf8').trim().split('\n').map(value=>JSON.parse(value)),begun=observed.find(value=>value.kind==='begin');assert.ok(begun);t.diagnostic(JSON.stringify(observed));assert.deepEqual(observed.find(value=>value.kind==='compute-scan-created' && value.stageId===begun.stageId),{kind:'compute-scan-created',stageId:begun.stageId});assert.deepEqual(observed.find(value=>value.kind==='source-discarded' && value.stageId===begun.stageId),{kind:'source-discarded',stageId:begun.stageId,headers:0,items:0});assert.deepEqual(observed.find(value=>value.kind==='compute-scan-deleted' && value.stageId===begun.stageId),{kind:'compute-scan-deleted',stageId:begun.stageId,deleted:true,remaining:false});
-  const reader=new UnifiedDataStore(root,undefined,{readOnly:true});try{assert.equal(reader.rows('SELECT COUNT(*) AS n FROM growth_snapshots')[0].n,0);for(const table of ['content_lifecycle_prepare_owners','content_lifecycle_prepare_pins'])assert.equal(reader.rows(`SELECT COUNT(*) AS n FROM ${table}`)[0].n,0);}finally{reader.close();}
+  assert.equal(begun.requestId, 'actual-begin-failure');
+  const owners = observed.filter(value => value.kind === 'source-owner-created' && value.requestId === begun.requestId);
+  assert.ok(owners.length > 0, 'the probe must observe preparation for this growth request');
+  const reader = new UnifiedDataStore(root, undefined, { readOnly: true });
+  try {
+    assert.equal(reader.rows('SELECT COUNT(*) AS n FROM growth_snapshots')[0].n, 0);
+    for (const { ownerId } of owners) {
+      assert.ok(ownerId);
+      assert.deepEqual(reader.rows('SELECT id FROM content_lifecycle_prepare_owners WHERE id=?', [ownerId]), []);
+      assert.deepEqual(reader.rows('SELECT owner_id FROM content_lifecycle_prepare_pins WHERE owner_id=?', [ownerId]), []);
+    }
+  } finally { reader.close(); }
 });

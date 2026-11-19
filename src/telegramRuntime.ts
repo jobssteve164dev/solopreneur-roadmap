@@ -337,9 +337,10 @@ export function startTelegramBackgroundRuntime(globalDataPath: string, operation
           if (claimed.items[0]) inboxClaims.set(claimKey, { sourceId: update.update_id, token: claimed.items[0].token, generation: acceptedReplyGeneration });
           return Boolean(claimed.items[0]);
         },
-        async finishChatUpdate(update: TelegramUpdate) {
+        async finishChatUpdate(update: TelegramUpdate, completedAction?: 'authorize_chat') {
           // A service stop retains accepted work for the next owner of the same lease.
-          if (closed || acceptedGeneration !== serviceGeneration) return;
+          // An approved binding has already confirmed its action with the original lease.
+          if (closed || (acceptedGeneration !== serviceGeneration && completedAction !== 'authorize_chat')) return;
           const claimKey = inboxClaimKey(acceptedReplyGeneration, update.update_id);
           const claim = inboxClaims.get(claimKey);
           if (!claim) return;

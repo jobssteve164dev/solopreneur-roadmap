@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const control = require('../out/autonomousRuntimeControl.js');
+const { waitForAutonomousRuntimeHealth } = require('../out/autonomousRuntimeHost.js');
 
 const previousTestSecretStore = process.env.SOLOMAP_TEST_SECRET_STORE;
 const testSecretStore = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-telegram-secrets-'));
@@ -147,7 +148,7 @@ const request=https.request;https.request=function(options,callback){if(options.
       '--interval-ms', String(intervalMs), ...(runtimeVersion ? ['--runtime-version', runtimeVersion] : [])], { stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.resume();
     child.stderr.on('data', chunk => { childStderr += String(chunk); });
-    await waitFor(() => fs.existsSync(path.join(runtimeRoot, 'control.json')), 'Daemon must start its authenticated endpoint');
+    await waitForAutonomousRuntimeHealth(globalRoot);
   }
   async function stop() {
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
@@ -156,7 +157,11 @@ const request=https.request;https.request=function(options,callback){if(options.
     await exited;
   }
   t.after(async () => {
-    if (child && child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await new Promise(resolve => child.once('exit', resolve)); }
+    if (child && child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise(resolve => child.once('exit', resolve));
+      child.kill('SIGTERM');
+      await exited;
+    }
     heldDeliveryRelease?.();
     await new Promise(resolve => server.close(resolve));
     unlinkFixtureFile(path.join(runtimeRoot, 'control.json'));
@@ -582,19 +587,30 @@ test('editor binding, reconnect and disconnect preserve one background channel a
       async executeCommand(command, ...args) { commands.push({ command, args }); return command === 'solopreneur.internalStopAgent'; }
     },
     loadSettings: async () => settings,
-    async bindChat(chatId) { settings.telegramChatId = chatId; await connection.sync(fixture.globalRoot, fixture.projectRoot, 'zh'); },
+    async bindChat(chatId) {
+      settings.telegramChatId = chatId;
+      await connection.sync(fixture.globalRoot, fixture.projectRoot, 'zh');
+      // Let the daemon observe the persisted binding before the editor callback returns.
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    },
     async ensureRuntime() { await fixture.start(); }
   };
   connection = createTelegramBackgroundConnection(options);
   t.after(() => connection.dispose());
   await connection.sync(fixture.globalRoot, fixture.projectRoot, 'zh');
   assert.equal(staleHostReads, 0, 'editor synchronization must use the refreshed database projection instead of a stale host snapshot');
+  const bindingGeneration = (await refreshTelegramRuntimeConfig(fixture.globalRoot)).replyGeneration;
   fixture.updates.push(fixture.update(200, '绑定'));
   await waitFor(() => fixture.sent.some(m => m.text.includes('绑定成功')), 'First message must still require and complete editor approval');
   assert.equal((await refreshTelegramRuntimeConfig(fixture.globalRoot)).chatId, '123456');
   fixture.updates.push(fixture.update(201, '/stop'));
   await waitFor(() => fixture.sent.some(m => m.text.includes('成功终止')), 'Existing editor commands must reach their original handler');
   assert.deepEqual(commands, [{ command: 'solopreneur.internalStopAgent', args: [] }]);
+  assert.equal(fixture.sent.filter(message => message.text.includes('绑定成功')).length, 1);
+  assert.equal(await control.sendRuntimeDataRequest(fixture.globalRoot, {
+    operation: 'read_notification',
+    input: { intentId: `telegram-action-recovery:${bindingGeneration}:200:authorize_chat` }
+  }), null, 'a confirmed editor binding must acknowledge the original update without an extra recovery notification');
   connection.dispose();
   connection = createTelegramBackgroundConnection(options);
   await connection.sync(fixture.globalRoot, fixture.projectRoot, 'zh');

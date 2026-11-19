@@ -1,9 +1,28 @@
-const fs=require('node:fs'),path=require('node:path'),{isMainThread,workerData}=require('node:worker_threads');
+const fs=require('node:fs'),path=require('node:path'),{isMainThread,parentPort,workerData}=require('node:worker_threads');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const file=process.env.SOLOMAP_GROWTH_INPUT_EXIT_PROBE,out=process.env.SOLOMAP_GROWTH_RUNTIME_OUT;
 function record(value){fs.appendFileSync(file,JSON.stringify(value)+'\n');}
 if(file && out && !isMainThread && workerData?.affinity==='writer-actor'){
+  const growthRequest = new AsyncLocalStorage();
+  const on = parentPort.on;
+  parentPort.on = function (event, listener) {
+    if (event !== 'message') return on.call(this, event, listener);
+    return on.call(this, event, function (message) {
+      if (message.request?.operation !== 'refresh_project_growth') return listener.call(this, message);
+      return growthRequest.run(message.request.input.requestId, () => listener.call(this, message));
+    });
+  };
   const {UnifiedDataStore}=require(path.join(out,'db/unifiedDataStore.js')),prototype=UnifiedDataStore.prototype,begin=prototype.beginProjectGrowthRefreshStage,discard=prototype.discardProjectGrowthRefreshStage;
-  prototype.beginProjectGrowthRefreshStage=function(...args){this.ensureProjectGrowthStageTables();this.db.run("CREATE TEMP TRIGGER actual_runtime_growth_begin_failure BEFORE INSERT ON runtime_growth_refresh_stages BEGIN SELECT RAISE(ABORT,'actual_runtime_growth_begin_sql_failure'); END");record({kind:'begin',stageId:args[1].manifest.stageId});return begin.apply(this,args);};
+  const prepare = prototype.withPreparedContentOwnership;
+  prototype.withPreparedContentOwnership = function (action, ...args) {
+    const requestId = growthRequest.getStore();
+    if (!requestId) return prepare.call(this, action, ...args);
+    return prepare.call(this, () => {
+      record({ kind: 'source-owner-created', requestId, ownerId: this.contentPreparationContext.getStore() });
+      return action();
+    }, ...args);
+  };
+  prototype.beginProjectGrowthRefreshStage=function(...args){this.ensureProjectGrowthStageTables();this.db.run("CREATE TEMP TRIGGER actual_runtime_growth_begin_failure BEFORE INSERT ON runtime_growth_refresh_stages BEGIN SELECT RAISE(ABORT,'actual_runtime_growth_begin_sql_failure'); END");record({kind:'begin',stageId:args[1].manifest.stageId,requestId:growthRequest.getStore()});return begin.apply(this,args);};
   prototype.discardProjectGrowthRefreshStage=function(stageId){const done=()=>record({kind:'source-discarded',stageId,headers:Number(this.rows('SELECT COUNT(*) AS n FROM runtime_growth_refresh_stages WHERE stage_id=?',[stageId])[0].n),items:Number(this.rows('SELECT COUNT(*) AS n FROM runtime_growth_refresh_stage_items WHERE stage_id=?',[stageId])[0].n)}),result=discard.call(this,stageId);if(result && typeof result.then==='function')return result.then(value=>{done();return value;});done();return result;};
 }
 if(file && out && !isMainThread && workerData?.root && workerData.databaseId && !workerData.affinity){

@@ -6,6 +6,7 @@ const test = require('node:test');
 
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
 const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
+const { attachLazyContentCompute } = require('./content-compute-fixture.cjs');
 const { confirmTimePlan, extractTimePlanDraft, readTimePlan, saveTimePlan } = require('../out/timePlan.js');
 const { importAnalysisCaches } = require('../out/analysisDatabaseMigration.js');
 const { MigrationRecycling } = require('../out/migrationRecycling.js');
@@ -60,7 +61,11 @@ test('a legacy time plan is imported once without replacing newer database state
   };
   fs.writeFileSync(path.join(metadataPath, 'time-plan.json'), JSON.stringify(plan));
   const store = new UnifiedDataStore(globalDataPath);
-  t.after(() => { store.close(); fs.rmSync(base, { recursive: true, force: true }); });
+  const closeCompute = attachLazyContentCompute(store);
+  t.after(async () => {
+    try { await closeCompute(); }
+    finally { store.close(); fs.rmSync(base, { recursive: true, force: true }); }
+  });
   const project = await store.registerProject({ root: projectPath });
 
   const result = await importAnalysisCaches(store, globalDataPath, { projectScopes: { [projectPath]: project.projectId }, archiveUnresolved: true });

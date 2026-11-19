@@ -5,8 +5,8 @@ const { once } = require('node:events');
 const connections = new Set();
 require('node:test').after(async () => { for (const close of connections) await close(); });
 
-async function openContentCompute(store) {
-  const worker = new Worker(path.resolve(__dirname, '../out/maintenanceComputeWorker.js'), { workerData: { root: store.root, databaseId: store.databaseId } });
+async function connectContentCompute(store, createWorker = (filename, options) => new Worker(filename, options)) {
+  const worker = createWorker(path.resolve(__dirname, '../out/maintenanceComputeWorker.js'), { workerData: { root: store.root, databaseId: store.databaseId } });
   const pending = new Map(); let sequence = 0;
   const ready = once(worker, 'message');
   worker.on('message', message => {
@@ -77,7 +77,7 @@ async function openContentCompute(store) {
   return {...connection,prepareFlowTrace:value=>rpc('prepare_flow_trace_publication',{value}),planFlowTrace:value=>rpc('plan_flow_trace_publication',{value})};
 }
 exports.attachContentCompute = async function attachContentCompute(store) {
-  const connection = await openContentCompute(store);
+  const connection = await connectContentCompute(store);
   store.setContentPreparationCompute(connection.prepare);
   store.setContentVerificationCompute(connection.verify);
   store.setDataWriteCompute({prepare:connection.prepareWrite,search:connection.searchWrite,references:connection.writeReferences});
@@ -147,7 +147,8 @@ exports.attachContentCompute = async function attachContentCompute(store) {
   store.setStorageLifecycleCompute({prepareStorageReferenceBatch:connection.storageReference,prepareStorageColdBatch:connection.storageCold,prepareStorageGcBatch:connection.storageGc,prepareStorageRunOutputBatch:connection.storageOutputs,prepareStorageRepairBatch:connection.storageRepair,prepareProjectRetirementPage:connection.retirementPage,qualifyProjectRetirement:connection.retirementQualify});
   return connection.close;
 };
-exports.attachLazyContentCompute = function attachLazyContentCompute(store) {
+exports.attachLazyContentCompute = function attachLazyContentCompute(store, createWorker) {
+  const openContentCompute = source => connectContentCompute(source, createWorker);
   let connection;
   store.setContentPreparationCompute(input => {
     connection ||= openContentCompute(store);

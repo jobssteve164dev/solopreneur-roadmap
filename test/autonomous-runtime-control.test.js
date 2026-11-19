@@ -57,8 +57,8 @@ test('runtime control lets independent maintenance run beside an admitted contro
       maintenanceStarted = true;
       return 'maintained';
     }, { label: 'internal:planner-statistics' });
-    await new Promise(resolve => setTimeout(resolve, 20));
-    assert.equal(maintenanceStarted, true, 'an admitted control read must not globally lock an independent maintenance executor');
+    await assert.doesNotReject(() => waitFor(() => maintenanceStarted),
+      'an admitted control read must not globally lock an independent maintenance executor');
     assert.equal(await maintenance, 'maintained');
 
     releaseRead();
@@ -552,7 +552,8 @@ test('standalone runtime keeps Today suggestions fresh while autonomous executio
     '--interval-ms', '5000'
   ], { stdio: 'ignore' });
   try {
-    await waitFor(() => fs.existsSync(path.join(runtimeRoot, 'control.json')));
+    const { waitForAutonomousRuntimeHealth } = require('../out/autonomousRuntimeHost.js');
+    await waitForAutonomousRuntimeHealth(globalRoot);
     const health = await control.sendRuntimeControlCommand(globalRoot, 'health');
     assert.equal(health.owner, 'fallback');
     assert.equal(health.releaseVersion, '0.0.514');
@@ -597,7 +598,11 @@ test('standalone runtime keeps Today suggestions fresh while autonomous executio
         'Runtime shutdown must retain its initiating reason and exact process identity');
     } finally { stoppedStore.close(); }
   } finally {
-    if (child.exitCode === null) child.kill('SIGTERM');
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = events.once(child, 'exit');
+      child.kill('SIGTERM');
+      await exited;
+    }
     for (const fileName of ['control.json', 'owner.json', 'events.jsonl', 'execution-runtime.json', 'today-shadow.json']) {
       const filePath = path.join(runtimeRoot, fileName);
       if (fs.existsSync(filePath)) fs.unlinkSync(filePath);

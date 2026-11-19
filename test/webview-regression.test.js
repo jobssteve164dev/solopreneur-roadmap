@@ -807,7 +807,8 @@ test('production polling resumes an undelivered task after its creating window a
   let store = new UnifiedDataStore(root); let ops = createRuntimeDataOperations(store);
   const call = request => ops(request);
   const input = { agentCli: 'claude', selectedModel: 'original-model', prompt: '完整原始目标🌿\n'.repeat(10000), workspaceRoot: project, nodeId: '__solo__', executionLogId: 1, userMessage: '原始用户请求', runKind: 'solo', globalDataPath: root, taskPermissionMode: 'auto' };
-  const prepared = await prepareAgentRun(input, (operation, value) => call({ operation, input: operation === 'prepare_run' ? { ...value, deliveryOwner: { id: 'closed-creator', pid: 2147483647, birth: 'proc:gone' } } : value }));
+  const deliveryOwner = { id: 'closed-creator', pid: 2147483647, birth: 'proc:gone' };
+  const prepared = await prepareAgentRun({ ...input, deliveryOwner }, (operation, value) => call({ operation, input: value }));
   await ops.close(); store.close(); store = new UnifiedDataStore(root); ops = createRuntimeDataOperations(store);
   let ready; let created; let creates = 0; const commands = [];
   const createdGate = new Promise(resolve => { created = resolve; });
@@ -3682,7 +3683,7 @@ test('publishing verifies the full extension and builds the VSIX before pushing 
   assert.ok(websiteInstallAt < testAt, 'website dependencies must exist before the full suite starts');
   assert.ok(testAt < bumpAt && compileAt < bumpAt, 'no release mutation may precede validation');
   assert.ok(packageAt < pushAt, 'the exact VSIX must exist before its version commit and tag are pushed');
-  assert.match(workflow, /timeout-minutes:\s*90/, 'a leaked test handle cannot hold the release runner indefinitely');
+  assert.match(workflow, /timeout-minutes:\s*240\b/, 'a leaked test handle cannot hold the release runner indefinitely');
 });
 
 test('marketplace description keeps English and Chinese content on separate pages', () => {

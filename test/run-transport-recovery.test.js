@@ -8,6 +8,7 @@ const { once } = require('node:events');
 const { startRuntimeControlServer, sendRuntimeDataRequest } = require('../out/autonomousRuntimeControl.js');
 const { claimRuntimeLease } = require('../out/autonomousRuntime.js');
 const { shellQuote } = require('../out/agentCli.js');
+const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
 
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(check) {
@@ -38,7 +39,6 @@ test('five real conversations survive missing discovery and lost acknowledgement
   fs.mkdirSync(project);
   execFileSync('git', ['init', '-q', project]);
   const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-  const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
   const store = new UnifiedDataStore(root), ops = createRuntimeDataOperations(store);
   const runners = [], output = [], errors = [], storageFailures = new Set();
   let loseAcknowledgement = false, storageUnavailable = false;
@@ -138,7 +138,7 @@ test('explicit user interruption stops the Agent and preserves pending output un
   const project = path.join(base, 'project'), root = path.join(base, '.solomap-global');
   fs.mkdirSync(project); execFileSync('git', ['init', '-q', project]);
   const store = new (require('../out/db/unifiedDataStore.js').UnifiedDataStore)(root);
-  const ops = require('./runtime-data-fixture.cjs').createRuntimeDataOperations(store);
+  const ops = createRuntimeDataOperations(store);
   const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'interrupt-owner',
     onCommand: () => ({ status: 'running' }), onData: ops });
   const file = path.join(root, 'runtime/control.json'), endpoint = fs.readFileSync(file);

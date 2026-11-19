@@ -6,18 +6,19 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
 const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
-const { createRuntimeDataOperations } = require('./runtime-data-fixture.cjs');
+const { createRuntimeDataOperations, createRuntimeDataOperationsWithComputeWorker } = require('./runtime-data-fixture.cjs');
+const { createWindowsRunProcess } = require('./windows-run-process-fixture.cjs');
 
 function owner(id) {
   const stat = fs.readFileSync(`/proc/${process.pid}/stat`, 'utf8');
   return { id, pid: process.pid, birth: 'proc:' + stat.slice(stat.lastIndexOf(') ') + 2).trim().split(/\s+/)[19] };
 }
-async function fixture() {
+async function fixture(createOperations = createRuntimeDataOperations) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-automation-delivery-'));
   const root = path.join(base, '.solomap-global'); const project = path.join(base, 'project'); fs.mkdirSync(project);
-  let store = new UnifiedDataStore(root); let ops = createRuntimeDataOperations(store);
+  let store = new UnifiedDataStore(root); let ops = createOperations(store);
   return { root, project, store: () => store, call: (operation, input) => ops({ operation, input }),
-    async reopen() { await ops.close(); store.close(); store = new UnifiedDataStore(root); ops = createRuntimeDataOperations(store); },
+    async reopen() { await ops.close(); store.close(); store = new UnifiedDataStore(root); ops = createOperations(store); },
     async close() {
       await ops.close(); store.close();
       const unlink = file => { try { fs.unlinkSync(file); } catch (error) { if (error.code !== 'ENOENT') throw error; } };
@@ -180,16 +181,12 @@ test('the shared Windows liveness probe preserves an existing ps birth marker', 
 });
 
 test('Windows ps owners remain exclusive through formal run recovery, delivery, settlement and effects', async () => {
-  const f = await fixture(); const store = f.store(); const { RunRecovery } = require('../out/runRecovery.js');
-  let startedAt = 'Fri Oct 09 08:00:00 2026';
-  const marker = 'ps:' + startedAt; const owner = { id: 'existing-ps-window', pid: 42, birth: marker };
+  const windows = createWindowsRunProcess(42);
+  const f = await fixture(store => createRuntimeDataOperationsWithComputeWorker(store, windows.createWorker));
+  const store = f.store(); const { RunRecovery } = require('../out/runRecovery.js');
+  const marker = windows.marker(); const owner = { id: 'existing-ps-window', pid: 42, birth: marker };
   const competitor = { ...owner, id: 'other-window' };
-  const implementation = store.hasLiveRunProcess.toString();
-  store.hasLiveRunProcess = vm.runInNewContext('(function' + implementation.slice(implementation.indexOf('(')) + ')', {
-    process: { platform: 'win32', kill: () => {} }, fs: { readFileSync: () => { throw new Error('no-proc'); } },
-    childProcess: { execFileSync: command => { assert.equal(command, 'ps'); return startedAt; } },
-    processIdentity_js_1: { readWindowsProcessBirthMarker: () => 'win32:638954012345678901' }
-  });
+  windows.install(store);
   const recovery = new RunRecovery(store);
   const prepare = (id, extra = {}) => f.call('prepare_run', { root: f.project, executionLogId: id, nodeId: 'step', runKind: 'step', prompt: '原任务', command: 'actual command', userMessage: '保持实际任务', metadata: { interactiveSession: true }, idempotencyKey: `ps-run:${id}`, ...extra });
   try {
@@ -209,8 +206,8 @@ test('Windows ps owners remain exclusive through formal run recovery, delivery, 
     const effect = (await f.call('list_run_effects', { projectId: source.projectId })).items[0];
     const held = await f.call('claim_run_effect', { projectId: source.projectId, effectId: effect.effectId, owner });
     assert.equal(await f.call('claim_run_effect', { projectId: source.projectId, effectId: effect.effectId, owner: competitor }), null);
-    startedAt = 'Fri Oct 09 08:00:01 2026';
-    const resumed = await f.call('claim_run_effect', { projectId: source.projectId, effectId: effect.effectId, owner: { ...competitor, birth: 'ps:' + startedAt } });
+    windows.reusePid();
+    const resumed = await f.call('claim_run_effect', { projectId: source.projectId, effectId: effect.effectId, owner: { ...competitor, birth: windows.marker() } });
     assert.ok(resumed); assert.notEqual(resumed.token, held.token);
   } finally { await recovery.close(); await f.close(); }
 });
