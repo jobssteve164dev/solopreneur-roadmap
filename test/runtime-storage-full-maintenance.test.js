@@ -10,6 +10,73 @@ const {UnifiedDataStore}=require('../out/db/unifiedDataStore.js');
 const {createRuntimeDataOperations}=require('../out/runtimeDataOperations.js');
 const {RuntimeExecutionScheduler,continueRuntimeWork,readRuntimeWorkContinuation,resumeRuntimeWork}=require('../out/runtimePriorityScheduler.js');
 const {RuntimeDataExecutionDomains}=require('../out/runtimeDataExecutionDomains.js');
+const {removeOwnedEntry}=require('../scripts/owned-fixture-cleanup.cjs');
+
+test('the production storage-ready boundary enables collection and preserves referenced history across restart',async t=>{
+  const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-storage-activation-'));
+  const root=path.join(base,'.solomap-global');
+  const project=path.join(base,'project');
+  const csvPath=path.join(project,'.solopreneur','roadmap.csv');
+  fs.mkdirSync(path.dirname(csvPath),{recursive:true});
+  fs.writeFileSync(csvPath,'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n1,Original roadmap,,Build,,,,Pending,,\n');
+  let domains;
+  t.after(async()=>{await domains?.close();removeOwnedEntry(base,base);});
+  const setup=new UnifiedDataStore(root);
+  const databaseId=setup.databaseId;
+  const orphan=setup.putContent('unreferenced bytes reserved for this test');
+  const history=setup.putContent('retained history', 'text/plain', 'utf8');
+  const retained=setup.write({kind:'memory',action:'create',scope:null,idempotencyKey:'retained-history',
+    data:{category:'inbox',status:'captured',title:'History',content:{bodyContentId:history}}});
+  setup.db.run("UPDATE content_lifecycle_reference_progress SET cursor='',upper_id=(SELECT MAX(id) FROM contents) WHERE id=1");
+  setup.close();
+  const read=operation=>{
+    const reader=UnifiedDataStore.openReadOnly(root,databaseId);
+    try{return operation(reader);}finally{reader.close();}
+  };
+  const state=()=>read(reader=>reader.rows('SELECT enabled,strict_publication,incarnation,revision,deleted_contents,reclaimed_stored_bytes FROM content_lifecycle_gc_state WHERE id=1')[0]);
+  const start=()=>RuntimeDataExecutionDomains.start({root,databaseId,
+    runtime:{runtimeId:crypto.randomUUID(),releaseVersion:'0.0.655',buildId:'storage-activation-test'}});
+  domains=await start();
+  assert.equal(state().enabled,0);
+  await domains.control('storage_maintenance_ready');
+  const enabled=state();
+  assert.equal(enabled.enabled,1);
+  assert.equal(enabled.strict_publication,0);
+  assert.notEqual(enabled.incarnation,'');
+  await domains.control('storage_maintenance_ready');
+  assert.deepEqual(state(),enabled);
+  assert.equal(read(reader=>reader.prepareStorageGcBatch()).action,'idle','unindexed history protects the original content');
+  assert.equal(read(reader=>reader.content(orphan).toString()),'unreferenced bytes reserved for this test');
+
+  const accepted=await domains.operations({operation:'accept_roadmap_csv',input:{root:project}});
+  const updated=await domains.operations({operation:'update_roadmap',input:{root:project,expectedRevision:accepted.revision,
+    nodes:accepted.nodes.map(node=>({...node,title:'Updated after activation'})),idempotencyKey:'roadmap-after-activation'}});
+  assert.equal(updated.pending,false);
+  assert.match(fs.readFileSync(csvPath,'utf8'),/Updated after activation/);
+
+  for(let i=0;i<512;i++){
+    await domains.operations({operation:'maintain_database_storage',input:{phase:'lifecycle',automatic:true,limit:64}});
+    const exists=read(reader=>reader.rows('SELECT 1 FROM contents WHERE id=?',[orphan]).length);
+    if(!exists)break;
+    assert.notEqual(i,511,'production maintenance must reclaim the proven orphan');
+  }
+  const reclaimed=state();
+  assert.ok(reclaimed.deleted_contents>0 && reclaimed.reclaimed_stored_bytes>0);
+  assert.equal(read(reader=>reader.content(history).toString()),'retained history');
+  assert.equal(read(reader=>reader.read(retained.objectId,1).data.content),JSON.stringify({bodyContentId:history}));
+  await domains.close();domains=undefined;
+  domains=await start();
+  const resumed=state();
+  assert.equal(resumed.enabled,1);
+  assert.equal(resumed.strict_publication,0);
+  assert.notEqual(resumed.incarnation,enabled.incarnation);
+  assert.equal(resumed.deleted_contents,reclaimed.deleted_contents);
+  await domains.control('storage_maintenance_ready');
+  assert.deepEqual(state(),resumed);
+  assert.equal(read(reader=>reader.content(history).toString()),'retained history');
+  const roadmap=await domains.operations({operation:'read_roadmap',input:{root:project}});
+  assert.equal(roadmap.nodes[0].title,'Updated after activation');
+});
 
 test('the complete storage entry releases maintenance admission between real cleanup pieces and returns complete totals',async t=>{
   const base=fs.mkdtempSync(path.join(os.tmpdir(),'solomap-full-maintenance-')),root=path.join(base,'data'),projectRoot=path.join(base,'project');fs.mkdirSync(projectRoot);

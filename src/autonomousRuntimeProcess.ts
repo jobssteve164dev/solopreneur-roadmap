@@ -248,6 +248,7 @@ async function main(): Promise<void> {
   let storageColdTimer: NodeJS.Timeout | undefined;
   let storageColdFailure = '';
   let storageColdReady=false,storageColdRunning=false,storageColdRetryAt=0;
+  let storageMaintenanceReadiness: Promise<unknown> | undefined;
   let startupMigration: Promise<void> | undefined;
   let stopping = false;
   let paused = await readRuntimePauseState(scheduledOperations, isAutonomousRuntimeDisabled(globalDataPath));
@@ -594,8 +595,14 @@ async function main(): Promise<void> {
   outboxRecovery = startupMigrationReady;
   void startupMigrationReady.then(() => scheduleControl('maintenance', 'recover_intelligence'))
     .catch(error => process.stderr.write(`SoloMap intelligence recovery: ${String(error)}\n`));
+  function ensureStorageMaintenanceReady(): Promise<unknown> {
+    return storageMaintenanceReadiness ??= scheduleControl('runtime-event', 'storage_maintenance_ready').catch(error => {
+      storageMaintenanceReadiness = undefined;
+      throw error;
+    });
+  }
   void startupMigrationReady.then(
-    () => scheduleControl('runtime-event', 'storage_maintenance_ready'),
+    () => stopping ? undefined : ensureStorageMaintenanceReady(),
     error => scheduleControl('runtime-event', 'storage_maintenance_failed', { error: String(error) })
   ).catch(error => process.stderr.write(`SoloMap storage maintenance barrier: ${String(error)}\n`));
   startupMigration = startupMigrationReady.catch(error => { process.stderr.write(`SoloMap Runtime memory migration: ${String(error)}\n`); });
@@ -617,10 +624,13 @@ async function main(): Promise<void> {
       storageColdTimer = undefined;
       if (stopping) return;
       storageColdRunning=true;storageWakePending=false;
-      storageMaintenance = scheduledOperations({ operation: 'maintain_database_storage', input: { phase: 'lifecycle', automatic: true, limit: 64 } }).then(
+      storageMaintenance = ensureStorageMaintenanceReady().then(() => {
+        if (stopping) return;
+        return scheduledOperations({ operation: 'maintain_database_storage', input: { phase: 'lifecycle', automatic: true, limit: 64 } });
+      }).then(
         result => {
           storageColdFailure = '';storageColdRunning=false;storageColdRetryAt=0;
-          const state = result as { pending?: boolean; runnable?: boolean };
+          const state = (result ?? {}) as { pending?: boolean; runnable?: boolean };
           scheduleStorageColdMaintenance(storageWakePending?0:state.pending ? state.runnable === false ? 100 : 0 : 30_000);
         },
         error => { storageColdRunning=false;storageColdRetryAt=Date.now()+5_000;if (!stopping) { const failure = String(error); if (failure !== storageColdFailure) { storageColdFailure = failure; process.stderr.write(`SoloMap cold storage maintenance: ${failure}\n`); } scheduleStorageColdMaintenance(5_000); } }

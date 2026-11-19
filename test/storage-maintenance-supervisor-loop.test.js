@@ -6,24 +6,27 @@ const vm=require('node:vm');
 const ts=require('typescript');
 
 // Execute the final generated controller without starting a Supervisor or inheriting real state roots.
-function fixture(t,run=async()=>({pending:false})){
+function fixture(t,run=async()=>({pending:false}),ready=async()=>({ready:true})){
   const file=process.env.SOLOMAP_STORAGE_CONTROLLER_BASELINE || path.resolve(__dirname,'../out/autonomousRuntimeProcess.js');
   let source=fs.readFileSync(file,'utf8');
   if(file.endsWith('.ts'))source=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
   const parsed=ts.createSourceFile(file,source,ts.ScriptTarget.Latest,true,ts.ScriptKind.JS),controllers=[];
-  const visit=node=>{if(ts.isFunctionDeclaration(node)&&node.name?.text==='scheduleStorageColdMaintenance')controllers.push(node.getText(parsed));ts.forEachChild(node,visit);};visit(parsed);
-  assert.equal(controllers.length,1,'validate the actual final generated Supervisor controller');
-  let now=0,sequence=0;const timers=new Map(),calls=[],errors=[];
+  const names=new Set(['scheduleStorageColdMaintenance','ensureStorageMaintenanceReady']);
+  const visit=node=>{if(ts.isFunctionDeclaration(node)&&names.has(node.name?.text))controllers.push(node.getText(parsed));ts.forEachChild(node,visit);};visit(parsed);
+  assert.equal(controllers.length,names.size,'validate the actual final generated Supervisor controller');
+  let now=0,sequence=0;const timers=new Map(),calls=[],controls=[],errors=[];
   const clock={
     tick(ms){now+=ms;for(const [id,timer]of [...timers].sort((a,b)=>a[1].at-b[1].at)){if(timer.at<=now&&timers.delete(id))timer.callback();}},
     get next(){return timers.size?Math.min(...[...timers.values()].map(timer=>timer.at)):null;},get size(){return timers.size;}
   };
   const context=vm.createContext({stopping:false,storageColdTimer:undefined,storageColdReady:false,storageColdRunning:false,storageColdRetryAt:0,storageWakePending:false,storageColdFailure:'',storageMaintenance:undefined,
     Date:{now:()=>now},setTimeout:(callback,delay)=>{const handle={id:++sequence,unref(){}};timers.set(handle.id,{callback,at:now+delay});return handle;},clearTimeout:handle=>timers.delete(handle?.id),
+    storageMaintenanceReadiness:undefined,
+    scheduleControl:(domain,action)=>{controls.push({domain,action});return ready();},
     scheduledOperations:request=>{calls.push(request);return run();},process:{stderr:{write:value=>errors.push(value)}}});
-  vm.runInContext('"use strict";\n'+controllers[0],context,{filename:file});
+  vm.runInContext('"use strict";\n'+controllers.join('\n'),context,{filename:file});
   t.after(async()=>{context.stopping=true;timers.clear();await context.storageMaintenance;});
-  return {context,clock,calls,errors,schedule:delay=>context.scheduleStorageColdMaintenance(delay),flush:()=>new Promise(resolve=>setImmediate(resolve))};
+  return {context,clock,calls,controls,errors,schedule:delay=>context.scheduleStorageColdMaintenance(delay),flush:()=>new Promise(resolve=>setImmediate(resolve))};
 }
 
 test('generated maintenance controller coalesces early wake messages behind the startup barrier',async t=>{
@@ -35,7 +38,7 @@ test('generated maintenance controller coalesces early wake messages behind the 
 
 test('generated maintenance controller holds one flight and merges repeated wakes into one next piece',async t=>{
   let release;const gate=new Promise(resolve=>{release=resolve;});t.after(()=>release({pending:false}));
-  const f=fixture(t,()=>gate);f.context.storageColdReady=true;f.schedule(0);f.clock.tick(0);
+  const f=fixture(t,()=>gate);f.context.storageColdReady=true;f.schedule(0);f.clock.tick(0);await f.flush();
   assert.equal(f.calls.length,1);for(let i=0;i<100;i++)f.schedule(0);
   assert.equal(f.clock.size,0,'no parallel timer may run a second piece while the first is active');
   release({pending:false});await f.flush();assert.equal(f.clock.next,0);f.clock.tick(0);await f.flush();
@@ -48,6 +51,17 @@ test('generated maintenance controller keeps the original failure cadence despit
   for(let i=0;i<10;i++){f.clock.tick(100);f.schedule(0);assert.equal(f.clock.next,5000);}
   f.clock.tick(3999);assert.equal(f.calls.length,1);f.clock.tick(1);await f.flush();assert.equal(f.calls.length,2);assert.equal(f.clock.next,10000);
   assert.equal(f.errors.length,1,'the unchanged persistent error is not logged on every wake or retry');assert.match(f.errors[0],/original-maintenance-io/);
+});
+
+test('generated maintenance controller retries failed Writer activation and reuses the successful result',async t=>{
+  let attempts=0;
+  const f=fixture(t,undefined,async()=>{if(++attempts===1)throw Error('storage-activation-io');return {ready:true};});
+  f.context.storageColdReady=true;f.schedule(0);f.clock.tick(0);await f.flush();
+  assert.equal(f.calls.length,0);assert.equal(f.clock.next,5000);
+  assert.match(f.errors[0],/storage-activation-io/);
+  f.clock.tick(5000);await f.flush();assert.equal(f.calls.length,1);
+  f.schedule(0);f.clock.tick(0);await f.flush();assert.equal(f.calls.length,2);
+  assert.deepEqual(f.controls,Array.from({length:2},()=>({domain:'runtime-event',action:'storage_maintenance_ready'})));
 });
 
 test('generated maintenance controller distinguishes blocked pending, runnable progress and a true idle window',async t=>{

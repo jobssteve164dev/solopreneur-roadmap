@@ -934,7 +934,15 @@ async function control(action: RuntimeWriteActorControl, input: Record<string, u
       await operations.waitForMigrations(); return { settled: true };
     case 'quiesce_for_database_generation': await operations.quiesceForDatabaseGeneration(); return { settled: true };
     case 'interrupt': operations.interruptMigrations(); operations.interruptRuns(); return { interrupted: true };
-    case 'storage_maintenance_ready': resolveStorageMaintenanceBarrier?.(); return { ready: true };
+    case 'storage_maintenance_ready': {
+      if (resolveStorageMaintenanceBarrier) {
+        store.activateStorageContentLifecycle();
+        resolveStorageMaintenanceBarrier();
+        resolveStorageMaintenanceBarrier = undefined;
+        rejectStorageMaintenanceBarrier = undefined;
+      }
+      return { ready: true };
+    }
     case 'storage_maintenance_failed': rejectStorageMaintenanceBarrier?.(new Error(String(input.error || 'startup_migration_failed'))); return { failed: true };
     case 'settle_redundant_upgrade_migrations': store.settleRedundantAgentRunUpgradeMigrations(); return { settled: true };
     case 'enqueue_startup_migrations': {
