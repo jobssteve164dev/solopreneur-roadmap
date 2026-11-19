@@ -259,6 +259,7 @@ export interface StorageColdBatch {
   faults: Array<{ id: string; sha256: string; encoding: string; storedData: Uint8Array; error: string }>;
   verified: Array<{ id: string; sha256: string; encoding: string; storedData: Uint8Array }>;
   revision: number; dirtyReceipts: Array<{ id: string; contentId: string }>; dirty: Array<{ id: string; sha256: string }>;
+  deferred: Array<{ id: string; sha256: string }>;
   contentCursor: number; nextContentCursor: number; receiptCursor: number; nextReceiptCursor: number; pending: boolean;
   contents: Array<{ id: string; sha256: string; encoding: string; storedBytes: number; data: Uint8Array }>;
   receipts: Array<{ id: string; inputHash: string; contentId: string; contentHash: string; sequence: number; descriptorId: string; inline: string }>;
@@ -15238,7 +15239,13 @@ export class UnifiedDataStore {
       return this.withPreparedContentOwnership(async()=>{
         const owner=this.requireContentPreparationOwner(),proof=await this.stageAgentDependencies(selected,actualProject),handles:AgentPreparationProof[]=[proof];
         try{
-          const guarded:ContentPublicationCommit=publish=>commit(()=>{checkSelection(selected);proof.check();return publish();});
+          const guarded:ContentPublicationCommit=publish=>commit(()=>{
+            checkSelection(selected);
+            // Only launch selection can renew this proof. Inner creation can retry its own plan.
+            try{proof.check();}
+            catch(error){if(error===runCreationChanged)throw agentLaunchChanged;throw error;}
+            return publish();
+          });
           if(selected.creation){
             if(!locationId)throw agentLaunchChanged;
             const factory:RunCreationCompanionFactory=async(request,_prepared,publication)=>{
@@ -21428,7 +21435,7 @@ export class UnifiedDataStore {
     if (!Number.isInteger(limit) || limit < 1 || limit > 64) throw new Error('database_maintenance_limit_invalid');
     return this.readTransaction(() => {
       const state = this.rows('SELECT * FROM content_lifecycle_progress WHERE id=1')[0];
-      const batch: StorageColdBatch = { revision: Number(state.revision), faults: [], verified: [], dirtyReceipts: [], dirty: [], contentCursor: Number(state.content_cursor), nextContentCursor: Number(state.content_cursor),
+      const batch: StorageColdBatch = { revision: Number(state.revision), faults: [], verified: [], dirtyReceipts: [], dirty: [], deferred: [], contentCursor: Number(state.content_cursor), nextContentCursor: Number(state.content_cursor),
         receiptCursor: Number(state.receipt_cursor), nextReceiptCursor: Number(state.receipt_cursor), pending: false, contents: [], receipts: [] };
       let readBytes = 0;
       const readRetained = (id: string, metadata: Record<string, SqlValue>): Buffer | null => {
@@ -21446,9 +21453,13 @@ export class UnifiedDataStore {
           return null;
         }
       };
-      const historical = this.rows('SELECT rowid AS cursor,id,sha256,mime_type,encoding,byte_length,stored_byte_length FROM contents WHERE rowid>? ORDER BY rowid LIMIT ?', [batch.contentCursor, Math.ceil(limit / 2)]);
+      const historical = this.rows(`SELECT rowid AS cursor,id,sha256,mime_type,encoding,byte_length,stored_byte_length,
+        EXISTS(SELECT 1 FROM content_lifecycle_prepare_pins WHERE content_id=contents.id) AS pinned
+        FROM contents WHERE rowid>? ORDER BY rowid LIMIT ?`, [batch.contentCursor, Math.ceil(limit / 2)]);
       const dirty = this.rows(`SELECT contents.rowid AS cursor,contents.id,contents.sha256,contents.mime_type,contents.encoding,contents.byte_length,contents.stored_byte_length
-        FROM content_lifecycle_cold_pending JOIN contents ON contents.id=content_lifecycle_cold_pending.content_id LIMIT ?`, [limit]);
+        FROM content_lifecycle_cold_pending pending
+        CROSS JOIN contents INDEXED BY sqlite_autoindex_contents_1 ON contents.id=pending.content_id
+        WHERE NOT EXISTS(SELECT 1 FROM content_lifecycle_prepare_pins WHERE content_id=pending.content_id) LIMIT ?`, [limit]);
       const historicalIds = new Set(historical.map(row => String(row.id)));
       for (const row of [...historical, ...dirty.filter(row => !historicalIds.has(String(row.id))).slice(0, limit - historical.length)]) {
         if (readBytes >= 4 * 1024 * 1024) break;
@@ -21456,6 +21467,10 @@ export class UnifiedDataStore {
         if (dirty.some(item => item.id === row.id)) batch.dirty.push({ id: String(row.id), sha256: String(row.sha256) });
         if (this.isContentRetired(String(row.id))) continue;
         if (row.mime_type !== 'application/json' || /^(?:gzip|chunked):/.test(String(row.encoding)) || contentEncodingBase(String(row.encoding)) !== 'utf8' || Number(row.byte_length) < 256 || Number(row.byte_length) > 65536) continue;
+        if (row.pinned) {
+          batch.deferred.push({ id: String(row.id), sha256: String(row.sha256) });
+          continue;
+        }
         const bytes = readRetained(String(row.id), row);
         if (!bytes) continue;
         readBytes += bytes.length;
@@ -21512,17 +21527,27 @@ export class UnifiedDataStore {
         if (this.rows('SELECT id FROM contents WHERE id=? AND sha256=? AND encoding=? AND data=?', [item.id, item.sha256, item.encoding, Buffer.from(item.storedData)]).length) this.db.run('DELETE FROM content_lifecycle_faults WHERE content_id=?', [item.id]);
       }
       for (const item of batch.dirtyReceipts) this.db.run('DELETE FROM content_lifecycle_receipt_pending WHERE request_id=? AND content_id=?', [item.id, item.contentId]);
-      for (const item of batch.dirty) if (!staleFaults.has(item.id)) this.db.run('DELETE FROM content_lifecycle_cold_pending WHERE content_id=? AND sha256=?', [item.id, item.sha256]);
+      for (const item of batch.dirty) if (!staleFaults.has(item.id)) this.db.run(`DELETE FROM content_lifecycle_cold_pending WHERE content_id=? AND sha256=?
+        AND NOT EXISTS(SELECT 1 FROM content_lifecycle_prepare_pins WHERE content_id=content_lifecycle_cold_pending.content_id)`, [item.id, item.sha256]);
+      const deferred = [...batch.deferred];
       let compressedContents = 0, compressedBytes = 0, inlinedReceipts = 0;
       for (const item of batch.contents) {
-        const row = this.rows('SELECT sha256,encoding,stored_byte_length,mime_type FROM contents WHERE id=?', [item.id])[0];
+        const row = this.rows(`SELECT sha256,encoding,stored_byte_length,mime_type,
+          EXISTS(SELECT 1 FROM content_lifecycle_prepare_pins WHERE content_id=contents.id) AS pinned
+          FROM contents WHERE id=?`, [item.id])[0];
         if (!row || this.isContentRetired(item.id) || row.sha256 !== item.sha256 || row.encoding !== item.encoding || Number(row.stored_byte_length) !== item.storedBytes) continue;
+        if (row.pinned) {
+          deferred.push(item);
+          continue;
+        }
         if (this.rows('SELECT id FROM contents WHERE sha256=? AND mime_type=? AND encoding=? AND id<>?', [item.sha256, row.mime_type, `gzip:${item.encoding}`, item.id]).length) continue;
         const referencesComplete = this.hasCompleteContentReferenceSummary(item.id);
         this.db.run('UPDATE contents SET encoding=?,stored_byte_length=?,data=? WHERE id=?', [`gzip:${item.encoding}`, item.data.byteLength, Buffer.from(item.data), item.id]);
         if (referencesComplete) this.db.run('UPDATE content_lifecycle_reference_pending SET ready=1 WHERE content_id=?', [item.id]);
         compressedContents++; compressedBytes += item.storedBytes - item.data.byteLength;
       }
+      for (const item of deferred) this.db.run(`INSERT OR IGNORE INTO content_lifecycle_cold_pending
+        SELECT id,sha256 FROM contents WHERE id=? AND sha256=?`, [item.id, item.sha256]);
       for (const item of batch.receipts) {
         const row = this.rows(`SELECT requests.id FROM requests JOIN events ON events.request_id=requests.id JOIN contents ON contents.id=requests.result_content_id
           WHERE requests.id=? AND requests.input_hash=? AND requests.status='committed' AND requests.result_content_id=? AND requests.result_inline_json IS NULL

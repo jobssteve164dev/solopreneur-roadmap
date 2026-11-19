@@ -75,6 +75,52 @@ test('cold JSON conversion retains identity and exact bytes and reaches zero wor
   f.store.commitStorageColdBatch(plan);
   assert.deepEqual(f.store.rows('SELECT * FROM content_lifecycle_progress'), before);
 });
+
+for (const { label, pinnedBeforeRead, initiallyQueued } of [
+  { label: 'before the historical scan', pinnedBeforeRead: true, initiallyQueued: false },
+  { label: 'after the historical scan', pinnedBeforeRead: false, initiallyQueued: false },
+  { label: 'after reading the pending queue', pinnedBeforeRead: false, initiallyQueued: true },
+]) {
+  test(`cold conversion preserves a pin acquired ${label}`, async t => {
+    const f = await fixture(t);
+    const bytes = Buffer.from(JSON.stringify({ text: '完整准备内容🌿'.repeat(180) }));
+    const id = f.store.putContent(bytes, 'application/json');
+    const encoding = () => f.store.rows('SELECT encoding FROM contents WHERE id=?', [id])[0].encoding;
+    const queued = () => Boolean(f.store.rows('SELECT 1 FROM content_lifecycle_cold_pending WHERE content_id=?', [id])[0]);
+    const prepare = () => {
+      const reader = UnifiedDataStore.openReadOnly(f.root);
+      try { return reader.prepareStorageColdBatch(64); }
+      finally { reader.close(); }
+    };
+    if (initiallyQueued) {
+      f.store.db.run('UPDATE content_lifecycle_progress SET content_cursor=(SELECT rowid FROM contents WHERE id=?) WHERE id=1', [id]);
+    } else f.store.db.run('DELETE FROM content_lifecycle_cold_pending WHERE content_id=?', [id]);
+    const initial = pinnedBeforeRead ? undefined : prepare();
+    if (initial) assert.ok(initial.contents.some(item => item.id === id));
+
+    await f.store.withPreparedContentOwnership(async () => {
+      f.store.pinPreparedContent(f.store.requireContentPreparationOwner(), id);
+      let batch = initial || prepare();
+      if (pinnedBeforeRead) assert.ok(!batch.contents.some(item => item.id === id));
+      for (let index = 0; index < 20 && batch.pending; index++) {
+        f.store.commitStorageColdBatch(batch);
+        assert.equal(encoding(), 'utf8');
+        batch = prepare();
+      }
+      assert.equal(batch.pending, false);
+      assert.ok(queued(), 'the deferred content must survive advancing the historical cursor');
+      assert.deepEqual(f.store.content(id), bytes);
+    });
+
+    const deferred = prepare();
+    assert.ok(deferred.contents.some(item => item.id === id));
+    assert.equal(f.store.commitStorageColdBatch(deferred).compressedContents, 1);
+    assert.equal(encoding(), 'gzip:utf8');
+    assert.equal(queued(), false);
+    assert.deepEqual(f.store.content(id), bytes);
+  });
+}
+
 test('storage cursors cannot skip new JSON when SQLite reuses the highest rowid', async t => {
   const f = await fixture(t);
   const make = suffix => Buffer.from(JSON.stringify({ retained: suffix + '历史🌿'.repeat(180) }));

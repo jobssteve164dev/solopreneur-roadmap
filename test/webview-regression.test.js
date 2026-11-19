@@ -17216,7 +17216,9 @@ test('a native Codex task completion settles the interactive turn without an Age
   fs.readFileSync = function(file, ...args) { if (path.resolve(String(file)) === f.transcriptPath) throw new Error('the status poller must not synchronously read the complete transcript'); return originalRead.call(this, file, ...args); };
   try {
     await f.ops({ operation: 'recover_run_executions', input: {} });
-    await loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js')).settle(f.reference, undefined, f.root);
+    const host = loadSoloSettlementHost(f, null, require('../out/autonomousRuntimeControl.js'));
+    await host.settle(f.reference, undefined, f.root);
+    await host.drain();
   } finally { fs.readFileSync = originalRead; }
   const status = await f.ops({ operation: 'read_run_state', input: f.scope });
   const binding = await f.ops({ operation: 'read_run_binding', input: f.scope });
@@ -17231,7 +17233,7 @@ test('a native Codex task completion settles the interactive turn without an Age
   assert.deepEqual(Buffer.from(captured.bytes, 'base64'), fs.readFileSync(f.transcriptPath), 'the full original machine evidence must remain byte exact');
   const walPath = path.join(f.root, 'solomap.db-wal'); const wal = fs.readFileSync(walPath);
   await f.ops({ operation: 'recover_run_executions', input: {} });
-  assert.deepEqual(fs.readFileSync(walPath), wal, 'unchanged native recovery must not amplify writes');
+  assert.ok(fs.readFileSync(walPath).equals(wal), 'unchanged native recovery must not amplify writes');
   for (const dir of ['agent-runs', 'agent-status', 'step-sessions']) assert.equal(fs.existsSync(path.join(f.project, '.solopreneur', dir)), false);
 });
 
@@ -20055,7 +20057,8 @@ test('concurrent settings patches serialize without restoring stale values', asy
   };
   extensionModule.__connectSettingsDatabase(operations);
   const writes = [];
-  let releaseFirstWrite;
+  const firstWriteEntered = Promise.withResolvers();
+  const firstWriteRelease = Promise.withResolvers();
   let writeCount = 0;
   const context = {
     extensionPath: projectRoot,
@@ -20067,12 +20070,8 @@ test('concurrent settings patches serialize without restoring stale values', asy
         writeCount += 1;
         writes.push(value);
         if (writeCount === 1) {
-          return new Promise((resolve) => {
-            releaseFirstWrite = () => {
-              Object.assign(saved, value);
-              resolve();
-            };
-          });
+          firstWriteEntered.resolve();
+          return firstWriteRelease.promise.then(() => { Object.assign(saved, value); });
         }
         Object.assign(saved, value);
         return Promise.resolve();
@@ -20081,15 +20080,19 @@ test('concurrent settings patches serialize without restoring stale values', asy
   };
 
   const languageWrite = extensionModule.__updatePersistedSettings(context, { language: 'zh' });
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  const promptWrite = extensionModule.__updatePersistedSettings(context, { globalPrompt: 'Keep the newer prompt' });
-
-  const optimistic = extensionModule.__getPersistedSettings(context);
-  assert.equal(optimistic.language, 'zh');
-  assert.equal(optimistic.globalPrompt, 'Keep the newer prompt');
-
-  releaseFirstWrite();
-  await Promise.all([languageWrite, promptWrite]);
+  let promptWrite;
+  try {
+    await Promise.race([firstWriteEntered.promise, languageWrite.then(() => {
+      throw new Error('The first settings update finished without entering globalState.update.');
+    })]);
+    promptWrite = extensionModule.__updatePersistedSettings(context, { globalPrompt: 'Keep the newer prompt' });
+    const optimistic = extensionModule.__getPersistedSettings(context);
+    assert.equal(optimistic.language, 'zh');
+    assert.equal(optimistic.globalPrompt, 'Keep the newer prompt');
+  } finally {
+    firstWriteRelease.resolve();
+    await Promise.all([languageWrite, promptWrite]);
+  }
   assert.equal(writes.length, 2);
   assert.ok(writes.every(value => Object.keys(value).every(key => ['globalDataPath', 'telegramBotToken'].includes(key))));
   const finalSettings = extensionModule.__getPersistedSettings(context);
@@ -21905,7 +21908,10 @@ for (const scenario of ['accepted', 'refused', 'cancelled']) test(`focus reminde
   const pending = extension.run({}, task, occurrence);
   const outcome = pending.then(() => null, error => error);
   try {
-    extension.select(selectedLater); await started;
+    extension.select(selectedLater);
+    await Promise.race([started, outcome.then(error => {
+      throw error || new Error('The focus reminder finished before entering the event commit.');
+    })]);
     const noticesBeforeCommit = extension.__vscodeTestState.informationMessages.length;
     if (scenario === 'cancelled') extension.cancel(state);
     release(); await finished; await new Promise(resolve => setImmediate(resolve));
@@ -21914,7 +21920,7 @@ for (const scenario of ['accepted', 'refused', 'cancelled']) test(`focus reminde
     assert.deepEqual(eventRoots, [project], 'changing the selected project must not move a pending focus reminder');
     assert.equal(extension.__vscodeTestState.informationMessages.length, scenario === 'accepted' ? 1 : 0);
     assert.equal(error?.message || null, refused ? 'focus_commit_refused' : null);
-  } finally { release(); await finished; await outcome; await ops.close(); store.close(); }
+  } finally { release(); await outcome; await ops.close(); store.close(); }
 });
 
 for (const mutation of ['add', 'edit', 'delete', 'unchanged']) test(`a completed one-time reminder preserves current scheduled settings after ${mutation}`, async () => {
