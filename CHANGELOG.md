@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.655 - 2026-11-19
+
+### Changed
+- Enable reference-gated content collection in production Runtime (0c26c5d)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.654 - 2026-11-19
 
 ### Changed
