@@ -60,6 +60,48 @@ test('historical receipt conversion preserves replay and routes released content
   assert.equal(f.store.rows('SELECT content_id FROM content_lifecycle_gc_pending WHERE content_id=?', [original]).length, 1);
   assert.deepEqual(JSON.parse(f.store.content(original).toString()), result);
 });
+test('cold receipt catch-up drives indexed lookups from its queue with production-sized history', async t => {
+  const f = await fixture(t);
+  const result = await f.store.appendRunLog(f.run.projectId, f.input);
+  const original = f.store.putContent(JSON.stringify(result), 'application/json');
+  f.store.db.run('UPDATE requests SET result_inline_json=NULL,result_content_id=? WHERE id=?', [original, result.requestId]);
+  f.store.db.run('UPDATE content_lifecycle_progress SET receipt_cursor=(SELECT MAX(sequence) FROM events) WHERE id=1');
+  // Reproduce production's planner estimates while the new queue has no statistics.
+  f.store.db.run('ANALYZE sqlite_schema');
+  const stats = [
+    ['events', 'events_request', '1278327 1'],
+    ['events', 'sqlite_autoindex_events_2', '1278327 1'],
+    ['events', 'sqlite_autoindex_events_1', '1278327 1'],
+    ['requests', 'sqlite_autoindex_requests_1', '1278331 1'],
+    ['requests', 'sqlite_autoindex_requests_2', '1278331 159792 1'],
+  ];
+  for (const row of stats) f.store.db.run('INSERT INTO sqlite_stat1 VALUES(?,?,?)', row);
+  f.store.db.run('ANALYZE sqlite_schema');
+
+  const plans = [];
+  const rows = f.store.rows;
+  f.store.rows = function (sql, parameters) {
+    if (sql.includes('FROM content_lifecycle_receipt_pending pending')) {
+      plans.push(rows.call(this, 'EXPLAIN QUERY PLAN ' + sql, parameters).map(row => row.detail));
+    }
+    return rows.call(this, sql, parameters);
+  };
+  const batch = f.store.prepareStorageColdBatch(64);
+  assert.equal(batch.nextReceiptCursor, batch.receiptCursor);
+  assert.equal(batch.receipts.length, 1);
+  assert.equal(batch.receipts[0].id, result.requestId);
+  assert.equal(f.store.commitStorageColdBatch(batch).inlinedReceipts, 1);
+  assert.deepEqual(await f.store.appendRunLog(f.run.projectId, f.input), result);
+  const drained = f.store.prepareStorageColdBatch(64);
+  assert.equal(drained.receipts.length, 0);
+  assert.equal(drained.dirtyReceipts.length, 0);
+  assert.equal(plans.length, 2);
+  for (const plan of plans) {
+    assert.match(plan[0], /^SCAN pending\b/);
+    assert.ok(plan.some(step => /^SEARCH requests .*\(id=\?\)/.test(step)));
+    assert.ok(plan.some(step => /^SEARCH events USING INDEX events_request \(request_id=\?\)/.test(step)));
+  }
+});
 test('cold JSON conversion retains identity and exact bytes and reaches zero work after restart', async t => {
   const f = await fixture(t);
   // Emulate an old, uncompressed body. Existing write behavior intentionally skips compression below 16KiB.

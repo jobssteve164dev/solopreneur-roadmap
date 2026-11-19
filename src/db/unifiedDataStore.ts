@@ -21479,8 +21479,9 @@ export class UnifiedDataStore {
       }
       const receiptColumns = `events.sequence,events.content_id AS descriptor_id,requests.id,requests.input_hash,requests.status,requests.committed_sequence,requests.result_content_id,requests.result_inline_json,events.kind`;
       const historicalReceipts = this.rows(`SELECT ${receiptColumns} FROM events JOIN requests ON requests.id=events.request_id WHERE events.sequence>? ORDER BY events.sequence LIMIT ?`, [batch.receiptCursor, Math.ceil(limit / 2)]);
-      const dirtyReceipts = this.rows(`SELECT ${receiptColumns} FROM content_lifecycle_receipt_pending pending JOIN requests ON requests.id=pending.request_id
-        JOIN events ON events.request_id=requests.id AND events.kind='run.log_appended' LIMIT ?`, [limit]);
+      const dirtyReceipts = this.rows(`SELECT ${receiptColumns} FROM content_lifecycle_receipt_pending pending
+        CROSS JOIN requests INDEXED BY sqlite_autoindex_requests_1 ON requests.id=pending.request_id
+        CROSS JOIN events INDEXED BY events_request ON events.request_id=pending.request_id AND events.kind='run.log_appended' LIMIT ?`, [limit]);
       const historicalRequestIds = new Set(historicalReceipts.map(row => String(row.id)));
       for (const row of [...historicalReceipts, ...dirtyReceipts.filter(row => !historicalRequestIds.has(String(row.id))).slice(0, limit - historicalReceipts.length)]) {
         if (readBytes >= 4 * 1024 * 1024) break;
