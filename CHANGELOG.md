@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.0.653 - 2026-11-19
+
+### Added
+- complete learning and database lifecycle cutover (f952e11)
+
+### Changed
+- Keep active run preparation stable during storage maintenance (eaef66a)
+- Fix lifecycle regressions that blocked the SoloMap release (69dfdce)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.652 - 2026-11-11
 
 ### Fixed
