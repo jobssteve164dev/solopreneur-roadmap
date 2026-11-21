@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.656 - 2026-11-21
+
+### Changed
+- Keep sidebar view selection stable during refreshes (49768ba)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.655 - 2026-11-19
 
 ### Changed
