@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.657 - 2026-11-21
+
+### Changed
+- Show automatic reclamation in database overview (77c1fd8)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.656 - 2026-11-21
 
 ### Changed
