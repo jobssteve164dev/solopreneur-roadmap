@@ -5017,6 +5017,9 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     let pendingProjectSelectionInteractionId = '';
     let projectSelectionRequestSequence = 0;
     const projectSelectionClientId = Math.random().toString(36).slice(2);
+    const portfolioFilterLabels = {
+      all: 'filterAll', active: 'filterActive', failed: 'filterFailed', completed: 'filterCompleted', frozen: 'filterFrozen'
+    };
     let activePortfolioFilter = 'all';
     let sidebarSoloConversations = [];
     const sidebarSoloConversationsByProject = {};
@@ -5198,7 +5201,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
         projectConversationModelSelections: { ...projectConversationModelSelections },
         projectContinueFiles: { ...projectContinueFiles }, projectSoloFiles: { ...projectSoloFiles },
         projectSoloDrafts: { ...projectSoloDrafts }, projectContinueDrafts: { ...projectContinueDrafts },
-        intelligenceDrafts: Object.fromEntries(intelligenceDrafts), intelligenceView, intelligenceConversationId, activePortfolioFilter,
+        intelligenceDrafts: Object.fromEntries(intelligenceDrafts), intelligenceView, intelligenceConversationId,
         sidebarExpandedConversations: { ...sidebarExpandedConversations },
         sidebarLogsExpandedConversations: { ...sidebarLogsExpandedConversations },
         collaborationExpandedMessageIds: Object.fromEntries([...collaborationExpandedMessageIds].map(id => [id, true]))
@@ -8842,6 +8845,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
     }
 
     // Request configurations and nodes on load
+    renderPortfolioFilters();
     vscode.postMessage({ command: 'getNodes' });
     requestSettings('snapshot');
     vscode.postMessage({ command: 'project.getAll' });
@@ -8902,14 +8906,20 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           if (message.view !== 'sidebar') break;
           if (!message.loadRequestId || uiStateLoadRequestIds.get(message.scopeKey) !== message.loadRequestId) break;
           const observedRevision = uiStateLoadRevisions.get(message.scopeKey) || 0;
-          const state = Object.fromEntries(Object.entries(message.state || {}).filter(([key]) => (uiStateLeafEditRevisions.get(message.scopeKey + '\\n' + key) || 0) <= observedRevision));
           if (message.scopeKey === 'global') {
-            if (typeof state.portfolioFilter === 'string') activePortfolioFilter = state.portfolioFilter;
+            uiStateLoadRequestIds.delete('global');
+            uiStateLoadRevisions.delete('global');
+            if ((uiStateLeafEditRevisions.get('global\\nportfolioFilter') || 0) > observedRevision) break;
+            const savedFilter = message.state?.portfolioFilter;
+            const filter = typeof savedFilter === 'string' && Object.hasOwn(portfolioFilterLabels, savedFilter) ? savedFilter : 'all';
+            if (filter === activePortfolioFilter) break;
+            activePortfolioFilter = filter;
             renderPortfolioFilters();
             renderPortfolioFromAsyncUpdate(currentProjects.portfolio, currentProjects.selectedProjectPath);
             break;
           }
           if (message.scopeKey !== currentProjects.selectedProjectPath) break;
+          const state = Object.fromEntries(Object.entries(message.state || {}).filter(([key]) => (uiStateLeafEditRevisions.get(message.scopeKey + '\\n' + key) || 0) <= observedRevision));
           const composerStateKeys = ['soloDraft', 'flowDraft', 'continueDraft', 'conversationMode'];
           const hasNewerLocalComposerState = composerStateKeys.some(key => (uiStateLeafEditRevisions.get(message.scopeKey + '\\n' + key) || 0) > observedRevision);
           const localComposerInput = hasNewerLocalComposerState && portfolioList && portfolioList.querySelectorAll
@@ -8918,6 +8928,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           const storedInteraction = sidebarInteractionFromState(state);
           const remoteInteraction = Object.keys(storedInteraction).length ? storedInteraction : (state.interactionState && typeof state.interactionState === 'object' ? state.interactionState : {});
           const mergedFlat = flattenSidebarInteraction(remoteInteraction);
+          // Older releases also stored the global filter in project snapshots.
+          mergedFlat.delete('activePortfolioFilter');
           flattenSidebarInteraction(currentSidebarInteractionState()).forEach((value, key) => {
             if ((uiStateLeafEditRevisions.get(message.scopeKey + '\\ninteraction.' + key) || 0) > observedRevision) mergedFlat.set(key, value);
           });
@@ -8956,7 +8968,6 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
           Object.entries(interaction.collaborationExpandedMessageIds || {}).forEach(([id, expanded]) => { if (expanded) collaborationExpandedMessageIds.add(id); });
           intelligenceView = typeof interaction.intelligenceView === 'string' ? interaction.intelligenceView : intelligenceView;
           intelligenceConversationId = typeof interaction.intelligenceConversationId === 'string' ? interaction.intelligenceConversationId : intelligenceConversationId;
-          if (typeof interaction.activePortfolioFilter === 'string') activePortfolioFilter = interaction.activePortfolioFilter;
           lastSidebarInteractionFlat = flattenSidebarInteraction(interaction);
           const projectPath = String(message.scopeKey || '');
           if (projectPath && projectPath !== 'global') {
@@ -10664,24 +10675,30 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
     function renderPortfolioFilters() {
       if (!portfolioFilters) return;
-      const filters = [
-        { key: 'all', label: t('filterAll') },
-        { key: 'active', label: t('filterActive') },
-        { key: 'failed', label: t('filterFailed') },
-        { key: 'completed', label: t('filterCompleted') },
-        { key: 'frozen', label: t('filterFrozen') }
-      ];
-      portfolioFilters.innerHTML = filters.map(filter => (
-        '<button type="button" class="portfolio-filter-btn ' + (activePortfolioFilter === filter.key ? 'active' : '') +
-        '" data-portfolio-filter="' + escapeHtml(filter.key) + '">' + escapeHtml(filter.label) + '</button>'
-      )).join('');
-      portfolioFilters.querySelectorAll('[data-portfolio-filter]').forEach(button => {
-        button.addEventListener('click', () => {
-          activePortfolioFilter = button.getAttribute('data-portfolio-filter') || 'all';
-          saveSidebarUiState('portfolioFilter', activePortfolioFilter, 'global');
-          renderPortfolioFilters();
-          renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath);
+      if (!portfolioFilters.firstElementChild) {
+        portfolioFilters.innerHTML = Object.keys(portfolioFilterLabels).map(key => (
+          '<button type="button" class="portfolio-filter-btn" data-portfolio-filter="' + key + '"></button>'
+        )).join('');
+        portfolioFilters.querySelectorAll('[data-portfolio-filter]').forEach(button => {
+          button.addEventListener('click', () => {
+            const filter = button.getAttribute('data-portfolio-filter');
+            saveSidebarUiState('portfolioFilter', filter, 'global');
+            if (activePortfolioFilter === filter && !pendingAsyncPortfolioRender) return;
+            activePortfolioFilter = filter;
+            renderPortfolioFilters();
+            const preserveComposerInput = pendingAsyncPortfolioRender?.preserveComposerInput ?? true;
+            pendingAsyncPortfolioRender = null;
+            renderPortfolio(currentProjects.portfolio, currentProjects.selectedProjectPath, preserveComposerInput);
+          });
         });
+      }
+      portfolioFilters.querySelectorAll('[data-portfolio-filter]').forEach(button => {
+        const key = button.getAttribute('data-portfolio-filter');
+        const active = activePortfolioFilter === key;
+        const label = t(portfolioFilterLabels[key]);
+        if (button.textContent !== label) button.textContent = label;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
       });
     }
 

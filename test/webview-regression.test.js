@@ -7188,7 +7188,7 @@ test('project priority supports freezing and the sidebar can filter frozen proje
   assert.match(sidebarSource, /filterFrozen: '冻结'/);
   assert.match(sidebarSource, /filterFrozen: 'Frozen'/);
   assert.match(sidebarSource, /activePortfolioFilter === 'frozen'[\s\S]*?return project\.globalPriority === 'P99'[\s\S]*?if \(project\.globalPriority === 'P99'\) \{\s*return false/);
-  assert.match(sidebarSource, /\{ key: 'frozen', label: t\('filterFrozen'\) \}/);
+  assert.match(sidebarSource, /frozen: 'filterFrozen'/);
   assert.match(sidebarSource, /\.global-priority\.P99/);
 });
 
