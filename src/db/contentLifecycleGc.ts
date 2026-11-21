@@ -17,6 +17,11 @@ interface GcStore {
   handoffReservation(id: string, previousOwner: string): void;
 }
 type Candidate = { id: string; token: string };
+export interface StorageReclamationOverview {
+  status: 'disabled' | 'paused' | 'checkingHistory' | 'checkingReferences' | 'pending' | 'idle';
+  deletedContents: number;
+  reclaimedStoredBytes: number;
+}
 export interface StorageGcBatch {
   incarnation: string; revision: number; pending: boolean;
   action: 'idle' | 'recover' | 'release_holds' | 'scan' | 'start' | 'discard' | 'expand' | 'cancel' | 'clean' | 'seal' | 'purge';
@@ -35,10 +40,38 @@ export class ContentLifecycleGc {
   private rooted(id: string): boolean {
     return Boolean(this.store.rows(this.rootSql, contentLifecycleGcRoots.map(() => id))[0]);
   }
-  private indexIncomplete(): boolean {
+  private historicalReferencesRemain(): boolean {
     return Boolean(this.store.rows(`SELECT 1 FROM content_lifecycle_reference_progress p WHERE id=1 AND EXISTS
-      (SELECT 1 FROM contents WHERE contents.id>p.cursor AND contents.id<=p.upper_id) LIMIT 1`)[0]
-      || this.store.rows('SELECT 1 FROM content_lifecycle_gc_debt LIMIT 1')[0]);
+      (SELECT 1 FROM contents WHERE contents.id>p.cursor AND contents.id<=p.upper_id) LIMIT 1`)[0]);
+  }
+  private hasUnverifiedReferences(): boolean {
+    return Boolean(this.store.rows('SELECT 1 FROM content_lifecycle_gc_debt LIMIT 1')[0]);
+  }
+  private indexIncomplete(): boolean {
+    return this.historicalReferencesRemain() || this.hasUnverifiedReferences();
+  }
+  readOverview(): StorageReclamationOverview {
+    return this.store.readTransaction(() => {
+      const state = this.store.rows('SELECT * FROM content_lifecycle_gc_state WHERE id=1')[0];
+      let status: StorageReclamationOverview['status'] = 'idle';
+      if (!Number(state.enabled)) status = 'disabled';
+      else if (Number(state.capture_hold)) status = 'paused';
+      else if (this.historicalReferencesRemain()) status = 'checkingHistory';
+      else if (this.hasUnverifiedReferences()) status = 'checkingReferences';
+      else if (Number(state.recover_exemptions) || this.store.rows(`SELECT 1
+        WHERE EXISTS(SELECT 1 FROM content_lifecycle_gc_groups)
+           OR EXISTS(SELECT 1 FROM content_lifecycle_gc_pending)
+           OR EXISTS(SELECT 1 FROM content_lifecycle_release_holds)
+           OR EXISTS(SELECT 1 FROM database_storage_cleanup_candidates)
+           OR EXISTS(SELECT 1 FROM contents WHERE id>? AND id<=?)`, [state.cursor, state.upper_id])[0]) {
+        status = 'pending';
+      }
+      return {
+        status,
+        deletedContents: Number(state.deleted_contents),
+        reclaimedStoredBytes: Number(state.reclaimed_stored_bytes)
+      };
+    });
   }
   private assertWriter(): void {
     if (!this.store.ownsWriter()) throw new Error('content_gc_writer_required');

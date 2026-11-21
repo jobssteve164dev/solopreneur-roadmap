@@ -44,7 +44,7 @@ test('database overview keeps stable placeholders and exposes only a read-only r
   assert.match(html, /可复用空间/);
   assert.match(html, /data-database-overview-refresh/);
   assert.match(html, /aria-live="polite"/);
-  assert.doesNotMatch(html, /迁移|回收|清理|WAL|SQLite|dataMigration\./);
+  assert.doesNotMatch(html, /迁移|WAL|SQLite|dataMigration\./);
   const values = overview.formatDatabaseOverview({
     databaseBytes: 12 * 1024 * 1024 * 1024,
     freePageBytes: 256 * 1024 * 1024,
@@ -83,6 +83,29 @@ test('database overview keeps stable placeholders and exposes only a read-only r
   }, 'en').status, 'Available · Last maintenance incomplete');
   assert.match(overview.getDatabaseOverviewScript(), /databaseOverview\.get/);
   assert.doesNotMatch(overview.getDatabaseOverviewScript(), /read_database_storage|maintain_database_storage|dataMigration\./);
+});
+
+test('the database overview displays background reclamation and distinguishes retired content from reusable space', () => {
+  const overview = loadOverviewModule();
+  const html = overview.getDatabaseOverviewCardHtml();
+  assert.match(html, /自动回收/);
+  assert.match(html, /data-database-reclamation-status/);
+  assert.match(html, /data-database-reclamation-bytes/);
+  const input = {
+    databaseBytes: 12 * 1024 ** 3,
+    freePageBytes: 3 * 1024,
+    contents: { records: 100 },
+    lastMaintenance: null,
+    reclamation: { status: 'checkingHistory', deletedContents: 0, reclaimedStoredBytes: 0 }
+  };
+  assert.deepEqual(overview.formatDatabaseOverview(input, 'zh').reclamation, {
+    status: '正在校验历史引用', deletedContents: '0', reclaimedBytes: '0 B'
+  });
+  input.reclamation = { status: 'idle', deletedContents: 5678, reclaimedStoredBytes: 2 * 1024 ** 2 };
+  assert.deepEqual(overview.formatDatabaseOverview(input, 'en').reclamation, {
+    status: 'On · Nothing to reclaim', deletedContents: '5,678', reclaimedBytes: '2 MB'
+  });
+  assert.equal(overview.formatDatabaseOverview(input, 'en').reusableSpace, '3 KB');
 });
 
 test('database overview action reads storage without exposing maintenance operations', async () => {
@@ -172,8 +195,12 @@ test('database overview reloads every time settings opens', () => {
   listeners.get('message')({ data: {
     command: 'databaseOverviewLoaded',
     requestId: first.requestId,
-    overview: { databaseBytes: 10, freePageBytes: 0, contents: { records: 1 }, lastMaintenance: null }
+    overview: { databaseBytes: 10, freePageBytes: 0, contents: { records: 1 }, lastMaintenance: null,
+      reclamation: { status: 'pending', deletedContents: 3, reclaimedStoredBytes: 128 } }
   } });
+  assert.equal(element('[data-database-reclamation-status]').textContent, '等待后台回收');
+  assert.equal(element('[data-database-reclamation-records]').textContent, '3');
+  assert.equal(element('[data-database-reclamation-bytes]').textContent, '128 B');
 
   panel.style.display = 'none';
   observe();

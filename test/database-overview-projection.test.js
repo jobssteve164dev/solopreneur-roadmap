@@ -59,3 +59,32 @@ test('database overview uses a resumable exact projection instead of scanning th
   assert.match(runtime, /scheduleDatabaseOverviewProjectionBackfill\(5_000\)/,
     'legacy projection reconciliation must start after the interactive startup window');
 });
+
+test('database overview reports the automatic reclamation phases and committed totals without changing them', t => {
+  const { UnifiedDataStore } = require('../out/db/unifiedDataStore.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-reclamation-overview-'));
+  const store = new UnifiedDataStore(root);
+  t.after(() => store.close());
+  const reclamation = () => store.readDatabaseOverview().reclamation;
+  assert.deepEqual(reclamation(), { status: 'disabled', deletedContents: 0, reclaimedStoredBytes: 0 });
+
+  const contentId = store.putContent('Accurately report the reference scan');
+  store.db.run("UPDATE content_lifecycle_reference_progress SET cursor='',upper_id=? WHERE id=1", [contentId]);
+  store.beginContentPreparationRecovery();
+  store.activateStorageContentLifecycle();
+  assert.equal(reclamation().status, 'checkingHistory');
+
+  store.db.run('UPDATE content_lifecycle_reference_progress SET cursor=upper_id WHERE id=1');
+  store.db.run('INSERT OR IGNORE INTO content_lifecycle_gc_debt(content_id) VALUES(?)', [contentId]);
+  assert.equal(reclamation().status, 'checkingReferences');
+  store.db.run('DELETE FROM content_lifecycle_gc_debt');
+  assert.equal(reclamation().status, 'pending');
+
+  store.db.run('UPDATE content_lifecycle_gc_state SET capture_hold=1 WHERE id=1');
+  assert.equal(reclamation().status, 'paused');
+  store.db.run('UPDATE content_lifecycle_gc_state SET capture_hold=0,cursor=upper_id,deleted_contents=7,reclaimed_stored_bytes=2048 WHERE id=1');
+  store.db.run('DELETE FROM content_lifecycle_gc_pending');
+  const changes = store.rows('SELECT total_changes() AS count')[0].count;
+  assert.deepEqual(reclamation(), { status: 'idle', deletedContents: 7, reclaimedStoredBytes: 2048 });
+  assert.equal(store.rows('SELECT total_changes() AS count')[0].count, changes);
+});

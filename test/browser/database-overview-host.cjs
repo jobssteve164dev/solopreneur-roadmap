@@ -32,6 +32,10 @@ async function freePort() {
     exports.activate=async context=>{try{
       const root=path.join(base,'.solomap-global');
       const store=new (require(path.join(repo,'out/db/unifiedDataStore.js')).UnifiedDataStore)(root);
+      const contentId=store.putContent('Historical attachment for database overview');
+      store.db.run("UPDATE content_lifecycle_reference_progress SET cursor='',upper_id=? WHERE id=1",[contentId]);
+      store.beginContentPreparationRecovery();
+      store.activateStorageContentLifecycle();
       const ops=require(path.join(repo,'out/runtimeDataOperations.js')).createRuntimeDataOperations(store);
       require(path.join(repo,'out/autonomousRuntime.js')).claimRuntimeLease(root,{runtimeId:'overview-fixture',pid:process.pid});
       const server=await require(path.join(repo,'out/autonomousRuntimeControl.js')).startRuntimeControlServer({globalDataPath:root,runtimeId:'overview-fixture',entryPath:path.join(repo,'out/autonomousRuntimeProcess.js'),buildId:require(path.join(repo,'out/runtimeBuildIdentity.js')).runtimeBuildId(repo),onCommand:()=>({status:'running'}),onData:async request=>{
@@ -57,7 +61,13 @@ async function freePort() {
       context.subscriptions.push(vscode.window.registerWebviewViewProvider('solopreneur.sidebar',provider));
       context.subscriptions.push(vscode.commands.registerCommand('overview.open',()=>vscode.commands.executeCommand('workbench.view.extension.overview-fixture')));
       context.subscriptions.push(vscode.commands.registerCommand('overview.fail',()=>{state.fail=true;save();}));
-      context.subscriptions.push(vscode.commands.registerCommand('overview.restore',()=>{state.fail=false;save();}));
+      context.subscriptions.push(vscode.commands.registerCommand('overview.restore',()=>{
+        state.fail=false;
+        store.db.run('UPDATE content_lifecycle_reference_progress SET cursor=upper_id WHERE id=1');
+        store.db.run('DELETE FROM content_lifecycle_gc_debt');
+        store.db.run("UPDATE content_lifecycle_gc_state SET deleted_contents=7,reclaimed_stored_bytes=2097152 WHERE id=1");
+        save();
+      }));
       state.ready=true;save();
     }catch(error){state.error=error.stack;save();}};
     exports.deactivate=async()=>{if(cleanup)await cleanup();};
@@ -89,20 +99,27 @@ async function freePort() {
     const status = frame.locator('[data-database-overview-status]');
     await status.getByText('运行正常', { exact: true }).waitFor();
     assert.equal(await frame.locator('[data-database-records]').innerText(), String(JSON.parse(fs.readFileSync(receipt)).expectedRecords));
+    await frame.locator('[data-database-reclamation-status]').getByText('正在校验历史引用', { exact: true }).waitFor();
+    assert.equal(await frame.locator('[data-database-reclamation-bytes]').innerText(), '0 B');
+    assert.ok(await frame.locator('.database-reclamation').evaluate(el => el.scrollWidth <= el.clientWidth));
     assert.equal(JSON.parse(fs.readFileSync(receipt)).reconnected, true);
     await command('Overview Fixture: Fail'); await frame.locator('[data-database-overview-refresh]').click();
     await status.getByText('暂时无法读取数据库概览，请重试。', { exact: true }).waitFor();
     assert.notEqual(await frame.locator('[data-database-size]').innerText(), '—');
+    assert.equal(await frame.locator('[data-database-reclamation-bytes]').innerText(), '0 B');
     assert.equal(await frame.locator('[data-database-overview-refresh]').isEnabled(), true);
     await command('Overview Fixture: Restore'); await frame.locator('[data-database-overview-refresh]').click();
     await status.getByText('运行正常', { exact: true }).waitFor();
+    await frame.locator('[data-database-reclamation-status]').getByText('等待后台回收', { exact: true }).waitFor();
+    assert.equal(await frame.locator('[data-database-reclamation-records]').innerText(), '7');
+    assert.equal(await frame.locator('[data-database-reclamation-bytes]').innerText(), '2 MB');
     assert.equal(await frame.locator('#database-overview-card').getAttribute('aria-busy'), 'false');
     const readsBeforeReopen = JSON.parse(fs.readFileSync(receipt)).reads;
     await frame.locator('#btn-toggle-settings').click();
     await frame.locator('#btn-toggle-settings').click();
     await wait(() => JSON.parse(fs.readFileSync(receipt)).reads > readsBeforeReopen);
     await status.getByText('运行正常', { exact: true }).waitFor();
-    console.log(JSON.stringify({ realExtensionHost: true, generatedScriptsParse: true, automaticReconnect: true, failedReadRetainsMetrics: true, refreshRecovers: true, reopenRefreshes: true, base }));
+    console.log(JSON.stringify({ realExtensionHost: true, generatedScriptsParse: true, automaticReconnect: true, failedReadRetainsMetrics: true, refreshRecovers: true, reopenRefreshes: true, reclamationStatsRefresh: true, base }));
   } finally {
     if (browser) await browser.close();
     server.kill('SIGTERM');

@@ -89,7 +89,7 @@ import { runArtifactKind, runArtifactStorageKind, type RunArtifactKind } from '.
 import { StorageRunOutputs, runOutputRelativePath, type StorageRunOutputBatch } from './storageRunOutputs.js';
 import type { DatabaseSnapshotBinding, DatabaseSnapshotOwner } from './pinnedDatabaseSnapshot.js';
 import { canonicalJson, collectContentReferences, serializeContentWithReferences, stringifyContentWithReferences, summarizeContentBytes, type ContentReferenceSummary } from '../contentReferences.js';
-import { ContentLifecycleGc, type StorageGcBatch } from './contentLifecycleGc.js';
+import { ContentLifecycleGc, type StorageGcBatch, type StorageReclamationOverview } from './contentLifecycleGc.js';
 import { ContentLifecycleRepair, contentEncodingBase, type StorageRepairBatch } from './contentLifecycleRepair.js';
 import { assertCandidateImportAuthority, type CandidateImportAuthority } from './candidateImportAuthority.js';
 import { projectImportContentOrder } from './projectImportContentOrder.js';
@@ -21804,6 +21804,7 @@ export class UnifiedDataStore {
   public readDatabaseOverview(): {
     databaseBytes: number; freePageBytes: number; contents: { records: number | null; exact: boolean };
     lastMaintenance: { finishedAt: number | null; status: string } | null;
+    reclamation: StorageReclamationOverview;
   } {
     const { databaseBytes } = this.databaseStorageFileSizes();
     const pageSize = Number(this.rows('PRAGMA page_size')[0]?.page_size || 0);
@@ -21816,6 +21817,7 @@ export class UnifiedDataStore {
       databaseBytes,
       freePageBytes: pageSize * freePages,
       contents: { records: exact ? Number(projection.contents_records) : null, exact },
+      reclamation: this.contentGc().readOverview(),
       lastMaintenance: maintenance ? {
         finishedAt: maintenance.finished_at === null ? null : Number(maintenance.finished_at),
         status: String(maintenance.status)
