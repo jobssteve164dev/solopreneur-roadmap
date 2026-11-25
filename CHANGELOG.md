@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.0.658 - 2026-11-25
+
+### Fixed
+- reconcile closed conversations and stream terminal echo (648d6d3)
+
+### Tests
+- wait for persisted output before continuing the live session (e9c5ea5)
+
+### Release Checks
+- Built from repository commits and packaged by the release workflow.
+- Marketplace and Open VSX publishing are handled by CI; Open VSX visibility may lag after publish succeeds.
+
 ## 0.0.657 - 2026-11-21
 
 ### Changed
