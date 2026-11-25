@@ -240,7 +240,7 @@ test('the real direct bridge reaches an interactive child without a VS Code shel
   bridge.attachOutput(bytes => output.push(bytes));
   const startedAt = Date.now();
   bridge.start();
-  while (!Buffer.concat(output).includes(Buffer.from('provider-ready'))) {
+  while (!Buffer.concat(output).includes(Buffer.from('provider-ready:30 120'))) {
     assert.ok(Date.now() - startedAt <= 10_000, Buffer.concat(output).toString('utf8'));
     await new Promise(resolve => setTimeout(resolve, 20));
   }

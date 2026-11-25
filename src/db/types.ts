@@ -29,6 +29,9 @@ export interface AgentConversation {
   dataState?: {
     resumableSessionId: string;
     sessionOpen: boolean;
+    sessionClosed?: boolean;
+    importedJournal?: boolean;
+    settledTurnStatus?: 'Failed' | 'In Progress';
     requestPreview?: string;
     conclusion?: string;
     runId?: string;

@@ -21,6 +21,7 @@ export interface ConversationCapabilities {
 }
 
 export type PresentedAgentConversation = ContinuableAgentConversation & {
+  displayStatus: string;
   continuationParentConversationId: number;
   reviewParentConversationId: number;
   summary: string;
@@ -180,6 +181,8 @@ export function buildConversationPresentations(
     const canContinue = conversation.status !== 'Running' && (hasOpenInteractiveSession || Boolean(resumableNativeSessionId));
     return {
       ...conversation,
+      displayStatus: conversation.dataState?.sessionClosed && ['In Progress', 'Session Closed'].includes(conversation.status)
+        ? 'Completed' : conversation.status,
       ...(resumableNativeSessionId ? { resumableNativeSessionId } : {}),
       continuationParentConversationId: extractConversationParentConversationId(conversation),
       reviewParentConversationId: extractReviewParentConversationId(output),

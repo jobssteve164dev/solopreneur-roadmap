@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { isProcessOwnerAlive } from './processIdentity.js';
 import { AgentConversation } from './db/types';
 
 export interface ConversationLifecycleOptions {
@@ -9,7 +10,6 @@ export interface ConversationLifecycleOptions {
 }
 
 const defaultStaleRunningMs = 2 * 60 * 1000;
-const defaultStaleRunningStatusMs = 10 * 60 * 1000;
 const agentStatusDirName = 'agent-status';
 
 function readJson(filePath: string): any | null {
@@ -80,14 +80,12 @@ function isContinuationConversation(conversation: AgentConversation, status: any
     || /Agent continuation started\.|Continuation parent conversation:|Continuation mode:/i.test(output);
 }
 
-function hasFreshRunningStatus(
-  projectRoot: string,
-  conversation: AgentConversation,
-  _nowMs: number,
-  _staleRunningStatusMs: number
-): boolean {
-  const match = readStatusForConversation(projectRoot, Number(conversation.id || 0));
-  return Boolean(match && String(match.status?.status || '') === 'Running');
+function hasRunningOwner(status: any): boolean {
+  if (status?.status !== 'Running' || status.interactiveSessionClosed) return false;
+  const owners = [[status.agentPid, status.processBirth], [status.agentChildPid, status.processChildBirth]]
+    .filter(([pid]) => Number.isSafeInteger(Number(pid)) && Number(pid) > 0);
+  // Older agents did not record PIDs or refresh quiet sessions.
+  return owners.length === 0 || owners.some(([pid, birth]) => isProcessOwnerAlive(Number(pid), String(birth || '')));
 }
 
 function statusFromStatusFile(conversation: AgentConversation, status: any | null): string {
@@ -115,7 +113,19 @@ export function normalizeAgentConversationLifecycle(
   conversation: AgentConversation,
   options: ConversationLifecycleOptions = {}
 ): AgentConversation {
-  if (conversation.dataState) return conversation;
+  if (conversation.dataState) {
+    if (conversation.dataState.importedJournal && ['Running', 'In Progress'].includes(conversation.status)) {
+      const summary = String(conversation.output || '').match(
+        /(?:^|\n)Sentinel captured state: [^\n]+\n+(?:Solo conversation state|Roadmap step state|Continuation record state): (Completed|Failed|Recorded|In Progress)\n+(?:Run started at: [^\n]+\n+)?Run finished at: (\S+)/);
+      if (summary && Number.isFinite(Date.parse(summary[2]))) {
+        const sessionStates = [...conversation.output.matchAll(/^Interactive session state: (Waiting|Open|Running|Closed)$/gim)];
+        const closed = !sessionStates.length || sessionStates.at(-1)?.[1].toLowerCase() === 'closed';
+        return { ...conversation, status: summary[1], dataState: { ...conversation.dataState, sessionClosed: closed } };
+      }
+    }
+    const settled = conversation.dataState.settledTurnStatus;
+    return conversation.status === 'Running' && settled ? { ...conversation, status: settled } : conversation;
+  }
   const status = String(conversation.status || '');
   const outputStatus = statusFromOutput(String(conversation.output || ''));
   if (outputStatus && (status === 'Running' || status === 'In Progress' || status === '')) {
@@ -125,13 +135,12 @@ export function normalizeAgentConversationLifecycle(
     return conversation;
   }
   const nowMs = options.nowMs ?? Date.now();
-  const staleRunningStatusMs = options.staleRunningStatusMs ?? defaultStaleRunningStatusMs;
   const statusMatch = readStatusForConversation(projectRoot, Number(conversation.id || 0));
   const settledStatus = statusFromStatusFile(conversation, statusMatch?.status || null);
   if (settledStatus) {
     return { ...conversation, status: settledStatus };
   }
-  if (hasFreshRunningStatus(projectRoot, conversation, nowMs, staleRunningStatusMs)) {
+  if (hasRunningOwner(statusMatch?.status)) {
     return conversation;
   }
   const startedAt = Date.parse(String(conversation.timestamp || ''));

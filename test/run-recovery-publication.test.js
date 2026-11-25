@@ -22,3 +22,22 @@ test('recovery persists the original failure backoff with large metadata and a d
     const wal=()=>{const bytes=fs.readFileSync(f.store.filePath+'-wal');return{bytes:bytes.length,sha:crypto.createHash('sha256').update(bytes).digest('hex')};},before=wal();await recovery.recover();assert.deepEqual(wal(),before);
   }finally{restore();await recovery.close();}
 });
+
+test('an unreadable candidate does not strand later abandoned conversations', async t => {
+  const { store, run } = await fixture(t);
+  const second = await store.prepareRun(run.projectId, (await store.registerProject({ root: run.status.workspaceRoot })).locationId, {
+    root: run.status.workspaceRoot, executionLogId: 2, nodeId: '__solo__', runKind: 'solo',
+    prompt: '恢复另一对话', command: 'unused', userMessage: '恢复另一对话', idempotencyKey: 'second-abandoned'
+  });
+  await store.claimRun(run.projectId, { executionLogId: 2, expectedRevision: second.revision, idempotencyKey: 'claim-second' });
+  const read = store.readRunContextPublication.bind(store);
+  store.readRunContextPublication = (project, input) => {
+    if (input.executionLogId === 1) throw new Error('unreadable_candidate');
+    return read(project, input);
+  };
+  const recovery = new RunRecovery(store);
+  try {
+    await assert.rejects(recovery.recover(), /unreadable_candidate/);
+    assert.equal((await read(run.projectId, { executionLogId: 2 })).state.status.status, 'Failed');
+  } finally { await recovery.close(); }
+});

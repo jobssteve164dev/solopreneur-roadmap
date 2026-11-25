@@ -12298,7 +12298,11 @@ async function reconcileRestoredAgentTerminalOwners(
           runId: endpoint!.runId, generation: endpoint!.generation, status
         });
     });
-    if (matchingTerminal && foregroundAgentTerminalSurfaces.get(matchingTerminal)?.bridge?.isRunning) continue;
+    if (matchingTerminal && matchingTerminal.exitStatus === undefined) {
+      const surface = foregroundAgentTerminalSurfaces.get(matchingTerminal);
+      // A bound shell terminal owns its runner directly, without a PTY bridge.
+      if (surface?.bridge?.isRunning || (!surface && reconnectable)) continue;
+    }
 
     if (!reconnectable) {
       // Runners created before the reconnect protocol remain untouched. They

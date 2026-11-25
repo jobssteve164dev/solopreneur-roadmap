@@ -71,6 +71,10 @@ export class ForegroundTerminalReconnectServer {
   private output: BufferedOutput[] = [];
   private bufferedBytes = 0;
   private latestOffset = 0;
+  // Only formal PTY stdout is previewed. The capture pipe bounds these bytes
+  // while the journal is committing. Replay offsets always refer to commits.
+  private pendingStdout: Buffer[] = [];
+  private pendingStdoutBytes = 0;
 
   constructor(
     private readonly identity: ForegroundTerminalReconnectIdentity,
@@ -98,7 +102,21 @@ export class ForegroundTerminalReconnectServer {
     return { ...this.identity, host: '127.0.0.1', port: address.port, runnerPid: process.pid, protocol: 1 };
   }
 
-  publish(bytes: Buffer, endOffset: number): void {
+  previewStdout(bytes: Buffer): void {
+    if (!bytes.length) return;
+    const startOffset = this.latestOffset + this.pendingStdoutBytes;
+    this.pendingStdout.push(bytes);
+    this.pendingStdoutBytes += bytes.length;
+    this.sendLiveOutput(bytes, startOffset);
+  }
+
+  private sendLiveOutput(bytes: Buffer, startOffset: number): void {
+    if (this.socket && !this.socket.destroyed) {
+      void this.send(this.socket, this.outputFrame({ bytes, startOffset, endOffset: startOffset + bytes.length })).catch(() => undefined);
+    }
+  }
+
+  publish(bytes: Buffer, endOffset: number, previewedStdout = false): void {
     if (!bytes.length) return;
     if (!Number.isInteger(endOffset) || endOffset < bytes.length || endOffset < this.latestOffset) throw new Error('terminal_reconnect_offset_invalid');
     const item = { startOffset: endOffset - bytes.length, endOffset, bytes: Buffer.from(bytes) };
@@ -106,7 +124,22 @@ export class ForegroundTerminalReconnectServer {
     this.output.push(item); this.bufferedBytes += item.bytes.length;
     const max = Math.max(1, Number(this.options.maxBufferedBytes || 4 * 1024 * 1024));
     while (this.bufferedBytes > max && this.output.length > 1) this.bufferedBytes -= this.output.shift()!.bytes.length;
-    if (this.socket && !this.socket.destroyed) void this.send(this.socket, this.outputFrame(item)).catch(() => undefined);
+    if (!previewedStdout) {
+      this.sendLiveOutput(bytes, item.startOffset + this.pendingStdoutBytes);
+      return;
+    }
+    let consumed = bytes.length;
+    if (consumed > this.pendingStdoutBytes) throw new Error('terminal_preview_offset_invalid');
+    this.pendingStdoutBytes -= consumed;
+    while (consumed) {
+      const first = this.pendingStdout[0];
+      if (consumed < first.length) {
+        this.pendingStdout[0] = first.subarray(consumed);
+        break;
+      }
+      consumed -= first.length;
+      this.pendingStdout.shift();
+    }
   }
 
   async close(exitCode?: number): Promise<void> {
@@ -167,7 +200,12 @@ export class ForegroundTerminalReconnectServer {
           const bytes = item.bytes.subarray(skip);
           void this.send(socket, this.outputFrame({ startOffset: item.startOffset + skip, endOffset: item.endOffset, bytes })).catch(() => undefined);
         }
-        void this.send(socket, { type: 'ready', latestOffset: this.latestOffset }).catch(() => undefined);
+        let liveOffset = this.latestOffset;
+        for (const bytes of this.pendingStdout) {
+          this.sendLiveOutput(bytes, liveOffset);
+          liveOffset += bytes.length;
+        }
+        void this.send(socket, { type: 'ready', latestOffset: liveOffset }).catch(() => undefined);
         return;
       }
       if (socket !== this.socket) return;

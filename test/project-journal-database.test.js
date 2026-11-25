@@ -353,8 +353,14 @@ test('actual presentation keeps formal running and resumable conversations witho
   const proof = head.proof;
   head = await call('checkpoint_run', { ...identity, generation: head.generation, proof: head.proof, expectedRevision: head.revision, expectedTurnId: head.turnId, action: 'complete', outcome: 'partial', summary: '已完成本轮', idempotencyKey: 'formal-presentation-complete' });
   await call('checkpoint_run', { ...identity, generation: head.generation, proof, expectedRevision: head.revision, action: 'session-close', exitCode: 0, idempotencyKey: 'formal-presentation-close' });
-  const closed = await present(); assert.equal(closed.capabilities.canContinue, true); assert.equal(closed.resumableNativeSessionId, prepared.status.plannedNativeSessionId); assert.equal(closed.capabilities.canStop, false);
+  const closed = await present(); assert.equal(closed.displayStatus, 'Completed', 'the closed conversation card must read Finished'); assert.equal(closed.status, 'In Progress', 'preserve the partial task outcome'); assert.equal(closed.capabilities.canContinue, true); assert.equal(closed.resumableNativeSessionId, prepared.status.plannedNativeSessionId); assert.equal(closed.capabilities.canStop, false);
   assert.equal(closed.summary, '保留可继续的会话'); assert.equal(closed.conclusion, '已完成本轮');
+  owner.store.updateProjectJournal(prepared.projectId, 1, { agentCli: 'claude', command: 'claude', output: '旧的对话记录', status: 'Running' });
+  const historical = await present();
+  assert.equal(historical.displayStatus, 'Completed');
+  assert.equal(historical.capabilities.canStop, false);
+  assert.equal(historical.capabilities.canOpenTerminal, false);
+  assert.equal(historical.capabilities.canContinue, true);
   assert.deepEqual(fs.readdirSync(path.join(project, '.solopreneur')), ['project.json']);
   assert.ok(!JSON.stringify(closed).includes(head.proof), 'presentation cannot expose an execution proof');
 });
@@ -819,7 +825,8 @@ test('plugin restart reserves legacy IDs and reads imported history only from th
   fs.mkdirSync(solopreneur, { recursive: true });
   fs.writeFileSync(path.join(solopreneur, 'roadmap.csv'), 'id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt\n1,Plan,,Stage,,codex,,Pending,2026-01-01T00:00:00.000Z,');
   const journal = new (require('../out/db/sqliteStore.js').SqliteStore)(path.join(solopreneur, 'project_journal.db'), path.resolve(__dirname, '..'));
-  await journal.init(); const legacyId = journal.logExecution('step', 'codex', 'resume', 'legacy running task', 'Running'); journal.close();
+  const legacyOutput = 'Sentinel captured state: In Progress\n\nRoadmap step state: Completed\n\nRun finished at: 2026-01-01T12:00:00.000Z';
+  await journal.init(); const legacyId = journal.logExecution('step', 'codex', 'resume', legacyOutput, 'Running'); journal.close();
   const store = new UnifiedDataStore(root); const operations = createRuntimeDataOperations(store);
   const server = await startRuntimeControlServer({ globalDataPath: root, runtimeId: 'journal-restart-owner', onCommand: () => ({ status: 'running' }), onData: operations });
   try {
@@ -831,8 +838,20 @@ test('plugin restart reserves legacy IDs and reads imported history only from th
     await operations({ operation: 'import_project_data', input: { collection: 'project-journal', sourceRoot: path.join(solopreneur, 'project_journal.db'), projectRoot: project, idempotencyKey: 'restart-race' } });
     await operations.waitForMigrations();
     const history = await operations({ operation: 'read_project_journal', input: { root: project, limit: 10 } });
-    assert.deepEqual(history.logs.map(entry => entry.output), ['new run during migration', 'legacy running task']);
-    assert.deepEqual((await engine.readAgentExecutions('step')).map(entry => entry.output), ['new run during migration', 'legacy running task']);
+    assert.deepEqual(history.logs.map(entry => entry.output), ['new run during migration', legacyOutput]);
+    assert.deepEqual((await engine.readAgentExecutions('step')).map(entry => entry.output), ['new run during migration', legacyOutput]);
+    const presented = require('../out/conversationPresentation.js').buildConversationPresentations(project, 'step', history.logs);
+    assert.equal(presented.find(entry => entry.id === legacyId).displayStatus, 'Completed');
+    assert.equal(presented.find(entry => entry.id === newId).displayStatus, 'Running');
+    const { projectId } = await store.registerProject({ root: project });
+    for (const status of ['Running', 'In Progress']) {
+      store.updateProjectJournal(projectId,
+        legacyId, { status, agentCli: 'codex', command: 'resume', output: legacyOutput.replace('step state: Completed', 'step state: In Progress') });
+      const page = await operations({ operation: 'read_project_journal', input: { root: project, executionLogId: legacyId } });
+      const [partial] = require('../out/conversationPresentation.js').buildConversationPresentations(project, 'step', page.logs);
+      assert.equal(partial.status, 'In Progress');
+      assert.equal(partial.displayStatus, 'Completed');
+    }
     engine.close();
   } finally { await server.close(); await operations.close(); store.close(); }
 });
@@ -1228,4 +1247,20 @@ test('agent-run resume preserves a newer database artifact and records the confl
     assert.deepEqual(result.conflicts.map(item => path.basename(item.source)), ['output.log']);
     assert.equal(Buffer.from(artifact.bytes, 'base64').toString(), current.toString());
   } finally { store.close(); }
+});
+
+test('legacy running files follow their recorded process owner after the terminal exits', t => {
+  const { normalizeAgentConversationLifecycle } = require('../out/conversationLifecycle.js');
+  const { readProcessBirthMarker } = require('../out/processIdentity.js');
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'solomap-history-owner-'));
+  const statusFile = path.join(project, '.agent_status.json');
+  t.after(() => { fs.unlinkSync(statusFile); fs.rmdirSync(project); });
+  const entry = { id: 17, nodeId: '__solo__', status: 'Running', timestamp: '2020-01-01', output: '' };
+  const check = (status, expected) => {
+    fs.writeFileSync(statusFile, JSON.stringify({ executionLogId: 17, status: 'Running', ...status }));
+    assert.equal(normalizeAgentConversationLifecycle(project, entry).status, expected);
+  };
+  check({ agentPid: process.pid, processBirth: readProcessBirthMarker(process.pid) }, 'Running');
+  check({ agentPid: 2147483647 }, 'Failed');
+  check({ runKind: 'solo_continue', agentPid: 2147483647 }, 'Recorded');
 });

@@ -10282,7 +10282,8 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
       const fullSummary = summarizeSoloConversation(conversation);
       const shortSummary = fullSummary.length > 28 ? fullSummary.substring(0, 26) + '...' : fullSummary;
       
-      const statusClassName = statusClass(statusKey).toLowerCase();
+      const displayStatus = conversation.displayStatus || statusKey;
+      const statusClassName = statusClass(displayStatus).toLowerCase();
       let statusDotClass = 'status-dot-' + statusClassName;
       if (statusKey === 'Running') {
         statusDotClass += ' status-dot-running-glow';
@@ -10321,7 +10322,7 @@ export function getSidebarWebviewHtml(webview: vscode.Webview, extensionUri: vsc
 
             <div class="sidebar-conversation-right-col">
               \${miniActions}
-              <span class="status-badge-new \${statusClassName}">\${escapeHtml(conversationStatusText(statusKey))}</span>
+              <span class="status-badge-new \${statusClassName}">\${escapeHtml(conversationStatusText(displayStatus))}</span>
               <button type="button" class="delivery-toggle-btn" data-conversation-expand-id="\${escapeHtml(convId)}" data-is-solo="\${isSolo}" aria-expanded="\${detailExpanded ? 'true' : 'false'}" title="\${escapeHtml(detailExpanded ? t('issueCollapse') : t('issueExpand'))}">
                 <span class="expand-arrow-icon codicon \${detailExpanded ? 'codicon-chevron-up' : 'codicon-chevron-down'}"></span>
               </button>

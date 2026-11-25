@@ -20430,6 +20430,10 @@ export class UnifiedDataStore {
         } : {};
         dataState = {
           resumableSessionId: resumable?.sessionId || '', sessionOpen: Boolean(source?.state.status.interactiveSession && !source.state.status.interactiveSessionClosed),
+          ...(!source && row.idempotency_key === `legacy:${id}` ? { importedJournal: true } : {}),
+          ...(turn?.data.finished_at != null && turn.data.outcome
+            ? { settledTurnStatus: turn.data.outcome === 'failed' ? 'Failed' as const : 'In Progress' as const } : {}),
+          ...(source?.state.status.interactiveSessionClosed === true ? { sessionClosed: true } : {}),
           ...(row.linked ? { linkedFromNodeId: String(row.node_id) } : {}),
           ...(source ? { runId: source.state.runId, turnId: source.turnId, runRevision: source.state.revision, hasExecutionLogs: true } : {}),
           ...presentation

@@ -179,3 +179,30 @@ test('rejecting excess unauthenticated sockets never emits an unhandled server e
   await new Promise(resolve => setTimeout(resolve, 25));
   assert.equal(sockets.filter(socket => !socket.destroyed).length, 8);
 });
+
+test('reattaching between PTY display and journal commit renders every byte once', async t => {
+  const server = new ForegroundTerminalReconnectServer(
+    { runId: 'preview', generation: 1, deliveryId: 'preview', nonce: 'fixture' }, () => {}
+  );
+  const endpoint = await server.start();
+  t.after(() => server.close());
+  server.previewStdout(Buffer.from('abc'));
+  server.publish(Buffer.from('ab'), 2, true);
+  const client = new ForegroundTerminalReconnectClient(endpoint, 2);
+  const output = [];
+  client.onOutput(bytes => output.push(bytes.toString()));
+  await client.connect();
+  assert.deepEqual(output, ['c']);
+  server.previewStdout(Buffer.from('d'));
+  server.publish(Buffer.from('!'), 3);
+  server.publish(Buffer.from('cd'), 5, true);
+  await client.writeInput(Buffer.from('x'));
+  assert.equal(output.join(''), 'cd!');
+  client.disconnect();
+  const next = new ForegroundTerminalReconnectClient(endpoint, 3);
+  const replay = [];
+  next.onOutput(bytes => replay.push(bytes.toString()));
+  await next.connect();
+  assert.equal(replay.join(''), 'cd');
+  next.disconnect();
+});

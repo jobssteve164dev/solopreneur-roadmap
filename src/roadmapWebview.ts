@@ -5215,7 +5215,7 @@ export function getWebviewHtml(webview: vscode.Webview, context: vscode.Extensio
               \${continueButton}
               \${retryButton}
               \${rollbackButton}
-              <span class="status-badge \${statusClass(conversation.status)}">\${conversationStatusText(conversation.status)}</span>
+              <span class="status-badge \${statusClass(conversation.displayStatus || conversation.status)}">\${conversationStatusText(conversation.displayStatus || conversation.status)}</span>
             </div>
           </div>
           \${open ? \`

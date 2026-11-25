@@ -1073,7 +1073,17 @@ for (const restored of [false, true]) test(`closing a terminal that executed its
     await f.ownerA.ops({ operation: 'release_run_delivery', input: { projectId: prepared.projectId, executionLogId: 1, generation: prepared.generation,
       owner: await getAgentRunDeliveryOwner(), error: 'old source window closed', idempotencyKey: 'actual-restored-release' } });
     assert.equal(f.ownerA.store.listRunDeliveries({}).items.length, 1);
+    scope.requestHook = async (_root, request) => {
+      if (request.operation !== 'list_recoverable_run_states' || !child) return;
+      const deadline = Date.now() + 10_000;
+      while (!f.ownerA.store.readRunState(prepared.projectId, 1).status.terminalReconnect) {
+        assert.equal(child.exitCode, null);
+        assert.ok(Date.now() < deadline, 'runner must advertise its reconnect endpoint');
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    };
     scope.useActualLaunch(); await scope.pollRuns(scope.context);
+    scope.requestHook = undefined;
     assert.equal(vscode.window.terminals.length, 1, 'the recovered task reaches the actual final launcher');
     assert.ok(child, 'the recovered source launches its own actual runner');
     terminal = vscode.window.terminals[0];

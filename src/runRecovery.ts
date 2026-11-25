@@ -1,6 +1,7 @@
 import { UnifiedDataStore } from './db/unifiedDataStore';
 import { snapshotWorkspace, captureRunGitEvidence } from './runWorkspace';
 import { RunNativeObserver } from './runNativeObserver';
+import type { RunState } from './runLifecycleTypes';
 import { RunStop } from './runStop';
 import { RunInputMaterialization } from './runInputMaterialization';
 import { captureMaintenanceRunResult } from './maintenanceRunResult';
@@ -67,7 +68,13 @@ export class RunRecovery {
       for (const identity of page.items) {
         if (this.stopped) return;
         if(!this.store.runRecoveryIdentityCurrent(identity))continue;
-        const {state:observed}=await this.store.readRunContextPublication(identity.projectId,{executionLogId:identity.executionLogId});
+        let observed: RunState;
+        try {
+          ({ state: observed } = await this.store.readRunContextPublication(identity.projectId, { executionLogId: identity.executionLogId }));
+        } catch (error) {
+          errors.push(error);
+          continue;
+        }
         if(this.stopped)return;
         if(observed.runId!==identity.runId || observed.generation!==identity.generation || observed.revision!==identity.revision || !this.store.runRecoveryIdentityCurrent(identity))continue;
         if (this.retryDeferred(observed)) continue;

@@ -3,7 +3,8 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { once } from 'events';
-import type { Writable } from 'stream';
+import { PassThrough, Readable, Writable } from 'stream';
+import { pipeline } from 'stream/promises';
 import { isRuntimeDataTransportError, sendRuntimeDataRequest } from './autonomousRuntimeControl';
 import { shellQuote, getAgentProvider } from './agentCli';
 import { buildDatabaseAgentCommand, DatabaseAgentLaunch } from './agentDatabaseLaunch';
@@ -15,7 +16,7 @@ import { getCodexSessionHome, NativeSessionBinding } from './sessionIdentity';
 import { readWindowsProcessBirthMarker } from './processIdentity.js';
 import { maintenanceRunKinds } from './runLifecycleTypes';
 import { captureMaintenanceRunResult, maintenanceResultSignature } from './maintenanceRunResult';
-import { captureRunLog, runLogBatchMaxDelayFor } from './runLogBatching';
+import { captureRunLog, runLogBatchMaxDelayFor, runLogBatchMaxBytes } from './runLogBatching';
 import { ForegroundTerminalReconnectServer } from './foregroundTerminalReconnect';
 import { readCompleteRunDocument } from './runDocumentClient';
 
@@ -255,17 +256,20 @@ async function main(): Promise<void> {
     };
   };
   const stdoutDisplay = display(process.stdout, 1); const stderrDisplay = display(process.stderr, 2);
-  const capture = async (stream: NodeJS.ReadableStream, name: string, forward: (bytes: Buffer) => Promise<void>, head: { nextSequence: number; totalBytes: number }, maxDelayMs?: number): Promise<void> => {
+  const capture = async (stream: Readable, name: string, forward: (bytes: Buffer) => Promise<void>, head: { nextSequence: number; totalBytes: number }, maxDelayMs?: number, liveDisplay = false): Promise<void> => {
     let sequence = head.nextSequence;
     let offset = head.totalBytes;
-    await captureRunLog(stream, {
+    // Keep the primary terminal responsive while the journal commits batches.
+    // Reconnect replay uses committed aggregate offsets, including wrapper stderr.
+    const journal = liveDisplay ? new PassThrough({ highWaterMark: runLogBatchMaxBytes }) : stream;
+    const capturing = captureRunLog(journal, {
       ...(maxDelayMs === undefined ? {} : { maxDelayMs }),
       forward: async bytes => {
         if (reconnectServer && (name === 'stdout' || name === 'stderr')) {
           reconnectOutputOffset += bytes.length;
-          reconnectServer.publish(bytes, reconnectOutputOffset);
+          reconnectServer.publish(bytes, reconnectOutputOffset, liveDisplay);
         }
-        await forward(bytes);
+        if (!liveDisplay) await forward(bytes);
       },
       append: async bytes => {
         await request('append_run_log', { ...identity, generation, stream: name, sequence, offset, bytes: bytes.toString('base64'), idempotencyKey: `run:${plan.runId}:${generation}:${name}:${sequence}` });
@@ -273,6 +277,21 @@ async function main(): Promise<void> {
         offset += bytes.length;
       }
     });
+    if (!liveDisplay) return capturing;
+    const screen = new Writable({
+      highWaterMark: runLogBatchMaxBytes,
+      write(bytes: Buffer, _encoding, done) { forward(bytes).then(() => done(), done); }
+    });
+    const preview = (bytes: Buffer) => reconnectServer?.previewStdout(bytes);
+    stream.on('data', preview);
+    stream.pipe(journal as PassThrough);
+    try {
+      await Promise.all([capturing, pipeline(stream, screen)]);
+    } finally {
+      stream.off('data', preview);
+      journal.destroy();
+      screen.destroy();
+    }
   };
   const checkStopped = async () => {
     await terminationDecision;
@@ -338,7 +357,7 @@ async function main(): Promise<void> {
     captures = [
       // `script` carries the PTY data stream on stdout. Its stderr is reserved for
       // wrapper failures and keeps the ordinary batching policy.
-      capture(child.stdout!, streams[0], forward(0, stdoutDisplay), heads[0], runLogBatchMaxDelayFor({ terminal, executionKind, stream: 'stdout' })),
+      capture(child.stdout!, streams[0], forward(0, stdoutDisplay), heads[0], runLogBatchMaxDelayFor({ terminal, executionKind, stream: 'stdout' }), terminal && executionKind === 'formal'),
       capture(child.stderr!, streams[1], forward(1, stderrDisplay), heads[1], runLogBatchMaxDelayFor({ terminal, executionKind, stream: 'stderr' }))
     ];
     const finished = Promise.all([...captures, exited]);
