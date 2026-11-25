@@ -18932,7 +18932,16 @@ test('native continuation stops old lineage processes before launching the same 
     const project = path.join(base, 'project'), other = path.join(base, 'other-project');fs.mkdirSync(project);fs.mkdirSync(other);
     const root = path.join(base, '.solomap-global'), closes = [];
     let native = await require('./analysis-fixture.js').openAnalysisOwner({after:close=>closes.push(close)}, root, [{path:project},{path:other}]);
-    t.after(async()=>{for(const wrapper of wrappers){if(wrapper&&wrapper.exitCode===null&&wrapper.signalCode===null){const ended=require('node:events').once(wrapper,'exit');wrapper.kill('SIGTERM');await ended;}}for(const close of closes.splice(0).reverse())await close();});
+    t.after(async () => {
+      for (const wrapper of wrappers) {
+        if (!wrapper || wrapper.exitCode !== null || wrapper.signalCode !== null) continue;
+        const ended = once(wrapper, 'exit');
+        // The real runner accepts an interrupt even before a stop intent exists.
+        wrapper.kill(mode === 'running' && wrapper === wrappers[0] ? 'SIGINT' : 'SIGTERM');
+        await ended;
+      }
+      for (const close of closes.splice(0).reverse()) await close();
+    });
     const csvPath = path.join(project,'.solopreneur','roadmap.csv'), otherCsvPath = path.join(other,'.solopreneur','roadmap.csv');
     const csv = ['id,title,description,stage,dependencies,agentCli,agentPrompt,status,createdAt,completedAt','2,实现 MVP,保留原目标,实施,,claude,Ship MVP,In Progress,2026-01-01T00:00:00.000Z,'].join('\n');
     fs.writeFileSync(csvPath,csv);const otherCsv=csv.replace('实现 MVP','其他项目任务');fs.writeFileSync(otherCsvPath,otherCsv);
@@ -18953,13 +18962,19 @@ test('native continuation stops old lineage processes before launching the same 
     const run=await prepareControlledClaudeRun({agentCli:'claude',selectedModel:'',prompt:'原任务完整输入',workspaceRoot:project,nodeId:'__solo__',executionLogId:336,userMessage:'保持原会话继续讨论',runKind:'solo',globalDataPath:root,taskPermissionMode:'auto',collaborationReviewMode:'off',...(mode==='running'?{directExecutionCommand:`exec ${quote(process.execPath)} -e ${quote(`process.stdout.write('第336轮完整结果保留🌿\\n'.repeat(10000));setInterval(()=>{},1000)`)}`} : {}),metadata:{terminalName:'old window',...(mode==='verified'?identity(wrappers[0]):mode==='unverified'?{agentPid:wrappers[2].pid,processBirth:'proc:wrong-birth-marker'}:{})}},operation);
     if(mode==='running'){
       const runner=childProcess.spawn(process.execPath,[path.join(projectRoot,'out/runAgentProcess.js'),'--global-data-path',root,'--project-path',project,'--execution-log-id','336'],{cwd:project,stdio:'pipe',env:require('./analysis-fixture.js').anonymousToolEnv()});wrappers[0]=runner;
-      t.after(async()=>{if(live(runner)){const ended=once(runner,'exit');runner.kill('SIGTERM');await ended;}});
       const stdout=[],stderr=[];runner.stdout.on('data',bytes=>stdout.push(bytes));runner.stderr.on('data',bytes=>stderr.push(bytes));
       const deadline=Date.now()+10000;
       while(Buffer.concat(stdout).toString().replace(/\r\n/g,'\n').length<runnerOutput.length){
         assert.equal(live(runner),true,Buffer.concat(stderr).toString());assert.ok(Date.now()<deadline,'actual shared runner must durably capture complete output');await new Promise(resolve=>setTimeout(resolve,20));
       }
-      assert.equal(Buffer.concat(stdout).toString().replace(/\r\n/g,'\n'),runnerOutput);
+      const displayed = Buffer.concat(stdout);
+      assert.equal(displayed.toString().replace(/\r\n/g,'\n'),runnerOutput);
+      let persisted = await client.readLog(ref(336), 'stdout');
+      while (persisted.length < displayed.length && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+        persisted = await client.readLog(ref(336), 'stdout');
+      }
+      assert.deepEqual(persisted, displayed);
       const state=await read(project,336);assert.equal(state.status.agentPid,runner.pid);assert.ok(state.status.agentChildPid);assert.equal(Boolean(state.status.finishedAt),false);
     }
     for(const [workspace,id,child] of [[project,13,wrappers[2]],[other,337,wrappers[3]]])await operation('prepare_run',{root:workspace,executionLogId:id,nodeId:'__solo__',runKind:'solo',prompt:'其他对话',command:'owned Node fixture',userMessage:'其他任务',metadata:{interactiveSession:true,agentCli:'claude',sessionProvider:'claude',nativeSessionId:workspace===other?run.status.plannedNativeSessionId:'another-session',...identity(child)},idempotencyKey:`lineage-peer:${workspace}:${id}`});
